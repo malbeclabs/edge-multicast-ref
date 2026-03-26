@@ -28,15 +28,12 @@ fn create_multicast_socket(
     let bind_addr = std::net::SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port);
     socket
         .bind(&bind_addr.into())
-        .with_context(|| format!("binding to port {}", port))?;
+        .with_context(|| format!("binding to port {port}"))?;
 
     socket
         .join_multicast_v4(multicast_group, interface_ip)
         .with_context(|| {
-            format!(
-                "joining multicast {} on interface {}",
-                multicast_group, interface_ip
-            )
+            format!("joining multicast {multicast_group} on interface {interface_ip}")
         })?;
 
     socket
@@ -66,10 +63,7 @@ fn resolve_interface_ip(interface: &str) -> Ipv4Addr {
             }
         }
     }
-    eprintln!(
-        "warning: could not resolve IP for interface '{}', using 0.0.0.0",
-        interface
-    );
+    eprintln!("warning: could not resolve IP for interface '{interface}', using 0.0.0.0");
     Ipv4Addr::UNSPECIFIED
 }
 
@@ -168,7 +162,7 @@ pub fn run_recv_loop(
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                     Err(e) => {
-                        eprintln!("recv error on shred socket: {}", e);
+                        eprintln!("recv error on shred socket: {e}");
                         break;
                     }
                 }
@@ -187,7 +181,7 @@ pub fn run_recv_loop(
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                     Err(e) => {
-                        eprintln!("recv error on heartbeat socket: {}", e);
+                        eprintln!("recv error on heartbeat socket: {e}");
                         break;
                     }
                 }

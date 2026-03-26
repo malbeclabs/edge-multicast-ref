@@ -44,7 +44,7 @@ fn main() -> Result<()> {
         .name("receiver".into())
         .spawn(move || {
             if let Err(e) = receiver::run_recv_loop(&recv_config, recv_stats, recv_shutdown) {
-                eprintln!("Receiver error: {:#}", e);
+                eprintln!("Receiver error: {e:#}");
             }
         })?;
 

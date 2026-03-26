@@ -11,14 +11,14 @@ use crate::config::Config;
 use crate::stats::Stats;
 
 fn format_signature_prefix(sig: &[u8; 8]) -> String {
-    let hex: String = sig.iter().map(|b| format!("{:02x}", b)).collect();
+    let hex: String = sig.iter().map(|b| format!("{b:02x}")).collect();
     format!("{}..{}", &hex[..4], &hex[12..])
 }
 
 fn format_duration_short(d: Duration) -> String {
     let secs = d.as_secs();
     if secs < 60 {
-        format!("{}s", secs)
+        format!("{secs}s")
     } else if secs < 3600 {
         format!("{}m{}s", secs / 60, secs % 60)
     } else {

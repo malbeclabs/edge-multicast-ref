@@ -6,7 +6,7 @@ use crate::config::Config;
 use crate::stats::Stats;
 
 fn format_signature_prefix(sig: &[u8; 8]) -> String {
-    let hex: String = sig.iter().map(|b| format!("{:02x}", b)).collect();
+    let hex: String = sig.iter().map(|b| format!("{b:02x}")).collect();
     format!("{}..{}", &hex[..4], &hex[12..])
 }
 

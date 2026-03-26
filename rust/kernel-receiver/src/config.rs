@@ -63,20 +63,11 @@ impl Default for StatsConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct Config {
     pub network: NetworkConfig,
     pub display: DisplayConfig,
     pub stats: StatsConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            network: NetworkConfig::default(),
-            display: DisplayConfig::default(),
-            stats: StatsConfig::default(),
-        }
-    }
 }
 
 #[derive(Parser, Debug)]
@@ -133,7 +124,7 @@ impl Config {
             config.display.mode = match mode.as_str() {
                 "log" => DisplayMode::Log,
                 "tui" => DisplayMode::Tui,
-                other => anyhow::bail!("unknown display mode: {}", other),
+                other => anyhow::bail!("unknown display mode: {other}"),
             };
         }
 

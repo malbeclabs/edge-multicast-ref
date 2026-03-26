@@ -2,6 +2,7 @@ use solana_ledger::shred::{Shred, ShredType};
 
 /// Extracted fields from a parsed shred.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ParsedShred {
     pub slot: u64,
     pub index: u32,
