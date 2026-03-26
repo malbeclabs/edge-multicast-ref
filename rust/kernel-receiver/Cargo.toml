@@ -1,0 +1,29 @@
+[package]
+name = "edge-multicast-receiver"
+version = "0.1.0"
+edition = "2021"
+description = "Reference design for consuming DoubleZero edge multicast shred feeds"
+
+[dependencies]
+# Solana - upstream Agave
+solana-ledger = "2.2"
+solana-sdk = "2.2"
+
+# CLI + Config
+clap = { version = "4", features = ["derive"] }
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Networking
+socket2 = "0.5"
+libc = "0.2"
+
+# Signal handling
+ctrlc = { version = "3", features = ["termination"] }
+
+# Misc
+anyhow = "1"
