@@ -1,0 +1,46 @@
+# DoubleZero Edge Multicast Reference Designs
+
+Reference implementations for consuming Solana shred multicast feeds from [DoubleZero](https://doublezero.xyz) edge infrastructure.
+
+## What This Is
+
+DoubleZero delivers Solana shreds via GRE-encapsulated UDP multicast. These reference designs show how to receive, parse, and monitor that feed using kernel sockets (simple) and XDP (high performance).
+
+The feed arrives on a GRE tunnel interface (e.g. `doublezero1`) as clean UDP packets — the kernel handles GRE de-encapsulation. Two packet types are present on the feed:
+
+- **Shred packets** (port 7733) — Solana shreds (~1247-1272 bytes each)
+- **Heartbeat packets** (port 5765) — 4-byte DoubleZero liveness probes
+
+## Implementations
+
+| Language | Kernel Sockets | XDP |
+|----------|---------------|-----|
+| **Rust** | [rust/kernel-receiver](rust/kernel-receiver/) | planned |
+| **Go** | planned | planned |
+| **C** | planned | planned |
+
+## Target Audience
+
+Traders and operators already familiar with tools like the [jito shredstream-proxy](https://github.com/jito-labs/shredstream-proxy) who want to consume DoubleZero edge multicast feeds directly.
+
+## Sample Captures
+
+The `pcaps/` directory contains sample packet captures from a live DoubleZero edge feed. These can be inspected with Wireshark using the `solana.shreds` dissector (decode as UDP port 7733 -> `solana.shreds`).
+
+## Network Setup
+
+These tools expect a working DoubleZero GRE tunnel interface. The DoubleZero client handles tunnel setup and heartbeat responses — the reference designs are receive-only.
+
+```
+Physical NIC:  Eth → Outer IP → GRE → Inner IP → UDP → Shred
+GRE interface: Inner IP (148.51.x.x → 233.84.178.1) → UDP → Shred payload
+```
+
+Example interface:
+
+```
+$ ip a s doublezero1
+26: doublezero1@NONE: <POINTOPOINT,NOARP,UP,LOWER_UP> mtu 1476 qdisc noqueue state UNKNOWN
+    link/gre 64.130.37.175 peer 4.42.212.122
+    inet 169.254.10.233/31 scope link doublezero1
+```
