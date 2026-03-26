@@ -20,3 +20,4 @@ Thumbs.db
 
 # Rust
 Cargo.lock
+.worktrees/
