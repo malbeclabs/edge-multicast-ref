@@ -1,0 +1,14 @@
+[network]
+interface = "doublezero1"
+multicast_group = "233.84.178.1"
+shred_port = 7733
+heartbeat_port = 5765
+recv_buffer_size = 8388608
+
+[display]
+mode = "tui"
+refresh_hz = 4
+log_interval_secs = 5
+
+[stats]
+max_slots = 32
