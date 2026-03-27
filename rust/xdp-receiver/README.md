@@ -14,8 +14,11 @@ This approach processes packets before they enter the kernel network stack, avoi
 - Rust stable toolchain (1.75+)
 - Rust nightly toolchain with `rust-src` (for eBPF compilation)
 - `bpf-linker`
-- `libclang` (required by `solana-ledger` for RocksDB)
-- `libelf` and `zlib` (required by `libbpf-sys`)
+- `clang` and `llvm` (required by `libxdp-sys` build)
+- `libclang-dev` (required by `solana-ledger` for RocksDB)
+- `libelf-dev` and `zlib1g-dev` (required by `libbpf-sys`)
+- `libpcap-dev` (required by `libxdp-sys`)
+- `m4` (required by `libxdp-sys` configure)
 
 ```bash
 # Install nightly toolchain for eBPF
@@ -25,7 +28,7 @@ rustup toolchain install nightly --component rust-src
 cargo install bpf-linker
 
 # Install system deps (Ubuntu/Debian)
-apt install libclang-dev libelf-dev zlib1g-dev
+apt install clang llvm libclang-dev libelf-dev zlib1g-dev libpcap-dev m4
 ```
 
 ## Build

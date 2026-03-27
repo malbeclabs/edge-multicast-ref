@@ -27,21 +27,21 @@ const GRE_HDR_MIN_LEN: usize = 4;
 
 #[inline(always)]
 fn inc_redirected() {
-    if let Some(stats) = unsafe { STATS.get_ptr_mut(0) } {
+    if let Some(stats) = STATS.get_ptr_mut(0) {
         unsafe { (*stats).redirected += 1 };
     }
 }
 
 #[inline(always)]
 fn inc_passed() {
-    if let Some(stats) = unsafe { STATS.get_ptr_mut(0) } {
+    if let Some(stats) = STATS.get_ptr_mut(0) {
         unsafe { (*stats).passed += 1 };
     }
 }
 
 #[inline(always)]
 fn inc_errors() {
-    if let Some(stats) = unsafe { STATS.get_ptr_mut(0) } {
+    if let Some(stats) = STATS.get_ptr_mut(0) {
         unsafe { (*stats).errors += 1 };
     }
 }
@@ -89,7 +89,7 @@ fn try_xdp_filter(ctx: &XdpContext) -> Result<u32, ()> {
     let data_end = ctx.data_end() as usize;
 
     // Load filter config from BPF map
-    let cfg = unsafe { CONFIG.get(0) }.ok_or(())?;
+    let cfg = CONFIG.get(0).ok_or(())?;
 
     // 1. Parse Ethernet header (14 bytes)
     let ethertype = unsafe { read_u16(data, data_end, 12) }.ok_or(())?;

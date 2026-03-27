@@ -1,9 +1,11 @@
+use std::num::NonZeroU32;
 use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use xsk_rs::config::{Interface, LibxdpFlags, SocketConfig, UmemConfig};
 
 use crate::config::Config;
 use crate::shred_parser;
@@ -28,43 +30,41 @@ impl AfXdpReceiver {
     /// Returns the receiver and the socket's raw fd (for registering in XSKMAP).
     pub fn new(config: &Config) -> Result<(Self, i32)> {
         let frame_count = config.frame_count();
-        let frame_size = config.xdp.frame_size as u32;
+        let frame_size: xsk_rs::config::FrameSize = (config.xdp.frame_size as u32)
+            .try_into()
+            .context("invalid frame size")?;
 
         // Configure UMEM
-        let umem_config = xsk_rs::UmemConfig::builder()
-            .frame_count(frame_count as u32)
+        let umem_config = UmemConfig::builder()
             .frame_size(frame_size)
-            .fill_queue_size(frame_count as u32)
-            .comp_queue_size(frame_count as u32)
             .build()
             .context("invalid UMEM config")?;
 
-        let (umem, frame_descs) = xsk_rs::Umem::new(umem_config, frame_count as u32, false)
-            .context("failed to create UMEM")?;
+        let nz_frame_count =
+            NonZeroU32::new(frame_count as u32).context("frame_count must be > 0")?;
+        let (umem, frame_descs) =
+            xsk_rs::Umem::new(umem_config, nz_frame_count, false).context("failed to create UMEM")?;
 
-        // Configure socket
-        let socket_config = xsk_rs::SocketConfig::builder()
-            .rx_queue_size(frame_count as u32)
-            .tx_queue_size(0) // RX only
-            .build()
-            .context("invalid socket config")?;
+        // Configure socket - inhibit prog load since we load our own XDP program via aya
+        let socket_config = SocketConfig::builder()
+            .libxdp_flags(LibxdpFlags::XSK_LIBXDP_FLAGS_INHIBIT_PROG_LOAD)
+            .build();
 
-        let iface =
-            xsk_rs::Interface::new(&config.network.physical_interface).with_context(|| {
-                format!(
-                    "interface '{}' not found",
-                    config.network.physical_interface
-                )
-            })?;
+        let iface: Interface = config
+            .network
+            .physical_interface
+            .parse()
+            .context("invalid interface name")?;
 
-        let (_tx_queue, rx_queue, fq_cq) =
+        let (_tx_queue, rx_queue, fq_cq) = unsafe {
             xsk_rs::Socket::new(socket_config, &umem, &iface, config.xdp.rx_queue)
-                .context("failed to create AF_XDP socket")?;
+                .context("failed to create AF_XDP socket")?
+        };
 
         let (fill_queue, _comp_queue) =
             fq_cq.context("fill/completion queues not available (shared UMEM?)")?;
 
-        let raw_fd = rx_queue.as_raw_fd();
+        let raw_fd = rx_queue.fd().as_raw_fd();
 
         let receiver = Self {
             fill_queue,
@@ -106,6 +106,7 @@ impl AfXdpReceiver {
             let frames_received = unsafe {
                 self.rx_queue
                     .poll_and_consume(&mut self.frame_descs[..], poll_timeout_ms)
+                    .unwrap_or(0)
             };
 
             if frames_received == 0 {
@@ -119,8 +120,8 @@ impl AfXdpReceiver {
             // Process received frames
             for i in 0..frames_received {
                 let frame = &self.frame_descs[i];
-                let pkt_data = unsafe { self.umem.data(frame) };
-                self.process_packet(pkt_data, config, &stats);
+                let data = unsafe { self.umem.data(frame) };
+                self.process_packet(data.contents(), config, &stats);
             }
 
             // Return consumed frames to the fill ring

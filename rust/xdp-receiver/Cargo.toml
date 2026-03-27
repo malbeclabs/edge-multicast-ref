@@ -38,5 +38,4 @@ anyhow = "1"
 xdp-filter-common = { path = "common", features = ["userspace"] }
 
 [build-dependencies]
-aya-build = "0.1"
 cargo_metadata = "0.19"
