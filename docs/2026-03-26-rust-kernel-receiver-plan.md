@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust, solana-ledger (upstream Agave), socket2, ratatui/crossterm, clap, serde/toml
 
-**Spec:** `.claude/2026-03-26-rust-kernel-receiver-design.md`
+**Spec:** `docs/2026-03-26-rust-kernel-receiver-design.md`
 
 ---
 
