@@ -6,11 +6,9 @@ use clap::Parser;
 
 mod config;
 mod display;
-#[cfg(target_os = "linux")]
 mod receiver;
 mod shred_parser;
 mod stats;
-#[cfg(target_os = "linux")]
 mod xdp;
 
 use config::{Cli, Config};
@@ -20,10 +18,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = Config::load(&cli)?;
 
-    eprintln!(
-        "edge-multicast-xdp-receiver v{}",
-        env!("CARGO_PKG_VERSION")
-    );
+    eprintln!("edge-multicast-xdp-receiver v{}", env!("CARGO_PKG_VERSION"));
     eprintln!(
         "Interface: {}, Multicast: {}, Shred port: {}, Heartbeat port: {}",
         config.network.physical_interface,
@@ -41,20 +36,6 @@ fn main() -> Result<()> {
     );
     eprintln!("Display mode: {:?}", config.display.mode);
 
-    #[cfg(not(target_os = "linux"))]
-    {
-        anyhow::bail!(
-            "XDP receiver requires Linux. This binary was compiled on a non-Linux platform \
-             and cannot attach XDP programs or create AF_XDP sockets."
-        );
-    }
-
-    #[cfg(target_os = "linux")]
-    run_linux(config)
-}
-
-#[cfg(target_os = "linux")]
-fn run_linux(config: Config) -> Result<()> {
     let stats = Arc::new(RwLock::new(Stats::new(config.stats.max_slots)));
     let shutdown = Arc::new(AtomicBool::new(false));
 

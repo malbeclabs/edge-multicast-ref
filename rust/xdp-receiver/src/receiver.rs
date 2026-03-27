@@ -49,24 +49,20 @@ impl AfXdpReceiver {
             .build()
             .context("invalid socket config")?;
 
-        let iface = xsk_rs::Interface::new(&config.network.physical_interface)
-            .with_context(|| {
+        let iface =
+            xsk_rs::Interface::new(&config.network.physical_interface).with_context(|| {
                 format!(
                     "interface '{}' not found",
                     config.network.physical_interface
                 )
             })?;
 
-        let (_tx_queue, rx_queue, fq_cq) = xsk_rs::Socket::new(
-            socket_config,
-            &umem,
-            &iface,
-            config.xdp.rx_queue,
-        )
-        .context("failed to create AF_XDP socket")?;
+        let (_tx_queue, rx_queue, fq_cq) =
+            xsk_rs::Socket::new(socket_config, &umem, &iface, config.xdp.rx_queue)
+                .context("failed to create AF_XDP socket")?;
 
-        let (fill_queue, _comp_queue) = fq_cq
-            .context("fill/completion queues not available (shared UMEM?)")?;
+        let (fill_queue, _comp_queue) =
+            fq_cq.context("fill/completion queues not available (shared UMEM?)")?;
 
         let raw_fd = rx_queue.as_raw_fd();
 
@@ -128,8 +124,10 @@ impl AfXdpReceiver {
             }
 
             // Return consumed frames to the fill ring
-            let returned =
-                unsafe { self.fill_queue.produce(&self.frame_descs[..frames_received]) };
+            let returned = unsafe {
+                self.fill_queue
+                    .produce(&self.frame_descs[..frames_received])
+            };
             if returned < frames_received {
                 stats.write().unwrap().afxdp_fill_starvation += 1;
             }

@@ -128,9 +128,7 @@ pub fn read_xdp_stats(ebpf: &Ebpf) -> Result<(u64, u64, u64)> {
         PerCpuArray::try_from(ebpf.map("STATS").context("STATS map not found")?)
             .context("STATS map is not a PerCpuArray")?;
 
-    let per_cpu_values = stats_map
-        .get(&0, 0)
-        .context("failed to read STATS map")?;
+    let per_cpu_values = stats_map.get(&0, 0).context("failed to read STATS map")?;
 
     let mut total_redirected: u64 = 0;
     let mut total_passed: u64 = 0;
