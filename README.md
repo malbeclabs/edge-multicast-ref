@@ -15,7 +15,7 @@ The feed arrives on a GRE tunnel interface (e.g. `doublezero1`) as clean UDP pac
 
 | Language | Kernel Sockets | XDP |
 |----------|---------------|-----|
-| **Rust** | [rust/kernel-receiver](rust/kernel-receiver/) | planned |
+| **Rust** | [rust/kernel-receiver](rust/kernel-receiver/) | [rust/xdp-receiver](rust/xdp-receiver/) |
 | **Go** | planned | planned |
 | **C** | planned | planned |
 
