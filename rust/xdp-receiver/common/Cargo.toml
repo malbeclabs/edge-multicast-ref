@@ -1,0 +1,11 @@
+[package]
+name = "xdp-filter-common"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+userspace = ["aya"]
+
+[dependencies]
+aya = { version = "0.13", optional = true, default-features = false }

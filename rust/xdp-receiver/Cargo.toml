@@ -1,0 +1,41 @@
+[package]
+name = "edge-multicast-xdp-receiver"
+version = "0.1.0"
+edition = "2021"
+description = "XDP-based receiver for DoubleZero edge multicast shred feeds"
+
+[dependencies]
+# Solana - upstream Agave
+solana-ledger = "2.2"
+solana-sdk = "2.2"
+
+# CLI + Config
+clap = { version = "4", features = ["derive"] }
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# System
+libc = "0.2"
+
+# Signal handling
+ctrlc = { version = "3", features = ["termination"] }
+
+# Misc
+anyhow = "1"
+
+# eBPF / XDP / AF_XDP (Linux only - libbpf-sys, libxdp-sys require Linux)
+[target.'cfg(target_os = "linux")'.dependencies]
+aya = "0.13"
+aya-log = "0.2"
+xsk-rs = "0.6"
+xdp-filter-common = { path = "common", features = ["userspace"] }
+
+[build-dependencies]
+cargo_metadata = "0.19"
+
+[target.'cfg(target_os = "linux")'.build-dependencies]
+aya-build = "0.1"
