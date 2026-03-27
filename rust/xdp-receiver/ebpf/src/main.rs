@@ -21,9 +21,6 @@ static XSKMAP: XskMap = XskMap::with_max_entries(8, 0);
 const ETH_P_IP: u16 = 0x0800;
 const IPPROTO_GRE: u8 = 47;
 const IPPROTO_UDP: u8 = 17;
-const ETH_HDR_LEN: usize = 14;
-const IPV4_HDR_MIN_LEN: usize = 20;
-const GRE_HDR_MIN_LEN: usize = 4;
 
 #[inline(always)]
 fn inc_redirected() {
@@ -46,31 +43,30 @@ fn inc_errors() {
     }
 }
 
-/// Read a u16 from packet data, converting from network byte order to host order.
+/// Read a u8 from a cursor pointer. Caller must have already bounds-checked.
 #[inline(always)]
-unsafe fn read_u16(data: usize, data_end: usize, offset: usize) -> Option<u16> {
-    if data + offset + 2 > data_end {
-        return None;
-    }
-    Some(u16::from_be(((data + offset) as *const u16).read_unaligned()))
+unsafe fn read_u8_at(ptr: usize, off: usize) -> u8 {
+    *((ptr + off) as *const u8)
 }
 
-/// Read a u8 from packet data.
+/// Read a big-endian u16 from a cursor pointer using byte loads.
+/// Caller must have already bounds-checked ptr + off + 2.
 #[inline(always)]
-unsafe fn read_u8(data: usize, data_end: usize, offset: usize) -> Option<u8> {
-    if data + offset + 1 > data_end {
-        return None;
-    }
-    Some(*((data + offset) as *const u8))
+unsafe fn read_u16_at(ptr: usize, off: usize) -> u16 {
+    let b0 = *((ptr + off) as *const u8) as u16;
+    let b1 = *((ptr + off + 1) as *const u8) as u16;
+    b0 << 8 | b1
 }
 
-/// Read a u32 from packet data, converting from network byte order to host order.
+/// Read a big-endian u32 from a cursor pointer using byte loads.
+/// Caller must have already bounds-checked ptr + off + 4.
 #[inline(always)]
-unsafe fn read_u32(data: usize, data_end: usize, offset: usize) -> Option<u32> {
-    if data + offset + 4 > data_end {
-        return None;
-    }
-    Some(u32::from_be(((data + offset) as *const u32).read_unaligned()))
+unsafe fn read_u32_at(ptr: usize, off: usize) -> u32 {
+    let b0 = *((ptr + off) as *const u8) as u32;
+    let b1 = *((ptr + off + 1) as *const u8) as u32;
+    let b2 = *((ptr + off + 2) as *const u8) as u32;
+    let b3 = *((ptr + off + 3) as *const u8) as u32;
+    b0 << 24 | b1 << 16 | b2 << 8 | b3
 }
 
 #[xdp]
@@ -88,79 +84,92 @@ fn try_xdp_filter(ctx: &XdpContext) -> Result<u32, ()> {
     let data = ctx.data() as usize;
     let data_end = ctx.data_end() as usize;
 
-    // Load filter config from BPF map
     let cfg = CONFIG.get(0).ok_or(())?;
 
-    // 1. Parse Ethernet header (14 bytes)
-    let ethertype = unsafe { read_u16(data, data_end, 12) }.ok_or(())?;
+    // 1. Ethernet header: need 14 bytes (read ethertype at 12-13)
+    if data + 14 > data_end {
+        return Err(());
+    }
+    let ethertype = unsafe { read_u16_at(data, 12) };
     if ethertype != ETH_P_IP {
         inc_passed();
         return Ok(xdp_action::XDP_PASS);
     }
 
-    let mut offset = ETH_HDR_LEN;
-
-    // 2. Parse outer IPv4 header
-    let outer_ihl_byte = unsafe { read_u8(data, data_end, offset) }.ok_or(())?;
+    // 2. Outer IPv4 at fixed offset 14: need at least 20 bytes (through proto at +9)
+    if data + 34 > data_end {
+        return Err(());
+    }
+    let outer_ihl_byte = unsafe { read_u8_at(data, 14) };
     let outer_ihl = ((outer_ihl_byte & 0x0F) as usize) * 4;
-    if outer_ihl < IPV4_HDR_MIN_LEN {
+    if outer_ihl < 20 {
         inc_errors();
         return Ok(xdp_action::XDP_PASS);
     }
-    let outer_proto = unsafe { read_u8(data, data_end, offset + 9) }.ok_or(())?;
+    let outer_proto = unsafe { read_u8_at(data, 23) };
     if outer_proto != IPPROTO_GRE {
         inc_passed();
         return Ok(xdp_action::XDP_PASS);
     }
-    offset += outer_ihl;
 
-    // 3. Parse GRE header (minimum 4 bytes)
-    if data + offset + GRE_HDR_MIN_LEN > data_end {
+    // --- From here, offset is variable (depends on outer IHL) ---
+    // Use cursor pointer pattern: compute pointer, bounds-check, read from it.
+
+    // 3. GRE header at data + 14 + outer_ihl
+    let cursor = data + 14 + outer_ihl;
+    if cursor + 4 > data_end {
         inc_errors();
         return Ok(xdp_action::XDP_PASS);
     }
-    let gre_flags = unsafe { read_u16(data, data_end, offset) }.ok_or(())?;
-    let gre_protocol = unsafe { read_u16(data, data_end, offset + 2) }.ok_or(())?;
+    let gre_flags = unsafe { read_u16_at(cursor, 0) };
+    let gre_protocol = unsafe { read_u16_at(cursor, 2) };
     if gre_protocol != ETH_P_IP {
         inc_passed();
         return Ok(xdp_action::XDP_PASS);
     }
 
-    // Calculate GRE header length based on C/K/S flags
-    let mut gre_len = GRE_HDR_MIN_LEN;
+    // Variable GRE header length based on C/K/S flags
+    let mut gre_len: usize = 4;
     if gre_flags & 0x8000 != 0 {
-        gre_len += 4; // Checksum + Reserved1
+        gre_len += 4;
     }
     if gre_flags & 0x2000 != 0 {
-        gre_len += 4; // Key
+        gre_len += 4;
     }
     if gre_flags & 0x1000 != 0 {
-        gre_len += 4; // Sequence Number
+        gre_len += 4;
     }
-    offset += gre_len;
 
-    // 4. Parse inner IPv4 header
-    let inner_ihl_byte = unsafe { read_u8(data, data_end, offset) }.ok_or(())?;
-    let inner_ihl = ((inner_ihl_byte & 0x0F) as usize) * 4;
-    if inner_ihl < IPV4_HDR_MIN_LEN {
+    // 4. Inner IPv4 at cursor + gre_len: need 20 bytes (through dst_ip at +16..+19)
+    let cursor = cursor + gre_len;
+    if cursor + 20 > data_end {
         inc_errors();
         return Ok(xdp_action::XDP_PASS);
     }
-    let inner_proto = unsafe { read_u8(data, data_end, offset + 9) }.ok_or(())?;
+    let inner_ihl_byte = unsafe { read_u8_at(cursor, 0) };
+    let inner_ihl = ((inner_ihl_byte & 0x0F) as usize) * 4;
+    if inner_ihl < 20 {
+        inc_errors();
+        return Ok(xdp_action::XDP_PASS);
+    }
+    let inner_proto = unsafe { read_u8_at(cursor, 9) };
     if inner_proto != IPPROTO_UDP {
         inc_passed();
         return Ok(xdp_action::XDP_PASS);
     }
-    // Check destination IP matches configured multicast group
-    let inner_dst_ip = unsafe { read_u32(data, data_end, offset + 16) }.ok_or(())?;
+    let inner_dst_ip = unsafe { read_u32_at(cursor, 16) };
     if inner_dst_ip != cfg.multicast_ip {
         inc_passed();
         return Ok(xdp_action::XDP_PASS);
     }
-    offset += inner_ihl;
 
-    // 5. Parse UDP header — check destination port
-    let udp_dst_port = unsafe { read_u16(data, data_end, offset + 2) }.ok_or(())?;
+    // 5. UDP header at cursor + inner_ihl: need 4 bytes (dst port at +2..+3)
+    let cursor = cursor + inner_ihl;
+    if cursor + 4 > data_end {
+        inc_errors();
+        return Ok(xdp_action::XDP_PASS);
+    }
+    let udp_dst_port = unsafe { read_u16_at(cursor, 2) };
     if udp_dst_port != cfg.shred_port && udp_dst_port != cfg.heartbeat_port {
         inc_passed();
         return Ok(xdp_action::XDP_PASS);

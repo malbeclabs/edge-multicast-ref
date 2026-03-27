@@ -40,11 +40,29 @@ pub fn attach_xdp(config: &Config) -> Result<(XdpHandle, String)> {
 
     let actual_mode = match config.xdp.xdp_mode {
         XdpMode::Auto => {
-            // Try native first, fall back to SKB
+            // Try native first, fall back to SKB.
+            // On failure, reload the program to clear any partial link state
+            // before retrying with a different mode.
             match program.attach(&config.network.physical_interface, XdpFlags::DRV_MODE) {
                 Ok(_) => "native".to_string(),
-                Err(_) => {
-                    eprintln!("Native XDP attach failed, falling back to SKB mode");
+                Err(native_err) => {
+                    eprintln!(
+                        "Native XDP attach failed ({native_err:#}), falling back to SKB mode"
+                    );
+                    // Reload program fresh — failed native attach may leave
+                    // partial BPF link state that blocks the SKB attempt.
+                    drop(ebpf);
+                    ebpf = Ebpf::load(aya::include_bytes_aligned!(concat!(
+                        env!("OUT_DIR"),
+                        "/xdp-filter"
+                    )))
+                    .context("failed to reload eBPF program for SKB fallback")?;
+                    let program: &mut Xdp = ebpf
+                        .program_mut("xdp_filter")
+                        .unwrap()
+                        .try_into()
+                        .unwrap();
+                    program.load().context("failed to load XDP program")?;
                     program
                         .attach(&config.network.physical_interface, XdpFlags::SKB_MODE)
                         .context("failed to attach XDP program in SKB mode")?;
