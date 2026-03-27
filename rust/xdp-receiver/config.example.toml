@@ -1,0 +1,19 @@
+[network]
+physical_interface = "eth0"
+multicast_group = "233.84.178.1"
+shred_port = 7733
+heartbeat_port = 5765
+
+[xdp]
+xdp_mode = "auto"          # "auto", "native", "skb"
+umem_size = 4194304         # 4MB
+frame_size = 2048
+rx_queue = 0
+
+[display]
+mode = "tui"                # "tui" or "log"
+refresh_hz = 4
+log_interval_secs = 5
+
+[stats]
+max_slots = 32
