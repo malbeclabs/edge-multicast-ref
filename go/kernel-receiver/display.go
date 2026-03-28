@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"sync"
 
 	"github.com/malbeclabs/edge-multicast-ref/go/internal/config"
@@ -18,10 +17,7 @@ func RunDisplay(ctx context.Context, cfg *Config, s *stats.Stats, mu *sync.RWMut
 		display.RunLogDisplay(ctx, s, mu, cfg.Display.LogIntervalSecs)
 		return nil
 	case config.DisplayModeTUI:
-		// TODO: TUI mode not yet implemented, fall back to log
-		fmt.Fprintln(os.Stderr, "TUI mode not yet implemented, using log mode")
-		display.RunLogDisplay(ctx, s, mu, cfg.Display.LogIntervalSecs)
-		return nil
+		return display.RunTUI(ctx, s, mu, cfg.Display.RefreshHz, cfg.Network.Interface, cfg.Network.MulticastGroup)
 	default:
 		return fmt.Errorf("unknown display mode: %s", cfg.Display.Mode)
 	}
