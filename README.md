@@ -19,6 +19,10 @@ The feed arrives on a GRE tunnel interface (e.g. `doublezero1`) as clean UDP pac
 | **Go** | [go/kernel-receiver](go/kernel-receiver/) | [go/xdp-receiver](go/xdp-receiver/) |
 | **C** | planned | planned |
 
+### GRE Decapsulator
+
+[gre-decap](gre-decap/) is a standalone XDP program that strips GRE encapsulation inline on the physical NIC. After decap, the kernel sees plain multicast UDP — no tunnel interface or application changes needed. Useful when you want existing socket-based applications to receive the feed without a GRE tunnel.
+
 ## Target Audience
 
 Traders and operators already familiar with tools like the [jito shredstream-proxy](https://github.com/jito-labs/shredstream-proxy) who want to consume DoubleZero edge multicast feeds directly.
