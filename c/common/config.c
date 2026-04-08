@@ -32,7 +32,20 @@ static void copy_str(char *dst, size_t dst_sz, const char *src) {
     dst[dst_sz - 1] = '\0';
 }
 
+// Parse a numeric CLI arg into a long in the inclusive range [min, max].
+// Returns 0 on success, -1 if the string is not a valid number or is out of range.
+static int parse_uint_arg(const char *s, long min, long max, long *out) {
+    if (!s || !*s) return -1;
+    char *end;
+    errno = 0;
+    long v = strtol(s, &end, 10);
+    if (errno || end == s || *end != '\0' || v < min || v > max) return -1;
+    *out = v;
+    return 0;
+}
+
 int config_load_file(config_t *cfg, const char *path) {
+    if (!path) return -2;
     FILE *f = fopen(path, "r");
     if (!f) {
         if (errno == ENOENT) return -2;
@@ -54,11 +67,11 @@ int config_load_file(config_t *cfg, const char *path) {
         d = toml_string_in(net, "multicast_group");
         if (d.ok) { copy_str(cfg->network.multicast_group, sizeof(cfg->network.multicast_group), d.u.s); free(d.u.s); }
         d = toml_int_in(net, "shred_port");
-        if (d.ok) cfg->network.shred_port = (uint16_t)d.u.i;
+        if (d.ok && d.u.i > 0 && d.u.i <= 65535) cfg->network.shred_port = (uint16_t)d.u.i;
         d = toml_int_in(net, "heartbeat_port");
-        if (d.ok) cfg->network.heartbeat_port = (uint16_t)d.u.i;
+        if (d.ok && d.u.i > 0 && d.u.i <= 65535) cfg->network.heartbeat_port = (uint16_t)d.u.i;
         d = toml_int_in(net, "recv_buffer_size");
-        if (d.ok) cfg->network.recv_buffer_size = (size_t)d.u.i;
+        if (d.ok && d.u.i > 0) cfg->network.recv_buffer_size = (size_t)d.u.i;
     }
 
     toml_table_t *xdp = toml_table_in(root, "xdp");
@@ -69,14 +82,20 @@ int config_load_file(config_t *cfg, const char *path) {
             if (strcmp(d.u.s, "auto") == 0) cfg->xdp.mode = XDP_MODE_AUTO;
             else if (strcmp(d.u.s, "native") == 0) cfg->xdp.mode = XDP_MODE_NATIVE;
             else if (strcmp(d.u.s, "skb") == 0) cfg->xdp.mode = XDP_MODE_SKB;
+            else {
+                fprintf(stderr, "config: unknown xdp_mode: %s\n", d.u.s);
+                free(d.u.s);
+                toml_free(root);
+                return -1;
+            }
             free(d.u.s);
         }
         d = toml_int_in(xdp, "umem_size");
-        if (d.ok) cfg->xdp.umem_size = (size_t)d.u.i;
+        if (d.ok && d.u.i > 0) cfg->xdp.umem_size = (size_t)d.u.i;
         d = toml_int_in(xdp, "frame_size");
-        if (d.ok) cfg->xdp.frame_size = (size_t)d.u.i;
+        if (d.ok && d.u.i > 0) cfg->xdp.frame_size = (size_t)d.u.i;
         d = toml_int_in(xdp, "rx_queue");
-        if (d.ok) cfg->xdp.rx_queue = (uint32_t)d.u.i;
+        if (d.ok && d.u.i >= 0 && (unsigned long long)d.u.i <= 4294967295ULL) cfg->xdp.rx_queue = (uint32_t)d.u.i;
     }
 
     toml_table_t *disp = toml_table_in(root, "display");
@@ -86,18 +105,24 @@ int config_load_file(config_t *cfg, const char *path) {
         if (d.ok) {
             if (strcmp(d.u.s, "tui") == 0) cfg->display.mode = DISPLAY_MODE_TUI;
             else if (strcmp(d.u.s, "log") == 0) cfg->display.mode = DISPLAY_MODE_LOG;
+            else {
+                fprintf(stderr, "config: unknown display mode: %s\n", d.u.s);
+                free(d.u.s);
+                toml_free(root);
+                return -1;
+            }
             free(d.u.s);
         }
         d = toml_int_in(disp, "refresh_hz");
-        if (d.ok) cfg->display.refresh_hz = (uint32_t)d.u.i;
+        if (d.ok && d.u.i > 0) cfg->display.refresh_hz = (uint32_t)d.u.i;
         d = toml_int_in(disp, "log_interval_secs");
-        if (d.ok) cfg->display.log_interval_secs = (uint32_t)d.u.i;
+        if (d.ok && d.u.i > 0) cfg->display.log_interval_secs = (uint32_t)d.u.i;
     }
 
     toml_table_t *st = toml_table_in(root, "stats");
     if (st) {
         toml_datum_t d = toml_int_in(st, "max_slots");
-        if (d.ok) cfg->stats.max_slots = (size_t)d.u.i;
+        if (d.ok && d.u.i > 0) cfg->stats.max_slots = (size_t)d.u.i;
     }
 
     toml_free(root);
@@ -134,12 +159,24 @@ int config_parse_cli(config_t *cfg, int argc, char **argv,
             case 'g':
                 copy_str(cfg->network.multicast_group, sizeof(cfg->network.multicast_group), optarg);
                 break;
-            case 's':
-                cfg->network.shred_port = (uint16_t)atoi(optarg);
+            case 's': {
+                long v;
+                if (parse_uint_arg(optarg, 1, 65535, &v) != 0) {
+                    fprintf(stderr, "invalid shred port: %s\n", optarg);
+                    return -1;
+                }
+                cfg->network.shred_port = (uint16_t)v;
                 break;
-            case 'b':
-                cfg->network.heartbeat_port = (uint16_t)atoi(optarg);
+            }
+            case 'b': {
+                long v;
+                if (parse_uint_arg(optarg, 1, 65535, &v) != 0) {
+                    fprintf(stderr, "invalid heartbeat port: %s\n", optarg);
+                    return -1;
+                }
+                cfg->network.heartbeat_port = (uint16_t)v;
                 break;
+            }
             case 'm':
                 if (strcmp(optarg, "tui") == 0) cfg->display.mode = DISPLAY_MODE_TUI;
                 else if (strcmp(optarg, "log") == 0) cfg->display.mode = DISPLAY_MODE_LOG;
@@ -151,9 +188,15 @@ int config_parse_cli(config_t *cfg, int argc, char **argv,
                 else if (strcmp(optarg, "skb") == 0) cfg->xdp.mode = XDP_MODE_SKB;
                 else { fprintf(stderr, "unknown XDP mode: %s\n", optarg); return -1; }
                 break;
-            case 'q':
-                cfg->xdp.rx_queue = (uint32_t)atoi(optarg);
+            case 'q': {
+                long v;
+                if (parse_uint_arg(optarg, 0, 4294967295L, &v) != 0) {
+                    fprintf(stderr, "invalid rx-queue: %s\n", optarg);
+                    return -1;
+                }
+                cfg->xdp.rx_queue = (uint32_t)v;
                 break;
+            }
             case 'h':
                 fprintf(stderr,
                     "Usage: %s [options]\n"
