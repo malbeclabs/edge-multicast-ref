@@ -1,4 +1,5 @@
 #include "stats.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -16,6 +17,10 @@ void stats_init(stats_t *s, size_t max_slots) {
     memset(s, 0, sizeof(*s));
     s->max_slots = max_slots;
     s->slots = calloc(max_slots, sizeof(slot_stats_t));
+    if (!s->slots) {
+        fprintf(stderr, "stats_init: calloc failed\n");
+        abort();
+    }
     s->start_time = now_ts();
 }
 
@@ -65,11 +70,17 @@ static void insert_fec_set(slot_stats_t *slot, uint32_t fec_set_index) {
 void stats_record_shred(stats_t *s, uint64_t slot, bool is_data,
                         uint32_t index, uint32_t fec_set_index,
                         const uint8_t signature[64]) {
-    if (is_data) s->total_data_shreds++;
-    else s->total_coding_shreds++;
-
     size_t pos;
     int existing = find_slot(s, slot, &pos);
+
+    // If this is a new slot AND the buffer is full AND the new slot is older
+    // than all tracked slots, drop it entirely (including the global counter).
+    if (existing < 0 && s->slots_len >= s->max_slots && pos == 0) {
+        return;
+    }
+
+    if (is_data) s->total_data_shreds++;
+    else s->total_coding_shreds++;
 
     slot_stats_t *ss;
     if (existing < 0) {
@@ -80,10 +91,7 @@ void stats_record_shred(stats_t *s, uint64_t slot, bool is_data,
             s->slots_len++;
         } else {
             // Full: evict oldest (index 0) by shifting left, then adjust pos.
-            if (pos == 0) {
-                // New slot is older than all existing — skip it entirely.
-                return;
-            }
+            // (pos == 0 case already handled by early return above)
             memmove(&s->slots[0], &s->slots[1], (pos - 1) * sizeof(slot_stats_t));
             pos--;
         }

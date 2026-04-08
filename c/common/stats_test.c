@@ -118,6 +118,53 @@ TEST(fec_set_dedup) {
     stats_free(&s);
 }
 
+TEST(old_slot_dropped_when_full) {
+    stats_t s;
+    stats_init(&s, 4);
+    // Fill the buffer with slots 100, 101, 102, 103
+    stats_record_shred(&s, 100, true, 0, 0, SIG_AB);
+    stats_record_shred(&s, 101, true, 0, 0, SIG_AB);
+    stats_record_shred(&s, 102, true, 0, 0, SIG_AB);
+    stats_record_shred(&s, 103, true, 0, 0, SIG_AB);
+    assert(s.total_data_shreds == 4);
+    assert(s.slots_len == 4);
+
+    // A slot older than all existing (50) should be dropped.
+    // Both the global counter AND slots_len should remain unchanged.
+    stats_record_shred(&s, 50, true, 0, 0, SIG_AB);
+    assert(s.total_data_shreds == 4);  // not incremented
+    assert(s.slots_len == 4);
+    assert(stats_get_slot(&s, 50) == NULL);
+    // The originals should still be present.
+    assert(stats_get_slot(&s, 100) != NULL);
+    assert(stats_get_slot(&s, 103) != NULL);
+    stats_free(&s);
+}
+
+TEST(fec_set_capacity_enforced) {
+    stats_t s;
+    stats_init(&s, 4);
+    // Insert STATS_MAX_FEC_SETS_PER_SLOT + 5 unique fec_set indices into one slot.
+    for (uint32_t i = 0; i < STATS_MAX_FEC_SETS_PER_SLOT + 5; i++) {
+        stats_record_shred(&s, 100, true, 0, i, SIG_AB);
+    }
+    const slot_stats_t *slot = stats_get_slot(&s, 100);
+    assert(slot != NULL);
+    assert(slot->fec_set_count == STATS_MAX_FEC_SETS_PER_SLOT);
+    stats_free(&s);
+}
+
+TEST(shreds_per_second_smoke) {
+    stats_t s;
+    stats_init(&s, 4);
+    for (int i = 0; i < 10; i++) {
+        stats_record_shred(&s, 100, true, (uint32_t)i, 0, SIG_AB);
+    }
+    double rate = stats_shreds_per_second(&s);
+    assert(rate >= 10.0);  // 10 shreds within the last 1 second
+    stats_free(&s);
+}
+
 TEST(update_xdp_counters) {
     stats_t s;
     stats_init(&s, 4);
@@ -137,6 +184,9 @@ int main(void) {
     RUN_TEST(heartbeat_counting);
     RUN_TEST(recent_slots_descending);
     RUN_TEST(fec_set_dedup);
+    RUN_TEST(old_slot_dropped_when_full);     // new
+    RUN_TEST(fec_set_capacity_enforced);      // new
+    RUN_TEST(shreds_per_second_smoke);        // new
     RUN_TEST(update_xdp_counters);
     printf("All stats tests passed.\n");
     return 0;
