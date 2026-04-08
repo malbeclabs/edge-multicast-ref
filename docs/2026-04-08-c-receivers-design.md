@@ -38,7 +38,7 @@ Both binaries share a `c/common/` directory containing shred header parsing, sta
 - Capabilities `cap_net_raw,cap_net_admin,cap_bpf,cap_perfmon=ep` on the XDP binary (or run as root)
 
 **Vendored (checked into the repo):**
-- `tomlc99` — single-file public-domain TOML parser (~2000 lines, one `.c` + one `.h`). Used by both receivers for config parsing.
+- `tomlc99` — single-file MIT-licensed TOML parser (~2000 lines, one `.c` + one `.h`). Used by both receivers for config parsing.
 
 No other external libraries. In particular: no libmnl, no libnl, no JSON/YAML parsers, no test frameworks.
 
@@ -291,7 +291,7 @@ In the kernel-receiver the XDP-specific suffix (` xdp_mode=... redirected=... pa
 
 ### `toml.h` / `toml.c`
 
-Verbatim copy of tomlc99 (https://github.com/cktan/tomlc99). Public domain. No modifications. Single source/header pair.
+Verbatim copy of tomlc99 (https://github.com/cktan/tomlc99). MIT License (Copyright (c) CK Tan). No modifications. Single source/header pair.
 
 ## `c/kernel-receiver`
 
@@ -717,7 +717,7 @@ No condition variables needed — both loops use their own `poll` timeouts and c
 ## Attribution & Licenses
 
 - **Firedancer (Apache 2.0):** The shred header struct in `common/shred.h` is derived from `src/ballet/shred/fd_shred.h`. A citation appears in the file header comment and in `c/common/NOTICE`.
-- **tomlc99 (Public Domain):** Full source vendored into `c/common/toml.[ch]`. License text appears in `c/common/NOTICE`.
+- **tomlc99 (MIT License):** Full source vendored into `c/common/toml.[ch]`. License text appears in `c/common/NOTICE`.
 - The rest of the C code is original and carries the same license as the top-level repo.
 
 ## Limitations

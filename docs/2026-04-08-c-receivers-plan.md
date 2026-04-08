@@ -120,7 +120,7 @@ See the design spec at [docs/2026-04-08-c-receivers-design.md](../docs/2026-04-0
 
 - [ ] **Step 3: Download tomlc99**
 
-Fetch `toml.h` and `toml.c` from https://github.com/cktan/tomlc99 (public domain). Place them verbatim at `c/common/toml.h` and `c/common/toml.c`.
+Fetch `toml.h` and `toml.c` from https://github.com/cktan/tomlc99 (MIT License). Place them verbatim at `c/common/toml.h` and `c/common/toml.c`.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/cktan/tomlc99/master/toml.h -o c/common/toml.h
@@ -150,14 +150,16 @@ Licensed under the Apache License, Version 2.0. A copy of the license is
 available at: http://www.apache.org/licenses/LICENSE-2.0
 
 ================================================================================
-tomlc99 (Public Domain)
+tomlc99 (MIT License)
 ================================================================================
 
 common/toml.h and common/toml.c are vendored verbatim from:
 
     https://github.com/cktan/tomlc99
 
-Released to the public domain. No modifications.
+Licensed under the MIT License. Copyright (c) CK Tan.
+The full MIT license text is reproduced in the headers of toml.h and toml.c.
+No modifications.
 ```
 
 - [ ] **Step 5: Write c/common/test.h**

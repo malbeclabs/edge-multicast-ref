@@ -16,11 +16,13 @@ Licensed under the Apache License, Version 2.0. A copy of the license is
 available at: http://www.apache.org/licenses/LICENSE-2.0
 
 ================================================================================
-tomlc99 (Public Domain)
+tomlc99 (MIT License)
 ================================================================================
 
 common/toml.h and common/toml.c are vendored verbatim from:
 
     https://github.com/cktan/tomlc99
 
-Released to the public domain. No modifications.
+Licensed under the MIT License. Copyright (c) CK Tan.
+The full MIT license text is reproduced in the headers of toml.h and toml.c.
+No modifications.
