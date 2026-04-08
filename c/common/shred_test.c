@@ -67,6 +67,22 @@ TEST(parse_merkle_code_chained_variant) {
     free(buf);
 }
 
+TEST(parse_merkle_data_chained_resigned_variant) {
+    uint8_t *buf = build_shred(0xb0, 500, 0, 0, 0, 0x00);
+    parsed_shred_t out;
+    assert(shred_parse(buf, SHRED_COMMON_HDR_SZ, &out) == true);
+    assert(out.is_data == true);
+    free(buf);
+}
+
+TEST(parse_merkle_code_chained_resigned_variant) {
+    uint8_t *buf = build_shred(0x70, 501, 0, 0, 0, 0x00);
+    parsed_shred_t out;
+    assert(shred_parse(buf, SHRED_COMMON_HDR_SZ, &out) == true);
+    assert(out.is_data == false);
+    free(buf);
+}
+
 TEST(parse_legacy_data_variant_0xa5) {
     uint8_t *buf = build_shred(0xa5, 400, 0, 0, 0, 0x00);
     parsed_shred_t out;
@@ -97,6 +113,8 @@ int main(void) {
     RUN_TEST(parse_merkle_coding_variant);
     RUN_TEST(parse_merkle_data_chained_variant);
     RUN_TEST(parse_merkle_code_chained_variant);
+    RUN_TEST(parse_merkle_data_chained_resigned_variant);
+    RUN_TEST(parse_merkle_code_chained_resigned_variant);
     RUN_TEST(parse_legacy_data_variant_0xa5);
     RUN_TEST(parse_legacy_coding_variant_0x5a);
     RUN_TEST(parse_garbage_returns_false);

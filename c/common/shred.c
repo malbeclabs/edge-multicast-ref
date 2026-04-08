@@ -1,6 +1,9 @@
 #include "shred.h"
 #include <string.h>
 
+_Static_assert(sizeof(struct shred_common_hdr) == SHRED_COMMON_HDR_SZ,
+               "shred_common_hdr size mismatch: check packed attribute and field types");
+
 // Classify a variant byte. Returns 1 for data, 0 for coding, -1 for unknown.
 static int classify_variant(uint8_t variant) {
     if (variant == 0xa5) return 1;           // legacy data
