@@ -45,6 +45,13 @@ type metrics struct {
 	buildInfo *prometheus.GaugeVec
 	uptime    prometheus.GaugeFunc
 
+	// ClickHouse writer
+	chRowsWritten   *prometheus.CounterVec
+	chRowsDropped   *prometheus.CounterVec
+	chWriteErrors   *prometheus.CounterVec
+	chBatchDuration *prometheus.HistogramVec
+	chBufferedRows  *prometheus.GaugeVec
+
 	startTime time.Time
 }
 
@@ -141,6 +148,32 @@ func newMetrics() *metrics {
 		Help: "Seconds since the process started.",
 	}, func() float64 { return time.Since(m.startTime).Seconds() })
 
+	m.chRowsWritten = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "dz_bot_clickhouse_rows_written_total",
+		Help: "Rows successfully inserted into ClickHouse, by table.",
+	}, []string{"table"})
+
+	m.chRowsDropped = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "dz_bot_clickhouse_rows_dropped_total",
+		Help: "Rows dropped on the ClickHouse write path, by table and reason.",
+	}, []string{"table", "reason"})
+
+	m.chWriteErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "dz_bot_clickhouse_write_errors_total",
+		Help: "ClickHouse write failures, by table and reason.",
+	}, []string{"table", "reason"})
+
+	m.chBatchDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "dz_bot_clickhouse_batch_duration_seconds",
+		Help:    "Time to POST a batch to ClickHouse, by table.",
+		Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5},
+	}, []string{"table"})
+
+	m.chBufferedRows = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "dz_bot_clickhouse_buffered_rows",
+		Help: "Rows currently queued for the ClickHouse batcher, by table.",
+	}, []string{"table"})
+
 	reg.MustRegister(
 		m.records, m.dropped, m.latency,
 		m.reconnects, m.connected, m.decodeError,
@@ -148,6 +181,8 @@ func newMetrics() *metrics {
 		m.spread, m.spreadBps,
 		m.lastTradePrice, m.lastTradeQty,
 		m.lastUpdateTS,
+		m.chRowsWritten, m.chRowsDropped, m.chWriteErrors,
+		m.chBatchDuration, m.chBufferedRows,
 		m.buildInfo, m.uptime,
 	)
 

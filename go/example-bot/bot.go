@@ -47,11 +47,14 @@ func (f filter) list() []string {
 }
 
 // Bot connects to the topofbook-parser's Unix socket, decodes JSON Lines
-// records, filters by symbol, and emits Prometheus metrics.
+// records, filters by symbol, and emits Prometheus metrics. When a
+// ClickHouse writer is attached, quote/trade/instrument records are also
+// forwarded there for tick-level persistence.
 type Bot struct {
 	sockPath string
 	filter   filter
 	metrics  *metrics
+	chw      *chWriter // optional; nil disables ClickHouse writes
 
 	// reconnect policy
 	initialBackoff time.Duration
@@ -66,6 +69,11 @@ func NewBot(sockPath string, filter filter, m *metrics) *Bot {
 		initialBackoff: 250 * time.Millisecond,
 		maxBackoff:     5 * time.Second,
 	}
+}
+
+// AttachClickHouse wires an optional ClickHouse writer. Call before Run.
+func (b *Bot) AttachClickHouse(w *chWriter) {
+	b.chw = w
 }
 
 // Run loops forever: dial the socket, stream records until EOF/error, back
@@ -154,11 +162,25 @@ func (b *Bot) handle(rec *Record) {
 	}
 
 	b.metrics.records.WithLabelValues(rec.Type).Inc()
+	recvTime := time.Now()
 
 	if !rec.Timestamp.IsZero() {
-		lat := time.Since(rec.Timestamp).Seconds()
+		lat := recvTime.Sub(rec.Timestamp).Seconds()
 		if lat >= 0 {
 			b.metrics.latency.WithLabelValues(rec.Type).Observe(lat)
+		}
+	}
+
+	// Persist tick-level rows to ClickHouse if a writer is attached.
+	// Non-blocking: the writer drops into metrics if its buffer is full.
+	if b.chw != nil {
+		switch rec.Type {
+		case "quote":
+			b.chw.EnqueueQuote(rec, recvTime)
+		case "trade":
+			b.chw.EnqueueTrade(rec, recvTime)
+		case "instrument_definition":
+			b.chw.EnqueueInstrument(rec, recvTime)
 		}
 	}
 
