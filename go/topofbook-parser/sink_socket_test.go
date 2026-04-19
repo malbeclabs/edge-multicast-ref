@@ -12,7 +12,7 @@ import (
 func TestSocketSink_JSONBroadcast(t *testing.T) {
 	sockPath := filepath.Join(t.TempDir(), "test.sock")
 
-	sink, err := NewSocketSink("json", sockPath)
+	sink, err := NewSocketSink("json", sockPath, nil)
 	if err != nil {
 		t.Fatalf("error creating socket sink: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestSocketSink_JSONBroadcast(t *testing.T) {
 func TestSocketSink_CSVBroadcast(t *testing.T) {
 	sockPath := filepath.Join(t.TempDir(), "test.sock")
 
-	sink, err := NewSocketSink("csv", sockPath)
+	sink, err := NewSocketSink("csv", sockPath, nil)
 	if err != nil {
 		t.Fatalf("error creating socket sink: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestSocketSink_CSVBroadcast(t *testing.T) {
 func TestSocketSink_DropsDisconnectedClient(t *testing.T) {
 	sockPath := filepath.Join(t.TempDir(), "test.sock")
 
-	sink, err := NewSocketSink("json", sockPath)
+	sink, err := NewSocketSink("json", sockPath, nil)
 	if err != nil {
 		t.Fatalf("error creating socket sink: %v", err)
 	}

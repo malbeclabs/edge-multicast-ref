@@ -17,6 +17,7 @@ import (
 type SocketSink struct {
 	format   string
 	sockPath string
+	metrics  *metrics // optional
 
 	mu       sync.Mutex
 	listener net.Listener
@@ -30,8 +31,8 @@ type recordWriter interface {
 }
 
 // NewSocketSink creates a Unix domain socket at sockPath and begins
-// accepting connections. format must be "json" or "csv".
-func NewSocketSink(format, sockPath string) (*SocketSink, error) {
+// accepting connections. format must be "json" or "csv". m may be nil.
+func NewSocketSink(format, sockPath string, m *metrics) (*SocketSink, error) {
 	// Remove any stale socket file.
 	os.Remove(sockPath) //nolint:errcheck
 
@@ -48,6 +49,7 @@ func NewSocketSink(format, sockPath string) (*SocketSink, error) {
 	s := &SocketSink{
 		format:   format,
 		sockPath: sockPath,
+		metrics:  m,
 		listener: lis,
 		clients:  make(map[net.Conn]recordWriter),
 	}
@@ -79,8 +81,12 @@ func (s *SocketSink) acceptLoop() {
 			w = newCSVConnWriter(conn)
 		}
 		s.clients[conn] = w
+		clientCount := len(s.clients)
 		s.mu.Unlock()
 
+		if s.metrics != nil {
+			s.metrics.socketClients.Set(float64(clientCount))
+		}
 		slog.Info("edge: socket client connected", "path", s.sockPath, "remote", conn.RemoteAddr())
 	}
 }
@@ -89,11 +95,25 @@ func (s *SocketSink) Write(records []Record) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	dropped := 0
+	sentTo := 0
 	for conn, w := range s.clients {
 		if err := w.writeRecords(records); err != nil {
 			slog.Warn("edge: dropping socket client", "path", s.sockPath, "error", err)
 			conn.Close()
 			delete(s.clients, conn)
+			dropped++
+			continue
+		}
+		sentTo++
+	}
+	if s.metrics != nil {
+		if dropped > 0 {
+			s.metrics.socketClientDrops.WithLabelValues("write_error").Add(float64(dropped))
+			s.metrics.socketClients.Set(float64(len(s.clients)))
+		}
+		if sentTo > 0 {
+			s.metrics.socketRecordsSent.Add(float64(len(records)))
 		}
 	}
 	return nil

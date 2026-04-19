@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -23,6 +24,7 @@ type RunnerConfig struct {
 	Interface      string // network interface to join multicast on (optional)
 	Parser         Parser
 	Sink           OutputSink
+	Metrics        *metrics // optional; may be nil
 }
 
 type Runner struct {
@@ -121,8 +123,18 @@ func (r *Runner) listenPort(ctx context.Context, port int, label string) error {
 			continue
 		}
 
+		recvTime := time.Now()
+
+		if r.cfg.Metrics != nil {
+			r.cfg.Metrics.ingressPackets.WithLabelValues(label).Inc()
+			r.cfg.Metrics.ingressBytes.WithLabelValues(label).Add(float64(n))
+		}
+
 		records, err := r.cfg.Parser.Parse(buf[:n])
 		if err != nil {
+			if r.cfg.Metrics != nil {
+				r.cfg.Metrics.parseErrors.WithLabelValues(label, classifyParseErr(err)).Inc()
+			}
 			slog.Warn("parse error", "port", label, "error", err)
 			continue
 		}
@@ -133,11 +145,44 @@ func (r *Runner) listenPort(ctx context.Context, port int, label string) error {
 					"port", label,
 					"first_batch_size", len(records))
 			}
+			if r.cfg.Metrics != nil {
+				for i := range records {
+					rec := &records[i]
+					r.cfg.Metrics.records.WithLabelValues(rec.Type).Inc()
+					if !rec.Timestamp.IsZero() {
+						lat := recvTime.Sub(rec.Timestamp).Seconds()
+						if lat >= 0 {
+							r.cfg.Metrics.wireLatency.WithLabelValues(rec.Type).Observe(lat)
+						}
+					}
+				}
+			}
 			if err := r.cfg.Sink.Write(records); err != nil {
+				if r.cfg.Metrics != nil {
+					r.cfg.Metrics.sinkWriteErrors.Inc()
+				}
 				slog.Error("sink write error", "error", err)
 				continue
 			}
 			r.recordsWritten.Add(uint64(len(records)))
 		}
+	}
+}
+
+// classifyParseErr maps a parse error into a low-cardinality bucket.
+// Used as a Prometheus label value, so it must stay finite.
+func classifyParseErr(err error) string {
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "magic"):
+		return "bad_magic"
+	case strings.Contains(msg, "schema"):
+		return "schema_version"
+	case strings.Contains(msg, "frame_length"):
+		return "frame_length"
+	case strings.Contains(msg, "truncat"):
+		return "truncated"
+	default:
+		return "other"
 	}
 }

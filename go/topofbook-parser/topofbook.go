@@ -46,6 +46,16 @@ type TopOfBookParser struct {
 	// bufferFullLogged records whether we've already emitted an INFO log
 	// about hitting the cap; further drops log at DEBUG.
 	bufferFullLogged bool
+
+	// metrics is optional; nil when the parser runs under tests that
+	// don't wire the metrics registry.
+	metrics *metrics
+}
+
+// setMetrics satisfies metricsAware (parser.go) so main.go can inject metrics
+// after construction without threading them through the Parser factory.
+func (p *TopOfBookParser) setMetrics(m *metrics) {
+	p.metrics = m
 }
 
 func NewTopOfBookParser() *TopOfBookParser {
@@ -168,9 +178,14 @@ func (p *TopOfBookParser) handleInstrumentDef(channelID uint8, seq uint64, sendT
 	p.mu.Lock()
 	_, existed := p.instruments[body.InstrumentID]
 	p.instruments[body.InstrumentID] = info
+	instrumentCount := len(p.instruments)
 	// Clear the first-time-buffering flag so a future gap is logged again.
 	delete(p.bufferingLogged, body.InstrumentID)
 	p.mu.Unlock()
+
+	if p.metrics != nil {
+		p.metrics.instrumentsTracked.Set(float64(instrumentCount))
+	}
 
 	if existed {
 		slog.Debug("edge: instrument redefined",
@@ -223,6 +238,7 @@ func (p *TopOfBookParser) handleQuote(channelID uint8, seq uint64, sendTS uint64
 		})
 		p.mu.Unlock()
 		ev.emit()
+		p.updateBufferMetrics(ev)
 		return nil
 	}
 
@@ -262,6 +278,7 @@ func (p *TopOfBookParser) handleTrade(channelID uint8, seq uint64, sendTS uint64
 		})
 		p.mu.Unlock()
 		ev.emit()
+		p.updateBufferMetrics(ev)
 		return nil
 	}
 
@@ -448,8 +465,6 @@ func (e pendingLogEvent) emit() {
 
 func (p *TopOfBookParser) flushBuffer() []Record {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	var records []Record
 	for instrumentID, bm := range p.buffer {
 		recs, err := p.processBufferedMessage(bm)
@@ -459,15 +474,32 @@ func (p *TopOfBookParser) flushBuffer() []Record {
 		records = append(records, recs...)
 		delete(p.buffer, instrumentID)
 	}
+	remaining := len(p.buffer)
+	p.mu.Unlock()
 
 	if len(records) > 0 {
 		slog.Info("edge: flushed buffered messages",
 			"parser", "topofbook",
 			"flushed", len(records),
-			"remaining", len(p.buffer))
+			"remaining", remaining)
+	}
+	if p.metrics != nil {
+		p.metrics.buffered.Set(float64(remaining))
 	}
 
 	return records
+}
+
+// updateBufferMetrics reflects a buffering event into Prometheus.
+// Safe to call with p.metrics nil (no-op).
+func (p *TopOfBookParser) updateBufferMetrics(ev pendingLogEvent) {
+	if p.metrics == nil {
+		return
+	}
+	p.metrics.buffered.Set(float64(ev.bufferDepth))
+	if ev.kind == logBufferFull {
+		p.metrics.bufferDrops.Inc()
+	}
 }
 
 // processBufferedMessage processes a buffered message without acquiring locks

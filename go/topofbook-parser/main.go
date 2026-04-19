@@ -19,6 +19,7 @@ var (
 	format         = flag.String("format", "json", "output format: json or csv")
 	output         = flag.String("output", "", "output path: file path or unix:///path/to/sock (required)")
 	iface          = flag.String("interface", "", "network interface to join multicast on (optional; default: system-selected)")
+	metricsAddr    = flag.String("metrics-addr", "", "if set, serve Prometheus /metrics on this addr (e.g. 127.0.0.1:9090)")
 	verbose        = flag.Bool("v", false, "enable debug logging")
 	versionFlag    = flag.Bool("version", false, "print version and exit")
 
@@ -72,12 +73,18 @@ func run() error {
 		return fmt.Errorf("--output is required")
 	}
 
+	m := newMetrics()
+	m.buildInfo.WithLabelValues(version, commit).Set(1)
+
 	parser, ok := NewParser(*parserName)
 	if !ok {
 		return fmt.Errorf("unknown parser %q; available: %v", *parserName, RegisteredParsers())
 	}
+	if mp, ok := parser.(metricsAware); ok {
+		mp.setMetrics(m)
+	}
 
-	sink, err := NewSink(SinkConfig{Format: *format, Path: *output})
+	sink, err := NewSink(SinkConfig{Format: *format, Path: *output, Metrics: m})
 	if err != nil {
 		return fmt.Errorf("creating output sink: %w", err)
 	}
@@ -90,10 +97,19 @@ func run() error {
 		Interface:      *iface,
 		Parser:         parser,
 		Sink:           sink,
+		Metrics:        m,
 	})
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+
+	if *metricsAddr != "" {
+		go func() {
+			if err := m.serve(ctx, *metricsAddr); err != nil {
+				slog.Error("metrics server error", "error", err)
+			}
+		}()
+	}
 
 	slog.Info("starting",
 		"group", ip,

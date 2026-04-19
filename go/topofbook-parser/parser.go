@@ -34,6 +34,12 @@ type Parser interface {
 	InstrumentCount() int
 }
 
+// metricsAware is implemented by parsers that can emit their own metrics.
+// main.go calls setMetrics at startup if the parser opts in.
+type metricsAware interface {
+	setMetrics(m *metrics)
+}
+
 // ParserFactory creates a new Parser instance.
 type ParserFactory func() Parser
 
