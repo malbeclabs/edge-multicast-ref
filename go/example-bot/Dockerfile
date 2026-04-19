@@ -2,7 +2,7 @@
 # Multi-stage build for dz-example-bot. Assumes build context is the
 # repo root (so the Go workspace is visible) — see docker-compose.yml.
 
-FROM golang:1.23-alpine AS build
+FROM golang:1.25-alpine AS build
 WORKDIR /src
 
 # Cache deps first — all workspace members' go.mod/go.sum so `go mod download`
