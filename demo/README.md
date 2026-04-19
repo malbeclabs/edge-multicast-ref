@@ -3,10 +3,10 @@
 End-to-end demo: multicast feed → parser → example bot → ClickHouse → Grafana. One command to run against any DoubleZero multicast feed.
 
 ```
-┌──────────────┐  multicast UDP   ┌────────────┐  Unix  ┌──────────────┐  HTTP JSONL  ┌────────────┐   native   ┌─────────┐
-│ Edge feed    │─────────────────▶│   parser   │─socket─▶│ example-bot  │─────────────▶│ ClickHouse │◀──────────│ Grafana │
-│ (publisher)  │                   │ (container)│         │ (container)  │              │ (container)│           │ (container)
-└──────────────┘                   └────────────┘         └──────────────┘              └────────────┘           └─────────┘
+┌──────────────┐  multicast UDP   ┌────────────┐  Unix   ┌──────────────┐  HTTP JSONL  ┌────────────┐   native  ┌────────────┐
+│ Edge feed    │─────────────────▶│   parser   │─socket─▶│ example-bot  │─────────────▶│ ClickHouse │◀──────────│ Grafana    │
+│ (publisher)  │                  │ (container)│         │ (container)  │              │ (container)│           │ (container)│
+└──────────────┘                  └────────────┘         └──────────────┘              └────────────┘           └────────────┘
 ```
 
 Everything after the feed runs in Docker. The parser uses host networking (for IGMP); everything else uses the default compose network. Grafana auto-provisions the ClickHouse datasource and the TOB dashboard on first boot.
