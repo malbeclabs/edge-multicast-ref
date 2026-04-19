@@ -1,0 +1,19 @@
+# Auto-registered on Grafana start. Connects the grafana-clickhouse-datasource
+# plugin to the clickhouse service in this compose network.
+apiVersion: 1
+
+datasources:
+  - name: ClickHouse
+    uid: clickhouse-topofbook
+    type: grafana-clickhouse-datasource
+    access: proxy
+    isDefault: true
+    jsonData:
+      host: clickhouse
+      port: 9000
+      protocol: native
+      secure: false
+      tlsSkipVerify: true
+      username: default
+      defaultDatabase: topofbook
+    editable: true
