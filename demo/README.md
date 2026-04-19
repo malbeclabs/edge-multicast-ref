@@ -16,7 +16,7 @@ Everything after the feed runs in Docker. The parser uses host networking (for I
 - Linux host with Docker and Docker Compose
 - A DoubleZero tunnel up on the host (see the top-level project docs) so the parser can join the multicast group. Typically: `doublezerod` running, `doublezero connect multicast subscriber <group_code>` issued, `doublezero1` interface present.
 
-The demo is designed for a host like `nyc-tn-qa01` where the tunnel is already in place.
+The demo is designed for a host where the DoubleZero tunnel is already in place.
 
 ## Quick start
 
