@@ -118,12 +118,16 @@ func (i *Instrument) ApplyOrderExecute(orderID uint64, execFlags uint8, execQty 
 }
 
 func (i *Instrument) applyExecToOrder(book map[uint64]*RestingOrder, o *RestingOrder, execFlags uint8, execQty uint64) {
+	if execFlags&0x01 != 0 {
+		delete(book, o.OrderID)
+		return
+	}
 	if execQty >= o.Quantity {
 		o.Quantity = 0
 	} else {
 		o.Quantity -= execQty
 	}
-	if execFlags&0x01 != 0 || o.Quantity == 0 {
+	if o.Quantity == 0 {
 		delete(book, o.OrderID)
 	}
 }
