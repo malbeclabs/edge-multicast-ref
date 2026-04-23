@@ -62,11 +62,16 @@ func (r *Runner) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	errs := make(chan error, len(r.ports))
 
+	var opened []*net.UDPConn
 	for _, pc := range r.ports {
 		conn, err := r.openMulticast(pc.Port)
 		if err != nil {
+			for _, c := range opened {
+				c.Close()
+			}
 			return fmt.Errorf("open %s port %d: %w", pc.Label, pc.Port, err)
 		}
+		opened = append(opened, conn)
 		wg.Add(1)
 		go func(label string, conn *net.UDPConn) {
 			defer wg.Done()
@@ -128,8 +133,9 @@ func (r *Runner) receive(ctx context.Context, port string, conn *net.UDPConn, er
 
 		for i := range records {
 			r.metrics.RecordsTotal.WithLabelValues(records[i].Type).Inc()
-			r.metrics.WireLatency.WithLabelValues(port).Observe(
-				time.Since(records[i].Timestamp).Seconds())
+			if lat := time.Since(records[i].Timestamp).Seconds(); lat >= 0 {
+				r.metrics.WireLatency.WithLabelValues(port).Observe(lat)
+			}
 		}
 
 		if err := r.sink.Write(records); err != nil {
