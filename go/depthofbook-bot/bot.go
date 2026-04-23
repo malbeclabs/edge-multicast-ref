@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net"
@@ -51,7 +50,8 @@ func (b *Bot) Run(ctx context.Context) {
 			return
 		}
 
-		conn, err := net.Dial("unix", b.socketPath)
+		var d net.Dialer
+		conn, err := d.DialContext(ctx, "unix", b.socketPath)
 		if err != nil {
 			b.metrics.SocketReconnects.WithLabelValues("dial_failed").Inc()
 			log.Printf("dial %s: %v (retry in %v)", b.socketPath, err, backoff)
@@ -69,7 +69,9 @@ func (b *Bot) Run(ctx context.Context) {
 		reason := b.read(ctx, conn)
 		_ = conn.Close()
 		b.metrics.SocketConnected.Set(0)
-		b.metrics.SocketReconnects.WithLabelValues(reason).Inc()
+		if ctx.Err() == nil {
+			b.metrics.SocketReconnects.WithLabelValues(reason).Inc()
+		}
 
 		if ctx.Err() != nil {
 			return
@@ -90,6 +92,9 @@ func (b *Bot) read(ctx context.Context, conn net.Conn) string {
 			return "shutdown"
 		}
 		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
 
 		var rec Record
 		if err := json.Unmarshal(line, &rec); err != nil {
@@ -113,6 +118,8 @@ func (b *Bot) read(ctx context.Context, conn net.Conn) string {
 	return "read_error"
 }
 
+// sleepCtx sleeps for d or until ctx is cancelled.
+// Returns true if the full duration elapsed; false if ctx was cancelled.
 func sleepCtx(ctx context.Context, d time.Duration) bool {
 	t := time.NewTimer(d)
 	defer t.Stop()
@@ -130,10 +137,4 @@ func nextBackoff(cur, max time.Duration) time.Duration {
 		next = max
 	}
 	return next
-}
-
-// encodeRecord produces a JSON-encoded Record line for tests.
-func encodeRecord(r Record) string {
-	b, _ := json.Marshal(r)
-	return fmt.Sprintf("%s\n", b)
 }
