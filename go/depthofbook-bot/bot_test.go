@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -11,6 +13,11 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 )
+
+func encodeRecord(r Record) string {
+	b, _ := json.Marshal(r)
+	return fmt.Sprintf("%s\n", b)
+}
 
 // stubMetrics returns a Metrics struct wired with no-op collectors so Bot can run in tests.
 func stubMetrics() *Metrics {
