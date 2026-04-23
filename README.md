@@ -23,6 +23,16 @@ The feed arrives on a GRE tunnel interface (e.g. `doublezero1`) as clean UDP pac
 
 [gre-decap](gre-decap/) is a standalone XDP program that strips GRE encapsulation inline on the physical NIC. After decap, the kernel sees plain multicast UDP — no tunnel interface or application changes needed. Useful when you want existing socket-based applications to receive the feed without a GRE tunnel.
 
+### Top-of-Book Feeds
+
+The repo also includes components for a second feed type — binary market data frames over multicast (DZ-TOB v0.1.0):
+
+| Component | Description |
+|---|---|
+| [go/topofbook-parser](go/topofbook-parser/) | Multicast subscriber. Decodes frames, writes JSON/CSV to a file or Unix socket, exposes Prometheus metrics |
+| [go/example-bot](go/example-bot/) | Reference subscriber that reads the parser's Unix socket, filters by symbol, exposes per-symbol TOB state as Prometheus metrics, and optionally writes every tick to ClickHouse |
+| [demo/](demo/) | One-command Docker Compose stack: parser + bot + ClickHouse + Grafana, pre-provisioned dashboard |
+
 ## Target Audience
 
 Traders and operators already familiar with tools like the [jito shredstream-proxy](https://github.com/jito-labs/shredstream-proxy) who want to consume DoubleZero edge multicast feeds directly.

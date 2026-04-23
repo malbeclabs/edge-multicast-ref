@@ -1,0 +1,217 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "type": "table",
+      "title": "Latest top-of-book (all subscribed symbols)",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 7 },
+      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "auto", "cellOptions": { "type": "auto" } },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "spread_bps" }, "properties": [{ "id": "unit", "value": "none" }, { "id": "decimals", "value": 2 }] },
+          { "matcher": { "id": "byName", "options": "bid" }, "properties": [{ "id": "custom.cellOptions", "value": { "type": "color-background" } }, { "id": "color", "value": { "mode": "thresholds" } }] }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "queryType": "sql",
+          "rawSql": "SELECT\n  symbol,\n  argMax(bid_price, recv_ts) AS bid,\n  argMax(ask_price, recv_ts) AS ask,\n  argMax(bid_qty, recv_ts)  AS bid_qty,\n  argMax(ask_qty, recv_ts)  AS ask_qty,\n  argMax(spread_bps, recv_ts) AS spread_bps,\n  max(recv_ts) AS last_update\nFROM topofbook.quotes\nWHERE $__timeFilter(recv_ts)\nGROUP BY symbol\nORDER BY symbol",
+          "format": 1
+        }
+      ],
+      "options": { "showHeader": true }
+    },
+    {
+      "type": "timeseries",
+      "title": "$symbol — bid / ask",
+      "gridPos": { "x": 0, "y": 7, "w": 16, "h": 9 },
+      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "lineWidth": 1, "fillOpacity": 0, "spanNulls": true },
+          "decimals": 6
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "bid" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] },
+          { "matcher": { "id": "byName", "options": "ask" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] },
+          { "matcher": { "id": "byName", "options": "trade" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "yellow" } }, { "id": "custom.drawStyle", "value": "points" }, { "id": "custom.pointSize", "value": 5 }] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "none" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "queryType": "sql",
+          "rawSql": "SELECT\n  recv_ts AS time,\n  bid_price AS bid,\n  ask_price AS ask\nFROM topofbook.quotes\nWHERE symbol = '$symbol'\n  AND $__timeFilter(recv_ts)\nORDER BY recv_ts",
+          "format": 0
+        },
+        {
+          "refId": "B",
+          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "queryType": "sql",
+          "rawSql": "SELECT\n  recv_ts AS time,\n  price AS trade\nFROM topofbook.trades\nWHERE symbol = '$symbol'\n  AND $__timeFilter(recv_ts)\nORDER BY recv_ts",
+          "format": 0
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Spread (bps) — $symbols",
+      "gridPos": { "x": 16, "y": 7, "w": 8, "h": 9 },
+      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "lineWidth": 1, "fillOpacity": 0 },
+          "unit": "none",
+          "decimals": 2
+        }
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "right", "showLegend": true }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "queryType": "sql",
+          "rawSql": "SELECT\n  $__timeInterval(recv_ts) AS time,\n  symbol,\n  avg(spread_bps) AS spread_bps\nFROM topofbook.quotes\nWHERE symbol IN ($symbols)\n  AND $__timeFilter(recv_ts)\nGROUP BY time, symbol\nORDER BY time",
+          "format": 0
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "Trade tape — $symbols (latest 100)",
+      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 9 },
+      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto", "cellOptions": { "type": "auto" } } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "aggressor_side" }, "properties": [{ "id": "custom.cellOptions", "value": { "type": "color-background" } }, { "id": "mappings", "value": [{ "type": "value", "options": { "buy": { "color": "green", "index": 0 }, "sell": { "color": "red", "index": 1 } } }] }] }
+        ]
+      },
+      "options": { "showHeader": true, "sortBy": [{ "displayName": "recv_ts", "desc": true }] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "queryType": "sql",
+          "rawSql": "SELECT\n  recv_ts,\n  symbol,\n  aggressor_side,\n  price,\n  qty\nFROM topofbook.trades\nWHERE symbol IN ($symbols)\n  AND $__timeFilter(recv_ts)\nORDER BY recv_ts DESC\nLIMIT 100",
+          "format": 1
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Volume traded (qty) — $symbols",
+      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 9 },
+      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "bars", "fillOpacity": 80, "lineWidth": 0, "barAlignment": -1 },
+          "decimals": 2
+        }
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "right", "showLegend": true }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "queryType": "sql",
+          "rawSql": "SELECT\n  $__timeInterval(recv_ts) AS time,\n  symbol,\n  sum(qty) AS volume\nFROM topofbook.trades\nWHERE symbol IN ($symbols)\n  AND $__timeFilter(recv_ts)\nGROUP BY time, symbol\nORDER BY time",
+          "format": 0
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Update rate — quotes/sec and trades/sec",
+      "gridPos": { "x": 0, "y": 25, "w": 12, "h": 7 },
+      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10 }, "unit": "cps" } },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "queryType": "sql",
+          "rawSql": "SELECT\n  $__timeInterval(recv_ts) AS time,\n  count() / ($__interval_s) AS quotes_per_sec\nFROM topofbook.quotes\nWHERE symbol IN ($symbols)\n  AND $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
+          "format": 0
+        },
+        {
+          "refId": "B",
+          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "queryType": "sql",
+          "rawSql": "SELECT\n  $__timeInterval(recv_ts) AS time,\n  count() / ($__interval_s) AS trades_per_sec\nFROM topofbook.trades\nWHERE symbol IN ($symbols)\n  AND $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
+          "format": 0
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Wire latency quantiles (ms)",
+      "description": "Publisher send_ts → subscriber receive. Includes clock skew between publisher and subscriber hosts; treat as a relative signal, not absolute latency.",
+      "gridPos": { "x": 12, "y": 25, "w": 12, "h": 7 },
+      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 0 }, "unit": "ms", "decimals": 1 } },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "queryType": "sql",
+          "rawSql": "SELECT\n  $__timeInterval(recv_ts) AS time,\n  quantile(0.50)(wire_latency_ms) AS p50,\n  quantile(0.95)(wire_latency_ms) AS p95,\n  quantile(0.99)(wire_latency_ms) AS p99\nFROM topofbook.quotes\nWHERE $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
+          "format": 0
+        }
+      ]
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 40,
+  "tags": ["dz-tob", "demo"],
+  "templating": {
+    "list": [
+      {
+        "name": "symbol",
+        "label": "Symbol (single)",
+        "type": "query",
+        "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+        "query": "SELECT DISTINCT symbol FROM topofbook.quotes WHERE $__timeFilter(recv_ts) ORDER BY symbol",
+        "refresh": 2,
+        "sort": 1,
+        "multi": false,
+        "includeAll": false
+      },
+      {
+        "name": "symbols",
+        "label": "Symbols (multi)",
+        "type": "query",
+        "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+        "query": "SELECT DISTINCT symbol FROM topofbook.quotes WHERE $__timeFilter(recv_ts) ORDER BY symbol",
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": "SELECT symbol FROM topofbook.quotes"
+      }
+    ]
+  },
+  "time": { "from": "now-15m", "to": "now" },
+  "timepicker": {},
+  "timezone": "utc",
+  "title": "DZ Top-of-Book",
+  "uid": "dz-topofbook",
+  "version": 1,
+  "weekStart": ""
+}

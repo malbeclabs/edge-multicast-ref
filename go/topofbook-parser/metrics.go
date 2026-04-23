@@ -1,0 +1,193 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"net/http"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+)
+
+// Latency histogram buckets: 100us .. 60s, log-spaced.
+// Covers in-venue multicast (sub-ms) to geographic hops (hundreds of ms)
+// to pathological buffering cases (seconds).
+var latencyBuckets = []float64{
+	0.0001, 0.00025, 0.0005,
+	0.001, 0.0025, 0.005,
+	0.01, 0.025, 0.05,
+	0.1, 0.25, 0.5,
+	1, 2.5, 5,
+	10, 30, 60,
+}
+
+// metrics holds all Prometheus metrics for the subscriber.
+// Created once in main and passed by pointer to components that emit.
+type metrics struct {
+	registry *prometheus.Registry
+
+	// Ingress (UDP → parser)
+	ingressPackets    *prometheus.CounterVec
+	ingressBytes      *prometheus.CounterVec
+	parseErrors       *prometheus.CounterVec
+	frameHeaderErrors *prometheus.CounterVec
+
+	// Decoded output
+	records         *prometheus.CounterVec
+	sinkWriteErrors prometheus.Counter
+
+	// Buffering / refdata state
+	buffered           prometheus.Gauge
+	bufferDrops        prometheus.Counter
+	instrumentsTracked prometheus.Gauge
+
+	// Wire latency (publisher send_ts → parser recv).
+	// Caveat: includes clock skew between publisher and subscriber hosts.
+	wireLatency *prometheus.HistogramVec
+
+	// Socket sink
+	socketClients      prometheus.Gauge
+	socketClientDrops  *prometheus.CounterVec
+	socketRecordsSent  prometheus.Counter
+
+	// Process / health
+	buildInfo *prometheus.GaugeVec
+	startTime time.Time
+	uptime    prometheus.GaugeFunc
+}
+
+func newMetrics() *metrics {
+	reg := prometheus.NewRegistry()
+	m := &metrics{
+		registry:  reg,
+		startTime: time.Now(),
+	}
+
+	m.ingressPackets = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "dz_subscriber_ingress_packets_total",
+		Help: "UDP datagrams received from the multicast group, by channel.",
+	}, []string{"channel"})
+
+	m.ingressBytes = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "dz_subscriber_ingress_bytes_total",
+		Help: "UDP bytes received from the multicast group, by channel.",
+	}, []string{"channel"})
+
+	m.parseErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "dz_subscriber_parse_errors_total",
+		Help: "Frames that failed to decode, by channel and reason.",
+	}, []string{"channel", "reason"})
+
+	m.frameHeaderErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "dz_subscriber_frame_header_errors_total",
+		Help: "Frames rejected by header validation, by reason.",
+	}, []string{"reason"})
+
+	m.records = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "dz_subscriber_records_total",
+		Help: "Decoded records emitted to the sink, by record type.",
+	}, []string{"type"})
+
+	m.sinkWriteErrors = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "dz_subscriber_sink_write_errors_total",
+		Help: "Sink write failures.",
+	})
+
+	m.buffered = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "dz_subscriber_buffered_messages",
+		Help: "Messages currently buffered awaiting instrument definitions.",
+	})
+
+	m.bufferDrops = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "dz_subscriber_buffer_drops_total",
+		Help: "Messages dropped because the cold-start buffer was full.",
+	})
+
+	m.instrumentsTracked = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "dz_subscriber_instruments_tracked",
+		Help: "Distinct instruments the parser has learned definitions for.",
+	})
+
+	m.wireLatency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "dz_subscriber_wire_latency_seconds",
+		Help:    "Time from publisher send_ts to parser receive, by record type. Includes clock skew between hosts and (for buffered records) refdata cold-start delay.",
+		Buckets: latencyBuckets,
+	}, []string{"type"})
+
+	m.socketClients = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "dz_subscriber_socket_clients",
+		Help: "Currently connected Unix socket clients.",
+	})
+
+	m.socketClientDrops = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "dz_subscriber_socket_client_drops_total",
+		Help: "Unix socket clients dropped, by reason.",
+	}, []string{"reason"})
+
+	m.socketRecordsSent = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "dz_subscriber_socket_records_sent_total",
+		Help: "Records successfully written to at least one connected Unix socket client.",
+	})
+
+	m.buildInfo = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "dz_subscriber_build_info",
+		Help: "Build metadata. Always 1.",
+	}, []string{"version", "commit"})
+
+	m.uptime = prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name: "dz_subscriber_uptime_seconds",
+		Help: "Seconds since the process started.",
+	}, func() float64 {
+		return time.Since(m.startTime).Seconds()
+	})
+
+	reg.MustRegister(
+		m.ingressPackets, m.ingressBytes, m.parseErrors, m.frameHeaderErrors,
+		m.records, m.sinkWriteErrors,
+		m.buffered, m.bufferDrops, m.instrumentsTracked,
+		m.wireLatency,
+		m.socketClients, m.socketClientDrops, m.socketRecordsSent,
+		m.buildInfo, m.uptime,
+	)
+
+	return m
+}
+
+// serve starts an HTTP server on addr exposing /metrics. Returns when the
+// server stops (listener closed, context cancelled, or unrecoverable error).
+// Startup errors (bind failures) are returned synchronously.
+func (m *metrics) serve(ctx context.Context, addr string) error {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.HandlerFor(m.registry, promhttp.HandlerOpts{Registry: m.registry}))
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok\n"))
+	})
+
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		slog.Info("metrics server listening", "addr", addr)
+		err := srv.ListenAndServe()
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+		}
+		close(errCh)
+	}()
+
+	select {
+	case <-ctx.Done():
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutCtx)
+		return nil
+	case err := <-errCh:
+		return err
+	}
+}
