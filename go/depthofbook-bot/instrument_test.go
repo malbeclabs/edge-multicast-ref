@@ -90,7 +90,7 @@ func TestInstrument_SnapshotReassembly(t *testing.T) {
 
 func TestInstrument_SnapshotEndMismatchedID(t *testing.T) {
 	inst := NewInstrument(100, "BTC-USDT", -2, -8)
-	inst.BeginSnapshot(7, 5000, 1, 100)
+	inst.BeginSnapshot(7, 5000, 2, 100)
 	inst.AddSnapshotOrder(7, 10, 0, 0, time.Now(), 82446, 3000)
 	_, _, err := inst.EndSnapshot(8, 5000) // wrong snapshot_id
 	if !errors.Is(err, errSnapshotMismatch) {
@@ -135,5 +135,8 @@ func TestInstrument_Reset(t *testing.T) {
 	}
 	if inst.LastAppliedMktdataSeq != 0 || inst.LastAppliedInstrumentSeq != 0 {
 		t.Error("seq trackers not reset")
+	}
+	if inst.OpenSnapshot != nil {
+		t.Error("OpenSnapshot not cleared by Reset")
 	}
 }
