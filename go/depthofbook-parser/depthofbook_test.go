@@ -192,3 +192,164 @@ func TestParseTrade(t *testing.T) {
 		t.Errorf("ts: got %v want %v", body.SourceTimestamp, ts)
 	}
 }
+
+func TestParseOrderAdd(t *testing.T) {
+	enter := time.Unix(1700000010, 0)
+	buf := make([]byte, 48)
+	binary.LittleEndian.PutUint32(buf[0:4], 100)
+	binary.LittleEndian.PutUint16(buf[4:6], 1)
+	buf[6] = 0  // bid
+	buf[7] = 1  // post-only flag
+	binary.LittleEndian.PutUint32(buf[8:12], 42)
+	binary.LittleEndian.PutUint64(buf[12:20], 999)
+	binary.LittleEndian.PutUint64(buf[20:28], uint64(enter.UnixNano()))
+	binary.LittleEndian.PutUint64(buf[28:36], uint64(int64(82446)))
+	binary.LittleEndian.PutUint64(buf[36:44], 3031)
+
+	body, err := ParseOrderAdd(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body.InstrumentID != 100 || body.SourceID != 1 || body.Side != 0 || body.OrderFlags != 1 {
+		t.Errorf("hdr: %+v", body)
+	}
+	if body.PerInstrumentSeq != 42 || body.OrderID != 999 || !body.EnterTimestamp.Equal(enter) {
+		t.Errorf("ids/ts: %+v", body)
+	}
+	if body.PriceRaw != 82446 || body.QtyRaw != 3031 {
+		t.Errorf("price/qty: %+v", body)
+	}
+}
+
+func TestParseOrderCancel(t *testing.T) {
+	ts := time.Unix(1700000011, 0)
+	buf := make([]byte, 28)
+	binary.LittleEndian.PutUint32(buf[0:4], 100)
+	binary.LittleEndian.PutUint16(buf[4:6], 1)
+	buf[6] = 1  // UserCancel
+	binary.LittleEndian.PutUint32(buf[8:12], 43)
+	binary.LittleEndian.PutUint64(buf[12:20], 999)
+	binary.LittleEndian.PutUint64(buf[20:28], uint64(ts.UnixNano()))
+
+	body, err := ParseOrderCancel(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body.InstrumentID != 100 || body.SourceID != 1 || body.Reason != 1 ||
+		body.PerInstrumentSeq != 43 || body.OrderID != 999 || !body.Timestamp.Equal(ts) {
+		t.Errorf("body: %+v", body)
+	}
+}
+
+func TestParseOrderExecute(t *testing.T) {
+	ts := time.Unix(1700000012, 0)
+	buf := make([]byte, 52)
+	binary.LittleEndian.PutUint32(buf[0:4], 100)
+	binary.LittleEndian.PutUint16(buf[4:6], 1)
+	buf[6] = 1  // Buy aggressor
+	buf[7] = 1  // full-fill flag
+	binary.LittleEndian.PutUint32(buf[8:12], 44)
+	binary.LittleEndian.PutUint64(buf[12:20], 999)
+	binary.LittleEndian.PutUint64(buf[20:28], 1234567890)
+	binary.LittleEndian.PutUint64(buf[28:36], uint64(ts.UnixNano()))
+	binary.LittleEndian.PutUint64(buf[36:44], uint64(int64(82500)))
+	binary.LittleEndian.PutUint64(buf[44:52], 100)
+
+	body, err := ParseOrderExecute(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body.InstrumentID != 100 || body.AggressorSide != 1 || body.ExecFlags != 1 ||
+		body.PerInstrumentSeq != 44 || body.OrderID != 999 || body.TradeID != 1234567890 ||
+		!body.Timestamp.Equal(ts) || body.ExecPriceRaw != 82500 || body.ExecQtyRaw != 100 {
+		t.Errorf("body: %+v", body)
+	}
+}
+
+func TestParseBatchBoundary(t *testing.T) {
+	ts := time.Unix(1700000013, 0)
+	buf := make([]byte, 12)
+	binary.LittleEndian.PutUint32(buf[0:4], 7000)
+	binary.LittleEndian.PutUint64(buf[4:12], uint64(ts.UnixNano()))
+
+	body, err := ParseBatchBoundary(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body.BatchID != 7000 || !body.BatchTime.Equal(ts) {
+		t.Errorf("body: %+v", body)
+	}
+}
+
+func TestParseInstrumentReset(t *testing.T) {
+	ts := time.Unix(1700000014, 0)
+	buf := make([]byte, 24)
+	binary.LittleEndian.PutUint32(buf[0:4], 100)
+	buf[4] = 1  // PublisherInconsistency
+	binary.LittleEndian.PutUint64(buf[8:16], 5000)
+	binary.LittleEndian.PutUint64(buf[16:24], uint64(ts.UnixNano()))
+
+	body, err := ParseInstrumentReset(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body.InstrumentID != 100 || body.Reason != 1 || body.NewAnchorSeq != 5000 || !body.Timestamp.Equal(ts) {
+		t.Errorf("body: %+v", body)
+	}
+}
+
+func TestParseSnapshotBegin(t *testing.T) {
+	ts := time.Unix(1700000015, 0)
+	buf := make([]byte, 32)
+	binary.LittleEndian.PutUint32(buf[0:4], 100)
+	binary.LittleEndian.PutUint64(buf[4:12], 5000)
+	binary.LittleEndian.PutUint32(buf[12:16], 25)  // TotalOrders
+	binary.LittleEndian.PutUint32(buf[16:20], 7)   // SnapshotID
+	binary.LittleEndian.PutUint32(buf[20:24], 100) // LastInstrumentSeq
+	binary.LittleEndian.PutUint64(buf[24:32], uint64(ts.UnixNano()))
+
+	body, err := ParseSnapshotBegin(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body.InstrumentID != 100 || body.AnchorSeq != 5000 || body.TotalOrders != 25 ||
+		body.SnapshotID != 7 || body.LastInstrumentSeq != 100 || !body.Timestamp.Equal(ts) {
+		t.Errorf("body: %+v", body)
+	}
+}
+
+func TestParseSnapshotOrder(t *testing.T) {
+	enter := time.Unix(1700000016, 0)
+	buf := make([]byte, 40)
+	binary.LittleEndian.PutUint32(buf[0:4], 7)
+	binary.LittleEndian.PutUint64(buf[4:12], 999)
+	buf[12] = 0
+	buf[13] = 1
+	binary.LittleEndian.PutUint64(buf[16:24], uint64(enter.UnixNano()))
+	binary.LittleEndian.PutUint64(buf[24:32], uint64(int64(82446)))
+	binary.LittleEndian.PutUint64(buf[32:40], 3031)
+
+	body, err := ParseSnapshotOrder(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body.SnapshotID != 7 || body.OrderID != 999 || body.Side != 0 || body.OrderFlags != 1 ||
+		!body.EnterTimestamp.Equal(enter) || body.PriceRaw != 82446 || body.QtyRaw != 3031 {
+		t.Errorf("body: %+v", body)
+	}
+}
+
+func TestParseSnapshotEnd(t *testing.T) {
+	buf := make([]byte, 16)
+	binary.LittleEndian.PutUint32(buf[0:4], 100)
+	binary.LittleEndian.PutUint64(buf[4:12], 5000)
+	binary.LittleEndian.PutUint32(buf[12:16], 7)
+
+	body, err := ParseSnapshotEnd(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body.InstrumentID != 100 || body.AnchorSeq != 5000 || body.SnapshotID != 7 {
+		t.Errorf("body: %+v", body)
+	}
+}

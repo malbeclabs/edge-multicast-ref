@@ -248,3 +248,195 @@ func ParseTrade(buf []byte) (TradeBody, error) {
 		CumulativeVolumeRaw: binary.LittleEndian.Uint64(buf[40:48]),
 	}, nil
 }
+
+// OrderAddBody is the 48-byte body of an OrderAdd message (after the 4-byte header).
+type OrderAddBody struct {
+	InstrumentID     uint32
+	SourceID         uint16
+	Side             uint8
+	OrderFlags       uint8
+	PerInstrumentSeq uint32
+	OrderID          uint64
+	EnterTimestamp   time.Time
+	PriceRaw         int64
+	QtyRaw           uint64
+}
+
+func ParseOrderAdd(buf []byte) (OrderAddBody, error) {
+	if len(buf) != 48 {
+		return OrderAddBody{}, fmt.Errorf("%w: expected 48 bytes for order_add body, got %d", errTruncated, len(buf))
+	}
+	return OrderAddBody{
+		InstrumentID:     binary.LittleEndian.Uint32(buf[0:4]),
+		SourceID:         binary.LittleEndian.Uint16(buf[4:6]),
+		Side:             buf[6],
+		OrderFlags:       buf[7],
+		PerInstrumentSeq: binary.LittleEndian.Uint32(buf[8:12]),
+		OrderID:          binary.LittleEndian.Uint64(buf[12:20]),
+		EnterTimestamp:   readTSNs(buf[20:28]),
+		PriceRaw:         int64(binary.LittleEndian.Uint64(buf[28:36])),
+		QtyRaw:           binary.LittleEndian.Uint64(buf[36:44]),
+		// bytes 44-48 are reserved padding
+	}, nil
+}
+
+// OrderCancelBody is the 28-byte body of an OrderCancel message.
+type OrderCancelBody struct {
+	InstrumentID     uint32
+	SourceID         uint16
+	Reason           uint8
+	PerInstrumentSeq uint32
+	OrderID          uint64
+	Timestamp        time.Time
+}
+
+func ParseOrderCancel(buf []byte) (OrderCancelBody, error) {
+	if len(buf) != 28 {
+		return OrderCancelBody{}, fmt.Errorf("%w: expected 28 bytes for order_cancel body, got %d", errTruncated, len(buf))
+	}
+	return OrderCancelBody{
+		InstrumentID:     binary.LittleEndian.Uint32(buf[0:4]),
+		SourceID:         binary.LittleEndian.Uint16(buf[4:6]),
+		Reason:           buf[6],
+		PerInstrumentSeq: binary.LittleEndian.Uint32(buf[8:12]),
+		OrderID:          binary.LittleEndian.Uint64(buf[12:20]),
+		Timestamp:        readTSNs(buf[20:28]),
+	}, nil
+}
+
+// OrderExecuteBody is the 52-byte body of an OrderExecute message.
+type OrderExecuteBody struct {
+	InstrumentID     uint32
+	SourceID         uint16
+	AggressorSide    uint8
+	ExecFlags        uint8
+	PerInstrumentSeq uint32
+	OrderID          uint64
+	TradeID          uint64
+	Timestamp        time.Time
+	ExecPriceRaw     int64
+	ExecQtyRaw       uint64
+}
+
+func ParseOrderExecute(buf []byte) (OrderExecuteBody, error) {
+	if len(buf) != 52 {
+		return OrderExecuteBody{}, fmt.Errorf("%w: expected 52 bytes for order_execute body, got %d", errTruncated, len(buf))
+	}
+	return OrderExecuteBody{
+		InstrumentID:     binary.LittleEndian.Uint32(buf[0:4]),
+		SourceID:         binary.LittleEndian.Uint16(buf[4:6]),
+		AggressorSide:    buf[6],
+		ExecFlags:        buf[7],
+		PerInstrumentSeq: binary.LittleEndian.Uint32(buf[8:12]),
+		OrderID:          binary.LittleEndian.Uint64(buf[12:20]),
+		TradeID:          binary.LittleEndian.Uint64(buf[20:28]),
+		Timestamp:        readTSNs(buf[28:36]),
+		ExecPriceRaw:     int64(binary.LittleEndian.Uint64(buf[36:44])),
+		ExecQtyRaw:       binary.LittleEndian.Uint64(buf[44:52]),
+	}, nil
+}
+
+// BatchBoundaryBody is the 12-byte body of a BatchBoundary message.
+type BatchBoundaryBody struct {
+	BatchID   uint32
+	BatchTime time.Time
+}
+
+func ParseBatchBoundary(buf []byte) (BatchBoundaryBody, error) {
+	if len(buf) != 12 {
+		return BatchBoundaryBody{}, fmt.Errorf("%w: expected 12 bytes for batch_boundary body, got %d", errTruncated, len(buf))
+	}
+	return BatchBoundaryBody{
+		BatchID:   binary.LittleEndian.Uint32(buf[0:4]),
+		BatchTime: readTSNs(buf[4:12]),
+	}, nil
+}
+
+// InstrumentResetBody is the 24-byte body of an InstrumentReset message.
+type InstrumentResetBody struct {
+	InstrumentID uint32
+	Reason       uint8
+	NewAnchorSeq uint64
+	Timestamp    time.Time
+}
+
+func ParseInstrumentReset(buf []byte) (InstrumentResetBody, error) {
+	if len(buf) != 24 {
+		return InstrumentResetBody{}, fmt.Errorf("%w: expected 24 bytes for instrument_reset body, got %d", errTruncated, len(buf))
+	}
+	return InstrumentResetBody{
+		InstrumentID: binary.LittleEndian.Uint32(buf[0:4]),
+		Reason:       buf[4],
+		NewAnchorSeq: binary.LittleEndian.Uint64(buf[8:16]),
+		Timestamp:    readTSNs(buf[16:24]),
+	}, nil
+}
+
+// SnapshotBeginBody is the 32-byte body of a SnapshotBegin message.
+type SnapshotBeginBody struct {
+	InstrumentID      uint32
+	AnchorSeq         uint64
+	TotalOrders       uint32
+	SnapshotID        uint32
+	LastInstrumentSeq uint32
+	Timestamp         time.Time
+}
+
+func ParseSnapshotBegin(buf []byte) (SnapshotBeginBody, error) {
+	if len(buf) != 32 {
+		return SnapshotBeginBody{}, fmt.Errorf("%w: expected 32 bytes for snapshot_begin body, got %d", errTruncated, len(buf))
+	}
+	return SnapshotBeginBody{
+		InstrumentID:      binary.LittleEndian.Uint32(buf[0:4]),
+		AnchorSeq:         binary.LittleEndian.Uint64(buf[4:12]),
+		TotalOrders:       binary.LittleEndian.Uint32(buf[12:16]),
+		SnapshotID:        binary.LittleEndian.Uint32(buf[16:20]),
+		LastInstrumentSeq: binary.LittleEndian.Uint32(buf[20:24]),
+		Timestamp:         readTSNs(buf[24:32]),
+	}, nil
+}
+
+// SnapshotOrderBody is the 40-byte body of a SnapshotOrder message.
+// Note: Instrument ID is implied by the containing SnapshotBegin; not in this body.
+type SnapshotOrderBody struct {
+	SnapshotID     uint32
+	OrderID        uint64
+	Side           uint8
+	OrderFlags     uint8
+	EnterTimestamp time.Time
+	PriceRaw       int64
+	QtyRaw         uint64
+}
+
+func ParseSnapshotOrder(buf []byte) (SnapshotOrderBody, error) {
+	if len(buf) != 40 {
+		return SnapshotOrderBody{}, fmt.Errorf("%w: expected 40 bytes for snapshot_order body, got %d", errTruncated, len(buf))
+	}
+	return SnapshotOrderBody{
+		SnapshotID:     binary.LittleEndian.Uint32(buf[0:4]),
+		OrderID:        binary.LittleEndian.Uint64(buf[4:12]),
+		Side:           buf[12],
+		OrderFlags:     buf[13],
+		EnterTimestamp: readTSNs(buf[16:24]),
+		PriceRaw:       int64(binary.LittleEndian.Uint64(buf[24:32])),
+		QtyRaw:         binary.LittleEndian.Uint64(buf[32:40]),
+	}, nil
+}
+
+// SnapshotEndBody is the 16-byte body of a SnapshotEnd message.
+type SnapshotEndBody struct {
+	InstrumentID uint32
+	AnchorSeq    uint64
+	SnapshotID   uint32
+}
+
+func ParseSnapshotEnd(buf []byte) (SnapshotEndBody, error) {
+	if len(buf) != 16 {
+		return SnapshotEndBody{}, fmt.Errorf("%w: expected 16 bytes for snapshot_end body, got %d", errTruncated, len(buf))
+	}
+	return SnapshotEndBody{
+		InstrumentID: binary.LittleEndian.Uint32(buf[0:4]),
+		AnchorSeq:    binary.LittleEndian.Uint64(buf[4:12]),
+		SnapshotID:   binary.LittleEndian.Uint32(buf[12:16]),
+	}, nil
+}
