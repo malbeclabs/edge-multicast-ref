@@ -1,13 +1,11 @@
 module github.com/malbeclabs/edge-multicast-ref/go/kernel-receiver
 
-go 1.23.0
-
-toolchain go1.23.7
+go 1.25.0
 
 require (
 	github.com/BurntSushi/toml v1.5.0
 	github.com/malbeclabs/edge-multicast-ref/go/internal v0.0.0
-	golang.org/x/net v0.40.0
+	golang.org/x/net v0.53.0
 )
 
 require (
@@ -28,9 +26,9 @@ require (
 	github.com/muesli/termenv v0.16.0 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
-	golang.org/x/sync v0.14.0 // indirect
-	golang.org/x/sys v0.33.0 // indirect
-	golang.org/x/text v0.25.0 // indirect
+	golang.org/x/sync v0.20.0 // indirect
+	golang.org/x/sys v0.43.0 // indirect
+	golang.org/x/text v0.36.0 // indirect
 )
 
 replace github.com/malbeclabs/edge-multicast-ref/go/internal => ../internal

@@ -30,8 +30,17 @@ The repo also includes components for a second feed type — binary market data 
 | Component | Description |
 |---|---|
 | [go/topofbook-parser](go/topofbook-parser/) | Multicast subscriber. Decodes frames, writes JSON/CSV to a file or Unix socket, exposes Prometheus metrics |
-| [go/example-bot](go/example-bot/) | Reference subscriber that reads the parser's Unix socket, filters by symbol, exposes per-symbol TOB state as Prometheus metrics, and optionally writes every tick to ClickHouse |
+| [go/topofbook-bot](go/topofbook-bot/) | Reference subscriber that reads the parser's Unix socket, filters by symbol, exposes per-symbol TOB state as Prometheus metrics, and optionally writes every tick to ClickHouse |
 | [demo/](demo/) | One-command Docker Compose stack: parser + bot + ClickHouse + Grafana, pre-provisioned dashboard |
+
+### Depth-of-Book Feeds (in development)
+
+A sibling DOB pipeline is under development, mirroring the TOB pipeline above:
+
+| Component | Description |
+| --- | --- |
+| [go/depthofbook-parser](go/depthofbook-parser/) | Multicast subscriber. Decodes DZ-DOB v0.1.0 wire-format frames and writes decoded market data records to a file or Unix socket |
+| [go/depthofbook-bot](go/depthofbook-bot/) | Reference subscriber that consumes the parser's Unix socket, maintains in-memory MBO order books, and persists per-event rows and level snapshots into ClickHouse |
 
 ## Target Audience
 

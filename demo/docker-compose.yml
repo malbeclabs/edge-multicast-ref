@@ -35,7 +35,7 @@ services:
   bot:
     build:
       context: ..
-      dockerfile: go/example-bot/Dockerfile
+      dockerfile: go/topofbook-bot/Dockerfile
     depends_on:
       clickhouse:
         condition: service_healthy
