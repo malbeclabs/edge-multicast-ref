@@ -1,10 +1,10 @@
 # DZ Top-of-Book Demo Stack
 
-End-to-end demo: multicast feed → parser → example bot → ClickHouse → Grafana. One command to run against any DoubleZero multicast feed.
+End-to-end demo: multicast feed → parser → topofbook-bot → ClickHouse → Grafana. One command to run against any DoubleZero multicast feed.
 
 ```
 ┌──────────────┐  multicast UDP   ┌────────────┐  Unix   ┌──────────────┐  HTTP JSONL  ┌────────────┐   native  ┌────────────┐
-│ Edge feed    │─────────────────▶│   parser   │─socket─▶│ example-bot  │─────────────▶│ ClickHouse │◀──────────│ Grafana    │
+│ Edge feed    │─────────────────▶│   parser   │─socket─▶│ topofbook-bot│─────────────▶│ ClickHouse │◀──────────│ Grafana    │
 │ (publisher)  │                  │ (container)│         │ (container)  │              │ (container)│           │ (container)│
 └──────────────┘                  └────────────┘         └──────────────┘              └────────────┘           └────────────┘
 ```

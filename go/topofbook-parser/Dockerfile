@@ -15,6 +15,8 @@ COPY go/topofbook-parser/go.mod go/topofbook-parser/go.sum ./go/topofbook-parser
 COPY go/kernel-receiver/go.mod go/kernel-receiver/go.sum ./go/kernel-receiver/
 COPY go/xdp-receiver/go.mod go/xdp-receiver/go.sum ./go/xdp-receiver/
 COPY go/topofbook-bot/go.mod go/topofbook-bot/go.sum ./go/topofbook-bot/
+COPY go/depthofbook-parser/go.mod ./go/depthofbook-parser/
+COPY go/depthofbook-bot/go.mod ./go/depthofbook-bot/
 
 WORKDIR /src/go/topofbook-parser
 RUN go mod download
