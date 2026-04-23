@@ -353,3 +353,75 @@ func TestParseSnapshotEnd(t *testing.T) {
 		t.Errorf("body: %+v", body)
 	}
 }
+
+// buildSingleMessageFrame wraps an application message body in a complete frame.
+func buildSingleMessageFrame(t *testing.T, msgType uint8, msgLength uint8, msgBody []byte) []byte {
+	t.Helper()
+	frameLen := frameHeaderSize + messageHeaderSize + len(msgBody)
+	buf := buildFrameHeader(dobMagic, dobSchemaVersion, 1, 100, time.Unix(1700000020, 0), 1, 0, uint16(frameLen))
+	mh := make([]byte, messageHeaderSize)
+	mh[0] = msgType
+	mh[1] = msgLength
+	binary.LittleEndian.PutUint16(mh[2:4], 0)
+	buf = append(buf, mh...)
+	buf = append(buf, msgBody...)
+	return buf
+}
+
+func TestDepthOfBookParser_OrderAdd(t *testing.T) {
+	enter := time.Unix(1700000010, 0)
+	body := make([]byte, 48)
+	binary.LittleEndian.PutUint32(body[0:4], 100)
+	binary.LittleEndian.PutUint16(body[4:6], 1)
+	body[6] = 0
+	binary.LittleEndian.PutUint32(body[8:12], 42)
+	binary.LittleEndian.PutUint64(body[12:20], 999)
+	binary.LittleEndian.PutUint64(body[20:28], uint64(enter.UnixNano()))
+	binary.LittleEndian.PutUint64(body[28:36], uint64(int64(82446)))
+	binary.LittleEndian.PutUint64(body[36:44], 3031)
+
+	frame := buildSingleMessageFrame(t, msgTypeOrderAdd, messageHeaderSize+48, body)
+
+	p := &depthOfBookParser{}
+	recs, err := p.ParseFrame("mktdata", frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(recs))
+	}
+	r := recs[0]
+	if r.Type != "order_add" || r.Port != "mktdata" || r.InstrumentID != 100 || r.SequenceNumber != 100 {
+		t.Errorf("envelope: %+v", r)
+	}
+	if r.Fields["per_instrument_seq"].(uint32) != 42 || r.Fields["order_id"].(uint64) != 999 {
+		t.Errorf("fields: %+v", r.Fields)
+	}
+}
+
+func TestDepthOfBookParser_UnknownTypeSkipped(t *testing.T) {
+	body := make([]byte, 8)
+	frame := buildSingleMessageFrame(t, 0xFE, messageHeaderSize+8, body)
+
+	p := &depthOfBookParser{}
+	recs, err := p.ParseFrame("mktdata", frame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 0 {
+		t.Fatalf("expected 0 records for unknown type, got %d", len(recs))
+	}
+}
+
+func TestDepthOfBookParser_TruncatedFrame(t *testing.T) {
+	body := make([]byte, 48)
+	frame := buildSingleMessageFrame(t, msgTypeOrderAdd, messageHeaderSize+48, body)
+	// Truncate the frame to 30 bytes — header says 76, only 30 present.
+	truncated := frame[:30]
+
+	p := &depthOfBookParser{}
+	_, err := p.ParseFrame("mktdata", truncated)
+	if err == nil {
+		t.Fatal("expected error on truncated frame")
+	}
+}
