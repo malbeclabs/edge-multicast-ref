@@ -262,6 +262,7 @@ type OrderAddBody struct {
 	QtyRaw           uint64
 }
 
+// ParseOrderAdd decodes an OrderAdd body. buf must be exactly 48 bytes.
 func ParseOrderAdd(buf []byte) (OrderAddBody, error) {
 	if len(buf) != 48 {
 		return OrderAddBody{}, fmt.Errorf("%w: expected 48 bytes for order_add body, got %d", errTruncated, len(buf))
@@ -290,14 +291,16 @@ type OrderCancelBody struct {
 	Timestamp        time.Time
 }
 
+// ParseOrderCancel decodes an OrderCancel body. buf must be exactly 28 bytes.
 func ParseOrderCancel(buf []byte) (OrderCancelBody, error) {
 	if len(buf) != 28 {
 		return OrderCancelBody{}, fmt.Errorf("%w: expected 28 bytes for order_cancel body, got %d", errTruncated, len(buf))
 	}
 	return OrderCancelBody{
-		InstrumentID:     binary.LittleEndian.Uint32(buf[0:4]),
-		SourceID:         binary.LittleEndian.Uint16(buf[4:6]),
-		Reason:           buf[6],
+		InstrumentID: binary.LittleEndian.Uint32(buf[0:4]),
+		SourceID:     binary.LittleEndian.Uint16(buf[4:6]),
+		Reason:       buf[6],
+		// byte 7 is reserved padding
 		PerInstrumentSeq: binary.LittleEndian.Uint32(buf[8:12]),
 		OrderID:          binary.LittleEndian.Uint64(buf[12:20]),
 		Timestamp:        readTSNs(buf[20:28]),
@@ -318,6 +321,7 @@ type OrderExecuteBody struct {
 	ExecQtyRaw       uint64
 }
 
+// ParseOrderExecute decodes an OrderExecute body. buf must be exactly 52 bytes.
 func ParseOrderExecute(buf []byte) (OrderExecuteBody, error) {
 	if len(buf) != 52 {
 		return OrderExecuteBody{}, fmt.Errorf("%w: expected 52 bytes for order_execute body, got %d", errTruncated, len(buf))
@@ -342,6 +346,7 @@ type BatchBoundaryBody struct {
 	BatchTime time.Time
 }
 
+// ParseBatchBoundary decodes a BatchBoundary body. buf must be exactly 12 bytes.
 func ParseBatchBoundary(buf []byte) (BatchBoundaryBody, error) {
 	if len(buf) != 12 {
 		return BatchBoundaryBody{}, fmt.Errorf("%w: expected 12 bytes for batch_boundary body, got %d", errTruncated, len(buf))
@@ -360,6 +365,7 @@ type InstrumentResetBody struct {
 	Timestamp    time.Time
 }
 
+// ParseInstrumentReset decodes an InstrumentReset body. buf must be exactly 24 bytes.
 func ParseInstrumentReset(buf []byte) (InstrumentResetBody, error) {
 	if len(buf) != 24 {
 		return InstrumentResetBody{}, fmt.Errorf("%w: expected 24 bytes for instrument_reset body, got %d", errTruncated, len(buf))
@@ -367,6 +373,7 @@ func ParseInstrumentReset(buf []byte) (InstrumentResetBody, error) {
 	return InstrumentResetBody{
 		InstrumentID: binary.LittleEndian.Uint32(buf[0:4]),
 		Reason:       buf[4],
+		// bytes 5-7 are reserved padding
 		NewAnchorSeq: binary.LittleEndian.Uint64(buf[8:16]),
 		Timestamp:    readTSNs(buf[16:24]),
 	}, nil
@@ -382,6 +389,7 @@ type SnapshotBeginBody struct {
 	Timestamp         time.Time
 }
 
+// ParseSnapshotBegin decodes a SnapshotBegin body. buf must be exactly 32 bytes.
 func ParseSnapshotBegin(buf []byte) (SnapshotBeginBody, error) {
 	if len(buf) != 32 {
 		return SnapshotBeginBody{}, fmt.Errorf("%w: expected 32 bytes for snapshot_begin body, got %d", errTruncated, len(buf))
@@ -408,15 +416,17 @@ type SnapshotOrderBody struct {
 	QtyRaw         uint64
 }
 
+// ParseSnapshotOrder decodes a SnapshotOrder body. buf must be exactly 40 bytes.
 func ParseSnapshotOrder(buf []byte) (SnapshotOrderBody, error) {
 	if len(buf) != 40 {
 		return SnapshotOrderBody{}, fmt.Errorf("%w: expected 40 bytes for snapshot_order body, got %d", errTruncated, len(buf))
 	}
 	return SnapshotOrderBody{
-		SnapshotID:     binary.LittleEndian.Uint32(buf[0:4]),
-		OrderID:        binary.LittleEndian.Uint64(buf[4:12]),
-		Side:           buf[12],
-		OrderFlags:     buf[13],
+		SnapshotID: binary.LittleEndian.Uint32(buf[0:4]),
+		OrderID:    binary.LittleEndian.Uint64(buf[4:12]),
+		Side:       buf[12],
+		OrderFlags: buf[13],
+		// bytes 14-15 are reserved padding
 		EnterTimestamp: readTSNs(buf[16:24]),
 		PriceRaw:       int64(binary.LittleEndian.Uint64(buf[24:32])),
 		QtyRaw:         binary.LittleEndian.Uint64(buf[32:40]),
@@ -430,6 +440,7 @@ type SnapshotEndBody struct {
 	SnapshotID   uint32
 }
 
+// ParseSnapshotEnd decodes a SnapshotEnd body. buf must be exactly 16 bytes.
 func ParseSnapshotEnd(buf []byte) (SnapshotEndBody, error) {
 	if len(buf) != 16 {
 		return SnapshotEndBody{}, fmt.Errorf("%w: expected 16 bytes for snapshot_end body, got %d", errTruncated, len(buf))

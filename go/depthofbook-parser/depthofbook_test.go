@@ -259,7 +259,7 @@ func TestParseOrderExecute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if body.InstrumentID != 100 || body.AggressorSide != 1 || body.ExecFlags != 1 ||
+	if body.InstrumentID != 100 || body.SourceID != 1 || body.AggressorSide != 1 || body.ExecFlags != 1 ||
 		body.PerInstrumentSeq != 44 || body.OrderID != 999 || body.TradeID != 1234567890 ||
 		!body.Timestamp.Equal(ts) || body.ExecPriceRaw != 82500 || body.ExecQtyRaw != 100 {
 		t.Errorf("body: %+v", body)
