@@ -236,6 +236,8 @@ func (p *depthOfBookParser) decodeMessage(port string, hdr FrameHeader, mh Messa
 		return base, true, nil
 
 	case msgTypeSnapshotOrder:
+		// SnapshotOrder has no InstrumentID on the wire; instrument
+		// association must be inferred from snapshot_id matching a SnapshotBegin.
 		b, err := ParseSnapshotOrder(body)
 		if err != nil {
 			return Record{}, false, err
@@ -278,7 +280,7 @@ func sideString(s uint8) string {
 	case 1:
 		return "ask"
 	default:
-		return ""
+		return "unknown"
 	}
 }
 
@@ -325,6 +327,6 @@ func resetReasonString(r uint8) string {
 	case 255:
 		return "other"
 	default:
-		return "unspecified"
+		return "unknown"
 	}
 }
