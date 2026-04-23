@@ -25,7 +25,7 @@ type SinkConfig struct {
 
 	// Metrics is optional; when non-nil, the socket sink tracks
 	// connected-client and drop counters.
-	Metrics *metrics
+	Metrics *Metrics
 }
 
 // NewSink creates an OutputSink from the given configuration.
