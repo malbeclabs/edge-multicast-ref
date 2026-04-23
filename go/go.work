@@ -1,9 +1,11 @@
 go 1.25.0
 
 use (
-	./example-bot
+	./depthofbook-bot
+	./depthofbook-parser
 	./internal
 	./kernel-receiver
+	./topofbook-bot
 	./topofbook-parser
 	./xdp-receiver
 )

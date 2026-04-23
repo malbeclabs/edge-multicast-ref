@@ -35,7 +35,7 @@ func main() {
 	flag.Parse()
 
 	if *versionFlag {
-		fmt.Printf("dz-example-bot %s (%s) built %s\n", version, commit, date)
+		fmt.Printf("dz-topofbook-bot %s (%s) built %s\n", version, commit, date)
 		os.Exit(0)
 	}
 
