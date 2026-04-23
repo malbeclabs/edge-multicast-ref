@@ -16,7 +16,7 @@ import (
 type SocketSink struct {
 	format   string
 	sockPath string
-	metrics  *metrics // optional
+	metrics  *Metrics // optional
 
 	mu       sync.Mutex
 	listener net.Listener
@@ -31,7 +31,7 @@ type recordWriter interface {
 
 // NewSocketSink creates a Unix domain socket at sockPath and begins
 // accepting connections. format must be "json". m may be nil.
-func NewSocketSink(format, sockPath string, m *metrics) (*SocketSink, error) {
+func NewSocketSink(format, sockPath string, m *Metrics) (*SocketSink, error) {
 	// Remove any stale socket file.
 	os.Remove(sockPath) //nolint:errcheck
 
@@ -78,7 +78,7 @@ func (s *SocketSink) acceptLoop() {
 		s.mu.Unlock()
 
 		if s.metrics != nil {
-			s.metrics.socketClients.Set(float64(clientCount))
+			s.metrics.SocketClients.Set(float64(clientCount))
 		}
 		slog.Info("edge: socket client connected", "path", s.sockPath, "remote", conn.RemoteAddr())
 	}
@@ -102,11 +102,11 @@ func (s *SocketSink) Write(records []Record) error {
 	}
 	if s.metrics != nil {
 		if dropped > 0 {
-			s.metrics.socketClientDrops.WithLabelValues("write_error").Add(float64(dropped))
-			s.metrics.socketClients.Set(float64(len(s.clients)))
+			s.metrics.SocketClientDrops.WithLabelValues("write_error").Add(float64(dropped))
+			s.metrics.SocketClients.Set(float64(len(s.clients)))
 		}
 		if sentTo > 0 {
-			s.metrics.socketRecordsSent.Add(float64(len(records)))
+			s.metrics.SocketRecordsSent.Add(float64(len(records)))
 		}
 	}
 	return nil
