@@ -10,8 +10,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/prometheus/client_golang/prometheus"
 )
 
 func encodeRecord(r Record) string {
@@ -19,15 +17,9 @@ func encodeRecord(r Record) string {
 	return fmt.Sprintf("%s\n", b)
 }
 
-// stubMetrics returns a Metrics struct wired with no-op collectors so Bot can run in tests.
+// stubMetrics returns a real Metrics instance for use in tests.
 func stubMetrics() *Metrics {
-	return &Metrics{
-		SocketConnected:    prometheus.NewGauge(prometheus.GaugeOpts{Name: "stub_connected"}),
-		SocketReconnects:   prometheus.NewCounterVec(prometheus.CounterOpts{Name: "stub_reconnects"}, []string{"reason"}),
-		RecordsTotal:       prometheus.NewCounterVec(prometheus.CounterOpts{Name: "stub_records"}, []string{"type"}),
-		DecodeErrors:       prometheus.NewCounter(prometheus.CounterOpts{Name: "stub_decode_errors"}),
-		SocketToBotLatency: prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "stub_latency"}, []string{"type"}),
-	}
+	return NewMetrics("test", "test")
 }
 
 type capturingDispatcher struct {

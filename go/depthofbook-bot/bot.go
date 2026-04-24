@@ -9,18 +9,7 @@ import (
 	"log"
 	"net"
 	"time"
-
-	"github.com/prometheus/client_golang/prometheus"
 )
-
-// Metrics is the subset used by Bot. Task 12 will replace this stub with the full implementation.
-type Metrics struct {
-	SocketConnected    prometheus.Gauge
-	SocketReconnects   *prometheus.CounterVec
-	RecordsTotal       *prometheus.CounterVec
-	DecodeErrors       prometheus.Counter
-	SocketToBotLatency *prometheus.HistogramVec
-}
 
 // Dispatcher is called for every successfully decoded Record.
 // Implementations MUST be fast (don't block the read loop).
