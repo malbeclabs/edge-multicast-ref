@@ -106,6 +106,41 @@ func main() {
 	dispatcher := DispatcherFunc(func(rec Record) {
 		c, sw := getOrCreateChannel(rec.ChannelID)
 		evs := c.Apply(rec)
+
+		// Snapshot frame routing is unconditional per-record.
+		// snapshot_begin and snapshot_order produce no ChannelEvents, so they
+		// must be handled before the events loop.
+		switch rec.Type {
+		case "snapshot_begin":
+			// Resolve exponents from refdata if available.
+			var priceExp, qtyExp int8
+			symbol := ""
+			if def, ok := c.Refdata[rec.InstrumentID]; ok {
+				symbol = def.Symbol
+				priceExp = def.PriceExponent
+				qtyExp = def.QtyExponent
+			}
+			snapCtxMu.Lock()
+			snapCtx[c.ChannelID] = SnapshotContext{
+				InstrumentID:      rec.InstrumentID,
+				Symbol:            symbol,
+				SnapshotID:        getUint32(rec.Fields, "snapshot_id"),
+				AnchorSeq:         getUint64(rec.Fields, "anchor_seq"),
+				TotalOrders:       getUint32(rec.Fields, "total_orders"),
+				LastInstrumentSeq: getUint32(rec.Fields, "last_instrument_seq"),
+				PriceExponent:     priceExp,
+				QtyExponent:       qtyExp,
+			}
+			snapCtxMu.Unlock()
+		case "snapshot_order":
+			snapCtxMu.Lock()
+			sctx, ok := snapCtx[c.ChannelID]
+			snapCtxMu.Unlock()
+			if ok {
+				eventsWriter.WriteSnapshotOrder(rec, c.ChannelID, sctx)
+			}
+		}
+
 		for _, ev := range evs {
 			// Resolve symbol + exponents from refdata.
 			symbol := ""
@@ -116,28 +151,7 @@ func main() {
 				qtyExp = def.QtyExponent
 			}
 
-			// Special-case snapshot frames: maintain context, route via WriteSnapshotOrder.
 			switch rec.Type {
-			case "snapshot_begin":
-				snapCtxMu.Lock()
-				snapCtx[c.ChannelID] = SnapshotContext{
-					InstrumentID:      rec.InstrumentID,
-					Symbol:            symbol,
-					SnapshotID:        getUint32(rec.Fields, "snapshot_id"),
-					AnchorSeq:         getUint64(rec.Fields, "anchor_seq"),
-					TotalOrders:       getUint32(rec.Fields, "total_orders"),
-					LastInstrumentSeq: getUint32(rec.Fields, "last_instrument_seq"),
-					PriceExponent:     priceExp,
-					QtyExponent:       qtyExp,
-				}
-				snapCtxMu.Unlock()
-			case "snapshot_order":
-				snapCtxMu.Lock()
-				sctx, ok := snapCtx[c.ChannelID]
-				snapCtxMu.Unlock()
-				if ok {
-					eventsWriter.WriteSnapshotOrder(rec, c.ChannelID, sctx)
-				}
 			case "snapshot_end":
 				snapCtxMu.Lock()
 				delete(snapCtx, c.ChannelID)
