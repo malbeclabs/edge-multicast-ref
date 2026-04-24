@@ -1,0 +1,275 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "type": "table",
+      "title": "Book ladder",
+      "id": 1,
+      "gridPos": { "x": 0, "y": 0, "w": 8, "h": 14 },
+      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "auto", "cellOptions": { "type": "auto" } },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "options": { "showHeader": true },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "queryType": "sql",
+          "rawSql": "SELECT side, level_idx, price, qty, cumulative_qty\nFROM depthofbook.level_snapshots\nWHERE symbol = '${symbol}'\n  AND recv_ts = (\n    SELECT max(recv_ts) FROM depthofbook.level_snapshots\n    WHERE symbol = '${symbol}' AND $__timeFilter(recv_ts)\n  )\nORDER BY side DESC, level_idx",
+          "format": 1
+        }
+      ]
+    },
+    {
+      "type": "heatmap",
+      "title": "Depth heatmap",
+      "id": 2,
+      "gridPos": { "x": 8, "y": 0, "w": 16, "h": 14 },
+      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "calculate": false,
+        "color": { "mode": "scheme", "scheme": "Spectral", "steps": 64 },
+        "exemplars": { "color": "rgba(255,0,255,0.7)" },
+        "filterValues": { "le": 1e-9 },
+        "legend": { "show": true },
+        "tooltip": { "mode": "single", "showColorScale": false, "yHistogram": false },
+        "yAxis": { "axisPlacement": "left", "unit": "none" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "queryType": "sql",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, price, sum(qty) AS qty\nFROM depthofbook.level_snapshots\nWHERE symbol = '${symbol}' AND $__timeFilter(recv_ts)\nGROUP BY time, price\nORDER BY time",
+          "format": 1
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Spread (bps)",
+      "id": 3,
+      "gridPos": { "x": 0, "y": 14, "w": 8, "h": 7 },
+      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "lineWidth": 1, "fillOpacity": 0 },
+          "unit": "none",
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "queryType": "sql",
+          "rawSql": "WITH best AS (\n  SELECT $__timeInterval(recv_ts) AS time,\n         min(price) FILTER (WHERE side = 'ask') AS best_ask,\n         max(price) FILTER (WHERE side = 'bid') AS best_bid\n  FROM depthofbook.level_snapshots\n  WHERE symbol = '${symbol}' AND level_idx = 0 AND $__timeFilter(recv_ts)\n  GROUP BY time\n)\nSELECT time, ((best_ask - best_bid) / ((best_ask + best_bid) / 2)) * 10000 AS spread_bps\nFROM best ORDER BY time",
+          "format": 0
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "Top of book",
+      "id": 4,
+      "gridPos": { "x": 8, "y": 14, "w": 16, "h": 7 },
+      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "auto", "cellOptions": { "type": "auto" } },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "bid" }, "properties": [{ "id": "custom.cellOptions", "value": { "type": "color-background" } }, { "id": "color", "value": { "mode": "thresholds" } }] }
+        ]
+      },
+      "options": { "showHeader": true },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "queryType": "sql",
+          "rawSql": "SELECT\n  symbol,\n  argMax(price, recv_ts) FILTER (WHERE side = 'bid' AND level_idx = 0) AS bid,\n  argMax(price, recv_ts) FILTER (WHERE side = 'ask' AND level_idx = 0) AS ask,\n  argMax(qty, recv_ts) FILTER (WHERE side = 'bid' AND level_idx = 0) AS bid_qty,\n  argMax(qty, recv_ts) FILTER (WHERE side = 'ask' AND level_idx = 0) AS ask_qty,\n  max(recv_ts) AS last_update\nFROM depthofbook.level_snapshots\nWHERE symbol IN (${symbols:singlequote}) AND $__timeFilter(recv_ts)\nGROUP BY symbol\nORDER BY symbol",
+          "format": 1
+        }
+      ]
+    },
+    {
+      "type": "table",
+      "title": "Trade tape",
+      "id": 5,
+      "gridPos": { "x": 0, "y": 21, "w": 12, "h": 9 },
+      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+      "fieldConfig": {
+        "defaults": { "custom": { "align": "auto", "cellOptions": { "type": "auto" } } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "aggressor_side" }, "properties": [{ "id": "custom.cellOptions", "value": { "type": "color-background" } }, { "id": "mappings", "value": [{ "type": "value", "options": { "buy": { "color": "green", "index": 0 }, "sell": { "color": "red", "index": 1 } } }] }] }
+        ]
+      },
+      "options": { "showHeader": true, "sortBy": [{ "displayName": "recv_ts", "desc": true }] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "queryType": "sql",
+          "rawSql": "SELECT recv_ts, symbol, aggressor_side, price, qty\nFROM depthofbook.events\nWHERE kind = 'trade' AND symbol IN (${symbols:singlequote})\n  AND $__timeFilter(recv_ts)\nORDER BY recv_ts DESC LIMIT 100",
+          "format": 1
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Add/Cancel/Execute rate",
+      "id": 6,
+      "gridPos": { "x": 12, "y": 21, "w": 12, "h": 9 },
+      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10 },
+          "unit": "cps"
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "queryType": "sql",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, kind, count() AS rate\nFROM depthofbook.events\nWHERE kind IN ('order_add', 'order_cancel', 'order_execute')\n  AND symbol IN (${symbols:singlequote}) AND $__timeFilter(recv_ts)\nGROUP BY time, kind ORDER BY time",
+          "format": 0
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Resting order count",
+      "id": 7,
+      "gridPos": { "x": 0, "y": 30, "w": 12, "h": 7 },
+      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 0 }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "queryType": "sql",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, side, sum(order_count) AS orders\nFROM depthofbook.level_snapshots\nWHERE symbol = '${symbol}' AND $__timeFilter(recv_ts)\nGROUP BY time, side ORDER BY time",
+          "format": 0
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Channel health",
+      "id": 8,
+      "gridPos": { "x": 12, "y": 30, "w": 12, "h": 5 },
+      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 0 },
+          "unit": "ms",
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "queryType": "sql",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time,\n       quantile(0.5)(wire_latency_ms) AS p50,\n       quantile(0.95)(wire_latency_ms) AS p95,\n       quantile(0.99)(wire_latency_ms) AS p99\nFROM depthofbook.level_snapshots\nWHERE $__timeFilter(recv_ts)\nGROUP BY time ORDER BY time",
+          "format": 0
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Active instrument count",
+      "id": 9,
+      "gridPos": { "x": 20, "y": 35, "w": 4, "h": 5 },
+      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
+          "color": { "mode": "thresholds" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "queryType": "sql",
+          "rawSql": "SELECT instrument_count\nFROM depthofbook.channel_health\nWHERE kind = 'manifest_summary'\nORDER BY recv_ts DESC LIMIT 1",
+          "format": 1
+        }
+      ]
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 40,
+  "tags": ["dz-dob", "demo"],
+  "templating": {
+    "list": [
+      {
+        "name": "symbol",
+        "label": "Symbol",
+        "type": "query",
+        "datasource": "ClickHouse",
+        "query": "SELECT DISTINCT symbol FROM depthofbook.level_snapshots WHERE $__timeFilter(recv_ts)",
+        "multi": false,
+        "includeAll": false,
+        "refresh": 2
+      },
+      {
+        "name": "symbols",
+        "label": "Symbols",
+        "type": "query",
+        "datasource": "ClickHouse",
+        "query": "SELECT DISTINCT symbol FROM depthofbook.level_snapshots WHERE $__timeFilter(recv_ts)",
+        "multi": true,
+        "includeAll": true,
+        "refresh": 2
+      }
+    ]
+  },
+  "time": { "from": "now-15m", "to": "now" },
+  "timepicker": {},
+  "timezone": "utc",
+  "title": "DZ Depth-of-Book",
+  "uid": "dz-depthofbook",
+  "version": 1,
+  "weekStart": ""
+}
