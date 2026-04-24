@@ -98,6 +98,14 @@ func (w *SnapshotWriter) flushDue() {
 			w.metrics.SnapshotWritesTotal.Inc()
 			w.metrics.SnapshotLagMs.Observe(float64(now.Sub(e.dirtiedAt).Milliseconds()))
 		}
+		w.mu.Lock()
+		if e2, ok := w.dirty[e.instrumentID]; ok {
+			rearm := now.Add(w.coalesceInterval)
+			if e2.nextAllowedAt.Before(rearm) {
+				e2.nextAllowedAt = rearm
+			}
+		}
+		w.mu.Unlock()
 	}
 }
 
