@@ -65,7 +65,7 @@ services:
       - --snapshot-port=${DZ_DOB_SNAPSHOT_PORT}
       - --interface=${DZ_INTERFACE}
       - --output=unix:///var/run/dz/dob.sock
-      - --metrics-addr=127.0.0.1:9091
+      - --metrics-addr=127.0.0.1:${DZ_DOB_PARSER_METRICS_PORT:-9093}
     volumes:
       - dz-sockets:/var/run/dz
 
