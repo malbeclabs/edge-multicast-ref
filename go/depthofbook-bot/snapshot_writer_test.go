@@ -19,10 +19,6 @@ func (w *captureWriter) Enqueue(table string, row map[string]any) bool {
 	return true
 }
 
-// Wrapper to satisfy ClickhouseClient signature in this test path.
-// The SnapshotWriter only calls .Enqueue, so a small adapter suffices.
-type chAdapter struct{ inner *captureWriter }
-
 func TestSnapshotWriter_CoalescesRapidChanges(t *testing.T) {
 	// Build an instrument with one bid and one ask so ComputeLevels has output.
 	inst := NewInstrument(100, "BTC-USDT", 0, 0)
