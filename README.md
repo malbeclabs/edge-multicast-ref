@@ -33,14 +33,13 @@ The repo also includes components for a second feed type — binary market data 
 | [go/topofbook-bot](go/topofbook-bot/) | Reference subscriber that reads the parser's Unix socket, filters by symbol, exposes per-symbol TOB state as Prometheus metrics, and optionally writes every tick to ClickHouse |
 | [demo/](demo/) | One-command Docker Compose stack: parser + bot + ClickHouse + Grafana, pre-provisioned dashboard |
 
-### Depth-of-Book Feeds (in development)
+### Depth-of-Book Demo
 
-A sibling DOB pipeline is under development, mirroring the TOB pipeline above:
+A sibling pipeline to top-of-book, consuming the DZ-DOB v0.1.0 feed:
 
-| Component | Description |
-| --- | --- |
-| [go/depthofbook-parser](go/depthofbook-parser/) | Multicast subscriber. Decodes DZ-DOB v0.1.0 wire-format frames and writes decoded market data records to a file or Unix socket |
-| [go/depthofbook-bot](go/depthofbook-bot/) | Reference subscriber that consumes the parser's Unix socket, maintains in-memory MBO order books, and persists per-event rows and level snapshots into ClickHouse |
+- **[`go/depthofbook-parser`](go/depthofbook-parser/)** — three-port multicast subscriber + binary wire decoder, broadcasts decoded JSONL on a Unix socket
+- **[`go/depthofbook-bot`](go/depthofbook-bot/)** — book builder + persistor, maintains in-memory MBO order books and writes per-event rows + coalesced top-N level snapshots to ClickHouse
+- **[`demo`](demo/)** — extended docker-compose stack with a new "DZ Depth-of-Book" Grafana dashboard featuring book ladder, depth heatmap, spread, trade tape, and event-rate panels
 
 ## Target Audience
 
