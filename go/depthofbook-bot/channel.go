@@ -282,7 +282,7 @@ func (c *ChannelState) bufferDelta(rec Record) {
 }
 
 func (c *ChannelState) replayBuffer(inst *Instrument) {
-	remaining := c.DeltaBuffer[:0]
+	remaining := make([]BufferedDelta, 0, len(c.DeltaBuffer))
 	for _, b := range c.DeltaBuffer {
 		if b.Record.InstrumentID != inst.ID {
 			remaining = append(remaining, b)
@@ -297,7 +297,7 @@ func (c *ChannelState) replayBuffer(inst *Instrument) {
 }
 
 func filterBuffer(buf []BufferedDelta, keep func(BufferedDelta) bool) []BufferedDelta {
-	out := buf[:0]
+	out := make([]BufferedDelta, 0, len(buf))
 	for _, b := range buf {
 		if keep(b) {
 			out = append(out, b)
