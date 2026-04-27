@@ -55,7 +55,7 @@ type topOfBookHeader struct {
 	SequenceNumber uint64
 	SendTimestamp  uint64 // nanoseconds since Unix epoch
 	MsgCount       uint8
-	Reserved       uint8
+	ResetCount     uint8
 	FrameLength    uint16
 }
 
@@ -231,7 +231,7 @@ func decodeTopOfBookFrame(data []byte) (*topOfBookFrame, error) {
 	f.Header.SequenceNumber = r.u64()
 	f.Header.SendTimestamp = r.u64()
 	f.Header.MsgCount = r.u8()
-	f.Header.Reserved = r.u8()
+	f.Header.ResetCount = r.u8()
 	f.Header.FrameLength = r.u16()
 	if r.err != nil {
 		return nil, fmt.Errorf("decoding frame header: %w", r.err)

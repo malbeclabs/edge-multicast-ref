@@ -4,13 +4,17 @@ import "time"
 
 // Record represents a single decoded feed message ready for output.
 type Record struct {
-	Type           string         `json:"type"`
-	Timestamp      time.Time      `json:"ts"`
-	ChannelID      uint8          `json:"channel_id"`
-	SequenceNumber uint64         `json:"seq"`
-	InstrumentID   uint32         `json:"instrument_id,omitempty"`
-	Symbol         string         `json:"symbol,omitempty"`
-	Fields         map[string]any `json:"fields,omitempty"`
+	Type            string         `json:"type"`
+	Timestamp       time.Time      `json:"ts"`
+	RecvTimestamp   time.Time      `json:"recv_ts,omitempty"`
+	RecvTimestampNS uint64         `json:"parser_kernel_recv_ts_ns,omitempty"`
+	RecvTSKind      string         `json:"recv_ts_kind,omitempty"`
+	ChannelID       uint8          `json:"channel_id"`
+	SequenceNumber  uint64         `json:"seq"`
+	ResetCount      uint8          `json:"reset_count"`
+	InstrumentID    uint32         `json:"instrument_id,omitempty"`
+	Symbol          string         `json:"symbol,omitempty"`
+	Fields          map[string]any `json:"fields,omitempty"`
 }
 
 // Parser decodes raw UDP datagrams into structured records.

@@ -102,6 +102,9 @@ func (r *Runner) listenPort(ctx context.Context, port int, label string) error {
 	if err := pc.SetControlMessage(ipv4.FlagDst, true); err != nil {
 		slog.Warn("could not set control message flag", "error", err)
 	}
+	if err := enableTimestamping(conn); err != nil {
+		slog.Warn("could not enable UDP receive timestamping", "error", err)
+	}
 
 	slog.Info("listening for multicast", "group", r.cfg.GroupIP, "port", port, "label", label,
 		"interface", r.cfg.Interface)
@@ -114,7 +117,7 @@ func (r *Runner) listenPort(ctx context.Context, port int, label string) error {
 		default:
 		}
 
-		n, _, err := conn.ReadFromUDP(buf)
+		n, recvTime, recvKind, err := readDatagram(conn, buf)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -122,8 +125,6 @@ func (r *Runner) listenPort(ctx context.Context, port int, label string) error {
 			slog.Warn("read error", "port", label, "error", err)
 			continue
 		}
-
-		recvTime := time.Now()
 
 		if r.cfg.Metrics != nil {
 			r.cfg.Metrics.ingressPackets.WithLabelValues(label).Inc()
@@ -145,6 +146,7 @@ func (r *Runner) listenPort(ctx context.Context, port int, label string) error {
 					"port", label,
 					"first_batch_size", len(records))
 			}
+			annotateReceiveTimestamp(records, recvTime, recvKind)
 			if r.cfg.Metrics != nil {
 				for i := range records {
 					rec := &records[i]
@@ -166,6 +168,16 @@ func (r *Runner) listenPort(ctx context.Context, port int, label string) error {
 			}
 			r.recordsWritten.Add(uint64(len(records)))
 		}
+	}
+}
+
+func annotateReceiveTimestamp(records []Record, recvTime time.Time, recvKind string) {
+	recvTime = recvTime.UTC()
+	recvTSNS := uint64(recvTime.UnixNano())
+	for i := range records {
+		records[i].RecvTimestamp = recvTime
+		records[i].RecvTimestampNS = recvTSNS
+		records[i].RecvTSKind = recvKind
 	}
 }
 

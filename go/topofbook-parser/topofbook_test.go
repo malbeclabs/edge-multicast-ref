@@ -9,6 +9,10 @@ import (
 
 // buildFrame constructs a raw Top-of-Book frame from a header and message payloads.
 func buildFrame(channelID uint8, seq uint64, sendTS uint64, msgs ...[]byte) []byte {
+	return buildFrameWithReset(channelID, seq, sendTS, 0, msgs...)
+}
+
+func buildFrameWithReset(channelID uint8, seq uint64, sendTS uint64, resetCount uint8, msgs ...[]byte) []byte {
 	headerSize := 24
 	bodySize := 0
 	for _, m := range msgs {
@@ -25,7 +29,7 @@ func buildFrame(channelID uint8, seq uint64, sendTS uint64, msgs ...[]byte) []by
 	binary.LittleEndian.PutUint64(buf[4:], seq)
 	binary.LittleEndian.PutUint64(buf[12:], sendTS)
 	buf[20] = uint8(len(msgs)) // msg count
-	buf[21] = 0                // reserved
+	buf[21] = resetCount
 	binary.LittleEndian.PutUint16(buf[22:], uint16(frameLen))
 
 	off := headerSize
@@ -167,6 +171,9 @@ func TestTopOfBookParser_InstrumentDefinition(t *testing.T) {
 	if r.SequenceNumber != 100 {
 		t.Errorf("expected sequence number 100, got %d", r.SequenceNumber)
 	}
+	if r.ResetCount != 0 {
+		t.Errorf("expected reset count 0, got %d", r.ResetCount)
+	}
 	if r.Fields["price_exponent"] != int8(-2) {
 		t.Errorf("expected price_exponent -2, got %v", r.Fields["price_exponent"])
 	}
@@ -220,6 +227,56 @@ func TestTopOfBookParser_QuoteWithDefinition(t *testing.T) {
 	if math.Abs(bidQty-1.25) > 0.0001 {
 		t.Errorf("expected bid_qty 1.25, got %f", bidQty)
 	}
+
+	if r.Fields["source_ts_ns"] != srcTS {
+		t.Errorf("expected source_ts_ns %d, got %v", srcTS, r.Fields["source_ts_ns"])
+	}
+	if r.Fields["source_ts_ms"] != srcTS/uint64(time.Millisecond) {
+		t.Errorf("expected source_ts_ms %d, got %v", srcTS/uint64(time.Millisecond), r.Fields["source_ts_ms"])
+	}
+	if r.Fields["bid_px_raw"] != int64(6743250) {
+		t.Errorf("expected bid_px_raw 6743250, got %v", r.Fields["bid_px_raw"])
+	}
+	if r.Fields["bid_sz_raw"] != uint64(125000000) {
+		t.Errorf("expected bid_sz_raw 125000000, got %v", r.Fields["bid_sz_raw"])
+	}
+	if r.Fields["ask_px_raw"] != int64(6743300) {
+		t.Errorf("expected ask_px_raw 6743300, got %v", r.Fields["ask_px_raw"])
+	}
+	if r.Fields["ask_sz_raw"] != uint64(80000000) {
+		t.Errorf("expected ask_sz_raw 80000000, got %v", r.Fields["ask_sz_raw"])
+	}
+	if r.Fields["bid_n"] != uint16(5) {
+		t.Errorf("expected bid_n 5, got %v", r.Fields["bid_n"])
+	}
+	if r.Fields["ask_n"] != uint16(3) {
+		t.Errorf("expected ask_n 3, got %v", r.Fields["ask_n"])
+	}
+	if r.Fields["price_exponent"] != int8(-2) {
+		t.Errorf("expected price_exponent -2, got %v", r.Fields["price_exponent"])
+	}
+	if r.Fields["qty_exponent"] != int8(-8) {
+		t.Errorf("expected qty_exponent -8, got %v", r.Fields["qty_exponent"])
+	}
+}
+
+func TestTopOfBookParser_ResetCount(t *testing.T) {
+	p := NewTopOfBookParser()
+
+	ts := uint64(time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC).UnixNano())
+	instDef := buildInstrumentDef(42, "BTC-USDT", "BTC", "USDT", -2, -8)
+	frame := buildFrameWithReset(1, 100, ts, 7, instDef)
+
+	records, err := p.Parse(frame)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(records))
+	}
+	if records[0].ResetCount != 7 {
+		t.Fatalf("expected reset count 7, got %d", records[0].ResetCount)
+	}
 }
 
 func TestTopOfBookParser_QuoteBuffering(t *testing.T) {
@@ -260,6 +317,9 @@ func TestTopOfBookParser_QuoteBuffering(t *testing.T) {
 	}
 	if records[1].Type != "quote" {
 		t.Errorf("expected second record to be quote, got %s", records[1].Type)
+	}
+	if records[1].Fields["buffered"] != true {
+		t.Errorf("expected flushed quote to be marked buffered, got %v", records[1].Fields["buffered"])
 	}
 	if p.Buffered() != 0 {
 		t.Errorf("expected 0 buffered after flush, got %d", p.Buffered())
