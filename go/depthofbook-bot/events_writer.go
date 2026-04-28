@@ -25,7 +25,7 @@ func (w *EventsWriter) Write(ev ChannelEvent, channelID uint8, instSymbol string
 	switch rec.Type {
 	case "instrument_definition":
 		w.ch.Enqueue("instruments", map[string]any{
-			"recv_ts":         now,
+			"recv_ts":         chTime(now),
 			"channel_id":      channelID,
 			"instrument_id":   rec.InstrumentID,
 			"symbol":          getString(rec.Fields, "symbol"),
@@ -38,7 +38,7 @@ func (w *EventsWriter) Write(ev ChannelEvent, channelID uint8, instSymbol string
 			"tick_size":       scalePrice(getInt64(rec.Fields, "tick_size_raw"), getInt8(rec.Fields, "price_exponent")),
 			"lot_size":        scaleQty(getUint64(rec.Fields, "lot_size_raw"), getInt8(rec.Fields, "qty_exponent")),
 			"contract_value":  getUint64(rec.Fields, "contract_value"),
-			"expiry_ts":       getTime(rec.Fields, "expiry"),
+			"expiry_ts":       chTime(getTime(rec.Fields, "expiry")),
 			"settle_type":     settleTypeString(getUint8(rec.Fields, "settle_type")),
 			"price_bound":     priceBoundString(getUint8(rec.Fields, "price_bound")),
 			"manifest_seq":    getUint16(rec.Fields, "manifest_seq"),
@@ -46,8 +46,8 @@ func (w *EventsWriter) Write(ev ChannelEvent, channelID uint8, instSymbol string
 
 	case "heartbeat", "manifest_summary", "end_of_session":
 		row := map[string]any{
-			"recv_ts":            now,
-			"publisher_send_ts":  rec.Timestamp,
+			"recv_ts":            chTime(now),
+			"publisher_send_ts":  chTime(rec.Timestamp),
 			"channel_id":         channelID,
 			"kind":               rec.Type,
 		}
@@ -60,8 +60,8 @@ func (w *EventsWriter) Write(ev ChannelEvent, channelID uint8, instSymbol string
 
 	case "order_add", "order_cancel", "order_execute", "trade", "instrument_reset", "batch_boundary":
 		row := map[string]any{
-			"recv_ts":           now,
-			"publisher_send_ts": rec.Timestamp,
+			"recv_ts":           chTime(now),
+			"publisher_send_ts": chTime(rec.Timestamp),
 			"channel_id":        channelID,
 			"mktdata_seq":       rec.SequenceNumber,
 			"reset_count":       rec.ResetCount,
@@ -78,7 +78,7 @@ func (w *EventsWriter) Write(ev ChannelEvent, channelID uint8, instSymbol string
 			row["order_flags"] = getUint8(rec.Fields, "order_flags")
 			row["price"] = scalePrice(getInt64(rec.Fields, "price_raw"), priceExp)
 			row["qty"] = scaleQty(getUint64(rec.Fields, "qty_raw"), qtyExp)
-			row["enter_ts"] = getTime(rec.Fields, "enter_ts")
+			row["enter_ts"] = chTime(getTime(rec.Fields, "enter_ts"))
 		case "order_cancel":
 			row["source_id"] = getUint16(rec.Fields, "source_id")
 			row["per_instrument_seq"] = getUint32(rec.Fields, "per_instrument_seq")
@@ -105,7 +105,7 @@ func (w *EventsWriter) Write(ev ChannelEvent, channelID uint8, instSymbol string
 			row["new_anchor_seq"] = getUint64(rec.Fields, "new_anchor_seq")
 		case "batch_boundary":
 			row["batch_id"] = getUint32(rec.Fields, "batch_id")
-			row["batch_ts"] = getTime(rec.Fields, "batch_ts")
+			row["batch_ts"] = chTime(getTime(rec.Fields, "batch_ts"))
 		}
 		w.ch.Enqueue("events", row)
 	}
@@ -129,8 +129,8 @@ func (w *EventsWriter) WriteSnapshotOrder(rec Record, channelID uint8, ctx Snaps
 		return
 	}
 	w.ch.Enqueue("wire_snapshots", map[string]any{
-		"recv_ts":             time.Now().UTC(),
-		"publisher_send_ts":   rec.Timestamp,
+		"recv_ts":             chTime(time.Now().UTC()),
+		"publisher_send_ts":   chTime(rec.Timestamp),
 		"channel_id":          channelID,
 		"instrument_id":       ctx.InstrumentID,
 		"symbol":              ctx.Symbol,
@@ -141,7 +141,7 @@ func (w *EventsWriter) WriteSnapshotOrder(rec Record, channelID uint8, ctx Snaps
 		"order_id":            getUint64(rec.Fields, "order_id"),
 		"side":                getString(rec.Fields, "side"),
 		"order_flags":         getUint8(rec.Fields, "order_flags"),
-		"enter_ts":            getTime(rec.Fields, "enter_ts"),
+		"enter_ts":            chTime(getTime(rec.Fields, "enter_ts")),
 		"price":               scalePrice(getInt64(rec.Fields, "price_raw"), ctx.PriceExponent),
 		"qty":                 scaleQty(getUint64(rec.Fields, "qty_raw"), ctx.QtyExponent),
 	})

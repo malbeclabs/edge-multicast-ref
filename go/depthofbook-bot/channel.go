@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"sort"
+	"sync"
 	"time"
 )
 
@@ -15,7 +16,13 @@ type BufferedDelta struct {
 }
 
 // ChannelState holds all state for one channel_id.
+//
+// Mu guards every field below it, and also the contents of each *Instrument
+// it owns. The dispatcher (single reader) holds Mu across Apply; the
+// SnapshotWriter holds Mu via the withInstrument callback while iterating
+// inst.Bids/Asks in ComputeLevels.
 type ChannelState struct {
+	Mu          sync.Mutex
 	ChannelID   uint8
 	ResetCount  uint8
 	SeqLast     map[string]uint64 // port → last seq seen

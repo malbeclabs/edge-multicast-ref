@@ -18,7 +18,9 @@
           "custom": { "align": "auto", "cellOptions": { "type": "auto" } },
           "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
         },
-        "overrides": []
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "price" }, "properties": [{ "id": "decimals", "value": 6 }] }
+        ]
       },
       "options": { "showHeader": true },
       "targets": [
@@ -26,7 +28,7 @@
           "refId": "A",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "SELECT side, level_idx, price, qty, cumulative_qty\nFROM depthofbook.level_snapshots\nWHERE symbol = '${symbol}'\n  AND recv_ts = (\n    SELECT max(recv_ts) FROM depthofbook.level_snapshots\n    WHERE symbol = '${symbol}' AND $__timeFilter(recv_ts)\n  )\nORDER BY side DESC, level_idx",
+          "rawSql": "SELECT side, level_idx, price, qty, cumulative_qty\nFROM depthofbook.level_snapshots\nWHERE symbol = '${symbol}'\n  AND level_idx < 16\n  AND recv_ts = (\n    SELECT max(recv_ts) FROM depthofbook.level_snapshots\n    WHERE symbol = '${symbol}' AND $__timeFilter(recv_ts)\n  )\nORDER BY multiIf(side = 'ask', -toInt32(level_idx), toInt32(level_idx) + 1000)",
           "format": 1
         }
       ]
@@ -42,7 +44,7 @@
         "overrides": []
       },
       "options": {
-        "calculate": false,
+        "calculate": true,
         "color": { "mode": "scheme", "scheme": "Spectral", "steps": 64 },
         "exemplars": { "color": "rgba(255,0,255,0.7)" },
         "filterValues": { "le": 1e-9 },
@@ -55,7 +57,7 @@
           "refId": "A",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, price, sum(qty) AS qty\nFROM depthofbook.level_snapshots\nWHERE symbol = '${symbol}' AND $__timeFilter(recv_ts)\nGROUP BY time, price\nORDER BY time",
+          "rawSql": "SELECT recv_ts AS time, price\nFROM depthofbook.level_snapshots\nWHERE symbol = '${symbol}' AND level_idx < 10 AND $__timeFilter(recv_ts)\nORDER BY recv_ts",
           "format": 1
         }
       ]
@@ -97,7 +99,8 @@
           "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
         },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "bid" }, "properties": [{ "id": "custom.cellOptions", "value": { "type": "color-background" } }, { "id": "color", "value": { "mode": "thresholds" } }] }
+          { "matcher": { "id": "byName", "options": "bid" }, "properties": [{ "id": "custom.cellOptions", "value": { "type": "color-background" } }, { "id": "color", "value": { "mode": "thresholds" } }, { "id": "decimals", "value": 6 }] },
+          { "matcher": { "id": "byName", "options": "ask" }, "properties": [{ "id": "decimals", "value": 6 }] }
         ]
       },
       "options": { "showHeader": true },
@@ -120,7 +123,8 @@
       "fieldConfig": {
         "defaults": { "custom": { "align": "auto", "cellOptions": { "type": "auto" } } },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "aggressor_side" }, "properties": [{ "id": "custom.cellOptions", "value": { "type": "color-background" } }, { "id": "mappings", "value": [{ "type": "value", "options": { "buy": { "color": "green", "index": 0 }, "sell": { "color": "red", "index": 1 } } }] }] }
+          { "matcher": { "id": "byName", "options": "aggressor_side" }, "properties": [{ "id": "custom.cellOptions", "value": { "type": "color-background" } }, { "id": "mappings", "value": [{ "type": "value", "options": { "buy": { "color": "green", "index": 0 }, "sell": { "color": "red", "index": 1 } } }] }] },
+          { "matcher": { "id": "byName", "options": "price" }, "properties": [{ "id": "decimals", "value": 6 }] }
         ]
       },
       "options": { "showHeader": true, "sortBy": [{ "displayName": "recv_ts", "desc": true }] },
@@ -129,7 +133,7 @@
           "refId": "A",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "SELECT recv_ts, symbol, aggressor_side, price, qty\nFROM depthofbook.events\nWHERE kind = 'trade' AND symbol IN (${symbols:singlequote})\n  AND $__timeFilter(recv_ts)\nORDER BY recv_ts DESC LIMIT 100",
+          "rawSql": "SELECT t AS recv_ts, sym AS symbol, side AS aggressor_side, vwap AS price, total_qty AS qty\nFROM (\n  SELECT min(recv_ts) AS t, any(symbol) AS sym, any(aggressor_side) AS side,\n         sum(price * qty) / sum(qty) AS vwap, sum(qty) AS total_qty\n  FROM depthofbook.events\n  WHERE kind = 'order_execute' AND symbol IN (${symbols:singlequote}) AND $__timeFilter(recv_ts)\n  GROUP BY instrument_id, trade_id\n)\nORDER BY recv_ts DESC LIMIT 100",
           "format": 1
         }
       ]
@@ -201,7 +205,7 @@
           "refId": "A",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "SELECT $__timeInterval(recv_ts) AS time,\n       quantile(0.5)(wire_latency_ms) AS p50,\n       quantile(0.95)(wire_latency_ms) AS p95,\n       quantile(0.99)(wire_latency_ms) AS p99\nFROM depthofbook.level_snapshots\nWHERE $__timeFilter(recv_ts)\nGROUP BY time ORDER BY time",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time,\n       quantile(0.5)(wire_latency_ms) AS p50,\n       quantile(0.95)(wire_latency_ms) AS p95,\n       quantile(0.99)(wire_latency_ms) AS p99\nFROM depthofbook.events\nWHERE $__timeFilter(recv_ts)\nGROUP BY time ORDER BY time",
           "format": 0
         }
       ]
