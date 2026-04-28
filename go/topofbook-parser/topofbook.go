@@ -25,6 +25,7 @@ type instrumentInfo struct {
 type bufferedMsg struct {
 	channelID uint8
 	seq       uint64
+	reset     uint8
 	sendTS    uint64
 	msg       *topOfBookAppMessage
 }
@@ -104,12 +105,13 @@ func (p *TopOfBookParser) Parse(data []byte) ([]Record, error) {
 
 	channelID := frame.Header.ChannelID
 	seq := frame.Header.SequenceNumber
+	reset := frame.Header.ResetCount
 	sendTS := frame.Header.SendTimestamp
 
 	var records []Record
 	for i := range frame.Messages {
 		msg := &frame.Messages[i]
-		recs, err := p.processMessage(channelID, seq, sendTS, msg)
+		recs, err := p.processMessage(channelID, seq, reset, sendTS, msg)
 		if err != nil {
 			return records, fmt.Errorf("processing message type 0x%02x: %w", msg.MsgType, err)
 		}
@@ -146,29 +148,29 @@ func (p *TopOfBookParser) validateHeader(frame *topOfBookFrame, datagramLen int)
 	return nil
 }
 
-func (p *TopOfBookParser) processMessage(channelID uint8, seq uint64, sendTS uint64, msg *topOfBookAppMessage) ([]Record, error) {
+func (p *TopOfBookParser) processMessage(channelID uint8, seq uint64, reset uint8, sendTS uint64, msg *topOfBookAppMessage) ([]Record, error) {
 	switch body := msg.Body.(type) {
 	case *topOfBookInstrumentDef:
-		return p.handleInstrumentDef(channelID, seq, sendTS, msg, body), nil
+		return p.handleInstrumentDef(channelID, seq, reset, sendTS, msg, body), nil
 	case *topOfBookQuote:
-		return p.handleQuote(channelID, seq, sendTS, msg, body), nil
+		return p.handleQuote(channelID, seq, reset, sendTS, msg, body), nil
 	case *topOfBookTrade:
-		return p.handleTrade(channelID, seq, sendTS, msg, body), nil
+		return p.handleTrade(channelID, seq, reset, sendTS, msg, body), nil
 	case *topOfBookHeartbeat:
-		return p.handleHeartbeat(channelID, seq, body), nil
+		return p.handleHeartbeat(channelID, seq, reset, body), nil
 	case *topOfBookChannelReset:
-		return p.handleChannelReset(channelID, seq, body), nil
+		return p.handleChannelReset(channelID, seq, reset, body), nil
 	case *topOfBookEndOfSession:
-		return p.handleEndOfSession(channelID, seq, body), nil
+		return p.handleEndOfSession(channelID, seq, reset, body), nil
 	case *topOfBookManifestSummary:
-		return p.handleManifestSummary(channelID, seq, body), nil
+		return p.handleManifestSummary(channelID, seq, reset, body), nil
 	default:
 		// Unknown message type — skip per spec.
 		return nil, nil
 	}
 }
 
-func (p *TopOfBookParser) handleInstrumentDef(channelID uint8, seq uint64, sendTS uint64, msg *topOfBookAppMessage, body *topOfBookInstrumentDef) []Record {
+func (p *TopOfBookParser) handleInstrumentDef(channelID uint8, seq uint64, reset uint8, sendTS uint64, msg *topOfBookAppMessage, body *topOfBookInstrumentDef) []Record {
 	info := &instrumentInfo{
 		Symbol:        trimNull(body.Symbol),
 		PriceExponent: body.PriceExponent,
@@ -204,6 +206,7 @@ func (p *TopOfBookParser) handleInstrumentDef(channelID uint8, seq uint64, sendT
 		Timestamp:      nsToTime(sendTS),
 		ChannelID:      channelID,
 		SequenceNumber: seq,
+		ResetCount:     reset,
 		InstrumentID:   body.InstrumentID,
 		Symbol:         info.Symbol,
 		Fields: map[string]any{
@@ -223,7 +226,7 @@ func (p *TopOfBookParser) handleInstrumentDef(channelID uint8, seq uint64, sendT
 	}}
 }
 
-func (p *TopOfBookParser) handleQuote(channelID uint8, seq uint64, sendTS uint64, msg *topOfBookAppMessage, body *topOfBookQuote) []Record {
+func (p *TopOfBookParser) handleQuote(channelID uint8, seq uint64, reset uint8, sendTS uint64, msg *topOfBookAppMessage, body *topOfBookQuote) []Record {
 	p.mu.RLock()
 	info, ok := p.instruments[body.InstrumentID]
 	p.mu.RUnlock()
@@ -233,6 +236,7 @@ func (p *TopOfBookParser) handleQuote(channelID uint8, seq uint64, sendTS uint64
 		ev := p.bufferPendingLocked(body.InstrumentID, "quote", bufferedMsg{
 			channelID: channelID,
 			seq:       seq,
+			reset:     reset,
 			sendTS:    sendTS,
 			msg:       msg,
 		})
@@ -247,9 +251,20 @@ func (p *TopOfBookParser) handleQuote(channelID uint8, seq uint64, sendTS uint64
 		Timestamp:      nsToTime(body.SourceTimestamp),
 		ChannelID:      channelID,
 		SequenceNumber: seq,
+		ResetCount:     reset,
 		InstrumentID:   body.InstrumentID,
 		Symbol:         info.Symbol,
 		Fields: map[string]any{
+			"source_ts_ns":     body.SourceTimestamp,
+			"source_ts_ms":     body.SourceTimestamp / uint64(time.Millisecond),
+			"bid_px_raw":       body.BidPrice,
+			"bid_sz_raw":       body.BidQty,
+			"ask_px_raw":       body.AskPrice,
+			"ask_sz_raw":       body.AskQty,
+			"bid_n":            body.BidSourceCount,
+			"ask_n":            body.AskSourceCount,
+			"price_exponent":   info.PriceExponent,
+			"qty_exponent":     info.QtyExponent,
 			"source_id":        body.SourceID,
 			"bid_price":        applyExponent(body.BidPrice, info.PriceExponent),
 			"bid_qty":          applyExponentUnsigned(body.BidQty, info.QtyExponent),
@@ -263,7 +278,7 @@ func (p *TopOfBookParser) handleQuote(channelID uint8, seq uint64, sendTS uint64
 	}}
 }
 
-func (p *TopOfBookParser) handleTrade(channelID uint8, seq uint64, sendTS uint64, msg *topOfBookAppMessage, body *topOfBookTrade) []Record {
+func (p *TopOfBookParser) handleTrade(channelID uint8, seq uint64, reset uint8, sendTS uint64, msg *topOfBookAppMessage, body *topOfBookTrade) []Record {
 	p.mu.RLock()
 	info, ok := p.instruments[body.InstrumentID]
 	p.mu.RUnlock()
@@ -273,6 +288,7 @@ func (p *TopOfBookParser) handleTrade(channelID uint8, seq uint64, sendTS uint64
 		ev := p.bufferPendingLocked(body.InstrumentID, "trade", bufferedMsg{
 			channelID: channelID,
 			seq:       seq,
+			reset:     reset,
 			sendTS:    sendTS,
 			msg:       msg,
 		})
@@ -295,6 +311,7 @@ func (p *TopOfBookParser) handleTrade(channelID uint8, seq uint64, sendTS uint64
 		Timestamp:      nsToTime(body.SourceTimestamp),
 		ChannelID:      channelID,
 		SequenceNumber: seq,
+		ResetCount:     reset,
 		InstrumentID:   body.InstrumentID,
 		Symbol:         info.Symbol,
 		Fields: map[string]any{
@@ -309,16 +326,17 @@ func (p *TopOfBookParser) handleTrade(channelID uint8, seq uint64, sendTS uint64
 	}}
 }
 
-func (p *TopOfBookParser) handleHeartbeat(channelID uint8, seq uint64, body *topOfBookHeartbeat) []Record {
+func (p *TopOfBookParser) handleHeartbeat(channelID uint8, seq uint64, reset uint8, body *topOfBookHeartbeat) []Record {
 	return []Record{{
 		Type:           "heartbeat",
 		Timestamp:      nsToTime(body.Timestamp),
 		ChannelID:      channelID,
 		SequenceNumber: seq,
+		ResetCount:     reset,
 	}}
 }
 
-func (p *TopOfBookParser) handleChannelReset(channelID uint8, seq uint64, body *topOfBookChannelReset) []Record {
+func (p *TopOfBookParser) handleChannelReset(channelID uint8, seq uint64, reset uint8, body *topOfBookChannelReset) []Record {
 	p.mu.Lock()
 	p.instruments = make(map[uint32]*instrumentInfo)
 	p.buffer = make(map[uint32]bufferedMsg)
@@ -331,24 +349,27 @@ func (p *TopOfBookParser) handleChannelReset(channelID uint8, seq uint64, body *
 		Timestamp:      nsToTime(body.Timestamp),
 		ChannelID:      channelID,
 		SequenceNumber: seq,
+		ResetCount:     reset,
 	}}
 }
 
-func (p *TopOfBookParser) handleEndOfSession(channelID uint8, seq uint64, body *topOfBookEndOfSession) []Record {
+func (p *TopOfBookParser) handleEndOfSession(channelID uint8, seq uint64, reset uint8, body *topOfBookEndOfSession) []Record {
 	return []Record{{
 		Type:           "end_of_session",
 		Timestamp:      nsToTime(body.Timestamp),
 		ChannelID:      channelID,
 		SequenceNumber: seq,
+		ResetCount:     reset,
 	}}
 }
 
-func (p *TopOfBookParser) handleManifestSummary(channelID uint8, seq uint64, body *topOfBookManifestSummary) []Record {
+func (p *TopOfBookParser) handleManifestSummary(channelID uint8, seq uint64, reset uint8, body *topOfBookManifestSummary) []Record {
 	return []Record{{
 		Type:           "manifest_summary",
 		Timestamp:      nsToTime(body.Timestamp),
 		ChannelID:      channelID,
 		SequenceNumber: seq,
+		ResetCount:     reset,
 		Fields: map[string]any{
 			"manifest_seq":     body.ManifestSeq,
 			"instrument_count": body.InstrumentCount,
@@ -516,9 +537,21 @@ func (p *TopOfBookParser) processBufferedMessage(bm bufferedMsg) ([]Record, erro
 			Timestamp:      nsToTime(body.SourceTimestamp),
 			ChannelID:      bm.channelID,
 			SequenceNumber: bm.seq,
+			ResetCount:     bm.reset,
 			InstrumentID:   body.InstrumentID,
 			Symbol:         info.Symbol,
 			Fields: map[string]any{
+				"source_ts_ns":     body.SourceTimestamp,
+				"source_ts_ms":     body.SourceTimestamp / uint64(time.Millisecond),
+				"bid_px_raw":       body.BidPrice,
+				"bid_sz_raw":       body.BidQty,
+				"ask_px_raw":       body.AskPrice,
+				"ask_sz_raw":       body.AskQty,
+				"bid_n":            body.BidSourceCount,
+				"ask_n":            body.AskSourceCount,
+				"price_exponent":   info.PriceExponent,
+				"qty_exponent":     info.QtyExponent,
+				"buffered":         true,
 				"source_id":        body.SourceID,
 				"bid_price":        applyExponent(body.BidPrice, info.PriceExponent),
 				"bid_qty":          applyExponentUnsigned(body.BidQty, info.QtyExponent),
@@ -547,10 +580,12 @@ func (p *TopOfBookParser) processBufferedMessage(bm bufferedMsg) ([]Record, erro
 			Timestamp:      nsToTime(body.SourceTimestamp),
 			ChannelID:      bm.channelID,
 			SequenceNumber: bm.seq,
+			ResetCount:     bm.reset,
 			InstrumentID:   body.InstrumentID,
 			Symbol:         info.Symbol,
 			Fields: map[string]any{
 				"source_id":         body.SourceID,
+				"buffered":          true,
 				"trade_price":       applyExponent(body.TradePrice, info.PriceExponent),
 				"trade_qty":         applyExponentUnsigned(body.TradeQty, info.QtyExponent),
 				"aggressor_side":    side,
