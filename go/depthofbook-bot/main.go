@@ -83,13 +83,17 @@ func main() {
 		}
 		c := NewChannelState(id)
 		channels[id] = c
-		sw := NewSnapshotWriter(ch, *depth, *coalesceMS, metrics, id, func(instID uint32) *Instrument {
+		sw := NewSnapshotWriter(ch, *depth, *coalesceMS, metrics, id, func(instID uint32, fn func(*Instrument)) {
 			chMu.Lock()
-			defer chMu.Unlock()
-			if c, ok := channels[id]; ok {
-				return c.Instruments[instID]
+			cs, ok := channels[id]
+			chMu.Unlock()
+			if !ok {
+				fn(nil)
+				return
 			}
-			return nil
+			cs.Mu.Lock()
+			defer cs.Mu.Unlock()
+			fn(cs.Instruments[instID])
 		})
 		snapWriters[id] = sw
 		go sw.Run(ctx)
@@ -105,6 +109,8 @@ func main() {
 
 	dispatcher := DispatcherFunc(func(rec Record) {
 		c, sw := getOrCreateChannel(rec.ChannelID)
+		c.Mu.Lock()
+		defer c.Mu.Unlock()
 		evs := c.Apply(rec)
 
 		// Snapshot frame routing is unconditional per-record.

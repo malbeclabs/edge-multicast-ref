@@ -181,6 +181,16 @@ func (b *Batcher) send(ctx context.Context, rows []map[string]any) error {
 	return nil
 }
 
+// chTime formats a time into ClickHouse's DateTime64(9) textual format.
+// Default date_time_input_format=basic rejects RFC3339 with a Z suffix in
+// JSONEachRow, so emit the native form ClickHouse echoes from now64() instead.
+func chTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format("2006-01-02 15:04:05.000000000")
+}
+
 func classifyHTTPErr(err error) string {
 	s := err.Error()
 	switch {

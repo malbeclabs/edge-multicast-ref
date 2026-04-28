@@ -15,10 +15,10 @@ type SnapshotWriter struct {
 	tickInterval     time.Duration
 	metrics          *Metrics
 
-	mu      sync.Mutex
-	dirty   map[uint32]*dirtyEntry
-	lookup  func(uint32) *Instrument // injected by bot main; returns current instrument or nil
-	channel uint8
+	mu             sync.Mutex
+	dirty          map[uint32]*dirtyEntry
+	withInstrument func(uint32, func(*Instrument)) // runs fn under the channel lock with the current instrument (or nil)
+	channel        uint8
 }
 
 type dirtyEntry struct {
@@ -28,7 +28,7 @@ type dirtyEntry struct {
 	coalescedCount int
 }
 
-func NewSnapshotWriter(ch *ClickhouseClient, depth int, coalesceMS int, metrics *Metrics, channelID uint8, lookup func(uint32) *Instrument) *SnapshotWriter {
+func NewSnapshotWriter(ch *ClickhouseClient, depth int, coalesceMS int, metrics *Metrics, channelID uint8, withInstrument func(uint32, func(*Instrument))) *SnapshotWriter {
 	return &SnapshotWriter{
 		ch:               ch,
 		depth:            depth,
@@ -37,7 +37,7 @@ func NewSnapshotWriter(ch *ClickhouseClient, depth int, coalesceMS int, metrics 
 		metrics:          metrics,
 		dirty:            map[uint32]*dirtyEntry{},
 		channel:          channelID,
-		lookup:           lookup,
+		withInstrument:   withInstrument,
 	}
 }
 
@@ -87,12 +87,27 @@ func (w *SnapshotWriter) flushDue() {
 	w.mu.Unlock()
 
 	for _, e := range due {
-		inst := w.lookup(e.instrumentID)
-		if inst == nil || inst.Status != StatusReady {
+		var (
+			snap    LevelSnapshot
+			instID  uint32
+			symbol  string
+			lastSeq uint64
+			ready   bool
+		)
+		w.withInstrument(e.instrumentID, func(inst *Instrument) {
+			if inst == nil || inst.Status != StatusReady {
+				return
+			}
+			snap = ComputeLevels(inst, w.depth)
+			instID = inst.ID
+			symbol = inst.Symbol
+			lastSeq = inst.LastAppliedMktdataSeq
+			ready = true
+		})
+		if !ready {
 			continue
 		}
-		snap := ComputeLevels(inst, w.depth)
-		w.write(snap, inst, e.dirtiedAt, now)
+		w.write(snap, instID, symbol, lastSeq, now)
 		_ = e.coalescedCount // metric already incremented per coalesce
 		if w.metrics != nil {
 			w.metrics.SnapshotWritesTotal.Inc()
@@ -109,18 +124,19 @@ func (w *SnapshotWriter) flushDue() {
 	}
 }
 
-func (w *SnapshotWriter) write(snap LevelSnapshot, inst *Instrument, _ time.Time, now time.Time) {
+func (w *SnapshotWriter) write(snap LevelSnapshot, instID uint32, symbol string, lastSeq uint64, now time.Time) {
 	if w.ch == nil {
 		return
 	}
+	nowStr := chTime(now)
 	for i, lvl := range snap.Bids {
 		w.ch.Enqueue("level_snapshots", map[string]any{
-			"recv_ts":           now,
-			"publisher_send_ts": now,
+			"recv_ts":           nowStr,
+			"publisher_send_ts": nowStr,
 			"channel_id":        w.channel,
-			"instrument_id":     inst.ID,
-			"symbol":            inst.Symbol,
-			"last_applied_seq":  inst.LastAppliedMktdataSeq,
+			"instrument_id":     instID,
+			"symbol":            symbol,
+			"last_applied_seq":  lastSeq,
 			"side":              "bid",
 			"level_idx":         uint16(i),
 			"price":             lvl.Price,
@@ -131,12 +147,12 @@ func (w *SnapshotWriter) write(snap LevelSnapshot, inst *Instrument, _ time.Time
 	}
 	for i, lvl := range snap.Asks {
 		w.ch.Enqueue("level_snapshots", map[string]any{
-			"recv_ts":           now,
-			"publisher_send_ts": now,
+			"recv_ts":           nowStr,
+			"publisher_send_ts": nowStr,
 			"channel_id":        w.channel,
-			"instrument_id":     inst.ID,
-			"symbol":            inst.Symbol,
-			"last_applied_seq":  inst.LastAppliedMktdataSeq,
+			"instrument_id":     instID,
+			"symbol":            symbol,
+			"last_applied_seq":  lastSeq,
 			"side":              "ask",
 			"level_idx":         uint16(i),
 			"price":             lvl.Price,

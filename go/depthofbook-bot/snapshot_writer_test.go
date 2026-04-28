@@ -39,7 +39,7 @@ func TestSnapshotWriter_DirtyEntryCoalesces(t *testing.T) {
 	inst := NewInstrument(100, "BTC-USDT", 0, 0)
 	inst.Status = StatusReady
 	metrics := NewMetrics("test", "test")
-	w := NewSnapshotWriter(nil, 5, 100, metrics, 0, func(id uint32) *Instrument { return inst })
+	w := NewSnapshotWriter(nil, 5, 100, metrics, 0, func(id uint32, fn func(*Instrument)) { fn(inst) })
 
 	// Mark dirty 5 times in rapid succession; only the first should create an entry.
 	for i := 0; i < 5; i++ {
@@ -60,7 +60,7 @@ func TestSnapshotWriter_RunFlushesAndClears(t *testing.T) {
 	inst.ApplyOrderAdd(1, 0, 0, time.Now(), 100, 5)
 
 	metrics := NewMetrics("test", "test")
-	w := NewSnapshotWriter(nil, 5, 50, metrics, 0, func(id uint32) *Instrument { return inst })
+	w := NewSnapshotWriter(nil, 5, 50, metrics, 0, func(id uint32, fn func(*Instrument)) { fn(inst) })
 	w.tickInterval = 10 * time.Millisecond
 
 	w.MarkDirty(100)
