@@ -1,4 +1,4 @@
-package main
+package tob
 
 import (
 	"fmt"
@@ -8,10 +8,6 @@ import (
 	"sync"
 	"time"
 )
-
-func init() {
-	RegisterParser("topofbook", func() Parser { return NewTopOfBookParser() })
-}
 
 // instrumentInfo holds refdata needed to interpret Quote/Trade messages.
 type instrumentInfo struct {
@@ -27,6 +23,7 @@ type bufferedMsg struct {
 	seq       uint64
 	reset     uint8
 	sendTS    uint64
+	meta      PacketMeta
 	msg       *topOfBookAppMessage
 }
 
@@ -47,16 +44,6 @@ type TopOfBookParser struct {
 	// bufferFullLogged records whether we've already emitted an INFO log
 	// about hitting the cap; further drops log at DEBUG.
 	bufferFullLogged bool
-
-	// metrics is optional; nil when the parser runs under tests that
-	// don't wire the metrics registry.
-	metrics *metrics
-}
-
-// setMetrics satisfies metricsAware (parser.go) so main.go can inject metrics
-// after construction without threading them through the Parser factory.
-func (p *TopOfBookParser) setMetrics(m *metrics) {
-	p.metrics = m
 }
 
 func NewTopOfBookParser() *TopOfBookParser {
@@ -93,7 +80,7 @@ const (
 	maxBufferedInstruments = 1000
 )
 
-func (p *TopOfBookParser) Parse(data []byte) ([]Record, error) {
+func (p *TopOfBookParser) Parse(data []byte, meta PacketMeta) ([]Record, error) {
 	frame, err := decodeTopOfBookFrame(data)
 	if err != nil {
 		return nil, fmt.Errorf("decoding frame: %w", err)
@@ -111,7 +98,7 @@ func (p *TopOfBookParser) Parse(data []byte) ([]Record, error) {
 	var records []Record
 	for i := range frame.Messages {
 		msg := &frame.Messages[i]
-		recs, err := p.processMessage(channelID, seq, reset, sendTS, msg)
+		recs, err := p.processMessage(channelID, seq, reset, sendTS, meta, msg)
 		if err != nil {
 			return records, fmt.Errorf("processing message type 0x%02x: %w", msg.MsgType, err)
 		}
@@ -148,29 +135,29 @@ func (p *TopOfBookParser) validateHeader(frame *topOfBookFrame, datagramLen int)
 	return nil
 }
 
-func (p *TopOfBookParser) processMessage(channelID uint8, seq uint64, reset uint8, sendTS uint64, msg *topOfBookAppMessage) ([]Record, error) {
+func (p *TopOfBookParser) processMessage(channelID uint8, seq uint64, reset uint8, sendTS uint64, meta PacketMeta, msg *topOfBookAppMessage) ([]Record, error) {
 	switch body := msg.Body.(type) {
 	case *topOfBookInstrumentDef:
-		return p.handleInstrumentDef(channelID, seq, reset, sendTS, msg, body), nil
+		return p.handleInstrumentDef(channelID, seq, reset, sendTS, meta, msg, body), nil
 	case *topOfBookQuote:
-		return p.handleQuote(channelID, seq, reset, sendTS, msg, body), nil
+		return p.handleQuote(channelID, seq, reset, sendTS, meta, msg, body), nil
 	case *topOfBookTrade:
-		return p.handleTrade(channelID, seq, reset, sendTS, msg, body), nil
+		return p.handleTrade(channelID, seq, reset, sendTS, meta, msg, body), nil
 	case *topOfBookHeartbeat:
-		return p.handleHeartbeat(channelID, seq, reset, body), nil
+		return applyMeta(p.handleHeartbeat(channelID, seq, reset, body), meta), nil
 	case *topOfBookChannelReset:
-		return p.handleChannelReset(channelID, seq, reset, body), nil
+		return applyMeta(p.handleChannelReset(channelID, seq, reset, body), meta), nil
 	case *topOfBookEndOfSession:
-		return p.handleEndOfSession(channelID, seq, reset, body), nil
+		return applyMeta(p.handleEndOfSession(channelID, seq, reset, body), meta), nil
 	case *topOfBookManifestSummary:
-		return p.handleManifestSummary(channelID, seq, reset, body), nil
+		return applyMeta(p.handleManifestSummary(channelID, seq, reset, body), meta), nil
 	default:
 		// Unknown message type — skip per spec.
 		return nil, nil
 	}
 }
 
-func (p *TopOfBookParser) handleInstrumentDef(channelID uint8, seq uint64, reset uint8, sendTS uint64, msg *topOfBookAppMessage, body *topOfBookInstrumentDef) []Record {
+func (p *TopOfBookParser) handleInstrumentDef(channelID uint8, seq uint64, reset uint8, sendTS uint64, meta PacketMeta, msg *topOfBookAppMessage, body *topOfBookInstrumentDef) []Record {
 	info := &instrumentInfo{
 		Symbol:        trimNull(body.Symbol),
 		PriceExponent: body.PriceExponent,
@@ -180,14 +167,9 @@ func (p *TopOfBookParser) handleInstrumentDef(channelID uint8, seq uint64, reset
 	p.mu.Lock()
 	_, existed := p.instruments[body.InstrumentID]
 	p.instruments[body.InstrumentID] = info
-	instrumentCount := len(p.instruments)
 	// Clear the first-time-buffering flag so a future gap is logged again.
 	delete(p.bufferingLogged, body.InstrumentID)
 	p.mu.Unlock()
-
-	if p.metrics != nil {
-		p.metrics.instrumentsTracked.Set(float64(instrumentCount))
-	}
 
 	if existed {
 		slog.Debug("edge: instrument redefined",
@@ -201,7 +183,7 @@ func (p *TopOfBookParser) handleInstrumentDef(channelID uint8, seq uint64, reset
 			"symbol", info.Symbol)
 	}
 
-	return []Record{{
+	return applyMeta([]Record{{
 		Type:           "instrument_definition",
 		Timestamp:      nsToTime(sendTS),
 		ChannelID:      channelID,
@@ -223,10 +205,10 @@ func (p *TopOfBookParser) handleInstrumentDef(channelID uint8, seq uint64, reset
 			"price_bound":    body.PriceBound,
 			"manifest_seq":   body.ManifestSeq,
 		},
-	}}
+	}}, meta)
 }
 
-func (p *TopOfBookParser) handleQuote(channelID uint8, seq uint64, reset uint8, sendTS uint64, msg *topOfBookAppMessage, body *topOfBookQuote) []Record {
+func (p *TopOfBookParser) handleQuote(channelID uint8, seq uint64, reset uint8, sendTS uint64, meta PacketMeta, msg *topOfBookAppMessage, body *topOfBookQuote) []Record {
 	p.mu.RLock()
 	info, ok := p.instruments[body.InstrumentID]
 	p.mu.RUnlock()
@@ -238,15 +220,15 @@ func (p *TopOfBookParser) handleQuote(channelID uint8, seq uint64, reset uint8, 
 			seq:       seq,
 			reset:     reset,
 			sendTS:    sendTS,
+			meta:      meta,
 			msg:       msg,
 		})
 		p.mu.Unlock()
 		ev.emit()
-		p.updateBufferMetrics(ev)
 		return nil
 	}
 
-	return []Record{{
+	return applyMeta([]Record{{
 		Type:           "quote",
 		Timestamp:      nsToTime(body.SourceTimestamp),
 		ChannelID:      channelID,
@@ -275,10 +257,10 @@ func (p *TopOfBookParser) handleQuote(channelID uint8, seq uint64, reset uint8, 
 			"update_flags":     body.UpdateFlags,
 			"snapshot":         msg.Flags&1 == 1,
 		},
-	}}
+	}}, meta)
 }
 
-func (p *TopOfBookParser) handleTrade(channelID uint8, seq uint64, reset uint8, sendTS uint64, msg *topOfBookAppMessage, body *topOfBookTrade) []Record {
+func (p *TopOfBookParser) handleTrade(channelID uint8, seq uint64, reset uint8, sendTS uint64, meta PacketMeta, msg *topOfBookAppMessage, body *topOfBookTrade) []Record {
 	p.mu.RLock()
 	info, ok := p.instruments[body.InstrumentID]
 	p.mu.RUnlock()
@@ -290,11 +272,11 @@ func (p *TopOfBookParser) handleTrade(channelID uint8, seq uint64, reset uint8, 
 			seq:       seq,
 			reset:     reset,
 			sendTS:    sendTS,
+			meta:      meta,
 			msg:       msg,
 		})
 		p.mu.Unlock()
 		ev.emit()
-		p.updateBufferMetrics(ev)
 		return nil
 	}
 
@@ -306,7 +288,7 @@ func (p *TopOfBookParser) handleTrade(channelID uint8, seq uint64, reset uint8, 
 		side = "sell"
 	}
 
-	return []Record{{
+	return applyMeta([]Record{{
 		Type:           "trade",
 		Timestamp:      nsToTime(body.SourceTimestamp),
 		ChannelID:      channelID,
@@ -323,7 +305,7 @@ func (p *TopOfBookParser) handleTrade(channelID uint8, seq uint64, reset uint8, 
 			"cumulative_volume": applyExponentUnsigned(body.CumulativeVolume, info.QtyExponent),
 			"snapshot":          msg.Flags&1 == 1,
 		},
-	}}
+	}}, meta)
 }
 
 func (p *TopOfBookParser) handleHeartbeat(channelID uint8, seq uint64, reset uint8, body *topOfBookHeartbeat) []Record {
@@ -504,23 +486,7 @@ func (p *TopOfBookParser) flushBuffer() []Record {
 			"flushed", len(records),
 			"remaining", remaining)
 	}
-	if p.metrics != nil {
-		p.metrics.buffered.Set(float64(remaining))
-	}
-
 	return records
-}
-
-// updateBufferMetrics reflects a buffering event into Prometheus.
-// Safe to call with p.metrics nil (no-op).
-func (p *TopOfBookParser) updateBufferMetrics(ev pendingLogEvent) {
-	if p.metrics == nil {
-		return
-	}
-	p.metrics.buffered.Set(float64(ev.bufferDepth))
-	if ev.kind == logBufferFull {
-		p.metrics.bufferDrops.Inc()
-	}
 }
 
 // processBufferedMessage processes a buffered message without acquiring locks
@@ -532,7 +498,7 @@ func (p *TopOfBookParser) processBufferedMessage(bm bufferedMsg) ([]Record, erro
 		if !ok {
 			return nil, nil
 		}
-		return []Record{{
+		return applyMeta([]Record{{
 			Type:           "quote",
 			Timestamp:      nsToTime(body.SourceTimestamp),
 			ChannelID:      bm.channelID,
@@ -562,7 +528,7 @@ func (p *TopOfBookParser) processBufferedMessage(bm bufferedMsg) ([]Record, erro
 				"update_flags":     body.UpdateFlags,
 				"snapshot":         bm.msg.Flags&1 == 1,
 			},
-		}}, nil
+		}}, bm.meta), nil
 	case *topOfBookTrade:
 		info, ok := p.instruments[body.InstrumentID]
 		if !ok {
@@ -575,7 +541,7 @@ func (p *TopOfBookParser) processBufferedMessage(bm bufferedMsg) ([]Record, erro
 		case 2:
 			side = "sell"
 		}
-		return []Record{{
+		return applyMeta([]Record{{
 			Type:           "trade",
 			Timestamp:      nsToTime(body.SourceTimestamp),
 			ChannelID:      bm.channelID,
@@ -593,10 +559,30 @@ func (p *TopOfBookParser) processBufferedMessage(bm bufferedMsg) ([]Record, erro
 				"cumulative_volume": applyExponentUnsigned(body.CumulativeVolume, info.QtyExponent),
 				"snapshot":          bm.msg.Flags&1 == 1,
 			},
-		}}, nil
+		}}, bm.meta), nil
 	default:
 		return nil, nil
 	}
+}
+
+func applyMeta(records []Record, meta PacketMeta) []Record {
+	recvTime := meta.RecvTimestamp.UTC()
+	recvNS := meta.RecvTimestampNS
+	if recvNS == 0 && !recvTime.IsZero() {
+		recvNS = uint64(recvTime.UnixNano())
+	}
+	for i := range records {
+		if !recvTime.IsZero() {
+			records[i].RecvTimestamp = recvTime
+		}
+		records[i].RecvTimestampNS = recvNS
+		records[i].RecvTSKind = meta.RecvTSKind
+		records[i].PublisherSource = meta.PublisherSource
+		records[i].MulticastGroup = meta.MulticastGroup
+		records[i].Port = meta.Port
+		records[i].Channel = meta.Channel
+	}
+	return records
 }
 
 // trimNull removes trailing null bytes from a fixed-size ASCII string.

@@ -48,9 +48,9 @@ type metrics struct {
 	wireLatency *prometheus.HistogramVec
 
 	// Socket sink
-	socketClients      prometheus.Gauge
-	socketClientDrops  *prometheus.CounterVec
-	socketRecordsSent  prometheus.Counter
+	socketClients     prometheus.Gauge
+	socketClientDrops *prometheus.CounterVec
+	socketRecordsSent prometheus.Counter
 
 	// Process / health
 	buildInfo *prometheus.GaugeVec

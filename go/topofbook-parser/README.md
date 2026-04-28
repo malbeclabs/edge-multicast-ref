@@ -1,6 +1,6 @@
 # DZ Top-of-Book Parser
 
-A standalone multicast subscriber that decodes DoubleZero Top-of-Book (DZ-TOB v0.1.0) wire-format frames and writes decoded market data records to a file or Unix socket.
+A multicast subscriber and reusable Go parser for DoubleZero Top-of-Book (DZ-TOB v0.1.0) wire-format frames. The CLI writes decoded market data records to a file or Unix socket; the `tob` package exposes the same parser for in-process consumers.
 
 ## What it does
 
@@ -55,6 +55,30 @@ go build -o dz-topofbook-parser .
 ```
 
 Runs until SIGINT or SIGTERM.
+
+## Reusable parser package
+
+The reusable parser lives at:
+
+```go
+import "github.com/malbeclabs/edge-multicast-ref/go/topofbook-parser/tob"
+```
+
+Use `tob.NewTopOfBookParser()` for one logical publisher/feed. The parser is stateful: it tracks instrument definitions, buffers market-data messages that arrive before refdata, and flushes them once the instrument definition is learned.
+
+```go
+parser := tob.NewTopOfBookParser()
+records, err := parser.Parse(datagram, tob.PacketMeta{
+    RecvTimestamp:   recvTime,
+    RecvTSKind:      "kernel_udp_software",
+    PublisherSource: "10.0.0.9",
+    MulticastGroup:  "239.10.10.10",
+    Port:            7001,
+    Channel:         "marketdata",
+})
+```
+
+Create a separate parser instance per publisher/source. If a quote or trade is buffered while awaiting refdata, the flushed record keeps the original datagram receive metadata, not the later refdata packet timestamp.
 
 ## CLI flags
 

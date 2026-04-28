@@ -131,7 +131,14 @@ func (r *Runner) listenPort(ctx context.Context, port int, label string) error {
 			r.cfg.Metrics.ingressBytes.WithLabelValues(label).Add(float64(n))
 		}
 
-		records, err := r.cfg.Parser.Parse(buf[:n])
+		records, err := r.cfg.Parser.Parse(buf[:n], PacketMeta{
+			RecvTimestamp:   recvTime,
+			RecvTimestampNS: uint64(recvTime.UnixNano()),
+			RecvTSKind:      recvKind,
+			MulticastGroup:  r.cfg.GroupIP.String(),
+			Port:            port,
+			Channel:         label,
+		})
 		if err != nil {
 			if r.cfg.Metrics != nil {
 				r.cfg.Metrics.parseErrors.WithLabelValues(label, classifyParseErr(err)).Inc()
@@ -146,8 +153,9 @@ func (r *Runner) listenPort(ctx context.Context, port int, label string) error {
 					"port", label,
 					"first_batch_size", len(records))
 			}
-			annotateReceiveTimestamp(records, recvTime, recvKind)
 			if r.cfg.Metrics != nil {
+				r.cfg.Metrics.buffered.Set(float64(r.cfg.Parser.Buffered()))
+				r.cfg.Metrics.instrumentsTracked.Set(float64(r.cfg.Parser.InstrumentCount()))
 				for i := range records {
 					rec := &records[i]
 					r.cfg.Metrics.records.WithLabelValues(rec.Type).Inc()
