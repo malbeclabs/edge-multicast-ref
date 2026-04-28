@@ -80,9 +80,6 @@ func run() error {
 	if !ok {
 		return fmt.Errorf("unknown parser %q; available: %v", *parserName, RegisteredParsers())
 	}
-	if mp, ok := parser.(metricsAware); ok {
-		mp.setMetrics(m)
-	}
 
 	sink, err := NewSink(SinkConfig{Format: *format, Path: *output, Metrics: m})
 	if err != nil {

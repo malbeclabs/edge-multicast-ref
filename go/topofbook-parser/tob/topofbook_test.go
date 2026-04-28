@@ -1,4 +1,4 @@
-package main
+package tob
 
 import (
 	"encoding/binary"
@@ -147,7 +147,7 @@ func TestTopOfBookParser_InstrumentDefinition(t *testing.T) {
 	instDef := buildInstrumentDef(42, "BTC-USDT", "BTC", "USDT", -2, -8)
 	frame := buildFrame(1, 100, ts, instDef)
 
-	records, err := p.Parse(frame)
+	records, err := p.Parse(frame, PacketMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestTopOfBookParser_QuoteWithDefinition(t *testing.T) {
 	// First send instrument definition.
 	instDef := buildInstrumentDef(42, "BTC-USDT", "BTC", "USDT", -2, -8)
 	frame1 := buildFrame(1, 100, ts, instDef)
-	_, err := p.Parse(frame1)
+	_, err := p.Parse(frame1, PacketMeta{})
 	if err != nil {
 		t.Fatalf("error parsing instrument def: %v", err)
 	}
@@ -200,7 +200,7 @@ func TestTopOfBookParser_QuoteWithDefinition(t *testing.T) {
 	quote := buildQuote(42, 1, srcTS, 6743250, 125000000, 6743300, 80000000, 0)
 	frame2 := buildFrame(1, 101, ts, quote)
 
-	records, err := p.Parse(frame2)
+	records, err := p.Parse(frame2, PacketMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -267,7 +267,7 @@ func TestTopOfBookParser_ResetCount(t *testing.T) {
 	instDef := buildInstrumentDef(42, "BTC-USDT", "BTC", "USDT", -2, -8)
 	frame := buildFrameWithReset(1, 100, ts, 7, instDef)
 
-	records, err := p.Parse(frame)
+	records, err := p.Parse(frame, PacketMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -289,7 +289,7 @@ func TestTopOfBookParser_QuoteBuffering(t *testing.T) {
 	quote := buildQuote(42, 1, srcTS, 6743250, 125000000, 6743300, 80000000, 0)
 	frame1 := buildFrame(1, 101, ts, quote)
 
-	records, err := p.Parse(frame1)
+	records, err := p.Parse(frame1, PacketMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestTopOfBookParser_QuoteBuffering(t *testing.T) {
 	instDef := buildInstrumentDef(42, "BTC-USDT", "BTC", "USDT", -2, -8)
 	frame2 := buildFrame(1, 102, ts, instDef)
 
-	records, err = p.Parse(frame2)
+	records, err = p.Parse(frame2, PacketMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -326,6 +326,91 @@ func TestTopOfBookParser_QuoteBuffering(t *testing.T) {
 	}
 }
 
+func TestTopOfBookParser_RecordIncludesPacketMeta(t *testing.T) {
+	p := NewTopOfBookParser()
+	srcTS := uint64(1_777_050_000_123_000_000)
+	recvTS := time.Unix(0, int64(srcTS+1234)).UTC()
+	meta := PacketMeta{
+		RecvTimestamp:   recvTS,
+		RecvTSKind:      "kernel_udp_software",
+		PublisherSource: "10.0.0.9",
+		MulticastGroup:  "239.1.1.1",
+		Port:            5000,
+		Channel:         "marketdata",
+	}
+	frame := buildFrame(1, 10, srcTS,
+		buildInstrumentDef(42, "BTC", "BTC", "USD", -2, -8),
+		buildQuote(42, 1, srcTS, 100, 200, 300, 400, 0),
+	)
+	records, err := p.Parse(frame, meta)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	var quote *Record
+	for i := range records {
+		if records[i].Type == "quote" {
+			quote = &records[i]
+		}
+	}
+	if quote == nil {
+		t.Fatal("quote record not found")
+	}
+	if quote.RecvTimestampNS != uint64(recvTS.UnixNano()) || quote.RecvTSKind != meta.RecvTSKind {
+		t.Fatalf("recv metadata mismatch: %+v", quote)
+	}
+	if quote.PublisherSource != meta.PublisherSource || quote.MulticastGroup != meta.MulticastGroup || quote.Port != meta.Port || quote.Channel != meta.Channel {
+		t.Fatalf("packet metadata mismatch: %+v", quote)
+	}
+}
+
+func TestTopOfBookParser_BufferedRecordPreservesOriginalPacketMeta(t *testing.T) {
+	p := NewTopOfBookParser()
+	srcTS := uint64(1_777_050_000_123_000_000)
+	quoteRecv := time.Unix(0, int64(srcTS+1_000)).UTC()
+	refRecv := time.Unix(0, int64(srcTS+9_000)).UTC()
+
+	quoteFrame := buildFrame(1, 100, srcTS, buildQuote(42, 1, srcTS, 100, 200, 300, 400, 0))
+	records, err := p.Parse(quoteFrame, PacketMeta{
+		RecvTimestamp:   quoteRecv,
+		RecvTSKind:      "kernel_udp_software",
+		PublisherSource: "10.0.0.1",
+		MulticastGroup:  "239.1.1.1",
+		Port:            5000,
+		Channel:         "marketdata",
+	})
+	if err != nil {
+		t.Fatalf("quote Parse: %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("records before refdata = %d, want 0", len(records))
+	}
+
+	refFrame := buildFrame(2, 101, srcTS, buildInstrumentDef(42, "BTC", "BTC", "USD", -2, -8))
+	records, err = p.Parse(refFrame, PacketMeta{
+		RecvTimestamp:   refRecv,
+		RecvTSKind:      "kernel_udp_software",
+		PublisherSource: "10.0.0.1",
+		MulticastGroup:  "239.1.1.1",
+		Port:            5001,
+		Channel:         "refdata",
+	})
+	if err != nil {
+		t.Fatalf("refdata Parse: %v", err)
+	}
+	var quote *Record
+	for i := range records {
+		if records[i].Type == "quote" {
+			quote = &records[i]
+		}
+	}
+	if quote == nil {
+		t.Fatal("buffered quote not flushed")
+	}
+	if quote.RecvTimestampNS != uint64(quoteRecv.UnixNano()) || quote.Port != 5000 || quote.Channel != "marketdata" {
+		t.Fatalf("buffered quote used wrong packet metadata: %+v", quote)
+	}
+}
+
 func TestTopOfBookParser_Trade(t *testing.T) {
 	p := NewTopOfBookParser()
 
@@ -334,14 +419,14 @@ func TestTopOfBookParser_Trade(t *testing.T) {
 	// Register instrument first.
 	instDef := buildInstrumentDef(42, "ETH-USDT", "ETH", "USDT", -2, -6)
 	frame1 := buildFrame(1, 100, ts, instDef)
-	p.Parse(frame1)
+	p.Parse(frame1, PacketMeta{})
 
 	// Send a trade (sell aggressor).
 	srcTS := uint64(time.Date(2026, 4, 10, 12, 0, 5, 0, time.UTC).UnixNano())
 	trade := buildTrade(42, 1, srcTS, 350025, 1500000, 2)
 	frame2 := buildFrame(1, 101, ts, trade)
 
-	records, err := p.Parse(frame2)
+	records, err := p.Parse(frame2, PacketMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -371,7 +456,7 @@ func TestTopOfBookParser_Heartbeat(t *testing.T) {
 	hb := buildHeartbeat(3, ts)
 	frame := buildFrame(3, 50, ts, hb)
 
-	records, err := p.Parse(frame)
+	records, err := p.Parse(frame, PacketMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -394,12 +479,12 @@ func TestTopOfBookParser_ChannelReset(t *testing.T) {
 	// Add an instrument definition.
 	instDef := buildInstrumentDef(42, "BTC-USDT", "BTC", "USDT", -2, -8)
 	frame1 := buildFrame(1, 100, ts, instDef)
-	p.Parse(frame1)
+	p.Parse(frame1, PacketMeta{})
 
 	// Channel reset should clear instruments.
 	reset := buildChannelReset(ts)
 	frame2 := buildFrame(1, 101, ts, reset)
-	records, err := p.Parse(frame2)
+	records, err := p.Parse(frame2, PacketMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -414,7 +499,7 @@ func TestTopOfBookParser_ChannelReset(t *testing.T) {
 	srcTS := uint64(time.Date(2026, 4, 10, 12, 0, 1, 0, time.UTC).UnixNano())
 	quote := buildQuote(42, 1, srcTS, 100, 200, 300, 400, 0)
 	frame3 := buildFrame(1, 102, ts, quote)
-	records, err = p.Parse(frame3)
+	records, err = p.Parse(frame3, PacketMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -438,7 +523,7 @@ func TestTopOfBookParser_MultipleMessagesInFrame(t *testing.T) {
 
 	frame := buildFrame(1, 200, ts, instDef, quote)
 
-	records, err := p.Parse(frame)
+	records, err := p.Parse(frame, PacketMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -482,14 +567,14 @@ func TestTopOfBookParser_SnapshotFlag(t *testing.T) {
 	// Register instrument.
 	instDef := buildInstrumentDef(1, "BTC-USDT", "BTC", "USDT", -2, -8)
 	frame1 := buildFrame(1, 100, ts, instDef)
-	p.Parse(frame1)
+	p.Parse(frame1, PacketMeta{})
 
 	// Send a quote with snapshot flag set (flags bit 0 = 1).
 	srcTS := uint64(time.Date(2026, 4, 10, 12, 0, 1, 0, time.UTC).UnixNano())
 	quote := buildQuote(1, 1, srcTS, 100, 200, 300, 400, 1) // flags=1 → snapshot
 	frame2 := buildFrame(1, 101, ts, quote)
 
-	records, err := p.Parse(frame2)
+	records, err := p.Parse(frame2, PacketMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -515,7 +600,7 @@ func TestTopOfBookParser_UnknownMessageTypeSkipped(t *testing.T) {
 	hb := buildHeartbeat(1, ts)
 	frame := buildFrame(1, 100, ts, unknownMsg, hb)
 
-	records, err := p.Parse(frame)
+	records, err := p.Parse(frame, PacketMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -571,7 +656,7 @@ func TestTopOfBookParser_GarbageData(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			records, err := p.Parse(tt.data)
+			records, err := p.Parse(tt.data, PacketMeta{})
 			if err == nil {
 				t.Errorf("expected error for %s input, got %d records", tt.name, len(records))
 			}
