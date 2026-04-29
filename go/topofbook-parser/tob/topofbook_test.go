@@ -231,6 +231,9 @@ func TestTopOfBookParser_QuoteWithDefinition(t *testing.T) {
 	if r.Fields["source_ts_ns"] != srcTS {
 		t.Errorf("expected source_ts_ns %d, got %v", srcTS, r.Fields["source_ts_ns"])
 	}
+	if r.Fields["send_timestamp_ns"] != ts {
+		t.Errorf("expected send_timestamp_ns %d, got %v", ts, r.Fields["send_timestamp_ns"])
+	}
 	if r.Fields["source_ts_ms"] != srcTS/uint64(time.Millisecond) {
 		t.Errorf("expected source_ts_ms %d, got %v", srcTS/uint64(time.Millisecond), r.Fields["source_ts_ms"])
 	}
@@ -320,6 +323,9 @@ func TestTopOfBookParser_QuoteBuffering(t *testing.T) {
 	}
 	if records[1].Fields["buffered"] != true {
 		t.Errorf("expected flushed quote to be marked buffered, got %v", records[1].Fields["buffered"])
+	}
+	if records[1].Fields["send_timestamp_ns"] != ts {
+		t.Errorf("expected flushed quote send_timestamp_ns %d, got %v", ts, records[1].Fields["send_timestamp_ns"])
 	}
 	if p.Buffered() != 0 {
 		t.Errorf("expected 0 buffered after flush, got %d", p.Buffered())
