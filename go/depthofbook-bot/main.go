@@ -45,7 +45,10 @@ func main() {
 	if *verbose {
 		log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	}
-	_ = symbolFilter // reserved for future filtering
+	filter := NewSymbolFilter(*symbolFilter)
+	if filter.Enabled() {
+		log.Printf("symbol filter enabled: %s", filter.String())
+	}
 
 	metrics := NewMetrics(version, commit)
 
@@ -108,6 +111,9 @@ func main() {
 	snapCtx := map[uint8]SnapshotContext{}
 
 	dispatcher := DispatcherFunc(func(rec Record) {
+		if !filter.Allow(rec) {
+			return
+		}
 		c, sw := getOrCreateChannel(rec.ChannelID)
 		c.Mu.Lock()
 		defer c.Mu.Unlock()
