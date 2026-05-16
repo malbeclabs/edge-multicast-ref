@@ -451,7 +451,7 @@
       "type": "table",
       "title": "Order book",
       "id": 17,
-      "gridPos": { "x": 16, "y": 20, "w": 8, "h": 12 },
+      "gridPos": { "x": 16, "y": 20, "w": 8, "h": 20 },
       "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
       "fieldConfig": {
         "defaults": {
@@ -480,7 +480,7 @@
       "type": "timeseries",
       "title": "Bid / ask context",
       "id": 18,
-      "gridPos": { "x": 0, "y": 32, "w": 12, "h": 8 },
+      "gridPos": { "x": 0, "y": 32, "w": 10, "h": 8 },
       "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
       "fieldConfig": {
         "defaults": {
@@ -514,7 +514,7 @@
       "type": "timeseries",
       "title": "Spread",
       "id": 19,
-      "gridPos": { "x": 12, "y": 32, "w": 6, "h": 8 },
+      "gridPos": { "x": 10, "y": 32, "w": 6, "h": 8 },
       "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
       "fieldConfig": {
         "defaults": {
@@ -539,7 +539,7 @@
       "type": "timeseries",
       "title": "Trade volume",
       "id": 20,
-      "gridPos": { "x": 18, "y": 32, "w": 6, "h": 8 },
+      "gridPos": { "x": 0, "y": 40, "w": 16, "h": 7 },
       "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
       "fieldConfig": {
         "defaults": {
@@ -563,7 +563,7 @@
       "type": "table",
       "title": "Trade tape",
       "id": 21,
-      "gridPos": { "x": 0, "y": 40, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 47, "w": 24, "h": 8 },
       "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
       "fieldConfig": {
         "defaults": { "custom": { "align": "auto", "cellOptions": { "type": "auto" } } },
@@ -609,6 +609,6 @@
   "timezone": "utc",
   "title": "DZ Top-of-Book",
   "uid": "dz-topofbook",
-  "version": 10,
+  "version": 11,
   "weekStart": ""
 }
