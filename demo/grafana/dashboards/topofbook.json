@@ -408,8 +408,8 @@
     },
     {
       "type": "candlestick",
-      "title": "Price candles and volume",
-      "description": "OHLC buckets are built from trades for the selected symbols. Multiple selected symbols are combined into one aggregate traded market view.",
+      "title": "Mid-price candles",
+      "description": "OHLC buckets are built from quote midpoints for the selected symbols. Multiple selected symbols are combined into one aggregate market view.",
       "id": 16,
       "gridPos": { "x": 0, "y": 20, "w": 16, "h": 12 },
       "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
@@ -422,7 +422,10 @@
           "decimals": 6
         },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "volume" }, "properties": [{ "id": "unit", "value": "none" }, { "id": "decimals", "value": 2 }] }
+          { "matcher": { "id": "byName", "options": "open" }, "properties": [{ "id": "decimals", "value": 6 }] },
+          { "matcher": { "id": "byName", "options": "high" }, "properties": [{ "id": "decimals", "value": 6 }] },
+          { "matcher": { "id": "byName", "options": "low" }, "properties": [{ "id": "decimals", "value": 6 }] },
+          { "matcher": { "id": "byName", "options": "close" }, "properties": [{ "id": "decimals", "value": 6 }] }
         ]
       },
       "options": {
@@ -439,7 +442,7 @@
           "refId": "A",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "SELECT\n  time,\n  argMin(price, recv_ts) AS open,\n  max(price) AS high,\n  min(price) AS low,\n  argMax(price, recv_ts) AS close,\n  sum(qty) AS volume\nFROM (\n  SELECT $__timeInterval(recv_ts) AS time, recv_ts, price, qty\n  FROM topofbook.trades\n  WHERE symbol IN (${symbols:singlequote}) AND $__timeFilter(recv_ts)\n)\nGROUP BY time\nORDER BY time",
+          "rawSql": "SELECT\n  time,\n  argMin(mid, recv_ts) AS open,\n  max(mid) AS high,\n  min(mid) AS low,\n  argMax(mid, recv_ts) AS close\nFROM (\n  SELECT $__timeInterval(recv_ts) AS time, recv_ts, mid\n  FROM topofbook.quotes\n  WHERE symbol IN (${symbols:singlequote}) AND $__timeFilter(recv_ts)\n)\nGROUP BY time\nORDER BY time",
           "format": 1
         }
       ]
@@ -485,8 +488,8 @@
           "decimals": 6
         },
         "overrides": [
-          { "matcher": { "id": "byRegexp", "options": "/ bid$/" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] },
-          { "matcher": { "id": "byRegexp", "options": "/ ask$/" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] }
+          { "matcher": { "id": "byName", "options": "bid" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] },
+          { "matcher": { "id": "byName", "options": "ask" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] }
         ]
       },
       "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "none" } },
@@ -495,7 +498,14 @@
           "refId": "A",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "SELECT\n  recv_ts AS time,\n  concat(symbol, ' bid') AS metric,\n  bid_price AS value\nFROM topofbook.quotes\nWHERE symbol IN (${symbols:singlequote}) AND $__timeFilter(recv_ts)\nUNION ALL\nSELECT\n  recv_ts AS time,\n  concat(symbol, ' ask') AS metric,\n  ask_price AS value\nFROM topofbook.quotes\nWHERE symbol IN (${symbols:singlequote}) AND $__timeFilter(recv_ts)\nORDER BY time",
+          "rawSql": "SELECT\n  $__timeInterval(recv_ts) AS time,\n  symbol,\n  avg(bid_price) AS bid\nFROM topofbook.quotes\nWHERE symbol IN (${symbols:singlequote}) AND $__timeFilter(recv_ts)\nGROUP BY time, symbol\nORDER BY time",
+          "format": 0
+        },
+        {
+          "refId": "B",
+          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "queryType": "sql",
+          "rawSql": "SELECT\n  $__timeInterval(recv_ts) AS time,\n  symbol,\n  avg(ask_price) AS ask\nFROM topofbook.quotes\nWHERE symbol IN (${symbols:singlequote}) AND $__timeFilter(recv_ts)\nGROUP BY time, symbol\nORDER BY time",
           "format": 0
         }
       ]
