@@ -179,10 +179,10 @@
         "defaults": { "custom": { "align": "auto", "cellOptions": { "type": "auto" } } },
         "overrides": [
           { "matcher": { "id": "byName", "options": "side" }, "properties": [{ "id": "custom.hidden", "value": true }] },
-          { "matcher": { "id": "byName", "options": "price" }, "properties": [{ "id": "decimals", "value": 6 }, { "id": "custom.width", "value": 120 }] },
-          { "matcher": { "id": "byName", "options": "amount" }, "properties": [{ "id": "decimals", "value": 2 }, { "id": "custom.width", "value": 120 }] },
-          { "matcher": { "id": "byName", "options": "ask_depth" }, "properties": [{ "id": "decimals", "value": 2 }, { "id": "displayName", "value": "ask" }, { "id": "custom.width", "value": 160 }, { "id": "custom.cellOptions", "value": { "type": "gauge", "mode": "basic" } }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] },
-          { "matcher": { "id": "byName", "options": "bid_depth" }, "properties": [{ "id": "decimals", "value": 2 }, { "id": "displayName", "value": "bid" }, { "id": "custom.width", "value": 160 }, { "id": "custom.cellOptions", "value": { "type": "gauge", "mode": "basic" } }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] },
+          { "matcher": { "id": "byName", "options": "price" }, "properties": [{ "id": "decimals", "value": 6 }] },
+          { "matcher": { "id": "byName", "options": "amount" }, "properties": [{ "id": "decimals", "value": 2 }] },
+          { "matcher": { "id": "byName", "options": "ask_depth" }, "properties": [{ "id": "decimals", "value": 2 }, { "id": "displayName", "value": "ask" }, { "id": "custom.cellOptions", "value": { "type": "gauge", "mode": "basic" } }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] },
+          { "matcher": { "id": "byName", "options": "bid_depth" }, "properties": [{ "id": "decimals", "value": 2 }, { "id": "displayName", "value": "bid" }, { "id": "custom.cellOptions", "value": { "type": "gauge", "mode": "basic" } }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] },
           { "matcher": { "id": "byName", "options": "sort_key" }, "properties": [{ "id": "custom.hidden", "value": true }] }
         ]
       },
@@ -424,6 +424,6 @@
   "timezone": "utc",
   "title": "DZ Depth-of-Book",
   "uid": "dz-depthofbook",
-  "version": 7,
+  "version": 8,
   "weekStart": ""
 }
