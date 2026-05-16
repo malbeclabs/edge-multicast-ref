@@ -1018,7 +1018,7 @@
     {
       "type": "candlestick",
       "title": "Mid-price candles",
-      "description": "OHLC buckets are built from quote midpoints for the selected symbol. Trade volume uses the right axis; trade prints are yellow markers.",
+      "description": "OHLC buckets are built from quote midpoints for the selected symbol using the Candle interval selector. Trade volume uses the right axis; trade prints are yellow markers.",
       "id": 16,
       "gridPos": {
         "x": 0,
@@ -1189,7 +1189,7 @@
             "type": "grafana-clickhouse-datasource"
           },
           "queryType": "sql",
-          "rawSql": "WITH\n  q AS (\n    SELECT\n      $__timeInterval(recv_ts) AS time,\n      argMin(mid, recv_ts) AS open,\n      max(mid) AS high,\n      min(mid) AS low,\n      argMax(mid, recv_ts) AS close\n    FROM topofbook.quotes\n    WHERE symbol IN (${symbols:singlequote}) AND $__timeFilter(recv_ts)\n    GROUP BY time\n  ),\n  v AS (\n    SELECT\n      $__timeInterval(recv_ts) AS time,\n      sum(qty) AS volume\n    FROM topofbook.trades\n    WHERE symbol IN (${symbols:singlequote}) AND $__timeFilter(recv_ts)\n    GROUP BY time\n  )\nSELECT\n  q.time,\n  q.open,\n  q.high,\n  q.low,\n  q.close,\n  ifNull(v.volume, 0) AS volume\nFROM q\nLEFT JOIN v USING time\nORDER BY q.time",
+          "rawSql": "WITH\n  q AS (\n    SELECT\n      toStartOfInterval(recv_ts, INTERVAL ${candle_interval:raw} SECOND) AS time,\n      argMin(mid, recv_ts) AS open,\n      max(mid) AS high,\n      min(mid) AS low,\n      argMax(mid, recv_ts) AS close\n    FROM topofbook.quotes\n    WHERE symbol IN (${symbols:singlequote}) AND $__timeFilter(recv_ts)\n    GROUP BY time\n  ),\n  v AS (\n    SELECT\n      toStartOfInterval(recv_ts, INTERVAL ${candle_interval:raw} SECOND) AS time,\n      sum(qty) AS volume\n    FROM topofbook.trades\n    WHERE symbol IN (${symbols:singlequote}) AND $__timeFilter(recv_ts)\n    GROUP BY time\n  )\nSELECT\n  q.time,\n  q.open,\n  q.high,\n  q.low,\n  q.close,\n  ifNull(v.volume, 0) AS volume\nFROM q\nLEFT JOIN v USING time\nORDER BY q.time",
           "format": 1
         },
         {
@@ -1595,6 +1595,18 @@
         "sort": 1,
         "multi": false,
         "includeAll": false
+      },
+      {
+        "name": "candle_interval",
+        "label": "Candle interval (s)",
+        "type": "custom",
+        "query": "10,30,60,300,1800",
+        "current": { "selected": true, "text": "60", "value": "60" },
+        "hide": 0,
+        "multi": false,
+        "includeAll": false,
+        "refresh": 0,
+        "sort": 0
       }
     ]
   },
@@ -1606,6 +1618,6 @@
   "timezone": "utc",
   "title": "DZ Top-of-Book",
   "uid": "dz-topofbook",
-  "version": 16,
+  "version": 17,
   "weekStart": ""
 }
