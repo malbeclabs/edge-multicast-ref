@@ -2,129 +2,259 @@
   "annotations": { "list": [] },
   "editable": true,
   "fiscalYearStartMonth": 0,
-  "graphTooltip": 0,
+  "graphTooltip": 1,
   "id": null,
   "links": [],
   "liveNow": true,
   "panels": [
     {
-      "type": "table",
-      "title": "Book ladder",
+      "type": "row",
+      "title": "Global market health",
       "id": 1,
-      "gridPos": { "x": 0, "y": 0, "w": 8, "h": 14 },
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Active instruments",
+      "id": 2,
+      "gridPos": { "x": 0, "y": 1, "w": 4, "h": 4 },
+      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }, "unit": "none", "decimals": 0 }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "queryType": "sql",
+          "rawSql": "SELECT instrument_count\nFROM depthofbook.channel_health\nWHERE kind = 'manifest_summary'\nORDER BY recv_ts DESC\nLIMIT 1",
+          "format": 1
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Event rate",
+      "id": 3,
+      "gridPos": { "x": 4, "y": 1, "w": 4, "h": 4 },
+      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }, "unit": "cps", "decimals": 1 }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "queryType": "sql",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, count() / $__interval_s AS events_per_sec\nFROM depthofbook.events\nWHERE $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
+          "format": 0
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Snapshot rate",
+      "id": 4,
+      "gridPos": { "x": 8, "y": 1, "w": 4, "h": 4 },
+      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] }, "unit": "cps", "decimals": 1 }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "queryType": "sql",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, count() / $__interval_s AS snapshots_per_sec\nFROM depthofbook.level_snapshots\nWHERE $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
+          "format": 0
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Average wire latency",
+      "description": "Publisher send_ts to subscriber receive, from DOB events. Includes clock skew between hosts.",
+      "id": 5,
+      "gridPos": { "x": 12, "y": 1, "w": 4, "h": 4 },
+      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 250 }, { "color": "red", "value": 1000 }] }, "unit": "ms", "decimals": 1 }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "queryType": "sql",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, avg(wire_latency_ms) AS avg_wire_latency_ms\nFROM depthofbook.events\nWHERE $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
+          "format": 0
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "P99 wire latency",
+      "description": "Publisher send_ts to subscriber receive, from DOB events. Includes clock skew between hosts.",
+      "id": 6,
+      "gridPos": { "x": 16, "y": 1, "w": 4, "h": 4 },
+      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 500 }, { "color": "red", "value": 2000 }] }, "unit": "ms", "decimals": 1 }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "queryType": "sql",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, quantile(0.99)(wire_latency_ms) AS p99_wire_latency_ms\nFROM depthofbook.events\nWHERE $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
+          "format": 0
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Latest event age",
+      "id": 7,
+      "gridPos": { "x": 20, "y": 1, "w": 4, "h": 4 },
+      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 15 }, { "color": "red", "value": 60 }] }, "unit": "s", "decimals": 1 }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "queryType": "sql",
+          "rawSql": "SELECT dateDiff('millisecond', max(recv_ts), now64(3)) / 1000 AS latest_event_age_seconds\nFROM (\n  SELECT max(recv_ts) AS recv_ts FROM depthofbook.events\n  UNION ALL\n  SELECT max(recv_ts) AS recv_ts FROM depthofbook.level_snapshots\n)",
+          "format": 1
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Trading view",
+      "id": 8,
+      "gridPos": { "x": 0, "y": 5, "w": 24, "h": 1 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "type": "candlestick",
+      "title": "Mid-price candles",
+      "description": "OHLC buckets are built from best bid/ask midpoint using the Candle interval selector. Executions are yellow markers; executed volume uses the right axis.",
+      "id": 9,
+      "gridPos": { "x": 0, "y": 6, "w": 16, "h": 12 },
       "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
       "fieldConfig": {
-        "defaults": {
-          "custom": { "align": "auto", "cellOptions": { "type": "auto" } },
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
-        },
+        "defaults": { "custom": { "axisLabel": "Price", "axisPlacement": "left", "lineWidth": 1, "fillOpacity": 20 }, "decimals": 6 },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "price" }, "properties": [{ "id": "decimals", "value": 6 }] }
+          { "matcher": { "id": "byName", "options": "open" }, "properties": [{ "id": "decimals", "value": 6 }] },
+          { "matcher": { "id": "byName", "options": "high" }, "properties": [{ "id": "decimals", "value": 6 }] },
+          { "matcher": { "id": "byName", "options": "low" }, "properties": [{ "id": "decimals", "value": 6 }] },
+          { "matcher": { "id": "byName", "options": "close" }, "properties": [{ "id": "decimals", "value": 6 }] },
+          { "matcher": { "id": "byName", "options": "volume" }, "properties": [{ "id": "unit", "value": "none" }, { "id": "decimals", "value": 2 }, { "id": "custom.axisPlacement", "value": "right" }, { "id": "custom.axisLabel", "value": "Volume" }, { "id": "custom.drawStyle", "value": "bars" }, { "id": "custom.fillOpacity", "value": 45 }, { "id": "custom.lineWidth", "value": 0 }] },
+          { "matcher": { "id": "byName", "options": "trade" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "yellow" } }, { "id": "custom.drawStyle", "value": "points" }, { "id": "custom.lineWidth", "value": 0 }, { "id": "custom.pointSize", "value": 5 }, { "id": "custom.showPoints", "value": "always" }, { "id": "decimals", "value": 6 }] }
         ]
       },
-      "options": { "showHeader": true },
+      "options": { "candleStyle": "candles", "colorStrategy": "open-close", "colors": { "down": "red", "up": "green" }, "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false }, "tooltip": { "mode": "single", "sort": "none" }, "includeAllFields": true, "mode": "candles" },
       "targets": [
         {
           "refId": "A",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "SELECT side, level_idx, price, qty, cumulative_qty\nFROM depthofbook.level_snapshots\nWHERE symbol = '${symbol}'\n  AND level_idx < 16\n  AND recv_ts = (\n    SELECT max(recv_ts) FROM depthofbook.level_snapshots\n    WHERE symbol = '${symbol}' AND $__timeFilter(recv_ts)\n  )\nORDER BY multiIf(side = 'ask', -toInt32(level_idx), toInt32(level_idx) + 1000)",
+          "rawSql": "WITH\n  best AS (\n    SELECT\n      recv_ts,\n      maxIf(price, side = 'bid' AND level_idx = 0) AS bid,\n      minIf(price, side = 'ask' AND level_idx = 0) AS ask\n    FROM depthofbook.level_snapshots\n    WHERE symbol = ${symbol:singlequote} AND $__timeFilter(recv_ts)\n    GROUP BY recv_ts\n    HAVING bid > 0 AND ask > 0\n  ),\n  q AS (\n    SELECT\n      toStartOfInterval(recv_ts, INTERVAL ${candle_interval:raw} SECOND) AS time,\n      argMin((bid + ask) / 2, recv_ts) AS open,\n      max((bid + ask) / 2) AS high,\n      min((bid + ask) / 2) AS low,\n      argMax((bid + ask) / 2, recv_ts) AS close\n    FROM best\n    GROUP BY time\n  ),\n  v AS (\n    SELECT\n      toStartOfInterval(recv_ts, INTERVAL ${candle_interval:raw} SECOND) AS time,\n      sum(ifNull(qty, 0)) AS volume\n    FROM depthofbook.events\n    WHERE kind = 'order_execute' AND symbol = ${symbol:singlequote} AND $__timeFilter(recv_ts)\n    GROUP BY time\n  )\nSELECT q.time, q.open, q.high, q.low, q.close, ifNull(v.volume, 0) AS volume\nFROM q\nLEFT JOIN v USING time\nORDER BY q.time",
           "format": 1
-        }
-      ]
-    },
-    {
-      "type": "heatmap",
-      "title": "Depth heatmap",
-      "id": 2,
-      "gridPos": { "x": 8, "y": 0, "w": 16, "h": 14 },
-      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
-      "fieldConfig": {
-        "defaults": {},
-        "overrides": []
-      },
-      "options": {
-        "calculate": true,
-        "color": { "mode": "scheme", "scheme": "Spectral", "steps": 64 },
-        "exemplars": { "color": "rgba(255,0,255,0.7)" },
-        "filterValues": { "le": 1e-9 },
-        "legend": { "show": true },
-        "tooltip": { "mode": "single", "showColorScale": false, "yHistogram": false },
-        "yAxis": { "axisPlacement": "left", "unit": "none" }
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
-          "queryType": "sql",
-          "rawSql": "SELECT recv_ts AS time, price\nFROM depthofbook.level_snapshots\nWHERE symbol = '${symbol}' AND level_idx < 10 AND $__timeFilter(recv_ts)\nORDER BY recv_ts",
-          "format": 1
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "title": "Spread (bps)",
-      "id": 3,
-      "gridPos": { "x": 0, "y": 14, "w": 8, "h": 7 },
-      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
-      "fieldConfig": {
-        "defaults": {
-          "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter", "lineWidth": 1, "fillOpacity": 0 },
-          "unit": "none",
-          "decimals": 2
         },
-        "overrides": []
-      },
-      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi" } },
-      "targets": [
         {
-          "refId": "A",
+          "refId": "B",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "WITH best AS (\n  SELECT $__timeInterval(recv_ts) AS time,\n         min(price) FILTER (WHERE side = 'ask') AS best_ask,\n         max(price) FILTER (WHERE side = 'bid') AS best_bid\n  FROM depthofbook.level_snapshots\n  WHERE symbol = '${symbol}' AND level_idx = 0 AND $__timeFilter(recv_ts)\n  GROUP BY time\n)\nSELECT time, ((best_ask - best_bid) / ((best_ask + best_bid) / 2)) * 10000 AS spread_bps\nFROM best ORDER BY time",
+          "rawSql": "SELECT min(recv_ts) AS time, sum(ifNull(price, 0) * ifNull(qty, 0)) / sum(ifNull(qty, 0)) AS trade\nFROM depthofbook.events\nWHERE '${show_trades:raw}' = 'yes'\n  AND kind = 'order_execute'\n  AND symbol = ${symbol:singlequote}\n  AND $__timeFilter(recv_ts)\nGROUP BY instrument_id, trade_id\nHAVING sum(ifNull(qty, 0)) > 0\nORDER BY time",
           "format": 0
         }
       ]
     },
     {
       "type": "table",
-      "title": "Top of book",
-      "id": 4,
-      "gridPos": { "x": 8, "y": 14, "w": 16, "h": 7 },
+      "title": "Book ladder",
+      "id": 10,
+      "gridPos": { "x": 16, "y": 6, "w": 8, "h": 12 },
       "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
       "fieldConfig": {
-        "defaults": {
-          "custom": { "align": "auto", "cellOptions": { "type": "auto" } },
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
-        },
+        "defaults": { "custom": { "align": "auto", "cellOptions": { "type": "auto" } } },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "bid" }, "properties": [{ "id": "custom.cellOptions", "value": { "type": "color-background" } }, { "id": "color", "value": { "mode": "thresholds" } }, { "id": "decimals", "value": 6 }] },
-          { "matcher": { "id": "byName", "options": "ask" }, "properties": [{ "id": "decimals", "value": 6 }] }
+          { "matcher": { "id": "byName", "options": "price" }, "properties": [{ "id": "decimals", "value": 6 }] },
+          { "matcher": { "id": "byName", "options": "qty" }, "properties": [{ "id": "decimals", "value": 2 }] },
+          { "matcher": { "id": "byName", "options": "cumulative_qty" }, "properties": [{ "id": "decimals", "value": 2 }] }
         ]
       },
-      "options": { "showHeader": true },
+      "options": { "showHeader": true, "sortBy": [{ "displayName": "sort_key", "desc": false }] },
       "targets": [
         {
           "refId": "A",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "SELECT\n  symbol,\n  argMax(price, recv_ts) FILTER (WHERE side = 'bid' AND level_idx = 0) AS bid,\n  argMax(price, recv_ts) FILTER (WHERE side = 'ask' AND level_idx = 0) AS ask,\n  argMax(qty, recv_ts) FILTER (WHERE side = 'bid' AND level_idx = 0) AS bid_qty,\n  argMax(qty, recv_ts) FILTER (WHERE side = 'ask' AND level_idx = 0) AS ask_qty,\n  max(recv_ts) AS last_update\nFROM depthofbook.level_snapshots\nWHERE symbol IN (${symbols:singlequote}) AND $__timeFilter(recv_ts)\nGROUP BY symbol\nORDER BY symbol",
+          "rawSql": "SELECT\n  side,\n  level_idx,\n  price,\n  qty,\n  cumulative_qty,\n  order_count,\n  multiIf(side = 'ask', 1000 - toInt32(level_idx), 2000 + toInt32(level_idx)) AS sort_key\nFROM depthofbook.level_snapshots\nWHERE symbol = ${symbol:singlequote}\n  AND level_idx < 16\n  AND recv_ts = (\n    SELECT max(recv_ts)\n    FROM depthofbook.level_snapshots\n    WHERE symbol = ${symbol:singlequote} AND $__timeFilter(recv_ts)\n  )\nORDER BY sort_key",
           "format": 1
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Bid / ask context",
+      "id": 11,
+      "gridPos": { "x": 0, "y": 18, "w": 16, "h": 8 },
+      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+      "fieldConfig": {
+        "defaults": { "custom": { "axisLabel": "Price", "drawStyle": "line", "lineInterpolation": "stepAfter", "lineWidth": 1, "fillOpacity": 0, "spanNulls": true }, "decimals": 6 },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "bid" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] },
+          { "matcher": { "id": "byName", "options": "ask" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "none" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "queryType": "sql",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, avg(price) AS bid\nFROM depthofbook.level_snapshots\nWHERE symbol = ${symbol:singlequote} AND side = 'bid' AND level_idx = 0 AND $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
+          "format": 0
+        },
+        {
+          "refId": "B",
+          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "queryType": "sql",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, avg(price) AS ask\nFROM depthofbook.level_snapshots\nWHERE symbol = ${symbol:singlequote} AND side = 'ask' AND level_idx = 0 AND $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
+          "format": 0
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Spread",
+      "id": 12,
+      "gridPos": { "x": 16, "y": 18, "w": 8, "h": 8 },
+      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+      "fieldConfig": { "defaults": { "custom": { "axisLabel": "Spread", "drawStyle": "line", "lineInterpolation": "stepAfter", "lineWidth": 1, "fillOpacity": 0, "spanNulls": true }, "unit": "none", "decimals": 2 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "none" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "queryType": "sql",
+          "rawSql": "WITH best AS (\n  SELECT $__timeInterval(recv_ts) AS time,\n         minIf(price, side = 'ask' AND level_idx = 0) AS best_ask,\n         maxIf(price, side = 'bid' AND level_idx = 0) AS best_bid\n  FROM depthofbook.level_snapshots\n  WHERE symbol = ${symbol:singlequote} AND $__timeFilter(recv_ts)\n  GROUP BY time\n)\nSELECT time, ((best_ask - best_bid) / ((best_ask + best_bid) / 2)) * 10000 AS spread_bps\nFROM best\nWHERE best_ask > 0 AND best_bid > 0\nORDER BY time",
+          "format": 0
         }
       ]
     },
     {
       "type": "table",
       "title": "Trade tape",
-      "id": 5,
-      "gridPos": { "x": 0, "y": 21, "w": 12, "h": 9 },
+      "id": 13,
+      "gridPos": { "x": 0, "y": 26, "w": 24, "h": 8 },
       "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
       "fieldConfig": {
         "defaults": { "custom": { "align": "auto", "cellOptions": { "type": "auto" } } },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "aggressor_side" }, "properties": [{ "id": "custom.cellOptions", "value": { "type": "color-background" } }, { "id": "mappings", "value": [{ "type": "value", "options": { "buy": { "color": "green", "index": 0 }, "sell": { "color": "red", "index": 1 } } }] }] },
-          { "matcher": { "id": "byName", "options": "price" }, "properties": [{ "id": "decimals", "value": 6 }] }
+          { "matcher": { "id": "byName", "options": "aggressor_side" }, "properties": [{ "id": "custom.cellOptions", "value": { "type": "color-background" } }, { "id": "mappings", "value": [{ "type": "value", "options": { "buy": { "color": "green", "index": 0 }, "sell": { "color": "red", "index": 1 }, "unknown": { "color": "yellow", "index": 2 } } }] }] },
+          { "matcher": { "id": "byName", "options": "price" }, "properties": [{ "id": "decimals", "value": 6 }] },
+          { "matcher": { "id": "byName", "options": "notional" }, "properties": [{ "id": "decimals", "value": 2 }] }
         ]
       },
       "options": { "showHeader": true, "sortBy": [{ "displayName": "recv_ts", "desc": true }] },
@@ -133,111 +263,113 @@
           "refId": "A",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "SELECT t AS recv_ts, sym AS symbol, side AS aggressor_side, vwap AS price, total_qty AS qty\nFROM (\n  SELECT min(recv_ts) AS t, any(symbol) AS sym, any(aggressor_side) AS side,\n         sum(price * qty) / sum(qty) AS vwap, sum(qty) AS total_qty\n  FROM depthofbook.events\n  WHERE kind = 'order_execute' AND symbol IN (${symbols:singlequote}) AND $__timeFilter(recv_ts)\n  GROUP BY instrument_id, trade_id\n)\nORDER BY recv_ts DESC LIMIT 100",
+          "rawSql": "SELECT\n  min(recv_ts) AS recv_ts,\n  any(symbol) AS symbol,\n  any(aggressor_side) AS aggressor_side,\n  sum(ifNull(price, 0) * ifNull(qty, 0)) / sum(ifNull(qty, 0)) AS price,\n  sum(ifNull(qty, 0)) AS qty,\n  sum(ifNull(price, 0) * ifNull(qty, 0)) AS notional\nFROM depthofbook.events\nWHERE kind = 'order_execute' AND symbol = ${symbol:singlequote} AND $__timeFilter(recv_ts)\nGROUP BY instrument_id, trade_id\nHAVING qty > 0\nORDER BY recv_ts DESC\nLIMIT 200",
           "format": 1
         }
       ]
     },
     {
+      "type": "row",
+      "title": "ClickHouse data health",
+      "id": 14,
+      "gridPos": { "x": 0, "y": 34, "w": 24, "h": 1 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
       "type": "timeseries",
-      "title": "Add/Cancel/Execute rate",
-      "id": 6,
-      "gridPos": { "x": 12, "y": 21, "w": 12, "h": 9 },
+      "title": "Record rate",
+      "id": 15,
+      "gridPos": { "x": 0, "y": 35, "w": 8, "h": 7 },
       "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
-      "fieldConfig": {
-        "defaults": {
-          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10 },
-          "unit": "cps"
-        },
-        "overrides": []
-      },
-      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi" } },
+      "fieldConfig": { "defaults": { "custom": { "axisLabel": "Records / second", "drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 1, "fillOpacity": 12, "spanNulls": true }, "unit": "cps", "decimals": 1 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "none" } },
       "targets": [
         {
           "refId": "A",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, kind, count() AS rate\nFROM depthofbook.events\nWHERE kind IN ('order_add', 'order_cancel', 'order_execute')\n  AND symbol IN (${symbols:singlequote}) AND $__timeFilter(recv_ts)\nGROUP BY time, kind ORDER BY time",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, kind, count() / $__interval_s AS rate\nFROM depthofbook.events\nWHERE kind IN ('order_add', 'order_cancel', 'order_execute', 'trade') AND $__timeFilter(recv_ts)\nGROUP BY time, kind\nORDER BY time",
           "format": 0
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Wire latency quantiles",
+      "id": 16,
+      "gridPos": { "x": 8, "y": 35, "w": 8, "h": 7 },
+      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+      "fieldConfig": {
+        "defaults": { "custom": { "axisLabel": "Latency", "drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 1, "fillOpacity": 0, "spanNulls": true }, "unit": "ms", "decimals": 1 },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "p50" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] },
+          { "matcher": { "id": "byName", "options": "p95" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "yellow" } }] },
+          { "matcher": { "id": "byName", "options": "p99" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } }] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "none" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "queryType": "sql",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time,\n       quantile(0.5)(wire_latency_ms) AS p50,\n       quantile(0.95)(wire_latency_ms) AS p95,\n       quantile(0.99)(wire_latency_ms) AS p99\nFROM depthofbook.events\nWHERE $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
+          "format": 0
+        }
+      ]
+    },
+    {
+      "type": "heatmap",
+      "title": "Depth heatmap",
+      "id": 17,
+      "gridPos": { "x": 16, "y": 35, "w": 8, "h": 7 },
+      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "options": { "calculate": true, "color": { "mode": "scheme", "scheme": "Spectral", "steps": 64 }, "filterValues": { "le": 1e-9 }, "legend": { "show": true }, "tooltip": { "mode": "single", "showColorScale": false, "yHistogram": false }, "yAxis": { "axisLabel": "Price", "axisPlacement": "left", "unit": "none" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "queryType": "sql",
+          "rawSql": "SELECT recv_ts AS time, price\nFROM depthofbook.level_snapshots\nWHERE symbol = ${symbol:singlequote} AND level_idx < 10 AND $__timeFilter(recv_ts)\nORDER BY recv_ts",
+          "format": 1
         }
       ]
     },
     {
       "type": "timeseries",
       "title": "Resting order count",
-      "id": 7,
-      "gridPos": { "x": 0, "y": 30, "w": 12, "h": 7 },
+      "id": 18,
+      "gridPos": { "x": 0, "y": 42, "w": 12, "h": 6 },
       "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
-      "fieldConfig": {
-        "defaults": {
-          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 0 }
-        },
-        "overrides": []
-      },
+      "fieldConfig": { "defaults": { "custom": { "axisLabel": "Orders", "drawStyle": "line", "lineWidth": 1, "fillOpacity": 0 }, "decimals": 0 }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi" } },
       "targets": [
         {
           "refId": "A",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, side, sum(order_count) AS orders\nFROM depthofbook.level_snapshots\nWHERE symbol = '${symbol}' AND $__timeFilter(recv_ts)\nGROUP BY time, side ORDER BY time",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, side, sum(order_count) AS orders\nFROM depthofbook.level_snapshots\nWHERE symbol = ${symbol:singlequote} AND $__timeFilter(recv_ts)\nGROUP BY time, side\nORDER BY time",
           "format": 0
         }
       ]
     },
     {
       "type": "timeseries",
-      "title": "Channel health",
-      "id": 8,
-      "gridPos": { "x": 12, "y": 30, "w": 12, "h": 5 },
+      "title": "Book quantity",
+      "id": 19,
+      "gridPos": { "x": 12, "y": 42, "w": 12, "h": 6 },
       "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
-      "fieldConfig": {
-        "defaults": {
-          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 0 },
-          "unit": "ms",
-          "decimals": 1
-        },
-        "overrides": []
-      },
+      "fieldConfig": { "defaults": { "custom": { "axisLabel": "Quantity", "drawStyle": "line", "lineWidth": 1, "fillOpacity": 0 }, "decimals": 2 }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi" } },
       "targets": [
         {
           "refId": "A",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "SELECT $__timeInterval(recv_ts) AS time,\n       quantile(0.5)(wire_latency_ms) AS p50,\n       quantile(0.95)(wire_latency_ms) AS p95,\n       quantile(0.99)(wire_latency_ms) AS p99\nFROM depthofbook.events\nWHERE $__timeFilter(recv_ts)\nGROUP BY time ORDER BY time",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, side, sum(qty) AS resting_qty\nFROM depthofbook.level_snapshots\nWHERE symbol = ${symbol:singlequote} AND level_idx < 10 AND $__timeFilter(recv_ts)\nGROUP BY time, side\nORDER BY time",
           "format": 0
-        }
-      ]
-    },
-    {
-      "type": "stat",
-      "title": "Active instrument count",
-      "id": 9,
-      "gridPos": { "x": 20, "y": 35, "w": 4, "h": 5 },
-      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
-      "fieldConfig": {
-        "defaults": {
-          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
-          "color": { "mode": "thresholds" }
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "textMode": "auto"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
-          "queryType": "sql",
-          "rawSql": "SELECT instrument_count\nFROM depthofbook.channel_health\nWHERE kind = 'manifest_summary'\nORDER BY recv_ts DESC LIMIT 1",
-          "format": 1
         }
       ]
     }
@@ -251,21 +383,36 @@
         "name": "symbol",
         "label": "Symbol",
         "type": "query",
-        "datasource": "ClickHouse",
-        "query": "SELECT DISTINCT symbol FROM depthofbook.level_snapshots WHERE $__timeFilter(recv_ts)",
+        "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+        "query": "SELECT DISTINCT symbol FROM depthofbook.level_snapshots WHERE $__timeFilter(recv_ts) ORDER BY symbol",
+        "refresh": 2,
+        "sort": 1,
         "multi": false,
-        "includeAll": false,
-        "refresh": 2
+        "includeAll": false
       },
       {
-        "name": "symbols",
-        "label": "Symbols",
-        "type": "query",
-        "datasource": "ClickHouse",
-        "query": "SELECT DISTINCT symbol FROM depthofbook.level_snapshots WHERE $__timeFilter(recv_ts)",
-        "multi": true,
-        "includeAll": true,
-        "refresh": 2
+        "name": "candle_interval",
+        "label": "Candle interval (s)",
+        "type": "custom",
+        "query": "10,30,60,300,1800",
+        "current": { "selected": true, "text": "60", "value": "60" },
+        "hide": 0,
+        "multi": false,
+        "includeAll": false,
+        "refresh": 0,
+        "sort": 0
+      },
+      {
+        "name": "show_trades",
+        "label": "Show trades",
+        "type": "custom",
+        "query": "yes,no",
+        "current": { "selected": true, "text": "yes", "value": "yes" },
+        "hide": 0,
+        "multi": false,
+        "includeAll": false,
+        "refresh": 0,
+        "sort": 0
       }
     ]
   },
@@ -274,6 +421,6 @@
   "timezone": "utc",
   "title": "DZ Depth-of-Book",
   "uid": "dz-depthofbook",
-  "version": 1,
+  "version": 3,
   "weekStart": ""
 }
