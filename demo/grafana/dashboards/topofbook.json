@@ -1129,7 +1129,7 @@
                 "id": "color",
                 "value": {
                   "mode": "fixed",
-                  "fixedColor": "dark-gray"
+                  "fixedColor": "#2f3338"
                 }
               }
             ]
@@ -1642,6 +1642,6 @@
   "timezone": "utc",
   "title": "DZ Top-of-Book",
   "uid": "dz-topofbook",
-  "version": 19,
+  "version": 20,
   "weekStart": ""
 }
