@@ -1,8 +1,6 @@
-module github.com/malbeclabs/edge-multicast-ref/go/example-bot
+module topofbook-bot
 
-go 1.23.0
-
-toolchain go1.23.7
+go 1.25.0
 
 require (
 	github.com/prometheus/client_golang v1.23.2
@@ -16,7 +14,8 @@ require (
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/prometheus/common v0.66.1 // indirect
 	github.com/prometheus/procfs v0.16.1 // indirect
+	github.com/rogpeppe/go-internal v1.11.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
-	golang.org/x/sys v0.35.0 // indirect
+	golang.org/x/sys v0.43.0 // indirect
 	google.golang.org/protobuf v1.36.8 // indirect
 )

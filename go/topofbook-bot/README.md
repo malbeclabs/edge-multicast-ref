@@ -1,11 +1,11 @@
-# DZ Example Bot
+# Top-of-Book Bot
 
-A reference subscriber that reads the `topofbook-parser`'s Unix socket output, filters by symbol, and exposes per-symbol top-of-book state as Prometheus metrics. Designed to be a minimal, readable starting point for trading-bot-style consumers and a convenient source for Grafana demos.
+Reference Go subscriber that consumes the DoubleZero Top-of-Book parser's Unix socket, filters by symbol, exposes Prometheus metrics, and persists tick-level data into ClickHouse.
 
 ## What it does
 
 ```
-topofbook-parser  ──unix socket JSONL──▶  example-bot  ──/metrics──▶  Prometheus  ──▶  Grafana
+topofbook-parser  ──unix socket JSONL──▶  topofbook-bot  ──/metrics──▶  Prometheus  ──▶  Grafana
 ```
 
 - Connects to the parser's Unix domain socket
@@ -30,7 +30,7 @@ dz-topofbook-parser \
   --metrics-addr 127.0.0.1:9090
 
 # Bot side:
-./dz-example-bot \
+./dz-topofbook-bot \
   --socket /tmp/topofbook.sock \
   --symbol BTC,ETH,SOL \
   --metrics-addr 127.0.0.1:9091
@@ -111,19 +111,19 @@ The bot exponentially backs off on connect failure (250ms → 5s cap). On succes
 ## Building
 
 ```bash
-go build -o dz-example-bot .
+go build -o dz-topofbook-bot .
 ```
 
 With embedded version info:
 
 ```bash
-go build -ldflags "-X main.version=0.1.0 -X main.commit=$(git rev-parse --short HEAD) -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o dz-example-bot .
+go build -ldflags "-X main.version=0.1.0 -X main.commit=$(git rev-parse --short HEAD) -X main.date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o dz-topofbook-bot .
 ```
 
 Cross-compile to linux/amd64:
 
 ```bash
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o dz-example-bot-linux-amd64 .
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o dz-topofbook-bot-linux-amd64 .
 ```
 
 ## Testing

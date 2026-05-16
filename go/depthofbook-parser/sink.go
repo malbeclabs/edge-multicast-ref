@@ -1,0 +1,48 @@
+package main
+
+import (
+	"fmt"
+	"strings"
+)
+
+// OutputSink writes decoded records to a destination.
+type OutputSink interface {
+	// Write outputs one or more records.
+	Write(records []Record) error
+
+	// Close releases any resources held by the sink.
+	Close() error
+}
+
+// SinkConfig describes the desired output format and destination.
+type SinkConfig struct {
+	// Format is the output encoding: "json".
+	Format string
+
+	// Path is the output destination. A file path for file output,
+	// or "unix:///path/to/sock" for a Unix domain socket.
+	Path string
+
+	// Metrics is optional; when non-nil, the socket sink tracks
+	// connected-client and drop counters.
+	Metrics *Metrics
+}
+
+// NewSink creates an OutputSink from the given configuration.
+//
+// Path formats:
+//   - "/path/to/file"          → file output
+//   - "unix:///path/to/sock"   → Unix domain socket (broadcast to all connected clients)
+func NewSink(cfg SinkConfig) (OutputSink, error) {
+	isSocket := strings.HasPrefix(cfg.Path, "unix://")
+
+	switch cfg.Format {
+	case "json":
+		if isSocket {
+			return NewSocketSink("json", strings.TrimPrefix(cfg.Path, "unix://"), cfg.Metrics)
+		}
+		return NewJSONFileSink(cfg.Path)
+	default:
+		return nil, fmt.Errorf("unsupported format: %q (depthofbook supports json only)", cfg.Format)
+	}
+}

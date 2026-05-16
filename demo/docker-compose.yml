@@ -35,7 +35,7 @@ services:
   bot:
     build:
       context: ..
-      dockerfile: go/example-bot/Dockerfile
+      dockerfile: go/topofbook-bot/Dockerfile
     depends_on:
       clickhouse:
         condition: service_healthy
@@ -52,6 +52,46 @@ services:
       - "--metrics-addr=0.0.0.0:9091"
       - "--clickhouse-url=http://clickhouse:8123"
       - "--clickhouse-database=topofbook"
+
+  depthofbook-parser:
+    build:
+      context: ..
+      dockerfile: go/depthofbook-parser/Dockerfile
+    image: dz/depthofbook-parser:latest
+    network_mode: host
+    restart: unless-stopped
+    command:
+      - --group=${DZ_DOB_MULTICAST_GROUP}
+      - --refdata-port=${DZ_DOB_REFDATA_PORT}
+      - --mktdata-port=${DZ_DOB_MKTDATA_PORT}
+      - --snapshot-port=${DZ_DOB_SNAPSHOT_PORT}
+      - --interface=${DZ_INTERFACE}
+      - --output=unix:///var/run/dz/dob.sock
+      - --metrics-addr=127.0.0.1:${DZ_DOB_PARSER_METRICS_PORT:-9093}
+    volumes:
+      - dz-sockets:/var/run/dz
+
+  depthofbook-bot:
+    build:
+      context: ..
+      dockerfile: go/depthofbook-bot/Dockerfile
+    image: dz/depthofbook-bot:latest
+    restart: unless-stopped
+    depends_on:
+      - depthofbook-parser
+      - clickhouse
+    command:
+      - --socket=/var/run/dz/dob.sock
+      - --symbol=${DZ_DOB_SYMBOLS}
+      - --depth=${DZ_DOB_DEPTH:-20}
+      - --coalesce-ms=${DZ_DOB_COALESCE_MS:-50}
+      - --metrics-addr=0.0.0.0:9092
+      - --clickhouse-url=http://clickhouse:8123
+      - --clickhouse-database=depthofbook
+    ports:
+      - "${DOB_BOT_METRICS_PORT:-9092}:9092"
+    volumes:
+      - dz-sockets:/var/run/dz
 
   clickhouse:
     image: clickhouse/clickhouse-server:24.8
@@ -101,3 +141,4 @@ volumes:
   parser-socket:
   clickhouse-data:
   grafana-data:
+  dz-sockets:

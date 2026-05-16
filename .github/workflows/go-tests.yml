@@ -17,9 +17,11 @@ jobs:
       fail-fast: false
       matrix:
         module:
-          - go/example-bot
+          - go/depthofbook-bot
+          - go/depthofbook-parser
           - go/internal
           - go/kernel-receiver
+          - go/topofbook-bot
           - go/topofbook-parser
           - gre-decap
 
