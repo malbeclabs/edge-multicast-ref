@@ -179,8 +179,11 @@
         "defaults": { "custom": { "align": "auto", "cellOptions": { "type": "auto" } } },
         "overrides": [
           { "matcher": { "id": "byName", "options": "price" }, "properties": [{ "id": "decimals", "value": 6 }] },
-          { "matcher": { "id": "byName", "options": "qty" }, "properties": [{ "id": "decimals", "value": 2 }] },
-          { "matcher": { "id": "byName", "options": "cumulative_qty" }, "properties": [{ "id": "decimals", "value": 2 }] }
+          { "matcher": { "id": "byName", "options": "ask_qty" }, "properties": [{ "id": "decimals", "value": 2 }, { "id": "custom.cellOptions", "value": { "type": "gauge", "mode": "basic" } }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] },
+          { "matcher": { "id": "byName", "options": "ask_total" }, "properties": [{ "id": "decimals", "value": 2 }, { "id": "custom.cellOptions", "value": { "type": "gauge", "mode": "basic" } }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] },
+          { "matcher": { "id": "byName", "options": "bid_qty" }, "properties": [{ "id": "decimals", "value": 2 }, { "id": "custom.cellOptions", "value": { "type": "gauge", "mode": "basic" } }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] },
+          { "matcher": { "id": "byName", "options": "bid_total" }, "properties": [{ "id": "decimals", "value": 2 }, { "id": "custom.cellOptions", "value": { "type": "gauge", "mode": "basic" } }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] },
+          { "matcher": { "id": "byName", "options": "sort_key" }, "properties": [{ "id": "custom.hidden", "value": true }] }
         ]
       },
       "options": { "showHeader": true, "sortBy": [{ "displayName": "sort_key", "desc": false }] },
@@ -189,7 +192,7 @@
           "refId": "A",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "SELECT\n  side,\n  level_idx,\n  price,\n  qty,\n  cumulative_qty,\n  order_count,\n  multiIf(side = 'ask', 1000 - toInt32(level_idx), 2000 + toInt32(level_idx)) AS sort_key\nFROM depthofbook.level_snapshots\nWHERE symbol = ${symbol:singlequote}\n  AND level_idx < 16\n  AND recv_ts = (\n    SELECT max(recv_ts)\n    FROM depthofbook.level_snapshots\n    WHERE symbol = ${symbol:singlequote} AND $__timeFilter(recv_ts)\n  )\nORDER BY sort_key",
+          "rawSql": "SELECT\n  side,\n  level_idx,\n  price,\n  if(side = 'ask', qty, NULL) AS ask_qty,\n  if(side = 'ask', cumulative_qty, NULL) AS ask_total,\n  if(side = 'bid', qty, NULL) AS bid_qty,\n  if(side = 'bid', cumulative_qty, NULL) AS bid_total,\n  order_count,\n  multiIf(side = 'ask', 1000 - toInt32(level_idx), 2000 + toInt32(level_idx)) AS sort_key\nFROM depthofbook.level_snapshots\nWHERE symbol = ${symbol:singlequote}\n  AND level_idx < 16\n  AND recv_ts = (\n    SELECT max(recv_ts)\n    FROM depthofbook.level_snapshots\n    WHERE symbol = ${symbol:singlequote} AND $__timeFilter(recv_ts)\n  )\nORDER BY sort_key",
           "format": 1
         }
       ]
@@ -421,6 +424,6 @@
   "timezone": "utc",
   "title": "DZ Depth-of-Book",
   "uid": "dz-depthofbook",
-  "version": 3,
+  "version": 4,
   "weekStart": ""
 }
