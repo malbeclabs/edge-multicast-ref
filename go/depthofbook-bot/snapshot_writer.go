@@ -19,7 +19,7 @@ type SnapshotWriter struct {
 	dirty          map[uint32]*dirtyEntry
 	withInstrument func(uint32, func(*Instrument)) // runs fn under the channel lock with the current instrument (or nil)
 	channel        uint8
-	generation     uint64           // guarded by mu; bumped on Reset to invalidate in-flight flush batches
+	generation     uint64 // guarded by mu; bumped on Reset to invalidate in-flight flush batches
 	resetCh        chan chan struct{}
 }
 
