@@ -8,6 +8,8 @@ import (
 	"sort"
 	"testing"
 	"time"
+
+	dto "github.com/prometheus/client_model/go"
 )
 
 // genStream produces a deterministic multi-instrument stream: define, snapshot
@@ -130,5 +132,44 @@ func TestParity_ShardedMatchesSingleShard(t *testing.T) {
 			}
 		}
 		t.Fatalf("n=%d: fingerprint maps differ in key set", n)
+	}
+}
+
+func counterVal(t *testing.T, c interface{ Write(*dto.Metric) error }) float64 {
+	t.Helper()
+	var m dto.Metric
+	if err := c.Write(&m); err != nil {
+		t.Fatalf("counter write: %v", err)
+	}
+	return m.GetCounter().GetValue()
+}
+
+func TestAcceptance_ThroughputSoakAndParity(t *testing.T) {
+	if testing.Short() {
+		t.Skip("soak test")
+	}
+	recs := genStream(330, 50, 99)
+
+	base, _ := runSharded(t, 1, recs)
+
+	for _, n := range []int{1, 4} {
+		start := time.Now()
+		got, m := runSharded(t, n, recs)
+		elapsed := time.Since(start)
+
+		// (1) No spurious per-instrument gaps — the stream is contiguous.
+		if g := counterVal(t, m.PerInstrumentGapsTotal); g != 0 {
+			t.Fatalf("n=%d: per_instrument_gaps_total=%v (want 0) — sharding reordered an instrument", n, g)
+		}
+		// (2) Per-instrument terminal parity vs single-shard baseline.
+		if !reflect.DeepEqual(base, got) {
+			t.Fatalf("n=%d: parity mismatch vs single-shard baseline", n)
+		}
+		// (3) Completion without deadlock/backlog. ~330*50 deltas + setup
+		// (~18k records); 30s is intentionally generous for CI.
+		if elapsed > 30*time.Second {
+			t.Fatalf("n=%d: processing took %v (>30s) — backlog/deadlock suspected", n, elapsed)
+		}
+		t.Logf("n=%d processed %d records in %v, gaps=0, parity ok", n, len(recs), elapsed)
 	}
 }
