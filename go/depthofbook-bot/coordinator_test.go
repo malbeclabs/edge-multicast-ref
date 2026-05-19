@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -71,5 +72,89 @@ func TestCoordinator_SnapshotOrderNoRouteDropsAndCounts(t *testing.T) {
 	c.Dispatch(order)
 	if got := testCounter(t, c.metrics.SnapshotOrderDroppedTotal); got != 1 {
 		t.Errorf("snapshot_order_dropped_total = %v, want 1", got)
+	}
+}
+
+func TestCoordinator_ResetBarrierWipesShardsThenRoutesHeldRecord(t *testing.T) {
+	metrics := stubMetrics()
+	n := 3
+	shards := make([]*Shard, n)
+	for i := 0; i < n; i++ {
+		s := NewShard(i, n, NewEventsWriter(nil), nil, metrics)
+		s.sw = NewSnapshotWriter(nil, 5, 50, metrics, 0, func(id uint32, fn func(*Instrument)) {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			fn(s.instruments[instKey{0, id}])
+		})
+		shards[i] = s
+	}
+	c := NewCoordinator(shards, NewEventsWriter(nil), metrics)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	for _, s := range shards {
+		go s.sw.Run(ctx)
+		go s.Run(ctx)
+	}
+
+	// Era 1: define instrument 3 (3 % 3 == 0).
+	c.Dispatch(Record{Type: "instrument_definition", ChannelID: 0, InstrumentID: 3, ResetCount: 1,
+		Timestamp: time.Unix(1700000000, 0), Fields: map[string]any{
+			"symbol": "A", "price_exponent": float64(-2), "qty_exponent": float64(-8)}})
+	time.Sleep(50 * time.Millisecond)
+
+	// Era 2: reset_count bump on a new instrument_definition (the held first new-era frame).
+	c.Dispatch(Record{Type: "instrument_definition", ChannelID: 0, InstrumentID: 5, ResetCount: 2,
+		Timestamp: time.Unix(1700000000, 0), Fields: map[string]any{
+			"symbol": "B", "price_exponent": float64(-2), "qty_exponent": float64(-8)}})
+	time.Sleep(50 * time.Millisecond)
+
+	shards[0].mu.Lock()
+	_, oldGone := shards[0].instruments[instKey{0, 3}]
+	shards[0].mu.Unlock()
+	if oldGone {
+		t.Error("old-era instrument 3 should have been wiped by reset barrier")
+	}
+	shards[2].mu.Lock()
+	_, newHere := shards[2].instruments[instKey{0, 5}] // 5 % 3 == 2
+	shards[2].mu.Unlock()
+	if !newHere {
+		t.Error("held first new-era record (instrument 5) not applied to shard 2")
+	}
+	if c.resetCount != 2 {
+		t.Errorf("coordinator resetCount = %d, want 2", c.resetCount)
+	}
+	if got := testCounter(t, metrics.ChannelResetsTotal); got != 1 {
+		t.Errorf("channel_resets_total = %v, want 1", got)
+	}
+}
+
+func TestCoordinator_ResetBarrierHandlesChannelScopedFirstFrame(t *testing.T) {
+	metrics := stubMetrics()
+	n := 2
+	shards := make([]*Shard, n)
+	for i := 0; i < n; i++ {
+		s := NewShard(i, n, NewEventsWriter(nil), nil, metrics)
+		s.sw = NewSnapshotWriter(nil, 5, 50, metrics, 0, func(id uint32, fn func(*Instrument)) {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			fn(s.instruments[instKey{0, id}])
+		})
+		shards[i] = s
+	}
+	c := NewCoordinator(shards, NewEventsWriter(nil), metrics)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	for _, s := range shards {
+		go s.sw.Run(ctx)
+		go s.Run(ctx)
+	}
+	c.Dispatch(Record{Type: "heartbeat", ChannelID: 0, ResetCount: 1,
+		Timestamp: time.Unix(1700000000, 0), Fields: map[string]any{}})
+	// First new-era frame is channel-scoped (manifest_summary) — must not panic / not hash.
+	c.Dispatch(Record{Type: "manifest_summary", ChannelID: 0, ResetCount: 2,
+		Timestamp: time.Unix(1700000000, 0), Fields: map[string]any{
+			"manifest_seq": float64(1), "valid": float64(1), "instrument_count": float64(0)}})
+	if c.resetCount != 2 {
+		t.Errorf("resetCount = %d, want 2", c.resetCount)
 	}
 }

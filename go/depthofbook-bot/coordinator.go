@@ -89,9 +89,30 @@ func recPtr(rec Record) *Record {
 
 // --- temporary stubs, replaced in Tasks 7 and 8 ---
 
-func (c *Coordinator) runResetBarrier(rec Record) {
-	// Task 7 replaces this. Minimal placeholder keeps build green:
-	c.resetCount = rec.ResetCount
+// runResetBarrier executes the in-band FIFO reset barrier, then routes the
+// held triggering record as the first new-era frame.
+func (c *Coordinator) runResetBarrier(held Record) {
+	acks := make(chan int, c.n)
+	for _, s := range c.shards {
+		s := s
+		go func() { s.inbox <- shardMsg{kind: msgReset, ack: acks} }()
+	}
+	for i := 0; i < c.n; i++ {
+		<-acks
+	}
+
+	if c.metrics != nil {
+		c.metrics.ChannelResetsTotal.Inc()
+	}
+	c.snapshotRoute = map[snapKey]int{}
+	c.seqLast = map[string]uint64{}
+	c.manifest = ManifestState{}
+	c.resetCount = held.ResetCount
+
+	// Route the held record as the first new-era frame, via the full classifier.
+	// resetSeen is already true and resetCount now equals held.ResetCount, so
+	// this re-entry into Dispatch falls through to normal classification.
+	c.Dispatch(held)
 }
 
 func (c *Coordinator) runFence(rec Record) {
