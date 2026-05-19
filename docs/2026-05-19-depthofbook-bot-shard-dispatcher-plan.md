@@ -16,6 +16,7 @@
   `cd go/depthofbook-bot && go test ./... -run <Name> -v`
 - Race tests: `cd go/depthofbook-bot && go test ./... -race -run <Name> -v`
 - Commit messages: all lowercase, no `Co-Authored-By` line, no body needed unless noted (per repo CLAUDE.md).
+- **Before EVERY commit step, run `cd go/depthofbook-bot && gofmt -w .` then confirm `gofmt -l .` prints nothing.** The Go code blocks in this plan are logically exact but their inline-comment whitespace is NOT guaranteed gofmt-clean (aligned struct-field comments in particular). Reproduce the code's logic verbatim, then let `gofmt -w` normalize formatting — a `gofmt`-dirty file is a task blocker per repo CLAUDE.md.
 - Branch is already `ss/angry-dhawan-71b52e` (worktree). Do not create new branches.
 - Never commit binaries or `.claude/`.
 
