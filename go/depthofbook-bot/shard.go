@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"sort"
 	"sync"
@@ -417,6 +418,34 @@ func (s *Shard) handle(rec Record) {
 		case "per_instrument_gap":
 			if s.metrics != nil {
 				s.metrics.PerInstrumentGapsTotal.Inc()
+			}
+		}
+	}
+}
+
+// Run is the shard goroutine. It processes its FIFO inbox until ctx is done.
+// Records mutate book state; a reset marker wipes state and quiesces the
+// SnapshotWriter before acking; a fence marker only acks (FIFO already
+// guarantees preceding records' rows are enqueued).
+func (s *Shard) Run(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg := <-s.inbox:
+			switch msg.kind {
+			case msgRecord:
+				s.handle(*msg.rec)
+			case msgReset:
+				s.mu.Lock()
+				s.reset()
+				s.mu.Unlock()
+				if s.sw != nil {
+					s.sw.Reset() // blocks until writer goroutine quiesced
+				}
+				msg.ack <- s.idx
+			case msgFence:
+				msg.ack <- s.idx
 			}
 		}
 	}

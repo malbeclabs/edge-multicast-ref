@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -163,5 +164,75 @@ func TestShard_HandlePerInstrumentGapMetric(t *testing.T) {
 	}))
 	if got := testCounter(t, metrics.PerInstrumentGapsTotal); got != 1 {
 		t.Errorf("per_instrument_gaps_total = %v, want 1", got)
+	}
+}
+
+func TestShard_RunProcessesRecordsThenResetAcks(t *testing.T) {
+	metrics := stubMetrics()
+	s := NewShard(0, 1, NewEventsWriter(nil), nil, metrics)
+	s.sw = NewSnapshotWriter(nil, 5, 50, metrics, 0, func(id uint32, fn func(*Instrument)) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		fn(s.instruments[instKey{0, id}])
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.sw.Run(ctx)
+	go s.Run(ctx)
+
+	rec := sr("instrument_definition", "refdata", 1, 100, map[string]any{
+		"symbol": "X", "price_exponent": float64(-2), "qty_exponent": float64(-8),
+	})
+	s.inbox <- shardMsg{kind: msgRecord, rec: &rec}
+
+	acks := make(chan int, 1)
+	s.inbox <- shardMsg{kind: msgReset, ack: acks}
+	select {
+	case got := <-acks:
+		if got != 0 {
+			t.Errorf("ack idx = %d, want 0", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for reset ack")
+	}
+
+	// Reset must have wiped instrument state (processed before the marker, FIFO).
+	s.mu.Lock()
+	n := len(s.instruments)
+	s.mu.Unlock()
+	if n != 0 {
+		t.Errorf("instruments not wiped after reset: %d", n)
+	}
+}
+
+func TestShard_FenceAcksWithoutWipe(t *testing.T) {
+	metrics := stubMetrics()
+	s := NewShard(0, 1, NewEventsWriter(nil), nil, metrics)
+	s.sw = NewSnapshotWriter(nil, 5, 50, metrics, 0, func(id uint32, fn func(*Instrument)) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		fn(s.instruments[instKey{0, id}])
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.sw.Run(ctx)
+	go s.Run(ctx)
+
+	rec := sr("instrument_definition", "refdata", 1, 100, map[string]any{
+		"symbol": "X", "price_exponent": float64(-2), "qty_exponent": float64(-8),
+	})
+	s.inbox <- shardMsg{kind: msgRecord, rec: &rec}
+	acks := make(chan int, 1)
+	s.inbox <- shardMsg{kind: msgFence, ack: acks}
+	select {
+	case <-acks:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for fence ack")
+	}
+	s.mu.Lock()
+	n := len(s.instruments)
+	s.mu.Unlock()
+	if n != 1 {
+		t.Errorf("fence must NOT wipe state: instruments=%d want 1", n)
 	}
 }
