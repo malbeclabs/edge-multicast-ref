@@ -25,31 +25,31 @@ func (w *EventsWriter) Write(ev ChannelEvent, channelID uint8, instSymbol string
 	switch rec.Type {
 	case "instrument_definition":
 		w.ch.Enqueue("instruments", map[string]any{
-			"recv_ts":         chTime(now),
-			"channel_id":      channelID,
-			"instrument_id":   rec.InstrumentID,
-			"symbol":          getString(rec.Fields, "symbol"),
-			"leg1":            getString(rec.Fields, "leg1"),
-			"leg2":            getString(rec.Fields, "leg2"),
-			"asset_class":     assetClassString(getUint8(rec.Fields, "asset_class")),
-			"market_model":    marketModelString(getUint8(rec.Fields, "market_model")),
-			"price_exponent":  getInt8(rec.Fields, "price_exponent"),
-			"qty_exponent":    getInt8(rec.Fields, "qty_exponent"),
-			"tick_size":       scalePrice(getInt64(rec.Fields, "tick_size_raw"), getInt8(rec.Fields, "price_exponent")),
-			"lot_size":        scaleQty(getUint64(rec.Fields, "lot_size_raw"), getInt8(rec.Fields, "qty_exponent")),
-			"contract_value":  getUint64(rec.Fields, "contract_value"),
-			"expiry_ts":       chTime(getTime(rec.Fields, "expiry")),
-			"settle_type":     settleTypeString(getUint8(rec.Fields, "settle_type")),
-			"price_bound":     priceBoundString(getUint8(rec.Fields, "price_bound")),
-			"manifest_seq":    getUint16(rec.Fields, "manifest_seq"),
+			"recv_ts":        chTime(now),
+			"channel_id":     channelID,
+			"instrument_id":  rec.InstrumentID,
+			"symbol":         getString(rec.Fields, "symbol"),
+			"leg1":           getString(rec.Fields, "leg1"),
+			"leg2":           getString(rec.Fields, "leg2"),
+			"asset_class":    assetClassString(getUint8(rec.Fields, "asset_class")),
+			"market_model":   marketModelString(getUint8(rec.Fields, "market_model")),
+			"price_exponent": getInt8(rec.Fields, "price_exponent"),
+			"qty_exponent":   getInt8(rec.Fields, "qty_exponent"),
+			"tick_size":      scalePrice(getInt64(rec.Fields, "tick_size_raw"), getInt8(rec.Fields, "price_exponent")),
+			"lot_size":       scaleQty(getUint64(rec.Fields, "lot_size_raw"), getInt8(rec.Fields, "qty_exponent")),
+			"contract_value": getUint64(rec.Fields, "contract_value"),
+			"expiry_ts":      chTime(getTime(rec.Fields, "expiry")),
+			"settle_type":    settleTypeString(getUint8(rec.Fields, "settle_type")),
+			"price_bound":    priceBoundString(getUint8(rec.Fields, "price_bound")),
+			"manifest_seq":   getUint16(rec.Fields, "manifest_seq"),
 		})
 
 	case "heartbeat", "manifest_summary", "end_of_session":
 		row := map[string]any{
-			"recv_ts":            chTime(now),
-			"publisher_send_ts":  chTime(rec.Timestamp),
-			"channel_id":         channelID,
-			"kind":               rec.Type,
+			"recv_ts":           chTime(now),
+			"publisher_send_ts": chTime(rec.Timestamp),
+			"channel_id":        channelID,
+			"kind":              rec.Type,
 		}
 		if rec.Type == "manifest_summary" {
 			row["manifest_seq"] = getUint16(rec.Fields, "manifest_seq")
