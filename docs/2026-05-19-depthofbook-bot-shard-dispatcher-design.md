@@ -86,9 +86,12 @@ Rejected alternatives:
 - `snapshotRoute map[snapKey]int` where `snapKey = {channelID, snapshotID}` →
   shard index. Registered when the coordinator *sees* `snapshot_begin`, cleared
   on `snapshot_end`.
-- Writes channel-health rows (`heartbeat`, `manifest_summary`,
-  `end_of_session`) directly — these touch no book. `manifest_summary` also
-  updates the coordinator-owned `Manifest`.
+- Writes `heartbeat` and `manifest_summary` rows directly with **no fence** —
+  these have no ordering dependency on instrument rows. `manifest_summary`
+  also updates the coordinator-owned `Manifest`.
+- Writes `end_of_session` and `batch_boundary` rows via the **fence
+  mechanism** (drain all shards, *then* coordinator direct-writes the row —
+  see "Fence mechanism" below). Never write these before the drain completes.
 
 **Each shard (own goroutine + bounded inbox):**
 
@@ -149,6 +152,28 @@ today's `applySnapshotOrder` returning nil when no instrument is in
 bare `snapshotID`, to prevent silent cross-channel misrouting if snapshot IDs
 collide across channels.
 
+### Fence mechanism (`end_of_session`, `batch_boundary`)
+
+These records carry no `instrument_id` but have ordering semantics relative to
+instrument rows already routed into shard inboxes: the `end_of_session` /
+`batch_boundary` row in ClickHouse must not appear before the instrument rows
+it logically follows. The fence **reuses the exact marker/ack pattern of the
+reset barrier** (it is the same primitive, without the state wipe):
+
+1. Coordinator holds the fence record `F`.
+2. Coordinator creates `acks := make(chan shardID, N)` and spawns one goroutine
+   per shard, each doing the blocking `shard.inbox <- fenceMarker{ack: acks}`
+   through the normal FIFO inbox.
+3. Each shard drains all records ahead of the marker (so their ClickHouse rows
+   are enqueued), then acks. **A `fenceMarker` does *not* wipe shard state and
+   does *not* touch the SnapshotWriter** — it only forces drain ordering.
+4. Coordinator waits for all `N` acks, then direct-writes the `end_of_session`
+   / `batch_boundary` row. Only then does it process the next record.
+
+This guarantees the fence row lands in ClickHouse strictly after every
+instrument row that preceded it in the stream. `heartbeat` / `manifest_summary`
+do **not** use this path (no fence) — they are written directly with no drain.
+
 ### Channel-reset barrier
 
 Today `ChannelState.Apply` (channel.go:69–82) detects a `reset_count` change,
@@ -165,11 +190,15 @@ first new-era frame. Sharded version, as an **in-band FIFO barrier**:
    the deadlock where the coordinator blocks sending a marker into one full
    inbox while other shards sit idle.)
 3. Each shard drains all its old-era records first (FIFO), then hits the
-   marker, wipes its own Instruments / Refdata / per-instrument DeltaBuffers /
-   snapCtx **and clears its `SnapshotWriter` dirty map**, then sends an ack.
+   marker and wipes its own Instruments / Refdata / per-instrument
+   DeltaBuffers / snapCtx. It then **quiesces its `SnapshotWriter` and waits
+   for the writer's reset-ack before acking the coordinator** (see
+   "SnapshotWriter reset ordering" below). Only after the writer is confirmed
+   quiescent does the shard send its barrier ack.
 4. Coordinator blocks until it has acks from all `N` shards. This guarantees
-   every old-era record was fully applied and its ClickHouse rows enqueued
-   before any new-era record exists anywhere.
+   every old-era record was fully applied **and every old-era
+   `level_snapshots` flush has either completed or been abandoned** before any
+   new-era record exists anywhere.
 5. Coordinator increments `ChannelResetsTotal`, clears its own
    `snapshotRoute`, `SeqLast`, `Manifest`, adopts the new `ResetCount`.
 6. Coordinator routes the **held `R`** through the full classifier as the
@@ -189,9 +218,32 @@ inside that call provably closes the "old-era record routed after wipe"
 window: no later old-era `snapshot_order` (or any record) can be routed after
 the coordinator observes `R`.
 
-`SnapshotWriter.Reset()` is added to support step 3 — `SnapshotWriter.dirty`
-(snapshot_writer.go:18–20,44–61) is separate from instrument state; a surviving
-old-era dirty entry would otherwise cause a stale flush in the new era.
+**SnapshotWriter reset ordering.** `SnapshotWriter.dirty`
+(snapshot_writer.go:18–20,44–61) is separate from instrument state, and
+`flushDue` (snapshot_writer.go:77–110) copies due entries out of `dirty` under
+the lock, deletes them, releases the lock, and then writes to ClickHouse
+*outside* the lock. So a cross-goroutine `Reset()` that merely clears `dirty`
+does not stop an already-extracted batch from writing **old-era rows after the
+shard has acked** — violating the step-4 guarantee. The reset must therefore be
+serialized on the SnapshotWriter's own goroutine, not called cross-goroutine:
+
+- The SnapshotWriter gains a `reset chan chan struct{}` consulted in its `Run`
+  select loop alongside the existing tick. Because `flushDue` and reset
+  handling run on the **same goroutine**, a reset can never overlap an
+  in-flight `flushDue` by construction.
+- On reset the writer clears `dirty`, increments a `generation uint64` (guarded
+  by `w.mu`), and replies on the supplied done channel.
+- The shard sends the reset request and blocks on the done channel before
+  acking the coordinator (step 3). This is the quiesce point.
+- Belt-and-suspenders: `flushDue` captures `generation` under `w.mu` when it
+  extracts a batch and re-checks it under `w.mu` before each ClickHouse write;
+  a changed generation aborts the remaining batch. (This also covers the
+  benign case where wiped instruments make `withInstrument` return not-ready
+  and the write is skipped anyway.)
+
+The same `generation`/serialized-goroutine discipline is *not* needed for the
+`fenceMarker` path: a fence does not wipe state or reset the writer, so any
+in-flight flush there is still valid old-era data and may complete normally.
 
 ### Error handling
 
@@ -208,6 +260,10 @@ old-era dirty entry would otherwise cause a stale flush in the new era.
   an immutable level copy and hands it to the writer, eliminating the mutex; a
   larger rewrite of `snapshot_writer.go`, deferred unless profiling shows the
   per-shard mutex matters.
+- **SnapshotWriter reset race** → reset is serialized on the writer's own
+  goroutine + a `generation` re-check in `flushDue`; the shard waits for the
+  writer's reset-ack before acking the barrier. See "SnapshotWriter reset
+  ordering" above. This is a correctness requirement, not optional.
 - **Shard panic**: no new recovery added — parity with today's no-recovery
   dispatcher. Out of scope.
 
@@ -232,6 +288,16 @@ old-era dirty entry would otherwise cause a stale flush in the new era.
   pre-wipe state, (c) SnapshotWriter dirty map cleared, (d) held triggering
   record applied as the first new-era frame, including the case where the
   triggering frame is `manifest_summary` (channel-scoped).
+- **Reset vs in-flight flush test:** force a `flushDue` batch to be extracted
+  (dirty entries moved into the local `due` slice) and then deliver the reset
+  before the batch's ClickHouse writes complete; assert no old-era
+  `level_snapshots` row is written after the shard's barrier ack (generation
+  re-check aborts the stale batch).
+- **Fence ordering test:** interleave instrument records across shards followed
+  by `end_of_session` / `batch_boundary`; assert the fence row is enqueued to
+  ClickHouse strictly after every preceding instrument row from all shards, and
+  that `heartbeat` / `manifest_summary` are *not* fenced (written without a
+  drain).
 - **Snapshot routing test:** `snapshot_begin`/`order`/`end` for instruments on
   different shards interleaved; assert each snapshot reassembles on its owning
   shard and `snapshot_order` with no registered route is dropped + counted.
