@@ -1731,7 +1731,7 @@ In `go/depthofbook-bot/main.go`:
 		shards        = flag.Int("shards", 0, "number of instrument shards (0 = auto from GOMAXPROCS)")
 ```
 
-(b) Add `"runtime"` to the imports.
+(b) Fix the import block: **add `"runtime"`** and **remove `"sync"`**. `sync` was used only by the now-deleted `chMu`/`snapCtxMu` mutexes in the block removed in (c); after this task nothing in `main.go` uses `sync`, so leaving it is an unused-import compile error. (`time`, `context`, `flag`, `fmt`, `log`, `os`, `os/signal`, `syscall` are all still used and stay.)
 
 (c) Replace the block from `// Channel state per channel_id ...` (the `var ( chMu ... )` through the end of the `dispatcher := DispatcherFunc(func(rec Record) { ... })` closure, i.e. main.go lines ~72–185) with:
 
