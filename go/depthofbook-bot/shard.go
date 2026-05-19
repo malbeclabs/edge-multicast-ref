@@ -364,6 +364,64 @@ func sideFromString(s string) uint8 {
 	return 0
 }
 
+// handle applies a record and performs persistence (events + snapshot dirty
+// marking + metrics) for the shard's instruments. It is the shard goroutine's
+// per-record entry point. Channel-scoped records never reach a shard.
+func (s *Shard) handle(rec Record) {
+	evs := s.apply(rec)
+
+	k := instKey{rec.ChannelID, rec.InstrumentID}
+
+	sk := snapKey{rec.ChannelID, getUint32(rec.Fields, "snapshot_id")}
+	switch rec.Type {
+	case "snapshot_begin":
+		s.mu.Lock()
+		def := s.refdata[k]
+		s.mu.Unlock()
+		s.snapCtx[sk] = SnapshotContext{
+			InstrumentID:      rec.InstrumentID,
+			Symbol:            def.Symbol,
+			SnapshotID:        getUint32(rec.Fields, "snapshot_id"),
+			AnchorSeq:         getUint64(rec.Fields, "anchor_seq"),
+			TotalOrders:       getUint32(rec.Fields, "total_orders"),
+			LastInstrumentSeq: getUint32(rec.Fields, "last_instrument_seq"),
+			PriceExponent:     def.PriceExponent,
+			QtyExponent:       def.QtyExponent,
+		}
+	case "snapshot_order":
+		if sctx, ok := s.snapCtx[sk]; ok {
+			s.eventsW.WriteSnapshotOrder(rec, rec.ChannelID, sctx)
+		}
+	case "snapshot_end":
+		delete(s.snapCtx, sk)
+	}
+
+	for _, ev := range evs {
+		s.mu.Lock()
+		def := s.refdata[instKey{rec.ChannelID, ev.InstrumentID}]
+		s.mu.Unlock()
+		s.eventsW.Write(ev, rec.ChannelID, def.Symbol, def.PriceExponent, def.QtyExponent)
+
+		switch ev.Kind {
+		case "applied_delta", "applied_snapshot":
+			if ev.InstrumentID != 0 && s.sw != nil {
+				s.sw.MarkDirty(ev.InstrumentID)
+			}
+		case "instrument_reset":
+			if s.metrics != nil {
+				s.metrics.InstrumentResetsTotal.WithLabelValues(getString(ev.Record.Fields, "reason")).Inc()
+			}
+			if s.sw != nil {
+				s.sw.MarkDirty(ev.InstrumentID)
+			}
+		case "per_instrument_gap":
+			if s.metrics != nil {
+				s.metrics.PerInstrumentGapsTotal.Inc()
+			}
+		}
+	}
+}
+
 // shardMsg is the inbox protocol; populated in Task 5.
 type shardMsg struct {
 	rec  *Record
