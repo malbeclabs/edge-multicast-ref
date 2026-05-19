@@ -81,14 +81,56 @@ func TestSnapshotWriter_ResetClearsDirtyAndBumpsGeneration(t *testing.T) {
 		t.Errorf("generation not bumped: got %d want %d", w.generation, gen0+1)
 	}
 }
+
+// Exercises the flushDue generation re-check directly: a batch is extracted,
+// then a Reset (generation bump) lands mid-batch; every remaining write must
+// be abandoned. This is the deterministic guard the design relies on for the
+// "reset vs in-flight flush" hazard.
+func TestSnapshotWriter_FlushAbortsRemainderOnGenerationBump(t *testing.T) {
+	metrics := stubMetrics()
+	insts := map[uint32]*Instrument{}
+	for id := uint32(1); id <= 3; id++ {
+		in := NewInstrument(id, "X", -2, -8)
+		in.Status = StatusReady
+		insts[id] = in
+	}
+	var w *SnapshotWriter
+	bumped := false
+	w = NewSnapshotWriter(nil, 5, 100, metrics, 0, func(id uint32, fn func(*Instrument)) {
+		// Simulate a Reset landing after this flush batch was extracted:
+		// bump generation while resolving the first instrument of the batch.
+		if !bumped {
+			bumped = true
+			w.mu.Lock()
+			w.generation++
+			w.mu.Unlock()
+		}
+		fn(insts[id])
+	})
+	w.MarkDirty(1)
+	w.MarkDirty(2)
+	w.MarkDirty(3)
+	w.flushDue() // synchronous; not via the Run goroutine
+
+	var mm dto.Metric
+	if err := metrics.SnapshotWritesTotal.Write(&mm); err != nil {
+		t.Fatalf("counter write: %v", err)
+	}
+	// The re-check runs at the top of each due entry. The first entry's
+	// re-check passes (bump happens during its withInstrument), so it writes;
+	// every subsequent entry sees the bumped generation and aborts. Exactly 1.
+	if got := mm.GetCounter().GetValue(); got != 1 {
+		t.Fatalf("expected exactly 1 write before generation re-check aborted the batch, got %v", got)
+	}
+}
 ```
 
-`context` is already imported in that test file via other tests; if `go vet` complains, add `"context"` to the import block.
+Add to `snapshot_writer_test.go`'s import block (alongside `context`): `dto "github.com/prometheus/client_model/go"` (already in `go.sum`, used by `metrics.go`). `context` is used by the first test; if not already imported in that file, add `"context"` to the import block.
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd go/depthofbook-bot && go test ./... -run TestSnapshotWriter_ResetClearsDirtyAndBumpsGeneration -v`
-Expected: FAIL — `w.generation` undefined and `w.Reset` undefined (compile error).
+Run: `cd go/depthofbook-bot && go test ./... -run 'TestSnapshotWriter_ResetClearsDirtyAndBumpsGeneration|TestSnapshotWriter_FlushAbortsRemainderOnGenerationBump' -v`
+Expected: FAIL — `w.generation`, `w.Reset`, and the `flushDue` generation re-check are undefined (compile error).
 
 - [ ] **Step 3: Add fields, Reset(), generation handling**
 
@@ -218,7 +260,7 @@ func (w *SnapshotWriter) flushDue() {
 - [ ] **Step 4: Run tests to verify pass**
 
 Run: `cd go/depthofbook-bot && go test ./... -run TestSnapshotWriter -v`
-Expected: PASS (new test + the three existing `TestSnapshotWriter_*` still pass).
+Expected: PASS — both new tests (`...ResetClearsDirtyAndBumpsGeneration`, `...FlushAbortsRemainderOnGenerationBump`) + the three existing `TestSnapshotWriter_*` pass.
 
 - [ ] **Step 5: Commit**
 
@@ -407,6 +449,15 @@ type instKey struct {
 	id uint32
 }
 
+// snapKey composite-keys snapshot context / routing by (channel, snapshot_id);
+// snapshot IDs are only unique within a channel. Defined here (shard.go is the
+// first new file); coordinator.go (Task 6) reuses this same type — do NOT
+// redeclare it there.
+type snapKey struct {
+	ch   uint8
+	snap uint32
+}
+
 type BufferedDelta struct {
 	MktdataSeq uint64
 	Record     Record
@@ -444,7 +495,7 @@ type Shard struct {
 	instruments map[instKey]*Instrument
 	refdata     map[instKey]InstrumentDef
 	deltaBuf    map[instKey][]BufferedDelta // per instrument, ordered by MktdataSeq
-	snapCtx     map[uint32]SnapshotContext  // keyed by snapshot_id (publisher never interleaves snapshot groups)
+	snapCtx     map[snapKey]SnapshotContext // keyed by (channel, snapshot_id)
 
 	inbox   chan shardMsg
 	sw      *SnapshotWriter
@@ -459,7 +510,7 @@ func NewShard(idx, n int, eventsW *EventsWriter, sw *SnapshotWriter, metrics *Me
 		instruments: map[instKey]*Instrument{},
 		refdata:     map[instKey]InstrumentDef{},
 		deltaBuf:    map[instKey][]BufferedDelta{},
-		snapCtx:     map[uint32]SnapshotContext{},
+		snapCtx:     map[snapKey]SnapshotContext{},
 		inbox:       make(chan shardMsg, 4096),
 		sw:          sw,
 		eventsW:     eventsW,
@@ -471,7 +522,7 @@ func (s *Shard) reset() {
 	s.instruments = map[instKey]*Instrument{}
 	s.refdata = map[instKey]InstrumentDef{}
 	s.deltaBuf = map[instKey][]BufferedDelta{}
-	s.snapCtx = map[uint32]SnapshotContext{}
+	s.snapCtx = map[snapKey]SnapshotContext{}
 }
 
 // apply mutates book state for one record and returns the resulting events.
@@ -495,7 +546,13 @@ func (s *Shard) apply(rec Record) []ChannelEvent {
 	case "instrument_reset":
 		return s.applyInstrumentReset(k, rec)
 	case "trade":
-		return []ChannelEvent{{Kind: "applied_delta", InstrumentID: rec.InstrumentID, Record: rec}}
+		// Behavior parity: the original channel.go set NO InstrumentID on the
+		// trade event, so the dispatcher did not MarkDirty and resolved an
+		// empty symbol. The events_writer "trade" row uses rec.InstrumentID
+		// directly (not ev.InstrumentID), so the persisted instrument_id is
+		// still correct. Do NOT set ev.InstrumentID here — it would change
+		// MarkDirty / symbol-resolution behavior.
+		return []ChannelEvent{{Kind: "applied_delta", Record: rec}}
 	}
 	return nil
 }
@@ -764,6 +821,18 @@ const (
 
 Because `channel.go` still defines `toUint8`/`toUint16`/`toUint32`/`toUint64`/`toInt8`/`toInt64`/`toString`/`toTime`/`sideFromString`/`filterBuffer`/`BufferedDelta`/`InstrumentDef`/`ManifestState`/`ChannelEvent`, defining them again in `shard.go` is a duplicate-symbol compile error. Resolve by **deleting those duplicated declarations from `channel.go` in this same step** (the helpers and the four shared types), keeping `channel.go`'s `ChannelState` + its methods referencing the now-shared helpers. Concretely, in `channel.go` delete: the `BufferedDelta`, `InstrumentDef`, `ManifestState`, `ChannelEvent` type blocks and every `func toX(...)`, `func sideFromString`, `func filterBuffer` definition. Leave `ChannelState`, `NewChannelState`, `Apply`, `reset`, `applyInner`, and the `apply*`/`bufferDelta`/`replayBuffer` methods (they keep compiling against the shared helpers). `const maxBufferedDeltas` stays in `channel.go`; `shard.go` uses its own `maxBufferedDeltasPerInstrument`.
 
+**Import cleanup in `channel.go` (required, else compile error):** the only use of the `time` package in `channel.go` was inside the now-deleted `toTime`. After the deletions, change `channel.go`'s import block to just:
+
+```go
+import (
+	"log"
+	"sort"
+	"sync"
+)
+```
+
+(`sort` is still used by `ChannelState.bufferDelta`, `log` by gap/reset logging, `sync` by `ChannelState.Mu`; `time` is no longer referenced and must be removed.) Run `cd go/depthofbook-bot && gofmt -w channel.go shard.go` after editing so Step 4 is gofmt-clean.
+
 - [ ] **Step 4: Run tests to verify pass**
 
 Run: `cd go/depthofbook-bot && go test ./... -run 'TestShard_|TestChannel_|TestSnapshotWriter' -v`
@@ -896,12 +965,13 @@ func (s *Shard) handle(rec Record) {
 
 	k := instKey{rec.ChannelID, rec.InstrumentID}
 
+	sk := snapKey{rec.ChannelID, getUint32(rec.Fields, "snapshot_id")}
 	switch rec.Type {
 	case "snapshot_begin":
 		s.mu.Lock()
 		def := s.refdata[k]
 		s.mu.Unlock()
-		s.snapCtx[toUint32(rec.Fields["snapshot_id"])] = SnapshotContext{
+		s.snapCtx[sk] = SnapshotContext{
 			InstrumentID:      rec.InstrumentID,
 			Symbol:            def.Symbol,
 			SnapshotID:        getUint32(rec.Fields, "snapshot_id"),
@@ -912,11 +982,11 @@ func (s *Shard) handle(rec Record) {
 			QtyExponent:       def.QtyExponent,
 		}
 	case "snapshot_order":
-		if sctx, ok := s.snapCtx[getUint32(rec.Fields, "snapshot_id")]; ok {
+		if sctx, ok := s.snapCtx[sk]; ok {
 			s.eventsW.WriteSnapshotOrder(rec, rec.ChannelID, sctx)
 		}
 	case "snapshot_end":
-		delete(s.snapCtx, getUint32(rec.Fields, "snapshot_id"))
+		delete(s.snapCtx, sk)
 	}
 
 	for _, ev := range evs {
@@ -1053,7 +1123,21 @@ Expected: FAIL — `s.Run` undefined.
 
 - [ ] **Step 3: Replace the placeholder shardMsg and add Run**
 
-In `go/depthofbook-bot/shard.go`, the placeholder `shardMsg`/`shardMsgKind` from Task 3 already has the right shape — keep it. Add the `Run` loop:
+In `go/depthofbook-bot/shard.go`, the placeholder `shardMsg`/`shardMsgKind` from Task 3 already has the right shape — keep it.
+
+**Import update (required):** `Run` uses `context.Context`, which `shard.go` does not yet import. Change `shard.go`'s import block to:
+
+```go
+import (
+	"context"
+	"log"
+	"sort"
+	"sync"
+	"time"
+)
+```
+
+Then add the `Run` loop:
 
 ```go
 // Run is the shard goroutine. It processes its FIFO inbox until ctx is done.
@@ -1220,10 +1304,8 @@ type Coordinator struct {
 	snapshotRoute map[snapKey]int
 }
 
-type snapKey struct {
-	ch   uint8
-	snap uint32
-}
+// snapKey is defined in shard.go (Task 3). Do NOT redeclare it here — a second
+// declaration in the same package is a compile error.
 
 func NewCoordinator(shards []*Shard, eventsW *EventsWriter, metrics *Metrics) *Coordinator {
 	return &Coordinator{
@@ -1490,50 +1572,76 @@ git commit -m "depthofbook-bot: add coordinator channel-reset barrier"
 
 ---
 
-## Task 8: Coordinator — fence + channel-health direct writes; delete channel.go
+## Task 8: Coordinator — fence + channel-health direct writes
 
 **Files:**
 - Modify: `go/depthofbook-bot/coordinator.go`
 - Modify: `go/depthofbook-bot/coordinator_test.go`
-- Delete: `go/depthofbook-bot/channel.go`, `go/depthofbook-bot/channel_test.go`
+
+> `channel.go`/`channel_test.go` are NOT deleted here. `main.go` still references `ChannelState` until Task 9; deleting now would break `go test ./...`. The deletion is performed in Task 9 Step 2 after `main.go` is rewired.
 
 - [ ] **Step 1: Write the failing test**
 
 Add to `go/depthofbook-bot/coordinator_test.go`:
 
 ```go
-func TestCoordinator_FenceDrainsAllShardsBeforeWrite(t *testing.T) {
+// This test is deterministic (no sleeps-as-assertions): with shards PAUSED
+// (Run not started), a correct fence blocks on shard acks; the stub returns
+// immediately. We assert "blocked while paused" then "unblocks once shards run".
+func TestCoordinator_FenceBlocksUntilShardsDrain(t *testing.T) {
 	metrics := stubMetrics()
 	n := 3
 	shards := make([]*Shard, n)
 	for i := 0; i < n; i++ {
 		s := NewShard(i, n, NewEventsWriter(nil), nil, metrics)
-		s.sw = NewSnapshotWriter(nil, 5, 50, metrics, 0, func(id uint32, fn func(*Instrument)) {
-			s.mu.Lock()
-			defer s.mu.Unlock()
-			fn(s.instruments[instKey{0, id}])
-		})
+		s.sw = NewSnapshotWriter(nil, 5, 50, metrics, 0, func(s *Shard) func(uint32, func(*Instrument)) {
+			return func(id uint32, fn func(*Instrument)) {
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				fn(s.instruments[instKey{0, id}])
+			}
+		}(s))
 		shards[i] = s
 	}
 	c := NewCoordinator(shards, NewEventsWriter(nil), metrics)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	// SnapshotWriters can run; shard.Run is intentionally NOT started yet.
 	for _, s := range shards {
 		go s.sw.Run(ctx)
-		go s.Run(ctx)
 	}
 
-	// Enqueue instrument records, then a fence. The fence must not return until
-	// all shards have drained their inboxes.
+	// Pre-load instrument records into shard inboxes (buffered, won't block).
 	for id := uint32(1); id <= 9; id++ {
 		c.Dispatch(Record{Type: "instrument_definition", ChannelID: 0, InstrumentID: id, ResetCount: 1,
 			Timestamp: time.Unix(1700000000, 0), Fields: map[string]any{
 				"symbol": "S", "price_exponent": float64(-2), "qty_exponent": float64(-8)}})
 	}
-	c.Dispatch(Record{Type: "end_of_session", ChannelID: 0, ResetCount: 1,
-		Timestamp: time.Unix(1700000000, 0), Fields: map[string]any{}})
 
-	// After the fence returns, every shard inbox is drained.
+	done := make(chan struct{})
+	go func() {
+		c.Dispatch(Record{Type: "end_of_session", ChannelID: 0, ResetCount: 1,
+			Timestamp: time.Unix(1700000000, 0), Fields: map[string]any{}})
+		close(done)
+	}()
+
+	// While shards are paused a correct fence MUST still be blocked on acks.
+	// The stub runFence writes immediately and returns -> done closes here -> FAIL.
+	select {
+	case <-done:
+		t.Fatal("fence returned while shards were paused: it did not drain/ack")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// Start the shards; they drain FIFO (9 records then the fence marker) and ack.
+	for _, s := range shards {
+		go s.Run(ctx)
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("fence did not return after shards started draining")
+	}
 	for i, s := range shards {
 		if len(s.inbox) != 0 {
 			t.Errorf("shard %d inbox not drained after fence: %d", i, len(s.inbox))
@@ -1557,8 +1665,8 @@ func TestCoordinator_HeartbeatNotFenced(t *testing.T) {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd go/depthofbook-bot && go test ./... -run 'TestCoordinator_Fence|TestCoordinator_Heartbeat' -v`
-Expected: FAIL — `TestCoordinator_FenceDrainsAllShardsBeforeWrite` flaky/failing because the stub `runFence` does not actually drain (writes immediately).
+Run: `cd go/depthofbook-bot && go test ./... -run 'TestCoordinator_FenceBlocks|TestCoordinator_Heartbeat' -v`
+Expected: FAIL — `TestCoordinator_FenceBlocksUntilShardsDrain` fails deterministically at `t.Fatal("fence returned while shards were paused...")`: the Task 6 stub `runFence` writes immediately and returns instead of blocking on shard acks. (`TestCoordinator_HeartbeatNotFenced` already passes — heartbeat never routes to a shard.)
 
 - [ ] **Step 3: Replace the runFence and writeChannelHealth stubs**
 
@@ -1592,34 +1700,25 @@ func (c *Coordinator) writeChannelHealth(rec Record) {
 }
 ```
 
-- [ ] **Step 4: Delete the decomposed ChannelState**
-
-`ChannelState` is now fully superseded by `Shard` + `Coordinator`. Delete both files:
-
-```bash
-git rm go/depthofbook-bot/channel.go go/depthofbook-bot/channel_test.go
-```
-
-`const maxBufferedDeltas` lived in `channel.go`; it is unused now (shard uses `maxBufferedDeltasPerInstrument`). The shared helpers/types already moved to `shard.go` in Task 3, so nothing else references `channel.go`.
-
-- [ ] **Step 5: Run tests to verify pass**
+- [ ] **Step 4: Run tests to verify pass**
 
 Run: `cd go/depthofbook-bot && go test ./...`
-Expected: PASS — `ok depthofbook-bot`. (`TestChannel_*` are gone; `TestShard_*`/`TestCoordinator_*` cover the same behavior.)
+Expected: PASS — `ok depthofbook-bot`. `channel.go`/`channel_test.go` still exist and `TestChannel_*` still pass (they are removed in Task 9 once `main.go` no longer references `ChannelState`).
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add go/depthofbook-bot/coordinator.go go/depthofbook-bot/coordinator_test.go
-git commit -m "depthofbook-bot: add coordinator fence + channel-health writes, remove channelstate"
+git commit -m "depthofbook-bot: add coordinator fence + channel-health writes"
 ```
 
 ---
 
-## Task 9: Wire coordinator + shards into main.go (`--shards` flag, GOMAXPROCS default)
+## Task 9: Wire coordinator + shards into main.go (`--shards` flag, GOMAXPROCS default); delete ChannelState
 
 **Files:**
 - Modify: `go/depthofbook-bot/main.go`
+- Delete: `go/depthofbook-bot/channel.go`, `go/depthofbook-bot/channel_test.go`
 
 - [ ] **Step 1: Replace the channels map + dispatcher closure**
 
@@ -1680,36 +1779,51 @@ In `go/depthofbook-bot/main.go`:
 
 The per-shard `withInstrument` closure uses channel id `0`: this build targets the single-channel profile (design "Out of scope: multi-channel"). Instruments from any channel still route correctly (keyed by `instKey{ch,id}`), but snapshot-level lookups assume channel 0 as today's demo does.
 
-- [ ] **Step 2: Build**
+- [ ] **Step 2: Delete the decomposed ChannelState**
+
+`main.go` no longer references `ChannelState` (rewired in Step 1), so `ChannelState` is now fully superseded by `Shard` + `Coordinator`. Delete both files:
+
+```bash
+git rm go/depthofbook-bot/channel.go go/depthofbook-bot/channel_test.go
+```
+
+`const maxBufferedDeltas` lived only in `channel.go` (shard uses `maxBufferedDeltasPerInstrument`); it disappears with the file. The shared helpers/types moved to `shard.go` in Task 3, so no other file references `channel.go`. Verify nothing dangles:
+
+Run: `cd go/depthofbook-bot && grep -rn 'ChannelState\|NewChannelState\|maxBufferedDeltas\b' . ; echo done`
+Expected: only `done` printed (no matches) — if anything matches, fix that reference before continuing.
+
+- [ ] **Step 3: Build**
 
 Run: `cd go/depthofbook-bot && go build ./...`
 Expected: no output (clean). Fix any leftover reference to `dispatcher`/`getOrCreateChannel`/`snapCtx`/`channels` (all removed).
 
-- [ ] **Step 3: Full test + vet**
+- [ ] **Step 4: Full test + vet**
 
 Run: `cd go/depthofbook-bot && go vet ./... && go test ./...`
-Expected: vet clean; `ok depthofbook-bot`.
+Expected: vet clean; `ok depthofbook-bot`. (`TestChannel_*` are gone; `TestShard_*`/`TestCoordinator_*` cover the same behavior.)
 
-- [ ] **Step 4: Smoke-run the binary version flag**
+- [ ] **Step 5: Smoke-run the binary version flag**
 
 Run: `cd go/depthofbook-bot && go run . --version`
 Expected: prints `depthofbook-bot 0.1.0-dev (unknown)` and exits 0.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
+
+`git rm` (Step 2) already staged the two deletions; only `main.go` needs staging:
 
 ```bash
 git add go/depthofbook-bot/main.go
-git commit -m "depthofbook-bot: wire coordinator and shards into main, add --shards flag"
+git commit -m "depthofbook-bot: wire coordinator and shards into main, add --shards flag, remove channelstate"
 ```
 
 ---
 
-## Task 10: Order-preservation golden test (per-instrument parity)
+## Task 10: Per-instrument terminal-state parity test
 
 **Files:**
 - Create: `go/depthofbook-bot/parity_test.go`
 
-Per-instrument event order through the sharded path must equal a single-shard baseline. We compare the ordered sequence of `applied_*`/`per_instrument_gap` events per instrument by capturing them at the shard boundary via a recording `EventsWriter` substitute. Since `EventsWriter` is concrete with `ch *ClickhouseClient` and a nil client makes `Write` a no-op, we instead record events by wrapping the shard: feed the same stream to (a) one `Shard` directly (baseline, N=1) and (b) a `Coordinator` over N shards, and compare each instrument's final `Instrument` book plus the ordered `ChannelEvent` kinds returned by `apply`.
+Honest scope: we do **not** capture the literal ordered event stream (`EventsWriter` is concrete with `ch *ClickhouseClient`; a nil client makes `Write` a no-op, and adding a capture seam is out of scope). Instead we compare a **per-instrument terminal-state fingerprint** — `{Status, len(Bids), len(Asks), LastAppliedInstrumentSeq, LastAppliedMktdataSeq}` — between a single-shard baseline (N=1) and N shards over the *same* stream. This is a strong reordering detector: per-instrument FIFO is the invariant; if sharding reordered an instrument's records, its `per_instrument_seq` continuity breaks, which deterministically diverges `Status` (→ `StatusGap`) and/or `LastAppliedInstrumentSeq` from the baseline. The fingerprint catches that; it is not a literal event-order assertion and the test name/comment say so.
 
 - [ ] **Step 1: Write the test**
 
@@ -1771,9 +1885,19 @@ func genStream(instruments int, deltasPer int, seed int64) []Record {
 	return recs
 }
 
-// runSharded feeds recs through a Coordinator over n shards and returns each
-// instrument's final bid-order-count (book fingerprint).
-func runSharded(t *testing.T, n int, recs []Record) map[uint32]int {
+// instFP is the per-instrument terminal-state fingerprint compared across
+// shard counts. Divergence here means per-instrument ordering was not preserved.
+type instFP struct {
+	Status     InstrumentStatus
+	Bids, Asks int
+	LastPiSeq  uint32
+	LastMktSeq uint64
+}
+
+// runSharded feeds recs through a Coordinator over n shards, drains via a
+// fence, and returns each instrument's terminal fingerprint plus the metrics
+// (so callers can assert e.g. no spurious per-instrument gaps).
+func runSharded(t *testing.T, n int, recs []Record) (map[uint32]instFP, *Metrics) {
 	t.Helper()
 	metrics := stubMetrics()
 	shards := make([]*Shard, n)
@@ -1798,39 +1922,46 @@ func runSharded(t *testing.T, n int, recs []Record) map[uint32]int {
 	for _, r := range recs {
 		c.Dispatch(r)
 	}
-	// Drain via a fence so all shard inboxes are empty.
+	// Drain via a fence so all shard inboxes are empty before we read state.
 	c.runFence(Record{Type: "end_of_session", ChannelID: 0, ResetCount: 1, Timestamp: time.Unix(1700000000, 0), Fields: map[string]any{}})
 
-	out := map[uint32]int{}
+	out := map[uint32]instFP{}
 	for _, s := range shards {
 		s.mu.Lock()
 		for k, inst := range s.instruments {
-			out[k.id] = len(inst.Bids)
+			out[k.id] = instFP{
+				Status:     inst.Status,
+				Bids:       len(inst.Bids),
+				Asks:       len(inst.Asks),
+				LastPiSeq:  inst.LastAppliedInstrumentSeq,
+				LastMktSeq: inst.LastAppliedMktdataSeq,
+			}
 		}
 		s.mu.Unlock()
 	}
-	return out
+	return out, metrics
 }
 
 func TestParity_ShardedMatchesSingleShard(t *testing.T) {
 	recs := genStream(50, 20, 12345)
-	base := runSharded(t, 1, recs)
+	base, _ := runSharded(t, 1, recs)
 	for _, n := range []int{2, 4, 8} {
-		got := runSharded(t, n, recs)
-		if !reflect.DeepEqual(base, got) {
-			// Surface first mismatch for debugging.
-			ids := make([]int, 0, len(base))
-			for id := range base {
-				ids = append(ids, int(id))
-			}
-			sort.Ints(ids)
-			for _, id := range ids {
-				if base[uint32(id)] != got[uint32(id)] {
-					t.Fatalf("n=%d instrument %d: baseline bids=%d sharded bids=%d",
-						n, id, base[uint32(id)], got[uint32(id)])
-				}
+		got, _ := runSharded(t, n, recs)
+		if reflect.DeepEqual(base, got) {
+			continue
+		}
+		ids := make([]int, 0, len(base))
+		for id := range base {
+			ids = append(ids, int(id))
+		}
+		sort.Ints(ids)
+		for _, id := range ids {
+			if base[uint32(id)] != got[uint32(id)] {
+				t.Fatalf("n=%d instrument %d: baseline=%+v sharded=%+v",
+					n, id, base[uint32(id)], got[uint32(id)])
 			}
 		}
+		t.Fatalf("n=%d: fingerprint maps differ in key set", n)
 	}
 }
 ```
@@ -1838,7 +1969,7 @@ func TestParity_ShardedMatchesSingleShard(t *testing.T) {
 - [ ] **Step 2: Run the test**
 
 Run: `cd go/depthofbook-bot && go test ./... -run TestParity_ShardedMatchesSingleShard -v`
-Expected: PASS — N=2/4/8 produce identical per-instrument book fingerprints to N=1.
+Expected: PASS — N=2/4/8 produce identical per-instrument terminal fingerprints (status, bid/ask counts, last seqs) to N=1.
 
 - [ ] **Step 3: Commit**
 
@@ -1854,43 +1985,59 @@ git commit -m "depthofbook-bot: add per-instrument parity test across shard coun
 **Files:**
 - Modify: `go/depthofbook-bot/parity_test.go`
 
-The design's acceptance gate: a synthetic high-rate stream over ~330 instruments must be processed without unbounded backlog/deadlock and with per-instrument parity. (Parser `queue_full` is a parser-side metric; in-process we assert the bot keeps up — bounded inboxes drain within a deadline — and parity holds.)
+Scope honesty (matches the design's acceptance section): parser `queue_full` and the demo CPU spread are validated by the **demo docker-compose stack**, which the design explicitly marks the non-gating real-metric check. The in-process gate asserts the three things that *are* automatable and that sharding could regress: (1) **no spurious `per_instrument_gaps`** — the synthetic stream has perfectly contiguous `per_instrument_seq`, so any gap means sharding reordered an instrument's records; (2) **per-instrument terminal parity** vs the N=1 baseline; (3) **completion without deadlock/unbounded backlog** within a generous deadline.
 
 - [ ] **Step 1: Write the test**
 
 Add to `go/depthofbook-bot/parity_test.go`:
 
 ```go
+func counterVal(t *testing.T, c interface{ Write(*dto.Metric) error }) float64 {
+	t.Helper()
+	var m dto.Metric
+	if err := c.Write(&m); err != nil {
+		t.Fatalf("counter write: %v", err)
+	}
+	return m.GetCounter().GetValue()
+}
+
 func TestAcceptance_ThroughputSoakAndParity(t *testing.T) {
 	if testing.Short() {
 		t.Skip("soak test")
 	}
 	recs := genStream(330, 50, 99)
 
-	// N=1 baseline fingerprint.
-	base := runSharded(t, 1, recs)
+	base, _ := runSharded(t, 1, recs)
 
 	for _, n := range []int{1, 4} {
 		start := time.Now()
-		got := runSharded(t, n, recs)
+		got, m := runSharded(t, n, recs)
 		elapsed := time.Since(start)
+
+		// (1) No spurious per-instrument gaps — the stream is contiguous.
+		if g := counterVal(t, m.PerInstrumentGapsTotal); g != 0 {
+			t.Fatalf("n=%d: per_instrument_gaps_total=%v (want 0) — sharding reordered an instrument", n, g)
+		}
+		// (2) Per-instrument terminal parity vs single-shard baseline.
 		if !reflect.DeepEqual(base, got) {
 			t.Fatalf("n=%d: parity mismatch vs single-shard baseline", n)
 		}
-		// 330*50 deltas + setup ~ 18k records; must complete well under the
-		// hard deadline (generous to avoid CI flakiness).
+		// (3) Completion without deadlock/backlog. ~330*50 deltas + setup
+		// (~18k records); 30s is intentionally generous for CI.
 		if elapsed > 30*time.Second {
 			t.Fatalf("n=%d: processing took %v (>30s) — backlog/deadlock suspected", n, elapsed)
 		}
-		t.Logf("n=%d processed %d records in %v", n, len(recs), elapsed)
+		t.Logf("n=%d processed %d records in %v, gaps=0, parity ok", n, len(recs), elapsed)
 	}
 }
 ```
 
+Add `dto "github.com/prometheus/client_model/go"` to `parity_test.go`'s import block.
+
 - [ ] **Step 2: Run the test**
 
 Run: `cd go/depthofbook-bot && go test ./... -run TestAcceptance_ThroughputSoakAndParity -v`
-Expected: PASS — both N=1 and N=4 finish well under 30s with identical fingerprints. Log lines show elapsed times.
+Expected: PASS — N=1 and N=4 each: `per_instrument_gaps_total == 0`, fingerprints identical to the N=1 baseline, completion well under 30s. Log lines show elapsed times.
 
 - [ ] **Step 3: Commit**
 
@@ -1966,17 +2113,19 @@ Use the superpowers:finishing-a-development-branch skill to decide merge/PR. The
 - Coordinator + N shards, share-nothing → Tasks 3–9.
 - `--shards` flag, GOMAXPROCS default, N=1 degenerate → Task 9; N=1 parity → Tasks 10–11.
 - Type-first classification; `instrument_id` never hashed when absent → Task 6 (`switch rec.Type` before any `% n`; channel-scoped types never call `routeInstrument`); reset channel-scoped-first-frame → Task 7 test `...HandlesChannelScopedFirstFrame`.
-- `(channelID, snapshotID)` snapshot route key → Task 6 `snapKey`.
+- `(channelID, snapshotID)` composite key for BOTH snapshot routing and shard snapshot context → `snapKey` defined once in `shard.go` (Task 3), reused by `Coordinator.snapshotRoute` (Task 6) and `Shard.snapCtx` (Tasks 3/4). Codex defect 5 fixed.
 - snapshot_order no-route drop + counter → Task 2 (metric) + Task 6 (logic/test).
 - Per-instrument delta buffers replace global buffer → Task 3 (`deltaBuf map[instKey][]BufferedDelta`).
+- `trade` behavior parity (no `ev.InstrumentID` → no MarkDirty, empty symbol; row uses `rec.InstrumentID`) preserved → Task 3 `apply` `case "trade"` (Codex defect 4 fixed; commented in code).
 - Reset barrier (hold R, goroutine-per-shard markers, N acks, clear coord state, route held R) → Task 7.
 - SnapshotWriter reset ordering (serialized reset, generation re-check, shard waits for writer ack before barrier ack) → Task 1 (writer) + Task 5 (`msgReset` calls `s.sw.Reset()` before `ack`).
 - Fence for end_of_session/batch_boundary, heartbeat/manifest_summary not fenced → Task 8.
 - SeqLast/Manifest coordinator-owned, parity-only bookkeeping → Task 6 (`seqLast`), Task 8 (`manifest`).
-- Tests: per-shard unit (Task 3), routing table (Task 6), order-preservation golden (Task 10), reset-barrier (Task 7), reset-vs-in-flight-flush (Task 1 generation test covers the abandon path; reinforced by Task 7 barrier), fence ordering (Task 8), snapshot routing (Task 6), race detector (Tasks 5,7,12), in-process acceptance harness (Task 11).
+- Build-green ordering: `channel.go`/`channel_test.go` survive until `main.go` is rewired, deleted in Task 9 Step 2 (Codex defect 1 fixed). `context` imported in `shard.go` at Task 5 (Codex defect 2 fixed); orphaned `time` import removed from `channel.go` in Task 3 (Codex defect 3 fixed).
+- Tests: per-shard unit (Task 3), routing table (Task 6), order-preservation/terminal-parity (Task 10), reset-barrier (Task 7), **reset-vs-in-flight-flush — now a deterministic standalone test** `TestSnapshotWriter_FlushAbortsRemainderOnGenerationBump` exercising a half-extracted `flushDue` batch against a generation bump (Task 1; Codex defect 7 fixed — no longer a substitution), deterministic fence test `TestCoordinator_FenceBlocksUntilShardsDrain` (Task 8; Codex defect 6 fixed), snapshot routing (Task 6), race detector (Tasks 5,7,12), in-process acceptance harness with explicit zero-gap + parity assertions (Task 11; Codex defect 8 fixed).
 
-Gap accepted: the design's "reset vs in-flight flush" test is realized as Task 1's generation-bump/clear test plus the Task 7 barrier (which calls `sw.Reset()` before the shard acks). A standalone test that races a half-extracted `flushDue` batch against a reset is inherently timing-fragile; the generation re-check in `flushDue` (Task 1) is the deterministic guard and is unit-tested directly. This is a deliberate, documented substitution, not a missing requirement.
+**2. Placeholder scan:** The only intentional temporary code is the `runResetBarrier`/`runFence`/`writeChannelHealth` stubs in Task 6, each explicitly deleted and replaced in Tasks 7/8 with full replacement code; each intermediate state is build-green and its stub test fails deterministically (not falsely green). The `shardMsg` placeholder in Task 3 has its final shape (Task 5 only adds the `Run` consumer + the `context` import). No `TBD`/`TODO`/"handle edge cases" remain; all code steps show complete code.
 
-**2. Placeholder scan:** The only intentional temporary code is the `runResetBarrier`/`runFence`/`writeChannelHealth` stubs in Task 6, each explicitly replaced in Tasks 7/8 with the replacement code shown in full. The `shardMsg` placeholder in Task 3 has its final shape (Task 5 only adds the `Run` consumer). No `TBD`/`TODO`/"handle edge cases" remain; all code steps show complete code.
+**3. Type consistency:** `instKey{ch uint8; id uint32}`, `snapKey{ch uint8; snap uint32}` (defined in `shard.go`, NOT redeclared in `coordinator.go`), `shardMsg{rec *Record; kind shardMsgKind; ack chan int}`, `Shard.instruments/refdata/deltaBuf/snapCtx` (snapCtx now `map[snapKey]SnapshotContext`), `Coordinator.snapshotRoute/seqLast/manifest`, `NewShard(idx,n,eventsW,sw,metrics)`, `NewCoordinator(shards,eventsW,metrics)`, `SnapshotWriter.Reset()/generation/resetCh`, `runSharded` returns `(map[uint32]instFP, *Metrics)` consistently in Tasks 10–11, `s.handle`/`s.apply`/`s.Run` — all names consistent across Tasks 1–12. `getUint32`/`getUint64`/`getString` reused from `events_writer.go` (not redefined). Helpers `toUint8`/etc. moved once (Task 3) with the duplicate-symbol + orphaned-import removal from `channel.go` called out in the same step.
 
-**3. Type consistency:** `instKey{ch uint8; id uint32}`, `snapKey{ch uint8; snap uint32}`, `shardMsg{rec *Record; kind shardMsgKind; ack chan int}`, `Shard.instruments/refdata/deltaBuf/snapCtx`, `Coordinator.snapshotRoute/seqLast/manifest`, `NewShard(idx,n,eventsW,sw,metrics)`, `NewCoordinator(shards,eventsW,metrics)`, `SnapshotWriter.Reset()/generation/resetCh`, `s.handle`/`s.apply`/`s.Run` — all names consistent across Tasks 1–12. `getUint32`/`getUint64`/`getString` reused from `events_writer.go` (not redefined). Helpers `toUint8`/etc. moved once (Task 3) with the duplicate-symbol removal from `channel.go` called out in the same step.
+**4. Codex plan-review defects (all 8 must-fix addressed):** (1) channel.go deletion moved Task 8→9; (2) `context` import added in Task 5; (3) orphaned `time` import removed from channel.go in Task 3; (4) `trade` event reverted to zero InstrumentID with parity comment; (5) `snapCtx` composite-keyed via shared `snapKey`; (6) fence test rewritten to be deterministic (paused-shards); (7) standalone deterministic generation-abort flush test added to Task 1; (8) Task 10 strengthened to a full terminal-state fingerprint, Task 11 adds explicit zero-`per_instrument_gaps` + parity assertions and documents `queue_full` as demo-validated per the design. Codex-confirmed-OK items (per-instrument buffer emptying; reset anchor filter equivalence; Task 7 non-infinite recursion) left unchanged.
