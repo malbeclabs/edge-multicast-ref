@@ -260,15 +260,16 @@ func (s *Shard) bufferDelta(k instKey, rec Record) {
 }
 
 func (s *Shard) replayBuffer(k instKey, inst *Instrument) {
-	buf := s.deltaBuf[k]
-	remaining := make([]BufferedDelta, 0, len(buf))
-	for _, b := range buf {
+	// Per-instrument buffer is fully consumed on snapshot end: every entry is
+	// either covered by the snapshot anchor or re-applied. Drop the empty slot
+	// so the map stays clean (it'll be recreated on demand by bufferDelta).
+	for _, b := range s.deltaBuf[k] {
 		if b.MktdataSeq <= inst.LastAppliedMktdataSeq {
 			continue
 		}
 		s.applyDeltaToReady(k, inst, b.Record)
 	}
-	s.deltaBuf[k] = remaining
+	delete(s.deltaBuf, k)
 }
 
 func filterBuffer(buf []BufferedDelta, keep func(BufferedDelta) bool) []BufferedDelta {
