@@ -4,16 +4,9 @@ import (
 	"log"
 	"sort"
 	"sync"
-	"time"
 )
 
 const maxBufferedDeltas = 10000 // bound on cold-start / gap-recovery buffer per channel
-
-// BufferedDelta is one mktdata-port delta held while an instrument awaits a snapshot.
-type BufferedDelta struct {
-	MktdataSeq uint64
-	Record     Record
-}
 
 // ChannelState holds all state for one channel_id.
 //
@@ -30,27 +23,6 @@ type ChannelState struct {
 	Manifest    ManifestState
 	Instruments map[uint32]*Instrument
 	DeltaBuffer []BufferedDelta // ordered by MktdataSeq
-}
-
-type InstrumentDef struct {
-	Symbol        string
-	PriceExponent int8
-	QtyExponent   int8
-}
-
-type ManifestState struct {
-	Seq             uint16
-	Valid           bool
-	InstrumentCount uint32
-}
-
-// ChannelEvent is the small subset of bot-side state changes the channel reports
-// outward (used by writers to enqueue persistence and by metrics to track resets).
-type ChannelEvent struct {
-	Kind         string // "applied_delta" | "applied_snapshot" | "instrument_reset" | "channel_reset" | "per_instrument_gap"
-	InstrumentID uint32
-	Symbol       string
-	Record       Record
 }
 
 // NewChannelState returns an empty channel.
@@ -301,98 +273,4 @@ func (c *ChannelState) replayBuffer(inst *Instrument) {
 		c.applyDeltaToReady(inst, b.Record)
 	}
 	c.DeltaBuffer = remaining
-}
-
-func filterBuffer(buf []BufferedDelta, keep func(BufferedDelta) bool) []BufferedDelta {
-	out := make([]BufferedDelta, 0, len(buf))
-	for _, b := range buf {
-		if keep(b) {
-			out = append(out, b)
-		}
-	}
-	return out
-}
-
-// --- type conversion helpers (JSON unmarshal yields float64 / string / bool by default) ---
-
-func toUint8(v any) uint8 {
-	switch x := v.(type) {
-	case float64:
-		return uint8(x)
-	case uint8:
-		return x
-	}
-	return 0
-}
-
-func toUint16(v any) uint16 {
-	switch x := v.(type) {
-	case float64:
-		return uint16(x)
-	case uint16:
-		return x
-	}
-	return 0
-}
-
-func toUint32(v any) uint32 {
-	switch x := v.(type) {
-	case float64:
-		return uint32(x)
-	case uint32:
-		return x
-	}
-	return 0
-}
-
-func toUint64(v any) uint64 {
-	switch x := v.(type) {
-	case float64:
-		return uint64(x)
-	case uint64:
-		return x
-	}
-	return 0
-}
-
-func toInt8(v any) int8 {
-	switch x := v.(type) {
-	case float64:
-		return int8(x)
-	case int8:
-		return x
-	}
-	return 0
-}
-
-func toInt64(v any) int64 {
-	switch x := v.(type) {
-	case float64:
-		return int64(x)
-	case int64:
-		return x
-	}
-	return 0
-}
-
-func toString(v any) string {
-	if s, ok := v.(string); ok {
-		return s
-	}
-	return ""
-}
-
-func toTime(v any) time.Time {
-	if s, ok := v.(string); ok {
-		t, _ := time.Parse(time.RFC3339Nano, s)
-		return t
-	}
-	return time.Time{}
-}
-
-func sideFromString(s string) uint8 {
-	if s == "ask" {
-		return 1
-	}
-	return 0
 }
