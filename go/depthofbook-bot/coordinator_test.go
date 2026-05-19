@@ -128,6 +128,83 @@ func TestCoordinator_ResetBarrierWipesShardsThenRoutesHeldRecord(t *testing.T) {
 	}
 }
 
+// This test is deterministic (no sleeps-as-assertions): with shards PAUSED
+// (Run not started), a correct fence blocks on shard acks; the stub returns
+// immediately. We assert "blocked while paused" then "unblocks once shards run".
+func TestCoordinator_FenceBlocksUntilShardsDrain(t *testing.T) {
+	metrics := stubMetrics()
+	n := 3
+	shards := make([]*Shard, n)
+	for i := 0; i < n; i++ {
+		s := NewShard(i, n, NewEventsWriter(nil), nil, metrics)
+		s.sw = NewSnapshotWriter(nil, 5, 50, metrics, 0, func(s *Shard) func(uint32, func(*Instrument)) {
+			return func(id uint32, fn func(*Instrument)) {
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				fn(s.instruments[instKey{0, id}])
+			}
+		}(s))
+		shards[i] = s
+	}
+	c := NewCoordinator(shards, NewEventsWriter(nil), metrics)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// SnapshotWriters can run; shard.Run is intentionally NOT started yet.
+	for _, s := range shards {
+		go s.sw.Run(ctx)
+	}
+
+	// Pre-load instrument records into shard inboxes (buffered, won't block).
+	for id := uint32(1); id <= 9; id++ {
+		c.Dispatch(Record{Type: "instrument_definition", ChannelID: 0, InstrumentID: id, ResetCount: 1,
+			Timestamp: time.Unix(1700000000, 0), Fields: map[string]any{
+				"symbol": "S", "price_exponent": float64(-2), "qty_exponent": float64(-8)}})
+	}
+
+	done := make(chan struct{})
+	go func() {
+		c.Dispatch(Record{Type: "end_of_session", ChannelID: 0, ResetCount: 1,
+			Timestamp: time.Unix(1700000000, 0), Fields: map[string]any{}})
+		close(done)
+	}()
+
+	// While shards are paused a correct fence MUST still be blocked on acks.
+	// The stub runFence writes immediately and returns -> done closes here -> FAIL.
+	select {
+	case <-done:
+		t.Fatal("fence returned while shards were paused: it did not drain/ack")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// Start the shards; they drain FIFO (9 records then the fence marker) and ack.
+	for _, s := range shards {
+		go s.Run(ctx)
+	}
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("fence did not return after shards started draining")
+	}
+	for i, s := range shards {
+		if len(s.inbox) != 0 {
+			t.Errorf("shard %d inbox not drained after fence: %d", i, len(s.inbox))
+		}
+	}
+}
+
+func TestCoordinator_HeartbeatNotFenced(t *testing.T) {
+	c, inboxes := newCoordWithCapture(2)
+	c.Dispatch(Record{Type: "heartbeat", ChannelID: 0, ResetCount: 1,
+		Timestamp: time.Unix(1700000000, 0), Fields: map[string]any{}})
+	for i, in := range inboxes {
+		select {
+		case m := <-in:
+			t.Fatalf("heartbeat must not reach shard %d: %+v", i, m)
+		default:
+		}
+	}
+}
+
 func TestCoordinator_ResetBarrierHandlesChannelScopedFirstFrame(t *testing.T) {
 	metrics := stubMetrics()
 	n := 2

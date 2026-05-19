@@ -87,7 +87,7 @@ func recPtr(rec Record) *Record {
 	return &r
 }
 
-// --- temporary stubs, replaced in Tasks 7 and 8 ---
+// --- barrier / fence / channel-health ---
 
 // runResetBarrier executes the in-band FIFO reset barrier, then routes the
 // held triggering record as the first new-era frame.
@@ -115,12 +115,28 @@ func (c *Coordinator) runResetBarrier(held Record) {
 	c.Dispatch(held)
 }
 
+// runFence drains every shard (FIFO marker/ack, no state wipe) so the fence
+// record's ClickHouse row lands strictly after all preceding instrument rows.
 func (c *Coordinator) runFence(rec Record) {
-	// Task 8 replaces this.
+	acks := make(chan int, c.n)
+	for _, s := range c.shards {
+		s := s
+		go func() { s.inbox <- shardMsg{kind: msgFence, ack: acks} }()
+	}
+	for i := 0; i < c.n; i++ {
+		<-acks
+	}
 	c.eventsW.Write(ChannelEvent{Kind: "applied_delta", Record: rec}, rec.ChannelID, "", 0, 0)
 }
 
+// writeChannelHealth writes heartbeat / manifest_summary directly (no fence).
 func (c *Coordinator) writeChannelHealth(rec Record) {
-	// Task 8 replaces this.
+	if rec.Type == "manifest_summary" {
+		c.manifest = ManifestState{
+			Seq:             toUint16(rec.Fields["manifest_seq"]),
+			Valid:           toUint8(rec.Fields["valid"]) != 0,
+			InstrumentCount: toUint32(rec.Fields["instrument_count"]),
+		}
+	}
 	c.eventsW.Write(ChannelEvent{Kind: "applied_delta", Record: rec}, rec.ChannelID, "", 0, 0)
 }
