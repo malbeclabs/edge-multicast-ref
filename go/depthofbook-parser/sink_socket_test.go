@@ -99,10 +99,19 @@ func TestSocketSink_DropsDisconnectedClient(t *testing.T) {
 		t.Fatalf("expected no error after client disconnect, got: %v", err)
 	}
 
-	// Verify client was removed.
-	sink.mu.Lock()
-	count := len(sink.clients)
-	sink.mu.Unlock()
+	// Verify client was removed. Removal is async (per-client writer
+	// goroutine detects the closed conn on its next flush), so poll.
+	deadline := time.Now().Add(time.Second)
+	var count int
+	for time.Now().Before(deadline) {
+		sink.mu.Lock()
+		count = len(sink.clients)
+		sink.mu.Unlock()
+		if count == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if count != 0 {
 		t.Errorf("expected 0 clients after disconnect, got %d", count)
 	}
