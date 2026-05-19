@@ -29,14 +29,15 @@ type Metrics struct {
 	SocketToBotLatency *prometheus.HistogramVec
 
 	// Book state
-	InstrumentsTotal       *prometheus.GaugeVec
-	InstrumentResetsTotal  *prometheus.CounterVec
-	ChannelResetsTotal     prometheus.Counter
-	PerInstrumentGapsTotal prometheus.Counter
-	BookOrders             *prometheus.GaugeVec
-	BookTopPrice           *prometheus.GaugeVec
-	BookTopQty             *prometheus.GaugeVec
-	BookSpreadBps          *prometheus.GaugeVec
+	InstrumentsTotal          *prometheus.GaugeVec
+	InstrumentResetsTotal     *prometheus.CounterVec
+	ChannelResetsTotal        prometheus.Counter
+	PerInstrumentGapsTotal    prometheus.Counter
+	SnapshotOrderDroppedTotal prometheus.Counter
+	BookOrders                *prometheus.GaugeVec
+	BookTopPrice              *prometheus.GaugeVec
+	BookTopQty                *prometheus.GaugeVec
+	BookSpreadBps             *prometheus.GaugeVec
 
 	// Snapshot writer
 	SnapshotWritesTotal    prometheus.Counter
@@ -74,6 +75,7 @@ func NewMetrics(version, commit string) *Metrics {
 	m.InstrumentResetsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "instrument_resets_total"}, []string{"reason"})
 	m.ChannelResetsTotal = prometheus.NewCounter(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "channel_resets_total"})
 	m.PerInstrumentGapsTotal = prometheus.NewCounter(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "per_instrument_gaps_total"})
+	m.SnapshotOrderDroppedTotal = prometheus.NewCounter(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "snapshot_order_dropped_total"})
 	m.BookOrders = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: metricsNamespace, Name: "book_orders"}, []string{"symbol", "side"})
 	m.BookTopPrice = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: metricsNamespace, Name: "book_top_price"}, []string{"symbol", "side"})
 	m.BookTopQty = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: metricsNamespace, Name: "book_top_qty"}, []string{"symbol", "side"})
@@ -98,7 +100,7 @@ func NewMetrics(version, commit string) *Metrics {
 	reg.MustRegister(
 		m.BuildInfo, m.UptimeSeconds,
 		m.SocketConnected, m.SocketReconnects, m.RecordsTotal, m.DecodeErrors, m.SocketToBotLatency,
-		m.InstrumentsTotal, m.InstrumentResetsTotal, m.ChannelResetsTotal, m.PerInstrumentGapsTotal,
+		m.InstrumentsTotal, m.InstrumentResetsTotal, m.ChannelResetsTotal, m.PerInstrumentGapsTotal, m.SnapshotOrderDroppedTotal,
 		m.BookOrders, m.BookTopPrice, m.BookTopQty, m.BookSpreadBps,
 		m.SnapshotWritesTotal, m.SnapshotCoalescesTotal, m.SnapshotLagMs,
 		m.ClickhouseRowsWritten, m.ClickhouseRowsDropped, m.ClickhouseWriteErrors,
