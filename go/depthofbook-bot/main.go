@@ -99,7 +99,7 @@ func main() {
 		go s.Run(ctx)
 	}
 
-	coordinator := NewCoordinator(shardList, eventsWriter, metrics)
+	coordinator := NewCoordinator(ctx, shardList, eventsWriter, metrics)
 	log.Printf("depthofbook-bot %s sharding: shards=%d", version, n)
 
 	// Spawn ClickHouse runner.

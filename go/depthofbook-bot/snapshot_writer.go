@@ -40,7 +40,7 @@ func NewSnapshotWriter(ch *ClickhouseClient, depth int, coalesceMS int, metrics 
 		dirty:            map[uint32]*dirtyEntry{},
 		channel:          channelID,
 		withInstrument:   withInstrument,
-		resetCh:          make(chan chan struct{}),
+		resetCh:          make(chan chan struct{}, 1),
 	}
 }
 
@@ -66,10 +66,22 @@ func (w *SnapshotWriter) MarkDirty(instrumentID uint32) {
 // Reset clears pending dirty state and invalidates any in-flight flush batch.
 // It is serialized onto the writer goroutine (via resetCh) and blocks until that
 // goroutine has applied the reset, so the caller can rely on no concurrent flush.
-func (w *SnapshotWriter) Reset() {
+//
+// Reset is ctx-aware so a shutdown in flight (Run already returned via
+// ctx.Done) cannot wedge the caller. If ctx is cancelled before Run sees the
+// request, Reset returns without applying it — which is safe because the
+// writer is also shutting down.
+func (w *SnapshotWriter) Reset(ctx context.Context) {
 	done := make(chan struct{})
-	w.resetCh <- done
-	<-done
+	select {
+	case w.resetCh <- done:
+	case <-ctx.Done():
+		return
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
 }
 
 func (w *SnapshotWriter) doReset() {
@@ -86,6 +98,14 @@ func (w *SnapshotWriter) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			// Drain any in-flight Reset caller so they don't hang on <-done.
+			// resetCh is buffered(1), so a non-blocking peek covers the race
+			// where Reset's send won and our ctx.Done fired second.
+			select {
+			case done := <-w.resetCh:
+				close(done)
+			default:
+			}
 			return
 		case done := <-w.resetCh:
 			w.doReset()

@@ -16,7 +16,7 @@ func newCoordWithCapture(n int) (*Coordinator, []chan shardMsg) {
 		shards[i] = s
 		inboxes[i] = s.inbox
 	}
-	return NewCoordinator(shards, NewEventsWriter(nil), metrics), inboxes
+	return NewCoordinator(context.Background(), shards, NewEventsWriter(nil), metrics), inboxes
 }
 
 func TestCoordinator_RoutesInstrumentRecordByMod(t *testing.T) {
@@ -88,8 +88,8 @@ func TestCoordinator_ResetBarrierWipesShardsThenRoutesHeldRecord(t *testing.T) {
 		})
 		shards[i] = s
 	}
-	c := NewCoordinator(shards, NewEventsWriter(nil), metrics)
 	ctx, cancel := context.WithCancel(context.Background())
+	c := NewCoordinator(ctx, shards, NewEventsWriter(nil), metrics)
 	defer cancel()
 	for _, s := range shards {
 		go s.sw.Run(ctx)
@@ -146,8 +146,8 @@ func TestCoordinator_FenceBlocksUntilShardsDrain(t *testing.T) {
 		}(s))
 		shards[i] = s
 	}
-	c := NewCoordinator(shards, NewEventsWriter(nil), metrics)
 	ctx, cancel := context.WithCancel(context.Background())
+	c := NewCoordinator(ctx, shards, NewEventsWriter(nil), metrics)
 	defer cancel()
 	// SnapshotWriters can run; shard.Run is intentionally NOT started yet.
 	for _, s := range shards {
@@ -218,8 +218,8 @@ func TestCoordinator_ResetBarrierHandlesChannelScopedFirstFrame(t *testing.T) {
 		})
 		shards[i] = s
 	}
-	c := NewCoordinator(shards, NewEventsWriter(nil), metrics)
 	ctx, cancel := context.WithCancel(context.Background())
+	c := NewCoordinator(ctx, shards, NewEventsWriter(nil), metrics)
 	defer cancel()
 	for _, s := range shards {
 		go s.sw.Run(ctx)
@@ -233,5 +233,77 @@ func TestCoordinator_ResetBarrierHandlesChannelScopedFirstFrame(t *testing.T) {
 			"manifest_seq": float64(1), "valid": float64(1), "instrument_count": float64(0)}})
 	if c.resetCount != 2 {
 		t.Errorf("resetCount = %d, want 2", c.resetCount)
+	}
+}
+
+// Closes the shutdown-during-reset hazard: if ctx is cancelled mid-barrier
+// (shards/SnapshotWriters already exiting), the coordinator must abandon the
+// barrier instead of hanging forever on the ack-wait.
+func TestCoordinator_ResetBarrierEscapesOnCtxCancel(t *testing.T) {
+	metrics := stubMetrics()
+	n := 2
+	shards := make([]*Shard, n)
+	for i := 0; i < n; i++ {
+		s := NewShard(i, n, NewEventsWriter(nil), nil, metrics)
+		shards[i] = s
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c := NewCoordinator(ctx, shards, NewEventsWriter(nil), metrics)
+	// Prime the barrier predicate. Do NOT start shard.Run, so no acks can arrive.
+	c.resetSeen = true
+	c.resetCount = 1
+
+	dispatchDone := make(chan struct{})
+	go func() {
+		c.Dispatch(Record{Type: "heartbeat", ChannelID: 0, ResetCount: 2,
+			Timestamp: time.Unix(1700000000, 0), Fields: map[string]any{}})
+		close(dispatchDone)
+	}()
+
+	// Barrier must be blocked (no shards draining).
+	select {
+	case <-dispatchDone:
+		t.Fatal("Dispatch returned without acks — barrier did not actually block")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	cancel()
+	select {
+	case <-dispatchDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("coordinator barrier hung after ctx cancel")
+	}
+}
+
+// Closes the same hazard for the fence path.
+func TestCoordinator_FenceEscapesOnCtxCancel(t *testing.T) {
+	metrics := stubMetrics()
+	n := 2
+	shards := make([]*Shard, n)
+	for i := 0; i < n; i++ {
+		s := NewShard(i, n, NewEventsWriter(nil), nil, metrics)
+		shards[i] = s
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c := NewCoordinator(ctx, shards, NewEventsWriter(nil), metrics)
+
+	dispatchDone := make(chan struct{})
+	go func() {
+		c.Dispatch(Record{Type: "end_of_session", ChannelID: 0, ResetCount: 1,
+			Timestamp: time.Unix(1700000000, 0), Fields: map[string]any{}})
+		close(dispatchDone)
+	}()
+	select {
+	case <-dispatchDone:
+		t.Fatal("Dispatch returned before ctx cancelled — fence did not block")
+	case <-time.After(100 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case <-dispatchDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("coordinator fence hung after ctx cancel")
 	}
 }

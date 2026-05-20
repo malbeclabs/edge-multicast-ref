@@ -442,11 +442,19 @@ func (s *Shard) Run(ctx context.Context) {
 				s.reset()
 				s.mu.Unlock()
 				if s.sw != nil {
-					s.sw.Reset() // blocks until writer goroutine quiesced
+					s.sw.Reset(ctx) // ctx-aware: never wedges on shutdown
 				}
-				msg.ack <- s.idx
+				select {
+				case msg.ack <- s.idx:
+				case <-ctx.Done():
+					return
+				}
 			case msgFence:
-				msg.ack <- s.idx
+				select {
+				case msg.ack <- s.idx:
+				case <-ctx.Done():
+					return
+				}
 			}
 		}
 	}

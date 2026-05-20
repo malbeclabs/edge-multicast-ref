@@ -82,8 +82,8 @@ func runSharded(t *testing.T, n int, recs []Record) (map[uint32]instFP, *Metrics
 		}(s))
 		shards[i] = s
 	}
-	c := NewCoordinator(shards, NewEventsWriter(nil), metrics)
 	ctx, cancel := context.WithCancel(context.Background())
+	c := NewCoordinator(ctx, shards, NewEventsWriter(nil), metrics)
 	defer cancel()
 	for _, s := range shards {
 		go s.sw.Run(ctx)

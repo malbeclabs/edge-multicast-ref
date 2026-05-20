@@ -1,9 +1,16 @@
 package main
 
+import "context"
+
 // Coordinator is the single-goroutine Dispatcher. It owns channel-scoped state
 // and routes each record to exactly one shard (by instrument_id % N), or to a
 // direct-write / barrier / fence path. Shards own all instrument-scoped state.
+//
+// Dispatch is NOT safe for concurrent callers: it mutates resetSeen/resetCount/
+// snapshotRoute/seqLast/manifest without locks, on the assumption that the
+// only caller is the synchronous bot read loop.
 type Coordinator struct {
+	ctx     context.Context // used to escape barrier/fence ack waits on shutdown
 	shards  []*Shard
 	n       int
 	eventsW *EventsWriter
@@ -19,8 +26,12 @@ type Coordinator struct {
 // snapKey is defined in shard.go (Task 3). Do NOT redeclare it here — a second
 // declaration in the same package is a compile error.
 
-func NewCoordinator(shards []*Shard, eventsW *EventsWriter, metrics *Metrics) *Coordinator {
+// NewCoordinator builds a Coordinator. ctx is used solely to break barrier and
+// fence ack-waits on shutdown so the coordinator cannot wedge when shards or
+// SnapshotWriters have exited.
+func NewCoordinator(ctx context.Context, shards []*Shard, eventsW *EventsWriter, metrics *Metrics) *Coordinator {
 	return &Coordinator{
+		ctx:           ctx,
 		shards:        shards,
 		n:             len(shards),
 		eventsW:       eventsW,
@@ -91,14 +102,26 @@ func recPtr(rec Record) *Record {
 
 // runResetBarrier executes the in-band FIFO reset barrier, then routes the
 // held triggering record as the first new-era frame.
+//
+// Barrier sends and ack-waits are ctx-aware: if ctx is cancelled mid-barrier
+// (the bot is shutting down), we abandon the barrier and return without
+// routing the held record. No consistency requirement to uphold post-shutdown.
 func (c *Coordinator) runResetBarrier(held Record) {
 	acks := make(chan int, c.n)
 	for _, s := range c.shards {
-		s := s
-		go func() { s.inbox <- shardMsg{kind: msgReset, ack: acks} }()
+		go func(s *Shard) {
+			select {
+			case s.inbox <- shardMsg{kind: msgReset, ack: acks}:
+			case <-c.ctx.Done():
+			}
+		}(s)
 	}
 	for i := 0; i < c.n; i++ {
-		<-acks
+		select {
+		case <-acks:
+		case <-c.ctx.Done():
+			return
+		}
 	}
 
 	if c.metrics != nil {
@@ -117,14 +140,23 @@ func (c *Coordinator) runResetBarrier(held Record) {
 
 // runFence drains every shard (FIFO marker/ack, no state wipe) so the fence
 // record's ClickHouse row lands strictly after all preceding instrument rows.
+// Ctx-aware on the same shutdown-safety grounds as runResetBarrier.
 func (c *Coordinator) runFence(rec Record) {
 	acks := make(chan int, c.n)
 	for _, s := range c.shards {
-		s := s
-		go func() { s.inbox <- shardMsg{kind: msgFence, ack: acks} }()
+		go func(s *Shard) {
+			select {
+			case s.inbox <- shardMsg{kind: msgFence, ack: acks}:
+			case <-c.ctx.Done():
+			}
+		}(s)
 	}
 	for i := 0; i < c.n; i++ {
-		<-acks
+		select {
+		case <-acks:
+		case <-c.ctx.Done():
+			return
+		}
 	}
 	c.eventsW.Write(ChannelEvent{Kind: "applied_delta", Record: rec}, rec.ChannelID, "", 0, 0)
 }
