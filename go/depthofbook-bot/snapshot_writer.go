@@ -98,9 +98,13 @@ func (w *SnapshotWriter) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			// Drain any in-flight Reset caller so they don't hang on <-done.
-			// resetCh is buffered(1), so a non-blocking peek covers the race
-			// where Reset's send won and our ctx.Done fired second.
+			// Defense-in-depth: drain any pending Reset() caller so their
+			// <-done escape is not solely dependent on their own ctx. In
+			// production all SnapshotWriter callers (shards) pass the same
+			// ctx as Run, so Reset's own ctx.Done fires alongside Run's and
+			// this drain is redundant; we keep it so a future caller with a
+			// broader ctx than Run's still cannot wedge. resetCh is buffered
+			// (cap 1), so a non-blocking peek suffices.
 			select {
 			case done := <-w.resetCh:
 				close(done)

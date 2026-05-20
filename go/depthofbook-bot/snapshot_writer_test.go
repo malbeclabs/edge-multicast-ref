@@ -153,7 +153,16 @@ func TestSnapshotWriter_FlushAbortsRemainderOnGenerationBump(t *testing.T) {
 }
 
 // Closes the shutdown-during-reset hazard: if SnapshotWriter.Run has already
-// returned via ctx.Done, a subsequent Reset must not hang.
+// returned via ctx.Done, a subsequent Reset must not hang — its own ctx
+// must let it escape.
+//
+// We do NOT have a separate test for Run's ctx.Done drain branch (defense-in-
+// depth in snapshot_writer.go): it covers only the cross-ctx-hierarchy case
+// (Reset's ctx broader than Run's), which production never produces, so any
+// test exercising it would also exercise the redundant-with-this-test ctx
+// escape and the drain branch only nondeterministically due to select
+// randomness. The drain branch is documented in the implementation as belt-
+// and-suspenders for that case.
 func TestSnapshotWriter_ResetReturnsAfterRunExits(t *testing.T) {
 	metrics := stubMetrics()
 	inst := NewInstrument(1, "X", -2, -8)
@@ -171,51 +180,19 @@ func TestSnapshotWriter_ResetReturnsAfterRunExits(t *testing.T) {
 		t.Fatal("Run did not return on ctx.Done")
 	}
 
-	// Reset is called AFTER Run has exited. With an unbuffered resetCh +
-	// non-ctx-aware Reset, this would hang forever.
+	// Reset is called AFTER Run has exited. Pre-fix (unbuffered resetCh +
+	// non-ctx-aware Reset), this would hang forever; with the fix Reset's own
+	// ctx lets it escape.
+	rctx, rcancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer rcancel()
 	resetDone := make(chan struct{})
 	go func() {
-		w.Reset(context.Background()) // even with no shutdown signal of its own
+		w.Reset(rctx)
 		close(resetDone)
 	}()
-
-	// Reset should NOT have returned (no one will read resetCh and Run is gone).
-	// But its caller's own ctx escape is the production path — exercise that:
-	rctx, rcancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer rcancel()
-	resetDone2 := make(chan struct{})
-	go func() {
-		w.Reset(rctx)
-		close(resetDone2)
-	}()
 	select {
-	case <-resetDone2:
+	case <-resetDone:
 	case <-time.After(time.Second):
 		t.Fatal("Reset hung after Run exited; ctx cancel should have unblocked it")
-	}
-	_ = resetDone // first one stays blocked by design; only ctx unblocks Reset
-}
-
-// Closes the race where Reset's send wins but Run picks ctx.Done first —
-// Run's ctx.Done branch must drain resetCh so the caller's <-done returns.
-func TestSnapshotWriter_RunDrainsPendingResetOnCtxDone(t *testing.T) {
-	metrics := stubMetrics()
-	inst := NewInstrument(1, "X", -2, -8)
-	inst.Status = StatusReady
-	w := NewSnapshotWriter(nil, 5, 100, metrics, 0, func(id uint32, fn func(*Instrument)) { fn(inst) })
-
-	ctx, cancel := context.WithCancel(context.Background())
-	go w.Run(ctx)
-
-	// Buffered resetCh(1): pre-load a pending Reset send, then cancel ctx so
-	// Run takes the ctx.Done branch and must drain the pending done.
-	done := make(chan struct{})
-	w.resetCh <- done
-	cancel()
-
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("Run did not drain pending resetCh on ctx.Done; caller would hang")
 	}
 }
