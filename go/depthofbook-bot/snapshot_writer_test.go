@@ -5,6 +5,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	dto "github.com/prometheus/client_model/go"
 )
 
 type captureWriter struct {
@@ -74,5 +76,123 @@ func TestSnapshotWriter_RunFlushesAndClears(t *testing.T) {
 	w.mu.Unlock()
 	if count != 0 {
 		t.Errorf("expected dirty cleared after flush, got %d", count)
+	}
+}
+
+func TestSnapshotWriter_ResetClearsDirtyAndBumpsGeneration(t *testing.T) {
+	metrics := stubMetrics()
+	inst := NewInstrument(1, "X", -2, -8)
+	inst.Status = StatusReady
+	w := NewSnapshotWriter(nil, 5, 100, metrics, 0, func(id uint32, fn func(*Instrument)) { fn(inst) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go w.Run(ctx)
+
+	w.MarkDirty(1)
+	w.mu.Lock()
+	if len(w.dirty) != 1 {
+		w.mu.Unlock()
+		t.Fatalf("expected 1 dirty entry, got %d", len(w.dirty))
+	}
+	gen0 := w.generation
+	w.mu.Unlock()
+
+	w.Reset(ctx) // must block until the writer goroutine handled it
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if len(w.dirty) != 0 {
+		t.Errorf("dirty not cleared after Reset: %d", len(w.dirty))
+	}
+	if w.generation != gen0+1 {
+		t.Errorf("generation not bumped: got %d want %d", w.generation, gen0+1)
+	}
+}
+
+// Exercises the flushDue generation re-check directly: a batch is extracted,
+// then a Reset (generation bump) lands mid-batch; every remaining write must
+// be abandoned. This is the deterministic guard the design relies on for the
+// "reset vs in-flight flush" hazard.
+func TestSnapshotWriter_FlushAbortsRemainderOnGenerationBump(t *testing.T) {
+	metrics := stubMetrics()
+	insts := map[uint32]*Instrument{}
+	for id := uint32(1); id <= 3; id++ {
+		in := NewInstrument(id, "X", -2, -8)
+		in.Status = StatusReady
+		insts[id] = in
+	}
+	var w *SnapshotWriter
+	bumped := false
+	w = NewSnapshotWriter(nil, 5, 100, metrics, 0, func(id uint32, fn func(*Instrument)) {
+		// Simulate a Reset landing after this flush batch was extracted:
+		// bump generation while resolving the first instrument of the batch.
+		if !bumped {
+			bumped = true
+			w.mu.Lock()
+			w.generation++
+			w.mu.Unlock()
+		}
+		fn(insts[id])
+	})
+	w.MarkDirty(1)
+	w.MarkDirty(2)
+	w.MarkDirty(3)
+	w.flushDue() // synchronous; not via the Run goroutine
+
+	var mm dto.Metric
+	if err := metrics.SnapshotWritesTotal.Write(&mm); err != nil {
+		t.Fatalf("counter write: %v", err)
+	}
+	// The re-check runs at the top of each due entry. The first entry's
+	// re-check passes (bump happens during its withInstrument), so it writes;
+	// every subsequent entry sees the bumped generation and aborts. Exactly 1.
+	if got := mm.GetCounter().GetValue(); got != 1 {
+		t.Fatalf("expected exactly 1 write before generation re-check aborted the batch, got %v", got)
+	}
+}
+
+// Closes the shutdown-during-reset hazard: if SnapshotWriter.Run has already
+// returned via ctx.Done, a subsequent Reset must not hang — its own ctx
+// must let it escape.
+//
+// We do NOT have a separate test for Run's ctx.Done drain branch (defense-in-
+// depth in snapshot_writer.go): it covers only the cross-ctx-hierarchy case
+// (Reset's ctx broader than Run's), which production never produces, so any
+// test exercising it would also exercise the redundant-with-this-test ctx
+// escape and the drain branch only nondeterministically due to select
+// randomness. The drain branch is documented in the implementation as belt-
+// and-suspenders for that case.
+func TestSnapshotWriter_ResetReturnsAfterRunExits(t *testing.T) {
+	metrics := stubMetrics()
+	inst := NewInstrument(1, "X", -2, -8)
+	inst.Status = StatusReady
+	w := NewSnapshotWriter(nil, 5, 100, metrics, 0, func(id uint32, fn func(*Instrument)) { fn(inst) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runDone := make(chan struct{})
+	go func() { w.Run(ctx); close(runDone) }()
+
+	cancel()
+	select {
+	case <-runDone:
+	case <-time.After(time.Second):
+		t.Fatal("Run did not return on ctx.Done")
+	}
+
+	// Reset is called AFTER Run has exited. Pre-fix (unbuffered resetCh +
+	// non-ctx-aware Reset), this would hang forever; with the fix Reset's own
+	// ctx lets it escape.
+	rctx, rcancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer rcancel()
+	resetDone := make(chan struct{})
+	go func() {
+		w.Reset(rctx)
+		close(resetDone)
+	}()
+	select {
+	case <-resetDone:
+	case <-time.After(time.Second):
+		t.Fatal("Reset hung after Run exited; ctx cancel should have unblocked it")
 	}
 }

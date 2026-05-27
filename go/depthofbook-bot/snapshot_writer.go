@@ -19,6 +19,8 @@ type SnapshotWriter struct {
 	dirty          map[uint32]*dirtyEntry
 	withInstrument func(uint32, func(*Instrument)) // runs fn under the channel lock with the current instrument (or nil)
 	channel        uint8
+	generation     uint64 // guarded by mu; bumped on Reset to invalidate in-flight flush batches
+	resetCh        chan chan struct{}
 }
 
 type dirtyEntry struct {
@@ -38,6 +40,7 @@ func NewSnapshotWriter(ch *ClickhouseClient, depth int, coalesceMS int, metrics 
 		dirty:            map[uint32]*dirtyEntry{},
 		channel:          channelID,
 		withInstrument:   withInstrument,
+		resetCh:          make(chan chan struct{}, 1),
 	}
 }
 
@@ -60,6 +63,34 @@ func (w *SnapshotWriter) MarkDirty(instrumentID uint32) {
 	}
 }
 
+// Reset clears pending dirty state and invalidates any in-flight flush batch.
+// It is serialized onto the writer goroutine (via resetCh) and blocks until that
+// goroutine has applied the reset, so the caller can rely on no concurrent flush.
+//
+// Reset is ctx-aware so a shutdown in flight (Run already returned via
+// ctx.Done) cannot wedge the caller. If ctx is cancelled before Run sees the
+// request, Reset returns without applying it — which is safe because the
+// writer is also shutting down.
+func (w *SnapshotWriter) Reset(ctx context.Context) {
+	done := make(chan struct{})
+	select {
+	case w.resetCh <- done:
+	case <-ctx.Done():
+		return
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+}
+
+func (w *SnapshotWriter) doReset() {
+	w.mu.Lock()
+	w.dirty = map[uint32]*dirtyEntry{}
+	w.generation++
+	w.mu.Unlock()
+}
+
 // Run is the writer's tick loop. Returns when ctx is cancelled.
 func (w *SnapshotWriter) Run(ctx context.Context) {
 	tick := time.NewTicker(w.tickInterval)
@@ -67,7 +98,22 @@ func (w *SnapshotWriter) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			// Defense-in-depth: drain any pending Reset() caller so their
+			// <-done escape is not solely dependent on their own ctx. In
+			// production all SnapshotWriter callers (shards) pass the same
+			// ctx as Run, so Reset's own ctx.Done fires alongside Run's and
+			// this drain is redundant; we keep it so a future caller with a
+			// broader ctx than Run's still cannot wedge. resetCh is buffered
+			// (cap 1), so a non-blocking peek suffices.
+			select {
+			case done := <-w.resetCh:
+				close(done)
+			default:
+			}
 			return
+		case done := <-w.resetCh:
+			w.doReset()
+			close(done)
 		case <-tick.C:
 			w.flushDue()
 		}
@@ -77,6 +123,7 @@ func (w *SnapshotWriter) Run(ctx context.Context) {
 func (w *SnapshotWriter) flushDue() {
 	w.mu.Lock()
 	now := time.Now()
+	gen := w.generation
 	due := []*dirtyEntry{}
 	for id, e := range w.dirty {
 		if !e.nextAllowedAt.After(now) {
@@ -87,6 +134,12 @@ func (w *SnapshotWriter) flushDue() {
 	w.mu.Unlock()
 
 	for _, e := range due {
+		w.mu.Lock()
+		stale := w.generation != gen
+		w.mu.Unlock()
+		if stale {
+			return // a Reset happened after this batch was extracted; abandon it
+		}
 		var (
 			snap    LevelSnapshot
 			instID  uint32
@@ -108,7 +161,7 @@ func (w *SnapshotWriter) flushDue() {
 			continue
 		}
 		w.write(snap, instID, symbol, lastSeq, now)
-		_ = e.coalescedCount // metric already incremented per coalesce
+		_ = e.coalescedCount
 		if w.metrics != nil {
 			w.metrics.SnapshotWritesTotal.Inc()
 			w.metrics.SnapshotLagMs.Observe(float64(now.Sub(e.dirtiedAt).Milliseconds()))

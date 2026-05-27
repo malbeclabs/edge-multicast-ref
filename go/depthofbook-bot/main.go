@@ -7,7 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"sync"
+	"runtime"
 	"syscall"
 	"time"
 )
@@ -22,6 +22,7 @@ func main() {
 		symbolFilter  = flag.String("symbol", "", "comma-separated symbol filter (empty = all)")
 		depth         = flag.Int("depth", 20, "snapshot depth (levels per side)")
 		coalesceMS    = flag.Int("coalesce-ms", 50, "snapshot coalesce window in milliseconds")
+		shards        = flag.Int("shards", 0, "number of instrument shards (0 = auto from GOMAXPROCS)")
 		metricsAddr   = flag.String("metrics-addr", "127.0.0.1:9092", "Prometheus /metrics HTTP listen address")
 		clickhouseURL = flag.String("clickhouse-url", "", "ClickHouse HTTP endpoint (empty disables persistence)")
 		clickhouseDB  = flag.String("clickhouse-database", "depthofbook", "ClickHouse database")
@@ -69,120 +70,37 @@ func main() {
 		}
 	}
 
-	// Channel state per channel_id (created lazily on first record).
-	var (
-		chMu        sync.Mutex
-		channels    = map[uint8]*ChannelState{}
-		snapWriters = map[uint8]*SnapshotWriter{}
-	)
-	getOrCreateChannel := func(id uint8) (*ChannelState, *SnapshotWriter) {
-		chMu.Lock()
-		defer chMu.Unlock()
-		if c, ok := channels[id]; ok {
-			return c, snapWriters[id]
-		}
-		c := NewChannelState(id)
-		channels[id] = c
-		sw := NewSnapshotWriter(ch, *depth, *coalesceMS, metrics, id, func(instID uint32, fn func(*Instrument)) {
-			chMu.Lock()
-			cs, ok := channels[id]
-			chMu.Unlock()
-			if !ok {
-				fn(nil)
-				return
-			}
-			cs.Mu.Lock()
-			defer cs.Mu.Unlock()
-			fn(cs.Instruments[instID])
-		})
-		snapWriters[id] = sw
-		go sw.Run(ctx)
-		return c, sw
-	}
-
 	eventsWriter := NewEventsWriter(ch)
 
-	// Per-channel snapshot-in-flight context, keyed by channel_id.
-	// Populated on snapshot_begin, consulted on snapshot_order, cleared on snapshot_end.
-	snapCtxMu := sync.Mutex{}
-	snapCtx := map[uint8]SnapshotContext{}
-
-	dispatcher := DispatcherFunc(func(rec Record) {
-		c, sw := getOrCreateChannel(rec.ChannelID)
-		c.Mu.Lock()
-		defer c.Mu.Unlock()
-		evs := c.Apply(rec)
-
-		// Snapshot frame routing is unconditional per-record.
-		// snapshot_begin and snapshot_order produce no ChannelEvents, so they
-		// must be handled before the events loop.
-		switch rec.Type {
-		case "snapshot_begin":
-			// Resolve exponents from refdata if available.
-			var priceExp, qtyExp int8
-			symbol := ""
-			if def, ok := c.Refdata[rec.InstrumentID]; ok {
-				symbol = def.Symbol
-				priceExp = def.PriceExponent
-				qtyExp = def.QtyExponent
-			}
-			snapCtxMu.Lock()
-			snapCtx[c.ChannelID] = SnapshotContext{
-				InstrumentID:      rec.InstrumentID,
-				Symbol:            symbol,
-				SnapshotID:        getUint32(rec.Fields, "snapshot_id"),
-				AnchorSeq:         getUint64(rec.Fields, "anchor_seq"),
-				TotalOrders:       getUint32(rec.Fields, "total_orders"),
-				LastInstrumentSeq: getUint32(rec.Fields, "last_instrument_seq"),
-				PriceExponent:     priceExp,
-				QtyExponent:       qtyExp,
-			}
-			snapCtxMu.Unlock()
-		case "snapshot_order":
-			snapCtxMu.Lock()
-			sctx, ok := snapCtx[c.ChannelID]
-			snapCtxMu.Unlock()
-			if ok {
-				eventsWriter.WriteSnapshotOrder(rec, c.ChannelID, sctx)
-			}
+	n := *shards
+	if n <= 0 {
+		n = runtime.GOMAXPROCS(0) - 2
+		if n < 1 {
+			n = 1
 		}
-
-		for _, ev := range evs {
-			// Resolve symbol + exponents from refdata.
-			symbol := ""
-			var priceExp, qtyExp int8
-			if def, ok := c.Refdata[ev.InstrumentID]; ok {
-				symbol = def.Symbol
-				priceExp = def.PriceExponent
-				qtyExp = def.QtyExponent
-			}
-
-			switch rec.Type {
-			case "snapshot_end":
-				snapCtxMu.Lock()
-				delete(snapCtx, c.ChannelID)
-				snapCtxMu.Unlock()
-				eventsWriter.Write(ev, c.ChannelID, symbol, priceExp, qtyExp)
-			default:
-				eventsWriter.Write(ev, c.ChannelID, symbol, priceExp, qtyExp)
-			}
-
-			// Mark dirty for snapshot writer if book changed.
-			switch ev.Kind {
-			case "applied_delta", "applied_snapshot":
-				if ev.InstrumentID != 0 {
-					sw.MarkDirty(ev.InstrumentID)
-				}
-			case "instrument_reset":
-				metrics.InstrumentResetsTotal.WithLabelValues(getString(ev.Record.Fields, "reason")).Inc()
-				sw.MarkDirty(ev.InstrumentID)
-			case "channel_reset":
-				metrics.ChannelResetsTotal.Inc()
-			case "per_instrument_gap":
-				metrics.PerInstrumentGapsTotal.Inc()
-			}
+		if n > 8 {
+			n = 8
 		}
-	})
+	}
+
+	shardList := make([]*Shard, n)
+	for i := 0; i < n; i++ {
+		s := NewShard(i, n, eventsWriter, nil, metrics)
+		sw := NewSnapshotWriter(ch, *depth, *coalesceMS, metrics, 0, func(s *Shard) func(uint32, func(*Instrument)) {
+			return func(instID uint32, fn func(*Instrument)) {
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				fn(s.instruments[instKey{0, instID}])
+			}
+		}(s))
+		s.sw = sw
+		shardList[i] = s
+		go sw.Run(ctx)
+		go s.Run(ctx)
+	}
+
+	coordinator := NewCoordinator(ctx, shardList, eventsWriter, metrics)
+	log.Printf("depthofbook-bot %s sharding: shards=%d", version, n)
 
 	// Spawn ClickHouse runner.
 	if ch != nil {
@@ -198,14 +116,9 @@ func main() {
 		cancel()
 	}()
 
-	bot := NewBot(*socketPath, dispatcher, metrics)
+	bot := NewBot(*socketPath, coordinator, metrics)
 	log.Printf("depthofbook-bot %s started: socket=%s clickhouse=%v depth=%d coalesce=%dms",
 		version, *socketPath, *clickhouseURL != "", *depth, *coalesceMS)
 	bot.Run(ctx)
 	log.Println("shutdown complete")
 }
-
-// DispatcherFunc adapts a func(Record) to the Dispatcher interface.
-type DispatcherFunc func(Record)
-
-func (f DispatcherFunc) Dispatch(rec Record) { f(rec) }
