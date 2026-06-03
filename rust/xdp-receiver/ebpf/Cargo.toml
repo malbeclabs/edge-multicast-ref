@@ -2,6 +2,9 @@
 name = "xdp-filter"
 version = "0.1.0"
 edition = "2021"
+authors = ["Malbec Labs <dev@malbeclabs.com>"]
+license = "Apache-2.0"
+repository = "https://github.com/malbeclabs/edge-multicast-ref"
 
 [[bin]]
 name = "xdp-filter"
