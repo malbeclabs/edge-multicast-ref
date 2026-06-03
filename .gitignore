@@ -11,6 +11,9 @@ target/
 *.swp
 *.swo
 
+# Agent tooling
+.claude/
+
 # OS
 .DS_Store
 Thumbs.db
