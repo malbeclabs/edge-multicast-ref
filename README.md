@@ -66,3 +66,9 @@ $ ip a s doublezero1
     link/gre 64.130.37.175 peer 4.42.212.122
     inet 169.254.10.233/31 scope link doublezero1
 ```
+
+## License
+
+Licensed under the **Apache License 2.0**.
+
+See [LICENSE](./LICENSE) for details.
