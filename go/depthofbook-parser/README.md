@@ -1,5 +1,5 @@
-# DZ Depth-of-Book Parser
+# DZ Market-by-Order Parser
 
-A standalone multicast subscriber that decodes DoubleZero Depth-of-Book (DZ-DOB v0.1.0) wire-format frames and writes decoded market data records to a file or Unix socket.
+A standalone multicast subscriber that decodes DoubleZero Market-by-Order (DZ-MBO v0.1.0) wire-format frames and writes decoded market data records to a file or Unix socket.
 
 Sibling to [topofbook-parser](../topofbook-parser/). Documentation will land as the implementation completes.
