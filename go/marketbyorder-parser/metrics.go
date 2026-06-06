@@ -11,7 +11,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-const metricsNamespace = "dz_dob_parser"
+const metricsNamespace = "dz_mbo_parser"
 
 type Metrics struct {
 	registry *prometheus.Registry

@@ -11,7 +11,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-const metricsNamespace = "dz_dob_bot"
+const metricsNamespace = "dz_mbo_bot"
 
 // Metrics is the bot's full Prometheus metric set. Replaces the stub in bot.go.
 type Metrics struct {
