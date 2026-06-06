@@ -43,9 +43,9 @@ type metrics struct {
 	bufferDrops        prometheus.Counter
 	instrumentsTracked prometheus.Gauge
 
-	// Wire latency (publisher send_ts → parser recv).
-	// Caveat: includes clock skew between publisher and subscriber hosts.
-	wireLatency *prometheus.HistogramVec
+	// Latency metrics (kernel recv time as reference).
+	sourceLatency *prometheus.HistogramVec
+	sendLatency   *prometheus.HistogramVec
 
 	// Socket sink
 	socketClients     prometheus.Gauge
@@ -110,9 +110,15 @@ func newMetrics() *metrics {
 		Help: "Distinct instruments the parser has learned definitions for.",
 	})
 
-	m.wireLatency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Name:    "dz_subscriber_wire_latency_seconds",
-		Help:    "Time from publisher send_ts to parser receive, by record type. Includes clock skew between hosts and (for buffered records) refdata cold-start delay.",
+	m.sourceLatency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "dz_subscriber_source_latency_seconds",
+		Help:    "Latency from block/venue source timestamp to kernel receive, by record type (crosses validator and local clocks).",
+		Buckets: latencyBuckets,
+	}, []string{"type"})
+
+	m.sendLatency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "dz_subscriber_send_latency_seconds",
+		Help:    "Latency from publisher egress send timestamp to kernel receive, by record type.",
 		Buckets: latencyBuckets,
 	}, []string{"type"})
 
@@ -147,7 +153,7 @@ func newMetrics() *metrics {
 		m.ingressPackets, m.ingressBytes, m.parseErrors, m.frameHeaderErrors,
 		m.records, m.sinkWriteErrors,
 		m.buffered, m.bufferDrops, m.instrumentsTracked,
-		m.wireLatency,
+		m.sourceLatency, m.sendLatency,
 		m.socketClients, m.socketClientDrops, m.socketRecordsSent,
 		m.buildInfo, m.uptime,
 	)
