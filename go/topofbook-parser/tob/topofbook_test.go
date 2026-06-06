@@ -365,6 +365,15 @@ func TestTopOfBookParser_QuoteBuffering(t *testing.T) {
 	if records[1].Fields["send_timestamp_ns"] != ts {
 		t.Errorf("expected flushed quote send_timestamp_ns %d, got %v", ts, records[1].Fields["send_timestamp_ns"])
 	}
+	// Flushed buffered records must carry the top-level source/send ns fields the
+	// bot reads for latency (regression: the flush path once left these zero,
+	// producing 1970-epoch publisher_send_ts in ClickHouse).
+	if records[1].SendTSNS != ts {
+		t.Errorf("expected flushed quote SendTSNS %d, got %d", ts, records[1].SendTSNS)
+	}
+	if records[1].SourceTSNS != srcTS {
+		t.Errorf("expected flushed quote SourceTSNS %d, got %d", srcTS, records[1].SourceTSNS)
+	}
 	if p.Buffered() != 0 {
 		t.Errorf("expected 0 buffered after flush, got %d", p.Buffered())
 	}

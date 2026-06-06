@@ -506,6 +506,8 @@ func (p *TopOfBookParser) processBufferedMessage(bm bufferedMsg) ([]Record, erro
 		return applyMeta([]Record{{
 			Type:           "quote",
 			Timestamp:      nsToTime(body.SourceTimestamp),
+			SourceTSNS:     body.SourceTimestamp,
+			SendTSNS:       bm.sendTS,
 			ChannelID:      bm.channelID,
 			SequenceNumber: bm.seq,
 			ResetCount:     bm.reset,
@@ -550,6 +552,8 @@ func (p *TopOfBookParser) processBufferedMessage(bm bufferedMsg) ([]Record, erro
 		return applyMeta([]Record{{
 			Type:           "trade",
 			Timestamp:      nsToTime(body.SourceTimestamp),
+			SourceTSNS:     body.SourceTimestamp,
+			SendTSNS:       bm.sendTS,
 			ChannelID:      bm.channelID,
 			SequenceNumber: bm.seq,
 			ResetCount:     bm.reset,

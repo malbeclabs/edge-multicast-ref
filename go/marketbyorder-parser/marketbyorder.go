@@ -205,7 +205,8 @@ func (p *marketByOrderParser) decodeMessage(port string, hdr FrameHeader, mh Mes
 			return Record{}, false, err
 		}
 		base.Type = "batch_boundary"
-		base.SourceTSNS = tsNS(b.BatchTime)
+		// batch_boundary is a framing/control message; BatchTime is a batch
+		// counter, not a block/venue timestamp, so it gets no source_ts.
 		base.Fields = map[string]any{
 			"batch_id": b.BatchID,
 			"batch_ts": b.BatchTime,

@@ -446,6 +446,41 @@ func buildOrderAddFrameWithTS(t *testing.T) (frame []byte, enterNS, sendNS uint6
 	return frame, enterNS, sendNS
 }
 
+// TestParseFrame_BatchBoundaryHasNoSourceTS guards against treating a
+// batch_boundary's BatchTime as a block/venue timestamp. BatchTime is a batch
+// counter, not wall-clock, so the record must carry SourceTSNS == 0 (which the
+// bot maps to a NULL source_ts and excludes from source latency).
+func TestParseFrame_BatchBoundaryHasNoSourceTS(t *testing.T) {
+	sendTS := time.Unix(1700000020, 111111111)
+	body := make([]byte, 12)
+	binary.LittleEndian.PutUint32(body[0:4], 7000)            // BatchID
+	binary.LittleEndian.PutUint64(body[4:12], 1025401179)     // BatchTime (counter, not epoch ns)
+
+	msgLen := uint8(messageHeaderSize + 12)
+	frameLen := frameHeaderSize + int(msgLen)
+	hdr := buildFrameHeader(mboMagic, mboSchemaVersion, 1, 200, sendTS, 1, 0, uint16(frameLen))
+	mh := make([]byte, messageHeaderSize)
+	mh[0] = msgTypeBatchBoundary
+	mh[1] = msgLen
+	frame := append(hdr, mh...)
+	frame = append(frame, body...)
+
+	p := &marketByOrderParser{}
+	recs, err := p.ParseFrame("mktdata", frame)
+	if err != nil {
+		t.Fatalf("ParseFrame: %v", err)
+	}
+	if len(recs) != 1 || recs[0].Type != "batch_boundary" {
+		t.Fatalf("got %d records, want 1 batch_boundary", len(recs))
+	}
+	if recs[0].SourceTSNS != 0 {
+		t.Errorf("batch_boundary SourceTSNS = %d, want 0", recs[0].SourceTSNS)
+	}
+	if recs[0].SendTSNS != uint64(sendTS.UnixNano()) {
+		t.Errorf("batch_boundary SendTSNS = %d, want %d", recs[0].SendTSNS, uint64(sendTS.UnixNano()))
+	}
+}
+
 func TestParseFrame_OrderAddEmitsSourceAndSendTS(t *testing.T) {
 	frame, enterNS, sendNS := buildOrderAddFrameWithTS(t)
 	p := &marketByOrderParser{}
