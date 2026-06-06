@@ -23,13 +23,13 @@ func buildFrameHeader(magic uint16, schema, channel uint8, seq uint64, ts time.T
 
 func TestParseFrameHeader_Valid(t *testing.T) {
 	ts := time.Unix(1700000000, 123456789)
-	buf := buildFrameHeader(dobMagic, dobSchemaVersion, 7, 42, ts, 3, 1, frameHeaderSize)
+	buf := buildFrameHeader(mboMagic, mboSchemaVersion, 7, 42, ts, 3, 1, frameHeaderSize)
 	h, err := ParseFrameHeader(buf)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
-	if h.Magic != dobMagic {
-		t.Errorf("magic: got %x want %x", h.Magic, dobMagic)
+	if h.Magic != mboMagic {
+		t.Errorf("magic: got %x want %x", h.Magic, mboMagic)
 	}
 	if h.ChannelID != 7 {
 		t.Errorf("channel: got %d", h.ChannelID)
@@ -46,7 +46,7 @@ func TestParseFrameHeader_Valid(t *testing.T) {
 }
 
 func TestParseFrameHeader_BadMagic(t *testing.T) {
-	buf := buildFrameHeader(0xDEAD, dobSchemaVersion, 0, 0, time.Now(), 0, 0, frameHeaderSize)
+	buf := buildFrameHeader(0xDEAD, mboSchemaVersion, 0, 0, time.Now(), 0, 0, frameHeaderSize)
 	_, err := ParseFrameHeader(buf)
 	if !errors.Is(err, errBadMagic) {
 		t.Fatalf("expected errBadMagic, got %v", err)
@@ -54,7 +54,7 @@ func TestParseFrameHeader_BadMagic(t *testing.T) {
 }
 
 func TestParseFrameHeader_WrongVersion(t *testing.T) {
-	buf := buildFrameHeader(dobMagic, 99, 0, 0, time.Now(), 0, 0, frameHeaderSize)
+	buf := buildFrameHeader(mboMagic, 99, 0, 0, time.Now(), 0, 0, frameHeaderSize)
 	_, err := ParseFrameHeader(buf)
 	if !errors.Is(err, errSchemaVersion) {
 		t.Fatalf("expected errSchemaVersion, got %v", err)
@@ -62,7 +62,7 @@ func TestParseFrameHeader_WrongVersion(t *testing.T) {
 }
 
 func TestParseFrameHeader_LengthMismatch(t *testing.T) {
-	buf := buildFrameHeader(dobMagic, dobSchemaVersion, 0, 0, time.Now(), 0, 0, 999)
+	buf := buildFrameHeader(mboMagic, mboSchemaVersion, 0, 0, time.Now(), 0, 0, 999)
 	_, err := ParseFrameHeader(buf)
 	if !errors.Is(err, errFrameLength) {
 		t.Fatalf("expected errFrameLength, got %v", err)
@@ -358,7 +358,7 @@ func TestParseSnapshotEnd(t *testing.T) {
 func buildSingleMessageFrame(t *testing.T, msgType uint8, msgLength uint8, msgBody []byte) []byte {
 	t.Helper()
 	frameLen := frameHeaderSize + messageHeaderSize + len(msgBody)
-	buf := buildFrameHeader(dobMagic, dobSchemaVersion, 1, 100, time.Unix(1700000020, 0), 1, 0, uint16(frameLen))
+	buf := buildFrameHeader(mboMagic, mboSchemaVersion, 1, 100, time.Unix(1700000020, 0), 1, 0, uint16(frameLen))
 	mh := make([]byte, messageHeaderSize)
 	mh[0] = msgType
 	mh[1] = msgLength

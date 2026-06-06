@@ -12,8 +12,8 @@ import (
 )
 
 const (
-	dobMagic           uint16 = 0x4444
-	dobSchemaVersion   uint8  = 1
+	mboMagic           uint16 = 0x4444
+	mboSchemaVersion   uint8  = 1
 	frameHeaderSize           = 24
 	messageHeaderSize         = 4
 	maxFrameSize              = 1232
@@ -84,10 +84,10 @@ func ParseFrameHeader(buf []byte) (FrameHeader, error) {
 		ResetCount:    buf[21],
 		FrameLength:   binary.LittleEndian.Uint16(buf[22:24]),
 	}
-	if h.Magic != dobMagic {
+	if h.Magic != mboMagic {
 		return h, errBadMagic
 	}
-	if h.SchemaVersion != dobSchemaVersion {
+	if h.SchemaVersion != mboSchemaVersion {
 		return h, errSchemaVersion
 	}
 	tsNs := binary.LittleEndian.Uint64(buf[12:20])
