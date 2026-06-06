@@ -61,13 +61,13 @@ func NewMetrics(version, commit string) *Metrics {
 
 	m.SourceLatency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: metricsNamespace, Name: "source_latency_seconds",
-		Help:    "Latency from block/venue source timestamp to kernel receive, by port (crosses validator and local clocks)",
+		Help:    "Latency from block/venue source timestamp to kernel receive, by port (crosses validator and local clocks).",
 		Buckets: prometheus.ExponentialBuckets(0.0001, 2, 16),
 	}, []string{"port"})
 
 	m.SendLatency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: metricsNamespace, Name: "send_latency_seconds",
-		Help:    "Latency from publisher egress send timestamp to kernel receive, by port",
+		Help:    "Latency from publisher egress send timestamp to kernel receive, by port.",
 		Buckets: prometheus.ExponentialBuckets(0.0001, 2, 16),
 	}, []string{"port"})
 

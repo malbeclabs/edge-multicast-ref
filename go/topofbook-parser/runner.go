@@ -160,14 +160,18 @@ func (r *Runner) listenPort(ctx context.Context, port int, label string) error {
 					rec := &records[i]
 					r.cfg.Metrics.records.WithLabelValues(rec.Type).Inc()
 					if rec.SendTSNS != 0 {
-						if lat := recvTime.Sub(time.Unix(0, int64(rec.SendTSNS))).Seconds(); lat >= 0 {
-							r.cfg.Metrics.sendLatency.WithLabelValues(rec.Type).Observe(lat)
+						lat := recvTime.Sub(time.Unix(0, int64(rec.SendTSNS))).Seconds()
+						if lat < 0 {
+							lat = 0
 						}
+						r.cfg.Metrics.sendLatency.WithLabelValues(rec.Type).Observe(lat)
 					}
 					if rec.SourceTSNS != 0 {
-						if lat := recvTime.Sub(time.Unix(0, int64(rec.SourceTSNS))).Seconds(); lat >= 0 {
-							r.cfg.Metrics.sourceLatency.WithLabelValues(rec.Type).Observe(lat)
+						lat := recvTime.Sub(time.Unix(0, int64(rec.SourceTSNS))).Seconds()
+						if lat < 0 {
+							lat = 0
 						}
+						r.cfg.Metrics.sourceLatency.WithLabelValues(rec.Type).Observe(lat)
 					}
 				}
 			}
