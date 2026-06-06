@@ -1,4 +1,4 @@
-module depthofbook-bot
+module github.com/malbeclabs/edge-multicast-ref/go/marketbyorder-bot
 
 go 1.25.0
 

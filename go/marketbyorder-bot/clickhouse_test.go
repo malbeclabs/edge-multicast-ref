@@ -28,7 +28,7 @@ func TestClickhouseBatcher_FlushesOnSize(t *testing.T) {
 
 	metrics := NewMetrics("test", "test")
 	cfg := BatcherConfig{Table: "events", BatchSize: 5, BatchInterval: 1 * time.Hour, BufferSize: 100}
-	c, err := NewClickhouseClient(srv.URL, "depthofbook", []BatcherConfig{cfg}, metrics)
+	c, err := NewClickhouseClient(srv.URL, "marketbyorder", []BatcherConfig{cfg}, metrics)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestClickhouseBatcher_FlushesOnInterval(t *testing.T) {
 
 	metrics := NewMetrics("test", "test")
 	cfg := BatcherConfig{Table: "events", BatchSize: 1000, BatchInterval: 100 * time.Millisecond, BufferSize: 100}
-	c, _ := NewClickhouseClient(srv.URL, "depthofbook", []BatcherConfig{cfg}, metrics)
+	c, _ := NewClickhouseClient(srv.URL, "marketbyorder", []BatcherConfig{cfg}, metrics)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -88,7 +88,7 @@ func TestClickhouseBatcher_DropsOnBufferFull(t *testing.T) {
 
 	metrics := NewMetrics("test", "test")
 	cfg := BatcherConfig{Table: "events", BatchSize: 5, BatchInterval: 1 * time.Hour, BufferSize: 3}
-	c, _ := NewClickhouseClient(srv.URL, "depthofbook", []BatcherConfig{cfg}, metrics)
+	c, _ := NewClickhouseClient(srv.URL, "marketbyorder", []BatcherConfig{cfg}, metrics)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -25,7 +25,7 @@ func main() {
 		shards        = flag.Int("shards", 0, "number of instrument shards (0 = auto from GOMAXPROCS)")
 		metricsAddr   = flag.String("metrics-addr", "127.0.0.1:9092", "Prometheus /metrics HTTP listen address")
 		clickhouseURL = flag.String("clickhouse-url", "", "ClickHouse HTTP endpoint (empty disables persistence)")
-		clickhouseDB  = flag.String("clickhouse-database", "depthofbook", "ClickHouse database")
+		clickhouseDB  = flag.String("clickhouse-database", "marketbyorder", "ClickHouse database")
 		batchSize     = flag.Int("clickhouse-batch-size", 1000, "rows per batch flush")
 		batchInterval = flag.Duration("clickhouse-batch-interval", 200*time.Millisecond, "max time between batch flushes")
 		bufferSize    = flag.Int("clickhouse-buffer", 100000, "per-table channel capacity")
@@ -35,7 +35,7 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Printf("depthofbook-bot %s (%s)\n", version, commit)
+		fmt.Printf("marketbyorder-bot %s (%s)\n", version, commit)
 		os.Exit(0)
 	}
 	if *socketPath == "" {
@@ -100,7 +100,7 @@ func main() {
 	}
 
 	coordinator := NewCoordinator(ctx, shardList, eventsWriter, metrics)
-	log.Printf("depthofbook-bot %s sharding: shards=%d", version, n)
+	log.Printf("marketbyorder-bot %s sharding: shards=%d", version, n)
 
 	// Spawn ClickHouse runner.
 	if ch != nil {
@@ -117,7 +117,7 @@ func main() {
 	}()
 
 	bot := NewBot(*socketPath, coordinator, metrics)
-	log.Printf("depthofbook-bot %s started: socket=%s clickhouse=%v depth=%d coalesce=%dms",
+	log.Printf("marketbyorder-bot %s started: socket=%s clickhouse=%v depth=%d coalesce=%dms",
 		version, *socketPath, *clickhouseURL != "", *depth, *coalesceMS)
 	bot.Run(ctx)
 	log.Println("shutdown complete")
