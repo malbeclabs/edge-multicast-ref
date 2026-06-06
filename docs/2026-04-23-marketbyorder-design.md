@@ -1,32 +1,32 @@
-# DZ Depth-of-Book Demo Stack — Design Spec
+# DZ Market-by-Order Demo Stack — Design Spec
 
 **Date:** 2026-04-23
 **Status:** Draft
-**Scope:** New `depthofbook-parser` Go binary, new `depthofbook-bot` Go binary, schema additions to the existing `demo/` Docker stack, new Grafana dashboard, rename of `go/example-bot/` to `go/topofbook-bot/`.
+**Scope:** New `marketbyorder-parser` Go binary, new `marketbyorder-bot` Go binary, schema additions to the existing `demo/` Docker stack, new Grafana dashboard, rename of `go/example-bot/` to `go/topofbook-bot/`.
 
 ## Overview
 
-Sibling pipeline to the existing top-of-book demo, consuming the [DoubleZero Depth-of-Book Feed v0.1.0](https://github.com/malbeclabs/edge-feed-spec/blob/main/depth-of-book/spec.md) (DZ-DOB). End-to-end:
+Sibling pipeline to the existing top-of-book demo, consuming the [DoubleZero Market-by-Order Feed v0.1.0](https://github.com/malbeclabs/edge-feed-spec/blob/main/market-by-order/spec.md) (DZ-MBO). End-to-end:
 
 ```
 publisher (Hyperliquid)
-   ─── multicast UDP, 3 ports ──▶ depthofbook-parser
+   ─── multicast UDP, 3 ports ──▶ marketbyorder-parser
                                     (stateless wire decoder)
                                        │
                                        │ broadcast unix socket, JSONL
                                        │ one record per wire message
                                        ▼
-                                 depthofbook-bot
+                                 marketbyorder-bot
                                     (book builder + persistor)
                                        │ ClickHouse HTTP (batched JSONEachRow)
                                        ▼
                                   ClickHouse  ◀──native──  Grafana
-                                  database: depthofbook
+                                  database: marketbyorder
 ```
 
-Three new components: `go/depthofbook-parser/`, `go/depthofbook-bot/`, and additions to the existing `demo/` directory. Shares ClickHouse, Grafana, and `docker-compose.yml` with the TOB pipeline.
+Three new components: `go/marketbyorder-parser/`, `go/marketbyorder-bot/`, and additions to the existing `demo/` directory. Shares ClickHouse, Grafana, and `docker-compose.yml` with the TOB pipeline.
 
-**Real-world driver:** a Hyperliquid publisher is being built in parallel and will deliver MBO data over UDP multicast. The demo runs against any DZ-DOB-compliant publisher.
+**Real-world driver:** a Hyperliquid publisher is being built in parallel and will deliver MBO data over UDP multicast. The demo runs against any DZ-MBO-compliant publisher.
 
 **Non-goals for v1:**
 - Pcap input (the wire decoder will be cleanly separable from the multicast receiver so this is an easy follow-up)
@@ -41,8 +41,8 @@ Three new components: `go/depthofbook-parser/`, `go/depthofbook-bot/`, and addit
 
 | Component | Owns | Does NOT own |
 |---|---|---|
-| `depthofbook-parser` | Wire decoding, multicast join (3 ports), JSONL broadcast | Book state, refdata tracking, exponent application, symbol filtering |
-| `depthofbook-bot` | State machine, book maintenance, level aggregation, persistence | Wire decoding, Grafana queries |
+| `marketbyorder-parser` | Wire decoding, multicast join (3 ports), JSONL broadcast | Book state, refdata tracking, exponent application, symbol filtering |
+| `marketbyorder-bot` | State machine, book maintenance, level aggregation, persistence | Wire decoding, Grafana queries |
 | ClickHouse | Tick storage, retention, derived columns | Bot logic, dashboard queries |
 | Grafana | Visualization, templating | Data acquisition, alerting (out of scope) |
 
@@ -62,19 +62,19 @@ The split between parser and bot mirrors how production trading systems separate
    - Heartbeats and ManifestSummary → `channel_health` table
 6. Grafana queries ClickHouse via the native protocol; dashboards auto-provisioned.
 
-## `depthofbook-parser`
+## `marketbyorder-parser`
 
 Stateless wire decoder. No book state, no refdata cache, no symbol filtering. Emits raw integer prices and quantities — the bot scales them via `InstrumentDefinition` exponents. This keeps the parser truly stateless and makes the JSONL output ground-truth (no implicit conversions, no precision loss).
 
 ### File layout
 
 ```
-go/depthofbook-parser/
+go/marketbyorder-parser/
 ├── main.go              # CLI flags, signal handling, sink and parser wiring
 ├── runner.go            # Three goroutines: refdata + mktdata + snapshot UDP receivers
 ├── parser.go            # Parser interface, Record output type, registry
-├── depthofbook.go       # Parser impl: routes wire frames into Record stream
-├── depthofbook_wire.go  # Binary frame decoder for all DZ-DOB message types
+├── marketbyorder.go       # Parser impl: routes wire frames into Record stream
+├── marketbyorder_wire.go  # Binary frame decoder for all DZ-MBO message types
 ├── sink.go              # Reused interface: OutputSink { Write(records) error }
 ├── sink_socket.go       # Reused: broadcast Unix socket, drop-on-slow-consumer
 ├── sink_json.go         # Reused: JSONL file output (debugging only)
@@ -178,7 +178,7 @@ All prices and quantities are emitted as **raw signed/unsigned integers** in the
 
 `snapshot_end`: `anchor_seq`, `snapshot_id`
 
-### Prometheus metrics (prefix `dz_dob_parser_`)
+### Prometheus metrics (prefix `dz_mbo_parser_`)
 
 - `ingress_packets_total{port}`, `ingress_bytes_total{port}`
 - `parse_errors_total{port,reason}` — reasons: `bad_magic`, `schema_version`, `frame_length`, `truncated`, `other`
@@ -190,14 +190,14 @@ All prices and quantities are emitted as **raw signed/unsigned integers** in the
 - `sink_write_errors_total`
 - `build_info{version,commit}`, `uptime_seconds`
 
-## `depthofbook-bot`
+## `marketbyorder-bot`
 
 Stateful book builder and persistor. Reads JSONL from the parser socket, applies the spec's subscriber algorithm per channel, maintains in-memory order books, and writes both per-event rows and coalesced level-snapshot rows to ClickHouse.
 
 ### File layout
 
 ```
-go/depthofbook-bot/
+go/marketbyorder-bot/
 ├── main.go              # CLI flags, signal handling, wiring
 ├── bot.go               # Read parser socket, decode JSONL, dispatch to channel state
 ├── channel.go           # ChannelState struct + cold-start + steady-state algorithm
@@ -250,7 +250,7 @@ type RestingOrder struct {
 }
 ```
 
-The bot implements the [Subscriber Algorithm](https://github.com/malbeclabs/edge-feed-spec/blob/main/depth-of-book/spec.md#subscriber-algorithm) section of the spec verbatim:
+The bot implements the [Subscriber Algorithm](https://github.com/malbeclabs/edge-feed-spec/blob/main/market-by-order/spec.md#subscriber-algorithm) section of the spec verbatim:
 
 - **Cold start**: bind all three ports (parser does this; bot reads the merged stream), wait for refdata, buffer deltas, accept snapshot, replay buffered deltas with `mktdata_seq > anchor_seq`.
 - **Steady state**: dispatch each delta on `Per-Instrument Seq` continuity. Gap → mark instrument `gap`, buffer further deltas, await next snapshot.
@@ -274,14 +274,14 @@ This collapses bursts (e.g., a block batch with hundreds of events affecting one
 | `--coalesce-ms` | no | `50` | Snapshot coalesce window in milliseconds |
 | `--metrics-addr` | no | `127.0.0.1:9092` | Prometheus endpoint |
 | `--clickhouse-url` | no | empty | HTTP endpoint; empty disables persistence |
-| `--clickhouse-database` | no | `depthofbook` | |
+| `--clickhouse-database` | no | `marketbyorder` | |
 | `--clickhouse-batch-size` | no | `1000` | Rows per batch flush |
 | `--clickhouse-batch-interval` | no | `200ms` | Max time between flushes |
 | `--clickhouse-buffer` | no | `100000` | Per-table channel capacity |
 | `-v` | no | false | Debug logging |
 | `--version` | no | — | Print version and exit |
 
-### Prometheus metrics (prefix `dz_dob_bot_`)
+### Prometheus metrics (prefix `dz_mbo_bot_`)
 
 Process: `build_info{version,commit}`, `uptime_seconds`, `socket_connected`.
 
@@ -315,7 +315,7 @@ ClickHouse persistence:
 
 Per-symbol gauge cardinality is bounded by the symbol filter; with no filter, the bot emits a warning that high-cardinality symbols may overwhelm Prometheus.
 
-## ClickHouse schema (`depthofbook` database)
+## ClickHouse schema (`marketbyorder` database)
 
 Five tables. All `MergeTree` family, daily-partitioned, 30-day TTL.
 
@@ -471,11 +471,11 @@ TTL toDateTime(recv_ts) + INTERVAL 30 DAY;
 
 ## Grafana dashboard
 
-`demo/grafana/dashboards/depthofbook.json`. Auto-provisioned via the existing `demo/grafana/provisioning/dashboards/dashboards.yaml` (it already wildcards the directory). The ClickHouse datasource provisioned for TOB is reused; the `depthofbook` database is selected explicitly per-query.
+`demo/grafana/dashboards/marketbyorder.json`. Auto-provisioned via the existing `demo/grafana/provisioning/dashboards/dashboards.yaml` (it already wildcards the directory). The ClickHouse datasource provisioned for TOB is reused; the `marketbyorder` database is selected explicitly per-query.
 
 ### Template variables
 
-- `$symbol` — single-select, `SELECT DISTINCT symbol FROM depthofbook.level_snapshots WHERE $__timeFilter(recv_ts)`
+- `$symbol` — single-select, `SELECT DISTINCT symbol FROM marketbyorder.level_snapshots WHERE $__timeFilter(recv_ts)`
 - `$symbols` — multi-select, same source
 
 ### Panels
@@ -489,7 +489,7 @@ TTL toDateTime(recv_ts) + INTERVAL 30 DAY;
 | 5 | Trade tape — `$symbols` | Table | row 3, 12w × 9h | `events`, `kind='trade'` |
 | 6 | Add/Cancel/Execute rate — `$symbols` | Time Series (stacked area) | row 3, 12w × 9h | `events`, `kind IN (...)` per `$__timeInterval` |
 | 7 | Resting order count — `$symbol` | Time Series | row 4, 12w × 7h | `level_snapshots` order_count summed per side |
-| 8 | Channel health | Time Series + Stat | row 4, 12w × 5h | `channel_health` + Prometheus `dz_dob_bot_*` |
+| 8 | Channel health | Time Series + Stat | row 4, 12w × 5h | `channel_health` + Prometheus `dz_mbo_bot_*` |
 | 9 | Active instrument count | Stat | row 4, 4w × 5h | `channel_health`, latest `manifest_summary` |
 
 Specific Grafana JSON, color rules, and threshold values are detailed in the implementation plan. Panel 1's specific cell-bar render is a Grafana-version-dependent setting; if the table panel can't produce the Hyperliquid-style ladder cleanly, the implementer falls back to a Bar Chart panel with the same query.
@@ -501,59 +501,59 @@ The book ladder + heatmap pair is the centerpiece of the dashboard.
 Two new services added to `demo/docker-compose.yml`:
 
 ```yaml
-depthofbook-parser:
-  build: ../go/depthofbook-parser
+marketbyorder-parser:
+  build: ../go/marketbyorder-parser
   network_mode: host
   command:
-    - --group=${DZ_DOB_MULTICAST_GROUP}
-    - --refdata-port=${DZ_DOB_REFDATA_PORT}
-    - --mktdata-port=${DZ_DOB_MKTDATA_PORT}
-    - --snapshot-port=${DZ_DOB_SNAPSHOT_PORT}
+    - --group=${DZ_MBO_MULTICAST_GROUP}
+    - --refdata-port=${DZ_MBO_REFDATA_PORT}
+    - --mktdata-port=${DZ_MBO_MKTDATA_PORT}
+    - --snapshot-port=${DZ_MBO_SNAPSHOT_PORT}
     - --interface=${DZ_INTERFACE}
-    - --output=unix:///var/run/dz/dob.sock
+    - --output=unix:///var/run/dz/mbo.sock
     - --metrics-addr=127.0.0.1:9091
   volumes:
     - dz-sockets:/var/run/dz
 
-depthofbook-bot:
-  build: ../go/depthofbook-bot
-  depends_on: [depthofbook-parser, clickhouse]
+marketbyorder-bot:
+  build: ../go/marketbyorder-bot
+  depends_on: [marketbyorder-parser, clickhouse]
   command:
-    - --socket=/var/run/dz/dob.sock
-    - --symbol=${DZ_DOB_SYMBOLS}
-    - --depth=${DZ_DOB_DEPTH:-20}
-    - --coalesce-ms=${DZ_DOB_COALESCE_MS:-50}
+    - --socket=/var/run/dz/mbo.sock
+    - --symbol=${DZ_MBO_SYMBOLS}
+    - --depth=${DZ_MBO_DEPTH:-20}
+    - --coalesce-ms=${DZ_MBO_COALESCE_MS:-50}
     - --metrics-addr=0.0.0.0:9092
     - --clickhouse-url=http://clickhouse:8123
-    - --clickhouse-database=depthofbook
+    - --clickhouse-database=marketbyorder
   volumes:
     - dz-sockets:/var/run/dz
-  ports: ["${DOB_BOT_METRICS_PORT:-9092}:9092"]
+  ports: ["${MBO_BOT_METRICS_PORT:-9092}:9092"]
 ```
 
-New schema file `demo/clickhouse/init/02_schema_dob.sql` creates the five `depthofbook.*` tables alongside the existing `topofbook.*` ones (the existing `01_schema.sql` runs first; ClickHouse executes init files in lexical order).
+New schema file `demo/clickhouse/init/02_schema_mbo.sql` creates the five `marketbyorder.*` tables alongside the existing `topofbook.*` ones (the existing `01_schema.sql` runs first; ClickHouse executes init files in lexical order).
 
-New dashboard file `demo/grafana/dashboards/depthofbook.json`. The existing provisioning YAML picks it up automatically.
+New dashboard file `demo/grafana/dashboards/marketbyorder.json`. The existing provisioning YAML picks it up automatically.
 
 `demo/.env.example` additions:
 
 ```bash
 # Depth-of-book feed
-DZ_DOB_MULTICAST_GROUP=239.10.10.20
-DZ_DOB_REFDATA_PORT=7011
-DZ_DOB_MKTDATA_PORT=7012
-DZ_DOB_SNAPSHOT_PORT=7013
-DZ_DOB_SYMBOLS=
-DZ_DOB_DEPTH=20
-DZ_DOB_COALESCE_MS=50
-DOB_BOT_METRICS_PORT=9092
+DZ_MBO_MULTICAST_GROUP=239.10.10.20
+DZ_MBO_REFDATA_PORT=7011
+DZ_MBO_MKTDATA_PORT=7012
+DZ_MBO_SNAPSHOT_PORT=7013
+DZ_MBO_SYMBOLS=
+DZ_MBO_DEPTH=20
+DZ_MBO_COALESCE_MS=50
+MBO_BOT_METRICS_PORT=9092
 ```
 
 Existing `DZ_*` keys (TOB) remain unchanged.
 
 ## Rename: `go/example-bot/` → `go/topofbook-bot/`
 
-The existing `example-bot` is in practice TOB-specific (consumes TOB Records, has TOB-shaped metrics, writes to the `topofbook` ClickHouse database). With a sibling DOB bot landing, the generic name becomes confusing.
+The existing `example-bot` is in practice TOB-specific (consumes TOB Records, has TOB-shaped metrics, writes to the `topofbook` ClickHouse database). With a sibling MBO bot landing, the generic name becomes confusing.
 
 Steps:
 - `git mv go/example-bot go/topofbook-bot`
@@ -652,7 +652,7 @@ No automated integration test against a live publisher in v1 (the Hyperliquid pu
 
 ### `demo/.env` (new keys)
 
-`DZ_DOB_MULTICAST_GROUP`, `DZ_DOB_REFDATA_PORT`, `DZ_DOB_MKTDATA_PORT`, `DZ_DOB_SNAPSHOT_PORT`, `DZ_DOB_SYMBOLS`, `DZ_DOB_DEPTH`, `DZ_DOB_COALESCE_MS`, `DOB_BOT_METRICS_PORT`
+`DZ_MBO_MULTICAST_GROUP`, `DZ_MBO_REFDATA_PORT`, `DZ_MBO_MKTDATA_PORT`, `DZ_MBO_SNAPSHOT_PORT`, `DZ_MBO_SYMBOLS`, `DZ_MBO_DEPTH`, `DZ_MBO_COALESCE_MS`, `MBO_BOT_METRICS_PORT`
 
 ## Open items deferred to implementation
 
@@ -666,4 +666,4 @@ No automated integration test against a live publisher in v1 (the Hyperliquid pu
 - A dedicated reconciliation job that compares the bot's reconstructed book against an external reference snapshot
 - A standalone book viewer (CLI or web) that reads from the parser socket directly without ClickHouse
 - Multi-channel sharded publisher support beyond the single-channel-per-publisher case
-- Cross-feed dashboards correlating TOB, DOB, and (future) midpoint feeds for the same symbol
+- Cross-feed dashboards correlating TOB, MBO, and (future) midpoint feeds for the same symbol

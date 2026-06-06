@@ -1,14 +1,14 @@
-# DZ Depth-of-Book Demo Stack — Implementation Plan
+# DZ Market-by-Order Demo Stack — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a sibling DZ Depth-of-Book pipeline alongside the existing top-of-book demo: a stateless wire-decoding parser, a book-building bot that persists to ClickHouse, and Grafana dashboards.
+**Goal:** Build a sibling DZ Market-by-Order pipeline alongside the existing top-of-book demo: a stateless wire-decoding parser, a book-building bot that persists to ClickHouse, and Grafana dashboards.
 
-**Architecture:** `depthofbook-parser` joins three multicast UDP ports (refdata + mktdata + snapshot), decodes the binary DZ-DOB v0.1.0 wire format, and broadcasts JSONL records on a Unix socket (drop-on-slow-consumer). `depthofbook-bot` reads the socket, runs the spec's per-instrument state machine to maintain MBO order books, and writes per-event rows + coalesced top-N level snapshots + raw wire snapshots to ClickHouse. The existing `demo/` Docker stack is extended with the two new services and a new Grafana dashboard. The existing `go/example-bot/` is renamed to `go/topofbook-bot/` for clarity.
+**Architecture:** `marketbyorder-parser` joins three multicast UDP ports (refdata + mktdata + snapshot), decodes the binary DZ-MBO v0.1.0 wire format, and broadcasts JSONL records on a Unix socket (drop-on-slow-consumer). `marketbyorder-bot` reads the socket, runs the spec's per-instrument state machine to maintain MBO order books, and writes per-event rows + coalesced top-N level snapshots + raw wire snapshots to ClickHouse. The existing `demo/` Docker stack is extended with the two new services and a new Grafana dashboard. The existing `go/example-bot/` is renamed to `go/topofbook-bot/` for clarity.
 
 **Tech Stack:** Go 1.25, ClickHouse, Grafana, Docker Compose, Prometheus client_golang. Standard `encoding/binary` + `bufio` for wire decoding; `encoding/json` for the parser→bot socket; `net/http` for ClickHouse JSONEachRow inserts.
 
-**Spec:** [docs/2026-04-23-depthofbook-design.md](2026-04-23-depthofbook-design.md)
+**Spec:** [docs/2026-04-23-marketbyorder-design.md](2026-04-23-marketbyorder-design.md)
 
 **Reference implementations to mirror:**
 - Parser pattern: [go/topofbook-parser/](../go/topofbook-parser/) — every file in this dir is a structural template
@@ -23,54 +23,54 @@
 
 | File | Responsibility |
 |---|---|
-| `go/depthofbook-parser/go.mod` | Module manifest |
-| `go/depthofbook-parser/Dockerfile` | Container build |
-| `go/depthofbook-parser/README.md` | Usage |
-| `go/depthofbook-parser/main.go` | CLI flags, signal handling, wiring |
-| `go/depthofbook-parser/runner.go` | Three goroutines: refdata + mktdata + snapshot UDP receivers |
-| `go/depthofbook-parser/parser.go` | Parser interface + Record envelope + parser registry |
-| `go/depthofbook-parser/depthofbook.go` | TopOfBookParser-style impl: routes wire frames into Record stream |
-| `go/depthofbook-parser/depthofbook_wire.go` | Binary frame decoder for all 13 DZ-DOB message types |
-| `go/depthofbook-parser/sink.go` | OutputSink interface + factory |
-| `go/depthofbook-parser/sink_socket.go` | Broadcast Unix socket sink (copied from TOB) |
-| `go/depthofbook-parser/sink_json.go` | JSONL file sink (copied from TOB) |
-| `go/depthofbook-parser/metrics.go` | Prometheus metrics + /metrics HTTP server |
-| `go/depthofbook-parser/depthofbook_test.go` | Wire decoder tests + routing tests |
-| `go/depthofbook-parser/sink_socket_test.go` | Broadcast / drop / framing tests (copied from TOB) |
-| `go/depthofbook-parser/sink_json_test.go` | JSONL output tests (copied from TOB) |
-| `go/depthofbook-bot/go.mod` | Module manifest |
-| `go/depthofbook-bot/Dockerfile` | Container build |
-| `go/depthofbook-bot/README.md` | Usage |
-| `go/depthofbook-bot/main.go` | CLI flags, signal handling, wiring |
-| `go/depthofbook-bot/bot.go` | Read parser socket, decode JSONL, dispatch to channel state, reconnect loop |
-| `go/depthofbook-bot/record.go` | Wire-compatible Record type (mirrors parser's, kept independent) |
-| `go/depthofbook-bot/channel.go` | ChannelState struct + cold-start + steady-state algorithm + reset handling |
-| `go/depthofbook-bot/instrument.go` | Instrument struct + book ops (apply OrderAdd/Cancel/Execute) + snapshot reassembly |
-| `go/depthofbook-bot/levels.go` | Aggregate bid/ask order maps → top-N price levels + cumulative_qty |
-| `go/depthofbook-bot/clickhouse.go` | HTTP-based per-table batchers, JSONEachRow inserts |
-| `go/depthofbook-bot/events_writer.go` | Dispatch Records → events table rows |
-| `go/depthofbook-bot/snapshot_writer.go` | Coalesce-aware level-snapshot scheduler |
-| `go/depthofbook-bot/metrics.go` | Prometheus metrics + /metrics HTTP server |
-| `go/depthofbook-bot/bot_test.go` | Socket reader + reconnect tests |
-| `go/depthofbook-bot/instrument_test.go` | Book ops + snapshot reassembly tests |
-| `go/depthofbook-bot/channel_test.go` | State machine tests |
-| `go/depthofbook-bot/levels_test.go` | Level aggregation tests |
-| `go/depthofbook-bot/clickhouse_test.go` | Batcher tests against mock HTTP server |
-| `go/depthofbook-bot/snapshot_writer_test.go` | Coalesce tests |
-| `demo/clickhouse/init/02_schema_dob.sql` | Five `depthofbook.*` tables |
-| `demo/grafana/dashboards/depthofbook.json` | New Grafana dashboard |
+| `go/marketbyorder-parser/go.mod` | Module manifest |
+| `go/marketbyorder-parser/Dockerfile` | Container build |
+| `go/marketbyorder-parser/README.md` | Usage |
+| `go/marketbyorder-parser/main.go` | CLI flags, signal handling, wiring |
+| `go/marketbyorder-parser/runner.go` | Three goroutines: refdata + mktdata + snapshot UDP receivers |
+| `go/marketbyorder-parser/parser.go` | Parser interface + Record envelope + parser registry |
+| `go/marketbyorder-parser/marketbyorder.go` | TopOfBookParser-style impl: routes wire frames into Record stream |
+| `go/marketbyorder-parser/marketbyorder_wire.go` | Binary frame decoder for all 13 DZ-MBO message types |
+| `go/marketbyorder-parser/sink.go` | OutputSink interface + factory |
+| `go/marketbyorder-parser/sink_socket.go` | Broadcast Unix socket sink (copied from TOB) |
+| `go/marketbyorder-parser/sink_json.go` | JSONL file sink (copied from TOB) |
+| `go/marketbyorder-parser/metrics.go` | Prometheus metrics + /metrics HTTP server |
+| `go/marketbyorder-parser/marketbyorder_test.go` | Wire decoder tests + routing tests |
+| `go/marketbyorder-parser/sink_socket_test.go` | Broadcast / drop / framing tests (copied from TOB) |
+| `go/marketbyorder-parser/sink_json_test.go` | JSONL output tests (copied from TOB) |
+| `go/marketbyorder-bot/go.mod` | Module manifest |
+| `go/marketbyorder-bot/Dockerfile` | Container build |
+| `go/marketbyorder-bot/README.md` | Usage |
+| `go/marketbyorder-bot/main.go` | CLI flags, signal handling, wiring |
+| `go/marketbyorder-bot/bot.go` | Read parser socket, decode JSONL, dispatch to channel state, reconnect loop |
+| `go/marketbyorder-bot/record.go` | Wire-compatible Record type (mirrors parser's, kept independent) |
+| `go/marketbyorder-bot/channel.go` | ChannelState struct + cold-start + steady-state algorithm + reset handling |
+| `go/marketbyorder-bot/instrument.go` | Instrument struct + book ops (apply OrderAdd/Cancel/Execute) + snapshot reassembly |
+| `go/marketbyorder-bot/levels.go` | Aggregate bid/ask order maps → top-N price levels + cumulative_qty |
+| `go/marketbyorder-bot/clickhouse.go` | HTTP-based per-table batchers, JSONEachRow inserts |
+| `go/marketbyorder-bot/events_writer.go` | Dispatch Records → events table rows |
+| `go/marketbyorder-bot/snapshot_writer.go` | Coalesce-aware level-snapshot scheduler |
+| `go/marketbyorder-bot/metrics.go` | Prometheus metrics + /metrics HTTP server |
+| `go/marketbyorder-bot/bot_test.go` | Socket reader + reconnect tests |
+| `go/marketbyorder-bot/instrument_test.go` | Book ops + snapshot reassembly tests |
+| `go/marketbyorder-bot/channel_test.go` | State machine tests |
+| `go/marketbyorder-bot/levels_test.go` | Level aggregation tests |
+| `go/marketbyorder-bot/clickhouse_test.go` | Batcher tests against mock HTTP server |
+| `go/marketbyorder-bot/snapshot_writer_test.go` | Coalesce tests |
+| `demo/clickhouse/init/02_schema_mbo.sql` | Five `marketbyorder.*` tables |
+| `demo/grafana/dashboards/marketbyorder.json` | New Grafana dashboard |
 
 ### Modified files
 
 | File | Modification |
 |---|---|
-| `go/go.work` | Add `./depthofbook-parser`, `./depthofbook-bot`; rename `./example-bot` → `./topofbook-bot` |
+| `go/go.work` | Add `./marketbyorder-parser`, `./marketbyorder-bot`; rename `./example-bot` → `./topofbook-bot` |
 | `go/example-bot/` (whole dir) | Renamed to `go/topofbook-bot/` |
 | `go/topofbook-bot/go.mod` (post-rename) | Module path bumped to `topofbook-bot` |
 | `go/topofbook-bot/README.md` | Update title from "Example Bot" to "Top-of-Book Bot" |
-| `demo/docker-compose.yml` | Rename `example-bot` service → `topofbook-bot`; add `depthofbook-parser` and `depthofbook-bot` services |
-| `demo/.env.example` | Add `DZ_DOB_*` keys + `DOB_BOT_METRICS_PORT` |
-| `README.md` (top level) | Update implementation table to add depth-of-book row; rename example-bot reference |
+| `demo/docker-compose.yml` | Rename `example-bot` service → `topofbook-bot`; add `marketbyorder-parser` and `marketbyorder-bot` services |
+| `demo/.env.example` | Add `DZ_MBO_*` keys + `MBO_BOT_METRICS_PORT` |
+| `README.md` (top level) | Update implementation table to add market-by-order row; rename example-bot reference |
 
 ---
 
@@ -83,16 +83,16 @@
 - Modify: `go/go.work`
 - Modify: `demo/docker-compose.yml`
 - Modify: `README.md` (top level)
-- Create: `go/depthofbook-parser/go.mod`
-- Create: `go/depthofbook-parser/Dockerfile`
-- Create: `go/depthofbook-parser/README.md` (skeleton)
-- Create: `go/depthofbook-parser/main.go` (stub)
-- Create: `go/depthofbook-parser/.gitignore`
-- Create: `go/depthofbook-bot/go.mod`
-- Create: `go/depthofbook-bot/Dockerfile`
-- Create: `go/depthofbook-bot/README.md` (skeleton)
-- Create: `go/depthofbook-bot/main.go` (stub)
-- Create: `go/depthofbook-bot/.gitignore`
+- Create: `go/marketbyorder-parser/go.mod`
+- Create: `go/marketbyorder-parser/Dockerfile`
+- Create: `go/marketbyorder-parser/README.md` (skeleton)
+- Create: `go/marketbyorder-parser/main.go` (stub)
+- Create: `go/marketbyorder-parser/.gitignore`
+- Create: `go/marketbyorder-bot/go.mod`
+- Create: `go/marketbyorder-bot/Dockerfile`
+- Create: `go/marketbyorder-bot/README.md` (skeleton)
+- Create: `go/marketbyorder-bot/main.go` (stub)
+- Create: `go/marketbyorder-bot/.gitignore`
 
 This task gets all the boilerplate out of the way before any real logic lands. After this task, `go build ./...` from the workspace root succeeds, all existing TOB tests still pass, and the two new binaries produce a "starting..." line and exit cleanly.
 
@@ -144,8 +144,8 @@ Replace contents:
 go 1.25.0
 
 use (
-	./depthofbook-bot
-	./depthofbook-parser
+	./marketbyorder-bot
+	./marketbyorder-parser
 	./internal
 	./kernel-receiver
 	./topofbook-bot
@@ -174,11 +174,11 @@ topofbook-bot:
   ...
 ```
 
-Also update any `depends_on` references elsewhere in the file (search for `example-bot`). Do NOT add the two new DOB services in this task — that's Task 17.
+Also update any `depends_on` references elsewhere in the file (search for `example-bot`). Do NOT add the two new MBO services in this task — that's Task 17.
 
 - [ ] **Step 6: Update top-level README.md**
 
-In the implementations table or wherever `example-bot` is referenced, change references to `topofbook-bot`. Add a new row or section noting that depth-of-book pipeline is "in development" — exact wording at implementer's discretion. Top-level README is small; one re-read after editing should be enough.
+In the implementations table or wherever `example-bot` is referenced, change references to `topofbook-bot`. Add a new row or section noting that market-by-order pipeline is "in development" — exact wording at implementer's discretion. Top-level README is small; one re-read after editing should be enough.
 
 - [ ] **Step 7: Verify the rename builds and existing tests pass**
 
@@ -188,25 +188,25 @@ cd go/topofbook-bot && go build ./... && go test ./...
 
 Expected: clean build, all existing tests pass.
 
-- [ ] **Step 8: Create depthofbook-parser scaffold**
+- [ ] **Step 8: Create marketbyorder-parser scaffold**
 
-Create `go/depthofbook-parser/go.mod`:
+Create `go/marketbyorder-parser/go.mod`:
 
 ```
-module depthofbook-parser
+module marketbyorder-parser
 
 go 1.25.0
 ```
 
-Create `go/depthofbook-parser/.gitignore`:
+Create `go/marketbyorder-parser/.gitignore`:
 
 ```
-depthofbook-parser
+marketbyorder-parser
 *.test
 *.out
 ```
 
-Create `go/depthofbook-parser/main.go`:
+Create `go/marketbyorder-parser/main.go`:
 
 ```go
 package main
@@ -219,41 +219,41 @@ import (
 const version = "0.1.0-dev"
 
 func main() {
-	fmt.Fprintf(os.Stderr, "depthofbook-parser %s starting...\n", version)
+	fmt.Fprintf(os.Stderr, "marketbyorder-parser %s starting...\n", version)
 }
 ```
 
-Create `go/depthofbook-parser/Dockerfile` (copy verbatim from `go/topofbook-parser/Dockerfile` and replace any `topofbook-parser` references with `depthofbook-parser`).
+Create `go/marketbyorder-parser/Dockerfile` (copy verbatim from `go/topofbook-parser/Dockerfile` and replace any `topofbook-parser` references with `marketbyorder-parser`).
 
-Create `go/depthofbook-parser/README.md`:
+Create `go/marketbyorder-parser/README.md`:
 
 ```markdown
-# DZ Depth-of-Book Parser
+# DZ Market-by-Order Parser
 
-A standalone multicast subscriber that decodes DoubleZero Depth-of-Book (DZ-DOB v0.1.0) wire-format frames and writes decoded market data records to a file or Unix socket.
+A standalone multicast subscriber that decodes DoubleZero Market-by-Order (DZ-MBO v0.1.0) wire-format frames and writes decoded market data records to a file or Unix socket.
 
 Sibling to [topofbook-parser](../topofbook-parser/). Documentation will land as the implementation completes.
 ```
 
-- [ ] **Step 9: Create depthofbook-bot scaffold**
+- [ ] **Step 9: Create marketbyorder-bot scaffold**
 
-Create `go/depthofbook-bot/go.mod`:
+Create `go/marketbyorder-bot/go.mod`:
 
 ```
-module depthofbook-bot
+module marketbyorder-bot
 
 go 1.25.0
 ```
 
-Create `go/depthofbook-bot/.gitignore`:
+Create `go/marketbyorder-bot/.gitignore`:
 
 ```
-depthofbook-bot
+marketbyorder-bot
 *.test
 *.out
 ```
 
-Create `go/depthofbook-bot/main.go`:
+Create `go/marketbyorder-bot/main.go`:
 
 ```go
 package main
@@ -266,18 +266,18 @@ import (
 const version = "0.1.0-dev"
 
 func main() {
-	fmt.Fprintf(os.Stderr, "depthofbook-bot %s starting...\n", version)
+	fmt.Fprintf(os.Stderr, "marketbyorder-bot %s starting...\n", version)
 }
 ```
 
-Create `go/depthofbook-bot/Dockerfile` (copy from `go/topofbook-bot/Dockerfile` and adjust any references).
+Create `go/marketbyorder-bot/Dockerfile` (copy from `go/topofbook-bot/Dockerfile` and adjust any references).
 
-Create `go/depthofbook-bot/README.md`:
+Create `go/marketbyorder-bot/README.md`:
 
 ```markdown
-# DZ Depth-of-Book Bot
+# DZ Market-by-Order Bot
 
-Reference Go subscriber that consumes the DoubleZero Depth-of-Book parser's Unix socket, maintains in-memory MBO order books per instrument, and persists per-event rows + coalesced top-N level snapshots + raw wire snapshots into ClickHouse.
+Reference Go subscriber that consumes the DoubleZero Market-by-Order parser's Unix socket, maintains in-memory MBO order books per instrument, and persists per-event rows + coalesced top-N level snapshots + raw wire snapshots into ClickHouse.
 
 Sibling to [topofbook-bot](../topofbook-bot/). Documentation will land as the implementation completes.
 ```
@@ -291,21 +291,21 @@ cd go && go work sync && go build ./...
 Expected: clean build, no errors. Each module's `main` package compiles.
 
 ```bash
-cd go/depthofbook-parser && go run . 2>&1 | head -1
-cd go/depthofbook-bot && go run . 2>&1 | head -1
+cd go/marketbyorder-parser && go run . 2>&1 | head -1
+cd go/marketbyorder-bot && go run . 2>&1 | head -1
 ```
 
 Expected output:
 ```
-depthofbook-parser 0.1.0-dev starting...
-depthofbook-bot 0.1.0-dev starting...
+marketbyorder-parser 0.1.0-dev starting...
+marketbyorder-bot 0.1.0-dev starting...
 ```
 
 - [ ] **Step 11: Commit**
 
 ```bash
 git add -A go/ demo/docker-compose.yml README.md
-git commit -m "scaffold(dob): rename example-bot, add depthofbook-parser and depthofbook-bot stubs"
+git commit -m "scaffold(mbo): rename example-bot, add marketbyorder-parser and marketbyorder-bot stubs"
 ```
 
 ---
@@ -313,8 +313,8 @@ git commit -m "scaffold(dob): rename example-bot, add depthofbook-parser and dep
 ### Task 2: Parser wire decoder — frame header + reader helpers + inherited message types
 
 **Files:**
-- Create: `go/depthofbook-parser/depthofbook_wire.go`
-- Create: `go/depthofbook-parser/depthofbook_test.go` (initial — wire tests only)
+- Create: `go/marketbyorder-parser/marketbyorder_wire.go`
+- Create: `go/marketbyorder-parser/marketbyorder_test.go` (initial — wire tests only)
 
 This task implements the binary decoder for the 24-byte frame header, the 4-byte application-message header, and the five inherited message types (Heartbeat, InstrumentDefinition, Trade, EndOfSession, ManifestSummary). The reader uses the sticky-error pattern from [go/topofbook-parser/topofbook_wire.go](../go/topofbook-parser/topofbook_wire.go) — read it as a structural template before writing this file.
 
@@ -327,7 +327,7 @@ This task implements the binary decoder for the 24-byte frame header, the 4-byte
 
 - [ ] **Step 1: Write the decoder file with frame header + reader helpers**
 
-Create `go/depthofbook-parser/depthofbook_wire.go`:
+Create `go/marketbyorder-parser/marketbyorder_wire.go`:
 
 ```go
 package main
@@ -584,7 +584,7 @@ func ParseTrade(buf []byte) (TradeBody, error) {
 
 - [ ] **Step 2: Write tests for the frame header and inherited messages**
 
-Create `go/depthofbook-parser/depthofbook_test.go`:
+Create `go/marketbyorder-parser/marketbyorder_test.go`:
 
 ```go
 package main
@@ -785,7 +785,7 @@ func TestParseTrade(t *testing.T) {
 - [ ] **Step 3: Run tests and confirm they pass**
 
 ```bash
-cd go/depthofbook-parser && go test -run 'TestParseFrameHeader|TestParseHeartbeat|TestParseEndOfSession|TestParseManifestSummary|TestParseInstrumentDefinition|TestParseTrade' -v ./...
+cd go/marketbyorder-parser && go test -run 'TestParseFrameHeader|TestParseHeartbeat|TestParseEndOfSession|TestParseManifestSummary|TestParseInstrumentDefinition|TestParseTrade' -v ./...
 ```
 
 Expected: all listed tests PASS.
@@ -793,23 +793,23 @@ Expected: all listed tests PASS.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add go/depthofbook-parser/depthofbook_wire.go go/depthofbook-parser/depthofbook_test.go
-git commit -m "feat(dob-parser): wire decoder for frame header and inherited message types"
+git add go/marketbyorder-parser/marketbyorder_wire.go go/marketbyorder-parser/marketbyorder_test.go
+git commit -m "feat(mbo-parser): wire decoder for frame header and inherited message types"
 ```
 
 ---
 
-### Task 3: Parser wire decoder — DOB-specific message types
+### Task 3: Parser wire decoder — MBO-specific message types
 
 **Files:**
-- Modify: `go/depthofbook-parser/depthofbook_wire.go` (append decoders)
-- Modify: `go/depthofbook-parser/depthofbook_test.go` (append tests)
+- Modify: `go/marketbyorder-parser/marketbyorder_wire.go` (append decoders)
+- Modify: `go/marketbyorder-parser/marketbyorder_test.go` (append tests)
 
-Add decoders for the eight DOB-specific message types: OrderAdd, OrderCancel, OrderExecute, BatchBoundary, InstrumentReset, SnapshotBegin, SnapshotOrder, SnapshotEnd. Each gets a body struct, a parse function, and a test.
+Add decoders for the eight MBO-specific message types: OrderAdd, OrderCancel, OrderExecute, BatchBoundary, InstrumentReset, SnapshotBegin, SnapshotOrder, SnapshotEnd. Each gets a body struct, a parse function, and a test.
 
-- [ ] **Step 1: Append the body structs and parse functions to depthofbook_wire.go**
+- [ ] **Step 1: Append the body structs and parse functions to marketbyorder_wire.go**
 
-Add at the end of `go/depthofbook-parser/depthofbook_wire.go`:
+Add at the end of `go/marketbyorder-parser/marketbyorder_wire.go`:
 
 ```go
 // OrderAddBody is the 48-byte body of an OrderAdd message (after the 4-byte header).
@@ -1007,7 +1007,7 @@ func ParseSnapshotEnd(buf []byte) (SnapshotEndBody, error) {
 
 - [ ] **Step 2: Append tests**
 
-Append to `go/depthofbook-parser/depthofbook_test.go`:
+Append to `go/marketbyorder-parser/marketbyorder_test.go`:
 
 ```go
 func TestParseOrderAdd(t *testing.T) {
@@ -1175,7 +1175,7 @@ func TestParseSnapshotEnd(t *testing.T) {
 - [ ] **Step 3: Run all tests**
 
 ```bash
-cd go/depthofbook-parser && go test -v ./...
+cd go/marketbyorder-parser && go test -v ./...
 ```
 
 Expected: all 13 wire decoder tests PASS.
@@ -1183,20 +1183,20 @@ Expected: all 13 wire decoder tests PASS.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add go/depthofbook-parser/depthofbook_wire.go go/depthofbook-parser/depthofbook_test.go
-git commit -m "feat(dob-parser): wire decoder for DOB-specific message types"
+git add go/marketbyorder-parser/marketbyorder_wire.go go/marketbyorder-parser/marketbyorder_test.go
+git commit -m "feat(mbo-parser): wire decoder for MBO-specific message types"
 ```
 
 ---
 
-### Task 4: Parser Record envelope + frame routing (depthofbook.go + parser.go)
+### Task 4: Parser Record envelope + frame routing (marketbyorder.go + parser.go)
 
 **Files:**
-- Create: `go/depthofbook-parser/parser.go`
-- Create: `go/depthofbook-parser/depthofbook.go`
-- Modify: `go/depthofbook-parser/depthofbook_test.go` (append routing tests)
+- Create: `go/marketbyorder-parser/parser.go`
+- Create: `go/marketbyorder-parser/marketbyorder.go`
+- Modify: `go/marketbyorder-parser/marketbyorder_test.go` (append routing tests)
 
-This task wires the wire decoder into a `Parser` interface that produces `Record` values. Mirror `go/topofbook-parser/parser.go` and `go/topofbook-parser/topofbook.go` structurally — read those before writing. The DOB version is simpler than TOB because there's no cold-start buffering (the bot owns that); the parser just emits one Record per wire message.
+This task wires the wire decoder into a `Parser` interface that produces `Record` values. Mirror `go/topofbook-parser/parser.go` and `go/topofbook-parser/topofbook.go` structurally — read those before writing. The MBO version is simpler than TOB because there's no cold-start buffering (the bot owns that); the parser just emits one Record per wire message.
 
 - [ ] **Step 1: Create parser.go (Record envelope + Parser interface)**
 
@@ -1245,7 +1245,7 @@ func newParser(name string) (Parser, error) {
 }
 ```
 
-- [ ] **Step 2: Create depthofbook.go (Parser implementation)**
+- [ ] **Step 2: Create marketbyorder.go (Parser implementation)**
 
 ```go
 package main
@@ -1255,15 +1255,15 @@ import (
 )
 
 func init() {
-	registerParser("depthofbook", func() Parser { return &depthOfBookParser{} })
+	registerParser("marketbyorder", func() Parser { return &marketByOrderParser{} })
 }
 
-type depthOfBookParser struct{}
+type marketByOrderParser struct{}
 
-func (p *depthOfBookParser) Name() string { return "depthofbook" }
+func (p *marketByOrderParser) Name() string { return "marketbyorder" }
 
-// ParseFrame decodes one DOB frame and returns one Record per application message.
-func (p *depthOfBookParser) ParseFrame(port string, frame []byte) ([]Record, error) {
+// ParseFrame decodes one MBO frame and returns one Record per application message.
+func (p *marketByOrderParser) ParseFrame(port string, frame []byte) ([]Record, error) {
 	hdr, err := ParseFrameHeader(frame)
 	if err != nil {
 		return nil, fmt.Errorf("header: %w", err)
@@ -1299,7 +1299,7 @@ func (p *depthOfBookParser) ParseFrame(port string, frame []byte) ([]Record, err
 	return records, nil
 }
 
-func (p *depthOfBookParser) decodeMessage(port string, hdr FrameHeader, mh MessageHeader, body []byte) (Record, bool, error) {
+func (p *marketByOrderParser) decodeMessage(port string, hdr FrameHeader, mh MessageHeader, body []byte) (Record, bool, error) {
 	base := Record{
 		Timestamp:      hdr.SendTimestamp,
 		ChannelID:      hdr.ChannelID,
@@ -1580,7 +1580,7 @@ func resetReasonString(r uint8) string {
 }
 ```
 
-- [ ] **Step 3: Append routing tests to depthofbook_test.go**
+- [ ] **Step 3: Append routing tests to marketbyorder_test.go**
 
 ```go
 // buildSingleMessageFrame wraps an application message body in a complete frame.
@@ -1597,7 +1597,7 @@ func buildSingleMessageFrame(t *testing.T, msgType uint8, msgLength uint8, msgBo
 	return buf
 }
 
-func TestDepthOfBookParser_OrderAdd(t *testing.T) {
+func TestMarketByOrderParser_OrderAdd(t *testing.T) {
 	enter := time.Unix(1700000010, 0)
 	body := make([]byte, 48)
 	binary.LittleEndian.PutUint32(body[0:4], 100)
@@ -1611,7 +1611,7 @@ func TestDepthOfBookParser_OrderAdd(t *testing.T) {
 
 	frame := buildSingleMessageFrame(t, msgTypeOrderAdd, messageHeaderSize+48, body)
 
-	p := &depthOfBookParser{}
+	p := &marketByOrderParser{}
 	recs, err := p.ParseFrame("mktdata", frame)
 	if err != nil {
 		t.Fatal(err)
@@ -1628,11 +1628,11 @@ func TestDepthOfBookParser_OrderAdd(t *testing.T) {
 	}
 }
 
-func TestDepthOfBookParser_UnknownTypeSkipped(t *testing.T) {
+func TestMarketByOrderParser_UnknownTypeSkipped(t *testing.T) {
 	body := make([]byte, 8)
 	frame := buildSingleMessageFrame(t, 0xFE, messageHeaderSize+8, body)
 
-	p := &depthOfBookParser{}
+	p := &marketByOrderParser{}
 	recs, err := p.ParseFrame("mktdata", frame)
 	if err != nil {
 		t.Fatal(err)
@@ -1642,13 +1642,13 @@ func TestDepthOfBookParser_UnknownTypeSkipped(t *testing.T) {
 	}
 }
 
-func TestDepthOfBookParser_TruncatedFrame(t *testing.T) {
+func TestMarketByOrderParser_TruncatedFrame(t *testing.T) {
 	body := make([]byte, 48)
 	frame := buildSingleMessageFrame(t, msgTypeOrderAdd, messageHeaderSize+48, body)
 	// Truncate the frame to 30 bytes — header says 76, only 30 present.
 	truncated := frame[:30]
 
-	p := &depthOfBookParser{}
+	p := &marketByOrderParser{}
 	_, err := p.ParseFrame("mktdata", truncated)
 	if err == nil {
 		t.Fatal("expected error on truncated frame")
@@ -1659,7 +1659,7 @@ func TestDepthOfBookParser_TruncatedFrame(t *testing.T) {
 - [ ] **Step 4: Run tests**
 
 ```bash
-cd go/depthofbook-parser && go test -v ./...
+cd go/marketbyorder-parser && go test -v ./...
 ```
 
 Expected: all wire decoder tests + 3 new routing tests PASS.
@@ -1667,8 +1667,8 @@ Expected: all wire decoder tests + 3 new routing tests PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add go/depthofbook-parser/parser.go go/depthofbook-parser/depthofbook.go go/depthofbook-parser/depthofbook_test.go
-git commit -m "feat(dob-parser): Record envelope and frame routing for all message types"
+git add go/marketbyorder-parser/parser.go go/marketbyorder-parser/marketbyorder.go go/marketbyorder-parser/marketbyorder_test.go
+git commit -m "feat(mbo-parser): Record envelope and frame routing for all message types"
 ```
 
 ---
@@ -1676,34 +1676,34 @@ git commit -m "feat(dob-parser): Record envelope and frame routing for all messa
 ### Task 5: Parser sinks (copy from TOB)
 
 **Files:**
-- Create: `go/depthofbook-parser/sink.go`
-- Create: `go/depthofbook-parser/sink_socket.go`
-- Create: `go/depthofbook-parser/sink_json.go`
-- Create: `go/depthofbook-parser/sink_socket_test.go`
-- Create: `go/depthofbook-parser/sink_json_test.go`
+- Create: `go/marketbyorder-parser/sink.go`
+- Create: `go/marketbyorder-parser/sink_socket.go`
+- Create: `go/marketbyorder-parser/sink_json.go`
+- Create: `go/marketbyorder-parser/sink_socket_test.go`
+- Create: `go/marketbyorder-parser/sink_json_test.go`
 
-The sinks are functionally identical to TOB's. Copy them verbatim and adapt only what's necessary (package name; the `Record` type used here is the local DOB Record but has the same JSON shape, so the sink code itself doesn't change). Skip the CSV sink — DOB Records have `fields` of variable shape that don't fit CSV cleanly, and the spec specifies JSON-only.
+The sinks are functionally identical to TOB's. Copy them verbatim and adapt only what's necessary (package name; the `Record` type used here is the local MBO Record but has the same JSON shape, so the sink code itself doesn't change). Skip the CSV sink — MBO Records have `fields` of variable shape that don't fit CSV cleanly, and the spec specifies JSON-only.
 
 - [ ] **Step 1: Copy the four files from TOB**
 
 ```bash
-cp go/topofbook-parser/sink.go go/depthofbook-parser/sink.go
-cp go/topofbook-parser/sink_socket.go go/depthofbook-parser/sink_socket.go
-cp go/topofbook-parser/sink_json.go go/depthofbook-parser/sink_json.go
-cp go/topofbook-parser/sink_socket_test.go go/depthofbook-parser/sink_socket_test.go
-cp go/topofbook-parser/sink_json_test.go go/depthofbook-parser/sink_json_test.go
+cp go/topofbook-parser/sink.go go/marketbyorder-parser/sink.go
+cp go/topofbook-parser/sink_socket.go go/marketbyorder-parser/sink_socket.go
+cp go/topofbook-parser/sink_json.go go/marketbyorder-parser/sink_json.go
+cp go/topofbook-parser/sink_socket_test.go go/marketbyorder-parser/sink_socket_test.go
+cp go/topofbook-parser/sink_json_test.go go/marketbyorder-parser/sink_json_test.go
 ```
 
 - [ ] **Step 2: Remove CSV-related code from sink.go**
 
-Open `go/depthofbook-parser/sink.go`. Remove any branches, format constants, or factory cases that reference `csv` or `CSVFileSink`. The DOB parser supports `json` only.
+Open `go/marketbyorder-parser/sink.go`. Remove any branches, format constants, or factory cases that reference `csv` or `CSVFileSink`. The MBO parser supports `json` only.
 
-If `sink.go` has a format-dispatch function, simplify it to handle only `json` (or `unix:` prefix for socket sink); return an error for anything else with message like `unsupported format: %q (depthofbook supports json only)`.
+If `sink.go` has a format-dispatch function, simplify it to handle only `json` (or `unix:` prefix for socket sink); return an error for anything else with message like `unsupported format: %q (marketbyorder supports json only)`.
 
-- [ ] **Step 3: Verify the sink files compile in the DOB package**
+- [ ] **Step 3: Verify the sink files compile in the MBO package**
 
 ```bash
-cd go/depthofbook-parser && go build ./...
+cd go/marketbyorder-parser && go build ./...
 ```
 
 Expected: clean build. The `Record` type defined in `parser.go` (Task 4) is what the sinks reference; both packages have it with the same JSON shape.
@@ -1711,7 +1711,7 @@ Expected: clean build. The `Record` type defined in `parser.go` (Task 4) is what
 - [ ] **Step 4: Run tests**
 
 ```bash
-cd go/depthofbook-parser && go test -v ./...
+cd go/marketbyorder-parser && go test -v ./...
 ```
 
 Expected: all wire/routing tests still pass; new sink tests (copied from TOB) PASS as well.
@@ -1719,8 +1719,8 @@ Expected: all wire/routing tests still pass; new sink tests (copied from TOB) PA
 - [ ] **Step 5: Commit**
 
 ```bash
-git add go/depthofbook-parser/sink.go go/depthofbook-parser/sink_socket.go go/depthofbook-parser/sink_json.go go/depthofbook-parser/sink_socket_test.go go/depthofbook-parser/sink_json_test.go
-git commit -m "feat(dob-parser): copy sink layer from topofbook-parser"
+git add go/marketbyorder-parser/sink.go go/marketbyorder-parser/sink_socket.go go/marketbyorder-parser/sink_json.go go/marketbyorder-parser/sink_socket_test.go go/marketbyorder-parser/sink_json_test.go
+git commit -m "feat(mbo-parser): copy sink layer from topofbook-parser"
 ```
 
 ---
@@ -1728,14 +1728,14 @@ git commit -m "feat(dob-parser): copy sink layer from topofbook-parser"
 ### Task 6: Parser metrics
 
 **Files:**
-- Create: `go/depthofbook-parser/metrics.go`
+- Create: `go/marketbyorder-parser/metrics.go`
 
-Mirror [go/topofbook-parser/metrics.go](../go/topofbook-parser/metrics.go) structurally. Same Prometheus client, same HTTP server pattern. Metric names are different per the spec (`dz_dob_parser_*` prefix).
+Mirror [go/topofbook-parser/metrics.go](../go/topofbook-parser/metrics.go) structurally. Same Prometheus client, same HTTP server pattern. Metric names are different per the spec (`dz_mbo_parser_*` prefix).
 
 - [ ] **Step 1: Add Prometheus dependency to go.mod**
 
 ```bash
-cd go/depthofbook-parser && go get github.com/prometheus/client_golang/prometheus github.com/prometheus/client_golang/prometheus/promhttp
+cd go/marketbyorder-parser && go get github.com/prometheus/client_golang/prometheus github.com/prometheus/client_golang/prometheus/promhttp
 ```
 
 - [ ] **Step 2: Write metrics.go**
@@ -1754,7 +1754,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-const metricsNamespace = "dz_dob_parser"
+const metricsNamespace = "dz_mbo_parser"
 
 type Metrics struct {
 	registry *prometheus.Registry
@@ -1875,7 +1875,7 @@ func (m *Metrics) ServeHTTP(ctx context.Context, addr string, logErr func(error)
 - [ ] **Step 3: Verify it compiles**
 
 ```bash
-cd go/depthofbook-parser && go build ./...
+cd go/marketbyorder-parser && go build ./...
 ```
 
 Expected: clean build.
@@ -1883,8 +1883,8 @@ Expected: clean build.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add go/depthofbook-parser/go.mod go/depthofbook-parser/go.sum go/depthofbook-parser/metrics.go
-git commit -m "feat(dob-parser): Prometheus metrics and /metrics endpoint"
+git add go/marketbyorder-parser/go.mod go/marketbyorder-parser/go.sum go/marketbyorder-parser/metrics.go
+git commit -m "feat(mbo-parser): Prometheus metrics and /metrics endpoint"
 ```
 
 ---
@@ -1892,10 +1892,10 @@ git commit -m "feat(dob-parser): Prometheus metrics and /metrics endpoint"
 ### Task 7: Parser runner + main
 
 **Files:**
-- Create: `go/depthofbook-parser/runner.go`
-- Modify: `go/depthofbook-parser/main.go`
+- Create: `go/marketbyorder-parser/runner.go`
+- Modify: `go/marketbyorder-parser/main.go`
 
-The runner spawns three goroutines, one per port. Each receives UDP datagrams, hands them to the parser, and forwards Records to the sink. Mirror [go/topofbook-parser/runner.go](../go/topofbook-parser/runner.go) (which has 2 receivers); the DOB version has 3 with port labels `refdata`, `mktdata`, `snapshot`.
+The runner spawns three goroutines, one per port. Each receives UDP datagrams, hands them to the parser, and forwards Records to the sink. Mirror [go/topofbook-parser/runner.go](../go/topofbook-parser/runner.go) (which has 2 receivers); the MBO version has 3 with port labels `refdata`, `mktdata`, `snapshot`.
 
 - [ ] **Step 1: Write runner.go**
 
@@ -2059,7 +2059,7 @@ You'll also need to add `"errors"` to the imports. Verify with `go build`.
 
 - [ ] **Step 2: Replace main.go with the real entry point**
 
-Replace `go/depthofbook-parser/main.go`:
+Replace `go/marketbyorder-parser/main.go`:
 
 ```go
 package main
@@ -2087,7 +2087,7 @@ func main() {
 		iface        = flag.String("interface", "", "network interface for multicast join (e.g., doublezero1)")
 		output       = flag.String("output", "", "output target: unix:///path/to/sock or file:///path/to/log (required)")
 		format       = flag.String("format", "json", "output format: json")
-		parserName   = flag.String("parser", "depthofbook", "parser name from registry")
+		parserName   = flag.String("parser", "marketbyorder", "parser name from registry")
 		metricsAddr  = flag.String("metrics-addr", "", "Prometheus /metrics HTTP listen address (empty = disabled)")
 		verbose      = flag.Bool("v", false, "debug logging")
 		showVersion  = flag.Bool("version", false, "print version and exit")
@@ -2095,7 +2095,7 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Printf("depthofbook-parser %s (%s)\n", version, commit)
+		fmt.Printf("marketbyorder-parser %s (%s)\n", version, commit)
 		os.Exit(0)
 	}
 
@@ -2138,7 +2138,7 @@ func main() {
 		cancel()
 	}()
 
-	log.Printf("depthofbook-parser %s started: group=%s refdata=:%d mktdata=:%d snapshot=:%d output=%s",
+	log.Printf("marketbyorder-parser %s started: group=%s refdata=:%d mktdata=:%d snapshot=:%d output=%s",
 		version, *group, *refdataPort, *mktdataPort, *snapshotPort, *output)
 
 	if err := runner.Run(ctx); err != nil {
@@ -2153,14 +2153,14 @@ Note: `NewSink(output, format, metrics)` is the factory function in `sink.go` (T
 - [ ] **Step 3: Build and smoke-test**
 
 ```bash
-cd go/depthofbook-parser && go build ./...
-./depthofbook-parser --version
+cd go/marketbyorder-parser && go build ./...
+./marketbyorder-parser --version
 ```
 
-Expected: prints `depthofbook-parser 0.1.0-dev (unknown)` and exits 0.
+Expected: prints `marketbyorder-parser 0.1.0-dev (unknown)` and exits 0.
 
 ```bash
-./depthofbook-parser
+./marketbyorder-parser
 ```
 
 Expected: prints required-flags error and exits 2.
@@ -2168,8 +2168,8 @@ Expected: prints required-flags error and exits 2.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add go/depthofbook-parser/runner.go go/depthofbook-parser/main.go
-git commit -m "feat(dob-parser): runner with three-port receivers + main entry"
+git add go/marketbyorder-parser/runner.go go/marketbyorder-parser/main.go
+git commit -m "feat(mbo-parser): runner with three-port receivers + main entry"
 ```
 
 ---
@@ -2177,9 +2177,9 @@ git commit -m "feat(dob-parser): runner with three-port receivers + main entry"
 ### Task 8: Bot record + JSONL socket reader + reconnect loop
 
 **Files:**
-- Create: `go/depthofbook-bot/record.go`
-- Create: `go/depthofbook-bot/bot.go`
-- Create: `go/depthofbook-bot/bot_test.go`
+- Create: `go/marketbyorder-bot/record.go`
+- Create: `go/marketbyorder-bot/bot.go`
+- Create: `go/marketbyorder-bot/bot_test.go`
 
 The bot's record.go is a wire-compatible mirror of the parser's Record. The bot.go reads the parser socket via `bufio.Scanner` and dispatches to a callback. Mirror [go/example-bot/bot.go](../go/example-bot/bot.go) (post-rename: `go/topofbook-bot/bot.go`) for the reconnect/backoff loop pattern.
 
@@ -2354,7 +2354,7 @@ type Metrics struct {
 Add `import "github.com/prometheus/client_golang/prometheus"` and:
 
 ```bash
-cd go/depthofbook-bot && go get github.com/prometheus/client_golang/prometheus
+cd go/marketbyorder-bot && go get github.com/prometheus/client_golang/prometheus
 ```
 
 Task 12 will replace this with a full Metrics struct + constructor.
@@ -2501,7 +2501,7 @@ The reconnect test takes ~6 seconds. That's fine in CI but consider marking it w
 - [ ] **Step 4: Run tests**
 
 ```bash
-cd go/depthofbook-bot && go test -v ./...
+cd go/marketbyorder-bot && go test -v ./...
 ```
 
 Expected: both tests PASS. Reconnect test takes 6+ seconds.
@@ -2509,8 +2509,8 @@ Expected: both tests PASS. Reconnect test takes 6+ seconds.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add go/depthofbook-bot/go.mod go/depthofbook-bot/go.sum go/depthofbook-bot/record.go go/depthofbook-bot/bot.go go/depthofbook-bot/bot_test.go
-git commit -m "feat(dob-bot): record envelope and JSONL socket reader with reconnect"
+git add go/marketbyorder-bot/go.mod go/marketbyorder-bot/go.sum go/marketbyorder-bot/record.go go/marketbyorder-bot/bot.go go/marketbyorder-bot/bot_test.go
+git commit -m "feat(mbo-bot): record envelope and JSONL socket reader with reconnect"
 ```
 
 ---
@@ -2518,8 +2518,8 @@ git commit -m "feat(dob-bot): record envelope and JSONL socket reader with recon
 ### Task 9: Bot instrument (book ops + snapshot reassembly)
 
 **Files:**
-- Create: `go/depthofbook-bot/instrument.go`
-- Create: `go/depthofbook-bot/instrument_test.go`
+- Create: `go/marketbyorder-bot/instrument.go`
+- Create: `go/marketbyorder-bot/instrument_test.go`
 
 The Instrument type holds bid/ask order maps and applies the book-affecting wire events. Snapshot reassembly buffers SnapshotOrders between SnapshotBegin and SnapshotEnd, validates the count and IDs, then commits to the live book.
 
@@ -2880,7 +2880,7 @@ func TestInstrument_Reset(t *testing.T) {
 - [ ] **Step 3: Run tests**
 
 ```bash
-cd go/depthofbook-bot && go test -v -run TestInstrument ./...
+cd go/marketbyorder-bot && go test -v -run TestInstrument ./...
 ```
 
 Expected: all 8 instrument tests PASS.
@@ -2888,8 +2888,8 @@ Expected: all 8 instrument tests PASS.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add go/depthofbook-bot/instrument.go go/depthofbook-bot/instrument_test.go
-git commit -m "feat(dob-bot): instrument book operations and snapshot reassembly"
+git add go/marketbyorder-bot/instrument.go go/marketbyorder-bot/instrument_test.go
+git commit -m "feat(mbo-bot): instrument book operations and snapshot reassembly"
 ```
 
 ---
@@ -2897,10 +2897,10 @@ git commit -m "feat(dob-bot): instrument book operations and snapshot reassembly
 ### Task 10: Bot channel state machine
 
 **Files:**
-- Create: `go/depthofbook-bot/channel.go`
-- Create: `go/depthofbook-bot/channel_test.go`
+- Create: `go/marketbyorder-bot/channel.go`
+- Create: `go/marketbyorder-bot/channel_test.go`
 
-This is the heart of the bot — the spec's [Subscriber Algorithm](https://github.com/malbeclabs/edge-feed-spec/blob/main/depth-of-book/spec.md#subscriber-algorithm) realised in Go. It dispatches Records into per-instrument book ops, handles per-instrument seq gap detection, snapshot recovery, instrument reset, and channel reset.
+This is the heart of the bot — the spec's [Subscriber Algorithm](https://github.com/malbeclabs/edge-feed-spec/blob/main/market-by-order/spec.md#subscriber-algorithm) realised in Go. It dispatches Records into per-instrument book ops, handles per-instrument seq gap detection, snapshot recovery, instrument reset, and channel reset.
 
 - [ ] **Step 1: Write channel.go**
 
@@ -3432,7 +3432,7 @@ func TestChannel_ChannelReset(t *testing.T) {
 - [ ] **Step 3: Run tests**
 
 ```bash
-cd go/depthofbook-bot && go test -v -run TestChannel ./...
+cd go/marketbyorder-bot && go test -v -run TestChannel ./...
 ```
 
 Expected: 3 channel tests PASS.
@@ -3440,8 +3440,8 @@ Expected: 3 channel tests PASS.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add go/depthofbook-bot/channel.go go/depthofbook-bot/channel_test.go
-git commit -m "feat(dob-bot): channel state machine with cold-start, gap detection, and reset handling"
+git add go/marketbyorder-bot/channel.go go/marketbyorder-bot/channel_test.go
+git commit -m "feat(mbo-bot): channel state machine with cold-start, gap detection, and reset handling"
 ```
 
 ---
@@ -3449,8 +3449,8 @@ git commit -m "feat(dob-bot): channel state machine with cold-start, gap detecti
 ### Task 11: Bot levels aggregation
 
 **Files:**
-- Create: `go/depthofbook-bot/levels.go`
-- Create: `go/depthofbook-bot/levels_test.go`
+- Create: `go/marketbyorder-bot/levels.go`
+- Create: `go/marketbyorder-bot/levels_test.go`
 
 Aggregate bid/ask order maps into top-N price levels. Bids sorted descending by price (best = highest); asks ascending (best = lowest). `cumulative_qty` is a running sum from `level_idx=0` outward.
 
@@ -3653,7 +3653,7 @@ func TestLevels_EmptySide(t *testing.T) {
 - [ ] **Step 3: Run tests**
 
 ```bash
-cd go/depthofbook-bot && go test -v -run TestLevels ./...
+cd go/marketbyorder-bot && go test -v -run TestLevels ./...
 ```
 
 Expected: 6 tests PASS.
@@ -3661,8 +3661,8 @@ Expected: 6 tests PASS.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add go/depthofbook-bot/levels.go go/depthofbook-bot/levels_test.go
-git commit -m "feat(dob-bot): top-N level aggregation with cumulative qty"
+git add go/marketbyorder-bot/levels.go go/marketbyorder-bot/levels_test.go
+git commit -m "feat(mbo-bot): top-N level aggregation with cumulative qty"
 ```
 
 ---
@@ -3670,9 +3670,9 @@ git commit -m "feat(dob-bot): top-N level aggregation with cumulative qty"
 ### Task 12: Bot Prometheus metrics
 
 **Files:**
-- Create: `go/depthofbook-bot/metrics.go` (replaces stub from Task 8)
+- Create: `go/marketbyorder-bot/metrics.go` (replaces stub from Task 8)
 
-Mirror [go/example-bot/metrics.go](../go/example-bot/metrics.go) structurally with the new metric names from the spec (prefix `dz_dob_bot_`).
+Mirror [go/example-bot/metrics.go](../go/example-bot/metrics.go) structurally with the new metric names from the spec (prefix `dz_mbo_bot_`).
 
 - [ ] **Step 1: Write metrics.go**
 
@@ -3690,7 +3690,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-const metricsNamespace = "dz_dob_bot"
+const metricsNamespace = "dz_mbo_bot"
 
 // Metrics is the bot's full Prometheus metric set. Replaces the stub in bot.go.
 type Metrics struct {
@@ -3811,7 +3811,7 @@ func (m *Metrics) ServeHTTP(ctx context.Context, addr string, logErr func(error)
 
 - [ ] **Step 2: Remove the stub Metrics declaration from bot.go**
 
-In `go/depthofbook-bot/bot.go`, delete the stub `Metrics` struct that was added in Task 8 (the comment said "Stub declaration here keeps this task standalone-buildable" — replace it with the real one in metrics.go now).
+In `go/marketbyorder-bot/bot.go`, delete the stub `Metrics` struct that was added in Task 8 (the comment said "Stub declaration here keeps this task standalone-buildable" — replace it with the real one in metrics.go now).
 
 Update bot_test.go's `stubMetrics()` helper if needed: the real Metrics struct is now compatible by name; tests can use `NewMetrics("test", "test")` instead of the stub. Update `bot_test.go`:
 
@@ -3824,7 +3824,7 @@ func stubMetrics() *Metrics {
 - [ ] **Step 3: Verify build and tests**
 
 ```bash
-cd go/depthofbook-bot && go test ./...
+cd go/marketbyorder-bot && go test ./...
 ```
 
 Expected: clean build, all tests still pass.
@@ -3832,8 +3832,8 @@ Expected: clean build, all tests still pass.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add go/depthofbook-bot/metrics.go go/depthofbook-bot/bot.go go/depthofbook-bot/bot_test.go
-git commit -m "feat(dob-bot): full Prometheus metrics, replace stub"
+git add go/marketbyorder-bot/metrics.go go/marketbyorder-bot/bot.go go/marketbyorder-bot/bot_test.go
+git commit -m "feat(mbo-bot): full Prometheus metrics, replace stub"
 ```
 
 ---
@@ -3841,10 +3841,10 @@ git commit -m "feat(dob-bot): full Prometheus metrics, replace stub"
 ### Task 13: Bot ClickHouse writer
 
 **Files:**
-- Create: `go/depthofbook-bot/clickhouse.go`
-- Create: `go/depthofbook-bot/clickhouse_test.go`
+- Create: `go/marketbyorder-bot/clickhouse.go`
+- Create: `go/marketbyorder-bot/clickhouse_test.go`
 
-Mirror [go/example-bot/clickhouse.go](../go/example-bot/clickhouse.go) for the per-table batcher pattern (size + interval triggers, drop-on-buffer-full, per-table goroutine). The DOB bot has more tables (5 vs TOB's 3), but the batcher itself is generic — pass a table name + column list at construction.
+Mirror [go/example-bot/clickhouse.go](../go/example-bot/clickhouse.go) for the per-table batcher pattern (size + interval triggers, drop-on-buffer-full, per-table goroutine). The MBO bot has more tables (5 vs TOB's 3), but the batcher itself is generic — pass a table name + column list at construction.
 
 - [ ] **Step 1: Write clickhouse.go**
 
@@ -4082,7 +4082,7 @@ func TestClickhouseBatcher_FlushesOnSize(t *testing.T) {
 
 	metrics := NewMetrics("test", "test")
 	cfg := BatcherConfig{Table: "events", BatchSize: 5, BatchInterval: 1 * time.Hour, BufferSize: 100}
-	c, err := NewClickhouseClient(srv.URL, "depthofbook", []BatcherConfig{cfg}, metrics)
+	c, err := NewClickhouseClient(srv.URL, "marketbyorder", []BatcherConfig{cfg}, metrics)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4118,7 +4118,7 @@ func TestClickhouseBatcher_FlushesOnInterval(t *testing.T) {
 
 	metrics := NewMetrics("test", "test")
 	cfg := BatcherConfig{Table: "events", BatchSize: 1000, BatchInterval: 100 * time.Millisecond, BufferSize: 100}
-	c, _ := NewClickhouseClient(srv.URL, "depthofbook", []BatcherConfig{cfg}, metrics)
+	c, _ := NewClickhouseClient(srv.URL, "marketbyorder", []BatcherConfig{cfg}, metrics)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -4142,7 +4142,7 @@ func TestClickhouseBatcher_DropsOnBufferFull(t *testing.T) {
 
 	metrics := NewMetrics("test", "test")
 	cfg := BatcherConfig{Table: "events", BatchSize: 5, BatchInterval: 1 * time.Hour, BufferSize: 3}
-	c, _ := NewClickhouseClient(srv.URL, "depthofbook", []BatcherConfig{cfg}, metrics)
+	c, _ := NewClickhouseClient(srv.URL, "marketbyorder", []BatcherConfig{cfg}, metrics)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -4163,7 +4163,7 @@ func TestClickhouseBatcher_DropsOnBufferFull(t *testing.T) {
 - [ ] **Step 3: Run tests**
 
 ```bash
-cd go/depthofbook-bot && go test -v -run TestClickhouse ./...
+cd go/marketbyorder-bot && go test -v -run TestClickhouse ./...
 ```
 
 Expected: 3 tests PASS.
@@ -4171,8 +4171,8 @@ Expected: 3 tests PASS.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add go/depthofbook-bot/clickhouse.go go/depthofbook-bot/clickhouse_test.go
-git commit -m "feat(dob-bot): ClickHouse HTTP batcher with per-table workers"
+git add go/marketbyorder-bot/clickhouse.go go/marketbyorder-bot/clickhouse_test.go
+git commit -m "feat(mbo-bot): ClickHouse HTTP batcher with per-table workers"
 ```
 
 ---
@@ -4180,9 +4180,9 @@ git commit -m "feat(dob-bot): ClickHouse HTTP batcher with per-table workers"
 ### Task 14: Bot events writer + snapshot writer (with coalescing)
 
 **Files:**
-- Create: `go/depthofbook-bot/events_writer.go`
-- Create: `go/depthofbook-bot/snapshot_writer.go`
-- Create: `go/depthofbook-bot/snapshot_writer_test.go`
+- Create: `go/marketbyorder-bot/events_writer.go`
+- Create: `go/marketbyorder-bot/snapshot_writer.go`
+- Create: `go/marketbyorder-bot/snapshot_writer_test.go`
 
 Two writers consume `ChannelEvent`s from the channel state and produce ClickHouse rows. The events writer is straightforward — one row per event into the appropriate table. The snapshot writer is the coalesce scheduler: it tracks dirty instruments and emits level snapshots at most once per `coalesce_interval`.
 
@@ -4650,7 +4650,7 @@ func TestSnapshotWriter_RunFlushesAndClears(t *testing.T) {
 - [ ] **Step 4: Run tests**
 
 ```bash
-cd go/depthofbook-bot && go test -v -run 'TestSnapshotWriter|TestEvents' ./...
+cd go/marketbyorder-bot && go test -v -run 'TestSnapshotWriter|TestEvents' ./...
 ```
 
 Expected: 2 snapshot tests PASS (one is skipped pending integration in Task 15).
@@ -4658,8 +4658,8 @@ Expected: 2 snapshot tests PASS (one is skipped pending integration in Task 15).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add go/depthofbook-bot/events_writer.go go/depthofbook-bot/snapshot_writer.go go/depthofbook-bot/snapshot_writer_test.go
-git commit -m "feat(dob-bot): events writer and coalescing snapshot writer"
+git add go/marketbyorder-bot/events_writer.go go/marketbyorder-bot/snapshot_writer.go go/marketbyorder-bot/snapshot_writer_test.go
+git commit -m "feat(mbo-bot): events writer and coalescing snapshot writer"
 ```
 
 ---
@@ -4667,8 +4667,8 @@ git commit -m "feat(dob-bot): events writer and coalescing snapshot writer"
 ### Task 15: Bot main wiring
 
 **Files:**
-- Modify: `go/depthofbook-bot/main.go` (replace stub from Task 1)
-- Possibly modify: `go/depthofbook-bot/events_writer.go` and `go/depthofbook-bot/snapshot_writer.go` to fix the placeholder exponent-scaling and snapshot-context denormalization noted in Task 14.
+- Modify: `go/marketbyorder-bot/main.go` (replace stub from Task 1)
+- Possibly modify: `go/marketbyorder-bot/events_writer.go` and `go/marketbyorder-bot/snapshot_writer.go` to fix the placeholder exponent-scaling and snapshot-context denormalization noted in Task 14.
 
 This task wires bot.go, channel.go, instrument.go, levels.go, events_writer.go, snapshot_writer.go, clickhouse.go, and metrics.go together.
 
@@ -4759,7 +4759,7 @@ func main() {
 		coalesceMS           = flag.Int("coalesce-ms", 50, "snapshot coalesce window in milliseconds")
 		metricsAddr          = flag.String("metrics-addr", "127.0.0.1:9092", "Prometheus /metrics HTTP listen address")
 		clickhouseURL        = flag.String("clickhouse-url", "", "ClickHouse HTTP endpoint (empty disables persistence)")
-		clickhouseDB         = flag.String("clickhouse-database", "depthofbook", "ClickHouse database")
+		clickhouseDB         = flag.String("clickhouse-database", "marketbyorder", "ClickHouse database")
 		batchSize            = flag.Int("clickhouse-batch-size", 1000, "rows per batch flush")
 		batchInterval        = flag.Duration("clickhouse-batch-interval", 200*time.Millisecond, "max time between batch flushes")
 		bufferSize           = flag.Int("clickhouse-buffer", 100000, "per-table channel capacity")
@@ -4772,7 +4772,7 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Printf("depthofbook-bot %s (%s)\n", version, commit)
+		fmt.Printf("marketbyorder-bot %s (%s)\n", version, commit)
 		os.Exit(0)
 	}
 	if *socketPath == "" {
@@ -4916,7 +4916,7 @@ func main() {
 	}()
 
 	bot := NewBot(*socketPath, dispatcher, metrics)
-	log.Printf("depthofbook-bot %s started: socket=%s clickhouse=%v depth=%d coalesce=%dms",
+	log.Printf("marketbyorder-bot %s started: socket=%s clickhouse=%v depth=%d coalesce=%dms",
 		version, *socketPath, *clickhouseURL != "", *depth, *coalesceMS)
 	bot.Run(ctx)
 	log.Println("shutdown complete")
@@ -4931,7 +4931,7 @@ func (f DispatcherFunc) Dispatch(rec Record) { f(rec) }
 - [ ] **Step 2: Verify build and run tests**
 
 ```bash
-cd go/depthofbook-bot && go build ./... && go test ./...
+cd go/marketbyorder-bot && go build ./... && go test ./...
 ```
 
 Expected: clean build, all tests pass.
@@ -4939,13 +4939,13 @@ Expected: clean build, all tests pass.
 - [ ] **Step 3: Smoke test**
 
 ```bash
-./depthofbook-bot --version
+./marketbyorder-bot --version
 ```
 
 Expected: prints version and exits 0.
 
 ```bash
-./depthofbook-bot
+./marketbyorder-bot
 ```
 
 Expected: prints `error: --socket is required` and exits 2.
@@ -4953,28 +4953,28 @@ Expected: prints `error: --socket is required` and exits 2.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add go/depthofbook-bot/main.go
-git commit -m "feat(dob-bot): main entry wiring channel state, writers, and ClickHouse"
+git add go/marketbyorder-bot/main.go
+git commit -m "feat(mbo-bot): main entry wiring channel state, writers, and ClickHouse"
 ```
 
 ---
 
-### Task 16: ClickHouse schema for depthofbook database
+### Task 16: ClickHouse schema for marketbyorder database
 
 **Files:**
-- Create: `demo/clickhouse/init/02_schema_dob.sql`
+- Create: `demo/clickhouse/init/02_schema_mbo.sql`
 
-ClickHouse runs `*.sql` init files in lexical order on first boot. The existing `01_schema.sql` creates the `topofbook` database; this new file creates `depthofbook` with five tables.
+ClickHouse runs `*.sql` init files in lexical order on first boot. The existing `01_schema.sql` creates the `topofbook` database; this new file creates `marketbyorder` with five tables.
 
 - [ ] **Step 1: Write the schema file**
 
-Create `demo/clickhouse/init/02_schema_dob.sql`:
+Create `demo/clickhouse/init/02_schema_mbo.sql`:
 
 ```sql
-CREATE DATABASE IF NOT EXISTS depthofbook;
+CREATE DATABASE IF NOT EXISTS marketbyorder;
 
 -- Slowly-changing instrument dimension. ReplacingMergeTree keeps latest per (channel_id, instrument_id).
-CREATE TABLE IF NOT EXISTS depthofbook.instruments (
+CREATE TABLE IF NOT EXISTS marketbyorder.instruments (
     recv_ts          DateTime64(9),
     channel_id       UInt8,
     instrument_id    UInt32,
@@ -4997,7 +4997,7 @@ ENGINE = ReplacingMergeTree(recv_ts)
 ORDER BY (channel_id, instrument_id);
 
 -- Per-event log: order deltas + trades + structural events.
-CREATE TABLE IF NOT EXISTS depthofbook.events (
+CREATE TABLE IF NOT EXISTS marketbyorder.events (
     recv_ts                DateTime64(9),
     publisher_send_ts      DateTime64(9),
     wire_latency_ms        Float64 MATERIALIZED (toUnixTimestamp64Nano(recv_ts) - toUnixTimestamp64Nano(publisher_send_ts)) / 1000000.0,
@@ -5037,7 +5037,7 @@ ORDER BY (symbol, recv_ts, kind)
 TTL toDateTime(recv_ts) + INTERVAL 30 DAY;
 
 -- Top-N depth, coalesced. Flat one-row-per-level layout for direct table/heatmap rendering.
-CREATE TABLE IF NOT EXISTS depthofbook.level_snapshots (
+CREATE TABLE IF NOT EXISTS marketbyorder.level_snapshots (
     recv_ts             DateTime64(9),
     publisher_send_ts   DateTime64(9),
     wire_latency_ms     Float64 MATERIALIZED (toUnixTimestamp64Nano(recv_ts) - toUnixTimestamp64Nano(publisher_send_ts)) / 1000000.0,
@@ -5058,7 +5058,7 @@ ORDER BY (symbol, recv_ts, side, level_idx)
 TTL toDateTime(recv_ts) + INTERVAL 30 DAY;
 
 -- Raw SnapshotOrder capture, for full replay. Group identity denormalized onto every row.
-CREATE TABLE IF NOT EXISTS depthofbook.wire_snapshots (
+CREATE TABLE IF NOT EXISTS marketbyorder.wire_snapshots (
     recv_ts             DateTime64(9),
     publisher_send_ts   DateTime64(9),
     channel_id          UInt8,
@@ -5081,7 +5081,7 @@ ORDER BY (channel_id, instrument_id, snapshot_id, side, order_id)
 TTL toDateTime(recv_ts) + INTERVAL 30 DAY;
 
 -- Channel health: heartbeats, manifest summaries, end-of-session signals.
-CREATE TABLE IF NOT EXISTS depthofbook.channel_health (
+CREATE TABLE IF NOT EXISTS marketbyorder.channel_health (
     recv_ts             DateTime64(9),
     publisher_send_ts   DateTime64(9),
     wire_latency_ms     Float64 MATERIALIZED (toUnixTimestamp64Nano(recv_ts) - toUnixTimestamp64Nano(publisher_send_ts)) / 1000000.0,
@@ -5102,7 +5102,7 @@ TTL toDateTime(recv_ts) + INTERVAL 30 DAY;
 If you have a local ClickHouse client:
 
 ```bash
-clickhouse-client --query "$(cat demo/clickhouse/init/02_schema_dob.sql)"
+clickhouse-client --query "$(cat demo/clickhouse/init/02_schema_mbo.sql)"
 ```
 
 Expected: no errors. If you don't have one, the init script will be validated when the docker stack first boots in Task 17/19.
@@ -5110,8 +5110,8 @@ Expected: no errors. If you don't have one, the init script will be validated wh
 - [ ] **Step 3: Commit**
 
 ```bash
-git add demo/clickhouse/init/02_schema_dob.sql
-git commit -m "feat(demo): ClickHouse schema for depthofbook database (5 tables)"
+git add demo/clickhouse/init/02_schema_mbo.sql
+git commit -m "feat(demo): ClickHouse schema for marketbyorder database (5 tables)"
 ```
 
 ---
@@ -5129,39 +5129,39 @@ Add the two new services and the new env keys.
 Open `demo/docker-compose.yml`. After the existing `topofbook-bot` service block (renamed in Task 1), add:
 
 ```yaml
-  depthofbook-parser:
-    build: ../go/depthofbook-parser
-    image: dz/depthofbook-parser:latest
+  marketbyorder-parser:
+    build: ../go/marketbyorder-parser
+    image: dz/marketbyorder-parser:latest
     network_mode: host
     restart: unless-stopped
     command:
-      - --group=${DZ_DOB_MULTICAST_GROUP}
-      - --refdata-port=${DZ_DOB_REFDATA_PORT}
-      - --mktdata-port=${DZ_DOB_MKTDATA_PORT}
-      - --snapshot-port=${DZ_DOB_SNAPSHOT_PORT}
+      - --group=${DZ_MBO_MULTICAST_GROUP}
+      - --refdata-port=${DZ_MBO_REFDATA_PORT}
+      - --mktdata-port=${DZ_MBO_MKTDATA_PORT}
+      - --snapshot-port=${DZ_MBO_SNAPSHOT_PORT}
       - --interface=${DZ_INTERFACE}
-      - --output=unix:///var/run/dz/dob.sock
+      - --output=unix:///var/run/dz/mbo.sock
       - --metrics-addr=127.0.0.1:9091
     volumes:
       - dz-sockets:/var/run/dz
 
-  depthofbook-bot:
-    build: ../go/depthofbook-bot
-    image: dz/depthofbook-bot:latest
+  marketbyorder-bot:
+    build: ../go/marketbyorder-bot
+    image: dz/marketbyorder-bot:latest
     restart: unless-stopped
     depends_on:
-      - depthofbook-parser
+      - marketbyorder-parser
       - clickhouse
     command:
-      - --socket=/var/run/dz/dob.sock
-      - --symbol=${DZ_DOB_SYMBOLS}
-      - --depth=${DZ_DOB_DEPTH:-20}
-      - --coalesce-ms=${DZ_DOB_COALESCE_MS:-50}
+      - --socket=/var/run/dz/mbo.sock
+      - --symbol=${DZ_MBO_SYMBOLS}
+      - --depth=${DZ_MBO_DEPTH:-20}
+      - --coalesce-ms=${DZ_MBO_COALESCE_MS:-50}
       - --metrics-addr=0.0.0.0:9092
       - --clickhouse-url=http://clickhouse:8123
-      - --clickhouse-database=depthofbook
+      - --clickhouse-database=marketbyorder
     ports:
-      - "${DOB_BOT_METRICS_PORT:-9092}:9092"
+      - "${MBO_BOT_METRICS_PORT:-9092}:9092"
     volumes:
       - dz-sockets:/var/run/dz
 ```
@@ -5181,14 +5181,14 @@ Append to `demo/.env.example`:
 
 ```bash
 # Depth-of-book feed
-DZ_DOB_MULTICAST_GROUP=239.10.10.20
-DZ_DOB_REFDATA_PORT=7011
-DZ_DOB_MKTDATA_PORT=7012
-DZ_DOB_SNAPSHOT_PORT=7013
-DZ_DOB_SYMBOLS=
-DZ_DOB_DEPTH=20
-DZ_DOB_COALESCE_MS=50
-DOB_BOT_METRICS_PORT=9092
+DZ_MBO_MULTICAST_GROUP=239.10.10.20
+DZ_MBO_REFDATA_PORT=7011
+DZ_MBO_MKTDATA_PORT=7012
+DZ_MBO_SNAPSHOT_PORT=7013
+DZ_MBO_SYMBOLS=
+DZ_MBO_DEPTH=20
+DZ_MBO_COALESCE_MS=50
+MBO_BOT_METRICS_PORT=9092
 ```
 
 - [ ] **Step 3: Validate docker compose syntax**
@@ -5203,7 +5203,7 @@ Expected: no syntax errors. (This doesn't actually start anything.)
 
 ```bash
 git add demo/docker-compose.yml demo/.env.example
-git commit -m "feat(demo): add depthofbook-parser and depthofbook-bot services"
+git commit -m "feat(demo): add marketbyorder-parser and marketbyorder-bot services"
 ```
 
 ---
@@ -5211,21 +5211,21 @@ git commit -m "feat(demo): add depthofbook-parser and depthofbook-bot services"
 ### Task 18: Grafana dashboard
 
 **Files:**
-- Create: `demo/grafana/dashboards/depthofbook.json`
+- Create: `demo/grafana/dashboards/marketbyorder.json`
 
 The existing dashboards provisioning YAML at `demo/grafana/provisioning/dashboards/dashboards.yaml` already wildcards the dashboards directory. The new file is auto-discovered on Grafana boot.
 
-The ClickHouse datasource provisioned at `demo/grafana/provisioning/datasources/clickhouse.yaml` defaults to the `topofbook` database. Each query in the new dashboard explicitly selects the `depthofbook` database via the datasource UI's "database" field per panel — no datasource provisioning change is required.
+The ClickHouse datasource provisioned at `demo/grafana/provisioning/datasources/clickhouse.yaml` defaults to the `topofbook` database. Each query in the new dashboard explicitly selects the `marketbyorder` database via the datasource UI's "database" field per panel — no datasource provisioning change is required.
 
 - [ ] **Step 1: Create the dashboard JSON file**
 
-Create `demo/grafana/dashboards/depthofbook.json`. The full Grafana JSON model for a dashboard with the 9 panels from the spec is too large to embed verbatim here, so the implementer composes it as follows:
+Create `demo/grafana/dashboards/marketbyorder.json`. The full Grafana JSON model for a dashboard with the 9 panels from the spec is too large to embed verbatim here, so the implementer composes it as follows:
 
 1. Open the existing `demo/grafana/dashboards/topofbook.json` as a structural reference. Note its top-level structure: `{annotations, editable, panels:[...], templating:{list:[...]}, time, timepicker, title, uid, version, ...}`.
 
-2. Copy `topofbook.json` to `depthofbook.json` and modify:
-   - `title`: `"DZ Depth-of-Book"`
-   - `uid`: a fresh UID — `"dz-depthofbook"` is fine
+2. Copy `topofbook.json` to `marketbyorder.json` and modify:
+   - `title`: `"DZ Market-by-Order"`
+   - `uid`: a fresh UID — `"dz-marketbyorder"` is fine
    - `templating.list`: replace the symbol variables with these two:
 
      ```json
@@ -5234,7 +5234,7 @@ Create `demo/grafana/dashboards/depthofbook.json`. The full Grafana JSON model f
        "label": "Symbol",
        "type": "query",
        "datasource": "ClickHouse",
-       "query": "SELECT DISTINCT symbol FROM depthofbook.level_snapshots WHERE $__timeFilter(recv_ts)",
+       "query": "SELECT DISTINCT symbol FROM marketbyorder.level_snapshots WHERE $__timeFilter(recv_ts)",
        "multi": false,
        "includeAll": false,
        "refresh": 2
@@ -5244,7 +5244,7 @@ Create `demo/grafana/dashboards/depthofbook.json`. The full Grafana JSON model f
        "label": "Symbols",
        "type": "query",
        "datasource": "ClickHouse",
-       "query": "SELECT DISTINCT symbol FROM depthofbook.level_snapshots WHERE $__timeFilter(recv_ts)",
+       "query": "SELECT DISTINCT symbol FROM marketbyorder.level_snapshots WHERE $__timeFilter(recv_ts)",
        "multi": true,
        "includeAll": true,
        "refresh": 2
@@ -5256,10 +5256,10 @@ Create `demo/grafana/dashboards/depthofbook.json`. The full Grafana JSON model f
    **Panel 1 — Book ladder** (type `"table"`, gridPos `{x:0,y:0,w:8,h:14}`):
    ```sql
    SELECT side, level_idx, price, qty, cumulative_qty
-   FROM depthofbook.level_snapshots
+   FROM marketbyorder.level_snapshots
    WHERE symbol = '${symbol}'
      AND recv_ts = (
-       SELECT max(recv_ts) FROM depthofbook.level_snapshots
+       SELECT max(recv_ts) FROM marketbyorder.level_snapshots
        WHERE symbol = '${symbol}' AND $__timeFilter(recv_ts)
      )
    ORDER BY side DESC, level_idx
@@ -5269,7 +5269,7 @@ Create `demo/grafana/dashboards/depthofbook.json`. The full Grafana JSON model f
    **Panel 2 — Depth heatmap** (type `"heatmap"`, gridPos `{x:8,y:0,w:16,h:14}`):
    ```sql
    SELECT $__timeInterval(recv_ts) AS time, price, sum(qty) AS qty
-   FROM depthofbook.level_snapshots
+   FROM marketbyorder.level_snapshots
    WHERE symbol = '${symbol}' AND $__timeFilter(recv_ts)
    GROUP BY time, price
    ORDER BY time
@@ -5281,7 +5281,7 @@ Create `demo/grafana/dashboards/depthofbook.json`. The full Grafana JSON model f
      SELECT $__timeInterval(recv_ts) AS time,
             min(price) FILTER (WHERE side = 'ask') AS best_ask,
             max(price) FILTER (WHERE side = 'bid') AS best_bid
-     FROM depthofbook.level_snapshots
+     FROM marketbyorder.level_snapshots
      WHERE symbol = '${symbol}' AND level_idx = 0 AND $__timeFilter(recv_ts)
      GROUP BY time
    )
@@ -5298,7 +5298,7 @@ Create `demo/grafana/dashboards/depthofbook.json`. The full Grafana JSON model f
      argMax(qty, recv_ts) FILTER (WHERE side = 'bid' AND level_idx = 0) AS bid_qty,
      argMax(qty, recv_ts) FILTER (WHERE side = 'ask' AND level_idx = 0) AS ask_qty,
      max(recv_ts) AS last_update
-   FROM depthofbook.level_snapshots
+   FROM marketbyorder.level_snapshots
    WHERE symbol IN (${symbols:singlequote}) AND $__timeFilter(recv_ts)
    GROUP BY symbol
    ORDER BY symbol
@@ -5307,7 +5307,7 @@ Create `demo/grafana/dashboards/depthofbook.json`. The full Grafana JSON model f
    **Panel 5 — Trade tape** (type `"table"`, gridPos `{x:0,y:21,w:12,h:9}`):
    ```sql
    SELECT recv_ts, symbol, aggressor_side, price, qty
-   FROM depthofbook.events
+   FROM marketbyorder.events
    WHERE kind = 'trade' AND symbol IN (${symbols:singlequote})
      AND $__timeFilter(recv_ts)
    ORDER BY recv_ts DESC LIMIT 100
@@ -5316,7 +5316,7 @@ Create `demo/grafana/dashboards/depthofbook.json`. The full Grafana JSON model f
    **Panel 6 — Add/Cancel/Execute rate** (type `"timeseries"` with `stacking.mode = "normal"`, gridPos `{x:12,y:21,w:12,h:9}`):
    ```sql
    SELECT $__timeInterval(recv_ts) AS time, kind, count() AS rate
-   FROM depthofbook.events
+   FROM marketbyorder.events
    WHERE kind IN ('order_add', 'order_cancel', 'order_execute')
      AND symbol IN (${symbols:singlequote}) AND $__timeFilter(recv_ts)
    GROUP BY time, kind ORDER BY time
@@ -5325,7 +5325,7 @@ Create `demo/grafana/dashboards/depthofbook.json`. The full Grafana JSON model f
    **Panel 7 — Resting order count** (type `"timeseries"`, gridPos `{x:0,y:30,w:12,h:7}`):
    ```sql
    SELECT $__timeInterval(recv_ts) AS time, side, sum(order_count) AS orders
-   FROM depthofbook.level_snapshots
+   FROM marketbyorder.level_snapshots
    WHERE symbol = '${symbol}' AND $__timeFilter(recv_ts)
    GROUP BY time, side ORDER BY time
    ```
@@ -5336,7 +5336,7 @@ Create `demo/grafana/dashboards/depthofbook.json`. The full Grafana JSON model f
           quantile(0.5)(wire_latency_ms) AS p50,
           quantile(0.95)(wire_latency_ms) AS p95,
           quantile(0.99)(wire_latency_ms) AS p99
-   FROM depthofbook.level_snapshots
+   FROM marketbyorder.level_snapshots
    WHERE $__timeFilter(recv_ts)
    GROUP BY time ORDER BY time
    ```
@@ -5344,7 +5344,7 @@ Create `demo/grafana/dashboards/depthofbook.json`. The full Grafana JSON model f
    **Panel 9 — Active instrument count** (type `"stat"`, gridPos `{x:20,y:35,w:4,h:5}`):
    ```sql
    SELECT instrument_count
-   FROM depthofbook.channel_health
+   FROM marketbyorder.channel_health
    WHERE kind = 'manifest_summary'
    ORDER BY recv_ts DESC LIMIT 1
    ```
@@ -5353,7 +5353,7 @@ Create `demo/grafana/dashboards/depthofbook.json`. The full Grafana JSON model f
 
 5. Validate the JSON parses:
    ```bash
-   python3 -c 'import json; json.load(open("demo/grafana/dashboards/depthofbook.json"))'
+   python3 -c 'import json; json.load(open("demo/grafana/dashboards/marketbyorder.json"))'
    ```
    Expected: no output (clean parse).
 
@@ -5362,8 +5362,8 @@ The dashboard JSON ends up around 600-1000 lines depending on Grafana version's 
 - [ ] **Step 2: Commit**
 
 ```bash
-git add demo/grafana/dashboards/depthofbook.json
-git commit -m "feat(demo): Grafana dashboard for depth-of-book"
+git add demo/grafana/dashboards/marketbyorder.json
+git commit -m "feat(demo): Grafana dashboard for market-by-order"
 ```
 
 ---
@@ -5373,20 +5373,20 @@ git commit -m "feat(demo): Grafana dashboard for depth-of-book"
 **Files:**
 - Modify: `README.md` (top level)
 
-Update the implementations table or add a new section noting that the depth-of-book pipeline is now available.
+Update the implementations table or add a new section noting that the market-by-order pipeline is now available.
 
 - [ ] **Step 1: Update top-level README.md**
 
 Find the implementations table or relevant section and add a row/section like:
 
 ```markdown
-### Depth-of-Book Demo
+### Market-by-Order Demo
 
-A sibling pipeline to top-of-book, consuming the [DZ-DOB v0.1.0](https://github.com/malbeclabs/edge-feed-spec/blob/main/depth-of-book/spec.md) feed:
+A sibling pipeline to top-of-book, consuming the [DZ-MBO v0.1.0](https://github.com/malbeclabs/edge-feed-spec/blob/main/market-by-order/spec.md) feed:
 
-- **[`go/depthofbook-parser`](go/depthofbook-parser/)** — three-port multicast subscriber + binary wire decoder, broadcasts decoded JSONL on a Unix socket
-- **[`go/depthofbook-bot`](go/depthofbook-bot/)** — book builder + persistor, maintains in-memory MBO order books and writes per-event rows + coalesced top-N level snapshots to ClickHouse
-- **[`demo`](demo/)** — extended docker-compose stack with a new "DZ Depth-of-Book" Grafana dashboard featuring book ladder, depth heatmap, spread, trade tape, and event-rate panels
+- **[`go/marketbyorder-parser`](go/marketbyorder-parser/)** — three-port multicast subscriber + binary wire decoder, broadcasts decoded JSONL on a Unix socket
+- **[`go/marketbyorder-bot`](go/marketbyorder-bot/)** — book builder + persistor, maintains in-memory MBO order books and writes per-event rows + coalesced top-N level snapshots to ClickHouse
+- **[`demo`](demo/)** — extended docker-compose stack with a new "DZ Market-by-Order" Grafana dashboard featuring book ladder, depth heatmap, spread, trade tape, and event-rate panels
 ```
 
 - [ ] **Step 2: Run all tests across the workspace**
@@ -5409,7 +5409,7 @@ Expected: no errors.
 
 ```bash
 git add README.md
-git commit -m "docs: top-level README updates for depth-of-book pipeline"
+git commit -m "docs: top-level README updates for market-by-order pipeline"
 ```
 
 ---
@@ -5419,19 +5419,19 @@ git commit -m "docs: top-level README updates for depth-of-book pipeline"
 ```bash
 cd demo
 cp .env.example .env
-# Edit .env — at minimum set DZ_DOB_MULTICAST_GROUP, DZ_DOB_*_PORT, DZ_INTERFACE
+# Edit .env — at minimum set DZ_MBO_MULTICAST_GROUP, DZ_MBO_*_PORT, DZ_INTERFACE
 docker compose up -d --build
 ```
 
-First boot builds both parser images and runs the new ClickHouse init script. Grafana picks up the new dashboard automatically. Open http://localhost:3000 and select "DZ Depth-of-Book".
+First boot builds both parser images and runs the new ClickHouse init script. Grafana picks up the new dashboard automatically. Open http://localhost:3000 and select "DZ Market-by-Order".
 
 If the dashboard is empty, give the cold-start state machine a few seconds to receive its first snapshot cycle (worst case: one snapshot cycle period — typically 15s). Check:
 
 ```bash
-docker compose logs depthofbook-parser | tail
-docker compose logs depthofbook-bot    | tail
+docker compose logs marketbyorder-parser | tail
+docker compose logs marketbyorder-bot    | tail
 docker compose exec clickhouse clickhouse-client -q \
-  "SELECT count() FROM depthofbook.level_snapshots"
+  "SELECT count() FROM marketbyorder.level_snapshots"
 ```
 
 ---
@@ -5442,4 +5442,4 @@ docker compose exec clickhouse clickhouse-client -q \
 - Reconciliation between bot's reconstructed book and a reference snapshot
 - Standalone book viewer (CLI or web) reading parser socket directly
 - Multi-channel sharded publisher coordination beyond the single-channel-per-publisher case
-- Cross-feed dashboards correlating TOB, DOB, and (future) midpoint feeds
+- Cross-feed dashboards correlating TOB, MBO, and (future) midpoint feeds

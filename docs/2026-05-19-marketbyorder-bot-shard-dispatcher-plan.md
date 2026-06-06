@@ -1,22 +1,22 @@
-# depthofbook-bot Shard Dispatcher Implementation Plan
+# marketbyorder-bot Shard Dispatcher Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace the depthofbook-bot's single-goroutine dispatcher with a coordinator that shards record application across N per-instrument worker goroutines, eliminating the throughput choke at ~330 instruments/1 channel.
+**Goal:** Replace the marketbyorder-bot's single-goroutine dispatcher with a coordinator that shards record application across N per-instrument worker goroutines, eliminating the throughput choke at ~330 instruments/1 channel.
 
 **Architecture:** A `Coordinator` (single goroutine, the `Dispatcher`) owns channel-scoped state and routing; it forwards each record to one of N `Shard` goroutines keyed by `instrument_id % N`. Each shard exclusively owns its instruments, refdata, per-instrument delta buffers, snapshot context, and its own `SnapshotWriter`. Channel-reset and `end_of_session`/`batch_boundary` use an in-band FIFO marker/ack barrier.
 
-**Tech Stack:** Go 1.25, package `main` in `go/depthofbook-bot/` (module `depthofbook-bot`), Prometheus client, standard `testing`. Design doc: `docs/2026-05-19-depthofbook-bot-shard-dispatcher-design.md`.
+**Tech Stack:** Go 1.25, package `main` in `go/marketbyorder-bot/` (module `marketbyorder-bot`), Prometheus client, standard `testing`. Design doc: `docs/2026-05-19-marketbyorder-bot-shard-dispatcher-design.md`.
 
 ---
 
 ## Conventions for every task
 
 - All commands run from the worktree root unless stated. Test command form:
-  `cd go/depthofbook-bot && go test ./... -run <Name> -v`
-- Race tests: `cd go/depthofbook-bot && go test ./... -race -run <Name> -v`
+  `cd go/marketbyorder-bot && go test ./... -run <Name> -v`
+- Race tests: `cd go/marketbyorder-bot && go test ./... -race -run <Name> -v`
 - Commit messages: all lowercase, no `Co-Authored-By` line, no body needed unless noted (per repo CLAUDE.md).
-- **Before EVERY commit step, run `cd go/depthofbook-bot && gofmt -w .` then confirm `gofmt -l .` prints nothing.** The Go code blocks in this plan are logically exact but their inline-comment whitespace is NOT guaranteed gofmt-clean (aligned struct-field comments in particular). Reproduce the code's logic verbatim, then let `gofmt -w` normalize formatting — a `gofmt`-dirty file is a task blocker per repo CLAUDE.md.
+- **Before EVERY commit step, run `cd go/marketbyorder-bot && gofmt -w .` then confirm `gofmt -l .` prints nothing.** The Go code blocks in this plan are logically exact but their inline-comment whitespace is NOT guaranteed gofmt-clean (aligned struct-field comments in particular). Reproduce the code's logic verbatim, then let `gofmt -w` normalize formatting — a `gofmt`-dirty file is a task blocker per repo CLAUDE.md.
 - Branch is already `ss/angry-dhawan-71b52e` (worktree). Do not create new branches.
 - Never commit binaries or `.claude/`.
 
@@ -24,16 +24,16 @@
 
 ## File Structure
 
-- **Create** `go/depthofbook-bot/shard.go` — `Shard` type: instrument-scoped state (instruments, refdata, per-instrument delta buffers, per-snapshot context), the ported `apply*` logic, the per-shard `sync.Mutex`, the inbox + `Run` loop, reset/fence marker handling, and the dispatcher-body persistence logic (events + snapshot MarkDirty) for its instruments.
-- **Create** `go/depthofbook-bot/shard_test.go` — per-shard unit tests (ported from `channel_test.go`) + inbox/marker tests.
-- **Create** `go/depthofbook-bot/coordinator.go` — `Coordinator` type: channel-scoped state (`resetCount`, `manifest`, `seqLast`), `snapshotRoute` map, classification/routing, reset barrier, fence, channel-health direct writes. Implements `Dispatcher`.
-- **Create** `go/depthofbook-bot/coordinator_test.go` — routing/classification, reset-barrier, fence, snapshot-routing tests.
-- **Create** `go/depthofbook-bot/parity_test.go` — order-preservation golden test + in-process acceptance harness.
-- **Modify** `go/depthofbook-bot/snapshot_writer.go` — add `generation`, `resetCh`, `Reset()`, generation re-check in `flushDue`.
-- **Modify** `go/depthofbook-bot/snapshot_writer_test.go` — add `Reset()` tests.
-- **Modify** `go/depthofbook-bot/metrics.go` — add `SnapshotOrderDroppedTotal` counter.
-- **Modify** `go/depthofbook-bot/main.go` — `--shards` flag, GOMAXPROCS default, build coordinator + N shards, wire as `Dispatcher`; remove the old `ChannelState`/`getOrCreateChannel`/inline-dispatcher path.
-- **Delete** `go/depthofbook-bot/channel.go` and `go/depthofbook-bot/channel_test.go` — `ChannelState` is decomposed into `Shard` (instrument-scoped) + `Coordinator` (channel-scoped). Helper conversions (`toUint8`, `toUint32`, …, `sideFromString`, `filterBuffer`) and the `ChannelEvent`/`InstrumentDef`/`ManifestState`/`BufferedDelta` types move into `shard.go`.
+- **Create** `go/marketbyorder-bot/shard.go` — `Shard` type: instrument-scoped state (instruments, refdata, per-instrument delta buffers, per-snapshot context), the ported `apply*` logic, the per-shard `sync.Mutex`, the inbox + `Run` loop, reset/fence marker handling, and the dispatcher-body persistence logic (events + snapshot MarkDirty) for its instruments.
+- **Create** `go/marketbyorder-bot/shard_test.go` — per-shard unit tests (ported from `channel_test.go`) + inbox/marker tests.
+- **Create** `go/marketbyorder-bot/coordinator.go` — `Coordinator` type: channel-scoped state (`resetCount`, `manifest`, `seqLast`), `snapshotRoute` map, classification/routing, reset barrier, fence, channel-health direct writes. Implements `Dispatcher`.
+- **Create** `go/marketbyorder-bot/coordinator_test.go` — routing/classification, reset-barrier, fence, snapshot-routing tests.
+- **Create** `go/marketbyorder-bot/parity_test.go` — order-preservation golden test + in-process acceptance harness.
+- **Modify** `go/marketbyorder-bot/snapshot_writer.go` — add `generation`, `resetCh`, `Reset()`, generation re-check in `flushDue`.
+- **Modify** `go/marketbyorder-bot/snapshot_writer_test.go` — add `Reset()` tests.
+- **Modify** `go/marketbyorder-bot/metrics.go` — add `SnapshotOrderDroppedTotal` counter.
+- **Modify** `go/marketbyorder-bot/main.go` — `--shards` flag, GOMAXPROCS default, build coordinator + N shards, wire as `Dispatcher`; remove the old `ChannelState`/`getOrCreateChannel`/inline-dispatcher path.
+- **Delete** `go/marketbyorder-bot/channel.go` and `go/marketbyorder-bot/channel_test.go` — `ChannelState` is decomposed into `Shard` (instrument-scoped) + `Coordinator` (channel-scoped). Helper conversions (`toUint8`, `toUint32`, …, `sideFromString`, `filterBuffer`) and the `ChannelEvent`/`InstrumentDef`/`ManifestState`/`BufferedDelta` types move into `shard.go`.
 
 Decomposition rationale: `ChannelState` today mixes channel-scoped and instrument-scoped responsibilities under one mutex; splitting along that exact seam is the change. `Shard` stays focused on one instrument subset; `Coordinator` stays focused on classify/route/barrier.
 
@@ -42,14 +42,14 @@ Decomposition rationale: `ChannelState` today mixes channel-scoped and instrumen
 ## Task 1: SnapshotWriter — generation counter + serialized Reset()
 
 **Files:**
-- Modify: `go/depthofbook-bot/snapshot_writer.go`
-- Test: `go/depthofbook-bot/snapshot_writer_test.go`
+- Modify: `go/marketbyorder-bot/snapshot_writer.go`
+- Test: `go/marketbyorder-bot/snapshot_writer_test.go`
 
 This is self-contained (no Shard yet). It adds the reset-ordering guarantee from the design's "SnapshotWriter reset ordering" section.
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `go/depthofbook-bot/snapshot_writer_test.go`:
+Add to `go/marketbyorder-bot/snapshot_writer_test.go`:
 
 ```go
 func TestSnapshotWriter_ResetClearsDirtyAndBumpsGeneration(t *testing.T) {
@@ -130,12 +130,12 @@ Add to `snapshot_writer_test.go`'s import block (alongside `context`): `dto "git
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd go/depthofbook-bot && go test ./... -run 'TestSnapshotWriter_ResetClearsDirtyAndBumpsGeneration|TestSnapshotWriter_FlushAbortsRemainderOnGenerationBump' -v`
+Run: `cd go/marketbyorder-bot && go test ./... -run 'TestSnapshotWriter_ResetClearsDirtyAndBumpsGeneration|TestSnapshotWriter_FlushAbortsRemainderOnGenerationBump' -v`
 Expected: FAIL — `w.generation`, `w.Reset`, and the `flushDue` generation re-check are undefined (compile error).
 
 - [ ] **Step 3: Add fields, Reset(), generation handling**
 
-In `go/depthofbook-bot/snapshot_writer.go`, extend the struct (add the two fields after `channel uint8`):
+In `go/marketbyorder-bot/snapshot_writer.go`, extend the struct (add the two fields after `channel uint8`):
 
 ```go
 	mu             sync.Mutex
@@ -260,14 +260,14 @@ func (w *SnapshotWriter) flushDue() {
 
 - [ ] **Step 4: Run tests to verify pass**
 
-Run: `cd go/depthofbook-bot && go test ./... -run TestSnapshotWriter -v`
+Run: `cd go/marketbyorder-bot && go test ./... -run TestSnapshotWriter -v`
 Expected: PASS — both new tests (`...ResetClearsDirtyAndBumpsGeneration`, `...FlushAbortsRemainderOnGenerationBump`) + the three existing `TestSnapshotWriter_*` pass.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add go/depthofbook-bot/snapshot_writer.go go/depthofbook-bot/snapshot_writer_test.go
-git commit -m "depthofbook-bot: add serialized snapshotwriter reset with generation fence"
+git add go/marketbyorder-bot/snapshot_writer.go go/marketbyorder-bot/snapshot_writer_test.go
+git commit -m "marketbyorder-bot: add serialized snapshotwriter reset with generation fence"
 ```
 
 ---
@@ -275,11 +275,11 @@ git commit -m "depthofbook-bot: add serialized snapshotwriter reset with generat
 ## Task 2: metrics — snapshot_order dropped counter
 
 **Files:**
-- Modify: `go/depthofbook-bot/metrics.go`
+- Modify: `go/marketbyorder-bot/metrics.go`
 
 - [ ] **Step 1: Add the counter field**
 
-In `go/depthofbook-bot/metrics.go`, add to the `Metrics` struct under the "Book state" group (after `PerInstrumentGapsTotal`):
+In `go/marketbyorder-bot/metrics.go`, add to the `Metrics` struct under the "Book state" group (after `PerInstrumentGapsTotal`):
 
 ```go
 	PerInstrumentGapsTotal prometheus.Counter
@@ -302,14 +302,14 @@ In the `reg.MustRegister(` call, add `m.SnapshotOrderDroppedTotal,` to the book-
 
 - [ ] **Step 3: Verify it compiles**
 
-Run: `cd go/depthofbook-bot && go build ./...`
+Run: `cd go/marketbyorder-bot && go build ./...`
 Expected: no output (success).
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add go/depthofbook-bot/metrics.go
-git commit -m "depthofbook-bot: add snapshot_order_dropped_total metric"
+git add go/marketbyorder-bot/metrics.go
+git commit -m "marketbyorder-bot: add snapshot_order_dropped_total metric"
 ```
 
 ---
@@ -317,15 +317,15 @@ git commit -m "depthofbook-bot: add snapshot_order_dropped_total metric"
 ## Task 3: Shard type — instrument-scoped state + ported apply logic
 
 **Files:**
-- Create: `go/depthofbook-bot/shard.go`
-- Create: `go/depthofbook-bot/shard_test.go`
+- Create: `go/marketbyorder-bot/shard.go`
+- Create: `go/marketbyorder-bot/shard_test.go`
 - (Do not delete `channel.go` yet — it stays until Task 8 so the build keeps passing.)
 
 `Shard` owns one instrument subset. State maps are keyed by `instKey{ch, id}` so two channels sharing an instrument_id never collide (preserves today's per-channel `ChannelState` isolation). Per-instrument delta buffers replace the channel-global `DeltaBuffer`.
 
 - [ ] **Step 1: Write the failing test**
 
-Create `go/depthofbook-bot/shard_test.go`:
+Create `go/marketbyorder-bot/shard_test.go`:
 
 ```go
 package main
@@ -426,12 +426,12 @@ func TestShard_PerInstrumentGap(t *testing.T) {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd go/depthofbook-bot && go test ./... -run TestShard_ -v`
+Run: `cd go/marketbyorder-bot && go test ./... -run TestShard_ -v`
 Expected: FAIL — `NewShard`, `Shard`, `instKey` undefined (compile error).
 
 - [ ] **Step 3: Create shard.go with state + ported apply logic**
 
-Create `go/depthofbook-bot/shard.go`. This ports the instrument-scoped logic from `channel.go` (the `apply*` methods, `bufferDelta`/`replayBuffer`, the type-conversion helpers, and the `ChannelEvent`/`InstrumentDef`/`ManifestState`/`BufferedDelta` types) onto `Shard`. Delta buffers are per-instrument (`map[instKey][]BufferedDelta`), removing the global `sort.Slice`. Channel-reset detection and `SeqLast` are intentionally NOT here (the coordinator owns them).
+Create `go/marketbyorder-bot/shard.go`. This ports the instrument-scoped logic from `channel.go` (the `apply*` methods, `bufferDelta`/`replayBuffer`, the type-conversion helpers, and the `ChannelEvent`/`InstrumentDef`/`ManifestState`/`BufferedDelta` types) onto `Shard`. Delta buffers are per-instrument (`map[instKey][]BufferedDelta`), removing the global `sort.Slice`. Channel-reset detection and `SeqLast` are intentionally NOT here (the coordinator owns them).
 
 ```go
 package main
@@ -832,23 +832,23 @@ import (
 )
 ```
 
-(`sort` is still used by `ChannelState.bufferDelta`, `log` by gap/reset logging, `sync` by `ChannelState.Mu`; `time` is no longer referenced and must be removed.) Run `cd go/depthofbook-bot && gofmt -w channel.go shard.go` after editing so Step 4 is gofmt-clean.
+(`sort` is still used by `ChannelState.bufferDelta`, `log` by gap/reset logging, `sync` by `ChannelState.Mu`; `time` is no longer referenced and must be removed.) Run `cd go/marketbyorder-bot && gofmt -w channel.go shard.go` after editing so Step 4 is gofmt-clean.
 
 - [ ] **Step 4: Run tests to verify pass**
 
-Run: `cd go/depthofbook-bot && go test ./... -run 'TestShard_|TestChannel_|TestSnapshotWriter' -v`
+Run: `cd go/marketbyorder-bot && go test ./... -run 'TestShard_|TestChannel_|TestSnapshotWriter' -v`
 Expected: PASS — new `TestShard_*` pass; existing `TestChannel_*` and `TestSnapshotWriter_*` still pass (channel.go now uses the shared helpers).
 
 - [ ] **Step 5: Run the full package build/test**
 
-Run: `cd go/depthofbook-bot && go build ./... && go test ./...`
-Expected: build clean; `ok depthofbook-bot`.
+Run: `cd go/marketbyorder-bot && go build ./... && go test ./...`
+Expected: build clean; `ok marketbyorder-bot`.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add go/depthofbook-bot/shard.go go/depthofbook-bot/shard_test.go go/depthofbook-bot/channel.go
-git commit -m "depthofbook-bot: add shard type with per-instrument state and ported apply logic"
+git add go/marketbyorder-bot/shard.go go/marketbyorder-bot/shard_test.go go/marketbyorder-bot/channel.go
+git commit -m "marketbyorder-bot: add shard type with per-instrument state and ported apply logic"
 ```
 
 ---
@@ -856,14 +856,14 @@ git commit -m "depthofbook-bot: add shard type with per-instrument state and por
 ## Task 4: Shard — persistence body (events + snapshot MarkDirty) for its instruments
 
 **Files:**
-- Modify: `go/depthofbook-bot/shard.go`
-- Modify: `go/depthofbook-bot/shard_test.go`
+- Modify: `go/marketbyorder-bot/shard.go`
+- Modify: `go/marketbyorder-bot/shard_test.go`
 
 This ports the dispatcher-closure body from `main.go:110-185` (events writing, snapshot frame routing, `MarkDirty`, metric increments) onto the shard, scoped to its instruments. `apply()` stays pure (book only); a new `handle()` calls `apply()` then does persistence.
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `go/depthofbook-bot/shard_test.go`:
+Add to `go/marketbyorder-bot/shard_test.go`:
 
 ```go
 func TestShard_HandleMarksDirtyOnAppliedDelta(t *testing.T) {
@@ -950,12 +950,12 @@ Place the extra imports in `shard_test.go`'s import block (merge with `testing`/
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd go/depthofbook-bot && go test ./... -run 'TestShard_Handle' -v`
+Run: `cd go/marketbyorder-bot && go test ./... -run 'TestShard_Handle' -v`
 Expected: FAIL — `s.handle` undefined (compile error).
 
 - [ ] **Step 3: Implement handle()**
 
-Add to `go/depthofbook-bot/shard.go` (this mirrors `main.go`'s dispatcher body, scoped to the shard's instruments; refdata/snapCtx are shard-local). Add `"time"` is already imported. Append:
+Add to `go/marketbyorder-bot/shard.go` (this mirrors `main.go`'s dispatcher body, scoped to the shard's instruments; refdata/snapCtx are shard-local). Add `"time"` is already imported. Append:
 
 ```go
 // handle applies a record and performs persistence (events + snapshot dirty
@@ -1021,14 +1021,14 @@ Note: `channel_reset` is intentionally not handled here — the coordinator owns
 
 - [ ] **Step 4: Run tests to verify pass**
 
-Run: `cd go/depthofbook-bot && go test ./... -run 'TestShard_' -v`
+Run: `cd go/marketbyorder-bot && go test ./... -run 'TestShard_' -v`
 Expected: PASS (all `TestShard_*`).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add go/depthofbook-bot/shard.go go/depthofbook-bot/shard_test.go
-git commit -m "depthofbook-bot: add shard persistence body (events, dirty marking, metrics)"
+git add go/marketbyorder-bot/shard.go go/marketbyorder-bot/shard_test.go
+git commit -m "marketbyorder-bot: add shard persistence body (events, dirty marking, metrics)"
 ```
 
 ---
@@ -1036,12 +1036,12 @@ git commit -m "depthofbook-bot: add shard persistence body (events, dirty markin
 ## Task 5: Shard — inbox protocol, Run loop, reset/fence marker handling
 
 **Files:**
-- Modify: `go/depthofbook-bot/shard.go`
-- Modify: `go/depthofbook-bot/shard_test.go`
+- Modify: `go/marketbyorder-bot/shard.go`
+- Modify: `go/marketbyorder-bot/shard_test.go`
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `go/depthofbook-bot/shard_test.go`:
+Add to `go/marketbyorder-bot/shard_test.go`:
 
 ```go
 import "context"  // merge into existing import block
@@ -1119,12 +1119,12 @@ func TestShard_FenceAcksWithoutWipe(t *testing.T) {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd go/depthofbook-bot && go test ./... -run 'TestShard_Run|TestShard_Fence' -v`
+Run: `cd go/marketbyorder-bot && go test ./... -run 'TestShard_Run|TestShard_Fence' -v`
 Expected: FAIL — `s.Run` undefined.
 
 - [ ] **Step 3: Replace the placeholder shardMsg and add Run**
 
-In `go/depthofbook-bot/shard.go`, the placeholder `shardMsg`/`shardMsgKind` from Task 3 already has the right shape — keep it.
+In `go/marketbyorder-bot/shard.go`, the placeholder `shardMsg`/`shardMsgKind` from Task 3 already has the right shape — keep it.
 
 **Import update (required):** `Run` uses `context.Context`, which `shard.go` does not yet import. Change `shard.go`'s import block to:
 
@@ -1172,19 +1172,19 @@ func (s *Shard) Run(ctx context.Context) {
 
 - [ ] **Step 4: Run tests to verify pass**
 
-Run: `cd go/depthofbook-bot && go test ./... -run 'TestShard_' -v`
+Run: `cd go/marketbyorder-bot && go test ./... -run 'TestShard_' -v`
 Expected: PASS.
 
 - [ ] **Step 5: Race check**
 
-Run: `cd go/depthofbook-bot && go test ./... -race -run 'TestShard_Run|TestShard_Fence' -v`
+Run: `cd go/marketbyorder-bot && go test ./... -race -run 'TestShard_Run|TestShard_Fence' -v`
 Expected: PASS, no race warnings.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add go/depthofbook-bot/shard.go go/depthofbook-bot/shard_test.go
-git commit -m "depthofbook-bot: add shard run loop with reset and fence markers"
+git add go/marketbyorder-bot/shard.go go/marketbyorder-bot/shard_test.go
+git commit -m "marketbyorder-bot: add shard run loop with reset and fence markers"
 ```
 
 ---
@@ -1192,12 +1192,12 @@ git commit -m "depthofbook-bot: add shard run loop with reset and fence markers"
 ## Task 6: Coordinator — type, classification, instrument routing, snapshot route map
 
 **Files:**
-- Create: `go/depthofbook-bot/coordinator.go`
-- Create: `go/depthofbook-bot/coordinator_test.go`
+- Create: `go/marketbyorder-bot/coordinator.go`
+- Create: `go/marketbyorder-bot/coordinator_test.go`
 
 - [ ] **Step 1: Write the failing test**
 
-Create `go/depthofbook-bot/coordinator_test.go`:
+Create `go/marketbyorder-bot/coordinator_test.go`:
 
 ```go
 package main
@@ -1279,12 +1279,12 @@ func TestCoordinator_SnapshotOrderNoRouteDropsAndCounts(t *testing.T) {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd go/depthofbook-bot && go test ./... -run TestCoordinator_ -v`
+Run: `cd go/marketbyorder-bot && go test ./... -run TestCoordinator_ -v`
 Expected: FAIL — `NewCoordinator`/`Coordinator` undefined.
 
 - [ ] **Step 3: Implement coordinator.go (routing + snapshot map; barrier/fence stubbed)**
 
-Create `go/depthofbook-bot/coordinator.go`:
+Create `go/marketbyorder-bot/coordinator.go`:
 
 ```go
 package main
@@ -1400,19 +1400,19 @@ func (c *Coordinator) writeChannelHealth(rec Record) {
 
 - [ ] **Step 4: Run tests to verify pass**
 
-Run: `cd go/depthofbook-bot && go test ./... -run TestCoordinator_ -v`
+Run: `cd go/marketbyorder-bot && go test ./... -run TestCoordinator_ -v`
 Expected: PASS (routing, snapshot-follow, no-route-drop).
 
 - [ ] **Step 5: Full build/test**
 
-Run: `cd go/depthofbook-bot && go build ./... && go test ./...`
+Run: `cd go/marketbyorder-bot && go build ./... && go test ./...`
 Expected: build clean; `ok`.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add go/depthofbook-bot/coordinator.go go/depthofbook-bot/coordinator_test.go
-git commit -m "depthofbook-bot: add coordinator with classification and instrument routing"
+git add go/marketbyorder-bot/coordinator.go go/marketbyorder-bot/coordinator_test.go
+git commit -m "marketbyorder-bot: add coordinator with classification and instrument routing"
 ```
 
 ---
@@ -1420,14 +1420,14 @@ git commit -m "depthofbook-bot: add coordinator with classification and instrume
 ## Task 7: Coordinator — channel-reset barrier
 
 **Files:**
-- Modify: `go/depthofbook-bot/coordinator.go`
-- Modify: `go/depthofbook-bot/coordinator_test.go`
+- Modify: `go/marketbyorder-bot/coordinator.go`
+- Modify: `go/marketbyorder-bot/coordinator_test.go`
 
 Implements the design's "Channel-reset barrier": hold `R`, goroutine-per-shard `resetMarker` send, wait N acks, clear coordinator state, then route held `R` as first new-era frame.
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `go/depthofbook-bot/coordinator_test.go`:
+Add to `go/marketbyorder-bot/coordinator_test.go`:
 
 ```go
 import "context" // merge into import block
@@ -1519,12 +1519,12 @@ func TestCoordinator_ResetBarrierHandlesChannelScopedFirstFrame(t *testing.T) {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd go/depthofbook-bot && go test ./... -run TestCoordinator_ResetBarrier -v`
+Run: `cd go/marketbyorder-bot && go test ./... -run TestCoordinator_ResetBarrier -v`
 Expected: FAIL — held record not routed / instruments not wiped (stub `runResetBarrier` only sets resetCount).
 
 - [ ] **Step 3: Replace the runResetBarrier stub**
 
-In `go/depthofbook-bot/coordinator.go`, delete the temporary `runResetBarrier` stub and replace with:
+In `go/marketbyorder-bot/coordinator.go`, delete the temporary `runResetBarrier` stub and replace with:
 
 ```go
 // runResetBarrier executes the in-band FIFO reset barrier, then routes the
@@ -1556,19 +1556,19 @@ func (c *Coordinator) runResetBarrier(held Record) {
 
 - [ ] **Step 4: Run tests to verify pass**
 
-Run: `cd go/depthofbook-bot && go test ./... -run TestCoordinator_ -v`
+Run: `cd go/marketbyorder-bot && go test ./... -run TestCoordinator_ -v`
 Expected: PASS (both reset-barrier tests + earlier coordinator tests).
 
 - [ ] **Step 5: Race check**
 
-Run: `cd go/depthofbook-bot && go test ./... -race -run TestCoordinator_ResetBarrier -v`
+Run: `cd go/marketbyorder-bot && go test ./... -race -run TestCoordinator_ResetBarrier -v`
 Expected: PASS, no races.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add go/depthofbook-bot/coordinator.go go/depthofbook-bot/coordinator_test.go
-git commit -m "depthofbook-bot: add coordinator channel-reset barrier"
+git add go/marketbyorder-bot/coordinator.go go/marketbyorder-bot/coordinator_test.go
+git commit -m "marketbyorder-bot: add coordinator channel-reset barrier"
 ```
 
 ---
@@ -1576,14 +1576,14 @@ git commit -m "depthofbook-bot: add coordinator channel-reset barrier"
 ## Task 8: Coordinator — fence + channel-health direct writes
 
 **Files:**
-- Modify: `go/depthofbook-bot/coordinator.go`
-- Modify: `go/depthofbook-bot/coordinator_test.go`
+- Modify: `go/marketbyorder-bot/coordinator.go`
+- Modify: `go/marketbyorder-bot/coordinator_test.go`
 
 > `channel.go`/`channel_test.go` are NOT deleted here. `main.go` still references `ChannelState` until Task 9; deleting now would break `go test ./...`. The deletion is performed in Task 9 Step 2 after `main.go` is rewired.
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `go/depthofbook-bot/coordinator_test.go`:
+Add to `go/marketbyorder-bot/coordinator_test.go`:
 
 ```go
 // This test is deterministic (no sleeps-as-assertions): with shards PAUSED
@@ -1666,12 +1666,12 @@ func TestCoordinator_HeartbeatNotFenced(t *testing.T) {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cd go/depthofbook-bot && go test ./... -run 'TestCoordinator_FenceBlocks|TestCoordinator_Heartbeat' -v`
+Run: `cd go/marketbyorder-bot && go test ./... -run 'TestCoordinator_FenceBlocks|TestCoordinator_Heartbeat' -v`
 Expected: FAIL — `TestCoordinator_FenceBlocksUntilShardsDrain` fails deterministically at `t.Fatal("fence returned while shards were paused...")`: the Task 6 stub `runFence` writes immediately and returns instead of blocking on shard acks. (`TestCoordinator_HeartbeatNotFenced` already passes — heartbeat never routes to a shard.)
 
 - [ ] **Step 3: Replace the runFence and writeChannelHealth stubs**
 
-In `go/depthofbook-bot/coordinator.go`, delete the temporary `runFence` and `writeChannelHealth` stubs and replace with:
+In `go/marketbyorder-bot/coordinator.go`, delete the temporary `runFence` and `writeChannelHealth` stubs and replace with:
 
 ```go
 // runFence drains every shard (FIFO marker/ack, no state wipe) so the fence
@@ -1703,14 +1703,14 @@ func (c *Coordinator) writeChannelHealth(rec Record) {
 
 - [ ] **Step 4: Run tests to verify pass**
 
-Run: `cd go/depthofbook-bot && go test ./...`
-Expected: PASS — `ok depthofbook-bot`. `channel.go`/`channel_test.go` still exist and `TestChannel_*` still pass (they are removed in Task 9 once `main.go` no longer references `ChannelState`).
+Run: `cd go/marketbyorder-bot && go test ./...`
+Expected: PASS — `ok marketbyorder-bot`. `channel.go`/`channel_test.go` still exist and `TestChannel_*` still pass (they are removed in Task 9 once `main.go` no longer references `ChannelState`).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add go/depthofbook-bot/coordinator.go go/depthofbook-bot/coordinator_test.go
-git commit -m "depthofbook-bot: add coordinator fence + channel-health writes"
+git add go/marketbyorder-bot/coordinator.go go/marketbyorder-bot/coordinator_test.go
+git commit -m "marketbyorder-bot: add coordinator fence + channel-health writes"
 ```
 
 ---
@@ -1718,12 +1718,12 @@ git commit -m "depthofbook-bot: add coordinator fence + channel-health writes"
 ## Task 9: Wire coordinator + shards into main.go (`--shards` flag, GOMAXPROCS default); delete ChannelState
 
 **Files:**
-- Modify: `go/depthofbook-bot/main.go`
-- Delete: `go/depthofbook-bot/channel.go`, `go/depthofbook-bot/channel_test.go`
+- Modify: `go/marketbyorder-bot/main.go`
+- Delete: `go/marketbyorder-bot/channel.go`, `go/marketbyorder-bot/channel_test.go`
 
 - [ ] **Step 1: Replace the channels map + dispatcher closure**
 
-In `go/depthofbook-bot/main.go`:
+In `go/marketbyorder-bot/main.go`:
 
 (a) Add the flag in the `flag` block (after `coalesceMS`):
 
@@ -1767,7 +1767,7 @@ In `go/depthofbook-bot/main.go`:
 	}
 
 	coordinator := NewCoordinator(shardList, eventsWriter, metrics)
-	log.Printf("depthofbook-bot %s sharding: shards=%d", version, n)
+	log.Printf("marketbyorder-bot %s sharding: shards=%d", version, n)
 ```
 
 (d) Replace the `bot := NewBot(*socketPath, dispatcher, metrics)` line with:
@@ -1785,36 +1785,36 @@ The per-shard `withInstrument` closure uses channel id `0`: this build targets t
 `main.go` no longer references `ChannelState` (rewired in Step 1), so `ChannelState` is now fully superseded by `Shard` + `Coordinator`. Delete both files:
 
 ```bash
-git rm go/depthofbook-bot/channel.go go/depthofbook-bot/channel_test.go
+git rm go/marketbyorder-bot/channel.go go/marketbyorder-bot/channel_test.go
 ```
 
 `const maxBufferedDeltas` lived only in `channel.go` (shard uses `maxBufferedDeltasPerInstrument`); it disappears with the file. The shared helpers/types moved to `shard.go` in Task 3, so no other file references `channel.go`. Verify nothing dangles:
 
-Run: `cd go/depthofbook-bot && grep -rn 'ChannelState\|NewChannelState\|maxBufferedDeltas\b' . ; echo done`
+Run: `cd go/marketbyorder-bot && grep -rn 'ChannelState\|NewChannelState\|maxBufferedDeltas\b' . ; echo done`
 Expected: only `done` printed (no matches) — if anything matches, fix that reference before continuing.
 
 - [ ] **Step 3: Build**
 
-Run: `cd go/depthofbook-bot && go build ./...`
+Run: `cd go/marketbyorder-bot && go build ./...`
 Expected: no output (clean). Fix any leftover reference to `dispatcher`/`getOrCreateChannel`/`snapCtx`/`channels` (all removed).
 
 - [ ] **Step 4: Full test + vet**
 
-Run: `cd go/depthofbook-bot && go vet ./... && go test ./...`
-Expected: vet clean; `ok depthofbook-bot`. (`TestChannel_*` are gone; `TestShard_*`/`TestCoordinator_*` cover the same behavior.)
+Run: `cd go/marketbyorder-bot && go vet ./... && go test ./...`
+Expected: vet clean; `ok marketbyorder-bot`. (`TestChannel_*` are gone; `TestShard_*`/`TestCoordinator_*` cover the same behavior.)
 
 - [ ] **Step 5: Smoke-run the binary version flag**
 
-Run: `cd go/depthofbook-bot && go run . --version`
-Expected: prints `depthofbook-bot 0.1.0-dev (unknown)` and exits 0.
+Run: `cd go/marketbyorder-bot && go run . --version`
+Expected: prints `marketbyorder-bot 0.1.0-dev (unknown)` and exits 0.
 
 - [ ] **Step 6: Commit**
 
 `git rm` (Step 2) already staged the two deletions; only `main.go` needs staging:
 
 ```bash
-git add go/depthofbook-bot/main.go
-git commit -m "depthofbook-bot: wire coordinator and shards into main, add --shards flag, remove channelstate"
+git add go/marketbyorder-bot/main.go
+git commit -m "marketbyorder-bot: wire coordinator and shards into main, add --shards flag, remove channelstate"
 ```
 
 ---
@@ -1822,13 +1822,13 @@ git commit -m "depthofbook-bot: wire coordinator and shards into main, add --sha
 ## Task 10: Per-instrument terminal-state parity test
 
 **Files:**
-- Create: `go/depthofbook-bot/parity_test.go`
+- Create: `go/marketbyorder-bot/parity_test.go`
 
 Honest scope: we do **not** capture the literal ordered event stream (`EventsWriter` is concrete with `ch *ClickhouseClient`; a nil client makes `Write` a no-op, and adding a capture seam is out of scope). Instead we compare a **per-instrument terminal-state fingerprint** — `{Status, len(Bids), len(Asks), LastAppliedInstrumentSeq, LastAppliedMktdataSeq}` — between a single-shard baseline (N=1) and N shards over the *same* stream. This is a strong reordering detector: per-instrument FIFO is the invariant; if sharding reordered an instrument's records, its `per_instrument_seq` continuity breaks, which deterministically diverges `Status` (→ `StatusGap`) and/or `LastAppliedInstrumentSeq` from the baseline. The fingerprint catches that; it is not a literal event-order assertion and the test name/comment say so.
 
 - [ ] **Step 1: Write the test**
 
-Create `go/depthofbook-bot/parity_test.go`:
+Create `go/marketbyorder-bot/parity_test.go`:
 
 ```go
 package main
@@ -1969,14 +1969,14 @@ func TestParity_ShardedMatchesSingleShard(t *testing.T) {
 
 - [ ] **Step 2: Run the test**
 
-Run: `cd go/depthofbook-bot && go test ./... -run TestParity_ShardedMatchesSingleShard -v`
+Run: `cd go/marketbyorder-bot && go test ./... -run TestParity_ShardedMatchesSingleShard -v`
 Expected: PASS — N=2/4/8 produce identical per-instrument terminal fingerprints (status, bid/ask counts, last seqs) to N=1.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add go/depthofbook-bot/parity_test.go
-git commit -m "depthofbook-bot: add per-instrument parity test across shard counts"
+git add go/marketbyorder-bot/parity_test.go
+git commit -m "marketbyorder-bot: add per-instrument parity test across shard counts"
 ```
 
 ---
@@ -1984,13 +1984,13 @@ git commit -m "depthofbook-bot: add per-instrument parity test across shard coun
 ## Task 11: In-process acceptance harness (throughput soak + N=1 parity)
 
 **Files:**
-- Modify: `go/depthofbook-bot/parity_test.go`
+- Modify: `go/marketbyorder-bot/parity_test.go`
 
 Scope honesty (matches the design's acceptance section): parser `queue_full` and the demo CPU spread are validated by the **demo docker-compose stack**, which the design explicitly marks the non-gating real-metric check. The in-process gate asserts the three things that *are* automatable and that sharding could regress: (1) **no spurious `per_instrument_gaps`** — the synthetic stream has perfectly contiguous `per_instrument_seq`, so any gap means sharding reordered an instrument's records; (2) **per-instrument terminal parity** vs the N=1 baseline; (3) **completion without deadlock/unbounded backlog** within a generous deadline.
 
 - [ ] **Step 1: Write the test**
 
-Add to `go/depthofbook-bot/parity_test.go`:
+Add to `go/marketbyorder-bot/parity_test.go`:
 
 ```go
 func counterVal(t *testing.T, c interface{ Write(*dto.Metric) error }) float64 {
@@ -2037,14 +2037,14 @@ Add `dto "github.com/prometheus/client_model/go"` to `parity_test.go`'s import b
 
 - [ ] **Step 2: Run the test**
 
-Run: `cd go/depthofbook-bot && go test ./... -run TestAcceptance_ThroughputSoakAndParity -v`
+Run: `cd go/marketbyorder-bot && go test ./... -run TestAcceptance_ThroughputSoakAndParity -v`
 Expected: PASS — N=1 and N=4 each: `per_instrument_gaps_total == 0`, fingerprints identical to the N=1 baseline, completion well under 30s. Log lines show elapsed times.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add go/depthofbook-bot/parity_test.go
-git commit -m "depthofbook-bot: add in-process throughput soak + parity acceptance test"
+git add go/marketbyorder-bot/parity_test.go
+git commit -m "marketbyorder-bot: add in-process throughput soak + parity acceptance test"
 ```
 
 ---
@@ -2052,22 +2052,22 @@ git commit -m "depthofbook-bot: add in-process throughput soak + parity acceptan
 ## Task 12: Race sweep + documentation + finish
 
 **Files:**
-- Modify: `go/depthofbook-bot/README.md`
+- Modify: `go/marketbyorder-bot/README.md`
 - Modify: `/Users/fach/.claude/CLAUDE.md` is OFF LIMITS — do NOT touch. Only repo docs.
 
 - [ ] **Step 1: Full race sweep**
 
-Run: `cd go/depthofbook-bot && go test ./... -race`
-Expected: PASS — `ok depthofbook-bot`, no `DATA RACE` reports. If a race appears, it is a real bug in shard/coordinator ownership — fix before continuing (do not mark this task complete with a failing race sweep).
+Run: `cd go/marketbyorder-bot && go test ./... -race`
+Expected: PASS — `ok marketbyorder-bot`, no `DATA RACE` reports. If a race appears, it is a real bug in shard/coordinator ownership — fix before continuing (do not mark this task complete with a failing race sweep).
 
 - [ ] **Step 2: Full CI-style check for the package**
 
-Run: `cd go/depthofbook-bot && gofmt -l . && go vet ./... && go test ./...`
+Run: `cd go/marketbyorder-bot && gofmt -l . && go vet ./... && go test ./...`
 Expected: `gofmt -l .` prints nothing (all formatted); vet clean; tests `ok`.
 
 - [ ] **Step 3: Update the service README**
 
-Open `go/depthofbook-bot/README.md`. Add a section documenting the new architecture and flag. Insert after the existing overview/usage section (match the file's existing heading style):
+Open `go/marketbyorder-bot/README.md`. Add a section documenting the new architecture and flag. Insert after the existing overview/usage section (match the file's existing heading style):
 
 ```markdown
 ## Sharded dispatch
@@ -2088,17 +2088,17 @@ snapshot writer.
 - `end_of_session` / `batch_boundary` use an all-shard drain fence so their
   rows land after preceding instrument rows; `reset_count` changes use an
   in-band barrier that wipes all shard state before the new era.
-- New metric: `dz_dob_bot_snapshot_order_dropped_total` (snapshot_order with
+- New metric: `dz_mbo_bot_snapshot_order_dropped_total` (snapshot_order with
   no registered route, e.g. begin missed or arrived post-end).
 
-Design doc: `docs/2026-05-19-depthofbook-bot-shard-dispatcher-design.md`.
+Design doc: `docs/2026-05-19-marketbyorder-bot-shard-dispatcher-design.md`.
 ```
 
 - [ ] **Step 4: Commit docs**
 
 ```bash
-git add go/depthofbook-bot/README.md
-git commit -m "depthofbook-bot: document sharded dispatch and --shards flag"
+git add go/marketbyorder-bot/README.md
+git commit -m "marketbyorder-bot: document sharded dispatch and --shards flag"
 ```
 
 - [ ] **Step 5: Finish the development branch**

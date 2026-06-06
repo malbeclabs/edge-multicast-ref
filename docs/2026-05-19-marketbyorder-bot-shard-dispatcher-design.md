@@ -1,10 +1,10 @@
-# depthofbook-bot: shard dispatcher by instrument_id — design
+# marketbyorder-bot: shard dispatcher by instrument_id — design
 
 Issue: https://github.com/malbeclabs/edge-multicast-ref/issues/12
 
 ## Problem
 
-`go/depthofbook-bot/main.go`'s dispatcher is single-goroutine bound. Under
+`go/marketbyorder-bot/main.go`'s dispatcher is single-goroutine bound. Under
 sustained load on a feed with one channel and many instruments it hits ~1.2
 cores and becomes the throughput choke point: the parser's per-client
 unix-socket queue fills, `socket_client_drops_total{reason="queue_full"}`
@@ -131,7 +131,7 @@ The classifier branches on **record type first**, and only hashes
 | end_of_session, batch_boundary | no | **fence**: coordinator drains all shards, then writes |
 | reset_count change | — | **barrier** (see below) |
 
-Parser facts grounding this table (`go/depthofbook-parser/depthofbook.go`):
+Parser facts grounding this table (`go/marketbyorder-parser/marketbyorder.go`):
 `trade` carries `InstrumentID` (line ~105) so it shards normally;
 `batch_boundary` does **not** (line ~201) so it is channel-scoped;
 `snapshot_order` has no `InstrumentID` (line ~239), only `snapshot_id`;
