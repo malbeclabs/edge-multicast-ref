@@ -1,5 +1,7 @@
 {
-  "annotations": { "list": [] },
+  "annotations": {
+    "list": []
+  },
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -11,7 +13,12 @@
       "type": "row",
       "title": "Global market health",
       "id": 1,
-      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      },
       "collapsed": false,
       "panels": []
     },
@@ -19,14 +26,56 @@
       "type": "stat",
       "title": "Active instruments",
       "id": 2,
-      "gridPos": { "x": 0, "y": 1, "w": 4, "h": 4 },
-      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }, "unit": "none", "decimals": 0 }, "overrides": [] },
-      "options": { "colorMode": "value", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "uid": "clickhouse-topofbook",
+        "type": "grafana-clickhouse-datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "none",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
       "targets": [
         {
           "refId": "A",
-          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "datasource": {
+            "uid": "clickhouse-topofbook",
+            "type": "grafana-clickhouse-datasource"
+          },
           "queryType": "sql",
           "rawSql": "SELECT instrument_count\nFROM marketbyorder.channel_health\nWHERE kind = 'manifest_summary'\nORDER BY recv_ts DESC\nLIMIT 1",
           "format": 1
@@ -37,14 +86,56 @@
       "type": "stat",
       "title": "Event rate",
       "id": 3,
-      "gridPos": { "x": 4, "y": 1, "w": 4, "h": 4 },
-      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }, "unit": "cps", "decimals": 1 }, "overrides": [] },
-      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "gridPos": {
+        "x": 4,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "uid": "clickhouse-topofbook",
+        "type": "grafana-clickhouse-datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "cps",
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
       "targets": [
         {
           "refId": "A",
-          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "datasource": {
+            "uid": "clickhouse-topofbook",
+            "type": "grafana-clickhouse-datasource"
+          },
           "queryType": "sql",
           "rawSql": "SELECT $__timeInterval(recv_ts) AS time, count() / $__interval_s AS events_per_sec\nFROM marketbyorder.events\nWHERE $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
           "format": 0
@@ -55,14 +146,56 @@
       "type": "stat",
       "title": "Snapshot rate",
       "id": 4,
-      "gridPos": { "x": 8, "y": 1, "w": 4, "h": 4 },
-      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] }, "unit": "cps", "decimals": 1 }, "overrides": [] },
-      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "gridPos": {
+        "x": 8,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "uid": "clickhouse-topofbook",
+        "type": "grafana-clickhouse-datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "unit": "cps",
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
       "targets": [
         {
           "refId": "A",
-          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "datasource": {
+            "uid": "clickhouse-topofbook",
+            "type": "grafana-clickhouse-datasource"
+          },
           "queryType": "sql",
           "rawSql": "SELECT $__timeInterval(recv_ts) AS time, count() / $__interval_s AS snapshots_per_sec\nFROM marketbyorder.level_snapshots\nWHERE $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
           "format": 0
@@ -71,38 +204,138 @@
     },
     {
       "type": "stat",
-      "title": "Average wire latency",
-      "description": "Publisher send_ts to subscriber receive, from MBO events. Includes clock skew between hosts.",
+      "title": "Avg send\u2192recv latency",
+      "description": "Publisher send_ts to subscriber receive, from MBO events.",
       "id": 5,
-      "gridPos": { "x": 12, "y": 1, "w": 4, "h": 4 },
-      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 250 }, { "color": "red", "value": 1000 }] }, "unit": "ms", "decimals": 1 }, "overrides": [] },
-      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "gridPos": {
+        "x": 12,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "uid": "clickhouse-topofbook",
+        "type": "grafana-clickhouse-datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 250
+              },
+              {
+                "color": "red",
+                "value": 1000
+              }
+            ]
+          },
+          "unit": "ms",
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
       "targets": [
         {
           "refId": "A",
-          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "datasource": {
+            "uid": "clickhouse-topofbook",
+            "type": "grafana-clickhouse-datasource"
+          },
           "queryType": "sql",
-          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, avg(wire_latency_ms) AS avg_wire_latency_ms\nFROM marketbyorder.events\nWHERE $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, avg(greatest(send_latency_ms,0)) AS avg_send_latency_ms FROM marketbyorder.events WHERE $__timeFilter(recv_ts) GROUP BY time ORDER BY time",
           "format": 0
         }
       ]
     },
     {
       "type": "stat",
-      "title": "P99 wire latency",
-      "description": "Publisher send_ts to subscriber receive, from MBO events. Includes clock skew between hosts.",
+      "title": "Avg source\u2192recv latency",
+      "description": "Venue source_ts to subscriber receive, from MBO events with source_ts populated.",
       "id": 6,
-      "gridPos": { "x": 16, "y": 1, "w": 4, "h": 4 },
-      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 500 }, { "color": "red", "value": 2000 }] }, "unit": "ms", "decimals": 1 }, "overrides": [] },
-      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "gridPos": {
+        "x": 16,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "uid": "clickhouse-topofbook",
+        "type": "grafana-clickhouse-datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 500
+              },
+              {
+                "color": "red",
+                "value": 2000
+              }
+            ]
+          },
+          "unit": "ms",
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
       "targets": [
         {
           "refId": "A",
-          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "datasource": {
+            "uid": "clickhouse-topofbook",
+            "type": "grafana-clickhouse-datasource"
+          },
           "queryType": "sql",
-          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, quantile(0.99)(wire_latency_ms) AS p99_wire_latency_ms\nFROM marketbyorder.events\nWHERE $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, avg(greatest(source_latency_ms,0)) AS avg_source_latency_ms FROM marketbyorder.events WHERE source_ts IS NOT NULL AND $__timeFilter(recv_ts) GROUP BY time ORDER BY time",
           "format": 0
         }
       ]
@@ -111,14 +344,64 @@
       "type": "stat",
       "title": "Latest event age",
       "id": 7,
-      "gridPos": { "x": 20, "y": 1, "w": 4, "h": 4 },
-      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 15 }, { "color": "red", "value": 60 }] }, "unit": "s", "decimals": 1 }, "overrides": [] },
-      "options": { "colorMode": "value", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "gridPos": {
+        "x": 20,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "uid": "clickhouse-topofbook",
+        "type": "grafana-clickhouse-datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 15
+              },
+              {
+                "color": "red",
+                "value": 60
+              }
+            ]
+          },
+          "unit": "s",
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
       "targets": [
         {
           "refId": "A",
-          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "datasource": {
+            "uid": "clickhouse-topofbook",
+            "type": "grafana-clickhouse-datasource"
+          },
           "queryType": "sql",
           "rawSql": "SELECT dateDiff('millisecond', max(recv_ts), now64(3)) / 1000 AS latest_event_age_seconds\nFROM (\n  SELECT max(recv_ts) AS recv_ts FROM marketbyorder.events\n  UNION ALL\n  SELECT max(recv_ts) AS recv_ts FROM marketbyorder.level_snapshots\n)",
           "format": 1
@@ -129,7 +412,12 @@
       "type": "row",
       "title": "Trading view",
       "id": 8,
-      "gridPos": { "x": 0, "y": 5, "w": 24, "h": 1 },
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 24,
+        "h": 1
+      },
       "collapsed": false,
       "panels": []
     },
@@ -138,31 +426,191 @@
       "title": "Mid-price candles",
       "description": "OHLC buckets are built from best bid/ask midpoint using the Candle interval selector. Executions are yellow markers; executed volume uses the right axis.",
       "id": 9,
-      "gridPos": { "x": 0, "y": 6, "w": 16, "h": 12 },
-      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+      "gridPos": {
+        "x": 0,
+        "y": 6,
+        "w": 16,
+        "h": 12
+      },
+      "datasource": {
+        "uid": "clickhouse-topofbook",
+        "type": "grafana-clickhouse-datasource"
+      },
       "fieldConfig": {
-        "defaults": { "custom": { "axisLabel": "Price", "axisPlacement": "left", "lineWidth": 1, "fillOpacity": 20 }, "decimals": 6 },
+        "defaults": {
+          "custom": {
+            "axisLabel": "Price",
+            "axisPlacement": "left",
+            "lineWidth": 1,
+            "fillOpacity": 20
+          },
+          "decimals": 6
+        },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "open" }, "properties": [{ "id": "decimals", "value": 6 }] },
-          { "matcher": { "id": "byName", "options": "high" }, "properties": [{ "id": "decimals", "value": 6 }] },
-          { "matcher": { "id": "byName", "options": "low" }, "properties": [{ "id": "decimals", "value": 6 }] },
-          { "matcher": { "id": "byName", "options": "close" }, "properties": [{ "id": "decimals", "value": 6 }] },
-          { "matcher": { "id": "byName", "options": "volume" }, "properties": [{ "id": "unit", "value": "none" }, { "id": "decimals", "value": 2 }, { "id": "custom.axisPlacement", "value": "right" }, { "id": "custom.axisLabel", "value": "Volume" }, { "id": "custom.drawStyle", "value": "bars" }, { "id": "custom.fillOpacity", "value": 45 }, { "id": "custom.lineWidth", "value": 0 }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "#2f3338" } }] },
-          { "matcher": { "id": "byName", "options": "trade" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "yellow" } }, { "id": "custom.drawStyle", "value": "points" }, { "id": "custom.lineWidth", "value": 0 }, { "id": "custom.pointSize", "value": 5 }, { "id": "custom.showPoints", "value": "always" }, { "id": "decimals", "value": 6 }] }
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "open"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 6
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "high"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 6
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "low"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 6
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "close"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 6
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "volume"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "decimals",
+                "value": 2
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.axisLabel",
+                "value": "Volume"
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "bars"
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 45
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#2f3338"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "trade"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "yellow"
+                }
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "points"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 5
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "always"
+              },
+              {
+                "id": "decimals",
+                "value": 6
+              }
+            ]
+          }
         ]
       },
-      "options": { "candleStyle": "candles", "colorStrategy": "open-close", "colors": { "down": "red", "up": "green" }, "legend": { "displayMode": "list", "placement": "bottom", "showLegend": false }, "tooltip": { "mode": "single", "sort": "none" }, "includeAllFields": true, "mode": "candles" },
+      "options": {
+        "candleStyle": "candles",
+        "colorStrategy": "open-close",
+        "colors": {
+          "down": "red",
+          "up": "green"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        },
+        "includeAllFields": true,
+        "mode": "candles"
+      },
       "targets": [
         {
           "refId": "A",
-          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "datasource": {
+            "uid": "clickhouse-topofbook",
+            "type": "grafana-clickhouse-datasource"
+          },
           "queryType": "sql",
           "rawSql": "WITH\n  best AS (\n    SELECT\n      recv_ts,\n      maxIf(price, side = 'bid' AND level_idx = 0) AS bid,\n      minIf(price, side = 'ask' AND level_idx = 0) AS ask\n    FROM marketbyorder.level_snapshots\n    WHERE symbol = ${symbol:singlequote} AND $__timeFilter(recv_ts)\n    GROUP BY recv_ts\n    HAVING bid > 0 AND ask > 0\n  ),\n  q AS (\n    SELECT\n      toStartOfInterval(recv_ts, INTERVAL ${candle_interval:raw} SECOND) AS time,\n      argMin((bid + ask) / 2, recv_ts) AS open,\n      max((bid + ask) / 2) AS high,\n      min((bid + ask) / 2) AS low,\n      argMax((bid + ask) / 2, recv_ts) AS close\n    FROM best\n    GROUP BY time\n  ),\n  v AS (\n    SELECT\n      toStartOfInterval(recv_ts, INTERVAL ${candle_interval:raw} SECOND) AS time,\n      sum(ifNull(qty, 0)) AS volume\n    FROM marketbyorder.events\n    WHERE kind IN ('trade', 'order_execute') AND symbol = ${symbol:singlequote} AND $__timeFilter(recv_ts)\n    GROUP BY time\n  )\nSELECT q.time, q.open, q.high, q.low, q.close, ifNull(v.volume, 0) AS volume\nFROM q\nLEFT JOIN v USING time\nORDER BY q.time",
           "format": 1
         },
         {
           "refId": "B",
-          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "datasource": {
+            "uid": "clickhouse-topofbook",
+            "type": "grafana-clickhouse-datasource"
+          },
           "queryType": "sql",
           "rawSql": "SELECT recv_ts AS time, price AS trade\nFROM marketbyorder.events\nWHERE '${show_trades:raw}' = 'yes'\n  AND kind IN ('trade', 'order_execute')\n  AND symbol = ${symbol:singlequote}\n  AND $__timeFilter(recv_ts)\n  AND price IS NOT NULL\nORDER BY time",
           "format": 0
@@ -173,24 +621,152 @@
       "type": "table",
       "title": "Book ladder",
       "id": 10,
-      "gridPos": { "x": 16, "y": 6, "w": 8, "h": 12 },
-      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+      "gridPos": {
+        "x": 16,
+        "y": 6,
+        "w": 8,
+        "h": 12
+      },
+      "datasource": {
+        "uid": "clickhouse-topofbook",
+        "type": "grafana-clickhouse-datasource"
+      },
       "fieldConfig": {
-        "defaults": { "custom": { "align": "auto", "cellOptions": { "type": "auto" } } },
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "side" }, "properties": [{ "id": "custom.hidden", "value": true }] },
-          { "matcher": { "id": "byName", "options": "price" }, "properties": [{ "id": "decimals", "value": 6 }] },
-          { "matcher": { "id": "byName", "options": "amount" }, "properties": [{ "id": "decimals", "value": 2 }] },
-          { "matcher": { "id": "byName", "options": "ask_depth" }, "properties": [{ "id": "decimals", "value": 2 }, { "id": "displayName", "value": "ask" }, { "id": "custom.cellOptions", "value": { "type": "gauge", "mode": "basic" } }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] },
-          { "matcher": { "id": "byName", "options": "bid_depth" }, "properties": [{ "id": "decimals", "value": 2 }, { "id": "displayName", "value": "bid" }, { "id": "custom.cellOptions", "value": { "type": "gauge", "mode": "basic" } }, { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] },
-          { "matcher": { "id": "byName", "options": "sort_key" }, "properties": [{ "id": "custom.hidden", "value": true }] }
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "side"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "price"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 6
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "amount"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "ask_depth"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 2
+              },
+              {
+                "id": "displayName",
+                "value": "ask"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "basic"
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "bid_depth"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 2
+              },
+              {
+                "id": "displayName",
+                "value": "bid"
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "basic"
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "sort_key"
+            },
+            "properties": [
+              {
+                "id": "custom.hidden",
+                "value": true
+              }
+            ]
+          }
         ]
       },
-      "options": { "showHeader": true, "sortBy": [{ "displayName": "sort_key", "desc": false }] },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "sort_key",
+            "desc": false
+          }
+        ]
+      },
       "targets": [
         {
           "refId": "A",
-          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "datasource": {
+            "uid": "clickhouse-topofbook",
+            "type": "grafana-clickhouse-datasource"
+          },
           "queryType": "sql",
           "rawSql": "SELECT\n  side,\n  price,\n  qty AS amount,\n  if(side = 'ask', cumulative_qty, NULL) AS ask_depth,\n  if(side = 'bid', cumulative_qty, NULL) AS bid_depth,\n  multiIf(side = 'ask', 1000 - toInt32(level_idx), 2000 + toInt32(level_idx)) AS sort_key\nFROM marketbyorder.level_snapshots\nWHERE symbol = ${symbol:singlequote}\n  AND level_idx < 5\n  AND recv_ts = (\n    SELECT max(recv_ts)\n    FROM marketbyorder.level_snapshots\n    WHERE symbol = ${symbol:singlequote} AND $__timeFilter(recv_ts)\n  )\nORDER BY sort_key",
           "format": 1
@@ -201,27 +777,89 @@
       "type": "timeseries",
       "title": "Bid / ask context",
       "id": 11,
-      "gridPos": { "x": 0, "y": 18, "w": 16, "h": 8 },
-      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+      "gridPos": {
+        "x": 0,
+        "y": 18,
+        "w": 16,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "clickhouse-topofbook",
+        "type": "grafana-clickhouse-datasource"
+      },
       "fieldConfig": {
-        "defaults": { "custom": { "axisLabel": "Price", "drawStyle": "line", "lineInterpolation": "stepAfter", "lineWidth": 1, "fillOpacity": 0, "spanNulls": true }, "decimals": 6 },
+        "defaults": {
+          "custom": {
+            "axisLabel": "Price",
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "spanNulls": true
+          },
+          "decimals": 6
+        },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "bid" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] },
-          { "matcher": { "id": "byName", "options": "ask" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] }
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "bid"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "ask"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
         ]
       },
-      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "none" } },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
       "targets": [
         {
           "refId": "A",
-          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "datasource": {
+            "uid": "clickhouse-topofbook",
+            "type": "grafana-clickhouse-datasource"
+          },
           "queryType": "sql",
           "rawSql": "SELECT $__timeInterval(recv_ts) AS time, avg(price) AS bid\nFROM marketbyorder.level_snapshots\nWHERE symbol = ${symbol:singlequote} AND side = 'bid' AND level_idx = 0 AND $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
           "format": 0
         },
         {
           "refId": "B",
-          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "datasource": {
+            "uid": "clickhouse-topofbook",
+            "type": "grafana-clickhouse-datasource"
+          },
           "queryType": "sql",
           "rawSql": "SELECT $__timeInterval(recv_ts) AS time, avg(price) AS ask\nFROM marketbyorder.level_snapshots\nWHERE symbol = ${symbol:singlequote} AND side = 'ask' AND level_idx = 0 AND $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
           "format": 0
@@ -232,14 +870,49 @@
       "type": "timeseries",
       "title": "Spread",
       "id": 12,
-      "gridPos": { "x": 16, "y": 18, "w": 8, "h": 8 },
-      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
-      "fieldConfig": { "defaults": { "custom": { "axisLabel": "Spread", "drawStyle": "line", "lineInterpolation": "stepAfter", "lineWidth": 1, "fillOpacity": 0, "spanNulls": true }, "unit": "none", "decimals": 2 }, "overrides": [] },
-      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "none" } },
+      "gridPos": {
+        "x": 16,
+        "y": 18,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "clickhouse-topofbook",
+        "type": "grafana-clickhouse-datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "axisLabel": "Spread",
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "spanNulls": true
+          },
+          "unit": "none",
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
       "targets": [
         {
           "refId": "A",
-          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "datasource": {
+            "uid": "clickhouse-topofbook",
+            "type": "grafana-clickhouse-datasource"
+          },
           "queryType": "sql",
           "rawSql": "WITH best AS (\n  SELECT $__timeInterval(recv_ts) AS time,\n         minIf(price, side = 'ask' AND level_idx = 0) AS best_ask,\n         maxIf(price, side = 'bid' AND level_idx = 0) AS best_bid\n  FROM marketbyorder.level_snapshots\n  WHERE symbol = ${symbol:singlequote} AND $__timeFilter(recv_ts)\n  GROUP BY time\n)\nSELECT time, ((best_ask - best_bid) / ((best_ask + best_bid) / 2)) * 10000 AS spread_bps\nFROM best\nWHERE best_ask > 0 AND best_bid > 0\nORDER BY time",
           "format": 0
@@ -250,21 +923,104 @@
       "type": "table",
       "title": "Trade tape",
       "id": 13,
-      "gridPos": { "x": 0, "y": 26, "w": 24, "h": 8 },
-      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+      "gridPos": {
+        "x": 0,
+        "y": 26,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "clickhouse-topofbook",
+        "type": "grafana-clickhouse-datasource"
+      },
       "fieldConfig": {
-        "defaults": { "custom": { "align": "auto", "cellOptions": { "type": "auto" } } },
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "aggressor_side" }, "properties": [{ "id": "custom.cellOptions", "value": { "type": "color-background" } }, { "id": "mappings", "value": [{ "type": "value", "options": { "buy": { "color": "green", "index": 0 }, "sell": { "color": "red", "index": 1 }, "unknown": { "color": "yellow", "index": 2 } } }] }] },
-          { "matcher": { "id": "byName", "options": "price" }, "properties": [{ "id": "decimals", "value": 6 }] },
-          { "matcher": { "id": "byName", "options": "notional" }, "properties": [{ "id": "decimals", "value": 2 }] }
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "aggressor_side"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "buy": {
+                        "color": "green",
+                        "index": 0
+                      },
+                      "sell": {
+                        "color": "red",
+                        "index": 1
+                      },
+                      "unknown": {
+                        "color": "yellow",
+                        "index": 2
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "price"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 6
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "notional"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 2
+              }
+            ]
+          }
         ]
       },
-      "options": { "showHeader": true, "sortBy": [{ "displayName": "recv_ts", "desc": true }] },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "recv_ts",
+            "desc": true
+          }
+        ]
+      },
       "targets": [
         {
           "refId": "A",
-          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "datasource": {
+            "uid": "clickhouse-topofbook",
+            "type": "grafana-clickhouse-datasource"
+          },
           "queryType": "sql",
           "rawSql": "SELECT\n  recv_ts,\n  symbol,\n  aggressor_side,\n  price,\n  qty,\n  price * qty AS notional\nFROM marketbyorder.events\nWHERE kind IN ('trade', 'order_execute')\n  AND symbol = ${symbol:singlequote}\n  AND $__timeFilter(recv_ts)\nORDER BY recv_ts DESC\nLIMIT 200",
           "format": 1
@@ -275,7 +1031,12 @@
       "type": "row",
       "title": "ClickHouse data health",
       "id": 14,
-      "gridPos": { "x": 0, "y": 34, "w": 24, "h": 1 },
+      "gridPos": {
+        "x": 0,
+        "y": 34,
+        "w": 24,
+        "h": 1
+      },
       "collapsed": false,
       "panels": []
     },
@@ -283,14 +1044,49 @@
       "type": "timeseries",
       "title": "Record rate",
       "id": 15,
-      "gridPos": { "x": 0, "y": 35, "w": 8, "h": 7 },
-      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
-      "fieldConfig": { "defaults": { "custom": { "axisLabel": "Records / second", "drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 1, "fillOpacity": 12, "spanNulls": true }, "unit": "cps", "decimals": 1 }, "overrides": [] },
-      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "none" } },
+      "gridPos": {
+        "x": 0,
+        "y": 35,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "uid": "clickhouse-topofbook",
+        "type": "grafana-clickhouse-datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "axisLabel": "Records / second",
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 12,
+            "spanNulls": true
+          },
+          "unit": "cps",
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
       "targets": [
         {
           "refId": "A",
-          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "datasource": {
+            "uid": "clickhouse-topofbook",
+            "type": "grafana-clickhouse-datasource"
+          },
           "queryType": "sql",
           "rawSql": "SELECT $__timeInterval(recv_ts) AS time, kind, count() / $__interval_s AS rate\nFROM marketbyorder.events\nWHERE kind IN ('order_add', 'order_cancel', 'order_execute', 'trade') AND $__timeFilter(recv_ts)\nGROUP BY time, kind\nORDER BY time",
           "format": 0
@@ -299,25 +1095,99 @@
     },
     {
       "type": "timeseries",
-      "title": "Wire latency quantiles",
+      "title": "Latency quantiles (send vs source)",
       "id": 16,
-      "gridPos": { "x": 8, "y": 35, "w": 8, "h": 7 },
-      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+      "gridPos": {
+        "x": 8,
+        "y": 35,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "uid": "clickhouse-topofbook",
+        "type": "grafana-clickhouse-datasource"
+      },
       "fieldConfig": {
-        "defaults": { "custom": { "axisLabel": "Latency", "drawStyle": "line", "lineInterpolation": "linear", "lineWidth": 1, "fillOpacity": 0, "spanNulls": true }, "unit": "ms", "decimals": 1 },
+        "defaults": {
+          "custom": {
+            "axisLabel": "Latency",
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "spanNulls": true
+          },
+          "unit": "ms",
+          "decimals": 1
+        },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "p50" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] },
-          { "matcher": { "id": "byName", "options": "p95" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "yellow" } }] },
-          { "matcher": { "id": "byName", "options": "p99" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } }] }
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p50"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p95"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "yellow"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p99"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          }
         ]
       },
-      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "none" } },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
       "targets": [
         {
           "refId": "A",
-          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "datasource": {
+            "uid": "clickhouse-topofbook",
+            "type": "grafana-clickhouse-datasource"
+          },
           "queryType": "sql",
-          "rawSql": "SELECT $__timeInterval(recv_ts) AS time,\n       quantile(0.5)(wire_latency_ms) AS p50,\n       quantile(0.95)(wire_latency_ms) AS p95,\n       quantile(0.99)(wire_latency_ms) AS p99\nFROM marketbyorder.events\nWHERE $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, quantile(0.5)(greatest(send_latency_ms,0)) AS send_p50, quantile(0.99)(greatest(send_latency_ms,0)) AS send_p99, quantile(0.5)(greatest(source_latency_ms,0)) AS source_p50, quantile(0.99)(greatest(source_latency_ms,0)) AS source_p99 FROM marketbyorder.events WHERE source_ts IS NOT NULL AND $__timeFilter(recv_ts) GROUP BY time ORDER BY time",
           "format": 0
         }
       ]
@@ -326,14 +1196,51 @@
       "type": "heatmap",
       "title": "Depth heatmap",
       "id": 17,
-      "gridPos": { "x": 16, "y": 35, "w": 8, "h": 7 },
-      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
-      "fieldConfig": { "defaults": {}, "overrides": [] },
-      "options": { "calculate": true, "color": { "mode": "scheme", "scheme": "Spectral", "steps": 64 }, "filterValues": { "le": 1e-9 }, "legend": { "show": true }, "tooltip": { "mode": "single", "showColorScale": false, "yHistogram": false }, "yAxis": { "axisLabel": "Price", "axisPlacement": "left", "unit": "none" } },
+      "gridPos": {
+        "x": 16,
+        "y": 35,
+        "w": 8,
+        "h": 7
+      },
+      "datasource": {
+        "uid": "clickhouse-topofbook",
+        "type": "grafana-clickhouse-datasource"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "calculate": true,
+        "color": {
+          "mode": "scheme",
+          "scheme": "Spectral",
+          "steps": 64
+        },
+        "filterValues": {
+          "le": 1e-09
+        },
+        "legend": {
+          "show": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "showColorScale": false,
+          "yHistogram": false
+        },
+        "yAxis": {
+          "axisLabel": "Price",
+          "axisPlacement": "left",
+          "unit": "none"
+        }
+      },
       "targets": [
         {
           "refId": "A",
-          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "datasource": {
+            "uid": "clickhouse-topofbook",
+            "type": "grafana-clickhouse-datasource"
+          },
           "queryType": "sql",
           "rawSql": "SELECT recv_ts AS time, price\nFROM marketbyorder.level_snapshots\nWHERE symbol = ${symbol:singlequote} AND level_idx < 10 AND $__timeFilter(recv_ts)\nORDER BY recv_ts",
           "format": 1
@@ -344,14 +1251,45 @@
       "type": "timeseries",
       "title": "Resting order count",
       "id": 18,
-      "gridPos": { "x": 0, "y": 42, "w": 12, "h": 6 },
-      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
-      "fieldConfig": { "defaults": { "custom": { "axisLabel": "Orders", "drawStyle": "line", "lineWidth": 1, "fillOpacity": 0 }, "decimals": 0 }, "overrides": [] },
-      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi" } },
+      "gridPos": {
+        "x": 0,
+        "y": 42,
+        "w": 12,
+        "h": 6
+      },
+      "datasource": {
+        "uid": "clickhouse-topofbook",
+        "type": "grafana-clickhouse-datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "axisLabel": "Orders",
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
         {
           "refId": "A",
-          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "datasource": {
+            "uid": "clickhouse-topofbook",
+            "type": "grafana-clickhouse-datasource"
+          },
           "queryType": "sql",
           "rawSql": "SELECT $__timeInterval(recv_ts) AS time, side, sum(order_count) AS orders\nFROM marketbyorder.level_snapshots\nWHERE symbol = ${symbol:singlequote} AND $__timeFilter(recv_ts)\nGROUP BY time, side\nORDER BY time",
           "format": 0
@@ -362,44 +1300,141 @@
       "type": "timeseries",
       "title": "Book quantity",
       "id": 19,
-      "gridPos": { "x": 12, "y": 42, "w": 12, "h": 6 },
-      "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
-      "fieldConfig": { "defaults": { "custom": { "axisLabel": "Quantity", "drawStyle": "line", "lineWidth": 1, "fillOpacity": 0 }, "decimals": 2 }, "overrides": [] },
-      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi" } },
+      "gridPos": {
+        "x": 12,
+        "y": 42,
+        "w": 12,
+        "h": 6
+      },
+      "datasource": {
+        "uid": "clickhouse-topofbook",
+        "type": "grafana-clickhouse-datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "axisLabel": "Quantity",
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0
+          },
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
       "targets": [
         {
           "refId": "A",
-          "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+          "datasource": {
+            "uid": "clickhouse-topofbook",
+            "type": "grafana-clickhouse-datasource"
+          },
           "queryType": "sql",
           "rawSql": "SELECT $__timeInterval(recv_ts) AS time, side, sum(qty) AS resting_qty\nFROM marketbyorder.level_snapshots\nWHERE symbol = ${symbol:singlequote} AND level_idx < 10 AND $__timeFilter(recv_ts)\nGROUP BY time, side\nORDER BY time",
           "format": 0
         }
       ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Sequence gaps (per-instrument)",
+      "id": 20,
+      "gridPos": {
+        "x": 0,
+        "y": 48,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "clickhouse-topofbook",
+        "type": "grafana-clickhouse-datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "axisLabel": "Missing messages",
+            "drawStyle": "bars",
+            "lineWidth": 1,
+            "fillOpacity": 80,
+            "spanNulls": true
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "uid": "clickhouse-topofbook",
+            "type": "grafana-clickhouse-datasource"
+          },
+          "queryType": "sql",
+          "rawSql": "SELECT time, sum(missing) AS missing_messages FROM ( SELECT $__timeInterval(recv_ts) AS time, per_instrument_seq - lagInFrame(per_instrument_seq, 1, per_instrument_seq) OVER (PARTITION BY channel_id, instrument_id ORDER BY per_instrument_seq) - 1 AS missing FROM marketbyorder.events WHERE per_instrument_seq > 0 AND $__timeFilter(recv_ts) ) WHERE missing > 0 GROUP BY time ORDER BY time",
+          "format": 0
+        }
+      ],
+      "description": "Missing messages detected from the dense per-(channel,instrument) sequence (per_instrument_seq). This is contiguous per instrument, so a gap here is a genuine dropped/missed message."
     }
   ],
   "refresh": "5s",
   "schemaVersion": 40,
-  "tags": ["dz-mbo", "demo"],
+  "tags": [
+    "dz-mbo",
+    "demo"
+  ],
   "templating": {
     "list": [
       {
         "name": "symbol",
         "label": "Symbol",
         "type": "query",
-        "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
+        "datasource": {
+          "uid": "clickhouse-topofbook",
+          "type": "grafana-clickhouse-datasource"
+        },
         "query": "SELECT DISTINCT symbol FROM marketbyorder.level_snapshots WHERE $__timeFilter(recv_ts) ORDER BY symbol",
         "refresh": 2,
         "sort": 1,
         "multi": false,
         "includeAll": false,
-        "current": { "selected": true, "text": "2Z", "value": "2Z" }
+        "current": {
+          "selected": true,
+          "text": "2Z",
+          "value": "2Z"
+        }
       },
       {
         "name": "candle_interval",
         "label": "Candle interval (s)",
         "type": "custom",
         "query": "10,30,60,300,1800",
-        "current": { "selected": true, "text": "60", "value": "60" },
+        "current": {
+          "selected": true,
+          "text": "60",
+          "value": "60"
+        },
         "hide": 0,
         "multi": false,
         "includeAll": false,
@@ -411,7 +1446,11 @@
         "label": "Show trades",
         "type": "custom",
         "query": "yes,no",
-        "current": { "selected": true, "text": "yes", "value": "yes" },
+        "current": {
+          "selected": true,
+          "text": "yes",
+          "value": "yes"
+        },
         "hide": 0,
         "multi": false,
         "includeAll": false,
@@ -420,7 +1459,10 @@
       }
     ]
   },
-  "time": { "from": "now-15m", "to": "now" },
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
   "timepicker": {},
   "timezone": "utc",
   "title": "DZ Market-by-Order",

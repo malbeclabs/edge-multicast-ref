@@ -413,6 +413,93 @@ func TestMarketByOrderParser_UnknownTypeSkipped(t *testing.T) {
 	}
 }
 
+// buildOrderAddFrameWithTS constructs a complete MBO frame containing a single
+// order_add message. Returns the frame bytes, the enter timestamp in nanoseconds,
+// and the frame send timestamp in nanoseconds (enterNS != sendNS by design).
+func buildOrderAddFrameWithTS(t *testing.T) (frame []byte, enterNS, sendNS uint64) {
+	t.Helper()
+	sendTS := time.Unix(1700000020, 111111111)
+	enterTS := time.Unix(1700000010, 222222222)
+	sendNS = uint64(sendTS.UnixNano())
+	enterNS = uint64(enterTS.UnixNano())
+
+	body := make([]byte, 48)
+	binary.LittleEndian.PutUint32(body[0:4], 101)                    // InstrumentID
+	binary.LittleEndian.PutUint16(body[4:6], 2)                      // SourceID
+	body[6] = 0                                                       // Side = bid
+	body[7] = 0                                                       // OrderFlags
+	binary.LittleEndian.PutUint32(body[8:12], 55)                    // PerInstrumentSeq
+	binary.LittleEndian.PutUint64(body[12:20], 888)                  // OrderID
+	binary.LittleEndian.PutUint64(body[20:28], enterNS)              // EnterTimestamp
+	binary.LittleEndian.PutUint64(body[28:36], uint64(int64(50000))) // PriceRaw
+	binary.LittleEndian.PutUint64(body[36:44], 10)                   // QtyRaw
+
+	msgLen := uint8(messageHeaderSize + 48)
+	frameLen := frameHeaderSize + int(msgLen)
+	hdr := buildFrameHeader(mboMagic, mboSchemaVersion, 1, 200, sendTS, 1, 0, uint16(frameLen))
+	mh := make([]byte, messageHeaderSize)
+	mh[0] = msgTypeOrderAdd
+	mh[1] = msgLen
+	binary.LittleEndian.PutUint16(mh[2:4], 0)
+	frame = append(hdr, mh...)
+	frame = append(frame, body...)
+	return frame, enterNS, sendNS
+}
+
+// TestParseFrame_BatchBoundaryHasNoSourceTS guards against treating a
+// batch_boundary's BatchTime as a block/venue timestamp. BatchTime is a batch
+// counter, not wall-clock, so the record must carry SourceTSNS == 0 (which the
+// bot maps to a NULL source_ts and excludes from source latency).
+func TestParseFrame_BatchBoundaryHasNoSourceTS(t *testing.T) {
+	sendTS := time.Unix(1700000020, 111111111)
+	body := make([]byte, 12)
+	binary.LittleEndian.PutUint32(body[0:4], 7000)            // BatchID
+	binary.LittleEndian.PutUint64(body[4:12], 1025401179)     // BatchTime (counter, not epoch ns)
+
+	msgLen := uint8(messageHeaderSize + 12)
+	frameLen := frameHeaderSize + int(msgLen)
+	hdr := buildFrameHeader(mboMagic, mboSchemaVersion, 1, 200, sendTS, 1, 0, uint16(frameLen))
+	mh := make([]byte, messageHeaderSize)
+	mh[0] = msgTypeBatchBoundary
+	mh[1] = msgLen
+	frame := append(hdr, mh...)
+	frame = append(frame, body...)
+
+	p := &marketByOrderParser{}
+	recs, err := p.ParseFrame("mktdata", frame)
+	if err != nil {
+		t.Fatalf("ParseFrame: %v", err)
+	}
+	if len(recs) != 1 || recs[0].Type != "batch_boundary" {
+		t.Fatalf("got %d records, want 1 batch_boundary", len(recs))
+	}
+	if recs[0].SourceTSNS != 0 {
+		t.Errorf("batch_boundary SourceTSNS = %d, want 0", recs[0].SourceTSNS)
+	}
+	if recs[0].SendTSNS != uint64(sendTS.UnixNano()) {
+		t.Errorf("batch_boundary SendTSNS = %d, want %d", recs[0].SendTSNS, uint64(sendTS.UnixNano()))
+	}
+}
+
+func TestParseFrame_OrderAddEmitsSourceAndSendTS(t *testing.T) {
+	frame, enterNS, sendNS := buildOrderAddFrameWithTS(t)
+	p := &marketByOrderParser{}
+	recs, err := p.ParseFrame("mktdata", frame)
+	if err != nil {
+		t.Fatalf("ParseFrame: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("got %d records, want 1", len(recs))
+	}
+	r := recs[0]
+	if r.SourceTSNS != enterNS {
+		t.Errorf("SourceTSNS = %d, want %d (enter_ts)", r.SourceTSNS, enterNS)
+	}
+	if r.SendTSNS != sendNS {
+		t.Errorf("SendTSNS = %d, want %d (frame send)", r.SendTSNS, sendNS)
+	}
+}
+
 func TestMarketByOrderParser_TruncatedFrame(t *testing.T) {
 	body := make([]byte, 48)
 	frame := buildSingleMessageFrame(t, msgTypeOrderAdd, messageHeaderSize+48, body)

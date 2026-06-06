@@ -204,8 +204,8 @@
     },
     {
       "type": "stat",
-      "title": "Average wire latency",
-      "description": "Publisher send_ts to subscriber receive, from quote rows only. Includes clock skew between hosts.",
+      "title": "Avg send\u2192recv latency",
+      "description": "Publisher send_ts to subscriber receive, from quote rows only.",
       "id": 5,
       "gridPos": {
         "x": 12,
@@ -266,15 +266,15 @@
             "type": "grafana-clickhouse-datasource"
           },
           "queryType": "sql",
-          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, avg(wire_latency_ms) AS avg_wire_latency_ms\nFROM topofbook.quotes\nWHERE $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, avg(greatest(send_latency_ms,0)) AS avg_send_latency_ms FROM topofbook.quotes WHERE $__timeFilter(recv_ts) GROUP BY time ORDER BY time",
           "format": 0
         }
       ]
     },
     {
       "type": "stat",
-      "title": "P99 wire latency",
-      "description": "Publisher send_ts to subscriber receive, from quote rows only. Includes clock skew between hosts.",
+      "title": "Avg source\u2192recv latency",
+      "description": "Venue source_ts to subscriber receive, from quote rows with source_ts populated.",
       "id": 6,
       "gridPos": {
         "x": 16,
@@ -335,7 +335,7 @@
             "type": "grafana-clickhouse-datasource"
           },
           "queryType": "sql",
-          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, quantile(0.99)(wire_latency_ms) AS p99_wire_latency_ms\nFROM topofbook.quotes\nWHERE $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, avg(greatest(source_latency_ms,0)) AS avg_source_latency_ms FROM topofbook.quotes WHERE source_ts IS NOT NULL AND $__timeFilter(recv_ts) GROUP BY time ORDER BY time",
           "format": 0
         }
       ]
@@ -517,8 +517,8 @@
     },
     {
       "type": "timeseries",
-      "title": "Wire latency quantiles",
-      "description": "Quote publisher send_ts to subscriber receive. Includes clock skew between hosts.",
+      "title": "Latency quantiles (send vs source)",
+      "description": "send_latency_ms (publisher\u2192recv) and source_latency_ms (venue\u2192recv) quantiles per interval.",
       "id": 10,
       "gridPos": {
         "x": 8,
@@ -610,7 +610,7 @@
             "type": "grafana-clickhouse-datasource"
           },
           "queryType": "sql",
-          "rawSql": "SELECT\n  $__timeInterval(recv_ts) AS time,\n  quantile(0.50)(wire_latency_ms) AS p50,\n  quantile(0.95)(wire_latency_ms) AS p95,\n  quantile(0.99)(wire_latency_ms) AS p99\nFROM topofbook.quotes\nWHERE symbol IN (${symbols:singlequote}) AND $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, quantile(0.5)(greatest(send_latency_ms,0)) AS send_p50, quantile(0.99)(greatest(send_latency_ms,0)) AS send_p99, quantile(0.5)(greatest(source_latency_ms,0)) AS source_p50, quantile(0.99)(greatest(source_latency_ms,0)) AS source_p99 FROM topofbook.quotes WHERE symbol IN (${symbols:singlequote}) AND $__timeFilter(recv_ts) GROUP BY time ORDER BY time",
           "format": 0
         }
       ]
@@ -1583,6 +1583,58 @@
           "format": 1
         }
       ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Sequence gaps (per-channel)",
+      "id": 22,
+      "gridPos": {
+        "x": 0,
+        "y": 48,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "clickhouse-topofbook",
+        "type": "grafana-clickhouse-datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "axisLabel": "Missing messages",
+            "drawStyle": "bars",
+            "lineWidth": 1,
+            "fillOpacity": 80,
+            "spanNulls": true
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "uid": "clickhouse-topofbook",
+            "type": "grafana-clickhouse-datasource"
+          },
+          "queryType": "sql",
+          "rawSql": "SELECT time, sum(missing) AS missing_messages FROM ( SELECT $__timeInterval(recv_ts) AS time, seq - lagInFrame(seq, 1, seq) OVER (PARTITION BY channel_id ORDER BY seq) - 1 AS missing FROM topofbook.quotes WHERE $__timeFilter(recv_ts) ) WHERE missing > 0 AND missing < 1000000 GROUP BY time ORDER BY time",
+          "format": 0
+        }
+      ],
+      "description": "Frame-sequence gaps on the per-channel header seq. Quotes dominate the feed so this tracks drops closely, but a gap also counts intervening non-quote frames (trades, heartbeats) \u2014 treat spikes as a signal to investigate, not an exact drop count. For exact per-instrument drop detection use the Market-by-Order feed."
     }
   ],
   "refresh": "5s",
@@ -1606,14 +1658,22 @@
         "sort": 1,
         "multi": false,
         "includeAll": false,
-        "current": { "selected": true, "text": "2Z", "value": "2Z" }
+        "current": {
+          "selected": true,
+          "text": "2Z",
+          "value": "2Z"
+        }
       },
       {
         "name": "candle_interval",
         "label": "Candle interval (s)",
         "type": "custom",
         "query": "10,30,60,300,1800",
-        "current": { "selected": true, "text": "60", "value": "60" },
+        "current": {
+          "selected": true,
+          "text": "60",
+          "value": "60"
+        },
         "hide": 0,
         "multi": false,
         "includeAll": false,
@@ -1625,7 +1685,11 @@
         "label": "Show trades",
         "type": "custom",
         "query": "yes,no",
-        "current": { "selected": true, "text": "yes", "value": "yes" },
+        "current": {
+          "selected": true,
+          "text": "yes",
+          "value": "yes"
+        },
         "hide": 0,
         "multi": false,
         "includeAll": false,

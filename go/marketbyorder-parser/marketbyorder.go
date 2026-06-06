@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"time"
 )
 
 func init() {
@@ -52,6 +53,7 @@ func (p *marketByOrderParser) ParseFrame(port string, frame []byte) ([]Record, e
 func (p *marketByOrderParser) decodeMessage(port string, hdr FrameHeader, mh MessageHeader, body []byte) (Record, bool, error) {
 	base := Record{
 		Timestamp:      hdr.SendTimestamp,
+		SendTSNS:       tsNS(hdr.SendTimestamp),
 		ChannelID:      hdr.ChannelID,
 		Port:           port,
 		SequenceNumber: hdr.Sequence,
@@ -103,6 +105,7 @@ func (p *marketByOrderParser) decodeMessage(port string, hdr FrameHeader, mh Mes
 		}
 		base.Type = "trade"
 		base.InstrumentID = b.InstrumentID
+		base.SourceTSNS = tsNS(b.SourceTimestamp)
 		base.Fields = map[string]any{
 			"source_id":             b.SourceID,
 			"aggressor_side":        b.AggressorSide,
@@ -145,6 +148,7 @@ func (p *marketByOrderParser) decodeMessage(port string, hdr FrameHeader, mh Mes
 		}
 		base.Type = "order_add"
 		base.InstrumentID = b.InstrumentID
+		base.SourceTSNS = tsNS(b.EnterTimestamp)
 		base.Fields = map[string]any{
 			"source_id":          b.SourceID,
 			"side":               sideString(b.Side),
@@ -164,6 +168,7 @@ func (p *marketByOrderParser) decodeMessage(port string, hdr FrameHeader, mh Mes
 		}
 		base.Type = "order_cancel"
 		base.InstrumentID = b.InstrumentID
+		base.SourceTSNS = tsNS(b.Timestamp)
 		base.Fields = map[string]any{
 			"source_id":          b.SourceID,
 			"cancel_reason":      cancelReasonString(b.Reason),
@@ -180,6 +185,7 @@ func (p *marketByOrderParser) decodeMessage(port string, hdr FrameHeader, mh Mes
 		}
 		base.Type = "order_execute"
 		base.InstrumentID = b.InstrumentID
+		base.SourceTSNS = tsNS(b.Timestamp)
 		base.Fields = map[string]any{
 			"source_id":          b.SourceID,
 			"aggressor_side":     aggressorString(b.AggressorSide),
@@ -199,6 +205,8 @@ func (p *marketByOrderParser) decodeMessage(port string, hdr FrameHeader, mh Mes
 			return Record{}, false, err
 		}
 		base.Type = "batch_boundary"
+		// batch_boundary is a framing/control message; BatchTime is a batch
+		// counter, not a block/venue timestamp, so it gets no source_ts.
 		base.Fields = map[string]any{
 			"batch_id": b.BatchID,
 			"batch_ts": b.BatchTime,
@@ -212,6 +220,7 @@ func (p *marketByOrderParser) decodeMessage(port string, hdr FrameHeader, mh Mes
 		}
 		base.Type = "instrument_reset"
 		base.InstrumentID = b.InstrumentID
+		base.SourceTSNS = tsNS(b.Timestamp)
 		base.Fields = map[string]any{
 			"reason":         resetReasonString(b.Reason),
 			"new_anchor_seq": b.NewAnchorSeq,
@@ -243,6 +252,7 @@ func (p *marketByOrderParser) decodeMessage(port string, hdr FrameHeader, mh Mes
 			return Record{}, false, err
 		}
 		base.Type = "snapshot_order"
+		base.SourceTSNS = tsNS(b.EnterTimestamp)
 		base.Fields = map[string]any{
 			"snapshot_id": b.SnapshotID,
 			"order_id":    b.OrderID,
@@ -314,6 +324,14 @@ func cancelReasonString(r uint8) string {
 	default:
 		return "unknown"
 	}
+}
+
+// tsNS returns Unix-nanos for a non-zero time, else 0 (absent).
+func tsNS(t time.Time) uint64 {
+	if t.IsZero() {
+		return 0
+	}
+	return uint64(t.UnixNano())
 }
 
 func resetReasonString(r uint8) string {

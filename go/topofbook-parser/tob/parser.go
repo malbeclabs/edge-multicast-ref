@@ -6,6 +6,8 @@ import "time"
 type Record struct {
 	Type            string         `json:"type"`
 	Timestamp       time.Time      `json:"ts"`
+	SourceTSNS      uint64         `json:"source_ts_ns,omitempty"`
+	SendTSNS        uint64         `json:"send_ts_ns,omitempty"`
 	RecvTimestamp   time.Time      `json:"recv_ts,omitempty"`
 	RecvTimestampNS uint64         `json:"parser_kernel_recv_ts_ns,omitempty"`
 	RecvTSKind      string         `json:"recv_ts_kind,omitempty"`

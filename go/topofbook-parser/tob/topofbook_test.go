@@ -140,6 +140,44 @@ func putInt64LE(buf []byte, v int64) {
 	binary.LittleEndian.PutUint64(buf, uint64(v))
 }
 
+// decodeOneQuoteWithTS builds and parses a single quote frame and returns the
+// decoded Record along with the source and send timestamps that were encoded.
+func decodeOneQuoteWithTS(t *testing.T) (Record, uint64, uint64) {
+	t.Helper()
+	p := NewTopOfBookParser()
+
+	// Use distinct values so source != send.
+	sourceNS := uint64(1_777_050_000_111_000_000)
+	sendNS := uint64(1_777_050_000_222_000_000)
+
+	instDef := buildInstrumentDef(42, "BTC-USDT", "BTC", "USDT", -2, -8)
+	defFrame := buildFrame(1, 100, sendNS, instDef)
+	if _, err := p.Parse(defFrame, PacketMeta{}); err != nil {
+		t.Fatalf("parse instrument def: %v", err)
+	}
+
+	quote := buildQuote(42, 1, sourceNS, 6743250, 125000000, 6743300, 80000000, 0)
+	quoteFrame := buildFrame(1, 101, sendNS, quote)
+	records, err := p.Parse(quoteFrame, PacketMeta{})
+	if err != nil {
+		t.Fatalf("parse quote: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("expected 1 record, got %d", len(records))
+	}
+	return records[0], sourceNS, sendNS
+}
+
+func TestQuoteEmitsTopLevelSourceAndSendTS(t *testing.T) {
+	rec, sourceNS, sendNS := decodeOneQuoteWithTS(t)
+	if rec.SourceTSNS != sourceNS {
+		t.Errorf("SourceTSNS = %d, want %d", rec.SourceTSNS, sourceNS)
+	}
+	if rec.SendTSNS != sendNS {
+		t.Errorf("SendTSNS = %d, want %d", rec.SendTSNS, sendNS)
+	}
+}
+
 func TestTopOfBookParser_InstrumentDefinition(t *testing.T) {
 	p := NewTopOfBookParser()
 
@@ -326,6 +364,15 @@ func TestTopOfBookParser_QuoteBuffering(t *testing.T) {
 	}
 	if records[1].Fields["send_timestamp_ns"] != ts {
 		t.Errorf("expected flushed quote send_timestamp_ns %d, got %v", ts, records[1].Fields["send_timestamp_ns"])
+	}
+	// Flushed buffered records must carry the top-level source/send ns fields the
+	// bot reads for latency (regression: the flush path once left these zero,
+	// producing 1970-epoch publisher_send_ts in ClickHouse).
+	if records[1].SendTSNS != ts {
+		t.Errorf("expected flushed quote SendTSNS %d, got %d", ts, records[1].SendTSNS)
+	}
+	if records[1].SourceTSNS != srcTS {
+		t.Errorf("expected flushed quote SourceTSNS %d, got %d", srcTS, records[1].SourceTSNS)
 	}
 	if p.Buffered() != 0 {
 		t.Errorf("expected 0 buffered after flush, got %d", p.Buffered())
