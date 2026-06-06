@@ -46,8 +46,9 @@ func (w *EventsWriter) Write(ev ChannelEvent, channelID uint8, instSymbol string
 
 	case "heartbeat", "manifest_summary", "end_of_session":
 		row := map[string]any{
-			"recv_ts":           chTime(now),
-			"publisher_send_ts": chTime(rec.Timestamp),
+			"recv_ts":           chTime(rec.recvTime(now)),
+			"publisher_send_ts": chTime(rec.sendTime()),
+			"recv_ts_kind":      rec.RecvTSKind,
 			"channel_id":        channelID,
 			"kind":              rec.Type,
 		}
@@ -59,16 +60,7 @@ func (w *EventsWriter) Write(ev ChannelEvent, channelID uint8, instSymbol string
 		w.ch.Enqueue("channel_health", row)
 
 	case "order_add", "order_cancel", "order_execute", "trade", "instrument_reset", "batch_boundary":
-		row := map[string]any{
-			"recv_ts":           chTime(now),
-			"publisher_send_ts": chTime(rec.Timestamp),
-			"channel_id":        channelID,
-			"mktdata_seq":       rec.SequenceNumber,
-			"reset_count":       rec.ResetCount,
-			"kind":              rec.Type,
-			"instrument_id":     rec.InstrumentID,
-			"symbol":            instSymbol,
-		}
+		row := buildEventRow(rec, channelID, instSymbol)
 		switch rec.Type {
 		case "order_add":
 			row["source_id"] = getUint16(rec.Fields, "source_id")
@@ -109,6 +101,25 @@ func (w *EventsWriter) Write(ev ChannelEvent, channelID uint8, instSymbol string
 		}
 		w.ch.Enqueue("events", row)
 	}
+}
+
+// buildEventRow constructs the common timestamp and identity columns for an events row.
+func buildEventRow(rec Record, channelID uint8, instSymbol string) map[string]any {
+	row := map[string]any{
+		"recv_ts":           chTime(rec.recvTime(time.Now().UTC())),
+		"publisher_send_ts": chTime(rec.sendTime()),
+		"recv_ts_kind":      rec.RecvTSKind,
+		"channel_id":        channelID,
+		"mktdata_seq":       rec.SequenceNumber,
+		"reset_count":       rec.ResetCount,
+		"kind":              rec.Type,
+		"instrument_id":     rec.InstrumentID,
+		"symbol":            instSymbol,
+	}
+	if src, ok := rec.sourceTime(); ok {
+		row["source_ts"] = chTime(src)
+	}
+	return row
 }
 
 // WriteSnapshotOrder writes one SnapshotOrder record to wire_snapshots with full context
