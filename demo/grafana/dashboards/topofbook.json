@@ -204,7 +204,7 @@
     },
     {
       "type": "stat",
-      "title": "Avg send→recv latency",
+      "title": "Avg send\u2192recv latency",
       "description": "Publisher send_ts to subscriber receive, from quote rows only.",
       "id": 5,
       "gridPos": {
@@ -273,7 +273,7 @@
     },
     {
       "type": "stat",
-      "title": "Avg source→recv latency",
+      "title": "Avg source\u2192recv latency",
       "description": "Venue source_ts to subscriber receive, from quote rows with source_ts populated.",
       "id": 6,
       "gridPos": {
@@ -518,7 +518,7 @@
     {
       "type": "timeseries",
       "title": "Latency quantiles (send vs source)",
-      "description": "send_latency_ms (publisher→recv) and source_latency_ms (venue→recv) quantiles per interval.",
+      "description": "send_latency_ms (publisher\u2192recv) and source_latency_ms (venue\u2192recv) quantiles per interval.",
       "id": 10,
       "gridPos": {
         "x": 8,
@@ -1583,6 +1583,57 @@
           "format": 1
         }
       ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Sequence gaps (per-channel)",
+      "id": 22,
+      "gridPos": {
+        "x": 0,
+        "y": 48,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "clickhouse-topofbook",
+        "type": "grafana-clickhouse-datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "axisLabel": "Missing messages",
+            "drawStyle": "bars",
+            "lineWidth": 1,
+            "fillOpacity": 80,
+            "spanNulls": true
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "uid": "clickhouse-topofbook",
+            "type": "grafana-clickhouse-datasource"
+          },
+          "queryType": "sql",
+          "rawSql": "SELECT time, sum(missing) AS missing_messages FROM ( SELECT $__timeInterval(recv_ts) AS time, seq - lagInFrame(seq) OVER (PARTITION BY channel_id ORDER BY seq) - 1 AS missing FROM topofbook.quotes WHERE $__timeFilter(recv_ts) ) WHERE missing > 0 AND missing < 1000000 GROUP BY time ORDER BY time",
+          "format": 0
+        }
+      ]
     }
   ],
   "refresh": "5s",
@@ -1606,14 +1657,22 @@
         "sort": 1,
         "multi": false,
         "includeAll": false,
-        "current": { "selected": true, "text": "2Z", "value": "2Z" }
+        "current": {
+          "selected": true,
+          "text": "2Z",
+          "value": "2Z"
+        }
       },
       {
         "name": "candle_interval",
         "label": "Candle interval (s)",
         "type": "custom",
         "query": "10,30,60,300,1800",
-        "current": { "selected": true, "text": "60", "value": "60" },
+        "current": {
+          "selected": true,
+          "text": "60",
+          "value": "60"
+        },
         "hide": 0,
         "multi": false,
         "includeAll": false,
@@ -1625,7 +1684,11 @@
         "label": "Show trades",
         "type": "custom",
         "query": "yes,no",
-        "current": { "selected": true, "text": "yes", "value": "yes" },
+        "current": {
+          "selected": true,
+          "text": "yes",
+          "value": "yes"
+        },
         "hide": 0,
         "multi": false,
         "includeAll": false,
