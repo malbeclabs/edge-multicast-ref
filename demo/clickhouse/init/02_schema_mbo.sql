@@ -1,7 +1,7 @@
-CREATE DATABASE IF NOT EXISTS depthofbook;
+CREATE DATABASE IF NOT EXISTS marketbyorder;
 
 -- Slowly-changing instrument dimension. ReplacingMergeTree keeps latest per (channel_id, instrument_id).
-CREATE TABLE IF NOT EXISTS depthofbook.instruments (
+CREATE TABLE IF NOT EXISTS marketbyorder.instruments (
     recv_ts          DateTime64(9),
     channel_id       UInt8,
     instrument_id    UInt32,
@@ -24,7 +24,7 @@ ENGINE = ReplacingMergeTree(recv_ts)
 ORDER BY (channel_id, instrument_id);
 
 -- Per-event log: order deltas + trades + structural events.
-CREATE TABLE IF NOT EXISTS depthofbook.events (
+CREATE TABLE IF NOT EXISTS marketbyorder.events (
     recv_ts                DateTime64(9),
     publisher_send_ts      DateTime64(9),
     wire_latency_ms        Float64 MATERIALIZED (toUnixTimestamp64Nano(recv_ts) - toUnixTimestamp64Nano(publisher_send_ts)) / 1000000.0,
@@ -64,7 +64,7 @@ ORDER BY (symbol, recv_ts, kind)
 TTL toDateTime(recv_ts) + INTERVAL 30 DAY;
 
 -- Top-N depth, coalesced. Flat one-row-per-level layout for direct table/heatmap rendering.
-CREATE TABLE IF NOT EXISTS depthofbook.level_snapshots (
+CREATE TABLE IF NOT EXISTS marketbyorder.level_snapshots (
     recv_ts             DateTime64(9),
     publisher_send_ts   DateTime64(9),
     wire_latency_ms     Float64 MATERIALIZED (toUnixTimestamp64Nano(recv_ts) - toUnixTimestamp64Nano(publisher_send_ts)) / 1000000.0,
@@ -85,7 +85,7 @@ ORDER BY (symbol, recv_ts, side, level_idx)
 TTL toDateTime(recv_ts) + INTERVAL 30 DAY;
 
 -- Raw SnapshotOrder capture, for full replay. Group identity denormalized onto every row.
-CREATE TABLE IF NOT EXISTS depthofbook.wire_snapshots (
+CREATE TABLE IF NOT EXISTS marketbyorder.wire_snapshots (
     recv_ts             DateTime64(9),
     publisher_send_ts   DateTime64(9),
     channel_id          UInt8,
@@ -108,7 +108,7 @@ ORDER BY (channel_id, instrument_id, snapshot_id, side, order_id)
 TTL toDateTime(recv_ts) + INTERVAL 30 DAY;
 
 -- Channel health: heartbeats, manifest summaries, end-of-session signals.
-CREATE TABLE IF NOT EXISTS depthofbook.channel_health (
+CREATE TABLE IF NOT EXISTS marketbyorder.channel_health (
     recv_ts             DateTime64(9),
     publisher_send_ts   DateTime64(9),
     wire_latency_ms     Float64 MATERIALIZED (toUnixTimestamp64Nano(recv_ts) - toUnixTimestamp64Nano(publisher_send_ts)) / 1000000.0,

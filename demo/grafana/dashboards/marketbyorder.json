@@ -28,7 +28,7 @@
           "refId": "A",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "SELECT instrument_count\nFROM depthofbook.channel_health\nWHERE kind = 'manifest_summary'\nORDER BY recv_ts DESC\nLIMIT 1",
+          "rawSql": "SELECT instrument_count\nFROM marketbyorder.channel_health\nWHERE kind = 'manifest_summary'\nORDER BY recv_ts DESC\nLIMIT 1",
           "format": 1
         }
       ]
@@ -46,7 +46,7 @@
           "refId": "A",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, count() / $__interval_s AS events_per_sec\nFROM depthofbook.events\nWHERE $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, count() / $__interval_s AS events_per_sec\nFROM marketbyorder.events\nWHERE $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
           "format": 0
         }
       ]
@@ -64,7 +64,7 @@
           "refId": "A",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, count() / $__interval_s AS snapshots_per_sec\nFROM depthofbook.level_snapshots\nWHERE $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, count() / $__interval_s AS snapshots_per_sec\nFROM marketbyorder.level_snapshots\nWHERE $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
           "format": 0
         }
       ]
@@ -72,7 +72,7 @@
     {
       "type": "stat",
       "title": "Average wire latency",
-      "description": "Publisher send_ts to subscriber receive, from DOB events. Includes clock skew between hosts.",
+      "description": "Publisher send_ts to subscriber receive, from MBO events. Includes clock skew between hosts.",
       "id": 5,
       "gridPos": { "x": 12, "y": 1, "w": 4, "h": 4 },
       "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
@@ -83,7 +83,7 @@
           "refId": "A",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, avg(wire_latency_ms) AS avg_wire_latency_ms\nFROM depthofbook.events\nWHERE $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, avg(wire_latency_ms) AS avg_wire_latency_ms\nFROM marketbyorder.events\nWHERE $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
           "format": 0
         }
       ]
@@ -91,7 +91,7 @@
     {
       "type": "stat",
       "title": "P99 wire latency",
-      "description": "Publisher send_ts to subscriber receive, from DOB events. Includes clock skew between hosts.",
+      "description": "Publisher send_ts to subscriber receive, from MBO events. Includes clock skew between hosts.",
       "id": 6,
       "gridPos": { "x": 16, "y": 1, "w": 4, "h": 4 },
       "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
@@ -102,7 +102,7 @@
           "refId": "A",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, quantile(0.99)(wire_latency_ms) AS p99_wire_latency_ms\nFROM depthofbook.events\nWHERE $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, quantile(0.99)(wire_latency_ms) AS p99_wire_latency_ms\nFROM marketbyorder.events\nWHERE $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
           "format": 0
         }
       ]
@@ -120,7 +120,7 @@
           "refId": "A",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "SELECT dateDiff('millisecond', max(recv_ts), now64(3)) / 1000 AS latest_event_age_seconds\nFROM (\n  SELECT max(recv_ts) AS recv_ts FROM depthofbook.events\n  UNION ALL\n  SELECT max(recv_ts) AS recv_ts FROM depthofbook.level_snapshots\n)",
+          "rawSql": "SELECT dateDiff('millisecond', max(recv_ts), now64(3)) / 1000 AS latest_event_age_seconds\nFROM (\n  SELECT max(recv_ts) AS recv_ts FROM marketbyorder.events\n  UNION ALL\n  SELECT max(recv_ts) AS recv_ts FROM marketbyorder.level_snapshots\n)",
           "format": 1
         }
       ]
@@ -157,14 +157,14 @@
           "refId": "A",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "WITH\n  best AS (\n    SELECT\n      recv_ts,\n      maxIf(price, side = 'bid' AND level_idx = 0) AS bid,\n      minIf(price, side = 'ask' AND level_idx = 0) AS ask\n    FROM depthofbook.level_snapshots\n    WHERE symbol = ${symbol:singlequote} AND $__timeFilter(recv_ts)\n    GROUP BY recv_ts\n    HAVING bid > 0 AND ask > 0\n  ),\n  q AS (\n    SELECT\n      toStartOfInterval(recv_ts, INTERVAL ${candle_interval:raw} SECOND) AS time,\n      argMin((bid + ask) / 2, recv_ts) AS open,\n      max((bid + ask) / 2) AS high,\n      min((bid + ask) / 2) AS low,\n      argMax((bid + ask) / 2, recv_ts) AS close\n    FROM best\n    GROUP BY time\n  ),\n  v AS (\n    SELECT\n      toStartOfInterval(recv_ts, INTERVAL ${candle_interval:raw} SECOND) AS time,\n      sum(ifNull(qty, 0)) AS volume\n    FROM depthofbook.events\n    WHERE kind IN ('trade', 'order_execute') AND symbol = ${symbol:singlequote} AND $__timeFilter(recv_ts)\n    GROUP BY time\n  )\nSELECT q.time, q.open, q.high, q.low, q.close, ifNull(v.volume, 0) AS volume\nFROM q\nLEFT JOIN v USING time\nORDER BY q.time",
+          "rawSql": "WITH\n  best AS (\n    SELECT\n      recv_ts,\n      maxIf(price, side = 'bid' AND level_idx = 0) AS bid,\n      minIf(price, side = 'ask' AND level_idx = 0) AS ask\n    FROM marketbyorder.level_snapshots\n    WHERE symbol = ${symbol:singlequote} AND $__timeFilter(recv_ts)\n    GROUP BY recv_ts\n    HAVING bid > 0 AND ask > 0\n  ),\n  q AS (\n    SELECT\n      toStartOfInterval(recv_ts, INTERVAL ${candle_interval:raw} SECOND) AS time,\n      argMin((bid + ask) / 2, recv_ts) AS open,\n      max((bid + ask) / 2) AS high,\n      min((bid + ask) / 2) AS low,\n      argMax((bid + ask) / 2, recv_ts) AS close\n    FROM best\n    GROUP BY time\n  ),\n  v AS (\n    SELECT\n      toStartOfInterval(recv_ts, INTERVAL ${candle_interval:raw} SECOND) AS time,\n      sum(ifNull(qty, 0)) AS volume\n    FROM marketbyorder.events\n    WHERE kind IN ('trade', 'order_execute') AND symbol = ${symbol:singlequote} AND $__timeFilter(recv_ts)\n    GROUP BY time\n  )\nSELECT q.time, q.open, q.high, q.low, q.close, ifNull(v.volume, 0) AS volume\nFROM q\nLEFT JOIN v USING time\nORDER BY q.time",
           "format": 1
         },
         {
           "refId": "B",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "SELECT recv_ts AS time, price AS trade\nFROM depthofbook.events\nWHERE '${show_trades:raw}' = 'yes'\n  AND kind IN ('trade', 'order_execute')\n  AND symbol = ${symbol:singlequote}\n  AND $__timeFilter(recv_ts)\n  AND price IS NOT NULL\nORDER BY time",
+          "rawSql": "SELECT recv_ts AS time, price AS trade\nFROM marketbyorder.events\nWHERE '${show_trades:raw}' = 'yes'\n  AND kind IN ('trade', 'order_execute')\n  AND symbol = ${symbol:singlequote}\n  AND $__timeFilter(recv_ts)\n  AND price IS NOT NULL\nORDER BY time",
           "format": 0
         }
       ]
@@ -192,7 +192,7 @@
           "refId": "A",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "SELECT\n  side,\n  price,\n  qty AS amount,\n  if(side = 'ask', cumulative_qty, NULL) AS ask_depth,\n  if(side = 'bid', cumulative_qty, NULL) AS bid_depth,\n  multiIf(side = 'ask', 1000 - toInt32(level_idx), 2000 + toInt32(level_idx)) AS sort_key\nFROM depthofbook.level_snapshots\nWHERE symbol = ${symbol:singlequote}\n  AND level_idx < 5\n  AND recv_ts = (\n    SELECT max(recv_ts)\n    FROM depthofbook.level_snapshots\n    WHERE symbol = ${symbol:singlequote} AND $__timeFilter(recv_ts)\n  )\nORDER BY sort_key",
+          "rawSql": "SELECT\n  side,\n  price,\n  qty AS amount,\n  if(side = 'ask', cumulative_qty, NULL) AS ask_depth,\n  if(side = 'bid', cumulative_qty, NULL) AS bid_depth,\n  multiIf(side = 'ask', 1000 - toInt32(level_idx), 2000 + toInt32(level_idx)) AS sort_key\nFROM marketbyorder.level_snapshots\nWHERE symbol = ${symbol:singlequote}\n  AND level_idx < 5\n  AND recv_ts = (\n    SELECT max(recv_ts)\n    FROM marketbyorder.level_snapshots\n    WHERE symbol = ${symbol:singlequote} AND $__timeFilter(recv_ts)\n  )\nORDER BY sort_key",
           "format": 1
         }
       ]
@@ -216,14 +216,14 @@
           "refId": "A",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, avg(price) AS bid\nFROM depthofbook.level_snapshots\nWHERE symbol = ${symbol:singlequote} AND side = 'bid' AND level_idx = 0 AND $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, avg(price) AS bid\nFROM marketbyorder.level_snapshots\nWHERE symbol = ${symbol:singlequote} AND side = 'bid' AND level_idx = 0 AND $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
           "format": 0
         },
         {
           "refId": "B",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, avg(price) AS ask\nFROM depthofbook.level_snapshots\nWHERE symbol = ${symbol:singlequote} AND side = 'ask' AND level_idx = 0 AND $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, avg(price) AS ask\nFROM marketbyorder.level_snapshots\nWHERE symbol = ${symbol:singlequote} AND side = 'ask' AND level_idx = 0 AND $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
           "format": 0
         }
       ]
@@ -241,7 +241,7 @@
           "refId": "A",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "WITH best AS (\n  SELECT $__timeInterval(recv_ts) AS time,\n         minIf(price, side = 'ask' AND level_idx = 0) AS best_ask,\n         maxIf(price, side = 'bid' AND level_idx = 0) AS best_bid\n  FROM depthofbook.level_snapshots\n  WHERE symbol = ${symbol:singlequote} AND $__timeFilter(recv_ts)\n  GROUP BY time\n)\nSELECT time, ((best_ask - best_bid) / ((best_ask + best_bid) / 2)) * 10000 AS spread_bps\nFROM best\nWHERE best_ask > 0 AND best_bid > 0\nORDER BY time",
+          "rawSql": "WITH best AS (\n  SELECT $__timeInterval(recv_ts) AS time,\n         minIf(price, side = 'ask' AND level_idx = 0) AS best_ask,\n         maxIf(price, side = 'bid' AND level_idx = 0) AS best_bid\n  FROM marketbyorder.level_snapshots\n  WHERE symbol = ${symbol:singlequote} AND $__timeFilter(recv_ts)\n  GROUP BY time\n)\nSELECT time, ((best_ask - best_bid) / ((best_ask + best_bid) / 2)) * 10000 AS spread_bps\nFROM best\nWHERE best_ask > 0 AND best_bid > 0\nORDER BY time",
           "format": 0
         }
       ]
@@ -266,7 +266,7 @@
           "refId": "A",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "SELECT\n  recv_ts,\n  symbol,\n  aggressor_side,\n  price,\n  qty,\n  price * qty AS notional\nFROM depthofbook.events\nWHERE kind IN ('trade', 'order_execute')\n  AND symbol = ${symbol:singlequote}\n  AND $__timeFilter(recv_ts)\nORDER BY recv_ts DESC\nLIMIT 200",
+          "rawSql": "SELECT\n  recv_ts,\n  symbol,\n  aggressor_side,\n  price,\n  qty,\n  price * qty AS notional\nFROM marketbyorder.events\nWHERE kind IN ('trade', 'order_execute')\n  AND symbol = ${symbol:singlequote}\n  AND $__timeFilter(recv_ts)\nORDER BY recv_ts DESC\nLIMIT 200",
           "format": 1
         }
       ]
@@ -292,7 +292,7 @@
           "refId": "A",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, kind, count() / $__interval_s AS rate\nFROM depthofbook.events\nWHERE kind IN ('order_add', 'order_cancel', 'order_execute', 'trade') AND $__timeFilter(recv_ts)\nGROUP BY time, kind\nORDER BY time",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, kind, count() / $__interval_s AS rate\nFROM marketbyorder.events\nWHERE kind IN ('order_add', 'order_cancel', 'order_execute', 'trade') AND $__timeFilter(recv_ts)\nGROUP BY time, kind\nORDER BY time",
           "format": 0
         }
       ]
@@ -317,7 +317,7 @@
           "refId": "A",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "SELECT $__timeInterval(recv_ts) AS time,\n       quantile(0.5)(wire_latency_ms) AS p50,\n       quantile(0.95)(wire_latency_ms) AS p95,\n       quantile(0.99)(wire_latency_ms) AS p99\nFROM depthofbook.events\nWHERE $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time,\n       quantile(0.5)(wire_latency_ms) AS p50,\n       quantile(0.95)(wire_latency_ms) AS p95,\n       quantile(0.99)(wire_latency_ms) AS p99\nFROM marketbyorder.events\nWHERE $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
           "format": 0
         }
       ]
@@ -335,7 +335,7 @@
           "refId": "A",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "SELECT recv_ts AS time, price\nFROM depthofbook.level_snapshots\nWHERE symbol = ${symbol:singlequote} AND level_idx < 10 AND $__timeFilter(recv_ts)\nORDER BY recv_ts",
+          "rawSql": "SELECT recv_ts AS time, price\nFROM marketbyorder.level_snapshots\nWHERE symbol = ${symbol:singlequote} AND level_idx < 10 AND $__timeFilter(recv_ts)\nORDER BY recv_ts",
           "format": 1
         }
       ]
@@ -353,7 +353,7 @@
           "refId": "A",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, side, sum(order_count) AS orders\nFROM depthofbook.level_snapshots\nWHERE symbol = ${symbol:singlequote} AND $__timeFilter(recv_ts)\nGROUP BY time, side\nORDER BY time",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, side, sum(order_count) AS orders\nFROM marketbyorder.level_snapshots\nWHERE symbol = ${symbol:singlequote} AND $__timeFilter(recv_ts)\nGROUP BY time, side\nORDER BY time",
           "format": 0
         }
       ]
@@ -371,7 +371,7 @@
           "refId": "A",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, side, sum(qty) AS resting_qty\nFROM depthofbook.level_snapshots\nWHERE symbol = ${symbol:singlequote} AND level_idx < 10 AND $__timeFilter(recv_ts)\nGROUP BY time, side\nORDER BY time",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, side, sum(qty) AS resting_qty\nFROM marketbyorder.level_snapshots\nWHERE symbol = ${symbol:singlequote} AND level_idx < 10 AND $__timeFilter(recv_ts)\nGROUP BY time, side\nORDER BY time",
           "format": 0
         }
       ]
@@ -379,7 +379,7 @@
   ],
   "refresh": "5s",
   "schemaVersion": 40,
-  "tags": ["dz-dob", "demo"],
+  "tags": ["dz-mbo", "demo"],
   "templating": {
     "list": [
       {
@@ -387,7 +387,7 @@
         "label": "Symbol",
         "type": "query",
         "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
-        "query": "SELECT DISTINCT symbol FROM depthofbook.level_snapshots WHERE $__timeFilter(recv_ts) ORDER BY symbol",
+        "query": "SELECT DISTINCT symbol FROM marketbyorder.level_snapshots WHERE $__timeFilter(recv_ts) ORDER BY symbol",
         "refresh": 2,
         "sort": 1,
         "multi": false,
@@ -423,8 +423,8 @@
   "time": { "from": "now-15m", "to": "now" },
   "timepicker": {},
   "timezone": "utc",
-  "title": "DZ Depth-of-Book",
-  "uid": "dz-depthofbook",
+  "title": "DZ Market-by-Order",
+  "uid": "dz-marketbyorder",
   "version": 10,
   "weekStart": ""
 }
