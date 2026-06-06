@@ -1630,7 +1630,7 @@
             "type": "grafana-clickhouse-datasource"
           },
           "queryType": "sql",
-          "rawSql": "SELECT time, sum(missing) AS missing_messages FROM ( SELECT $__timeInterval(recv_ts) AS time, seq - lagInFrame(seq) OVER (PARTITION BY channel_id ORDER BY seq) - 1 AS missing FROM topofbook.quotes WHERE $__timeFilter(recv_ts) ) WHERE missing > 0 AND missing < 1000000 GROUP BY time ORDER BY time",
+          "rawSql": "SELECT time, sum(missing) AS missing_messages FROM ( SELECT $__timeInterval(recv_ts) AS time, seq - lagInFrame(seq, 1, seq) OVER (PARTITION BY channel_id ORDER BY seq) - 1 AS missing FROM topofbook.quotes WHERE $__timeFilter(recv_ts) ) WHERE missing > 0 AND missing < 1000000 GROUP BY time ORDER BY time",
           "format": 0
         }
       ],
