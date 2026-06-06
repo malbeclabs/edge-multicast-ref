@@ -71,8 +71,8 @@
     },
     {
       "type": "stat",
-      "title": "Average wire latency",
-      "description": "Publisher send_ts to subscriber receive, from MBO events. Includes clock skew between hosts.",
+      "title": "Avg send→recv latency",
+      "description": "Publisher send_ts to subscriber receive, from MBO events.",
       "id": 5,
       "gridPos": { "x": 12, "y": 1, "w": 4, "h": 4 },
       "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
@@ -83,15 +83,15 @@
           "refId": "A",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, avg(wire_latency_ms) AS avg_wire_latency_ms\nFROM marketbyorder.events\nWHERE $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, avg(greatest(send_latency_ms,0)) AS avg_send_latency_ms FROM marketbyorder.events WHERE $__timeFilter(recv_ts) GROUP BY time ORDER BY time",
           "format": 0
         }
       ]
     },
     {
       "type": "stat",
-      "title": "P99 wire latency",
-      "description": "Publisher send_ts to subscriber receive, from MBO events. Includes clock skew between hosts.",
+      "title": "Avg source→recv latency",
+      "description": "Venue source_ts to subscriber receive, from MBO events with source_ts populated.",
       "id": 6,
       "gridPos": { "x": 16, "y": 1, "w": 4, "h": 4 },
       "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
@@ -102,7 +102,7 @@
           "refId": "A",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, quantile(0.99)(wire_latency_ms) AS p99_wire_latency_ms\nFROM marketbyorder.events\nWHERE $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, avg(greatest(source_latency_ms,0)) AS avg_source_latency_ms FROM marketbyorder.events WHERE source_ts IS NOT NULL AND $__timeFilter(recv_ts) GROUP BY time ORDER BY time",
           "format": 0
         }
       ]
@@ -299,7 +299,7 @@
     },
     {
       "type": "timeseries",
-      "title": "Wire latency quantiles",
+      "title": "Latency quantiles (send vs source)",
       "id": 16,
       "gridPos": { "x": 8, "y": 35, "w": 8, "h": 7 },
       "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
@@ -317,7 +317,7 @@
           "refId": "A",
           "datasource": { "uid": "clickhouse-topofbook", "type": "grafana-clickhouse-datasource" },
           "queryType": "sql",
-          "rawSql": "SELECT $__timeInterval(recv_ts) AS time,\n       quantile(0.5)(wire_latency_ms) AS p50,\n       quantile(0.95)(wire_latency_ms) AS p95,\n       quantile(0.99)(wire_latency_ms) AS p99\nFROM marketbyorder.events\nWHERE $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, quantile(0.5)(greatest(send_latency_ms,0)) AS send_p50, quantile(0.99)(greatest(send_latency_ms,0)) AS send_p99, quantile(0.5)(greatest(source_latency_ms,0)) AS source_p50, quantile(0.99)(greatest(source_latency_ms,0)) AS source_p99 FROM marketbyorder.events WHERE source_ts IS NOT NULL AND $__timeFilter(recv_ts) GROUP BY time ORDER BY time",
           "format": 0
         }
       ]
