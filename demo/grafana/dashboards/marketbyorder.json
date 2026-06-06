@@ -1394,7 +1394,8 @@
           "rawSql": "SELECT time, sum(missing) AS missing_messages FROM ( SELECT $__timeInterval(recv_ts) AS time, per_instrument_seq - lagInFrame(per_instrument_seq) OVER (PARTITION BY channel_id, instrument_id ORDER BY per_instrument_seq) - 1 AS missing FROM marketbyorder.events WHERE per_instrument_seq > 0 AND $__timeFilter(recv_ts) ) WHERE missing > 0 GROUP BY time ORDER BY time",
           "format": 0
         }
-      ]
+      ],
+      "description": "Missing messages detected from the dense per-(channel,instrument) sequence (per_instrument_seq). This is contiguous per instrument, so a gap here is a genuine dropped/missed message."
     }
   ],
   "refresh": "5s",

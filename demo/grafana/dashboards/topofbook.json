@@ -1633,7 +1633,8 @@
           "rawSql": "SELECT time, sum(missing) AS missing_messages FROM ( SELECT $__timeInterval(recv_ts) AS time, seq - lagInFrame(seq) OVER (PARTITION BY channel_id ORDER BY seq) - 1 AS missing FROM topofbook.quotes WHERE $__timeFilter(recv_ts) ) WHERE missing > 0 AND missing < 1000000 GROUP BY time ORDER BY time",
           "format": 0
         }
-      ]
+      ],
+      "description": "Frame-sequence gaps on the per-channel header seq. Quotes dominate the feed so this tracks drops closely, but a gap also counts intervening non-quote frames (trades, heartbeats) \u2014 treat spikes as a signal to investigate, not an exact drop count. For exact per-instrument drop detection use the Market-by-Order feed."
     }
   ],
   "refresh": "5s",
