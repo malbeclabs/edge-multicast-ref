@@ -4,13 +4,29 @@ import (
 	"bufio"
 	"encoding/json"
 	"net"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
+// shortTempSock returns a Unix-domain socket path short enough to fit within the
+// macOS sockaddr_un.sun_path limit (104 bytes). t.TempDir() embeds the test's
+// function name, which for longer names pushes the socket path over that limit
+// and makes bind fail with EINVAL ("invalid argument"). A minimal-prefix temp
+// dir keeps the path short regardless of the test name.
+func shortTempSock(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "s")
+	if err != nil {
+		t.Fatalf("creating temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return filepath.Join(dir, "s.sock")
+}
+
 func TestSocketSink_JSONBroadcast(t *testing.T) {
-	sockPath := filepath.Join(t.TempDir(), "test.sock")
+	sockPath := shortTempSock(t)
 
 	sink, err := NewSocketSink("json", sockPath, nil)
 	if err != nil {
@@ -71,7 +87,7 @@ func TestSocketSink_JSONBroadcast(t *testing.T) {
 }
 
 func TestSocketSink_CSVBroadcast(t *testing.T) {
-	sockPath := filepath.Join(t.TempDir(), "test.sock")
+	sockPath := shortTempSock(t)
 
 	sink, err := NewSocketSink("csv", sockPath, nil)
 	if err != nil {
@@ -127,7 +143,7 @@ func TestSocketSink_CSVBroadcast(t *testing.T) {
 }
 
 func TestSocketSink_DropsDisconnectedClient(t *testing.T) {
-	sockPath := filepath.Join(t.TempDir(), "test.sock")
+	sockPath := shortTempSock(t)
 
 	sink, err := NewSocketSink("json", sockPath, nil)
 	if err != nil {
