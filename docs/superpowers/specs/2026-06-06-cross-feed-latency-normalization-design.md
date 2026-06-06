@@ -68,16 +68,19 @@ This normalization is the core of the change — it removes the ambiguity where
 | JSON field | Type | Meaning | Per-feed source |
 |---|---|---|---|
 | `source_ts_ns` | uint64 ns (0 = absent) | block/venue time | TOB: quote/trade `SourceTimestamp`. MBO: `enter_ts` (order_add), event block-ts (order_cancel/order_execute), fill ts (trade), batch time (batch_boundary) |
-| `send_ts_ns` | uint64 ns | publisher egress | frame header `SendTimestamp` (both). `ts` is normalized to equal this in both feeds. |
-| `parser_kernel_recv_ts_ns` | uint64 ns | kernel NIC arrival | `SO_TIMESTAMPNS` (TOB already; **add to MBO**) |
-| `recv_ts_kind` | string | `"kernel"` or `"app_fallback"` | which clock produced `parser_kernel_recv_ts_ns` |
+| `send_ts_ns` | uint64 ns | publisher egress | frame header `SendTimestamp` (both) |
+| `parser_kernel_recv_ts_ns` | uint64 ns | kernel NIC arrival | `SO_TIMESTAMPNS` (TOB already emits top-level; **add to MBO**) |
+| `recv_ts_kind` | string | `kernel_udp_software` / `app_udp_fallback` | which clock produced the recv ts (existing TOB constants, reused for MBO) |
+
+All four are **top-level** JSON fields (TOB currently emits `send_timestamp_ns` /
+`source_ts_ns` only inside quote `fields`; promote to top-level on both feeds).
 
 Records with no meaningful source time (heartbeat, manifest_summary,
 channel_reset, end_of_session) emit `source_ts_ns = 0` → `source_ts` NULL →
 `source_latency` NULL.
 
-`ts` is retained for backward compatibility but normalized to mean **send time**
-in both feeds. Bots read the explicit fields above, not `ts`.
+`ts` is left unchanged per feed (TOB: source; MBO: send) for backward
+compatibility; the bots ignore it and read the explicit top-level fields above.
 
 ## ClickHouse schema (both feeds' market-data tables)
 
@@ -88,7 +91,7 @@ Applies to `topofbook.quotes`, `topofbook.trades`, `marketbyorder.events`, and
 recv_ts            DateTime64(9),            -- parser kernel NIC recv (was bot time.Now)
 publisher_send_ts  DateTime64(9),            -- frame egress (FIXES TOB, which stored source here)
 source_ts          Nullable(DateTime64(9)),  -- block/venue time (NEW)
-recv_ts_kind       LowCardinality(String),   -- "kernel" | "app_fallback"
+recv_ts_kind       LowCardinality(String),   -- "kernel_udp_software" | "app_udp_fallback"
 send_latency_ms    Float64           MATERIALIZED (toUnixTimestamp64Nano(recv_ts) - toUnixTimestamp64Nano(publisher_send_ts)) / 1e6,
 source_latency_ms  Nullable(Float64) MATERIALIZED if(source_ts IS NULL, NULL,
                        (toUnixTimestamp64Nano(recv_ts) - toUnixTimestamp64Nano(assumeNotNull(source_ts))) / 1e6),
