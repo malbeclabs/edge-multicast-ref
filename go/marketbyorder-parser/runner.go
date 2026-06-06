@@ -99,6 +99,9 @@ func (r *Runner) openMulticast(port int) (*net.UDPConn, error) {
 	if err := conn.SetReadBuffer(8 * 1024 * 1024); err != nil {
 		log.Printf("warning: SetReadBuffer: %v", err)
 	}
+	if err := enableTimestamping(conn); err != nil {
+		log.Printf("warning: enableTimestamping: %v", err)
+	}
 	return conn, nil
 }
 
@@ -113,7 +116,7 @@ func (r *Runner) receive(ctx context.Context, port string, conn *net.UDPConn, er
 		}
 
 		_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-		n, _, err := conn.ReadFromUDP(buf)
+		n, recvTime, recvKind, err := readDatagram(conn, buf)
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				continue
@@ -131,16 +134,37 @@ func (r *Runner) receive(ctx context.Context, port string, conn *net.UDPConn, er
 			continue
 		}
 
+		recvNS := uint64(recvTime.UnixNano())
 		for i := range records {
+			records[i].RecvTSNS = recvNS
+			records[i].RecvTSKind = recvKind
 			r.metrics.RecordsTotal.WithLabelValues(records[i].Type).Inc()
-			if lat := time.Since(records[i].Timestamp).Seconds(); lat >= 0 {
-				r.metrics.WireLatency.WithLabelValues(port).Observe(lat)
-			}
+			observeLatencies(r.metrics, port, recvTime, records[i])
 		}
 
 		if err := r.sink.Write(records); err != nil {
 			r.metrics.SinkWriteErrors.Inc()
 		}
+	}
+}
+
+// observeLatencies records send→recv and (when present) source→recv latency.
+// Negatives are clamped to 0 for the histogram; raw signed values still reach
+// ClickHouse via the bot.
+func observeLatencies(m *Metrics, port string, recvTime time.Time, rec Record) {
+	if rec.SendTSNS != 0 {
+		lat := recvTime.Sub(time.Unix(0, int64(rec.SendTSNS))).Seconds()
+		if lat < 0 {
+			lat = 0
+		}
+		m.SendLatency.WithLabelValues(port).Observe(lat)
+	}
+	if rec.SourceTSNS != 0 {
+		lat := recvTime.Sub(time.Unix(0, int64(rec.SourceTSNS))).Seconds()
+		if lat < 0 {
+			lat = 0
+		}
+		m.SourceLatency.WithLabelValues(port).Observe(lat)
 	}
 }
 

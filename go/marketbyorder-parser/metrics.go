@@ -20,7 +20,8 @@ type Metrics struct {
 	IngressBytes      *prometheus.CounterVec
 	ParseErrors       *prometheus.CounterVec
 	RecordsTotal      *prometheus.CounterVec
-	WireLatency       *prometheus.HistogramVec
+	SourceLatency     *prometheus.HistogramVec
+	SendLatency       *prometheus.HistogramVec
 	SocketClients     prometheus.Gauge
 	SocketClientDrops *prometheus.CounterVec
 	SocketRecordsSent prometheus.Counter
@@ -58,9 +59,15 @@ func NewMetrics(version, commit string) *Metrics {
 		Help: "Records emitted per record type",
 	}, []string{"type"})
 
-	m.WireLatency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Namespace: metricsNamespace, Name: "wire_latency_seconds",
-		Help:    "Latency from publisher send_ts to parse, by port (includes clock skew)",
+	m.SourceLatency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: metricsNamespace, Name: "source_latency_seconds",
+		Help:    "Latency from block/venue source timestamp to kernel receive, by port (crosses validator and local clocks)",
+		Buckets: prometheus.ExponentialBuckets(0.0001, 2, 16),
+	}, []string{"port"})
+
+	m.SendLatency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: metricsNamespace, Name: "send_latency_seconds",
+		Help:    "Latency from publisher egress send timestamp to kernel receive, by port",
 		Buckets: prometheus.ExponentialBuckets(0.0001, 2, 16),
 	}, []string{"port"})
 
@@ -95,7 +102,7 @@ func NewMetrics(version, commit string) *Metrics {
 	}, func() float64 { return time.Since(m.startTime).Seconds() })
 
 	reg.MustRegister(
-		m.IngressPackets, m.IngressBytes, m.ParseErrors, m.RecordsTotal, m.WireLatency,
+		m.IngressPackets, m.IngressBytes, m.ParseErrors, m.RecordsTotal, m.SourceLatency, m.SendLatency,
 		m.SocketClients, m.SocketClientDrops, m.SocketRecordsSent, m.SinkWriteErrors,
 		m.BuildInfo, m.UptimeSeconds,
 	)
