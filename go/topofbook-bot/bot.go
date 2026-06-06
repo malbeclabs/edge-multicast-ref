@@ -164,8 +164,8 @@ func (b *Bot) handle(rec *Record) {
 	b.metrics.records.WithLabelValues(rec.Type).Inc()
 	recvTime := time.Now()
 
-	if !rec.Timestamp.IsZero() {
-		lat := recvTime.Sub(rec.Timestamp).Seconds()
+	if rec.SendTSNS != 0 {
+		lat := recvTime.Sub(rec.sendTime()).Seconds()
 		if lat >= 0 {
 			b.metrics.latency.WithLabelValues(rec.Type).Observe(lat)
 		}

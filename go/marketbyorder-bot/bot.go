@@ -92,8 +92,11 @@ func (b *Bot) read(ctx context.Context, conn net.Conn) string {
 		}
 
 		b.metrics.RecordsTotal.WithLabelValues(rec.Type).Inc()
-		b.metrics.SocketToBotLatency.WithLabelValues(rec.Type).Observe(
-			time.Since(rec.Timestamp).Seconds())
+		if rec.SendTSNS != 0 {
+			if lat := time.Since(rec.sendTime()).Seconds(); lat >= 0 {
+				b.metrics.SocketToBotLatency.WithLabelValues(rec.Type).Observe(lat)
+			}
+		}
 		b.dispatcher.Dispatch(rec)
 	}
 

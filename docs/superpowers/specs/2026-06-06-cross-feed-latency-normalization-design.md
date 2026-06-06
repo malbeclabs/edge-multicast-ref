@@ -123,7 +123,9 @@ Notes:
 - Already captures the kernel recv time; keep it.
 - Additionally emit `send_ts_ns` (frame header `SendTimestamp`, currently
   discarded for quotes/trades) and `source_ts_ns` (the value currently in `ts`).
-- Normalize `ts` → send time.
+- Leave `ts` unchanged (it stays the source timestamp on TOB); bots read the
+  explicit `send_ts_ns`/`source_ts_ns` fields, not `ts` (see the field-model note
+  above).
 
 ### Both bots
 - Read `source_ts_ns`, `send_ts_ns`, `parser_kernel_recv_ts_ns`, `recv_ts_kind`
