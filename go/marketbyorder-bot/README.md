@@ -1,5 +1,7 @@
 # DZ Market-by-Order Bot
 
+> Implements the [Market-by-Order Feed](https://github.com/malbeclabs/edge-feed-spec/blob/main/market-by-order/spec.md) spec.
+
 Reference Go subscriber that consumes the DoubleZero Market-by-Order parser's Unix socket, maintains in-memory MBO order books per instrument, and persists per-event rows + coalesced top-N level snapshots + raw wire snapshots into ClickHouse.
 
 Sibling to [topofbook-bot](../topofbook-bot/). Documentation will land as the implementation completes.
@@ -22,7 +24,7 @@ snapshot writer.
 - `end_of_session` / `batch_boundary` use an all-shard drain fence so their
   rows land after preceding instrument rows; `reset_count` changes use an
   in-band barrier that wipes all shard state before the new era.
-- New metric: `dz_dob_bot_snapshot_order_dropped_total` (snapshot_order with
+- New metric: `dz_mbo_bot_snapshot_order_dropped_total` (snapshot_order with
   no registered route, e.g. begin missed or arrived post-end).
 
-Design doc: `docs/2026-05-19-depthofbook-bot-shard-dispatcher-design.md`.
+Design doc: `docs/2026-05-19-marketbyorder-bot-shard-dispatcher-design.md`.

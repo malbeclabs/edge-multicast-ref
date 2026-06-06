@@ -1,3 +1,7 @@
+// Wire format authoritatively defined by the Market-by-Order Feed spec:
+// https://github.com/malbeclabs/edge-feed-spec/blob/main/market-by-order/spec.md
+// Keep the byte layout below in sync with that document.
+
 package main
 
 import (

@@ -46,6 +46,11 @@ Kernel-socket receivers are the simple path; XDP receivers are the high-performa
 
 Decode DoubleZero's binary market-data feeds (defined in [edge-feed-spec](https://github.com/malbeclabs/edge-feed-spec)) and monitor them live. Each feed has a multicast subscriber (**parser**) that decodes the wire format and republishes it on a Unix socket, and a reference **bot** that builds state and persists to ClickHouse.
 
+| Feed | Spec | Implementation |
+|------|------|----------------|
+| Top-of-Book & Trades | [spec](https://github.com/malbeclabs/edge-feed-spec/blob/main/top-of-book/spec.md) | `go/topofbook-parser`, `go/topofbook-bot` |
+| Market-by-Order | [spec](https://github.com/malbeclabs/edge-feed-spec/blob/main/market-by-order/spec.md) | `go/marketbyorder-parser`, `go/marketbyorder-bot` |
+
 ### Top-of-Book & Trades
 
 Consumes the [Top-of-Book & Trades feed](https://github.com/malbeclabs/edge-feed-spec/blob/main/top-of-book/spec.md).
@@ -57,12 +62,12 @@ Consumes the [Top-of-Book & Trades feed](https://github.com/malbeclabs/edge-feed
 
 ### Market-by-Order
 
-Consumes the [Market-by-Order feed](https://github.com/malbeclabs/edge-feed-spec/blob/main/market-by-order/spec.md). The implementation predates the spec's rename and keeps its original `depthofbook` directory names.
+Consumes the [Market-by-Order feed](https://github.com/malbeclabs/edge-feed-spec/blob/main/market-by-order/spec.md).
 
 | Component | Description |
 |---|---|
-| [go/depthofbook-parser](go/depthofbook-parser/) | Three-port multicast subscriber + binary wire decoder, broadcasts decoded JSONL on a Unix socket |
-| [go/depthofbook-bot](go/depthofbook-bot/) | Book builder + persistor. Maintains in-memory market-by-order books and writes per-event rows + coalesced top-N level snapshots to ClickHouse |
+| [go/marketbyorder-parser](go/marketbyorder-parser/) | Three-port multicast subscriber + binary wire decoder, broadcasts decoded JSONL on a Unix socket |
+| [go/marketbyorder-bot](go/marketbyorder-bot/) | Book builder + persistor. Maintains in-memory market-by-order books and writes per-event rows + coalesced top-N level snapshots to ClickHouse |
 
 ### Demo Stack
 

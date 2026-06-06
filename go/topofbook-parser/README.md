@@ -1,5 +1,7 @@
 # DZ Top-of-Book Parser
 
+> Implements the [Top-of-Book & Trades Feed](https://github.com/malbeclabs/edge-feed-spec/blob/main/top-of-book/spec.md) spec.
+
 A multicast subscriber and reusable Go parser for DoubleZero Top-of-Book (DZ-TOB v0.1.0) wire-format frames. The CLI writes decoded market data records to a file or Unix socket; the `tob` package exposes the same parser for in-process consumers.
 
 ## What it does
