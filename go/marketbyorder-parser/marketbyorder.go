@@ -5,15 +5,15 @@ import (
 )
 
 func init() {
-	registerParser("depthofbook", func() Parser { return &depthOfBookParser{} })
+	registerParser("marketbyorder", func() Parser { return &marketByOrderParser{} })
 }
 
-type depthOfBookParser struct{}
+type marketByOrderParser struct{}
 
-func (p *depthOfBookParser) Name() string { return "depthofbook" }
+func (p *marketByOrderParser) Name() string { return "marketbyorder" }
 
-// ParseFrame decodes one DOB frame and returns one Record per application message.
-func (p *depthOfBookParser) ParseFrame(port string, frame []byte) ([]Record, error) {
+// ParseFrame decodes one MBO frame and returns one Record per application message.
+func (p *marketByOrderParser) ParseFrame(port string, frame []byte) ([]Record, error) {
 	hdr, err := ParseFrameHeader(frame)
 	if err != nil {
 		return nil, fmt.Errorf("header: %w", err)
@@ -49,7 +49,7 @@ func (p *depthOfBookParser) ParseFrame(port string, frame []byte) ([]Record, err
 	return records, nil
 }
 
-func (p *depthOfBookParser) decodeMessage(port string, hdr FrameHeader, mh MessageHeader, body []byte) (Record, bool, error) {
+func (p *marketByOrderParser) decodeMessage(port string, hdr FrameHeader, mh MessageHeader, body []byte) (Record, bool, error) {
 	base := Record{
 		Timestamp:      hdr.SendTimestamp,
 		ChannelID:      hdr.ChannelID,

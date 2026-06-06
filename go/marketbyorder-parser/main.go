@@ -23,7 +23,7 @@ func main() {
 		iface        = flag.String("interface", "", "network interface for multicast join (e.g., doublezero1)")
 		output       = flag.String("output", "", "output target: unix:///path/to/sock or file:///path/to/log (required)")
 		format       = flag.String("format", "json", "output format: json")
-		parserName   = flag.String("parser", "depthofbook", "parser name from registry")
+		parserName   = flag.String("parser", "marketbyorder", "parser name from registry")
 		metricsAddr  = flag.String("metrics-addr", "", "Prometheus /metrics HTTP listen address (empty = disabled)")
 		verbose      = flag.Bool("v", false, "debug logging")
 		showVersion  = flag.Bool("version", false, "print version and exit")
@@ -31,7 +31,7 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Printf("depthofbook-parser %s (%s)\n", version, commit)
+		fmt.Printf("marketbyorder-parser %s (%s)\n", version, commit)
 		os.Exit(0)
 	}
 
@@ -74,7 +74,7 @@ func main() {
 		cancel()
 	}()
 
-	log.Printf("depthofbook-parser %s started: group=%s refdata=:%d mktdata=:%d snapshot=:%d output=%s",
+	log.Printf("marketbyorder-parser %s started: group=%s refdata=:%d mktdata=:%d snapshot=:%d output=%s",
 		version, *group, *refdataPort, *mktdataPort, *snapshotPort, *output)
 
 	if err := runner.Run(ctx); err != nil {

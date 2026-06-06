@@ -368,7 +368,7 @@ func buildSingleMessageFrame(t *testing.T, msgType uint8, msgLength uint8, msgBo
 	return buf
 }
 
-func TestDepthOfBookParser_OrderAdd(t *testing.T) {
+func TestMarketByOrderParser_OrderAdd(t *testing.T) {
 	enter := time.Unix(1700000010, 0)
 	body := make([]byte, 48)
 	binary.LittleEndian.PutUint32(body[0:4], 100)
@@ -382,7 +382,7 @@ func TestDepthOfBookParser_OrderAdd(t *testing.T) {
 
 	frame := buildSingleMessageFrame(t, msgTypeOrderAdd, messageHeaderSize+48, body)
 
-	p := &depthOfBookParser{}
+	p := &marketByOrderParser{}
 	recs, err := p.ParseFrame("mktdata", frame)
 	if err != nil {
 		t.Fatal(err)
@@ -399,11 +399,11 @@ func TestDepthOfBookParser_OrderAdd(t *testing.T) {
 	}
 }
 
-func TestDepthOfBookParser_UnknownTypeSkipped(t *testing.T) {
+func TestMarketByOrderParser_UnknownTypeSkipped(t *testing.T) {
 	body := make([]byte, 8)
 	frame := buildSingleMessageFrame(t, 0xFE, messageHeaderSize+8, body)
 
-	p := &depthOfBookParser{}
+	p := &marketByOrderParser{}
 	recs, err := p.ParseFrame("mktdata", frame)
 	if err != nil {
 		t.Fatal(err)
@@ -413,13 +413,13 @@ func TestDepthOfBookParser_UnknownTypeSkipped(t *testing.T) {
 	}
 }
 
-func TestDepthOfBookParser_TruncatedFrame(t *testing.T) {
+func TestMarketByOrderParser_TruncatedFrame(t *testing.T) {
 	body := make([]byte, 48)
 	frame := buildSingleMessageFrame(t, msgTypeOrderAdd, messageHeaderSize+48, body)
 	// Truncate the frame to 30 bytes — header says 76, only 30 present.
 	truncated := frame[:30]
 
-	p := &depthOfBookParser{}
+	p := &marketByOrderParser{}
 	_, err := p.ParseFrame("mktdata", truncated)
 	if err == nil {
 		t.Fatal("expected error on truncated frame")

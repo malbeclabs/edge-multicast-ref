@@ -43,6 +43,6 @@ func NewSink(cfg SinkConfig) (OutputSink, error) {
 		}
 		return NewJSONFileSink(cfg.Path)
 	default:
-		return nil, fmt.Errorf("unsupported format: %q (depthofbook supports json only)", cfg.Format)
+		return nil, fmt.Errorf("unsupported format: %q (marketbyorder supports json only)", cfg.Format)
 	}
 }

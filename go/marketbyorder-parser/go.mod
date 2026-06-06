@@ -1,4 +1,4 @@
-module depthofbook-parser
+module github.com/malbeclabs/edge-multicast-ref/go/marketbyorder-parser
 
 go 1.25.0
 
