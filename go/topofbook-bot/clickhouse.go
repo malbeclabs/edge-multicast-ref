@@ -86,11 +86,11 @@ func (w *chWriter) Run(ctx context.Context) {
 	wg.Wait()
 }
 
-// EnqueueQuote serializes a quote record into the quotes batcher. Non-blocking.
-func (w *chWriter) EnqueueQuote(rec *Record, recvTime time.Time) {
+func buildQuoteRow(rec *Record) map[string]any {
 	row := map[string]any{
-		"recv_ts":           chTime(recvTime),
-		"publisher_send_ts": chTime(rec.Timestamp),
+		"recv_ts":           chTime(rec.recvTime(time.Now().UTC())),
+		"publisher_send_ts": chTime(rec.sendTime()),
+		"recv_ts_kind":      rec.RecvTSKind,
 		"channel_id":        rec.ChannelID,
 		"seq":               rec.SequenceNumber,
 		"instrument_id":     rec.InstrumentID,
@@ -101,16 +101,19 @@ func (w *chWriter) EnqueueQuote(rec *Record, recvTime time.Time) {
 		"ask_qty":           floatOrZero(rec, "ask_qty"),
 		"source_id":         uintOrZero(rec, "source_id"),
 	}
-	w.submit("quotes", row)
+	if src, ok := rec.sourceTime(); ok {
+		row["source_ts"] = chTime(src)
+	}
+	return row
 }
 
-// EnqueueTrade serializes a trade record into the trades batcher.
-func (w *chWriter) EnqueueTrade(rec *Record, recvTime time.Time) {
+func buildTradeRow(rec *Record) map[string]any {
 	side, _ := rec.aggressorSide()
 	tid, _ := rec.tradeID()
 	row := map[string]any{
-		"recv_ts":           chTime(recvTime),
-		"publisher_send_ts": chTime(rec.Timestamp),
+		"recv_ts":           chTime(rec.recvTime(time.Now().UTC())),
+		"publisher_send_ts": chTime(rec.sendTime()),
+		"recv_ts_kind":      rec.RecvTSKind,
 		"channel_id":        rec.ChannelID,
 		"seq":               rec.SequenceNumber,
 		"instrument_id":     rec.InstrumentID,
@@ -122,7 +125,20 @@ func (w *chWriter) EnqueueTrade(rec *Record, recvTime time.Time) {
 		"trade_id":          tid,
 		"source_id":         uintOrZero(rec, "source_id"),
 	}
-	w.submit("trades", row)
+	if src, ok := rec.sourceTime(); ok {
+		row["source_ts"] = chTime(src)
+	}
+	return row
+}
+
+// EnqueueQuote serializes a quote record into the quotes batcher. Non-blocking.
+func (w *chWriter) EnqueueQuote(rec *Record, recvTime time.Time) {
+	w.submit("quotes", buildQuoteRow(rec))
+}
+
+// EnqueueTrade serializes a trade record into the trades batcher.
+func (w *chWriter) EnqueueTrade(rec *Record, recvTime time.Time) {
+	w.submit("trades", buildTradeRow(rec))
 }
 
 // EnqueueInstrument serializes an InstrumentDefinition into the instruments batcher.

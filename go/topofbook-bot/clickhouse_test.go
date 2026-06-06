@@ -240,6 +240,41 @@ func TestChWriter_BufferFullDropsRows(t *testing.T) {
 	}
 }
 
+func TestBuildQuoteRow_WritesSourceSendRecvColumns(t *testing.T) {
+	source := time.Unix(1717689600, 0).UTC()
+	send := source.Add(150 * time.Millisecond)
+	recv := source.Add(230 * time.Millisecond)
+	rec := &Record{
+		Type:       "quote",
+		SourceTSNS: uint64(source.UnixNano()),
+		SendTSNS:   uint64(send.UnixNano()),
+		RecvTSNS:   uint64(recv.UnixNano()),
+		RecvTSKind: "kernel_udp_software",
+		Symbol:     "TEST",
+	}
+	row := buildQuoteRow(rec)
+	if row["publisher_send_ts"] != chTime(send) {
+		t.Errorf("publisher_send_ts = %v, want %v", row["publisher_send_ts"], chTime(send))
+	}
+	if row["source_ts"] != chTime(source) {
+		t.Errorf("source_ts = %v, want %v", row["source_ts"], chTime(source))
+	}
+	if row["recv_ts"] != chTime(recv) {
+		t.Errorf("recv_ts = %v, want %v", row["recv_ts"], chTime(recv))
+	}
+	if row["recv_ts_kind"] != "kernel_udp_software" {
+		t.Errorf("recv_ts_kind = %v", row["recv_ts_kind"])
+	}
+}
+
+func TestBuildQuoteRow_OmitsSourceTsWhenAbsent(t *testing.T) {
+	rec := &Record{Type: "quote", SendTSNS: uint64(time.Unix(1717689600, 0).UnixNano()), RecvTSNS: uint64(time.Unix(1717689600, 0).UnixNano())}
+	row := buildQuoteRow(rec)
+	if _, ok := row["source_ts"]; ok {
+		t.Errorf("source_ts should be omitted when SourceTSNS==0, got %v", row["source_ts"])
+	}
+}
+
 func countNewlines(s string) int {
 	return strings.Count(s, "\n")
 }

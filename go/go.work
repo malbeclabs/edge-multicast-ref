@@ -1,8 +1,8 @@
 go 1.25.0
 
 use (
-	./depthofbook-bot
-	./depthofbook-parser
+	./marketbyorder-bot
+	./marketbyorder-parser
 	./internal
 	./kernel-receiver
 	./topofbook-bot

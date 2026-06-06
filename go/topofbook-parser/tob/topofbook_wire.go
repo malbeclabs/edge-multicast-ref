@@ -1,3 +1,7 @@
+// Wire format authoritatively defined by the Top-of-Book & Trades Feed spec:
+// https://github.com/malbeclabs/edge-feed-spec/blob/main/top-of-book/spec.md
+// Keep the byte layout below in sync with that document.
+
 package tob
 
 import (

@@ -1,5 +1,7 @@
 # DZ Top-of-Book Parser
 
+> Implements the [Top-of-Book & Trades Feed](https://github.com/malbeclabs/edge-feed-spec/blob/main/top-of-book/spec.md) spec.
+
 A multicast subscriber and reusable Go parser for DoubleZero Top-of-Book (DZ-TOB v0.1.0) wire-format frames. The CLI writes decoded market data records to a file or Unix socket; the `tob` package exposes the same parser for in-process consumers.
 
 ## What it does
@@ -148,7 +150,8 @@ Scrape `http://127.0.0.1:9090/metrics`. Liveness probe at `/healthz`.
 | `parse_errors_total` | counter | `channel`, `reason` | Frame decode failures (reasons: `bad_magic`, `schema_version`, `frame_length`, `truncated`, `other`) |
 | `frame_header_errors_total` | counter | `reason` | Header validation failures (reserved; not yet emitted) |
 | `records_total` | counter | `type` | Decoded records emitted to sink (types: `quote`, `trade`, `instrument_def`, `heartbeat`, ...) |
-| `wire_latency_seconds` | histogram | `type` | Publisher `send_ts` → local receive. Includes clock skew between publisher and subscriber hosts |
+| `source_latency_seconds` | histogram | `type` | Block/venue `source_ts` → kernel receive. End-to-end; crosses validator and local clocks |
+| `send_latency_seconds` | histogram | `type` | Publisher egress `send_ts` → kernel receive |
 | `buffered_messages` | gauge | — | Messages awaiting instrument definitions (cold-start buffer) |
 | `buffer_drops_total` | counter | — | Messages dropped due to buffer full |
 | `instruments_tracked` | gauge | — | Instrument definitions learned |
@@ -161,7 +164,7 @@ Scrape `http://127.0.0.1:9090/metrics`. Liveness probe at `/healthz`.
 
 Cardinality is bounded: `channel` is 2 values, `type` a handful, `reason` a small enum. No `instrument_id` label — per-instrument stats belong in a downstream store (ClickHouse etc.), not in the subscriber's Prometheus scrape.
 
-**Wire latency caveat:** `wire_latency_seconds` compares wall-clock timestamps across two hosts. NTP skew, hypervisor time drift, and buffered-record flushes all contribute. Treat it as a relative health signal and trend indicator, not an absolute latency measurement. For rigorous latency attribution, correlate with publisher-side metrics and use a single-host loopback test as a zero reference.
+**Latency caveat:** both latency histograms compare wall-clock timestamps across hosts. `source_latency_seconds` spans the block/venue clock (validator) and the local kernel clock; `send_latency_seconds` spans the publisher clock and the local kernel clock. NTP skew, hypervisor time drift, and buffered-record flushes all contribute, and `source_latency` can read negative when the upstream clock runs ahead. Treat them as relative health signals and trend indicators, not absolute latency measurements. For rigorous attribution, correlate with publisher-side metrics and use a single-host loopback test as a zero reference.
 
 ## Building
 

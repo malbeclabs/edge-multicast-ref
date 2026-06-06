@@ -4,9 +4,10 @@
 --
 -- Design notes:
 --   * One table per record type keeps queries simple and indexing efficient.
---   * `wire_latency_ms` is computed as a materialized column so queries can
---     filter/aggregate on it without recomputing from the two timestamps.
---     Caveat: includes clock skew between publisher and subscriber hosts.
+--   * `send_latency_ms` (recv - publisher_send) and `source_latency_ms`
+--     (recv - source_ts, NULL when source_ts is absent) are materialized so
+--     queries can filter/aggregate on latency without recomputing timestamps.
+--     Both include clock skew between publisher and subscriber hosts.
 --   * ORDER BY (symbol, recv_ts) makes per-symbol time-range scans fast —
 --     exactly the shape every dashboard panel uses.
 --   * Daily partitioning keeps inserts cheap and lets operators drop old
@@ -19,8 +20,13 @@ CREATE DATABASE IF NOT EXISTS topofbook;
 CREATE TABLE IF NOT EXISTS topofbook.quotes (
     recv_ts             DateTime64(9),
     publisher_send_ts   DateTime64(9),
-    wire_latency_ms     Float64 MATERIALIZED
-        (toFloat64(recv_ts) - toFloat64(publisher_send_ts)) * 1000,
+    source_ts           Nullable(DateTime64(9)),
+    recv_ts_kind        LowCardinality(String) DEFAULT '',
+    send_latency_ms     Float64 MATERIALIZED
+        (toUnixTimestamp64Nano(recv_ts) - toUnixTimestamp64Nano(publisher_send_ts)) / 1e6,
+    source_latency_ms   Nullable(Float64) MATERIALIZED
+        if(source_ts IS NULL, NULL,
+           (toUnixTimestamp64Nano(recv_ts) - toUnixTimestamp64Nano(assumeNotNull(source_ts))) / 1e6),
     channel_id          UInt8,
     seq                 UInt64,
     instrument_id       UInt32,
@@ -44,8 +50,13 @@ CREATE TABLE IF NOT EXISTS topofbook.quotes (
 CREATE TABLE IF NOT EXISTS topofbook.trades (
     recv_ts             DateTime64(9),
     publisher_send_ts   DateTime64(9),
-    wire_latency_ms     Float64 MATERIALIZED
-        (toFloat64(recv_ts) - toFloat64(publisher_send_ts)) * 1000,
+    source_ts           Nullable(DateTime64(9)),
+    recv_ts_kind        LowCardinality(String) DEFAULT '',
+    send_latency_ms     Float64 MATERIALIZED
+        (toUnixTimestamp64Nano(recv_ts) - toUnixTimestamp64Nano(publisher_send_ts)) / 1e6,
+    source_latency_ms   Nullable(Float64) MATERIALIZED
+        if(source_ts IS NULL, NULL,
+           (toUnixTimestamp64Nano(recv_ts) - toUnixTimestamp64Nano(assumeNotNull(source_ts))) / 1e6),
     channel_id          UInt8,
     seq                 UInt64,
     instrument_id       UInt32,

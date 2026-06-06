@@ -53,43 +53,43 @@ services:
       - "--clickhouse-url=http://clickhouse:8123"
       - "--clickhouse-database=topofbook"
 
-  depthofbook-parser:
+  marketbyorder-parser:
     build:
       context: ..
-      dockerfile: go/depthofbook-parser/Dockerfile
-    image: dz/depthofbook-parser:latest
+      dockerfile: go/marketbyorder-parser/Dockerfile
+    image: dz/marketbyorder-parser:latest
     network_mode: host
     restart: unless-stopped
     command:
-      - --group=${DZ_DOB_MULTICAST_GROUP}
-      - --refdata-port=${DZ_DOB_REFDATA_PORT}
-      - --mktdata-port=${DZ_DOB_MKTDATA_PORT}
-      - --snapshot-port=${DZ_DOB_SNAPSHOT_PORT}
+      - --group=${DZ_MBO_MULTICAST_GROUP}
+      - --refdata-port=${DZ_MBO_REFDATA_PORT}
+      - --mktdata-port=${DZ_MBO_MKTDATA_PORT}
+      - --snapshot-port=${DZ_MBO_SNAPSHOT_PORT}
       - --interface=${DZ_INTERFACE}
-      - --output=unix:///var/run/dz/dob.sock
-      - --metrics-addr=127.0.0.1:${DZ_DOB_PARSER_METRICS_PORT:-9093}
+      - --output=unix:///var/run/dz/mbo.sock
+      - --metrics-addr=127.0.0.1:${DZ_MBO_PARSER_METRICS_PORT:-9093}
     volumes:
       - dz-sockets:/var/run/dz
 
-  depthofbook-bot:
+  marketbyorder-bot:
     build:
       context: ..
-      dockerfile: go/depthofbook-bot/Dockerfile
-    image: dz/depthofbook-bot:latest
+      dockerfile: go/marketbyorder-bot/Dockerfile
+    image: dz/marketbyorder-bot:latest
     restart: unless-stopped
     depends_on:
-      - depthofbook-parser
+      - marketbyorder-parser
       - clickhouse
     command:
-      - --socket=/var/run/dz/dob.sock
-      - --symbol=${DZ_DOB_SYMBOLS}
-      - --depth=${DZ_DOB_DEPTH:-20}
-      - --coalesce-ms=${DZ_DOB_COALESCE_MS:-50}
+      - --socket=/var/run/dz/mbo.sock
+      - --symbol=${DZ_MBO_SYMBOLS}
+      - --depth=${DZ_MBO_DEPTH:-20}
+      - --coalesce-ms=${DZ_MBO_COALESCE_MS:-50}
       - --metrics-addr=0.0.0.0:9092
       - --clickhouse-url=http://clickhouse:8123
-      - --clickhouse-database=depthofbook
+      - --clickhouse-database=marketbyorder
     ports:
-      - "${DOB_BOT_METRICS_PORT:-9092}:9092"
+      - "${MBO_BOT_METRICS_PORT:-9092}:9092"
     volumes:
       - dz-sockets:/var/run/dz
 

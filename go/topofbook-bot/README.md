@@ -1,5 +1,7 @@
 # Top-of-Book Bot
 
+> Implements the [Top-of-Book & Trades Feed](https://github.com/malbeclabs/edge-feed-spec/blob/main/top-of-book/spec.md) spec.
+
 Reference Go subscriber that consumes the DoubleZero Top-of-Book parser's Unix socket, filters by symbol, exposes Prometheus metrics, and persists tick-level data into ClickHouse.
 
 ## What it does
