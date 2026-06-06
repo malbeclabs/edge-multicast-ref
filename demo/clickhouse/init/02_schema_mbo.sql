@@ -27,7 +27,10 @@ ORDER BY (channel_id, instrument_id);
 CREATE TABLE IF NOT EXISTS marketbyorder.events (
     recv_ts                DateTime64(9),
     publisher_send_ts      DateTime64(9),
-    wire_latency_ms        Float64 MATERIALIZED (toUnixTimestamp64Nano(recv_ts) - toUnixTimestamp64Nano(publisher_send_ts)) / 1000000.0,
+    source_ts              Nullable(DateTime64(9)),
+    recv_ts_kind           LowCardinality(String) DEFAULT '',
+    send_latency_ms        Float64 MATERIALIZED (toUnixTimestamp64Nano(recv_ts) - toUnixTimestamp64Nano(publisher_send_ts)) / 1e6,
+    source_latency_ms      Nullable(Float64) MATERIALIZED if(source_ts IS NULL, NULL, (toUnixTimestamp64Nano(recv_ts) - toUnixTimestamp64Nano(assumeNotNull(source_ts))) / 1e6),
     channel_id             UInt8,
     mktdata_seq            UInt64,
     reset_count            UInt8,
@@ -111,7 +114,10 @@ TTL toDateTime(recv_ts) + INTERVAL 30 DAY;
 CREATE TABLE IF NOT EXISTS marketbyorder.channel_health (
     recv_ts             DateTime64(9),
     publisher_send_ts   DateTime64(9),
-    wire_latency_ms     Float64 MATERIALIZED (toUnixTimestamp64Nano(recv_ts) - toUnixTimestamp64Nano(publisher_send_ts)) / 1000000.0,
+    source_ts           Nullable(DateTime64(9)),
+    recv_ts_kind        LowCardinality(String) DEFAULT '',
+    send_latency_ms     Float64 MATERIALIZED (toUnixTimestamp64Nano(recv_ts) - toUnixTimestamp64Nano(publisher_send_ts)) / 1e6,
+    source_latency_ms   Nullable(Float64) MATERIALIZED if(source_ts IS NULL, NULL, (toUnixTimestamp64Nano(recv_ts) - toUnixTimestamp64Nano(assumeNotNull(source_ts))) / 1e6),
     channel_id          UInt8,
     kind                LowCardinality(String),
     manifest_seq        Nullable(UInt16),
