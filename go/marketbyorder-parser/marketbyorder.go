@@ -53,7 +53,7 @@ func (p *marketByOrderParser) ParseFrame(port string, frame []byte) ([]Record, e
 func (p *marketByOrderParser) decodeMessage(port string, hdr FrameHeader, mh MessageHeader, body []byte) (Record, bool, error) {
 	base := Record{
 		Timestamp:      hdr.SendTimestamp,
-		SendTSNS:       uint64(hdr.SendTimestamp.UnixNano()),
+		SendTSNS:       tsNS(hdr.SendTimestamp),
 		ChannelID:      hdr.ChannelID,
 		Port:           port,
 		SequenceNumber: hdr.Sequence,
