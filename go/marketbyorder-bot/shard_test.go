@@ -431,3 +431,37 @@ func TestRealGapEscalatesPastWindow(t *testing.T) {
 		t.Fatalf("book_demotions_total = %v, want 1", got)
 	}
 }
+
+// --- Task 6 tests ---
+
+func TestSteadyStateIgnoresLossySnapshots(t *testing.T) {
+	s := newTestShard(t)
+	k := instKey{0, 7}
+	// cold start
+	s.apply(snapshotBeginRec(0, 7, 1, 1, 1000, 0))
+	s.apply(snapshotOrderRec(0, 1, 100, 0, 50, 10))
+	s.apply(snapshotEndRec(0, 7, 1, 1000))
+	if s.instruments[k].Status != StatusReady {
+		t.Fatal("cold-start snapshot should make it Ready")
+	}
+	// interleave deltas with lossy re-snapshots
+	for i := uint32(1); i <= 30; i++ {
+		s.apply(orderAddRec(0, 7, i, uint64(1000+i), int64(50+i), 1))
+		if i%5 == 0 {
+			snap := 10 + i
+			s.apply(snapshotBeginRec(0, 7, snap, 3, uint64(2000+i), i))
+			s.apply(snapshotOrderRec(0, snap, 200, 0, 60, 1))
+			if i%3 != 0 { // drop an order on some snapshots
+				s.apply(snapshotOrderRec(0, snap, 201, 0, 61, 1))
+				s.apply(snapshotOrderRec(0, snap, 202, 0, 62, 1))
+			}
+			s.apply(snapshotEndRec(0, 7, snap, uint64(2000+i)))
+		}
+	}
+	if s.instruments[k].Status != StatusReady {
+		t.Fatalf("Ready instrument must ignore lossy re-snapshots; got %v", s.instruments[k].Status)
+	}
+	if got := testCounter(t, s.metrics.BookDemotionsTotal); got != 0 {
+		t.Fatalf("book_demotions_total = %v, want 0", got)
+	}
+}
