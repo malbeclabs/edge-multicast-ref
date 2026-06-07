@@ -1,0 +1,12 @@
+# Prometheus datasource for bot/parser Prometheus metrics.
+# The prometheus service scrapes dz_mbo_bot_* and dz_tob_* endpoints.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: false
+    editable: true
