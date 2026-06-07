@@ -163,7 +163,10 @@ func (r *Runner) listenPort(ctx context.Context, port int, label string) error {
 			continue
 		}
 
-		if n >= frameHeaderMinLen {
+		// Refdata is a low-rate periodic-retransmit stream; per-port frame-seq
+		// gaps there are not a meaningful loss signal (and reflect a shared seq
+		// space), so it's excluded.
+		if n >= frameHeaderMinLen && label != "refdata" {
 			seq := binary.LittleEndian.Uint64(buf[frameHeaderSeqOffset : frameHeaderSeqOffset+8])
 			if gaps, missing := tracker.observe(seq); gaps > 0 && r.cfg.Metrics != nil {
 				r.cfg.Metrics.frameSeqGaps.WithLabelValues(label).Add(float64(gaps))
