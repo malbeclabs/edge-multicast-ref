@@ -1,9 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -11,8 +11,10 @@ import (
 )
 
 // SocketSink listens on a Unix domain socket and writes records to all
-// connected clients. Each client gets its own encoder instance. Slow or
-// disconnected clients are dropped silently.
+// connected clients. Each client has its own goroutine + bounded outbound
+// queue so a slow consumer cannot back-pressure the UDP receive path:
+// when the queue is full, the batch is dropped (and counted) instead of
+// blocking the caller of Write.
 type SocketSink struct {
 	format   string
 	sockPath string
@@ -20,13 +22,19 @@ type SocketSink struct {
 
 	mu       sync.Mutex
 	listener net.Listener
-	clients  map[net.Conn]recordWriter
+	clients  map[net.Conn]*clientWriter
 	closed   bool
 }
 
-// recordWriter writes records to a single connected client.
-type recordWriter interface {
-	writeRecords(records []Record) error
+// outQueueLen bounds per-client buffered batches. Sized to absorb
+// burst variance when the bot's single-goroutine dispatch falls behind;
+// dropping here is preferred over dropping at the kernel UDP socket.
+const outQueueLen = 16384
+
+type clientWriter struct {
+	conn net.Conn
+	ch   chan []Record
+	done chan struct{}
 }
 
 // NewSocketSink creates a Unix domain socket at sockPath and begins
@@ -48,9 +56,9 @@ func NewSocketSink(format, sockPath string, m *Metrics) (*SocketSink, error) {
 	s := &SocketSink{
 		format:   format,
 		sockPath: sockPath,
-		metrics:  m,
 		listener: lis,
-		clients:  make(map[net.Conn]recordWriter),
+		metrics:  m,
+		clients:  make(map[net.Conn]*clientWriter),
 	}
 
 	go s.acceptLoop()
@@ -71,9 +79,14 @@ func (s *SocketSink) acceptLoop() {
 			continue
 		}
 
+		cw := &clientWriter{
+			conn: conn,
+			ch:   make(chan []Record, outQueueLen),
+			done: make(chan struct{}),
+		}
+
 		s.mu.Lock()
-		w := newJSONConnWriter(conn)
-		s.clients[conn] = w
+		s.clients[conn] = cw
 		clientCount := len(s.clients)
 		s.mu.Unlock()
 
@@ -81,29 +94,71 @@ func (s *SocketSink) acceptLoop() {
 			s.metrics.SocketClients.Set(float64(clientCount))
 		}
 		slog.Info("edge: socket client connected", "path", s.sockPath, "remote", conn.RemoteAddr())
+
+		go s.serve(cw)
+	}
+}
+
+// serve drains cw.ch and writes JSONL through a 1 MiB bufio.Writer.
+// Exits on first write error; the client is then removed by dropClient.
+func (s *SocketSink) serve(cw *clientWriter) {
+	defer close(cw.done)
+	bw := bufio.NewWriterSize(cw.conn, 1<<20)
+	enc := json.NewEncoder(bw)
+	enc.SetEscapeHTML(false)
+
+	for batch := range cw.ch {
+		for i := range batch {
+			if err := enc.Encode(&batch[i]); err != nil {
+				s.dropClient(cw, err)
+				return
+			}
+		}
+		if err := bw.Flush(); err != nil {
+			s.dropClient(cw, err)
+			return
+		}
+	}
+}
+
+func (s *SocketSink) dropClient(cw *clientWriter, err error) {
+	slog.Warn("edge: dropping socket client", "path", s.sockPath, "error", err)
+	s.mu.Lock()
+	if _, ok := s.clients[cw.conn]; ok {
+		delete(s.clients, cw.conn)
+		if s.metrics != nil {
+			s.metrics.SocketClientDrops.WithLabelValues("write_error").Inc()
+			s.metrics.SocketClients.Set(float64(len(s.clients)))
+		}
+	}
+	s.mu.Unlock()
+	cw.conn.Close()
+	// Drain remaining queue so any pending Write senders don't block.
+	for range cw.ch {
 	}
 }
 
 func (s *SocketSink) Write(records []Record) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	clients := make([]*clientWriter, 0, len(s.clients))
+	for _, cw := range s.clients {
+		clients = append(clients, cw)
+	}
+	s.mu.Unlock()
 
-	dropped := 0
 	sentTo := 0
-	for conn, w := range s.clients {
-		if err := w.writeRecords(records); err != nil {
-			slog.Warn("edge: dropping socket client", "path", s.sockPath, "error", err)
-			conn.Close()
-			delete(s.clients, conn)
-			dropped++
-			continue
+	queueDrops := 0
+	for _, cw := range clients {
+		select {
+		case cw.ch <- records:
+			sentTo++
+		default:
+			queueDrops++
 		}
-		sentTo++
 	}
 	if s.metrics != nil {
-		if dropped > 0 {
-			s.metrics.SocketClientDrops.WithLabelValues("write_error").Add(float64(dropped))
-			s.metrics.SocketClients.Set(float64(len(s.clients)))
+		if queueDrops > 0 {
+			s.metrics.SocketClientDrops.WithLabelValues("queue_full").Add(float64(queueDrops))
 		}
 		if sentTo > 0 {
 			s.metrics.SocketRecordsSent.Add(float64(len(records)))
@@ -114,35 +169,20 @@ func (s *SocketSink) Write(records []Record) error {
 
 func (s *SocketSink) Close() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	s.closed = true
-	for conn := range s.clients {
-		conn.Close()
+	clients := s.clients
+	s.clients = make(map[net.Conn]*clientWriter)
+	s.mu.Unlock()
+
+	for _, cw := range clients {
+		close(cw.ch)
+		cw.conn.Close()
 	}
-	s.clients = nil
+	for _, cw := range clients {
+		<-cw.done
+	}
 
 	err := s.listener.Close()
 	os.Remove(s.sockPath) //nolint:errcheck
 	return err
-}
-
-// jsonConnWriter writes JSONL to a single connection.
-type jsonConnWriter struct {
-	enc *json.Encoder
-}
-
-func newJSONConnWriter(w io.Writer) *jsonConnWriter {
-	enc := json.NewEncoder(w)
-	enc.SetEscapeHTML(false)
-	return &jsonConnWriter{enc: enc}
-}
-
-func (j *jsonConnWriter) writeRecords(records []Record) error {
-	for i := range records {
-		if err := j.enc.Encode(&records[i]); err != nil {
-			return err
-		}
-	}
-	return nil
 }

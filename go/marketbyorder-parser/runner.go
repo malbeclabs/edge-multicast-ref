@@ -96,7 +96,7 @@ func (r *Runner) openMulticast(port int) (*net.UDPConn, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := conn.SetReadBuffer(8 * 1024 * 1024); err != nil {
+	if err := conn.SetReadBuffer(64 * 1024 * 1024); err != nil {
 		log.Printf("warning: SetReadBuffer: %v", err)
 	}
 	if err := enableTimestamping(conn); err != nil {
