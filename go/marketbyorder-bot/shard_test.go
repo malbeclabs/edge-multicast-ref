@@ -94,16 +94,24 @@ func TestShard_PerInstrumentGap(t *testing.T) {
 		t.Fatalf("after seq=1 status: %v", inst.Status)
 	}
 
-	evs := s.apply(sr("order_add", "mktdata", 102, 100, map[string]any{
-		"side": "bid", "order_flags": float64(0), "per_instrument_seq": float64(3),
-		"order_id": float64(2), "enter_ts": time.Unix(1700000000, 0).Format(time.RFC3339Nano),
-		"price_raw": float64(82440), "qty_raw": float64(2000),
-	}))
+	// Flood with deltas beyond the reorder window (hole at seq=2 never fills).
+	// The window only holds up to reorderWindow entries; once exceeded a gap is declared.
+	var lastEvs []ChannelEvent
+	for piSeq := uint32(3); piSeq <= 3+uint32(reorderWindow)+1; piSeq++ {
+		lastEvs = s.apply(sr("order_add", "mktdata", uint64(100+piSeq), 100, map[string]any{
+			"side": "bid", "order_flags": float64(0), "per_instrument_seq": float64(piSeq),
+			"order_id": float64(piSeq), "enter_ts": time.Unix(1700000000, 0).Format(time.RFC3339Nano),
+			"price_raw": float64(82440), "qty_raw": float64(2000),
+		}))
+		if inst.Status == StatusGap {
+			break
+		}
+	}
 	if inst.Status != StatusGap {
 		t.Errorf("expected status gap, got %v", inst.Status)
 	}
-	if len(evs) != 1 || evs[0].Kind != "per_instrument_gap" {
-		t.Errorf("expected per_instrument_gap event, got %+v", evs)
+	if len(lastEvs) != 1 || lastEvs[0].Kind != "per_instrument_gap" {
+		t.Errorf("expected per_instrument_gap event, got %+v", lastEvs)
 	}
 }
 
@@ -157,12 +165,18 @@ func TestShard_HandlePerInstrumentGapMetric(t *testing.T) {
 		"order_id": float64(1), "enter_ts": time.Unix(1700000000, 0).Format(time.RFC3339Nano),
 		"price_raw": float64(1), "qty_raw": float64(1),
 	}))
-	// seq jump 1 -> 3 triggers a gap; handle() must increment the metric.
-	s.handle(sr("order_add", "mktdata", 102, 100, map[string]any{
-		"side": "bid", "order_flags": float64(0), "per_instrument_seq": float64(3),
-		"order_id": float64(2), "enter_ts": time.Unix(1700000000, 0).Format(time.RFC3339Nano),
-		"price_raw": float64(1), "qty_raw": float64(1),
-	}))
+	// Flood with deltas beyond the reorder window (hole at seq=2 never fills).
+	// Once the window is exceeded a gap is declared and handle() increments the metric.
+	for piSeq := uint32(3); piSeq <= 3+uint32(reorderWindow)+1; piSeq++ {
+		s.handle(sr("order_add", "mktdata", uint64(100+piSeq), 100, map[string]any{
+			"side": "bid", "order_flags": float64(0), "per_instrument_seq": float64(piSeq),
+			"order_id": float64(piSeq), "enter_ts": time.Unix(1700000000, 0).Format(time.RFC3339Nano),
+			"price_raw": float64(1), "qty_raw": float64(1),
+		}))
+		if s.instruments[instKey{0, 100}].Status == StatusGap {
+			break
+		}
+	}
 	if got := testCounter(t, metrics.PerInstrumentGapsTotal); got != 1 {
 		t.Errorf("per_instrument_gaps_total = %v, want 1", got)
 	}
@@ -360,5 +374,60 @@ func TestShortSnapshotIncrementsDiscardedNotDemotion(t *testing.T) {
 	}
 	if got := testCounter(t, s.metrics.BookDemotionsTotal); got != 0 {
 		t.Fatalf("book_demotions_total = %v, want 0", got)
+	}
+}
+
+// --- Task 4 tests ---
+
+func orderAddRec(ch uint8, instID uint32, piSeq uint32, mktSeq uint64, price int64, qty uint64) Record {
+	return Record{
+		Type: "order_add", ChannelID: ch, InstrumentID: instID,
+		SequenceNumber: mktSeq,
+		Fields: map[string]any{
+			"per_instrument_seq": float64(piSeq),
+			"side":               "bid",
+			"order_flags":        float64(0),
+			"order_id":           float64(piSeq),
+			"enter_ts":           "",
+			"price_raw":          float64(price),
+			"qty_raw":            float64(qty),
+		},
+	}
+}
+
+func TestReorderedDeltaDoesNotGap(t *testing.T) {
+	s := newTestShard(t)
+	k := instKey{0, 7}
+	in := NewInstrument(7, "BTC", 0, 0)
+	in.Status = StatusReady
+	in.LastAppliedInstrumentSeq = 10
+	s.instruments[k] = in
+	// seq 12 arrives before 11 (reorder)
+	s.apply(orderAddRec(0, 7, 12 /*piSeq*/, 120, 100, 1))
+	if in.Status == StatusGap {
+		t.Fatal("a single reordered delta must not declare a gap")
+	}
+	s.apply(orderAddRec(0, 7, 11 /*piSeq*/, 110, 100, 1))
+	if in.Status != StatusReady || in.LastAppliedInstrumentSeq != 12 {
+		t.Fatalf("reorder must drain to seq 12 Ready; got status=%v seq=%d", in.Status, in.LastAppliedInstrumentSeq)
+	}
+}
+
+func TestRealGapEscalatesPastWindow(t *testing.T) {
+	s := newTestShard(t)
+	k := instKey{0, 7}
+	in := NewInstrument(7, "BTC", 0, 0)
+	in.Status = StatusReady
+	in.LastAppliedInstrumentSeq = 10
+	s.instruments[k] = in
+	// A burst of far-ahead deltas with a permanent hole at 11.
+	for piSeq := uint32(12); piSeq <= 12+uint32(reorderWindow)+1; piSeq++ {
+		s.apply(orderAddRec(0, 7, piSeq, uint64(piSeq), 100, 1))
+	}
+	if in.Status != StatusGap {
+		t.Fatal("a hole beyond the reorder window must declare a gap")
+	}
+	if got := testCounter(t, s.metrics.BookDemotionsTotal); got != 1 {
+		t.Fatalf("book_demotions_total = %v, want 1", got)
 	}
 }

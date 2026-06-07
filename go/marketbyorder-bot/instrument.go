@@ -61,6 +61,7 @@ type Instrument struct {
 	LastAppliedMktdataSeq    uint64
 	LastAppliedInstrumentSeq uint32
 	OpenSnapshot             *PendingSnapshot
+	Pending                  map[uint32]Record // out-of-order deltas keyed by per_instrument_seq
 }
 
 // NewInstrument returns an Instrument awaiting its first snapshot.
@@ -199,6 +200,7 @@ func (i *Instrument) Reset() {
 	i.Bids = map[uint64]*RestingOrder{}
 	i.Asks = map[uint64]*RestingOrder{}
 	i.OpenSnapshot = nil
+	i.Pending = nil
 	i.Status = StatusAwaitingSnapshot
 	i.LastAppliedMktdataSeq = 0
 	i.LastAppliedInstrumentSeq = 0

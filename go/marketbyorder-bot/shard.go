@@ -10,6 +10,7 @@ import (
 )
 
 const maxBufferedDeltasPerInstrument = 10000
+const reorderWindow = 16
 
 type instKey struct {
 	ch uint8
@@ -210,36 +211,60 @@ func (s *Shard) applyDelta(k instKey, rec Record) []ChannelEvent {
 	return nil
 }
 
-func (s *Shard) applyDeltaToReady(k instKey, inst *Instrument, rec Record) []ChannelEvent {
-	piSeq := toUint32(rec.Fields["per_instrument_seq"])
-	expected := inst.LastAppliedInstrumentSeq + 1
-	if piSeq < expected {
-		return nil
-	}
-	if piSeq > expected {
-		log.Printf("shard %d instrument %d: per-instrument gap, expected %d got %d",
-			s.idx, inst.ID, expected, piSeq)
-		inst.Status = StatusGap
-		s.bufferDelta(k, rec)
-		return []ChannelEvent{{Kind: "per_instrument_gap", InstrumentID: inst.ID, Symbol: inst.Symbol, Record: rec}}
-	}
+func (s *Shard) applyOne(inst *Instrument, rec Record) ChannelEvent {
 	switch rec.Type {
 	case "order_add":
-		side := sideFromString(toString(rec.Fields["side"]))
-		flags := toUint8(rec.Fields["order_flags"])
-		orderID := toUint64(rec.Fields["order_id"])
-		enter := toTime(rec.Fields["enter_ts"])
-		price := toInt64(rec.Fields["price_raw"])
-		qty := toUint64(rec.Fields["qty_raw"])
-		inst.ApplyOrderAdd(orderID, side, flags, enter, price, qty)
+		inst.ApplyOrderAdd(toUint64(rec.Fields["order_id"]), sideFromString(toString(rec.Fields["side"])), toUint8(rec.Fields["order_flags"]), toTime(rec.Fields["enter_ts"]), toInt64(rec.Fields["price_raw"]), toUint64(rec.Fields["qty_raw"]))
 	case "order_cancel":
 		inst.ApplyOrderCancel(toUint64(rec.Fields["order_id"]))
 	case "order_execute":
 		inst.ApplyOrderExecute(toUint64(rec.Fields["order_id"]), toUint8(rec.Fields["exec_flags"]), toUint64(rec.Fields["exec_qty_raw"]))
 	}
 	inst.LastAppliedMktdataSeq = rec.SequenceNumber
-	inst.LastAppliedInstrumentSeq = piSeq
-	return []ChannelEvent{{Kind: "applied_delta", InstrumentID: inst.ID, Symbol: inst.Symbol, Record: rec}}
+	inst.LastAppliedInstrumentSeq = toUint32(rec.Fields["per_instrument_seq"])
+	return ChannelEvent{Kind: "applied_delta", InstrumentID: inst.ID, Symbol: inst.Symbol, Record: rec}
+}
+
+func (s *Shard) applyDeltaToReady(k instKey, inst *Instrument, rec Record) []ChannelEvent {
+	piSeq := toUint32(rec.Fields["per_instrument_seq"])
+	expected := inst.LastAppliedInstrumentSeq + 1
+	if piSeq < expected {
+		return nil // old / duplicate
+	}
+	if piSeq > expected {
+		if inst.Pending == nil {
+			inst.Pending = map[uint32]Record{}
+		}
+		inst.Pending[piSeq] = rec
+		if uint32(len(inst.Pending)) <= reorderWindow && piSeq-expected <= reorderWindow {
+			return nil // within reorder window; wait for the hole to fill
+		}
+		// Window exceeded: genuine gap.
+		log.Printf("shard %d instrument %d: per-instrument gap, expected %d got %d",
+			s.idx, inst.ID, expected, piSeq)
+		inst.Status = StatusGap
+		inst.Pending = nil
+		s.bufferDelta(k, rec)
+		if s.metrics != nil {
+			s.metrics.BookDemotionsTotal.Inc()
+		}
+		return []ChannelEvent{{Kind: "per_instrument_gap", InstrumentID: inst.ID, Symbol: inst.Symbol, Record: rec}}
+	}
+	// piSeq == expected: apply, then drain contiguous reordered deltas.
+	evs := []ChannelEvent{s.applyOne(inst, rec)}
+	for inst.Pending != nil {
+		next := inst.LastAppliedInstrumentSeq + 1
+		pr, ok := inst.Pending[next]
+		if !ok {
+			break
+		}
+		delete(inst.Pending, next)
+		evs = append(evs, s.applyOne(inst, pr))
+		if len(inst.Pending) == 0 {
+			inst.Pending = nil
+		}
+	}
+	return evs
 }
 
 func (s *Shard) applyInstrumentReset(k instKey, rec Record) []ChannelEvent {
