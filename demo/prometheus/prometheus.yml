@@ -11,10 +11,12 @@ scrape_configs:
     static_configs:
       - targets: ["bot:9091"]
 
+  # Parsers run network_mode: host (multicast on doublezero1); reach them via
+  # the host gateway, not a docker service name.
   - job_name: marketbyorder-parser
     static_configs:
-      - targets: ["marketbyorder-parser:9093"]
+      - targets: ["host.docker.internal:9093"]
 
   - job_name: topofbook-parser
     static_configs:
-      - targets: ["parser:9090"]
+      - targets: ["host.docker.internal:9090"]

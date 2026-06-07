@@ -104,6 +104,11 @@ services:
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
+    # The parsers run network_mode: host (to receive multicast on doublezero1),
+    # so they are not reachable by service name from this bridge-network
+    # container. host-gateway lets prometheus scrape them on the host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "127.0.0.1:9595:9090"
 
