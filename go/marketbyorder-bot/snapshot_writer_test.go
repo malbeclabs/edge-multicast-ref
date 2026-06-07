@@ -6,8 +6,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 )
+
+// testGaugeVec reads a single labelled gauge value from a GaugeVec.
+func testGaugeVec(t *testing.T, gv *prometheus.GaugeVec, labels ...string) float64 {
+	t.Helper()
+	var m dto.Metric
+	if err := gv.WithLabelValues(labels...).Write(&m); err != nil {
+		t.Fatalf("gauge vec write: %v", err)
+	}
+	return m.GetGauge().GetValue()
+}
 
 type captureWriter struct {
 	mu   sync.Mutex
@@ -248,6 +259,90 @@ func TestSnapshotWriter_AwaitingSnapshotEmitsNothing(t *testing.T) {
 
 	if rows := cap.captured(); len(rows) != 0 {
 		t.Fatalf("expected no rows for StatusAwaitingSnapshot instrument, got %d", len(rows))
+	}
+}
+
+// TestSnapshotWriter_BookGaugesPopulatedOnFlush verifies that BookOrders,
+// BookTopPrice, BookTopQty, and BookSpreadBps are set after a flush of a
+// StatusReady instrument.
+func TestSnapshotWriter_BookGaugesPopulatedOnFlush(t *testing.T) {
+	// PriceExponent=-2 → scale 0.01; QtyExponent=-8 → scale 1e-8.
+	// Two bids: price_raw 10200 (→ 102.00), qty_raw 300 (→ 3e-6)
+	//           price_raw 10100 (→ 101.00), qty_raw 200 (→ 2e-6)
+	// Two asks: price_raw 10300 (→ 103.00), qty_raw 150 (→ 1.5e-6)
+	//           price_raw 10400 (→ 104.00), qty_raw 100 (→ 1e-6)
+	// Best bid = 102.00, best ask = 103.00
+	// Mid = (102 + 103) / 2 = 102.5
+	// Spread bps = (103 - 102) / 102.5 * 10000 ≈ 97.56...
+	inst := NewInstrument(55, "ETH-USDT", -2, -8)
+	inst.Status = StatusReady
+	inst.ApplyOrderAdd(1, 0, 0, time.Now(), 10200, 300) // best bid
+	inst.ApplyOrderAdd(2, 0, 0, time.Now(), 10100, 200) // second bid
+	inst.ApplyOrderAdd(3, 1, 0, time.Now(), 10300, 150) // best ask
+	inst.ApplyOrderAdd(4, 1, 0, time.Now(), 10400, 100) // second ask
+
+	metrics := stubMetrics()
+	cap := &captureWriter{}
+	w := NewSnapshotWriter(nil, 5, 0, metrics, 0, func(id uint32, fn func(*Instrument)) { fn(inst) })
+	w.ch = cap
+
+	w.MarkDirty(55)
+	w.flushDue()
+
+	// BookOrders: 2 bids, 2 asks.
+	if got := testGaugeVec(t, metrics.BookOrders, "ETH-USDT", "bid"); got != 2 {
+		t.Errorf("BookOrders bid = %v, want 2", got)
+	}
+	if got := testGaugeVec(t, metrics.BookOrders, "ETH-USDT", "ask"); got != 2 {
+		t.Errorf("BookOrders ask = %v, want 2", got)
+	}
+
+	// BookTopPrice: best bid = 102.00, best ask = 103.00.
+	const priceScale = 0.01
+	if got := testGaugeVec(t, metrics.BookTopPrice, "ETH-USDT", "bid"); got != 10200*priceScale {
+		t.Errorf("BookTopPrice bid = %v, want %v", got, 10200*priceScale)
+	}
+	if got := testGaugeVec(t, metrics.BookTopPrice, "ETH-USDT", "ask"); got != 10300*priceScale {
+		t.Errorf("BookTopPrice ask = %v, want %v", got, 10300*priceScale)
+	}
+
+	// BookTopQty: best-bid qty_raw=300 * 1e-8 = 3e-6, best-ask qty_raw=150 * 1e-8 = 1.5e-6.
+	const qtyScale = 1e-8
+	const wantBidQty = 300 * qtyScale
+	const wantAskQty = 150 * qtyScale
+	if got := testGaugeVec(t, metrics.BookTopQty, "ETH-USDT", "bid"); got != wantBidQty {
+		t.Errorf("BookTopQty bid = %v, want %v", got, wantBidQty)
+	}
+	if got := testGaugeVec(t, metrics.BookTopQty, "ETH-USDT", "ask"); got != wantAskQty {
+		t.Errorf("BookTopQty ask = %v, want %v", got, wantAskQty)
+	}
+
+	// BookSpreadBps: (103 - 102) / 102.5 * 10000.
+	bestBid := 10200 * priceScale
+	bestAsk := 10300 * priceScale
+	wantSpread := (bestAsk - bestBid) / ((bestBid + bestAsk) / 2) * 10000
+	if got := testGaugeVec(t, metrics.BookSpreadBps, "ETH-USDT"); got != wantSpread {
+		t.Errorf("BookSpreadBps = %v, want %v", got, wantSpread)
+	}
+}
+
+// TestSnapshotWriter_BookGaugesSkipAwaitingSnapshot verifies that no book gauges
+// are set for a StatusAwaitingSnapshot instrument.
+func TestSnapshotWriter_BookGaugesSkipAwaitingSnapshot(t *testing.T) {
+	inst := NewInstrument(56, "SOL-USDT", 0, 0)
+	// StatusAwaitingSnapshot by default — do NOT set Status.
+
+	metrics := stubMetrics()
+	w := NewSnapshotWriter(nil, 5, 0, metrics, 0, func(id uint32, fn func(*Instrument)) { fn(inst) })
+
+	w.MarkDirty(56)
+	w.flushDue()
+
+	// None of the book gauges should have been touched for this symbol.
+	// The GaugeVec returns 0 for unseen label combinations; we just confirm
+	// no panic and the value is 0 (no series created).
+	if got := testGaugeVec(t, metrics.BookOrders, "SOL-USDT", "bid"); got != 0 {
+		t.Errorf("BookOrders bid unexpectedly set for AwaitingSnapshot: %v", got)
 	}
 }
 

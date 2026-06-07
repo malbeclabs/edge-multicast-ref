@@ -167,6 +167,7 @@ func (w *SnapshotWriter) flushDue() {
 		if !ready {
 			continue
 		}
+		w.updateBookGauges(snap, symbol)
 		w.write(snap, instID, symbol, lastSeq, bookStale, now)
 		_ = e.coalescedCount
 		if w.metrics != nil {
@@ -181,6 +182,58 @@ func (w *SnapshotWriter) flushDue() {
 			}
 		}
 		w.mu.Unlock()
+	}
+}
+
+// updateBookGauges sets the book-state Prometheus gauges from a freshly computed
+// LevelSnapshot. It is called on every flush so the gauges stay current.
+func (w *SnapshotWriter) updateBookGauges(snap LevelSnapshot, symbol string) {
+	if w.metrics == nil {
+		return
+	}
+	m := w.metrics
+
+	// Order counts: use raw order maps via snap — snap.Bids/Asks are aggregated
+	// price levels, not individual orders. We want individual order counts, which
+	// are available as the OrderCount fields summed across levels, but the simpler
+	// and more accurate source is the instrument's map sizes. However, we only have
+	// the snapshot here, so derive from the level OrderCount totals.
+	var bidOrders, askOrders uint32
+	for _, lvl := range snap.Bids {
+		bidOrders += lvl.OrderCount
+	}
+	for _, lvl := range snap.Asks {
+		askOrders += lvl.OrderCount
+	}
+	m.BookOrders.WithLabelValues(symbol, "bid").Set(float64(bidOrders))
+	m.BookOrders.WithLabelValues(symbol, "ask").Set(float64(askOrders))
+
+	// Top-of-book price and qty.
+	if len(snap.Bids) > 0 {
+		m.BookTopPrice.WithLabelValues(symbol, "bid").Set(snap.Bids[0].Price)
+		m.BookTopQty.WithLabelValues(symbol, "bid").Set(snap.Bids[0].Qty)
+	} else {
+		m.BookTopPrice.DeleteLabelValues(symbol, "bid")
+		m.BookTopQty.DeleteLabelValues(symbol, "bid")
+	}
+	if len(snap.Asks) > 0 {
+		m.BookTopPrice.WithLabelValues(symbol, "ask").Set(snap.Asks[0].Price)
+		m.BookTopQty.WithLabelValues(symbol, "ask").Set(snap.Asks[0].Qty)
+	} else {
+		m.BookTopPrice.DeleteLabelValues(symbol, "ask")
+		m.BookTopQty.DeleteLabelValues(symbol, "ask")
+	}
+
+	// Spread in bps.
+	if len(snap.Bids) > 0 && len(snap.Asks) > 0 {
+		bestBid := snap.Bids[0].Price
+		bestAsk := snap.Asks[0].Price
+		mid := (bestBid + bestAsk) / 2
+		if mid != 0 {
+			m.BookSpreadBps.WithLabelValues(symbol).Set((bestAsk - bestBid) / mid * 10000)
+		}
+	} else {
+		m.BookSpreadBps.DeleteLabelValues(symbol)
 	}
 }
 
