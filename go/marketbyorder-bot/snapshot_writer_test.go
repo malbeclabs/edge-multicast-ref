@@ -10,15 +10,23 @@ import (
 )
 
 type captureWriter struct {
-	mu       sync.Mutex
-	enqueued int
+	mu   sync.Mutex
+	rows []map[string]any
 }
 
 func (w *captureWriter) Enqueue(table string, row map[string]any) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.enqueued++
+	w.rows = append(w.rows, row)
 	return true
+}
+
+func (w *captureWriter) captured() []map[string]any {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := make([]map[string]any, len(w.rows))
+	copy(out, w.rows)
+	return out
 }
 
 func TestSnapshotWriter_CoalescesRapidChanges(t *testing.T) {
@@ -29,12 +37,22 @@ func TestSnapshotWriter_CoalescesRapidChanges(t *testing.T) {
 	inst.ApplyOrderAdd(2, 1, 0, time.Now(), 101, 3)
 
 	cap := &captureWriter{}
-	// We can't easily inject captureWriter into SnapshotWriter without changing
-	// the production type. For this test, use a real ClickhouseClient pointed at
-	// a counting test server — see clickhouse_test.go for the pattern.
-	t.Skip("Wire-up test using httptest server pattern from clickhouse_test.go; left as exercise during integration in Task 15")
-	_ = inst
-	_ = cap
+	metrics := NewMetrics("test", "test")
+	w := NewSnapshotWriter(nil, 5, 0, metrics, 0, func(id uint32, fn func(*Instrument)) { fn(inst) })
+	w.ch = cap
+
+	const rapid = 10
+	for i := 0; i < rapid; i++ {
+		w.MarkDirty(100)
+	}
+
+	w.flushDue()
+
+	rows := cap.captured()
+	// One flush for a 2-level book (1 bid + 1 ask) regardless of how many MarkDirty calls came in.
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows (1 bid + 1 ask) after coalescing %d marks, got %d", rapid, len(rows))
+	}
 }
 
 func TestSnapshotWriter_DirtyEntryCoalesces(t *testing.T) {
@@ -160,16 +178,14 @@ func TestSnapshotWriter_GapInstrumentEmitsStaleRows(t *testing.T) {
 	inst.ApplyOrderAdd(1, 0, 0, time.Now(), 100, 5) // one bid
 
 	metrics := stubMetrics()
+	cap := &captureWriter{}
 	w := NewSnapshotWriter(nil, 5, 0, metrics, 0, func(id uint32, fn func(*Instrument)) { fn(inst) })
-
-	var rows []map[string]any
-	w.testHook = func(table string, row map[string]any) {
-		rows = append(rows, row)
-	}
+	w.ch = cap
 
 	w.MarkDirty(42)
 	w.flushDue()
 
+	rows := cap.captured()
 	if len(rows) == 0 {
 		t.Fatal("expected rows for StatusGap instrument with non-empty book, got none")
 	}
@@ -192,16 +208,14 @@ func TestSnapshotWriter_ReadyInstrumentEmitsNonStaleRows(t *testing.T) {
 	inst.ApplyOrderAdd(1, 0, 0, time.Now(), 100, 5) // one bid
 
 	metrics := stubMetrics()
+	cap := &captureWriter{}
 	w := NewSnapshotWriter(nil, 5, 0, metrics, 0, func(id uint32, fn func(*Instrument)) { fn(inst) })
-
-	var rows []map[string]any
-	w.testHook = func(table string, row map[string]any) {
-		rows = append(rows, row)
-	}
+	w.ch = cap
 
 	w.MarkDirty(43)
 	w.flushDue()
 
+	rows := cap.captured()
 	if len(rows) == 0 {
 		t.Fatal("expected rows for StatusReady instrument, got none")
 	}
@@ -217,23 +231,22 @@ func TestSnapshotWriter_ReadyInstrumentEmitsNonStaleRows(t *testing.T) {
 }
 
 // TestSnapshotWriter_AwaitingSnapshotEmitsNothing verifies that an instrument
-// in StatusAwaitingSnapshot (no valid book) emits no rows.
+// in StatusAwaitingSnapshot emits no rows even when the book is non-empty,
+// proving the STATUS guard (not an empty book) is what suppresses output.
 func TestSnapshotWriter_AwaitingSnapshotEmitsNothing(t *testing.T) {
 	inst := NewInstrument(44, "SOL-USDT", 0, 0)
-	// StatusAwaitingSnapshot is the default; book is empty
+	// StatusAwaitingSnapshot is the default.
+	inst.ApplyOrderAdd(1, 0, 0, time.Now(), 100, 5) // non-empty book
 
 	metrics := stubMetrics()
+	cap := &captureWriter{}
 	w := NewSnapshotWriter(nil, 5, 0, metrics, 0, func(id uint32, fn func(*Instrument)) { fn(inst) })
-
-	var rows []map[string]any
-	w.testHook = func(table string, row map[string]any) {
-		rows = append(rows, row)
-	}
+	w.ch = cap
 
 	w.MarkDirty(44)
 	w.flushDue()
 
-	if len(rows) != 0 {
+	if rows := cap.captured(); len(rows) != 0 {
 		t.Fatalf("expected no rows for StatusAwaitingSnapshot instrument, got %d", len(rows))
 	}
 }

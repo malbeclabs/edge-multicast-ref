@@ -6,10 +6,15 @@ import (
 	"time"
 )
 
+// enqueuer is satisfied by *ClickhouseClient and by test stubs.
+type enqueuer interface {
+	Enqueue(table string, row map[string]any) bool
+}
+
 // SnapshotWriter coalesces book changes and emits level-snapshot rows to ClickHouse
 // at most once per coalesceInterval per instrument.
 type SnapshotWriter struct {
-	ch               *ClickhouseClient
+	ch               enqueuer
 	depth            int
 	coalesceInterval time.Duration
 	tickInterval     time.Duration
@@ -21,9 +26,6 @@ type SnapshotWriter struct {
 	channel        uint8
 	generation     uint64 // guarded by mu; bumped on Reset to invalidate in-flight flush batches
 	resetCh        chan chan struct{}
-	// testHook, when non-nil, is called for every row that would be enqueued
-	// (before or instead of w.ch.Enqueue). Used in tests to inspect row contents.
-	testHook func(table string, row map[string]any)
 }
 
 type dirtyEntry struct {
@@ -183,7 +185,7 @@ func (w *SnapshotWriter) flushDue() {
 }
 
 func (w *SnapshotWriter) write(snap LevelSnapshot, instID uint32, symbol string, lastSeq uint64, stale bool, now time.Time) {
-	if w.ch == nil && w.testHook == nil {
+	if w.ch == nil {
 		return
 	}
 	staleUInt8 := uint8(0)
@@ -192,12 +194,7 @@ func (w *SnapshotWriter) write(snap LevelSnapshot, instID uint32, symbol string,
 	}
 	nowStr := chTime(now)
 	enqueue := func(row map[string]any) {
-		if w.testHook != nil {
-			w.testHook("level_snapshots", row)
-		}
-		if w.ch != nil {
-			w.ch.Enqueue("level_snapshots", row)
-		}
+		w.ch.Enqueue("level_snapshots", row)
 	}
 	for i, lvl := range snap.Bids {
 		enqueue(map[string]any{
