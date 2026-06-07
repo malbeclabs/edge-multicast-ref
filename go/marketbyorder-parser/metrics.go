@@ -29,6 +29,10 @@ type Metrics struct {
 	BuildInfo         *prometheus.GaugeVec
 	UptimeSeconds     prometheus.GaugeFunc
 
+	// Frame header sequence gap tracking (real UDP datagram loss).
+	FrameSeqGaps  *prometheus.CounterVec
+	FramesMissing *prometheus.CounterVec
+
 	startTime time.Time
 }
 
@@ -91,6 +95,16 @@ func NewMetrics(version, commit string) *Metrics {
 		Help: "Sink write failures",
 	})
 
+	m.FrameSeqGaps = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricsNamespace, Name: "frame_seq_gaps_total",
+		Help: "Number of UDP frame header sequence discontinuities (real datagram loss events), by port.",
+	}, []string{"port"})
+
+	m.FramesMissing = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricsNamespace, Name: "frames_missing_total",
+		Help: "Total UDP frames missing (sum of gap magnitudes in header seq), by port.",
+	}, []string{"port"})
+
 	m.BuildInfo = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: metricsNamespace, Name: "build_info",
 		Help: "Build info; value always 1",
@@ -104,6 +118,7 @@ func NewMetrics(version, commit string) *Metrics {
 	reg.MustRegister(
 		m.IngressPackets, m.IngressBytes, m.ParseErrors, m.RecordsTotal, m.SourceLatency, m.SendLatency,
 		m.SocketClients, m.SocketClientDrops, m.SocketRecordsSent, m.SinkWriteErrors,
+		m.FrameSeqGaps, m.FramesMissing,
 		m.BuildInfo, m.UptimeSeconds,
 	)
 	m.BuildInfo.WithLabelValues(version, commit).Set(1)

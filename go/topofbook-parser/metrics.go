@@ -47,6 +47,10 @@ type metrics struct {
 	sourceLatency *prometheus.HistogramVec
 	sendLatency   *prometheus.HistogramVec
 
+	// Frame header sequence gap tracking (real UDP datagram loss).
+	frameSeqGaps    *prometheus.CounterVec
+	framesMissing   *prometheus.CounterVec
+
 	// Socket sink
 	socketClients     prometheus.Gauge
 	socketClientDrops *prometheus.CounterVec
@@ -122,6 +126,16 @@ func newMetrics() *metrics {
 		Buckets: latencyBuckets,
 	}, []string{"type"})
 
+	m.frameSeqGaps = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "dz_subscriber_frame_seq_gaps_total",
+		Help: "Number of UDP frame header sequence discontinuities (real datagram loss events), by port.",
+	}, []string{"port"})
+
+	m.framesMissing = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "dz_subscriber_frames_missing_total",
+		Help: "Total UDP frames missing (sum of gap magnitudes in header seq), by port.",
+	}, []string{"port"})
+
 	m.socketClients = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "dz_subscriber_socket_clients",
 		Help: "Currently connected Unix socket clients.",
@@ -154,6 +168,7 @@ func newMetrics() *metrics {
 		m.records, m.sinkWriteErrors,
 		m.buffered, m.bufferDrops, m.instrumentsTracked,
 		m.sourceLatency, m.sendLatency,
+		m.frameSeqGaps, m.framesMissing,
 		m.socketClients, m.socketClientDrops, m.socketRecordsSent,
 		m.buildInfo, m.uptime,
 	)

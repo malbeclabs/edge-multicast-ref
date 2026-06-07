@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log"
@@ -11,6 +12,37 @@ import (
 )
 
 const maxUDPPacket = 65536
+
+// frameHeaderSeqOffset is the byte offset of the little-endian u64 sequence
+// number in the 24-byte frame header.
+const frameHeaderSeqOffset = 4
+const frameHeaderMinLen = 12 // need at least bytes 0..11 to read the seq field
+
+// seqTracker tracks the per-port frame header sequence number to detect real
+// UDP datagram loss (gaps in the header seq).
+type seqTracker struct {
+	last        uint64
+	initialized bool
+}
+
+// observe records seq and returns (gaps, missing) where gaps is 1 if a
+// discontinuity was detected and missing is the number of missing frames.
+// Reorders/dups (seq <= last) are ignored and return (0, 0).
+func (s *seqTracker) observe(seq uint64) (gaps, missing uint64) {
+	if !s.initialized {
+		s.last = seq
+		s.initialized = true
+		return 0, 0
+	}
+	if seq > s.last+1 {
+		gaps = 1
+		missing = seq - (s.last + 1)
+	}
+	if seq >= s.last {
+		s.last = seq
+	}
+	return gaps, missing
+}
 
 // portConfig binds a label to a UDP listening address.
 type portConfig struct {
@@ -107,6 +139,7 @@ func (r *Runner) openMulticast(port int) (*net.UDPConn, error) {
 
 func (r *Runner) receive(ctx context.Context, port string, conn *net.UDPConn, errs chan<- error) {
 	buf := make([]byte, maxUDPPacket)
+	var tracker seqTracker
 
 	for {
 		select {
@@ -123,6 +156,14 @@ func (r *Runner) receive(ctx context.Context, port string, conn *net.UDPConn, er
 			}
 			errs <- fmt.Errorf("read %s: %w", port, err)
 			return
+		}
+
+		if n >= frameHeaderMinLen {
+			seq := binary.LittleEndian.Uint64(buf[frameHeaderSeqOffset : frameHeaderSeqOffset+8])
+			if gaps, missing := tracker.observe(seq); gaps > 0 {
+				r.metrics.FrameSeqGaps.WithLabelValues(port).Add(float64(gaps))
+				r.metrics.FramesMissing.WithLabelValues(port).Add(float64(missing))
+			}
 		}
 
 		r.metrics.IngressPackets.WithLabelValues(port).Inc()
