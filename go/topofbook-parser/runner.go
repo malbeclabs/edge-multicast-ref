@@ -98,6 +98,10 @@ func (r *Runner) listenPort(ctx context.Context, port int, label string) error {
 	}
 	defer conn.Close()
 
+	if err := conn.SetReadBuffer(64 * 1024 * 1024); err != nil {
+		slog.Warn("could not set UDP read buffer size", "error", err)
+	}
+
 	pc := ipv4.NewPacketConn(conn)
 	if err := pc.SetControlMessage(ipv4.FlagDst, true); err != nil {
 		slog.Warn("could not set control message flag", "error", err)
