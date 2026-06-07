@@ -94,26 +94,28 @@ func TestInstrument_SnapshotReassembly(t *testing.T) {
 
 func TestInstrument_SnapshotEndMismatchedID(t *testing.T) {
 	inst := NewInstrument(100, "BTC-USDT", -2, -8)
+	inst.Status = StatusGap
 	inst.BeginSnapshot(7, 5000, 2, 100)
 	inst.AddSnapshotOrder(7, 10, 0, 0, time.Now(), 82446, 3000)
 	_, _, err := inst.EndSnapshot(8, 5000) // wrong snapshot_id
 	if !errors.Is(err, errSnapshotMismatch) {
 		t.Fatalf("expected errSnapshotMismatch, got %v", err)
 	}
-	if inst.Status != StatusAwaitingSnapshot {
+	if inst.Status != StatusGap {
 		t.Errorf("status: %v", inst.Status)
 	}
 }
 
 func TestInstrument_SnapshotEndShortCount(t *testing.T) {
 	inst := NewInstrument(100, "BTC-USDT", -2, -8)
+	inst.Status = StatusGap
 	inst.BeginSnapshot(7, 5000, 3, 100)
 	inst.AddSnapshotOrder(7, 10, 0, 0, time.Now(), 82446, 3000) // only 1 of 3
 	_, _, err := inst.EndSnapshot(7, 5000)
 	if !errors.Is(err, errSnapshotShort) {
 		t.Fatalf("expected errSnapshotShort, got %v", err)
 	}
-	if inst.Status != StatusAwaitingSnapshot {
+	if inst.Status != StatusGap {
 		t.Errorf("status: %v", inst.Status)
 	}
 }

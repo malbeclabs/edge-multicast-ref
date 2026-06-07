@@ -35,6 +35,7 @@ type Metrics struct {
 	PerInstrumentGapsTotal    prometheus.Counter
 	SnapshotOrderDroppedTotal prometheus.Counter
 	SnapshotDiscardedTotal    *prometheus.CounterVec
+	// BookDemotionsTotal is incremented by the delta-path gap transition (Task 4); intentionally zero until that task is implemented.
 	BookDemotionsTotal        prometheus.Counter
 	BookOrders                *prometheus.GaugeVec
 	BookTopPrice              *prometheus.GaugeVec

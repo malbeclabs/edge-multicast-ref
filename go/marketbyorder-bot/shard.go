@@ -295,6 +295,7 @@ func discardReason(err error) string {
 	case errors.Is(err, errSnapshotMismatch):
 		return "mismatch"
 	default:
+		// errNoOpenSnapshot cannot reach here: applySnapshotEnd's nil-guard returns before calling EndSnapshot.
 		return "other"
 	}
 }
