@@ -152,6 +152,92 @@ func TestSnapshotWriter_FlushAbortsRemainderOnGenerationBump(t *testing.T) {
 	}
 }
 
+// TestSnapshotWriter_GapInstrumentEmitsStaleRows verifies that an instrument
+// in StatusGap with a non-empty book emits level rows with stale=1.
+func TestSnapshotWriter_GapInstrumentEmitsStaleRows(t *testing.T) {
+	inst := NewInstrument(42, "ETH-USDT", 0, 0)
+	inst.Status = StatusGap
+	inst.ApplyOrderAdd(1, 0, 0, time.Now(), 100, 5) // one bid
+
+	metrics := stubMetrics()
+	w := NewSnapshotWriter(nil, 5, 0, metrics, 0, func(id uint32, fn func(*Instrument)) { fn(inst) })
+
+	var rows []map[string]any
+	w.testHook = func(table string, row map[string]any) {
+		rows = append(rows, row)
+	}
+
+	w.MarkDirty(42)
+	w.flushDue()
+
+	if len(rows) == 0 {
+		t.Fatal("expected rows for StatusGap instrument with non-empty book, got none")
+	}
+	for _, row := range rows {
+		staleVal, ok := row["stale"]
+		if !ok {
+			t.Fatalf("row missing stale field: %v", row)
+		}
+		if staleVal != uint8(1) {
+			t.Errorf("expected stale=1 for Gap instrument, got %v", staleVal)
+		}
+	}
+}
+
+// TestSnapshotWriter_ReadyInstrumentEmitsNonStaleRows verifies that an instrument
+// in StatusReady emits level rows with stale=0.
+func TestSnapshotWriter_ReadyInstrumentEmitsNonStaleRows(t *testing.T) {
+	inst := NewInstrument(43, "BTC-USDT", 0, 0)
+	inst.Status = StatusReady
+	inst.ApplyOrderAdd(1, 0, 0, time.Now(), 100, 5) // one bid
+
+	metrics := stubMetrics()
+	w := NewSnapshotWriter(nil, 5, 0, metrics, 0, func(id uint32, fn func(*Instrument)) { fn(inst) })
+
+	var rows []map[string]any
+	w.testHook = func(table string, row map[string]any) {
+		rows = append(rows, row)
+	}
+
+	w.MarkDirty(43)
+	w.flushDue()
+
+	if len(rows) == 0 {
+		t.Fatal("expected rows for StatusReady instrument, got none")
+	}
+	for _, row := range rows {
+		staleVal, ok := row["stale"]
+		if !ok {
+			t.Fatalf("row missing stale field: %v", row)
+		}
+		if staleVal != uint8(0) {
+			t.Errorf("expected stale=0 for Ready instrument, got %v", staleVal)
+		}
+	}
+}
+
+// TestSnapshotWriter_AwaitingSnapshotEmitsNothing verifies that an instrument
+// in StatusAwaitingSnapshot (no valid book) emits no rows.
+func TestSnapshotWriter_AwaitingSnapshotEmitsNothing(t *testing.T) {
+	inst := NewInstrument(44, "SOL-USDT", 0, 0)
+	// StatusAwaitingSnapshot is the default; book is empty
+
+	metrics := stubMetrics()
+	w := NewSnapshotWriter(nil, 5, 0, metrics, 0, func(id uint32, fn func(*Instrument)) { fn(inst) })
+
+	var rows []map[string]any
+	w.testHook = func(table string, row map[string]any) {
+		rows = append(rows, row)
+	}
+
+	w.MarkDirty(44)
+	w.flushDue()
+
+	if len(rows) != 0 {
+		t.Fatalf("expected no rows for StatusAwaitingSnapshot instrument, got %d", len(rows))
+	}
+}
+
 // Closes the shutdown-during-reset hazard: if SnapshotWriter.Run has already
 // returned via ctx.Done, a subsequent Reset must not hang — its own ctx
 // must let it escape.

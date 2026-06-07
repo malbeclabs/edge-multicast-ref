@@ -21,6 +21,9 @@ type SnapshotWriter struct {
 	channel        uint8
 	generation     uint64 // guarded by mu; bumped on Reset to invalidate in-flight flush batches
 	resetCh        chan chan struct{}
+	// testHook, when non-nil, is called for every row that would be enqueued
+	// (before or instead of w.ch.Enqueue). Used in tests to inspect row contents.
+	testHook func(table string, row map[string]any)
 }
 
 type dirtyEntry struct {
@@ -141,14 +144,15 @@ func (w *SnapshotWriter) flushDue() {
 			return // a Reset happened after this batch was extracted; abandon it
 		}
 		var (
-			snap    LevelSnapshot
-			instID  uint32
-			symbol  string
-			lastSeq uint64
-			ready   bool
+			snap      LevelSnapshot
+			instID    uint32
+			symbol    string
+			lastSeq   uint64
+			ready     bool
+			bookStale bool
 		)
 		w.withInstrument(e.instrumentID, func(inst *Instrument) {
-			if inst == nil || inst.Status != StatusReady {
+			if inst == nil || inst.Status == StatusAwaitingSnapshot {
 				return
 			}
 			snap = ComputeLevels(inst, w.depth)
@@ -156,11 +160,12 @@ func (w *SnapshotWriter) flushDue() {
 			symbol = inst.Symbol
 			lastSeq = inst.LastAppliedMktdataSeq
 			ready = true
+			bookStale = inst.Status == StatusGap
 		})
 		if !ready {
 			continue
 		}
-		w.write(snap, instID, symbol, lastSeq, now)
+		w.write(snap, instID, symbol, lastSeq, bookStale, now)
 		_ = e.coalescedCount
 		if w.metrics != nil {
 			w.metrics.SnapshotWritesTotal.Inc()
@@ -177,13 +182,25 @@ func (w *SnapshotWriter) flushDue() {
 	}
 }
 
-func (w *SnapshotWriter) write(snap LevelSnapshot, instID uint32, symbol string, lastSeq uint64, now time.Time) {
-	if w.ch == nil {
+func (w *SnapshotWriter) write(snap LevelSnapshot, instID uint32, symbol string, lastSeq uint64, stale bool, now time.Time) {
+	if w.ch == nil && w.testHook == nil {
 		return
 	}
+	staleUInt8 := uint8(0)
+	if stale {
+		staleUInt8 = 1
+	}
 	nowStr := chTime(now)
+	enqueue := func(row map[string]any) {
+		if w.testHook != nil {
+			w.testHook("level_snapshots", row)
+		}
+		if w.ch != nil {
+			w.ch.Enqueue("level_snapshots", row)
+		}
+	}
 	for i, lvl := range snap.Bids {
-		w.ch.Enqueue("level_snapshots", map[string]any{
+		enqueue(map[string]any{
 			"recv_ts":           nowStr,
 			"publisher_send_ts": nowStr,
 			"channel_id":        w.channel,
@@ -196,10 +213,11 @@ func (w *SnapshotWriter) write(snap LevelSnapshot, instID uint32, symbol string,
 			"qty":               lvl.Qty,
 			"order_count":       lvl.OrderCount,
 			"cumulative_qty":    lvl.CumulativeQty,
+			"stale":             staleUInt8,
 		})
 	}
 	for i, lvl := range snap.Asks {
-		w.ch.Enqueue("level_snapshots", map[string]any{
+		enqueue(map[string]any{
 			"recv_ts":           nowStr,
 			"publisher_send_ts": nowStr,
 			"channel_id":        w.channel,
@@ -212,6 +230,7 @@ func (w *SnapshotWriter) write(snap LevelSnapshot, instID uint32, symbol string,
 			"qty":               lvl.Qty,
 			"order_count":       lvl.OrderCount,
 			"cumulative_qty":    lvl.CumulativeQty,
+			"stale":             staleUInt8,
 		})
 	}
 }
