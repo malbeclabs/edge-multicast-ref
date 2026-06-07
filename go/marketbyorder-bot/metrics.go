@@ -34,6 +34,8 @@ type Metrics struct {
 	ChannelResetsTotal        prometheus.Counter
 	PerInstrumentGapsTotal    prometheus.Counter
 	SnapshotOrderDroppedTotal prometheus.Counter
+	SnapshotDiscardedTotal    *prometheus.CounterVec
+	BookDemotionsTotal        prometheus.Counter
 	BookOrders                *prometheus.GaugeVec
 	BookTopPrice              *prometheus.GaugeVec
 	BookTopQty                *prometheus.GaugeVec
@@ -76,6 +78,8 @@ func NewMetrics(version, commit string) *Metrics {
 	m.ChannelResetsTotal = prometheus.NewCounter(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "channel_resets_total"})
 	m.PerInstrumentGapsTotal = prometheus.NewCounter(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "per_instrument_gaps_total"})
 	m.SnapshotOrderDroppedTotal = prometheus.NewCounter(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "snapshot_order_dropped_total"})
+	m.SnapshotDiscardedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "snapshot_discarded_total"}, []string{"reason"})
+	m.BookDemotionsTotal = prometheus.NewCounter(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "book_demotions_total"})
 	m.BookOrders = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: metricsNamespace, Name: "book_orders"}, []string{"symbol", "side"})
 	m.BookTopPrice = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: metricsNamespace, Name: "book_top_price"}, []string{"symbol", "side"})
 	m.BookTopQty = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: metricsNamespace, Name: "book_top_qty"}, []string{"symbol", "side"})
@@ -101,6 +105,7 @@ func NewMetrics(version, commit string) *Metrics {
 		m.BuildInfo, m.UptimeSeconds,
 		m.SocketConnected, m.SocketReconnects, m.RecordsTotal, m.DecodeErrors, m.SocketToBotLatency,
 		m.InstrumentsTotal, m.InstrumentResetsTotal, m.ChannelResetsTotal, m.PerInstrumentGapsTotal, m.SnapshotOrderDroppedTotal,
+		m.SnapshotDiscardedTotal, m.BookDemotionsTotal,
 		m.BookOrders, m.BookTopPrice, m.BookTopQty, m.BookSpreadBps,
 		m.SnapshotWritesTotal, m.SnapshotCoalescesTotal, m.SnapshotLagMs,
 		m.ClickhouseRowsWritten, m.ClickhouseRowsDropped, m.ClickhouseWriteErrors,

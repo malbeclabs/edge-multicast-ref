@@ -27,12 +27,13 @@ func sr(rt, port string, seq uint64, instID uint32, fields map[string]any) Recor
 	}
 }
 
-func newTestShard() *Shard {
-	return NewShard(0, 1, NewEventsWriter(nil), nil, nil)
+func newTestShard(t *testing.T) *Shard {
+	t.Helper()
+	return NewShard(0, 1, NewEventsWriter(nil), nil, NewMetrics("test", "test"))
 }
 
 func TestShard_ColdStart(t *testing.T) {
-	s := newTestShard()
+	s := newTestShard(t)
 	s.apply(sr("instrument_definition", "refdata", 1, 100, map[string]any{
 		"symbol": "BTC-USDT", "price_exponent": float64(-2), "qty_exponent": float64(-8),
 	}))
@@ -70,7 +71,7 @@ func TestShard_ColdStart(t *testing.T) {
 }
 
 func TestShard_PerInstrumentGap(t *testing.T) {
-	s := newTestShard()
+	s := newTestShard(t)
 	s.apply(sr("instrument_definition", "refdata", 1, 100, map[string]any{
 		"symbol": "BTC-USDT", "price_exponent": float64(-2), "qty_exponent": float64(-8),
 	}))
@@ -234,5 +235,130 @@ func TestShard_FenceAcksWithoutWipe(t *testing.T) {
 	s.mu.Unlock()
 	if n != 1 {
 		t.Errorf("fence must NOT wipe state: instruments=%d want 1", n)
+	}
+}
+
+// --- record builder helpers for snapshot tests ---
+
+func snapshotBeginRec(ch uint8, instID, snapID, total uint32, anchor uint64, lastInstr uint32) Record {
+	return Record{
+		Type: "snapshot_begin", ChannelID: ch, InstrumentID: instID,
+		Fields: map[string]any{
+			"snapshot_id":          float64(snapID),
+			"total_orders":         float64(total),
+			"anchor_seq":           float64(anchor),
+			"last_instrument_seq":  float64(lastInstr),
+		},
+	}
+}
+
+func snapshotOrderRec(ch uint8, snapID uint32, orderID uint64, side uint8, price int64, qty uint64) Record {
+	sideStr := "bid"
+	if side != 0 {
+		sideStr = "ask"
+	}
+	return Record{
+		Type: "snapshot_order", ChannelID: ch,
+		Fields: map[string]any{
+			"snapshot_id": float64(snapID),
+			"order_id":    float64(orderID),
+			"side":        sideStr,
+			"order_flags": float64(0),
+			"enter_ts":    "",
+			"price_raw":   float64(price),
+			"qty_raw":     float64(qty),
+		},
+	}
+}
+
+func snapshotEndRec(ch uint8, instID, snapID uint32, anchor uint64) Record {
+	return Record{
+		Type: "snapshot_end", ChannelID: ch, InstrumentID: instID,
+		Fields: map[string]any{
+			"snapshot_id": float64(snapID),
+			"anchor_seq":  float64(anchor),
+		},
+	}
+}
+
+func testCounterVec(t *testing.T, cv *prometheus.CounterVec, labels ...string) float64 {
+	t.Helper()
+	var m dto.Metric
+	if err := cv.WithLabelValues(labels...).Write(&m); err != nil {
+		t.Fatalf("counter vec write: %v", err)
+	}
+	return m.GetCounter().GetValue()
+}
+
+// --- Task 2 tests ---
+
+func TestReadyInstrumentIgnoresSnapshot(t *testing.T) {
+	s := newTestShard(t)
+	k := instKey{0, 7}
+	s.instruments[k] = NewInstrument(7, "BTC", 0, 0)
+	s.instruments[k].Status = StatusReady
+	s.instruments[k].Bids[1] = &RestingOrder{OrderID: 1}
+	s.instruments[k].LastAppliedInstrumentSeq = 10
+
+	s.apply(snapshotBeginRec(0, 7, 99, 5, 2000, 20))
+	if s.instruments[k].OpenSnapshot != nil {
+		t.Fatal("Ready instrument must not start a shadow build")
+	}
+	s.apply(snapshotEndRec(0, 7, 99, 2000))
+	if s.instruments[k].Status != StatusReady {
+		t.Fatal("snapshot end on a Ready (no-shadow) instrument must be a no-op")
+	}
+}
+
+func TestShortSnapshotKeepsReadyBook(t *testing.T) {
+	s := newTestShard(t)
+	k := instKey{0, 7}
+	s.instruments[k] = NewInstrument(7, "BTC", 0, 0)
+	s.instruments[k].Status = StatusGap
+	s.apply(snapshotBeginRec(0, 7, 99, 2, 2000, 20))
+	if s.instruments[k].OpenSnapshot == nil {
+		t.Fatal("Gap instrument must start a shadow build")
+	}
+	s.apply(snapshotOrderRec(0, 99, 11, 0, 100, 5)) // only 1 of 2
+	s.apply(snapshotEndRec(0, 7, 99, 2000))
+	if s.instruments[k].OpenSnapshot != nil {
+		t.Fatal("short snapshot shadow must be discarded")
+	}
+	if s.instruments[k].Status != StatusGap {
+		t.Fatal("short snapshot must leave a Gap instrument in Gap, not demote further")
+	}
+}
+
+func TestCompleteSnapshotRepairsGap(t *testing.T) {
+	s := newTestShard(t)
+	k := instKey{0, 7}
+	s.instruments[k] = NewInstrument(7, "BTC", 0, 0)
+	s.instruments[k].Status = StatusGap
+	s.apply(snapshotBeginRec(0, 7, 99, 1, 2000, 20))
+	s.apply(snapshotOrderRec(0, 99, 11, 0, 100, 5))
+	s.apply(snapshotEndRec(0, 7, 99, 2000))
+	if s.instruments[k].Status != StatusReady {
+		t.Fatal("complete snapshot must repair a Gap to Ready")
+	}
+	if _, ok := s.instruments[k].Bids[11]; !ok {
+		t.Fatal("repaired book must contain snapshot order")
+	}
+}
+
+// --- Task 3 tests ---
+
+func TestShortSnapshotIncrementsDiscardedNotDemotion(t *testing.T) {
+	s := newTestShard(t)
+	k := instKey{0, 7}
+	s.instruments[k] = NewInstrument(7, "BTC", 0, 0)
+	s.instruments[k].Status = StatusGap
+	s.apply(snapshotBeginRec(0, 7, 99, 2, 2000, 20))
+	s.apply(snapshotOrderRec(0, 99, 11, 0, 100, 5))
+	s.apply(snapshotEndRec(0, 7, 99, 2000))
+	if got := testCounterVec(t, s.metrics.SnapshotDiscardedTotal, "short"); got != 1 {
+		t.Fatalf("snapshot_discarded_total{short} = %v, want 1", got)
+	}
+	if got := testCounter(t, s.metrics.BookDemotionsTotal); got != 0 {
+		t.Fatalf("book_demotions_total = %v, want 0", got)
 	}
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"sort"
 	"sync"
@@ -144,13 +145,15 @@ func (s *Shard) applySnapshotBegin(k instKey, rec Record) []ChannelEvent {
 		inst = NewInstrument(k.id, "", 0, 0)
 		s.instruments[k] = inst
 	}
+	// A Ready instrument is maintained by contiguous deltas; snapshots are
+	// gap-recovery only, so ignore them while Ready.
+	if inst.Status == StatusReady {
+		return nil
+	}
 	anchor := toUint64(rec.Fields["anchor_seq"])
 	total := toUint32(rec.Fields["total_orders"])
 	snapID := toUint32(rec.Fields["snapshot_id"])
 	lastInstr := toUint32(rec.Fields["last_instrument_seq"])
-	if inst.Status == StatusReady && anchor <= inst.LastAppliedMktdataSeq {
-		return nil
-	}
 	inst.BeginSnapshot(snapID, anchor, total, lastInstr)
 	return nil
 }
@@ -158,10 +161,7 @@ func (s *Shard) applySnapshotBegin(k instKey, rec Record) []ChannelEvent {
 func (s *Shard) applySnapshotOrder(rec Record) []ChannelEvent {
 	snapID := toUint32(rec.Fields["snapshot_id"])
 	for _, inst := range s.instruments {
-		if inst.Status != StatusBuildingSnapshot || inst.OpenSnapshot == nil {
-			continue
-		}
-		if inst.OpenSnapshot.SnapshotID != snapID {
+		if inst.OpenSnapshot == nil || inst.OpenSnapshot.SnapshotID != snapID {
 			continue
 		}
 		orderID := toUint64(rec.Fields["order_id"])
@@ -181,11 +181,17 @@ func (s *Shard) applySnapshotEnd(k instKey, rec Record) []ChannelEvent {
 	if !ok {
 		return nil
 	}
+	if inst.OpenSnapshot == nil {
+		return nil // no shadow in progress; ignore (never demote)
+	}
 	snapID := toUint32(rec.Fields["snapshot_id"])
 	anchor := toUint64(rec.Fields["anchor_seq"])
 	if _, _, err := inst.EndSnapshot(snapID, anchor); err != nil {
-		log.Printf("shard %d instrument %d: snapshot end failed: %v", s.idx, k.id, err)
-		return nil
+		if s.metrics != nil {
+			s.metrics.SnapshotDiscardedTotal.WithLabelValues(discardReason(err)).Inc()
+		}
+		log.Printf("shard %d instrument %d: snapshot discarded: %v", s.idx, k.id, err)
+		return nil // discard shadow only; live book & status unchanged
 	}
 	s.replayBuffer(k, inst)
 	return []ChannelEvent{{Kind: "applied_snapshot", InstrumentID: k.id, Symbol: inst.Symbol, Record: rec}}
@@ -280,6 +286,17 @@ func filterBuffer(buf []BufferedDelta, keep func(BufferedDelta) bool) []Buffered
 		}
 	}
 	return out
+}
+
+func discardReason(err error) string {
+	switch {
+	case errors.Is(err, errSnapshotShort):
+		return "short"
+	case errors.Is(err, errSnapshotMismatch):
+		return "mismatch"
+	default:
+		return "other"
+	}
 }
 
 // --- type conversion helpers (JSON unmarshal yields float64 / string / bool by default) ---
