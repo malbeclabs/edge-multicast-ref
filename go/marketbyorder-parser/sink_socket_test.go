@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -241,4 +242,62 @@ func TestSocketSink_BackPressure(t *testing.T) {
 	if received == 0 {
 		t.Error("good client received no records despite not blocking")
 	}
+}
+
+// TestSocketSink_ConcurrentWriteClose verifies that concurrent Write() calls
+// racing against Close() never panic (e.g. send-on-closed-channel) and that
+// the sink shuts down cleanly with no goroutine leaks. Run under -race to
+// detect data races.
+func TestSocketSink_ConcurrentWriteClose(t *testing.T) {
+	sockPath := shortTempSock(t)
+
+	sink, err := NewSocketSink("json", sockPath, nil)
+	if err != nil {
+		t.Fatalf("creating socket sink: %v", err)
+	}
+
+	// Connect a client so Write has real channels to send on.
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("connecting client: %v", err)
+	}
+	defer conn.Close()
+
+	// Give the accept loop time to register the client.
+	time.Sleep(20 * time.Millisecond)
+
+	ts := time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC)
+	batch := []Record{
+		{Type: "quote", Timestamp: ts, ChannelID: 1, SequenceNumber: 1, InstrumentID: 99},
+	}
+
+	const writers = 8
+	ready := make(chan struct{})
+	var wg sync.WaitGroup
+
+	// Launch writers that all start at the same time as Close.
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-ready
+			for j := 0; j < 200; j++ {
+				sink.Write(batch) //nolint:errcheck
+			}
+		}()
+	}
+
+	// Close races directly against the writers.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-ready
+		sink.Close() //nolint:errcheck
+	}()
+
+	close(ready) // start all goroutines simultaneously
+	wg.Wait()
+
+	// Double-Close must also be safe (idempotent).
+	sink.Close() //nolint:errcheck
 }

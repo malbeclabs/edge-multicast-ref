@@ -140,15 +140,16 @@ func (s *SocketSink) dropClient(cw *clientWriter, err error) {
 
 func (s *SocketSink) Write(records []Record) error {
 	s.mu.Lock()
-	clients := make([]*clientWriter, 0, len(s.clients))
-	for _, cw := range s.clients {
-		clients = append(clients, cw)
+	if s.closed {
+		s.mu.Unlock()
+		return nil
 	}
-	s.mu.Unlock()
-
+	// Hold mu across all non-blocking sends so that Close() cannot close
+	// cw.ch between our snapshot and the send — which would cause a panic.
+	// The select{...; default:} never blocks, so holding mu here is safe.
 	sentTo := 0
 	queueDrops := 0
-	for _, cw := range clients {
+	for _, cw := range s.clients {
 		select {
 		case cw.ch <- records:
 			sentTo++
@@ -156,6 +157,8 @@ func (s *SocketSink) Write(records []Record) error {
 			queueDrops++
 		}
 	}
+	s.mu.Unlock()
+
 	if s.metrics != nil {
 		if queueDrops > 0 {
 			s.metrics.SocketClientDrops.WithLabelValues("queue_full").Add(float64(queueDrops))
@@ -169,15 +172,25 @@ func (s *SocketSink) Write(records []Record) error {
 
 func (s *SocketSink) Close() error {
 	s.mu.Lock()
+	if s.closed {
+		// Idempotent: second Close() is a no-op (channels are already closed).
+		s.mu.Unlock()
+		return nil
+	}
 	s.closed = true
 	clients := s.clients
 	s.clients = make(map[net.Conn]*clientWriter)
-	s.mu.Unlock()
-
+	// Close all channels while holding mu. This is safe because Write() also
+	// holds mu during its sends, so we can never close a channel that Write
+	// is currently sending on.
 	for _, cw := range clients {
 		close(cw.ch)
 		cw.conn.Close()
 	}
+	s.mu.Unlock()
+
+	// Wait for serve() goroutines OUTSIDE mu. serve() calls dropClient() which
+	// takes mu; waiting here while holding mu would deadlock.
 	for _, cw := range clients {
 		<-cw.done
 	}
