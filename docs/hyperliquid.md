@@ -67,7 +67,7 @@ guide targets **`aws-tyo-hl-mainnet2`**:
 |----------|-------|
 | Multicast group | `tiredsolid` → `233.84.178.15` |
 | Publisher source address | `148.51.120.79` |
-| Source ID | `3` |
+| Source ID | `3` (beta only) |
 
 It publishes two feeds, each on its own UDP ports:
 
@@ -76,9 +76,15 @@ It publishes two feeds, each on its own UDP ports:
 | Top-of-Book & Trades | `9201` | `9202` | — | [top-of-book](https://github.com/malbeclabs/edge-feed-spec/blob/main/top-of-book/spec.md) |
 | Market-by-Order | `10201` | `10202` | `10203` | [market-by-order](https://github.com/malbeclabs/edge-feed-spec/blob/main/market-by-order/spec.md) |
 
-The `source_id` field identifies the publisher host for audit, not the venue; every frame
-from this host carries **`source_id=3`**. The venue is Hyperliquid. To receive
-`aws-tyo-hl-mainnet2` specifically, bind to its ports above on `233.84.178.15`.
+To receive `aws-tyo-hl-mainnet2` specifically, bind to its ports above on
+`233.84.178.15`.
+
+> **Source ID is beta-only.** During the beta, the `source_id` field identifies the
+> publisher host for audit rather than the venue, so frames from this host carry
+> **`source_id=3`**. In production the Hyperliquid feed will carry **`source_id=1`**, the
+> venue value assigned in the
+> [edge-feed-spec source registry](https://github.com/malbeclabs/edge-feed-spec/blob/main/sources/spec.md).
+> Do not hard-code `source_id=3`; select the publisher by its ports, not its source ID.
 
 > On **testnet**, the `tiredsolid` group resolves to `233.84.178.6`. Ports and source ID
 > are per-host; confirm the values for the publisher you target.
@@ -160,9 +166,9 @@ mind:
 
 - Each frame is at most **1,232 bytes** (one UDP datagram per frame), which leaves room
   for the GRE headers used in last-mile delivery.
-- Bind to `aws-tyo-hl-mainnet2`'s ports on `233.84.178.15` (see
-  [Channel details](#channel-details-mainnet-beta)). Frames from this host carry
-  **`source_id=3`**.
+- Select `aws-tyo-hl-mainnet2` by binding to its ports on `233.84.178.15` (see
+  [Channel details](#channel-details-mainnet-beta)), not by source ID. Frames carry
+  **`source_id=3`** during the beta; this becomes **`source_id=1`** in production.
 
 ## Getting help
 
