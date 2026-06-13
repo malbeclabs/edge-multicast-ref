@@ -5,7 +5,7 @@ over [DoubleZero](https://doublezero.xyz) Edge.
 
 The Hyperliquid feed is in early beta. It is published as UDP multicast on a DoubleZero
 group named **`tiredsolid`**, on both **testnet** and **mainnet-beta**. This guide targets
-the **`aws-tyo-hl-mainnet2`** publisher on mainnet-beta. See
+the mainnet-beta Hyperliquid publisher. See
 [Channel details](#channel-details-mainnet-beta) below for its exact multicast address,
 ports, and source ID.
 
@@ -61,7 +61,7 @@ testnet and mainnet-beta. Note the code; you will use it in Steps 3 and 4.
 
 Several publisher hosts share the `tiredsolid` group. They use the same multicast address
 but **distinct ports**, so you select a specific publisher by the ports you bind. This
-guide targets **`aws-tyo-hl-mainnet2`**:
+guide targets the mainnet-beta Hyperliquid publisher with these details:
 
 | Property | Value |
 |----------|-------|
@@ -76,7 +76,7 @@ It publishes two feeds, each on its own UDP ports:
 | Top-of-Book & Trades | `9201` | `9202` | — | [top-of-book](https://github.com/malbeclabs/edge-feed-spec/blob/main/top-of-book/spec.md) |
 | Market-by-Order | `10201` | `10202` | `10203` | [market-by-order](https://github.com/malbeclabs/edge-feed-spec/blob/main/market-by-order/spec.md) |
 
-To receive `aws-tyo-hl-mainnet2` specifically, bind to its ports above on
+To receive this publisher specifically, bind to its ports above on
 `233.84.178.15`.
 
 > **Source ID is beta-only.** During the beta, the `source_id` field identifies the
@@ -133,7 +133,7 @@ Confirm the feed is arriving on the tunnel interface:
 # Tunnel is up
 ip a s doublezero1
 
-# Packets are flowing from aws-tyo-hl-mainnet2 (Top-of-Book mktdata)
+# Packets are flowing (Top-of-Book mktdata)
 sudo tcpdump -ni doublezero1 host 233.84.178.15 and udp port 9201
 ```
 
@@ -166,7 +166,7 @@ mind:
 
 - Each frame is at most **1,232 bytes** (one UDP datagram per frame), which leaves room
   for the GRE headers used in last-mile delivery.
-- Select `aws-tyo-hl-mainnet2` by binding to its ports on `233.84.178.15` (see
+- Select this publisher by binding to its ports on `233.84.178.15` (see
   [Channel details](#channel-details-mainnet-beta)), not by source ID. Frames carry
   **`source_id=3`** during the beta; this becomes **`source_id=1`** in production.
 
