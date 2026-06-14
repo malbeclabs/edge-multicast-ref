@@ -18,6 +18,24 @@ Everything after the feed runs in Docker. The parser uses host networking (for I
 
 The demo is designed for a host where the DoubleZero tunnel is already in place.
 
+## Host tuning (kernel socket buffers)
+
+The parsers raise their UDP receive buffer to 64 MiB to absorb feed bursts, but
+the kernel silently clamps that request to `net.core.rmem_max`. On a fresh host
+the default ceiling is far lower, so the 64 MiB is only partially honored and
+sustained bursts can still drop packets at the socket layer. Before running
+under a live feed, raise these sysctls (persist them in `/etc/sysctl.d/`):
+
+```bash
+sysctl -w net.core.rmem_max=134217728
+sysctl -w net.core.rmem_default=16777216
+sysctl -w net.core.netdev_max_backlog=50000
+```
+
+The parser decouples its unix sink from the UDP read path so a slow consumer
+can't back-pressure the socket, but that headroom only helps if the kernel
+actually grants the larger buffer — hence the sysctls above.
+
 ## Quick start
 
 ```bash
