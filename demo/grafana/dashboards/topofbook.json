@@ -80,7 +80,8 @@
           "rawSql": "SELECT countDistinct(instrument_id) AS active_instruments\nFROM topofbook.instruments",
           "format": 1
         }
-      ]
+      ],
+      "description": "Distinct instruments seen in the selected window (refdata-defined)."
     },
     {
       "type": "stat",
@@ -140,7 +141,8 @@
           "rawSql": "SELECT $__timeInterval(recv_ts) AS time, count() / $__interval_s AS quotes_per_sec\nFROM topofbook.quotes\nWHERE $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
           "format": 0
         }
-      ]
+      ],
+      "description": "Top-of-book quote updates per second written to ClickHouse."
     },
     {
       "type": "stat",
@@ -200,12 +202,13 @@
           "rawSql": "SELECT $__timeInterval(recv_ts) AS time, count() / $__interval_s AS trades_per_sec\nFROM topofbook.trades\nWHERE $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
           "format": 0
         }
-      ]
+      ],
+      "description": "Trade prints per second written to ClickHouse."
     },
     {
       "type": "stat",
-      "title": "Avg send\u2192recv latency",
-      "description": "Publisher send_ts to subscriber receive, from quote rows only.",
+      "title": "Avg send→recv latency",
+      "description": "Pure network leg — publisher send_ts → subscriber kernel receive (recv_ts is SO_TIMESTAMPNS, stamped on arrival). Wire + DZ tunnel only; it excludes the venue→publisher ingest lag, so this is the true transport number. The gap vs source→recv is the publisher's block→emit pipeline time.",
       "id": 5,
       "gridPos": {
         "x": 12,
@@ -273,8 +276,8 @@
     },
     {
       "type": "stat",
-      "title": "Avg source\u2192recv latency",
-      "description": "Venue source_ts to subscriber receive, from quote rows with source_ts populated.",
+      "title": "Avg source→recv latency",
+      "description": "End-to-end from the venue — block/source_ts → subscriber receive. This is the wire leg PLUS the publisher's block→emit ingest lag, which usually dominates and can spike to seconds when ingest stalls. It is feed-pipeline latency, not network. Rows with no venue timestamp (counter / batch_boundary records) are excluded.",
       "id": 6,
       "gridPos": {
         "x": 16,
@@ -406,7 +409,8 @@
           "rawSql": "SELECT dateDiff('millisecond', max(recv_ts), now64(3)) / 1000 AS latest_event_age_seconds\nFROM (\n  SELECT max(recv_ts) AS recv_ts FROM topofbook.quotes\n  UNION ALL\n  SELECT max(recv_ts) AS recv_ts FROM topofbook.trades\n)",
           "format": 1
         }
-      ]
+      ],
+      "description": "Wall-clock age of the newest row (now − max recv_ts). Rising means the feed stalled or the parser/bot fell behind — steady-state should sit near one publish interval."
     },
     {
       "type": "row",
@@ -513,12 +517,13 @@
           "rawSql": "SELECT $__timeInterval(recv_ts) AS time, count() / $__interval_s AS trades_per_sec\nFROM topofbook.trades\nWHERE symbol IN (${symbols:singlequote}) AND $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
           "format": 0
         }
-      ]
+      ],
+      "description": "Rows per second persisted to ClickHouse, split by table — overall ingest throughput."
     },
     {
       "type": "timeseries",
       "title": "Latency quantiles (send vs source)",
-      "description": "send_latency_ms (publisher\u2192recv) and source_latency_ms (venue\u2192recv) quantiles per interval.",
+      "description": "send_p50/p99 = pure network (publisher→recv). source_p50/p99 = end-to-end from the venue block time. The vertical gap between the send and source lines is the publisher's block→emit ingest lag; a fat source p99 under a flat send line means the venue→publisher pipeline stalled, not the network or the wire.",
       "id": 10,
       "gridPos": {
         "x": 8,
@@ -722,7 +727,8 @@
           "rawSql": "SELECT\n  symbol,\n  argMax(bid_price, recv_ts) AS bid,\n  argMax(ask_price, recv_ts) AS ask,\n  argMax(bid_qty, recv_ts) AS bid_qty,\n  argMax(ask_qty, recv_ts) AS ask_qty,\n  argMax(spread_bps, recv_ts) AS spread_bps,\n  max(recv_ts) AS last_update\nFROM topofbook.quotes\nWHERE symbol IN (${symbols:singlequote}) AND $__timeFilter(recv_ts)\nGROUP BY symbol\nORDER BY spread_bps DESC, symbol",
           "format": 1
         }
-      ]
+      ],
+      "description": "Most recent bid/ask (and spread) per symbol."
     },
     {
       "type": "table",
@@ -835,7 +841,8 @@
           "rawSql": "SELECT\n  symbol,\n  argMax(bid_price, recv_ts) AS bid,\n  argMax(ask_price, recv_ts) AS ask,\n  argMax(spread_bps, recv_ts) AS spread_bps,\n  max(recv_ts) AS last_update\nFROM topofbook.quotes\nWHERE symbol IN (${symbols:singlequote}) AND $__timeFilter(recv_ts)\nGROUP BY symbol\nORDER BY spread_bps DESC\nLIMIT 20",
           "format": 1
         }
-      ]
+      ],
+      "description": "Symbols with the widest current bid/ask spread (bps)."
     },
     {
       "type": "table",
@@ -909,7 +916,8 @@
           "rawSql": "SELECT\n  symbol,\n  count() AS trades,\n  sum(qty) AS traded_qty,\n  sum(price * qty) AS notional,\n  argMax(price, recv_ts) AS last_trade\nFROM topofbook.trades\nWHERE symbol IN (${symbols:singlequote}) AND $__timeFilter(recv_ts)\nGROUP BY symbol\nORDER BY trades DESC, traded_qty DESC\nLIMIT 20",
           "format": 1
         }
-      ]
+      ],
+      "description": "Symbols ranked by recent update volume."
     },
     {
       "type": "table",
@@ -1002,7 +1010,8 @@
           "rawSql": "SELECT\n  symbol,\n  max(recv_ts) AS last_update,\n  dateDiff('millisecond', max(recv_ts), now64(3)) / 1000 AS age_seconds\nFROM topofbook.quotes\nWHERE symbol IN (${symbols:singlequote}) AND $__timeFilter(recv_ts)\nGROUP BY symbol\nORDER BY age_seconds DESC\nLIMIT 20",
           "format": 1
         }
-      ]
+      ],
+      "description": "Symbols whose last update is oldest — possible thin or halted markets."
     },
     {
       "type": "row",
@@ -1328,7 +1337,8 @@
           "rawSql": "SELECT\n  symbol,\n  argMax(bid_price, recv_ts) AS bid,\n  argMax(bid_qty, recv_ts) AS bid_qty,\n  argMax(ask_price, recv_ts) AS ask,\n  argMax(ask_qty, recv_ts) AS ask_qty,\n  argMax(mid, recv_ts) AS mid,\n  argMax(spread_bps, recv_ts) AS spread_bps\nFROM topofbook.quotes\nWHERE symbol IN (${symbols:singlequote}) AND $__timeFilter(recv_ts)\nGROUP BY symbol\nORDER BY symbol",
           "format": 1
         }
-      ]
+      ],
+      "description": "Current resting bids/asks for the templated symbol."
     },
     {
       "type": "timeseries",
@@ -1421,7 +1431,8 @@
           "rawSql": "SELECT\n  $__timeInterval(recv_ts) AS time,\n  symbol,\n  avg(ask_price) AS ask\nFROM topofbook.quotes\nWHERE symbol IN (${symbols:singlequote}) AND $__timeFilter(recv_ts)\nGROUP BY time, symbol\nORDER BY time",
           "format": 0
         }
-      ]
+      ],
+      "description": "Best bid/ask over time for the templated symbol, with trade prints overlaid."
     },
     {
       "type": "timeseries",
@@ -1474,7 +1485,8 @@
           "rawSql": "SELECT\n  $__timeInterval(recv_ts) AS time,\n  symbol,\n  avg(spread_bps) AS spread_bps\nFROM topofbook.quotes\nWHERE symbol IN (${symbols:singlequote}) AND $__timeFilter(recv_ts)\nGROUP BY time, symbol\nORDER BY time",
           "format": 0
         }
-      ]
+      ],
+      "description": "Bid/ask spread (bps) over time for the templated symbol."
     },
     {
       "type": "table",
@@ -1582,7 +1594,8 @@
           "rawSql": "SELECT\n  recv_ts,\n  symbol,\n  aggressor_side,\n  price,\n  qty,\n  price * qty AS notional\nFROM topofbook.trades\nWHERE symbol IN (${symbols:singlequote}) AND $__timeFilter(recv_ts)\nORDER BY recv_ts DESC\nLIMIT 200",
           "format": 1
         }
-      ]
+      ],
+      "description": "Most recent trades across subscribed symbols."
     },
     {
       "type": "timeseries",
@@ -1633,7 +1646,107 @@
           "legendFormat": "frames missing/s"
         }
       ],
-      "description": "Real UDP frame loss measured at the parser (header-seq gaps). For the stateless top-of-book feed a lost quote self-heals on the next quote; this matters only for missed trade prints. Unlike the old per-channel-seq view, this does not count non-quote frames."
+      "description": "Real datagram loss (frames/s) from the honest per-socket loss metric — genuine drops, not a seq-gap artifact."
+    },
+    {
+      "type": "timeseries",
+      "title": "Wire latency (publisher→recv, network only)",
+      "description": "Pure transport, isolated: recv_ts − publisher_send_ts, kernel-stamped on arrival, so it excludes all upstream feed-pipeline lag. p50 ≈ the one-way publisher→host wire; the p99 bump is publisher-side burst serialization at block boundaries. Everything above this line in source→recv is venue→publisher ingest, not the network.",
+      "id": 23,
+      "gridPos": {
+        "x": 0,
+        "y": 56,
+        "w": 24,
+        "h": 7
+      },
+      "datasource": {
+        "uid": "clickhouse-topofbook",
+        "type": "grafana-clickhouse-datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "axisLabel": "Latency",
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "spanNulls": true
+          },
+          "unit": "ms",
+          "decimals": 1
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p50"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p95"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "yellow"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p99"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "uid": "clickhouse-topofbook",
+            "type": "grafana-clickhouse-datasource"
+          },
+          "queryType": "sql",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, quantile(0.5)(greatest(send_latency_ms,0)) AS p50, quantile(0.95)(greatest(send_latency_ms,0)) AS p95, quantile(0.99)(greatest(send_latency_ms,0)) AS p99 FROM topofbook.quotes WHERE $__timeFilter(recv_ts) GROUP BY time ORDER BY time",
+          "format": 0
+        }
+      ]
     }
   ],
   "refresh": "5s",

@@ -80,7 +80,8 @@
           "rawSql": "SELECT instrument_count\nFROM marketbyorder.channel_health\nWHERE kind = 'manifest_summary'\nORDER BY recv_ts DESC\nLIMIT 1",
           "format": 1
         }
-      ]
+      ],
+      "description": "Distinct instruments seen in the selected window (refdata-defined)."
     },
     {
       "type": "stat",
@@ -140,7 +141,8 @@
           "rawSql": "SELECT $__timeInterval(recv_ts) AS time, count() / $__interval_s AS events_per_sec\nFROM marketbyorder.events\nWHERE $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
           "format": 0
         }
-      ]
+      ],
+      "description": "MBO book events (order add/cancel/execute) per second written to ClickHouse."
     },
     {
       "type": "stat",
@@ -200,12 +202,13 @@
           "rawSql": "SELECT $__timeInterval(recv_ts) AS time, count() / $__interval_s AS snapshots_per_sec\nFROM marketbyorder.level_snapshots\nWHERE $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
           "format": 0
         }
-      ]
+      ],
+      "description": "Snapshot order rows per second from the recovery round-robin stream (resting-book re-broadcast)."
     },
     {
       "type": "stat",
-      "title": "Avg send\u2192recv latency",
-      "description": "Publisher send_ts to subscriber receive, from MBO events.",
+      "title": "Avg send→recv latency",
+      "description": "Pure network leg — publisher send_ts → subscriber kernel receive (recv_ts is SO_TIMESTAMPNS, stamped on arrival). Wire + DZ tunnel only; it excludes the venue→publisher ingest lag, so this is the true transport number. The gap vs source→recv is the publisher's block→emit pipeline time.",
       "id": 5,
       "gridPos": {
         "x": 12,
@@ -273,8 +276,8 @@
     },
     {
       "type": "stat",
-      "title": "Avg source\u2192recv latency",
-      "description": "Venue source_ts to subscriber receive, from MBO events with source_ts populated.",
+      "title": "Avg source→recv latency",
+      "description": "End-to-end from the venue — block/source_ts → subscriber receive. This is the wire leg PLUS the publisher's block→emit ingest lag, which usually dominates and can spike to seconds when ingest stalls. It is feed-pipeline latency, not network. Rows with no venue timestamp (counter / batch_boundary records) are excluded.",
       "id": 6,
       "gridPos": {
         "x": 16,
@@ -406,7 +409,8 @@
           "rawSql": "SELECT dateDiff('millisecond', max(recv_ts), now64(3)) / 1000 AS latest_event_age_seconds\nFROM (\n  SELECT max(recv_ts) AS recv_ts FROM marketbyorder.events\n  UNION ALL\n  SELECT max(recv_ts) AS recv_ts FROM marketbyorder.level_snapshots\n)",
           "format": 1
         }
-      ]
+      ],
+      "description": "Wall-clock age of the newest row (now − max recv_ts). Rising means the feed stalled or the parser/bot fell behind — steady-state should sit near one publish interval."
     },
     {
       "type": "row",
@@ -771,7 +775,8 @@
           "rawSql": "SELECT\n  side,\n  price,\n  qty AS amount,\n  if(side = 'ask', cumulative_qty, NULL) AS ask_depth,\n  if(side = 'bid', cumulative_qty, NULL) AS bid_depth,\n  multiIf(side = 'ask', 1000 - toInt32(level_idx), 2000 + toInt32(level_idx)) AS sort_key\nFROM marketbyorder.level_snapshots\nWHERE symbol = ${symbol:singlequote}\n  AND level_idx < 5\n  AND recv_ts = (\n    SELECT max(recv_ts)\n    FROM marketbyorder.level_snapshots\n    WHERE symbol = ${symbol:singlequote} AND $__timeFilter(recv_ts)\n  )\nORDER BY sort_key",
           "format": 1
         }
-      ]
+      ],
+      "description": "Current resting bid/ask ladder for the templated instrument."
     },
     {
       "type": "timeseries",
@@ -864,7 +869,8 @@
           "rawSql": "SELECT $__timeInterval(recv_ts) AS time, avg(price) AS ask\nFROM marketbyorder.level_snapshots\nWHERE symbol = ${symbol:singlequote} AND side = 'ask' AND level_idx = 0 AND $__timeFilter(recv_ts)\nGROUP BY time\nORDER BY time",
           "format": 0
         }
-      ]
+      ],
+      "description": "Best bid/ask over time for the templated instrument, with trade prints overlaid."
     },
     {
       "type": "timeseries",
@@ -917,7 +923,8 @@
           "rawSql": "WITH best AS (\n  SELECT $__timeInterval(recv_ts) AS time,\n         minIf(price, side = 'ask' AND level_idx = 0) AS best_ask,\n         maxIf(price, side = 'bid' AND level_idx = 0) AS best_bid\n  FROM marketbyorder.level_snapshots\n  WHERE symbol = ${symbol:singlequote} AND $__timeFilter(recv_ts)\n  GROUP BY time\n)\nSELECT time, ((best_ask - best_bid) / ((best_ask + best_bid) / 2)) * 10000 AS spread_bps\nFROM best\nWHERE best_ask > 0 AND best_bid > 0\nORDER BY time",
           "format": 0
         }
-      ]
+      ],
+      "description": "Bid/ask spread (bps) over time for the templated instrument."
     },
     {
       "type": "table",
@@ -1025,7 +1032,8 @@
           "rawSql": "SELECT\n  recv_ts,\n  symbol,\n  aggressor_side,\n  price,\n  qty,\n  price * qty AS notional\nFROM marketbyorder.events\nWHERE kind IN ('trade', 'order_execute')\n  AND symbol = ${symbol:singlequote}\n  AND $__timeFilter(recv_ts)\nORDER BY recv_ts DESC\nLIMIT 200",
           "format": 1
         }
-      ]
+      ],
+      "description": "Most recent trades across subscribed instruments."
     },
     {
       "type": "row",
@@ -1091,7 +1099,8 @@
           "rawSql": "SELECT $__timeInterval(recv_ts) AS time, kind, count() / $__interval_s AS rate\nFROM marketbyorder.events\nWHERE kind IN ('order_add', 'order_cancel', 'order_execute', 'trade') AND $__timeFilter(recv_ts)\nGROUP BY time, kind\nORDER BY time",
           "format": 0
         }
-      ]
+      ],
+      "description": "Rows per second persisted to ClickHouse, split by table — overall ingest throughput."
     },
     {
       "type": "timeseries",
@@ -1190,7 +1199,8 @@
           "rawSql": "SELECT $__timeInterval(recv_ts) AS time, quantile(0.5)(greatest(send_latency_ms,0)) AS send_p50, quantile(0.99)(greatest(send_latency_ms,0)) AS send_p99, quantile(0.5)(greatest(source_latency_ms,0)) AS source_p50, quantile(0.99)(greatest(source_latency_ms,0)) AS source_p99 FROM marketbyorder.events WHERE source_ts IS NOT NULL AND $__timeFilter(recv_ts) GROUP BY time ORDER BY time",
           "format": 0
         }
-      ]
+      ],
+      "description": "send_p50/p99 = pure network (publisher→recv). source_p50/p99 = end-to-end from the venue block time. The vertical gap between the send and source lines is the publisher's block→emit ingest lag; a fat source p99 under a flat send line means the venue→publisher pipeline stalled, not the network or the wire."
     },
     {
       "type": "heatmap",
@@ -1245,7 +1255,8 @@
           "rawSql": "SELECT recv_ts AS time, price\nFROM marketbyorder.level_snapshots\nWHERE symbol = ${symbol:singlequote} AND level_idx < 10 AND $__timeFilter(recv_ts)\nORDER BY recv_ts",
           "format": 1
         }
-      ]
+      ],
+      "description": "Resting-book depth distribution over time (price levels by quantity)."
     },
     {
       "type": "timeseries",
@@ -1294,7 +1305,8 @@
           "rawSql": "SELECT $__timeInterval(recv_ts) AS time, side, sum(order_count) AS orders\nFROM marketbyorder.level_snapshots\nWHERE symbol = ${symbol:singlequote} AND $__timeFilter(recv_ts)\nGROUP BY time, side\nORDER BY time",
           "format": 0
         }
-      ]
+      ],
+      "description": "Count of live resting orders on the book over time."
     },
     {
       "type": "timeseries",
@@ -1343,7 +1355,8 @@
           "rawSql": "SELECT $__timeInterval(recv_ts) AS time, side, sum(qty) AS resting_qty\nFROM marketbyorder.level_snapshots\nWHERE symbol = ${symbol:singlequote} AND level_idx < 10 AND $__timeFilter(recv_ts)\nGROUP BY time, side\nORDER BY time",
           "format": 0
         }
-      ]
+      ],
+      "description": "Total resting quantity on the book over time."
     },
     {
       "type": "timeseries",
@@ -1502,6 +1515,106 @@
         }
       ],
       "description": "Ready→Gap book demotions. The single legitimate demotion site — should trend to zero once back-pressure is fixed."
+    },
+    {
+      "type": "timeseries",
+      "title": "Wire latency (publisher→recv, network only)",
+      "description": "Pure transport, isolated: recv_ts − publisher_send_ts, kernel-stamped on arrival, so it excludes all upstream feed-pipeline lag. p50 ≈ the one-way publisher→host wire; the p99 bump is publisher-side burst serialization at block boundaries. Everything above this line in source→recv is venue→publisher ingest, not the network.",
+      "id": 23,
+      "gridPos": {
+        "x": 0,
+        "y": 64,
+        "w": 24,
+        "h": 7
+      },
+      "datasource": {
+        "uid": "clickhouse-topofbook",
+        "type": "grafana-clickhouse-datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "axisLabel": "Latency",
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "spanNulls": true
+          },
+          "unit": "ms",
+          "decimals": 1
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p50"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p95"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "yellow"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p99"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "uid": "clickhouse-topofbook",
+            "type": "grafana-clickhouse-datasource"
+          },
+          "queryType": "sql",
+          "rawSql": "SELECT $__timeInterval(recv_ts) AS time, quantile(0.5)(greatest(send_latency_ms,0)) AS p50, quantile(0.95)(greatest(send_latency_ms,0)) AS p95, quantile(0.99)(greatest(send_latency_ms,0)) AS p99 FROM marketbyorder.events WHERE $__timeFilter(recv_ts) GROUP BY time ORDER BY time",
+          "format": 0
+        }
+      ]
     }
   ],
   "refresh": "5s",
