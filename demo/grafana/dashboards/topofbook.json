@@ -1586,7 +1586,7 @@
     },
     {
       "type": "timeseries",
-      "title": "Sequence gaps (per-channel)",
+      "title": "Datagram loss (real, frames/s)",
       "id": 22,
       "gridPos": {
         "x": 0,
@@ -1595,14 +1595,14 @@
         "h": 8
       },
       "datasource": {
-        "uid": "clickhouse-topofbook",
-        "type": "grafana-clickhouse-datasource"
+        "uid": "prometheus",
+        "type": "prometheus"
       },
       "fieldConfig": {
         "defaults": {
           "custom": {
-            "axisLabel": "Missing messages",
-            "drawStyle": "bars",
+            "axisLabel": "Frames/s",
+            "drawStyle": "line",
             "lineWidth": 1,
             "fillOpacity": 80,
             "spanNulls": true
@@ -1626,15 +1626,14 @@
         {
           "refId": "A",
           "datasource": {
-            "uid": "clickhouse-topofbook",
-            "type": "grafana-clickhouse-datasource"
+            "uid": "prometheus",
+            "type": "prometheus"
           },
-          "queryType": "sql",
-          "rawSql": "SELECT time, sum(missing) AS missing_messages FROM ( SELECT $__timeInterval(recv_ts) AS time, seq - lagInFrame(seq, 1, seq) OVER (PARTITION BY channel_id ORDER BY seq) - 1 AS missing FROM topofbook.quotes WHERE $__timeFilter(recv_ts) ) WHERE missing > 0 AND missing < 1000000 GROUP BY time ORDER BY time",
-          "format": 0
+          "expr": "sum(rate(dz_subscriber_frames_missing_total{job=\"topofbook-parser\",port=\"marketdata\"}[$__rate_interval]))",
+          "legendFormat": "frames missing/s"
         }
       ],
-      "description": "Frame-sequence gaps on the per-channel header seq. Quotes dominate the feed so this tracks drops closely, but a gap also counts intervening non-quote frames (trades, heartbeats) \u2014 treat spikes as a signal to investigate, not an exact drop count. For exact per-instrument drop detection use the Market-by-Order feed."
+      "description": "Real UDP frame loss measured at the parser (header-seq gaps). For the stateless top-of-book feed a lost quote self-heals on the next quote; this matters only for missed trade prints. Unlike the old per-channel-seq view, this does not count non-quote frames."
     }
   ],
   "refresh": "5s",

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/csv"
 	"encoding/json"
 	"fmt"
@@ -12,8 +13,10 @@ import (
 )
 
 // SocketSink listens on a Unix domain socket and writes records to all
-// connected clients. Each client gets its own encoder instance. Slow or
-// disconnected clients are dropped silently.
+// connected clients. Each client has its own goroutine + bounded outbound
+// queue so a slow consumer cannot back-pressure the UDP receive path:
+// when the queue is full, the batch is dropped (and counted) instead of
+// blocking the caller of Write.
 type SocketSink struct {
 	format   string
 	sockPath string
@@ -21,8 +24,20 @@ type SocketSink struct {
 
 	mu       sync.Mutex
 	listener net.Listener
-	clients  map[net.Conn]recordWriter
+	clients  map[net.Conn]*clientWriter
 	closed   bool
+}
+
+// outQueueLen bounds per-client buffered batches. Sized to absorb
+// burst variance when the bot's single-goroutine dispatch falls behind;
+// dropping here is preferred over dropping at the kernel UDP socket.
+const outQueueLen = 16384
+
+type clientWriter struct {
+	conn net.Conn
+	ch   chan []Record
+	done chan struct{}
+	rw   recordWriter
 }
 
 // recordWriter writes records to a single connected client.
@@ -49,9 +64,9 @@ func NewSocketSink(format, sockPath string, m *metrics) (*SocketSink, error) {
 	s := &SocketSink{
 		format:   format,
 		sockPath: sockPath,
-		metrics:  m,
 		listener: lis,
-		clients:  make(map[net.Conn]recordWriter),
+		metrics:  m,
+		clients:  make(map[net.Conn]*clientWriter),
 	}
 
 	go s.acceptLoop()
@@ -72,15 +87,25 @@ func (s *SocketSink) acceptLoop() {
 			continue
 		}
 
-		s.mu.Lock()
-		var w recordWriter
+		// Choose encoder based on format; the per-client serve() goroutine
+		// drives the encoder through a 1 MiB bufio.Writer.
+		var rw recordWriter
 		switch s.format {
 		case "json":
-			w = newJSONConnWriter(conn)
+			rw = newJSONConnWriter(conn)
 		case "csv":
-			w = newCSVConnWriter(conn)
+			rw = newCSVConnWriter(conn)
 		}
-		s.clients[conn] = w
+
+		cw := &clientWriter{
+			conn: conn,
+			ch:   make(chan []Record, outQueueLen),
+			done: make(chan struct{}),
+			rw:   rw,
+		}
+
+		s.mu.Lock()
+		s.clients[conn] = cw
 		clientCount := len(s.clients)
 		s.mu.Unlock()
 
@@ -88,29 +113,67 @@ func (s *SocketSink) acceptLoop() {
 			s.metrics.socketClients.Set(float64(clientCount))
 		}
 		slog.Info("edge: socket client connected", "path", s.sockPath, "remote", conn.RemoteAddr())
+
+		go s.serve(cw)
+	}
+}
+
+// serve drains cw.ch and writes records via the per-client recordWriter.
+// For json clients the encoder is backed by a 1 MiB bufio.Writer; for csv
+// the csv.Writer does its own internal buffering and is flushed each batch.
+// Exits on first write error; the client is then removed by dropClient.
+func (s *SocketSink) serve(cw *clientWriter) {
+	defer close(cw.done)
+
+	for batch := range cw.ch {
+		if err := cw.rw.writeRecords(batch); err != nil {
+			s.dropClient(cw, err)
+			return
+		}
+	}
+}
+
+func (s *SocketSink) dropClient(cw *clientWriter, err error) {
+	slog.Warn("edge: dropping socket client", "path", s.sockPath, "error", err)
+	s.mu.Lock()
+	if _, ok := s.clients[cw.conn]; ok {
+		delete(s.clients, cw.conn)
+		if s.metrics != nil {
+			s.metrics.socketClientDrops.WithLabelValues("write_error").Inc()
+			s.metrics.socketClients.Set(float64(len(s.clients)))
+		}
+	}
+	s.mu.Unlock()
+	cw.conn.Close()
+	// Drain remaining queue so any pending Write senders don't block.
+	for range cw.ch {
 	}
 }
 
 func (s *SocketSink) Write(records []Record) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	dropped := 0
-	sentTo := 0
-	for conn, w := range s.clients {
-		if err := w.writeRecords(records); err != nil {
-			slog.Warn("edge: dropping socket client", "path", s.sockPath, "error", err)
-			conn.Close()
-			delete(s.clients, conn)
-			dropped++
-			continue
-		}
-		sentTo++
+	if s.closed {
+		s.mu.Unlock()
+		return nil
 	}
+	// Hold mu across all non-blocking sends so that Close() cannot close
+	// cw.ch between our snapshot and the send — which would cause a panic.
+	// The select{...; default:} never blocks, so holding mu here is safe.
+	sentTo := 0
+	queueDrops := 0
+	for _, cw := range s.clients {
+		select {
+		case cw.ch <- records:
+			sentTo++
+		default:
+			queueDrops++
+		}
+	}
+	s.mu.Unlock()
+
 	if s.metrics != nil {
-		if dropped > 0 {
-			s.metrics.socketClientDrops.WithLabelValues("write_error").Add(float64(dropped))
-			s.metrics.socketClients.Set(float64(len(s.clients)))
+		if queueDrops > 0 {
+			s.metrics.socketClientDrops.WithLabelValues("queue_full").Add(float64(queueDrops))
 		}
 		if sentTo > 0 {
 			s.metrics.socketRecordsSent.Add(float64(len(records)))
@@ -121,28 +184,45 @@ func (s *SocketSink) Write(records []Record) error {
 
 func (s *SocketSink) Close() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	s.closed = true
-	for conn := range s.clients {
-		conn.Close()
+	if s.closed {
+		// Idempotent: second Close() is a no-op (channels are already closed).
+		s.mu.Unlock()
+		return nil
 	}
-	s.clients = nil
+	s.closed = true
+	clients := s.clients
+	s.clients = make(map[net.Conn]*clientWriter)
+	// Close all channels while holding mu. This is safe because Write() also
+	// holds mu during its sends, so we can never close a channel that Write
+	// is currently sending on.
+	for _, cw := range clients {
+		close(cw.ch)
+		cw.conn.Close()
+	}
+	s.mu.Unlock()
+
+	// Wait for serve() goroutines OUTSIDE mu. serve() calls dropClient() which
+	// takes mu; waiting here while holding mu would deadlock.
+	for _, cw := range clients {
+		<-cw.done
+	}
 
 	err := s.listener.Close()
 	os.Remove(s.sockPath) //nolint:errcheck
 	return err
 }
 
-// jsonConnWriter writes JSONL to a single connection.
+// jsonConnWriter writes JSONL to a single connection via a 1 MiB bufio.Writer.
 type jsonConnWriter struct {
+	bw  *bufio.Writer
 	enc *json.Encoder
 }
 
 func newJSONConnWriter(w io.Writer) *jsonConnWriter {
-	enc := json.NewEncoder(w)
+	bw := bufio.NewWriterSize(w, 1<<20)
+	enc := json.NewEncoder(bw)
 	enc.SetEscapeHTML(false)
-	return &jsonConnWriter{enc: enc}
+	return &jsonConnWriter{bw: bw, enc: enc}
 }
 
 func (j *jsonConnWriter) writeRecords(records []Record) error {
@@ -151,7 +231,7 @@ func (j *jsonConnWriter) writeRecords(records []Record) error {
 			return err
 		}
 	}
-	return nil
+	return j.bw.Flush()
 }
 
 // csvConnWriter writes CSV quote/trade rows to a single connection.

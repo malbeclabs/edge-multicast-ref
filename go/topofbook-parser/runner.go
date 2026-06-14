@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"log/slog"
 	"net"
@@ -15,7 +16,38 @@ import (
 const (
 	maxDatagramSize = 65535
 	summaryInterval = 30 * time.Second
+
+	// frameHeaderSeqOffset is the byte offset of the little-endian u64 sequence
+	// number in the 24-byte frame header.
+	frameHeaderSeqOffset = 4
+	frameHeaderMinLen    = 12 // need at least bytes 0..11 to read the seq field
 )
+
+// seqTracker tracks the per-port frame header sequence number to detect real
+// UDP datagram loss (gaps in the header seq).
+type seqTracker struct {
+	last        uint64
+	initialized bool
+}
+
+// observe records seq and returns (gaps, missing) where gaps is 1 if a
+// discontinuity was detected and missing is the number of missing frames.
+// Reorders/dups (seq <= last) are ignored and return (0, 0).
+func (s *seqTracker) observe(seq uint64) (gaps, missing uint64) {
+	if !s.initialized {
+		s.last = seq
+		s.initialized = true
+		return 0, 0
+	}
+	if seq > s.last+1 {
+		gaps = 1
+		missing = seq - (s.last + 1)
+	}
+	if seq >= s.last {
+		s.last = seq
+	}
+	return gaps, missing
+}
 
 type RunnerConfig struct {
 	GroupIP        net.IP
@@ -98,6 +130,10 @@ func (r *Runner) listenPort(ctx context.Context, port int, label string) error {
 	}
 	defer conn.Close()
 
+	if err := conn.SetReadBuffer(64 * 1024 * 1024); err != nil {
+		slog.Warn("could not set UDP read buffer size", "error", err)
+	}
+
 	pc := ipv4.NewPacketConn(conn)
 	if err := pc.SetControlMessage(ipv4.FlagDst, true); err != nil {
 		slog.Warn("could not set control message flag", "error", err)
@@ -110,6 +146,7 @@ func (r *Runner) listenPort(ctx context.Context, port int, label string) error {
 		"interface", r.cfg.Interface)
 
 	buf := make([]byte, maxDatagramSize)
+	var tracker seqTracker
 	for {
 		select {
 		case <-ctx.Done():
@@ -124,6 +161,17 @@ func (r *Runner) listenPort(ctx context.Context, port int, label string) error {
 			}
 			slog.Warn("read error", "port", label, "error", err)
 			continue
+		}
+
+		// Refdata is a low-rate periodic-retransmit stream; per-port frame-seq
+		// gaps there are not a meaningful loss signal (and reflect a shared seq
+		// space), so it's excluded.
+		if n >= frameHeaderMinLen && label != "refdata" {
+			seq := binary.LittleEndian.Uint64(buf[frameHeaderSeqOffset : frameHeaderSeqOffset+8])
+			if gaps, missing := tracker.observe(seq); gaps > 0 && r.cfg.Metrics != nil {
+				r.cfg.Metrics.frameSeqGaps.WithLabelValues(label).Add(float64(gaps))
+				r.cfg.Metrics.framesMissing.WithLabelValues(label).Add(float64(missing))
+			}
 		}
 
 		if r.cfg.Metrics != nil {
