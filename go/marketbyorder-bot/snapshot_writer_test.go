@@ -6,19 +6,38 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 )
 
+// testGaugeVec reads a single labelled gauge value from a GaugeVec.
+func testGaugeVec(t *testing.T, gv *prometheus.GaugeVec, labels ...string) float64 {
+	t.Helper()
+	var m dto.Metric
+	if err := gv.WithLabelValues(labels...).Write(&m); err != nil {
+		t.Fatalf("gauge vec write: %v", err)
+	}
+	return m.GetGauge().GetValue()
+}
+
 type captureWriter struct {
-	mu       sync.Mutex
-	enqueued int
+	mu   sync.Mutex
+	rows []map[string]any
 }
 
 func (w *captureWriter) Enqueue(table string, row map[string]any) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.enqueued++
+	w.rows = append(w.rows, row)
 	return true
+}
+
+func (w *captureWriter) captured() []map[string]any {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := make([]map[string]any, len(w.rows))
+	copy(out, w.rows)
+	return out
 }
 
 func TestSnapshotWriter_CoalescesRapidChanges(t *testing.T) {
@@ -29,12 +48,22 @@ func TestSnapshotWriter_CoalescesRapidChanges(t *testing.T) {
 	inst.ApplyOrderAdd(2, 1, 0, time.Now(), 101, 3)
 
 	cap := &captureWriter{}
-	// We can't easily inject captureWriter into SnapshotWriter without changing
-	// the production type. For this test, use a real ClickhouseClient pointed at
-	// a counting test server — see clickhouse_test.go for the pattern.
-	t.Skip("Wire-up test using httptest server pattern from clickhouse_test.go; left as exercise during integration in Task 15")
-	_ = inst
-	_ = cap
+	metrics := NewMetrics("test", "test")
+	w := NewSnapshotWriter(nil, 5, 0, metrics, 0, func(id uint32, fn func(*Instrument)) { fn(inst) })
+	w.ch = cap
+
+	const rapid = 10
+	for i := 0; i < rapid; i++ {
+		w.MarkDirty(100)
+	}
+
+	w.flushDue()
+
+	rows := cap.captured()
+	// One flush for a 2-level book (1 bid + 1 ask) regardless of how many MarkDirty calls came in.
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows (1 bid + 1 ask) after coalescing %d marks, got %d", rapid, len(rows))
+	}
 }
 
 func TestSnapshotWriter_DirtyEntryCoalesces(t *testing.T) {
@@ -149,6 +178,171 @@ func TestSnapshotWriter_FlushAbortsRemainderOnGenerationBump(t *testing.T) {
 	// every subsequent entry sees the bumped generation and aborts. Exactly 1.
 	if got := mm.GetCounter().GetValue(); got != 1 {
 		t.Fatalf("expected exactly 1 write before generation re-check aborted the batch, got %v", got)
+	}
+}
+
+// TestSnapshotWriter_GapInstrumentEmitsStaleRows verifies that an instrument
+// in StatusGap with a non-empty book emits level rows with stale=1.
+func TestSnapshotWriter_GapInstrumentEmitsStaleRows(t *testing.T) {
+	inst := NewInstrument(42, "ETH-USDT", 0, 0)
+	inst.Status = StatusGap
+	inst.ApplyOrderAdd(1, 0, 0, time.Now(), 100, 5) // one bid
+
+	metrics := stubMetrics()
+	cap := &captureWriter{}
+	w := NewSnapshotWriter(nil, 5, 0, metrics, 0, func(id uint32, fn func(*Instrument)) { fn(inst) })
+	w.ch = cap
+
+	w.MarkDirty(42)
+	w.flushDue()
+
+	rows := cap.captured()
+	if len(rows) == 0 {
+		t.Fatal("expected rows for StatusGap instrument with non-empty book, got none")
+	}
+	for _, row := range rows {
+		staleVal, ok := row["stale"]
+		if !ok {
+			t.Fatalf("row missing stale field: %v", row)
+		}
+		if staleVal != uint8(1) {
+			t.Errorf("expected stale=1 for Gap instrument, got %v", staleVal)
+		}
+	}
+}
+
+// TestSnapshotWriter_ReadyInstrumentEmitsNonStaleRows verifies that an instrument
+// in StatusReady emits level rows with stale=0.
+func TestSnapshotWriter_ReadyInstrumentEmitsNonStaleRows(t *testing.T) {
+	inst := NewInstrument(43, "BTC-USDT", 0, 0)
+	inst.Status = StatusReady
+	inst.ApplyOrderAdd(1, 0, 0, time.Now(), 100, 5) // one bid
+
+	metrics := stubMetrics()
+	cap := &captureWriter{}
+	w := NewSnapshotWriter(nil, 5, 0, metrics, 0, func(id uint32, fn func(*Instrument)) { fn(inst) })
+	w.ch = cap
+
+	w.MarkDirty(43)
+	w.flushDue()
+
+	rows := cap.captured()
+	if len(rows) == 0 {
+		t.Fatal("expected rows for StatusReady instrument, got none")
+	}
+	for _, row := range rows {
+		staleVal, ok := row["stale"]
+		if !ok {
+			t.Fatalf("row missing stale field: %v", row)
+		}
+		if staleVal != uint8(0) {
+			t.Errorf("expected stale=0 for Ready instrument, got %v", staleVal)
+		}
+	}
+}
+
+// TestSnapshotWriter_AwaitingSnapshotEmitsNothing verifies that an instrument
+// in StatusAwaitingSnapshot emits no rows even when the book is non-empty,
+// proving the STATUS guard (not an empty book) is what suppresses output.
+func TestSnapshotWriter_AwaitingSnapshotEmitsNothing(t *testing.T) {
+	inst := NewInstrument(44, "SOL-USDT", 0, 0)
+	// StatusAwaitingSnapshot is the default.
+	inst.ApplyOrderAdd(1, 0, 0, time.Now(), 100, 5) // non-empty book
+
+	metrics := stubMetrics()
+	cap := &captureWriter{}
+	w := NewSnapshotWriter(nil, 5, 0, metrics, 0, func(id uint32, fn func(*Instrument)) { fn(inst) })
+	w.ch = cap
+
+	w.MarkDirty(44)
+	w.flushDue()
+
+	if rows := cap.captured(); len(rows) != 0 {
+		t.Fatalf("expected no rows for StatusAwaitingSnapshot instrument, got %d", len(rows))
+	}
+}
+
+// TestSnapshotWriter_BookGaugesPopulatedOnFlush verifies that BookOrders,
+// BookTopPrice, BookTopQty, and BookSpreadBps are set after a flush of a
+// StatusReady instrument.
+func TestSnapshotWriter_BookGaugesPopulatedOnFlush(t *testing.T) {
+	// PriceExponent=-2 → scale 0.01; QtyExponent=-8 → scale 1e-8.
+	// Two bids: price_raw 10200 (→ 102.00), qty_raw 300 (→ 3e-6)
+	//           price_raw 10100 (→ 101.00), qty_raw 200 (→ 2e-6)
+	// Two asks: price_raw 10300 (→ 103.00), qty_raw 150 (→ 1.5e-6)
+	//           price_raw 10400 (→ 104.00), qty_raw 100 (→ 1e-6)
+	// Best bid = 102.00, best ask = 103.00
+	// Mid = (102 + 103) / 2 = 102.5
+	// Spread bps = (103 - 102) / 102.5 * 10000 ≈ 97.56...
+	inst := NewInstrument(55, "ETH-USDT", -2, -8)
+	inst.Status = StatusReady
+	inst.ApplyOrderAdd(1, 0, 0, time.Now(), 10200, 300) // best bid
+	inst.ApplyOrderAdd(2, 0, 0, time.Now(), 10100, 200) // second bid
+	inst.ApplyOrderAdd(3, 1, 0, time.Now(), 10300, 150) // best ask
+	inst.ApplyOrderAdd(4, 1, 0, time.Now(), 10400, 100) // second ask
+
+	metrics := stubMetrics()
+	cap := &captureWriter{}
+	w := NewSnapshotWriter(nil, 5, 0, metrics, 0, func(id uint32, fn func(*Instrument)) { fn(inst) })
+	w.ch = cap
+
+	w.MarkDirty(55)
+	w.flushDue()
+
+	// BookOrders: 2 bids, 2 asks.
+	if got := testGaugeVec(t, metrics.BookOrders, "ETH-USDT", "bid"); got != 2 {
+		t.Errorf("BookOrders bid = %v, want 2", got)
+	}
+	if got := testGaugeVec(t, metrics.BookOrders, "ETH-USDT", "ask"); got != 2 {
+		t.Errorf("BookOrders ask = %v, want 2", got)
+	}
+
+	// BookTopPrice: best bid = 102.00, best ask = 103.00.
+	const priceScale = 0.01
+	if got := testGaugeVec(t, metrics.BookTopPrice, "ETH-USDT", "bid"); got != 10200*priceScale {
+		t.Errorf("BookTopPrice bid = %v, want %v", got, 10200*priceScale)
+	}
+	if got := testGaugeVec(t, metrics.BookTopPrice, "ETH-USDT", "ask"); got != 10300*priceScale {
+		t.Errorf("BookTopPrice ask = %v, want %v", got, 10300*priceScale)
+	}
+
+	// BookTopQty: best-bid qty_raw=300 * 1e-8 = 3e-6, best-ask qty_raw=150 * 1e-8 = 1.5e-6.
+	const qtyScale = 1e-8
+	const wantBidQty = 300 * qtyScale
+	const wantAskQty = 150 * qtyScale
+	if got := testGaugeVec(t, metrics.BookTopQty, "ETH-USDT", "bid"); got != wantBidQty {
+		t.Errorf("BookTopQty bid = %v, want %v", got, wantBidQty)
+	}
+	if got := testGaugeVec(t, metrics.BookTopQty, "ETH-USDT", "ask"); got != wantAskQty {
+		t.Errorf("BookTopQty ask = %v, want %v", got, wantAskQty)
+	}
+
+	// BookSpreadBps: (103 - 102) / 102.5 * 10000.
+	bestBid := 10200 * priceScale
+	bestAsk := 10300 * priceScale
+	wantSpread := (bestAsk - bestBid) / ((bestBid + bestAsk) / 2) * 10000
+	if got := testGaugeVec(t, metrics.BookSpreadBps, "ETH-USDT"); got != wantSpread {
+		t.Errorf("BookSpreadBps = %v, want %v", got, wantSpread)
+	}
+}
+
+// TestSnapshotWriter_BookGaugesSkipAwaitingSnapshot verifies that no book gauges
+// are set for a StatusAwaitingSnapshot instrument.
+func TestSnapshotWriter_BookGaugesSkipAwaitingSnapshot(t *testing.T) {
+	inst := NewInstrument(56, "SOL-USDT", 0, 0)
+	// StatusAwaitingSnapshot by default — do NOT set Status.
+
+	metrics := stubMetrics()
+	w := NewSnapshotWriter(nil, 5, 0, metrics, 0, func(id uint32, fn func(*Instrument)) { fn(inst) })
+
+	w.MarkDirty(56)
+	w.flushDue()
+
+	// None of the book gauges should have been touched for this symbol.
+	// The GaugeVec returns 0 for unseen label combinations; we just confirm
+	// no panic and the value is 0 (no series created).
+	if got := testGaugeVec(t, metrics.BookOrders, "SOL-USDT", "bid"); got != 0 {
+		t.Errorf("BookOrders bid unexpectedly set for AwaitingSnapshot: %v", got)
 	}
 }
 

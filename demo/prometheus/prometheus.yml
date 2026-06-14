@@ -1,0 +1,22 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: marketbyorder-bot
+    static_configs:
+      - targets: ["marketbyorder-bot:9092"]
+
+  - job_name: topofbook-bot
+    static_configs:
+      - targets: ["bot:9091"]
+
+  # Parsers run network_mode: host (multicast on doublezero1); reach them via
+  # the host gateway, not a docker service name.
+  - job_name: marketbyorder-parser
+    static_configs:
+      - targets: ["host.docker.internal:9093"]
+
+  - job_name: topofbook-parser
+    static_configs:
+      - targets: ["host.docker.internal:9090"]

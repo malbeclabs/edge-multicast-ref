@@ -80,7 +80,8 @@ CREATE TABLE IF NOT EXISTS marketbyorder.level_snapshots (
     price               Float64,
     qty                 Float64,
     order_count         UInt32,
-    cumulative_qty      Float64
+    cumulative_qty      Float64,
+    stale               UInt8 DEFAULT 0  -- existing deployments: run migrations/001_add_stale_to_level_snapshots.sql
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(recv_ts)

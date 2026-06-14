@@ -1396,6 +1396,112 @@
         }
       ],
       "description": "Missing messages detected from the dense per-(channel,instrument) sequence (per_instrument_seq). This is contiguous per instrument, so a gap here is a genuine dropped/missed message."
+    },
+    {
+      "type": "timeseries",
+      "title": "Snapshot discards (rate by reason)",
+      "id": 21,
+      "gridPos": {
+        "x": 0,
+        "y": 56,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "prometheus",
+        "type": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "axisLabel": "Discards / second",
+            "drawStyle": "bars",
+            "lineWidth": 1,
+            "fillOpacity": 80,
+            "spanNulls": true
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "uid": "prometheus",
+            "type": "prometheus"
+          },
+          "expr": "sum by (reason) (rate(dz_mbo_bot_snapshot_discarded_total[$__rate_interval]))",
+          "legendFormat": "{{reason}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "description": "Snapshots discarded without demoting the book, by reason (short, mismatch, other). Should be low in steady state."
+    },
+    {
+      "type": "timeseries",
+      "title": "Book demotions (rate)",
+      "id": 22,
+      "gridPos": {
+        "x": 12,
+        "y": 56,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "uid": "prometheus",
+        "type": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "axisLabel": "Demotions / second",
+            "drawStyle": "bars",
+            "lineWidth": 1,
+            "fillOpacity": 80,
+            "spanNulls": true
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "uid": "prometheus",
+            "type": "prometheus"
+          },
+          "expr": "rate(dz_mbo_bot_book_demotions_total[$__rate_interval])",
+          "legendFormat": "demotions",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "description": "Ready→Gap book demotions. The single legitimate demotion site — should trend to zero once back-pressure is fixed."
     }
   ],
   "refresh": "5s",

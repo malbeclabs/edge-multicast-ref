@@ -11,7 +11,6 @@ type InstrumentStatus int
 
 const (
 	StatusAwaitingSnapshot InstrumentStatus = iota
-	StatusBuildingSnapshot
 	StatusReady
 	StatusGap
 )
@@ -20,8 +19,6 @@ func (s InstrumentStatus) String() string {
 	switch s {
 	case StatusAwaitingSnapshot:
 		return "awaiting-snapshot"
-	case StatusBuildingSnapshot:
-		return "building-snapshot"
 	case StatusReady:
 		return "ready"
 	case StatusGap:
@@ -64,6 +61,7 @@ type Instrument struct {
 	LastAppliedMktdataSeq    uint64
 	LastAppliedInstrumentSeq uint32
 	OpenSnapshot             *PendingSnapshot
+	Pending                  map[uint32]Record // out-of-order deltas keyed by per_instrument_seq
 }
 
 // NewInstrument returns an Instrument awaiting its first snapshot.
@@ -132,8 +130,8 @@ func (i *Instrument) applyExecToOrder(book map[uint64]*RestingOrder, o *RestingO
 	}
 }
 
-// BeginSnapshot opens a new PendingSnapshot. If one is already open,
-// the partial book is discarded.
+// BeginSnapshot opens a new shadow PendingSnapshot without changing Status or
+// the live Bids/Asks. If a snapshot is already open, it is silently replaced.
 func (i *Instrument) BeginSnapshot(snapID uint32, anchorSeq uint64, totalOrders, lastInstrSeq uint32) {
 	i.OpenSnapshot = &PendingSnapshot{
 		SnapshotID:        snapID,
@@ -143,7 +141,6 @@ func (i *Instrument) BeginSnapshot(snapID uint32, anchorSeq uint64, totalOrders,
 		Bids:              map[uint64]*RestingOrder{},
 		Asks:              map[uint64]*RestingOrder{},
 	}
-	i.Status = StatusBuildingSnapshot
 }
 
 // AddSnapshotOrder appends an order to the pending snapshot. snapID must match the open one.
@@ -165,28 +162,28 @@ func (i *Instrument) AddSnapshotOrder(snapID uint32, orderID uint64, side, flags
 var (
 	errSnapshotMismatch = errors.New("snapshot end mismatch")
 	errSnapshotShort    = errors.New("snapshot order count short")
+	errNoOpenSnapshot   = errors.New("snapshot end with no open snapshot")
 )
 
 // EndSnapshot validates and commits the pending snapshot. Returns the AnchorSeq
 // and LastInstrumentSeq on success, or an error if validation fails.
-// On error the pending snapshot is discarded and Status reverts to StatusAwaitingSnapshot.
+// On any failure, only the shadow (OpenSnapshot) is discarded — Status, Bids,
+// and Asks are never touched.
 func (i *Instrument) EndSnapshot(snapID uint32, anchorSeq uint64) (uint64, uint32, error) {
-	if i.OpenSnapshot == nil ||
-		i.OpenSnapshot.SnapshotID != snapID ||
-		i.OpenSnapshot.AnchorSeq != anchorSeq {
-		i.OpenSnapshot = nil
-		i.Status = StatusAwaitingSnapshot
+	if i.OpenSnapshot == nil {
+		return 0, 0, errNoOpenSnapshot
+	}
+	if i.OpenSnapshot.SnapshotID != snapID || i.OpenSnapshot.AnchorSeq != anchorSeq {
+		i.OpenSnapshot = nil // discard shadow only; live book & Status untouched
 		return 0, 0, fmt.Errorf("%w: snapshot_id=%d anchor=%d", errSnapshotMismatch, snapID, anchorSeq)
 	}
 	if i.OpenSnapshot.ReceivedOrders != i.OpenSnapshot.TotalOrders {
-		want := i.OpenSnapshot.TotalOrders
-		got := i.OpenSnapshot.ReceivedOrders
-		i.OpenSnapshot = nil
-		i.Status = StatusAwaitingSnapshot
+		got, want := i.OpenSnapshot.ReceivedOrders, i.OpenSnapshot.TotalOrders
+		i.OpenSnapshot = nil // discard shadow only; live book & Status untouched
 		return 0, 0, fmt.Errorf("%w: got %d expected %d", errSnapshotShort, got, want)
 	}
 
-	// Commit
+	// Commit atomically.
 	i.Bids = i.OpenSnapshot.Bids
 	i.Asks = i.OpenSnapshot.Asks
 	anchor := i.OpenSnapshot.AnchorSeq
@@ -203,6 +200,7 @@ func (i *Instrument) Reset() {
 	i.Bids = map[uint64]*RestingOrder{}
 	i.Asks = map[uint64]*RestingOrder{}
 	i.OpenSnapshot = nil
+	i.Pending = nil
 	i.Status = StatusAwaitingSnapshot
 	i.LastAppliedMktdataSeq = 0
 	i.LastAppliedInstrumentSeq = 0

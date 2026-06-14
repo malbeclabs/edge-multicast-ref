@@ -30,7 +30,7 @@ services:
       - "--refdata-port=${DZ_REFDATA_PORT}"
       - "--interface=${DZ_INTERFACE}"
       - "--output=unix:///var/run/dz/tob.sock"
-      - "--metrics-addr=127.0.0.1:${PARSER_METRICS_PORT}"
+      - "--metrics-addr=0.0.0.0:${PARSER_METRICS_PORT}"
 
   bot:
     build:
@@ -67,7 +67,7 @@ services:
       - --snapshot-port=${DZ_MBO_SNAPSHOT_PORT}
       - --interface=${DZ_INTERFACE}
       - --output=unix:///var/run/dz/mbo.sock
-      - --metrics-addr=127.0.0.1:${DZ_MBO_PARSER_METRICS_PORT:-9093}
+      - --metrics-addr=0.0.0.0:${DZ_MBO_PARSER_METRICS_PORT:-9093}
     volumes:
       - dz-sockets:/var/run/dz
 
@@ -92,6 +92,25 @@ services:
       - "${MBO_BOT_METRICS_PORT:-9092}:9092"
     volumes:
       - dz-sockets:/var/run/dz
+
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    restart: unless-stopped
+    depends_on:
+      - marketbyorder-bot
+      - bot
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    # The parsers run network_mode: host (to receive multicast on doublezero1),
+    # so they are not reachable by service name from this bridge-network
+    # container. host-gateway lets prometheus scrape them on the host.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:9595:9090"
 
   clickhouse:
     image: clickhouse/clickhouse-server:24.8
@@ -125,6 +144,8 @@ services:
     depends_on:
       clickhouse:
         condition: service_healthy
+      prometheus:
+        condition: service_started
     environment:
       GF_SECURITY_ADMIN_PASSWORD: "${GF_ADMIN_PASSWORD}"
       GF_USERS_ALLOW_SIGN_UP: "false"
@@ -141,4 +162,5 @@ volumes:
   parser-socket:
   clickhouse-data:
   grafana-data:
+  prometheus-data:
   dz-sockets:
