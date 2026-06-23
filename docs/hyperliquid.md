@@ -3,11 +3,11 @@
 This guide walks you from nothing to a live Hyperliquid market-data feed delivered
 over [DoubleZero](https://doublezero.xyz) Edge.
 
-The Hyperliquid feed is in early beta. It is published as UDP multicast on a DoubleZero
-group named **`tiredsolid`**, on both **testnet** and **mainnet-beta**. This guide targets
-the mainnet-beta Hyperliquid publisher. See
+The Hyperliquid feed is published as UDP multicast on a DoubleZero group named
+**`tiredsolid`**, on both **testnet** and **mainnet-beta**. This guide targets the
+mainnet-beta Hyperliquid publishers. See
 [Channel details](#channel-details-mainnet-beta) below for its exact multicast address,
-ports, and source ID.
+ports, source ID, and channel ID.
 
 There are two steps that are yours and one that we do for you:
 
@@ -40,11 +40,10 @@ ip a s doublezero1
 The feed will arrive on this interface as plain UDP multicast once your access pass is in
 place (Step 3) and you subscribe (Step 4). You then decode it yourself (Step 5).
 
-> **Coming soon: a one-command container.** We also ship
-> [`doublezero-edge-connect`](https://github.com/malbeclabs/doublezero-edge-connect), a
-> container that bundles the client, decodes the feed, and re-serves it as normalized JSON
-> over a WebSocket. It is not yet supported on mainnet-beta and is omitted from this guide
-> for now. This page will be updated when it is ready.
+We also ship
+[`doublezero-edge-connect`](https://github.com/malbeclabs/doublezero-edge-connect), a
+container that bundles the client, decodes the feed, and re-serves it as normalized JSON
+over a WebSocket.
 
 ## Step 2: Find the feed
 
@@ -59,32 +58,31 @@ testnet and mainnet-beta. Note the code; you will use it in Steps 3 and 4.
 
 ### Channel details (mainnet-beta)
 
-Several publisher hosts share the `tiredsolid` group. They use the same multicast address
-but **distinct ports**, so you select a specific publisher by the ports you bind. This
-guide targets the mainnet-beta Hyperliquid publisher with these details:
+Several publisher streams share the `tiredsolid` group. They use the same multicast
+address but **distinct ports**, so you select a specific stream by the ports you bind.
+All mainnet-beta streams use `source_id=1` for Top-of-Book and Market-by-Order frames.
+Market-by-Order frames use `channel_id=1`.
 
 | Property | Value |
 |----------|-------|
 | Multicast group | `tiredsolid` → `233.84.178.15` |
-| Publisher source address | `148.51.120.79` |
-| Source ID | `3` (beta only) |
+| Source ID | `1` |
+| Market-by-Order channel ID | `1` |
 
-It publishes two feeds, each on its own UDP ports:
+Available mainnet-beta port sets:
 
-| Feed | mktdata | refdata | snapshot | Spec |
-|------|---------|---------|----------|------|
-| Top-of-Book & Trades | `9201` | `9202` | — | [top-of-book](https://github.com/malbeclabs/edge-feed-spec/blob/main/top-of-book/spec.md) |
-| Market-by-Order | `10201` | `10202` | `10203` | [market-by-order](https://github.com/malbeclabs/edge-feed-spec/blob/main/market-by-order/spec.md) |
+| Port set | TOB mktdata | TOB refdata | MBO mktdata | MBO refdata | MBO snapshot |
+|----------|-------------|-------------|-------------|-------------|--------------|
+| A | `9101` | `9102` | `10101` | `10102` | `10103` |
+| B | `9201` | `9202` | `10201` | `10202` | `10203` |
+| C | `9401` | `9402` | `10401` | `10402` | `10403` |
+| D | `9601` | `9602` | `10601` | `10602` | `10603` |
 
-To receive this publisher specifically, bind to its ports above on
-`233.84.178.15`.
-
-> **Source ID is beta-only.** During the beta, the `source_id` field identifies the
-> publisher host for audit rather than the venue, so frames from this host carry
-> **`source_id=3`**. In production the Hyperliquid feed will carry **`source_id=1`**, the
-> venue value assigned in the
-> [edge-feed-spec source registry](https://github.com/malbeclabs/edge-feed-spec/blob/main/sources/spec.md).
-> Do not hard-code `source_id=3`; select the publisher by its ports, not its source ID.
+To receive a stream specifically, bind to its ports above on `233.84.178.15`.
+Top-of-Book & Trades follows the
+[top-of-book spec](https://github.com/malbeclabs/edge-feed-spec/blob/main/top-of-book/spec.md).
+Market-by-Order follows the
+[market-by-order spec](https://github.com/malbeclabs/edge-feed-spec/blob/main/market-by-order/spec.md).
 
 > On **testnet**, the `tiredsolid` group resolves to `233.84.178.6`. Ports and source ID
 > are per-host; confirm the values for the publisher you target.
@@ -133,8 +131,8 @@ Confirm the feed is arriving on the tunnel interface:
 # Tunnel is up
 ip a s doublezero1
 
-# Packets are flowing (Top-of-Book mktdata)
-sudo tcpdump -ni doublezero1 host 233.84.178.15 and udp port 9201
+# Packets are flowing (Top-of-Book mktdata for port set A)
+sudo tcpdump -ni doublezero1 host 233.84.178.15 and udp port 9101
 ```
 
 ## Step 5: Decode the feed
@@ -166,11 +164,11 @@ mind:
 
 - Each frame is at most **1,232 bytes** (one UDP datagram per frame), which leaves room
   for the GRE headers used in last-mile delivery.
-- Select this publisher by binding to its ports on `233.84.178.15` (see
-  [Channel details](#channel-details-mainnet-beta)), not by source ID. Frames carry
-  **`source_id=3`** during the beta; this becomes **`source_id=1`** in production.
+- Select a stream by binding to its ports on `233.84.178.15` (see
+  [Channel details](#channel-details-mainnet-beta)). Frames carry **`source_id=1`**;
+  Market-by-Order frames carry **`channel_id=1`**.
 
 ## Getting help
 
-For access passes, allow-list changes, or feed issues during the beta, contact the
-DoubleZero Foundation with your identity pubkey and the IPs involved.
+For access passes, allow-list changes, or feed issues, contact the DoubleZero Foundation
+with your identity pubkey and the IPs involved.
