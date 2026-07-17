@@ -3,11 +3,12 @@
 This guide walks you from nothing to a live Hyperliquid market-data feed delivered
 over [DoubleZero](https://doublezero.xyz) Edge.
 
-The Hyperliquid feed is published as UDP multicast on a DoubleZero group named
-**`tiredsolid`**, on both **testnet** and **mainnet-beta**. This guide targets the
-mainnet-beta Hyperliquid publishers. See
-[Channel details](#channel-details-mainnet-beta) below for its exact multicast address,
-ports, source ID, and channel ID.
+The Hyperliquid feed is published as UDP multicast over DoubleZero on two groups:
+**`tiredsolid`** carries the book data (Top-of-Book and Market-by-Order) and
+**`tiredsolid-intent`** carries the order-intent feed. Both are available on
+**testnet** and **mainnet-beta**. This guide targets the mainnet-beta Hyperliquid
+publishers. See [Channel details](#channel-details-mainnet-beta) below for the exact
+multicast addresses, ports, source ID, and channel ID.
 
 There are two steps that are yours and one that we do for you:
 
@@ -69,20 +70,48 @@ Market-by-Order frames use `channel_id=1`.
 | Source ID | `1` |
 | Market-by-Order channel ID | `1` |
 
-Available mainnet-beta port sets:
+Available mainnet-beta port sets. Each set is one publisher stream carrying both
+Top-of-Book (TOB) and Market-by-Order (MBO) on the ports shown:
 
 | Port set | TOB mktdata | TOB refdata | MBO mktdata | MBO refdata | MBO snapshot |
 |----------|-------------|-------------|-------------|-------------|--------------|
-| A | `9101` | `9102` | `10101` | `10102` | `10103` |
-| B | `9201` | `9202` | `10201` | `10202` | `10203` |
-| C | `9401` | `9402` | `10401` | `10402` | `10403` |
-| D | `9601` | `9602` | `10601` | `10602` | `10603` |
+| A | `9601` | `9602` | `10601` | `10602` | `10603` |
+| B | `9801` | `9802` | `10801` | `10802` | `10803` |
+| C | `9101` | `9102` | `10101` | `10102` | `10103` |
+| D | `9901` | `9902` | `10901` | `10902` | `10903` |
+| E | `9501` | `9502` | `10501` | `10502` | `10503` |
+| F | `9001` | `9002` | `10001` | `10002` | `10003` |
+| G | `9301` | `9302` | `10301` | `10302` | `10303` |
+| H | `9701` | `9702` | `10701` | `10702` | `10703` |
+| I | `9201` | `9202` | `10201` | `10202` | `10203` |
+| J | `9401` | `9402` | `10401` | `10402` | `10403` |
 
 To receive a stream specifically, bind to its ports above on `233.84.178.15`.
 Top-of-Book & Trades follows the
 [top-of-book spec](https://github.com/malbeclabs/edge-feed-spec/blob/main/top-of-book/spec.md).
 Market-by-Order follows the
 [market-by-order spec](https://github.com/malbeclabs/edge-feed-spec/blob/main/market-by-order/spec.md).
+
+#### Order-intent feed
+
+The order-intent feed publishes pre-consensus order flow on a **separate group**,
+`tiredsolid-intent` → `233.84.178.19`. Frames carry `source_id=1`. Select a stream by
+binding its ports on `233.84.178.19`:
+
+| Property | Value |
+|----------|-------|
+| Multicast group | `tiredsolid-intent` → `233.84.178.19` |
+| Source ID | `1` |
+
+| Port set | OI mktdata | OI refdata |
+|----------|------------|------------|
+| A | `11001` | `11002` |
+| B | `11201` | `11202` |
+
+Order-intent follows the
+[order-intent spec](https://github.com/malbeclabs/edge-feed-spec/blob/main/order-intent/spec.md).
+Access to `tiredsolid-intent` is granted separately from `tiredsolid`; request it the
+same way (Step 3), naming the `tiredsolid-intent` group.
 
 > On **testnet**, the `tiredsolid` group resolves to `233.84.178.6`. Ports and source ID
 > are per-host; confirm the values for the publisher you target.
