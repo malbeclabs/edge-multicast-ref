@@ -2366,7 +2366,30 @@ Copy `go/marketbyorder-parser/main.go` and change every occurrence of the feed n
 
 The required-flag validation (`--group`, all three ports, `--output`), signal handling, and metrics server wiring are unchanged.
 
-- [ ] **Step 2: Verify the binary builds and its flags work**
+- [ ] **Step 2: Make the module self-contained (`go mod tidy`)**
+
+Task 1 hand-wrote `go.mod` and no `go.sum` was ever generated, so this module currently resolves its dependencies only through the Go workspace's union build list. Every sibling module carries its own `go.sum`. Two consequences: `timestamp_linux.go` imports `golang.org/x/sys/unix` which is not in this module's `require` block, and a `GOWORK=off` build fails outright with missing `go.sum` entries.
+
+The container build copies `go.work`, so workspace mode masks this — but the module should stand on its own like its siblings do, and a missing `go.sum` means no dependency verification.
+
+Run from `go/marketbyprice-parser`:
+
+```bash
+go mod tidy
+```
+
+Expected: `go.mod` gains `golang.org/x/sys` as a direct requirement (it is imported by `timestamp_linux.go`) plus the Prometheus indirect set, and a new `go.sum` appears. Confirm the module now builds standalone for both platforms:
+
+```bash
+GOWORK=off go build -o /tmp/mbp-darwin .
+GOWORK=off GOOS=linux go build -o /tmp/mbp-linux .
+```
+
+Expected: both succeed. The linux one is the build that matters — it is what the container runs, and it is the only one that compiles `timestamp_linux.go`.
+
+Commit `go.mod` and `go.sum` together with the rest of this task.
+
+- [ ] **Step 3: Verify the binary builds and its flags work**
 
 Run:
 ```bash
@@ -2377,12 +2400,12 @@ Expected: prints `marketbyprice-parser 0.1.0-dev (unknown)`.
 Run: `/tmp/dz-marketbyprice-parser 2>&1 | head -3`
 Expected: the required-flags error and usage, exit status 2.
 
-- [ ] **Step 3: Write the Dockerfile**
+- [ ] **Step 4: Write the Dockerfile**
 
 Copy `go/marketbyorder-parser/Dockerfile` and change every `marketbyorder-parser` to `marketbyprice-parser` and every `dz-marketbyorder-parser` to `dz-marketbyprice-parser`. In the dependency-copy block, replace the line copying this module's own `go.mod` with the sibling's, so the block lists every *other* workspace member plus its own:
 
 ```dockerfile
-COPY go/marketbyprice-parser/go.mod ./go/marketbyprice-parser/
+COPY go/marketbyprice-parser/go.mod go/marketbyprice-parser/go.sum ./go/marketbyprice-parser/
 ...
 COPY go/marketbyorder-parser/go.mod ./go/marketbyorder-parser/
 COPY go/marketbyorder-bot/go.mod ./go/marketbyorder-bot/
@@ -2390,15 +2413,15 @@ COPY go/marketbyorder-bot/go.mod ./go/marketbyorder-bot/
 
 Then `WORKDIR /src/go/marketbyprice-parser` and `COPY go/marketbyprice-parser/ ./`.
 
-- [ ] **Step 4: Add this module to the four existing Dockerfiles**
+- [ ] **Step 5: Add this module to the four existing Dockerfiles**
 
 In each of `go/marketbyorder-parser/Dockerfile`, `go/topofbook-parser/Dockerfile`, `go/marketbyorder-bot/Dockerfile`, and `go/topofbook-bot/Dockerfile`, add this line to the workspace-member copy block:
 
 ```dockerfile
-COPY go/marketbyprice-parser/go.mod ./go/marketbyprice-parser/
+COPY go/marketbyprice-parser/go.mod go/marketbyprice-parser/go.sum ./go/marketbyprice-parser/
 ```
 
-- [ ] **Step 5: Verify the container builds**
+- [ ] **Step 6: Verify the container builds**
 
 Run from the repo root:
 ```bash
@@ -2406,11 +2429,11 @@ docker build -f go/marketbyprice-parser/Dockerfile -t dz/marketbyprice-parser:te
 ```
 Expected: build succeeds. If Docker is unavailable in this environment, say so explicitly in the task report rather than marking this step done — do not claim a build that did not run.
 
-- [ ] **Step 6: Write `README.md`**
+- [ ] **Step 7: Write `README.md`**
 
 Model it on `go/marketbyorder-parser/README.md`. Cover: what the parser does, the three-port channel model and which message types arrive on each port, a build command, a run example with all required flags, the JSON record envelope with one real `level_update` example line, the full metric list including the two defect counters, and a link to the feed spec. State plainly that the parser is stateless and does not reconstruct books, and point at the bot for that.
 
-- [ ] **Step 7: Full verification**
+- [ ] **Step 8: Full verification**
 
 Run from `go/`:
 ```bash
@@ -2424,7 +2447,7 @@ for m in marketbyorder-bot marketbyorder-parser internal kernel-receiver topofbo
 ```
 Expected: six `ok` lines. `xdp-receiver` is excluded on purpose — it does not build for a pre-existing reason unrelated to this work (see Verification commands). Do not attempt to fix it.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git add go/marketbyprice-parser/ go/marketbyorder-parser/Dockerfile go/topofbook-parser/Dockerfile go/marketbyorder-bot/Dockerfile go/topofbook-bot/Dockerfile
