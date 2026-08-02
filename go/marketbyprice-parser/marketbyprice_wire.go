@@ -40,6 +40,11 @@ const (
 	msgTypeBatchBoundary        uint8 = 0x13
 	msgTypeInstrumentReset      uint8 = 0x14
 	msgTypeSnapshotEnd          uint8 = 0x22
+	msgTypeLiquidation          uint8 = 0x08
+	msgTypeSnapshotBegin        uint8 = 0x20
+	msgTypeLevelUpdate          uint8 = 0x40
+	msgTypeBookClear            uint8 = 0x41
+	msgTypeSnapshotLevel        uint8 = 0x42
 )
 
 // Wire decoding errors.
@@ -317,5 +322,181 @@ func ParseSnapshotEnd(buf []byte) (SnapshotEndBody, error) {
 		InstrumentID: binary.LittleEndian.Uint32(buf[0:4]),
 		AnchorSeq:    binary.LittleEndian.Uint64(buf[4:12]),
 		SnapshotID:   binary.LittleEndian.Uint32(buf[12:16]),
+	}, nil
+}
+
+// u16Unavailable is the shared sentinel for Order Count and Level Index. It
+// means "not provided, or beyond what this field can express", and saturates
+// rather than wrapping. It MUST NOT be read as a magnitude: it is neither a
+// count nor a rank of 65535.
+const u16Unavailable uint16 = 0xFFFF
+
+// LiquidationBody is the 44-byte body of a Liquidation message. Byte-identical
+// to the top-of-book feed's 0x08, though no other parser in this repo decodes it.
+// Annotates a forced Trade, keyed on Trade ID, in the same frame as that Trade.
+type LiquidationBody struct {
+	InstrumentID   uint32
+	SourceID       uint16
+	Flags          uint8 // bit 0: liquidated side (0=long, 1=short); bit 1: ADL
+	Method         uint8 // 0=market, 1=backstop, 0xFF=unknown
+	TradeID        uint64
+	MarkPriceRaw   int64
+	LiquidatedUser [20]byte
+}
+
+// ParseLiquidation decodes a Liquidation body. buf must be exactly 44 bytes.
+func ParseLiquidation(buf []byte) (LiquidationBody, error) {
+	if len(buf) != 44 {
+		return LiquidationBody{}, fmt.Errorf("%w: expected 44 bytes for liquidation body, got %d", errTruncated, len(buf))
+	}
+	b := LiquidationBody{
+		InstrumentID: binary.LittleEndian.Uint32(buf[0:4]),
+		SourceID:     binary.LittleEndian.Uint16(buf[4:6]),
+		Flags:        buf[6],
+		Method:       buf[7],
+		TradeID:      binary.LittleEndian.Uint64(buf[8:16]),
+		MarkPriceRaw: int64(binary.LittleEndian.Uint64(buf[16:24])),
+	}
+	copy(b.LiquidatedUser[:], buf[24:44])
+	return b, nil
+}
+
+// SnapshotBeginBody is the 36-byte body of a SnapshotBegin message.
+//
+// Bytes 0-31 are byte-for-byte the market-by-order feed's 32-byte body, with
+// Total Orders reading as Total Levels. Depth Bound is appended at offset 32.
+// That prefix-superset rule exists so a market-by-order decoder can read a
+// market-by-price frame; it does not license this decoder to accept a 32-byte
+// body, so the length check is exact.
+type SnapshotBeginBody struct {
+	InstrumentID      uint32
+	AnchorSeq         uint64
+	TotalLevels       uint32
+	SnapshotID        uint32
+	LastInstrumentSeq uint32
+	Timestamp         time.Time
+	DepthBound        uint32 // 0 = complete book; N = bounded at N levels per side
+}
+
+// ParseSnapshotBegin decodes a SnapshotBegin body. buf must be exactly 36 bytes.
+func ParseSnapshotBegin(buf []byte) (SnapshotBeginBody, error) {
+	if len(buf) != 36 {
+		return SnapshotBeginBody{}, fmt.Errorf("%w: expected 36 bytes for snapshot_begin body, got %d", errTruncated, len(buf))
+	}
+	return SnapshotBeginBody{
+		InstrumentID:      binary.LittleEndian.Uint32(buf[0:4]),
+		AnchorSeq:         binary.LittleEndian.Uint64(buf[4:12]),
+		TotalLevels:       binary.LittleEndian.Uint32(buf[12:16]),
+		SnapshotID:        binary.LittleEndian.Uint32(buf[16:20]),
+		LastInstrumentSeq: binary.LittleEndian.Uint32(buf[20:24]),
+		Timestamp:         readTSNs(buf[24:32]),
+		DepthBound:        binary.LittleEndian.Uint32(buf[32:36]),
+	}, nil
+}
+
+// LevelUpdateBody is the 44-byte body of a LevelUpdate message — the core
+// message of this feed. Quantity is the ABSOLUTE aggregate resting quantity at
+// the price after the change, never a delta; 0 removes the level.
+type LevelUpdateBody struct {
+	InstrumentID     uint32
+	SourceID         uint16
+	Side             uint8 // 0=bid, 1=ask
+	Action           uint8 // informational only; MUST NOT gate the apply
+	PerInstrumentSeq uint32
+	PriceRaw         int64  // the level's key
+	QtyRaw           uint64 // absolute; 0 = delete
+	Timestamp        time.Time
+	OrderCount       uint16 // u16Unavailable = absent
+	LevelIndex       uint16 // informational only; u16Unavailable = absent
+	UpdateReason     uint8
+	LevelFlags       uint8
+}
+
+// ParseLevelUpdate decodes a LevelUpdate body. buf must be exactly 44 bytes.
+func ParseLevelUpdate(buf []byte) (LevelUpdateBody, error) {
+	if len(buf) != 44 {
+		return LevelUpdateBody{}, fmt.Errorf("%w: expected 44 bytes for level_update body, got %d", errTruncated, len(buf))
+	}
+	return LevelUpdateBody{
+		InstrumentID:     binary.LittleEndian.Uint32(buf[0:4]),
+		SourceID:         binary.LittleEndian.Uint16(buf[4:6]),
+		Side:             buf[6],
+		Action:           buf[7],
+		PerInstrumentSeq: binary.LittleEndian.Uint32(buf[8:12]),
+		PriceRaw:         int64(binary.LittleEndian.Uint64(buf[12:20])),
+		QtyRaw:           binary.LittleEndian.Uint64(buf[20:28]),
+		Timestamp:        readTSNs(buf[28:36]),
+		OrderCount:       binary.LittleEndian.Uint16(buf[36:38]),
+		LevelIndex:       binary.LittleEndian.Uint16(buf[38:40]),
+		UpdateReason:     buf[40],
+		LevelFlags:       buf[41],
+		// bytes 42-43 are reserved padding
+	}, nil
+}
+
+// BookClearBody is the 32-byte body of a BookClear message. Bulk removal of
+// levels. Not a resynchronization signal: a subscriber that applies one stays
+// ready.
+type BookClearBody struct {
+	InstrumentID     uint32
+	SourceID         uint16
+	ClearSide        uint8 // 0=bid, 1=ask, 2=both
+	Scope            uint8 // 0=entire side, 1=from FromPrice outward
+	PerInstrumentSeq uint32
+	FromPriceRaw     int64 // inclusive bound when Scope=1
+	Timestamp        time.Time
+	ClearReason      uint8
+}
+
+// ParseBookClear decodes a BookClear body. buf must be exactly 32 bytes.
+//
+// Scope=1 with ClearSide=2 is malformed — one price cannot bound both sides —
+// and is rejected so the caller discards and counts it.
+func ParseBookClear(buf []byte) (BookClearBody, error) {
+	if len(buf) != 32 {
+		return BookClearBody{}, fmt.Errorf("%w: expected 32 bytes for book_clear body, got %d", errTruncated, len(buf))
+	}
+	b := BookClearBody{
+		InstrumentID:     binary.LittleEndian.Uint32(buf[0:4]),
+		SourceID:         binary.LittleEndian.Uint16(buf[4:6]),
+		ClearSide:        buf[6],
+		Scope:            buf[7],
+		PerInstrumentSeq: binary.LittleEndian.Uint32(buf[8:12]),
+		FromPriceRaw:     int64(binary.LittleEndian.Uint64(buf[12:20])),
+		Timestamp:        readTSNs(buf[20:28]),
+		ClearReason:      buf[28],
+		// bytes 29-31 are reserved padding
+	}
+	if b.Scope == 1 && b.ClearSide == 2 {
+		return b, fmt.Errorf("%w: book_clear scope=1 with clear_side=both", errMalformedBody)
+	}
+	return b, nil
+}
+
+// SnapshotLevelBody is the 28-byte body of a SnapshotLevel message. The
+// Instrument ID is implied by the containing SnapshotBegin and is not repeated.
+// Quantity is non-zero by rule; an empty level is represented by its absence.
+type SnapshotLevelBody struct {
+	SnapshotID uint32
+	PriceRaw   int64
+	QtyRaw     uint64
+	OrderCount uint16 // u16Unavailable = absent
+	Side       uint8  // 0=bid, 1=ask
+	LevelFlags uint8
+}
+
+// ParseSnapshotLevel decodes a SnapshotLevel body. buf must be exactly 28 bytes.
+func ParseSnapshotLevel(buf []byte) (SnapshotLevelBody, error) {
+	if len(buf) != 28 {
+		return SnapshotLevelBody{}, fmt.Errorf("%w: expected 28 bytes for snapshot_level body, got %d", errTruncated, len(buf))
+	}
+	return SnapshotLevelBody{
+		SnapshotID: binary.LittleEndian.Uint32(buf[0:4]),
+		PriceRaw:   int64(binary.LittleEndian.Uint64(buf[4:12])),
+		QtyRaw:     binary.LittleEndian.Uint64(buf[12:20]),
+		OrderCount: binary.LittleEndian.Uint16(buf[20:22]),
+		Side:       buf[22],
+		LevelFlags: buf[23],
+		// bytes 24-27 are reserved padding
 	}, nil
 }
