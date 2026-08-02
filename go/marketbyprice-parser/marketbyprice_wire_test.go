@@ -173,10 +173,13 @@ func TestParseInstrumentDefinition(t *testing.T) {
 	copy(buf[4:20], "BTC-USDT")
 	copy(buf[20:28], "BTC")
 	copy(buf[28:36], "USDT")
-	buf[36] = 1                                              // Asset Class: crypto spot
-	buf[37] = 254                                             // Price Exponent: -2 as int8
-	buf[38] = 248                                             // Qty Exponent: -8 as int8
-	buf[39] = 1                                              // Market Model: CLOB
+	buf[36] = 1 // Asset Class: crypto spot
+	// Exponents are negative. Assign through typed variables: `byte(int8(-2))`
+	// is a compile-time overflow error, because the operand is a constant.
+	priceExp, qtyExp := int8(-2), int8(-8)
+	buf[37] = byte(priceExp)
+	buf[38] = byte(qtyExp)
+	buf[39] = 1 // Market Model: CLOB
 	binary.LittleEndian.PutUint64(buf[40:48], uint64(int64(1)))
 	binary.LittleEndian.PutUint64(buf[48:56], 100)
 	binary.LittleEndian.PutUint64(buf[56:64], 0)
@@ -208,10 +211,11 @@ func TestParseTrade(t *testing.T) {
 	buf := make([]byte, 48)
 	binary.LittleEndian.PutUint32(buf[0:4], 7)
 	binary.LittleEndian.PutUint16(buf[4:6], 1)
-	buf[6] = 1 // Aggressor Side: buy
+	buf[6] = 1    // Aggressor Side: buy
 	buf[7] = 0x02 // Trade Flags: sweep
 	binary.LittleEndian.PutUint64(buf[8:16], uint64(ts.UnixNano()))
-	binary.LittleEndian.PutUint64(buf[16:24], ^uint64(1499)) // -1500 as int64
+	tradePrice := int64(-1500) // typed variable; see the note on exponents above
+	binary.LittleEndian.PutUint64(buf[16:24], uint64(tradePrice))
 	binary.LittleEndian.PutUint64(buf[24:32], 250)
 	binary.LittleEndian.PutUint64(buf[32:40], 99887766)
 	binary.LittleEndian.PutUint64(buf[40:48], 1000000)
