@@ -50,7 +50,22 @@ All paths relative to `go/marketbyprice-parser/`.
 - `Dockerfile`, `README.md` — Task 8.
 - `../go.work` — add this module. Task 1.
 
-Baseline before starting: from `go/`, `go build ./...` and `go test ./...` are green.
+## Verification commands (read before running anything)
+
+The Go workspace does not support `./...` from `go/`. `go build ./...`, `go vet ./...`, and `go test ./...` all fail there with `pattern ./...: directory prefix . does not contain modules listed in go.work`, and they failed that way before this work started. Do not try to fix that, and do not use those forms.
+
+Use these instead, from `go/`:
+
+- Type-check: `go vet ./marketbyprice-parser/...`
+- Test: `go test ./marketbyprice-parser/...`
+- Race check: `go test -race ./marketbyprice-parser/...`
+
+Two more facts to save you a wrong diagnosis:
+
+- `go build` on this module fails with `function main is undeclared in the main package` until Task 8 adds `main.go`. That is expected in Tasks 1-7. `go vet` type-checks without linking, which is why it is the build gate until then.
+- `go build ./marketbyprice-parser/...` fails with `build output "marketbyprice-parser" already exists and is a directory` — building a `main` package writes a binary named after the directory into the current directory. From Task 8 on, use `go build -o /tmp/dz-marketbyprice-parser ./marketbyprice-parser/` or build from inside the module directory.
+
+Baseline before starting: `go vet` and `go test` pass for every module except `xdp-receiver`, which does not build because its generated BPF object `xdpfilter_bpfel.o` is absent. That is pre-existing and out of scope — leave it alone.
 
 ---
 
@@ -371,8 +386,8 @@ Expected: all PASS.
 
 - [ ] **Step 7: Verify the workspace still builds**
 
-Run from `go/`: `go build ./... && go vet ./marketbyprice-parser/`
-Expected: no output.
+Run from `go/`: `go vet ./marketbyprice-parser/...`
+Expected: no output. Do not run `go build` — see Verification commands above; it cannot succeed until Task 8.
 
 - [ ] **Step 8: Commit**
 
@@ -2362,9 +2377,15 @@ Model it on `go/marketbyorder-parser/README.md`. Cover: what the parser does, th
 
 Run from `go/`:
 ```bash
-go build ./... && go vet ./... && go test ./...
+go vet ./marketbyprice-parser/... && go test ./marketbyprice-parser/... && go build -o /tmp/dz-marketbyprice-parser ./marketbyprice-parser/
 ```
-Expected: all green, including the two existing parsers and both bots.
+Expected: all green. This is the first task where `go build` can succeed, because `main.go` now exists.
+
+Then confirm the other modules still vet and test, from `go/`:
+```bash
+for m in marketbyorder-bot marketbyorder-parser internal kernel-receiver topofbook-bot topofbook-parser; do (cd $m && go vet ./... && go test ./... >/dev/null && echo "$m ok"); done
+```
+Expected: six `ok` lines. `xdp-receiver` is excluded on purpose — it does not build for a pre-existing reason unrelated to this work (see Verification commands). Do not attempt to fix it.
 
 - [ ] **Step 8: Commit**
 
@@ -2377,7 +2398,8 @@ git commit -m "marketbyprice-parser: add entry point, container, and readme"
 
 ## Done criteria
 
-- `go build ./...`, `go vet ./...`, and `go test ./...` are green from `go/`.
+- From `go/`: `go vet ./marketbyprice-parser/...`, `go test ./marketbyprice-parser/...`, and `go test -race ./marketbyprice-parser/...` are green, and `go build -o /tmp/dz-marketbyprice-parser ./marketbyprice-parser/` succeeds.
+- The six other buildable modules still vet and test clean; `xdp-receiver` remains untouched in its pre-existing broken state.
 - Every one of the 13 message types has a byte-exact decode test.
 - Sentinel omission, unknown-type skip, `Message Length = 0` termination, and malformed-`BookClear` drop-without-frame-failure each have a test.
 - `dz-marketbyprice-parser --version` runs; the container builds.
