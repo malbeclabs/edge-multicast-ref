@@ -1,8 +1,8 @@
-# DZ Market-by-Price Parser
+# DoubleZero Market-by-Price Parser
 
 > Implements the [Market-by-Price Feed](https://github.com/malbeclabs/edge-feed-spec/blob/main/market-by-price/spec.md) spec.
 
-A standalone multicast subscriber that decodes DoubleZero Market-by-Price (DZ-MBP v0.1.0) wire-format frames and writes decoded market data records to a file or Unix socket.
+A standalone multicast subscriber that decodes DoubleZero Market-by-Price wire-format frames (schema version 1) and writes decoded market-data records to a file or Unix socket.
 
 **The parser is stateless.** It decodes each wire message into a JSON record and forwards it; it does not track price levels, does not reconstruct an order book, and holds no per-instrument state across frames. Book construction, snapshot/delta reconciliation, and persistence belong to a separate consumer — the planned `marketbyprice-bot` — which subscribes to this parser's output socket and does that work.
 
