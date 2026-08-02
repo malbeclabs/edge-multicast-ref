@@ -27,6 +27,7 @@
 - Write "DoubleZero" in prose, never "DZ". Binary names and env vars keep their existing `dz-` / `DZ_` prefixes.
 - **Encoding negative values in tests:** assign through a typed variable, never a constant conversion. `byte(int8(-2))` and `uint64(int64(-1500))` are compile-time overflow errors in every Go version, because the operand is an untyped-constant expression. Write `exp := int8(-2); buf[i] = byte(exp)`. Do not substitute the equivalent unsigned literal (`254`) or a bit-complement trick (`^uint64(1499)`) — both compile, but they hide which signed value the test is asserting, and these tests exist to guard sign handling on `price` and exponent fields.
 - Commit messages: `component: short description`, lowercase, imperative, no trailing period, no `Co-Authored-By` line.
+- **Every task ends gofmt-clean.** Before committing, run `gofmt -l ./marketbyprice-parser/` from `go/` and confirm it prints nothing; run `gofmt -w` on any file it lists. The code blocks in this plan are indented for readability in Markdown and are not guaranteed gofmt-canonical — particularly inline comment alignment, which shifts whenever a literal's width changes.
 - Never write a `Liquidation`, `LevelUpdate`, `BookClear`, or `SnapshotLevel` decoder by copying from `marketbyorder-parser` — those four do not exist there. Write them from the offsets in this plan.
 
 ## File map
