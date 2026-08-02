@@ -91,7 +91,7 @@ header, since that is what the parse functions receive:
 | `0x04` | Trade | 52 | 48 | mktdata | identical to both siblings |
 | `0x06` | EndOfSession | 12 | 8 | mktdata | identical to both siblings |
 | `0x07` | ManifestSummary | 24 | 20 | refdata | identical to both siblings |
-| `0x08` | Liquidation | 48 | 44 | mktdata | identical to top-of-book; **new to this repo's MBO-shaped decoders** |
+| `0x08` | Liquidation | 48 | 44 | mktdata | identical to top-of-book on the wire, but **neither existing parser decodes it — new code here** |
 | `0x13` | BatchBoundary | 16 | 12 | mktdata | identical to market-by-order |
 | `0x14` | InstrumentReset | 28 | 24 | mktdata | identical to market-by-order |
 | `0x20` | SnapshotBegin | 40 | 36 | snapshot | market-by-order's 32-byte body + `Depth Bound` at body offset 32 |
