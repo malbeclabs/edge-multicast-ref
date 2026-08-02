@@ -3,6 +3,7 @@ go 1.25.0
 use (
 	./marketbyorder-bot
 	./marketbyorder-parser
+	./marketbyprice-parser
 	./internal
 	./kernel-receiver
 	./topofbook-bot
