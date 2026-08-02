@@ -25,6 +25,7 @@
 - Body length checks are **exact equality**, never `>=`. A v1 body of unexpected length is malformed.
 - The `u16` value `0xFFFF` in `Order Count` and `Level Index` means *absent*. It MUST NOT reach JSON as `65535`; the key is omitted instead.
 - Write "DoubleZero" in prose, never "DZ". Binary names and env vars keep their existing `dz-` / `DZ_` prefixes.
+- **Encoding negative values in tests:** assign through a typed variable, never a constant conversion. `byte(int8(-2))` and `uint64(int64(-1500))` are compile-time overflow errors in every Go version, because the operand is an untyped-constant expression. Write `exp := int8(-2); buf[i] = byte(exp)`. Do not substitute the equivalent unsigned literal (`254`) or a bit-complement trick (`^uint64(1499)`) — both compile, but they hide which signed value the test is asserting, and these tests exist to guard sign handling on `price` and exponent fields.
 - Commit messages: `component: short description`, lowercase, imperative, no trailing period, no `Co-Authored-By` line.
 - Never write a `Liquidation`, `LevelUpdate`, `BookClear`, or `SnapshotLevel` decoder by copying from `marketbyorder-parser` — those four do not exist there. Write them from the offsets in this plan.
 
@@ -473,8 +474,11 @@ func TestParseInstrumentDefinition(t *testing.T) {
 	copy(buf[20:28], "BTC")
 	copy(buf[28:36], "USDT")
 	buf[36] = 1                                              // Asset Class: crypto spot
-	buf[37] = byte(int8(-2))                                 // Price Exponent
-	buf[38] = byte(int8(-8))                                 // Qty Exponent
+	// Exponents are negative. Assign through typed variables: `byte(int8(-2))`
+	// is a compile-time overflow error, because the operand is a constant.
+	priceExp, qtyExp := int8(-2), int8(-8)
+	buf[37] = byte(priceExp)
+	buf[38] = byte(qtyExp)
 	buf[39] = 1                                              // Market Model: CLOB
 	binary.LittleEndian.PutUint64(buf[40:48], uint64(int64(1)))
 	binary.LittleEndian.PutUint64(buf[48:56], 100)
@@ -510,7 +514,8 @@ func TestParseTrade(t *testing.T) {
 	buf[6] = 1 // Aggressor Side: buy
 	buf[7] = 0x02 // Trade Flags: sweep
 	binary.LittleEndian.PutUint64(buf[8:16], uint64(ts.UnixNano()))
-	binary.LittleEndian.PutUint64(buf[16:24], uint64(int64(-1500)))
+	tradePrice := int64(-1500) // typed variable; see the note on exponents above
+	binary.LittleEndian.PutUint64(buf[16:24], uint64(tradePrice))
 	binary.LittleEndian.PutUint64(buf[24:32], 250)
 	binary.LittleEndian.PutUint64(buf[32:40], 99887766)
 	binary.LittleEndian.PutUint64(buf[40:48], 1000000)
@@ -751,7 +756,10 @@ func TestParseLevelUpdate(t *testing.T) {
 	buf[6] = 1 // Side: ask
 	buf[7] = 2 // Action: change
 	binary.LittleEndian.PutUint32(buf[8:12], 777)
-	binary.LittleEndian.PutUint64(buf[12:20], uint64(int64(-2500))) // negative price is legal
+	// Negative prices are legal. Encode through a typed variable: a constant
+	// conversion such as uint64(int64(-2500)) is a compile-time overflow error.
+	priceRaw := int64(-2500)
+	binary.LittleEndian.PutUint64(buf[12:20], uint64(priceRaw))
 	binary.LittleEndian.PutUint64(buf[20:28], 12345)
 	binary.LittleEndian.PutUint64(buf[28:36], uint64(ts.UnixNano()))
 	binary.LittleEndian.PutUint16(buf[36:38], 4)  // Order Count
@@ -834,7 +842,9 @@ func TestParseBookClear_ScopedFromPrice(t *testing.T) {
 	buf := make([]byte, 32)
 	buf[6] = 0 // Clear Side: bid
 	buf[7] = 1 // Scope: from price outward
-	binary.LittleEndian.PutUint64(buf[12:20], uint64(int64(-777)))
+	// Typed variable, not a constant conversion — see TestParseLevelUpdate.
+	fromPrice := int64(-777)
+	binary.LittleEndian.PutUint64(buf[12:20], uint64(fromPrice))
 	body, err := ParseBookClear(buf)
 	if err != nil {
 		t.Fatal(err)
