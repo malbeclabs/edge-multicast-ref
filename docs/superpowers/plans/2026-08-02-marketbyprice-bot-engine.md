@@ -625,16 +625,24 @@ func (i *Instrument) ApplyLevelUpdate(sideByte uint8, priceRaw int64, qtyRaw uin
 	book := i.side(sideByte)
 	_, present := book[priceRaw]
 
+	// Independent checks, deliberately NOT a switch. The spec's four divergence
+	// conditions are not mutually exclusive — Quantity=0 with Action=New on an
+	// already-present level violates two of them at once — and the spec asks a
+	// subscriber to surface each. A switch fires at most one case and would
+	// silently drop the rest, under-reporting exactly the doubly-malformed
+	// messages that most deserve attention.
 	var div []DivergenceKind
-	switch {
-	case qtyRaw == 0 && action != 3:
+	if qtyRaw == 0 && action != 3 {
 		// Publisher rule: Quantity 0 is only legal with Action=Delete.
 		div = append(div, DivergenceZeroQtyBadAction)
-	case qtyRaw != 0 && action == 3:
+	}
+	if qtyRaw != 0 && action == 3 {
 		div = append(div, DivergenceDeleteNonzeroQty)
-	case action == 1 && present:
+	}
+	if action == 1 && present {
 		div = append(div, DivergenceNewOnPresent)
-	case action == 2 && !present:
+	}
+	if action == 2 && !present {
 		div = append(div, DivergenceChangeOnAbsent)
 	}
 
