@@ -62,6 +62,47 @@ func TestApplyLevelUpdate_DivergenceCounters(t *testing.T) {
 	}
 }
 
+// The four divergence conditions are not mutually exclusive, and the spec asks a
+// subscriber to surface each one. A single message can violate two at once, so
+// the classification must report both rather than stopping at the first match.
+func TestApplyLevelUpdate_OverlappingDivergencesBothReported(t *testing.T) {
+	has := func(div []DivergenceKind, want DivergenceKind) bool {
+		for _, d := range div {
+			if d == want {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Quantity=0 with Action=New on a level that IS present: violates both the
+	// "zero quantity requires Action=Delete" rule and "New on a present level".
+	i := ready(t)
+	i.ApplyLevelUpdate(0, 1000, 50, 1, 0, 1)
+	div := i.ApplyLevelUpdate(0, 1000, 0, 0, 0, 1)
+	if len(div) != 2 {
+		t.Fatalf("expected 2 divergences, got %d: %v", len(div), div)
+	}
+	if !has(div, DivergenceZeroQtyBadAction) || !has(div, DivergenceNewOnPresent) {
+		t.Errorf("expected both zero_qty_wrong_action and new_on_present: %v", div)
+	}
+	// The apply itself is still correct: quantity 0 removed the level.
+	if _, present := i.Bids[1000]; present {
+		t.Error("qty 0 must still remove the level regardless of divergences")
+	}
+
+	// Quantity=0 with Action=Change on a level that is ABSENT: violates both the
+	// zero-quantity rule and "Change on an absent level".
+	j := ready(t)
+	div = j.ApplyLevelUpdate(1, 2000, 0, 0, 0, 2)
+	if len(div) != 2 {
+		t.Fatalf("expected 2 divergences, got %d: %v", len(div), div)
+	}
+	if !has(div, DivergenceZeroQtyBadAction) || !has(div, DivergenceChangeOnAbsent) {
+		t.Errorf("expected both zero_qty_wrong_action and change_on_absent: %v", div)
+	}
+}
+
 func TestApplyBookClear_EntireSide(t *testing.T) {
 	i := ready(t)
 	i.ApplyLevelUpdate(0, 1000, 5, 1, 0, 1)
