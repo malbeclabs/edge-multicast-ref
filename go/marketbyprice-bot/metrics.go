@@ -54,13 +54,6 @@ type Metrics struct {
 	SnapshotCoalescesTotal prometheus.Counter
 	SnapshotLagMs          prometheus.Histogram
 
-	// ClickHouse
-	ClickhouseRowsWritten   *prometheus.CounterVec
-	ClickhouseRowsDropped   *prometheus.CounterVec
-	ClickhouseWriteErrors   *prometheus.CounterVec
-	ClickhouseBatchDuration *prometheus.HistogramVec
-	ClickhouseBufferedRows  *prometheus.GaugeVec
-
 	startTime time.Time
 }
 
@@ -106,15 +99,6 @@ func NewMetrics(version, commit string) *Metrics {
 		Buckets: prometheus.ExponentialBuckets(1, 2, 12),
 	})
 
-	m.ClickhouseRowsWritten = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "clickhouse_rows_written_total"}, []string{"table"})
-	m.ClickhouseRowsDropped = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "clickhouse_rows_dropped_total"}, []string{"table", "reason"})
-	m.ClickhouseWriteErrors = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "clickhouse_write_errors_total"}, []string{"table", "reason"})
-	m.ClickhouseBatchDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Namespace: metricsNamespace, Name: "clickhouse_batch_duration_seconds",
-		Buckets: prometheus.ExponentialBuckets(0.001, 2, 14),
-	}, []string{"table"})
-	m.ClickhouseBufferedRows = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: metricsNamespace, Name: "clickhouse_buffered_rows"}, []string{"table"})
-
 	reg.MustRegister(
 		m.BuildInfo, m.UptimeSeconds,
 		m.SocketConnected, m.SocketReconnects, m.RecordsTotal, m.DecodeErrors, m.SocketToBotLatency,
@@ -124,8 +108,6 @@ func NewMetrics(version, commit string) *Metrics {
 		m.SnapshotDiscardedTotal, m.SnapshotLevelDroppedTotal, m.DepthBoundedInstruments,
 		m.PerInstrumentGapsTotal, m.InstrumentResetsTotal, m.ChannelResetsTotal, m.InstrumentsTotal,
 		m.SnapshotWritesTotal, m.SnapshotCoalescesTotal, m.SnapshotLagMs,
-		m.ClickhouseRowsWritten, m.ClickhouseRowsDropped, m.ClickhouseWriteErrors,
-		m.ClickhouseBatchDuration, m.ClickhouseBufferedRows,
 	)
 	m.BuildInfo.WithLabelValues(version, commit).Set(1)
 
