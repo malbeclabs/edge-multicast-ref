@@ -1034,7 +1034,13 @@ Create `coordinator_test.go` covering:
 2. `TestDispatch_SnapshotLevelRoutedToOpenGroupsShard` — `snapshot_begin` for instrument 5 (shard 1), then a `snapshot_level` with the matching `snapshot_id`, arrives at shard 1 even though the level record carries no `instrument_id`.
 3. `TestDispatch_SnapshotLevelWithNoOpenGroupDropped` — a `snapshot_level` before any `snapshot_begin` is dropped and counted.
 4. `TestDispatch_SnapshotLevelMismatchedIDDropped` — with a group open at `snapshot_id = 7`, a level carrying `snapshot_id = 8` is dropped and counted.
-5. **`TestDispatch_TwoInstrumentsSameSnapshotIDRouteIndependently`** — the regression test for issue #30. Open a group for instrument 4 at `snapshot_id = 5`, close it, then open one for instrument 7 also at `snapshot_id = 5`; levels after the second `snapshot_begin` must reach instrument 7's shard, not instrument 4's. With 4 shards those are different shards, so a `{channel, snapshot_id}` route would fail this test.
+5. `TestDispatch_TwoInstrumentsSameSnapshotIDRouteIndependently` — open a group for instrument 4 at `snapshot_id = 5`, close it, then open one for instrument 7 also at `snapshot_id = 5`; levels after the second `snapshot_begin` must reach instrument 7's shard (3) and not instrument 4's (0).
+
+   **This is not a regression test, despite appearances.** I built the wrong `{channel, snapshot_id}` route in a prototype and this test passed against it, because for sequential complete groups the later `snapshot_begin` overwrites the bad entry before any of its levels arrive. Keep the test — it pins the correct routing — but do not claim it discriminates between the two models. Test 5a is the one that does.
+
+5a. **`TestDispatch_StrayLevelAfterSnapshotEndIsDroppedNotRouted`** — the test that actually discriminates. Run a complete group for instrument 4 at `snapshot_id = 5` (begin, one level, end), drain every shard, then dispatch one more `snapshot_level` bearing `snapshot_id = 5`. Assert **no shard receives it** and `SnapshotLevelDroppedTotal` is exactly 1.
+
+   Verified: this fails against a `{channel, snapshot_id}` route that keeps its entry past the group's end (the stray level is routed to a shard and silently swallowed, counter stays 0) and passes against the open-group model, which deletes the group on `snapshot_end` so the level has nowhere to go and is counted. Requires a real `*Metrics` rather than nil, plus a small helper to read a counter's value via `prometheus.Metric.Write` into a `dto.Metric`.
 6. `TestDispatch_ResetCountChangeRunsBarrier` — a `reset_count` change drains every shard via `msgReset`, clears coordinator state, counts `ChannelResetsTotal`, and then routes the triggering record as the first record of the new era.
 7. `TestDispatch_EndOfSessionRunsFence` — `end_of_session` sends `msgFence` to every shard and waits for all acks.
 8. `TestDispatch_ManifestSummaryUpdatesState` — a `manifest_summary` updates `ManifestState` without touching shards.
