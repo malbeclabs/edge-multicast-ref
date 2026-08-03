@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"log"
 	"sort"
 	"sync"
@@ -64,6 +63,13 @@ type Shard struct {
 	// records.
 	maxBuffered int
 
+	// Crossed-book monitoring state. sawBatchBoundary switches evaluation from
+	// per-delta to per-boundary; touched is the set of instruments changed since
+	// the previous boundary; crossed is the currently-crossed set behind the gauge.
+	sawBatchBoundary bool
+	touched          map[instKey]struct{}
+	crossed          map[instKey]struct{}
+
 	inbox   chan shardMsg
 	metrics *Metrics
 }
@@ -94,6 +100,8 @@ func NewShard(idx, n int, metrics *Metrics) *Shard {
 		refdata:     map[instKey]InstrumentDef{},
 		deltaBuf:    map[instKey][]BufferedDelta{},
 		maxBuffered: maxBufferedDeltasPerShard,
+		touched:     map[instKey]struct{}{},
+		crossed:     map[instKey]struct{}{},
 		inbox:       make(chan shardMsg, 4096),
 		metrics:     metrics,
 	}
@@ -403,5 +411,3 @@ func actionFromString(s string) uint8 {
 		return 0
 	}
 }
-
-var _ = errors.New // keep errors imported for later tasks
