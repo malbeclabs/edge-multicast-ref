@@ -18,6 +18,7 @@ COPY go/topofbook-bot/go.mod go/topofbook-bot/go.sum ./go/topofbook-bot/
 COPY go/topofbook-parser/go.mod go/topofbook-parser/go.sum ./go/topofbook-parser/
 COPY go/marketbyorder-parser/go.mod ./go/marketbyorder-parser/
 COPY go/marketbyorder-bot/go.mod ./go/marketbyorder-bot/
+COPY go/marketbyprice-bot/go.mod go/marketbyprice-bot/go.sum ./go/marketbyprice-bot/
 
 WORKDIR /src/go/marketbyprice-parser
 RUN go mod download
