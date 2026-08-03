@@ -187,6 +187,12 @@ func (r *Runner) receive(ctx context.Context, port string, conn *net.UDPConn, er
 		if defects.MalformedBookClear > 0 {
 			r.metrics.MalformedMessages.WithLabelValues("bookclear_scope_side").Add(float64(defects.MalformedBookClear))
 		}
+		if defects.MalformedOther > 0 {
+			r.metrics.MalformedMessages.WithLabelValues("other").Add(float64(defects.MalformedOther))
+		}
+		if defects.UnknownType > 0 {
+			r.metrics.SkippedMessages.WithLabelValues("unknown_type").Add(float64(defects.UnknownType))
+		}
 
 		recvNS := uint64(recvTime.UnixNano())
 		for i := range records {
@@ -196,8 +202,12 @@ func (r *Runner) receive(ctx context.Context, port string, conn *net.UDPConn, er
 			observeLatencies(r.metrics, port, recvTime, records[i])
 		}
 
-		if err := r.sink.Write(records); err != nil {
-			r.metrics.SinkWriteErrors.Inc()
+		// An all-skipped or all-malformed frame yields no records. Writing the
+		// empty batch would still consume a per-client queue slot in SocketSink.
+		if len(records) > 0 {
+			if err := r.sink.Write(records); err != nil {
+				r.metrics.SinkWriteErrors.Inc()
+			}
 		}
 	}
 }
@@ -232,8 +242,14 @@ func classifyError(err error) string {
 		return "frame_length"
 	case errors.Is(err, errFrameTooShort), errors.Is(err, errMessageTooShort), errors.Is(err, errTruncated):
 		return "truncated"
+	// Defensive only, and currently unreachable: ParseFrame drops a malformed or
+	// unknown-type message and counts it rather than failing the frame, so
+	// neither error reaches here. Kept so that a future frame-level use of either
+	// gets a real reason label instead of falling through to "other".
 	case errors.Is(err, errMalformedBody):
 		return "malformed_body"
+	case errors.Is(err, errUnknownType):
+		return "unknown_type"
 	default:
 		return "other"
 	}

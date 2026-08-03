@@ -38,6 +38,11 @@ type Metrics struct {
 	SnapshotFlagMismatch *prometheus.CounterVec
 	MalformedMessages    *prometheus.CounterVec
 
+	// Messages this parser decided not to emit. Distinct from MalformedMessages:
+	// skipping an unimplemented Type ID is spec-legal, so it must not raise a
+	// malformed-message alert, but it is still data leaving the pipeline.
+	SkippedMessages *prometheus.CounterVec
+
 	startTime time.Time
 }
 
@@ -120,6 +125,11 @@ func NewMetrics(version, commit string) *Metrics {
 		Help: "Individual messages the spec declares malformed, dropped without failing their frame.",
 	}, []string{"reason"})
 
+	m.SkippedMessages = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricsNamespace, Name: "skipped_messages_total",
+		Help: "Messages decoded but not emitted as records, by reason. reason=\"unknown_type\" is legal forward compatibility, not a publisher defect.",
+	}, []string{"reason"})
+
 	m.BuildInfo = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: metricsNamespace, Name: "build_info",
 		Help: "Build info; value always 1",
@@ -133,7 +143,7 @@ func NewMetrics(version, commit string) *Metrics {
 	reg.MustRegister(
 		m.IngressPackets, m.IngressBytes, m.ParseErrors, m.RecordsTotal, m.SourceLatency, m.SendLatency,
 		m.SocketClients, m.SocketClientDrops, m.SocketRecordsSent, m.SinkWriteErrors,
-		m.FrameSeqGaps, m.FramesMissing, m.SnapshotFlagMismatch, m.MalformedMessages,
+		m.FrameSeqGaps, m.FramesMissing, m.SnapshotFlagMismatch, m.MalformedMessages, m.SkippedMessages,
 		m.BuildInfo, m.UptimeSeconds,
 	)
 	m.BuildInfo.WithLabelValues(version, commit).Set(1)

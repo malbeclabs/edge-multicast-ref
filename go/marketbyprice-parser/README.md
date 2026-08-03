@@ -91,10 +91,13 @@ Namespace `dz_mbp_parser`. All metrics are exposed on `--metrics-addr` at `/metr
 | `dz_mbp_parser_frames_missing_total{port}` | counter | Total frames missing, summed across gap magnitudes in the frame-header sequence, by port |
 | `dz_mbp_parser_snapshot_flag_mismatch_total{port}` | counter | Application-header snapshot flag disagreeing with the arrival port — a publisher defect, never used for routing |
 | `dz_mbp_parser_malformed_total{reason}` | counter | Individual messages the spec declares malformed, dropped without failing the containing frame |
+| `dz_mbp_parser_skipped_messages_total{reason}` | counter | Messages decoded but not emitted as records, by reason |
 | `dz_mbp_parser_build_info{version,commit}` | gauge | Always `1`; labels carry build version/commit |
 | `dz_mbp_parser_uptime_seconds` | gauge | Seconds since process start |
 
 `snapshot_flag_mismatch_total` and `malformed_total` are publisher-defect counters: the parser still decodes and forwards these messages (or, for a malformed `BookClear`, drops just that message and keeps the rest of the frame), so they exist purely to surface upstream data-quality problems, not to indicate parser failure.
+
+`skipped_messages_total` is deliberately separate from `malformed_total`. Its only reason today is `unknown_type`, raised when a Type ID this decoder does not implement is skipped by its `Message Length`. That is the spec's forward-compatibility rule working as intended, not a publisher defect, so it must not fire a malformed-message alert — but it is data the parser does not emit, so a sustained non-zero rate means the publisher has started sending a message type this build needs to learn.
 
 ## Architecture
 

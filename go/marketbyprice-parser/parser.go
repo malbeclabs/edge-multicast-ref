@@ -30,8 +30,10 @@ type Record struct {
 // field on the Parser would be a data race. This is why the signature differs
 // from the topofbook and marketbyorder parsers, which surface no defect counts.
 //
-// A return of (nil, _, nil) means the frame was valid but produced no records.
-// A non-nil error indicates the frame should be dropped and a counter incremented.
+// On success the returned slice is non-nil but may be empty, meaning the frame
+// was valid and every message in it was skipped or dropped; callers must test
+// len, not nil. A non-nil error indicates the frame should be dropped and a
+// counter incremented, and the record slice is then nil.
 type Parser interface {
 	Name() string
 	ParseFrame(port string, frame []byte) ([]Record, Defects, error)

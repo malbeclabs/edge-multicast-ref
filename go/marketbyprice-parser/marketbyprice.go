@@ -16,6 +16,18 @@ func init() {
 type Defects struct {
 	SnapshotFlagMismatch int
 	MalformedBookClear   int
+
+	// MalformedOther counts messages rejected as malformed by a wire rule other
+	// than BookClear's. Unreachable today — BookClear is the only body that
+	// returns errMalformedBody — but it keeps the next such rule from dropping
+	// messages with no counter.
+	MalformedOther int
+
+	// UnknownType counts messages skipped because their Type ID is not one this
+	// decoder implements, including the reserved 0x50-0x5F positional-index
+	// range. Skipping is spec-legal forward compatibility, not a defect in the
+	// publisher, but it is data this parser does not emit and so must be visible.
+	UnknownType int
 }
 
 // marketByPriceParser is stateless. It deliberately holds no counters: the
@@ -43,6 +55,10 @@ func (p *marketByPriceParser) ParseFrame(port string, frame []byte) ([]Record, D
 	body := frame[frameHeaderSize:]
 	records := make([]Record, 0, hdr.MessageCount)
 
+	// Hoisted: the arrival port is fixed for the whole frame, so this compare
+	// runs once per frame rather than once per application message.
+	wantSnapshot := port == "snapshot"
+
 	for i := uint8(0); i < hdr.MessageCount; i++ {
 		mh, err := ParseMessageHeader(body)
 		if err != nil {
@@ -63,11 +79,11 @@ func (p *marketByPriceParser) ParseFrame(port string, frame []byte) ([]Record, D
 		// Flags bit 0 must be set on the snapshot port and clear on the other
 		// two. Disagreement is a publisher defect; it never affects routing,
 		// which uses Type ID and port only.
-		if set := mh.Flags&flagSnapshot != 0; (port == "snapshot") != set {
+		if set := mh.Flags&flagSnapshot != 0; wantSnapshot != set {
 			defects.SnapshotFlagMismatch++
 		}
 
-		rec, ok, decErr := p.decodeMessage(port, hdr, mh, msgBody)
+		rec, decErr := p.decodeMessage(port, hdr, mh, msgBody)
 
 		// Advance BEFORE any early-continue below. A `continue` that skips this
 		// leaves the walk pointing at the message just consumed, so the next
@@ -75,25 +91,44 @@ func (p *marketByPriceParser) ParseFrame(port string, frame []byte) ([]Record, D
 		body = body[mh.Length:]
 
 		if decErr != nil {
+			// An unimplemented Type ID is skipped by Message Length per the
+			// forward-compatibility rule. Counted so the skip is observable
+			// rather than silent.
+			if errors.Is(decErr, errUnknownType) {
+				defects.UnknownType++
+				continue
+			}
 			// A body the spec declares malformed is dropped and counted, not
 			// escalated to a frame failure — its neighbors are independently valid.
 			if errors.Is(decErr, errMalformedBody) {
 				if mh.Type == msgTypeBookClear {
 					defects.MalformedBookClear++
+				} else {
+					defects.MalformedOther++
 				}
 				continue
 			}
 			return nil, defects, fmt.Errorf("msg %d type 0x%02x: %w", i, mh.Type, decErr)
 		}
-		if ok {
-			records = append(records, rec)
-		}
+		records = append(records, rec)
+	}
+
+	// Message Count messages must account for exactly the bytes Frame Length
+	// declares. Leftovers mean the Message Lengths are collectively inconsistent
+	// with Frame Length, which the spec makes a malformed frame: stop parsing it
+	// and count it. Without this an under-stated Message Count, or trailing
+	// garbage behind a correct Frame Length, passes clean and loses messages.
+	if len(body) != 0 {
+		return nil, defects, fmt.Errorf("%w: %d trailing bytes after %d messages", errFrameLength, len(body), hdr.MessageCount)
 	}
 
 	return records, defects, nil
 }
 
-func (p *marketByPriceParser) decodeMessage(port string, hdr FrameHeader, mh MessageHeader, body []byte) (Record, bool, error) {
+// decodeMessage maps one application message body to a Record. It returns
+// errUnknownType for a Type ID this decoder does not implement, so ParseFrame
+// can count the skip; every other error is the wire layer's.
+func (p *marketByPriceParser) decodeMessage(port string, hdr FrameHeader, mh MessageHeader, body []byte) (Record, error) {
 	base := Record{
 		Timestamp:      hdr.SendTimestamp,
 		SendTSNS:       tsNS(hdr.SendTimestamp),
@@ -107,19 +142,19 @@ func (p *marketByPriceParser) decodeMessage(port string, hdr FrameHeader, mh Mes
 	case msgTypeHeartbeat:
 		b, err := ParseHeartbeat(body)
 		if err != nil {
-			return Record{}, false, err
+			return Record{}, err
 		}
 		base.Type = "heartbeat"
 		base.Fields = map[string]any{
 			"channel_id_in_body": b.ChannelID,
 			"timestamp":          b.Timestamp,
 		}
-		return base, true, nil
+		return base, nil
 
 	case msgTypeInstrumentDefinition:
 		b, err := ParseInstrumentDefinition(body)
 		if err != nil {
-			return Record{}, false, err
+			return Record{}, err
 		}
 		base.Type = "instrument_definition"
 		base.InstrumentID = b.InstrumentID
@@ -139,12 +174,12 @@ func (p *marketByPriceParser) decodeMessage(port string, hdr FrameHeader, mh Mes
 			"price_bound":    b.PriceBound,
 			"manifest_seq":   b.ManifestSeq,
 		}
-		return base, true, nil
+		return base, nil
 
 	case msgTypeTrade:
 		b, err := ParseTrade(body)
 		if err != nil {
-			return Record{}, false, err
+			return Record{}, err
 		}
 		base.Type = "trade"
 		base.InstrumentID = b.InstrumentID
@@ -159,21 +194,21 @@ func (p *marketByPriceParser) decodeMessage(port string, hdr FrameHeader, mh Mes
 			"trade_id":              b.TradeID,
 			"cumulative_volume_raw": b.CumulativeVolumeRaw,
 		}
-		return base, true, nil
+		return base, nil
 
 	case msgTypeEndOfSession:
 		b, err := ParseEndOfSession(body)
 		if err != nil {
-			return Record{}, false, err
+			return Record{}, err
 		}
 		base.Type = "end_of_session"
 		base.Fields = map[string]any{"timestamp": b.Timestamp}
-		return base, true, nil
+		return base, nil
 
 	case msgTypeManifestSummary:
 		b, err := ParseManifestSummary(body)
 		if err != nil {
-			return Record{}, false, err
+			return Record{}, err
 		}
 		base.Type = "manifest_summary"
 		base.Fields = map[string]any{
@@ -182,12 +217,12 @@ func (p *marketByPriceParser) decodeMessage(port string, hdr FrameHeader, mh Mes
 			"instrument_count": b.InstrumentCount,
 			"timestamp":        b.Timestamp,
 		}
-		return base, true, nil
+		return base, nil
 
 	case msgTypeLiquidation:
 		b, err := ParseLiquidation(body)
 		if err != nil {
-			return Record{}, false, err
+			return Record{}, err
 		}
 		base.Type = "liquidation"
 		base.InstrumentID = b.InstrumentID
@@ -201,12 +236,12 @@ func (p *marketByPriceParser) decodeMessage(port string, hdr FrameHeader, mh Mes
 			"mark_price_raw":    b.MarkPriceRaw,
 			"liquidated_user":   hex.EncodeToString(b.LiquidatedUser[:]),
 		}
-		return base, true, nil
+		return base, nil
 
 	case msgTypeLevelUpdate:
 		b, err := ParseLevelUpdate(body)
 		if err != nil {
-			return Record{}, false, err
+			return Record{}, err
 		}
 		base.Type = "level_update"
 		base.InstrumentID = b.InstrumentID
@@ -232,13 +267,13 @@ func (p *marketByPriceParser) decodeMessage(port string, hdr FrameHeader, mh Mes
 		if b.LevelIndex != u16Unavailable {
 			base.Fields["level_index"] = b.LevelIndex
 		}
-		return base, true, nil
+		return base, nil
 
 	case msgTypeBookClear:
 		b, err := ParseBookClear(body)
 		if err != nil {
 			// ParseFrame counts the malformed case and drops the message.
-			return Record{}, false, err
+			return Record{}, err
 		}
 		base.Type = "book_clear"
 		base.InstrumentID = b.InstrumentID
@@ -255,12 +290,12 @@ func (p *marketByPriceParser) decodeMessage(port string, hdr FrameHeader, mh Mes
 		if b.Scope == 1 {
 			base.Fields["from_price_raw"] = b.FromPriceRaw
 		}
-		return base, true, nil
+		return base, nil
 
 	case msgTypeBatchBoundary:
 		b, err := ParseBatchBoundary(body)
 		if err != nil {
-			return Record{}, false, err
+			return Record{}, err
 		}
 		base.Type = "batch_boundary"
 		// A framing/control message. Batch Time is a batch marker rather than a
@@ -269,12 +304,12 @@ func (p *marketByPriceParser) decodeMessage(port string, hdr FrameHeader, mh Mes
 			"batch_id": b.BatchID,
 			"batch_ts": b.BatchTime,
 		}
-		return base, true, nil
+		return base, nil
 
 	case msgTypeInstrumentReset:
 		b, err := ParseInstrumentReset(body)
 		if err != nil {
-			return Record{}, false, err
+			return Record{}, err
 		}
 		base.Type = "instrument_reset"
 		base.InstrumentID = b.InstrumentID
@@ -284,12 +319,12 @@ func (p *marketByPriceParser) decodeMessage(port string, hdr FrameHeader, mh Mes
 			"new_anchor_seq": b.NewAnchorSeq,
 			"timestamp":      b.Timestamp,
 		}
-		return base, true, nil
+		return base, nil
 
 	case msgTypeSnapshotBegin:
 		b, err := ParseSnapshotBegin(body)
 		if err != nil {
-			return Record{}, false, err
+			return Record{}, err
 		}
 		base.Type = "snapshot_begin"
 		base.InstrumentID = b.InstrumentID
@@ -301,7 +336,7 @@ func (p *marketByPriceParser) decodeMessage(port string, hdr FrameHeader, mh Mes
 			"timestamp":           b.Timestamp,
 			"depth_bound":         b.DepthBound,
 		}
-		return base, true, nil
+		return base, nil
 
 	case msgTypeSnapshotLevel:
 		// No Instrument ID on the wire: InstrumentID stays 0. A consumer must
@@ -311,7 +346,7 @@ func (p *marketByPriceParser) decodeMessage(port string, hdr FrameHeader, mh Mes
 		// mismatch) rather than keying it.
 		b, err := ParseSnapshotLevel(body)
 		if err != nil {
-			return Record{}, false, err
+			return Record{}, err
 		}
 		base.Type = "snapshot_level"
 		base.Fields = map[string]any{
@@ -326,12 +361,12 @@ func (p *marketByPriceParser) decodeMessage(port string, hdr FrameHeader, mh Mes
 		if b.OrderCount != u16Unavailable {
 			base.Fields["order_count"] = b.OrderCount
 		}
-		return base, true, nil
+		return base, nil
 
 	case msgTypeSnapshotEnd:
 		b, err := ParseSnapshotEnd(body)
 		if err != nil {
-			return Record{}, false, err
+			return Record{}, err
 		}
 		base.Type = "snapshot_end"
 		base.InstrumentID = b.InstrumentID
@@ -339,12 +374,13 @@ func (p *marketByPriceParser) decodeMessage(port string, hdr FrameHeader, mh Mes
 			"anchor_seq":  b.AnchorSeq,
 			"snapshot_id": b.SnapshotID,
 		}
-		return base, true, nil
+		return base, nil
 
 	default:
 		// Unknown type — skip per the forward-compatibility rule. This covers the
-		// reserved 0x50-0x5F positional-index range. Caller advances by mh.Length.
-		return Record{}, false, nil
+		// reserved 0x50-0x5F positional-index range. Caller advances by mh.Length
+		// and counts the skip.
+		return Record{}, fmt.Errorf("%w: 0x%02x", errUnknownType, mh.Type)
 	}
 }
 
@@ -481,6 +517,9 @@ func liquidationMethodString(m uint8) string {
 	case 1:
 		return "backstop"
 	case 255:
+		// Spec-defined "unknown", deliberately mapped to the same string as an
+		// unrecognised value: the spec's rule is to treat both as the unknown
+		// member, so the distinction is not one a consumer may act on.
 		return "unknown"
 	default:
 		return "unknown"
@@ -495,7 +534,24 @@ func liquidatedSideString(flags uint8) string {
 	return "long"
 }
 
-// tsNS returns Unix-nanos for a non-zero time, else 0 (absent).
+// tsNS returns Unix-nanos for a non-zero time, else 0, which omitempty then
+// drops from the envelope.
+//
+// The IsZero guard is purely defensive and does not fire on this path: every
+// timestamp here comes from readTSNs, which yields time.Unix(0, ns) and so is
+// never the zero time.Time. A zero wire value therefore reaches the second
+// return and yields 0 via UnixNano, which is the wanted answer; the guard exists
+// only so a genuinely zero-valued time.Time cannot produce the large negative
+// nanosecond count UnixNano returns for year 1.
+//
+// Note the asymmetry this leaves with Fields["timestamp"], which carries the
+// decoded time verbatim and so renders a zero wire value as 1970-01-01T00:00:00Z
+// rather than omitting it. That is deliberate: the spec defines LevelUpdate and
+// BookClear Timestamp as the venue time of the change, with no zero-means-absent
+// rule (where it intends one it says so, as with Trade ID and Cumulative Volume
+// "0 if unavailable"). A zero there is a publisher defect, and fields is the
+// verbatim view of what arrived, so hiding it would mask the defect the envelope
+// value already normalizes away.
 func tsNS(t time.Time) uint64 {
 	if t.IsZero() {
 		return 0

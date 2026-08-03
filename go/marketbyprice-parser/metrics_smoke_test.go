@@ -44,12 +44,14 @@ func TestMetricsNamespaceAndDefectCounters(t *testing.T) {
 	m.FrameSeqGaps.WithLabelValues("mktdata").Inc()
 	m.SnapshotFlagMismatch.WithLabelValues("mktdata").Inc()
 	m.MalformedMessages.WithLabelValues("bookclear_scope_side").Inc()
+	m.SkippedMessages.WithLabelValues("unknown_type").Inc()
 
 	names = gatheredNames(t, m)
 	for _, want := range []string{
 		"dz_mbp_parser_frame_seq_gaps_total",
 		"dz_mbp_parser_snapshot_flag_mismatch_total",
 		"dz_mbp_parser_malformed_total",
+		"dz_mbp_parser_skipped_messages_total",
 	} {
 		mustContain(t, names, want)
 	}

@@ -24,7 +24,6 @@ const (
 	mbpSchemaVersion  uint8  = 1
 	frameHeaderSize          = 24
 	messageHeaderSize        = 4
-	maxFrameSize             = 1232
 )
 
 // Message type IDs. Types 0x03 and 0x05 are reserved and intentionally unused
@@ -57,6 +56,7 @@ var (
 	errMessageLength   = errors.New("message length out of range")
 	errTruncated       = errors.New("truncated message body")
 	errMalformedBody   = errors.New("malformed message body")
+	errUnknownType     = errors.New("unknown message type")
 )
 
 // FrameHeader is the 24-byte frame header common to all three ports.

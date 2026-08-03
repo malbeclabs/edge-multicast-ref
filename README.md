@@ -50,6 +50,7 @@ Decode DoubleZero's binary market-data feeds (defined in [edge-feed-spec](https:
 |------|------|----------------|
 | Top-of-Book & Trades | [spec](https://github.com/malbeclabs/edge-feed-spec/blob/main/top-of-book/spec.md) | `go/topofbook-parser`, `go/topofbook-bot` |
 | Market-by-Order | [spec](https://github.com/malbeclabs/edge-feed-spec/blob/main/market-by-order/spec.md) | `go/marketbyorder-parser`, `go/marketbyorder-bot` |
+| Market-by-Price | [spec](https://github.com/malbeclabs/edge-feed-spec/blob/main/market-by-price/spec.md) | `go/marketbyprice-parser` |
 
 ### Top-of-Book & Trades
 
@@ -68,6 +69,16 @@ Consumes the [Market-by-Order feed](https://github.com/malbeclabs/edge-feed-spec
 |---|---|
 | [go/marketbyorder-parser](go/marketbyorder-parser/) | Three-port multicast subscriber + binary wire decoder, broadcasts decoded JSONL on a Unix socket |
 | [go/marketbyorder-bot](go/marketbyorder-bot/) | Book builder + persistor. Maintains in-memory market-by-order books and writes per-event rows + coalesced top-N level snapshots to ClickHouse |
+
+### Market-by-Price
+
+Consumes the [Market-by-Price feed](https://github.com/malbeclabs/edge-feed-spec/blob/main/market-by-price/spec.md) — full-depth aggregated (L2) levels rather than individual orders.
+
+| Component | Description |
+|---|---|
+| [go/marketbyprice-parser](go/marketbyprice-parser/) | Three-port multicast subscriber + binary wire decoder, broadcasts decoded JSONL on a Unix socket |
+
+No bot yet: the parser lands first, so the feed is decodable and observable before a book builder is written against it.
 
 ### Demo Stack
 
