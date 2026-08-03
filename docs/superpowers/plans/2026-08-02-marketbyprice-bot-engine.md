@@ -1101,6 +1101,24 @@ Sort the map keys per side and take the best `n`. Scale with `math.Pow10(int(exp
 
 Carry `DepthBound` and `Crossed` onto the result. `CumulativeQty` is only meaningful as exhaustive depth when `DepthBound` is a non-nil `0`; say so in a comment, because a caller summing it under a non-zero bound is understating available liquidity — the exact failure the field exists to prevent.
 
+- [ ] **Step 2a: Drop the metrics whose subsystem does not exist yet**
+
+Task 1 copied `metrics.go` from the sibling bot and dropped the order-keyed metrics, but five ClickHouse collectors came along and are referenced nowhere in the module: `clickhouse_rows_written_total`, `clickhouse_rows_dropped_total`, `clickhouse_write_errors_total`, `clickhouse_batch_duration_seconds`, `clickhouse_buffered_rows`. That was an omission in the Task 1 brief, not an implementer error.
+
+Registered-but-unwritten collectors export as `0` forever. Combined with this binary having no ClickHouse flags at all, an operator or dashboard reading `dz_mbp_bot_clickhouse_rows_written_total = 0` would reasonably conclude the persistence pipeline is configured and failing, rather than absent. A metric that describes a subsystem the binary does not contain is worse than a missing metric.
+
+Remove all five — struct fields, constructors, and their `reg.MustRegister` arguments. The persistence follow-on plan adds them back alongside the code that writes them.
+
+After removing, verify by name (not by count — one `prometheus.New*` call is `NewRegistry()`) that every remaining constructed collector is still registered:
+
+```bash
+grep -oE '^\tm\.[A-Za-z]+ = prometheus\.New' metrics.go | sed 's/\tm\.//;s/ = prometheus.New//' | sort > /tmp/c.txt
+sed -n '/MustRegister(/,/^\t)/p' metrics.go | grep -oE 'm\.[A-Za-z]+' | sed 's/m\.//' | sort -u > /tmp/r.txt
+diff /tmp/c.txt /tmp/r.txt && echo "constructed == registered"
+```
+
+Then confirm `go test ./marketbyprice-bot/...` still passes — the namespace test gathers from the registry and must not reference a removed collector.
+
 - [ ] **Step 3: Write `main.go`**
 
 Flags: `--socket` (required), `--symbol` (comma-separated filter, empty = all), `--depth` (default 20), `--shards` (0 = auto from `GOMAXPROCS-2`, clamped to `[1,8]`), `--metrics-addr` (default `127.0.0.1:9094`), `-v`, `--version`. No ClickHouse flags — persistence is a follow-on plan.
