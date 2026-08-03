@@ -837,7 +837,15 @@ git commit -m "marketbyprice-bot: add price-keyed instrument book and state mach
 
 **Interfaces:**
 - Consumes: `Instrument` and its methods (Task 2), `Record` and `Metrics` (Task 1).
-- Produces: `instKey{ch uint8; id uint32}`; `BufferedDelta{MktdataSeq uint64; Record Record}`; `InstrumentDef{Symbol string; PriceExponent, QtyExponent int8}`; `Shard` with `NewShard(idx, n int, metrics *Metrics) *Shard`; `applyDelta(k instKey, rec Record) []ChannelEvent`; `bufferDelta(k instKey, rec Record)`; `replayBuffer(k instKey, inst *Instrument)`; `ChannelEvent{Kind string; InstrumentID uint32; Symbol string; Record Record}`; the JSON coercion helpers `toUint8/toUint16/toUint32/toUint64/toInt8/toInt64/toString/toTime`, `sideFromString`, `clearSideFromString`, `scopeFromString`, `actionFromString`; constants `maxBufferedDeltasPerShard = 200000` and `reorderWindow = 16`.
+- Produces: `instKey{ch uint8; id uint32}`; `BufferedDelta{MktdataSeq uint64; Record Record}`; `InstrumentDef{Symbol string; PriceExponent, QtyExponent int8; ManifestSeq uint16}`; `Shard` with `NewShard(idx, n int, metrics *Metrics) *Shard`; `applyDelta`, `applyDeltaToReady`, `applyOne`, `bufferDelta`, `evictLargestBuffer`, `replayBuffer`, `filterBuffer`; `ChannelEvent{Kind string; InstrumentID uint32; Symbol string; Record Record}`; the JSON coercion helpers `toUint8/toUint16/toUint32/toUint64/toInt8/toInt64/toString/toTime`, `orderCountFrom`, `sideFromString`, `clearSideFromString`, `scopeFromString`, `actionFromString`; constants `maxBufferedDeltasPerShard = 200000` and `reorderWindow = 16`.
+
+**This task's code was compiled and its 9 tests executed in a scratch module before this plan was committed** — `go vet` clean, gofmt clean, all passing alongside Task 2's 12 tests. Transcribe it as given.
+
+Writing it surfaced three things worth stating up front, because the obvious implementation gets each of them wrong:
+
+1. **`order_count` absent means the sentinel, not zero.** The parser *omits* the key when the wire carried `0xFFFF`, because that value means "not provided, or too large to express". A bare `toUint16(fields["order_count"])` returns `0` on an absent key, silently converting "unknown" into "zero resting orders". `orderCountFrom` maps absent back to `u16Unavailable`, and `0` stays a real count.
+2. **A malformed `BookClear` must not advance the sequence trackers.** Nothing was applied, so advancing `last_applied` would classify the *next* delta against a wrong expected seq and let a real gap pass undetected.
+3. **`maxBuffered` is a field, not the bare constant, and `bufferedN` is a running total.** The field lets tests drive the overflow path without allocating 200,000 records; the running total makes overflow detection O(1) instead of summing the map on every buffered delta.
 
 Sequencing rules, from the spec's steady state, per `(channel_id, instrument_id)`:
 
@@ -885,16 +893,23 @@ func levelUpdateRec(instID uint32, mktSeq uint64, piSeq uint32, side string, pri
 }
 ```
 
-Then write these tests, each asserting one rule:
+Note the helper sets `"order_count": float64(1)` — include it, because an absent key means the sentinel (see point 1 above) and several tests would then assert against `0xFFFF` rather than a real count.
 
-1. `TestApplyDelta_ContiguousApplies` — a ready instrument at `LastAppliedInstrumentSeq = 5` applies seq 6 and advances both trackers.
-2. `TestApplyDelta_DuplicateDiscardedSilently` — seq 5 and seq 3 against `last_applied = 5` leave the book and trackers untouched and produce no `per_instrument_gap` event.
-3. `TestApplyDelta_ReorderWithinWindowHeldThenDrained` — deliver seq 8, then 7, then 6 against `last_applied = 5`; after 6 arrives all three are applied in order and `LastAppliedInstrumentSeq == 8`.
-4. `TestApplyDelta_GapBeyondWindowDemotes` — deliver `last_applied + reorderWindow + 2`; the instrument becomes `StatusGap`, `Pending` is nil, and the delta is buffered.
-5. `TestApplyDelta_NotReadyBuffers` — a delta for an `awaiting-snapshot` instrument is buffered, not applied.
-6. `TestApplyDelta_UnknownInstrumentBuffers` — a delta for an instrument absent from the map is buffered (it is `awaiting-refdata`).
-7. `TestReplayBuffer_SkipsAtOrBelowAnchor` — buffered deltas with `MktdataSeq <= LastAppliedMktdataSeq` are dropped, later ones applied.
-8. `TestDeltaBuffer_OverflowEvictsLargestAndMarksGap` — fill past `maxBufferedDeltasPerShard` across two instruments with lopsided counts; the instrument with more buffered records loses its buffer and becomes `StatusGap`, the smaller one keeps its buffer.
+Then add these nine tests. The verified bodies are in the scratch prototype; each is listed here with its exact setup and assertions so the requirement is unambiguous:
+
+1. `TestApplyDelta_ContiguousApplies` — ready instrument at `LastAppliedInstrumentSeq = 5`; apply mkt seq 900 / pi seq 6. Expect one `applied_delta` event, both trackers advanced to 6 and 900, and the level present with the right quantity.
+2. `TestApplyDelta_DuplicateDiscardedSilently` — same instrument; deliver pi seqs 5, 3, and 1. Each must produce zero events, leave the tracker at 5, leave the book empty, and leave `deltaBuf` empty. Duplicates are neither applied nor buffered.
+3. `TestApplyDelta_ReorderWithinWindowHeldThenDrained` — deliver pi seq 8, then 7 (both held, zero events, tracker still 5), then 6. The 6 delivery must return **three** events and leave the tracker at 8, with `Pending` nil and all three levels present.
+4. `TestApplyDelta_GapBeyondWindowDemotes` — deliver pi seq `5 + reorderWindow + 2`. Expect one `per_instrument_gap` event, `StatusGap`, `Pending == nil`, and the triggering delta buffered.
+5. `TestApplyDelta_NotReadyBuffers` — an `awaiting-snapshot` instrument buffers rather than applies; book stays empty.
+6. `TestApplyDelta_UnknownInstrumentBuffers` — an instrument absent from the map buffers (it is `awaiting-refdata`).
+7. `TestReplayBuffer_SkipsAtOrBelowAnchor` — buffer four deltas at mkt seqs 500–503 with pi seqs 1–4, then apply a snapshot with `anchor_seq = 501` and `last_instrument_seq = 2`, then replay. Expect the tracker at 4, the two pre-anchor levels absent, the two post-anchor levels present, the `deltaBuf` entry deleted, and `bufferedN == 0`.
+8. `TestDeltaBuffer_OverflowEvictsLargestAndMarksGap` — set `s.maxBuffered = 10`, buffer 8 records for instrument 1 and 2 for instrument 2, assert no eviction yet, then buffer one more. Expect instrument 1's buffer evicted and its status `gap`, instrument 2's 3 records intact and its status unchanged, and `bufferedN == 3`.
+9. `TestOrderCountFrom_AbsentMeansSentinel` — absent key → `u16Unavailable`; explicit `0` → `0`; `7` → `7`.
+
+Plus one test for the tracker rule in point 2 above:
+
+10. `TestApplyOne_MalformedBookClearDoesNotAdvanceTrackers` — a ready instrument at tracker 5 with a level in its book receives a `book_clear` with `clear_side: "both"` and `scope: "from_price"` (the malformed combination) at pi seq 6. The tracker must stay at 5 and the book must be untouched.
 
 - [ ] **Step 2: Run to verify failure**
 
