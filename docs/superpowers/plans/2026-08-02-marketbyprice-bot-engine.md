@@ -16,6 +16,43 @@
 
 **Working dir for all commands:** `go/marketbyprice-bot` unless a step says otherwise.
 
+## State of play — read this first if you are resuming
+
+**Tasks 1, 2, and 3 are DONE and committed on branch `feat/marketbyprice-bot`.** 26 tests pass, `go test -race` is clean. Do not re-run them.
+
+| Task | Commits | Notes |
+|---|---|---|
+| 1 — module, `record.go`, `metrics.go`, `bot.go`, `go.work`, CI matrix, 5 sibling Dockerfiles | `9ffbc2a` | `BookDemotionsTotal` was dropped deliberately; `PerInstrumentGapsTotal` covers the same event |
+| 2 — `instrument.go` + tests | `a7ca75e`, fix `4496ee4` | Fix: divergence classification must be independent `if`s, not a `switch` — the four conditions overlap and a switch under-reports |
+| 3 — `shard.go` sequencing + bounded delta buffer | `c193a17`, fix `8676c3e` | Fix: `replayBuffer` must re-check `inst.Status` each iteration or one hole declares a gap per trailing record |
+
+**Tasks 4, 5, and 6 remain.** Tasks 4 and 5 have verified source in [Appendix A](#appendix-a-verified-source-for-tasks-4-and-5) — use it rather than the scenario lists in those task bodies, which were written before the code existed.
+
+Branch is stacked on `feat/marketbyprice-feed` (PR #29, the parser). If #29 has merged, rebase onto `main` before continuing.
+
+### Things that will bite you, learned the hard way
+
+- **`go build` cannot succeed on this module until Task 6 adds `main.go`.** A `main` package with no `func main` fails to link. `go vet` is the build gate until then. Also `./...` does not work from `go/` in this workspace — use `./marketbyprice-bot/...`. Neither is a defect; do not try to fix them.
+- **`snapshot_level` records carry no `instrument_id`.** The coordinator must stamp it from the currently-open snapshot group before forwarding, or the shard keys the record to instrument 0 and every snapshot level is silently dropped. Do **not** solve this by scanning instruments for a matching `snapshot_id` — `Snapshot ID` is monotonic per `(channel_id, instrument_id)`, so that picks arbitrarily when two instruments share an id. That is issue #30 against the sibling bot.
+- **Do not key snapshot routing by `snapshot_id`** for the same reason. Route by the open group; use `snapshot_id` only to validate.
+- **Negative values in tests need a typed variable**, never a constant conversion. `uint64(int64(-1500))` is a compile-time overflow error in every Go version.
+- **`order_count` absent means the `0xFFFF` sentinel, not 0.** The parser omits the key when the venue did not supply a count, and `0` is a real count.
+- **A prototype passing its own tests proves only that it does what its author intended.** Two reviews on this plan each found a real bug in pre-verified code, both metrics-fidelity errors invisible to the author's own tests. Review the design against the spec, not just the diff against the reference.
+- Commits are SSH-signed via 1Password and it fails intermittently. Retry; do not disable signing.
+
+### Deferred findings for the final whole-branch review
+
+- Malformed-`BookClear` discard returns `Kind: "applied_delta"` though nothing was applied — give it a distinct kind before a consumer trusts it.
+- That path is unreachable from live traffic: the parser already rejects `Scope=1`+`ClearSide=2` at decode. Add a comment marking it defense-in-depth.
+- `evictLargestBuffer`'s victim-absent-from-`instruments` branch is untested.
+- `Pending` entries dropped when the reorder window is exceeded are provably covered by the anchor filter, but that rests on reasoning rather than a test.
+- Five ClickHouse metrics are registered with no implementing subsystem — Task 6 Step 2a removes them.
+
+### Related issues filed from this work
+
+- **#30** — sibling `marketbyorder-bot` associates snapshot orders by `snapshot_id`. Includes a correction narrowing the coordinator claim; the two `shard.go` findings stand.
+- **#31** — a malformed `BookClear` stalls an instrument through the reorder window before demoting. Right end state, wasteful path, and it mis-attributes a publisher defect to `per_instrument_gaps_total`.
+
 ## Global Constraints
 
 - Module path `github.com/malbeclabs/edge-multicast-ref/go/marketbyprice-bot`, Go directive `go 1.25.0`.
@@ -1168,3 +1205,1759 @@ git commit -m "marketbyprice-bot: add level read-out, entry point, and readme"
 ## Follow-on plan (not this plan)
 
 **Persistence** — `clickhouse.go`, `events_writer.go`, `snapshot_writer.go` with its coalescing goroutine, the metrics those add, and `demo/clickhouse/init/03_schema_mbp.sql` with the five tables from the design spec's Component 3. Then the demo stack: compose services, `.env.example`, Prometheus jobs, Grafana dashboard, and the `docs/hyperliquid.md` port table — the last of which needs the live feed's group, port sets, and channel ID.
+
+---
+
+## Appendix A: verified source for Tasks 4 and 5
+
+Every file below was written, compiled, and executed in a scratch module before this plan was committed: `gofmt` clean, `go vet` clean, 47 tests passing. Transcribe them as given. If one fails to compile, it is a transcription error — re-read rather than redesign.
+
+These supersede the scenario lists in Tasks 4 and 5, which were written before the code existed. Where a scenario list and this appendix disagree, the appendix wins.
+
+
+### shard.go — crossed-book state and inbox plumbing (Task 4 modifies the Task 3 file)
+
+```go
+package main
+
+import (
+	"log"
+	"sort"
+	"sync"
+	"time"
+)
+
+// maxBufferedDeltasPerShard bounds the delta buffer by record count across every
+// instrument the shard owns. The spec requires a bounded buffer and a declared
+// overflow policy, and sizes the cold-start worst case at ~1.4 GB for a 60 s
+// snapshot cycle — the cycle-period knob and the subscriber-memory knob are the
+// same knob.
+const maxBufferedDeltasPerShard = 200000
+
+// reorderWindow is how far ahead of last_applied a delta may arrive and still be
+// treated as reordering rather than a gap. Carried over from the sibling bot,
+// where the live path was observed reordering.
+const reorderWindow = 16
+
+type instKey struct {
+	ch uint8
+	id uint32
+}
+
+type BufferedDelta struct {
+	MktdataSeq uint64
+	Record     Record
+}
+
+type InstrumentDef struct {
+	Symbol        string
+	PriceExponent int8
+	QtyExponent   int8
+	ManifestSeq   uint16
+}
+
+// ChannelEvent is the subset of state changes a shard reports outward. The
+// persistence layer (a follow-on plan) consumes these.
+type ChannelEvent struct {
+	Kind         string // "applied_delta" | "applied_snapshot" | "instrument_reset" | "channel_reset" | "per_instrument_gap"
+	InstrumentID uint32
+	Symbol       string
+	Record       Record
+}
+
+// Shard owns a disjoint subset of instruments (by instrument_id % n) and all
+// their state. Its goroutine is the only writer; mu guards book mutation so a
+// future reader goroutine can read levels safely.
+type Shard struct {
+	idx int
+	n   int
+
+	mu          sync.Mutex
+	instruments map[instKey]*Instrument
+	refdata     map[instKey]InstrumentDef
+	deltaBuf    map[instKey][]BufferedDelta
+	bufferedN   int // running total across deltaBuf, so overflow is O(1) to detect
+
+	// maxBuffered is the shard's record budget. A field rather than the bare
+	// constant so tests can drive the overflow path without allocating 200k
+	// records.
+	maxBuffered int
+
+	// Crossed-book monitoring state. sawBatchBoundary switches evaluation from
+	// per-delta to per-boundary; touched is the set of instruments changed since
+	// the previous boundary; crossed is the currently-crossed set behind the gauge.
+	sawBatchBoundary bool
+	touched          map[instKey]struct{}
+	crossed          map[instKey]struct{}
+
+	inbox   chan shardMsg
+	metrics *Metrics
+}
+
+// shardMsg is the inbox protocol. A record mutates book state; a reset wipes it
+// and acks; a fence only acks, which is enough to order a channel-scoped write
+// after every preceding instrument write because the inbox is FIFO.
+type shardMsg struct {
+	rec  *Record
+	kind shardMsgKind
+	seq  uint16 // manifest seq, for msgManifestPrune
+	ack  chan int
+}
+
+type shardMsgKind int
+
+const (
+	msgRecord shardMsgKind = iota
+	msgReset
+	msgFence
+	msgManifestPrune
+)
+
+func NewShard(idx, n int, metrics *Metrics) *Shard {
+	return &Shard{
+		idx: idx, n: n,
+		instruments: map[instKey]*Instrument{},
+		refdata:     map[instKey]InstrumentDef{},
+		deltaBuf:    map[instKey][]BufferedDelta{},
+		maxBuffered: maxBufferedDeltasPerShard,
+		touched:     map[instKey]struct{}{},
+		crossed:     map[instKey]struct{}{},
+		inbox:       make(chan shardMsg, 4096),
+		metrics:     metrics,
+	}
+}
+
+// applyDelta classifies one mktdata delta against the instrument's
+// per-instrument sequence and applies, holds, discards, or buffers it.
+func (s *Shard) applyDelta(k instKey, rec Record) []ChannelEvent {
+	inst, ok := s.instruments[k]
+	if !ok {
+		// Unknown instrument: awaiting-refdata. Buffer until its definition lands.
+		s.bufferDelta(k, rec)
+		return nil
+	}
+	if inst.Status != StatusReady {
+		s.bufferDelta(k, rec)
+		return nil
+	}
+	return s.applyDeltaToReady(k, inst, rec)
+}
+
+func (s *Shard) applyDeltaToReady(k instKey, inst *Instrument, rec Record) []ChannelEvent {
+	piSeq := toUint32(rec.Fields["per_instrument_seq"])
+	expected := inst.LastAppliedInstrumentSeq + 1
+
+	if piSeq < expected {
+		// Duplicate or late. Discard silently: a duplicated frame during
+		// bootstrap must not cost a re-bootstrap.
+		return nil
+	}
+	if piSeq > expected {
+		if inst.Pending == nil {
+			inst.Pending = map[uint32]Record{}
+		}
+		inst.Pending[piSeq] = rec
+		if uint32(len(inst.Pending)) <= reorderWindow && piSeq-expected <= reorderWindow {
+			return nil // within the reorder window; wait for the hole to fill
+		}
+		// Window exceeded: a genuine per-instrument gap.
+		log.Printf("shard %d instrument %d: per-instrument gap, expected %d got %d",
+			s.idx, inst.ID, expected, piSeq)
+		inst.Status = StatusGap
+		inst.Pending = nil
+		s.bufferDelta(k, rec)
+		if s.metrics != nil {
+			s.metrics.PerInstrumentGapsTotal.Inc()
+		}
+		return []ChannelEvent{{Kind: "per_instrument_gap", InstrumentID: inst.ID, Symbol: inst.Symbol, Record: rec}}
+	}
+
+	// Contiguous: apply, then drain any contiguous run held in Pending.
+	evs := []ChannelEvent{s.applyOne(inst, rec)}
+	for inst.Pending != nil {
+		next := inst.LastAppliedInstrumentSeq + 1
+		pr, ok := inst.Pending[next]
+		if !ok {
+			break
+		}
+		delete(inst.Pending, next)
+		evs = append(evs, s.applyOne(inst, pr))
+		if len(inst.Pending) == 0 {
+			inst.Pending = nil
+		}
+	}
+	return evs
+}
+
+// applyOne mutates the book for one already-sequenced record.
+func (s *Shard) applyOne(inst *Instrument, rec Record) ChannelEvent {
+	switch rec.Type {
+	case "level_update":
+		div := inst.ApplyLevelUpdate(
+			sideFromString(toString(rec.Fields["side"])),
+			toInt64(rec.Fields["price_raw"]),
+			toUint64(rec.Fields["qty_raw"]),
+			orderCountFrom(rec.Fields),
+			toUint8(rec.Fields["level_flags"]),
+			actionFromString(toString(rec.Fields["action"])),
+		)
+		if s.metrics != nil {
+			for _, d := range div {
+				s.metrics.BookDivergenceTotal.WithLabelValues(string(d)).Inc()
+			}
+		}
+	case "book_clear":
+		err := inst.ApplyBookClear(
+			clearSideFromString(toString(rec.Fields["clear_side"])),
+			scopeFromString(toString(rec.Fields["scope"])),
+			toInt64(rec.Fields["from_price_raw"]),
+		)
+		if err != nil {
+			// Malformed: discard without advancing the trackers, because nothing
+			// was applied. Returning early leaves last_applied where it was, so
+			// the next delta is classified against the correct expected seq.
+			log.Printf("shard %d instrument %d: %v", s.idx, inst.ID, err)
+			return ChannelEvent{Kind: "applied_delta", InstrumentID: inst.ID, Symbol: inst.Symbol, Record: rec}
+		}
+	}
+	inst.LastAppliedMktdataSeq = rec.SequenceNumber
+	inst.LastAppliedInstrumentSeq = toUint32(rec.Fields["per_instrument_seq"])
+	return ChannelEvent{Kind: "applied_delta", InstrumentID: inst.ID, Symbol: inst.Symbol, Record: rec}
+}
+
+// bufferDelta appends to the per-instrument buffer, keeping it ordered by
+// mktdata seq, and enforces the shard budget.
+func (s *Shard) bufferDelta(k instKey, rec Record) {
+	buf := append(s.deltaBuf[k], BufferedDelta{MktdataSeq: rec.SequenceNumber, Record: rec})
+	sort.Slice(buf, func(i, j int) bool { return buf[i].MktdataSeq < buf[j].MktdataSeq })
+	s.deltaBuf[k] = buf
+	s.bufferedN++
+	if s.bufferedN > s.maxBuffered {
+		s.evictLargestBuffer()
+	}
+	if s.metrics != nil {
+		s.metrics.DeltaBufferedRecords.Set(float64(s.bufferedN))
+	}
+}
+
+// evictLargestBuffer implements the spec's recommended overflow policy: drop the
+// buffered deltas for the instrument holding the most buffered data, mark that
+// instrument gap, and continue. It recovers on its next snapshot exactly as any
+// other gap instrument does. Sustained overflow means the snapshot cycle period
+// is too long for the deployment's memory budget — a tuning signal an operator
+// needs, which is why it is counted rather than silently absorbed.
+func (s *Shard) evictLargestBuffer() {
+	var victim instKey
+	best := -1
+	for k, buf := range s.deltaBuf {
+		if len(buf) > best {
+			victim, best = k, len(buf)
+		}
+	}
+	if best <= 0 {
+		return
+	}
+	s.bufferedN -= best
+	delete(s.deltaBuf, victim)
+	if inst, ok := s.instruments[victim]; ok {
+		inst.Status = StatusGap
+		inst.Pending = nil
+	}
+	if s.metrics != nil {
+		s.metrics.DeltaBufferOverflowTotal.Inc()
+	}
+	log.Printf("shard %d: delta buffer overflow, evicted instrument %d (%d records)",
+		s.idx, victim.id, best)
+}
+
+// replayBuffer drops buffered deltas covered by the snapshot anchor and replays
+// the rest through the same classification as steady state.
+func (s *Shard) replayBuffer(k instKey, inst *Instrument) {
+	buf := s.deltaBuf[k]
+	s.bufferedN -= len(buf)
+	delete(s.deltaBuf, k)
+	for _, b := range buf {
+		if b.MktdataSeq <= inst.LastAppliedMktdataSeq {
+			continue
+		}
+		// Re-check status every iteration, mirroring the guard in applyDelta. A
+		// hole discovered mid-replay flips the instrument to gap, and without
+		// this check every remaining entry would re-enter applyDeltaToReady and
+		// declare the same gap again — inflating PerInstrumentGapsTotal by the
+		// size of the trailing backlog and logging once per record.
+		if inst.Status != StatusReady {
+			s.bufferDelta(k, b.Record)
+			continue
+		}
+		s.applyDeltaToReady(k, inst, b.Record)
+	}
+	if s.metrics != nil {
+		s.metrics.DeltaBufferedRecords.Set(float64(s.bufferedN))
+	}
+}
+
+func filterBuffer(buf []BufferedDelta, keep func(BufferedDelta) bool) []BufferedDelta {
+	out := make([]BufferedDelta, 0, len(buf))
+	for _, b := range buf {
+		if keep(b) {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+// --- JSON coercion helpers: encoding/json yields float64 for every number ---
+
+func toUint8(v any) uint8 {
+	switch x := v.(type) {
+	case float64:
+		return uint8(x)
+	case uint8:
+		return x
+	}
+	return 0
+}
+
+func toUint16(v any) uint16 {
+	switch x := v.(type) {
+	case float64:
+		return uint16(x)
+	case uint16:
+		return x
+	}
+	return 0
+}
+
+func toUint32(v any) uint32 {
+	switch x := v.(type) {
+	case float64:
+		return uint32(x)
+	case uint32:
+		return x
+	}
+	return 0
+}
+
+func toUint64(v any) uint64 {
+	switch x := v.(type) {
+	case float64:
+		return uint64(x)
+	case uint64:
+		return x
+	}
+	return 0
+}
+
+func toInt8(v any) int8 {
+	switch x := v.(type) {
+	case float64:
+		return int8(x)
+	case int8:
+		return x
+	}
+	return 0
+}
+
+func toInt64(v any) int64 {
+	switch x := v.(type) {
+	case float64:
+		return int64(x)
+	case int64:
+		return x
+	}
+	return 0
+}
+
+func toString(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
+}
+
+func toTime(v any) time.Time {
+	if s, ok := v.(string); ok {
+		t, _ := time.Parse(time.RFC3339Nano, s)
+		return t
+	}
+	return time.Time{}
+}
+
+// orderCountFrom reads the optional order_count field. The parser OMITS the key
+// when the wire carried the 0xFFFF sentinel, so an absent key means "not
+// provided" and must map back to the sentinel — not to 0, which is a real count.
+func orderCountFrom(fields map[string]any) uint16 {
+	v, present := fields["order_count"]
+	if !present {
+		return u16Unavailable
+	}
+	return toUint16(v)
+}
+
+func sideFromString(s string) uint8 {
+	if s == "ask" {
+		return 1
+	}
+	return 0
+}
+
+func clearSideFromString(s string) uint8 {
+	switch s {
+	case "ask":
+		return 1
+	case "both":
+		return 2
+	default:
+		return 0
+	}
+}
+
+func scopeFromString(s string) uint8 {
+	if s == "from_price" {
+		return 1
+	}
+	return 0
+}
+
+func actionFromString(s string) uint8 {
+	switch s {
+	case "new":
+		return 1
+	case "change":
+		return 2
+	case "delete":
+		return 3
+	default:
+		return 0
+	}
+}
+```
+
+
+### dispatch.go — record dispatch, snapshot lifecycle, crossed-book, manifest prune (Task 4, new file)
+
+```go
+package main
+
+import (
+	"context"
+	"errors"
+	"log"
+)
+
+// apply mutates book state for one record and returns the resulting events.
+func (s *Shard) apply(rec Record) []ChannelEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := instKey{rec.ChannelID, rec.InstrumentID}
+
+	switch rec.Type {
+	case "instrument_definition":
+		return s.applyInstrumentDefinition(k, rec)
+	case "snapshot_begin":
+		return s.applySnapshotBegin(k, rec)
+	case "snapshot_level":
+		return s.applySnapshotLevel(k, rec)
+	case "snapshot_end":
+		return s.applySnapshotEnd(k, rec)
+	case "level_update", "book_clear":
+		evs := s.applyDelta(k, rec)
+		s.noteConsistencyPoint(k, evs)
+		return evs
+	case "instrument_reset":
+		return s.applyInstrumentReset(k, rec)
+	case "batch_boundary":
+		return s.applyBatchBoundary(rec)
+	case "trade", "liquidation":
+		// No book effect. Surfaced for the persistence layer only.
+		return []ChannelEvent{{Kind: "applied_delta", InstrumentID: rec.InstrumentID, Record: rec}}
+	}
+	return nil
+}
+
+func (s *Shard) applyInstrumentDefinition(k instKey, rec Record) []ChannelEvent {
+	symbol := toString(rec.Fields["symbol"])
+	priceExp := toInt8(rec.Fields["price_exponent"])
+	qtyExp := toInt8(rec.Fields["qty_exponent"])
+	s.refdata[k] = InstrumentDef{
+		Symbol:        symbol,
+		PriceExponent: priceExp,
+		QtyExponent:   qtyExp,
+		ManifestSeq:   toUint16(rec.Fields["manifest_seq"]),
+	}
+	inst, ok := s.instruments[k]
+	if !ok {
+		s.instruments[k] = NewInstrument(k.id, symbol, priceExp, qtyExp)
+	} else {
+		inst.Symbol = symbol
+		inst.PriceExponent = priceExp
+		inst.QtyExponent = qtyExp
+	}
+	return []ChannelEvent{{Kind: "applied_delta", InstrumentID: k.id, Symbol: symbol, Record: rec}}
+}
+
+func (s *Shard) instrumentFor(k instKey) *Instrument {
+	inst, ok := s.instruments[k]
+	if !ok {
+		def := s.refdata[k]
+		inst = NewInstrument(k.id, def.Symbol, def.PriceExponent, def.QtyExponent)
+		s.instruments[k] = inst
+	}
+	return inst
+}
+
+func (s *Shard) applySnapshotBegin(k instKey, rec Record) []ChannelEvent {
+	inst := s.instrumentFor(k)
+	anchor := toUint64(rec.Fields["anchor_seq"])
+	lastInstr := toUint32(rec.Fields["last_instrument_seq"])
+
+	ok, err := inst.SnapshotAcceptable(anchor, lastInstr)
+	if err != nil {
+		// Stale anchor: a snapshot captured before an InstrumentReset but
+		// delivered after it. Accepting it would leave the instrument ready
+		// holding exactly the diverged book the reset existed to discard.
+		if s.metrics != nil && errors.Is(err, errStaleAnchor) {
+			s.metrics.SnapshotDiscardedTotal.WithLabelValues("stale_anchor").Inc()
+		}
+		return nil
+	}
+	if !ok {
+		// Ready and current. Ignoring the snapshot is the ordinary case; deltas
+		// have kept this book correct.
+		return nil
+	}
+	inst.BeginSnapshot(
+		toUint32(rec.Fields["snapshot_id"]),
+		anchor,
+		toUint32(rec.Fields["total_levels"]),
+		lastInstr,
+		toUint32(rec.Fields["depth_bound"]),
+	)
+	return nil
+}
+
+func (s *Shard) applySnapshotLevel(k instKey, rec Record) []ChannelEvent {
+	inst, ok := s.instruments[k]
+	if !ok {
+		if s.metrics != nil {
+			s.metrics.SnapshotLevelDroppedTotal.Inc()
+		}
+		return nil
+	}
+	added := inst.AddSnapshotLevel(
+		toUint32(rec.Fields["snapshot_id"]),
+		sideFromString(toString(rec.Fields["side"])),
+		toInt64(rec.Fields["price_raw"]),
+		toUint64(rec.Fields["qty_raw"]),
+		orderCountFrom(rec.Fields),
+		toUint8(rec.Fields["level_flags"]),
+	)
+	if !added && s.metrics != nil {
+		s.metrics.SnapshotLevelDroppedTotal.Inc()
+	}
+	return nil
+}
+
+func (s *Shard) applySnapshotEnd(k instKey, rec Record) []ChannelEvent {
+	inst, ok := s.instruments[k]
+	if !ok {
+		return nil
+	}
+	if inst.OpenSnapshot == nil {
+		// No shadow in progress: the begin was ignored or discarded. Never demote.
+		return nil
+	}
+	err := inst.EndSnapshot(toUint32(rec.Fields["snapshot_id"]), toUint64(rec.Fields["anchor_seq"]))
+	if err != nil {
+		if s.metrics != nil {
+			s.metrics.SnapshotDiscardedTotal.WithLabelValues(discardReason(err)).Inc()
+		}
+		log.Printf("shard %d instrument %d: snapshot discarded: %v", s.idx, k.id, err)
+		return nil // shadow only; live book and status untouched
+	}
+	s.replayBuffer(k, inst)
+	evs := []ChannelEvent{{Kind: "applied_snapshot", InstrumentID: k.id, Symbol: inst.Symbol, Record: rec}}
+	s.noteConsistencyPoint(k, evs)
+	return evs
+}
+
+func discardReason(err error) string {
+	switch {
+	case errors.Is(err, errSnapshotShort):
+		return "short"
+	case errors.Is(err, errSnapshotMismatch):
+		return "mismatch"
+	case errors.Is(err, errNoOpenSnapshot):
+		return "no_open_snapshot"
+	default:
+		return "other"
+	}
+}
+
+func (s *Shard) applyInstrumentReset(k instKey, rec Record) []ChannelEvent {
+	inst, ok := s.instruments[k]
+	if !ok {
+		return nil
+	}
+	anchor := toUint64(rec.Fields["new_anchor_seq"])
+	inst.Reset(&anchor)
+
+	// Drop buffered deltas the reset supersedes, keeping bufferedN in step. The
+	// running total must be adjusted by exactly the number removed, or the shard
+	// budget drifts.
+	before := len(s.deltaBuf[k])
+	kept := filterBuffer(s.deltaBuf[k], func(b BufferedDelta) bool { return b.MktdataSeq > anchor })
+	s.bufferedN -= before - len(kept)
+	if len(kept) == 0 {
+		delete(s.deltaBuf, k)
+	} else {
+		s.deltaBuf[k] = kept
+	}
+	if s.metrics != nil {
+		s.metrics.InstrumentResetsTotal.WithLabelValues(toString(rec.Fields["reason"])).Inc()
+		s.metrics.DeltaBufferedRecords.Set(float64(s.bufferedN))
+	}
+	// A reset clears the book, so the instrument can no longer be crossed.
+	delete(s.crossed, k)
+	delete(s.touched, k)
+	s.publishCrossedGauge()
+	return []ChannelEvent{{Kind: "instrument_reset", InstrumentID: k.id, Symbol: inst.Symbol, Record: rec}}
+}
+
+// applyBatchBoundary marks the channel as batching and evaluates crossed-book
+// for every instrument touched since the previous boundary.
+//
+// Evaluating only at boundaries is what makes the counter meaningful on a
+// batching channel: intermediate states within a batch are explicitly not
+// consistency points, so a transient cross there is legal rather than a defect.
+func (s *Shard) applyBatchBoundary(rec Record) []ChannelEvent {
+	s.sawBatchBoundary = true
+	for k := range s.touched {
+		if inst, ok := s.instruments[k]; ok {
+			s.evaluateCrossed(k, inst)
+		}
+		delete(s.touched, k)
+	}
+	return []ChannelEvent{{Kind: "applied_delta", Record: rec}}
+}
+
+// noteConsistencyPoint records or evaluates crossed-book after a book change.
+// On a channel with no BatchBoundary observed, every applied delta is a
+// consistency point; once boundaries are seen, evaluation defers to them.
+func (s *Shard) noteConsistencyPoint(k instKey, evs []ChannelEvent) {
+	applied := false
+	for _, e := range evs {
+		if e.Kind == "applied_delta" || e.Kind == "applied_snapshot" {
+			applied = true
+			break
+		}
+	}
+	if !applied {
+		return
+	}
+	inst, ok := s.instruments[k]
+	if !ok {
+		return
+	}
+	if s.sawBatchBoundary {
+		s.touched[k] = struct{}{}
+		return
+	}
+	s.evaluateCrossed(k, inst)
+}
+
+// evaluateCrossed compares the inside market and counts a crossed observation.
+//
+// The spec says to compare at each consistency point and increment when crossed,
+// so this counts per observation rather than per transition — a persistently
+// crossed book keeps incrementing, which is the intended defect-rate reading.
+// The gauge answers "how many are crossed right now".
+//
+// Observability only: it never changes status, discards a book, or triggers a
+// re-bootstrap.
+func (s *Shard) evaluateCrossed(k instKey, inst *Instrument) {
+	if inst.Crossed() {
+		s.crossed[k] = struct{}{}
+		if s.metrics != nil {
+			s.metrics.CrossedBookEventsTotal.Inc()
+		}
+	} else {
+		delete(s.crossed, k)
+	}
+	s.publishCrossedGauge()
+}
+
+func (s *Shard) publishCrossedGauge() {
+	if s.metrics != nil {
+		s.metrics.CrossedInstruments.Set(float64(len(s.crossed)))
+	}
+}
+
+// pruneManifest drops instruments that have fallen out of the manifest.
+//
+// Definitions are retransmitted continuously across a definition cycle, so
+// instruments are re-advertised under a new Manifest Seq gradually rather than
+// all at once. Pruning everything below newSeq on the bump would evict
+// instruments that are still in the manifest but have not been re-advertised
+// yet. A one-generation grace window keeps anything at newSeq-1 or later.
+func (s *Shard) pruneManifest(newSeq uint16) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if newSeq <= 1 {
+		return // no generation old enough to be stale
+	}
+	cutoff := newSeq - 1
+	for k, def := range s.refdata {
+		if def.ManifestSeq >= cutoff {
+			continue
+		}
+		delete(s.refdata, k)
+		delete(s.instruments, k)
+		s.bufferedN -= len(s.deltaBuf[k])
+		delete(s.deltaBuf, k)
+		delete(s.crossed, k)
+		delete(s.touched, k)
+	}
+	s.publishCrossedGauge()
+	if s.metrics != nil {
+		s.metrics.DeltaBufferedRecords.Set(float64(s.bufferedN))
+	}
+}
+
+func (s *Shard) reset() {
+	s.instruments = map[instKey]*Instrument{}
+	s.refdata = map[instKey]InstrumentDef{}
+	s.deltaBuf = map[instKey][]BufferedDelta{}
+	s.bufferedN = 0
+	s.crossed = map[instKey]struct{}{}
+	s.touched = map[instKey]struct{}{}
+	s.sawBatchBoundary = false
+}
+
+// handle is the shard goroutine's per-record entry point.
+func (s *Shard) handle(rec Record) {
+	evs := s.apply(rec)
+	_ = evs // the persistence layer consumes these in a follow-on plan
+}
+
+// Run processes the inbox until ctx is done.
+func (s *Shard) Run(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg := <-s.inbox:
+			switch msg.kind {
+			case msgRecord:
+				s.handle(*msg.rec)
+			case msgManifestPrune:
+				s.pruneManifest(msg.seq)
+			case msgReset:
+				s.mu.Lock()
+				s.reset()
+				s.mu.Unlock()
+				select {
+				case msg.ack <- s.idx:
+				case <-ctx.Done():
+					return
+				}
+			case msgFence:
+				select {
+				case msg.ack <- s.idx:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}
+}
+```
+
+
+### dispatch_test.go (Task 4)
+
+```go
+package main
+
+import (
+	"testing"
+)
+
+func instDefRec(instID uint32, symbol string, manifestSeq uint16) Record {
+	return Record{
+		Type:         "instrument_definition",
+		Port:         "refdata",
+		InstrumentID: instID,
+		Fields: map[string]any{
+			"symbol":         symbol,
+			"price_exponent": float64(-2),
+			"qty_exponent":   float64(-8),
+			"manifest_seq":   float64(manifestSeq),
+		},
+	}
+}
+
+func snapBeginRec(instID, snapID, total, lastInstr, depth uint32, anchor uint64) Record {
+	return Record{
+		Type:         "snapshot_begin",
+		Port:         "snapshot",
+		InstrumentID: instID,
+		Fields: map[string]any{
+			"snapshot_id":         float64(snapID),
+			"anchor_seq":          float64(anchor),
+			"total_levels":        float64(total),
+			"last_instrument_seq": float64(lastInstr),
+			"depth_bound":         float64(depth),
+		},
+	}
+}
+
+// snapLevelRec models what the SHARD receives: the wire omits instrument_id on
+// snapshot_level, and the coordinator stamps it from the open group before
+// forwarding. Tests that call shard.apply directly must stamp it too.
+func snapLevelRec(instID, snapID uint32, side string, priceRaw int64, qtyRaw uint64) Record {
+	return Record{
+		Type:         "snapshot_level",
+		Port:         "snapshot",
+		InstrumentID: instID,
+		Fields: map[string]any{
+			"snapshot_id": float64(snapID),
+			"side":        side,
+			"price_raw":   float64(priceRaw),
+			"qty_raw":     float64(qtyRaw),
+			"level_flags": float64(0),
+			"order_count": float64(2),
+		},
+	}
+}
+
+func snapEndRec(instID, snapID uint32, anchor uint64) Record {
+	return Record{
+		Type:         "snapshot_end",
+		Port:         "snapshot",
+		InstrumentID: instID,
+		Fields: map[string]any{
+			"snapshot_id": float64(snapID),
+			"anchor_seq":  float64(anchor),
+		},
+	}
+}
+
+func TestApply_InstrumentDefinitionCreatesInstrument(t *testing.T) {
+	s := NewShard(0, 1, nil)
+	s.apply(instDefRec(11, "BTC-USDT", 5))
+
+	k := instKey{0, 11}
+	def, ok := s.refdata[k]
+	if !ok || def.Symbol != "BTC-USDT" || def.ManifestSeq != 5 {
+		t.Fatalf("refdata: %+v", def)
+	}
+	inst, ok := s.instruments[k]
+	if !ok {
+		t.Fatal("instrument should be created")
+	}
+	if inst.PriceExponent != -2 || inst.QtyExponent != -8 {
+		t.Errorf("exponents: %d %d", inst.PriceExponent, inst.QtyExponent)
+	}
+	if inst.Status != StatusAwaitingSnapshot {
+		t.Errorf("status: %v", inst.Status)
+	}
+}
+
+func TestApply_SnapshotLifecycleCommits(t *testing.T) {
+	m := NewMetrics()
+	s := NewShard(0, 1, m)
+	s.apply(instDefRec(11, "SYM", 1))
+	s.apply(snapBeginRec(11, 3, 2, 77, 25, 5000))
+	s.apply(snapLevelRec(11, 3, "bid", 1000, 10))
+	s.apply(snapLevelRec(11, 3, "ask", 1100, 20))
+	s.apply(snapEndRec(11, 3, 5000))
+
+	inst := s.instruments[instKey{0, 11}]
+	if inst.Status != StatusReady {
+		t.Fatalf("status: %v", inst.Status)
+	}
+	if inst.Bids[1000] == nil || inst.Asks[1100] == nil {
+		t.Errorf("book: bids=%+v asks=%+v", inst.Bids, inst.Asks)
+	}
+	if inst.DepthBound == nil || *inst.DepthBound != 25 {
+		t.Errorf("depth bound: %v", inst.DepthBound)
+	}
+	if inst.LastAppliedInstrumentSeq != 77 {
+		t.Errorf("tracker: %d", inst.LastAppliedInstrumentSeq)
+	}
+}
+
+func TestApply_SnapshotLevelWrongIDDropped(t *testing.T) {
+	m := NewMetrics()
+	s := NewShard(0, 1, m)
+	s.apply(instDefRec(11, "SYM", 1))
+	s.apply(snapBeginRec(11, 3, 1, 0, 0, 5000))
+	s.apply(snapLevelRec(11, 99, "bid", 1000, 10)) // wrong snapshot id
+
+	inst := s.instruments[instKey{0, 11}]
+	if inst.OpenSnapshot.ReceivedLevels != 0 {
+		t.Errorf("mismatched level must not enter the shadow: %d", inst.OpenSnapshot.ReceivedLevels)
+	}
+	if got := counterValue(m.SnapshotLevelDroppedTotal); got != 1 {
+		t.Errorf("dropped counter: got %v want 1", got)
+	}
+}
+
+// A ready, current instrument must ignore a periodic snapshot: no shadow opens.
+func TestApply_SnapshotWhileReadyIgnoredWhenCurrent(t *testing.T) {
+	s := NewShard(0, 1, nil)
+	s.apply(instDefRec(11, "SYM", 1))
+	inst := s.instruments[instKey{0, 11}]
+	inst.Status = StatusReady
+	inst.LastAppliedInstrumentSeq = 100
+
+	s.apply(snapBeginRec(11, 4, 1, 100, 0, 9999)) // K == tracker
+	if inst.OpenSnapshot != nil {
+		t.Error("a current ready instrument must not open a shadow")
+	}
+}
+
+func TestApply_SnapshotWhileReadyRebootstrapsWhenBehind(t *testing.T) {
+	s := NewShard(0, 1, nil)
+	s.apply(instDefRec(11, "SYM", 1))
+	inst := s.instruments[instKey{0, 11}]
+	inst.Status = StatusReady
+	inst.LastAppliedInstrumentSeq = 100
+	inst.ApplyLevelUpdate(0, 500, 5, 1, 0, 1) // stale level that must be replaced
+
+	s.apply(snapBeginRec(11, 5, 1, 150, 0, 9999)) // K > tracker
+	if inst.OpenSnapshot == nil {
+		t.Fatal("a behind ready instrument must open a shadow")
+	}
+	s.apply(snapLevelRec(11, 5, "bid", 1000, 10))
+	s.apply(snapEndRec(11, 5, 9999))
+
+	if inst.Bids[500] != nil {
+		t.Error("the stale level must be gone after re-bootstrap")
+	}
+	if inst.Bids[1000] == nil {
+		t.Error("the snapshot level must be present")
+	}
+	if inst.LastAppliedInstrumentSeq != 150 {
+		t.Errorf("tracker: got %d want 150", inst.LastAppliedInstrumentSeq)
+	}
+}
+
+func TestApply_InstrumentResetSetsAnchorAndTrimsBuffer(t *testing.T) {
+	m := NewMetrics()
+	s := NewShard(0, 1, m)
+	s.apply(instDefRec(11, "SYM", 1))
+	k := instKey{0, 11}
+	inst := s.instruments[k]
+	inst.Status = StatusReady
+
+	// Buffer deltas either side of the reset anchor.
+	for i, seq := range []uint64{100, 200, 300, 400} {
+		s.bufferDelta(k, levelUpdateRec(11, seq, uint32(i+1), "bid", 1000, 5))
+	}
+	if s.bufferedN != 4 {
+		t.Fatalf("setup bufferedN: %d", s.bufferedN)
+	}
+
+	s.apply(Record{Type: "instrument_reset", Port: "mktdata", InstrumentID: 11, Fields: map[string]any{
+		"reason": "upstream_gap", "new_anchor_seq": float64(250),
+	}})
+
+	if inst.Status != StatusAwaitingSnapshot {
+		t.Errorf("status: %v", inst.Status)
+	}
+	if inst.RequiredAnchorSeq == nil || *inst.RequiredAnchorSeq != 250 {
+		t.Errorf("required anchor: %v", inst.RequiredAnchorSeq)
+	}
+	if got := len(s.deltaBuf[k]); got != 2 {
+		t.Errorf("only deltas above the anchor survive: got %d want 2", got)
+	}
+	if s.bufferedN != 2 {
+		t.Errorf("bufferedN must track the trim: got %d want 2", s.bufferedN)
+	}
+	if inst.DepthBound != nil {
+		t.Error("reset must return depth bound to unknown")
+	}
+}
+
+// A snapshot captured before the reset but delivered after it must be discarded.
+func TestApply_StaleSnapshotAfterResetDiscarded(t *testing.T) {
+	m := NewMetrics()
+	s := NewShard(0, 1, m)
+	s.apply(instDefRec(11, "SYM", 1))
+	inst := s.instruments[instKey{0, 11}]
+
+	s.apply(Record{Type: "instrument_reset", Port: "mktdata", InstrumentID: 11, Fields: map[string]any{
+		"reason": "venue_resync", "new_anchor_seq": float64(9000),
+	}})
+	s.apply(snapBeginRec(11, 7, 1, 0, 0, 8500)) // anchor older than required
+
+	if inst.OpenSnapshot != nil {
+		t.Error("a stale-anchor snapshot must not open a shadow")
+	}
+	if inst.Status != StatusAwaitingSnapshot {
+		t.Errorf("status must stay awaiting-snapshot: %v", inst.Status)
+	}
+	if got := counterValue(m.SnapshotDiscardedTotal.WithLabelValues("stale_anchor")); got != 1 {
+		t.Errorf("stale_anchor discard counter: got %v want 1", got)
+	}
+}
+
+// With no BatchBoundary seen, every applied delta is a consistency point.
+func TestCrossedBook_PerDeltaWhenNoBatchBoundary(t *testing.T) {
+	m := NewMetrics()
+	s := NewShard(0, 1, m)
+	s.apply(instDefRec(11, "SYM", 1))
+	k := instKey{0, 11}
+	inst := s.instruments[k]
+	inst.Status = StatusReady
+
+	// Ask at 1000, then a bid at 1200 crosses it.
+	s.apply(levelUpdateRec(11, 900, 1, "ask", 1000, 5))
+	if got := counterValue(m.CrossedBookEventsTotal); got != 0 {
+		t.Fatalf("one-sided book is not crossed: got %v", got)
+	}
+	s.apply(levelUpdateRec(11, 901, 2, "bid", 1200, 5))
+	if got := counterValue(m.CrossedBookEventsTotal); got != 1 {
+		t.Errorf("crossing delta must count immediately: got %v want 1", got)
+	}
+	if got := gaugeRead(m.CrossedInstruments); got != 1 {
+		t.Errorf("crossed gauge: got %v want 1", got)
+	}
+	// Status and book untouched: this is observability, not control flow.
+	if inst.Status != StatusReady {
+		t.Errorf("crossed book must not change status: %v", inst.Status)
+	}
+	if inst.Bids[1200] == nil || inst.Asks[1000] == nil {
+		t.Error("crossed book must not be discarded")
+	}
+}
+
+// Once a BatchBoundary is seen, evaluation defers to the boundary.
+func TestCrossedBook_AtBoundaryWhenBatching(t *testing.T) {
+	m := NewMetrics()
+	s := NewShard(0, 1, m)
+	s.apply(instDefRec(11, "SYM", 1))
+	inst := s.instruments[instKey{0, 11}]
+	inst.Status = StatusReady
+
+	boundary := Record{Type: "batch_boundary", Port: "mktdata", Fields: map[string]any{
+		"batch_id": float64(1), "batch_ts": "2026-08-02T00:00:00Z",
+	}}
+	s.apply(boundary) // channel is now known to batch
+
+	s.apply(levelUpdateRec(11, 900, 1, "ask", 1000, 5))
+	s.apply(levelUpdateRec(11, 901, 2, "bid", 1200, 5)) // crosses mid-batch
+	if got := counterValue(m.CrossedBookEventsTotal); got != 0 {
+		t.Fatalf("a transient cross inside a batch is legal and must not count: got %v", got)
+	}
+	s.apply(boundary)
+	if got := counterValue(m.CrossedBookEventsTotal); got != 1 {
+		t.Errorf("the boundary is the consistency point: got %v want 1", got)
+	}
+
+	// A cross resolved before the next boundary must not count at all.
+	s.apply(levelUpdateRec(11, 902, 3, "bid", 1200, 0)) // delete the crossing bid
+	s.apply(boundary)
+	if got := counterValue(m.CrossedBookEventsTotal); got != 1 {
+		t.Errorf("resolved cross must not count again: got %v want 1", got)
+	}
+	if got := gaugeRead(m.CrossedInstruments); got != 0 {
+		t.Errorf("crossed gauge should clear: got %v", got)
+	}
+}
+
+// Definitions are retransmitted gradually across a definition cycle, so pruning
+// everything below the new seq would evict instruments still in the manifest.
+func TestPruneManifest_GraceWindowKeepsPreviousGeneration(t *testing.T) {
+	s := NewShard(0, 1, nil)
+	s.apply(instDefRec(1, "OLD", 3))     // two generations back
+	s.apply(instDefRec(2, "RECENT", 4))  // one generation back — inside grace
+	s.apply(instDefRec(3, "CURRENT", 5)) // current
+
+	s.pruneManifest(5)
+
+	if _, ok := s.instruments[instKey{0, 1}]; ok {
+		t.Error("an instrument two generations stale must be pruned")
+	}
+	if _, ok := s.instruments[instKey{0, 2}]; !ok {
+		t.Error("the previous generation is inside the grace window and must survive")
+	}
+	if _, ok := s.instruments[instKey{0, 3}]; !ok {
+		t.Error("the current generation must survive")
+	}
+}
+
+func TestPruneManifest_EarlySeqDoesNotPrune(t *testing.T) {
+	s := NewShard(0, 1, nil)
+	s.apply(instDefRec(1, "A", 0))
+	s.apply(instDefRec(2, "B", 1))
+	s.pruneManifest(1) // no generation is old enough to be stale
+	if len(s.instruments) != 2 {
+		t.Errorf("nothing should be pruned at seq 1, got %d instruments", len(s.instruments))
+	}
+}
+
+func TestPruneManifest_AdjustsBufferedN(t *testing.T) {
+	s := NewShard(0, 1, nil)
+	s.apply(instDefRec(1, "STALE", 2))
+	k := instKey{0, 1}
+	for i := 0; i < 3; i++ {
+		s.bufferDelta(k, levelUpdateRec(1, uint64(i), uint32(i+1), "bid", 1000, 5))
+	}
+	if s.bufferedN != 3 {
+		t.Fatalf("setup: %d", s.bufferedN)
+	}
+	s.pruneManifest(5)
+	if _, ok := s.instruments[k]; ok {
+		t.Fatal("stale instrument should be pruned")
+	}
+	if s.bufferedN != 0 {
+		t.Errorf("bufferedN must drop with the pruned buffer: got %d want 0", s.bufferedN)
+	}
+}
+```
+
+
+### coordinator.go (Task 5, new file)
+
+```go
+package main
+
+import "context"
+
+// ManifestState is parity bookkeeping for the refdata manifest.
+type ManifestState struct {
+	Seq             uint16
+	Valid           bool
+	InstrumentCount uint32
+}
+
+// openGroup is the currently-open snapshot group on the snapshot port, per
+// channel.
+//
+// This exists because `snapshot_level` records carry NO instrument_id — the wire
+// omits it since the containing SnapshotBegin implies it. Routing must therefore
+// follow the open group.
+//
+// Do NOT key snapshot routing by snapshot_id. Snapshot ID is monotonic per
+// (channel_id, instrument_id), not per channel, so two instruments routinely sit
+// at the same value within one cycle. A {channel_id, snapshot_id} route sends
+// levels to whichever instrument last claimed that id — a different shard in
+// general, where they are silently dropped. That is issue #30 against
+// marketbyorder-bot. snapshot_id is used only to validate membership.
+//
+// Publishers MUST NOT interleave snapshot groups, so one open group per channel
+// is sufficient state.
+type openGroup struct {
+	instrumentID uint32
+	snapshotID   uint32
+	shard        int
+}
+
+// Coordinator is the single-goroutine Dispatcher. It owns channel-scoped state
+// and routes each record to exactly one shard, or to a broadcast/barrier/fence
+// path. Shards own all instrument-scoped state.
+//
+// Dispatch is NOT safe for concurrent callers: it mutates its maps without
+// locks, on the assumption that the only caller is the synchronous bot read loop.
+type Coordinator struct {
+	ctx     context.Context // escapes barrier/fence ack waits on shutdown
+	shards  []*Shard
+	n       int
+	metrics *Metrics
+
+	resetSeen  bool
+	resetCount uint8
+	manifest   ManifestState
+	seqLast    map[string]uint64
+	open       map[uint8]openGroup // per channel_id
+}
+
+func NewCoordinator(ctx context.Context, shards []*Shard, metrics *Metrics) *Coordinator {
+	return &Coordinator{
+		ctx:     ctx,
+		shards:  shards,
+		n:       len(shards),
+		metrics: metrics,
+		seqLast: map[string]uint64{},
+		open:    map[uint8]openGroup{},
+	}
+}
+
+func (c *Coordinator) shardFor(instrumentID uint32) int {
+	return int(instrumentID) % c.n
+}
+
+// Dispatch implements Dispatcher. Called synchronously from the bot read loop.
+func (c *Coordinator) Dispatch(rec Record) {
+	if c.resetSeen && rec.ResetCount != c.resetCount {
+		c.runResetBarrier(rec)
+		return
+	}
+	if !c.resetSeen {
+		c.resetSeen = true
+		c.resetCount = rec.ResetCount
+	}
+	c.seqLast[rec.Port] = rec.SequenceNumber
+
+	switch rec.Type {
+	case "level_update", "book_clear", "instrument_definition", "instrument_reset", "trade", "liquidation":
+		c.routeInstrument(rec)
+
+	case "snapshot_begin":
+		idx := c.shardFor(rec.InstrumentID)
+		c.open[rec.ChannelID] = openGroup{
+			instrumentID: rec.InstrumentID,
+			snapshotID:   getUint32(rec.Fields, "snapshot_id"),
+			shard:        idx,
+		}
+		c.send(idx, rec)
+
+	case "snapshot_level":
+		g, ok := c.open[rec.ChannelID]
+		if !ok || g.snapshotID != getUint32(rec.Fields, "snapshot_id") {
+			// No open group, or the level does not belong to it. Discard and
+			// count — never guess an instrument.
+			if c.metrics != nil {
+				c.metrics.SnapshotLevelDroppedTotal.Inc()
+			}
+			return
+		}
+		// Stamp the instrument the open group identifies. The wire omits
+		// instrument_id on snapshot_level, and the shard keys everything by
+		// (channel_id, instrument_id) — without this the record resolves to
+		// instrument 0 and the level is silently dropped.
+		//
+		// Stamping here, where the identity is known from SnapshotBegin, is what
+		// lets the shard stay uniform. The alternative the sibling bot uses —
+		// scanning every instrument for one whose open snapshot matches the
+		// snapshot_id — picks arbitrarily when two instruments share an id, which
+		// is issue #30.
+		stamped := rec
+		stamped.InstrumentID = g.instrumentID
+		c.send(g.shard, stamped)
+
+	case "snapshot_end":
+		idx := c.shardFor(rec.InstrumentID)
+		c.send(idx, rec)
+		delete(c.open, rec.ChannelID)
+
+	case "batch_boundary":
+		// Carries no instrument_id and every shard evaluates crossed-book for the
+		// instruments it touched, so it must reach all of them.
+		for i := range c.shards {
+			c.send(i, rec)
+		}
+
+	case "heartbeat":
+		// Channel-scoped, no book effect.
+
+	case "manifest_summary":
+		c.applyManifest(rec)
+
+	case "end_of_session":
+		c.runFence(rec)
+	}
+}
+
+func (c *Coordinator) routeInstrument(rec Record) {
+	c.send(c.shardFor(rec.InstrumentID), rec)
+}
+
+func (c *Coordinator) send(idx int, rec Record) {
+	r := rec
+	select {
+	case c.shards[idx].inbox <- shardMsg{kind: msgRecord, rec: &r}:
+	case <-c.ctx.Done():
+	}
+}
+
+// applyManifest records manifest state and, on a seq increase, broadcasts a
+// prune so each shard can drop instruments that have fallen out of the manifest.
+func (c *Coordinator) applyManifest(rec Record) {
+	newSeq := toUint16(rec.Fields["manifest_seq"])
+	prev := c.manifest.Seq
+	c.manifest = ManifestState{
+		Seq:             newSeq,
+		Valid:           toUint8(rec.Fields["valid"]) != 0,
+		InstrumentCount: toUint32(rec.Fields["instrument_count"]),
+	}
+	if !c.manifest.Valid || newSeq <= prev {
+		return
+	}
+	for i := range c.shards {
+		select {
+		case c.shards[i].inbox <- shardMsg{kind: msgManifestPrune, seq: newSeq}:
+		case <-c.ctx.Done():
+			return
+		}
+	}
+}
+
+// runResetBarrier drains every shard, wipes coordinator state, then re-routes the
+// triggering record as the first record of the new era. Sends and ack-waits are
+// ctx-aware so a shutdown mid-barrier cannot wedge the read loop.
+func (c *Coordinator) runResetBarrier(held Record) {
+	acks := make(chan int, c.n)
+	for _, s := range c.shards {
+		go func(s *Shard) {
+			select {
+			case s.inbox <- shardMsg{kind: msgReset, ack: acks}:
+			case <-c.ctx.Done():
+			}
+		}(s)
+	}
+	for i := 0; i < c.n; i++ {
+		select {
+		case <-acks:
+		case <-c.ctx.Done():
+			return
+		}
+	}
+
+	if c.metrics != nil {
+		c.metrics.ChannelResetsTotal.Inc()
+	}
+	c.open = map[uint8]openGroup{}
+	c.seqLast = map[string]uint64{}
+	c.manifest = ManifestState{}
+	c.resetCount = held.ResetCount
+
+	// resetSeen is already true and resetCount now equals held.ResetCount, so
+	// this re-entry falls through to normal classification.
+	c.Dispatch(held)
+}
+
+// runFence drains every shard so a channel-scoped record is ordered strictly
+// after all preceding instrument records. No state is wiped.
+func (c *Coordinator) runFence(rec Record) {
+	acks := make(chan int, c.n)
+	for _, s := range c.shards {
+		go func(s *Shard) {
+			select {
+			case s.inbox <- shardMsg{kind: msgFence, ack: acks}:
+			case <-c.ctx.Done():
+			}
+		}(s)
+	}
+	for i := 0; i < c.n; i++ {
+		select {
+		case <-acks:
+		case <-c.ctx.Done():
+			return
+		}
+	}
+}
+
+func getUint32(fields map[string]any, key string) uint32 {
+	return toUint32(fields[key])
+}
+```
+
+
+### coordinator_test.go (Task 5)
+
+```go
+package main
+
+import (
+	"context"
+	"testing"
+)
+
+func newTestCoordinator(t *testing.T, n int) (*Coordinator, []*Shard) {
+	t.Helper()
+	shards := make([]*Shard, n)
+	for i := 0; i < n; i++ {
+		shards[i] = NewShard(i, n, nil)
+	}
+	return NewCoordinator(context.Background(), shards, nil), shards
+}
+
+// drain returns the record types sitting in a shard's inbox, without running the
+// shard goroutine.
+func drain(s *Shard) []Record {
+	var out []Record
+	for {
+		select {
+		case m := <-s.inbox:
+			if m.kind == msgRecord && m.rec != nil {
+				out = append(out, *m.rec)
+			}
+		default:
+			return out
+		}
+	}
+}
+
+func snapBegin(ch uint8, instID, snapID uint32) Record {
+	return Record{
+		Type:         "snapshot_begin",
+		Port:         "snapshot",
+		ChannelID:    ch,
+		InstrumentID: instID,
+		Fields: map[string]any{
+			"snapshot_id":         float64(snapID),
+			"anchor_seq":          float64(5000),
+			"total_levels":        float64(1),
+			"last_instrument_seq": float64(0),
+			"depth_bound":         float64(0),
+		},
+	}
+}
+
+func snapLevel(ch uint8, snapID uint32, priceRaw int64) Record {
+	return Record{
+		Type:      "snapshot_level",
+		Port:      "snapshot",
+		ChannelID: ch,
+		// NOTE: no InstrumentID — the wire omits it.
+		Fields: map[string]any{
+			"snapshot_id": float64(snapID),
+			"price_raw":   float64(priceRaw),
+			"qty_raw":     float64(10),
+			"side":        "bid",
+			"level_flags": float64(0),
+		},
+	}
+}
+
+func snapEnd(ch uint8, instID, snapID uint32) Record {
+	return Record{
+		Type:         "snapshot_end",
+		Port:         "snapshot",
+		ChannelID:    ch,
+		InstrumentID: instID,
+		Fields: map[string]any{
+			"snapshot_id": float64(snapID),
+			"anchor_seq":  float64(5000),
+		},
+	}
+}
+
+func TestDispatch_RoutesInstrumentRecordsByModulo(t *testing.T) {
+	c, shards := newTestCoordinator(t, 4)
+	c.Dispatch(levelUpdateRec(5, 100, 1, "bid", 1000, 50))
+
+	if got := len(drain(shards[1])); got != 1 { // 5 % 4 == 1
+		t.Errorf("shard 1 should hold the record, got %d", got)
+	}
+	for _, i := range []int{0, 2, 3} {
+		if got := len(drain(shards[i])); got != 0 {
+			t.Errorf("shard %d should be empty, got %d", i, got)
+		}
+	}
+}
+
+// snapshot_level carries no instrument_id, so it must follow the open group.
+func TestDispatch_SnapshotLevelRoutedToOpenGroupsShard(t *testing.T) {
+	c, shards := newTestCoordinator(t, 4)
+	c.Dispatch(snapBegin(0, 5, 7)) // instrument 5 -> shard 1
+	c.Dispatch(snapLevel(0, 7, 1000))
+	c.Dispatch(snapEnd(0, 5, 7))
+
+	got := drain(shards[1])
+	if len(got) != 3 {
+		t.Fatalf("shard 1 should hold begin+level+end, got %d: %+v", len(got), got)
+	}
+	if got[1].Type != "snapshot_level" {
+		t.Errorf("second record: %s", got[1].Type)
+	}
+	for _, i := range []int{0, 2, 3} {
+		if n := len(drain(shards[i])); n != 0 {
+			t.Errorf("shard %d should be empty, got %d", i, n)
+		}
+	}
+}
+
+func TestDispatch_SnapshotLevelWithNoOpenGroupDropped(t *testing.T) {
+	c, shards := newTestCoordinator(t, 4)
+	c.Dispatch(snapLevel(0, 7, 1000))
+	for i := range shards {
+		if n := len(drain(shards[i])); n != 0 {
+			t.Errorf("shard %d must be empty; an orphan level must be dropped, got %d", i, n)
+		}
+	}
+}
+
+func TestDispatch_SnapshotLevelMismatchedIDDropped(t *testing.T) {
+	c, shards := newTestCoordinator(t, 4)
+	c.Dispatch(snapBegin(0, 5, 7))
+	drain(shards[1]) // discard the begin
+	c.Dispatch(snapLevel(0, 8, 1000))
+	if n := len(drain(shards[1])); n != 0 {
+		t.Errorf("a level with a mismatched snapshot_id must be dropped, got %d", n)
+	}
+}
+
+// Regression test for the issue-#30 bug class. Two instruments legitimately share
+// a snapshot_id, because Snapshot ID is monotonic PER INSTRUMENT. Routing keyed on
+// {channel, snapshot_id} would send instrument 7's levels to instrument 4's shard.
+// 4 % 4 == 0 and 7 % 4 == 3, so the two land on different shards and the wrong
+// route is observable.
+func TestDispatch_TwoInstrumentsSameSnapshotIDRouteIndependently(t *testing.T) {
+	c, shards := newTestCoordinator(t, 4)
+
+	c.Dispatch(snapBegin(0, 4, 5)) // instrument 4 -> shard 0, snapshot_id 5
+	c.Dispatch(snapLevel(0, 5, 1000))
+	c.Dispatch(snapEnd(0, 4, 5))
+
+	first := drain(shards[0])
+	if len(first) != 3 {
+		t.Fatalf("shard 0 should hold instrument 4's group, got %d", len(first))
+	}
+
+	c.Dispatch(snapBegin(0, 7, 5)) // instrument 7 -> shard 3, SAME snapshot_id 5
+	c.Dispatch(snapLevel(0, 5, 2000))
+	c.Dispatch(snapEnd(0, 7, 5))
+
+	second := drain(shards[3])
+	if len(second) != 3 {
+		t.Fatalf("shard 3 should hold instrument 7's group, got %d: %+v", len(second), second)
+	}
+	if got := toInt64(second[1].Fields["price_raw"]); got != 2000 {
+		t.Errorf("shard 3 got the wrong level: price_raw %d", got)
+	}
+	// Instrument 4's shard must not have received the second group's level.
+	if n := len(drain(shards[0])); n != 0 {
+		t.Errorf("shard 0 must not receive instrument 7's records, got %d", n)
+	}
+}
+
+func TestDispatch_BatchBoundaryBroadcastsToAllShards(t *testing.T) {
+	c, shards := newTestCoordinator(t, 4)
+	c.Dispatch(Record{Type: "batch_boundary", Port: "mktdata", Fields: map[string]any{
+		"batch_id": float64(1), "batch_ts": "2026-08-02T00:00:00Z",
+	}})
+	for i := range shards {
+		if n := len(drain(shards[i])); n != 1 {
+			t.Errorf("shard %d should receive the boundary, got %d", i, n)
+		}
+	}
+}
+
+func TestDispatch_ResetCountChangeRunsBarrierThenRoutesHeldRecord(t *testing.T) {
+	c, shards := newTestCoordinator(t, 2)
+
+	// Establish era 0 and leave some coordinator state behind.
+	c.Dispatch(snapBegin(0, 2, 9))
+	if len(c.open) != 1 {
+		t.Fatal("expected an open group before the reset")
+	}
+	for i := range shards {
+		drain(shards[i])
+	}
+
+	// Drain reset markers concurrently so the barrier's ack wait completes.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := range shards {
+			for m := range shards[i].inbox {
+				if m.kind == msgReset {
+					m.ack <- i
+					break
+				}
+			}
+		}
+	}()
+
+	held := levelUpdateRec(3, 1, 1, "bid", 1000, 50)
+	held.ResetCount = 1
+	c.Dispatch(held)
+	<-done
+
+	if c.resetCount != 1 {
+		t.Errorf("resetCount: got %d want 1", c.resetCount)
+	}
+	if len(c.open) != 0 {
+		t.Errorf("open groups must be cleared by the barrier: %+v", c.open)
+	}
+	// The held record is re-dispatched as the first record of the new era.
+	if n := len(drain(shards[1])); n != 1 { // 3 % 2 == 1
+		t.Errorf("held record should be routed after the barrier, got %d", n)
+	}
+}
+
+func TestDispatch_ManifestSeqBumpBroadcastsPrune(t *testing.T) {
+	c, shards := newTestCoordinator(t, 3)
+
+	manifest := func(seq uint16, valid uint8) Record {
+		return Record{Type: "manifest_summary", Port: "refdata", Fields: map[string]any{
+			"manifest_seq": float64(seq), "valid": float64(valid), "instrument_count": float64(10),
+		}}
+	}
+
+	countPrunes := func(s *Shard) int {
+		n := 0
+		for {
+			select {
+			case m := <-s.inbox:
+				if m.kind == msgManifestPrune {
+					n++
+				}
+			default:
+				return n
+			}
+		}
+	}
+
+	c.Dispatch(manifest(5, 1))
+	for i := range shards {
+		if got := countPrunes(shards[i]); got != 1 {
+			t.Errorf("shard %d: first valid manifest should prune once, got %d", i, got)
+		}
+	}
+	// Same seq again: no prune.
+	c.Dispatch(manifest(5, 1))
+	for i := range shards {
+		if got := countPrunes(shards[i]); got != 0 {
+			t.Errorf("shard %d: repeated seq must not prune, got %d", i, got)
+		}
+	}
+	// Invalid manifest: no prune even on a higher seq.
+	c.Dispatch(manifest(6, 0))
+	for i := range shards {
+		if got := countPrunes(shards[i]); got != 0 {
+			t.Errorf("shard %d: invalid manifest must not prune, got %d", i, got)
+		}
+	}
+	if c.manifest.Seq != 6 || c.manifest.Valid {
+		t.Errorf("manifest state: %+v", c.manifest)
+	}
+}
+
+// The two models genuinely differ AFTER a group closes. The open-group model
+// deletes the group on snapshot_end, so a stray level bearing that snapshot_id
+// has no open group and is dropped and counted. A {channel, snapshot_id} route
+// keeps its entry, so the same stray level is routed to a shard and silently
+// swallowed — no counter, no signal.
+func TestDispatch_StrayLevelAfterSnapshotEndIsDroppedNotRouted(t *testing.T) {
+	shards := make([]*Shard, 4)
+	for i := range shards {
+		shards[i] = NewShard(i, 4, nil)
+	}
+	m := NewMetrics()
+	c := NewCoordinator(context.Background(), shards, m)
+
+	c.Dispatch(snapBegin(0, 4, 5))
+	c.Dispatch(snapLevel(0, 5, 1000))
+	c.Dispatch(snapEnd(0, 4, 5))
+	for i := range shards {
+		drain(shards[i])
+	}
+
+	// A level for the now-closed group arrives late.
+	c.Dispatch(snapLevel(0, 5, 9999))
+
+	for i := range shards {
+		if n := len(drain(shards[i])); n != 0 {
+			t.Errorf("shard %d must not receive a level for a closed group, got %d", i, n)
+		}
+	}
+	if got := counterValue(m.SnapshotLevelDroppedTotal); got != 1 {
+		t.Errorf("stray level must be counted as dropped: got %v want 1", got)
+	}
+}
+
+// The wire omits instrument_id on snapshot_level. The shard keys all state by
+// (channel_id, instrument_id), so the coordinator must stamp the identity the
+// open group establishes — otherwise the record resolves to instrument 0 at the
+// shard and the level is silently dropped.
+func TestDispatch_SnapshotLevelStampedWithOpenGroupInstrument(t *testing.T) {
+	c, shards := newTestCoordinator(t, 4)
+
+	c.Dispatch(snapBegin(0, 5, 7)) // instrument 5 -> shard 1
+	c.Dispatch(snapLevel(0, 7, 1000))
+
+	got := drain(shards[1])
+	if len(got) != 2 {
+		t.Fatalf("shard 1 should hold begin+level, got %d", len(got))
+	}
+	level := got[1]
+	if level.Type != "snapshot_level" {
+		t.Fatalf("second record: %s", level.Type)
+	}
+	if level.InstrumentID != 5 {
+		t.Errorf("level must be stamped with the open group's instrument: got %d want 5", level.InstrumentID)
+	}
+	// The incoming record genuinely carried no instrument id, so the stamp is
+	// the only source of that identity.
+	if snapLevel(0, 7, 1000).InstrumentID != 0 {
+		t.Fatal("test fixture should model the wire: no instrument_id on snapshot_level")
+	}
+}
+```
+
+
+### metrics.go — final form including the test-only counter/gauge readers
+
+```go
+package main
+
+import (
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
+)
+
+const metricsNamespace = "dz_mbp_bot"
+
+// Minimal subset of the real Metrics needed by the sequencing/buffer prototype.
+type Metrics struct {
+	BookDivergenceTotal       *prometheus.CounterVec
+	PerInstrumentGapsTotal    prometheus.Counter
+	DeltaBufferOverflowTotal  prometheus.Counter
+	DeltaBufferedRecords      prometheus.Gauge
+	SnapshotLevelDroppedTotal prometheus.Counter
+	SnapshotDiscardedTotal    *prometheus.CounterVec
+	InstrumentResetsTotal     *prometheus.CounterVec
+	CrossedBookEventsTotal    prometheus.Counter
+	CrossedInstruments        prometheus.Gauge
+	ChannelResetsTotal        prometheus.Counter
+}
+
+func NewMetrics() *Metrics {
+	return &Metrics{
+		BookDivergenceTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricsNamespace, Name: "book_divergence_total"}, []string{"kind"}),
+		PerInstrumentGapsTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: metricsNamespace, Name: "per_instrument_gaps_total"}),
+		DeltaBufferOverflowTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: metricsNamespace, Name: "delta_buffer_overflow_total"}),
+		DeltaBufferedRecords: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: metricsNamespace, Name: "delta_buffered_records"}),
+		SnapshotLevelDroppedTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: metricsNamespace, Name: "snapshot_level_dropped_total"}),
+		ChannelResetsTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: metricsNamespace, Name: "channel_resets_total"}),
+		SnapshotDiscardedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricsNamespace, Name: "snapshot_discarded_total"}, []string{"reason"}),
+		InstrumentResetsTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricsNamespace, Name: "instrument_resets_total"}, []string{"reason"}),
+		CrossedBookEventsTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: metricsNamespace, Name: "crossed_book_events_total"}),
+		CrossedInstruments: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: metricsNamespace, Name: "crossed_instruments"}),
+	}
+}
+
+// counterValue reads a counter's current value, for tests.
+func counterValue(c prometheus.Counter) float64 {
+	var m dto.Metric
+	if err := c.(prometheus.Metric).Write(&m); err != nil {
+		return -1
+	}
+	return m.GetCounter().GetValue()
+}
+
+// gaugeRead reads a gauge's current value, for tests.
+func gaugeRead(g prometheus.Gauge) float64 {
+	var m dto.Metric
+	if err := g.(prometheus.Metric).Write(&m); err != nil {
+		return -1
+	}
+	return m.GetGauge().GetValue()
+}
+```
