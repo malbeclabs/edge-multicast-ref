@@ -240,6 +240,8 @@ func classifyError(err error) string {
 		return "schema_version"
 	case errors.Is(err, errFrameLength), errors.Is(err, errMessageLength):
 		return "frame_length"
+	case errors.Is(err, errMessageCount):
+		return "message_count"
 	case errors.Is(err, errFrameTooShort), errors.Is(err, errMessageTooShort), errors.Is(err, errTruncated):
 		return "truncated"
 	// Defensive only, and currently unreachable: ParseFrame drops a malformed or

@@ -548,6 +548,22 @@ func TestParseFrame_TrailingBytesRejected(t *testing.T) {
 	})
 }
 
+// The spec gives Message Count a range of 1-255. A bare 24-byte frame is the one
+// remaining shape that would otherwise decode as valid-but-empty and be counted
+// nowhere, since the loop body is unreachable and no body bytes are left over.
+func TestParseFrame_ZeroMessageCountRejected(t *testing.T) {
+	p := &marketByPriceParser{}
+	frame := buildFrameHeader(mbpMagic, mbpSchemaVersion, 0, 1, time.Unix(1700000308, 0), 0, 0, frameHeaderSize)
+	if _, _, err := p.ParseFrame("mktdata", frame); !errors.Is(err, errMessageCount) {
+		t.Fatalf("expected errMessageCount, got %v", err)
+	}
+	// The reason label an operator sees must name the real cause, not fall
+	// through to "other".
+	if got := classifyError(errMessageCount); got != "message_count" {
+		t.Errorf("classifyError: got %q want message_count", got)
+	}
+}
+
 // A frame in which every message is skipped is valid and yields an empty,
 // non-nil slice — the contract documented on the Parser interface.
 func TestParseFrame_AllSkippedYieldsEmptyNonNilSlice(t *testing.T) {
@@ -585,6 +601,9 @@ func FuzzParseFrame(f *testing.F) {
 
 	f.Add([]byte{})
 	f.Add(make([]byte, frameHeaderSize))
+	// Bare well-formed header, Message Count 0 — must be rejected, not read as an
+	// empty frame.
+	f.Add(buildFrameHeader(mbpMagic, mbpSchemaVersion, 0, 1, recordTestTS, 0, 0, frameHeaderSize))
 	// Message Length 0 — the walk must not advance by zero and spin.
 	spin := buildFrameHeader(mbpMagic, mbpSchemaVersion, 0, 1, recordTestTS, 255, 0, frameHeaderSize+4)
 	f.Add(append(spin, 0x40, 0x00, 0x00, 0x00))

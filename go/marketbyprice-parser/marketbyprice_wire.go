@@ -54,6 +54,7 @@ var (
 	errFrameLength     = errors.New("frame length mismatch")
 	errMessageTooShort = errors.New("message too short for header")
 	errMessageLength   = errors.New("message length out of range")
+	errMessageCount    = errors.New("message count out of range")
 	errTruncated       = errors.New("truncated message body")
 	errMalformedBody   = errors.New("malformed message body")
 	errUnknownType     = errors.New("unknown message type")
@@ -66,7 +67,7 @@ type FrameHeader struct {
 	ChannelID     uint8
 	Sequence      uint64
 	SendTimestamp time.Time
-	MessageCount  uint8
+	MessageCount  uint8 // 1-255; ParseFrameHeader rejects 0
 	ResetCount    uint8
 	FrameLength   uint16
 }
@@ -108,6 +109,15 @@ func ParseFrameHeader(buf []byte) (FrameHeader, error) {
 	h.SendTimestamp = time.Unix(0, int64(tsNs)).UTC()
 	if int(h.FrameLength) != len(buf) {
 		return h, errFrameLength
+	}
+	// The spec gives Message Count a range of 1-255: a frame carries at least one
+	// application message. Checked here rather than left to the walk, because a
+	// zero count makes the loop body unreachable, so the frame would otherwise be
+	// accepted as valid-but-empty and the violation would never be counted. This
+	// is the last surviving silently-tolerated empty frame now that leftover body
+	// bytes fail the frame.
+	if h.MessageCount == 0 {
+		return h, fmt.Errorf("%w: message count 0, frame carries no messages", errMessageCount)
 	}
 	return h, nil
 }
