@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -138,21 +140,17 @@ func TestParseFrame_UnknownTypeSkipped(t *testing.T) {
 
 // A Message Length below the 4-byte floor must error, not advance by zero and
 // spin forever on one malformed datagram.
-func TestParseFrame_ZeroMessageLengthTerminates(t *testing.T) {
-	p := &marketByPriceParser{}
-	frame := buildFrameHeader(mbpMagic, mbpSchemaVersion, 0, 1, time.Unix(1700000204, 0), 1, 0, frameHeaderSize+4)
-	frame = append(frame, 0x40, 0x00, 0x00, 0x00) // Type 0x40, Length 0
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		if _, _, err := p.ParseFrame("mktdata", frame); err == nil {
-			t.Error("expected error for message length 0")
-		}
-	}()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("ParseFrame did not terminate on message length 0")
+func TestParseFrame_MessageLengthBelowHeaderFloorRejected(t *testing.T) {
+	for _, length := range []uint8{0, 1, 2, 3} {
+		t.Run(fmt.Sprintf("length=%d", length), func(t *testing.T) {
+			p := &marketByPriceParser{}
+			frame := buildFrameHeader(mbpMagic, mbpSchemaVersion, 0, 1, time.Unix(1700000204, 0), 1, 0, frameHeaderSize+4)
+			frame = append(frame, 0x40, length, 0x00, 0x00) // Type 0x40, Length below the 4-byte header floor
+			_, _, err := p.ParseFrame("mktdata", frame)
+			if !errors.Is(err, errMessageLength) {
+				t.Fatalf("expected errMessageLength for message length %d, got %v", length, err)
+			}
+		})
 	}
 }
 

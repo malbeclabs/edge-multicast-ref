@@ -163,21 +163,24 @@ motivates directly:
   bit 0 normative for the first time on this feed specifically so it is
   verifiable from a capture, and asks subscribers to count disagreement as a
   publisher defect. Routing still uses Type ID and port, never the bit.
-- `dz_mbp_parser_malformed_total{reason}` — `reason` in
-  `{message_length_underflow, bookclear_scope_side}`. The second is `Scope = 1`
-  with `Clear Side = 2`, which the spec declares malformed because one price
-  cannot bound both sides, and requires the subscriber to discard and count.
+- `dz_mbp_parser_malformed_total{reason}` — `reason` is `bookclear_scope_side`:
+  `Scope = 1` with `Clear Side = 2`, which the spec declares malformed because
+  one price cannot bound both sides, and requires the subscriber to discard and
+  count. This is the only value this metric emits — a sub-floor `Message
+  Length` (see below) fails the whole frame instead, and is counted in
+  `parse_errors_total{reason="frame_length"}`, since `malformed_total`'s own
+  purpose is messages dropped without failing their frame.
 
-  The first is the `Message Length < 4` case. The feed spec motivates that floor
-  by noting a length of `0` advances the walk by zero bytes and spins forever,
-  which is true of a walk driven by remaining bytes (`for len(body) > 0`). This
-  parser's walk is bounded by the frame header's `Message Count` instead, so the
-  floor is not what prevents a hang here — a hang is not reachable. What it
-  prevents is a slice-bounds panic on `body[4:mh.Length]` when `Message Length`
-  is below the header size. Both are reasons to keep the check; only the second
-  describes this implementation. Stating it precisely matters because the wrong
-  rationale invites a test that guards nothing: a timeout-based test passes
-  whether or not the check exists.
+  A `Message Length < 4` case fails the frame rather than being counted here.
+  The feed spec motivates that floor by noting a length of `0` advances the
+  walk by zero bytes and spins forever, which is true of a walk driven by
+  remaining bytes (`for len(body) > 0`). This parser's walk is bounded by the
+  frame header's `Message Count` instead, so the floor is not what prevents a
+  hang here — a hang is not reachable. What it prevents is a slice-bounds panic
+  on `body[4:mh.Length]` when `Message Length` is below the header size. Both
+  are reasons to keep the check; only the second describes this implementation.
+  Stating it precisely matters because the wrong rationale invites a test that
+  guards nothing: a timeout-based test passes whether or not the check exists.
 
 As with the sibling parsers, per-port frame-sequence gap tracking excludes
 `refdata`, which is a low-rate periodic-retransmit stream where gaps are not a

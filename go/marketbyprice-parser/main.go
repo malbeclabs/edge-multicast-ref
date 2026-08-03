@@ -21,7 +21,7 @@ func main() {
 		mktdataPort  = flag.Int("mktdata-port", 0, "mktdata UDP port (required)")
 		snapshotPort = flag.Int("snapshot-port", 0, "snapshot UDP port (required)")
 		iface        = flag.String("interface", "", "network interface for multicast join (e.g., doublezero1)")
-		output       = flag.String("output", "", "output target: unix:///path/to/sock or file:///path/to/log (required)")
+		output       = flag.String("output", "", "output target: file path or unix:///path/to/sock (required)")
 		format       = flag.String("format", "json", "output format: json")
 		parserName   = flag.String("parser", "marketbyprice", "parser name from registry")
 		metricsAddr  = flag.String("metrics-addr", "", "Prometheus /metrics HTTP listen address (empty = disabled)")

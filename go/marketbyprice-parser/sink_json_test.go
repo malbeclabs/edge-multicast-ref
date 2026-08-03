@@ -32,7 +32,7 @@ func TestJSONFileSink_Write(t *testing.T) {
 				"action":             "new",
 				"per_instrument_seq": uint32(1000),
 				"price_raw":          int64(6743250),
-				"qty_raw":            uint32(100),
+				"qty_raw":            uint64(100),
 				"timestamp":          ts,
 				"update_reason":      "new_order",
 				"level_flags":        uint8(0),
@@ -49,7 +49,7 @@ func TestJSONFileSink_Write(t *testing.T) {
 			Fields: map[string]any{
 				"source_id":          uint16(1),
 				"clear_side":         "bid",
-				"scope":              uint8(0),
+				"scope":              "entire_side",
 				"per_instrument_seq": uint32(1001),
 				"timestamp":          ts,
 				"clear_reason":       "halt",

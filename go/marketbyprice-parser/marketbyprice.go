@@ -48,8 +48,10 @@ func (p *marketByPriceParser) ParseFrame(port string, frame []byte) ([]Record, D
 		if err != nil {
 			return nil, defects, fmt.Errorf("msg %d header: %w", i, err)
 		}
-		// The < 4 floor matters for more than validation: without it a length
-		// of 0 advances the walk by zero bytes and spins forever.
+		// The < 4 floor prevents a slice-bounds panic on body[messageHeaderSize:mh.Length]
+		// when Message Length is below the header size. It is not needed to
+		// prevent a hang: the walk is bounded by Message Count (a u8), so an
+		// infinite loop is not reachable regardless of how far body advances.
 		if int(mh.Length) < messageHeaderSize {
 			return nil, defects, fmt.Errorf("%w: msg %d length %d", errMessageLength, i, mh.Length)
 		}
@@ -302,8 +304,11 @@ func (p *marketByPriceParser) decodeMessage(port string, hdr FrameHeader, mh Mes
 		return base, true, nil
 
 	case msgTypeSnapshotLevel:
-		// No Instrument ID on the wire: the containing SnapshotBegin implies it,
-		// so InstrumentID stays 0 and the consumer associates by snapshot_id.
+		// No Instrument ID on the wire: InstrumentID stays 0. A consumer must
+		// attribute this record to the currently-open SnapshotBegin on the
+		// snapshot port; Snapshot ID is monotonic per (channel_id, instrument_id),
+		// not per channel, so it validates that association (discard on
+		// mismatch) rather than keying it.
 		b, err := ParseSnapshotLevel(body)
 		if err != nil {
 			return Record{}, false, err

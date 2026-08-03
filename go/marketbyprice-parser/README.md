@@ -69,6 +69,8 @@ Every decoded message becomes one JSON line: an envelope of type/timestamp/seque
 
 **`order_count` and `level_index` are omitted when the wire carries `0xFFFF`.** That sentinel means the value is absent, or too large to express in 16 bits — not literally 65535. A `LevelUpdate` with a real `order_count` of `0` still emits `"order_count":0`; only the `0xFFFF` sentinel triggers omission.
 
+**`snapshot_level` records carry no `instrument_id`.** The wire format omits it because the containing `SnapshotBegin` implies it. A consumer must attribute each `snapshot_level` to the most recently seen `snapshot_begin` on the `snapshot` port — not by `snapshot_id`, which is monotonic per `(channel_id, instrument_id)` rather than per channel, so two instruments can be mid-snapshot at the same `snapshot_id` simultaneously. `snapshot_id` validates the association (discard on mismatch); it must never be used as the key. The parser preserves group ordering as received, so a consumer reading the output socket in order can rely on `snapshot_begin` → its `snapshot_level`s → `snapshot_end` arriving as a contiguous, correctly-ordered run per instrument.
+
 ## Metrics
 
 Namespace `dz_mbp_parser`. All metrics are exposed on `--metrics-addr` at `/metrics` when set.

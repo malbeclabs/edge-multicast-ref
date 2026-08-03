@@ -19,6 +19,7 @@ jobs:
         module:
           - go/marketbyorder-bot
           - go/marketbyorder-parser
+          - go/marketbyprice-parser
           - go/internal
           - go/kernel-receiver
           - go/topofbook-bot
