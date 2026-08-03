@@ -17,6 +17,7 @@ COPY go/xdp-receiver/go.mod go/xdp-receiver/go.sum ./go/xdp-receiver/
 COPY go/topofbook-bot/go.mod go/topofbook-bot/go.sum ./go/topofbook-bot/
 COPY go/topofbook-parser/go.mod go/topofbook-parser/go.sum ./go/topofbook-parser/
 COPY go/marketbyorder-bot/go.mod ./go/marketbyorder-bot/
+COPY go/marketbyprice-parser/go.mod go/marketbyprice-parser/go.sum ./go/marketbyprice-parser/
 
 WORKDIR /src/go/marketbyorder-parser
 RUN go mod download
