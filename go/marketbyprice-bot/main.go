@@ -11,9 +11,13 @@ import (
 	"syscall"
 )
 
-const version = "0.1.0-dev"
-
-var commit = "unknown"
+// version and commit are both vars, not consts, so the linker can stamp them:
+// `-X main.version=...` is silently ignored on a const, and a const default
+// would make the Dockerfile's VERSION build arg a no-op.
+var (
+	version = "0.1.0-dev"
+	commit  = "unknown"
+)
 
 func main() {
 	var (

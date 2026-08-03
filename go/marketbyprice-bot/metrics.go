@@ -29,12 +29,6 @@ type Metrics struct {
 	DecodeErrors       prometheus.Counter
 	SocketToBotLatency *prometheus.HistogramVec
 
-	// Book state
-	BookLevels    *prometheus.GaugeVec // labels: symbol, side
-	BookTopPrice  *prometheus.GaugeVec // labels: symbol, side
-	BookTopQty    *prometheus.GaugeVec // labels: symbol, side
-	BookSpreadBps *prometheus.GaugeVec // labels: symbol
-
 	// Feed-specific defect and health counters
 	CrossedBookEventsTotal    prometheus.Counter
 	CrossedInstruments        prometheus.Gauge
@@ -43,16 +37,9 @@ type Metrics struct {
 	DeltaBufferedRecords      prometheus.Gauge
 	SnapshotDiscardedTotal    *prometheus.CounterVec // label: reason
 	SnapshotLevelDroppedTotal prometheus.Counter
-	DepthBoundedInstruments   prometheus.Gauge
 	PerInstrumentGapsTotal    prometheus.Counter
 	InstrumentResetsTotal     *prometheus.CounterVec // label: reason
 	ChannelResetsTotal        prometheus.Counter
-	InstrumentsTotal          *prometheus.GaugeVec // label: status
-
-	// Snapshot writer
-	SnapshotWritesTotal    prometheus.Counter
-	SnapshotCoalescesTotal prometheus.Counter
-	SnapshotLagMs          prometheus.Histogram
 
 	startTime time.Time
 }
@@ -74,11 +61,6 @@ func NewMetrics(version, commit string) *Metrics {
 		Buckets: prometheus.ExponentialBuckets(0.0001, 2, 16),
 	}, []string{"type"})
 
-	m.BookLevels = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: metricsNamespace, Name: "book_levels"}, []string{"symbol", "side"})
-	m.BookTopPrice = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: metricsNamespace, Name: "book_top_price"}, []string{"symbol", "side"})
-	m.BookTopQty = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: metricsNamespace, Name: "book_top_qty"}, []string{"symbol", "side"})
-	m.BookSpreadBps = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: metricsNamespace, Name: "book_spread_bps"}, []string{"symbol"})
-
 	m.CrossedBookEventsTotal = prometheus.NewCounter(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "crossed_book_events_total"})
 	m.CrossedInstruments = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: metricsNamespace, Name: "crossed_instruments"})
 	m.BookDivergenceTotal = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "book_divergence_total"}, []string{"kind"})
@@ -86,28 +68,17 @@ func NewMetrics(version, commit string) *Metrics {
 	m.DeltaBufferedRecords = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: metricsNamespace, Name: "delta_buffered_records"})
 	m.SnapshotDiscardedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "snapshot_discarded_total"}, []string{"reason"})
 	m.SnapshotLevelDroppedTotal = prometheus.NewCounter(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "snapshot_level_dropped_total"})
-	m.DepthBoundedInstruments = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: metricsNamespace, Name: "depth_bounded_instruments"})
 	m.PerInstrumentGapsTotal = prometheus.NewCounter(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "per_instrument_gaps_total"})
 	m.InstrumentResetsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "instrument_resets_total"}, []string{"reason"})
 	m.ChannelResetsTotal = prometheus.NewCounter(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "channel_resets_total"})
-	m.InstrumentsTotal = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: metricsNamespace, Name: "instruments_total"}, []string{"status"})
-
-	m.SnapshotWritesTotal = prometheus.NewCounter(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "snapshot_writes_total"})
-	m.SnapshotCoalescesTotal = prometheus.NewCounter(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "snapshot_coalesces_total"})
-	m.SnapshotLagMs = prometheus.NewHistogram(prometheus.HistogramOpts{
-		Namespace: metricsNamespace, Name: "snapshot_lag_ms",
-		Buckets: prometheus.ExponentialBuckets(1, 2, 12),
-	})
 
 	reg.MustRegister(
 		m.BuildInfo, m.UptimeSeconds,
 		m.SocketConnected, m.SocketReconnects, m.RecordsTotal, m.DecodeErrors, m.SocketToBotLatency,
-		m.BookLevels, m.BookTopPrice, m.BookTopQty, m.BookSpreadBps,
 		m.CrossedBookEventsTotal, m.CrossedInstruments, m.BookDivergenceTotal,
 		m.DeltaBufferOverflowTotal, m.DeltaBufferedRecords,
-		m.SnapshotDiscardedTotal, m.SnapshotLevelDroppedTotal, m.DepthBoundedInstruments,
-		m.PerInstrumentGapsTotal, m.InstrumentResetsTotal, m.ChannelResetsTotal, m.InstrumentsTotal,
-		m.SnapshotWritesTotal, m.SnapshotCoalescesTotal, m.SnapshotLagMs,
+		m.SnapshotDiscardedTotal, m.SnapshotLevelDroppedTotal,
+		m.PerInstrumentGapsTotal, m.InstrumentResetsTotal, m.ChannelResetsTotal,
 	)
 	m.BuildInfo.WithLabelValues(version, commit).Set(1)
 

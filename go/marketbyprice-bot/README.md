@@ -89,7 +89,7 @@ Namespace `dz_mbp_bot`.
 | `delta_buffered_records` | Deltas currently buffered across the shard. |
 | `delta_buffer_overflow_total` | Buffer evictions. Sustained non-zero means the snapshot cycle is too long for the memory budget. |
 
-The following are registered but **not yet populated**, because the subsystems that would write them arrive with the persistence follow-on: `book_levels`, `book_top_price`, `book_top_qty`, `book_spread_bps`, `depth_bounded_instruments`, `instruments_total`, `snapshot_writes_total`, `snapshot_coalesces_total`, `snapshot_lag_ms`. They export `0`; do not alert on them yet.
+Every metric listed above is written by code in this binary. Book-state gauges and snapshot-writer metrics arrive with the persistence follow-on, alongside the subsystems that populate them — a registered collector nothing writes exports `0` forever, which reads as "configured and failing" rather than "absent".
 
 ## Architecture
 
