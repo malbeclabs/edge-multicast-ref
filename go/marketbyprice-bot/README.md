@@ -102,3 +102,5 @@ The **Coordinator** owns channel-scoped state and routes each record to exactly 
 Snapshot routing follows the **currently-open group**, never `{channel, snapshot_id}`. `Snapshot ID` is monotonic per `(channel_id, instrument_id)`, not per channel, so two instruments routinely hold the same value within one cycle and an id-keyed route delivers levels to the wrong shard, where they are silently dropped.
 
 Each **Shard** owns a disjoint set of instruments and all their book state. Its goroutine is the sole writer; `mu` guards book mutation so a reader can take a consistent level snapshot.
+
+Shards report state changes outward as `ChannelEvent`s, which the persistence layer will consume. Only `applied_delta` and `applied_snapshot` assert that book state actually changed. `malformed_delta` reports a delta that arrived and was deliberately not applied — a consumer must not persist it as a mutation. The remaining kinds are `instrument_reset`, `channel_reset`, and `per_instrument_gap`.

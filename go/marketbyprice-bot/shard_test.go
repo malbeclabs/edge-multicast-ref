@@ -364,3 +364,112 @@ func TestApplyDelta_ReorderWindowBoundary(t *testing.T) {
 		t.Error("Pending must be dropped when the window is exceeded")
 	}
 }
+
+// bookClearRec builds a book_clear the way the parser emits one.
+func bookClearRec(instID uint32, mktSeq uint64, piSeq uint32, clearSide, scope string, fromPriceRaw int64) Record {
+	return Record{
+		Type:           "book_clear",
+		Port:           "mktdata",
+		SequenceNumber: mktSeq,
+		InstrumentID:   instID,
+		Fields: map[string]any{
+			"clear_side":         clearSide,
+			"scope":              scope,
+			"per_instrument_seq": float64(piSeq),
+			"from_price_raw":     float64(fromPriceRaw),
+			"clear_reason":       "halt",
+		},
+	}
+}
+
+// A discarded BookClear must not report itself as applied. The persistence layer
+// keys off Kind, and "applied_delta" here would record a mutation the book never
+// saw. Scope=1 with ClearSide=both is the malformed case: one price cannot bound
+// both sides.
+func TestApplyOne_MalformedBookClearReportsDistinctKind(t *testing.T) {
+	s := newTestShard(t)
+	k := instKey{0, 11}
+	inst := readyInstrumentInShard(t, s, k, 5)
+	inst.Bids[900] = &LevelState{QtyRaw: 7}
+	inst.Asks[1100] = &LevelState{QtyRaw: 7}
+
+	evs := s.applyDelta(k, bookClearRec(11, 900, 6, "both", "from_price", 1000))
+
+	if len(evs) != 1 {
+		t.Fatalf("events: %+v", evs)
+	}
+	if evs[0].Kind != "malformed_delta" {
+		t.Errorf("kind: got %q want \"malformed_delta\"", evs[0].Kind)
+	}
+	// Nothing applied: the book is untouched and the trackers have not advanced,
+	// so the next delta is still classified against the correct expected seq.
+	if inst.Bids[900] == nil || inst.Asks[1100] == nil {
+		t.Error("a discarded book_clear must not mutate the book")
+	}
+	if inst.LastAppliedInstrumentSeq != 5 {
+		t.Errorf("trackers must not advance on a discard: got %d want 5", inst.LastAppliedInstrumentSeq)
+	}
+}
+
+// evictLargestBuffer must survive a victim that has buffered deltas but no
+// Instrument yet — the awaiting-refdata case, where deltas arrive before the
+// definition that would create it.
+func TestEvictLargestBuffer_VictimAbsentFromInstruments(t *testing.T) {
+	s := newTestShard(t)
+	s.maxBuffered = 2
+	k := instKey{0, 42} // deliberately never added to s.instruments
+
+	for i := 0; i < 3; i++ {
+		s.bufferDelta(k, levelUpdateRec(42, uint64(i), uint32(i+1), "bid", 1000, 5))
+	}
+
+	if _, ok := s.instruments[k]; ok {
+		t.Fatal("fixture: the victim must have no Instrument")
+	}
+	if _, ok := s.deltaBuf[k]; ok {
+		t.Error("the overflowing buffer should have been evicted")
+	}
+	if s.bufferedN != 0 {
+		t.Errorf("bufferedN must track the eviction: got %d want 0", s.bufferedN)
+	}
+}
+
+// When the reorder window is exceeded the instrument goes gap and Pending is
+// dropped. Those dropped records are not lost: each was already buffered or is
+// superseded by the snapshot anchor, so the recovery snapshot plus replay
+// restores the book. This pins that reasoning to an executable check.
+func TestApplyDeltaToReady_PendingDroppedAtGapIsCoveredByAnchor(t *testing.T) {
+	s := newTestShard(t)
+	k := instKey{0, 11}
+	inst := readyInstrumentInShard(t, s, k, 5)
+
+	// A record far beyond the reorder window: straight to gap.
+	evs := s.applyDelta(k, levelUpdateRec(11, 900, 5+reorderWindow+2, "bid", 1000, 50))
+	if len(evs) != 1 || evs[0].Kind != "per_instrument_gap" {
+		t.Fatalf("expected a gap event: %+v", evs)
+	}
+	if inst.Status != StatusGap {
+		t.Fatalf("status: %v", inst.Status)
+	}
+	if inst.Pending != nil {
+		t.Error("Pending must be dropped when the window is exceeded")
+	}
+	// The triggering record was buffered rather than discarded.
+	if len(s.deltaBuf[k]) != 1 {
+		t.Fatalf("the gap record must be buffered: %+v", s.deltaBuf[k])
+	}
+
+	// A snapshot anchored at or past that record supersedes the buffer entirely:
+	// replay drops everything at or below the anchor, leaving the snapshot's book.
+	inst.Status = StatusReady
+	inst.LastAppliedMktdataSeq = 900
+	inst.LastAppliedInstrumentSeq = 5 + reorderWindow + 2
+	s.replayBuffer(k, inst)
+
+	if s.bufferedN != 0 || len(s.deltaBuf[k]) != 0 {
+		t.Errorf("the anchor must cover the buffered record: bufferedN=%d buf=%+v", s.bufferedN, s.deltaBuf[k])
+	}
+	if inst.Status != StatusReady {
+		t.Errorf("replay must not re-declare a gap: %v", inst.Status)
+	}
+}

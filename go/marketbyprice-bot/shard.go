@@ -39,7 +39,13 @@ type InstrumentDef struct {
 // ChannelEvent is the subset of state changes a shard reports outward. The
 // persistence layer (a follow-on plan) consumes these.
 type ChannelEvent struct {
-	Kind         string // "applied_delta" | "applied_snapshot" | "instrument_reset" | "channel_reset" | "per_instrument_gap"
+	// Kind is one of "applied_delta", "applied_snapshot", "instrument_reset",
+	// "channel_reset", "per_instrument_gap", or "malformed_delta".
+	//
+	// Only "applied_delta" and "applied_snapshot" assert that book state changed.
+	// "malformed_delta" reports a delta that arrived and was deliberately not
+	// applied, so a consumer must not persist it as a mutation.
+	Kind         string
 	InstrumentID uint32
 	Symbol       string
 	Record       Record
@@ -196,8 +202,17 @@ func (s *Shard) applyOne(inst *Instrument, rec Record) ChannelEvent {
 			// Malformed: discard without advancing the trackers, because nothing
 			// was applied. Returning early leaves last_applied where it was, so
 			// the next delta is classified against the correct expected seq.
+			//
+			// The event Kind must NOT be "applied_delta" — no book change happened,
+			// and a consumer that persists this as applied records a mutation the
+			// book never saw.
+			//
+			// Defense in depth: unreachable from live traffic, because the parser
+			// already rejects Scope=1 with ClearSide=2 at decode and never emits
+			// such a record. This guards a hand-fed socket or a future parser that
+			// relaxes that check.
 			log.Printf("shard %d instrument %d: %v", s.idx, inst.ID, err)
-			return ChannelEvent{Kind: "applied_delta", InstrumentID: inst.ID, Symbol: inst.Symbol, Record: rec}
+			return ChannelEvent{Kind: "malformed_delta", InstrumentID: inst.ID, Symbol: inst.Symbol, Record: rec}
 		}
 	}
 	inst.LastAppliedMktdataSeq = rec.SequenceNumber
