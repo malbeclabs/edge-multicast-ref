@@ -64,8 +64,28 @@ type Shard struct {
 	// records.
 	maxBuffered int
 
+	inbox   chan shardMsg
 	metrics *Metrics
 }
+
+// shardMsg is the inbox protocol. A record mutates book state; a reset wipes it
+// and acks; a fence only acks, which is enough to order a channel-scoped write
+// after every preceding instrument write because the inbox is FIFO.
+type shardMsg struct {
+	rec  *Record
+	kind shardMsgKind
+	seq  uint16 // manifest seq, for msgManifestPrune
+	ack  chan int
+}
+
+type shardMsgKind int
+
+const (
+	msgRecord shardMsgKind = iota
+	msgReset
+	msgFence
+	msgManifestPrune
+)
 
 func NewShard(idx, n int, metrics *Metrics) *Shard {
 	return &Shard{
@@ -74,6 +94,7 @@ func NewShard(idx, n int, metrics *Metrics) *Shard {
 		refdata:     map[instKey]InstrumentDef{},
 		deltaBuf:    map[instKey][]BufferedDelta{},
 		maxBuffered: maxBufferedDeltasPerShard,
+		inbox:       make(chan shardMsg, 4096),
 		metrics:     metrics,
 	}
 }
@@ -229,6 +250,15 @@ func (s *Shard) replayBuffer(k instKey, inst *Instrument) {
 	delete(s.deltaBuf, k)
 	for _, b := range buf {
 		if b.MktdataSeq <= inst.LastAppliedMktdataSeq {
+			continue
+		}
+		// Re-check status every iteration, mirroring the guard in applyDelta. A
+		// hole discovered mid-replay flips the instrument to gap, and without
+		// this check every remaining entry would re-enter applyDeltaToReady and
+		// declare the same gap again — inflating PerInstrumentGapsTotal by the
+		// size of the trailing backlog and logging once per record.
+		if inst.Status != StatusReady {
+			s.bufferDelta(k, b.Record)
 			continue
 		}
 		s.applyDeltaToReady(k, inst, b.Record)

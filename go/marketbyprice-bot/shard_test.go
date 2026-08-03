@@ -281,3 +281,86 @@ func TestApplyOne_MalformedBookClearDoesNotAdvanceTrackers(t *testing.T) {
 		t.Error("book must be untouched")
 	}
 }
+
+// A hole discovered mid-replay must declare exactly ONE gap, not one per
+// remaining record. Without a status re-check inside replayBuffer's loop, every
+// trailing entry re-enters applyDeltaToReady and re-declares the same gap,
+// inflating the operator-facing counter by the size of the backlog.
+func TestReplayBuffer_MidReplayGapDeclaredOnce(t *testing.T) {
+	m := NewMetrics("test", "test")
+	s := NewShard(0, 1, m)
+	k := instKey{0, 11}
+	inst := NewInstrument(11, "SYM", 0, 0)
+	s.instruments[k] = inst
+
+	// Buffer a contiguous run, then a run that skips well past the reorder
+	// window, so the hole can never fill.
+	for i := 0; i < 3; i++ {
+		s.bufferDelta(k, levelUpdateRec(11, uint64(600+i), uint32(101+i), "bid", int64(1000+i), 5))
+	}
+	for i := 0; i < 20; i++ {
+		s.bufferDelta(k, levelUpdateRec(11, uint64(700+i), uint32(200+i), "bid", int64(2000+i), 5))
+	}
+
+	// Snapshot lands at anchor 599 / last_instrument_seq 100, so everything replays.
+	inst.BeginSnapshot(1, 599, 0, 100, 0)
+	if err := inst.EndSnapshot(1, 599); err != nil {
+		t.Fatal(err)
+	}
+	s.replayBuffer(k, inst)
+
+	if inst.Status != StatusGap {
+		t.Fatalf("a hole in the replayed run must gap the instrument, got %v", inst.Status)
+	}
+	if got := counterValue(m.PerInstrumentGapsTotal); got != 1 {
+		t.Errorf("exactly one gap should be declared for one hole: got %v want 1", got)
+	}
+	// The contiguous prefix applied; the post-hole backlog is buffered for the
+	// next snapshot rather than discarded.
+	if inst.LastAppliedInstrumentSeq != 103 {
+		t.Errorf("prefix should have applied through 103, got %d", inst.LastAppliedInstrumentSeq)
+	}
+	if len(s.deltaBuf[k]) == 0 {
+		t.Error("post-gap backlog must be re-buffered for the next snapshot")
+	}
+	if s.bufferedN != len(s.deltaBuf[k]) {
+		t.Errorf("bufferedN %d must match actual buffered records %d", s.bufferedN, len(s.deltaBuf[k]))
+	}
+}
+
+// Build Pending right up to the reorder window, then exceed it, to pin the
+// boundary rather than only the single-shot far jump.
+func TestApplyDelta_ReorderWindowBoundary(t *testing.T) {
+	m := NewMetrics("test", "test")
+	s := NewShard(0, 1, m)
+	k := instKey{0, 11}
+	inst := readyInstrumentInShard(t, s, k, 5)
+
+	// Fill Pending to exactly reorderWindow entries, all within the distance
+	// bound. Nothing should apply and no gap should be declared.
+	for i := 0; i < reorderWindow; i++ {
+		piSeq := uint32(7 + i) // 6 is the hole; 7..22 held
+		s.applyDelta(k, levelUpdateRec(11, uint64(900+i), piSeq, "bid", int64(3000+i), 5))
+	}
+	if inst.Status != StatusReady {
+		t.Fatalf("at the window boundary the instrument must stay ready, got %v", inst.Status)
+	}
+	if got := counterValue(m.PerInstrumentGapsTotal); got != 0 {
+		t.Fatalf("no gap should be declared at the boundary: got %v", got)
+	}
+	if len(inst.Pending) != reorderWindow {
+		t.Fatalf("Pending should hold %d entries, got %d", reorderWindow, len(inst.Pending))
+	}
+
+	// One more held record exceeds the count bound and declares the gap.
+	s.applyDelta(k, levelUpdateRec(11, 999, uint32(7+reorderWindow), "bid", 4000, 5))
+	if inst.Status != StatusGap {
+		t.Errorf("exceeding the window must gap the instrument, got %v", inst.Status)
+	}
+	if got := counterValue(m.PerInstrumentGapsTotal); got != 1 {
+		t.Errorf("exactly one gap: got %v want 1", got)
+	}
+	if inst.Pending != nil {
+		t.Error("Pending must be dropped when the window is exceeded")
+	}
+}

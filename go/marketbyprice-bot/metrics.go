@@ -9,6 +9,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	dto "github.com/prometheus/client_model/go"
 )
 
 const metricsNamespace = "dz_mbp_bot"
@@ -149,4 +150,13 @@ func (m *Metrics) ServeHTTP(ctx context.Context, addr string, logErr func(error)
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
 	}()
+}
+
+// counterValue reads a counter's current value, for tests.
+func counterValue(c prometheus.Counter) float64 {
+	var m dto.Metric
+	if err := c.(prometheus.Metric).Write(&m); err != nil {
+		return -1
+	}
+	return m.GetCounter().GetValue()
 }
