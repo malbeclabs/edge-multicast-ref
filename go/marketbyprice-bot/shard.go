@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"log"
 	"sort"
 	"strconv"
@@ -42,17 +43,36 @@ type InstrumentDef struct {
 // ChannelEvent is the subset of state changes a shard reports outward. The
 // persistence layer (a follow-on plan) consumes these.
 type ChannelEvent struct {
-	// Kind is one of "applied_delta", "applied_snapshot", "instrument_reset",
-	// "channel_reset", "per_instrument_gap", or "malformed_delta".
+	// Kind is one of the constants below.
 	//
-	// Only "applied_delta" and "applied_snapshot" assert that book state changed.
-	// "malformed_delta" reports a delta that arrived and was deliberately not
-	// applied, so a consumer must not persist it as a mutation.
+	// ONLY KindAppliedDelta and KindAppliedSnapshot assert that book state
+	// changed. Every other kind reports a record that was seen and deliberately
+	// not applied to the book, so a consumer must not persist it as a mutation.
+	// noteConsistencyPoint depends on exactly this distinction to decide when to
+	// evaluate crossed-book.
+	//
+	// Channel resets are deliberately absent: they are handled by draining every
+	// shard through msgReset, which produces no per-instrument event, and are
+	// observable as channel_resets_total.
 	Kind         string
 	InstrumentID uint32
 	Symbol       string
 	Record       Record
 }
+
+const (
+	// Book state changed.
+	KindAppliedDelta    = "applied_delta"
+	KindAppliedSnapshot = "applied_snapshot"
+
+	// Seen but not applied to the book.
+	KindInstrumentReset      = "instrument_reset"
+	KindInstrumentDefinition = "instrument_definition"
+	KindBatchBoundary        = "batch_boundary"
+	KindTrade                = "trade"
+	KindPerInstrumentGap     = "per_instrument_gap"
+	KindMalformedDelta       = "malformed_delta"
+)
 
 // Shard owns a disjoint subset of instruments (by instrument_id % n) and all
 // their state. Its goroutine is the only writer; mu guards book mutation so a
@@ -113,6 +133,7 @@ const (
 	msgReset
 	msgFence
 	msgManifestPrune
+	msgClearShadows
 )
 
 func NewShard(idx, n int, metrics *Metrics) *Shard {
@@ -156,8 +177,18 @@ func (s *Shard) applyDeltaToReady(k instKey, inst *Instrument, rec Record) []Cha
 	expected := inst.LastAppliedInstrumentSeq + 1
 
 	if piSeq < expected {
-		// Duplicate or late. Discard silently: a duplicated frame during
+		// Duplicate or late. Discarded without demoting: a duplicated frame during
 		// bootstrap must not cost a re-bootstrap.
+		//
+		// Counted, though, because this path is also the only symptom of a wedged
+		// instrument. A snapshot carrying a Last Instrument Seq far ahead of reality
+		// commits and sets the tracker high; from then on every genuine delta lands
+		// here while every later snapshot is declined as current, and the instrument
+		// serves a frozen book indefinitely. Without this counter that state is
+		// invisible — no log, no metric, and a book that still reads as ready.
+		if s.metrics != nil {
+			s.metrics.DeltasDiscardedTotal.WithLabelValues("stale_seq").Inc()
+		}
 		return nil
 	}
 	if piSeq > expected {
@@ -177,7 +208,7 @@ func (s *Shard) applyDeltaToReady(k instKey, inst *Instrument, rec Record) []Cha
 		if s.metrics != nil {
 			s.metrics.PerInstrumentGapsTotal.Inc()
 		}
-		return []ChannelEvent{{Kind: "per_instrument_gap", InstrumentID: inst.ID, Symbol: inst.Symbol, Record: rec}}
+		return []ChannelEvent{{Kind: KindPerInstrumentGap, InstrumentID: inst.ID, Symbol: inst.Symbol, Record: rec}}
 	}
 
 	// Contiguous: apply, then drain any contiguous run held in Pending.
@@ -234,12 +265,12 @@ func (s *Shard) applyOne(inst *Instrument, rec Record) ChannelEvent {
 			// such a record. This guards a hand-fed socket or a future parser that
 			// relaxes that check.
 			log.Printf("shard %d instrument %d: %v", s.idx, inst.ID, err)
-			return ChannelEvent{Kind: "malformed_delta", InstrumentID: inst.ID, Symbol: inst.Symbol, Record: rec}
+			return ChannelEvent{Kind: KindMalformedDelta, InstrumentID: inst.ID, Symbol: inst.Symbol, Record: rec}
 		}
 	}
 	inst.LastAppliedMktdataSeq = rec.SequenceNumber
 	inst.LastAppliedInstrumentSeq = toUint32(rec.Fields["per_instrument_seq"])
-	return ChannelEvent{Kind: "applied_delta", InstrumentID: inst.ID, Symbol: inst.Symbol, Record: rec}
+	return ChannelEvent{Kind: KindAppliedDelta, InstrumentID: inst.ID, Symbol: inst.Symbol, Record: rec}
 }
 
 // bufferDelta appends to the per-instrument buffer, keeping it ordered by
@@ -338,10 +369,32 @@ func filterBuffer(buf []BufferedDelta, keep func(BufferedDelta) bool) []Buffered
 	return out
 }
 
-// --- JSON coercion helpers: encoding/json yields float64 for every number ---
+// --- JSON coercion helpers ---
+//
+// The socket reader decodes with UseNumber, so numbers in Fields arrive as
+// json.Number and are parsed from their literal text — exact for the full int64
+// and uint64 ranges. The float64 cases remain because tests build Fields
+// directly, and because a value written with a fraction or exponent still
+// decodes through the float path.
+
+// numInt64 parses a json.Number as an integer, falling back to its float value
+// for anything carrying a fraction or exponent.
+func numInt64(x json.Number) (int64, bool) {
+	if n, err := strconv.ParseInt(x.String(), 10, 64); err == nil {
+		return n, true
+	}
+	if f, err := x.Float64(); err == nil {
+		return int64(f), true
+	}
+	return 0, false
+}
 
 func toUint8(v any) uint8 {
 	switch x := v.(type) {
+	case json.Number:
+		if n, ok := numInt64(x); ok {
+			return uint8(n)
+		}
 	case float64:
 		return uint8(x)
 	case uint8:
@@ -352,6 +405,10 @@ func toUint8(v any) uint8 {
 
 func toUint16(v any) uint16 {
 	switch x := v.(type) {
+	case json.Number:
+		if n, ok := numInt64(x); ok {
+			return uint16(n)
+		}
 	case float64:
 		return uint16(x)
 	case uint16:
@@ -362,6 +419,10 @@ func toUint16(v any) uint16 {
 
 func toUint32(v any) uint32 {
 	switch x := v.(type) {
+	case json.Number:
+		if n, ok := numInt64(x); ok {
+			return uint32(n)
+		}
 	case float64:
 		return uint32(x)
 	case uint32:
@@ -372,6 +433,15 @@ func toUint32(v any) uint32 {
 
 func toUint64(v any) uint64 {
 	switch x := v.(type) {
+	case json.Number:
+		// ParseUint first: qty_raw is unsigned on the wire and its top half does
+		// not survive a round trip through int64.
+		if n, err := strconv.ParseUint(x.String(), 10, 64); err == nil {
+			return n
+		}
+		if n, ok := numInt64(x); ok {
+			return uint64(n)
+		}
 	case float64:
 		return uint64(x)
 	case uint64:
@@ -382,6 +452,10 @@ func toUint64(v any) uint64 {
 
 func toInt8(v any) int8 {
 	switch x := v.(type) {
+	case json.Number:
+		if n, ok := numInt64(x); ok {
+			return int8(n)
+		}
 	case float64:
 		return int8(x)
 	case int8:
@@ -392,6 +466,10 @@ func toInt8(v any) int8 {
 
 func toInt64(v any) int64 {
 	switch x := v.(type) {
+	case json.Number:
+		if n, ok := numInt64(x); ok {
+			return n
+		}
 	case float64:
 		return int64(x)
 	case int64:

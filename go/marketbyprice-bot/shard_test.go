@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"bytes"
+	"encoding/json"
+	"testing"
+)
 
 func newTestShard(t *testing.T) *Shard {
 	t.Helper()
@@ -408,6 +412,105 @@ func TestApplyDelta_SnapshotCommitFreesReorderBudget(t *testing.T) {
 	}
 	if len(inst.Pending) != 1 {
 		t.Errorf("Pending should hold only the new record, got %d", len(inst.Pending))
+	}
+}
+
+// price_raw is an int64 on the wire. Decoding Fields as plain map[string]any
+// makes every number a float64, which silently truncates above 2^53 — the book
+// then holds a price the venue never quoted, with no error and no counter. The
+// reader decodes with UseNumber so the literal text survives to the coercion
+// helpers. This drives the real decode path, not a hand-built Fields map.
+func TestCoercion_LargeIntegersSurviveDecode(t *testing.T) {
+	const bigPrice int64 = 1000000000000000001 // 2^53 < this; not representable as float64
+	const bigQty uint64 = 18446744073709551615 // math.MaxUint64
+	const bigSeq uint64 = 9007199254740993     // 2^53 + 1
+
+	line := []byte(`{"type":"level_update","port":"mktdata","fields":{` +
+		`"price_raw":1000000000000000001,` +
+		`"qty_raw":18446744073709551615,` +
+		`"per_instrument_seq":4294967295,` +
+		`"anchor_seq":9007199254740993,` +
+		`"price_exponent":-8,` +
+		`"side":"bid"}}`)
+
+	var rec Record
+	dec := json.NewDecoder(bytes.NewReader(line))
+	dec.UseNumber()
+	if err := dec.Decode(&rec); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if got := toInt64(rec.Fields["price_raw"]); got != bigPrice {
+		t.Errorf("price_raw: got %d want %d (diff %d)", got, bigPrice, got-bigPrice)
+	}
+	if got := toUint64(rec.Fields["qty_raw"]); got != bigQty {
+		t.Errorf("qty_raw: got %d want %d", got, bigQty)
+	}
+	if got := toUint64(rec.Fields["anchor_seq"]); got != bigSeq {
+		t.Errorf("anchor_seq: got %d want %d", got, bigSeq)
+	}
+	if got := toUint32(rec.Fields["per_instrument_seq"]); got != 4294967295 {
+		t.Errorf("per_instrument_seq: got %d want 4294967295", got)
+	}
+	if got := toInt8(rec.Fields["price_exponent"]); got != -8 {
+		t.Errorf("price_exponent: got %d want -8", got)
+	}
+	if got := toString(rec.Fields["side"]); got != "bid" {
+		t.Errorf("side: got %q want \"bid\"", got)
+	}
+}
+
+// The float64 path must keep working: every other test builds Fields directly.
+func TestCoercion_Float64PathUnchanged(t *testing.T) {
+	fields := map[string]any{
+		"price_raw":          float64(-1500),
+		"qty_raw":            float64(250),
+		"per_instrument_seq": float64(7),
+		"price_exponent":     float64(-2),
+		"level_flags":        float64(3),
+	}
+	if got := toInt64(fields["price_raw"]); got != -1500 {
+		t.Errorf("price_raw: got %d want -1500", got)
+	}
+	if got := toUint64(fields["qty_raw"]); got != 250 {
+		t.Errorf("qty_raw: got %d want 250", got)
+	}
+	if got := toUint32(fields["per_instrument_seq"]); got != 7 {
+		t.Errorf("per_instrument_seq: got %d want 7", got)
+	}
+	if got := toInt8(fields["price_exponent"]); got != -2 {
+		t.Errorf("price_exponent: got %d want -2", got)
+	}
+	if got := toUint8(fields["level_flags"]); got != 3 {
+		t.Errorf("level_flags: got %d want 3", got)
+	}
+}
+
+// A snapshot whose Last Instrument Seq is far ahead of reality commits, sets the
+// tracker high, and then silently swallows every real delta while every later
+// snapshot is declined as current — a frozen book that still reads as ready.
+// The discard counter is the only thing that makes that state visible.
+func TestApplyDeltaToReady_StaleSeqDiscardIsCounted(t *testing.T) {
+	m := NewMetrics("test", "test")
+	s := NewShard(0, 1, m)
+	k := instKey{0, 11}
+	inst := readyInstrumentInShard(t, s, k, 5)
+
+	// A snapshot has pushed the tracker far past the live feed.
+	inst.LastAppliedInstrumentSeq = 10000
+
+	for i := 0; i < 3; i++ {
+		evs := s.applyDelta(k, levelUpdateRec(11, uint64(900+i), uint32(6+i), "bid", 1000, 5))
+		if len(evs) != 0 {
+			t.Fatalf("a stale delta must not produce events: %+v", evs)
+		}
+	}
+
+	if inst.Status != StatusReady {
+		t.Errorf("the instrument still reads as ready, which is the trap: %v", inst.Status)
+	}
+	if got := counterValue(m.DeltasDiscardedTotal.WithLabelValues("stale_seq")); got != 3 {
+		t.Errorf("stale_seq discards: got %v want 3", got)
 	}
 }
 

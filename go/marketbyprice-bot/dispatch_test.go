@@ -320,6 +320,55 @@ func TestApply_DefinitionAfterResetPopulatesRefdata(t *testing.T) {
 	}
 }
 
+// Only KindAppliedDelta and KindAppliedSnapshot may assert a book mutation.
+// A consumer persisting events keys off exactly that, and noteConsistencyPoint
+// keys off it to decide when to evaluate crossed-book, so every non-mutating
+// path must carry its own kind.
+func TestChannelEvent_NonMutatingPathsDoNotClaimBookChange(t *testing.T) {
+	s := NewShard(0, 1, NewMetrics("test", "test"))
+
+	cases := []struct {
+		name string
+		rec  Record
+		want string
+	}{
+		{"instrument_definition", instDefRec(11, "SYM", 1), KindInstrumentDefinition},
+		{"batch_boundary", Record{Type: "batch_boundary", Port: "mktdata"}, KindBatchBoundary},
+		{"trade", Record{Type: "trade", Port: "mktdata", InstrumentID: 11, Fields: map[string]any{}}, KindTrade},
+		{"liquidation", Record{Type: "liquidation", Port: "mktdata", InstrumentID: 11, Fields: map[string]any{}}, KindTrade},
+		{"instrument_reset", Record{Type: "instrument_reset", Port: "mktdata", InstrumentID: 11,
+			Fields: map[string]any{"reason": "venue_resync", "new_anchor_seq": float64(10)}}, KindInstrumentReset},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			evs := s.apply(tc.rec)
+			if len(evs) != 1 {
+				t.Fatalf("expected one event, got %+v", evs)
+			}
+			if evs[0].Kind != tc.want {
+				t.Errorf("kind: got %q want %q", evs[0].Kind, tc.want)
+			}
+			if evs[0].Kind == KindAppliedDelta || evs[0].Kind == KindAppliedSnapshot {
+				t.Errorf("%s must not claim a book mutation", tc.name)
+			}
+		})
+	}
+}
+
+// A malformed BookClear is the one non-mutating path reached through applyOne,
+// and it must not report as applied either.
+func TestChannelEvent_MalformedBookClearIsNotApplied(t *testing.T) {
+	s := newTestShard(t)
+	k := instKey{0, 11}
+	readyInstrumentInShard(t, s, k, 5)
+
+	evs := s.apply(bookClearRec(11, 900, 6, "both", "from_price", 1000))
+	if len(evs) != 1 || evs[0].Kind != KindMalformedDelta {
+		t.Fatalf("expected a malformed_delta event, got %+v", evs)
+	}
+}
+
 // gaugeVecSum totals a shard-labelled gauge across the given shard indices,
 // which is how an operator reads it: sum(dz_mbp_bot_...) with no shard selector.
 func gaugeVecSum(g *prometheus.GaugeVec, shards int) float64 {

@@ -30,8 +30,9 @@ func (s *Shard) apply(rec Record) []ChannelEvent {
 	case "batch_boundary":
 		return s.applyBatchBoundary(rec)
 	case "trade", "liquidation":
-		// No book effect. Surfaced for the persistence layer only.
-		return []ChannelEvent{{Kind: "applied_delta", InstrumentID: rec.InstrumentID, Record: rec}}
+		// No book effect. Surfaced for the persistence layer only, so it must not
+		// claim a mutation.
+		return []ChannelEvent{{Kind: KindTrade, InstrumentID: rec.InstrumentID, Record: rec}}
 	}
 	return nil
 }
@@ -54,7 +55,8 @@ func (s *Shard) applyInstrumentDefinition(k instKey, rec Record) []ChannelEvent 
 		inst.PriceExponent = priceExp
 		inst.QtyExponent = qtyExp
 	}
-	return []ChannelEvent{{Kind: "applied_delta", InstrumentID: k.id, Symbol: symbol, Record: rec}}
+	// Refdata only: the book is untouched, so this is not an applied delta.
+	return []ChannelEvent{{Kind: KindInstrumentDefinition, InstrumentID: k.id, Symbol: symbol, Record: rec}}
 }
 
 func (s *Shard) instrumentFor(k instKey) *Instrument {
@@ -141,19 +143,25 @@ func (s *Shard) applySnapshotEnd(k instKey, rec Record) []ChannelEvent {
 		return nil // shadow only; live book and status untouched
 	}
 	s.replayBuffer(k, inst)
-	evs := []ChannelEvent{{Kind: "applied_snapshot", InstrumentID: k.id, Symbol: inst.Symbol, Record: rec}}
+	evs := []ChannelEvent{{Kind: KindAppliedSnapshot, InstrumentID: k.id, Symbol: inst.Symbol, Record: rec}}
 	s.noteConsistencyPoint(k, evs)
 	return evs
 }
 
+// discardReason labels a snapshot discard.
+//
+// There is deliberately no "no_open_snapshot" reason. applySnapshotEnd returns
+// before calling EndSnapshot when no shadow is open, so errNoOpenSnapshot cannot
+// reach here — and that case is the healthy declined-snapshot path anyway (a
+// ready, current instrument ignored the begin, and the end still arrives), not a
+// discard worth counting. EndSnapshot keeps returning the error as an API guard
+// for direct callers.
 func discardReason(err error) string {
 	switch {
 	case errors.Is(err, errSnapshotShort):
 		return "short"
 	case errors.Is(err, errSnapshotMismatch):
 		return "mismatch"
-	case errors.Is(err, errNoOpenSnapshot):
-		return "no_open_snapshot"
 	default:
 		return "other"
 	}
@@ -189,7 +197,7 @@ func (s *Shard) applyInstrumentReset(k instKey, rec Record) []ChannelEvent {
 	delete(s.crossed, k)
 	delete(s.touched, k)
 	s.publishCrossedGauge()
-	return []ChannelEvent{{Kind: "instrument_reset", InstrumentID: k.id, Symbol: inst.Symbol, Record: rec}}
+	return []ChannelEvent{{Kind: KindInstrumentReset, InstrumentID: k.id, Symbol: inst.Symbol, Record: rec}}
 }
 
 // applyBatchBoundary marks the channel as batching and evaluates crossed-book
@@ -206,7 +214,10 @@ func (s *Shard) applyBatchBoundary(rec Record) []ChannelEvent {
 		}
 		delete(s.touched, k)
 	}
-	return []ChannelEvent{{Kind: "applied_delta", Record: rec}}
+	// A boundary is a consistency point, not a book mutation, and it carries no
+	// instrument_id — reporting it as an applied delta on instrument 0 was doubly
+	// wrong.
+	return []ChannelEvent{{Kind: KindBatchBoundary, Record: rec}}
 }
 
 // noteConsistencyPoint records or evaluates crossed-book after a book change.
@@ -215,7 +226,7 @@ func (s *Shard) applyBatchBoundary(rec Record) []ChannelEvent {
 func (s *Shard) noteConsistencyPoint(k instKey, evs []ChannelEvent) {
 	applied := false
 	for _, e := range evs {
-		if e.Kind == "applied_delta" || e.Kind == "applied_snapshot" {
+		if e.Kind == KindAppliedDelta || e.Kind == KindAppliedSnapshot {
 			applied = true
 			break
 		}
@@ -306,6 +317,20 @@ func (s *Shard) reset() {
 	s.publishBufferedGauge()
 }
 
+// clearShadows discards every in-flight snapshot shadow after a socket drop.
+//
+// Status and the live book are deliberately untouched: a shadow is never the
+// live book, so abandoning a half-built one costs nothing a ready instrument was
+// relying on, and the next snapshot cycle rebuilds it. Demoting here would throw
+// away books the deltas are keeping correct.
+func (s *Shard) clearShadows() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, inst := range s.instruments {
+		inst.OpenSnapshot = nil
+	}
+}
+
 // handle is the shard goroutine's per-record entry point.
 func (s *Shard) handle(rec Record) {
 	evs := s.apply(rec)
@@ -324,6 +349,8 @@ func (s *Shard) Run(ctx context.Context) {
 				s.handle(*msg.rec)
 			case msgManifestPrune:
 				s.pruneManifest(msg.seq)
+			case msgClearShadows:
+				s.clearShadows()
 			case msgReset:
 				s.mu.Lock()
 				s.reset()

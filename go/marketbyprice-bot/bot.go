@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,14 @@ import (
 // Implementations MUST be fast (don't block the read loop).
 type Dispatcher interface {
 	Dispatch(rec Record)
+}
+
+// DisconnectAware is an optional Dispatcher capability. A dispatcher holding
+// state that spans records — an open snapshot group, say — cannot tell that the
+// stream was interrupted, because the reader simply resumes after reconnecting.
+// Implementing this lets it drop what the break invalidated.
+type DisconnectAware interface {
+	OnDisconnect()
 }
 
 // Bot reads JSONL Records from a parser Unix socket and dispatches them.
@@ -58,6 +67,11 @@ func (b *Bot) Run(ctx context.Context) {
 		reason := b.read(ctx, conn)
 		_ = conn.Close()
 		b.metrics.SocketConnected.Set(0)
+		// Tell the dispatcher the stream broke, before any reconnect can feed it
+		// records that its pre-drop state would misroute.
+		if d, ok := b.dispatcher.(DisconnectAware); ok {
+			d.OnDisconnect()
+		}
 		if ctx.Err() == nil {
 			b.metrics.SocketReconnects.WithLabelValues(reason).Inc()
 		}
@@ -85,8 +99,16 @@ func (b *Bot) read(ctx context.Context, conn net.Conn) string {
 			continue
 		}
 
+		// UseNumber, not a plain Unmarshal. Fields is map[string]any, so every
+		// number would otherwise land as float64 and silently lose precision above
+		// 2^53. price_raw is an int64 on the wire paired with an int8 exponent, so a
+		// venue quoting with a small exponent reaches that range and the book would
+		// be wrong with no error and no counter. json.Number keeps the literal text
+		// for the coercion helpers to parse exactly.
 		var rec Record
-		if err := json.Unmarshal(line, &rec); err != nil {
+		dec := json.NewDecoder(bytes.NewReader(line))
+		dec.UseNumber()
+		if err := dec.Decode(&rec); err != nil {
 			b.metrics.DecodeErrors.Inc()
 			continue
 		}

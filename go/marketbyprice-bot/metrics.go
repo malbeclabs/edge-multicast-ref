@@ -42,6 +42,7 @@ type Metrics struct {
 	DeltaBufferedRecords      *prometheus.GaugeVec   // label: shard
 	SnapshotDiscardedTotal    *prometheus.CounterVec // label: reason
 	SnapshotLevelDroppedTotal prometheus.Counter
+	DeltasDiscardedTotal      *prometheus.CounterVec // label: reason
 	PerInstrumentGapsTotal    prometheus.Counter
 	InstrumentResetsTotal     *prometheus.CounterVec // label: reason
 	ChannelResetsTotal        prometheus.Counter
@@ -73,6 +74,7 @@ func NewMetrics(version, commit string) *Metrics {
 	m.DeltaBufferedRecords = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: metricsNamespace, Name: "delta_buffered_records"}, []string{"shard"})
 	m.SnapshotDiscardedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "snapshot_discarded_total"}, []string{"reason"})
 	m.SnapshotLevelDroppedTotal = prometheus.NewCounter(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "snapshot_level_dropped_total"})
+	m.DeltasDiscardedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "deltas_discarded_total"}, []string{"reason"})
 	m.PerInstrumentGapsTotal = prometheus.NewCounter(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "per_instrument_gaps_total"})
 	m.InstrumentResetsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "instrument_resets_total"}, []string{"reason"})
 	m.ChannelResetsTotal = prometheus.NewCounter(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "channel_resets_total"})
@@ -82,7 +84,7 @@ func NewMetrics(version, commit string) *Metrics {
 		m.SocketConnected, m.SocketReconnects, m.RecordsTotal, m.DecodeErrors, m.SocketToBotLatency,
 		m.CrossedBookEventsTotal, m.CrossedInstruments, m.BookDivergenceTotal,
 		m.DeltaBufferOverflowTotal, m.DeltaBufferedRecords,
-		m.SnapshotDiscardedTotal, m.SnapshotLevelDroppedTotal,
+		m.SnapshotDiscardedTotal, m.SnapshotLevelDroppedTotal, m.DeltasDiscardedTotal,
 		m.PerInstrumentGapsTotal, m.InstrumentResetsTotal, m.ChannelResetsTotal,
 	)
 	m.BuildInfo.WithLabelValues(version, commit).Set(1)

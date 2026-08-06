@@ -84,8 +84,9 @@ Namespace `dz_mbp_bot`.
 | `per_instrument_gaps_total` | Confirmed per-instrument sequence gaps. |
 | `instrument_resets_total{reason}` | `InstrumentReset` messages applied. |
 | `channel_resets_total` | `Reset Count` era changes, each draining every shard. |
-| `snapshot_discarded_total{reason}` | Snapshots discarded: `stale_anchor`, `short`, `mismatch`, `no_open_snapshot`, `other`. |
+| `snapshot_discarded_total{reason}` | Snapshots discarded: `stale_anchor`, `short`, `mismatch`, `other`. A `snapshot_end` with no open shadow is not a discard — it is the healthy path where a ready, current instrument declined the begin. |
 | `snapshot_level_dropped_total` | `SnapshotLevel` records misrouted — no open group at the coordinator, or a `Snapshot ID` that does not match the open group. Levels belonging to a snapshot a ready-and-current instrument declined are NOT counted: the publisher sends every level of a group regardless, so counting them would bury the misroute signal under healthy steady state. |
+| `deltas_discarded_total{reason}` | Deltas seen and not applied. `stale_seq` is a duplicate or late frame — benign in bursts, but a sustained climb on one instrument with no matching applied traffic means a snapshot set the sequence tracker ahead of reality and the book is wedged. |
 | `delta_buffered_records{shard}` | Deltas currently buffered, per shard. Take `sum()` for the process total. |
 | `delta_buffer_overflow_total` | Buffer evictions. Sustained non-zero means the snapshot cycle is too long for the memory budget. |
 

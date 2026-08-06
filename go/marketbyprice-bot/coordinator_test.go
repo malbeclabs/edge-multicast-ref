@@ -327,3 +327,81 @@ func TestDispatch_SnapshotLevelStampedWithOpenGroupInstrument(t *testing.T) {
 		t.Fatal("test fixture should model the wire: no instrument_id on snapshot_level")
 	}
 }
+
+// A socket drop mid-snapshot-group must not leave the open group behind. The
+// reader simply resumes after reconnecting, and Reset Count is unchanged by a
+// socket-only drop, so the reset barrier does not cover this. Without an
+// explicit signal the next snapshot_level — which carries no instrument_id — is
+// stamped with the instrument that was in flight when the socket died and filed
+// into an orphaned shadow on that instrument's shard.
+func TestOnDisconnect_ClearsOpenGroup(t *testing.T) {
+	c, shards := newTestCoordinator(t, 2)
+
+	// A group opens on channel 0 for instrument 7, then the socket drops.
+	c.Dispatch(snapBegin(0, 7, 3))
+	if _, open := c.open[0]; !open {
+		t.Fatal("setup: a group should be open")
+	}
+	for _, s := range shards {
+		drain(s)
+	}
+
+	c.OnDisconnect()
+
+	if len(c.open) != 0 {
+		t.Errorf("the open group must not survive a disconnect: %+v", c.open)
+	}
+
+	// Every shard must be told to drop in-flight shadows.
+	for i, s := range shards {
+		var sawClear bool
+		for {
+			done := false
+			select {
+			case m := <-s.inbox:
+				if m.kind == msgClearShadows {
+					sawClear = true
+				}
+			default:
+				done = true
+			}
+			if done {
+				break
+			}
+		}
+		if !sawClear {
+			t.Errorf("shard %d was not told to clear shadows", i)
+		}
+	}
+
+	// A level arriving before the next begin is now discarded, not misrouted.
+	c.Dispatch(snapLevel(0, 3, 1000))
+	for i, s := range shards {
+		if recs := drain(s); len(recs) != 0 {
+			t.Errorf("shard %d received an orphaned level: %+v", i, recs)
+		}
+	}
+}
+
+// clearShadows must abandon the half-built shadow without touching the live
+// book: a shadow is never the live book, so a ready instrument keeps serving.
+func TestClearShadows_DropsShadowButKeepsReadyBook(t *testing.T) {
+	s := NewShard(0, 1, nil)
+	k := instKey{0, 11}
+	inst := readyInstrumentInShard(t, s, k, 5)
+	inst.ApplyLevelUpdate(0, 1000, 50, 1, 0, 1)
+	inst.BeginSnapshot(3, 5000, 10, 77, 0)
+	inst.AddSnapshotLevel(3, 0, 900, 10, 1, 0)
+
+	s.clearShadows()
+
+	if inst.OpenSnapshot != nil {
+		t.Error("the in-flight shadow must be dropped")
+	}
+	if inst.Status != StatusReady {
+		t.Errorf("a ready instrument must keep serving: %v", inst.Status)
+	}
+	if inst.Bids[1000] == nil || inst.Bids[1000].QtyRaw != 50 {
+		t.Errorf("the live book must be untouched: %+v", inst.Bids)
+	}
+}

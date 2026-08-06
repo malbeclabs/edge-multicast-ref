@@ -46,7 +46,6 @@ type Coordinator struct {
 	resetSeen  bool
 	resetCount uint8
 	manifest   ManifestState
-	seqLast    map[string]uint64
 	open       map[uint8]openGroup // per channel_id
 }
 
@@ -56,10 +55,17 @@ func NewCoordinator(ctx context.Context, shards []*Shard, metrics *Metrics) *Coo
 		shards:  shards,
 		n:       len(shards),
 		metrics: metrics,
-		seqLast: map[string]uint64{},
 		open:    map[uint8]openGroup{},
 	}
 }
+
+// The reader discovers OnDisconnect through a runtime type assertion, which
+// would silently stop firing if this method were ever renamed or removed. Fail
+// the build instead.
+var (
+	_ Dispatcher      = (*Coordinator)(nil)
+	_ DisconnectAware = (*Coordinator)(nil)
+)
 
 func (c *Coordinator) shardFor(instrumentID uint32) int {
 	return int(instrumentID) % c.n
@@ -75,8 +81,6 @@ func (c *Coordinator) Dispatch(rec Record) {
 		c.resetSeen = true
 		c.resetCount = rec.ResetCount
 	}
-	c.seqLast[rec.Port] = rec.SequenceNumber
-
 	switch rec.Type {
 	case "level_update", "book_clear", "instrument_definition", "instrument_reset", "trade", "liquidation":
 		c.routeInstrument(rec)
@@ -134,6 +138,29 @@ func (c *Coordinator) Dispatch(rec Record) {
 
 	case "end_of_session":
 		c.runFence(rec)
+	}
+}
+
+// OnDisconnect drops the channel-scoped snapshot state that a socket drop
+// invalidates, and tells every shard to discard its in-flight shadows.
+//
+// A reconnect resumes dispatching with no other signal. Without this, c.open
+// still names the group that was in flight when the socket died, so any
+// snapshot_level arriving before the next snapshot_begin is stamped with that
+// stale instrument and filed into an orphaned shadow. A Reset Count change would
+// clear it through the reset barrier, but a socket-only drop leaves Reset Count
+// untouched, so nothing else covers this.
+//
+// No ack barrier is needed: each shard's inbox is FIFO, so the clear is ordered
+// ahead of every record dispatched after the reconnect.
+func (c *Coordinator) OnDisconnect() {
+	c.open = map[uint8]openGroup{}
+	for i := range c.shards {
+		select {
+		case c.shards[i].inbox <- shardMsg{kind: msgClearShadows}:
+		case <-c.ctx.Done():
+			return
+		}
 	}
 }
 
@@ -196,7 +223,6 @@ func (c *Coordinator) runResetBarrier(held Record) {
 		c.metrics.ChannelResetsTotal.Inc()
 	}
 	c.open = map[uint8]openGroup{}
-	c.seqLast = map[string]uint64{}
 	c.manifest = ManifestState{}
 	c.resetCount = held.ResetCount
 
