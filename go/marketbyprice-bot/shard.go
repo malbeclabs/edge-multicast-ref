@@ -3,8 +3,11 @@ package main
 import (
 	"log"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // maxBufferedDeltasPerShard bounds the delta buffer by record count across every
@@ -78,6 +81,19 @@ type Shard struct {
 
 	inbox   chan shardMsg
 	metrics *Metrics
+
+	// Per-shard children of the shard-labelled gauges, resolved once. bufferDelta
+	// is a hot path, so a WithLabelValues map lookup per append is worth avoiding.
+	// Both are nil when metrics is nil, which tests rely on.
+	crossedGauge  prometheus.Gauge
+	bufferedGauge prometheus.Gauge
+}
+
+// publishBufferedGauge republishes this shard's buffered-record count.
+func (s *Shard) publishBufferedGauge() {
+	if s.bufferedGauge != nil {
+		s.bufferedGauge.Set(float64(s.bufferedN))
+	}
 }
 
 // shardMsg is the inbox protocol. A record mutates book state; a reset wipes it
@@ -100,7 +116,7 @@ const (
 )
 
 func NewShard(idx, n int, metrics *Metrics) *Shard {
-	return &Shard{
+	s := &Shard{
 		idx: idx, n: n,
 		instruments: map[instKey]*Instrument{},
 		refdata:     map[instKey]InstrumentDef{},
@@ -111,6 +127,12 @@ func NewShard(idx, n int, metrics *Metrics) *Shard {
 		inbox:       make(chan shardMsg, 4096),
 		metrics:     metrics,
 	}
+	if metrics != nil {
+		lbl := strconv.Itoa(idx)
+		s.crossedGauge = metrics.CrossedInstruments.WithLabelValues(lbl)
+		s.bufferedGauge = metrics.DeltaBufferedRecords.WithLabelValues(lbl)
+	}
+	return s
 }
 
 // applyDelta classifies one mktdata delta against the instrument's
@@ -222,17 +244,34 @@ func (s *Shard) applyOne(inst *Instrument, rec Record) ChannelEvent {
 
 // bufferDelta appends to the per-instrument buffer, keeping it ordered by
 // mktdata seq, and enforces the shard budget.
+//
+// The buffer is kept sorted by insertion rather than by re-sorting on every
+// append. Deltas arrive in mktdata-seq order, so the fast path is a bare append
+// and the ordered insert is rare. Re-sorting the whole slice per append made
+// this quadratic in the buffer's length — 2.0 us/record at 1k buffered but
+// 36.7 us at 40k — and that cost lands in the shard goroutine, the only reader
+// of its inbox. Once it exceeds the arrival rate it back-pressures through the
+// inbox into Coordinator.send and then into the socket read loop, so the bot
+// stops draining the parser exactly when one hot instrument is gapped waiting
+// for a snapshot: the case the buffer exists to survive.
 func (s *Shard) bufferDelta(k instKey, rec Record) {
-	buf := append(s.deltaBuf[k], BufferedDelta{MktdataSeq: rec.SequenceNumber, Record: rec})
-	sort.Slice(buf, func(i, j int) bool { return buf[i].MktdataSeq < buf[j].MktdataSeq })
+	buf := s.deltaBuf[k]
+	d := BufferedDelta{MktdataSeq: rec.SequenceNumber, Record: rec}
+	if n := len(buf); n > 0 && buf[n-1].MktdataSeq > d.MktdataSeq {
+		// Out of order: splice it into place, preserving the sorted invariant.
+		i := sort.Search(n, func(i int) bool { return buf[i].MktdataSeq > d.MktdataSeq })
+		buf = append(buf, BufferedDelta{})
+		copy(buf[i+1:], buf[i:])
+		buf[i] = d
+	} else {
+		buf = append(buf, d)
+	}
 	s.deltaBuf[k] = buf
 	s.bufferedN++
 	if s.bufferedN > s.maxBuffered {
 		s.evictLargestBuffer()
 	}
-	if s.metrics != nil {
-		s.metrics.DeltaBufferedRecords.Set(float64(s.bufferedN))
-	}
+	s.publishBufferedGauge()
 }
 
 // evictLargestBuffer implements the spec's recommended overflow policy: drop the
@@ -286,9 +325,7 @@ func (s *Shard) replayBuffer(k instKey, inst *Instrument) {
 		}
 		s.applyDeltaToReady(k, inst, b.Record)
 	}
-	if s.metrics != nil {
-		s.metrics.DeltaBufferedRecords.Set(float64(s.bufferedN))
-	}
+	s.publishBufferedGauge()
 }
 
 func filterBuffer(buf []BufferedDelta, keep func(BufferedDelta) bool) []BufferedDelta {

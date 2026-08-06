@@ -365,6 +365,92 @@ func TestApplyDelta_ReorderWindowBoundary(t *testing.T) {
 	}
 }
 
+// A snapshot commit must free the reorder-window budget. Pending entries held
+// against the pre-snapshot sequence can never drain once the snapshot jumps
+// LastAppliedInstrumentSeq forward, so if the commit leaks them they sit there
+// consuming the window and the next ordinary reorder is misread as a gap —
+// demoting a healthy instrument and inflating per_instrument_gaps_total, the
+// counter an operator uses to judge feed loss.
+func TestApplyDelta_SnapshotCommitFreesReorderBudget(t *testing.T) {
+	m := NewMetrics("test", "test")
+	s := NewShard(0, 1, m)
+	k := instKey{0, 11}
+	inst := readyInstrumentInShard(t, s, k, 5)
+
+	// Fill Pending to the window bound behind a hole at 6.
+	for i := 0; i < reorderWindow; i++ {
+		s.applyDelta(k, levelUpdateRec(11, uint64(900+i), uint32(7+i), "bid", int64(3000+i), 5))
+	}
+	if len(inst.Pending) != reorderWindow {
+		t.Fatalf("setup: Pending should hold %d, got %d", reorderWindow, len(inst.Pending))
+	}
+
+	// A snapshot arrives and commits, carrying the instrument well past the hole.
+	inst.BeginSnapshot(1, 5000, 0, 77, 0)
+	if err := inst.EndSnapshot(1, 5000); err != nil {
+		t.Fatalf("setup: snapshot commit: %v", err)
+	}
+
+	// One out-of-order delta, comfortably inside the window (expected 78, got 80).
+	// This must be held, not treated as a gap.
+	evs := s.applyDelta(k, levelUpdateRec(11, 1000, 80, "bid", 4000, 5))
+
+	for _, e := range evs {
+		if e.Kind == "per_instrument_gap" {
+			t.Fatal("a reorder within the window must not declare a gap after a snapshot commit")
+		}
+	}
+	if inst.Status != StatusReady {
+		t.Errorf("instrument must stay ready, got %v", inst.Status)
+	}
+	if got := counterValue(m.PerInstrumentGapsTotal); got != 0 {
+		t.Errorf("no gap should be counted: got %v want 0", got)
+	}
+	if len(inst.Pending) != 1 {
+		t.Errorf("Pending should hold only the new record, got %d", len(inst.Pending))
+	}
+}
+
+// bufferDelta keeps its buffer sorted by mktdata seq through insertion rather
+// than a per-append re-sort. replayBuffer depends on that ordering to drop
+// everything the snapshot anchor already covers and replay the rest in order, so
+// the invariant is worth pinning directly — including the out-of-order path,
+// which is the only one that still moves elements.
+func TestBufferDelta_StaysSortedOnOutOfOrderArrival(t *testing.T) {
+	s := newTestShard(t)
+	k := instKey{0, 11}
+
+	// Deliberately jumbled, including a duplicate seq and one that sorts first.
+	for i, seq := range []uint64{100, 300, 200, 700, 50, 500, 200, 400} {
+		s.bufferDelta(k, levelUpdateRec(11, seq, uint32(i+1), "bid", 1000, 5))
+	}
+
+	buf := s.deltaBuf[k]
+	if len(buf) != 8 || s.bufferedN != 8 {
+		t.Fatalf("all records must be retained: len=%d bufferedN=%d", len(buf), s.bufferedN)
+	}
+	for i := 1; i < len(buf); i++ {
+		if buf[i-1].MktdataSeq > buf[i].MktdataSeq {
+			t.Fatalf("buffer out of order at %d: %v", i, seqsOf(buf))
+		}
+	}
+	want := []uint64{50, 100, 200, 200, 300, 400, 500, 700}
+	got := seqsOf(buf)
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("buffer order: got %v want %v", got, want)
+		}
+	}
+}
+
+func seqsOf(buf []BufferedDelta) []uint64 {
+	out := make([]uint64, len(buf))
+	for i, b := range buf {
+		out[i] = b.MktdataSeq
+	}
+	return out
+}
+
 // bookClearRec builds a book_clear the way the parser emits one.
 func bookClearRec(instID uint32, mktSeq uint64, piSeq uint32, clearSide, scope string, fromPriceRaw int64) Record {
 	return Record{

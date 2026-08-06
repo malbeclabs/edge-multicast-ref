@@ -202,11 +202,33 @@ func (i *Instrument) BeginSnapshot(snapID uint32, anchorSeq uint64, totalLevels,
 	}
 }
 
-// AddSnapshotLevel inserts into the shadow. Returns false when snapID does not
-// match the open shadow, which the caller counts and discards.
-func (i *Instrument) AddSnapshotLevel(snapID uint32, sideByte uint8, priceRaw int64, qtyRaw uint64, orderCount uint16, flags uint8) bool {
-	if i.OpenSnapshot == nil || i.OpenSnapshot.SnapshotID != snapID {
-		return false
+// SnapshotLevelResult is why AddSnapshotLevel accepted or refused a level.
+//
+// The two refusals are deliberately distinct. "No open shadow" is the healthy
+// steady state: a ready, current instrument declines its periodic snapshot at
+// SnapshotBegin, yet the publisher still sends every level of that group and the
+// coordinator still forwards them. Counting those as dropped would bury the
+// misroute signal the drop counter exists to expose under ordinary traffic.
+type SnapshotLevelResult int
+
+const (
+	SnapshotLevelAdded SnapshotLevelResult = iota
+	// SnapshotLevelNoOpenShadow: the begin was declined or discarded by design.
+	// Expected, and NOT a defect.
+	SnapshotLevelNoOpenShadow
+	// SnapshotLevelMismatch: a level whose Snapshot ID does not match the open
+	// group. A real misroute, which is what the drop counter is for.
+	SnapshotLevelMismatch
+)
+
+// AddSnapshotLevel inserts into the shadow, reporting whether it was accepted
+// and, if not, which of the two refusals applied.
+func (i *Instrument) AddSnapshotLevel(snapID uint32, sideByte uint8, priceRaw int64, qtyRaw uint64, orderCount uint16, flags uint8) SnapshotLevelResult {
+	if i.OpenSnapshot == nil {
+		return SnapshotLevelNoOpenShadow
+	}
+	if i.OpenSnapshot.SnapshotID != snapID {
+		return SnapshotLevelMismatch
 	}
 	book := i.OpenSnapshot.Bids
 	if sideByte == 1 {
@@ -214,7 +236,7 @@ func (i *Instrument) AddSnapshotLevel(snapID uint32, sideByte uint8, priceRaw in
 	}
 	book[priceRaw] = &LevelState{QtyRaw: qtyRaw, OrderCount: orderCount, Flags: flags}
 	i.OpenSnapshot.ReceivedLevels++
-	return true
+	return SnapshotLevelAdded
 }
 
 var (
@@ -260,6 +282,14 @@ func (i *Instrument) EndSnapshot(snapID uint32, anchorSeq uint64) error {
 		i.RequiredAnchorSeq = nil
 	}
 	i.OpenSnapshot = nil
+	// Free Pending too. Its entries are keyed to the pre-snapshot per-instrument
+	// sequence, and LastAppliedInstrumentSeq has just jumped to the snapshot's
+	// Last Instrument Seq, so none of them can ever match LastApplied+1 and drain.
+	// Left behind they still count toward the reorder-window bound in
+	// applyDeltaToReady, so ordinary reordering is eventually misclassified as a
+	// gap and inflates per_instrument_gaps_total — the counter an operator reads
+	// to judge feed loss.
+	i.Pending = nil
 	i.Status = StatusReady
 	return nil
 }

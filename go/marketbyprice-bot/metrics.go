@@ -30,11 +30,16 @@ type Metrics struct {
 	SocketToBotLatency *prometheus.HistogramVec
 
 	// Feed-specific defect and health counters
-	CrossedBookEventsTotal    prometheus.Counter
-	CrossedInstruments        prometheus.Gauge
-	BookDivergenceTotal       *prometheus.CounterVec // label: kind
+	CrossedBookEventsTotal prometheus.Counter
+	// CrossedInstruments and DeltaBufferedRecords are labelled by shard because
+	// each shard owns a disjoint slice of instruments and can only ever report its
+	// own count. As bare process-wide gauges every shard would Set the same series
+	// to its local number, so the exported value was one arbitrary shard's rather
+	// than the total. Labelled per shard, sum() across the series is the truth.
+	CrossedInstruments        *prometheus.GaugeVec // label: shard
+	BookDivergenceTotal       *prometheus.CounterVec
 	DeltaBufferOverflowTotal  prometheus.Counter
-	DeltaBufferedRecords      prometheus.Gauge
+	DeltaBufferedRecords      *prometheus.GaugeVec   // label: shard
 	SnapshotDiscardedTotal    *prometheus.CounterVec // label: reason
 	SnapshotLevelDroppedTotal prometheus.Counter
 	PerInstrumentGapsTotal    prometheus.Counter
@@ -62,10 +67,10 @@ func NewMetrics(version, commit string) *Metrics {
 	}, []string{"type"})
 
 	m.CrossedBookEventsTotal = prometheus.NewCounter(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "crossed_book_events_total"})
-	m.CrossedInstruments = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: metricsNamespace, Name: "crossed_instruments"})
+	m.CrossedInstruments = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: metricsNamespace, Name: "crossed_instruments"}, []string{"shard"})
 	m.BookDivergenceTotal = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "book_divergence_total"}, []string{"kind"})
 	m.DeltaBufferOverflowTotal = prometheus.NewCounter(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "delta_buffer_overflow_total"})
-	m.DeltaBufferedRecords = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: metricsNamespace, Name: "delta_buffered_records"})
+	m.DeltaBufferedRecords = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: metricsNamespace, Name: "delta_buffered_records"}, []string{"shard"})
 	m.SnapshotDiscardedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "snapshot_discarded_total"}, []string{"reason"})
 	m.SnapshotLevelDroppedTotal = prometheus.NewCounter(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "snapshot_level_dropped_total"})
 	m.PerInstrumentGapsTotal = prometheus.NewCounter(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "per_instrument_gaps_total"})

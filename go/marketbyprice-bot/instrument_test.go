@@ -212,6 +212,31 @@ func TestEndSnapshot_CommitsAndSetsDepthBound(t *testing.T) {
 	}
 }
 
+// A committed snapshot must free Pending. The entries are keyed to the
+// pre-snapshot per-instrument sequence and EndSnapshot jumps
+// LastAppliedInstrumentSeq forward to the snapshot's Last Instrument Seq, so
+// nothing left behind can ever match LastApplied+1 and drain. Left in place they
+// still count toward the reorder-window bound in applyDeltaToReady, so ordinary
+// reordering is eventually misread as a per-instrument gap.
+func TestEndSnapshot_ClearsPending(t *testing.T) {
+	i := NewInstrument(7, "X", 0, 0)
+	i.LastAppliedInstrumentSeq = 4
+	i.Pending = map[uint32]Record{
+		6: {Type: "level_update"},
+		7: {Type: "level_update"},
+	}
+
+	i.BeginSnapshot(3, 5000, 1, 77, 0)
+	i.AddSnapshotLevel(3, 0, 1000, 10, 2, 0)
+	if err := i.EndSnapshot(3, 5000); err != nil {
+		t.Fatal(err)
+	}
+
+	if i.Pending != nil {
+		t.Errorf("Pending must be cleared on commit, still holds %d entries: %+v", len(i.Pending), i.Pending)
+	}
+}
+
 // Depth bound defaults to unknown, never 0. A never-snapshotted instrument must
 // not assert completeness.
 func TestDepthBound_DefaultsUnknown(t *testing.T) {

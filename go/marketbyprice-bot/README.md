@@ -80,13 +80,13 @@ Namespace `dz_mbp_bot`.
 | `decode_errors_total` | Unparseable lines from the socket. |
 | `book_divergence_total{kind}` | Publisher/subscriber disagreements on a `LevelUpdate`: `new_on_present`, `change_on_absent`, `delete_nonzero_qty`, `zero_qty_wrong_action`. Counted without altering the applied result. |
 | `crossed_book_events_total` | Crossed inside-market observations at consistency points. |
-| `crossed_instruments` | Instruments currently crossed. |
+| `crossed_instruments{shard}` | Instruments currently crossed, per shard. Shards own disjoint instruments, so take `sum()` for the process total. |
 | `per_instrument_gaps_total` | Confirmed per-instrument sequence gaps. |
 | `instrument_resets_total{reason}` | `InstrumentReset` messages applied. |
 | `channel_resets_total` | `Reset Count` era changes, each draining every shard. |
 | `snapshot_discarded_total{reason}` | Snapshots discarded: `stale_anchor`, `short`, `mismatch`, `no_open_snapshot`, `other`. |
-| `snapshot_level_dropped_total` | `SnapshotLevel` records dropped — no open group, or a `Snapshot ID` that does not match it. |
-| `delta_buffered_records` | Deltas currently buffered across the shard. |
+| `snapshot_level_dropped_total` | `SnapshotLevel` records misrouted — no open group at the coordinator, or a `Snapshot ID` that does not match the open group. Levels belonging to a snapshot a ready-and-current instrument declined are NOT counted: the publisher sends every level of a group regardless, so counting them would bury the misroute signal under healthy steady state. |
+| `delta_buffered_records{shard}` | Deltas currently buffered, per shard. Take `sum()` for the process total. |
 | `delta_buffer_overflow_total` | Buffer evictions. Sustained non-zero means the snapshot cycle is too long for the memory budget. |
 
 Every metric listed above is written by code in this binary. Book-state gauges and snapshot-writer metrics arrive with the persistence follow-on, alongside the subsystems that populate them — a registered collector nothing writes exports `0` forever, which reads as "configured and failing" rather than "absent".

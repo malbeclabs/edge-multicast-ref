@@ -105,7 +105,7 @@ func (s *Shard) applySnapshotLevel(k instKey, rec Record) []ChannelEvent {
 		}
 		return nil
 	}
-	added := inst.AddSnapshotLevel(
+	res := inst.AddSnapshotLevel(
 		toUint32(rec.Fields["snapshot_id"]),
 		sideFromString(toString(rec.Fields["side"])),
 		toInt64(rec.Fields["price_raw"]),
@@ -113,7 +113,11 @@ func (s *Shard) applySnapshotLevel(k instKey, rec Record) []ChannelEvent {
 		orderCountFrom(rec.Fields),
 		toUint8(rec.Fields["level_flags"]),
 	)
-	if !added && s.metrics != nil {
+	// Only a Snapshot ID mismatch is a misroute. SnapshotLevelNoOpenShadow is the
+	// healthy steady state — a ready, current instrument declined this periodic
+	// snapshot at SnapshotBegin, but the publisher still sends every level of the
+	// group. Counting those would swamp the misroute signal with normal traffic.
+	if res == SnapshotLevelMismatch && s.metrics != nil {
 		s.metrics.SnapshotLevelDroppedTotal.Inc()
 	}
 	return nil
@@ -156,10 +160,13 @@ func discardReason(err error) string {
 }
 
 func (s *Shard) applyInstrumentReset(k instKey, rec Record) []ChannelEvent {
-	inst, ok := s.instruments[k]
-	if !ok {
-		return nil
-	}
+	// instrumentFor, not an early return on absence, matching applySnapshotBegin.
+	// At cold start the refdata cycle lags mktdata, so a reset routinely arrives
+	// before the instrument's own definition. Dropping it there would discard the
+	// RequiredAnchorSeq it carries, and the pre-reset snapshot it exists to
+	// invalidate would then commit — leaving the instrument ready and serving the
+	// diverged book, with no discard counted anywhere.
+	inst := s.instrumentFor(k)
 	anchor := toUint64(rec.Fields["new_anchor_seq"])
 	inst.Reset(&anchor)
 
@@ -176,8 +183,8 @@ func (s *Shard) applyInstrumentReset(k instKey, rec Record) []ChannelEvent {
 	}
 	if s.metrics != nil {
 		s.metrics.InstrumentResetsTotal.WithLabelValues(toString(rec.Fields["reason"])).Inc()
-		s.metrics.DeltaBufferedRecords.Set(float64(s.bufferedN))
 	}
+	s.publishBufferedGauge()
 	// A reset clears the book, so the instrument can no longer be crossed.
 	delete(s.crossed, k)
 	delete(s.touched, k)
@@ -249,8 +256,8 @@ func (s *Shard) evaluateCrossed(k instKey, inst *Instrument) {
 }
 
 func (s *Shard) publishCrossedGauge() {
-	if s.metrics != nil {
-		s.metrics.CrossedInstruments.Set(float64(len(s.crossed)))
+	if s.crossedGauge != nil {
+		s.crossedGauge.Set(float64(len(s.crossed)))
 	}
 }
 
@@ -280,9 +287,7 @@ func (s *Shard) pruneManifest(newSeq uint16) {
 		delete(s.touched, k)
 	}
 	s.publishCrossedGauge()
-	if s.metrics != nil {
-		s.metrics.DeltaBufferedRecords.Set(float64(s.bufferedN))
-	}
+	s.publishBufferedGauge()
 }
 
 func (s *Shard) reset() {
@@ -293,6 +298,12 @@ func (s *Shard) reset() {
 	s.crossed = map[instKey]struct{}{}
 	s.touched = map[instKey]struct{}{}
 	s.sawBatchBoundary = false
+	// Republish both gauges. Zeroing the state without re-exporting leaves each
+	// series holding its pre-reset value indefinitely on a shard that then goes
+	// quiet — nothing else writes them until the next crossed book or buffered
+	// delta, which may never come.
+	s.publishCrossedGauge()
+	s.publishBufferedGauge()
 }
 
 // handle is the shard goroutine's per-record entry point.
