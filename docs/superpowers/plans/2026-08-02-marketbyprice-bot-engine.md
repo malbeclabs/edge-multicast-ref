@@ -18,17 +18,22 @@
 
 ## State of play — read this first if you are resuming
 
-**Tasks 1, 2, and 3 are DONE and committed on branch `feat/marketbyprice-bot`.** 26 tests pass, `go test -race` is clean. Do not re-run them.
+**All six tasks are DONE and committed on branch `feat/marketbyprice-bot`.** 56 tests pass, `go test -race` is clean. Do not re-run the implementation steps; this plan is now a record of how the module was built, not a work list.
+
+Commit hashes below are post-rebase. The branch was rebased onto `main` once PR #29 merged, which rewrote every hash an earlier revision of this section cited.
 
 | Task | Commits | Notes |
 |---|---|---|
-| 1 — module, `record.go`, `metrics.go`, `bot.go`, `go.work`, CI matrix, 5 sibling Dockerfiles | `9ffbc2a` | `BookDemotionsTotal` was dropped deliberately; `PerInstrumentGapsTotal` covers the same event |
-| 2 — `instrument.go` + tests | `a7ca75e`, fix `4496ee4` | Fix: divergence classification must be independent `if`s, not a `switch` — the four conditions overlap and a switch under-reports |
-| 3 — `shard.go` sequencing + bounded delta buffer | `c193a17`, fix `8676c3e` | Fix: `replayBuffer` must re-check `inst.Status` each iteration or one hole declares a gap per trailing record |
+| 1 — module, `record.go`, `metrics.go`, `bot.go`, `go.work`, CI matrix, 5 sibling Dockerfiles | `fa8a608` | `BookDemotionsTotal` was dropped deliberately; `PerInstrumentGapsTotal` covers the same event |
+| 2 — `instrument.go` + tests | `7235727`, fix `f7f1bca` | Fix: divergence classification must be independent `if`s, not a `switch` — the four conditions overlap and a switch under-reports |
+| 3 — `shard.go` sequencing + bounded delta buffer | `a1ce742`, fix `a19890f` | Fix: `replayBuffer` must re-check `inst.Status` each iteration or one hole declares a gap per trailing record |
+| 4 — `dispatch.go` snapshot lifecycle + crossed-book monitoring | `9ef5d05` | Transcribed from [Appendix A](#appendix-a-verified-source-for-tasks-4-and-5) |
+| 5 — `coordinator.go` routing, reset barrier, fence | `fcca33d` | Transcribed from [Appendix A](#appendix-a-verified-source-for-tasks-4-and-5) |
+| 6 — `levels.go`, `main.go`, `README.md` | `816259d`, then `9a92a0e` | `9a92a0e` is Step 2a: drops the unpopulated metrics and adds the container build |
 
-**Tasks 4, 5, and 6 remain.** Tasks 4 and 5 have verified source in [Appendix A](#appendix-a-verified-source-for-tasks-4-and-5) — use it rather than the scenario lists in those task bodies, which were written before the code existed.
+One follow-up commit sits outside the task numbering: `14930c3` resolves the first deferred finding below.
 
-Branch is stacked on `feat/marketbyprice-feed` (PR #29, the parser). If #29 has merged, rebase onto `main` before continuing.
+The Done criteria in this plan have all been verified against the tree: 56 tests race-clean, `go vet` and `gofmt` clean, module present in `go.work`, in the CI matrix and in all six Dockerfiles, standalone `GOWORK=off` builds for darwin and linux, and no ClickHouse code anywhere in the module.
 
 ### Things that will bite you, learned the hard way
 
@@ -40,13 +45,13 @@ Branch is stacked on `feat/marketbyprice-feed` (PR #29, the parser). If #29 has 
 - **A prototype passing its own tests proves only that it does what its author intended.** Two reviews on this plan each found a real bug in pre-verified code, both metrics-fidelity errors invisible to the author's own tests. Review the design against the spec, not just the diff against the reference.
 - Commits are SSH-signed via 1Password and it fails intermittently. Retry; do not disable signing.
 
-### Deferred findings for the final whole-branch review
+### Deferred findings for the final whole-branch review — all resolved
 
-- Malformed-`BookClear` discard returns `Kind: "applied_delta"` though nothing was applied — give it a distinct kind before a consumer trusts it.
-- That path is unreachable from live traffic: the parser already rejects `Scope=1`+`ClearSide=2` at decode. Add a comment marking it defense-in-depth.
-- `evictLargestBuffer`'s victim-absent-from-`instruments` branch is untested.
-- `Pending` entries dropped when the reorder window is exceeded are provably covered by the anchor filter, but that rests on reasoning rather than a test.
-- Five ClickHouse metrics are registered with no implementing subsystem — Task 6 Step 2a removes them.
+- ~~Malformed-`BookClear` discard returns `Kind: "applied_delta"` though nothing was applied~~ — now returns `"malformed_delta"` (`14930c3`); regression test at `shard_test.go:386`.
+- ~~That path is unreachable from live traffic; add a comment marking it defense-in-depth~~ — comment at `shard.go:210`.
+- ~~`evictLargestBuffer`'s victim-absent-from-`instruments` branch is untested~~ — covered at `shard_test.go:414`.
+- ~~`Pending` entries dropped when the reorder window is exceeded rest on reasoning rather than a test~~ — covered by `TestApplyDeltaToReady_PendingDroppedAtGapIsCoveredByAnchor`.
+- ~~Five ClickHouse metrics are registered with no implementing subsystem~~ — removed in `9a92a0e`; the module has no ClickHouse references.
 
 ### Related issues filed from this work
 
