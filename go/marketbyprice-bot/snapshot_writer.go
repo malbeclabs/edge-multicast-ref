@@ -25,12 +25,24 @@ type SnapshotWriter struct {
 	// instrument, or nil when the shard does not have it.
 	withInstrument func(instKey, func(*Instrument))
 
+	// now is the clock flushDue and MarkDirty read. A field, not a bare
+	// time.Now() call, so a test can pace a coalesce window deterministically
+	// without sleeping for real time.
+	now func() time.Time
+
 	mu sync.Mutex
 	// dirty is keyed by instKey, NOT by a bare instrument ID. A shard owns
 	// instruments across every channel for its id-modulo, so an id-only key would
 	// fold two channels' books into one entry and silently persist whichever
 	// flushed last.
 	dirty map[instKey]*dirtyEntry
+	// lastWrittenAt is the pacing state that survives the gap between a write and
+	// the next MarkDirty. dirty entries are deleted at extraction (flushDue), so
+	// nothing about a just-flushed instrument otherwise persists between writes;
+	// without this map the very next MarkDirty would start a fresh entry with no
+	// memory of when the instrument last wrote, and the coalesce interval would
+	// throttle nothing.
+	lastWrittenAt map[instKey]time.Time
 	// generation is bumped by Reset to invalidate a batch already extracted from
 	// dirty but not yet written.
 	generation uint64
@@ -52,7 +64,9 @@ func NewSnapshotWriter(ch enqueuer, depth, coalesceMS int, m *Metrics, withInstr
 		tickInterval:     10 * time.Millisecond,
 		metrics:          m,
 		withInstrument:   withInstrument,
+		now:              time.Now,
 		dirty:            map[instKey]*dirtyEntry{},
+		lastWrittenAt:    map[instKey]time.Time{},
 		resetCh:          make(chan chan struct{}, 1),
 	}
 }
@@ -63,7 +77,7 @@ func NewSnapshotWriter(ch enqueuer, depth, coalesceMS int, m *Metrics, withInstr
 func (w *SnapshotWriter) MarkDirty(k instKey) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	now := time.Now()
+	now := w.now()
 	if e, ok := w.dirty[k]; ok {
 		e.coalescedCount++
 		if w.metrics != nil {
@@ -71,7 +85,17 @@ func (w *SnapshotWriter) MarkDirty(k instKey) {
 		}
 		return
 	}
-	w.dirty[k] = &dirtyEntry{key: k, dirtiedAt: now, nextAllowedAt: now}
+	// nextAllowedAt is derived from the last actual write, not from now: a fresh
+	// dirty entry created shortly after a write must still honor the remainder of
+	// that write's coalesce window, or the window never has any effect between
+	// writes — only within the microseconds a batch spends being written.
+	nextAllowedAt := now
+	if last, ok := w.lastWrittenAt[k]; ok {
+		if allowed := last.Add(w.coalesceInterval); allowed.After(now) {
+			nextAllowedAt = allowed
+		}
+	}
+	w.dirty[k] = &dirtyEntry{key: k, dirtiedAt: now, nextAllowedAt: nextAllowedAt}
 }
 
 // Reset clears pending work and invalidates any in-flight batch. It is
@@ -96,6 +120,10 @@ func (w *SnapshotWriter) Reset(ctx context.Context) {
 func (w *SnapshotWriter) doReset() {
 	w.mu.Lock()
 	w.dirty = map[instKey]*dirtyEntry{}
+	// lastWrittenAt is cleared too: it is pacing history for book state that
+	// Reset is about to discard, so honoring it after a reset would throttle the
+	// first post-reset write against a book that no longer exists.
+	w.lastWrittenAt = map[instKey]time.Time{}
 	w.generation++
 	w.mu.Unlock()
 }
@@ -127,7 +155,7 @@ func (w *SnapshotWriter) Run(ctx context.Context) {
 
 func (w *SnapshotWriter) flushDue() {
 	w.mu.Lock()
-	now := time.Now()
+	now := w.now()
 	gen := w.generation
 	var due []*dirtyEntry
 	for k, e := range w.dirty {
@@ -173,15 +201,11 @@ func (w *SnapshotWriter) flushDue() {
 			w.metrics.SnapshotLagMs.Observe(float64(now.Sub(e.dirtiedAt).Milliseconds()))
 		}
 
-		// Re-arm the coalesce window if the instrument was dirtied again while we
-		// were writing it.
+		// Record when this instrument actually wrote, so the NEXT MarkDirty — which
+		// may land long after this flush loop returns — can compute a correctly
+		// paced nextAllowedAt instead of starting from a clean slate.
 		w.mu.Lock()
-		if again, ok := w.dirty[e.key]; ok {
-			rearm := now.Add(w.coalesceInterval)
-			if again.nextAllowedAt.Before(rearm) {
-				again.nextAllowedAt = rearm
-			}
-		}
+		w.lastWrittenAt[e.key] = now
 		w.mu.Unlock()
 	}
 }

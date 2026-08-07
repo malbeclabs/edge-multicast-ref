@@ -191,3 +191,48 @@ func TestSnapshotWriter_NilClientIsNoOp(t *testing.T) {
 	w.MarkDirty(instKey{0, 11})
 	w.flushDue() // must not panic
 }
+
+// fakeClock lets a test advance simulated time deterministically instead of
+// sleeping for real milliseconds.
+type fakeClock struct {
+	t time.Time
+}
+
+func (c *fakeClock) now() time.Time { return c.t }
+
+// The coalesce interval must pace writes across the quiet gap between a write
+// and the next MarkDirty, not just within the microseconds a single flush takes.
+// A dirty entry is deleted from the map the moment it is extracted in flushDue,
+// so if nothing records when an instrument last actually wrote, the very next
+// MarkDirty starts a brand new entry with no memory of that write — and the next
+// tick flushes it immediately, regardless of the configured coalesce interval.
+//
+// This drives 30 simulated 10ms ticks (300ms of simulated time) against a 250ms
+// coalesce interval, marking the instrument dirty on every tick as a 1kHz feed
+// would. A correct writer paces to at most 2 writes (one at t=0, one once the
+// 250ms window elapses); the pre-fix writer wrote on every tick — 30 writes.
+func TestSnapshotWriter_CoalesceIntervalPacesWritesAcrossTicks(t *testing.T) {
+	st := newStubEnqueuer()
+	m := NewMetrics("t", "t")
+	insts := map[instKey]*Instrument{{0, 11}: readySnapshotInstrument(11, "SYM")}
+	clock := &fakeClock{t: time.Unix(0, 0)}
+
+	w := NewSnapshotWriter(st, 5, 250, m, func(k instKey, fn func(*Instrument)) {
+		fn(insts[k])
+	})
+	w.now = clock.now
+
+	const tick = 10 * time.Millisecond
+	for i := 0; i < 30; i++ {
+		w.MarkDirty(instKey{0, 11})
+		w.flushDue()
+		clock.t = clock.t.Add(tick)
+	}
+
+	if got := counterValue(m.SnapshotWritesTotal); got > 2 {
+		t.Errorf("coalesce interval must pace writes: got %v writes over 300ms of simulated ticks at a 250ms interval, want <= 2 (tick-rate pacing would give ~30)", got)
+	}
+	if got := counterValue(m.SnapshotWritesTotal); got < 1 {
+		t.Errorf("expected at least one write, got %v", got)
+	}
+}
