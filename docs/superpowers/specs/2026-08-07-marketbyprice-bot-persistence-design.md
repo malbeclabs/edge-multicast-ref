@@ -101,6 +101,34 @@ Each instrument therefore records the identity of its last `SnapshotBegin`
 regardless of whether a shadow opened, and `wire_levels` rows read from that. The
 cost is five fields per instrument.
 
+### Channel-scoped records are written by the Coordinator, not by a shard
+
+Decided during execution; the original data-flow diagram routed every table
+through `Shard.handle`.
+
+`heartbeat`, `manifest_summary` and `end_of_session` never reach a shard at all —
+`Coordinator.Dispatch` classifies them itself and `Shard.apply` has no case for
+them — so `channel_health` is written by the Coordinator directly.
+
+`batch_boundary` is the subtler one, and it must be written there too. A boundary
+carries no `instrument_id`, and every shard needs it because each evaluates
+crossed-book for the instruments *it* touched, so the Coordinator broadcasts it
+to all N. Writing the row from the shard side therefore turned one wire message
+into N near-identical `events` rows — and inconsistent ones, since `handle`
+resolves refdata for `instKey{rec.ChannelID, 0}` and only the shard owning
+instrument 0 ever produced a symbol for it. The broadcast stays (the crossed-book
+evaluation depends on it) and `applyBatchBoundary` still returns its event, but
+the shard does not persist it.
+
+Two consequences follow for the shard path. First, `Shard.persists` can fail
+**closed**: with a filter active an empty symbol is no longer persisted, because
+in the shard path an empty symbol only ever means the instrument's definition has
+not arrived yet — routine at cold start, since the refdata cycle lags mktdata —
+and not "this is a channel-scoped record". Second, `events` stays an applied-delta
+log: `per_instrument_gap` and `malformed_delta` both carry an ordinary delta
+`Record.Type` while having applied nothing, so `handle` gates on `ChannelEvent.Kind`
+rather than letting the writer switch on `Record.Type` alone.
+
 ### `--symbol` gates persistence and read-out, never the book engine
 
 The flag is declared today and does nothing (`_ = symbolFilter`, `main.go:51`) —
@@ -124,12 +152,14 @@ exempt from the filter.
 parser socket
    -> Bot.read            (decodes with UseNumber)
    -> Coordinator         (routes; stamps snapshot_level with the open group)
-   -> Shard.handle        <- this PR replaces `_ = evs` here
-        |-> EventsWriter.Write(ev)          -> events / instruments /
-        |                                      channel_health / wire_levels
-        `-> SnapshotWriter.MarkDirty(k)     -> level_snapshots (coalesced)
-                 |
-                 `-> internal/clickhouse.Client -> batched HTTP JSONEachRow
+        |-> EventsWriter.Write(ev)          -> channel_health (heartbeat,
+        |                                      manifest_summary, end_of_session)
+        |                                   -> events (batch_boundary)
+        `-> Shard.handle   <- this PR replaces `_ = evs` here
+              |-> EventsWriter.Write(ev)    -> events / instruments / wire_levels
+              `-> SnapshotWriter.MarkDirty(k)
+                       |                    -> level_snapshots (coalesced)
+                       `-> internal/clickhouse.Client -> batched HTTP JSONEachRow
 ```
 
 `Shard.handle` becomes:
@@ -137,7 +167,9 @@ parser socket
 ```go
 evs := s.apply(rec)
 for _, ev := range evs {
-	s.eventsW.Write(ev, rec.ChannelID, def.Symbol, def.PriceExponent, def.QtyExponent)
+	if persist && persistableFromShard(ev.Kind) {
+		s.eventsW.Write(ev, rec.ChannelID, def.Symbol, def.PriceExponent, def.QtyExponent)
+	}
 	if ev.Kind == KindAppliedDelta || ev.Kind == KindAppliedSnapshot {
 		s.sw.MarkDirty(instKey{rec.ChannelID, ev.InstrumentID})
 	}
