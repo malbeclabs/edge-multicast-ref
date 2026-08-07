@@ -23,7 +23,9 @@ COPY go/marketbyprice-parser/go.mod go/marketbyprice-parser/go.sum ./go/marketby
 WORKDIR /src/go/marketbyprice-bot
 RUN go mod download
 
-# Now copy only the bot's source.
+# The bot imports internal/clickhouse, so that module's source is needed too —
+# unlike the other workspace members, whose go.mod alone satisfies the download.
+COPY go/internal/ /src/go/internal/
 COPY go/marketbyprice-bot/ ./
 
 ARG VERSION=dev

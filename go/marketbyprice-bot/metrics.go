@@ -47,6 +47,14 @@ type Metrics struct {
 	InstrumentResetsTotal     *prometheus.CounterVec // label: reason
 	ChannelResetsTotal        prometheus.Counter
 
+	// ClickHouse persistence. Populated through metricsObserver, which adapts
+	// the shared internal/clickhouse client's Observer interface onto these.
+	ClickhouseRowsWritten   *prometheus.CounterVec   // label: table
+	ClickhouseRowsDropped   *prometheus.CounterVec   // labels: table, reason
+	ClickhouseWriteErrors   *prometheus.CounterVec   // labels: table, reason
+	ClickhouseBatchDuration *prometheus.HistogramVec // label: table
+	ClickhouseBufferedRows  *prometheus.GaugeVec     // label: table
+
 	startTime time.Time
 }
 
@@ -79,6 +87,15 @@ func NewMetrics(version, commit string) *Metrics {
 	m.InstrumentResetsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "instrument_resets_total"}, []string{"reason"})
 	m.ChannelResetsTotal = prometheus.NewCounter(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "channel_resets_total"})
 
+	m.ClickhouseRowsWritten = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "clickhouse_rows_written_total"}, []string{"table"})
+	m.ClickhouseRowsDropped = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "clickhouse_rows_dropped_total"}, []string{"table", "reason"})
+	m.ClickhouseWriteErrors = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "clickhouse_write_errors_total"}, []string{"table", "reason"})
+	m.ClickhouseBatchDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: metricsNamespace, Name: "clickhouse_batch_duration_seconds",
+		Buckets: prometheus.ExponentialBuckets(0.001, 2, 14),
+	}, []string{"table"})
+	m.ClickhouseBufferedRows = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: metricsNamespace, Name: "clickhouse_buffered_rows"}, []string{"table"})
+
 	reg.MustRegister(
 		m.BuildInfo, m.UptimeSeconds,
 		m.SocketConnected, m.SocketReconnects, m.RecordsTotal, m.DecodeErrors, m.SocketToBotLatency,
@@ -86,6 +103,8 @@ func NewMetrics(version, commit string) *Metrics {
 		m.DeltaBufferOverflowTotal, m.DeltaBufferedRecords,
 		m.SnapshotDiscardedTotal, m.SnapshotLevelDroppedTotal, m.DeltasDiscardedTotal,
 		m.PerInstrumentGapsTotal, m.InstrumentResetsTotal, m.ChannelResetsTotal,
+		m.ClickhouseRowsWritten, m.ClickhouseRowsDropped, m.ClickhouseWriteErrors,
+		m.ClickhouseBatchDuration, m.ClickhouseBufferedRows,
 	)
 	m.BuildInfo.WithLabelValues(version, commit).Set(1)
 
