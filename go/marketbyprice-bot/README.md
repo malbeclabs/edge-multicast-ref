@@ -2,7 +2,7 @@
 
 Reference consumer for the DoubleZero [Market-by-Price feed](https://github.com/malbeclabs/edge-feed-spec/blob/main/market-by-price/spec.md). It reads decoded records from [`marketbyprice-parser`](../marketbyprice-parser/README.md) over a Unix socket and maintains a price-keyed (L2) order book per instrument, with Prometheus metrics.
 
-**Persistence is not implemented yet.** The engine maintains correct book state and exposes it through `ComputeLevels`, but nothing writes it anywhere. A follow-on plan adds the persistence layer that consumes the `ChannelEvent` stream and the level read-out.
+The engine maintains correct book state and exposes it through `ComputeLevels`. When `--clickhouse-url` is set, the `ChannelEvent` stream and the level read-out are persisted to ClickHouse across five tables — see [Persistence](#persistence) below.
 
 ## Input
 
@@ -51,19 +51,45 @@ Rank is derived by sorting price keys at read time, never stored — the spec fo
 
 An `order_count` of `0xFFFF` on the wire reads out as `0`, because the sentinel means *absent*. Do not read it as a real count of 65535.
 
+## Persistence
+
+When `--clickhouse-url` is non-empty, the bot writes to five ClickHouse tables:
+
+| Table | Source | Contents |
+|---|---|---|
+| `instruments` | `instrument_definition` | Refdata: symbol, exponents, contract terms. |
+| `events` | Applied deltas, trades, liquidations, batch boundaries, instrument resets | One row per `ChannelEvent` the engine reports. |
+| `wire_levels` | `snapshot_level` | Raw snapshot levels, captured for replay — including levels belonging to a *declined* snapshot, since the publisher sends every level of a group regardless of whether this subscriber needed it. |
+| `channel_health` | `heartbeat`, `manifest_summary`, `end_of_session` | Channel-scoped records that carry no instrument. |
+| `level_snapshots` | `ComputeLevels`, via the snapshot writer | The top-N read-out per instrument, coalesced to at most one write per `--coalesce-ms` per instrument. |
+
+**`events` is an applied-delta log, not a wire capture.** A delta that arrives while an instrument is `awaiting-snapshot` or `gap` is buffered, not applied. Once a snapshot commits and `replayBuffer` replays the buffer against the now-`ready` book, each buffered delta IS applied to the book — but that replay path discards the resulting event rather than handing it to the writer, so those deltas never produce an `events` row. This is pre-existing engine behavior, orthogonal to `--symbol` filtering, and is deliberately not being changed here. Do not treat `events` as a complete record of every delta seen on the wire — treat it as a complete record of every delta applied outside of buffered replay. The book itself (and therefore `level_snapshots`) is unaffected: every delta is applied exactly once, buffered or not.
+
+**An empty `--clickhouse-url` disables persistence entirely**, not just partially: the client is `nil`, every writer call is a no-op, and the bot runs exactly as it did before persistence existed — no writes attempted, no errors, and every `clickhouse_*` metric holds at `0`.
+
+**A write failure is counted and dropped, never propagated to the feed.** A batch that fails to insert increments `clickhouse_write_errors_total{table,reason}` and `clickhouse_rows_dropped_total{table,reason="write_failed"}`, then the batch is discarded. The batching client is the asynchronous boundary between the book engine and ClickHouse, so a wedged or unreachable database degrades to data loss for that table — it never backpressures into the socket read loop or slows the feed.
+
+**`--symbol` gates persistence and read-out only — never the book engine.** Every instrument is fully processed regardless of the filter: sequencing, per-instrument gap detection, and the delta buffer are only correct if every record is applied, so a filtered-out symbol's book is maintained exactly as if it were unfiltered. What the filter controls is whether that symbol's rows reach ClickHouse and whether its book-state gauges (`book_levels`, `book_top_price`, `book_top_qty`, `book_spread_bps`) get updated: a filtered symbol produces no rows in `instruments`, `events`, `wire_levels`, or `level_snapshots`. `channel_health` rows are never filtered — they carry no symbol, because they describe the channel, not an instrument.
+
+**`cumulative_qty` in `level_snapshots` is exhaustive depth only when `depth_bound` is a non-null `0`.** Under a non-zero bound, or a null bound, levels beyond what was captured are unknown rather than empty, so summing `cumulative_qty` as if it were the whole book understates available liquidity.
+
 ## Flags
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `--socket` | *(required)* | Path to the parser's Unix socket. |
 | `--shards` | `0` | Instrument shards, keyed `instrument_id % n`. `0` derives `GOMAXPROCS-2`, clamped to `[1,8]`. |
-| `--depth` | `20` | Read-out depth, levels per side. |
-| `--symbol` | *(empty)* | Comma-separated symbol filter; empty means all. |
+| `--depth` | `20` | Read-out depth, levels per side, passed to `ComputeLevels` by the snapshot writer. |
+| `--symbol` | *(empty)* | Comma-separated symbol filter. Empty means no filter. Gates persistence and read-out only — see [Persistence](#persistence). |
 | `--metrics-addr` | `127.0.0.1:9094` | Prometheus `/metrics` listen address. |
 | `-v` | `false` | Debug logging. |
 | `--version` | | Print version and exit. |
-
-`--depth` and `--symbol` are accepted but have no effect yet: both configure the level read-out, whose only consumer is the persistence layer in the follow-on plan.
+| `--clickhouse-url` | *(empty)* | ClickHouse HTTP endpoint. Empty disables persistence entirely. |
+| `--clickhouse-database` | `marketbyprice` | ClickHouse database. |
+| `--clickhouse-batch-size` | `500` | Rows per insert batch. |
+| `--clickhouse-batch-interval` | `1s` | Maximum time between insert batches. |
+| `--clickhouse-buffer-size` | `20000` | Per-table row buffer; rows are dropped when full. |
+| `--coalesce-ms` | `50` | Minimum interval between `level_snapshots` writes, per instrument. |
 
 ## Metrics
 
@@ -89,8 +115,20 @@ Namespace `dz_mbp_bot`.
 | `deltas_discarded_total{reason}` | Deltas seen and not applied. `stale_seq` is a duplicate or late frame — benign in bursts, but a sustained climb on one instrument with no matching applied traffic means a snapshot set the sequence tracker ahead of reality and the book is wedged. |
 | `delta_buffered_records{shard}` | Deltas currently buffered, per shard. Take `sum()` for the process total. |
 | `delta_buffer_overflow_total` | Buffer evictions. Sustained non-zero means the snapshot cycle is too long for the memory budget. |
+| `clickhouse_rows_written_total{table}` | Rows successfully inserted, per table. |
+| `clickhouse_rows_dropped_total{table,reason}` | Rows dropped before or during insert: `buffer_full` (the per-table channel was full) or `write_failed` (the insert errored and the batch was discarded). |
+| `clickhouse_write_errors_total{table,reason}` | Insert errors, per table. |
+| `clickhouse_batch_duration_seconds{table}` | Time spent inserting one batch, per table. |
+| `clickhouse_buffered_rows{table}` | Rows currently queued for insert, per table. |
+| `snapshot_writes_total` | `level_snapshots` writes committed by the snapshot writer. |
+| `snapshot_coalesces_total` | Times a `MarkDirty` was absorbed into an already-pending write instead of starting a new one. |
+| `snapshot_lag_ms` | Time from an instrument being marked dirty to its snapshot actually being written. |
+| `book_levels{symbol,side}` | Levels present in the most recent read-out, per symbol and side. |
+| `book_top_price{symbol,side}` | Best price in the most recent read-out, per symbol and side. |
+| `book_top_qty{symbol,side}` | Quantity at the best price in the most recent read-out, per symbol and side. |
+| `book_spread_bps{symbol}` | Best-ask/best-bid spread in basis points, per symbol. |
 
-Every metric listed above is written by code in this binary. Book-state gauges and snapshot-writer metrics arrive with the persistence follow-on, alongside the subsystems that populate them — a registered collector nothing writes exports `0` forever, which reads as "configured and failing" rather than "absent".
+Every metric listed above is written by code in this binary — no collector is registered without a writer that populates it, because a registered collector nothing writes exports `0` forever, which reads as "configured and failing" rather than "absent". The `book_*` gauges are the read-out, so they populate only for symbols that pass the `--symbol` filter; a filtered-out symbol's gauges are simply never set, not set to zero. The `clickhouse_*` counters are labelled by table, not by symbol, and keep incrementing normally for unfiltered traffic — a filtered symbol just contributes no rows to any of them.
 
 ## Architecture
 
@@ -104,4 +142,4 @@ Snapshot routing follows the **currently-open group**, never `{channel, snapshot
 
 Each **Shard** owns a disjoint set of instruments and all their book state. Its goroutine is the sole writer; `mu` guards book mutation so a reader can take a consistent level snapshot.
 
-Shards report state changes outward as `ChannelEvent`s, which the persistence layer will consume. Only `applied_delta` and `applied_snapshot` assert that book state actually changed. `malformed_delta` reports a delta that arrived and was deliberately not applied — a consumer must not persist it as a mutation. The remaining kinds are `instrument_reset`, `channel_reset`, and `per_instrument_gap`.
+Shards report state changes outward as `ChannelEvent`s, which the `EventsWriter` persists — see [Persistence](#persistence). Only `applied_delta` and `applied_snapshot` assert that book state actually changed. `malformed_delta` reports a delta that arrived and was deliberately not applied — a consumer must not persist it as a mutation. The remaining kinds are `instrument_reset`, `channel_reset`, and `per_instrument_gap`.

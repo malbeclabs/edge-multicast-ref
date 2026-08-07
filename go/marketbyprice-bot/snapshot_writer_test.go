@@ -11,7 +11,7 @@ func newTestSnapshotWriter(t *testing.T, st enqueuer, m *Metrics, insts map[inst
 	t.Helper()
 	return NewSnapshotWriter(st, 5, 0 /*coalesce off for determinism*/, m, func(k instKey, fn func(*Instrument)) {
 		fn(insts[k])
-	})
+	}, nil)
 }
 
 func readySnapshotInstrument(id uint32, symbol string) *Instrument {
@@ -187,7 +187,7 @@ func TestSnapshotWriter_NilClientIsNoOp(t *testing.T) {
 	insts := map[instKey]*Instrument{{0, 11}: readySnapshotInstrument(11, "SYM")}
 	w := NewSnapshotWriter(nil, 5, 0, NewMetrics("t", "t"), func(k instKey, fn func(*Instrument)) {
 		fn(insts[k])
-	})
+	}, nil)
 	w.MarkDirty(instKey{0, 11})
 	w.flushDue() // must not panic
 }
@@ -219,7 +219,7 @@ func TestSnapshotWriter_CoalesceIntervalPacesWritesAcrossTicks(t *testing.T) {
 
 	w := NewSnapshotWriter(st, 5, 250, m, func(k instKey, fn func(*Instrument)) {
 		fn(insts[k])
-	})
+	}, nil)
 	w.now = clock.now
 
 	const tick = 10 * time.Millisecond

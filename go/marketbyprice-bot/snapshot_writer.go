@@ -25,6 +25,10 @@ type SnapshotWriter struct {
 	// instrument, or nil when the shard does not have it.
 	withInstrument func(instKey, func(*Instrument))
 
+	// persists reports whether an instrument's rows should be written. Supplied
+	// by the owning shard so the symbol filter applies identically to snapshots.
+	persists func(symbol string) bool
+
 	// now is the clock flushDue and MarkDirty read. A field, not a bare
 	// time.Now() call, so a test can pace a coalesce window deterministically
 	// without sleeping for real time.
@@ -56,7 +60,10 @@ type dirtyEntry struct {
 	coalescedCount int
 }
 
-func NewSnapshotWriter(ch enqueuer, depth, coalesceMS int, m *Metrics, withInstrument func(instKey, func(*Instrument))) *SnapshotWriter {
+func NewSnapshotWriter(ch enqueuer, depth, coalesceMS int, m *Metrics, withInstrument func(instKey, func(*Instrument)), persists func(symbol string) bool) *SnapshotWriter {
+	if persists == nil {
+		persists = func(string) bool { return true }
+	}
 	return &SnapshotWriter{
 		ch:               ch,
 		depth:            depth,
@@ -64,6 +71,7 @@ func NewSnapshotWriter(ch enqueuer, depth, coalesceMS int, m *Metrics, withInstr
 		tickInterval:     10 * time.Millisecond,
 		metrics:          m,
 		withInstrument:   withInstrument,
+		persists:         persists,
 		now:              time.Now,
 		dirty:            map[instKey]*dirtyEntry{},
 		lastWrittenAt:    map[instKey]time.Time{},
@@ -196,6 +204,9 @@ func (w *SnapshotWriter) flushDue() {
 			bookStale = inst.Status == StatusGap
 		})
 		if !servable {
+			continue
+		}
+		if !w.persists(snap.Symbol) {
 			continue
 		}
 

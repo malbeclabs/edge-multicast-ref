@@ -130,7 +130,9 @@ func (s *Shard) applySnapshotLevel(k instKey, rec Record) []ChannelEvent {
 	// the publisher's book.
 	if inst.LastBegin != nil {
 		def := s.refdata[k]
-		s.eventsW.WriteWireLevel(rec, k.ch, *inst.LastBegin, def.Symbol, def.PriceExponent, def.QtyExponent)
+		if s.persists(def.Symbol) {
+			s.eventsW.WriteWireLevel(rec, k.ch, *inst.LastBegin, def.Symbol, def.PriceExponent, def.QtyExponent)
+		}
 	}
 	// Only a Snapshot ID mismatch is a misroute. SnapshotLevelNoOpenShadow is the
 	// healthy steady state — a ready, current instrument declined this periodic
@@ -356,8 +358,15 @@ func (s *Shard) handle(rec Record) {
 	}
 	k := instKey{rec.ChannelID, rec.InstrumentID}
 	def := s.refdataFor(k)
+	persist := s.persists(def.Symbol)
 	for _, ev := range evs {
-		s.eventsW.Write(ev, rec.ChannelID, def.Symbol, def.PriceExponent, def.QtyExponent)
+		if persist {
+			s.eventsW.Write(ev, rec.ChannelID, def.Symbol, def.PriceExponent, def.QtyExponent)
+		}
+		// MarkDirty stays outside the gate; the snapshot writer applies the filter
+		// itself at flush time, so a filtered instrument's dirty entry is dropped
+		// there rather than leaving stale gauge series behind.
+		//
 		// ONLY a real book mutation dirties an instrument. Dirtying on a
 		// non-mutating kind would rewrite an unchanged book on every batch
 		// boundary — which is why PR 3's review gave those paths their own kinds.

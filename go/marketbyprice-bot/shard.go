@@ -5,6 +5,7 @@ import (
 	"log"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -105,6 +106,11 @@ type Shard struct {
 	eventsW *EventsWriter
 	sw      *SnapshotWriter
 
+	// symbols gates PERSISTENCE and read-out only. Nil means no filter. The book
+	// engine always processes every instrument: sequencing, gap detection and the
+	// delta buffer are only correct if every record is applied.
+	symbols map[string]struct{}
+
 	// Per-shard children of the shard-labelled gauges, resolved once. bufferDelta
 	// is a hot path, so a WithLabelValues map lookup per append is worth avoiding.
 	// Both are nil when metrics is nil, which tests rely on.
@@ -158,6 +164,34 @@ func NewShard(idx, n int, eventsW *EventsWriter, metrics *Metrics) *Shard {
 		s.bufferedGauge = metrics.DeltaBufferedRecords.WithLabelValues(lbl)
 	}
 	return s
+}
+
+// parseSymbolFilter turns a comma-separated list into a lookup set. An empty
+// string means no filter, represented as a nil map.
+func parseSymbolFilter(csv string) map[string]struct{} {
+	if strings.TrimSpace(csv) == "" {
+		return nil
+	}
+	out := map[string]struct{}{}
+	for _, s := range strings.Split(csv, ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			out[s] = struct{}{}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// persists reports whether rows for this symbol should be written. An empty
+// symbol belongs to a channel-scoped record, which is never filtered.
+func (s *Shard) persists(symbol string) bool {
+	if s.symbols == nil || symbol == "" {
+		return true
+	}
+	_, ok := s.symbols[symbol]
+	return ok
 }
 
 // applyDelta classifies one mktdata delta against the instrument's

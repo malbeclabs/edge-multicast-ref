@@ -52,11 +52,6 @@ func main() {
 		log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	}
 
-	// --symbol configures the level read-out (ComputeLevels), which only has a
-	// consumer once Task 8 lands. Accepted now so deployment configs do not need
-	// to change then; until then it has no effect. See README.
-	_ = symbolFilter
-
 	metrics := NewMetrics(version, commit)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -99,6 +94,10 @@ func main() {
 	shardList := make([]*Shard, n)
 	for i := 0; i < n; i++ {
 		s := NewShard(i, n, eventsWriter, metrics)
+		// s.symbols must be set before the SnapshotWriter is constructed: the
+		// writer captures s.persists as a closure, so a populated filter must
+		// already be in place by the time that closure is created.
+		s.symbols = parseSymbolFilter(*symbolFilter)
 		// The writer's withInstrument closure needs the shard, so sw is assigned
 		// after construction.
 		s.sw = NewSnapshotWriter(ch, *depth, *coalesceMS, metrics, func(s *Shard) func(instKey, func(*Instrument)) {
@@ -107,7 +106,7 @@ func main() {
 				defer s.mu.Unlock()
 				fn(s.instruments[k])
 			}
-		}(s))
+		}(s), s.persists)
 		shardList[i] = s
 		go s.sw.Run(ctx)
 		go s.Run(ctx)

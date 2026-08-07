@@ -674,7 +674,7 @@ func TestHandle_OnlyMutatingEventsMarkDirty(t *testing.T) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		fn(s.instruments[k])
-	})
+	}, nil)
 
 	// instrument_definition and batch_boundary are non-mutating.
 	s.handle(instDefRec(11, "SYM", 1))
@@ -706,7 +706,7 @@ func TestHandle_WritesEventsWithRefdata(t *testing.T) {
 	st := newStubEnqueuer()
 	m := NewMetrics("t", "t")
 	s := NewShard(0, 1, NewEventsWriter(st), m)
-	s.sw = NewSnapshotWriter(nil, 5, 0, m, func(k instKey, fn func(*Instrument)) { fn(nil) })
+	s.sw = NewSnapshotWriter(nil, 5, 0, m, func(k instKey, fn func(*Instrument)) { fn(nil) }, nil)
 
 	s.handle(instDefRec(11, "BTC-USDT", 1)) // price_exponent -2, qty_exponent -8
 	s.instruments[instKey{0, 11}].Status = StatusReady
@@ -735,7 +735,7 @@ func TestOnDisconnect_DoesNotResetSnapshotWriter(t *testing.T) {
 	s := NewShard(0, 1, NewEventsWriter(nil), m)
 	s.sw = NewSnapshotWriter(nil, 5, 0, m, func(k instKey, fn func(*Instrument)) {
 		fn(s.instruments[k])
-	})
+	}, nil)
 	c := NewCoordinator(context.Background(), []*Shard{s}, NewEventsWriter(nil), m)
 
 	s.sw.MarkDirty(instKey{0, 11})
@@ -754,7 +754,7 @@ func TestHandle_CapturesWireLevelsForDeclinedSnapshot(t *testing.T) {
 	st := newStubEnqueuer()
 	m := NewMetrics("t", "t")
 	s := NewShard(0, 1, NewEventsWriter(st), m)
-	s.sw = NewSnapshotWriter(nil, 5, 0, m, func(k instKey, fn func(*Instrument)) { fn(nil) })
+	s.sw = NewSnapshotWriter(nil, 5, 0, m, func(k instKey, fn func(*Instrument)) { fn(nil) }, nil)
 
 	s.handle(instDefRec(11, "SYM", 1))
 	inst := s.instruments[instKey{0, 11}]
@@ -769,5 +769,86 @@ func TestHandle_CapturesWireLevelsForDeclinedSnapshot(t *testing.T) {
 
 	if got := len(st.rows["wire_levels"]); got != 1 {
 		t.Errorf("a declined snapshot's levels must still be captured, got %d rows", got)
+	}
+}
+
+func TestParseSymbolFilter(t *testing.T) {
+	if got := parseSymbolFilter(""); got != nil {
+		t.Errorf("an empty filter means no filter, got %v", got)
+	}
+	got := parseSymbolFilter(" BTC-USDT , ETH-USDT ")
+	if len(got) != 2 {
+		t.Fatalf("expected 2 symbols, got %v", got)
+	}
+	if _, ok := got["BTC-USDT"]; !ok {
+		t.Error("BTC-USDT missing; entries must be trimmed")
+	}
+}
+
+// A filtered symbol must be absent from every table, while the book engine still
+// applies its deltas — sequencing and gap detection are only correct if every
+// record is processed.
+func TestSymbolFilter_GatesPersistenceNotTheEngine(t *testing.T) {
+	st := newStubEnqueuer()
+	m := NewMetrics("t", "t")
+	s := NewShard(0, 1, NewEventsWriter(st), m)
+	s.symbols = parseSymbolFilter("WANTED")
+	s.sw = NewSnapshotWriter(nil, 5, 0, m, func(k instKey, fn func(*Instrument)) { fn(nil) }, nil)
+
+	// An instrument that is NOT in the filter.
+	s.handle(instDefRec(11, "IGNORED", 1))
+	s.instruments[instKey{0, 11}].Status = StatusReady
+	s.handle(levelUpdateRec(11, 900, 1, "bid", 1000, 50))
+
+	if got := len(st.rows["events"]); got != 0 {
+		t.Errorf("a filtered symbol must not be persisted, got %d event rows", got)
+	}
+	if got := len(st.rows["instruments"]); got != 0 {
+		t.Errorf("a filtered symbol's definition must not be persisted, got %d rows", got)
+	}
+
+	// The book engine must still have applied it.
+	inst := s.instruments[instKey{0, 11}]
+	if inst.LastAppliedInstrumentSeq != 1 {
+		t.Errorf("the engine must still apply filtered instruments: seq %d", inst.LastAppliedInstrumentSeq)
+	}
+	if inst.Bids[1000] == nil {
+		t.Error("the book must still be maintained for a filtered instrument")
+	}
+
+	// A wanted symbol still persists.
+	s.handle(instDefRec(12, "WANTED", 1))
+	s.instruments[instKey{0, 12}].Status = StatusReady
+	s.handle(levelUpdateRec(12, 901, 1, "bid", 1000, 50))
+	if got := len(st.rows["events"]); got != 1 {
+		t.Errorf("an unfiltered symbol must persist, got %d event rows", got)
+	}
+}
+
+// Channel-scoped records carry no symbol and must never be filtered out.
+//
+// The brief's version of this test called s.handle on a heartbeat directly
+// against a Shard, but channel-scoped records never reach a shard at all:
+// Coordinator.Dispatch handles heartbeat, manifest_summary and end_of_session
+// itself and calls c.eventsW.Write directly (see coordinator.go). Shard.apply
+// has no case for "heartbeat", so s.handle would produce zero events and this
+// test would assert a false negative instead of exercising the filter.
+//
+// The Coordinator holds no symbol filter of its own — persists() lives on
+// Shard — so the real assertion of the same intent is that a heartbeat
+// dispatched through a Coordinator still produces exactly one channel_health
+// row while a shard-level symbol filter is active.
+func TestSymbolFilter_KeepsChannelScopedRecords(t *testing.T) {
+	st := newStubEnqueuer()
+	m := NewMetrics("t", "t")
+	s := NewShard(0, 1, NewEventsWriter(st), m)
+	s.symbols = parseSymbolFilter("WANTED")
+	s.sw = NewSnapshotWriter(nil, 5, 0, m, func(k instKey, fn func(*Instrument)) { fn(nil) }, nil)
+
+	c := NewCoordinator(context.Background(), []*Shard{s}, NewEventsWriter(st), m)
+	c.Dispatch(Record{Type: "heartbeat", Port: "mktdata", Fields: map[string]any{}})
+
+	if got := len(st.rows["channel_health"]); got != 1 {
+		t.Errorf("channel health must not be symbol-filtered, got %d rows", got)
 	}
 }
