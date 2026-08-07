@@ -9,7 +9,7 @@ func newTestCoordinator(t *testing.T, n int) (*Coordinator, []*Shard) {
 	t.Helper()
 	shards := make([]*Shard, n)
 	for i := 0; i < n; i++ {
-		shards[i] = NewShard(i, n, nil)
+		shards[i] = NewShard(i, n, NewEventsWriter(nil), nil)
 	}
 	return NewCoordinator(context.Background(), shards, nil), shards
 }
@@ -275,7 +275,7 @@ func TestDispatch_ManifestSeqBumpBroadcastsPrune(t *testing.T) {
 func TestDispatch_StrayLevelAfterSnapshotEndIsDroppedNotRouted(t *testing.T) {
 	shards := make([]*Shard, 4)
 	for i := range shards {
-		shards[i] = NewShard(i, 4, nil)
+		shards[i] = NewShard(i, 4, NewEventsWriter(nil), nil)
 	}
 	m := NewMetrics("test", "test")
 	c := NewCoordinator(context.Background(), shards, m)
@@ -386,7 +386,7 @@ func TestOnDisconnect_ClearsOpenGroup(t *testing.T) {
 // clearShadows must abandon the half-built shadow without touching the live
 // book: a shadow is never the live book, so a ready instrument keeps serving.
 func TestClearShadows_DropsShadowButKeepsReadyBook(t *testing.T) {
-	s := NewShard(0, 1, nil)
+	s := NewShard(0, 1, NewEventsWriter(nil), nil)
 	k := instKey{0, 11}
 	inst := readyInstrumentInShard(t, s, k, 5)
 	inst.ApplyLevelUpdate(0, 1000, 50, 1, 0, 1)

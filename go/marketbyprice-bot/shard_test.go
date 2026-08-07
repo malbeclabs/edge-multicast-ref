@@ -2,13 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"testing"
 )
 
 func newTestShard(t *testing.T) *Shard {
 	t.Helper()
-	return NewShard(0, 1, nil)
+	return NewShard(0, 1, NewEventsWriter(nil), nil)
 }
 
 // levelUpdateRec builds a level_update the way the parser emits one: JSON
@@ -292,7 +293,7 @@ func TestApplyOne_MalformedBookClearDoesNotAdvanceTrackers(t *testing.T) {
 // inflating the operator-facing counter by the size of the backlog.
 func TestReplayBuffer_MidReplayGapDeclaredOnce(t *testing.T) {
 	m := NewMetrics("test", "test")
-	s := NewShard(0, 1, m)
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
 	k := instKey{0, 11}
 	inst := NewInstrument(11, "SYM", 0, 0)
 	s.instruments[k] = inst
@@ -336,7 +337,7 @@ func TestReplayBuffer_MidReplayGapDeclaredOnce(t *testing.T) {
 // boundary rather than only the single-shot far jump.
 func TestApplyDelta_ReorderWindowBoundary(t *testing.T) {
 	m := NewMetrics("test", "test")
-	s := NewShard(0, 1, m)
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
 	k := instKey{0, 11}
 	inst := readyInstrumentInShard(t, s, k, 5)
 
@@ -377,7 +378,7 @@ func TestApplyDelta_ReorderWindowBoundary(t *testing.T) {
 // counter an operator uses to judge feed loss.
 func TestApplyDelta_SnapshotCommitFreesReorderBudget(t *testing.T) {
 	m := NewMetrics("test", "test")
-	s := NewShard(0, 1, m)
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
 	k := instKey{0, 11}
 	inst := readyInstrumentInShard(t, s, k, 5)
 
@@ -492,7 +493,7 @@ func TestCoercion_Float64PathUnchanged(t *testing.T) {
 // The discard counter is the only thing that makes that state visible.
 func TestApplyDeltaToReady_StaleSeqDiscardIsCounted(t *testing.T) {
 	m := NewMetrics("test", "test")
-	s := NewShard(0, 1, m)
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
 	k := instKey{0, 11}
 	inst := readyInstrumentInShard(t, s, k, 5)
 
@@ -660,5 +661,113 @@ func TestApplyDeltaToReady_PendingDroppedAtGapIsCoveredByAnchor(t *testing.T) {
 	}
 	if inst.Status != StatusReady {
 		t.Errorf("replay must not re-declare a gap: %v", inst.Status)
+	}
+}
+
+// Only a real book mutation may dirty an instrument for snapshotting. A
+// non-mutating kind marking the book dirty would rewrite an unchanged book on
+// every batch boundary and every instrument definition.
+func TestHandle_OnlyMutatingEventsMarkDirty(t *testing.T) {
+	m := NewMetrics("t", "t")
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
+	s.sw = NewSnapshotWriter(nil, 5, 0, m, func(k instKey, fn func(*Instrument)) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		fn(s.instruments[k])
+	})
+
+	// instrument_definition and batch_boundary are non-mutating.
+	s.handle(instDefRec(11, "SYM", 1))
+	s.handle(Record{Type: "batch_boundary", Port: "mktdata", Fields: map[string]any{}})
+
+	s.sw.mu.Lock()
+	n := len(s.sw.dirty)
+	s.sw.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("non-mutating events must not dirty a book, got %d entries", n)
+	}
+
+	// An applied delta must.
+	s.instruments[instKey{0, 11}].Status = StatusReady
+	s.handle(levelUpdateRec(11, 900, 1, "bid", 1000, 50))
+
+	s.sw.mu.Lock()
+	n = len(s.sw.dirty)
+	_, present := s.sw.dirty[instKey{0, 11}]
+	s.sw.mu.Unlock()
+	if n != 1 || !present {
+		t.Errorf("an applied delta must dirty its instrument: n=%d present=%v", n, present)
+	}
+}
+
+// Events reach the writer with the instrument's symbol and exponents attached,
+// which is what lets the writer scale raw prices at the persistence boundary.
+func TestHandle_WritesEventsWithRefdata(t *testing.T) {
+	st := newStubEnqueuer()
+	m := NewMetrics("t", "t")
+	s := NewShard(0, 1, NewEventsWriter(st), m)
+	s.sw = NewSnapshotWriter(nil, 5, 0, m, func(k instKey, fn func(*Instrument)) { fn(nil) })
+
+	s.handle(instDefRec(11, "BTC-USDT", 1)) // price_exponent -2, qty_exponent -8
+	s.instruments[instKey{0, 11}].Status = StatusReady
+	s.handle(levelUpdateRec(11, 900, 1, "bid", 123456, 500))
+
+	rows := st.rows["events"]
+	if len(rows) != 1 {
+		t.Fatalf("expected one events row, got %d", len(rows))
+	}
+	if rows[0]["symbol"] != "BTC-USDT" {
+		t.Errorf("symbol must come from refdata: %v", rows[0]["symbol"])
+	}
+	if got := rows[0]["price"].(float64); got < 1234.55 || got > 1234.57 {
+		t.Errorf("price must be scaled by the instrument exponent: got %v", got)
+	}
+}
+
+// A socket reconnect must NOT reset the snapshot writer. OnDisconnect clears
+// in-flight shadows because a half-built shadow spans the break, but live books
+// stay valid and keep being served, so pending dirty entries still point at real
+// state. Resetting here would discard queued writes for books that never changed.
+// This asserts a deliberate absence, which is exactly the kind of decision that
+// regresses silently when someone later "tidies up" the disconnect path.
+func TestOnDisconnect_DoesNotResetSnapshotWriter(t *testing.T) {
+	m := NewMetrics("t", "t")
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
+	s.sw = NewSnapshotWriter(nil, 5, 0, m, func(k instKey, fn func(*Instrument)) {
+		fn(s.instruments[k])
+	})
+	c := NewCoordinator(context.Background(), []*Shard{s}, m)
+
+	s.sw.MarkDirty(instKey{0, 11})
+	c.OnDisconnect()
+
+	s.sw.mu.Lock()
+	n := len(s.sw.dirty)
+	s.sw.mu.Unlock()
+	if n != 1 {
+		t.Errorf("a disconnect must leave queued snapshot work intact, got %d entries", n)
+	}
+}
+
+// Snapshot levels are captured for replay even when the snapshot was declined.
+func TestHandle_CapturesWireLevelsForDeclinedSnapshot(t *testing.T) {
+	st := newStubEnqueuer()
+	m := NewMetrics("t", "t")
+	s := NewShard(0, 1, NewEventsWriter(st), m)
+	s.sw = NewSnapshotWriter(nil, 5, 0, m, func(k instKey, fn func(*Instrument)) { fn(nil) })
+
+	s.handle(instDefRec(11, "SYM", 1))
+	inst := s.instruments[instKey{0, 11}]
+	inst.Status = StatusReady
+	inst.LastAppliedInstrumentSeq = 100
+
+	s.handle(snapBeginRec(11, 4, 2, 100, 0, 9999)) // declined: K == tracker
+	if inst.OpenSnapshot != nil {
+		t.Fatal("setup: the snapshot should have been declined")
+	}
+	s.handle(snapLevelRec(11, 4, "bid", 1000, 5))
+
+	if got := len(st.rows["wire_levels"]); got != 1 {
+		t.Errorf("a declined snapshot's levels must still be captured, got %d rows", got)
 	}
 }

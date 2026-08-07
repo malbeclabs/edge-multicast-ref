@@ -68,7 +68,7 @@ func snapEndRec(instID, snapID uint32, anchor uint64) Record {
 }
 
 func TestApply_InstrumentDefinitionCreatesInstrument(t *testing.T) {
-	s := NewShard(0, 1, nil)
+	s := NewShard(0, 1, NewEventsWriter(nil), nil)
 	s.apply(instDefRec(11, "BTC-USDT", 5))
 
 	k := instKey{0, 11}
@@ -90,7 +90,7 @@ func TestApply_InstrumentDefinitionCreatesInstrument(t *testing.T) {
 
 func TestApply_SnapshotLifecycleCommits(t *testing.T) {
 	m := NewMetrics("test", "test")
-	s := NewShard(0, 1, m)
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
 	s.apply(instDefRec(11, "SYM", 1))
 	s.apply(snapBeginRec(11, 3, 2, 77, 25, 5000))
 	s.apply(snapLevelRec(11, 3, "bid", 1000, 10))
@@ -114,7 +114,7 @@ func TestApply_SnapshotLifecycleCommits(t *testing.T) {
 
 func TestApply_SnapshotLevelWrongIDDropped(t *testing.T) {
 	m := NewMetrics("test", "test")
-	s := NewShard(0, 1, m)
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
 	s.apply(instDefRec(11, "SYM", 1))
 	s.apply(snapBeginRec(11, 3, 1, 0, 0, 5000))
 	s.apply(snapLevelRec(11, 99, "bid", 1000, 10)) // wrong snapshot id
@@ -131,7 +131,7 @@ func TestApply_SnapshotLevelWrongIDDropped(t *testing.T) {
 // A ready, current instrument must ignore a periodic snapshot: no shadow opens.
 func TestApply_SnapshotWhileReadyIgnoredWhenCurrent(t *testing.T) {
 	m := NewMetrics("test", "test")
-	s := NewShard(0, 1, m)
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
 	s.apply(instDefRec(11, "SYM", 1))
 	inst := s.instruments[instKey{0, 11}]
 	inst.Status = StatusReady
@@ -159,7 +159,7 @@ func TestApply_SnapshotWhileReadyIgnoredWhenCurrent(t *testing.T) {
 // Snapshot ID does not match the open group is a genuine misroute.
 func TestApply_SnapshotLevelMismatchStillCounted(t *testing.T) {
 	m := NewMetrics("test", "test")
-	s := NewShard(0, 1, m)
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
 	s.apply(instDefRec(11, "SYM", 1))
 	inst := s.instruments[instKey{0, 11}]
 	inst.Status = StatusReady
@@ -182,7 +182,7 @@ func TestApply_SnapshotLevelMismatchStillCounted(t *testing.T) {
 }
 
 func TestApply_SnapshotWhileReadyRebootstrapsWhenBehind(t *testing.T) {
-	s := NewShard(0, 1, nil)
+	s := NewShard(0, 1, NewEventsWriter(nil), nil)
 	s.apply(instDefRec(11, "SYM", 1))
 	inst := s.instruments[instKey{0, 11}]
 	inst.Status = StatusReady
@@ -209,7 +209,7 @@ func TestApply_SnapshotWhileReadyRebootstrapsWhenBehind(t *testing.T) {
 
 func TestApply_InstrumentResetSetsAnchorAndTrimsBuffer(t *testing.T) {
 	m := NewMetrics("test", "test")
-	s := NewShard(0, 1, m)
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
 	s.apply(instDefRec(11, "SYM", 1))
 	k := instKey{0, 11}
 	inst := s.instruments[k]
@@ -247,7 +247,7 @@ func TestApply_InstrumentResetSetsAnchorAndTrimsBuffer(t *testing.T) {
 // A snapshot captured before the reset but delivered after it must be discarded.
 func TestApply_StaleSnapshotAfterResetDiscarded(t *testing.T) {
 	m := NewMetrics("test", "test")
-	s := NewShard(0, 1, m)
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
 	s.apply(instDefRec(11, "SYM", 1))
 	inst := s.instruments[instKey{0, 11}]
 
@@ -275,7 +275,7 @@ func TestApply_StaleSnapshotAfterResetDiscarded(t *testing.T) {
 // exactly the diverged book, with no discard counted.
 func TestApply_InstrumentResetBeforeDefinitionStillDiscardsStaleSnapshot(t *testing.T) {
 	m := NewMetrics("test", "test")
-	s := NewShard(0, 1, m)
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
 
 	// Reset first, while the instrument is entirely unknown to the shard.
 	s.apply(Record{Type: "instrument_reset", Port: "mktdata", InstrumentID: 11, Fields: map[string]any{
@@ -307,7 +307,7 @@ func TestApply_InstrumentResetBeforeDefinitionStillDiscardsStaleSnapshot(t *test
 // The definition must not clobber the identity the reset established, and must
 // still populate symbol and exponents on the instrument the reset created.
 func TestApply_DefinitionAfterResetPopulatesRefdata(t *testing.T) {
-	s := NewShard(0, 1, NewMetrics("test", "test"))
+	s := NewShard(0, 1, NewEventsWriter(nil), NewMetrics("test", "test"))
 	s.apply(Record{Type: "instrument_reset", Port: "mktdata", InstrumentID: 11, Fields: map[string]any{
 		"reason": "venue_resync", "new_anchor_seq": float64(9000),
 	}})
@@ -325,7 +325,7 @@ func TestApply_DefinitionAfterResetPopulatesRefdata(t *testing.T) {
 // keys off it to decide when to evaluate crossed-book, so every non-mutating
 // path must carry its own kind.
 func TestChannelEvent_NonMutatingPathsDoNotClaimBookChange(t *testing.T) {
-	s := NewShard(0, 1, NewMetrics("test", "test"))
+	s := NewShard(0, 1, NewEventsWriter(nil), NewMetrics("test", "test"))
 
 	cases := []struct {
 		name string
@@ -385,7 +385,7 @@ func gaugeVecSum(g *prometheus.GaugeVec, shards int) float64 {
 // in this package runs a single shard, which is why that passed.
 func TestCrossedInstruments_SumsAcrossShards(t *testing.T) {
 	m := NewMetrics("test", "test")
-	shards := []*Shard{NewShard(0, 2, m), NewShard(1, 2, m)}
+	shards := []*Shard{NewShard(0, 2, NewEventsWriter(nil), m), NewShard(1, 2, NewEventsWriter(nil), m)}
 
 	// One crossed instrument on each shard: bid above ask.
 	for i, s := range shards {
@@ -403,7 +403,7 @@ func TestCrossedInstruments_SumsAcrossShards(t *testing.T) {
 
 func TestDeltaBufferedRecords_SumsAcrossShards(t *testing.T) {
 	m := NewMetrics("test", "test")
-	shards := []*Shard{NewShard(0, 2, m), NewShard(1, 2, m)}
+	shards := []*Shard{NewShard(0, 2, NewEventsWriter(nil), m), NewShard(1, 2, NewEventsWriter(nil), m)}
 
 	// Four buffered on shard 0, two on shard 1.
 	for i := 0; i < 4; i++ {
@@ -424,7 +424,7 @@ func TestDeltaBufferedRecords_SumsAcrossShards(t *testing.T) {
 // buffered delta — which may never come.
 func TestReset_RepublishesGauges(t *testing.T) {
 	m := NewMetrics("test", "test")
-	s := NewShard(0, 1, m)
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
 
 	s.apply(instDefRec(11, "SYM", 1))
 	s.instruments[instKey{0, 11}].Status = StatusReady
@@ -452,7 +452,7 @@ func TestReset_RepublishesGauges(t *testing.T) {
 // With no BatchBoundary seen, every applied delta is a consistency point.
 func TestCrossedBook_PerDeltaWhenNoBatchBoundary(t *testing.T) {
 	m := NewMetrics("test", "test")
-	s := NewShard(0, 1, m)
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
 	s.apply(instDefRec(11, "SYM", 1))
 	k := instKey{0, 11}
 	inst := s.instruments[k]
@@ -482,7 +482,7 @@ func TestCrossedBook_PerDeltaWhenNoBatchBoundary(t *testing.T) {
 // Once a BatchBoundary is seen, evaluation defers to the boundary.
 func TestCrossedBook_AtBoundaryWhenBatching(t *testing.T) {
 	m := NewMetrics("test", "test")
-	s := NewShard(0, 1, m)
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
 	s.apply(instDefRec(11, "SYM", 1))
 	inst := s.instruments[instKey{0, 11}]
 	inst.Status = StatusReady
@@ -516,7 +516,7 @@ func TestCrossedBook_AtBoundaryWhenBatching(t *testing.T) {
 // Definitions are retransmitted gradually across a definition cycle, so pruning
 // everything below the new seq would evict instruments still in the manifest.
 func TestPruneManifest_GraceWindowKeepsPreviousGeneration(t *testing.T) {
-	s := NewShard(0, 1, nil)
+	s := NewShard(0, 1, NewEventsWriter(nil), nil)
 	s.apply(instDefRec(1, "OLD", 3))     // two generations back
 	s.apply(instDefRec(2, "RECENT", 4))  // one generation back — inside grace
 	s.apply(instDefRec(3, "CURRENT", 5)) // current
@@ -535,7 +535,7 @@ func TestPruneManifest_GraceWindowKeepsPreviousGeneration(t *testing.T) {
 }
 
 func TestPruneManifest_EarlySeqDoesNotPrune(t *testing.T) {
-	s := NewShard(0, 1, nil)
+	s := NewShard(0, 1, NewEventsWriter(nil), nil)
 	s.apply(instDefRec(1, "A", 0))
 	s.apply(instDefRec(2, "B", 1))
 	s.pruneManifest(1) // no generation is old enough to be stale
@@ -545,7 +545,7 @@ func TestPruneManifest_EarlySeqDoesNotPrune(t *testing.T) {
 }
 
 func TestPruneManifest_AdjustsBufferedN(t *testing.T) {
-	s := NewShard(0, 1, nil)
+	s := NewShard(0, 1, NewEventsWriter(nil), nil)
 	s.apply(instDefRec(1, "STALE", 2))
 	k := instKey{0, 1}
 	for i := 0; i < 3; i++ {
@@ -567,7 +567,7 @@ func TestPruneManifest_AdjustsBufferedN(t *testing.T) {
 // DECLINED, because wire_levels denormalizes it onto every captured level and
 // declining is the steady-state case.
 func TestApply_LastBeginRecordedEvenWhenDeclined(t *testing.T) {
-	s := NewShard(0, 1, NewMetrics("test", "test"))
+	s := NewShard(0, 1, NewEventsWriter(nil), NewMetrics("test", "test"))
 	s.apply(instDefRec(11, "SYM", 1))
 	inst := s.instruments[instKey{0, 11}]
 	inst.Status = StatusReady
@@ -595,7 +595,7 @@ func TestApply_LastBeginRecordedEvenWhenDeclined(t *testing.T) {
 
 // It must also be recorded on the accepted path, so recovery captures too.
 func TestApply_LastBeginRecordedWhenAccepted(t *testing.T) {
-	s := NewShard(0, 1, NewMetrics("test", "test"))
+	s := NewShard(0, 1, NewEventsWriter(nil), NewMetrics("test", "test"))
 	s.apply(instDefRec(11, "SYM", 1))
 	s.apply(snapBeginRec(11, 7, 2, 50, 0, 5000))
 

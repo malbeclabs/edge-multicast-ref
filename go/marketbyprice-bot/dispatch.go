@@ -125,6 +125,13 @@ func (s *Shard) applySnapshotLevel(k instKey, rec Record) []ChannelEvent {
 		orderCountFrom(rec.Fields),
 		toUint8(rec.Fields["level_flags"]),
 	)
+	// Capture for replay regardless of whether the level joined a shadow: a
+	// declined snapshot is the steady-state case and its levels still describe
+	// the publisher's book.
+	if inst.LastBegin != nil {
+		def := s.refdata[k]
+		s.eventsW.WriteWireLevel(rec, k.ch, *inst.LastBegin, def.Symbol, def.PriceExponent, def.QtyExponent)
+	}
 	// Only a Snapshot ID mismatch is a misroute. SnapshotLevelNoOpenShadow is the
 	// healthy steady state — a ready, current instrument declined this periodic
 	// snapshot at SnapshotBegin, but the publisher still sends every level of the
@@ -344,7 +351,28 @@ func (s *Shard) clearShadows() {
 // handle is the shard goroutine's per-record entry point.
 func (s *Shard) handle(rec Record) {
 	evs := s.apply(rec)
-	_ = evs // the persistence layer consumes these in a follow-on plan
+	if len(evs) == 0 {
+		return
+	}
+	k := instKey{rec.ChannelID, rec.InstrumentID}
+	def := s.refdataFor(k)
+	for _, ev := range evs {
+		s.eventsW.Write(ev, rec.ChannelID, def.Symbol, def.PriceExponent, def.QtyExponent)
+		// ONLY a real book mutation dirties an instrument. Dirtying on a
+		// non-mutating kind would rewrite an unchanged book on every batch
+		// boundary — which is why PR 3's review gave those paths their own kinds.
+		if ev.Kind == KindAppliedDelta || ev.Kind == KindAppliedSnapshot {
+			s.sw.MarkDirty(instKey{rec.ChannelID, ev.InstrumentID})
+		}
+	}
+}
+
+// refdataFor returns the instrument's definition, or a zero value when the
+// definition has not arrived yet. Taken under the shard lock.
+func (s *Shard) refdataFor(k instKey) InstrumentDef {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.refdata[k]
 }
 
 // Run processes the inbox until ctx is done.
@@ -365,6 +393,10 @@ func (s *Shard) Run(ctx context.Context) {
 				s.mu.Lock()
 				s.reset()
 				s.mu.Unlock()
+				// Drop queued snapshot work for books that no longer exist, and
+				// bump the generation so a batch already extracted is abandoned
+				// rather than written against post-reset state.
+				s.sw.Reset(ctx)
 				select {
 				case msg.ack <- s.idx:
 				case <-ctx.Done():

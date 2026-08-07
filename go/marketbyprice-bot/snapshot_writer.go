@@ -75,6 +75,9 @@ func NewSnapshotWriter(ch enqueuer, depth, coalesceMS int, m *Metrics, withInstr
 // may call this: dirtying on a non-mutating event would rewrite an unchanged
 // book on every batch boundary.
 func (w *SnapshotWriter) MarkDirty(k instKey) {
+	if w == nil {
+		return
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	now := w.now()
@@ -105,6 +108,9 @@ func (w *SnapshotWriter) MarkDirty(k instKey) {
 // It is ctx-aware so a shutdown already in flight — Run having returned via
 // ctx.Done — cannot wedge the caller.
 func (w *SnapshotWriter) Reset(ctx context.Context) {
+	if w == nil {
+		return
+	}
 	done := make(chan struct{})
 	select {
 	case w.resetCh <- done:

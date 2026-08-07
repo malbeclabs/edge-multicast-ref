@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"runtime"
 	"syscall"
+	"time"
 )
 
 // version and commit are both vars, not consts, so the linker can stamp them:
@@ -28,6 +29,13 @@ func main() {
 		metricsAddr  = flag.String("metrics-addr", "127.0.0.1:9094", "Prometheus /metrics HTTP listen address")
 		verbose      = flag.Bool("v", false, "debug logging")
 		showVersion  = flag.Bool("version", false, "print version and exit")
+
+		clickhouseURL = flag.String("clickhouse-url", "", "ClickHouse HTTP endpoint (empty = persistence disabled)")
+		clickhouseDB  = flag.String("clickhouse-database", "marketbyprice", "ClickHouse database")
+		batchSize     = flag.Int("clickhouse-batch-size", 500, "rows per insert batch")
+		batchInterval = flag.Duration("clickhouse-batch-interval", time.Second, "maximum time between insert batches")
+		bufferSize    = flag.Int("clickhouse-buffer-size", 20000, "per-table row buffer; rows are dropped when full")
+		coalesceMS    = flag.Int("coalesce-ms", 50, "minimum interval between level_snapshots writes per instrument")
 	)
 	flag.Parse()
 
@@ -44,12 +52,10 @@ func main() {
 		log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	}
 
-	// --symbol and --depth configure the level read-out (ComputeLevels), which
-	// only has a consumer once the persistence layer lands in the follow-on plan.
-	// They are accepted now so deployment configs do not need to change then;
-	// until then they have no effect. See README.
+	// --symbol configures the level read-out (ComputeLevels), which only has a
+	// consumer once Task 8 lands. Accepted now so deployment configs do not need
+	// to change then; until then it has no effect. See README.
 	_ = symbolFilter
-	_ = depth
 
 	metrics := NewMetrics(version, commit)
 
@@ -68,11 +74,31 @@ func main() {
 		}
 	}
 
+	ch, err := newClickhouseClient(*clickhouseURL, *clickhouseDB, *batchSize, *batchInterval, *bufferSize, metrics)
+	if err != nil {
+		log.Fatalf("clickhouse: %v", err)
+	}
+	eventsWriter := NewEventsWriter(ch)
+
 	shardList := make([]*Shard, n)
 	for i := 0; i < n; i++ {
-		s := NewShard(i, n, metrics)
+		s := NewShard(i, n, eventsWriter, metrics)
+		// The writer's withInstrument closure needs the shard, so sw is assigned
+		// after construction.
+		s.sw = NewSnapshotWriter(ch, *depth, *coalesceMS, metrics, func(s *Shard) func(instKey, func(*Instrument)) {
+			return func(k instKey, fn func(*Instrument)) {
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				fn(s.instruments[k])
+			}
+		}(s))
 		shardList[i] = s
+		go s.sw.Run(ctx)
 		go s.Run(ctx)
+	}
+
+	if ch != nil {
+		go ch.Run(ctx)
 	}
 
 	coordinator := NewCoordinator(ctx, shardList, metrics)

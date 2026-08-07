@@ -12,7 +12,7 @@ func BenchmarkBufferDelta(b *testing.B) {
 	for _, n := range []int{1000, 10000, 40000} {
 		b.Run(fmt.Sprintf("fill-%d", n), func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
-				s := NewShard(0, 1, nil)
+				s := NewShard(0, 1, NewEventsWriter(nil), nil)
 				k := instKey{1, 7}
 				for j := 0; j < n; j++ {
 					s.bufferDelta(k, Record{SequenceNumber: uint64(j)})

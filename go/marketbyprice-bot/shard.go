@@ -102,6 +102,9 @@ type Shard struct {
 	inbox   chan shardMsg
 	metrics *Metrics
 
+	eventsW *EventsWriter
+	sw      *SnapshotWriter
+
 	// Per-shard children of the shard-labelled gauges, resolved once. bufferDelta
 	// is a hot path, so a WithLabelValues map lookup per append is worth avoiding.
 	// Both are nil when metrics is nil, which tests rely on.
@@ -136,7 +139,7 @@ const (
 	msgClearShadows
 )
 
-func NewShard(idx, n int, metrics *Metrics) *Shard {
+func NewShard(idx, n int, eventsW *EventsWriter, metrics *Metrics) *Shard {
 	s := &Shard{
 		idx: idx, n: n,
 		instruments: map[instKey]*Instrument{},
@@ -147,6 +150,7 @@ func NewShard(idx, n int, metrics *Metrics) *Shard {
 		crossed:     map[instKey]struct{}{},
 		inbox:       make(chan shardMsg, 4096),
 		metrics:     metrics,
+		eventsW:     eventsW,
 	}
 	if metrics != nil {
 		lbl := strconv.Itoa(idx)
