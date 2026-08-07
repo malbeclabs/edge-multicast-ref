@@ -8,9 +8,16 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"sync"
 	"syscall"
 	"time"
+
+	"github.com/malbeclabs/edge-multicast-ref/go/internal/clickhouse"
 )
+
+// shutdownTimeout bounds each stage of the shutdown drain, so a wedged
+// ClickHouse cannot hang the process.
+const shutdownTimeout = 5 * time.Second
 
 // version and commit are both vars, not consts, so the linker can stamp them:
 // `-X main.version=...` is silently ignored on a const, and a const default
@@ -73,23 +80,36 @@ func main() {
 	if err != nil {
 		log.Fatalf("clickhouse: %v", err)
 	}
-	eventsWriter := NewEventsWriter(ch)
+	enq := enqueuerFor(ch)
+	eventsWriter := NewEventsWriter(enq)
 
-	// chDone closes once the client's batchers have drained and flushed after
-	// ctx is cancelled. Joined below before main returns, with a bounded
-	// timeout, so shutdown does not silently discard the buffered tail — see
-	// the "discarding buffered rows on shutdown" comment in
-	// internal/clickhouse/client.go — but a wedged ClickHouse cannot hang
-	// shutdown forever either.
+	// The ClickHouse client runs on its OWN context, deliberately NOT derived
+	// from ctx. Its batchers must outlive every goroutine that can enqueue a row.
+	// On cancellation a batcher drains what is buffered at that instant and
+	// returns — typically in microseconds — so sharing ctx left every row the
+	// shards and snapshot writers produced after that point stranded in a
+	// channel: never written, never counted dropped, while the join below made
+	// shutdown look clean.
+	//
+	// chDone closes once every batcher has drained and flushed. See the
+	// "discarding buffered rows on shutdown" comment in
+	// internal/clickhouse/client.go.
+	chCtx, chCancel := context.WithCancel(context.Background())
+	defer chCancel()
 	chDone := make(chan struct{})
 	if ch != nil {
 		go func() {
-			ch.Run(ctx)
+			ch.Run(chCtx)
 			close(chDone)
 		}()
 	} else {
 		close(chDone)
 	}
+
+	// producers counts every goroutine that can enqueue a row. They were
+	// previously never joined at all, so shutdown could not tell whether they had
+	// stopped producing.
+	var producers sync.WaitGroup
 
 	shardList := make([]*Shard, n)
 	for i := 0; i < n; i++ {
@@ -100,7 +120,7 @@ func main() {
 		s.symbols = parseSymbolFilter(*symbolFilter)
 		// The writer's withInstrument closure needs the shard, so sw is assigned
 		// after construction.
-		s.sw = NewSnapshotWriter(ch, *depth, *coalesceMS, metrics, func(s *Shard) func(instKey, func(*Instrument)) {
+		s.sw = NewSnapshotWriter(enq, *depth, *coalesceMS, metrics, func(s *Shard) func(instKey, func(*Instrument)) {
 			return func(k instKey, fn func(*Instrument)) {
 				s.mu.Lock()
 				defer s.mu.Unlock()
@@ -108,8 +128,9 @@ func main() {
 			}
 		}(s), s.persists)
 		shardList[i] = s
-		go s.sw.Run(ctx)
-		go s.Run(ctx)
+		producers.Add(2)
+		go func() { defer producers.Done(); s.sw.Run(ctx) }()
+		go func() { defer producers.Done(); s.Run(ctx) }()
 	}
 
 	coordinator := NewCoordinator(ctx, shardList, eventsWriter, metrics)
@@ -127,13 +148,61 @@ func main() {
 		version, *socketPath, n, *metricsAddr)
 	bot.Run(ctx)
 
-	// bot.Run only returns once ctx is done, so the client's batchers are
-	// already draining; wait for them to finish rather than exiting out from
-	// under them, bounded so a wedged ClickHouse cannot hang shutdown forever.
+	drainOnShutdown(&producers, chCancel, chDone, shutdownTimeout)
+	log.Println("shutdown complete")
+}
+
+// enqueuerFor adapts a possibly-nil *clickhouse.Client onto the interface the
+// writers take.
+//
+// The guard is load-bearing, not defensive style. A typed nil pointer stored in
+// an interface is NOT == nil, so assigning a nil *clickhouse.Client straight
+// into an enqueuer field makes the writers' `ch == nil` fast path false forever
+// — including under the default --clickhouse-url="", where the bot would then
+// build and immediately discard a row map for every record and every level, and
+// snapshot_writes_total would count writes that never happened.
+func enqueuerFor(ch *clickhouse.Client) enqueuer {
+	if ch == nil {
+		return nil
+	}
+	return ch
+}
+
+// drainOnShutdown stops the pipeline in producer-then-consumer order.
+//
+// bot.Run has already returned, so the Coordinator — which writes channel_health
+// and batch_boundary rows on the read loop's own goroutine — has stopped. Join
+// the remaining producers, the shard and snapshot-writer goroutines, so nothing
+// can enqueue another row, and only THEN cancel the client's context so its
+// batchers drain a queue that is guaranteed complete. Cancelling the batchers
+// first, as sharing one context did, drains an arbitrary prefix and abandons the
+// rest.
+//
+// Both stages are bounded: an unreachable ClickHouse must degrade to data loss,
+// never to a process that will not exit.
+func drainOnShutdown(producers *sync.WaitGroup, chCancel context.CancelFunc, chDone <-chan struct{}, timeout time.Duration) {
+	if !waitTimeout(producers, timeout) {
+		log.Println("timed out waiting for shard goroutines to stop")
+	}
+	chCancel()
 	select {
 	case <-chDone:
-	case <-time.After(5 * time.Second):
+	case <-time.After(timeout):
 		log.Println("timed out waiting for clickhouse to drain buffered rows")
 	}
-	log.Println("shutdown complete")
+}
+
+// waitTimeout waits for wg, reporting false when timeout elapsed first.
+func waitTimeout(wg *sync.WaitGroup, timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
