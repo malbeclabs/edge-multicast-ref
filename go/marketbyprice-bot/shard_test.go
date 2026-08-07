@@ -736,7 +736,7 @@ func TestOnDisconnect_DoesNotResetSnapshotWriter(t *testing.T) {
 	s.sw = NewSnapshotWriter(nil, 5, 0, m, func(k instKey, fn func(*Instrument)) {
 		fn(s.instruments[k])
 	})
-	c := NewCoordinator(context.Background(), []*Shard{s}, m)
+	c := NewCoordinator(context.Background(), []*Shard{s}, NewEventsWriter(nil), m)
 
 	s.sw.MarkDirty(instKey{0, 11})
 	c.OnDisconnect()

@@ -80,6 +80,22 @@ func main() {
 	}
 	eventsWriter := NewEventsWriter(ch)
 
+	// chDone closes once the client's batchers have drained and flushed after
+	// ctx is cancelled. Joined below before main returns, with a bounded
+	// timeout, so shutdown does not silently discard the buffered tail — see
+	// the "discarding buffered rows on shutdown" comment in
+	// internal/clickhouse/client.go — but a wedged ClickHouse cannot hang
+	// shutdown forever either.
+	chDone := make(chan struct{})
+	if ch != nil {
+		go func() {
+			ch.Run(ctx)
+			close(chDone)
+		}()
+	} else {
+		close(chDone)
+	}
+
 	shardList := make([]*Shard, n)
 	for i := 0; i < n; i++ {
 		s := NewShard(i, n, eventsWriter, metrics)
@@ -97,11 +113,7 @@ func main() {
 		go s.Run(ctx)
 	}
 
-	if ch != nil {
-		go ch.Run(ctx)
-	}
-
-	coordinator := NewCoordinator(ctx, shardList, metrics)
+	coordinator := NewCoordinator(ctx, shardList, eventsWriter, metrics)
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
@@ -115,5 +127,14 @@ func main() {
 	log.Printf("marketbyprice-bot %s started: socket=%s shards=%d metrics=%s",
 		version, *socketPath, n, *metricsAddr)
 	bot.Run(ctx)
+
+	// bot.Run only returns once ctx is done, so the client's batchers are
+	// already draining; wait for them to finish rather than exiting out from
+	// under them, bounded so a wedged ClickHouse cannot hang shutdown forever.
+	select {
+	case <-chDone:
+	case <-time.After(5 * time.Second):
+		log.Println("timed out waiting for clickhouse to drain buffered rows")
+	}
 	log.Println("shutdown complete")
 }

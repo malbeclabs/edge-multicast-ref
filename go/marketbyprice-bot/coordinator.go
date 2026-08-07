@@ -41,6 +41,7 @@ type Coordinator struct {
 	ctx     context.Context // escapes barrier/fence ack waits on shutdown
 	shards  []*Shard
 	n       int
+	eventsW *EventsWriter
 	metrics *Metrics
 
 	resetSeen  bool
@@ -49,11 +50,12 @@ type Coordinator struct {
 	open       map[uint8]openGroup // per channel_id
 }
 
-func NewCoordinator(ctx context.Context, shards []*Shard, metrics *Metrics) *Coordinator {
+func NewCoordinator(ctx context.Context, shards []*Shard, eventsW *EventsWriter, metrics *Metrics) *Coordinator {
 	return &Coordinator{
 		ctx:     ctx,
 		shards:  shards,
 		n:       len(shards),
+		eventsW: eventsW,
 		metrics: metrics,
 		open:    map[uint8]openGroup{},
 	}
@@ -131,12 +133,18 @@ func (c *Coordinator) Dispatch(rec Record) {
 		}
 
 	case "heartbeat":
-		// Channel-scoped, no book effect.
+		// Channel-scoped, no book effect, no instrument — so no per-instrument
+		// symbol or exponents.
+		c.eventsW.Write(ChannelEvent{Record: rec}, rec.ChannelID, "", 0, 0)
 
 	case "manifest_summary":
 		c.applyManifest(rec)
+		c.eventsW.Write(ChannelEvent{Record: rec}, rec.ChannelID, "", 0, 0)
 
 	case "end_of_session":
+		// Written before the fence so the row is enqueued even if the fence's
+		// ack wait exits early on ctx cancellation.
+		c.eventsW.Write(ChannelEvent{Record: rec}, rec.ChannelID, "", 0, 0)
 		c.runFence(rec)
 	}
 }

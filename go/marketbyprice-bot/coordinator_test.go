@@ -11,7 +11,7 @@ func newTestCoordinator(t *testing.T, n int) (*Coordinator, []*Shard) {
 	for i := 0; i < n; i++ {
 		shards[i] = NewShard(i, n, NewEventsWriter(nil), nil)
 	}
-	return NewCoordinator(context.Background(), shards, nil), shards
+	return NewCoordinator(context.Background(), shards, NewEventsWriter(nil), nil), shards
 }
 
 // drain returns the record types sitting in a shard's inbox, without running the
@@ -267,6 +267,49 @@ func TestDispatch_ManifestSeqBumpBroadcastsPrune(t *testing.T) {
 	}
 }
 
+// heartbeat and manifest_summary never reach a shard — Dispatch treats
+// heartbeat as a channel-scoped no-op and routes manifest_summary to
+// applyManifest, neither of which produces a msgRecord — so the Coordinator
+// itself must write their channel_health row, or that table stays permanently
+// empty.
+func TestDispatch_HeartbeatWritesChannelHealthRow(t *testing.T) {
+	st := newStubEnqueuer()
+	shards := []*Shard{NewShard(0, 1, NewEventsWriter(nil), nil)}
+	c := NewCoordinator(context.Background(), shards, NewEventsWriter(st), nil)
+
+	c.Dispatch(Record{Type: "heartbeat", Port: "mktdata", ChannelID: 3})
+
+	if got := len(st.rows["channel_health"]); got != 1 {
+		t.Errorf("expected exactly one channel_health row from a heartbeat, got %d", got)
+	}
+}
+
+func TestDispatch_ManifestSummaryWritesChannelHealthRow(t *testing.T) {
+	st := newStubEnqueuer()
+	shards := []*Shard{NewShard(0, 1, NewEventsWriter(nil), nil)}
+	c := NewCoordinator(context.Background(), shards, NewEventsWriter(st), nil)
+
+	c.Dispatch(Record{
+		Type: "manifest_summary", Port: "refdata", ChannelID: 3,
+		Fields: map[string]any{
+			"manifest_seq":     float64(7),
+			"valid":            float64(1),
+			"instrument_count": float64(42),
+		},
+	})
+
+	row := st.only(t, "channel_health")
+	if row["manifest_seq"] != uint16(7) {
+		t.Errorf("manifest_seq: got %v", row["manifest_seq"])
+	}
+	if row["manifest_valid"] != uint8(1) {
+		t.Errorf("manifest_valid: got %v", row["manifest_valid"])
+	}
+	if row["instrument_count"] != uint32(42) {
+		t.Errorf("instrument_count: got %v", row["instrument_count"])
+	}
+}
+
 // The two models genuinely differ AFTER a group closes. The open-group model
 // deletes the group on snapshot_end, so a stray level bearing that snapshot_id
 // has no open group and is dropped and counted. A {channel, snapshot_id} route
@@ -278,7 +321,7 @@ func TestDispatch_StrayLevelAfterSnapshotEndIsDroppedNotRouted(t *testing.T) {
 		shards[i] = NewShard(i, 4, NewEventsWriter(nil), nil)
 	}
 	m := NewMetrics("test", "test")
-	c := NewCoordinator(context.Background(), shards, m)
+	c := NewCoordinator(context.Background(), shards, NewEventsWriter(nil), m)
 
 	c.Dispatch(snapBegin(0, 4, 5))
 	c.Dispatch(snapLevel(0, 5, 1000))
