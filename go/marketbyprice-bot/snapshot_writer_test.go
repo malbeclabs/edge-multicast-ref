@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/malbeclabs/edge-multicast-ref/go/internal/clickhouse"
 )
 
 // newTestSnapshotWriter wires a writer over a fixed instrument map.
@@ -190,6 +192,83 @@ func TestSnapshotWriter_NilClientIsNoOp(t *testing.T) {
 	}, nil)
 	w.MarkDirty(instKey{0, 11})
 	w.flushDue() // must not panic
+}
+
+// With persistence disabled nothing is enqueued, so snapshot_writes_total must
+// stay at zero. Incrementing it unconditionally reported writes that never
+// happened — a metric with no writer behind it, which is precisely what this bot
+// refuses to register.
+func TestSnapshotWriter_NilClientCountsNoWrites(t *testing.T) {
+	m := NewMetrics("t", "t")
+	insts := map[instKey]*Instrument{{0, 11}: readySnapshotInstrument(11, "SYM")}
+	w := NewSnapshotWriter(enqueuerFor(nil), 5, 0, m, func(k instKey, fn func(*Instrument)) {
+		fn(insts[k])
+	}, nil)
+
+	w.MarkDirty(instKey{0, 11})
+	w.flushDue()
+
+	if got := counterValue(m.SnapshotWritesTotal); got != 0 {
+		t.Errorf("a nil client writes nothing, so snapshot_writes_total must stay 0: got %v", got)
+	}
+	// The read-out itself still happened, so the book gauges are still current.
+	if got := gaugeRead(m.BookLevels.WithLabelValues("SYM", "bid")); got != 1 {
+		t.Errorf("book gauges are the read-out and must still populate: got %v want 1", got)
+	}
+}
+
+// wire_latency_ms on level_snapshots is MATERIALIZED as
+// recv_ts - publisher_send_ts. Writing the flush timestamp into both columns
+// pinned it at 0.0 for every row that could ever exist. publisher_send_ts must
+// instead carry the send timestamp of the last record the book actually applied.
+func TestSnapshotWriter_PublisherSendTSComesFromTheLastAppliedRecord(t *testing.T) {
+	st := newStubEnqueuer()
+	inst := readySnapshotInstrument(11, "SYM")
+	sendTS := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
+	inst.LastAppliedSendTS = sendTS
+
+	insts := map[instKey]*Instrument{{0, 11}: inst}
+	w := newTestSnapshotWriter(t, st, NewMetrics("t", "t"), insts)
+	w.MarkDirty(instKey{0, 11})
+	w.flushDue()
+
+	rows := st.rows["level_snapshots"]
+	if len(rows) == 0 {
+		t.Fatal("expected rows")
+	}
+	if got, want := rows[0]["publisher_send_ts"], clickhouse.ChTime(sendTS); got != want {
+		t.Errorf("publisher_send_ts: got %v want %v", got, want)
+	}
+	if rows[0]["recv_ts"] == rows[0]["publisher_send_ts"] {
+		t.Error("recv_ts and publisher_send_ts must differ, or wire_latency_ms is structurally zero")
+	}
+}
+
+// applyOne is what maintains that timestamp, alongside the sequence trackers —
+// and only on the path that genuinely mutated the book.
+func TestApplyOne_RecordsLastAppliedSendTS(t *testing.T) {
+	s := newTestShard(t)
+	k := instKey{0, 11}
+	inst := readyInstrumentInShard(t, s, k, 5)
+
+	rec := levelUpdateRec(11, 900, 6, "bid", 1000, 50)
+	rec.SendTSNS = 1754568000000000000
+	s.applyDelta(k, rec)
+
+	if !inst.LastAppliedSendTS.Equal(rec.sendTime()) {
+		t.Errorf("an applied delta must record its send timestamp: got %v want %v",
+			inst.LastAppliedSendTS, rec.sendTime())
+	}
+
+	// A malformed book_clear applies nothing, so it must not move the timestamp
+	// any more than it moves the sequence trackers.
+	bad := bookClearRec(11, 901, 7, "both", "from_price", 1000)
+	bad.SendTSNS = 1754568999000000000
+	s.applyDelta(k, bad)
+
+	if !inst.LastAppliedSendTS.Equal(rec.sendTime()) {
+		t.Errorf("a discarded book_clear must not advance the send timestamp: got %v", inst.LastAppliedSendTS)
+	}
 }
 
 // fakeClock lets a test advance simulated time deterministically instead of

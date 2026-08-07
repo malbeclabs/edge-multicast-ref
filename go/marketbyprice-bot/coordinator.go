@@ -131,6 +131,14 @@ func (c *Coordinator) Dispatch(rec Record) {
 		for i := range c.shards {
 			c.send(i, rec)
 		}
+		// Persisted HERE, exactly once, the same way channel_health is — never
+		// from the shard path. A boundary is channel-scoped: it carries no
+		// instrument_id and no symbol, and the broadcast above hands the same wire
+		// message to every shard. Writing it from Shard.handle turned one wire
+		// message into N near-identical `events` rows, and inconsistent ones at
+		// that, since only the shard owning instrument 0 ever resolved a symbol
+		// for it.
+		c.eventsW.Write(ChannelEvent{Kind: KindBatchBoundary, Record: rec}, rec.ChannelID, "", 0, 0)
 
 	case "heartbeat":
 		// Channel-scoped, no book effect, no instrument — so no per-instrument

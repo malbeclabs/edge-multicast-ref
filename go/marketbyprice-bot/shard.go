@@ -184,10 +184,23 @@ func parseSymbolFilter(csv string) map[string]struct{} {
 	return out
 }
 
-// persists reports whether rows for this symbol should be written. An empty
-// symbol belongs to a channel-scoped record, which is never filtered.
+// persists reports whether rows for this symbol should be written.
+//
+// With a filter active it fails CLOSED: an empty symbol is NOT persisted. In the
+// shard path an empty symbol means the instrument's definition has not arrived
+// yet, which is routine at cold start because the refdata cycle lags mktdata.
+// Three paths reach here in that state — an instrument_reset (whose own comment
+// notes it routinely precedes the definition), a snapshot_level captured for
+// wire_levels, and the snapshot writer's read-out — and failing open leaked all
+// three into ClickHouse under an empty symbol for instruments the operator explicitly
+// filtered out.
+//
+// Channel-scoped records never reach this path. Coordinator.Dispatch writes
+// heartbeat, manifest_summary, end_of_session and batch_boundary itself, so the
+// "an empty symbol belongs to a channel-scoped record" justification the
+// fail-open was built on no longer applies anywhere in the Shard path.
 func (s *Shard) persists(symbol string) bool {
-	if s.symbols == nil || symbol == "" {
+	if s.symbols == nil {
 		return true
 	}
 	_, ok := s.symbols[symbol]
@@ -308,6 +321,10 @@ func (s *Shard) applyOne(inst *Instrument, rec Record) ChannelEvent {
 	}
 	inst.LastAppliedMktdataSeq = rec.SequenceNumber
 	inst.LastAppliedInstrumentSeq = toUint32(rec.Fields["per_instrument_seq"])
+	// Recorded only past the malformed-BookClear early return above, so it tracks
+	// records that genuinely changed the book — the same rule as the two sequence
+	// trackers. level_snapshots.publisher_send_ts reads it.
+	inst.LastAppliedSendTS = rec.sendTime()
 	return ChannelEvent{Kind: KindAppliedDelta, InstrumentID: inst.ID, Symbol: inst.Symbol, Record: rec}
 }
 

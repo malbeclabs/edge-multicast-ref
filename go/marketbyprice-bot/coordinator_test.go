@@ -176,6 +176,55 @@ func TestDispatch_BatchBoundaryBroadcastsToAllShards(t *testing.T) {
 	}
 }
 
+// A batch_boundary is broadcast to every shard, because each evaluates
+// crossed-book for its own instruments — but it is ONE wire message and must
+// produce exactly one `events` row.
+//
+// Persisting it from Shard.handle produced N rows for N shards, and inconsistent
+// ones: handle resolves refdata for instKey{rec.ChannelID, 0}, so the shard
+// owning instrument 0 wrote that instrument's symbol while the other N-1 wrote
+// an empty one. With --symbol set, which of the duplicates survived depended on
+// whether instrument 0's symbol happened to be in the filter.
+func TestDispatch_BatchBoundaryProducesExactlyOneEventsRow(t *testing.T) {
+	st := newStubEnqueuer()
+	w := NewEventsWriter(st)
+	const n = 4
+	shards := make([]*Shard, n)
+	for i := range shards {
+		shards[i] = NewShard(i, n, w, nil)
+	}
+	c := NewCoordinator(context.Background(), shards, w, nil)
+
+	c.Dispatch(Record{Type: "batch_boundary", Port: "mktdata", ChannelID: 2, Fields: map[string]any{
+		"batch_id": float64(1), "batch_ts": "2026-08-02T00:00:00Z",
+	}})
+
+	// Run what each shard received through handle, exactly as its goroutine
+	// would, synchronously so the assertion is deterministic.
+	for _, s := range shards {
+		for _, rec := range drain(s) {
+			s.handle(rec)
+		}
+		if !s.sawBatchBoundary {
+			t.Errorf("shard %d must still SEE the boundary: crossed-book evaluation depends on it", s.idx)
+		}
+	}
+
+	rows := st.rows["events"]
+	if len(rows) != 1 {
+		t.Fatalf("one batch_boundary must produce exactly one events row, got %d", len(rows))
+	}
+	if rows[0]["kind"] != "batch_boundary" {
+		t.Errorf("kind: got %v", rows[0]["kind"])
+	}
+	if rows[0]["channel_id"] != uint8(2) {
+		t.Errorf("channel_id: got %v want 2", rows[0]["channel_id"])
+	}
+	if rows[0]["batch_id"] != uint32(1) {
+		t.Errorf("batch_id: got %v want 1", rows[0]["batch_id"])
+	}
+}
+
 func TestDispatch_ResetCountChangeRunsBarrierThenRoutesHeldRecord(t *testing.T) {
 	c, shards := newTestCoordinator(t, 2)
 

@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"time"
 )
 
 // InstrumentStatus is the serving status of one instrument's book.
@@ -95,6 +96,15 @@ type Instrument struct {
 
 	LastAppliedMktdataSeq    uint64
 	LastAppliedInstrumentSeq uint32
+
+	// LastAppliedSendTS is the publisher's send timestamp on the last record that
+	// actually changed this book — an applied delta, or the snapshot_end that
+	// committed a shadow. It is maintained alongside LastAppliedMktdataSeq and is
+	// the only honest source for level_snapshots.publisher_send_ts: the read-out
+	// is computed by this process, so it has no send timestamp of its own, and
+	// stamping recv_ts into both columns made the schema's MATERIALIZED
+	// wire_latency_ms structurally 0.0 for every row that could ever exist.
+	LastAppliedSendTS time.Time
 
 	// RequiredAnchorSeq is set by InstrumentReset. While non-nil, any
 	// SnapshotBegin with an older Anchor Seq MUST be discarded.
@@ -366,6 +376,7 @@ func (i *Instrument) Reset(requiredAnchor *uint64) {
 	i.Status = StatusAwaitingSnapshot
 	i.LastAppliedMktdataSeq = 0
 	i.LastAppliedInstrumentSeq = 0
+	i.LastAppliedSendTS = time.Time{}
 	i.DepthBound = nil // back to unknown, never 0
 	i.RequiredAnchorSeq = requiredAnchor
 }

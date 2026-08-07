@@ -189,10 +189,11 @@ func (w *SnapshotWriter) flushDue() {
 		}
 
 		var (
-			snap      LevelSnapshot
-			lastSeq   uint64
-			servable  bool
-			bookStale bool
+			snap       LevelSnapshot
+			lastSeq    uint64
+			lastSendTS time.Time
+			servable   bool
+			bookStale  bool
 		)
 		w.withInstrument(e.key, func(inst *Instrument) {
 			if inst == nil || inst.Status == StatusAwaitingSnapshot {
@@ -200,6 +201,7 @@ func (w *SnapshotWriter) flushDue() {
 			}
 			snap = ComputeLevels(inst, w.depth)
 			lastSeq = inst.LastAppliedMktdataSeq
+			lastSendTS = inst.LastAppliedSendTS
 			servable = true
 			bookStale = inst.Status == StatusGap
 		})
@@ -210,10 +212,15 @@ func (w *SnapshotWriter) flushDue() {
 			continue
 		}
 
+		// The gauges are the read-out and are useful with persistence disabled, so
+		// they are refreshed either way.
 		w.updateBookGauges(snap)
-		w.write(e.key, snap, lastSeq, bookStale, now)
 
-		if w.metrics != nil {
+		// Counted only when rows were actually enqueued. With persistence disabled
+		// write is a no-op, and incrementing here regardless made
+		// snapshot_writes_total report writes that never happened — a metric with
+		// no writer behind it, which is exactly what this bot refuses to register.
+		if n := w.write(e.key, snap, lastSeq, lastSendTS, bookStale, now); n > 0 && w.metrics != nil {
 			w.metrics.SnapshotWritesTotal.Inc()
 			w.metrics.SnapshotLagMs.Observe(float64(now.Sub(e.dirtiedAt).Milliseconds()))
 		}
@@ -263,9 +270,12 @@ func (w *SnapshotWriter) updateBookGauges(snap LevelSnapshot) {
 	}
 }
 
-func (w *SnapshotWriter) write(k instKey, snap LevelSnapshot, lastSeq uint64, bookStale bool, now time.Time) {
+// write enqueues one read-out and returns how many rows it produced. Zero means
+// nothing reached ClickHouse — persistence is disabled, or the book held no
+// levels — and the caller must not count it as a write.
+func (w *SnapshotWriter) write(k instKey, snap LevelSnapshot, lastSeq uint64, lastSendTS time.Time, bookStale bool, now time.Time) int {
 	if w.ch == nil {
-		return
+		return 0
 	}
 	staleFlag, crossedFlag := uint8(0), uint8(0)
 	if bookStale {
@@ -283,11 +293,26 @@ func (w *SnapshotWriter) write(k instKey, snap LevelSnapshot, lastSeq uint64, bo
 	}
 	nowStr := clickhouse.ChTime(now)
 
+	// publisher_send_ts is the send timestamp of the last wire record this book
+	// reflects, NOT recv_ts. The schema derives wire_latency_ms as
+	// recv_ts - publisher_send_ts, so writing recv_ts into both pinned that
+	// column at 0.0 for every row — advertising a latency measurement that could
+	// not exist. A zero value here means no record has been applied yet, which
+	// encodes as the epoch, matching how `events` already spells an absent send
+	// timestamp rather than silently reading as zero latency.
+	sendTS := lastSendTS
+	if sendTS.IsZero() {
+		sendTS = time.Unix(0, 0).UTC()
+	}
+	sendStr := clickhouse.ChTime(sendTS)
+
+	rows := 0
 	emit := func(side string, levels []Level) {
 		for i, lvl := range levels {
+			rows++
 			w.ch.Enqueue("level_snapshots", map[string]any{
 				"recv_ts":           nowStr,
-				"publisher_send_ts": nowStr,
+				"publisher_send_ts": sendStr,
 				"channel_id":        k.ch,
 				"instrument_id":     k.id,
 				"symbol":            snap.Symbol,
@@ -306,4 +331,5 @@ func (w *SnapshotWriter) write(k instKey, snap LevelSnapshot, lastSeq uint64, bo
 	}
 	emit("bid", snap.Bids)
 	emit("ask", snap.Asks)
+	return rows
 }

@@ -825,6 +825,103 @@ func TestSymbolFilter_GatesPersistenceNotTheEngine(t *testing.T) {
 	}
 }
 
+// `events` is an applied-delta log. Two engine paths report a record that was
+// deliberately NOT applied while carrying an ordinary delta Record.Type, so a
+// writer that switches on Record.Type alone — as EventsWriter does — records a
+// mutation the book never saw:
+//
+//   - per_instrument_gap carries Record.Type "level_update"; the record was
+//     buffered for replay, not applied.
+//   - malformed_delta carries Record.Type "book_clear"; nothing was applied and
+//     the sequence trackers deliberately did not advance.
+//
+// The engine computes the Kind correctly, so handle must gate on it.
+func TestHandle_UnappliedDeltaKindsAreNotPersisted(t *testing.T) {
+	st := newStubEnqueuer()
+	m := NewMetrics("t", "t")
+	s := NewShard(0, 1, NewEventsWriter(st), m)
+	s.sw = NewSnapshotWriter(nil, 5, 0, m, func(k instKey, fn func(*Instrument)) { fn(nil) }, nil)
+
+	s.handle(instDefRec(11, "SYM", 1))
+	inst := s.instruments[instKey{0, 11}]
+	inst.Status = StatusReady
+	inst.LastAppliedInstrumentSeq = 5
+
+	// A genuinely applied delta DOES produce a row — the control for the two
+	// negative assertions below.
+	s.handle(levelUpdateRec(11, 900, 6, "bid", 1000, 50))
+	if got := len(st.rows["events"]); got != 1 {
+		t.Fatalf("an applied delta must produce one events row, got %d", got)
+	}
+
+	// A per-instrument gap: far beyond the reorder window, so the record is
+	// buffered and the instrument demoted.
+	s.handle(levelUpdateRec(11, 999, 6+reorderWindow+2, "bid", 1100, 50))
+	if inst.Status != StatusGap {
+		t.Fatalf("setup: the instrument should have gapped, got %v", inst.Status)
+	}
+	if got := len(st.rows["events"]); got != 1 {
+		t.Errorf("a per-instrument gap buffers the record rather than applying it, so it must not "+
+			"be persisted as an applied delta: got %d events rows want 1", got)
+	}
+
+	// A malformed book_clear: scope=from_price with clear_side=both, which
+	// ApplyBookClear rejects without touching the book.
+	inst.Status = StatusReady
+	s.handle(bookClearRec(11, 1000, 7, "both", "from_price", 1000))
+	if inst.LastAppliedInstrumentSeq != 6 {
+		t.Fatalf("setup: a malformed book_clear must not advance the tracker, got %d", inst.LastAppliedInstrumentSeq)
+	}
+	if got := len(st.rows["events"]); got != 1 {
+		t.Errorf("a malformed book_clear applied nothing and must not be persisted: got %d events rows want 1", got)
+	}
+}
+
+// The --symbol filter must fail CLOSED. Every one of these three paths runs
+// before the instrument's definition arrives — the ordinary cold-start ordering,
+// since the refdata cycle lags mktdata — and each resolves an empty symbol. An
+// empty symbol that persists is a filtered instrument leaking into ClickHouse
+// under a blank symbol.
+func TestSymbolFilter_FailsClosedBeforeRefdataArrives(t *testing.T) {
+	st := newStubEnqueuer()
+	m := NewMetrics("t", "t")
+	s := NewShard(0, 1, NewEventsWriter(st), m)
+	s.symbols = parseSymbolFilter("WANTED")
+	s.sw = NewSnapshotWriter(st, 5, 0, m, func(k instKey, fn func(*Instrument)) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		fn(s.instruments[k])
+	}, s.persists)
+
+	// 1. instrument_reset before the definition. applyInstrumentReset creates the
+	//    instrument through instrumentFor precisely so the required anchor is not
+	//    lost, so refdataFor still returns a zero InstrumentDef.
+	s.handle(Record{Type: "instrument_reset", Port: "mktdata", InstrumentID: 11, Fields: map[string]any{
+		"reason": "venue_resync", "new_anchor_seq": float64(0),
+	}})
+	if got := len(st.rows["events"]); got != 0 {
+		t.Errorf("an instrument_reset for a filtered instrument must not be persisted, got %d events rows", got)
+	}
+
+	// 2. snapshot_level capture, which reads s.refdata after instrumentFor has
+	//    already created the instrument.
+	s.handle(snapBeginRec(11, 3, 1, 0, 0, 5000))
+	s.handle(snapLevelRec(11, 3, "bid", 1000, 10))
+	if got := len(st.rows["wire_levels"]); got != 0 {
+		t.Errorf("wire levels for a filtered instrument must not be persisted, got %d rows", got)
+	}
+
+	// 3. the snapshot writer's read-out, which reads inst.Symbol.
+	s.handle(snapEndRec(11, 3, 5000))
+	if s.instruments[instKey{0, 11}].Status != StatusReady {
+		t.Fatal("setup: the snapshot should have committed, leaving a servable book")
+	}
+	s.sw.flushDue()
+	if got := len(st.rows["level_snapshots"]); got != 0 {
+		t.Errorf("a filtered instrument's read-out must not be persisted, got %d rows", got)
+	}
+}
+
 // Channel-scoped records carry no symbol and must never be filtered out.
 //
 // The brief's version of this test called s.handle on a heartbeat directly

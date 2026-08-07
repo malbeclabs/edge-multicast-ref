@@ -161,6 +161,10 @@ func (s *Shard) applySnapshotEnd(k instKey, rec Record) []ChannelEvent {
 		log.Printf("shard %d instrument %d: snapshot discarded: %v", s.idx, k.id, err)
 		return nil // shadow only; live book and status untouched
 	}
+	// The commit replaced the whole book, so the snapshot_end that carried it is
+	// the newest wire record this book reflects. replayBuffer may push it further
+	// forward through applyOne; both write the same field.
+	inst.LastAppliedSendTS = rec.sendTime()
 	s.replayBuffer(k, inst)
 	evs := []ChannelEvent{{Kind: KindAppliedSnapshot, InstrumentID: k.id, Symbol: inst.Symbol, Record: rec}}
 	s.noteConsistencyPoint(k, evs)
@@ -360,7 +364,7 @@ func (s *Shard) handle(rec Record) {
 	def := s.refdataFor(k)
 	persist := s.persists(def.Symbol)
 	for _, ev := range evs {
-		if persist {
+		if persist && persistableFromShard(ev.Kind) {
 			s.eventsW.Write(ev, rec.ChannelID, def.Symbol, def.PriceExponent, def.QtyExponent)
 		}
 		// MarkDirty stays outside the gate; the snapshot writer applies the filter
@@ -376,8 +380,38 @@ func (s *Shard) handle(rec Record) {
 	}
 }
 
+// persistableFromShard reports whether an event Kind may be written to `events`
+// from the shard path.
+//
+// The engine already computes the right Kind for every path; the writer used to
+// throw it away and switch on Record.Type alone, which is what made these three
+// indistinguishable from real applied deltas.
+//
+//   - batch_boundary is channel-scoped and BROADCAST to every shard, so a
+//     per-shard write turns one wire message into N rows. The Coordinator writes
+//     the single row (see coordinator.go). The event itself is still returned,
+//     because applyBatchBoundary's crossed-book evaluation depends on it.
+//   - per_instrument_gap carries Record.Type "level_update" but the record was
+//     BUFFERED, not applied.
+//   - malformed_delta carries Record.Type "book_clear" but nothing was applied.
+//
+// `events` is defined as an applied-delta log, so the latter two do not belong
+// in it at all — they are already observable as per_instrument_gaps_total and in
+// the log line applyOne emits.
+func persistableFromShard(kind string) bool {
+	switch kind {
+	case KindBatchBoundary, KindPerInstrumentGap, KindMalformedDelta:
+		return false
+	}
+	return true
+}
+
 // refdataFor returns the instrument's definition, or a zero value when the
-// definition has not arrived yet. Taken under the shard lock.
+// definition has not arrived yet.
+//
+// It ACQUIRES s.mu itself, so it must never be called from code already holding
+// the shard lock — that is the self-deadlock this split exists to avoid. handle
+// calls it after s.apply has returned and released the lock.
 func (s *Shard) refdataFor(k instKey) InstrumentDef {
 	s.mu.Lock()
 	defer s.mu.Unlock()
