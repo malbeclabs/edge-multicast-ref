@@ -56,6 +56,26 @@ func New(rawURL, database string, configs []BatcherConfig, obs Observer) (*Clien
 	if _, err := url.Parse(rawURL); err != nil {
 		return nil, fmt.Errorf("clickhouse url: %w", err)
 	}
+	// Validate every batcher BEFORE any goroutine can be started. These values
+	// come straight from user-supplied flags, and each failure mode is silent or
+	// fatal at a distance:
+	//   - BatchInterval <= 0 panics time.NewTicker inside a batcher goroutine,
+	//     unrecovered, so the whole process dies after startup looked fine.
+	//   - BufferSize <= 0 makes an unbuffered channel, and Enqueue's deliberately
+	//     non-blocking send then drops very nearly every row to a counter.
+	//   - BatchSize <= 0 flushes on every single row, defeating batching.
+	// Returning an error lets the caller fail fast with a message naming the flag.
+	for _, cfg := range configs {
+		if cfg.BatchSize <= 0 {
+			return nil, fmt.Errorf("clickhouse table %q: batch size must be positive, got %d", cfg.Table, cfg.BatchSize)
+		}
+		if cfg.BatchInterval <= 0 {
+			return nil, fmt.Errorf("clickhouse table %q: batch interval must be positive, got %v", cfg.Table, cfg.BatchInterval)
+		}
+		if cfg.BufferSize <= 0 {
+			return nil, fmt.Errorf("clickhouse table %q: buffer size must be positive, got %d", cfg.Table, cfg.BufferSize)
+		}
+	}
 	c := &Client{
 		url:      strings.TrimRight(rawURL, "/"),
 		database: database,

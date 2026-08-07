@@ -255,6 +255,79 @@ func TestClient_EmptyURLDisables(t *testing.T) {
 	c.Run(context.Background()) // must not panic
 }
 
+// Batcher config comes from user-supplied flags, and New validated only the URL.
+// A non-positive BatchInterval panicked time.NewTicker inside a batcher
+// goroutine — unrecovered, so --clickhouse-batch-interval=0 killed the process
+// after startup had already reported success. A non-positive BufferSize is
+// quieter but no better: an unbuffered channel makes Enqueue's deliberately
+// non-blocking send drop very nearly every row.
+func TestNew_RejectsNonPositiveBatcherConfig(t *testing.T) {
+	valid := BatcherConfig{Table: "events", BatchSize: 10, BatchInterval: time.Second, BufferSize: 10}
+
+	mutate := func(fn func(*BatcherConfig)) BatcherConfig {
+		c := valid
+		fn(&c)
+		return c
+	}
+
+	cases := []struct {
+		name    string
+		cfg     BatcherConfig
+		wantErr bool
+	}{
+		{"valid", valid, false},
+		{"zero batch size", mutate(func(c *BatcherConfig) { c.BatchSize = 0 }), true},
+		{"negative batch size", mutate(func(c *BatcherConfig) { c.BatchSize = -1 }), true},
+		{"zero batch interval", mutate(func(c *BatcherConfig) { c.BatchInterval = 0 }), true},
+		{"negative batch interval", mutate(func(c *BatcherConfig) { c.BatchInterval = -time.Second }), true},
+		{"zero buffer size", mutate(func(c *BatcherConfig) { c.BufferSize = 0 }), true},
+		{"negative buffer size", mutate(func(c *BatcherConfig) { c.BufferSize = -5 }), true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := New("http://localhost:8123", "testdb", []BatcherConfig{tc.cfg}, nil)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected an error for %+v", tc.cfg)
+				}
+				if c != nil {
+					t.Error("a rejected config must not yield a usable client")
+				}
+				if !strings.Contains(err.Error(), "events") {
+					t.Errorf("the error should name the table: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("valid config rejected: %v", err)
+			}
+			// The valid case must actually be runnable: this is the call that
+			// panicked on a non-positive interval.
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() { c.Run(ctx); close(done) }()
+			cancel()
+			<-done
+		})
+	}
+}
+
+// One bad table among several must reject the whole client, not silently
+// configure the rest.
+func TestNew_RejectsWhenAnyTableIsInvalid(t *testing.T) {
+	_, err := New("http://localhost:8123", "testdb", []BatcherConfig{
+		{Table: "events", BatchSize: 10, BatchInterval: time.Second, BufferSize: 10},
+		{Table: "level_snapshots", BatchSize: 10, BatchInterval: 0, BufferSize: 10},
+	}, nil)
+	if err == nil {
+		t.Fatal("a single invalid table must reject the client")
+	}
+	if !strings.Contains(err.Error(), "level_snapshots") {
+		t.Errorf("the error should name the offending table: %v", err)
+	}
+}
+
 func TestChTime_FormatsForJSONEachRow(t *testing.T) {
 	ts := time.Date(2026, 8, 7, 12, 34, 56, 123456789, time.UTC)
 	if got, want := ChTime(ts), "2026-08-07 12:34:56.123456789"; got != want {
