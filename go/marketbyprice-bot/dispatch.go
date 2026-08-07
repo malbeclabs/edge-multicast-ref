@@ -74,6 +74,16 @@ func (s *Shard) applySnapshotBegin(k instKey, rec Record) []ChannelEvent {
 	anchor := toUint64(rec.Fields["anchor_seq"])
 	lastInstr := toUint32(rec.Fields["last_instrument_seq"])
 
+	// Record the group identity before any accept/decline decision. Declining is
+	// the steady-state case and its levels still arrive and still need capturing.
+	inst.LastBegin = &SnapshotGroup{
+		SnapshotID:        toUint32(rec.Fields["snapshot_id"]),
+		AnchorSeq:         anchor,
+		TotalLevels:       toUint32(rec.Fields["total_levels"]),
+		LastInstrumentSeq: lastInstr,
+		DepthBound:        toUint32(rec.Fields["depth_bound"]),
+	}
+
 	ok, err := inst.SnapshotAcceptable(anchor, lastInstr)
 	if err != nil {
 		// Stale anchor: a snapshot captured before an InstrumentReset but

@@ -125,6 +125,31 @@ func (w *EventsWriter) Write(ev ChannelEvent, channelID uint8, symbol string, pr
 	}
 }
 
+// WriteWireLevel captures one raw SnapshotLevel for replay, denormalizing the
+// group identity from the instrument's last SnapshotBegin.
+func (w *EventsWriter) WriteWireLevel(rec Record, channelID uint8, g SnapshotGroup, symbol string, priceExp, qtyExp int8) {
+	if w == nil || w.ch == nil {
+		return
+	}
+	w.ch.Enqueue("wire_levels", map[string]any{
+		"recv_ts":             clickhouse.ChTime(rec.recvTime(time.Now().UTC())),
+		"publisher_send_ts":   clickhouse.ChTime(rec.sendTime()),
+		"channel_id":          channelID,
+		"instrument_id":       rec.InstrumentID,
+		"symbol":              symbol,
+		"snapshot_id":         g.SnapshotID,
+		"anchor_seq":          g.AnchorSeq,
+		"total_levels":        g.TotalLevels,
+		"last_instrument_seq": g.LastInstrumentSeq,
+		"depth_bound":         g.DepthBound,
+		"side":                getString(rec.Fields, "side"),
+		"price":               scalePrice(getInt64(rec.Fields, "price_raw"), priceExp),
+		"qty":                 scaleQty(getUint64(rec.Fields, "qty_raw"), qtyExp),
+		"order_count":         getOptUint32(rec.Fields, "order_count"),
+		"level_flags":         getUint8(rec.Fields, "level_flags"),
+	})
+}
+
 // buildEventRow fills the identity and timestamp columns shared by every kind.
 func buildEventRow(rec Record, channelID uint8, symbol string, now time.Time) map[string]any {
 	row := map[string]any{

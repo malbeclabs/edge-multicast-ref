@@ -562,3 +562,45 @@ func TestPruneManifest_AdjustsBufferedN(t *testing.T) {
 		t.Errorf("bufferedN must drop with the pruned buffer: got %d want 0", s.bufferedN)
 	}
 }
+
+// The last SnapshotBegin's identity must be recorded even when the snapshot is
+// DECLINED, because wire_levels denormalizes it onto every captured level and
+// declining is the steady-state case.
+func TestApply_LastBeginRecordedEvenWhenDeclined(t *testing.T) {
+	s := NewShard(0, 1, NewMetrics("test", "test"))
+	s.apply(instDefRec(11, "SYM", 1))
+	inst := s.instruments[instKey{0, 11}]
+	inst.Status = StatusReady
+	inst.LastAppliedInstrumentSeq = 100
+
+	// K == tracker, so the begin is declined and no shadow opens.
+	s.apply(snapBeginRec(11, 4, 3, 100, 25, 9999))
+
+	if inst.OpenSnapshot != nil {
+		t.Fatal("setup: a current ready instrument must not open a shadow")
+	}
+	if inst.LastBegin == nil {
+		t.Fatal("LastBegin must be recorded even for a declined snapshot")
+	}
+	if inst.LastBegin.SnapshotID != 4 || inst.LastBegin.AnchorSeq != 9999 {
+		t.Errorf("LastBegin identity: %+v", inst.LastBegin)
+	}
+	if inst.LastBegin.TotalLevels != 3 || inst.LastBegin.LastInstrumentSeq != 100 {
+		t.Errorf("LastBegin counts: %+v", inst.LastBegin)
+	}
+	if inst.LastBegin.DepthBound != 25 {
+		t.Errorf("LastBegin depth bound: %+v", inst.LastBegin)
+	}
+}
+
+// It must also be recorded on the accepted path, so recovery captures too.
+func TestApply_LastBeginRecordedWhenAccepted(t *testing.T) {
+	s := NewShard(0, 1, NewMetrics("test", "test"))
+	s.apply(instDefRec(11, "SYM", 1))
+	s.apply(snapBeginRec(11, 7, 2, 50, 0, 5000))
+
+	inst := s.instruments[instKey{0, 11}]
+	if inst.LastBegin == nil || inst.LastBegin.SnapshotID != 7 {
+		t.Fatalf("LastBegin: %+v", inst.LastBegin)
+	}
+}

@@ -173,3 +173,47 @@ func TestEventsWriter_NilClientIsNoOp(t *testing.T) {
 	w.Write(ChannelEvent{Kind: KindAppliedDelta, Record: levelUpdateRec(11, 900, 6, "bid", 1000, 5)}, 0, "SYM", 0, 0)
 	// No panic is the assertion.
 }
+
+func TestEventsWriter_WireLevelDenormalizesGroupIdentity(t *testing.T) {
+	st := newStubEnqueuer()
+	w := NewEventsWriter(st)
+
+	g := SnapshotGroup{
+		SnapshotID: 4, AnchorSeq: 9999, TotalLevels: 3,
+		LastInstrumentSeq: 100, DepthBound: 25,
+	}
+	rec := snapLevelRec(11, 4, "bid", 123456, 500)
+
+	w.WriteWireLevel(rec, 0, g, "SYM", -2, -8)
+
+	row := st.only(t, "wire_levels")
+	if row["snapshot_id"] != uint32(4) || row["anchor_seq"] != uint64(9999) {
+		t.Errorf("group identity: %v %v", row["snapshot_id"], row["anchor_seq"])
+	}
+	if row["total_levels"] != uint32(3) || row["last_instrument_seq"] != uint32(100) {
+		t.Errorf("group counts: %v %v", row["total_levels"], row["last_instrument_seq"])
+	}
+	if row["depth_bound"] != uint32(25) {
+		t.Errorf("depth_bound: %v", row["depth_bound"])
+	}
+	if got := row["price"].(float64); got < 1234.55 || got > 1234.57 {
+		t.Errorf("price must be scaled: got %v", got)
+	}
+	if row["side"] != "bid" {
+		t.Errorf("side: %v", row["side"])
+	}
+}
+
+func TestEventsWriter_WireLevelOmittedOrderCountIsNull(t *testing.T) {
+	st := newStubEnqueuer()
+	w := NewEventsWriter(st)
+
+	rec := snapLevelRec(11, 4, "bid", 1000, 5)
+	delete(rec.Fields, "order_count") // the wire sentinel
+
+	w.WriteWireLevel(rec, 0, SnapshotGroup{SnapshotID: 4}, "SYM", 0, 0)
+
+	if row := st.only(t, "wire_levels"); row["order_count"] != nil {
+		t.Errorf("an omitted order_count must be nil, got %v", row["order_count"])
+	}
+}

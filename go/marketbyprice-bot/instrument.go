@@ -57,6 +57,23 @@ type PendingSnapshot struct {
 	Bids, Asks        map[int64]*LevelState
 }
 
+// SnapshotGroup is the identity a SnapshotBegin establishes for the group of
+// SnapshotLevel records that follow it.
+//
+// It is recorded whether or not the snapshot is accepted. SnapshotLevel records
+// carry only snapshot_id, so the remaining four fields exist nowhere else, and a
+// ready, current instrument DECLINES its periodic snapshot without opening a
+// shadow while the publisher still sends every level of that group. Sourcing
+// these from OpenSnapshot would leave the replay capture empty exactly when the
+// feed is healthy.
+type SnapshotGroup struct {
+	SnapshotID        uint32
+	AnchorSeq         uint64
+	TotalLevels       uint32
+	LastInstrumentSeq uint32
+	DepthBound        uint32
+}
+
 // Instrument holds the book and state-machine position for one
 // (channel_id, instrument_id).
 type Instrument struct {
@@ -85,6 +102,10 @@ type Instrument struct {
 
 	OpenSnapshot *PendingSnapshot
 	Pending      map[uint32]Record // out-of-order deltas keyed by per_instrument_seq
+
+	// LastBegin is the identity of the most recent SnapshotBegin, accepted or
+	// declined. Used only to denormalize group identity onto wire_levels rows.
+	LastBegin *SnapshotGroup
 }
 
 func NewInstrument(id uint32, symbol string, priceExp, qtyExp int8) *Instrument {
