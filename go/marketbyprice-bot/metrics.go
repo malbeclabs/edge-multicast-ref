@@ -55,6 +55,17 @@ type Metrics struct {
 	ClickhouseBatchDuration *prometheus.HistogramVec // label: table
 	ClickhouseBufferedRows  *prometheus.GaugeVec     // label: table
 
+	// Snapshot writer
+	SnapshotWritesTotal    prometheus.Counter
+	SnapshotCoalescesTotal prometheus.Counter
+	SnapshotLagMs          prometheus.Histogram
+
+	// Book state, refreshed on every snapshot flush
+	BookLevels    *prometheus.GaugeVec // labels: symbol, side
+	BookTopPrice  *prometheus.GaugeVec // labels: symbol, side
+	BookTopQty    *prometheus.GaugeVec // labels: symbol, side
+	BookSpreadBps *prometheus.GaugeVec // label: symbol
+
 	startTime time.Time
 }
 
@@ -96,6 +107,17 @@ func NewMetrics(version, commit string) *Metrics {
 	}, []string{"table"})
 	m.ClickhouseBufferedRows = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: metricsNamespace, Name: "clickhouse_buffered_rows"}, []string{"table"})
 
+	m.SnapshotWritesTotal = prometheus.NewCounter(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "snapshot_writes_total"})
+	m.SnapshotCoalescesTotal = prometheus.NewCounter(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "snapshot_coalesces_total"})
+	m.SnapshotLagMs = prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: metricsNamespace, Name: "snapshot_lag_ms",
+		Buckets: prometheus.ExponentialBuckets(1, 2, 12),
+	})
+	m.BookLevels = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: metricsNamespace, Name: "book_levels"}, []string{"symbol", "side"})
+	m.BookTopPrice = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: metricsNamespace, Name: "book_top_price"}, []string{"symbol", "side"})
+	m.BookTopQty = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: metricsNamespace, Name: "book_top_qty"}, []string{"symbol", "side"})
+	m.BookSpreadBps = prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: metricsNamespace, Name: "book_spread_bps"}, []string{"symbol"})
+
 	reg.MustRegister(
 		m.BuildInfo, m.UptimeSeconds,
 		m.SocketConnected, m.SocketReconnects, m.RecordsTotal, m.DecodeErrors, m.SocketToBotLatency,
@@ -105,6 +127,8 @@ func NewMetrics(version, commit string) *Metrics {
 		m.PerInstrumentGapsTotal, m.InstrumentResetsTotal, m.ChannelResetsTotal,
 		m.ClickhouseRowsWritten, m.ClickhouseRowsDropped, m.ClickhouseWriteErrors,
 		m.ClickhouseBatchDuration, m.ClickhouseBufferedRows,
+		m.SnapshotWritesTotal, m.SnapshotCoalescesTotal, m.SnapshotLagMs,
+		m.BookLevels, m.BookTopPrice, m.BookTopQty, m.BookSpreadBps,
 	)
 	m.BuildInfo.WithLabelValues(version, commit).Set(1)
 
