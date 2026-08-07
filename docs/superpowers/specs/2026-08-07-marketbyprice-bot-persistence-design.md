@@ -1,6 +1,9 @@
 # Market-by-Price bot: persistence layer design
 
-**Status:** approved, not yet implemented
+**Status:** implemented on `feat/marketbyprice-bot-persistence`. Two decisions below
+were made during implementation rather than up front and are marked as such:
+channel-scoped records are written by the Coordinator, and `Shard.persists` fails
+closed.
 **Parent spec:** [`2026-08-02-marketbyprice-design.md`](2026-08-02-marketbyprice-design.md), Components 3 and 4
 **Delivers:** PR 4 of the parent spec's five-PR sequence
 
