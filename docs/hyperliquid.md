@@ -92,30 +92,6 @@ Top-of-Book & Trades follows the
 Market-by-Order follows the
 [market-by-order spec](https://github.com/malbeclabs/edge-feed-spec/blob/main/market-by-order/spec.md).
 
-#### Market-by-Price feed
-
-Market-by-Price publishes aggregated price levels on its own group,
-`233.84.178.20`. Select a stream by binding its ports on that address:
-
-| Property | Value |
-|----------|-------|
-| Multicast group | `233.84.178.20` |
-| Source ID | `1` (provisional, confirm with the publisher) |
-| Market-by-Price channel ID | `1` (provisional, confirm with the publisher) |
-
-| Port set | MBP mktdata | MBP refdata | MBP snapshot |
-|----------|-------------|-------------|--------------|
-| A | `33010` | `43010` | `53010` |
-
-Market-by-Price follows the
-[market-by-price spec](https://github.com/malbeclabs/edge-feed-spec/blob/main/market-by-price/spec.md).
-
-> The source ID and channel ID above are placeholders carried over from
-> Market-by-Order and have not been confirmed against the Market-by-Price
-> publisher. They do not affect which frames you receive — that is decided by the
-> group and ports — but a consumer that filters on them should verify the real
-> values first.
-
 #### Order-intent feed
 
 The order-intent feed publishes pre-consensus order flow on a **separate group**,
