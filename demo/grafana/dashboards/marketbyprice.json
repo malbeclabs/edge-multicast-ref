@@ -1663,8 +1663,8 @@
   "refresh": "5s",
   "schemaVersion": 40,
   "tags": [
-    "doublezero",
-    "marketbyprice"
+    "dz-mbp",
+    "demo"
   ],
   "templating": {
     "list": [
@@ -1727,7 +1727,7 @@
   },
   "timepicker": {},
   "timezone": "utc",
-  "title": "DoubleZero Market-by-Price",
+  "title": "DZ Market-by-Price",
   "uid": "dz-marketbyprice",
   "version": 10,
   "weekStart": ""
