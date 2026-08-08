@@ -5,6 +5,7 @@ import (
 	"log"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -102,6 +103,14 @@ type Shard struct {
 	inbox   chan shardMsg
 	metrics *Metrics
 
+	eventsW *EventsWriter
+	sw      *SnapshotWriter
+
+	// symbols gates PERSISTENCE and read-out only. Nil means no filter. The book
+	// engine always processes every instrument: sequencing, gap detection and the
+	// delta buffer are only correct if every record is applied.
+	symbols map[string]struct{}
+
 	// Per-shard children of the shard-labelled gauges, resolved once. bufferDelta
 	// is a hot path, so a WithLabelValues map lookup per append is worth avoiding.
 	// Both are nil when metrics is nil, which tests rely on.
@@ -136,7 +145,7 @@ const (
 	msgClearShadows
 )
 
-func NewShard(idx, n int, metrics *Metrics) *Shard {
+func NewShard(idx, n int, eventsW *EventsWriter, metrics *Metrics) *Shard {
 	s := &Shard{
 		idx: idx, n: n,
 		instruments: map[instKey]*Instrument{},
@@ -147,6 +156,7 @@ func NewShard(idx, n int, metrics *Metrics) *Shard {
 		crossed:     map[instKey]struct{}{},
 		inbox:       make(chan shardMsg, 4096),
 		metrics:     metrics,
+		eventsW:     eventsW,
 	}
 	if metrics != nil {
 		lbl := strconv.Itoa(idx)
@@ -154,6 +164,47 @@ func NewShard(idx, n int, metrics *Metrics) *Shard {
 		s.bufferedGauge = metrics.DeltaBufferedRecords.WithLabelValues(lbl)
 	}
 	return s
+}
+
+// parseSymbolFilter turns a comma-separated list into a lookup set. An empty
+// string means no filter, represented as a nil map.
+func parseSymbolFilter(csv string) map[string]struct{} {
+	if strings.TrimSpace(csv) == "" {
+		return nil
+	}
+	out := map[string]struct{}{}
+	for _, s := range strings.Split(csv, ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			out[s] = struct{}{}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// persists reports whether rows for this symbol should be written.
+//
+// With a filter active it fails CLOSED: an empty symbol is NOT persisted. In the
+// shard path an empty symbol means the instrument's definition has not arrived
+// yet, which is routine at cold start because the refdata cycle lags mktdata.
+// Three paths reach here in that state — an instrument_reset (whose own comment
+// notes it routinely precedes the definition), a snapshot_level captured for
+// wire_levels, and the snapshot writer's read-out — and failing open leaked all
+// three into ClickHouse under an empty symbol for instruments the operator explicitly
+// filtered out.
+//
+// Channel-scoped records never reach this path. Coordinator.Dispatch writes
+// heartbeat, manifest_summary, end_of_session and batch_boundary itself, so the
+// "an empty symbol belongs to a channel-scoped record" justification the
+// fail-open was built on no longer applies anywhere in the Shard path.
+func (s *Shard) persists(symbol string) bool {
+	if s.symbols == nil {
+		return true
+	}
+	_, ok := s.symbols[symbol]
+	return ok
 }
 
 // applyDelta classifies one mktdata delta against the instrument's
@@ -270,6 +321,10 @@ func (s *Shard) applyOne(inst *Instrument, rec Record) ChannelEvent {
 	}
 	inst.LastAppliedMktdataSeq = rec.SequenceNumber
 	inst.LastAppliedInstrumentSeq = toUint32(rec.Fields["per_instrument_seq"])
+	// Recorded only past the malformed-BookClear early return above, so it tracks
+	// records that genuinely changed the book — the same rule as the two sequence
+	// trackers. level_snapshots.publisher_send_ts reads it.
+	inst.LastAppliedSendTS = rec.sendTime()
 	return ChannelEvent{Kind: KindAppliedDelta, InstrumentID: inst.ID, Symbol: inst.Symbol, Record: rec}
 }
 
@@ -337,10 +392,16 @@ func (s *Shard) evictLargestBuffer() {
 
 // replayBuffer drops buffered deltas covered by the snapshot anchor and replays
 // the rest through the same classification as steady state.
-func (s *Shard) replayBuffer(k instKey, inst *Instrument) {
+//
+// It returns the events the replayed deltas produced, and the caller must
+// forward them. These deltas ARE applied to the live book, so dropping their
+// events would leave a mktdata_seq hole in the events log on every bootstrap
+// and every gap recovery — precisely the continuity a consumer queries it for.
+func (s *Shard) replayBuffer(k instKey, inst *Instrument) []ChannelEvent {
 	buf := s.deltaBuf[k]
 	s.bufferedN -= len(buf)
 	delete(s.deltaBuf, k)
+	var evs []ChannelEvent
 	for _, b := range buf {
 		if b.MktdataSeq <= inst.LastAppliedMktdataSeq {
 			continue
@@ -354,9 +415,10 @@ func (s *Shard) replayBuffer(k instKey, inst *Instrument) {
 			s.bufferDelta(k, b.Record)
 			continue
 		}
-		s.applyDeltaToReady(k, inst, b.Record)
+		evs = append(evs, s.applyDeltaToReady(k, inst, b.Record)...)
 	}
 	s.publishBufferedGauge()
+	return evs
 }
 
 func filterBuffer(buf []BufferedDelta, keep func(BufferedDelta) bool) []BufferedDelta {

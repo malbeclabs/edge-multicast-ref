@@ -74,6 +74,16 @@ func (s *Shard) applySnapshotBegin(k instKey, rec Record) []ChannelEvent {
 	anchor := toUint64(rec.Fields["anchor_seq"])
 	lastInstr := toUint32(rec.Fields["last_instrument_seq"])
 
+	// Record the group identity before any accept/decline decision. Declining is
+	// the steady-state case and its levels still arrive and still need capturing.
+	inst.LastBegin = &SnapshotGroup{
+		SnapshotID:        toUint32(rec.Fields["snapshot_id"]),
+		AnchorSeq:         anchor,
+		TotalLevels:       toUint32(rec.Fields["total_levels"]),
+		LastInstrumentSeq: lastInstr,
+		DepthBound:        toUint32(rec.Fields["depth_bound"]),
+	}
+
 	ok, err := inst.SnapshotAcceptable(anchor, lastInstr)
 	if err != nil {
 		// Stale anchor: a snapshot captured before an InstrumentReset but
@@ -115,6 +125,15 @@ func (s *Shard) applySnapshotLevel(k instKey, rec Record) []ChannelEvent {
 		orderCountFrom(rec.Fields),
 		toUint8(rec.Fields["level_flags"]),
 	)
+	// Capture for replay regardless of whether the level joined a shadow: a
+	// declined snapshot is the steady-state case and its levels still describe
+	// the publisher's book.
+	if inst.LastBegin != nil {
+		def := s.refdata[k]
+		if s.persists(def.Symbol) {
+			s.eventsW.WriteWireLevel(rec, k.ch, *inst.LastBegin, def.Symbol, def.PriceExponent, def.QtyExponent)
+		}
+	}
 	// Only a Snapshot ID mismatch is a misroute. SnapshotLevelNoOpenShadow is the
 	// healthy steady state — a ready, current instrument declined this periodic
 	// snapshot at SnapshotBegin, but the publisher still sends every level of the
@@ -142,8 +161,17 @@ func (s *Shard) applySnapshotEnd(k instKey, rec Record) []ChannelEvent {
 		log.Printf("shard %d instrument %d: snapshot discarded: %v", s.idx, k.id, err)
 		return nil // shadow only; live book and status untouched
 	}
-	s.replayBuffer(k, inst)
-	evs := []ChannelEvent{{Kind: KindAppliedSnapshot, InstrumentID: k.id, Symbol: inst.Symbol, Record: rec}}
+	// The commit replaced the whole book, so the snapshot_end that carried it is
+	// the newest wire record this book reflects. replayBuffer may push it further
+	// forward through applyOne; both write the same field.
+	inst.LastAppliedSendTS = rec.sendTime()
+	replayed := s.replayBuffer(k, inst)
+	// The commit precedes the deltas replayed on top of it, so the snapshot event
+	// leads and the replayed deltas follow in mktdata_seq order.
+	evs := append(
+		[]ChannelEvent{{Kind: KindAppliedSnapshot, InstrumentID: k.id, Symbol: inst.Symbol, Record: rec}},
+		replayed...,
+	)
 	s.noteConsistencyPoint(k, evs)
 	return evs
 }
@@ -334,7 +362,65 @@ func (s *Shard) clearShadows() {
 // handle is the shard goroutine's per-record entry point.
 func (s *Shard) handle(rec Record) {
 	evs := s.apply(rec)
-	_ = evs // the persistence layer consumes these in a follow-on plan
+	if len(evs) == 0 {
+		return
+	}
+	k := instKey{rec.ChannelID, rec.InstrumentID}
+	def := s.refdataFor(k)
+	persist := s.persists(def.Symbol)
+	for _, ev := range evs {
+		if persist && persistableFromShard(ev.Kind) {
+			s.eventsW.Write(ev, rec.ChannelID, def.Symbol, def.PriceExponent, def.QtyExponent)
+		}
+		// MarkDirty stays outside the gate; the snapshot writer applies the filter
+		// itself at flush time, so a filtered instrument's dirty entry is dropped
+		// there rather than leaving stale gauge series behind.
+		//
+		// ONLY a real book mutation dirties an instrument. Dirtying on a
+		// non-mutating kind would rewrite an unchanged book on every batch
+		// boundary — which is why PR 3's review gave those paths their own kinds.
+		if ev.Kind == KindAppliedDelta || ev.Kind == KindAppliedSnapshot {
+			s.sw.MarkDirty(instKey{rec.ChannelID, ev.InstrumentID})
+		}
+	}
+}
+
+// persistableFromShard reports whether an event Kind may be written to `events`
+// from the shard path.
+//
+// The engine already computes the right Kind for every path; the writer used to
+// throw it away and switch on Record.Type alone, which is what made these three
+// indistinguishable from real applied deltas.
+//
+//   - batch_boundary is channel-scoped and BROADCAST to every shard, so a
+//     per-shard write turns one wire message into N rows. The Coordinator writes
+//     the single row (see coordinator.go). The event itself is still returned,
+//     because applyBatchBoundary's crossed-book evaluation depends on it.
+//   - per_instrument_gap carries Record.Type "level_update" but the record was
+//     BUFFERED, not applied.
+//   - malformed_delta carries Record.Type "book_clear" but nothing was applied.
+//
+// `events` is defined as an applied-delta log, so the latter two do not belong
+// in it at all — they are already observable as per_instrument_gaps_total and in
+// the log line applyOne emits.
+func persistableFromShard(kind string) bool {
+	switch kind {
+	case KindBatchBoundary, KindPerInstrumentGap, KindMalformedDelta:
+		return false
+	}
+	return true
+}
+
+// refdataFor returns the instrument's definition, or a zero value when the
+// definition has not arrived yet.
+//
+// It ACQUIRES s.mu itself, so it must never be called from code already holding
+// the shard lock — that is the self-deadlock this split exists to avoid. handle
+// calls it after s.apply has returned and released the lock.
+func (s *Shard) refdataFor(k instKey) InstrumentDef {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.refdata[k]
 }
 
 // Run processes the inbox until ctx is done.
@@ -355,6 +441,10 @@ func (s *Shard) Run(ctx context.Context) {
 				s.mu.Lock()
 				s.reset()
 				s.mu.Unlock()
+				// Drop queued snapshot work for books that no longer exist, and
+				// bump the generation so a batch already extracted is abandoned
+				// rather than written against post-reset state.
+				s.sw.Reset(ctx)
 				select {
 				case msg.ack <- s.idx:
 				case <-ctx.Done():

@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"time"
 )
 
 // InstrumentStatus is the serving status of one instrument's book.
@@ -57,6 +58,23 @@ type PendingSnapshot struct {
 	Bids, Asks        map[int64]*LevelState
 }
 
+// SnapshotGroup is the identity a SnapshotBegin establishes for the group of
+// SnapshotLevel records that follow it.
+//
+// It is recorded whether or not the snapshot is accepted. SnapshotLevel records
+// carry only snapshot_id, so the remaining four fields exist nowhere else, and a
+// ready, current instrument DECLINES its periodic snapshot without opening a
+// shadow while the publisher still sends every level of that group. Sourcing
+// these from OpenSnapshot would leave the replay capture empty exactly when the
+// feed is healthy.
+type SnapshotGroup struct {
+	SnapshotID        uint32
+	AnchorSeq         uint64
+	TotalLevels       uint32
+	LastInstrumentSeq uint32
+	DepthBound        uint32
+}
+
 // Instrument holds the book and state-machine position for one
 // (channel_id, instrument_id).
 type Instrument struct {
@@ -79,12 +97,25 @@ type Instrument struct {
 	LastAppliedMktdataSeq    uint64
 	LastAppliedInstrumentSeq uint32
 
+	// LastAppliedSendTS is the publisher's send timestamp on the last record that
+	// actually changed this book — an applied delta, or the snapshot_end that
+	// committed a shadow. It is maintained alongside LastAppliedMktdataSeq and is
+	// the only honest source for level_snapshots.publisher_send_ts: the read-out
+	// is computed by this process, so it has no send timestamp of its own, and
+	// stamping recv_ts into both columns made the schema's MATERIALIZED
+	// wire_latency_ms structurally 0.0 for every row that could ever exist.
+	LastAppliedSendTS time.Time
+
 	// RequiredAnchorSeq is set by InstrumentReset. While non-nil, any
 	// SnapshotBegin with an older Anchor Seq MUST be discarded.
 	RequiredAnchorSeq *uint64
 
 	OpenSnapshot *PendingSnapshot
 	Pending      map[uint32]Record // out-of-order deltas keyed by per_instrument_seq
+
+	// LastBegin is the identity of the most recent SnapshotBegin, accepted or
+	// declined. Used only to denormalize group identity onto wire_levels rows.
+	LastBegin *SnapshotGroup
 }
 
 func NewInstrument(id uint32, symbol string, priceExp, qtyExp int8) *Instrument {
@@ -345,6 +376,7 @@ func (i *Instrument) Reset(requiredAnchor *uint64) {
 	i.Status = StatusAwaitingSnapshot
 	i.LastAppliedMktdataSeq = 0
 	i.LastAppliedInstrumentSeq = 0
+	i.LastAppliedSendTS = time.Time{}
 	i.DepthBound = nil // back to unknown, never 0
 	i.RequiredAnchorSeq = requiredAnchor
 }

@@ -2,13 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"testing"
 )
 
 func newTestShard(t *testing.T) *Shard {
 	t.Helper()
-	return NewShard(0, 1, nil)
+	return NewShard(0, 1, NewEventsWriter(nil), nil)
 }
 
 // levelUpdateRec builds a level_update the way the parser emits one: JSON
@@ -292,7 +293,7 @@ func TestApplyOne_MalformedBookClearDoesNotAdvanceTrackers(t *testing.T) {
 // inflating the operator-facing counter by the size of the backlog.
 func TestReplayBuffer_MidReplayGapDeclaredOnce(t *testing.T) {
 	m := NewMetrics("test", "test")
-	s := NewShard(0, 1, m)
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
 	k := instKey{0, 11}
 	inst := NewInstrument(11, "SYM", 0, 0)
 	s.instruments[k] = inst
@@ -336,7 +337,7 @@ func TestReplayBuffer_MidReplayGapDeclaredOnce(t *testing.T) {
 // boundary rather than only the single-shot far jump.
 func TestApplyDelta_ReorderWindowBoundary(t *testing.T) {
 	m := NewMetrics("test", "test")
-	s := NewShard(0, 1, m)
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
 	k := instKey{0, 11}
 	inst := readyInstrumentInShard(t, s, k, 5)
 
@@ -377,7 +378,7 @@ func TestApplyDelta_ReorderWindowBoundary(t *testing.T) {
 // counter an operator uses to judge feed loss.
 func TestApplyDelta_SnapshotCommitFreesReorderBudget(t *testing.T) {
 	m := NewMetrics("test", "test")
-	s := NewShard(0, 1, m)
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
 	k := instKey{0, 11}
 	inst := readyInstrumentInShard(t, s, k, 5)
 
@@ -492,7 +493,7 @@ func TestCoercion_Float64PathUnchanged(t *testing.T) {
 // The discard counter is the only thing that makes that state visible.
 func TestApplyDeltaToReady_StaleSeqDiscardIsCounted(t *testing.T) {
 	m := NewMetrics("test", "test")
-	s := NewShard(0, 1, m)
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
 	k := instKey{0, 11}
 	inst := readyInstrumentInShard(t, s, k, 5)
 
@@ -660,5 +661,291 @@ func TestApplyDeltaToReady_PendingDroppedAtGapIsCoveredByAnchor(t *testing.T) {
 	}
 	if inst.Status != StatusReady {
 		t.Errorf("replay must not re-declare a gap: %v", inst.Status)
+	}
+}
+
+// Only a real book mutation may dirty an instrument for snapshotting. A
+// non-mutating kind marking the book dirty would rewrite an unchanged book on
+// every batch boundary and every instrument definition.
+func TestHandle_OnlyMutatingEventsMarkDirty(t *testing.T) {
+	m := NewMetrics("t", "t")
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
+	s.sw = NewSnapshotWriter(nil, 5, 0, m, func(k instKey, fn func(*Instrument)) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		fn(s.instruments[k])
+	}, nil)
+
+	// instrument_definition and batch_boundary are non-mutating.
+	s.handle(instDefRec(11, "SYM", 1))
+	s.handle(Record{Type: "batch_boundary", Port: "mktdata", Fields: map[string]any{}})
+
+	s.sw.mu.Lock()
+	n := len(s.sw.dirty)
+	s.sw.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("non-mutating events must not dirty a book, got %d entries", n)
+	}
+
+	// An applied delta must.
+	s.instruments[instKey{0, 11}].Status = StatusReady
+	s.handle(levelUpdateRec(11, 900, 1, "bid", 1000, 50))
+
+	s.sw.mu.Lock()
+	n = len(s.sw.dirty)
+	_, present := s.sw.dirty[instKey{0, 11}]
+	s.sw.mu.Unlock()
+	if n != 1 || !present {
+		t.Errorf("an applied delta must dirty its instrument: n=%d present=%v", n, present)
+	}
+}
+
+// Events reach the writer with the instrument's symbol and exponents attached,
+// which is what lets the writer scale raw prices at the persistence boundary.
+func TestHandle_WritesEventsWithRefdata(t *testing.T) {
+	st := newStubEnqueuer()
+	m := NewMetrics("t", "t")
+	s := NewShard(0, 1, NewEventsWriter(st), m)
+	s.sw = NewSnapshotWriter(nil, 5, 0, m, func(k instKey, fn func(*Instrument)) { fn(nil) }, nil)
+
+	s.handle(instDefRec(11, "BTC-USDT", 1)) // price_exponent -2, qty_exponent -8
+	s.instruments[instKey{0, 11}].Status = StatusReady
+	s.handle(levelUpdateRec(11, 900, 1, "bid", 123456, 500))
+
+	rows := st.rows["events"]
+	if len(rows) != 1 {
+		t.Fatalf("expected one events row, got %d", len(rows))
+	}
+	if rows[0]["symbol"] != "BTC-USDT" {
+		t.Errorf("symbol must come from refdata: %v", rows[0]["symbol"])
+	}
+	if got := rows[0]["price"].(float64); got < 1234.55 || got > 1234.57 {
+		t.Errorf("price must be scaled by the instrument exponent: got %v", got)
+	}
+}
+
+// A socket reconnect must NOT reset the snapshot writer. OnDisconnect clears
+// in-flight shadows because a half-built shadow spans the break, but live books
+// stay valid and keep being served, so pending dirty entries still point at real
+// state. Resetting here would discard queued writes for books that never changed.
+// This asserts a deliberate absence, which is exactly the kind of decision that
+// regresses silently when someone later "tidies up" the disconnect path.
+func TestOnDisconnect_DoesNotResetSnapshotWriter(t *testing.T) {
+	m := NewMetrics("t", "t")
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
+	s.sw = NewSnapshotWriter(nil, 5, 0, m, func(k instKey, fn func(*Instrument)) {
+		fn(s.instruments[k])
+	}, nil)
+	c := NewCoordinator(context.Background(), []*Shard{s}, NewEventsWriter(nil), m)
+
+	s.sw.MarkDirty(instKey{0, 11})
+	c.OnDisconnect()
+
+	s.sw.mu.Lock()
+	n := len(s.sw.dirty)
+	s.sw.mu.Unlock()
+	if n != 1 {
+		t.Errorf("a disconnect must leave queued snapshot work intact, got %d entries", n)
+	}
+}
+
+// Snapshot levels are captured for replay even when the snapshot was declined.
+func TestHandle_CapturesWireLevelsForDeclinedSnapshot(t *testing.T) {
+	st := newStubEnqueuer()
+	m := NewMetrics("t", "t")
+	s := NewShard(0, 1, NewEventsWriter(st), m)
+	s.sw = NewSnapshotWriter(nil, 5, 0, m, func(k instKey, fn func(*Instrument)) { fn(nil) }, nil)
+
+	s.handle(instDefRec(11, "SYM", 1))
+	inst := s.instruments[instKey{0, 11}]
+	inst.Status = StatusReady
+	inst.LastAppliedInstrumentSeq = 100
+
+	s.handle(snapBeginRec(11, 4, 2, 100, 0, 9999)) // declined: K == tracker
+	if inst.OpenSnapshot != nil {
+		t.Fatal("setup: the snapshot should have been declined")
+	}
+	s.handle(snapLevelRec(11, 4, "bid", 1000, 5))
+
+	if got := len(st.rows["wire_levels"]); got != 1 {
+		t.Errorf("a declined snapshot's levels must still be captured, got %d rows", got)
+	}
+}
+
+func TestParseSymbolFilter(t *testing.T) {
+	if got := parseSymbolFilter(""); got != nil {
+		t.Errorf("an empty filter means no filter, got %v", got)
+	}
+	got := parseSymbolFilter(" BTC-USDT , ETH-USDT ")
+	if len(got) != 2 {
+		t.Fatalf("expected 2 symbols, got %v", got)
+	}
+	if _, ok := got["BTC-USDT"]; !ok {
+		t.Error("BTC-USDT missing; entries must be trimmed")
+	}
+}
+
+// A filtered symbol must be absent from every table, while the book engine still
+// applies its deltas — sequencing and gap detection are only correct if every
+// record is processed.
+func TestSymbolFilter_GatesPersistenceNotTheEngine(t *testing.T) {
+	st := newStubEnqueuer()
+	m := NewMetrics("t", "t")
+	s := NewShard(0, 1, NewEventsWriter(st), m)
+	s.symbols = parseSymbolFilter("WANTED")
+	s.sw = NewSnapshotWriter(nil, 5, 0, m, func(k instKey, fn func(*Instrument)) { fn(nil) }, nil)
+
+	// An instrument that is NOT in the filter.
+	s.handle(instDefRec(11, "IGNORED", 1))
+	s.instruments[instKey{0, 11}].Status = StatusReady
+	s.handle(levelUpdateRec(11, 900, 1, "bid", 1000, 50))
+
+	if got := len(st.rows["events"]); got != 0 {
+		t.Errorf("a filtered symbol must not be persisted, got %d event rows", got)
+	}
+	if got := len(st.rows["instruments"]); got != 0 {
+		t.Errorf("a filtered symbol's definition must not be persisted, got %d rows", got)
+	}
+
+	// The book engine must still have applied it.
+	inst := s.instruments[instKey{0, 11}]
+	if inst.LastAppliedInstrumentSeq != 1 {
+		t.Errorf("the engine must still apply filtered instruments: seq %d", inst.LastAppliedInstrumentSeq)
+	}
+	if inst.Bids[1000] == nil {
+		t.Error("the book must still be maintained for a filtered instrument")
+	}
+
+	// A wanted symbol still persists.
+	s.handle(instDefRec(12, "WANTED", 1))
+	s.instruments[instKey{0, 12}].Status = StatusReady
+	s.handle(levelUpdateRec(12, 901, 1, "bid", 1000, 50))
+	if got := len(st.rows["events"]); got != 1 {
+		t.Errorf("an unfiltered symbol must persist, got %d event rows", got)
+	}
+}
+
+// `events` is an applied-delta log. Two engine paths report a record that was
+// deliberately NOT applied while carrying an ordinary delta Record.Type, so a
+// writer that switches on Record.Type alone — as EventsWriter does — records a
+// mutation the book never saw:
+//
+//   - per_instrument_gap carries Record.Type "level_update"; the record was
+//     buffered for replay, not applied.
+//   - malformed_delta carries Record.Type "book_clear"; nothing was applied and
+//     the sequence trackers deliberately did not advance.
+//
+// The engine computes the Kind correctly, so handle must gate on it.
+func TestHandle_UnappliedDeltaKindsAreNotPersisted(t *testing.T) {
+	st := newStubEnqueuer()
+	m := NewMetrics("t", "t")
+	s := NewShard(0, 1, NewEventsWriter(st), m)
+	s.sw = NewSnapshotWriter(nil, 5, 0, m, func(k instKey, fn func(*Instrument)) { fn(nil) }, nil)
+
+	s.handle(instDefRec(11, "SYM", 1))
+	inst := s.instruments[instKey{0, 11}]
+	inst.Status = StatusReady
+	inst.LastAppliedInstrumentSeq = 5
+
+	// A genuinely applied delta DOES produce a row — the control for the two
+	// negative assertions below.
+	s.handle(levelUpdateRec(11, 900, 6, "bid", 1000, 50))
+	if got := len(st.rows["events"]); got != 1 {
+		t.Fatalf("an applied delta must produce one events row, got %d", got)
+	}
+
+	// A per-instrument gap: far beyond the reorder window, so the record is
+	// buffered and the instrument demoted.
+	s.handle(levelUpdateRec(11, 999, 6+reorderWindow+2, "bid", 1100, 50))
+	if inst.Status != StatusGap {
+		t.Fatalf("setup: the instrument should have gapped, got %v", inst.Status)
+	}
+	if got := len(st.rows["events"]); got != 1 {
+		t.Errorf("a per-instrument gap buffers the record rather than applying it, so it must not "+
+			"be persisted as an applied delta: got %d events rows want 1", got)
+	}
+
+	// A malformed book_clear: scope=from_price with clear_side=both, which
+	// ApplyBookClear rejects without touching the book.
+	inst.Status = StatusReady
+	s.handle(bookClearRec(11, 1000, 7, "both", "from_price", 1000))
+	if inst.LastAppliedInstrumentSeq != 6 {
+		t.Fatalf("setup: a malformed book_clear must not advance the tracker, got %d", inst.LastAppliedInstrumentSeq)
+	}
+	if got := len(st.rows["events"]); got != 1 {
+		t.Errorf("a malformed book_clear applied nothing and must not be persisted: got %d events rows want 1", got)
+	}
+}
+
+// The --symbol filter must fail CLOSED. Every one of these three paths runs
+// before the instrument's definition arrives — the ordinary cold-start ordering,
+// since the refdata cycle lags mktdata — and each resolves an empty symbol. An
+// empty symbol that persists is a filtered instrument leaking into ClickHouse
+// under a blank symbol.
+func TestSymbolFilter_FailsClosedBeforeRefdataArrives(t *testing.T) {
+	st := newStubEnqueuer()
+	m := NewMetrics("t", "t")
+	s := NewShard(0, 1, NewEventsWriter(st), m)
+	s.symbols = parseSymbolFilter("WANTED")
+	s.sw = NewSnapshotWriter(st, 5, 0, m, func(k instKey, fn func(*Instrument)) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		fn(s.instruments[k])
+	}, s.persists)
+
+	// 1. instrument_reset before the definition. applyInstrumentReset creates the
+	//    instrument through instrumentFor precisely so the required anchor is not
+	//    lost, so refdataFor still returns a zero InstrumentDef.
+	s.handle(Record{Type: "instrument_reset", Port: "mktdata", InstrumentID: 11, Fields: map[string]any{
+		"reason": "venue_resync", "new_anchor_seq": float64(0),
+	}})
+	if got := len(st.rows["events"]); got != 0 {
+		t.Errorf("an instrument_reset for a filtered instrument must not be persisted, got %d events rows", got)
+	}
+
+	// 2. snapshot_level capture, which reads s.refdata after instrumentFor has
+	//    already created the instrument.
+	s.handle(snapBeginRec(11, 3, 1, 0, 0, 5000))
+	s.handle(snapLevelRec(11, 3, "bid", 1000, 10))
+	if got := len(st.rows["wire_levels"]); got != 0 {
+		t.Errorf("wire levels for a filtered instrument must not be persisted, got %d rows", got)
+	}
+
+	// 3. the snapshot writer's read-out, which reads inst.Symbol.
+	s.handle(snapEndRec(11, 3, 5000))
+	if s.instruments[instKey{0, 11}].Status != StatusReady {
+		t.Fatal("setup: the snapshot should have committed, leaving a servable book")
+	}
+	s.sw.flushDue()
+	if got := len(st.rows["level_snapshots"]); got != 0 {
+		t.Errorf("a filtered instrument's read-out must not be persisted, got %d rows", got)
+	}
+}
+
+// Channel-scoped records carry no symbol and must never be filtered out.
+//
+// The brief's version of this test called s.handle on a heartbeat directly
+// against a Shard, but channel-scoped records never reach a shard at all:
+// Coordinator.Dispatch handles heartbeat, manifest_summary and end_of_session
+// itself and calls c.eventsW.Write directly (see coordinator.go). Shard.apply
+// has no case for "heartbeat", so s.handle would produce zero events and this
+// test would assert a false negative instead of exercising the filter.
+//
+// The Coordinator holds no symbol filter of its own — persists() lives on
+// Shard — so the real assertion of the same intent is that a heartbeat
+// dispatched through a Coordinator still produces exactly one channel_health
+// row while a shard-level symbol filter is active.
+func TestSymbolFilter_KeepsChannelScopedRecords(t *testing.T) {
+	st := newStubEnqueuer()
+	m := NewMetrics("t", "t")
+	s := NewShard(0, 1, NewEventsWriter(st), m)
+	s.symbols = parseSymbolFilter("WANTED")
+	s.sw = NewSnapshotWriter(nil, 5, 0, m, func(k instKey, fn func(*Instrument)) { fn(nil) }, nil)
+
+	c := NewCoordinator(context.Background(), []*Shard{s}, NewEventsWriter(st), m)
+	c.Dispatch(Record{Type: "heartbeat", Port: "mktdata", Fields: map[string]any{}})
+
+	if got := len(st.rows["channel_health"]); got != 1 {
+		t.Errorf("channel health must not be symbol-filtered, got %d rows", got)
 	}
 }

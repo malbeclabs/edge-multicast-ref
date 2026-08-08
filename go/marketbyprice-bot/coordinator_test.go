@@ -9,9 +9,9 @@ func newTestCoordinator(t *testing.T, n int) (*Coordinator, []*Shard) {
 	t.Helper()
 	shards := make([]*Shard, n)
 	for i := 0; i < n; i++ {
-		shards[i] = NewShard(i, n, nil)
+		shards[i] = NewShard(i, n, NewEventsWriter(nil), nil)
 	}
-	return NewCoordinator(context.Background(), shards, nil), shards
+	return NewCoordinator(context.Background(), shards, NewEventsWriter(nil), nil), shards
 }
 
 // drain returns the record types sitting in a shard's inbox, without running the
@@ -176,6 +176,55 @@ func TestDispatch_BatchBoundaryBroadcastsToAllShards(t *testing.T) {
 	}
 }
 
+// A batch_boundary is broadcast to every shard, because each evaluates
+// crossed-book for its own instruments — but it is ONE wire message and must
+// produce exactly one `events` row.
+//
+// Persisting it from Shard.handle produced N rows for N shards, and inconsistent
+// ones: handle resolves refdata for instKey{rec.ChannelID, 0}, so the shard
+// owning instrument 0 wrote that instrument's symbol while the other N-1 wrote
+// an empty one. With --symbol set, which of the duplicates survived depended on
+// whether instrument 0's symbol happened to be in the filter.
+func TestDispatch_BatchBoundaryProducesExactlyOneEventsRow(t *testing.T) {
+	st := newStubEnqueuer()
+	w := NewEventsWriter(st)
+	const n = 4
+	shards := make([]*Shard, n)
+	for i := range shards {
+		shards[i] = NewShard(i, n, w, nil)
+	}
+	c := NewCoordinator(context.Background(), shards, w, nil)
+
+	c.Dispatch(Record{Type: "batch_boundary", Port: "mktdata", ChannelID: 2, Fields: map[string]any{
+		"batch_id": float64(1), "batch_ts": "2026-08-02T00:00:00Z",
+	}})
+
+	// Run what each shard received through handle, exactly as its goroutine
+	// would, synchronously so the assertion is deterministic.
+	for _, s := range shards {
+		for _, rec := range drain(s) {
+			s.handle(rec)
+		}
+		if !s.sawBatchBoundary {
+			t.Errorf("shard %d must still SEE the boundary: crossed-book evaluation depends on it", s.idx)
+		}
+	}
+
+	rows := st.rows["events"]
+	if len(rows) != 1 {
+		t.Fatalf("one batch_boundary must produce exactly one events row, got %d", len(rows))
+	}
+	if rows[0]["kind"] != "batch_boundary" {
+		t.Errorf("kind: got %v", rows[0]["kind"])
+	}
+	if rows[0]["channel_id"] != uint8(2) {
+		t.Errorf("channel_id: got %v want 2", rows[0]["channel_id"])
+	}
+	if rows[0]["batch_id"] != uint32(1) {
+		t.Errorf("batch_id: got %v want 1", rows[0]["batch_id"])
+	}
+}
+
 func TestDispatch_ResetCountChangeRunsBarrierThenRoutesHeldRecord(t *testing.T) {
 	c, shards := newTestCoordinator(t, 2)
 
@@ -267,6 +316,49 @@ func TestDispatch_ManifestSeqBumpBroadcastsPrune(t *testing.T) {
 	}
 }
 
+// heartbeat and manifest_summary never reach a shard — Dispatch treats
+// heartbeat as a channel-scoped no-op and routes manifest_summary to
+// applyManifest, neither of which produces a msgRecord — so the Coordinator
+// itself must write their channel_health row, or that table stays permanently
+// empty.
+func TestDispatch_HeartbeatWritesChannelHealthRow(t *testing.T) {
+	st := newStubEnqueuer()
+	shards := []*Shard{NewShard(0, 1, NewEventsWriter(nil), nil)}
+	c := NewCoordinator(context.Background(), shards, NewEventsWriter(st), nil)
+
+	c.Dispatch(Record{Type: "heartbeat", Port: "mktdata", ChannelID: 3})
+
+	if got := len(st.rows["channel_health"]); got != 1 {
+		t.Errorf("expected exactly one channel_health row from a heartbeat, got %d", got)
+	}
+}
+
+func TestDispatch_ManifestSummaryWritesChannelHealthRow(t *testing.T) {
+	st := newStubEnqueuer()
+	shards := []*Shard{NewShard(0, 1, NewEventsWriter(nil), nil)}
+	c := NewCoordinator(context.Background(), shards, NewEventsWriter(st), nil)
+
+	c.Dispatch(Record{
+		Type: "manifest_summary", Port: "refdata", ChannelID: 3,
+		Fields: map[string]any{
+			"manifest_seq":     float64(7),
+			"valid":            float64(1),
+			"instrument_count": float64(42),
+		},
+	})
+
+	row := st.only(t, "channel_health")
+	if row["manifest_seq"] != uint16(7) {
+		t.Errorf("manifest_seq: got %v", row["manifest_seq"])
+	}
+	if row["manifest_valid"] != uint8(1) {
+		t.Errorf("manifest_valid: got %v", row["manifest_valid"])
+	}
+	if row["instrument_count"] != uint32(42) {
+		t.Errorf("instrument_count: got %v", row["instrument_count"])
+	}
+}
+
 // The two models genuinely differ AFTER a group closes. The open-group model
 // deletes the group on snapshot_end, so a stray level bearing that snapshot_id
 // has no open group and is dropped and counted. A {channel, snapshot_id} route
@@ -275,10 +367,10 @@ func TestDispatch_ManifestSeqBumpBroadcastsPrune(t *testing.T) {
 func TestDispatch_StrayLevelAfterSnapshotEndIsDroppedNotRouted(t *testing.T) {
 	shards := make([]*Shard, 4)
 	for i := range shards {
-		shards[i] = NewShard(i, 4, nil)
+		shards[i] = NewShard(i, 4, NewEventsWriter(nil), nil)
 	}
 	m := NewMetrics("test", "test")
-	c := NewCoordinator(context.Background(), shards, m)
+	c := NewCoordinator(context.Background(), shards, NewEventsWriter(nil), m)
 
 	c.Dispatch(snapBegin(0, 4, 5))
 	c.Dispatch(snapLevel(0, 5, 1000))
@@ -386,7 +478,7 @@ func TestOnDisconnect_ClearsOpenGroup(t *testing.T) {
 // clearShadows must abandon the half-built shadow without touching the live
 // book: a shadow is never the live book, so a ready instrument keeps serving.
 func TestClearShadows_DropsShadowButKeepsReadyBook(t *testing.T) {
-	s := NewShard(0, 1, nil)
+	s := NewShard(0, 1, NewEventsWriter(nil), nil)
 	k := instKey{0, 11}
 	inst := readyInstrumentInShard(t, s, k, 5)
 	inst.ApplyLevelUpdate(0, 1000, 50, 1, 0, 1)
