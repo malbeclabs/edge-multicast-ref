@@ -50,7 +50,7 @@ Decode DoubleZero's binary market-data feeds (defined in [edge-feed-spec](https:
 |------|------|----------------|
 | Top-of-Book & Trades | [spec](https://github.com/malbeclabs/edge-feed-spec/blob/main/top-of-book/spec.md) | `go/topofbook-parser`, `go/topofbook-bot` |
 | Market-by-Order | [spec](https://github.com/malbeclabs/edge-feed-spec/blob/main/market-by-order/spec.md) | `go/marketbyorder-parser`, `go/marketbyorder-bot` |
-| Market-by-Price | [spec](https://github.com/malbeclabs/edge-feed-spec/blob/main/market-by-price/spec.md) | `go/marketbyprice-parser` |
+| Market-by-Price | [spec](https://github.com/malbeclabs/edge-feed-spec/blob/main/market-by-price/spec.md) | `go/marketbyprice-parser`, `go/marketbyprice-bot` |
 
 ### Top-of-Book & Trades
 
@@ -77,12 +77,11 @@ Consumes the [Market-by-Price feed](https://github.com/malbeclabs/edge-feed-spec
 | Component | Description |
 |---|---|
 | [go/marketbyprice-parser](go/marketbyprice-parser/) | Three-port multicast subscriber + binary wire decoder, broadcasts decoded JSONL on a Unix socket |
-
-No bot yet: the parser lands first, so the feed is decodable and observable before a book builder is written against it.
+| [go/marketbyprice-bot](go/marketbyprice-bot/) | Book builder + persistor. Maintains price-keyed L2 books across shards and writes per-event rows, raw snapshot levels, and coalesced top-N level snapshots to ClickHouse |
 
 ### Demo Stack
 
-[demo/](demo/) is a one-command Docker Compose stack — parsers + bots + ClickHouse + Grafana — with pre-provisioned dashboards for both feeds: per-symbol top-of-book state, and an order-book view with ladder, depth heatmap, spread, trade tape, and event-rate panels.
+[demo/](demo/) is a one-command Docker Compose stack — parsers + bots + ClickHouse + Grafana — with pre-provisioned dashboards for all three feeds: per-symbol top-of-book state, an order-book view with ladder, depth heatmap, spread, trade tape and event-rate panels, and an aggregated-depth view adding crossed-book, delta-buffer and persistence panels.
 
 ## Sample Captures
 
