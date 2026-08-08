@@ -36,7 +36,7 @@ ssh -L 3000:localhost:3000 ubuntu@<host>
 # Open http://localhost:3000 — login: admin / ${GF_ADMIN_PASSWORD}
 ```
 
-Open the "DZ Top-of-Book" dashboard. "DoubleZero Market-by-Price" shows the aggregated-depth
+Open the "DZ Top-of-Book" dashboard. "DZ Market-by-Price" shows the aggregated-depth
 view for that feed, including crossed-book, delta-buffer and persistence panels.
 
 ## What you should see
