@@ -525,7 +525,7 @@ func TestParseFrame_TrailingBytesRejected(t *testing.T) {
 		p := &marketByPriceParser{}
 		msg := buildMsg(msgTypeLevelUpdate, 0, levelUpdateBody(11, 0, 1, 1000, 50, 1, 0, 1, 1))
 		total := frameHeaderSize + len(msg) + 6 // 6 bytes the walk never reaches
-		frame := buildFrameHeader(mbpMagic, mbpSchemaVersion, 0, 1, time.Unix(1700000305, 0), 1, 0, uint16(total))
+		frame := buildFrameHeader(mbpMagic, schemaV1, 0, 1, time.Unix(1700000305, 0), 1, 0, uint16(total))
 		frame = append(frame, msg...)
 		frame = append(frame, 0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00)
 		if _, _, err := p.ParseFrame("mktdata", frame); !errors.Is(err, errFrameLength) {
@@ -539,7 +539,7 @@ func TestParseFrame_TrailingBytesRejected(t *testing.T) {
 		a := buildMsg(msgTypeLevelUpdate, 0, levelUpdateBody(11, 0, 1, 1000, 50, 1, 0, 1, 1))
 		b := buildMsg(msgTypeLevelUpdate, 0, levelUpdateBody(11, 1, 2, 1010, 60, 1, 0, 1, 1))
 		total := frameHeaderSize + len(a) + len(b)
-		frame := buildFrameHeader(mbpMagic, mbpSchemaVersion, 0, 1, time.Unix(1700000306, 0), 1, 0, uint16(total))
+		frame := buildFrameHeader(mbpMagic, schemaV1, 0, 1, time.Unix(1700000306, 0), 1, 0, uint16(total))
 		frame = append(frame, a...)
 		frame = append(frame, b...)
 		if _, _, err := p.ParseFrame("mktdata", frame); !errors.Is(err, errFrameLength) {
@@ -553,7 +553,7 @@ func TestParseFrame_TrailingBytesRejected(t *testing.T) {
 // nowhere, since the loop body is unreachable and no body bytes are left over.
 func TestParseFrame_ZeroMessageCountRejected(t *testing.T) {
 	p := &marketByPriceParser{}
-	frame := buildFrameHeader(mbpMagic, mbpSchemaVersion, 0, 1, time.Unix(1700000308, 0), 0, 0, frameHeaderSize)
+	frame := buildFrameHeader(mbpMagic, schemaV1, 0, 1, time.Unix(1700000308, 0), 0, 0, frameHeaderSize)
 	if _, _, err := p.ParseFrame("mktdata", frame); !errors.Is(err, errMessageCount) {
 		t.Fatalf("expected errMessageCount, got %v", err)
 	}
@@ -591,11 +591,11 @@ func TestParseFrame_AllSkippedYieldsEmptyNonNilSlice(t *testing.T) {
 // decodes. The frame body is fully attacker-controlled over multicast, so the
 // bounds arithmetic in the message walk is the highest-value thing to fuzz.
 func FuzzParseFrame(f *testing.F) {
-	valid := buildFrameHeader(mbpMagic, mbpSchemaVersion, 1, 10, recordTestTS, 1, 0, frameHeaderSize+48)
+	valid := buildFrameHeader(mbpMagic, schemaV1, 1, 10, recordTestTS, 1, 0, frameHeaderSize+48)
 	valid = append(valid, buildMsg(msgTypeLevelUpdate, 0, levelUpdateBody(11, 0, 1, 1000, 50, 1, 0, 1, 1))...)
 	f.Add(valid)
 
-	clear := buildFrameHeader(mbpMagic, mbpSchemaVersion, 1, 11, recordTestTS, 1, 0, frameHeaderSize+36)
+	clear := buildFrameHeader(mbpMagic, schemaV1, 1, 11, recordTestTS, 1, 0, frameHeaderSize+36)
 	clear = append(clear, buildMsg(msgTypeBookClear, 0, bookClearBody(11, 0, 1, 1, 100))...)
 	f.Add(clear)
 
@@ -603,9 +603,9 @@ func FuzzParseFrame(f *testing.F) {
 	f.Add(make([]byte, frameHeaderSize))
 	// Bare well-formed header, Message Count 0 — must be rejected, not read as an
 	// empty frame.
-	f.Add(buildFrameHeader(mbpMagic, mbpSchemaVersion, 0, 1, recordTestTS, 0, 0, frameHeaderSize))
+	f.Add(buildFrameHeader(mbpMagic, schemaV1, 0, 1, recordTestTS, 0, 0, frameHeaderSize))
 	// Message Length 0 — the walk must not advance by zero and spin.
-	spin := buildFrameHeader(mbpMagic, mbpSchemaVersion, 0, 1, recordTestTS, 255, 0, frameHeaderSize+4)
+	spin := buildFrameHeader(mbpMagic, schemaV1, 0, 1, recordTestTS, 255, 0, frameHeaderSize+4)
 	f.Add(append(spin, 0x40, 0x00, 0x00, 0x00))
 
 	p := &marketByPriceParser{}

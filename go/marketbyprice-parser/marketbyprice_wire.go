@@ -8,7 +8,8 @@
 // Length checks are exact equality, not >=. The spec's forward-compatibility
 // rule that a decoder ignores trailing bytes only applies across a Schema
 // Version bump, and ParseFrameHeader rejects unimplemented versions before any
-// body is parsed. Within v1, an unexpected body length is malformed.
+// body is parsed. Within a version, an unexpected body length is malformed —
+// including an InstrumentDefinition sized for the other version.
 
 package main
 
@@ -21,9 +22,14 @@ import (
 
 const (
 	mbpMagic          uint16 = 0x4442
-	mbpSchemaVersion  uint8  = 1
 	frameHeaderSize          = 24
 	messageHeaderSize        = 4
+)
+
+// Schema Versions this parser decodes, from the frame header's byte 2.
+const (
+	schemaV1 uint8 = 1
+	schemaV2 uint8 = 2
 )
 
 // Message type IDs. Types 0x03 and 0x05 are reserved and intentionally unused
@@ -102,7 +108,7 @@ func ParseFrameHeader(buf []byte) (FrameHeader, error) {
 	if h.Magic != mbpMagic {
 		return h, errBadMagic
 	}
-	if h.SchemaVersion != mbpSchemaVersion {
+	if _, _, ok := instrumentDefLayout(h.SchemaVersion); !ok {
 		return h, errSchemaVersion
 	}
 	tsNs := binary.LittleEndian.Uint64(buf[12:20])
@@ -203,7 +209,8 @@ func ParseManifestSummary(buf []byte) (ManifestSummaryBody, error) {
 	}, nil
 }
 
-// InstrumentDefinitionBody is the 76-byte body of an InstrumentDefinition.
+// InstrumentDefinitionBody is the body of an InstrumentDefinition: 76 bytes
+// under schema 1, 124 under schema 2.
 type InstrumentDefinitionBody struct {
 	InstrumentID  uint32
 	Symbol        string
@@ -222,27 +229,52 @@ type InstrumentDefinitionBody struct {
 	ManifestSeq   uint16
 }
 
-// ParseInstrumentDefinition decodes an InstrumentDefinition body. buf must be exactly 76 bytes.
-func ParseInstrumentDefinition(buf []byte) (InstrumentDefinitionBody, error) {
-	if len(buf) != 76 {
-		return InstrumentDefinitionBody{}, fmt.Errorf("%w: expected 76 bytes for instrument_definition body, got %d", errTruncated, len(buf))
+// instrumentDefLayout maps a Schema Version to InstrumentDefinition's Symbol
+// width and body size, and reports whether this parser implements that version.
+// InstrumentDefinition is the only message schema 2 touched: Symbol widened from
+// 16 to 64 bytes, shifting every field after it by 48. Both generations are
+// decoded because a publisher rollout is staged, so the two are on the wire at
+// once and refusing either blinds this parser.
+func instrumentDefLayout(schema uint8) (symbolBytes, bodyBytes int, ok bool) {
+	switch schema {
+	case schemaV1:
+		return 16, 76, true // 80-byte message
+	case schemaV2:
+		return 64, 124, true // 128-byte message
 	}
+	return 0, 0, false
+}
+
+// ParseInstrumentDefinition decodes an InstrumentDefinition body under the frame
+// header's Schema Version. The length check is exact against that version, so a
+// body from the other generation is refused rather than mis-decoded.
+func ParseInstrumentDefinition(buf []byte, schema uint8) (InstrumentDefinitionBody, error) {
+	symbolBytes, bodyBytes, ok := instrumentDefLayout(schema)
+	if !ok {
+		return InstrumentDefinitionBody{}, fmt.Errorf("%w: %d", errSchemaVersion, schema)
+	}
+	if len(buf) != bodyBytes {
+		return InstrumentDefinitionBody{}, fmt.Errorf("%w: expected %d bytes for schema %d instrument_definition body, got %d", errTruncated, bodyBytes, schema, len(buf))
+	}
+	// Only Symbol's width differs between the two; the fields after it keep
+	// their order and widths, so they are read relative to the end of Symbol.
+	tail := buf[4+symbolBytes:]
 	return InstrumentDefinitionBody{
 		InstrumentID:  binary.LittleEndian.Uint32(buf[0:4]),
-		Symbol:        fixedString(buf[4:20]),
-		Leg1:          fixedString(buf[20:28]),
-		Leg2:          fixedString(buf[28:36]),
-		AssetClass:    buf[36],
-		PriceExponent: int8(buf[37]),
-		QtyExponent:   int8(buf[38]),
-		MarketModel:   buf[39],
-		TickSizeRaw:   int64(binary.LittleEndian.Uint64(buf[40:48])),
-		LotSizeRaw:    binary.LittleEndian.Uint64(buf[48:56]),
-		ContractValue: binary.LittleEndian.Uint64(buf[56:64]),
-		Expiry:        readTSNs(buf[64:72]),
-		SettleType:    buf[72],
-		PriceBound:    buf[73],
-		ManifestSeq:   binary.LittleEndian.Uint16(buf[74:76]),
+		Symbol:        fixedString(buf[4 : 4+symbolBytes]),
+		Leg1:          fixedString(tail[0:8]),
+		Leg2:          fixedString(tail[8:16]),
+		AssetClass:    tail[16],
+		PriceExponent: int8(tail[17]),
+		QtyExponent:   int8(tail[18]),
+		MarketModel:   tail[19],
+		TickSizeRaw:   int64(binary.LittleEndian.Uint64(tail[20:28])),
+		LotSizeRaw:    binary.LittleEndian.Uint64(tail[28:36]),
+		ContractValue: binary.LittleEndian.Uint64(tail[36:44]),
+		Expiry:        readTSNs(tail[44:52]),
+		SettleType:    tail[52],
+		PriceBound:    tail[53],
+		ManifestSeq:   binary.LittleEndian.Uint16(tail[54:56]),
 	}, nil
 }
 

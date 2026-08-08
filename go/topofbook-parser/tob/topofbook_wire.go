@@ -36,6 +36,12 @@ const (
 	frameMagic1 = 0x44
 )
 
+// Schema Versions this reader decodes, from the frame header's byte 2.
+const (
+	schemaV1 uint8 = 1
+	schemaV2 uint8 = 2
+)
+
 const (
 	msgHeartbeat            uint8 = 0x01
 	msgInstrumentDefinition uint8 = 0x02
@@ -80,7 +86,7 @@ type topOfBookHeartbeat struct {
 
 type topOfBookInstrumentDef struct {
 	InstrumentID  uint32
-	Symbol        string // fixed 16 bytes, null-padded ASCII
+	Symbol        string // fixed 16 bytes under schema 1, 64 under schema 2; null-padded ASCII
 	Leg1          string // fixed 8 bytes
 	Leg2          string // fixed 8 bytes
 	AssetClass    uint8
@@ -94,6 +100,22 @@ type topOfBookInstrumentDef struct {
 	SettleType    uint8
 	PriceBound    uint8
 	ManifestSeq   uint16
+}
+
+// instrumentDefLayout maps a Schema Version to InstrumentDefinition's Symbol
+// width and body size, and reports whether this reader implements that version.
+// InstrumentDefinition is the only message schema 2 touched: Symbol widened from
+// 16 to 64 bytes, shifting every field after it by 48. Both generations are
+// decoded because a publisher rollout is staged, so the two are on the wire at
+// once and refusing either blinds this reader.
+func instrumentDefLayout(schema uint8) (symbolBytes, bodyBytes int, ok bool) {
+	switch schema {
+	case schemaV1:
+		return 16, 76, true // 80-byte message
+	case schemaV2:
+		return 64, 124, true // 128-byte message
+	}
+	return 0, 0, false
 }
 
 type topOfBookQuote struct {
@@ -260,7 +282,7 @@ func decodeTopOfBookFrame(data []byte) (*topOfBookFrame, error) {
 			return nil, fmt.Errorf("decoding message %d body (len=%d): %w", i, bodyLen, r.err)
 		}
 
-		body, err := decodeTopOfBookBody(msg.MsgType, bodyBuf)
+		body, err := decodeTopOfBookBody(msg.MsgType, bodyBuf, f.Header.SchemaVersion)
 		if err != nil {
 			return nil, fmt.Errorf("decoding message %d (type=0x%02x): %w", i, msg.MsgType, err)
 		}
@@ -272,8 +294,11 @@ func decodeTopOfBookFrame(data []byte) (*topOfBookFrame, error) {
 }
 
 // decodeTopOfBookBody dispatches on msg type to decode a message body.
-// Returns (nil, nil) for unknown types so the parser skips them.
-func decodeTopOfBookBody(msgType uint8, buf []byte) (any, error) {
+// Returns (nil, nil) for unknown types so the parser skips them. schema is the
+// frame header's Schema Version, which selects InstrumentDefinition's layout;
+// bodies run before validateHeader, so the version comes from the header just
+// parsed rather than from the caller.
+func decodeTopOfBookBody(msgType uint8, buf []byte, schema uint8) (any, error) {
 	br := &wireReader{buf: buf}
 
 	switch msgType {
@@ -288,9 +313,18 @@ func decodeTopOfBookBody(msgType uint8, buf []byte) (any, error) {
 		return &b, nil
 
 	case msgInstrumentDefinition:
+		symbolBytes, bodyBytes, ok := instrumentDefLayout(schema)
+		if !ok {
+			return nil, fmt.Errorf("unsupported schema version %d", schema)
+		}
+		// Exact, so a body from the other generation is refused on its declared
+		// length instead of decoding every field after Symbol at a wrong offset.
+		if len(buf) != bodyBytes {
+			return nil, fmt.Errorf("instrument_definition body: expected %d bytes under schema version %d, got %d", bodyBytes, schema, len(buf))
+		}
 		var b topOfBookInstrumentDef
 		b.InstrumentID = br.u32()
-		b.Symbol = string(br.bytes(16))
+		b.Symbol = string(br.bytes(symbolBytes))
 		b.Leg1 = string(br.bytes(8))
 		b.Leg2 = string(br.bytes(8))
 		b.AssetClass = br.u8()

@@ -74,7 +74,7 @@ func (p *marketByOrderParser) decodeMessage(port string, hdr FrameHeader, mh Mes
 		return base, true, nil
 
 	case msgTypeInstrumentDefinition:
-		b, err := ParseInstrumentDefinition(body)
+		b, err := ParseInstrumentDefinition(body, hdr.SchemaVersion)
 		if err != nil {
 			return Record{}, false, err
 		}

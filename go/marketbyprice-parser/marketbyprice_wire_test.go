@@ -36,7 +36,7 @@ func TestMagicIsMarketByPrice(t *testing.T) {
 
 func TestParseFrameHeader_Valid(t *testing.T) {
 	ts := time.Unix(1700000000, 123456789)
-	buf := buildFrameHeader(mbpMagic, mbpSchemaVersion, 7, 42, ts, 3, 1, frameHeaderSize)
+	buf := buildFrameHeader(mbpMagic, schemaV1, 7, 42, ts, 3, 1, frameHeaderSize)
 	h, err := ParseFrameHeader(buf)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
@@ -60,7 +60,7 @@ func TestParseFrameHeader_Valid(t *testing.T) {
 
 func TestParseFrameHeader_BadMagic(t *testing.T) {
 	// A market-by-order frame must not decode here.
-	buf := buildFrameHeader(0x4444, mbpSchemaVersion, 0, 0, time.Now(), 0, 0, frameHeaderSize)
+	buf := buildFrameHeader(0x4444, schemaV1, 0, 0, time.Now(), 0, 0, frameHeaderSize)
 	if _, err := ParseFrameHeader(buf); !errors.Is(err, errBadMagic) {
 		t.Fatalf("expected errBadMagic, got %v", err)
 	}
@@ -74,7 +74,7 @@ func TestParseFrameHeader_WrongVersion(t *testing.T) {
 }
 
 func TestParseFrameHeader_LengthMismatch(t *testing.T) {
-	buf := buildFrameHeader(mbpMagic, mbpSchemaVersion, 0, 0, time.Now(), 0, 0, 999)
+	buf := buildFrameHeader(mbpMagic, schemaV1, 0, 0, time.Now(), 0, 0, 999)
 	if _, err := ParseFrameHeader(buf); !errors.Is(err, errFrameLength) {
 		t.Fatalf("expected errFrameLength, got %v", err)
 	}
@@ -188,7 +188,7 @@ func TestParseInstrumentDefinition(t *testing.T) {
 	buf[73] = 2 // Price Bound: non-negative
 	binary.LittleEndian.PutUint16(buf[74:76], 9)
 
-	body, err := ParseInstrumentDefinition(buf)
+	body, err := ParseInstrumentDefinition(buf, schemaV1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,7 +287,7 @@ func TestInheritedBodies_ExactLengthOnly(t *testing.T) {
 		fn   func([]byte) error
 	}{
 		{"heartbeat", 12, func(b []byte) error { _, err := ParseHeartbeat(b); return err }},
-		{"instrument_definition", 76, func(b []byte) error { _, err := ParseInstrumentDefinition(b); return err }},
+		{"instrument_definition", 76, func(b []byte) error { _, err := ParseInstrumentDefinition(b, schemaV1); return err }},
 		{"trade", 48, func(b []byte) error { _, err := ParseTrade(b); return err }},
 		{"end_of_session", 8, func(b []byte) error { _, err := ParseEndOfSession(b); return err }},
 		{"manifest_summary", 20, func(b []byte) error { _, err := ParseManifestSummary(b); return err }},

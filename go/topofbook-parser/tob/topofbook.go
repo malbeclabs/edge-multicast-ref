@@ -70,7 +70,6 @@ func (p *TopOfBookParser) InstrumentCount() int {
 
 const (
 	frameHeaderSize   = 24
-	maxSchemaVersion  = 1
 	maxReasonableMsgs = 200
 
 	// maxBufferedInstruments caps the number of distinct instruments for
@@ -117,8 +116,8 @@ func (p *TopOfBookParser) Parse(data []byte, meta PacketMeta) ([]Record, error) 
 func (p *TopOfBookParser) validateHeader(frame *topOfBookFrame, datagramLen int) error {
 	h := frame.Header
 
-	if h.SchemaVersion == 0 || h.SchemaVersion > maxSchemaVersion {
-		return fmt.Errorf("unsupported schema version %d (expected 1..%d)", h.SchemaVersion, maxSchemaVersion)
+	if _, _, ok := instrumentDefLayout(h.SchemaVersion); !ok {
+		return fmt.Errorf("unsupported schema version %d (expected %d or %d)", h.SchemaVersion, schemaV1, schemaV2)
 	}
 
 	if int(h.FrameLength) != datagramLen {

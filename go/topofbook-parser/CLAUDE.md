@@ -37,7 +37,7 @@ Fixed-layout, little-endian binary protocol. One UDP datagram = one frame. No va
 
 ```
 magic          u16   0x445A ("DZ", on wire: 5A 44)
-schema_ver     u8    1
+schema_ver     u8    1 or 2 — selects InstrumentDefinition's layout, see below
 channel_id     u8
 sequence       u64   monotonic per publisher
 send_ts        u64   publisher wall clock, ns since epoch
@@ -59,7 +59,7 @@ flags          u16   (0x0001 = snapshot)
 | ID | Name | Body bytes | Channel | Notes |
 |---:|---|---:|---|---|
 | 0x01 | Heartbeat | 16 | either | Idle liveness |
-| 0x02 | InstrumentDefinition | variable | refdata | instrument_id → symbol, price/qty exponents |
+| 0x02 | InstrumentDefinition | 76 (schema 1) / 124 (schema 2) | refdata | instrument_id → symbol, price/qty exponents |
 | 0x03 | Quote (BBO) | 60 | marketdata | Best bid/ask per instrument |
 | 0x04 | Trade | 52 | marketdata | Single trade |
 | 0x05 | ChannelReset | 12 | either | Publisher startup — drop cached state |
@@ -72,7 +72,7 @@ Fixed-point integers with per-instrument exponents from InstrumentDefinition. `f
 
 ### Forward compatibility
 
-Unknown message types are skipped, not rejected. Schema version is checked — unsupported versions are rejected cleanly.
+Unknown message types are skipped, not rejected. Schema version is checked — unsupported versions are rejected cleanly. Both 1 and 2 are decoded: schema 2 widened InstrumentDefinition's symbol from 16 to 64 bytes, and a publisher rollout is staged, so both generations are on the wire at once.
 
 ## Architecture and source map
 
