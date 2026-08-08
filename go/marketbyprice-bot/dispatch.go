@@ -165,8 +165,13 @@ func (s *Shard) applySnapshotEnd(k instKey, rec Record) []ChannelEvent {
 	// the newest wire record this book reflects. replayBuffer may push it further
 	// forward through applyOne; both write the same field.
 	inst.LastAppliedSendTS = rec.sendTime()
-	s.replayBuffer(k, inst)
-	evs := []ChannelEvent{{Kind: KindAppliedSnapshot, InstrumentID: k.id, Symbol: inst.Symbol, Record: rec}}
+	replayed := s.replayBuffer(k, inst)
+	// The commit precedes the deltas replayed on top of it, so the snapshot event
+	// leads and the replayed deltas follow in mktdata_seq order.
+	evs := append(
+		[]ChannelEvent{{Kind: KindAppliedSnapshot, InstrumentID: k.id, Symbol: inst.Symbol, Record: rec}},
+		replayed...,
+	)
 	s.noteConsistencyPoint(k, evs)
 	return evs
 }

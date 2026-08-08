@@ -392,10 +392,16 @@ func (s *Shard) evictLargestBuffer() {
 
 // replayBuffer drops buffered deltas covered by the snapshot anchor and replays
 // the rest through the same classification as steady state.
-func (s *Shard) replayBuffer(k instKey, inst *Instrument) {
+//
+// It returns the events the replayed deltas produced, and the caller must
+// forward them. These deltas ARE applied to the live book, so dropping their
+// events would leave a mktdata_seq hole in the events log on every bootstrap
+// and every gap recovery — precisely the continuity a consumer queries it for.
+func (s *Shard) replayBuffer(k instKey, inst *Instrument) []ChannelEvent {
 	buf := s.deltaBuf[k]
 	s.bufferedN -= len(buf)
 	delete(s.deltaBuf, k)
+	var evs []ChannelEvent
 	for _, b := range buf {
 		if b.MktdataSeq <= inst.LastAppliedMktdataSeq {
 			continue
@@ -409,9 +415,10 @@ func (s *Shard) replayBuffer(k instKey, inst *Instrument) {
 			s.bufferDelta(k, b.Record)
 			continue
 		}
-		s.applyDeltaToReady(k, inst, b.Record)
+		evs = append(evs, s.applyDeltaToReady(k, inst, b.Record)...)
 	}
 	s.publishBufferedGauge()
+	return evs
 }
 
 func filterBuffer(buf []BufferedDelta, keep func(BufferedDelta) bool) []BufferedDelta {

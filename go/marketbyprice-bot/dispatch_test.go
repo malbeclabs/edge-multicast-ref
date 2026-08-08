@@ -604,3 +604,65 @@ func TestApply_LastBeginRecordedWhenAccepted(t *testing.T) {
 		t.Fatalf("LastBegin: %+v", inst.LastBegin)
 	}
 }
+
+// Deltas buffered while an instrument is awaiting-snapshot or gapped are applied
+// to the live book by replayBuffer, so their events must reach the caller. When
+// they did not, the events log carried a mktdata_seq hole on every bootstrap and
+// every gap recovery — the exact continuity a consumer queries that table for.
+//
+// This is the reviewer's repro from PR #35: a definition, one buffered
+// level_update at per_instrument_seq 6, then a snapshot committing at
+// last_instrument_seq 5. The book advances to 6; the events must say so.
+func TestApply_ReplayedDeltasAreReported(t *testing.T) {
+	st := newStubEnqueuer()
+	m := NewMetrics("test", "test")
+	s := NewShard(0, 1, NewEventsWriter(st), m)
+	s.sw = NewSnapshotWriter(nil, 5, 0, m, func(k instKey, fn func(*Instrument)) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		fn(s.instruments[k])
+	}, nil)
+
+	s.handle(instDefRec(11, "SYM", 1))
+	// Buffered: the instrument is still awaiting its first snapshot.
+	s.handle(levelUpdateRec(11, 600, 6, "bid", 1000, 50))
+	// The definition lands in `instruments`; nothing has reached `events` yet,
+	// because the delta is sitting in the buffer.
+	if got := len(st.rows["events"]); got != 0 {
+		t.Fatalf("setup: a buffered delta must not be written yet, got %d events rows", got)
+	}
+	k := instKey{0, 11}
+	if len(s.deltaBuf[k]) != 1 {
+		t.Fatalf("setup: the delta should be buffered, got %+v", s.deltaBuf[k])
+	}
+
+	// Snapshot commits at anchor 500, last_instrument_seq 5, so the buffered
+	// delta at mktdata seq 600 / piSeq 6 replays on top of it.
+	s.handle(snapBeginRec(11, 3, 1, 5, 0, 500))
+	s.handle(snapLevelRec(11, 3, "bid", 900, 10))
+	s.handle(snapEndRec(11, 3, 500))
+
+	inst := s.instruments[k]
+	if inst.LastAppliedInstrumentSeq != 6 {
+		t.Fatalf("the book must have advanced through the replayed delta: got %d want 6",
+			inst.LastAppliedInstrumentSeq)
+	}
+
+	// The replayed level_update is the only events row: snapshot_end matches no
+	// events case by design, and the definition went to `instruments`.
+	var replayed []map[string]any
+	for _, row := range st.rows["events"] {
+		if row["kind"] == "level_update" {
+			replayed = append(replayed, row)
+		}
+	}
+	if len(replayed) != 1 {
+		t.Fatalf("the replayed delta must produce exactly one events row, got %d", len(replayed))
+	}
+	if got := replayed[0]["mktdata_seq"]; got != uint64(600) {
+		t.Errorf("mktdata_seq: got %v want 600", got)
+	}
+	if got := replayed[0]["per_instrument_seq"]; got != uint32(6) {
+		t.Errorf("per_instrument_seq: got %v want 6", got)
+	}
+}

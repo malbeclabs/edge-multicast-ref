@@ -132,6 +132,21 @@ log: `per_instrument_gap` and `malformed_delta` both carry an ordinary delta
 `Record.Type` while having applied nothing, so `handle` gates on `ChannelEvent.Kind`
 rather than letting the writer switch on `Record.Type` alone.
 
+### Replayed deltas are reported, so `mktdata_seq` stays continuous
+
+Revised after PR review. An earlier revision of this document accepted that
+deltas buffered while an instrument was `awaiting-snapshot` or `gap` would never
+reach `events`, on the grounds that they were not applied when they arrived.
+
+That reasoning was wrong. `replayBuffer` does apply them, against the committed
+book, so an applied-delta log that omitted them left a `mktdata_seq` hole on every
+bootstrap and every gap recovery — and `mktdata_seq` continuity is the obvious
+thing a consumer queries that table for.
+
+`replayBuffer` therefore returns the events it produced and `applySnapshotEnd`
+forwards them, ordered after the `applied_snapshot` entry, because the commit
+logically precedes the deltas replayed on top of it.
+
 ### `--symbol` gates persistence and read-out, never the book engine
 
 The flag is declared today and does nothing (`_ = symbolFilter`, `main.go:51`) —
