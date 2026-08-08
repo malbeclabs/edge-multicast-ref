@@ -93,10 +93,51 @@ services:
     volumes:
       - dz-sockets:/var/run/dz
 
+  marketbyprice-parser:
+    build:
+      context: ..
+      dockerfile: go/marketbyprice-parser/Dockerfile
+    image: dz/marketbyprice-parser:latest
+    network_mode: host
+    restart: unless-stopped
+    command:
+      - --group=${DZ_MBP_MULTICAST_GROUP}
+      - --refdata-port=${DZ_MBP_REFDATA_PORT}
+      - --mktdata-port=${DZ_MBP_MKTDATA_PORT}
+      - --snapshot-port=${DZ_MBP_SNAPSHOT_PORT}
+      - --interface=${DZ_INTERFACE}
+      - --output=unix:///var/run/dz/mbp.sock
+      - --metrics-addr=0.0.0.0:${DZ_MBP_PARSER_METRICS_PORT:-9095}
+    volumes:
+      - dz-sockets:/var/run/dz
+
+  marketbyprice-bot:
+    build:
+      context: ..
+      dockerfile: go/marketbyprice-bot/Dockerfile
+    image: dz/marketbyprice-bot:latest
+    restart: unless-stopped
+    depends_on:
+      - marketbyprice-parser
+      - clickhouse
+    command:
+      - --socket=/var/run/dz/mbp.sock
+      - --symbol=${DZ_MBP_SYMBOLS}
+      - --depth=${DZ_MBP_DEPTH:-20}
+      - --coalesce-ms=${DZ_MBP_COALESCE_MS:-50}
+      - --metrics-addr=0.0.0.0:9094
+      - --clickhouse-url=http://clickhouse:8123
+      - --clickhouse-database=marketbyprice
+    ports:
+      - "${MBP_BOT_METRICS_PORT:-9094}:9094"
+    volumes:
+      - dz-sockets:/var/run/dz
+
   prometheus:
     image: prom/prometheus:v3.1.0
     restart: unless-stopped
     depends_on:
+      - marketbyprice-bot
       - marketbyorder-bot
       - bot
     command:

@@ -36,7 +36,8 @@ ssh -L 3000:localhost:3000 ubuntu@<host>
 # Open http://localhost:3000 — login: admin / ${GF_ADMIN_PASSWORD}
 ```
 
-Open the "DZ Top-of-Book" dashboard.
+Open the "DZ Top-of-Book" dashboard. "DoubleZero Market-by-Price" shows the aggregated-depth
+view for that feed, including crossed-book, delta-buffer and persistence panels.
 
 ## What you should see
 
@@ -72,6 +73,13 @@ All tunables live in `.env`:
 | `CLICKHOUSE_HTTP_PORT` | `8123` | Bound to `127.0.0.1` only |
 | `BOT_METRICS_PORT` | `9091` | Bot Prometheus scrape endpoint |
 | `PARSER_METRICS_PORT` | `9090` | Parser Prometheus scrape endpoint |
+| `DZ_MBP_MULTICAST_GROUP` | `239.10.10.30` | Market-by-Price group |
+| `DZ_MBP_MKTDATA_PORT` | `7021` | Market-by-Price deltas |
+| `DZ_MBP_REFDATA_PORT` | `7022` | Market-by-Price instrument definitions |
+| `DZ_MBP_SNAPSHOT_PORT` | `7023` | Market-by-Price snapshot groups |
+| `DZ_MBP_SYMBOLS` | empty (all) | Filters what the bot persists, never what it tracks |
+| `DZ_MBP_DEPTH` | `20` | Price levels per side to read out |
+| `DZ_MBP_COALESCE_MS` | `50` | Minimum gap between snapshot writes per instrument |
 
 ## ClickHouse schema
 
@@ -119,6 +127,8 @@ FROM topofbook.quotes WHERE recv_ts > now() - INTERVAL 5 MINUTE;
 | ClickHouse HTTP | http://localhost:8123 | `SELECT now()` → `200 OK` |
 | Bot metrics | http://localhost:9091/metrics | `dz_bot_*` |
 | Parser metrics | http://localhost:9090/metrics | `dz_subscriber_*` (host-networked so no port mapping needed) |
+| Market-by-Price bot metrics | http://localhost:9094/metrics | `dz_mbp_bot_*` |
+| Market-by-Price parser metrics | http://localhost:9095/metrics | `dz_mbp_parser_*` (host-networked) |
 
 All host ports bind `127.0.0.1` only. Edit `docker-compose.yml` if you want public access (not recommended).
 
