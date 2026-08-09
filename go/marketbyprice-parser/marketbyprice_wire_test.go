@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/binary"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -36,7 +37,7 @@ func TestMagicIsMarketByPrice(t *testing.T) {
 
 func TestParseFrameHeader_Valid(t *testing.T) {
 	ts := time.Unix(1700000000, 123456789)
-	buf := buildFrameHeader(mbpMagic, mbpSchemaVersion, 7, 42, ts, 3, 1, frameHeaderSize)
+	buf := buildFrameHeader(mbpMagic, mbpSchemaVersionV1, 7, 42, ts, 3, 1, frameHeaderSize)
 	h, err := ParseFrameHeader(buf)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
@@ -60,7 +61,7 @@ func TestParseFrameHeader_Valid(t *testing.T) {
 
 func TestParseFrameHeader_BadMagic(t *testing.T) {
 	// A market-by-order frame must not decode here.
-	buf := buildFrameHeader(0x4444, mbpSchemaVersion, 0, 0, time.Now(), 0, 0, frameHeaderSize)
+	buf := buildFrameHeader(0x4444, mbpSchemaVersionV1, 0, 0, time.Now(), 0, 0, frameHeaderSize)
 	if _, err := ParseFrameHeader(buf); !errors.Is(err, errBadMagic) {
 		t.Fatalf("expected errBadMagic, got %v", err)
 	}
@@ -74,7 +75,7 @@ func TestParseFrameHeader_WrongVersion(t *testing.T) {
 }
 
 func TestParseFrameHeader_LengthMismatch(t *testing.T) {
-	buf := buildFrameHeader(mbpMagic, mbpSchemaVersion, 0, 0, time.Now(), 0, 0, 999)
+	buf := buildFrameHeader(mbpMagic, mbpSchemaVersionV1, 0, 0, time.Now(), 0, 0, 999)
 	if _, err := ParseFrameHeader(buf); !errors.Is(err, errFrameLength) {
 		t.Fatalf("expected errFrameLength, got %v", err)
 	}
@@ -188,7 +189,7 @@ func TestParseInstrumentDefinition(t *testing.T) {
 	buf[73] = 2 // Price Bound: non-negative
 	binary.LittleEndian.PutUint16(buf[74:76], 9)
 
-	body, err := ParseInstrumentDefinition(buf)
+	body, err := ParseInstrumentDefinition(buf, mbpSchemaVersionV1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,7 +288,7 @@ func TestInheritedBodies_ExactLengthOnly(t *testing.T) {
 		fn   func([]byte) error
 	}{
 		{"heartbeat", 12, func(b []byte) error { _, err := ParseHeartbeat(b); return err }},
-		{"instrument_definition", 76, func(b []byte) error { _, err := ParseInstrumentDefinition(b); return err }},
+		{"instrument_definition", 76, func(b []byte) error { _, err := ParseInstrumentDefinition(b, mbpSchemaVersionV1); return err }},
 		{"trade", 48, func(b []byte) error { _, err := ParseTrade(b); return err }},
 		{"end_of_session", 8, func(b []byte) error { _, err := ParseEndOfSession(b); return err }},
 		{"manifest_summary", 20, func(b []byte) error { _, err := ParseManifestSummary(b); return err }},
@@ -540,6 +541,218 @@ func TestNewBodies_ExactLengthOnly(t *testing.T) {
 		}
 		if err := c.fn(make([]byte, c.size+1)); !errors.Is(err, errTruncated) {
 			t.Errorf("%s: trailing byte accepted (must be exact-length): %v", c.name, err)
+		}
+	}
+}
+
+// buildInstDefV1 builds a 76-byte v1 InstrumentDefinition body.
+func buildInstDefV1(symbol string) []byte {
+	b := make([]byte, 76)
+	binary.LittleEndian.PutUint32(b[0:4], 4242)
+	copy(b[4:20], symbol)
+	copy(b[20:28], "BTC")
+	copy(b[28:36], "USDT")
+	b[36] = 1 // asset class
+	// Typed variables, not constant conversions: byte(int8(-2)) is a
+	// compile-time overflow error because the operand is a constant.
+	priceExp, qtyExp := int8(-2), int8(-8)
+	b[37] = byte(priceExp)                              // price exponent
+	b[38] = byte(qtyExp)                                // qty exponent
+	b[39] = 1                                           // market model
+	binary.LittleEndian.PutUint64(b[40:48], 50)         // tick size
+	binary.LittleEndian.PutUint64(b[48:56], 100)        // lot size
+	binary.LittleEndian.PutUint64(b[56:64], 1000)       // contract value
+	binary.LittleEndian.PutUint64(b[64:72], 1700000000) // expiry
+	b[72] = 1                                           // settle type
+	b[73] = 2                                           // price bound
+	binary.LittleEndian.PutUint16(b[74:76], 7)          // manifest seq
+	return b
+}
+
+// buildInstDefV3 builds a 126-byte v3 body. Source ID is inserted at 4:6 and
+// Symbol widens to 64 bytes, so every field after Instrument ID sits 50 bytes
+// later than in v1.
+func buildInstDefV3(symbol string) []byte {
+	b := make([]byte, 126)
+	binary.LittleEndian.PutUint32(b[0:4], 4242)
+	binary.LittleEndian.PutUint16(b[4:6], 77) // source id
+	copy(b[6:70], symbol)
+	copy(b[70:78], "BTC")
+	copy(b[78:86], "USDT")
+	b[86] = 1
+	priceExp, qtyExp := int8(-2), int8(-8)
+	b[87] = byte(priceExp)
+	b[88] = byte(qtyExp)
+	b[89] = 1
+	binary.LittleEndian.PutUint64(b[90:98], 50)
+	binary.LittleEndian.PutUint64(b[98:106], 100)
+	binary.LittleEndian.PutUint64(b[106:114], 1000)
+	binary.LittleEndian.PutUint64(b[114:122], 1700000000)
+	b[122] = 1
+	b[123] = 2
+	binary.LittleEndian.PutUint16(b[124:126], 7)
+	return b
+}
+
+func assertInstDefFields(t *testing.T, got InstrumentDefinitionBody, wantSymbol string) {
+	t.Helper()
+	if got.InstrumentID != 4242 {
+		t.Errorf("instrument id: got %d want 4242", got.InstrumentID)
+	}
+	if got.Symbol != wantSymbol {
+		t.Errorf("symbol: got %q want %q", got.Symbol, wantSymbol)
+	}
+	if got.Leg1 != "BTC" || got.Leg2 != "USDT" {
+		t.Errorf("legs: got %q %q want BTC USDT", got.Leg1, got.Leg2)
+	}
+	if got.AssetClass != 1 || got.MarketModel != 1 {
+		t.Errorf("asset class / market model: got %d %d want 1 1", got.AssetClass, got.MarketModel)
+	}
+	if got.PriceExponent != -2 || got.QtyExponent != -8 {
+		t.Errorf("exponents: got %d %d want -2 -8", got.PriceExponent, got.QtyExponent)
+	}
+	if got.TickSizeRaw != 50 || got.LotSizeRaw != 100 {
+		t.Errorf("tick/lot: got %d %d want 50 100", got.TickSizeRaw, got.LotSizeRaw)
+	}
+	if got.ContractValue != 1000 {
+		t.Errorf("contract value: got %d want 1000", got.ContractValue)
+	}
+	if got.SettleType != 1 || got.PriceBound != 2 {
+		t.Errorf("settle/bound: got %d %d want 1 2", got.SettleType, got.PriceBound)
+	}
+	if got.ManifestSeq != 7 {
+		t.Errorf("manifest seq: got %d want 7", got.ManifestSeq)
+	}
+}
+
+func TestParseInstrumentDefinition_V1(t *testing.T) {
+	got, err := ParseInstrumentDefinition(buildInstDefV1("BTC-USDT"), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertInstDefFields(t, got, "BTC-USDT")
+}
+
+// The v3 symbol MUST exceed 16 bytes, or this test proves nothing a v1 test
+// does not. This is the whole point of the widening: a Kalshi ticker like
+// KXNFLGAME-26SEP13NYJTEN-NYJ is 27 bytes and was previously truncated.
+func TestParseInstrumentDefinition_V3LongSymbol(t *testing.T) {
+	const long = "KXNFLGAME-26SEP13NYJTEN-NYJ"
+	if len(long) <= 16 {
+		t.Fatal("fixture symbol must exceed 16 bytes to be meaningful")
+	}
+	got, err := ParseInstrumentDefinition(buildInstDefV3(long), 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertInstDefFields(t, got, long)
+	if got.SourceID != 77 {
+		t.Errorf("source id: got %d want 77", got.SourceID)
+	}
+}
+
+// v1 has no Source ID on the wire. It must decode as 0 (registry Unknown)
+// rather than picking up the first two bytes of Symbol.
+func TestParseInstrumentDefinition_V1SourceIDIsZero(t *testing.T) {
+	got, err := ParseInstrumentDefinition(buildInstDefV1("BTC-USDT"), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.SourceID != 0 {
+		t.Errorf("v1 source id: got %d want 0", got.SourceID)
+	}
+}
+
+// A symbol filling all 64 bytes has no null terminator; it must not be truncated
+// or run past the field.
+func TestParseInstrumentDefinition_V3SymbolFillsField(t *testing.T) {
+	full := strings.Repeat("A", 64)
+	got, err := ParseInstrumentDefinition(buildInstDefV3(full), 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Symbol != full {
+		t.Errorf("symbol length: got %d want 64", len(got.Symbol))
+	}
+	if got.Leg1 != "BTC" {
+		t.Errorf("a full-width symbol must not bleed into Leg1: got %q", got.Leg1)
+	}
+}
+
+// The declared version and the body length must agree. A v3 frame carrying a v1
+// body would otherwise read Source ID and Symbol across 66 bytes of adjacent
+// fields and produce plausible garbage instead of an error.
+func TestParseInstrumentDefinition_LengthMustMatchVersion(t *testing.T) {
+	if _, err := ParseInstrumentDefinition(buildInstDefV1("BTC-USDT"), 3); err == nil {
+		t.Error("version 3 with a 76-byte body must be rejected")
+	}
+	if _, err := ParseInstrumentDefinition(buildInstDefV3("BTC-USDT"), 1); err == nil {
+		t.Error("version 1 with a 126-byte body must be rejected")
+	}
+}
+
+// Version 2 was specified and superseded before any publisher emitted it. It is
+// not a layout this decoder implements, and it must be rejected as firmly as a
+// version that never existed at all — a version ceiling would let it through.
+func TestParseInstrumentDefinition_UnsupportedVersion(t *testing.T) {
+	for _, v := range []uint8{0, 2, 4, 255} {
+		if _, err := ParseInstrumentDefinition(buildInstDefV3("BTC-USDT"), v); err == nil {
+			t.Errorf("schema version %d must be rejected", v)
+		}
+	}
+}
+
+// The frame header accepts both implemented versions and nothing else.
+func TestParseFrameHeader_AcceptsV1AndV3(t *testing.T) {
+	ts := time.Unix(1700000000, 0)
+	for _, v := range []uint8{1, 3} {
+		buf := buildFrameHeader(mbpMagic, v, 0, 1, ts, 1, 0, frameHeaderSize)
+		if _, err := ParseFrameHeader(buf); err != nil {
+			t.Errorf("schema version %d must be accepted: %v", v, err)
+		}
+	}
+	for _, v := range []uint8{0, 2, 4, 255} {
+		buf := buildFrameHeader(mbpMagic, v, 0, 1, ts, 1, 0, frameHeaderSize)
+		if _, err := ParseFrameHeader(buf); err == nil {
+			t.Errorf("schema version %d must be rejected", v)
+		}
+	}
+}
+
+// A publisher cutting over from v1 to v3 mid-stream must be followed without a
+// restart. This is why the version is read per frame rather than latched from
+// the first frame.
+func TestParseFrame_FollowsVersionSwitchMidStream(t *testing.T) {
+	p := &marketByPriceParser{}
+	ts := time.Unix(1700000000, 0)
+
+	build := func(version uint8, body []byte) []byte {
+		msg := buildMsg(msgTypeInstrumentDefinition, 0, body)
+		total := frameHeaderSize + len(msg)
+		frame := buildFrameHeader(mbpMagic, version, 0, 1, ts, 1, 0, uint16(total))
+		return append(frame, msg...)
+	}
+
+	v1Frame := build(1, buildInstDefV1("SHORT"))
+	v3Frame := build(3, buildInstDefV3("KXNFLGAME-26SEP13NYJTEN-NYJ"))
+
+	for i, tc := range []struct {
+		frame []byte
+		want  string
+	}{
+		{v1Frame, "SHORT"},
+		{v3Frame, "KXNFLGAME-26SEP13NYJTEN-NYJ"},
+		{v1Frame, "SHORT"}, // and back again
+	} {
+		recs, _, err := p.ParseFrame("refdata", tc.frame)
+		if err != nil {
+			t.Fatalf("frame %d: %v", i, err)
+		}
+		if len(recs) != 1 {
+			t.Fatalf("frame %d: expected 1 record, got %d", i, len(recs))
+		}
+		if got := recs[0].Fields["symbol"]; got != tc.want {
+			t.Errorf("frame %d symbol: got %v want %q", i, got, tc.want)
 		}
 	}
 }

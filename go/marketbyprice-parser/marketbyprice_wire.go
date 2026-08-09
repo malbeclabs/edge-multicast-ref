@@ -7,8 +7,9 @@
 //
 // Length checks are exact equality, not >=. The spec's forward-compatibility
 // rule that a decoder ignores trailing bytes only applies across a Schema
-// Version bump, and ParseFrameHeader rejects unimplemented versions before any
-// body is parsed. Within v1, an unexpected body length is malformed.
+// Version bump, and ParseFrameHeader rejects unimplemented versions (anything
+// other than v1 or v3) before any body is parsed. Within a given version, an
+// unexpected body length is malformed.
 
 package main
 
@@ -20,10 +21,11 @@ import (
 )
 
 const (
-	mbpMagic          uint16 = 0x4442
-	mbpSchemaVersion  uint8  = 1
-	frameHeaderSize          = 24
-	messageHeaderSize        = 4
+	mbpMagic           uint16 = 0x4442
+	mbpSchemaVersionV1 uint8  = 1 // v1: InstrumentDefinition, 76-byte body (80-byte message)
+	mbpSchemaVersionV3 uint8  = 3 // v3: InstrumentDefinition, 126-byte body (130-byte message)
+	frameHeaderSize           = 24
+	messageHeaderSize         = 4
 )
 
 // Message type IDs. Types 0x03 and 0x05 are reserved and intentionally unused
@@ -102,7 +104,7 @@ func ParseFrameHeader(buf []byte) (FrameHeader, error) {
 	if h.Magic != mbpMagic {
 		return h, errBadMagic
 	}
-	if h.SchemaVersion != mbpSchemaVersion {
+	if h.SchemaVersion != mbpSchemaVersionV1 && h.SchemaVersion != mbpSchemaVersionV3 {
 		return h, errSchemaVersion
 	}
 	tsNs := binary.LittleEndian.Uint64(buf[12:20])
@@ -203,9 +205,11 @@ func ParseManifestSummary(buf []byte) (ManifestSummaryBody, error) {
 	}, nil
 }
 
-// InstrumentDefinitionBody is the 76-byte body of an InstrumentDefinition.
+// InstrumentDefinitionBody is the body of an InstrumentDefinition. Its wire
+// length depends on schema version: 76 bytes at v1, 126 bytes at v3.
 type InstrumentDefinitionBody struct {
 	InstrumentID  uint32
+	SourceID      uint16 // 0 at schema v1, which carries no Source ID
 	Symbol        string
 	Leg1          string
 	Leg2          string
@@ -222,27 +226,70 @@ type InstrumentDefinitionBody struct {
 	ManifestSeq   uint16
 }
 
-// ParseInstrumentDefinition decodes an InstrumentDefinition body. buf must be exactly 76 bytes.
-func ParseInstrumentDefinition(buf []byte) (InstrumentDefinitionBody, error) {
-	if len(buf) != 76 {
-		return InstrumentDefinitionBody{}, fmt.Errorf("%w: expected 76 bytes for instrument_definition body, got %d", errTruncated, len(buf))
+// InstrumentDefinition body lengths, excluding the 4-byte message header.
+//
+// v3 inserts Source ID (u16) after Instrument ID and widens Symbol from
+// char[16] to char[64], shifting every field after Instrument ID by 50 bytes.
+// Nothing else in this feed changed between the two schema versions.
+//
+// There is no version 2. A 128-byte layout carrying the widened Symbol without
+// Source ID was specified upstream and superseded before any publisher emitted
+// it, so version 2 is rejected here rather than decoded.
+const (
+	instDefBodyLenV1 = 76
+	instDefBodyLenV3 = 126
+)
+
+// ParseInstrumentDefinition decodes an InstrumentDefinition body using the
+// layout for the frame's schema version.
+//
+// The body length cross-checks the declared version. They can only disagree if a
+// publisher bumped the header without the payload or the reverse, and the
+// mismatch must be caught here: decoding a v1 body under the v3 layout would
+// read Source ID and Symbol across 66 bytes of adjacent fields and yield a
+// plausible-looking instrument rather than an error.
+func ParseInstrumentDefinition(buf []byte, schemaVersion uint8) (InstrumentDefinitionBody, error) {
+	var symStart, symEnd int
+	var sourceID uint16
+	switch schemaVersion {
+	case mbpSchemaVersionV1:
+		if len(buf) != instDefBodyLenV1 {
+			return InstrumentDefinitionBody{}, fmt.Errorf("%w: expected %d bytes for schema version 1 instrument_definition body, got %d",
+				errTruncated, instDefBodyLenV1, len(buf))
+		}
+		// v1 carries no Source ID; sourceID stays 0 (registry Unknown).
+		symStart, symEnd = 4, 20
+	case mbpSchemaVersionV3:
+		if len(buf) != instDefBodyLenV3 {
+			return InstrumentDefinitionBody{}, fmt.Errorf("%w: expected %d bytes for schema version 3 instrument_definition body, got %d",
+				errTruncated, instDefBodyLenV3, len(buf))
+		}
+		sourceID = binary.LittleEndian.Uint16(buf[4:6])
+		symStart, symEnd = 6, 70
+	default:
+		return InstrumentDefinitionBody{}, fmt.Errorf("%w: %d", errSchemaVersion, schemaVersion)
 	}
+
+	// Every field after Symbol is at a fixed offset from the end of Symbol, which
+	// is what makes one body of code serve both layouts.
+	o := symEnd
 	return InstrumentDefinitionBody{
 		InstrumentID:  binary.LittleEndian.Uint32(buf[0:4]),
-		Symbol:        fixedString(buf[4:20]),
-		Leg1:          fixedString(buf[20:28]),
-		Leg2:          fixedString(buf[28:36]),
-		AssetClass:    buf[36],
-		PriceExponent: int8(buf[37]),
-		QtyExponent:   int8(buf[38]),
-		MarketModel:   buf[39],
-		TickSizeRaw:   int64(binary.LittleEndian.Uint64(buf[40:48])),
-		LotSizeRaw:    binary.LittleEndian.Uint64(buf[48:56]),
-		ContractValue: binary.LittleEndian.Uint64(buf[56:64]),
-		Expiry:        readTSNs(buf[64:72]),
-		SettleType:    buf[72],
-		PriceBound:    buf[73],
-		ManifestSeq:   binary.LittleEndian.Uint16(buf[74:76]),
+		SourceID:      sourceID,
+		Symbol:        fixedString(buf[symStart:symEnd]),
+		Leg1:          fixedString(buf[o : o+8]),
+		Leg2:          fixedString(buf[o+8 : o+16]),
+		AssetClass:    buf[o+16],
+		PriceExponent: int8(buf[o+17]),
+		QtyExponent:   int8(buf[o+18]),
+		MarketModel:   buf[o+19],
+		TickSizeRaw:   int64(binary.LittleEndian.Uint64(buf[o+20 : o+28])),
+		LotSizeRaw:    binary.LittleEndian.Uint64(buf[o+28 : o+36]),
+		ContractValue: binary.LittleEndian.Uint64(buf[o+36 : o+44]),
+		Expiry:        readTSNs(buf[o+44 : o+52]),
+		SettleType:    buf[o+52],
+		PriceBound:    buf[o+53],
+		ManifestSeq:   binary.LittleEndian.Uint16(buf[o+54 : o+56]),
 	}, nil
 }
 

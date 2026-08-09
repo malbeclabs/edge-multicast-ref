@@ -2,7 +2,9 @@
 
 > Implements the [Market-by-Price Feed](https://github.com/malbeclabs/edge-feed-spec/blob/main/market-by-price/spec.md) spec.
 
-A standalone multicast subscriber that decodes DoubleZero Market-by-Price wire-format frames (schema version 1) and writes decoded market-data records to a file or Unix socket.
+A standalone multicast subscriber that decodes DoubleZero Market-by-Price wire-format frames and writes decoded market-data records to a file or Unix socket.
+
+**Dual wire schema support.** `InstrumentDefinition` is decoded at schema versions 1 and 3, selected per frame from the frame header's Schema Version byte — not a build-time or CLI setting. v3 inserts `Source ID` (`u16`) after `Instrument ID` and widens `Symbol` from 16 to 64 bytes; all other fields are unchanged. There is no version 2: that layout was specified upstream and superseded before any publisher emitted it, so the accepted versions are the set `{1, 3}` and version 2 is rejected exactly like version 0. A frame whose declared Schema Version disagrees with the length its `InstrumentDefinition` body actually carries is counted malformed (as a frame-level `parse_errors_total{reason="truncated"}`) and the whole frame is skipped, not guessed at. `frames_total{port,schema_version}` (see [Metrics](#metrics)) is how to watch a publisher's v1-to-v3 cutover in production.
 
 **The parser is stateless.** It decodes each wire message into a JSON record and forwards it; it does not track price levels, does not reconstruct an order book, and holds no per-instrument state across frames. Book construction, snapshot/delta reconciliation, and persistence belong to a separate consumer — the planned `marketbyprice-bot` — which subscribes to this parser's output socket and does that work.
 
@@ -87,6 +89,7 @@ Namespace `dz_mbp_parser`. All metrics are exposed on `--metrics-addr` at `/metr
 | `dz_mbp_parser_socket_client_drops_total{reason}` | counter | Slow socket clients dropped, by reason |
 | `dz_mbp_parser_socket_records_sent_total` | counter | Records written to at least one socket client |
 | `dz_mbp_parser_sink_write_errors_total` | counter | Output sink write failures |
+| `dz_mbp_parser_frames_total{port,schema_version}` | counter | Successfully parsed frames, by port and wire Schema Version. The way to watch a publisher's v1-to-v3 cutover: `schema_version="3"` climbing while `schema_version="1"` goes flat, then to zero, is when the v1 decode path can be retired. `schema_version="2"` should never appear; a nonzero count there means a publisher is emitting a version this parser believes does not exist |
 | `dz_mbp_parser_frame_seq_gaps_total{port}` | counter | Frame-header sequence discontinuities detected (real UDP datagram loss events), by port |
 | `dz_mbp_parser_frames_missing_total{port}` | counter | Total frames missing, summed across gap magnitudes in the frame-header sequence, by port |
 | `dz_mbp_parser_snapshot_flag_mismatch_total{port}` | counter | Application-header snapshot flag disagreeing with the arrival port — a publisher defect, never used for routing |

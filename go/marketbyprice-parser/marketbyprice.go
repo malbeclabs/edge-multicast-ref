@@ -152,7 +152,7 @@ func (p *marketByPriceParser) decodeMessage(port string, hdr FrameHeader, mh Mes
 		return base, nil
 
 	case msgTypeInstrumentDefinition:
-		b, err := ParseInstrumentDefinition(body)
+		b, err := ParseInstrumentDefinition(body, hdr.SchemaVersion)
 		if err != nil {
 			return Record{}, err
 		}
@@ -160,6 +160,7 @@ func (p *marketByPriceParser) decodeMessage(port string, hdr FrameHeader, mh Mes
 		base.InstrumentID = b.InstrumentID
 		base.Fields = map[string]any{
 			"symbol":         b.Symbol,
+			"source_id":      b.SourceID,
 			"leg1":           b.Leg1,
 			"leg2":           b.Leg2,
 			"asset_class":    b.AssetClass,
