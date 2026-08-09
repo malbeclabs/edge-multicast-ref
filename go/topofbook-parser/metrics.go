@@ -48,8 +48,14 @@ type metrics struct {
 	sendLatency   *prometheus.HistogramVec
 
 	// Frame header sequence gap tracking (real UDP datagram loss).
-	frameSeqGaps    *prometheus.CounterVec
-	framesMissing   *prometheus.CounterVec
+	frameSeqGaps  *prometheus.CounterVec
+	framesMissing *prometheus.CounterVec
+
+	// framesTotal counts successfully parsed frames by port and wire schema
+	// version. The version label is what makes a publisher's v1-to-v3 cutover
+	// observable: v3 climbs, v1 goes flat, and v1 reaching zero is when the
+	// legacy decode path can be retired.
+	framesTotal *prometheus.CounterVec // labels: port, schema_version
 
 	// Socket sink
 	socketClients     prometheus.Gauge
@@ -136,6 +142,11 @@ func newMetrics() *metrics {
 		Help: "Total UDP frames missing (sum of gap magnitudes in header seq), by port.",
 	}, []string{"port"})
 
+	m.framesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "dz_subscriber_frames_total",
+		Help: "Successfully parsed frames, by port and wire schema version.",
+	}, []string{"port", "schema_version"})
+
 	m.socketClients = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "dz_subscriber_socket_clients",
 		Help: "Currently connected Unix socket clients.",
@@ -168,7 +179,7 @@ func newMetrics() *metrics {
 		m.records, m.sinkWriteErrors,
 		m.buffered, m.bufferDrops, m.instrumentsTracked,
 		m.sourceLatency, m.sendLatency,
-		m.frameSeqGaps, m.framesMissing,
+		m.frameSeqGaps, m.framesMissing, m.framesTotal,
 		m.socketClients, m.socketClientDrops, m.socketRecordsSent,
 		m.buildInfo, m.uptime,
 	)

@@ -65,3 +65,26 @@ func TestMetricsNamespaceAndDefectCounters(t *testing.T) {
 		}
 	}
 }
+
+// TestFramesTotal_LabelsSchemaVersion proves frames_total is registered and
+// counts per port and wire schema version independently, which is what makes
+// a publisher's v1-to-v3 cutover observable.
+func TestFramesTotal_LabelsSchemaVersion(t *testing.T) {
+	m := NewMetrics("test", "test")
+
+	m.FramesTotal.WithLabelValues("refdata", "1").Inc()
+	m.FramesTotal.WithLabelValues("refdata", "3").Inc()
+	m.FramesTotal.WithLabelValues("refdata", "3").Inc()
+
+	// A CounterVec reports no metric family until a label set is observed
+	// (see the comment above), so the registration check runs after the
+	// increments rather than before.
+	mustContain(t, gatheredNames(t, m), "dz_mbp_parser_frames_total")
+
+	if got := readCounterVec(t, m.FramesTotal, "refdata", "1"); got != 1 {
+		t.Errorf("v1 frames: got %v want 1", got)
+	}
+	if got := readCounterVec(t, m.FramesTotal, "refdata", "3"); got != 2 {
+		t.Errorf("v3 frames: got %v want 2", got)
+	}
+}

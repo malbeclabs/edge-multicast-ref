@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -177,6 +178,11 @@ func (r *Runner) receive(ctx context.Context, port string, conn *net.UDPConn, er
 			r.metrics.ParseErrors.WithLabelValues(port, classifyError(perr)).Inc()
 			continue
 		}
+
+		// Schema Version is byte 2 of the frame header, already validated by
+		// ParseFrame. Read here rather than threaded through the parser, because
+		// the three parsers return different shapes and this is observability.
+		r.metrics.FramesTotal.WithLabelValues(port, strconv.Itoa(int(buf[2]))).Inc()
 
 		// Per-frame defect counts. Returned rather than accumulated on the
 		// parser, because one Parser is shared by all three port goroutines and

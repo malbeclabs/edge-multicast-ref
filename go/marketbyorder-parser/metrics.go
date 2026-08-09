@@ -33,6 +33,12 @@ type Metrics struct {
 	FrameSeqGaps  *prometheus.CounterVec
 	FramesMissing *prometheus.CounterVec
 
+	// FramesTotal counts successfully parsed frames by port and wire schema
+	// version. The version label is what makes a publisher's v1-to-v3 cutover
+	// observable: v3 climbs, v1 goes flat, and v1 reaching zero is when the
+	// legacy decode path can be retired.
+	FramesTotal *prometheus.CounterVec // labels: port, schema_version
+
 	startTime time.Time
 }
 
@@ -105,6 +111,11 @@ func NewMetrics(version, commit string) *Metrics {
 		Help: "Total UDP frames missing (sum of gap magnitudes in header seq), by port.",
 	}, []string{"port"})
 
+	m.FramesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricsNamespace, Name: "frames_total",
+		Help: "Successfully parsed frames, by port and wire schema version.",
+	}, []string{"port", "schema_version"})
+
 	m.BuildInfo = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: metricsNamespace, Name: "build_info",
 		Help: "Build info; value always 1",
@@ -118,7 +129,7 @@ func NewMetrics(version, commit string) *Metrics {
 	reg.MustRegister(
 		m.IngressPackets, m.IngressBytes, m.ParseErrors, m.RecordsTotal, m.SourceLatency, m.SendLatency,
 		m.SocketClients, m.SocketClientDrops, m.SocketRecordsSent, m.SinkWriteErrors,
-		m.FrameSeqGaps, m.FramesMissing,
+		m.FrameSeqGaps, m.FramesMissing, m.FramesTotal,
 		m.BuildInfo, m.UptimeSeconds,
 	)
 	m.BuildInfo.WithLabelValues(version, commit).Set(1)
