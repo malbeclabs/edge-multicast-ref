@@ -15,7 +15,7 @@ func buildFrame(t *testing.T, channel uint8, seq uint64, ts time.Time, resetCoun
 	for _, m := range msgs {
 		total += len(m)
 	}
-	frame := buildFrameHeader(mbpMagic, mbpSchemaVersion, channel, seq, ts, uint8(len(msgs)), resetCount, uint16(total))
+	frame := buildFrameHeader(mbpMagic, mbpSchemaVersionV1, channel, seq, ts, uint8(len(msgs)), resetCount, uint16(total))
 	for _, m := range msgs {
 		frame = append(frame, m...)
 	}
@@ -144,7 +144,7 @@ func TestParseFrame_MessageLengthBelowHeaderFloorRejected(t *testing.T) {
 	for _, length := range []uint8{0, 1, 2, 3} {
 		t.Run(fmt.Sprintf("length=%d", length), func(t *testing.T) {
 			p := &marketByPriceParser{}
-			frame := buildFrameHeader(mbpMagic, mbpSchemaVersion, 0, 1, time.Unix(1700000204, 0), 1, 0, frameHeaderSize+4)
+			frame := buildFrameHeader(mbpMagic, mbpSchemaVersionV1, 0, 1, time.Unix(1700000204, 0), 1, 0, frameHeaderSize+4)
 			frame = append(frame, 0x40, length, 0x00, 0x00) // Type 0x40, Length below the 4-byte header floor
 			_, _, err := p.ParseFrame("mktdata", frame)
 			if !errors.Is(err, errMessageLength) {
@@ -156,7 +156,7 @@ func TestParseFrame_MessageLengthBelowHeaderFloorRejected(t *testing.T) {
 
 func TestParseFrame_MessageLengthOverrunsFrame(t *testing.T) {
 	p := &marketByPriceParser{}
-	frame := buildFrameHeader(mbpMagic, mbpSchemaVersion, 0, 1, time.Unix(1700000205, 0), 1, 0, frameHeaderSize+4)
+	frame := buildFrameHeader(mbpMagic, mbpSchemaVersionV1, 0, 1, time.Unix(1700000205, 0), 1, 0, frameHeaderSize+4)
 	frame = append(frame, 0x40, 200, 0x00, 0x00) // claims 200 bytes, only 4 present
 	if _, _, err := p.ParseFrame("mktdata", frame); err == nil {
 		t.Fatal("expected error for length overrunning the frame")
@@ -165,7 +165,7 @@ func TestParseFrame_MessageLengthOverrunsFrame(t *testing.T) {
 
 func TestParseFrame_BadMagicRejected(t *testing.T) {
 	p := &marketByPriceParser{}
-	frame := buildFrameHeader(0x4444, mbpSchemaVersion, 0, 1, time.Unix(1700000206, 0), 0, 0, frameHeaderSize)
+	frame := buildFrameHeader(0x4444, mbpSchemaVersionV1, 0, 1, time.Unix(1700000206, 0), 0, 0, frameHeaderSize)
 	if _, _, err := p.ParseFrame("mktdata", frame); err == nil {
 		t.Fatal("expected error for market-by-order magic")
 	}

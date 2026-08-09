@@ -49,6 +49,42 @@ func TestEventsWriter_InstrumentDefinition(t *testing.T) {
 	}
 }
 
+func TestEventsWriter_InstrumentDefinitionCarriesSourceID(t *testing.T) {
+	st := newStubEnqueuer()
+	w := NewEventsWriter(st)
+
+	w.Write(ChannelEvent{
+		Kind:         KindInstrumentDefinition,
+		InstrumentID: 11,
+		Record:       instDefRec(11, "BTC-USDT", 5),
+	}, 0, "BTC-USDT", -2, -8)
+
+	row := st.only(t, "instruments")
+	if row["source_id"] != uint16(77) {
+		t.Errorf("source_id: got %v (%T) want uint16(77)", row["source_id"], row["source_id"])
+	}
+}
+
+// A v1 definition carries no Source ID at all. The row must still be written,
+// with the registry's Unknown value rather than being dropped.
+func TestEventsWriter_InstrumentDefinitionWithoutSourceID(t *testing.T) {
+	st := newStubEnqueuer()
+	w := NewEventsWriter(st)
+
+	rec := instDefRec(11, "BTC-USDT", 5)
+	delete(rec.Fields, "source_id")
+	w.Write(ChannelEvent{
+		Kind:         KindInstrumentDefinition,
+		InstrumentID: 11,
+		Record:       rec,
+	}, 0, "BTC-USDT", -2, -8)
+
+	row := st.only(t, "instruments")
+	if row["source_id"] != uint16(0) {
+		t.Errorf("source_id: got %v want uint16(0)", row["source_id"])
+	}
+}
+
 // asset_class, market_model, settle_type and price_bound arrive as raw uint8.
 // The parser stringifies side, action and the reason fields inline but NOT these,
 // and the schema declares them LowCardinality(String), so reading them as strings

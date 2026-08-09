@@ -143,14 +143,22 @@ func (w *chWriter) EnqueueTrade(rec *Record, recvTime time.Time) {
 
 // EnqueueInstrument serializes an InstrumentDefinition into the instruments batcher.
 func (w *chWriter) EnqueueInstrument(rec *Record, recvTime time.Time) {
-	row := map[string]any{
-		"recv_ts":        chTime(recvTime),
-		"instrument_id":  rec.InstrumentID,
+	w.submit("instruments", buildInstrumentRow(rec, recvTime))
+}
+
+func buildInstrumentRow(rec *Record, recvTime time.Time) map[string]any {
+	return map[string]any{
+		"recv_ts":       chTime(recvTime),
+		"instrument_id": rec.InstrumentID,
+		// uintOrZero, not intOrZero: intOrZero returns int64 and serves the
+		// signed exponents below, and an unsigned venue ID must not be able to
+		// arrive sign-extended. Both read through floatField, because records
+		// reach this bot as decoded JSON.
+		"source_id":      uintOrZero(rec, "source_id"),
 		"symbol":         rec.Symbol,
 		"price_exponent": intOrZero(rec, "price_exponent"),
 		"qty_exponent":   intOrZero(rec, "qty_exponent"),
 	}
-	w.submit("instruments", row)
 }
 
 // submit marshals and non-blockingly sends to the named batcher's channel.

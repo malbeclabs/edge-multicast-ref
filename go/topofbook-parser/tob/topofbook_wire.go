@@ -36,6 +36,24 @@ const (
 	frameMagic1 = 0x44
 )
 
+// InstrumentDefinition body lengths and Symbol widths, excluding the 4-byte
+// message header. v3 inserts Source ID (u16) after Instrument ID and widens
+// Symbol from char[16] to char[64]; every field after Instrument ID shifts by
+// 50 bytes. Named to match instDefBodyLenV1/V3 in the marketbyorder and
+// marketbyprice siblings, whose version constants live beside these;
+// topofbook's accepted-version set (schemaVersionV1/schemaVersionV3) lives in
+// topofbook.go.
+//
+// There is no version 2. A 128-byte layout carrying the widened Symbol without
+// Source ID was specified upstream and superseded before any publisher emitted
+// it, so version 2 is rejected here rather than decoded.
+const (
+	instDefSymLenV1  = 16
+	instDefSymLenV3  = 64
+	instDefBodyLenV1 = 76
+	instDefBodyLenV3 = 126
+)
+
 const (
 	msgHeartbeat            uint8 = 0x01
 	msgInstrumentDefinition uint8 = 0x02
@@ -80,7 +98,8 @@ type topOfBookHeartbeat struct {
 
 type topOfBookInstrumentDef struct {
 	InstrumentID  uint32
-	Symbol        string // fixed 16 bytes, null-padded ASCII
+	SourceID      uint16 // 0 at schema v1, which carries no Source ID
+	Symbol        string // fixed 16 bytes (schema v1) or 64 bytes (v3), null-padded ASCII
 	Leg1          string // fixed 8 bytes
 	Leg2          string // fixed 8 bytes
 	AssetClass    uint8
@@ -260,7 +279,7 @@ func decodeTopOfBookFrame(data []byte) (*topOfBookFrame, error) {
 			return nil, fmt.Errorf("decoding message %d body (len=%d): %w", i, bodyLen, r.err)
 		}
 
-		body, err := decodeTopOfBookBody(msg.MsgType, bodyBuf)
+		body, err := decodeTopOfBookBody(msg.MsgType, bodyBuf, f.Header.SchemaVersion)
 		if err != nil {
 			return nil, fmt.Errorf("decoding message %d (type=0x%02x): %w", i, msg.MsgType, err)
 		}
@@ -273,7 +292,7 @@ func decodeTopOfBookFrame(data []byte) (*topOfBookFrame, error) {
 
 // decodeTopOfBookBody dispatches on msg type to decode a message body.
 // Returns (nil, nil) for unknown types so the parser skips them.
-func decodeTopOfBookBody(msgType uint8, buf []byte) (any, error) {
+func decodeTopOfBookBody(msgType uint8, buf []byte, schemaVersion uint8) (any, error) {
 	br := &wireReader{buf: buf}
 
 	switch msgType {
@@ -288,9 +307,44 @@ func decodeTopOfBookBody(msgType uint8, buf []byte) (any, error) {
 		return &b, nil
 
 	case msgInstrumentDefinition:
+		// v3 inserts Source ID (u16) after Instrument ID and widens Symbol from
+		// char[16] to char[64]; every later field shifts by 50 bytes. The body
+		// length cross-checks the declared version, because reading a v1 body
+		// under the v3 layout would consume adjacent fields as source and symbol
+		// bytes and yield a plausible instrument rather than an error.
+		var symLen, wantLen int
+		hasSourceID := false
+		switch schemaVersion {
+		case schemaVersionV1:
+			symLen, wantLen = instDefSymLenV1, instDefBodyLenV1
+		case schemaVersionV3:
+			symLen, wantLen = instDefSymLenV3, instDefBodyLenV3
+			hasSourceID = true
+		default:
+			// Matches the siblings (marketbyorder, marketbyprice): an unsupported
+			// version is rejected here rather than falling through to the v1
+			// layout. This includes version 2, which was specified upstream and
+			// superseded before any publisher emitted it. Call order in Parse
+			// means validateHeader's accepted-version check would otherwise
+			// catch this frame too, but nothing should depend on that ordering —
+			// this decoder must be correct on its own.
+			return nil, fmt.Errorf("instrument_definition: unsupported schema version %d", schemaVersion)
+		}
+		if len(buf) != wantLen {
+			// Deliberately does not use the word "schema" — classifyParseErr in
+			// runner.go buckets on substrings, and this must land in the same
+			// "truncated" bucket as the identical fault on marketbyorder and
+			// marketbyprice, not in "schema_version" alongside the unsupported-
+			// version error above.
+			return nil, fmt.Errorf("instrument_definition: truncated: expected %d bytes at wire version %d, got %d",
+				wantLen, schemaVersion, len(buf))
+		}
 		var b topOfBookInstrumentDef
 		b.InstrumentID = br.u32()
-		b.Symbol = string(br.bytes(16))
+		if hasSourceID {
+			b.SourceID = br.u16()
+		}
+		b.Symbol = string(br.bytes(symLen))
 		b.Leg1 = string(br.bytes(8))
 		b.Leg2 = string(br.bytes(8))
 		b.AssetClass = br.u8()

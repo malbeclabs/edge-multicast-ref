@@ -70,7 +70,8 @@ func main() {
 		}
 	}
 
-	eventsWriter := NewEventsWriter(ch)
+	enq := enqueuerFor(ch)
+	eventsWriter := NewEventsWriter(enq)
 
 	n := *shards
 	if n <= 0 {
@@ -86,7 +87,7 @@ func main() {
 	shardList := make([]*Shard, n)
 	for i := 0; i < n; i++ {
 		s := NewShard(i, n, eventsWriter, nil, metrics)
-		sw := NewSnapshotWriter(ch, *depth, *coalesceMS, metrics, 0, func(s *Shard) func(uint32, func(*Instrument)) {
+		sw := NewSnapshotWriter(enq, *depth, *coalesceMS, metrics, 0, func(s *Shard) func(uint32, func(*Instrument)) {
 			return func(instID uint32, fn func(*Instrument)) {
 				s.mu.Lock()
 				defer s.mu.Unlock()
@@ -121,4 +122,20 @@ func main() {
 		version, *socketPath, *clickhouseURL != "", *depth, *coalesceMS)
 	bot.Run(ctx)
 	log.Println("shutdown complete")
+}
+
+// enqueuerFor adapts a possibly-nil *ClickhouseClient onto the interface the
+// writers take.
+//
+// The guard is load-bearing, not defensive style. A typed nil pointer stored
+// in an interface is NOT == nil, so assigning a nil *ClickhouseClient straight
+// into an enqueuer field makes the writers' `ch == nil` fast path false
+// forever — including under the default --clickhouse-url="", where the bot
+// would then build and immediately discard a row map for every record, and
+// SnapshotWritesTotal would count writes that never happened.
+func enqueuerFor(ch *ClickhouseClient) enqueuer {
+	if ch == nil {
+		return nil
+	}
+	return ch
 }

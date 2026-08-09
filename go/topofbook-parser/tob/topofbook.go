@@ -69,8 +69,17 @@ func (p *TopOfBookParser) InstrumentCount() int {
 }
 
 const (
-	frameHeaderSize   = 24
-	maxSchemaVersion  = 1
+	frameHeaderSize = 24
+
+	// Accepted wire schema versions, as a set rather than a range. There is no
+	// version 2: a 128-byte InstrumentDefinition carrying the widened Symbol
+	// without Source ID was specified upstream and superseded before any
+	// publisher emitted it. A ceiling check (version <= max) would admit those
+	// frames into the decoder, where they would fail later on a length mismatch
+	// and be counted as truncation rather than as an unsupported version.
+	schemaVersionV1 = 1
+	schemaVersionV3 = 3
+
 	maxReasonableMsgs = 200
 
 	// maxBufferedInstruments caps the number of distinct instruments for
@@ -117,8 +126,9 @@ func (p *TopOfBookParser) Parse(data []byte, meta PacketMeta) ([]Record, error) 
 func (p *TopOfBookParser) validateHeader(frame *topOfBookFrame, datagramLen int) error {
 	h := frame.Header
 
-	if h.SchemaVersion == 0 || h.SchemaVersion > maxSchemaVersion {
-		return fmt.Errorf("unsupported schema version %d (expected 1..%d)", h.SchemaVersion, maxSchemaVersion)
+	if h.SchemaVersion != schemaVersionV1 && h.SchemaVersion != schemaVersionV3 {
+		return fmt.Errorf("unsupported schema version %d (expected %d or %d)",
+			h.SchemaVersion, schemaVersionV1, schemaVersionV3)
 	}
 
 	if int(h.FrameLength) != datagramLen {
@@ -192,6 +202,7 @@ func (p *TopOfBookParser) handleInstrumentDef(channelID uint8, seq uint64, reset
 		InstrumentID:   body.InstrumentID,
 		Symbol:         info.Symbol,
 		Fields: map[string]any{
+			"source_id":      body.SourceID,
 			"leg1":           trimNull(body.Leg1),
 			"leg2":           trimNull(body.Leg2),
 			"asset_class":    body.AssetClass,

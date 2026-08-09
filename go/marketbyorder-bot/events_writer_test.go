@@ -38,3 +38,29 @@ func TestBuildEventRow_OmitsSourceTsWhenAbsent(t *testing.T) {
 		t.Errorf("source_ts should be omitted when SourceTSNS==0")
 	}
 }
+
+func TestEventsWriter_InstrumentDefinitionCarriesSourceID(t *testing.T) {
+	cw := &captureWriter{}
+	w := NewEventsWriter(cw)
+
+	w.Write(ChannelEvent{
+		InstrumentID: 4242,
+		Record: Record{
+			Type:         "instrument_definition",
+			InstrumentID: 4242,
+			Fields: map[string]any{
+				"symbol": "BTC-USDT",
+				// float64, not uint16: records reach the bot as decoded JSON.
+				"source_id": float64(77),
+			},
+		},
+	}, 0, "BTC-USDT", -2, -8)
+
+	rows := cw.captured()
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(rows))
+	}
+	if rows[0]["source_id"] != uint16(77) {
+		t.Errorf("source_id: got %v (%T) want uint16(77)", rows[0]["source_id"], rows[0]["source_id"])
+	}
+}

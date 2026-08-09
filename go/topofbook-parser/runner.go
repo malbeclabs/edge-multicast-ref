@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -193,6 +194,13 @@ func (r *Runner) listenPort(ctx context.Context, port int, label string) error {
 			}
 			slog.Warn("parse error", "port", label, "error", err)
 			continue
+		}
+
+		// Schema Version is byte 2 of the frame header, already validated by
+		// Parse. Read here rather than threaded through the parser, because the
+		// three parsers return different shapes and this is observability.
+		if r.cfg.Metrics != nil {
+			r.cfg.Metrics.framesTotal.WithLabelValues(label, strconv.Itoa(int(buf[2]))).Inc()
 		}
 
 		if len(records) > 0 {

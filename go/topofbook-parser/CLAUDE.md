@@ -37,7 +37,7 @@ Fixed-layout, little-endian binary protocol. One UDP datagram = one frame. No va
 
 ```
 magic          u16   0x445A ("DZ", on wire: 5A 44)
-schema_ver     u8    1
+schema_ver     u8    1 or 3 (no version 2; see InstrumentDefinition below)
 channel_id     u8
 sequence       u64   monotonic per publisher
 send_ts        u64   publisher wall clock, ns since epoch
@@ -59,7 +59,7 @@ flags          u16   (0x0001 = snapshot)
 | ID | Name | Body bytes | Channel | Notes |
 |---:|---|---:|---|---|
 | 0x01 | Heartbeat | 16 | either | Idle liveness |
-| 0x02 | InstrumentDefinition | variable | refdata | instrument_id → symbol, price/qty exponents |
+| 0x02 | InstrumentDefinition | 80 (v1) / 130 (v3) | refdata | instrument_id → source_id, symbol, price/qty exponents. Both lengths are exact, matching the Schema Version in the frame header — a frame whose declared version disagrees with the message length it actually carries is rejected, not guessed at. There is no version 2 |
 | 0x03 | Quote (BBO) | 60 | marketdata | Best bid/ask per instrument |
 | 0x04 | Trade | 52 | marketdata | Single trade |
 | 0x05 | ChannelReset | 12 | either | Publisher startup — drop cached state |

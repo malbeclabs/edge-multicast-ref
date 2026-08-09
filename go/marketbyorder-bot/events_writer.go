@@ -7,10 +7,10 @@ import (
 // EventsWriter dispatches Records into ClickHouse rows for events / wire_snapshots /
 // channel_health / instruments tables. Idempotent (just enqueues).
 type EventsWriter struct {
-	ch *ClickhouseClient
+	ch enqueuer
 }
 
-func NewEventsWriter(ch *ClickhouseClient) *EventsWriter {
+func NewEventsWriter(ch enqueuer) *EventsWriter {
 	return &EventsWriter{ch: ch}
 }
 
@@ -28,6 +28,7 @@ func (w *EventsWriter) Write(ev ChannelEvent, channelID uint8, instSymbol string
 			"recv_ts":        chTime(now),
 			"channel_id":     channelID,
 			"instrument_id":  rec.InstrumentID,
+			"source_id":      getUint16(rec.Fields, "source_id"),
 			"symbol":         getString(rec.Fields, "symbol"),
 			"leg1":           getString(rec.Fields, "leg1"),
 			"leg2":           getString(rec.Fields, "leg2"),
