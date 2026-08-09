@@ -35,7 +35,7 @@ type dirtyEntry struct {
 	coalescedCount int
 }
 
-func NewSnapshotWriter(ch *ClickhouseClient, depth int, coalesceMS int, metrics *Metrics, channelID uint8, withInstrument func(uint32, func(*Instrument))) *SnapshotWriter {
+func NewSnapshotWriter(ch enqueuer, depth int, coalesceMS int, metrics *Metrics, channelID uint8, withInstrument func(uint32, func(*Instrument))) *SnapshotWriter {
 	return &SnapshotWriter{
 		ch:               ch,
 		depth:            depth,

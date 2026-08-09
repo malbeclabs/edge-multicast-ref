@@ -38,6 +38,7 @@ func (w *EventsWriter) Write(ev ChannelEvent, channelID uint8, symbol string, pr
 			"recv_ts":       clickhouse.ChTime(now),
 			"channel_id":    channelID,
 			"instrument_id": rec.InstrumentID,
+			"source_id":     getUint16(rec.Fields, "source_id"),
 			"symbol":        getString(rec.Fields, "symbol"),
 			"leg1":          getString(rec.Fields, "leg1"),
 			"leg2":          getString(rec.Fields, "leg2"),

@@ -278,3 +278,28 @@ func TestBuildQuoteRow_OmitsSourceTsWhenAbsent(t *testing.T) {
 func countNewlines(s string) int {
 	return strings.Count(s, "\n")
 }
+
+func TestBuildInstrumentRow_CarriesSourceID(t *testing.T) {
+	now := time.Unix(1700000000, 0).UTC()
+	rec := &Record{
+		InstrumentID: 4242,
+		Symbol:       "BTC-USDT",
+		// float64, not uint16: records reach this bot as decoded JSON.
+		Fields: map[string]any{"source_id": float64(77)},
+	}
+	row := buildInstrumentRow(rec, now)
+	if row["source_id"] != uint64(77) {
+		t.Errorf("source_id: got %v (%T) want uint64(77)", row["source_id"], row["source_id"])
+	}
+}
+
+// A v1 definition carries no Source ID at all. The row must still be built,
+// with the registry's Unknown value.
+func TestBuildInstrumentRow_WithoutSourceID(t *testing.T) {
+	now := time.Unix(1700000000, 0).UTC()
+	rec := &Record{InstrumentID: 4242, Symbol: "BTC-USDT", Fields: map[string]any{}}
+	row := buildInstrumentRow(rec, now)
+	if row["source_id"] != uint64(0) {
+		t.Errorf("source_id: got %v want uint64(0)", row["source_id"])
+	}
+}

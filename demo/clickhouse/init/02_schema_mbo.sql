@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS marketbyorder.instruments (
     recv_ts          DateTime64(9),
     channel_id       UInt8,
     instrument_id    UInt32,
+    source_id        UInt16 DEFAULT 0,
     symbol           LowCardinality(String),
     leg1             LowCardinality(String),
     leg2             LowCardinality(String),

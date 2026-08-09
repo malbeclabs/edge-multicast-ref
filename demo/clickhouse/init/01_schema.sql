@@ -75,9 +75,13 @@ CREATE TABLE IF NOT EXISTS topofbook.trades (
 -- Refdata: most recent instrument definition per instrument_id.
 -- Emitted periodically by the publisher; ReplacingMergeTree keeps the
 -- latest row per (instrument_id) during merges.
+-- Added with feed schema v3. An existing volume predating that column needs
+--   ALTER TABLE <db>.instruments ADD COLUMN source_id UInt16 DEFAULT 0 AFTER instrument_id;
+-- on each of the three instruments tables, or a volume wipe (docker compose down -v).
 CREATE TABLE IF NOT EXISTS topofbook.instruments (
     recv_ts             DateTime64(9),
     instrument_id       UInt32,
+    source_id           UInt16 DEFAULT 0,
     symbol              LowCardinality(String),
     price_exponent      Int8,
     qty_exponent        Int8
