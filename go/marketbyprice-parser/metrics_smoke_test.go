@@ -41,7 +41,7 @@ func TestMetricsNamespaceAndDefectCounters(t *testing.T) {
 
 	// A CounterVec reports no metric family until a label set is observed, so
 	// touch each vec before asserting on it.
-	m.FrameSeqGaps.WithLabelValues("mktdata").Inc()
+	m.FrameSeqGaps.WithLabelValues("mktdata", "10.0.0.1", "1").Inc()
 	m.SnapshotFlagMismatch.WithLabelValues("mktdata").Inc()
 	m.MalformedMessages.WithLabelValues("bookclear_scope_side").Inc()
 	m.SkippedMessages.WithLabelValues("unknown_type").Inc()

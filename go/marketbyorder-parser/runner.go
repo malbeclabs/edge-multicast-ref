@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/netip"
 	"strconv"
 	"sync"
 	"time"
@@ -14,35 +15,69 @@ import (
 
 const maxUDPPacket = 65536
 
-// frameHeaderSeqOffset is the byte offset of the little-endian u64 sequence
-// number in the 24-byte frame header.
 const frameHeaderSeqOffset = 4
+const frameHeaderChannelOffset = 3
 const frameHeaderMinLen = 12 // need at least bytes 0..11 to read the seq field
 
-// seqTracker tracks the per-port frame header sequence number to detect real
-// UDP datagram loss (gaps in the header seq).
-type seqTracker struct {
-	last        uint64
-	initialized bool
+// pubKey identifies one publisher's sequence space.
+//
+// A group and port carries two redundant publishers interleaved packet by
+// packet, distinguished by source address and by Channel ID in the frame
+// header, and each numbers its frames independently. Keyed by port alone, the
+// tracker read the alternation between them as continuous loss.
+//
+// netip.Addr rather than a string: comparable, usable directly as a map key,
+// and no allocation per datagram.
+type pubKey struct {
+	src netip.Addr
+	ch  uint8
 }
 
-// observe records seq and returns (gaps, missing) where gaps is 1 if a
-// discontinuity was detected and missing is the number of missing frames.
-// Reorders/dups (seq <= last) are ignored and return (0, 0).
-func (s *seqTracker) observe(seq uint64) (gaps, missing uint64) {
-	if !s.initialized {
-		s.last = seq
-		s.initialized = true
+// seqTracker tracks the frame header sequence number per publisher to detect
+// real UDP datagram loss (gaps in the header seq).
+type seqTracker struct {
+	last map[pubKey]uint64
+}
+
+// observe records seq for one publisher and returns (gaps, missing) where gaps
+// is 1 if a discontinuity was detected and missing is the number of missing
+// frames. Reorders/dups (seq <= last) are ignored and return (0, 0).
+//
+// A key not seen before establishes its baseline silently and returns (0, 0);
+// that is what keeps a newly-appearing publisher from producing a phantom gap
+// the size of the sequence. It does not make a publisher that restarts in
+// place under the same key safe: its sequence resets to a low value, last
+// stays pinned high, and every later frame takes the seq >= last false
+// branch, so loss for that publisher is never reported again for the life of
+// the process. That in-place-restart case is a known limitation; Reset Count
+// in the frame header is the intended future signal for it.
+func (s *seqTracker) observe(src netip.Addr, ch uint8, seq uint64) (gaps, missing uint64) {
+	if s.last == nil {
+		s.last = make(map[pubKey]uint64)
+	}
+	k := pubKey{src: src, ch: ch}
+	last, seen := s.last[k]
+	if !seen {
+		s.last[k] = seq
 		return 0, 0
 	}
-	if seq > s.last+1 {
+	if seq > last+1 {
 		gaps = 1
-		missing = seq - (s.last + 1)
+		missing = seq - (last + 1)
 	}
-	if seq >= s.last {
-		s.last = seq
+	if seq >= last {
+		s.last[k] = seq
 	}
 	return gaps, missing
+}
+
+// srcAddr normalises a datagram's sender address so one publisher always
+// produces one map key. Shared by both build-tagged readDatagram variants.
+func srcAddr(addr *net.UDPAddr) netip.Addr {
+	if addr == nil {
+		return netip.Addr{}
+	}
+	return addr.AddrPort().Addr().Unmap()
 }
 
 // portConfig binds a label to a UDP listening address.
@@ -150,7 +185,7 @@ func (r *Runner) receive(ctx context.Context, port string, conn *net.UDPConn, er
 		}
 
 		_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-		n, recvTime, recvKind, err := readDatagram(conn, buf)
+		n, src, recvTime, recvKind, err := readDatagram(conn, buf)
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				continue
@@ -159,14 +194,15 @@ func (r *Runner) receive(ctx context.Context, port string, conn *net.UDPConn, er
 			return
 		}
 
-		// Refdata is a low-rate periodic-retransmit stream; per-port frame-seq
-		// gaps there are not a meaningful loss signal (and reflect a shared seq
-		// space), so it's excluded.
+		// Refdata is a low-rate periodic-retransmit stream; frame-seq gaps there
+		// are not a meaningful loss signal, so it's excluded.
 		if n >= frameHeaderMinLen && port != "refdata" {
+			ch := buf[frameHeaderChannelOffset]
 			seq := binary.LittleEndian.Uint64(buf[frameHeaderSeqOffset : frameHeaderSeqOffset+8])
-			if gaps, missing := tracker.observe(seq); gaps > 0 {
-				r.metrics.FrameSeqGaps.WithLabelValues(port).Add(float64(gaps))
-				r.metrics.FramesMissing.WithLabelValues(port).Add(float64(missing))
+			if gaps, missing := tracker.observe(src, ch, seq); gaps > 0 {
+				srcLabel, chLabel := src.String(), strconv.Itoa(int(ch))
+				r.metrics.FrameSeqGaps.WithLabelValues(port, srcLabel, chLabel).Add(float64(gaps))
+				r.metrics.FramesMissing.WithLabelValues(port, srcLabel, chLabel).Add(float64(missing))
 			}
 		}
 

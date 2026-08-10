@@ -5,6 +5,7 @@ package main
 import (
 	"encoding/binary"
 	"net"
+	"net/netip"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -31,16 +32,20 @@ func enableTimestamping(conn *net.UDPConn) error {
 	return setsockoptErr
 }
 
-func readDatagram(conn *net.UDPConn, buf []byte) (int, time.Time, string, error) {
+// readDatagram reads one datagram and returns the sender address plus the
+// kernel receive timestamp when available, otherwise an application-time
+// fallback.
+func readDatagram(conn *net.UDPConn, buf []byte) (int, netip.Addr, time.Time, string, error) {
 	oob := make([]byte, unix.CmsgSpace(16))
-	n, oobn, _, _, err := conn.ReadMsgUDP(buf, oob)
+	n, oobn, _, addr, err := conn.ReadMsgUDP(buf, oob)
 	if err != nil {
-		return 0, time.Time{}, "", err
+		return 0, netip.Addr{}, time.Time{}, "", err
 	}
+	src := srcAddr(addr)
 	if recvTime, ok := extractKernelTimestamp(oob[:oobn]); ok {
-		return n, recvTime.UTC(), recvTimestampKindKernelSoftware, nil
+		return n, src, recvTime.UTC(), recvTimestampKindKernelSoftware, nil
 	}
-	return n, time.Now().UTC(), recvTimestampKindAppFallback, nil
+	return n, src, time.Now().UTC(), recvTimestampKindAppFallback, nil
 }
 
 func extractKernelTimestamp(oob []byte) (time.Time, bool) {

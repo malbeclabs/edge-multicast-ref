@@ -24,8 +24,8 @@ Namespace `dz_mbo_parser`. All metrics are exposed on `--metrics-addr` at `/metr
 | `dz_mbo_parser_socket_client_drops_total{reason}` | counter | Slow socket clients dropped, by reason |
 | `dz_mbo_parser_socket_records_sent_total` | counter | Records written to at least one socket client |
 | `dz_mbo_parser_sink_write_errors_total` | counter | Output sink write failures |
-| `dz_mbo_parser_frame_seq_gaps_total{port}` | counter | Frame-header sequence discontinuities detected (real UDP datagram loss events), by port |
-| `dz_mbo_parser_frames_missing_total{port}` | counter | Total frames missing, summed across gap magnitudes in the frame-header sequence, by port |
+| `dz_mbo_parser_frame_seq_gaps_total{port,source_ip,channel_id}` | counter | Frame-header sequence discontinuities detected (real UDP datagram loss events), by port, publisher source IP, and channel ID |
+| `dz_mbo_parser_frames_missing_total{port,source_ip,channel_id}` | counter | Total frames missing, summed across gap magnitudes in the frame-header sequence, by port, publisher source IP, and channel ID |
 | `dz_mbo_parser_frames_total{port,schema_version}` | counter | Successfully parsed frames, by port and wire Schema Version. The way to watch a publisher's v1-to-v3 cutover: `schema_version="3"` climbing while `schema_version="1"` goes flat, then to zero, is when the v1 decode path can be retired. `schema_version="2"` should never appear; a nonzero count there means a publisher is emitting a version this parser believes does not exist |
 | `dz_mbo_parser_build_info{version,commit}` | gauge | Always `1`; labels carry build version/commit |
 | `dz_mbo_parser_uptime_seconds` | gauge | Seconds since process start |
