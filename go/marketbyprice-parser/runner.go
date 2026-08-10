@@ -43,9 +43,14 @@ type seqTracker struct {
 // is 1 if a discontinuity was detected and missing is the number of missing
 // frames. Reorders/dups (seq <= last) are ignored and return (0, 0).
 //
-// The first frame seen from a publisher establishes its baseline and returns
-// (0, 0). That is what makes a rehomed or newly-appearing publisher safe: it
-// under-reports once rather than inventing a gap the size of the sequence.
+// A key not seen before establishes its baseline silently and returns (0, 0);
+// that is what keeps a newly-appearing publisher from producing a phantom gap
+// the size of the sequence. It does not make a publisher that restarts in
+// place under the same key safe: its sequence resets to a low value, last
+// stays pinned high, and every later frame takes the seq >= last false
+// branch, so loss for that publisher is never reported again for the life of
+// the process. That in-place-restart case is a known limitation; Reset Count
+// in the frame header is the intended future signal for it.
 func (s *seqTracker) observe(src netip.Addr, ch uint8, seq uint64) (gaps, missing uint64) {
 	if s.last == nil {
 		s.last = make(map[pubKey]uint64)
