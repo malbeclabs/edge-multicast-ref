@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Go 1.25.0. Each parser and bot is its own module under a `go.work` workspace — run `go test` from inside the module directory.
-- **Never write "Kalshi" or "Hyperliquid" in commit messages, PR titles, or PR bodies.** Those names are fine inside code and comments. Describe the feed as "the live feed", "the publishers", or by lane (top-of-book, market-by-price, market-by-order).
+- **Never name the upstream venue in commit messages, PR titles, or PR bodies.** Venue names are fine inside code and comments, so grep the existing source if you need to know which ones are meant. In commit and PR prose, describe the feed as "the live feed", "the publishers", or by lane (top-of-book, market-by-price, market-by-order).
 - **Never quote live symbol strings** in commit messages or PR text. Numeric counts, port numbers, channel ids, and field names are all fine.
 - Commit message style follows the repo: `<component>: <lowercase description>`, e.g. `marketbyprice-parser: key sequence tracking by publisher`.
 - Do **not** add a `Co-Authored-By` trailer.
