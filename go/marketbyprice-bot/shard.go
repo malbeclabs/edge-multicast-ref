@@ -125,13 +125,15 @@ func (s *Shard) publishBufferedGauge() {
 	}
 }
 
-// shardMsg is the inbox protocol. A record mutates book state; a reset wipes it
-// and acks; a fence only acks, which is enough to order a channel-scoped write
-// after every preceding instrument write because the inbox is FIFO.
+// shardMsg is the inbox protocol. A record mutates book state; a reset wipes one
+// channel's share of it and acks; a fence only acks, which is enough to order a
+// channel-scoped write after every preceding instrument write because the inbox
+// is FIFO.
 type shardMsg struct {
 	rec  *Record
 	kind shardMsgKind
 	seq  uint16 // manifest seq, for msgManifestPrune
+	ch   uint8  // channel to wipe, for msgReset
 	ack  chan int
 }
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 )
 
@@ -256,8 +257,8 @@ func TestDispatch_ResetCountChangeRunsBarrierThenRoutesHeldRecord(t *testing.T) 
 	c.Dispatch(held)
 	<-done
 
-	if c.resetCount != 1 {
-		t.Errorf("resetCount: got %d want 1", c.resetCount)
+	if got := c.resetCount[held.ChannelID]; got != 1 {
+		t.Errorf("resetCount[%d]: got %d want 1", held.ChannelID, got)
 	}
 	if len(c.open) != 0 {
 		t.Errorf("open groups must be cleared by the barrier: %+v", c.open)
@@ -265,6 +266,99 @@ func TestDispatch_ResetCountChangeRunsBarrierThenRoutesHeldRecord(t *testing.T) 
 	// The held record is re-dispatched as the first record of the new era.
 	if n := len(drain(shards[1])); n != 1 { // 3 % 2 == 1
 		t.Errorf("held record should be routed after the barrier, got %d", n)
+	}
+}
+
+// countResetBarriers dispatches recs and reports how many reset barriers fired,
+// acking each one so a barrier that does fire cannot wedge the ack wait.
+func countResetBarriers(t *testing.T, c *Coordinator, shards []*Shard, recs []Record) int {
+	t.Helper()
+	var n int64
+	done := make(chan struct{})
+	stop := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			for i := range shards {
+				select {
+				case m := <-shards[i].inbox:
+					if m.kind == msgReset {
+						atomic.AddInt64(&n, 1)
+						// Stand in for the shard goroutine, so the wipe the
+						// barrier orders actually lands on shard state.
+						shards[i].resetChannel(m.ch)
+						m.ack <- i
+					}
+				default:
+				}
+			}
+		}
+	}()
+	for _, r := range recs {
+		c.Dispatch(r)
+	}
+	close(stop)
+	<-done
+	return int(atomic.LoadInt64(&n))
+}
+
+// A multicast group can carry two redundant publishers interleaved on the same
+// ports, distinguished only by channel_id. Reset Count is per publisher and is
+// stable while neither is resetting, so the differing values must NOT be read as
+// a reset. Treating Reset Count as one global value made every alternation
+// between the two channels trip the barrier, wiping refdata and leaving every
+// book read-out with an empty symbol.
+func TestDispatch_InterleavedChannelsWithDistinctResetCountsRunNoBarrier(t *testing.T) {
+	c, shards := newTestCoordinator(t, 2)
+
+	var recs []Record
+	for i := 0; i < 8; i++ {
+		a := levelUpdateRec(2, uint64(100+i), uint32(1+i), "bid", 1000, 50)
+		a.ChannelID, a.ResetCount = 10, 200
+		b := levelUpdateRec(2, uint64(100+i), uint32(1+i), "bid", 1000, 50)
+		b.ChannelID, b.ResetCount = 110, 194
+		recs = append(recs, a, b)
+	}
+
+	if got := countResetBarriers(t, c, shards, recs); got != 0 {
+		t.Errorf("interleaving two steady channels ran %d reset barriers, want 0", got)
+	}
+}
+
+// A genuine Reset Count change on one channel must still run a barrier, and must
+// leave the other channel's instruments intact.
+func TestDispatch_ResetOnOneChannelSparesTheOther(t *testing.T) {
+	c, shards := newTestCoordinator(t, 1)
+	s := shards[0]
+
+	keep := instKey{ch: 110, id: 2}
+	wipe := instKey{ch: 10, id: 2}
+	s.instruments[keep] = NewInstrument(2, "KEEP", -2, -8)
+	s.instruments[wipe] = NewInstrument(2, "WIPE", -2, -8)
+	s.refdata[keep] = InstrumentDef{Symbol: "KEEP"}
+	s.refdata[wipe] = InstrumentDef{Symbol: "WIPE"}
+
+	steady := levelUpdateRec(2, 100, 1, "bid", 1000, 50)
+	steady.ChannelID, steady.ResetCount = 10, 200
+	bumped := levelUpdateRec(2, 101, 2, "bid", 1000, 50)
+	bumped.ChannelID, bumped.ResetCount = 10, 201
+
+	if got := countResetBarriers(t, c, shards, []Record{steady, bumped}); got != 1 {
+		t.Fatalf("a real Reset Count change ran %d barriers, want 1", got)
+	}
+	if _, ok := s.instruments[keep]; !ok {
+		t.Error("channel 110 instrument was wiped by a channel 10 reset")
+	}
+	if _, ok := s.refdata[keep]; !ok {
+		t.Error("channel 110 refdata was wiped by a channel 10 reset")
+	}
+	if _, ok := s.instruments[wipe]; ok {
+		t.Error("channel 10 instrument survived its own channel's reset")
 	}
 }
 
