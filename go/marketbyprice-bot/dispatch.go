@@ -329,13 +329,41 @@ func (s *Shard) pruneManifest(newSeq uint16) {
 	s.publishBufferedGauge()
 }
 
-func (s *Shard) reset() {
-	s.instruments = map[instKey]*Instrument{}
-	s.refdata = map[instKey]InstrumentDef{}
-	s.deltaBuf = map[instKey][]BufferedDelta{}
-	s.bufferedN = 0
-	s.crossed = map[instKey]struct{}{}
-	s.touched = map[instKey]struct{}{}
+// resetChannel discards every instrument owned by one channel.
+//
+// Scoped to a channel, not the whole shard, because a group can carry two
+// redundant publishers interleaved on the same ports under different
+// channel_ids. Reset Count is per publisher, so a reset on one says nothing
+// about the other, and wiping both would throw away books that never reset.
+func (s *Shard) resetChannel(ch uint8) {
+	for k := range s.instruments {
+		if k.ch == ch {
+			delete(s.instruments, k)
+		}
+	}
+	for k := range s.refdata {
+		if k.ch == ch {
+			delete(s.refdata, k)
+		}
+	}
+	for k, buf := range s.deltaBuf {
+		if k.ch == ch {
+			s.bufferedN -= len(buf)
+			delete(s.deltaBuf, k)
+		}
+	}
+	for k := range s.crossed {
+		if k.ch == ch {
+			delete(s.crossed, k)
+		}
+	}
+	for k := range s.touched {
+		if k.ch == ch {
+			delete(s.touched, k)
+		}
+	}
+	// Batch boundaries are channel-scoped on the wire but this flag is not, so
+	// the surviving channel's next boundary re-arms it.
 	s.sawBatchBoundary = false
 	// Republish both gauges. Zeroing the state without re-exporting leaves each
 	// series holding its pre-reset value indefinitely on a shard that then goes
@@ -439,7 +467,7 @@ func (s *Shard) Run(ctx context.Context) {
 				s.clearShadows()
 			case msgReset:
 				s.mu.Lock()
-				s.reset()
+				s.resetChannel(msg.ch)
 				s.mu.Unlock()
 				// Drop queued snapshot work for books that no longer exist, and
 				// bump the generation so a batch already extracted is abandoned

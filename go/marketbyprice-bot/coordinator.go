@@ -44,8 +44,13 @@ type Coordinator struct {
 	eventsW *EventsWriter
 	metrics *Metrics
 
-	resetSeen  bool
-	resetCount uint8
+	// Reset Count is per publisher, and a group can carry two redundant
+	// publishers interleaved on the same ports under different channel_ids. Held
+	// as one global value, their differing-but-steady counts read as a reset on
+	// every alternation between them: the barrier fired thousands of times a
+	// minute, wiping refdata faster than it could be relearned, and every book
+	// read-out went out with an empty symbol.
+	resetCount map[uint8]uint8 // per channel_id
 	manifest   ManifestState
 	open       map[uint8]openGroup // per channel_id
 }
@@ -58,6 +63,8 @@ func NewCoordinator(ctx context.Context, shards []*Shard, eventsW *EventsWriter,
 		eventsW: eventsW,
 		metrics: metrics,
 		open:    map[uint8]openGroup{},
+
+		resetCount: map[uint8]uint8{},
 	}
 }
 
@@ -75,13 +82,11 @@ func (c *Coordinator) shardFor(instrumentID uint32) int {
 
 // Dispatch implements Dispatcher. Called synchronously from the bot read loop.
 func (c *Coordinator) Dispatch(rec Record) {
-	if c.resetSeen && rec.ResetCount != c.resetCount {
+	if prev, seen := c.resetCount[rec.ChannelID]; seen && rec.ResetCount != prev {
 		c.runResetBarrier(rec)
 		return
-	}
-	if !c.resetSeen {
-		c.resetSeen = true
-		c.resetCount = rec.ResetCount
+	} else if !seen {
+		c.resetCount[rec.ChannelID] = rec.ResetCount
 	}
 	switch rec.Type {
 	case "level_update", "book_clear", "instrument_definition", "instrument_reset", "trade", "liquidation":
@@ -214,15 +219,21 @@ func (c *Coordinator) applyManifest(rec Record) {
 	}
 }
 
-// runResetBarrier drains every shard, wipes coordinator state, then re-routes the
-// triggering record as the first record of the new era. Sends and ack-waits are
-// ctx-aware so a shutdown mid-barrier cannot wedge the read loop.
+// runResetBarrier drains every shard, wipes the resetting channel's state, then
+// re-routes the triggering record as the first record of that channel's new era.
+// Sends and ack-waits are ctx-aware so a shutdown mid-barrier cannot wedge the
+// read loop.
+//
+// Every shard is drained even though only one channel is wiped: the barrier's
+// job is to order the wipe after all records already in flight, and any shard
+// may hold records for this channel.
 func (c *Coordinator) runResetBarrier(held Record) {
+	ch := held.ChannelID
 	acks := make(chan int, c.n)
 	for _, s := range c.shards {
 		go func(s *Shard) {
 			select {
-			case s.inbox <- shardMsg{kind: msgReset, ack: acks}:
+			case s.inbox <- shardMsg{kind: msgReset, ch: ch, ack: acks}:
 			case <-c.ctx.Done():
 			}
 		}(s)
@@ -238,12 +249,15 @@ func (c *Coordinator) runResetBarrier(held Record) {
 	if c.metrics != nil {
 		c.metrics.ChannelResetsTotal.Inc()
 	}
-	c.open = map[uint8]openGroup{}
+	delete(c.open, ch)
+	// The manifest is published per channel but tracked once. Clearing it on any
+	// channel's reset keeps the old behaviour of relearning it from the next
+	// manifest_summary.
 	c.manifest = ManifestState{}
-	c.resetCount = held.ResetCount
+	c.resetCount[ch] = held.ResetCount
 
-	// resetSeen is already true and resetCount now equals held.ResetCount, so
-	// this re-entry falls through to normal classification.
+	// resetCount[ch] now equals held.ResetCount, so this re-entry falls through
+	// to normal classification.
 	c.Dispatch(held)
 }
 

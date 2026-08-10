@@ -442,7 +442,7 @@ func TestReset_RepublishesGauges(t *testing.T) {
 		t.Fatalf("setup: buffered gauge should be 1, got %v", got)
 	}
 
-	s.reset()
+	s.resetChannel(0)
 
 	if got := gaugeRead(m.CrossedInstruments.WithLabelValues("0")); got != 0 {
 		t.Errorf("crossed_instruments must be republished as 0 after reset: got %v", got)
