@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -120,8 +121,8 @@ func TestCoordinator_ResetBarrierWipesShardsThenRoutesHeldRecord(t *testing.T) {
 	if !newHere {
 		t.Error("held first new-era record (instrument 5) not applied to shard 2")
 	}
-	if c.resetCount != 2 {
-		t.Errorf("coordinator resetCount = %d, want 2", c.resetCount)
+	if c.resetCount[0] != 2 {
+		t.Errorf("coordinator resetCount[0] = %d, want 2", c.resetCount[0])
 	}
 	if got := testCounter(t, metrics.ChannelResetsTotal); got != 1 {
 		t.Errorf("channel_resets_total = %v, want 1", got)
@@ -231,8 +232,8 @@ func TestCoordinator_ResetBarrierHandlesChannelScopedFirstFrame(t *testing.T) {
 	c.Dispatch(Record{Type: "manifest_summary", ChannelID: 0, ResetCount: 2,
 		Timestamp: time.Unix(1700000000, 0), Fields: map[string]any{
 			"manifest_seq": float64(1), "valid": float64(1), "instrument_count": float64(0)}})
-	if c.resetCount != 2 {
-		t.Errorf("resetCount = %d, want 2", c.resetCount)
+	if c.resetCount[0] != 2 {
+		t.Errorf("resetCount[0] = %d, want 2", c.resetCount[0])
 	}
 }
 
@@ -251,8 +252,7 @@ func TestCoordinator_ResetBarrierEscapesOnCtxCancel(t *testing.T) {
 	defer cancel()
 	c := NewCoordinator(ctx, shards, NewEventsWriter(nil), metrics)
 	// Prime the barrier predicate. Do NOT start shard.Run, so no acks can arrive.
-	c.resetSeen = true
-	c.resetCount = 1
+	c.resetCount[0] = 1
 
 	dispatchDone := make(chan struct{})
 	go func() {
@@ -305,5 +305,114 @@ func TestCoordinator_FenceEscapesOnCtxCancel(t *testing.T) {
 	case <-dispatchDone:
 	case <-time.After(2 * time.Second):
 		t.Fatal("coordinator fence hung after ctx cancel")
+	}
+}
+
+// newCoordWithShards is newCoordWithCapture's sibling, returning the shards
+// themselves so a test can assert on the state a barrier did or did not wipe.
+func newCoordWithShards(n int) (*Coordinator, []*Shard) {
+	metrics := stubMetrics()
+	shards := make([]*Shard, n)
+	for i := 0; i < n; i++ {
+		shards[i] = NewShard(i, n, NewEventsWriter(nil), nil, metrics)
+	}
+	return NewCoordinator(context.Background(), shards, NewEventsWriter(nil), metrics), shards
+}
+
+// countResetBarriers dispatches recs and reports how many reset barriers fired,
+// acking each one so a barrier that does fire cannot wedge the ack wait, and
+// applying the wipe the barrier orders so shard state reflects it.
+func countResetBarriers(t *testing.T, c *Coordinator, shards []*Shard, recs []Record) int {
+	t.Helper()
+	var n int64
+	done := make(chan struct{})
+	stop := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			for i := range shards {
+				select {
+				case m := <-shards[i].inbox:
+					if m.kind == msgReset {
+						atomic.AddInt64(&n, 1)
+						shards[i].resetChannel(m.ch)
+						m.ack <- i
+					}
+				default:
+				}
+			}
+		}
+	}()
+	for _, r := range recs {
+		c.Dispatch(r)
+	}
+	close(stop)
+	<-done
+	return int(atomic.LoadInt64(&n))
+}
+
+// A group can carry two redundant publishers interleaved on the same ports,
+// distinguished only by channel_id. Reset Count is per publisher and is stable
+// while neither is resetting, so the differing values must NOT be read as a
+// reset.
+func TestDispatch_InterleavedChannelsWithDistinctResetCountsRunNoBarrier(t *testing.T) {
+	c, shards := newCoordWithShards(2)
+
+	var recs []Record
+	for i := 0; i < 8; i++ {
+		a := Record{Type: "trade", Port: "mktdata", ChannelID: 10, InstrumentID: 2,
+			ResetCount: 200, Fields: map[string]any{}}
+		b := Record{Type: "trade", Port: "mktdata", ChannelID: 110, InstrumentID: 2,
+			ResetCount: 194, Fields: map[string]any{}}
+		recs = append(recs, a, b)
+	}
+
+	if got := countResetBarriers(t, c, shards, recs); got != 0 {
+		t.Errorf("interleaving two steady channels ran %d reset barriers, want 0", got)
+	}
+}
+
+// A genuine Reset Count change on one channel must still run a barrier, and must
+// leave the other channel's instruments, refdata and snapshot contexts intact.
+func TestDispatch_ResetOnOneChannelSparesTheOther(t *testing.T) {
+	c, shards := newCoordWithShards(1)
+	s := shards[0]
+
+	keep := instKey{ch: 110, id: 2}
+	wipe := instKey{ch: 10, id: 2}
+	s.instruments[keep] = NewInstrument(2, "KEEP", -2, -8)
+	s.instruments[wipe] = NewInstrument(2, "WIPE", -2, -8)
+	s.refdata[keep] = InstrumentDef{Symbol: "KEEP"}
+	s.refdata[wipe] = InstrumentDef{Symbol: "WIPE"}
+	s.snapCtx[snapKey{ch: 110, snap: 1}] = SnapshotContext{}
+	s.snapCtx[snapKey{ch: 10, snap: 1}] = SnapshotContext{}
+
+	steady := Record{Type: "trade", Port: "mktdata", ChannelID: 10, InstrumentID: 2,
+		ResetCount: 200, Fields: map[string]any{}}
+	bumped := Record{Type: "trade", Port: "mktdata", ChannelID: 10, InstrumentID: 2,
+		ResetCount: 201, Fields: map[string]any{}}
+
+	if got := countResetBarriers(t, c, shards, []Record{steady, bumped}); got != 1 {
+		t.Fatalf("a real Reset Count change ran %d barriers, want 1", got)
+	}
+	if _, ok := s.instruments[keep]; !ok {
+		t.Error("channel 110 instrument was wiped by a channel 10 reset")
+	}
+	if _, ok := s.refdata[keep]; !ok {
+		t.Error("channel 110 refdata was wiped by a channel 10 reset")
+	}
+	if _, ok := s.snapCtx[snapKey{ch: 110, snap: 1}]; !ok {
+		t.Error("channel 110 snapshot context was wiped by a channel 10 reset")
+	}
+	if _, ok := s.instruments[wipe]; ok {
+		t.Error("channel 10 instrument survived its own channel's reset")
+	}
+	if _, ok := s.snapCtx[snapKey{ch: 10, snap: 1}]; ok {
+		t.Error("channel 10 snapshot context survived its own channel's reset")
 	}
 }

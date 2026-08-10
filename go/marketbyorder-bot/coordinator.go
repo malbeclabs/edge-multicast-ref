@@ -6,7 +6,7 @@ import "context"
 // and routes each record to exactly one shard (by instrument_id % N), or to a
 // direct-write / barrier / fence path. Shards own all instrument-scoped state.
 //
-// Dispatch is NOT safe for concurrent callers: it mutates resetSeen/resetCount/
+// Dispatch is NOT safe for concurrent callers: it mutates resetCount/
 // snapshotRoute/seqLast/manifest without locks, on the assumption that the
 // only caller is the synchronous bot read loop.
 type Coordinator struct {
@@ -16,9 +16,13 @@ type Coordinator struct {
 	eventsW *EventsWriter
 	metrics *Metrics
 
-	resetSeen     bool
-	resetCount    uint8
-	manifest      ManifestState // parity bookkeeping; not read for logic
+	// Reset Count is per publisher, and a group can carry two redundant
+	// publishers interleaved on the same ports under different channel_ids.
+	// Held as one global value, their differing-but-steady counts read as a
+	// reset on every alternation between them, wiping instrument state
+	// faster than it could be relearned.
+	resetCount    map[uint8]uint8 // per channel_id
+	manifest      ManifestState   // parity bookkeeping; not read for logic
 	seqLast       map[string]uint64
 	snapshotRoute map[snapKey]int
 }
@@ -38,19 +42,19 @@ func NewCoordinator(ctx context.Context, shards []*Shard, eventsW *EventsWriter,
 		metrics:       metrics,
 		seqLast:       map[string]uint64{},
 		snapshotRoute: map[snapKey]int{},
+
+		resetCount: map[uint8]uint8{},
 	}
 }
 
 // Dispatch implements Dispatcher. Called synchronously from the bot read loop.
 func (c *Coordinator) Dispatch(rec Record) {
 	// Channel-reset barrier: reset_count change. (Implemented in Task 7.)
-	if c.resetSeen && rec.ResetCount != c.resetCount {
+	if prev, seen := c.resetCount[rec.ChannelID]; seen && rec.ResetCount != prev {
 		c.runResetBarrier(rec)
 		return
-	}
-	if !c.resetSeen {
-		c.resetSeen = true
-		c.resetCount = rec.ResetCount
+	} else if !seen {
+		c.resetCount[rec.ChannelID] = rec.ResetCount
 	}
 	c.seqLast[rec.Port] = rec.SequenceNumber
 
@@ -107,11 +111,12 @@ func recPtr(rec Record) *Record {
 // (the bot is shutting down), we abandon the barrier and return without
 // routing the held record. No consistency requirement to uphold post-shutdown.
 func (c *Coordinator) runResetBarrier(held Record) {
+	ch := held.ChannelID
 	acks := make(chan int, c.n)
 	for _, s := range c.shards {
 		go func(s *Shard) {
 			select {
-			case s.inbox <- shardMsg{kind: msgReset, ack: acks}:
+			case s.inbox <- shardMsg{kind: msgReset, ch: ch, ack: acks}:
 			case <-c.ctx.Done():
 			}
 		}(s)
@@ -127,14 +132,18 @@ func (c *Coordinator) runResetBarrier(held Record) {
 	if c.metrics != nil {
 		c.metrics.ChannelResetsTotal.Inc()
 	}
-	c.snapshotRoute = map[snapKey]int{}
+	for k := range c.snapshotRoute {
+		if k.ch == ch {
+			delete(c.snapshotRoute, k)
+		}
+	}
 	c.seqLast = map[string]uint64{}
 	c.manifest = ManifestState{}
-	c.resetCount = held.ResetCount
+	c.resetCount[ch] = held.ResetCount
 
 	// Route the held record as the first new-era frame, via the full classifier.
-	// resetSeen is already true and resetCount now equals held.ResetCount, so
-	// this re-entry into Dispatch falls through to normal classification.
+	// resetCount[ch] now equals held.ResetCount, so this re-entry into Dispatch
+	// falls through to normal classification.
 	c.Dispatch(held)
 }
 
