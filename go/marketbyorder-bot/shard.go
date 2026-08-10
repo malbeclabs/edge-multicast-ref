@@ -525,6 +525,10 @@ func (s *Shard) Run(ctx context.Context) {
 	}
 }
 
+// shardMsg is the inbox protocol. A record mutates book state; a reset wipes one
+// channel's share of it and acks; a fence only acks, which is enough to order a
+// channel-scoped write after every preceding instrument write because the inbox
+// is FIFO.
 type shardMsg struct {
 	rec  *Record
 	kind shardMsgKind
