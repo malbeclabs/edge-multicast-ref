@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -17,37 +18,66 @@ import (
 const (
 	maxDatagramSize = 65535
 	summaryInterval = 30 * time.Second
-
-	// frameHeaderSeqOffset is the byte offset of the little-endian u64 sequence
-	// number in the 24-byte frame header.
-	frameHeaderSeqOffset = 4
-	frameHeaderMinLen    = 12 // need at least bytes 0..11 to read the seq field
 )
 
-// seqTracker tracks the per-port frame header sequence number to detect real
-// UDP datagram loss (gaps in the header seq).
-type seqTracker struct {
-	last        uint64
-	initialized bool
+const frameHeaderSeqOffset = 4
+const frameHeaderChannelOffset = 3
+const frameHeaderMinLen = 12 // need at least bytes 0..11 to read the seq field
+
+// pubKey identifies one publisher's sequence space.
+//
+// A group and port carries two redundant publishers interleaved packet by
+// packet, distinguished by source address and by Channel ID in the frame
+// header, and each numbers its frames independently. Keyed by port alone, the
+// tracker read the alternation between them as continuous loss.
+//
+// netip.Addr rather than a string: comparable, usable directly as a map key,
+// and no allocation per datagram.
+type pubKey struct {
+	src netip.Addr
+	ch  uint8
 }
 
-// observe records seq and returns (gaps, missing) where gaps is 1 if a
-// discontinuity was detected and missing is the number of missing frames.
-// Reorders/dups (seq <= last) are ignored and return (0, 0).
-func (s *seqTracker) observe(seq uint64) (gaps, missing uint64) {
-	if !s.initialized {
-		s.last = seq
-		s.initialized = true
+// seqTracker tracks the frame header sequence number per publisher to detect
+// real UDP datagram loss (gaps in the header seq).
+type seqTracker struct {
+	last map[pubKey]uint64
+}
+
+// observe records seq for one publisher and returns (gaps, missing) where gaps
+// is 1 if a discontinuity was detected and missing is the number of missing
+// frames. Reorders/dups (seq <= last) are ignored and return (0, 0).
+//
+// The first frame seen from a publisher establishes its baseline and returns
+// (0, 0). That is what makes a rehomed or newly-appearing publisher safe: it
+// under-reports once rather than inventing a gap the size of the sequence.
+func (s *seqTracker) observe(src netip.Addr, ch uint8, seq uint64) (gaps, missing uint64) {
+	if s.last == nil {
+		s.last = make(map[pubKey]uint64)
+	}
+	k := pubKey{src: src, ch: ch}
+	last, seen := s.last[k]
+	if !seen {
+		s.last[k] = seq
 		return 0, 0
 	}
-	if seq > s.last+1 {
+	if seq > last+1 {
 		gaps = 1
-		missing = seq - (s.last + 1)
+		missing = seq - (last + 1)
 	}
-	if seq >= s.last {
-		s.last = seq
+	if seq >= last {
+		s.last[k] = seq
 	}
 	return gaps, missing
+}
+
+// srcAddr normalises a datagram's sender address so one publisher always
+// produces one map key. Shared by both build-tagged readDatagram variants.
+func srcAddr(addr *net.UDPAddr) netip.Addr {
+	if addr == nil {
+		return netip.Addr{}
+	}
+	return addr.AddrPort().Addr().Unmap()
 }
 
 type RunnerConfig struct {
@@ -155,7 +185,7 @@ func (r *Runner) listenPort(ctx context.Context, port int, label string) error {
 		default:
 		}
 
-		n, recvTime, recvKind, err := readDatagram(conn, buf)
+		n, src, recvTime, recvKind, err := readDatagram(conn, buf)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -164,14 +194,15 @@ func (r *Runner) listenPort(ctx context.Context, port int, label string) error {
 			continue
 		}
 
-		// Refdata is a low-rate periodic-retransmit stream; per-port frame-seq
-		// gaps there are not a meaningful loss signal (and reflect a shared seq
-		// space), so it's excluded.
+		// Refdata is a low-rate periodic-retransmit stream; frame-seq gaps there
+		// are not a meaningful loss signal, so it's excluded.
 		if n >= frameHeaderMinLen && label != "refdata" {
+			ch := buf[frameHeaderChannelOffset]
 			seq := binary.LittleEndian.Uint64(buf[frameHeaderSeqOffset : frameHeaderSeqOffset+8])
-			if gaps, missing := tracker.observe(seq); gaps > 0 && r.cfg.Metrics != nil {
-				r.cfg.Metrics.frameSeqGaps.WithLabelValues(label).Add(float64(gaps))
-				r.cfg.Metrics.framesMissing.WithLabelValues(label).Add(float64(missing))
+			if gaps, missing := tracker.observe(src, ch, seq); gaps > 0 && r.cfg.Metrics != nil {
+				srcLabel, chLabel := src.String(), strconv.Itoa(int(ch))
+				r.cfg.Metrics.frameSeqGaps.WithLabelValues(label, srcLabel, chLabel).Add(float64(gaps))
+				r.cfg.Metrics.framesMissing.WithLabelValues(label, srcLabel, chLabel).Add(float64(missing))
 			}
 		}
 

@@ -134,13 +134,13 @@ func newMetrics() *metrics {
 
 	m.frameSeqGaps = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "dz_subscriber_frame_seq_gaps_total",
-		Help: "Number of UDP frame header sequence discontinuities (real datagram loss events), by port.",
-	}, []string{"port"})
+		Help: "Number of UDP frame header sequence discontinuities (real datagram loss events), by port and publisher.",
+	}, []string{"port", "source_ip", "channel_id"})
 
 	m.framesMissing = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "dz_subscriber_frames_missing_total",
-		Help: "Total UDP frames missing (sum of gap magnitudes in header seq), by port.",
-	}, []string{"port"})
+		Help: "Total UDP frames missing (sum of gap magnitudes in header seq), by port and publisher.",
+	}, []string{"port", "source_ip", "channel_id"})
 
 	m.framesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "dz_subscriber_frames_total",

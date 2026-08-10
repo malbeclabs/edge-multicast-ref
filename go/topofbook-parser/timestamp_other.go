@@ -4,6 +4,7 @@ package main
 
 import (
 	"net"
+	"net/netip"
 	"time"
 )
 
@@ -16,10 +17,11 @@ func enableTimestamping(_ *net.UDPConn) error {
 	return nil
 }
 
-func readDatagram(conn *net.UDPConn, buf []byte) (int, time.Time, string, error) {
-	n, _, err := conn.ReadFromUDP(buf)
+// readDatagram falls back to application time on non-Linux platforms.
+func readDatagram(conn *net.UDPConn, buf []byte) (int, netip.Addr, time.Time, string, error) {
+	n, addr, err := conn.ReadFromUDP(buf)
 	if err != nil {
-		return 0, time.Time{}, "", err
+		return 0, netip.Addr{}, time.Time{}, "", err
 	}
-	return n, time.Now().UTC(), recvTimestampKindAppFallback, nil
+	return n, srcAddr(addr), time.Now().UTC(), recvTimestampKindAppFallback, nil
 }
