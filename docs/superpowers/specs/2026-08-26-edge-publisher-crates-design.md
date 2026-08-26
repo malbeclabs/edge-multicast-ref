@@ -179,6 +179,31 @@ lap at 80% of the cycle period, because the period is a maximum on the interval
 between retransmissions of any single definition rather than a lap target, and a
 lap sized at exactly the period violates rule 1 under ordinary timer jitter.
 
+### Two publishers transmit a message on a reserved type ID
+
+Type ID `0x05` is marked *(reserved)* in the market-by-price, market-by-order
+and order-intent specs, and the perp-stats spec states that `0x05` "is reserved
+there". No current spec defines a message at `0x05`, and no current spec
+mentions `ChannelReset` at all.
+
+Two publishers define a `ChannelReset` message at `0x05` and transmit it. One
+sends it on both ports at startup as a handshake, before the manifest and the
+first reference-data cycle.
+
+This does not break a conformant subscriber, which skips an unknown type using
+the Message Length field. It costs two things anyway. A reserved identifier is
+occupied on the live wire by a private message, so assigning `0x05` upstream
+later would collide with a meaning already in use. And the reference-data
+supplement already specifies the reset mechanism as header-only: rule 7 says a
+publisher resets by incrementing `Reset Count` in the datagram header and
+restarting `Sequence Number` at 0, which is what subscribers key on.
+
+`dz-edge-core` therefore does not encode a message at `0x05`. Whether the
+startup handshake is worth keeping is an upstream question: if it is, it should
+be proposed as an additive change and given a real identifier, per the
+playbook's rule for anything the specification has no field for. Until then the
+shared codec emits the reset the supplement defines and nothing else.
+
 ### The mandated metrics library does not exist
 
 Playbook Phase 6.5 declares the `dz_publisher_*` names normative and says to
@@ -242,7 +267,7 @@ crates must be able to follow.
 
 | Crate | Holds |
 |---|---|
-| `dz-edge-core` | 24-byte datagram header, 4-byte message header, `DatagramBuilder` with the 1,232 clamp, shared enumerations, `Heartbeat`, `ChannelReset`, `EndOfSession`, `BatchBoundary`, `InstrumentReset`, `SnapshotEnd`, `DecodeError` |
+| `dz-edge-core` | 24-byte datagram header, 4-byte message header, `DatagramBuilder` with the 1,232 clamp, shared enumerations, `Heartbeat`, `EndOfSession`, `BatchBoundary`, `InstrumentReset`, `SnapshotEnd`, `DecodeError` |
 | `dz-edge-refdata` | `InstrumentDefinition`, `ManifestSummary`. Encodes Schema Version 3 only. Decodes 1 and 3 |
 | `dz-edge-tob` | `Quote`, `Trade` |
 | `dz-edge-mbp` | `LevelUpdate`, `BookClear`, `SnapshotLevel`, the 40-byte `SnapshotBegin` |
@@ -685,16 +710,11 @@ cross-repository consumption.
 Not here, and not in one shared index. A venue repository records which label it
 is; this repository records nothing.
 
----
-
-## Open questions
-
-**Whether the venue repositories keep their own Cargo workspaces.** This design
-leaves each venue with a workspace holding its adapter, its `main` and its
-configuration, depending on the shared crates by tag. The alternative moves the
-binaries here. The venue repositories hold the Ansible roles, the Terraform and
-the operational history, so splitting a publisher across two repositories has a
-cost that has not been weighed.
+**Venue repositories keep their own Cargo workspaces.** Each venue builds its
+own binary from a workspace holding its adapter, its `main` and its
+configuration, depending on the shared crates by tag. The venue repository
+already holds the Ansible role, the Terraform and the operational history for
+that publisher, and splitting the binary away from them buys nothing.
 
 ---
 
