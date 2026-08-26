@@ -523,26 +523,53 @@ per venue leaves the dashboards split for the duration.
 
 ---
 
+## Decisions
+
+**Publishing the egress logic: yes.** The publisher layer lives here, and the
+DoubleZero egress design is published with it: the route-derived source IP
+address, the `IP_MULTICAST_IF` finding, the transmitter discipline. The
+venue-facing page for venues standing up their own publishers is the reason this
+is right rather than merely tolerable, since those venues need exactly these
+crates.
+
+The playbook must be updated when this work lands. Phase 6 currently tells a new
+venue to implement egress, reference data and the definition cycle itself, and
+after this it should tell them to take the crates. Phase 6.5's instruction to
+"factor the required set into a shared `dz-publisher-metrics` library" becomes a
+statement that the library exists and must be used.
+
+**Crate consumption: tagged releases.** Path dependencies do not cross
+repositories. Each crate tags independently, matching how `edge-feed-spec`
+versions the specifications they implement, and a venue pins a tag. This needs a
+release discipline defined before step 2, because step 2 is the first
+cross-repository consumption.
+
+**The publisher labels map to venues in each venue's own private repository.**
+Not here, and not in one shared index. A venue repository records which label it
+is; this repository records nothing.
+
+---
+
 ## Open questions
 
-**Publishing the egress logic.** This repository is public and Apache-2.0.
-Moving the publisher layer here publishes the DoubleZero egress design: the
-route-derived source IP address, the `IP_MULTICAST_IF` finding, the transmitter
-discipline. That looks correct rather than merely acceptable, because the
-playbook maintains a venue-facing page for venues standing up their own
-publishers and those venues need exactly these crates. It is a one-way decision
-and deserves an explicit yes before the first publisher-layer PR.
+**Configuration shape.** Each shared crate owns the `serde` struct for its own
+section, so `[egress]`, `[refdata]`, `[metrics]` and `[ingress.*]` carry the same
+keys and the same meanings at every venue, and a venue cannot rename a key or
+change a default. Venue specifics live in a single `[adapter]` section the shared
+crates never read. `deny_unknown_fields` applies at every level: one publisher
+had a misspelled section parse cleanly, fall back to a default, and run the wrong
+transport while the operator believed otherwise, and a typo in a transport
+selection must fail at load rather than publish from the wrong one.
 
-**Whether the venue repositories keep their own workspaces.** This design leaves
-each venue with a workspace holding its adapter, its `main` and its
-configuration. An alternative puts the binaries here too. The venue repositories
-hold the Ansible roles, the Terraform and the operational history, so splitting
-a publisher across two repositories has a cost that has not been weighed.
+What is not settled is whether `[adapter]` is also constrained to a common shape,
+or stays free-form per venue.
 
-**How the crates are consumed.** Path dependencies do not work across
-repositories. Git tags are the obvious answer and need a release discipline. A
-private registry is the alternative. This does not change the architecture, and
-it blocks step 2.
+**Whether the venue repositories keep their own Cargo workspaces.** This design
+leaves each venue with a workspace holding its adapter, its `main` and its
+configuration, depending on the shared crates by tag. The alternative moves the
+binaries here. The venue repositories hold the Ansible roles, the Terraform and
+the operational history, so splitting a publisher across two repositories has a
+cost that has not been weighed.
 
 ---
 
