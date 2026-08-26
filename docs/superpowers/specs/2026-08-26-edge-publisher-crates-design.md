@@ -433,6 +433,143 @@ distinguishing `exchange_recv`, `matching_engine`, `gateway_send` and
 
 ---
 
+## Configuration
+
+### What the three configs share today, and under how many names
+
+The three publishers configure the same publisher. They do not spell it the same
+way. Six values appear in all three; only one of the six uses the same key in all
+three.
+
+| Concept | A | B | C |
+|---|---|---|---|
+| Matching engine identity | `tob_source_id`, `source_id` | `source_id` | `source_id` |
+| Multicast group | `group_addr` | `multicast_group` | `mktdata_group` **and** `refdata_group` |
+| Egress interface | `bind_addr` | `multicast_interface_ip` | `interface` |
+| Market data port | `port`, `mktdata_port` | `mktdata_port` | `mktdata_port` |
+| Reference data port | `refdata_port` | `refdata_port` | `refdata_port` |
+| Metrics endpoint | `metrics_address` + `metrics_port` | `listen_addr` | `metrics_addr` |
+
+Three more appear in two of the three and are hardcoded in the third: the
+heartbeat interval, the definition cycle and the manifest cadence. Two of the
+three make the datagram size an operator-settable key.
+
+The units diverge too. One publisher suffixes durations with `_seconds` and takes
+integers; the other two parse duration strings. So the same concept is a
+different key with a different type depending on which host an operator is
+looking at.
+
+Two of these are not merely inconsistent:
+
+**One publisher takes separate groups for market data and reference data.** The
+reference-data supplement specifies *"one multicast group with two destination
+ports"* and rejects the alternative explicitly: splitting into a separate group
+*"provides no NIC-filter benefit worth the operational cost of provisioning,
+IGMP-joining, and managing a second group per channel."* A configuration surface
+that accepts two groups permits a deviation the supplement argued against.
+
+**Two publishers let an operator set the datagram size.** It is spec-mandated at
+1,232 and is the key that is already set wrong in production. It stops being
+configuration.
+
+### The common sections
+
+Each section below is parsed by the shared crate that reads it, so the keys, the
+types and the defaults are the same at every venue by construction. A venue
+cannot rename a key, change a default, or add one.
+
+```toml
+venue = "..."                  # the label on every dz_publisher_* series
+
+[egress]                       # dz-publisher-egress
+expected_prefix = "..."        # optional invariant the discovered address must satisfy
+pin             = "..."        # optional override of route discovery
+ttl             = 1
+
+[[feed]]                       # one per feed this publisher emits
+spec            = "top-of-book"   # top-of-book | market-by-price | market-by-order | perp-stats
+enabled         = true
+channel_id      = 0
+source_id       = 0
+multicast_group = "..."        # one group
+mktdata_port    = 0
+refdata_port    = 0
+snapshot_port   = 0            # depth feeds only
+heartbeat_interval = "1s"
+definition_cycle   = "30s"
+manifest_cadence   = "1s"
+idle_guard         = "60s"
+
+[refdata]                      # dz-publisher-refdata
+state_dir = "..."
+[refdata.selection]
+bootstrap_top_n      = 0
+max_published        = 0
+warn_published_above = 0
+
+[metrics]                      # dz-publisher-metrics
+enabled     = true
+listen_addr = "127.0.0.1:9100"
+
+[ingress]                      # dz-ingress-core
+kind                      = "websocket"
+connect_timeout           = "5s"
+reconnect_backoff_initial = "500ms"
+reconnect_backoff_max     = "30s"
+rate_limit_per_second     = 0
+```
+
+There is no `mtu` key. The datagram size is mandated by the specs and clamped in
+the builder, so there is nothing for an operator to set and no way to set it
+wrong.
+
+`[[feed]]` is an array because a publisher may emit several feeds, which is what
+one publisher's repeated per-channel blocks already express and what another
+expresses as four differently-named sections. The `spec` key names the feed spec
+and selects the codec crate.
+
+### The adapter skeleton
+
+Most of what sits in a venue block today is not venue-specific. Reconnection,
+backoff, connect timeouts, rate limits and poll intervals are properties of the
+transport, and they move to `[ingress]`. What is left is genuinely the venue's,
+and the skeleton constrains its shape without constraining its content.
+
+```toml
+[adapter]
+kind = "..."                   # required; names the adapter implementation
+
+[adapter.upstream]             # endpoints; keys defined by the adapter
+[adapter.credentials]          # optional; paths only, never inline secrets
+[adapter.replay]               # optional; fixture directory for offline runs
+enabled = false
+path    = "..."
+```
+
+Four rules, and nothing else:
+
+1. `kind` is required and names the adapter, so the runtime can select it and the
+   `venue` metric label can be cross-checked against it.
+2. Everything venue-specific lives under `[adapter.*]`. A venue key at the top
+   level is a load error.
+3. Credentials are paths. A secret never appears inline in a rendered config.
+4. `[adapter.replay]` is uniform. Two of the three publishers already carry a
+   live-versus-fixture switch under three different spellings, and a common one
+   is what lets an offline conformance run be described the same way everywhere.
+
+Beyond those, `[adapter.upstream]` is free. An adapter reading a local node's
+directory, one holding two REST and WebSocket credentials, and one reading a
+chain RPC plus a local socket have nothing useful in common below that level,
+and inventing a shape they must share would be the config sprawl this is meant
+to prevent, moved up a level.
+
+`deny_unknown_fields` applies at every level, including inside `[adapter]`. One
+publisher had a misspelled section parse cleanly, fall back to a default, and run
+the wrong transport while the operator believed otherwise. A typo in a transport
+selection must fail at load rather than publish from the wrong one.
+
+---
+
 ## Golden vectors and conformance
 
 Hand-written codecs in two languages need something binding them together. A
@@ -551,18 +688,6 @@ is; this repository records nothing.
 ---
 
 ## Open questions
-
-**Configuration shape.** Each shared crate owns the `serde` struct for its own
-section, so `[egress]`, `[refdata]`, `[metrics]` and `[ingress.*]` carry the same
-keys and the same meanings at every venue, and a venue cannot rename a key or
-change a default. Venue specifics live in a single `[adapter]` section the shared
-crates never read. `deny_unknown_fields` applies at every level: one publisher
-had a misspelled section parse cleanly, fall back to a default, and run the wrong
-transport while the operator believed otherwise, and a typo in a transport
-selection must fail at load rather than publish from the wrong one.
-
-What is not settled is whether `[adapter]` is also constrained to a common shape,
-or stays free-form per venue.
 
 **Whether the venue repositories keep their own Cargo workspaces.** This design
 leaves each venue with a workspace holding its adapter, its `main` and its
