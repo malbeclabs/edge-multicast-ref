@@ -2,517 +2,257 @@
 
 **Status:** draft, pending review
 **Applies to:** the venue publisher repositories and this repository
-**Upstream authority:** [`edge-feed-spec`](https://github.com/malbeclabs/edge-feed-spec), its [`GLOSSARY.md`](https://github.com/malbeclabs/edge-feed-spec/blob/main/GLOSSARY.md) and [`VERSIONING.md`](https://github.com/malbeclabs/edge-feed-spec/blob/main/VERSIONING.md)
-**Process authority:** Feed Publisher Playbook, Phases 5, 6 and 6.5
+**Authority:** [`edge-feed-spec`](https://github.com/malbeclabs/edge-feed-spec), its [`GLOSSARY.md`](https://github.com/malbeclabs/edge-feed-spec/blob/main/GLOSSARY.md) and [`VERSIONING.md`](https://github.com/malbeclabs/edge-feed-spec/blob/main/VERSIONING.md); Feed Publisher Playbook Phases 5, 6 and 6.5
 
 ---
 
-## A note on naming
+## Naming
 
-This repository is public, and not every venue with a publisher has announced
-its DoubleZero feed. This document therefore names no venue, no venue
-repository, no venue-specific crate, module or configuration key, and no venue
-issue tracker.
+This repository is public. This document names no venue, venue repository,
+venue crate, config key, metric prefix or issue tracker, and gives no count of
+publishers. Findings refer to "an existing publisher" or "another publisher",
+identified where needed by the property under discussion. The same rule binds
+every later document here.
 
-Three publishers exist today. They are called **A**, **B** and **C** here. The
-mapping is recorded outside this repository, and nothing below depends on
-knowing it. A fourth venue is in early phases and is called **the next venue**.
-
-Where evidence comes from source comments, the quotation is trimmed to the part
-that carries the argument, and identifying detail is removed rather than
-paraphrased into vagueness. Where a metric prefix, path or configuration key
-would identify a venue, it is described by its role instead.
-
-The same rule applies to the implementation plan that follows this document, and
-to anything else committed to this repository on this subject.
+`GLOSSARY.md` governs all vocabulary and overrides any local definition.
 
 ---
 
 ## Purpose
 
-Three publishers now exist. Each was written on its own, and each solved the
-same problems in its own way. This document defines a set of crates that hold
-those solutions once, so a fourth publisher inherits them instead of
-rediscovering them.
+Existing publishers each solved the same problems separately. These crates hold
+the solutions once, so the next one inherits them.
 
-The goal is not code reuse for its own sake. It is that a publisher should have
-almost no semantics of its own. What differs between venues is the upstream
-source and the mapping onto our messages. Everything else the specs already
-decide, and every place a publisher gets to decide it again is a place one of
-them has already decided it wrong.
+A publisher should have almost no semantics of its own. What differs between
+venues is the upstream source and the mapping onto our messages. The specs
+decide everything else, and every place a publisher decides it again is a place
+one of them has decided it wrong.
 
 ---
 
-## Vocabulary
+## What the audit found
 
-`GLOSSARY.md` in `edge-feed-spec` governs this document and every crate it
-defines. Its precedence rule is absolute: a definition there overrides any local
-one. This section does not restate the glossary. It records the terms this
-design pins down, and the conflicts an audit of the three publishers found.
+### Vocabulary
 
-### Terms this design adds
+The glossary was published 2026-08-20. The feed specs were conformed to it; no
+publisher was. Counting matching lines in first-party code, one publisher
+carries over 800 uses of `frame` for our own traffic and another over 1,300;
+one carries over 1,100 uses of `lane`; `epoch` appears in two. This repository
+uses `bot` 92 times for components the glossary calls book-builders, and names
+three binaries `*-bot`. Its remaining `frame` uses are largely correct, since
+the XDP receiver and GRE decapsulator handle real layer-2 frames.
 
-The glossary does not name these, and they are used consistently below.
+One publisher names an enumeration `Channel` whose variants are market data,
+reference data and snapshot. Those are port roles, and the same crate separately
+handles `Channel ID`.
 
-| Term | Meaning |
-|---|---|
-| **Codec crate** | A crate holding one feed spec's wire layout. Encoders and decoders, no I/O, no async. |
-| **Input** | The transport a publisher reads its upstream source through: WebSocket, FIX, multicast, REST poll, file tail, Unix socket. Venue-agnostic. |
-| **Adapter** | The product-line-specific code mapping an upstream payload onto our messages. The only part a new venue writes from scratch. |
+**One publisher is at zero across every banned term.** Where this design chooses
+a name it takes that one's. Where it chooses a behavior it usually takes the
+publisher that has met production.
 
-`Input` and `Adapter` are chosen against the glossary rather than by taste.
-Bare `source` is banned, and the glossary says an input is an `input`. `Adapter`
-is the glossary's own replacement for a Rust trait spanning product lines.
+### Wire
 
-### Conflicts the audit found
+**The codec was forked twice by copy-paste.** One codec records its origin as a
+port from another publisher's protocol module, *"which is still on schema 1."*
+It then moved to Schema Version 3 alone. A second publisher moved to 3 alone,
+separately. The original still publishes 1.
 
-An audit of first-party code across the three publishers and this repository
-found the following. The glossary was published on 2026-08-20 and the feed specs
-were conformed to it. No publisher was.
+**One publisher exceeds the mandated datagram size.** Every feed spec mandates
+1,232 bytes for GRE headroom. One publisher defaults to 1448, ships that to
+production, and does not clamp, so its top-of-book feed can emit 216 bytes over
+the cap; its other two feeds are correct, because the constant lives in three
+places and two were fixed. Another holds a single constant at 1232. A third
+inherited the 1448 default but clamps to `min(mtu, MAX_DATAGRAM_SIZE)` in the
+builder, with a test asserting it, and is safe because the limit is in the
+builder rather than in configuration.
 
-Counts are matching lines in first-party code, excluding build artifacts and
-vendored dependencies.
+**Two publishers reached opposite conclusions on egress.** One transport module
+defers an improvement: *"Hosts that must pin multicast egress to a specific
+interface ... need `socket2`'s `set_multicast_if_v4`."* Another records why that
+is wrong here: `IP_MULTICAST_IF` *"stays unset: the kernel resolves it to an
+interface index at `setsockopt` time and `doublezerod` recreates [the tunnel
+interface] with a new index on every re-provision, which left the socket
+returning `ENODEV` forever."* One publisher's roadmap is another's outage.
 
-| Banned term | A | B | C | this repo |
-|---|---|---|---|---|
-| `frame`, for our own traffic | 827 | 1339 | 0 | 489 |
-| `lane` | 0 | 1131 | 0 | 0 |
-| `epoch` | 97 | 18 | 0 | 7 |
-| `bot` | 0 | 0 | 0 | 92 |
+That second publisher also survived a tunnel address moving without notice: the
+configured address stopped existing and the service crash-looped 31,108 times
+over two days. It now derives its source IP address from the route. The others
+read it from config.
 
-Some of this repository's `frame` uses are correct. The XDP receiver and the GRE
-decapsulator handle real layer-2 Ethernet frames, which is the word's proper
-sense. Every use describing our own UDP payload is a violation.
+**One publisher bursts the definition cycle.** `reference-data/spec.md` rule 2:
+*"Publishers MUST NOT emit the entire published set as a single burst."* That
+publisher's refdata module: *"the emission is a synchronized burst."* Another
+paces at 80% of the cycle period, because the period is a maximum on the
+interval between retransmissions of any single definition, not a lap target.
 
-Three conflicts matter enough to name:
+**Two publishers transmit on a reserved type ID.** `0x05` is marked *(reserved)*
+in the market-by-price, market-by-order and order-intent specs and defined by
+none; no spec mentions `ChannelReset`. Two publishers define and transmit one
+there, one as a startup handshake on both ports. Conformant subscribers skip it,
+but the ID is occupied on live wire and the supplement already defines reset as
+header-only via `Reset Count`. `dz-edge-core` emits nothing at `0x05`. Whether
+that handshake earns a real identifier is an upstream question.
 
-**One publisher declares an enumeration named `Channel` whose variants are
-market data, reference data and snapshot.** Those are port roles. The same crate
-separately handles `Channel ID`, which is the shard. One word, two meanings, in
-one crate. The glossary bans this directly.
+### Instrumentation
 
-**This repository names three binaries `*-bot`.** The glossary reserves `bot`
-for a real automated trading client and says we ship none. They are
-book-builders.
+Playbook Phase 6.5 declares the `dz_publisher_*` names normative and requires a
+shared `dz-publisher-metrics` library. No publisher emits a `dz_publisher_*`
+series. Two use their own venue prefixes by two different mechanisms; another
+runs its own registry. One fleet dashboard is not currently possible.
 
-**One publisher's codec decodes a Schema Version 2 that never existed on the
-wire.** It carries constants for a 128-byte `InstrumentDefinition` and a
-three-element table of accepted versions. This repository's own
-`2026-08-08-refdata-v3-dual-version-design.md` reached the opposite conclusion
-and stated it plainly: the 128-byte layout was superseded before any publisher
-emitted it, and the accepted-version check was *"deliberately built so it cannot
-be mistaken for one"*. This repository is right. The shared codec accepts 1 and
-3.
+### Subscriber side
 
-**Publisher C is at zero across every banned term.** It is the only
-implementation already conformant. Where this design must choose a name, it
-takes C's. Where it must choose a behavior, it usually takes B's. Those are
-different questions and this document answers them separately.
-
----
-
-## What is wrong today
-
-Every item below was found by reading the three publishers against each other.
-Each is a case of one publisher having learned something the others have not.
-
-### The wire codec has been forked twice by copy-paste
-
-C's codec crate records its own origin in a header comment: it was ported from
-A's protocol module, *"which is still on schema 1."* C then moved to Schema
-Version 3 on its own. B moved to 3 on its own, separately. Neither reused the
-other's work, and A still publishes 1.
-
-Two independent migrations of one 130-byte message is the whole problem in a
-sentence.
-
-### One publisher exceeds the mandated datagram size
-
-Every feed spec mandates 1,232 bytes, sized to leave room for the GRE
-encapsulation DoubleZero uses for last-mile delivery.
-
-| | Schema Version | Datagram size handling |
-|---|---|---|
-| A | 1 | a default of 1448, shipped as an Ansible default to production; the builder does not clamp |
-| C | 3 | inherited the same 1448 default and A's incorrect comment, but its builder clamps capacity to `min(mtu, MAX_DATAGRAM_SIZE)`, with a test asserting it |
-| B | 3 | a single constant at 1232 |
-
-A's top-of-book feed can emit datagrams 216 bytes over the cap. Its
-market-by-order and order-intent feeds are correct at 1,232, because the
-constant lives in three places in one repository and only two of them were
-fixed.
-
-C is safe for a reason worth copying. It put the limit in the builder rather
-than in configuration, so no operator and no Ansible default can overrun it.
-
-### Two publishers reached opposite conclusions on multicast egress
-
-C's transport module records a deferred improvement: *"Hosts that must pin
-multicast egress to a specific interface independent of source IP address need
-`socket2`'s `set_multicast_if_v4`; that is deliberately deferred to keep deps
-minimal."*
-
-B's transport module records why that call is wrong here: `IP_MULTICAST_IF`
-*"stays unset: the kernel resolves it to an interface index at `setsockopt` time
-and `doublezerod` recreates [the tunnel interface] with a new index on every
-re-provision, which left the socket returning `ENODEV` forever."*
-
-C's roadmap is B's outage. Neither repository can see the other.
-
-B also survived something A and C have not met. DoubleZero moved a host's tunnel
-address without notice, the configured address stopped existing, and the service
-crash-looped 31,108 times over two days. B now derives its source IP address
-from the route `doublezerod` installs for the group. The other two take it from
-configuration and will meet the same failure.
-
-### One publisher violates a reference-data MUST NOT, and says so
-
-`reference-data/spec.md` publisher rule 2: *"Definitions SHOULD be paced evenly
-over the cycle period. Publishers MUST NOT emit the entire published set as a
-single burst."*
-
-C's refdata module: *"the emission is a synchronized burst (deliberately simple
-— the universe is tiny)."*
-
-B's refdata module exists to satisfy that rule and works the arithmetic out: a
-lap at 80% of the cycle period, because the period is a maximum on the interval
-between retransmissions of any single definition rather than a lap target, and a
-lap sized at exactly the period violates rule 1 under ordinary timer jitter.
-
-### Two publishers transmit a message on a reserved type ID
-
-Type ID `0x05` is marked *(reserved)* in the market-by-price, market-by-order
-and order-intent specs, and the perp-stats spec states that `0x05` "is reserved
-there". No current spec defines a message at `0x05`, and no current spec
-mentions `ChannelReset` at all.
-
-Two publishers define a `ChannelReset` message at `0x05` and transmit it. One
-sends it on both ports at startup as a handshake, before the manifest and the
-first reference-data cycle.
-
-This does not break a conformant subscriber, which skips an unknown type using
-the Message Length field. It costs two things anyway. A reserved identifier is
-occupied on the live wire by a private message, so assigning `0x05` upstream
-later would collide with a meaning already in use. And the reference-data
-supplement already specifies the reset mechanism as header-only: rule 7 says a
-publisher resets by incrementing `Reset Count` in the datagram header and
-restarting `Sequence Number` at 0, which is what subscribers key on.
-
-`dz-edge-core` therefore does not encode a message at `0x05`. Whether the
-startup handshake is worth keeping is an upstream question: if it is, it should
-be proposed as an additive change and given a real identifier, per the
-playbook's rule for anything the specification has no field for. Until then the
-shared codec emits the reset the supplement defines and nothing else.
-
-### The mandated metrics library does not exist
-
-Playbook Phase 6.5 declares the `dz_publisher_*` names normative and says to
-*"factor the required set into a shared `dz-publisher-metrics` library so a new
-publisher inherits all of it. A per-venue reimplementation is how the names
-drift apart, and the names are the only reason a shared dashboard works."*
-
-No publisher emits a `dz_publisher_*` series. Two emit families under their own
-venue prefixes, by two different mechanisms, and the third runs a registry of
-its own. One dashboard across the fleet is not currently possible.
-
-### The subscriber side has the same disease
-
-Across the three parsers in this repository, `timestamp_linux.go`,
-`sink_socket.go` and `sink_json.go` are byte-identical copies. `sink.go` differs
-by two lines. `runner.go`, `metrics.go` and `seqtracker.go` are near-copies that
-have drifted apart. That is roughly 360 cloned lines per feed, and a fourth feed
-clones them again.
-
-This repository's most recent work, *"parsers: decode refdata at schema v1 and
-v3 (#37)"*, is the subscriber side paying for A's schema drift.
+Across the three parsers here, `timestamp_linux.go`, `sink_socket.go` and
+`sink_json.go` are byte-identical copies; `sink.go` differs by two lines;
+`runner.go`, `metrics.go` and `seqtracker.go` are drifted near-copies. Roughly
+360 cloned lines per feed. The most recent work here, *"parsers: decode refdata
+at schema v1 and v3 (#37)"*, is this side paying for the schema drift above.
 
 ---
 
 ## Architecture
 
-Three layers, in one repository, in two languages.
+Three layers, one repository, two languages. The codec layer serves both
+directions: a publisher encodes with it, a subscriber decodes with it. The input
+layer serves both too, since a venue handing off over its own multicast needs
+the receiver a parser needs.
 
-```
-                    ┌──────────────────────────────┐
-                    │       venue repository       │
-                    │   adapter + main + config    │
-                    └───────────────┬──────────────┘
-                                    │
-        ┌───────────────────────────┼───────────────────────────┐
-        │                           │                           │
-┌───────▼────────┐        ┌─────────▼─────────┐       ┌─────────▼────────┐
-│  input layer   │        │  publisher layer  │       │   codec layer    │
-│  dz-ingress-*  │───────▶│  dz-publisher-*   │──────▶│   dz-edge-*      │
-│  transports    │        │  runtime skeleton │       │  wire layouts    │
-└────────────────┘        └───────────────────┘       └──────────────────┘
-        │                                                       │
-        └───────────────────────┬───────────────────────────────┘
-                                │
-                    ┌───────────▼────────────┐
-                    │  subscriber side       │
-                    │  parsers, book-builders│
-                    │  Go and Rust           │
-                    └────────────────────────┘
-```
+### Codec layer
 
-The codec layer serves both directions. A publisher encodes with it and a
-subscriber decodes with it. The input layer serves both too: a venue that hands
-off over its own multicast needs the same receiver a parser needs.
-
-### Crate inventory
-
-**Codec layer.** No I/O, no async, no dependency above `thiserror`. One crate
-per feed spec, because `VERSIONING.md` versions the specs independently and the
-crates must be able to follow.
+No I/O, no async, no dependency above `thiserror`. One crate per feed spec,
+because `VERSIONING.md` versions the specs independently.
 
 | Crate | Holds |
 |---|---|
-| `dz-edge-core` | 24-byte datagram header, 4-byte message header, `DatagramBuilder` with the 1,232 clamp, shared enumerations, `Heartbeat`, `EndOfSession`, `BatchBoundary`, `InstrumentReset`, `SnapshotEnd`, `DecodeError` |
-| `dz-edge-refdata` | `InstrumentDefinition`, `ManifestSummary`. Encodes Schema Version 3 only. Decodes 1 and 3 |
+| `dz-edge-core` | datagram header, message header, `DatagramBuilder` with the 1,232 clamp, shared enumerations, `Heartbeat`, `EndOfSession`, `BatchBoundary`, `InstrumentReset`, `SnapshotEnd`, `DecodeError` |
+| `dz-edge-refdata` | `InstrumentDefinition`, `ManifestSummary`. Encodes schema 3, decodes 1 and 3 |
 | `dz-edge-tob` | `Quote`, `Trade` |
-| `dz-edge-mbp` | `LevelUpdate`, `BookClear`, `SnapshotLevel`, the 40-byte `SnapshotBegin` |
-| `dz-edge-mbo` | `OrderAdd`, `OrderCancel`, `OrderExecute`, `SnapshotOrder`, the 36-byte `SnapshotBegin` |
+| `dz-edge-mbp` | `LevelUpdate`, `BookClear`, `SnapshotLevel`, 40-byte `SnapshotBegin` |
+| `dz-edge-mbo` | `OrderAdd`, `OrderCancel`, `OrderExecute`, `SnapshotOrder`, 36-byte `SnapshotBegin` |
 | `dz-edge-perp-stats` | `PerpStats` |
 
-`BatchBoundary` at 16 bytes and `InstrumentReset` at 28 are byte-identical
-across market-by-order and market-by-price, so they belong in core. `SnapshotEnd`
-at 20 bytes likewise. `SnapshotBegin` is not identical. Market-by-price appends
-`Depth Bound` at offset 36 and the message grows to 40, so each depth feed
-carries its own.
+`BatchBoundary` (16B), `InstrumentReset` (28B) and `SnapshotEnd` (20B) are
+byte-identical across the depth feeds, so they sit in core. `SnapshotBegin` is
+not: market-by-price appends `Depth Bound` and grows to 40, so each depth crate
+carries its own. `dz-edge-order-intent` and `dz-edge-midpoint` follow when
+needed; midpoint stays at schema 1 with its 64-byte definition.
 
-`dz-edge-order-intent` and `dz-edge-midpoint` follow the same rule when a
-publisher needs them. Midpoint stays at Schema Version 1 with its 64-byte
-definition, as upstream specifies.
+Two rules, both from what went wrong:
 
-**Publisher layer.** Four crates, each with one job.
+**Encode one generation, decode several.** A publisher speaks one generation.
+`dz-edge-refdata` encodes 3 and decodes 1 and 3. It does not decode 2: that
+128-byte layout was superseded before any publisher emitted it, as this
+repository's own `2026-08-08-refdata-v3-dual-version-design.md` already
+concluded.
+
+**Put invariants where configuration cannot reach them.** `DatagramBuilder::new`
+clamps to `min(mtu, MAX_DATAGRAM_SIZE)`, so adopting the crate fixes the overrun
+without anyone editing a deployment default.
+
+Names follow the conformant publisher: `DatagramBuilder`, datagram header,
+`MAX_DATAGRAM_SIZE`. Port roles are `PortRole { Mktdata, Refdata, Snapshot }`.
+`Channel` means the `Channel ID` shard and nothing else.
+
+### Publisher layer
 
 | Crate | Holds |
 |---|---|
-| `dz-publisher-metrics` | The normative `dz_publisher_*` set, the standard histogram buckets, the `/metrics` server |
-| `dz-publisher-egress` | `MulticastTransmitter`, route-derived egress policy, transmitter discipline, the per-channel-instance sequencer, `Reset Count` persistence, the `DatagramSink` trait |
-| `dz-publisher-refdata` | Instrument ID minting and persistence, the single-writer guard, the selection policy, the paced definition cycle, `Manifest Seq`, the `Valid` flag |
-| `dz-publisher-runtime` | Configuration composition, the guards, shutdown and `EndOfSession`, and the skeleton wiring the rest |
+| `dz-publisher-metrics` | the normative `dz_publisher_*` set, standard histogram buckets, the `/metrics` server |
+| `dz-publisher-egress` | `MulticastTransmitter`, route-derived egress policy, transmitter discipline, per-channel-instance sequencer, `Reset Count` persistence, `DatagramSink` |
+| `dz-publisher-refdata` | ID minting and persistence, single-writer guard, selection policy, paced definition cycle, `Manifest Seq`, `Valid` flag |
+| `dz-publisher-runtime` | config composition, guards, shutdown and `EndOfSession`, the skeleton wiring the rest |
 
-Configuration is not a crate of its own. Each crate defines its own
-`serde` section and `dz-publisher-runtime` composes them, so a crate's
-configuration cannot drift from the crate that reads it.
+**Enforcement, not convention.** The playbook has asked for common metrics since
+Phase 6.5 and has not got them, because asking is not a mechanism.
 
-**Input layer.** `dz-ingress-core` holds the `Input` trait, reconnection and
-backoff, gap detection against the upstream source's own sequencing, and the
-parse-error taxonomy the playbook fixes at `schema`, `unknown_field`,
-`malformed` and `truncated`.
+- A venue never constructs a metric. `dz-publisher-metrics` exposes typed
+  handles, not names, and the crates owning the hot paths record internally. A
+  publisher transmitting through `dz-publisher-egress` emits
+  `dz_publisher_egress_*` whether or not anyone thought about it.
+- The registry constructor applies `venue` and `source_id`. There is no path to
+  a series without them.
+- Venue-specific metrics go to a second registry that rejects any name starting
+  `dz_publisher_`.
+- Histogram buckets are defined once, so two venues' percentiles are comparable.
 
-The transports are `dz-ingress-websocket`, `-fix`, `-multicast`, `-rest`,
-`-filetail` and `-uds`. Each is a transport the existing publishers already
-speak, and each is written once here rather than once per venue.
+The same device carries the spec obligations: the clamp is in the builder, the
+pacer owns the cycle, the sequencer owns `Sequence Number` and `Reset Count`.
+Every defect above is a publisher re-deciding something a spec already decided.
 
-The crate family keeps the `ingress` name to match the normative
-`dz_publisher_ingress_*` metric family, which is already a published dashboard
-contract. The trait inside is `Input`, per the glossary.
+**Egress** takes the implementation that has met production. It derives its
+source IP address from the route rather than config, because the address is a
+pool lease and not a host identity. It leaves `IP_MULTICAST_IF` unset for the
+`ENODEV` reason above, and the crate must say so, or the deferred improvement
+gets carried forward into it. It distinguishes a transmitter whose failure ends
+the process from one that darkens only its own channel. Sequencing keys on the
+channel instance. `Reset Count` persists per feed, so a newly enabled feed
+advertises 1 rather than inheriting another feed's history. The sink boundary is
+a `DatagramSink` trait, which is what makes the engine testable without a
+socket.
 
----
+**Reference data** takes the paced implementation and its registry. The pacer
+laps at 80% of the cycle, caps datagrams per tick so a stall degrades into a
+denser lap, and derives definitions-per-datagram from the datagram and message
+sizes. The registry writes with atomic rename and refuses a directory it already
+holds live, since two writers means the last flush wins and published IDs
+resolve to nothing after a restart. Selection is the playbook default: seed top
+N, cap at 2N, evict on natural end of life, warn above N, sticky admission.
 
-## The codec layer
+**Runtime** owns the loop, config composition, signals, `EndOfSession` and the
+guards. Upstream liveness is a property of the input connection and alone
+justifies a restart; feed silence is a property of one channel's published set,
+and a channel whose instruments are dormant is silent and healthy. Conflating
+them lets one quiet channel restart every other.
 
-Two rules govern it, and both come from what went wrong.
+### Input layer
 
-**Encode one generation, decode several.** A publisher speaks one generation.
-There is no reader asking it to downgrade, and emitting a mixture would make the
-version byte meaningless. So `dz-edge-refdata` encodes Schema Version 3 and
-nothing else. It decodes 1 and 3, because a subscriber meets both while one
-publisher is still on 1, and because a staged rollout is the one moment a feed
-is guaranteed to be mixed.
+`Input` yields payloads, receive timestamps and connection lifecycle. It is
+venue-agnostic and is where every `dz_publisher_ingress_*` series is recorded.
+`Adapter` maps a payload onto our messages; it is product-line-specific and
+small.
 
-It does not decode 2. No publisher ever emitted the 128-byte layout.
+One publisher already has an input trait with three implementations and
+another's WebSocket client hands back a receiver of decoded events, so two
+reached this boundary alone. What they do not share is the half above it, so
+each rebuilt reconnection, backoff, rate limits and error classification.
 
-**Put the invariant where configuration cannot reach it.** `DatagramBuilder::new`
-clamps capacity to `min(mtu, MAX_DATAGRAM_SIZE)`. C already does this and holds
-a test asserting it. Adopting the crate therefore fixes A's overrun without
-anyone editing an Ansible default, which is the point: the fix survives the next
-operator who does not know about it.
-
-### Naming
-
-C's vocabulary wins throughout: `DatagramBuilder`, not `FrameBuilder`. The
-datagram header, not the frame header. `MAX_DATAGRAM_SIZE`, not
-`MAX_FRAME_SIZE`. B's crate is the better implementation and C's is the better
-naming, so the shared crate takes B's byte handling under C's names.
-
-Port roles are `PortRole { Mktdata, Refdata, Snapshot }`, using the glossary's
-three tokens verbatim. `Channel` names the `Channel ID` shard and nothing else.
-
----
-
-## The publisher layer
-
-### Enforcement, not convention
-
-This is the part that does the work. The playbook has asked for common metrics
-since Phase 6.5 was written and has not got them, because asking is not a
-mechanism. These crates make the contract structural.
-
-**A venue never constructs a metric.** `dz-publisher-metrics` exposes typed
-handles rather than names. `IngressMetrics::message(kind)`,
-`EgressMetrics::datagram(port_role)`. The crates owning the hot paths take those
-handles at construction and record inside. A publisher that transmits through
-`dz-publisher-egress` emits `dz_publisher_egress_*` whether or not anyone
-thought about it.
-
-**Required labels cannot be omitted.** The registry constructor applies `venue`
-and `source_id`. There is no path to a series without them.
-
-**Venue-specific metrics are quarantined.** They go to a second registry that
-rejects any name beginning with `dz_publisher_`. A venue may add anything it
-likes under its own prefix and may not shadow the shared contract.
-
-**Histogram buckets are defined once.** The playbook requires this and gives the
-reason: buckets chosen per publisher make two venues' percentiles incomparable
-even when both are correct.
-
-The same device carries the spec obligations. The clamp lives in the builder, so
-no configuration can overrun the datagram size. The pacer owns the definition
-cycle, so no publisher can burst it. The sequencer owns `Sequence Number` and
-`Reset Count`, so no publisher can forget to advance the era across a restart.
-
-Every defect in this document is a publisher re-deciding something a spec had
-already decided. The design's job is to remove the opportunity.
-
-### Egress
-
-`dz-publisher-egress` takes B's implementation, which is the only one that has
-met production.
-
-It derives its source IP address from the route `doublezerod` installs for the
-group rather than reading it from configuration, because the address is a pool
-lease and not a host identity. It leaves `IP_MULTICAST_IF` unset, for the
-`ENODEV` reason recorded above, and this must be stated in the crate so the
-deferred improvement in C's transport module is not carried forward into it. It
-distinguishes a transmitter whose failure should end the process from one whose
-failure should darken only its own channel, because a publisher serving many
-channels must not restart them all for one.
-
-Sequencing keys on the channel instance, `(source IP address, Channel ID,
-destination port)`, as the glossary requires. `Reset Count` persists per feed
-rather than per process. A feed enabled for the first time on a host that has
-published another feed for months must advertise 1, not inherit another feed's
-history.
-
-The sink boundary is C's `DatagramSink` trait, which is what makes the engine
-testable without a socket.
-
-### Reference data
-
-`dz-publisher-refdata` takes B's pacer and its instrument registry.
-
-The pacer laps at 80% of the configured cycle period, caps the datagrams one
-tick may emit so that a stall degrades into a denser lap rather than a burst,
-and derives definitions-per-datagram from the datagram size and the message size
-so that changing either moves it. Adopting the crate fixes C's rule 2 violation.
-
-The registry mints and persists instrument IDs with atomic rename, and refuses a
-directory the process already holds a live registry for. Two writers to one file
-means the last flush wins, every ID the loser minted disappears, and IDs already
-published on the wire resolve to nothing after a restart.
-
-The selection policy is the playbook's default: seed the top N at start, cap
-growth at 2N, evict only on natural end of life, warn when the published set
-exceeds N. Sticky admission matters because a published set withdrawn on a
-refresh is a subscriber-visible fault.
-
-### Runtime
-
-`dz-publisher-runtime` owns the loop and the wiring: configuration composition,
-signal handling, `EndOfSession` on shutdown, the `/metrics` server, and the
-guards.
-
-The guards take B's distinction, which it reached the hard way. Upstream
-liveness is a property of the input connection and is the only thing that
-justifies restarting the process. Feed silence is a property of one channel's
-published set, and a channel whose instruments are dormant is silent and
-healthy. Conflating them means any one quiet channel restarts every other
-channel in the process.
-
----
-
-## The input layer
-
-`Input` yields payloads, receive timestamps and connection lifecycle events. It
-is venue-agnostic, and it is where every `dz_publisher_ingress_*` series is
-recorded.
-
-`Adapter` maps a payload onto our messages. It is product-line-specific, and it
-is small.
-
-This split is not invented here. C already has an input trait with three
-implementations, and B's WebSocket client already hands back a receiver of
-decoded events. Two of the three arrived at the same boundary on their own. What
-they do not share is the half above the boundary, so each rebuilt reconnection,
-backoff, rate-limit handling and error classification.
-
-`dz-ingress-core` also carries what the playbook requires of every ingest path:
-the connection-state gauge, reconnection counters tagged by trigger, the
-rate-limit counter, and venue-timestamp handling with `timestamp_kind`
-distinguishing `exchange_recv`, `matching_engine`, `gateway_send` and
-`block_time`. A venue exposing no timestamps sets
-`dz_publisher_venue_timestamps_available` to 0 and fabricates nothing.
+`dz-ingress-core` holds the trait, reconnection and backoff, gap detection
+against the upstream source's sequencing, the playbook's parse-error taxonomy
+(`schema`, `unknown_field`, `malformed`, `truncated`), the connection-state
+gauge, reconnect counters by trigger, and venue-timestamp handling with
+`timestamp_kind`. Transports: `dz-ingress-websocket`, `-fix`, `-multicast`,
+`-rest`, `-filetail`, `-uds`. The family keeps the `ingress` name to match the
+normative metric family; the trait inside is `Input`, per the glossary.
 
 ---
 
 ## Configuration
 
-### What the three configs share today, and under how many names
+Six values appear in every existing publisher. One uses the same key in all of
+them: `refdata_port`. The others are spelled two or three ways each — the
+matching engine identity, the multicast group, the egress interface, the market
+data port and the metrics endpoint. Heartbeat interval, definition cycle and
+manifest cadence appear in some and are hardcoded in others. One publisher
+suffixes durations `_seconds` and takes integers; others parse duration strings.
 
-The three publishers configure the same publisher. They do not spell it the same
-way. Six values appear in all three; only one of the six uses the same key in all
-three.
+Two are more than inconsistency. **Separate groups for market data and reference
+data**: the supplement specifies *"one multicast group with two destination
+ports"* and rejects a second group by name. **An operator-settable datagram
+size**: spec-mandated, and the key already set wrong in production.
 
-| Concept | A | B | C |
-|---|---|---|---|
-| Matching engine identity | `tob_source_id`, `source_id` | `source_id` | `source_id` |
-| Multicast group | `group_addr` | `multicast_group` | `mktdata_group` **and** `refdata_group` |
-| Egress interface | `bind_addr` | `multicast_interface_ip` | `interface` |
-| Market data port | `port`, `mktdata_port` | `mktdata_port` | `mktdata_port` |
-| Reference data port | `refdata_port` | `refdata_port` | `refdata_port` |
-| Metrics endpoint | `metrics_address` + `metrics_port` | `listen_addr` | `metrics_addr` |
-
-Three more appear in two of the three and are hardcoded in the third: the
-heartbeat interval, the definition cycle and the manifest cadence. Two of the
-three make the datagram size an operator-settable key.
-
-The units diverge too. One publisher suffixes durations with `_seconds` and takes
-integers; the other two parse duration strings. So the same concept is a
-different key with a different type depending on which host an operator is
-looking at.
-
-Two of these are not merely inconsistent:
-
-**One publisher takes separate groups for market data and reference data.** The
-reference-data supplement specifies *"one multicast group with two destination
-ports"* and rejects the alternative explicitly: splitting into a separate group
-*"provides no NIC-filter benefit worth the operational cost of provisioning,
-IGMP-joining, and managing a second group per channel."* A configuration surface
-that accepts two groups permits a deviation the supplement argued against.
-
-**Two publishers let an operator set the datagram size.** It is spec-mandated at
-1,232 and is the key that is already set wrong in production. It stops being
-configuration.
-
-### The common sections
-
-Each section below is parsed by the shared crate that reads it, so the keys, the
-types and the defaults are the same at every venue by construction. A venue
-cannot rename a key, change a default, or add one.
+Each shared crate parses its own section, so keys, types and defaults cannot
+drift between venues.
 
 ```toml
 venue = "..."                  # the label on every dz_publisher_* series
 
-[egress]                       # dz-publisher-egress
-expected_prefix = "..."        # optional invariant the discovered address must satisfy
+[egress]
+expected_prefix = "..."        # optional invariant on the discovered address
 pin             = "..."        # optional override of route discovery
 ttl             = 1
 
-[[feed]]                       # one per feed this publisher emits
-spec            = "top-of-book"   # top-of-book | market-by-price | market-by-order | perp-stats
+[[feed]]                       # one per feed emitted
+spec            = "top-of-book"
 enabled         = true
 channel_id      = 0
 source_id       = 0
@@ -525,18 +265,18 @@ definition_cycle   = "30s"
 manifest_cadence   = "1s"
 idle_guard         = "60s"
 
-[refdata]                      # dz-publisher-refdata
+[refdata]
 state_dir = "..."
 [refdata.selection]
 bootstrap_top_n      = 0
 max_published        = 0
 warn_published_above = 0
 
-[metrics]                      # dz-publisher-metrics
+[metrics]
 enabled     = true
 listen_addr = "127.0.0.1:9100"
 
-[ingress]                      # dz-ingress-core
+[ingress]
 kind                      = "websocket"
 connect_timeout           = "5s"
 reconnect_backoff_initial = "500ms"
@@ -544,21 +284,14 @@ reconnect_backoff_max     = "30s"
 rate_limit_per_second     = 0
 ```
 
-There is no `mtu` key. The datagram size is mandated by the specs and clamped in
-the builder, so there is nothing for an operator to set and no way to set it
-wrong.
+There is no `mtu` key. `[[feed]]` is an array because a publisher may emit
+several, which one already expresses as repeated blocks and another as four
+differently-named sections.
 
-`[[feed]]` is an array because a publisher may emit several feeds, which is what
-one publisher's repeated per-channel blocks already express and what another
-expresses as four differently-named sections. The `spec` key names the feed spec
-and selects the codec crate.
+### Adapter skeleton
 
-### The adapter skeleton
-
-Most of what sits in a venue block today is not venue-specific. Reconnection,
-backoff, connect timeouts, rate limits and poll intervals are properties of the
-transport, and they move to `[ingress]`. What is left is genuinely the venue's,
-and the skeleton constrains its shape without constraining its content.
+Reconnection, backoff, timeouts, rate limits and poll intervals are transport
+properties and move to `[ingress]`. What remains is the venue's.
 
 ```toml
 [adapter]
@@ -571,64 +304,46 @@ enabled = false
 path    = "..."
 ```
 
-Four rules, and nothing else:
+Four rules: `kind` is required; everything venue-specific lives under
+`[adapter.*]` and a top-level venue key is a load error; credentials are paths;
+`[adapter.replay]` is uniform, since publishers already carry a
+live-versus-fixture switch under different spellings.
 
-1. `kind` is required and names the adapter, so the runtime can select it and the
-   `venue` metric label can be cross-checked against it.
-2. Everything venue-specific lives under `[adapter.*]`. A venue key at the top
-   level is a load error.
-3. Credentials are paths. A secret never appears inline in a rendered config.
-4. `[adapter.replay]` is uniform. Two of the three publishers already carry a
-   live-versus-fixture switch under three different spellings, and a common one
-   is what lets an offline conformance run be described the same way everywhere.
+Below that, `[adapter.upstream]` is free. An adapter reading a local directory,
+one holding two credentialed APIs, and one reading a chain RPC plus a local
+socket have nothing useful in common, and forcing a shape would move the sprawl
+up a level.
 
-Beyond those, `[adapter.upstream]` is free. An adapter reading a local node's
-directory, one holding two REST and WebSocket credentials, and one reading a
-chain RPC plus a local socket have nothing useful in common below that level,
-and inventing a shape they must share would be the config sprawl this is meant
-to prevent, moved up a level.
-
-`deny_unknown_fields` applies at every level, including inside `[adapter]`. One
-publisher had a misspelled section parse cleanly, fall back to a default, and run
-the wrong transport while the operator believed otherwise. A typo in a transport
-selection must fail at load rather than publish from the wrong one.
+`deny_unknown_fields` applies everywhere including `[adapter]`. One publisher
+had a misspelled section parse cleanly, fall back to a default, and run the
+wrong transport while the operator believed otherwise.
 
 ---
 
 ## Golden vectors and conformance
 
-Hand-written codecs in two languages need something binding them together. A
-canonical set of byte vectors, one per message type per schema version, lives in
-`edge-feed-spec` and every implementation must reproduce it in CI: Rust encode,
-Rust decode, Go decode, the Go conformance tool, and the Wireshark dissectors.
+Hand-written codecs in two languages need a binding contract: one canonical byte
+vector per message type per schema version, in `edge-feed-spec`, reproduced in
+CI by Rust encode, Rust decode, Go decode, the conformance tool and the
+dissectors.
 
-This catches drift without coupling implementations, which preserves a property
-worth keeping. One publisher's conformance crate transcribes the layout tables
-by hand from the specification and refuses to depend on the encoder, so a
-conformance failure means the encoder is wrong rather than that both agree. That
-independence dies if everything is generated from one table, which is the main
-argument against code generation here.
+This catches drift without coupling implementations. One publisher's conformance
+crate transcribes layout tables by hand and refuses to depend on the encoder, so
+a failure means the encoder is wrong rather than that both agree. Code
+generation would kill that independence, which is the main argument against it.
 
-Two fleet-wide assets move into this repository, where the playbook already says
-they belong. The Wireshark dissectors currently live inside one venue's
-publisher; the playbook calls that *"the wrong home"* because a fleet-wide
-verification asset inside one venue's repository is discoverable only by someone
-who already knows it exists. That conformance crate joins them, and its
-hand-transcription discipline and its pinned specification revision come with
-it.
+Two fleet-wide assets move here, where the playbook says they belong: the
+Wireshark dissectors, currently inside one venue's publisher, which the playbook
+calls *"the wrong home"*, and that conformance crate, with its hand-transcription
+discipline and pinned spec revision.
 
 ---
 
 ## Go parity
 
-The codec layer mirrors as Go modules under `go/edge/`: `core`, `refdata`,
-`tob`, `mbp`, `mbo`. The three parsers drop their private wire decoders and
-their cloned support files in favor of `go/internal/feed`, which absorbs the
-sink implementations, the sequence tracker, the runner and the timestamping.
-
-The `*-bot` binaries are renamed to `*-book-builder`. They are book-builders,
-the glossary is explicit that we ship no bots, and the rename is cheap now and
-expensive after the crates take a dependency on the names.
+The codec mirrors as Go modules under `go/edge/`: `core`, `refdata`, `tob`,
+`mbp`, `mbo`. The parsers drop their private decoders and cloned support files
+for `go/internal/feed`. The `*-bot` binaries become `*-book-builder`.
 
 ---
 
@@ -651,81 +366,57 @@ edge-multicast-ref/
 ```
 
 Crates version and tag independently, matching how `edge-feed-spec` versions the
-specifications they implement.
+specs they implement.
 
 ---
 
 ## Migration
 
-Ordered so that the one risky step is isolated rather than spread across the
-program. Every step before it is invisible on the wire.
+The one risky step is isolated. Everything before it is invisible on the wire.
 
 | Step | Work | Wire effect |
 |---|---|---|
-| 1 | Land the codec crates and the golden vectors | none |
-| 2 | C adopts the codec | none: it is already Schema Version 3, so output should be byte-identical, which makes it the proof |
-| 3 | B adopts the codec | none: also 3. Exercises market-by-price and perp-stats |
-| 4 | **A adopts the codec** | **visible: Schema Version 1 to 3.** Needs a subscriber communication plan and a dual-publish window |
-| 5 | `dz-publisher-metrics`, all three publishers | none on the feed. Series are renamed and dashboards re-template on `venue` |
-| 6 | `dz-publisher-egress` | none. A and C inherit route-derived egress |
-| 7 | `dz-publisher-refdata` | none. Fixes C's rule 2 violation |
-| 8 | `dz-ingress-*`, per venue as it is touched | none |
-| 9 | `dz-publisher-runtime`; the next venue is built on it | none |
+| 1 | Codec crates and golden vectors | none |
+| 2 | A publisher already on schema 3 adopts the codec | none: output byte-identical. This is the proof |
+| 3 | The other schema-3 publisher adopts it | none. Exercises market-by-price and perp-stats |
+| 4 | **The schema-1 publisher adopts it** | **visible: schema 1 to 3.** Needs a subscriber comms plan and a dual-publish window |
+| 5 | `dz-publisher-metrics`, everywhere | none. Series renamed, dashboards re-template on `venue` |
+| 6 | `dz-publisher-egress` | none. The config-bound publishers inherit route discovery |
+| 7 | `dz-publisher-refdata` | none. Fixes the definition-cycle burst |
+| 8 | `dz-ingress-*`, per venue as touched | none |
+| 9 | `dz-publisher-runtime`; the next venue built on it | none |
 
-Step 2 is deliberately first among the adoptions. C should produce identical
-bytes before and after, so a byte-diff of captured output is the acceptance
-test, and the crate is proven before anything harder depends on it.
-
-Step 4 is the only subscriber-visible change in the program. It is scheduled
-after two publishers have proven the crate and before the runtime work, so it
-does not compete with anything else for attention.
-
-Step 5 renames every series in the fleet at once. That is the point. Doing it
-per venue leaves the dashboards split for the duration.
+Step 2 is first because a byte-diff of captured output is its acceptance test.
+Step 4 is the only subscriber-visible change, scheduled after the crate is
+already proven twice. Step 5 renames every series at once; doing it per venue
+leaves the dashboards split for the duration.
 
 ---
 
 ## Decisions
 
-**Publishing the egress logic: yes.** The publisher layer lives here, and the
-DoubleZero egress design is published with it: the route-derived source IP
-address, the `IP_MULTICAST_IF` finding, the transmitter discipline. The
-venue-facing page for venues standing up their own publishers is the reason this
-is right rather than merely tolerable, since those venues need exactly these
-crates.
+**Publishing the egress logic here: yes.** The venue-facing page for venues
+standing up their own publishers is why this is right rather than tolerable.
+**The playbook needs updating when this lands:** Phase 6 should stop telling a
+new venue to implement egress and reference data itself, and Phase 6.5's
+instruction to factor out a shared metrics library becomes a statement that it
+exists and must be used.
 
-The playbook must be updated when this work lands. Phase 6 currently tells a new
-venue to implement egress, reference data and the definition cycle itself, and
-after this it should tell them to take the crates. Phase 6.5's instruction to
-"factor the required set into a shared `dz-publisher-metrics` library" becomes a
-statement that the library exists and must be used.
+**Crates are consumed as tagged releases.** Each tags independently; a venue
+pins a tag. Needs a release discipline before step 2.
 
-**Crate consumption: tagged releases.** Path dependencies do not cross
-repositories. Each crate tags independently, matching how `edge-feed-spec`
-versions the specifications they implement, and a venue pins a tag. This needs a
-release discipline defined before step 2, because step 2 is the first
-cross-repository consumption.
-
-**The publisher labels map to venues in each venue's own private repository.**
-Not here, and not in one shared index. A venue repository records which label it
-is; this repository records nothing.
-
-**Venue repositories keep their own Cargo workspaces.** Each venue builds its
-own binary from a workspace holding its adapter, its `main` and its
-configuration, depending on the shared crates by tag. The venue repository
-already holds the Ansible role, the Terraform and the operational history for
-that publisher, and splitting the binary away from them buys nothing.
+**Venue repositories keep their own Cargo workspaces**, holding the adapter,
+`main` and config, and depending on the crates by tag. The Ansible role,
+Terraform and operational history already live there.
 
 ---
 
 ## Non-goals
 
-Nothing here changes a feed spec. Where a venue needs a field the specification
-lacks, the playbook's rule still applies: propose an additive change upstream,
-get it accepted, then implement.
+No feed spec changes: where a venue needs a missing field, propose an additive
+change upstream first, per the playbook.
 
-Nothing here converges the book state machines. Each venue's book follows its
-venue's microstructure, and one publisher already runs two that are deliberately
-not converged. That is a separate question with a separate answer.
+No convergence of book state machines. Each follows its venue's microstructure,
+and one publisher already runs two that are deliberately not converged.
 
-Nothing here changes the conformance tool's language. The Go tool stays Go.
+The Go conformance tool stays Go.
