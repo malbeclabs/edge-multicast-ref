@@ -99,6 +99,20 @@ fn a_v1_definition_decodes_at_its_own_offsets() {
 }
 
 #[test]
+fn a_negative_tick_size_survives_the_round_trip() {
+    // Tick Size is i64 and carries the instrument's Price Exponent, so a
+    // sign error corrupts every price a subscriber derives from it.
+    let mut d = sample();
+    d.tick_size = i64::MIN + 1;
+    let mut b = [0u8; InstrumentDefinition::SIZE];
+    d.encode_into(&mut b);
+    assert_eq!(
+        InstrumentDefinition::decode(&b, SCHEMA_VERSION).unwrap().tick_size,
+        i64::MIN + 1
+    );
+}
+
+#[test]
 fn schema_two_is_refused() {
     let d = sample();
     let mut b = [0u8; InstrumentDefinition::SIZE];

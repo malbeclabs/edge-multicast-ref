@@ -112,6 +112,27 @@ fn trade_fields_land_at_their_spec_offsets() {
 }
 
 #[test]
+fn a_negative_trade_price_survives_the_round_trip() {
+    // Trade Price is i64. A sign error would decode as a huge positive
+    // price with nothing on the wire to reveal it.
+    let mut t = Trade {
+        instrument_id: 7,
+        source_id: 9,
+        aggressor_side: 1,
+        trade_flags: 0x02,
+        source_timestamp_ns: 0x4142_4344_4546_4748,
+        trade_price: 100,
+        trade_qty: 200,
+        trade_id: 300,
+        cumulative_volume: 400,
+    };
+    t.trade_price = i64::MIN + 1;
+    let mut b = [0u8; Trade::SIZE];
+    t.encode_into(&mut b);
+    assert_eq!(Trade::decode(&b).unwrap().trade_price, i64::MIN + 1);
+}
+
+#[test]
 fn trade_decode_rejects_a_declared_length_that_is_not_the_fixed_size() {
     let t = Trade {
         instrument_id: 7,

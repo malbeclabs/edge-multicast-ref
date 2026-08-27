@@ -20,7 +20,7 @@ pub struct Trade {
     pub source_timestamp_ns: u64,
     pub trade_price: i64,
     pub trade_qty: u64,
-    /// Upstream-source-assigned. 0 if the upstream source exposes none.
+    /// Venue-assigned. 0 if the venue exposes none.
     pub trade_id: u64,
     /// Session cumulative volume. 0 if unavailable.
     pub cumulative_volume: u64,
