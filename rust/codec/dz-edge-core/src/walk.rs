@@ -146,7 +146,7 @@ pub struct MessageRef<'a> {
 /// Unknown and reserved type ids are yielded like any other message, never
 /// rejected. The top-of-book specification requires it: "A decoder
 /// encountering an unknown type MUST skip the message using its Message
-/// Length field and continue parsing the frame." That includes the reserved
+/// Length field and continue parsing [the datagram]." That includes the reserved
 /// `0x05`. This iterator only walks message boundaries; deciding what to do
 /// with a `type_id` — skip it, dispatch it, reject it — is the caller's job.
 /// Do not add a `BadTypeId` or `ReservedTypeId` check here: a subscriber
