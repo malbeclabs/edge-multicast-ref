@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["codec/dz-edge-core", "codec/dz-edge-tob", "codec/dz-edge-refdata"]
+exclude = ["kernel-receiver", "xdp-receiver"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88.0"
+license = "Apache-2.0"
+authors = ["Malbec Labs"]
+
+[workspace.dependencies]
+thiserror = "1.0"

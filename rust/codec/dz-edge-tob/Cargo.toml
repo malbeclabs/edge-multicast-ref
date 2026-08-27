@@ -1,0 +1,11 @@
+[package]
+name = "dz-edge-tob"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Top-of-Book & Trades feed wire format for DoubleZero Edge"
+
+[dependencies]
+dz-edge-core = { path = "../dz-edge-core" }

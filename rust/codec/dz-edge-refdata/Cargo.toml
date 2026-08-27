@@ -1,0 +1,11 @@
+[package]
+name = "dz-edge-refdata"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Reference Data Distribution wire format for DoubleZero Edge"
+
+[dependencies]
+dz-edge-core = { path = "../dz-edge-core" }
