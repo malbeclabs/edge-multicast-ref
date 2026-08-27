@@ -14,6 +14,15 @@ pub enum ParseErrorReason {
 }
 
 impl ParseErrorReason {
+    /// Every variant, in no particular order. Used to pre-create every
+    /// child series of this closed-label family at construction.
+    pub(crate) const ALL: [Self; 4] = [
+        Self::Schema,
+        Self::UnknownField,
+        Self::Malformed,
+        Self::Truncated,
+    ];
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -35,6 +44,15 @@ pub enum ReconnectReason {
 }
 
 impl ReconnectReason {
+    /// Every variant, in no particular order. Used to pre-create every
+    /// child series of this closed-label family at construction.
+    pub(crate) const ALL: [Self; 4] = [
+        Self::Timeout,
+        Self::RemoteClose,
+        Self::RateLimit,
+        Self::AuthExpired,
+    ];
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -56,6 +74,15 @@ pub enum InconsistencyKind {
 }
 
 impl InconsistencyKind {
+    /// Every variant, in no particular order. Used to pre-create every
+    /// child series of this closed-label family at construction.
+    pub(crate) const ALL: [Self; 4] = [
+        Self::MissingLevel,
+        Self::CrossedBook,
+        Self::SnapshotMismatch,
+        Self::SequenceGap,
+    ];
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -75,6 +102,10 @@ pub enum RecoveryOutcome {
 }
 
 impl RecoveryOutcome {
+    /// Every variant, in no particular order. Used to pre-create every
+    /// child series of this closed-label family at construction.
+    pub(crate) const ALL: [Self; 2] = [Self::Success, Self::Failed];
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -94,6 +125,15 @@ pub enum RefdataLoadErrorReason {
 }
 
 impl RefdataLoadErrorReason {
+    /// Every variant, in no particular order. Used to pre-create every
+    /// child series of this closed-label family at construction.
+    pub(crate) const ALL: [Self; 4] = [
+        Self::Timeout,
+        Self::RateLimit,
+        Self::Schema,
+        Self::Unavailable,
+    ];
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -116,6 +156,16 @@ pub enum EgressErrorReason {
 }
 
 impl EgressErrorReason {
+    /// Every variant, in no particular order. Used to pre-create every
+    /// child series of this closed-label family at construction.
+    pub(crate) const ALL: [Self; 5] = [
+        Self::MtuExceeded,
+        Self::SendWouldBlock,
+        Self::SocketError,
+        Self::NotRegistered,
+        Self::WrongPortRole,
+    ];
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -139,6 +189,15 @@ pub enum TimestampKind {
 }
 
 impl TimestampKind {
+    /// Every variant, in no particular order. Used to pre-create every
+    /// child series of this closed-label family at construction.
+    pub(crate) const ALL: [Self; 4] = [
+        Self::ExchangeRecv,
+        Self::MatchingEngine,
+        Self::GatewaySend,
+        Self::BlockTime,
+    ];
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -158,6 +217,10 @@ pub enum EventKind {
 }
 
 impl EventKind {
+    /// Every variant, in no particular order. Used to pre-create every
+    /// child series of this closed-label family at construction.
+    pub(crate) const ALL: [Self; 2] = [Self::BookUpdate, Self::Trade];
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -177,6 +240,15 @@ pub enum ExitReason {
 }
 
 impl ExitReason {
+    /// Every variant, in no particular order. Used to pre-create every
+    /// child series of this closed-label family at construction.
+    pub(crate) const ALL: [Self; 4] = [
+        Self::IdleGuard,
+        Self::ConsistencyGuard,
+        Self::Signal,
+        Self::Panic,
+    ];
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {

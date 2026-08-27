@@ -19,7 +19,7 @@ fn http_get(addr: std::net::SocketAddr, path: &str) -> String {
 
 #[test]
 fn answers_metrics_with_a_known_name_and_404s_elsewhere() {
-    let metrics = Arc::new(PublisherMetrics::new("test-venue", 1));
+    let metrics = Arc::new(PublisherMetrics::new("test-venue", 1, &[]));
     metrics.ingress().rate_limited();
 
     let server = serve(Arc::clone(&metrics), "127.0.0.1:0".parse().unwrap())

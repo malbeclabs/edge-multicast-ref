@@ -15,6 +15,9 @@ pub struct ProcessMetrics {
 
 impl ProcessMetrics {
     pub(crate) fn new(registry: &Registry, labels: &HashMap<String, String>) -> Self {
+        // Not pre-created: `version`, `commit`, and `toolchain` are values
+        // the caller supplies, not a closed set known at construction. A
+        // publisher registers this once at startup via `set_build_info`.
         let build_info = IntGaugeVec::new(
             opts(
                 "dz_publisher_build_info",
@@ -60,6 +63,12 @@ impl ProcessMetrics {
         registry
             .register(Box::new(exit_reason_total.clone()))
             .expect("static metric registration");
+        // `reason` is a closed enum: pre-create every child so the family
+        // exists at 0 from startup rather than appearing only after the
+        // process has already exited once.
+        for reason in ExitReason::ALL {
+            exit_reason_total.with_label_values(&[reason.as_str()]);
+        }
 
         Self {
             build_info,

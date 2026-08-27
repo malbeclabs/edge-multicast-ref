@@ -67,6 +67,12 @@ impl RefdataMetrics {
         registry
             .register(Box::new(load_errors_total.clone()))
             .expect("static metric registration");
+        // `reason` is a closed enum: pre-create every child so the family
+        // exists at 0 from startup rather than appearing only after the
+        // first load failure.
+        for reason in RefdataLoadErrorReason::ALL {
+            load_errors_total.with_label_values(&[reason.as_str()]);
+        }
 
         let last_refresh_timestamp_seconds = Gauge::with_opts(opts(
             "dz_publisher_refdata_last_refresh_timestamp_seconds",
@@ -98,6 +104,8 @@ impl RefdataMetrics {
             .register(Box::new(delistings_total.clone()))
             .expect("static metric registration");
 
+        // Not pre-created: `channel_id` is a deployment choice, not a
+        // closed set known at construction.
         let manifest_seq = IntGaugeVec::new(
             opts(
                 "dz_publisher_refdata_manifest_seq",
@@ -111,6 +119,8 @@ impl RefdataMetrics {
             .register(Box::new(manifest_seq.clone()))
             .expect("static metric registration");
 
+        // Not pre-created: `channel_id` is a deployment choice, not a
+        // closed set known at construction.
         let manifest_valid = IntGaugeVec::new(
             opts(
                 "dz_publisher_refdata_manifest_valid",

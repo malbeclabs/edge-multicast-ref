@@ -2,7 +2,7 @@ use dz_publisher_metrics::PublisherMetrics;
 
 #[test]
 fn a_counter_incremented_twice_renders_the_value_two() {
-    let metrics = PublisherMetrics::new("test-venue", 1);
+    let metrics = PublisherMetrics::new("test-venue", 1, &[]);
 
     metrics.ingress().rate_limited();
     metrics.ingress().rate_limited();

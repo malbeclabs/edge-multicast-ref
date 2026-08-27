@@ -5,7 +5,7 @@ use dz_publisher_metrics::PublisherMetrics;
 
 #[test]
 fn every_family_carries_venue_and_source_id() {
-    let metrics = PublisherMetrics::new("test-venue", 42);
+    let metrics = PublisherMetrics::new("test-venue", 42, &[dz_edge_core::PortRole::Mktdata]);
 
     // Touch one representative from each accessor, including both a plain
     // metric and a vector metric, so their samples exist in the render.

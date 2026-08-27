@@ -7,7 +7,7 @@ use dz_publisher_metrics::{MetricsError, PublisherMetrics};
 
 #[test]
 fn rejects_a_name_beginning_with_the_reserved_prefix() {
-    let metrics = PublisherMetrics::new("test-venue", 1);
+    let metrics = PublisherMetrics::new("test-venue", 1, &[]);
     let counter =
         IntCounter::with_opts(Opts::new("dz_publisher_sneaky_total", "should be rejected"))
             .unwrap();
@@ -24,7 +24,7 @@ fn rejects_a_name_beginning_with_the_reserved_prefix() {
 
 #[test]
 fn accepts_a_name_outside_the_reserved_prefix() {
-    let metrics = PublisherMetrics::new("test-venue", 1);
+    let metrics = PublisherMetrics::new("test-venue", 1, &[]);
     let counter = IntCounter::with_opts(Opts::new(
         "venue_specific_widget_total",
         "a venue-only series",

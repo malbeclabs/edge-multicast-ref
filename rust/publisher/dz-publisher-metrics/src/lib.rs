@@ -76,15 +76,34 @@ impl PublisherMetrics {
     /// `venue` and `source_id` are applied as constant labels to every
     /// series this crate exposes, both the normative set and anything
     /// registered through [`Self::venue_registry`].
+    ///
+    /// `port_roles` is exactly the set of port roles this publisher
+    /// operates (for example `&[PortRole::Mktdata, PortRole::Refdata]`).
+    /// Every family labelled by `port_role` - and, crossed with it,
+    /// `egress_errors_total` - is pre-created for exactly those roles at
+    /// construction, so it renders at 0 from startup instead of only
+    /// appearing once first touched. Passing a role this publisher does
+    /// not operate would assert a channel that does not exist, so pass
+    /// only the roles actually in use.
+    ///
+    /// Every other family whose labels are entirely closed enums is also
+    /// pre-created here, for the same reason: absence in the exposition
+    /// should mean "this publisher has emitted nothing on this series
+    /// yet", not "this publisher's build does not know about this
+    /// series". Families labelled by an open-ended value - the upstream
+    /// source's own `message_type` vocabulary, a `connection` or
+    /// `channel_id` chosen by deployment, or caller-supplied `build_info`
+    /// labels - are deliberately left uncreated until first touched; see
+    /// the per-field comments in `metrics/*.rs`.
     #[must_use]
-    pub fn new(venue: &str, source_id: u16) -> Self {
+    pub fn new(venue: &str, source_id: u16, port_roles: &[PortRole]) -> Self {
         let registry = Registry::new();
         let labels = opts::const_labels(venue, source_id);
 
         let ingress = IngressMetrics::new(&registry, &labels);
         let book = BookMetrics::new(&registry, &labels);
         let refdata = RefdataMetrics::new(&registry, &labels);
-        let egress = EgressMetrics::new(&registry, &labels);
+        let egress = EgressMetrics::new(&registry, &labels, port_roles);
         let latency = LatencyMetrics::new(&registry, &labels);
         let process = ProcessMetrics::new(&registry, &labels);
 

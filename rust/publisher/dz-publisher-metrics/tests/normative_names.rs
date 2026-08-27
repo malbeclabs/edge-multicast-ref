@@ -96,7 +96,7 @@ fn touch_every_family(m: &PublisherMetrics) {
 
 #[test]
 fn every_normative_family_renders_under_its_exact_name() {
-    let metrics = PublisherMetrics::new("test-venue", 7);
+    let metrics = PublisherMetrics::new("test-venue", 7, &[PortRole::Mktdata]);
     touch_every_family(&metrics);
     let rendered = metrics.render();
 

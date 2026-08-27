@@ -18,6 +18,10 @@ pub struct IngressMetrics {
 
 impl IngressMetrics {
     pub(crate) fn new(registry: &Registry, labels: &HashMap<String, String>) -> Self {
+        // Not pre-created: `message_type` is the upstream source's own
+        // vocabulary and `connection` is a deployment choice. Neither is a
+        // closed set known at construction, so this family only appears
+        // once a message has actually been observed.
         let messages_total = IntCounterVec::new(
             opts(
                 "dz_publisher_ingress_messages_total",
@@ -66,7 +70,15 @@ impl IngressMetrics {
         registry
             .register(Box::new(parse_errors_total.clone()))
             .expect("static metric registration");
+        // `reason` is a closed enum: pre-create every child so the family
+        // exists at 0 from startup rather than appearing only after the
+        // first parse error.
+        for reason in ParseErrorReason::ALL {
+            parse_errors_total.with_label_values(&[reason.as_str()]);
+        }
 
+        // Not pre-created: `connection` is a deployment choice, not a
+        // closed set known at construction.
         let connection_state = IntGaugeVec::new(
             opts(
                 "dz_publisher_ingress_connection_state",
@@ -92,6 +104,12 @@ impl IngressMetrics {
         registry
             .register(Box::new(reconnects_total.clone()))
             .expect("static metric registration");
+        // `reason` is a closed enum: pre-create every child so the family
+        // exists at 0 from startup rather than appearing only after the
+        // first reconnect.
+        for reason in ReconnectReason::ALL {
+            reconnects_total.with_label_values(&[reason.as_str()]);
+        }
 
         let rate_limited_total = IntCounter::with_opts(opts(
             "dz_publisher_ingress_rate_limited_total",

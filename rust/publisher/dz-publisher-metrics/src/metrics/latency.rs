@@ -34,6 +34,12 @@ impl LatencyMetrics {
         registry
             .register(Box::new(venue_to_recv_latency_seconds.clone()))
             .expect("static metric registration");
+        // `timestamp_kind` is a closed enum: pre-create every child so the
+        // family exists at 0 from startup rather than appearing only after
+        // the first observation.
+        for kind in TimestampKind::ALL {
+            venue_to_recv_latency_seconds.with_label_values(&[kind.as_str()]);
+        }
 
         let venue_timestamps_available = IntGauge::with_opts(opts(
             "dz_publisher_venue_timestamps_available",
@@ -59,6 +65,12 @@ impl LatencyMetrics {
         registry
             .register(Box::new(recv_to_send_latency_seconds.clone()))
             .expect("static metric registration");
+        // `event_kind` is a closed enum: pre-create every child so the
+        // family exists at 0 from startup rather than appearing only after
+        // the first observation.
+        for kind in EventKind::ALL {
+            recv_to_send_latency_seconds.with_label_values(&[kind.as_str()]);
+        }
 
         let book_update_duration_seconds = Histogram::with_opts(histogram_opts(
             "dz_publisher_book_update_duration_seconds",
@@ -71,6 +83,8 @@ impl LatencyMetrics {
             .register(Box::new(book_update_duration_seconds.clone()))
             .expect("static metric registration");
 
+        // Not pre-created: `message_type` is the upstream source's own
+        // vocabulary, not a closed set known at construction.
         let encode_duration_seconds = HistogramVec::new(
             histogram_opts(
                 "dz_publisher_encode_duration_seconds",

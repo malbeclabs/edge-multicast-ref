@@ -38,6 +38,12 @@ impl BookMetrics {
         registry
             .register(Box::new(inconsistency_total.clone()))
             .expect("static metric registration");
+        // `kind` is a closed enum: pre-create every child so the family
+        // exists at 0 from startup rather than appearing only after the
+        // first detected inconsistency.
+        for kind in InconsistencyKind::ALL {
+            inconsistency_total.with_label_values(&[kind.as_str()]);
+        }
 
         let recovery_total = IntCounterVec::new(
             opts(
@@ -51,6 +57,12 @@ impl BookMetrics {
         registry
             .register(Box::new(recovery_total.clone()))
             .expect("static metric registration");
+        // `outcome` is a closed enum: pre-create every child so the family
+        // exists at 0 from startup rather than appearing only after the
+        // first recovery attempt.
+        for outcome in RecoveryOutcome::ALL {
+            recovery_total.with_label_values(&[outcome.as_str()]);
+        }
 
         let instruments_tracked = IntGauge::with_opts(opts(
             "dz_publisher_instruments_tracked",
