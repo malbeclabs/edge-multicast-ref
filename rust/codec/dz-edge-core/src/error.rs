@@ -16,9 +16,8 @@ pub enum DecodeError {
     #[error("datagram builder full: {attempted} bytes would exceed max {max}")]
     DatagramFull { attempted: usize, max: usize },
 
-    /// `0x05` is marked reserved in every current feed spec. Two publishers
-    /// transmit a private message there; a decoder must not silently invent a
-    /// meaning for it.
+    /// `0x05` is reserved by the wire specification and carries no message.
+    /// A decoder must refuse it rather than silently invent a meaning for it.
     #[error("type id {0:#04x} is reserved and carries no message")]
     ReservedTypeId(u8),
 }
