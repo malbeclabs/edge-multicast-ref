@@ -1,12 +1,17 @@
-use dz_edge_core::{AppMessage, DecodeError, Heartbeat};
+use dz_edge_core::{AppMessage, DecodeError};
 
+// `Fake` writes only `dst[..SIZE]`, matching the trait's documented contract
+// exactly (see `message.rs`): a `dst` longer than `SIZE` has its first `SIZE`
+// bytes written and the remainder left untouched. Slicing to `Self::SIZE`
+// relies on Rust's ordinary bounds check (always enforced, in every profile)
+// rather than a `debug_assert!`, so a too-short `dst` still panics
+// regardless of build profile.
 struct Fake;
 impl AppMessage for Fake {
     const TYPE_ID: u8 = 0x01;
     const SIZE: usize = 16;
     fn encode_into(&self, dst: &mut [u8]) {
-        debug_assert_eq!(dst.len(), Self::SIZE);
-        dst.fill(0xAB);
+        dst[..Self::SIZE].fill(0xAB);
     }
 }
 
@@ -17,15 +22,25 @@ fn a_message_encodes_into_exactly_its_size() {
     assert_eq!(buf, [0xAB; 16]);
 }
 
+// Asserts the documented contract directly - a `dst` longer than `SIZE` has
+// its first `SIZE` bytes written and the remainder left untouched - and is
+// therefore deliberately profile-independent. This replaces a prior test
+// that used `#[should_panic]` on a real message type's `encode_into`, which
+// relied on a `debug_assert_eq!` in that impl: it passed under the dev
+// profile (debug assertions on) and failed under `--release` (debug
+// assertions compiled out), the exact opposite of what `message.rs`
+// documents. Production message types (`Heartbeat` and friends) additionally
+// guard the exact-size precondition with `debug_assert_eq!` as a dev-time
+// bug-catching aid, which is unrelated to this test and is left untouched;
+// `Fake` isolates the trait-level contract so the over-long-`dst` case can be
+// exercised without depending on debug-assertion state.
 #[test]
-#[should_panic(expected = "assertion `left == right` failed")]
-fn encode_into_panics_on_a_slice_longer_than_size() {
-    let msg = Heartbeat {
-        channel_id: 0,
-        timestamp_ns: 0,
-    };
-    let mut buf = vec![0u8; Heartbeat::SIZE + 1];
-    msg.encode_into(&mut buf);
+fn encode_into_writes_only_the_first_size_bytes() {
+    let mut buf = [0xAAu8; Fake::SIZE + 4];
+    Fake.encode_into(&mut buf);
+
+    assert_eq!(&buf[..Fake::SIZE], [0xAB; Fake::SIZE]);
+    assert!(buf[Fake::SIZE..].iter().all(|&b| b == 0xAA));
 }
 
 #[test]
