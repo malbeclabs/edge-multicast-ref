@@ -32,14 +32,14 @@ impl<'a> Datagram<'a> {
     /// mismatch is refused rather than parsed at the wrong layout.
     ///
     /// Checks, in order:
-    /// 1. The 24-byte header decodes and its schema version is supported.
+    /// 1. The 24-byte header decodes and its schema version is supported,
+    ///    which also validates the declared length bounds (at least the
+    ///    header size and does not exceed `buf.len()`).
     /// 2. `magic` matches `expected_magic`.
-    /// 3. The declared datagram length is at least the header size.
-    /// 4. The declared datagram length does not exceed `buf.len()` (a `buf`
+    /// 3. Every message from offset 24 to the declared length fits, and the
+    ///    number found agrees with the header's Message Count. A `buf`
     ///    longer than the declared length is fine; trailing bytes are
-    ///    ignored).
-    /// 5. Every message from offset 24 to the declared length fits, and the
-    ///    number found agrees with the header's Message Count.
+    ///    ignored.
     pub fn decode(buf: &'a [u8], expected_magic: u16) -> Result<Self, DecodeError> {
         let header = DatagramHeader::decode(buf)?;
         if header.magic != expected_magic {
@@ -50,19 +50,10 @@ impl<'a> Datagram<'a> {
         }
 
         let datagram_len = header.datagram_len as usize;
-        if datagram_len < DATAGRAM_HEADER_SIZE {
-            return Err(DecodeError::ShortBuffer {
-                need: DATAGRAM_HEADER_SIZE,
-                got: datagram_len,
-            });
-        }
-        if datagram_len > buf.len() {
-            return Err(DecodeError::ShortBuffer {
-                need: datagram_len,
-                got: buf.len(),
-            });
-        }
-
+        // `DatagramHeader::decode` has already guaranteed
+        // `DATAGRAM_HEADER_SIZE <= datagram_len <= buf.len()`, with the same two
+        // `ShortBuffer` errors. The slice below depends on that, so relaxing
+        // those checks there breaks this.
         let messages = &buf[DATAGRAM_HEADER_SIZE..datagram_len];
         let found = validate_messages(messages)?;
         if found != header.msg_count as usize {
