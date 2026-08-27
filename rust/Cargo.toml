@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["codec/dz-edge-core", "codec/dz-edge-tob", "codec/dz-edge-refdata"]
+members = [
+    "codec/dz-edge-core",
+    "codec/dz-edge-tob",
+    "codec/dz-edge-refdata",
+    "publisher/dz-publisher-metrics",
+]
 exclude = ["kernel-receiver", "xdp-receiver"]
 
 [workspace.package]
@@ -12,3 +17,6 @@ authors = ["Malbec Labs"]
 
 [workspace.dependencies]
 thiserror = "1.0"
+# Pinned: two libraries in one binary must not disagree about the exposition format.
+prometheus = "0.14.0"
+tiny_http = "0.12"

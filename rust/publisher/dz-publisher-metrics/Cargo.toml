@@ -1,0 +1,14 @@
+[package]
+name = "dz-publisher-metrics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The normative set of Prometheus metrics a DoubleZero Edge publisher must emit"
+
+[dependencies]
+dz-edge-core = { path = "../../codec/dz-edge-core" }
+prometheus = { workspace = true }
+thiserror = { workspace = true }
+tiny_http = { workspace = true }
