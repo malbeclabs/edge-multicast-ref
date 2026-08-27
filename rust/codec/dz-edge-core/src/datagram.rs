@@ -29,7 +29,8 @@ impl DatagramHeader {
     /// Decode a header from the front of `buf`.
     ///
     /// Rejects any schema version this build does not implement, per the spec's
-    /// "a subscriber MUST discard frames whose version it does not implement".
+    /// "a subscriber MUST discard [datagrams] whose version it does not
+    /// implement".
     pub fn decode(buf: &[u8]) -> Result<Self, DecodeError> {
         if buf.len() < DATAGRAM_HEADER_SIZE {
             return Err(DecodeError::ShortBuffer {
@@ -56,10 +57,11 @@ impl DatagramHeader {
 
 /// Accumulates application messages into one datagram.
 ///
-/// Capacity is `mtu` clamped to at least the datagram header and at most `MAX_DATAGRAM_SIZE`. The clamp is the point: the cap
-/// is mandated by every feed spec, so no configuration key and no operator can
-/// raise it. A deployment default above the cap is representable, which is why
-/// the limit lives here and not in a documentation note.
+/// Capacity is `mtu` clamped to at least the datagram header and at most
+/// `MAX_DATAGRAM_SIZE`. The clamp is the point: the cap is mandated by every
+/// feed spec, so no configuration key and no operator can raise it. A
+/// deployment default above the cap is representable, which is why the limit
+/// lives here and not in a documentation note.
 pub struct DatagramBuilder {
     buf: Vec<u8>,
     magic: u16,
@@ -126,6 +128,10 @@ impl DatagramBuilder {
             M::SIZE >= MSG_HEADER_SIZE,
             "AppMessage::SIZE must include the 4-byte message header"
         );
+        assert!(
+            M::TYPE_ID != 0x05,
+            "type id 0x05 is reserved by the wire specification"
+        );
         // Message Count is a u8; a 256th message would wrap it to 0 and every
         // subscriber would mis-parse the rest of the datagram.
         if self.msg_count == u8::MAX {
@@ -143,11 +149,13 @@ impl DatagramBuilder {
         let start = self.buf.len();
         self.buf.resize(start + M::SIZE, 0);
         msg.encode_into(&mut self.buf[start..start + M::SIZE]);
-        // The message writes its own type and length; the builder owns Flags so
-        // a caller cannot set the snapshot bit on a mktdata message by accident.
+        // The builder owns Flags so a caller cannot set the snapshot bit on a
+        // mktdata message by accident.
         self.buf[start + 2..start + 4].copy_from_slice(&flags.to_le_bytes());
-        debug_assert_eq!(self.buf[start], M::TYPE_ID);
-        debug_assert_eq!(self.buf[start + 1] as usize, M::SIZE);
+        // The builder owns the message header, exactly as it owns Flags: a message's
+        // own bytes cannot disagree with the associated consts the builder framed it by.
+        self.buf[start] = M::TYPE_ID;
+        self.buf[start + 1] = M::SIZE as u8;
         self.msg_count += 1;
         Ok(())
     }

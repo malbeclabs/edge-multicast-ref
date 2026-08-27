@@ -1,8 +1,5 @@
 //! Wire constants, transcribed from the edge-feed-spec field tables.
 
-/// Datagram delimiter for the top-of-book feed: "DZ", little-endian on the wire.
-pub const MAGIC_TOB: u16 = 0x445A;
-
 /// The schema generation this build emits. A publisher speaks one generation:
 /// there is no reader asking it to downgrade, and a mixture would make the
 /// version byte meaningless.

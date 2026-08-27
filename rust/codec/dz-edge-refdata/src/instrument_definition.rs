@@ -101,6 +101,16 @@ impl InstrumentDefinition {
                 got: buf.len(),
             });
         }
+        if buf[0] != Self::TYPE_ID {
+            return Err(DecodeError::BadTypeId(buf[0]));
+        }
+        if buf[1] as usize != Self::SIZE {
+            return Err(DecodeError::LengthMismatch {
+                type_id: Self::TYPE_ID,
+                declared: buf[1],
+                expected: Self::SIZE as u8,
+            });
+        }
         let mut symbol = [0u8; SYMBOL_LEN];
         symbol.copy_from_slice(&buf[10..74]);
         let mut leg1 = [0u8; LEG_LEN];
@@ -132,6 +142,16 @@ impl InstrumentDefinition {
             return Err(DecodeError::ShortBuffer {
                 need: SIZE_V1,
                 got: buf.len(),
+            });
+        }
+        if buf[0] != Self::TYPE_ID {
+            return Err(DecodeError::BadTypeId(buf[0]));
+        }
+        if buf[1] as usize != SIZE_V1 {
+            return Err(DecodeError::LengthMismatch {
+                type_id: Self::TYPE_ID,
+                declared: buf[1],
+                expected: SIZE_V1 as u8,
             });
         }
         // Schema 1 has no Source ID and a char[16] Symbol, so every field after

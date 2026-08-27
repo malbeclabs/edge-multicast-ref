@@ -43,6 +43,9 @@ impl ManifestSummary {
                 got: buf.len(),
             });
         }
+        if buf[0] != Self::TYPE_ID {
+            return Err(DecodeError::BadTypeId(buf[0]));
+        }
         if buf[1] as usize != Self::SIZE {
             return Err(DecodeError::LengthMismatch {
                 type_id: Self::TYPE_ID,

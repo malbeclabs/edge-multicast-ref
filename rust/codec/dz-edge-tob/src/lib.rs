@@ -10,3 +10,6 @@ pub use trade::{
     Trade, AGGRESSOR_BUY, AGGRESSOR_SELL, AGGRESSOR_UNKNOWN, TRADE_FLAG_BLOCK, TRADE_FLAG_CROSS,
     TRADE_FLAG_SWEEP,
 };
+
+/// Datagram delimiter for the top-of-book feed: "DZ", little-endian on the wire.
+pub const MAGIC_TOB: u16 = 0x445A;

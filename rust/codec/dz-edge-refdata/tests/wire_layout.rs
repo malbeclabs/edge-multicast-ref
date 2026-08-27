@@ -166,6 +166,49 @@ fn definition_decode_at_v1_rejects_a_buffer_shorter_than_the_v1_size() {
 }
 
 #[test]
+fn definition_decode_at_v3_rejects_a_corrupted_declared_length() {
+    let d = sample();
+    let mut b = [0u8; InstrumentDefinition::SIZE];
+    d.encode_into(&mut b);
+    b[1] = 80; // lie about the length: a valid v1 length, not v3's
+    assert!(matches!(
+        InstrumentDefinition::decode(&b, SCHEMA_VERSION),
+        Err(DecodeError::LengthMismatch {
+            type_id: 0x02,
+            declared: 80,
+            expected: 130
+        })
+    ));
+}
+
+#[test]
+fn definition_decode_at_v1_rejects_a_corrupted_declared_length() {
+    let mut b = [0u8; SIZE_V1];
+    b[0] = 0x02;
+    b[1] = 130; // lie about the length: a valid v3 length, not v1's
+    assert!(matches!(
+        InstrumentDefinition::decode(&b, SCHEMA_VERSION_V1),
+        Err(DecodeError::LengthMismatch {
+            type_id: 0x02,
+            declared: 130,
+            expected: 80
+        })
+    ));
+}
+
+#[test]
+fn definition_decode_rejects_a_type_id_that_is_not_its_own() {
+    let d = sample();
+    let mut b = [0u8; InstrumentDefinition::SIZE];
+    d.encode_into(&mut b);
+    b[0] = 0xFF;
+    assert!(matches!(
+        InstrumentDefinition::decode(&b, SCHEMA_VERSION),
+        Err(DecodeError::BadTypeId(0xFF))
+    ));
+}
+
+#[test]
 fn manifest_summary_carries_count_and_seq() {
     let m = ManifestSummary {
         channel_id: 7,

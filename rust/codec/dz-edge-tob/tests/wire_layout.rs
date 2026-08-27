@@ -1,5 +1,10 @@
 use dz_edge_core::{AppMessage, DecodeError};
-use dz_edge_tob::{Quote, Trade};
+use dz_edge_tob::{Quote, Trade, MAGIC_TOB};
+
+#[test]
+fn magic_tob_matches_the_spec() {
+    assert_eq!(MAGIC_TOB, 0x445A, "\"DZ\", top-of-book datagram delimiter");
+}
 
 fn sample_quote() -> Quote {
     Quote {
@@ -108,6 +113,17 @@ fn quote_decode_rejects_a_buffer_shorter_than_the_fixed_size() {
     assert!(matches!(
         Quote::decode(&b[..59]),
         Err(DecodeError::ShortBuffer { need: 60, got: 59 })
+    ));
+}
+
+#[test]
+fn quote_decode_rejects_a_type_id_that_is_not_its_own() {
+    let mut b = [0u8; Quote::SIZE];
+    sample_quote().encode_into(&mut b);
+    b[0] = 0xFF;
+    assert!(matches!(
+        Quote::decode(&b),
+        Err(DecodeError::BadTypeId(0xFF))
     ));
 }
 
