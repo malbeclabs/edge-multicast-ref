@@ -81,7 +81,7 @@ impl DatagramBuilder {
         reset_count: u8,
         mtu: u16,
     ) -> Self {
-        let capacity = (mtu as usize).min(MAX_DATAGRAM_SIZE);
+        let capacity = (mtu as usize).clamp(DATAGRAM_HEADER_SIZE, MAX_DATAGRAM_SIZE);
         let mut buf = Vec::with_capacity(capacity);
         buf.resize(DATAGRAM_HEADER_SIZE, 0);
         Self {
@@ -119,6 +119,13 @@ impl DatagramBuilder {
     }
 
     fn push_with_flags<M: AppMessage>(&mut self, msg: &M, flags: u16) -> Result<(), DecodeError> {
+        // `SIZE` includes the 4-byte message header, so anything smaller is a broken
+        // `AppMessage` impl rather than a runtime condition. `M::SIZE` is an associated
+        // const, so for any concrete type this folds away at compile time.
+        assert!(
+            M::SIZE >= MSG_HEADER_SIZE,
+            "AppMessage::SIZE must include the 4-byte message header"
+        );
         // Message Count is a u8; a 256th message would wrap it to 0 and every
         // subscriber would mis-parse the rest of the datagram.
         if self.msg_count == u8::MAX {
@@ -141,7 +148,6 @@ impl DatagramBuilder {
         self.buf[start + 2..start + 4].copy_from_slice(&flags.to_le_bytes());
         debug_assert_eq!(self.buf[start], M::TYPE_ID);
         debug_assert_eq!(self.buf[start + 1] as usize, M::SIZE);
-        debug_assert!(M::SIZE >= MSG_HEADER_SIZE);
         self.msg_count += 1;
         Ok(())
     }

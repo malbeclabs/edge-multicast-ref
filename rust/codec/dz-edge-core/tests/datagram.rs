@@ -13,6 +13,19 @@ impl AppMessage for Sixteen {
     }
 }
 
+struct SelfFlagged;
+impl AppMessage for SelfFlagged {
+    const TYPE_ID: u8 = 0x01;
+    const SIZE: usize = 16;
+    fn encode_into(&self, dst: &mut [u8]) {
+        dst[0] = Self::TYPE_ID;
+        dst[1] = Self::SIZE as u8;
+        // Deliberately sets the snapshot bit itself. The builder must clear it.
+        dst[2..4].copy_from_slice(&0x0001u16.to_le_bytes());
+        dst[4..].fill(0);
+    }
+}
+
 struct HeaderOnly;
 impl AppMessage for HeaderOnly {
     const TYPE_ID: u8 = 0x01;
@@ -106,6 +119,14 @@ fn the_snapshot_flag_is_set_only_by_push_snapshot() {
     let out = snap.finish();
     let flags = u16::from_le_bytes([out[DATAGRAM_HEADER_SIZE + 2], out[DATAGRAM_HEADER_SIZE + 3]]);
     assert_eq!(flags & 0x0001, 1, "snapshot-port messages set bit 0");
+
+    // A message that sets the snapshot bit itself must still have it cleared
+    // by plain push(): the builder owns Flags, not the message.
+    let mut fights_back = DatagramBuilder::new(MAGIC_TOB, 0, 0, 0, 0, 1232);
+    fights_back.push(&SelfFlagged).unwrap();
+    let out = fights_back.finish();
+    let flags = u16::from_le_bytes([out[DATAGRAM_HEADER_SIZE + 2], out[DATAGRAM_HEADER_SIZE + 3]]);
+    assert_eq!(flags & 0x0001, 0, "push() must clear a self-set snapshot bit");
 }
 
 #[test]
