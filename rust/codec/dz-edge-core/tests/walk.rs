@@ -255,7 +255,12 @@ fn header_claims_more_messages_than_are_present() {
 }
 
 #[test]
-fn header_claims_fewer_messages_than_are_present() {
+fn header_claims_fewer_messages_than_are_present_and_the_rest_is_ignored() {
+    // Message Count governs the walk, not the declared datagram length: a
+    // second, otherwise well-formed message sitting after the declared
+    // count is exactly as unreachable as any other filler byte would be.
+    // The reference parser reads only MsgCount messages and has no way to
+    // notice, let alone reject, what looks like an extra message after that.
     let mut b = DatagramBuilder::new(TEST_MAGIC, 0, 0, 0, 0, 1232);
     b.push(&Heartbeat {
         channel_id: 0,
@@ -270,12 +275,71 @@ fn header_claims_fewer_messages_than_are_present() {
     let mut out = b.finish().expect("datagram has messages");
     out[20] = 1; // claims one message though two are present
 
+    let dg = Datagram::decode(&out, TEST_MAGIC).unwrap();
+    let msgs: Vec<_> = dg.messages().collect();
+    assert_eq!(msgs.len(), 1);
+}
+
+#[test]
+fn a_few_filler_bytes_inside_the_declared_length_are_ignored() {
+    // The specification does not forbid intra-datagram padding, and the Go
+    // reference parser (`topofbook_wire.go`'s `decodeTopOfBookFrame`) reads
+    // exactly `MsgCount` messages and ignores whatever remains inside the
+    // declared length. A publisher that pads must not have its traffic
+    // dropped here while the reference parser accepts it.
+    let mut b = DatagramBuilder::new(TEST_MAGIC, 0, 0, 0, 0, 1232);
+    b.push(&Heartbeat {
+        channel_id: 0,
+        timestamp_ns: 7,
+    })
+    .unwrap();
+    let mut out = b.finish().expect("datagram has messages");
+    // Filler *inside* the declared length, unlike
+    // `trailing_bytes_past_datagram_len_are_ignored`, which appends bytes
+    // the header's declared length does not cover at all.
+    out.extend_from_slice(&[0xEE; 5]);
+    let new_len = out.len() as u16;
+    out[22..24].copy_from_slice(&new_len.to_le_bytes());
+
+    let dg = Datagram::decode(&out, TEST_MAGIC).unwrap();
+    let msgs: Vec<_> = dg.messages().collect();
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0].type_id, Heartbeat::TYPE_ID);
+}
+
+#[test]
+fn a_truncated_message_header_is_refused_without_inventing_a_length() {
+    // Only 2 bytes remain where a message is still required - not enough to
+    // hold the 4-byte message header, so no Length field can be read at all.
+    // This must not be confused with a genuine zero-length declaration
+    // (`MessageTooShort`), which does read a Length field off the wire.
+    let mut buf = header_bytes(
+        TEST_MAGIC,
+        SCHEMA_VERSION,
+        1,
+        (DATAGRAM_HEADER_SIZE + 2) as u16,
+    );
+    buf.extend_from_slice(&[0x7F, 0x00]);
+
     assert!(matches!(
-        Datagram::decode(&out, TEST_MAGIC),
-        Err(DecodeError::MessageCountMismatch {
-            declared: 1,
-            found: 2
+        Datagram::decode(&buf, TEST_MAGIC),
+        Err(DecodeError::MessageHeaderTruncated {
+            offset: DATAGRAM_HEADER_SIZE,
+            remaining: 2
         })
+    ));
+}
+
+#[test]
+fn a_declared_length_beyond_the_mandated_cap_is_rejected() {
+    // `DeclaredLengthOutOfRange` now lives in `DatagramHeader::decode`;
+    // confirm `Datagram::decode` still surfaces it for a declared length far
+    // beyond the mandated cap, not just a merely-too-small one.
+    let buf = header_bytes(TEST_MAGIC, SCHEMA_VERSION, 1, 4104);
+
+    assert!(matches!(
+        Datagram::decode(&buf, TEST_MAGIC),
+        Err(DecodeError::DeclaredLengthOutOfRange { declared: 4104, .. })
     ));
 }
 

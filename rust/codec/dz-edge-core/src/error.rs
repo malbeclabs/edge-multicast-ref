@@ -59,6 +59,15 @@ pub enum DecodeError {
     )]
     MessageTooShort { offset: usize, declared: u8 },
 
+    /// Fewer than the 4-byte message header remain, so no Length field was
+    /// ever read. Distinct from `MessageTooShort`, whose `declared` value was
+    /// actually read off the wire and found too small - reusing that variant
+    /// here would mean inventing a declared length that was never seen.
+    #[error(
+        "message at offset {offset} is truncated: only {remaining} bytes remain, below the 4-byte message header"
+    )]
+    MessageHeaderTruncated { offset: usize, remaining: usize },
+
     #[error("message at offset {offset} declares length {declared} but only {remaining} bytes remain in the datagram")]
     MessageOverrunsDatagram {
         offset: usize,
