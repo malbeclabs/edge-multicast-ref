@@ -4,6 +4,11 @@
 pub enum PortRole {
     Mktdata,
     Refdata,
+    /// No message type in these crates lists this role yet, because the
+    /// snapshot port role belongs to the depth feeds, which are not
+    /// implemented here. A builder constructed with this role will refuse
+    /// every message currently defined; the first depth feed's message types
+    /// will list it.
     Snapshot,
 }
 

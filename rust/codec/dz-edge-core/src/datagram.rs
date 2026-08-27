@@ -1,6 +1,8 @@
 //! The 24-byte datagram header and the builder that packs messages into one
 //! UDP payload.
 
+use core::marker::PhantomData;
+
 use crate::channel::ChannelSequence;
 use crate::constants::{
     DATAGRAM_HEADER_SIZE, FLAG_SNAPSHOT, MAX_DATAGRAM_SIZE, MSG_HEADER_SIZE, SCHEMA_VERSION,
@@ -8,7 +10,9 @@ use crate::constants::{
 };
 use crate::encode_error::EncodeError;
 use crate::error::DecodeError;
+use crate::feed::Feed;
 use crate::message::AppMessage;
+use crate::port_role::PortRole;
 
 /// The decoded datagram header.
 ///
@@ -23,6 +27,9 @@ pub struct DatagramHeader {
     pub sequence_number: u64,
     pub send_timestamp_ns: u64,
     pub msg_count: u8,
+    /// Decoded straight from a byte offset, not a positional constructor
+    /// argument next to another `u8`, so it carries no transposition risk;
+    /// left as a bare `u8` rather than wrapped in `ResetCount`.
     pub reset_count: u8,
     pub datagram_len: u16,
 }
@@ -102,31 +109,39 @@ impl DatagramHeader {
 /// feed spec, so no configuration key and no operator can raise it. A
 /// deployment default above the cap is representable, which is why the limit
 /// lives here and not in a documentation note.
-pub struct DatagramBuilder {
+pub struct DatagramBuilder<F: Feed> {
     buf: Vec<u8>,
-    magic: u16,
+    port_role: PortRole,
     channel_id: u8,
     sequence_number: u64,
     reset_count: u8,
     capacity: usize,
     msg_count: u8,
+    _feed: PhantomData<F>,
 }
 
-impl DatagramBuilder {
+impl<F: Feed> DatagramBuilder<F> {
     #[must_use]
-    pub fn new(magic: u16, sequence: ChannelSequence, mtu: u16) -> Self {
+    pub fn new(sequence: ChannelSequence, port_role: PortRole, mtu: u16) -> Self {
         let capacity = (mtu as usize).clamp(DATAGRAM_HEADER_SIZE, MAX_DATAGRAM_SIZE);
         let mut buf = Vec::with_capacity(capacity);
         buf.resize(DATAGRAM_HEADER_SIZE, 0);
         Self {
             buf,
-            magic,
+            port_role,
             channel_id: sequence.channel_id(),
             sequence_number: sequence.sequence_number(),
-            reset_count: sequence.reset_count(),
+            reset_count: sequence.reset_count().get(),
             capacity,
             msg_count: 0,
+            _feed: PhantomData,
         }
+    }
+
+    /// The port role this builder was constructed for.
+    #[must_use]
+    pub const fn port_role(&self) -> PortRole {
+        self.port_role
     }
 
     /// Bytes still available for messages.
@@ -154,21 +169,20 @@ impl DatagramBuilder {
         self.msg_count == 0
     }
 
-    /// Append a message with the snapshot flag cleared.
+    /// Append a message, with the snapshot flag set or cleared according to
+    /// this builder's port role: set when the role is `Snapshot`, cleared
+    /// otherwise. The builder owns this choice - a caller cannot get it wrong
+    /// by calling the wrong method, because there is no wrong method.
     ///
     /// On `Err` the builder is unchanged, so a caller may finish the current
     /// datagram and retry the same message on a fresh one.
     pub fn push<M: AppMessage>(&mut self, msg: &M) -> Result<(), EncodeError> {
-        self.push_with_flags(msg, 0)
-    }
-
-    /// Append a message with the snapshot flag set. Correct only on the
-    /// `snapshot` port role.
-    ///
-    /// On `Err` the builder is unchanged, so a caller may finish the current
-    /// datagram and retry the same message on a fresh one.
-    pub fn push_snapshot<M: AppMessage>(&mut self, msg: &M) -> Result<(), EncodeError> {
-        self.push_with_flags(msg, FLAG_SNAPSHOT)
+        let flags = if self.port_role == PortRole::Snapshot {
+            FLAG_SNAPSHOT
+        } else {
+            0
+        };
+        self.push_with_flags(msg, flags)
     }
 
     fn push_with_flags<M: AppMessage>(&mut self, msg: &M, flags: u16) -> Result<(), EncodeError> {
@@ -186,6 +200,16 @@ impl DatagramBuilder {
             M::SIZE <= u8::MAX as usize,
             "AppMessage::SIZE must fit the u8 message-header Length field"
         );
+        // A message not documented for this builder's port role is a spec
+        // violation, but a recoverable one: the send path counts it and drops
+        // the message rather than aborting, because a publisher that panics
+        // goes dark.
+        if !M::PORT_ROLES.contains(&self.port_role) {
+            return Err(EncodeError::WrongPortRole {
+                message: core::any::type_name::<M>(),
+                role: self.port_role.as_str(),
+            });
+        }
         // Message Count is a u8; a 256th message would wrap it to 0 and every
         // subscriber would mis-parse the rest of the datagram.
         if self.msg_count == u8::MAX {
@@ -234,7 +258,7 @@ impl DatagramBuilder {
             return None;
         }
         let len = self.buf.len() as u16;
-        self.buf[0..2].copy_from_slice(&self.magic.to_le_bytes());
+        self.buf[0..2].copy_from_slice(&F::MAGIC.to_le_bytes());
         self.buf[2] = SCHEMA_VERSION;
         self.buf[3] = self.channel_id;
         self.buf[4..12].copy_from_slice(&self.sequence_number.to_le_bytes());

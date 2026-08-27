@@ -1,4 +1,4 @@
-use dz_edge_core::{AppMessage, DecodeError};
+use dz_edge_core::{AppMessage, DecodeError, PortRole};
 
 pub const QUOTE_BID_UPDATED: u8 = 0x01;
 pub const QUOTE_ASK_UPDATED: u8 = 0x02;
@@ -28,6 +28,7 @@ pub struct Quote {
 impl AppMessage for Quote {
     const TYPE_ID: u8 = 0x03;
     const SIZE: usize = 60;
+    const PORT_ROLES: &'static [PortRole] = &[PortRole::Mktdata];
 
     fn encode_into(&self, dst: &mut [u8]) {
         debug_assert_eq!(dst.len(), Self::SIZE);

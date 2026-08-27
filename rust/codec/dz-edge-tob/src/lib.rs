@@ -13,3 +13,11 @@ pub use trade::{
 
 /// Datagram delimiter for the top-of-book feed: "DZ", little-endian on the wire.
 pub const MAGIC_TOB: u16 = 0x445A;
+
+/// The Top-of-Book & Trades feed.
+pub struct TopOfBook;
+
+impl dz_edge_core::Feed for TopOfBook {
+    const MAGIC: u16 = MAGIC_TOB;
+    const NAME: &'static str = "top-of-book";
+}

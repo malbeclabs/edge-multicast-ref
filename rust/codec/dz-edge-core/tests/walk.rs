@@ -1,11 +1,36 @@
 use dz_edge_core::{
-    AppMessage, ChannelSequence, Datagram, DatagramBuilder, DecodeError, EndOfSession, Heartbeat,
-    DATAGRAM_HEADER_SIZE, SCHEMA_VERSION,
+    AppMessage, ChannelSequence, Datagram, DatagramBuilder, DecodeError, EndOfSession, Feed,
+    Heartbeat, PortRole, ResetCount, DATAGRAM_HEADER_SIZE, SCHEMA_VERSION,
 };
 
-// Core's tests only need *a* magic value; they must not depend on
-// dz-edge-tob, which owns the real MAGIC_TOB.
-const TEST_MAGIC: u16 = 0x445A;
+// Core's tests cannot name `TopOfBook` - that would make core depend on
+// dz-edge-tob, which is backwards. A test-local feed stands in for it.
+struct TestFeed;
+impl Feed for TestFeed {
+    const MAGIC: u16 = 0x445A;
+    const NAME: &'static str = "test";
+}
+
+const TEST_MAGIC: u16 = TestFeed::MAGIC;
+
+/// A message declared eligible for the snapshot port role, so a
+/// `Snapshot`-role builder can be exercised without changing `Heartbeat`'s
+/// real, spec-declared roles (`mktdata` only).
+struct SnapshotEligible;
+impl AppMessage for SnapshotEligible {
+    const TYPE_ID: u8 = 0x01;
+    const SIZE: usize = 16;
+    const PORT_ROLES: &'static [PortRole] = &[PortRole::Snapshot];
+    fn encode_into(&self, dst: &mut [u8]) {
+        dst[0] = Self::TYPE_ID;
+        dst[1] = Self::SIZE as u8;
+        dst[2..4].copy_from_slice(&0u16.to_le_bytes());
+        dst[4..].fill(0);
+    }
+
+    // SnapshotEligible carries no redundant Channel ID.
+    fn stamp_channel_id(_dst: &mut [u8], _channel_id: u8) {}
+}
 
 /// Hand-craft a 24-byte header, independent of `DatagramBuilder`, so
 /// malformations the builder cannot produce (a bad message count, a
@@ -21,8 +46,8 @@ fn header_bytes(magic: u16, schema_version: u8, msg_count: u8, datagram_len: u16
 
 #[test]
 fn walks_heartbeats_and_end_of_session_in_order() {
-    let channel = ChannelSequence::resume(3, 0, 10);
-    let mut b = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
+    let channel = ChannelSequence::resume(3, ResetCount(0), 10);
+    let mut b = DatagramBuilder::<TestFeed>::new(channel, PortRole::Mktdata, 1232);
     let hb1 = Heartbeat {
         channel_id: 3,
         timestamp_ns: 111,
@@ -70,35 +95,41 @@ fn walks_heartbeats_and_end_of_session_in_order() {
 }
 
 #[test]
-fn flags_reflect_push_vs_push_snapshot() {
+fn flags_reflect_the_builders_port_role() {
     let hb = Heartbeat {
         channel_id: 0,
         timestamp_ns: 0,
     };
 
-    let channel = ChannelSequence::new(0, 0);
-    let mut plain = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
+    let channel = ChannelSequence::new(0, ResetCount(0));
+    let mut plain = DatagramBuilder::<TestFeed>::new(channel, PortRole::Mktdata, 1232);
     plain.push(&hb).unwrap();
     let out = plain.finish(0).expect("datagram has messages");
     let dg = Datagram::decode(&out, TEST_MAGIC).unwrap();
     let msg = dg.messages().next().unwrap();
-    assert_eq!(msg.flags, 0, "push() must clear the snapshot bit");
+    assert_eq!(
+        msg.flags, 0,
+        "a mktdata-role builder must clear the snapshot bit"
+    );
 
-    let channel = ChannelSequence::new(0, 0);
-    let mut snap = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
-    snap.push_snapshot(&hb).unwrap();
+    let channel = ChannelSequence::new(0, ResetCount(0));
+    let mut snap = DatagramBuilder::<TestFeed>::new(channel, PortRole::Snapshot, 1232);
+    snap.push(&SnapshotEligible).unwrap();
     let out = snap.finish(0).expect("datagram has messages");
     let dg = Datagram::decode(&out, TEST_MAGIC).unwrap();
     let msg = dg.messages().next().unwrap();
-    assert_eq!(msg.flags, 1, "push_snapshot() must set the snapshot bit");
+    assert_eq!(
+        msg.flags, 1,
+        "a snapshot-role builder must set the snapshot bit"
+    );
 }
 
 #[test]
 fn an_empty_builder_yields_no_datagram() {
     // Message Count is 1-255, so a tick with nothing to send produces no
     // datagram at all rather than one every conformant subscriber discards.
-    let channel = ChannelSequence::new(0, 0);
-    let b = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
+    let channel = ChannelSequence::new(0, ResetCount(0));
+    let b = DatagramBuilder::<TestFeed>::new(channel, PortRole::Mktdata, 1232);
     assert!(b.finish(0).is_none());
 }
 
@@ -119,8 +150,8 @@ fn a_hand_built_zero_message_datagram_is_refused() {
 
 #[test]
 fn a_magic_mismatch_is_rejected() {
-    let channel = ChannelSequence::new(0, 0);
-    let mut b = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
+    let channel = ChannelSequence::new(0, ResetCount(0));
+    let mut b = DatagramBuilder::<TestFeed>::new(channel, PortRole::Mktdata, 1232);
     b.push(&Heartbeat {
         channel_id: 0,
         timestamp_ns: 0,
@@ -139,8 +170,8 @@ fn a_magic_mismatch_is_rejected() {
 
 #[test]
 fn a_truncated_buffer_is_rejected() {
-    let channel = ChannelSequence::new(0, 0);
-    let mut b = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
+    let channel = ChannelSequence::new(0, ResetCount(0));
+    let mut b = DatagramBuilder::<TestFeed>::new(channel, PortRole::Mktdata, 1232);
     b.push(&Heartbeat {
         channel_id: 0,
         timestamp_ns: 0,
@@ -161,8 +192,8 @@ fn a_truncated_buffer_is_rejected() {
 
 #[test]
 fn trailing_bytes_past_datagram_len_are_ignored() {
-    let channel = ChannelSequence::new(0, 0);
-    let mut b = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
+    let channel = ChannelSequence::new(0, ResetCount(0));
+    let mut b = DatagramBuilder::<TestFeed>::new(channel, PortRole::Mktdata, 1232);
     b.push(&Heartbeat {
         channel_id: 0,
         timestamp_ns: 42,
@@ -181,8 +212,8 @@ fn trailing_bytes_past_datagram_len_are_ignored() {
 
 #[test]
 fn an_unsupported_schema_version_is_rejected() {
-    let channel = ChannelSequence::new(0, 0);
-    let mut b = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
+    let channel = ChannelSequence::new(0, ResetCount(0));
+    let mut b = DatagramBuilder::<TestFeed>::new(channel, PortRole::Mktdata, 1232);
     b.push(&Heartbeat {
         channel_id: 0,
         timestamp_ns: 0,
@@ -259,8 +290,8 @@ fn a_declared_length_past_the_datagram_end_overruns() {
 
 #[test]
 fn header_claims_more_messages_than_are_present() {
-    let channel = ChannelSequence::new(0, 0);
-    let mut b = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
+    let channel = ChannelSequence::new(0, ResetCount(0));
+    let mut b = DatagramBuilder::<TestFeed>::new(channel, PortRole::Mktdata, 1232);
     b.push(&Heartbeat {
         channel_id: 0,
         timestamp_ns: 0,
@@ -285,8 +316,8 @@ fn header_claims_fewer_messages_than_are_present_and_the_rest_is_ignored() {
     // count is exactly as unreachable as any other filler byte would be.
     // The reference parser reads only MsgCount messages and has no way to
     // notice, let alone reject, what looks like an extra message after that.
-    let channel = ChannelSequence::new(0, 0);
-    let mut b = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
+    let channel = ChannelSequence::new(0, ResetCount(0));
+    let mut b = DatagramBuilder::<TestFeed>::new(channel, PortRole::Mktdata, 1232);
     b.push(&Heartbeat {
         channel_id: 0,
         timestamp_ns: 0,
@@ -312,8 +343,8 @@ fn a_few_filler_bytes_inside_the_declared_length_are_ignored() {
     // exactly `MsgCount` messages and ignores whatever remains inside the
     // declared length. A publisher that pads must not have its traffic
     // dropped here while the reference parser accepts it.
-    let channel = ChannelSequence::new(0, 0);
-    let mut b = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
+    let channel = ChannelSequence::new(0, ResetCount(0));
+    let mut b = DatagramBuilder::<TestFeed>::new(channel, PortRole::Mktdata, 1232);
     b.push(&Heartbeat {
         channel_id: 0,
         timestamp_ns: 7,
@@ -398,8 +429,8 @@ fn the_builder_stamps_heartbeats_channel_id_from_the_datagram() {
         channel_id: 9,
         timestamp_ns: 555,
     };
-    let channel = ChannelSequence::new(3, 0);
-    let mut b = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
+    let channel = ChannelSequence::new(3, ResetCount(0));
+    let mut b = DatagramBuilder::<TestFeed>::new(channel, PortRole::Mktdata, 1232);
     b.push(&hb).unwrap();
     let out = b.finish(0).expect("datagram has messages");
 

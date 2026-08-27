@@ -12,4 +12,13 @@ pub enum EncodeError {
     /// limit - conflating them sends a reader chasing an MTU problem.
     #[error("datagram already holds the maximum {max} messages")]
     MessageCountExhausted { max: u8 },
+
+    /// The message's specification does not permit it on this datagram's port
+    /// role. Recoverable: the send path counts it and drops the message rather
+    /// than aborting, because a publisher that panics goes dark.
+    #[error("{message} may not be carried on the {role} port role")]
+    WrongPortRole {
+        message: &'static str,
+        role: &'static str,
+    },
 }
