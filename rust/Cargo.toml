@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["codec/dz-edge-core"]
+exclude = ["kernel-receiver", "xdp-receiver"]
 
 [workspace.package]
 version = "0.1.0"
