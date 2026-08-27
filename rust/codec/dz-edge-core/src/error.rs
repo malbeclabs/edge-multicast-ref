@@ -8,7 +8,11 @@ pub enum DecodeError {
     UnsupportedSchema(u8),
 
     #[error("message length {declared} mismatches fixed size {expected} for type {type_id:#04x}")]
-    LengthMismatch { type_id: u8, declared: u8, expected: u8 },
+    LengthMismatch {
+        type_id: u8,
+        declared: u8,
+        expected: u8,
+    },
 
     #[error("unknown message type id {0:#04x}")]
     BadTypeId(u8),

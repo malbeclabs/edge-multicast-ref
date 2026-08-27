@@ -24,7 +24,10 @@ impl AppMessage for EndOfSession {
 impl EndOfSession {
     pub fn decode(buf: &[u8]) -> Result<Self, DecodeError> {
         if buf.len() < Self::SIZE {
-            return Err(DecodeError::ShortBuffer { need: Self::SIZE, got: buf.len() });
+            return Err(DecodeError::ShortBuffer {
+                need: Self::SIZE,
+                got: buf.len(),
+            });
         }
         if buf[1] as usize != Self::SIZE {
             return Err(DecodeError::LengthMismatch {

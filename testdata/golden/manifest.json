@@ -1,0 +1,107 @@
+{
+  "spec_revision": "edge-feed-spec 3a8f19c615aa9270e8581a22d45c6a9e780fee66 (2026-08-23); top-of-book 3.0.1; reference-data 1.0.2",
+  "vectors": [
+    {
+      "file": "quote-v3.bin",
+      "message": "Quote",
+      "type_id": "0x03",
+      "size": 60,
+      "schema_version": 3,
+      "fields": {
+        "instrument_id": 1,
+        "source_id": 2,
+        "update_flags": 3,
+        "source_timestamp_ns": 1700000000000000000,
+        "bid_price": 9999500,
+        "bid_qty": 12500,
+        "ask_price": 10000500,
+        "ask_qty": 7250,
+        "bid_source_count": 3,
+        "ask_source_count": 4
+      }
+    },
+    {
+      "file": "trade-v3.bin",
+      "message": "Trade",
+      "type_id": "0x04",
+      "size": 52,
+      "schema_version": 3,
+      "fields": {
+        "instrument_id": 1,
+        "source_id": 2,
+        "aggressor_side": 1,
+        "trade_flags": 2,
+        "source_timestamp_ns": 1700000000000000001,
+        "trade_price": 10000000,
+        "trade_qty": 500,
+        "trade_id": 987654321,
+        "cumulative_volume": 1000000
+      }
+    },
+    {
+      "file": "instrument-definition-v3.bin",
+      "message": "InstrumentDefinition",
+      "type_id": "0x02",
+      "size": 130,
+      "schema_version": 3,
+      "fields": {
+        "instrument_id": 1,
+        "source_id": 2,
+        "symbol": "BTC-USDT",
+        "leg1": "BTC",
+        "leg2": "USDT",
+        "asset_class": 1,
+        "price_exponent": -2,
+        "qty_exponent": -8,
+        "market_model": 1,
+        "tick_size": 1,
+        "lot_size": 1000,
+        "contract_value": 0,
+        "expiry_ns": 0,
+        "settle_type": 0,
+        "price_bound": 0,
+        "manifest_seq": 9
+      }
+    },
+    {
+      "file": "instrument-definition-v1.bin",
+      "message": "InstrumentDefinition",
+      "type_id": "0x02",
+      "size": 80,
+      "schema_version": 1,
+      "note": "Decode-only layout: no Source ID field, Symbol is char[16] instead of char[64]. Carries the same logical values as instrument-definition-v3.bin; source_id must decode as 0.",
+      "fields": {
+        "instrument_id": 1,
+        "source_id": 0,
+        "symbol": "BTC-USDT",
+        "leg1": "BTC",
+        "leg2": "USDT",
+        "asset_class": 1,
+        "price_exponent": -2,
+        "qty_exponent": -8,
+        "market_model": 1,
+        "tick_size": 1,
+        "lot_size": 1000,
+        "contract_value": 0,
+        "expiry_ns": 0,
+        "settle_type": 0,
+        "price_bound": 0,
+        "manifest_seq": 9
+      }
+    },
+    {
+      "file": "manifest-summary-v3.bin",
+      "message": "ManifestSummary",
+      "type_id": "0x07",
+      "size": 24,
+      "schema_version": 3,
+      "fields": {
+        "channel_id": 7,
+        "valid": 1,
+        "manifest_seq": 9,
+        "instrument_count": 1234,
+        "timestamp_ns": 1700000000000000002
+      }
+    }
+  ]
+}

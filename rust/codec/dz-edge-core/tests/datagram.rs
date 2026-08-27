@@ -46,7 +46,11 @@ fn header_fields_land_at_their_spec_offsets() {
     assert_eq!(&out[0..2], &MAGIC_TOB.to_le_bytes(), "offset 0: Magic");
     assert_eq!(out[2], SCHEMA_VERSION, "offset 2: Schema Version");
     assert_eq!(out[3], 7, "offset 3: Channel ID");
-    assert_eq!(&out[4..12], &42u64.to_le_bytes(), "offset 4: Sequence Number");
+    assert_eq!(
+        &out[4..12],
+        &42u64.to_le_bytes(),
+        "offset 4: Sequence Number"
+    );
     assert_eq!(
         &out[12..20],
         &1_700_000_000_000_000_000u64.to_le_bytes(),
@@ -56,7 +60,10 @@ fn header_fields_land_at_their_spec_offsets() {
     assert_eq!(out[21], 3, "offset 21: Reset Count");
     // The spec's field table names offset 22 `Frame Length`. The identifier is
     // datagram_len; the wire meaning is the total datagram length.
-    assert_eq!(&out[22..24], &(DATAGRAM_HEADER_SIZE as u16 + 16).to_le_bytes());
+    assert_eq!(
+        &out[22..24],
+        &(DATAGRAM_HEADER_SIZE as u16 + 16).to_le_bytes()
+    );
     assert_eq!(out.len(), DATAGRAM_HEADER_SIZE + 16);
 }
 
@@ -87,7 +94,10 @@ fn a_finished_datagram_never_exceeds_the_cap() {
 fn a_message_that_does_not_fit_is_refused_rather_than_truncated() {
     let mut b = DatagramBuilder::new(MAGIC_TOB, 0, 0, 0, 0, 1232);
     while b.push(&Sixteen).is_ok() {}
-    assert!(matches!(b.push(&Sixteen), Err(DecodeError::DatagramFull { .. })));
+    assert!(matches!(
+        b.push(&Sixteen),
+        Err(DecodeError::DatagramFull { .. })
+    ));
 }
 
 #[test]
@@ -100,7 +110,10 @@ fn message_count_stops_at_255() {
     while b.push(&HeaderOnly).is_ok() {
         pushed += 1;
     }
-    assert_eq!(pushed, 255, "the u8 Message Count must stop the builder at 255");
+    assert_eq!(
+        pushed, 255,
+        "the u8 Message Count must stop the builder at 255"
+    );
     let out = b.finish();
     assert_eq!(out[20], 255, "offset 20: Message Count");
     assert!(out.len() <= MAX_DATAGRAM_SIZE);
@@ -112,7 +125,11 @@ fn the_snapshot_flag_is_set_only_by_push_snapshot() {
     plain.push(&Sixteen).unwrap();
     let out = plain.finish();
     let flags = u16::from_le_bytes([out[DATAGRAM_HEADER_SIZE + 2], out[DATAGRAM_HEADER_SIZE + 3]]);
-    assert_eq!(flags & 0x0001, 0, "mktdata and refdata messages clear bit 0");
+    assert_eq!(
+        flags & 0x0001,
+        0,
+        "mktdata and refdata messages clear bit 0"
+    );
 
     let mut snap = DatagramBuilder::new(MAGIC_TOB, 0, 0, 0, 0, 1232);
     snap.push_snapshot(&Sixteen).unwrap();
@@ -126,7 +143,11 @@ fn the_snapshot_flag_is_set_only_by_push_snapshot() {
     fights_back.push(&SelfFlagged).unwrap();
     let out = fights_back.finish();
     let flags = u16::from_le_bytes([out[DATAGRAM_HEADER_SIZE + 2], out[DATAGRAM_HEADER_SIZE + 3]]);
-    assert_eq!(flags & 0x0001, 0, "push() must clear a self-set snapshot bit");
+    assert_eq!(
+        flags & 0x0001,
+        0,
+        "push() must clear a self-set snapshot bit"
+    );
 }
 
 #[test]

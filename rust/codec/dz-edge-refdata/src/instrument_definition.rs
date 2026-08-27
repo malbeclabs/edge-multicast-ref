@@ -96,7 +96,10 @@ impl InstrumentDefinition {
 
     fn decode_v3(buf: &[u8]) -> Result<Self, DecodeError> {
         if buf.len() < Self::SIZE {
-            return Err(DecodeError::ShortBuffer { need: Self::SIZE, got: buf.len() });
+            return Err(DecodeError::ShortBuffer {
+                need: Self::SIZE,
+                got: buf.len(),
+            });
         }
         let mut symbol = [0u8; SYMBOL_LEN];
         symbol.copy_from_slice(&buf[10..74]);
@@ -126,7 +129,10 @@ impl InstrumentDefinition {
 
     fn decode_v1(buf: &[u8]) -> Result<Self, DecodeError> {
         if buf.len() < SIZE_V1 {
-            return Err(DecodeError::ShortBuffer { need: SIZE_V1, got: buf.len() });
+            return Err(DecodeError::ShortBuffer {
+                need: SIZE_V1,
+                got: buf.len(),
+            });
         }
         // Schema 1 has no Source ID and a char[16] Symbol, so every field after
         // Instrument ID sits 50 bytes earlier than at schema 3.

@@ -25,17 +25,45 @@ fn quote_fields_land_at_their_spec_offsets() {
     assert_eq!(b.len(), 60);
     assert_eq!(b[0], 0x03, "offset 0: Type");
     assert_eq!(b[1], 60, "offset 1: Length");
-    assert_eq!(&b[4..8], &0x1112_1314u32.to_le_bytes(), "offset 4: Instrument ID");
+    assert_eq!(
+        &b[4..8],
+        &0x1112_1314u32.to_le_bytes(),
+        "offset 4: Instrument ID"
+    );
     assert_eq!(&b[8..10], &0x2122u16.to_le_bytes(), "offset 8: Source ID");
     assert_eq!(b[10], 0x03, "offset 10: Update Flags");
     assert_eq!(b[11], 0, "offset 11: Reserved");
-    assert_eq!(&b[12..20], &0x3132_3334_3536_3738u64.to_le_bytes(), "offset 12: Source Timestamp");
-    assert_eq!(&b[20..28], &(-12_345i64).to_le_bytes(), "offset 20: Bid Price");
-    assert_eq!(&b[28..36], &6789u64.to_le_bytes(), "offset 28: Bid Quantity");
+    assert_eq!(
+        &b[12..20],
+        &0x3132_3334_3536_3738u64.to_le_bytes(),
+        "offset 12: Source Timestamp"
+    );
+    assert_eq!(
+        &b[20..28],
+        &(-12_345i64).to_le_bytes(),
+        "offset 20: Bid Price"
+    );
+    assert_eq!(
+        &b[28..36],
+        &6789u64.to_le_bytes(),
+        "offset 28: Bid Quantity"
+    );
     assert_eq!(&b[36..44], &54_321i64.to_le_bytes(), "offset 36: Ask Price");
-    assert_eq!(&b[44..52], &9876u64.to_le_bytes(), "offset 44: Ask Quantity");
-    assert_eq!(&b[52..54], &4u16.to_le_bytes(), "offset 52: Bid Source Count");
-    assert_eq!(&b[54..56], &5u16.to_le_bytes(), "offset 54: Ask Source Count");
+    assert_eq!(
+        &b[44..52],
+        &9876u64.to_le_bytes(),
+        "offset 44: Ask Quantity"
+    );
+    assert_eq!(
+        &b[52..54],
+        &4u16.to_le_bytes(),
+        "offset 52: Bid Source Count"
+    );
+    assert_eq!(
+        &b[54..56],
+        &5u16.to_le_bytes(),
+        "offset 54: Ask Source Count"
+    );
     assert_eq!(&b[56..60], &[0, 0, 0, 0], "offset 56: Reserved, 4 bytes");
 }
 
@@ -65,7 +93,11 @@ fn quote_decode_rejects_a_declared_length_that_is_not_the_fixed_size() {
     b[1] = 61; // lie about the length
     assert!(matches!(
         Quote::decode(&b),
-        Err(DecodeError::LengthMismatch { type_id: 0x03, declared: 61, expected: 60 })
+        Err(DecodeError::LengthMismatch {
+            type_id: 0x03,
+            declared: 61,
+            expected: 60
+        })
     ));
 }
 
@@ -102,11 +134,23 @@ fn trade_fields_land_at_their_spec_offsets() {
     assert_eq!(&b[8..10], &9u16.to_le_bytes(), "offset 8: Source ID");
     assert_eq!(b[10], 1, "offset 10: Aggressor Side");
     assert_eq!(b[11], 0x02, "offset 11: Trade Flags");
-    assert_eq!(&b[12..20], &0x4142_4344_4546_4748u64.to_le_bytes(), "offset 12: Source Timestamp");
+    assert_eq!(
+        &b[12..20],
+        &0x4142_4344_4546_4748u64.to_le_bytes(),
+        "offset 12: Source Timestamp"
+    );
     assert_eq!(&b[20..28], &100i64.to_le_bytes(), "offset 20: Trade Price");
-    assert_eq!(&b[28..36], &200u64.to_le_bytes(), "offset 28: Trade Quantity");
+    assert_eq!(
+        &b[28..36],
+        &200u64.to_le_bytes(),
+        "offset 28: Trade Quantity"
+    );
     assert_eq!(&b[36..44], &300u64.to_le_bytes(), "offset 36: Trade ID");
-    assert_eq!(&b[44..52], &400u64.to_le_bytes(), "offset 44: Cumulative Volume");
+    assert_eq!(
+        &b[44..52],
+        &400u64.to_le_bytes(),
+        "offset 44: Cumulative Volume"
+    );
 
     assert_eq!(Trade::decode(&b).unwrap(), t);
 }
@@ -150,7 +194,11 @@ fn trade_decode_rejects_a_declared_length_that_is_not_the_fixed_size() {
     b[1] = 53; // lie about the length
     assert!(matches!(
         Trade::decode(&b),
-        Err(DecodeError::LengthMismatch { type_id: 0x04, declared: 53, expected: 52 })
+        Err(DecodeError::LengthMismatch {
+            type_id: 0x04,
+            declared: 53,
+            expected: 52
+        })
     ));
 }
 

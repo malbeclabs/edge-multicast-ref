@@ -48,11 +48,19 @@ fn definition_fields_land_at_their_spec_offsets() {
     assert_eq!(b[93], 1, "offset 93: Market Model");
     assert_eq!(&b[94..102], &1i64.to_le_bytes(), "offset 94: Tick Size");
     assert_eq!(&b[102..110], &1000u64.to_le_bytes(), "offset 102: Lot Size");
-    assert_eq!(&b[110..118], &0u64.to_le_bytes(), "offset 110: Contract Value");
+    assert_eq!(
+        &b[110..118],
+        &0u64.to_le_bytes(),
+        "offset 110: Contract Value"
+    );
     assert_eq!(&b[118..126], &0u64.to_le_bytes(), "offset 118: Expiry");
     assert_eq!(b[126], 0, "offset 126: Settle Type");
     assert_eq!(b[127], 0, "offset 127: Price Bound");
-    assert_eq!(&b[128..130], &9u16.to_le_bytes(), "offset 128: Manifest Seq");
+    assert_eq!(
+        &b[128..130],
+        &9u16.to_le_bytes(),
+        "offset 128: Manifest Seq"
+    );
 }
 
 #[test]
@@ -90,7 +98,11 @@ fn a_v1_definition_decodes_at_its_own_offsets() {
     let d = InstrumentDefinition::decode(&b, SCHEMA_VERSION_V1).unwrap();
     assert_eq!(d.instrument_id, 42);
     assert_eq!(&d.symbol[..8], b"BTC-USDT");
-    assert_eq!(&d.symbol[8..], &[0u8; SYMBOL_LEN - 8][..], "widened symbol is null-padded");
+    assert_eq!(
+        &d.symbol[8..],
+        &[0u8; SYMBOL_LEN - 8][..],
+        "widened symbol is null-padded"
+    );
     assert_eq!(d.source_id, 0, "v1 carries no Source ID; it reads as 0");
     assert_eq!(d.price_exponent, -2);
     assert_eq!(d.qty_exponent, -8);
@@ -107,7 +119,9 @@ fn a_negative_tick_size_survives_the_round_trip() {
     let mut b = [0u8; InstrumentDefinition::SIZE];
     d.encode_into(&mut b);
     assert_eq!(
-        InstrumentDefinition::decode(&b, SCHEMA_VERSION).unwrap().tick_size,
+        InstrumentDefinition::decode(&b, SCHEMA_VERSION)
+            .unwrap()
+            .tick_size,
         i64::MIN + 1
     );
 }
@@ -118,7 +132,10 @@ fn schema_two_is_refused() {
     let mut b = [0u8; InstrumentDefinition::SIZE];
     d.encode_into(&mut b);
     assert!(
-        matches!(InstrumentDefinition::decode(&b, 2), Err(DecodeError::UnsupportedSchema(2))),
+        matches!(
+            InstrumentDefinition::decode(&b, 2),
+            Err(DecodeError::UnsupportedSchema(2))
+        ),
         "the 128-byte layout never reached the wire and must not be decodable"
     );
 }
@@ -130,7 +147,10 @@ fn definition_decode_at_v3_rejects_a_buffer_shorter_than_the_fixed_size() {
     d.encode_into(&mut b);
     assert!(matches!(
         InstrumentDefinition::decode(&b[..129], SCHEMA_VERSION),
-        Err(DecodeError::ShortBuffer { need: 130, got: 129 })
+        Err(DecodeError::ShortBuffer {
+            need: 130,
+            got: 129
+        })
     ));
 }
 
@@ -165,7 +185,11 @@ fn manifest_summary_carries_count_and_seq() {
     assert_eq!(&b[6..8], &[0, 0], "offset 6: Reserved, 2 bytes");
     assert_eq!(&b[8..10], &9u16.to_le_bytes(), "offset 8: Manifest Seq");
     assert_eq!(&b[10..12], &[0, 0], "offset 10: Reserved, 2 bytes");
-    assert_eq!(&b[12..16], &1234u32.to_le_bytes(), "offset 12: Instrument Count");
+    assert_eq!(
+        &b[12..16],
+        &1234u32.to_le_bytes(),
+        "offset 12: Instrument Count"
+    );
     assert_eq!(&b[16..24], &88u64.to_le_bytes(), "offset 16: Timestamp");
     assert_eq!(ManifestSummary::decode(&b).unwrap(), m);
 }
@@ -184,7 +208,11 @@ fn manifest_summary_decode_rejects_a_declared_length_that_is_not_the_fixed_size(
     b[1] = 25; // lie about the length
     assert!(matches!(
         ManifestSummary::decode(&b),
-        Err(DecodeError::LengthMismatch { type_id: 0x07, declared: 25, expected: 24 })
+        Err(DecodeError::LengthMismatch {
+            type_id: 0x07,
+            declared: 25,
+            expected: 24
+        })
     ));
 }
 

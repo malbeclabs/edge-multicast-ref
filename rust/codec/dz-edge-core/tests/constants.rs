@@ -2,7 +2,11 @@ use dz_edge_core as core;
 
 #[test]
 fn wire_constants_match_the_spec() {
-    assert_eq!(core::MAGIC_TOB, 0x445A, "\"DZ\", top-of-book datagram delimiter");
+    assert_eq!(
+        core::MAGIC_TOB,
+        0x445A,
+        "\"DZ\", top-of-book datagram delimiter"
+    );
     assert_eq!(core::SCHEMA_VERSION, 3, "publishers emit schema 3 only");
     assert_eq!(core::DATAGRAM_HEADER_SIZE, 24);
     assert_eq!(core::MSG_HEADER_SIZE, 4);

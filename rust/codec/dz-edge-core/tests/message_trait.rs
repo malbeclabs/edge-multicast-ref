@@ -26,5 +26,8 @@ fn decode_errors_render_the_numbers_a_reader_needs() {
     assert_eq!(e.to_string(), "unsupported schema version 2");
 
     let e = DecodeError::ReservedTypeId(0x05);
-    assert_eq!(e.to_string(), "type id 0x05 is reserved and carries no message");
+    assert_eq!(
+        e.to_string(),
+        "type id 0x05 is reserved and carries no message"
+    );
 }
