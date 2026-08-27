@@ -47,10 +47,11 @@ impl DatagramHeader {
             return Err(DecodeError::UnsupportedSchema(schema_version));
         }
         let datagram_len = u16::from_le_bytes([buf[22], buf[23]]) as usize;
-        if datagram_len < DATAGRAM_HEADER_SIZE {
-            return Err(DecodeError::ShortBuffer {
-                need: DATAGRAM_HEADER_SIZE,
-                got: datagram_len,
+        if !(DATAGRAM_HEADER_SIZE..=MAX_DATAGRAM_SIZE).contains(&datagram_len) {
+            return Err(DecodeError::DeclaredLengthOutOfRange {
+                declared: datagram_len as u16,
+                min: DATAGRAM_HEADER_SIZE,
+                max: MAX_DATAGRAM_SIZE,
             });
         }
         if datagram_len > buf.len() {

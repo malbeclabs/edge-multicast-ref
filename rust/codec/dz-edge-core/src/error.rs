@@ -37,4 +37,14 @@ pub enum DecodeError {
     /// a zero-message datagram is malformed rather than merely empty.
     #[error("datagram header declares 0 messages; the Message Count range is 1-255")]
     EmptyDatagram,
+
+    /// The header's declared datagram length is outside the representable
+    /// range. Distinct from `ShortBuffer`, whose `got` is the buffer length -
+    /// here the buffer may be intact and the header is what is wrong.
+    #[error("datagram header declares length {declared}, outside the valid range {min}..={max}")]
+    DeclaredLengthOutOfRange {
+        declared: u16,
+        min: usize,
+        max: usize,
+    },
 }

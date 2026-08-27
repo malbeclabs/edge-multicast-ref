@@ -213,8 +213,23 @@ fn decode_rejects_a_datagram_len_below_the_header_size() {
     buf[22..24].copy_from_slice(&20u16.to_le_bytes());
     assert!(matches!(
         DatagramHeader::decode(&buf),
-        Err(DecodeError::ShortBuffer { need, got })
-            if need == DATAGRAM_HEADER_SIZE && got == 20
+        Err(DecodeError::DeclaredLengthOutOfRange { declared, min, max })
+            if declared == 20 && min == DATAGRAM_HEADER_SIZE && max == MAX_DATAGRAM_SIZE
+    ));
+}
+
+#[test]
+fn decode_rejects_a_datagram_len_above_the_mandated_cap() {
+    // 40000 is representable in the u16 Frame Length field but far beyond the
+    // 1,232-byte mandated cap: an untrusted peer's header, not anything
+    // DatagramBuilder can produce (its capacity is clamped).
+    let mut buf = [0u8; DATAGRAM_HEADER_SIZE];
+    buf[2] = SCHEMA_VERSION;
+    buf[22..24].copy_from_slice(&40000u16.to_le_bytes());
+    assert!(matches!(
+        DatagramHeader::decode(&buf),
+        Err(DecodeError::DeclaredLengthOutOfRange { declared, min, max })
+            if declared == 40000 && min == DATAGRAM_HEADER_SIZE && max == MAX_DATAGRAM_SIZE
     ));
 }
 
@@ -229,6 +244,40 @@ fn decode_rejects_a_zero_message_count() {
         DatagramHeader::decode(&buf),
         Err(DecodeError::EmptyDatagram)
     ));
+}
+
+struct TooSmallForMessageHeader;
+impl AppMessage for TooSmallForMessageHeader {
+    const TYPE_ID: u8 = 0x01;
+    const SIZE: usize = 2;
+    fn encode_into(&self, dst: &mut [u8]) {
+        dst.fill(0);
+    }
+}
+
+#[test]
+#[should_panic(expected = "AppMessage::SIZE must include the 4-byte message header")]
+fn push_panics_when_size_excludes_the_message_header() {
+    let mut b = DatagramBuilder::new(TEST_MAGIC, 0, 0, 0, 0, 1232);
+    let _ = b.push(&TooSmallForMessageHeader);
+}
+
+struct TooLargeForLengthField;
+impl AppMessage for TooLargeForLengthField {
+    const TYPE_ID: u8 = 0x01;
+    const SIZE: usize = 300;
+    fn encode_into(&self, dst: &mut [u8]) {
+        dst.fill(0);
+    }
+}
+
+#[test]
+#[should_panic(expected = "AppMessage::SIZE must fit the u8 message-header Length field")]
+fn push_panics_when_size_cannot_fit_the_u8_length_field() {
+    // mtu of 1232 gives the builder plenty of capacity; the assert must fire
+    // before any capacity check, which it does since it is the first statement.
+    let mut b = DatagramBuilder::new(TEST_MAGIC, 0, 0, 0, 0, 1232);
+    let _ = b.push(&TooLargeForLengthField);
 }
 
 #[test]
