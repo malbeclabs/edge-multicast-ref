@@ -34,7 +34,7 @@ fn walks_heartbeats_and_end_of_session_in_order() {
     b.push(&hb1).unwrap();
     b.push(&hb2).unwrap();
     b.push(&eos).unwrap();
-    let out = b.finish();
+    let out = b.finish().expect("datagram has messages");
 
     let dg = Datagram::decode(&out, TEST_MAGIC).unwrap();
     let msgs: Vec<_> = dg.messages().collect();
@@ -62,26 +62,40 @@ fn flags_reflect_push_vs_push_snapshot() {
 
     let mut plain = DatagramBuilder::new(TEST_MAGIC, 0, 0, 0, 0, 1232);
     plain.push(&hb).unwrap();
-    let out = plain.finish();
+    let out = plain.finish().expect("datagram has messages");
     let dg = Datagram::decode(&out, TEST_MAGIC).unwrap();
     let msg = dg.messages().next().unwrap();
     assert_eq!(msg.flags, 0, "push() must clear the snapshot bit");
 
     let mut snap = DatagramBuilder::new(TEST_MAGIC, 0, 0, 0, 0, 1232);
     snap.push_snapshot(&hb).unwrap();
-    let out = snap.finish();
+    let out = snap.finish().expect("datagram has messages");
     let dg = Datagram::decode(&out, TEST_MAGIC).unwrap();
     let msg = dg.messages().next().unwrap();
     assert_eq!(msg.flags, 1, "push_snapshot() must set the snapshot bit");
 }
 
 #[test]
-fn an_empty_datagram_yields_no_messages_and_is_not_an_error() {
+fn an_empty_builder_yields_no_datagram() {
+    // Message Count is 1-255, so a tick with nothing to send produces no
+    // datagram at all rather than one every conformant subscriber discards.
     let b = DatagramBuilder::new(TEST_MAGIC, 0, 0, 0, 0, 1232);
-    let out = b.finish();
-    let dg = Datagram::decode(&out, TEST_MAGIC).unwrap();
-    assert_eq!(dg.header().msg_count, 0);
-    assert_eq!(dg.messages().count(), 0);
+    assert!(b.finish().is_none());
+}
+
+#[test]
+fn a_hand_built_zero_message_datagram_is_refused() {
+    // The decode half of the same 1-255 range: a header claiming zero messages
+    // is malformed, not empty.
+    let mut buf = vec![0u8; DATAGRAM_HEADER_SIZE];
+    buf[0..2].copy_from_slice(&TEST_MAGIC.to_le_bytes());
+    buf[2] = SCHEMA_VERSION; // schema version
+    buf[20] = 0; // Message Count
+    buf[22..24].copy_from_slice(&(DATAGRAM_HEADER_SIZE as u16).to_le_bytes());
+    assert!(matches!(
+        Datagram::decode(&buf, TEST_MAGIC),
+        Err(DecodeError::EmptyDatagram)
+    ));
 }
 
 #[test]
@@ -92,7 +106,7 @@ fn a_magic_mismatch_is_rejected() {
         timestamp_ns: 0,
     })
     .unwrap();
-    let out = b.finish();
+    let out = b.finish().expect("datagram has messages");
 
     assert!(matches!(
         Datagram::decode(&out, 0x1234),
@@ -111,7 +125,7 @@ fn a_truncated_buffer_is_rejected() {
         timestamp_ns: 0,
     })
     .unwrap();
-    let out = b.finish();
+    let out = b.finish().expect("datagram has messages");
     let full_len = out.len();
     // Chop bytes off the end without correcting the header's declared length,
     // so datagram_len ends up larger than the buffer actually holds.
@@ -132,7 +146,7 @@ fn trailing_bytes_past_datagram_len_are_ignored() {
         timestamp_ns: 42,
     })
     .unwrap();
-    let mut out = b.finish();
+    let mut out = b.finish().expect("datagram has messages");
     // Garbage past datagram_len; a real datagram, or a buffer reused across
     // receives, could easily carry stale trailing bytes like this.
     out.extend_from_slice(&[0xAA; 16]);
@@ -151,7 +165,7 @@ fn an_unsupported_schema_version_is_rejected() {
         timestamp_ns: 0,
     })
     .unwrap();
-    let mut out = b.finish();
+    let mut out = b.finish().expect("datagram has messages");
     out[2] = 2; // the generation that never reached the wire
 
     assert!(matches!(
@@ -228,7 +242,7 @@ fn header_claims_more_messages_than_are_present() {
         timestamp_ns: 0,
     })
     .unwrap();
-    let mut out = b.finish();
+    let mut out = b.finish().expect("datagram has messages");
     out[20] = 2; // claims two messages though only one is present
 
     assert!(matches!(
@@ -253,7 +267,7 @@ fn header_claims_fewer_messages_than_are_present() {
         timestamp_ns: 0,
     })
     .unwrap();
-    let mut out = b.finish();
+    let mut out = b.finish().expect("datagram has messages");
     out[20] = 1; // claims one message though two are present
 
     assert!(matches!(
