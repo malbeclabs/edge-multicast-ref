@@ -47,4 +47,25 @@ pub enum DecodeError {
         min: usize,
         max: usize,
     },
+
+    /// Magic is what rejects a datagram misrouted from another feed, so a
+    /// mismatch is refused rather than parsed at the wrong layout.
+    #[error("magic {found:#06x} does not match the expected {expected:#06x}")]
+    MagicMismatch { expected: u16, found: u16 },
+
+    /// A declared message length below the 4-byte message header is impossible.
+    #[error(
+        "message at offset {offset} declares length {declared}, below the 4-byte message header"
+    )]
+    MessageTooShort { offset: usize, declared: u8 },
+
+    #[error("message at offset {offset} declares length {declared} but only {remaining} bytes remain in the datagram")]
+    MessageOverrunsDatagram {
+        offset: usize,
+        declared: u8,
+        remaining: usize,
+    },
+
+    #[error("datagram header declares {declared} messages but {found} were found")]
+    MessageCountMismatch { declared: u8, found: usize },
 }
