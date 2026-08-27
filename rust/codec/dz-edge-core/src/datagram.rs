@@ -59,6 +59,9 @@ impl DatagramHeader {
                 got: buf.len(),
             });
         }
+        if buf[20] == 0 {
+            return Err(DecodeError::EmptyDatagram);
+        }
         Ok(Self {
             magic: u16::from_le_bytes([buf[0], buf[1]]),
             schema_version,
@@ -186,8 +189,18 @@ impl DatagramBuilder {
     }
 
     /// Stamp the header and return the datagram.
+    ///
+    /// An empty datagram is not emittable: the header's Message Count field
+    /// has range 1-255, so a tick with nothing pushed cannot be represented as
+    /// a valid datagram. Rather than hand back the 24-byte header with
+    /// `msg_count = 0` that every conformant subscriber discards, `finish`
+    /// returns `None`. `None` is a normal outcome here, not an error - that is
+    /// why this returns `Option` rather than `Result`.
     #[must_use]
-    pub fn finish(mut self) -> Vec<u8> {
+    pub fn finish(mut self) -> Option<Vec<u8>> {
+        if self.msg_count == 0 {
+            return None;
+        }
         let len = self.buf.len() as u16;
         self.buf[0..2].copy_from_slice(&self.magic.to_le_bytes());
         self.buf[2] = SCHEMA_VERSION;
@@ -197,6 +210,6 @@ impl DatagramBuilder {
         self.buf[20] = self.msg_count;
         self.buf[21] = self.reset_count;
         self.buf[22..24].copy_from_slice(&len.to_le_bytes());
-        self.buf
+        Some(self.buf)
     }
 }

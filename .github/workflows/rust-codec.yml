@@ -3,7 +3,9 @@ name: rust-codec
 on:
   pull_request:
     paths:
-      - 'rust/**'
+      - 'rust/codec/**'
+      - 'rust/Cargo.toml'
+      - 'rust/Cargo.lock'
       - 'testdata/golden/**'
       - '.github/workflows/rust-codec.yml'
   push:

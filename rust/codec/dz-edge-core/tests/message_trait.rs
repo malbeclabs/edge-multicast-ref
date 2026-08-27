@@ -1,4 +1,4 @@
-use dz_edge_core::{AppMessage, DecodeError};
+use dz_edge_core::{AppMessage, DecodeError, Heartbeat};
 
 struct Fake;
 impl AppMessage for Fake {
@@ -15,6 +15,17 @@ fn a_message_encodes_into_exactly_its_size() {
     let mut buf = [0u8; 16];
     Fake.encode_into(&mut buf);
     assert_eq!(buf, [0xAB; 16]);
+}
+
+#[test]
+#[should_panic]
+fn encode_into_panics_on_a_slice_longer_than_size() {
+    let msg = Heartbeat {
+        channel_id: 0,
+        timestamp_ns: 0,
+    };
+    let mut buf = vec![0u8; Heartbeat::SIZE + 1];
+    msg.encode_into(&mut buf);
 }
 
 #[test]

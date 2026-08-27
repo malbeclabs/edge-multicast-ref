@@ -32,4 +32,9 @@ pub enum DecodeError {
     /// meaning for it.
     #[error("type id {0:#04x} is reserved and carries no message")]
     ReservedTypeId(u8),
+
+    /// The header declares zero messages. The Message Count range is 1-255, so
+    /// a zero-message datagram is malformed rather than merely empty.
+    #[error("datagram header declares 0 messages; the Message Count range is 1-255")]
+    EmptyDatagram,
 }
