@@ -12,6 +12,7 @@ pub mod error;
 pub mod heartbeat;
 pub mod message;
 pub mod port_role;
+pub mod walk;
 
 pub use constants::*;
 pub use datagram::{DatagramBuilder, DatagramHeader};
@@ -20,3 +21,4 @@ pub use error::DecodeError;
 pub use heartbeat::Heartbeat;
 pub use message::AppMessage;
 pub use port_role::PortRole;
+pub use walk::{Datagram, MessageRef, Messages};
