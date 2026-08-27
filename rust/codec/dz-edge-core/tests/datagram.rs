@@ -234,16 +234,18 @@ fn decode_rejects_a_datagram_len_above_the_mandated_cap() {
 }
 
 #[test]
-fn decode_rejects_a_zero_message_count() {
+fn decode_accepts_a_zero_message_count() {
     // Otherwise well-formed 24-byte header: valid schema, datagram_len equal
-    // to the header size, and Message Count left at 0.
+    // to the header size, and Message Count left at 0. Whether a zero count
+    // makes the datagram malformed is a datagram-level rule, not a header
+    // one, so the header alone still decodes - a subscriber doing
+    // sequence-gap or reset accounting needs `sequence_number`, `channel_id`,
+    // and `send_timestamp_ns` even from a malformed datagram.
     let mut buf = [0u8; DATAGRAM_HEADER_SIZE];
     buf[2] = SCHEMA_VERSION;
     buf[22..24].copy_from_slice(&(DATAGRAM_HEADER_SIZE as u16).to_le_bytes());
-    assert!(matches!(
-        DatagramHeader::decode(&buf),
-        Err(DecodeError::EmptyDatagram)
-    ));
+    let h = DatagramHeader::decode(&buf).expect("header alone does not judge message count");
+    assert_eq!(h.msg_count, 0);
 }
 
 struct TooSmallForMessageHeader;

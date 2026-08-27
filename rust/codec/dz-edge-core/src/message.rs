@@ -7,6 +7,9 @@ pub trait AppMessage {
     /// Fixed on-the-wire size in bytes, including the 4-byte message header.
     const SIZE: usize;
 
-    /// Encode into `dst`, which MUST be exactly `SIZE` bytes.
+    /// Encode into `dst`, which MUST be exactly `SIZE` bytes; a longer slice
+    /// has its first `SIZE` bytes written and the remainder left untouched,
+    /// so a caller reusing a scratch buffer must slice to `SIZE` before
+    /// transmitting.
     fn encode_into(&self, dst: &mut [u8]);
 }

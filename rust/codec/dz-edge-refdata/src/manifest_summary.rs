@@ -21,7 +21,7 @@ impl AppMessage for ManifestSummary {
     const SIZE: usize = 24;
 
     fn encode_into(&self, dst: &mut [u8]) {
-        assert_eq!(dst.len(), Self::SIZE);
+        debug_assert_eq!(dst.len(), Self::SIZE);
         dst[0] = Self::TYPE_ID;
         dst[1] = Self::SIZE as u8;
         dst[2..4].copy_from_slice(&0u16.to_le_bytes());

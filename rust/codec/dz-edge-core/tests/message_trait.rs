@@ -5,7 +5,7 @@ impl AppMessage for Fake {
     const TYPE_ID: u8 = 0x01;
     const SIZE: usize = 16;
     fn encode_into(&self, dst: &mut [u8]) {
-        assert_eq!(dst.len(), Self::SIZE);
+        debug_assert_eq!(dst.len(), Self::SIZE);
         dst.fill(0xAB);
     }
 }
@@ -18,7 +18,7 @@ fn a_message_encodes_into_exactly_its_size() {
 }
 
 #[test]
-#[should_panic]
+#[should_panic(expected = "assertion `left == right` failed")]
 fn encode_into_panics_on_a_slice_longer_than_size() {
     let msg = Heartbeat {
         channel_id: 0,

@@ -28,13 +28,21 @@ pub struct DatagramHeader {
 impl DatagramHeader {
     /// Decode a header from the front of `buf`.
     ///
-    /// Rejects any schema version this build does not implement, per the spec's
-    /// "a subscriber MUST discard [datagrams] whose version it does not
-    /// implement".
+    /// Validates the buffer length, the schema version, and the declared
+    /// datagram length's range. Rejects any schema version this build does
+    /// not implement, per the spec's "a subscriber MUST discard [datagrams]
+    /// whose version it does not implement".
     ///
-    /// This cannot validate `Magic`, because only the caller knows which feed it
-    /// expects. A caller must compare `header.magic` itself to reject a datagram
-    /// misrouted from another feed.
+    /// This deliberately does not judge two things:
+    ///
+    /// - `Magic`, because only the caller knows which feed it expects. A
+    ///   caller must compare `header.magic` itself to reject a datagram
+    ///   misrouted from another feed.
+    /// - The message count, because whether a zero count makes the datagram
+    ///   malformed is a property of the datagram, not the header. A caller
+    ///   doing sequence-gap or reset accounting on a malformed datagram still
+    ///   needs `sequence_number`, `channel_id`, and `send_timestamp_ns` from
+    ///   here; that rule is enforced at the datagram level instead.
     pub fn decode(buf: &[u8]) -> Result<Self, DecodeError> {
         if buf.len() < DATAGRAM_HEADER_SIZE {
             return Err(DecodeError::ShortBuffer {
@@ -59,9 +67,6 @@ impl DatagramHeader {
                 need: datagram_len,
                 got: buf.len(),
             });
-        }
-        if buf[20] == 0 {
-            return Err(DecodeError::EmptyDatagram);
         }
         Ok(Self {
             magic: u16::from_le_bytes([buf[0], buf[1]]),
