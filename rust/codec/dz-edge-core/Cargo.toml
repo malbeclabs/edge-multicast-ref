@@ -1,0 +1,11 @@
+[package]
+name = "dz-edge-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Datagram header, message header and shared payloads for the DoubleZero Edge feed family"
+
+[dependencies]
+thiserror = { workspace = true }
