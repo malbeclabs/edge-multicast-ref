@@ -6,9 +6,11 @@
 #![forbid(unsafe_code)]
 
 pub mod constants;
+pub mod datagram;
 pub mod error;
 pub mod message;
 
 pub use constants::*;
+pub use datagram::{DatagramBuilder, DatagramHeader};
 pub use error::DecodeError;
 pub use message::AppMessage;

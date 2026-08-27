@@ -31,8 +31,8 @@ pub const MSG_HEADER_SIZE: usize = 4;
 /// **Mandated, not derived.** Every feed spec states 1,232 bytes "to leave room
 /// for GRE encapsulation headers used by the DoubleZero network's last-mile
 /// delivery". Do not recompute it from a path MTU; that is how it drifted, and
-/// a publisher is in production today emitting 1448 because a config key was
-/// allowed to say so.
+/// a configuration key that can express a larger value is why this constant is
+/// not a default.
 pub const MAX_DATAGRAM_SIZE: usize = 1232;
 
 // Shared message type IDs. `0x05` is reserved in every current spec and is
