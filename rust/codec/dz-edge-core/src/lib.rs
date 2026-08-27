@@ -6,5 +6,9 @@
 #![forbid(unsafe_code)]
 
 pub mod constants;
+pub mod error;
+pub mod message;
 
 pub use constants::*;
+pub use error::DecodeError;
+pub use message::AppMessage;
