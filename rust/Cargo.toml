@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["codec/dz-edge-core", "codec/dz-edge-tob"]
+members = ["codec/dz-edge-core", "codec/dz-edge-tob", "codec/dz-edge-refdata"]
 exclude = ["kernel-receiver", "xdp-receiver"]
 
 [workspace.package]
