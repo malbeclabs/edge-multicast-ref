@@ -20,8 +20,16 @@ pub enum DecodeError {
     #[error("datagram builder full: {attempted} bytes would exceed max {max}")]
     DatagramFull { attempted: usize, max: usize },
 
-    /// `0x05` is reserved by the wire specification and carries no message.
-    /// A decoder must refuse it rather than silently invent a meaning for it.
+    /// The datagram already holds 255 messages, the most the u8 Message Count
+    /// field can express. Distinct from `DatagramFull`, which is a byte-capacity
+    /// limit - conflating them sends a reader chasing an MTU problem.
+    #[error("datagram already holds the maximum {max} messages")]
+    MessageCountExhausted { max: u8 },
+
+    /// Which type ids are reserved is per feed, not fleet-wide. This variant
+    /// exists for a caller enforcing a reservation that applies to its own
+    /// feed; it must refuse the reserved id rather than silently invent a
+    /// meaning for it.
     #[error("type id {0:#04x} is reserved and carries no message")]
     ReservedTypeId(u8),
 }

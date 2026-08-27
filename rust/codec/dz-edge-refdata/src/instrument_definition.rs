@@ -118,7 +118,11 @@ impl InstrumentDefinition {
         let mut leg2 = [0u8; LEG_LEN];
         leg2.copy_from_slice(&buf[82..90]);
         Ok(Self {
-            instrument_id: u32::from_le_bytes(buf[4..8].try_into().unwrap_or_default()),
+            instrument_id: u32::from_le_bytes(
+                buf[4..8]
+                    .try_into()
+                    .expect("range width matches the target array"),
+            ),
             source_id: u16::from_le_bytes([buf[8], buf[9]]),
             symbol,
             leg1,
@@ -127,10 +131,26 @@ impl InstrumentDefinition {
             price_exponent: buf[91] as i8,
             qty_exponent: buf[92] as i8,
             market_model: buf[93],
-            tick_size: i64::from_le_bytes(buf[94..102].try_into().unwrap_or_default()),
-            lot_size: u64::from_le_bytes(buf[102..110].try_into().unwrap_or_default()),
-            contract_value: u64::from_le_bytes(buf[110..118].try_into().unwrap_or_default()),
-            expiry_ns: u64::from_le_bytes(buf[118..126].try_into().unwrap_or_default()),
+            tick_size: i64::from_le_bytes(
+                buf[94..102]
+                    .try_into()
+                    .expect("range width matches the target array"),
+            ),
+            lot_size: u64::from_le_bytes(
+                buf[102..110]
+                    .try_into()
+                    .expect("range width matches the target array"),
+            ),
+            contract_value: u64::from_le_bytes(
+                buf[110..118]
+                    .try_into()
+                    .expect("range width matches the target array"),
+            ),
+            expiry_ns: u64::from_le_bytes(
+                buf[118..126]
+                    .try_into()
+                    .expect("range width matches the target array"),
+            ),
             settle_type: buf[126],
             price_bound: buf[127],
             manifest_seq: u16::from_le_bytes([buf[128], buf[129]]),
@@ -163,7 +183,11 @@ impl InstrumentDefinition {
         let mut leg2 = [0u8; LEG_LEN];
         leg2.copy_from_slice(&buf[32..40]);
         Ok(Self {
-            instrument_id: u32::from_le_bytes(buf[4..8].try_into().unwrap_or_default()),
+            instrument_id: u32::from_le_bytes(
+                buf[4..8]
+                    .try_into()
+                    .expect("range width matches the target array"),
+            ),
             source_id: 0,
             symbol,
             leg1,
@@ -172,10 +196,26 @@ impl InstrumentDefinition {
             price_exponent: buf[41] as i8,
             qty_exponent: buf[42] as i8,
             market_model: buf[43],
-            tick_size: i64::from_le_bytes(buf[44..52].try_into().unwrap_or_default()),
-            lot_size: u64::from_le_bytes(buf[52..60].try_into().unwrap_or_default()),
-            contract_value: u64::from_le_bytes(buf[60..68].try_into().unwrap_or_default()),
-            expiry_ns: u64::from_le_bytes(buf[68..76].try_into().unwrap_or_default()),
+            tick_size: i64::from_le_bytes(
+                buf[44..52]
+                    .try_into()
+                    .expect("range width matches the target array"),
+            ),
+            lot_size: u64::from_le_bytes(
+                buf[52..60]
+                    .try_into()
+                    .expect("range width matches the target array"),
+            ),
+            contract_value: u64::from_le_bytes(
+                buf[60..68]
+                    .try_into()
+                    .expect("range width matches the target array"),
+            ),
+            expiry_ns: u64::from_le_bytes(
+                buf[68..76]
+                    .try_into()
+                    .expect("range width matches the target array"),
+            ),
             settle_type: buf[76],
             price_bound: buf[77],
             manifest_seq: u16::from_le_bytes([buf[78], buf[79]]),

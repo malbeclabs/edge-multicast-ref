@@ -66,15 +66,39 @@ impl Trade {
             });
         }
         Ok(Self {
-            instrument_id: u32::from_le_bytes(buf[4..8].try_into().unwrap_or_default()),
+            instrument_id: u32::from_le_bytes(
+                buf[4..8]
+                    .try_into()
+                    .expect("range width matches the target array"),
+            ),
             source_id: u16::from_le_bytes([buf[8], buf[9]]),
             aggressor_side: buf[10],
             trade_flags: buf[11],
-            source_timestamp_ns: u64::from_le_bytes(buf[12..20].try_into().unwrap_or_default()),
-            trade_price: i64::from_le_bytes(buf[20..28].try_into().unwrap_or_default()),
-            trade_qty: u64::from_le_bytes(buf[28..36].try_into().unwrap_or_default()),
-            trade_id: u64::from_le_bytes(buf[36..44].try_into().unwrap_or_default()),
-            cumulative_volume: u64::from_le_bytes(buf[44..52].try_into().unwrap_or_default()),
+            source_timestamp_ns: u64::from_le_bytes(
+                buf[12..20]
+                    .try_into()
+                    .expect("range width matches the target array"),
+            ),
+            trade_price: i64::from_le_bytes(
+                buf[20..28]
+                    .try_into()
+                    .expect("range width matches the target array"),
+            ),
+            trade_qty: u64::from_le_bytes(
+                buf[28..36]
+                    .try_into()
+                    .expect("range width matches the target array"),
+            ),
+            trade_id: u64::from_le_bytes(
+                buf[36..44]
+                    .try_into()
+                    .expect("range width matches the target array"),
+            ),
+            cumulative_volume: u64::from_le_bytes(
+                buf[44..52]
+                    .try_into()
+                    .expect("range width matches the target array"),
+            ),
         })
     }
 }

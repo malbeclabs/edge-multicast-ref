@@ -40,7 +40,11 @@ impl EndOfSession {
             });
         }
         Ok(Self {
-            timestamp_ns: u64::from_le_bytes(buf[4..12].try_into().unwrap_or_default()),
+            timestamp_ns: u64::from_le_bytes(
+                buf[4..12]
+                    .try_into()
+                    .expect("range width matches the target array"),
+            ),
         })
     }
 }

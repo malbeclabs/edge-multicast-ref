@@ -118,6 +118,10 @@ fn message_count_stops_at_255() {
         pushed, 255,
         "the u8 Message Count must stop the builder at 255"
     );
+    assert!(matches!(
+        b.push(&HeaderOnly),
+        Err(DecodeError::MessageCountExhausted { max: 255 })
+    ));
     let out = b.finish();
     assert_eq!(out[20], 255, "offset 20: Message Count");
     assert!(out.len() <= MAX_DATAGRAM_SIZE);
@@ -186,6 +190,32 @@ fn decode_refuses_a_short_buffer() {
         DatagramHeader::decode(&[0u8; 10]),
         Err(DecodeError::ShortBuffer { need: 24, got: 10 })
     );
+}
+
+#[test]
+fn decode_rejects_a_datagram_len_that_claims_more_than_the_buffer_holds() {
+    // 24-byte buffer, but the Frame Length field claims the full 1232-byte cap:
+    // a truncated datagram that still decodes clean if datagram_len is trusted.
+    let mut buf = [0u8; DATAGRAM_HEADER_SIZE];
+    buf[2] = SCHEMA_VERSION;
+    buf[22..24].copy_from_slice(&(MAX_DATAGRAM_SIZE as u16).to_le_bytes());
+    assert!(matches!(
+        DatagramHeader::decode(&buf),
+        Err(DecodeError::ShortBuffer { need, got })
+            if need == MAX_DATAGRAM_SIZE && got == DATAGRAM_HEADER_SIZE
+    ));
+}
+
+#[test]
+fn decode_rejects_a_datagram_len_below_the_header_size() {
+    let mut buf = [0u8; DATAGRAM_HEADER_SIZE];
+    buf[2] = SCHEMA_VERSION;
+    buf[22..24].copy_from_slice(&20u16.to_le_bytes());
+    assert!(matches!(
+        DatagramHeader::decode(&buf),
+        Err(DecodeError::ShortBuffer { need, got })
+            if need == DATAGRAM_HEADER_SIZE && got == 20
+    ));
 }
 
 #[test]

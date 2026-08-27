@@ -1,8 +1,12 @@
 # Golden vectors
 
-One canonical byte vector per message type per schema version. These are the
-cross-language contract: the Rust encoders, the Rust decoders, the Go decoders,
-the conformance tool and the Wireshark dissectors must all reproduce them.
+One canonical byte vector per message type per schema version. These are
+intended as the cross-language contract: every encoder and decoder in every
+language, plus the dissectors, should reproduce them.
+
+Today only the Rust crates assert against these vectors in CI. The Go decoders
+and the Wireshark dissectors do not yet, so a Go-side drift from the vectors
+would not currently be caught.
 
 The bytes were transcribed by hand from the field tables in `edge-feed-spec`,
 not captured from an encoder. That is the point — a vector generated from the

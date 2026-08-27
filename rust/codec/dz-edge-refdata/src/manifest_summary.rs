@@ -57,8 +57,16 @@ impl ManifestSummary {
             channel_id: buf[4],
             valid: buf[5],
             manifest_seq: u16::from_le_bytes([buf[8], buf[9]]),
-            instrument_count: u32::from_le_bytes(buf[12..16].try_into().unwrap_or_default()),
-            timestamp_ns: u64::from_le_bytes(buf[16..24].try_into().unwrap_or_default()),
+            instrument_count: u32::from_le_bytes(
+                buf[12..16]
+                    .try_into()
+                    .expect("range width matches the target array"),
+            ),
+            timestamp_ns: u64::from_le_bytes(
+                buf[16..24]
+                    .try_into()
+                    .expect("range width matches the target array"),
+            ),
         })
     }
 }

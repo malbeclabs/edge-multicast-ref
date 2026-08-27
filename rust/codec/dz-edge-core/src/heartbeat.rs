@@ -47,7 +47,11 @@ impl Heartbeat {
         }
         Ok(Self {
             channel_id: buf[4],
-            timestamp_ns: u64::from_le_bytes(buf[8..16].try_into().unwrap_or_default()),
+            timestamp_ns: u64::from_le_bytes(
+                buf[8..16]
+                    .try_into()
+                    .expect("range width matches the target array"),
+            ),
         })
     }
 }

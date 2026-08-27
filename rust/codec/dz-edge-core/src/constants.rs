@@ -32,8 +32,9 @@ pub const MSG_HEADER_SIZE: usize = 4;
 /// not a default.
 pub const MAX_DATAGRAM_SIZE: usize = 1232;
 
-// Shared message type IDs. `0x05` is reserved in every current spec and is
-// deliberately absent.
+// Shared message type IDs. This crate defines only the types shared by every
+// feed in the family; per-feed type ids, including any reserved ones, live in
+// the per-feed crates.
 pub const TYPE_HEARTBEAT: u8 = 0x01;
 pub const TYPE_END_OF_SESSION: u8 = 0x06;
 

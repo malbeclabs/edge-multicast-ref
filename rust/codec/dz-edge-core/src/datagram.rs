@@ -31,6 +31,10 @@ impl DatagramHeader {
     /// Rejects any schema version this build does not implement, per the spec's
     /// "a subscriber MUST discard [datagrams] whose version it does not
     /// implement".
+    ///
+    /// This cannot validate `Magic`, because only the caller knows which feed it
+    /// expects. A caller must compare `header.magic` itself to reject a datagram
+    /// misrouted from another feed.
     pub fn decode(buf: &[u8]) -> Result<Self, DecodeError> {
         if buf.len() < DATAGRAM_HEADER_SIZE {
             return Err(DecodeError::ShortBuffer {
@@ -42,15 +46,36 @@ impl DatagramHeader {
         if !SUPPORTED_SCHEMA_VERSIONS.contains(&schema_version) {
             return Err(DecodeError::UnsupportedSchema(schema_version));
         }
+        let datagram_len = u16::from_le_bytes([buf[22], buf[23]]) as usize;
+        if datagram_len < DATAGRAM_HEADER_SIZE {
+            return Err(DecodeError::ShortBuffer {
+                need: DATAGRAM_HEADER_SIZE,
+                got: datagram_len,
+            });
+        }
+        if datagram_len > buf.len() {
+            return Err(DecodeError::ShortBuffer {
+                need: datagram_len,
+                got: buf.len(),
+            });
+        }
         Ok(Self {
             magic: u16::from_le_bytes([buf[0], buf[1]]),
             schema_version,
             channel_id: buf[3],
-            sequence_number: u64::from_le_bytes(buf[4..12].try_into().unwrap_or_default()),
-            send_timestamp_ns: u64::from_le_bytes(buf[12..20].try_into().unwrap_or_default()),
+            sequence_number: u64::from_le_bytes(
+                buf[4..12]
+                    .try_into()
+                    .expect("range width matches the target array"),
+            ),
+            send_timestamp_ns: u64::from_le_bytes(
+                buf[12..20]
+                    .try_into()
+                    .expect("range width matches the target array"),
+            ),
             msg_count: buf[20],
             reset_count: buf[21],
-            datagram_len: u16::from_le_bytes([buf[22], buf[23]]),
+            datagram_len: datagram_len as u16,
         })
     }
 }
@@ -128,17 +153,17 @@ impl DatagramBuilder {
             M::SIZE >= MSG_HEADER_SIZE,
             "AppMessage::SIZE must include the 4-byte message header"
         );
+        // The message header's Length field is a u8, so a larger message cannot be
+        // represented on the wire at all. Truncating would write a Length that
+        // frames the next message in the wrong place.
         assert!(
-            M::TYPE_ID != 0x05,
-            "type id 0x05 is reserved by the wire specification"
+            M::SIZE <= u8::MAX as usize,
+            "AppMessage::SIZE must fit the u8 message-header Length field"
         );
         // Message Count is a u8; a 256th message would wrap it to 0 and every
         // subscriber would mis-parse the rest of the datagram.
         if self.msg_count == u8::MAX {
-            return Err(DecodeError::DatagramFull {
-                attempted: self.buf.len() + M::SIZE,
-                max: self.capacity,
-            });
+            return Err(DecodeError::MessageCountExhausted { max: u8::MAX });
         }
         if M::SIZE > self.remaining() {
             return Err(DecodeError::DatagramFull {
