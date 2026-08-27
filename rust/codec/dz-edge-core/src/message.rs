@@ -15,4 +15,14 @@ pub trait AppMessage {
     /// buffer must slice to `SIZE` before transmitting, or stale bytes ride along
     /// behind the message.
     fn encode_into(&self, dst: &mut [u8]);
+
+    /// Stamp the datagram's `Channel ID` into a message that carries one
+    /// redundantly with the datagram header.
+    ///
+    /// The default does nothing. A message with such a field overrides this and
+    /// writes it at its own offset, so the offset stays private to the message
+    /// that owns it and this trait names the behaviour rather than a byte
+    /// position. The builder calls this after `encode_into`, so a caller-supplied
+    /// value cannot disagree with the header that frames it.
+    fn stamp_channel_id(_dst: &mut [u8], _channel_id: u8) {}
 }

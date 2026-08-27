@@ -1,5 +1,12 @@
-use dz_edge_core::{AppMessage, DecodeError, SCHEMA_VERSION, SCHEMA_VERSION_V1};
+use dz_edge_core::{
+    AppMessage, ChannelSequence, DatagramBuilder, DecodeError, Fit, SCHEMA_VERSION,
+    SCHEMA_VERSION_V1,
+};
 use dz_edge_refdata::{InstrumentDefinition, ManifestSummary, LEG_LEN, SIZE_V1, SYMBOL_LEN};
+
+// These tests only need *a* magic value; they must not depend on
+// dz-edge-tob, which owns the real MAGIC_TOB.
+const TEST_MAGIC: u16 = 0x445A;
 
 fn sample() -> InstrumentDefinition {
     let mut symbol = [0u8; SYMBOL_LEN];
@@ -210,8 +217,10 @@ fn definition_decode_rejects_a_type_id_that_is_not_its_own() {
 
 #[test]
 fn manifest_summary_carries_count_and_seq() {
+    // encode_into honours Channel ID; constructed as 0 here so the plain
+    // decode round-trip below holds without a framing datagram involved.
     let m = ManifestSummary {
-        channel_id: 7,
+        channel_id: 0,
         valid: 1,
         manifest_seq: 9,
         instrument_count: 1234,
@@ -223,7 +232,7 @@ fn manifest_summary_carries_count_and_seq() {
     assert_eq!(b.len(), 24);
     assert_eq!(b[0], 0x07, "offset 0: Type");
     assert_eq!(b[1], 24, "offset 1: Length");
-    assert_eq!(b[4], 7, "offset 4: Channel ID");
+    assert_eq!(b[4], 0, "offset 4: Channel ID, honoured by encode_into");
     assert_eq!(b[5], 1, "offset 5: Valid");
     assert_eq!(&b[6..8], &[0, 0], "offset 6: Reserved, 2 bytes");
     assert_eq!(&b[8..10], &9u16.to_le_bytes(), "offset 8: Manifest Seq");
@@ -235,6 +244,22 @@ fn manifest_summary_carries_count_and_seq() {
     );
     assert_eq!(&b[16..24], &88u64.to_le_bytes(), "offset 16: Timestamp");
     assert_eq!(ManifestSummary::decode(&b).unwrap(), m);
+}
+
+#[test]
+fn manifest_summary_encode_into_round_trips_channel_id() {
+    // A standalone encode/decode round trip (no DatagramBuilder involved)
+    // must honour the public channel_id field honestly.
+    let m = ManifestSummary {
+        channel_id: 7,
+        valid: 1,
+        manifest_seq: 9,
+        instrument_count: 1234,
+        timestamp_ns: 88,
+    };
+    let mut b = [0u8; ManifestSummary::SIZE];
+    m.encode_into(&mut b);
+    assert_eq!(ManifestSummary::decode(&b).unwrap().channel_id, 7);
 }
 
 #[test]
@@ -274,4 +299,90 @@ fn manifest_summary_decode_rejects_a_buffer_shorter_than_the_fixed_size() {
         ManifestSummary::decode(&b[..23]),
         Err(DecodeError::ShortBuffer { need: 24, got: 23 })
     ));
+}
+
+#[test]
+fn the_builder_stamps_manifest_summarys_channel_id_from_the_datagram() {
+    // A ManifestSummary claiming channel 9 inside a datagram built for
+    // channel 3 must encode with 3 at the message's Channel ID offset and
+    // decode as 3: the builder owns this redundant copy, not the caller.
+    let m = ManifestSummary {
+        channel_id: 9,
+        valid: 1,
+        manifest_seq: 9,
+        instrument_count: 1234,
+        timestamp_ns: 88,
+    };
+    let channel = ChannelSequence::new(3, 0);
+    let mut b = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
+    b.push(&m).unwrap();
+    let out = b.finish(0).expect("datagram has messages");
+
+    let msg = &out[dz_edge_core::DATAGRAM_HEADER_SIZE..];
+    assert_eq!(
+        msg[4], 3,
+        "message offset 4: Channel ID stamped by the builder"
+    );
+
+    let decoded = ManifestSummary::decode(msg).unwrap();
+    assert_eq!(decoded.channel_id, 3);
+}
+
+#[test]
+fn set_symbol_fits_a_short_ascii_value() {
+    let mut d = sample();
+    let fit = d.set_symbol("ETH-USDT");
+    assert_eq!(fit, Fit::Fitted);
+    assert_eq!(&d.symbol[..8], b"ETH-USDT");
+    assert_eq!(&d.symbol[8..], &[0u8; SYMBOL_LEN - 8][..]);
+}
+
+#[test]
+fn set_symbol_reports_truncated_for_an_over_long_ascii_value() {
+    let mut d = sample();
+    let long = "A".repeat(SYMBOL_LEN + 10);
+    let fit = d.set_symbol(&long);
+    assert_eq!(fit, Fit::Truncated);
+    assert_eq!(&d.symbol, &[b'A'; SYMBOL_LEN]);
+}
+
+#[test]
+fn set_symbol_reports_unrepresentable_for_a_non_ascii_value() {
+    let mut d = sample();
+    let fit = d.set_symbol("BTC-USDT\u{e9}");
+    assert_eq!(fit, Fit::Unrepresentable);
+}
+
+#[test]
+fn set_leg1_fits_a_short_ascii_value() {
+    let mut d = sample();
+    let fit = d.set_leg1("BTC");
+    assert_eq!(fit, Fit::Fitted);
+    assert_eq!(&d.leg1[..3], b"BTC");
+    assert_eq!(&d.leg1[3..], &[0u8; LEG_LEN - 3][..]);
+}
+
+#[test]
+fn set_leg1_reports_truncated_for_an_over_long_value() {
+    let mut d = sample();
+    let fit = d.set_leg1("TOOLONGLEG");
+    assert_eq!(fit, Fit::Truncated);
+    assert_eq!(&d.leg1, b"TOOLONGL");
+}
+
+#[test]
+fn set_leg2_fits_a_short_ascii_value() {
+    let mut d = sample();
+    let fit = d.set_leg2("USDT");
+    assert_eq!(fit, Fit::Fitted);
+    assert_eq!(&d.leg2[..4], b"USDT");
+    assert_eq!(&d.leg2[4..], &[0u8; LEG_LEN - 4][..]);
+}
+
+#[test]
+fn set_leg2_reports_unrepresentable_for_an_interior_nul() {
+    let mut d = sample();
+    let fit = d.set_leg2("US\0DT");
+    assert_eq!(fit, Fit::Unrepresentable);
+    assert_eq!(&d.leg2[..5], b"US\0DT");
 }

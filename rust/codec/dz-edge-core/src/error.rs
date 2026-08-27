@@ -17,15 +17,6 @@ pub enum DecodeError {
     #[error("unknown message type id {0:#04x}")]
     BadTypeId(u8),
 
-    #[error("datagram builder full: {attempted} bytes would exceed max {max}")]
-    DatagramFull { attempted: usize, max: usize },
-
-    /// The datagram already holds 255 messages, the most the u8 Message Count
-    /// field can express. Distinct from `DatagramFull`, which is a byte-capacity
-    /// limit - conflating them sends a reader chasing an MTU problem.
-    #[error("datagram already holds the maximum {max} messages")]
-    MessageCountExhausted { max: u8 },
-
     /// Which type ids are reserved is per feed, not fleet-wide. This variant
     /// exists for a caller enforcing a reservation that applies to its own
     /// feed; it must refuse the reserved id rather than silently invent a

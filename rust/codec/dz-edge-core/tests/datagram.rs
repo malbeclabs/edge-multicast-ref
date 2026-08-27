@@ -1,5 +1,5 @@
-use dz_edge_core::{AppMessage, DatagramBuilder, DatagramHeader, DecodeError};
-use dz_edge_core::{DATAGRAM_HEADER_SIZE, MAX_DATAGRAM_SIZE, SCHEMA_VERSION};
+use dz_edge_core::{AppMessage, ChannelSequence, DatagramBuilder, DatagramHeader, DecodeError};
+use dz_edge_core::{EncodeError, DATAGRAM_HEADER_SIZE, MAX_DATAGRAM_SIZE, SCHEMA_VERSION};
 
 // Core's tests only need *a* magic value; they must not depend on
 // dz-edge-tob, which owns the real MAGIC_TOB.
@@ -43,9 +43,12 @@ impl AppMessage for HeaderOnly {
 
 #[test]
 fn header_fields_land_at_their_spec_offsets() {
-    let mut b = DatagramBuilder::new(TEST_MAGIC, 7, 42, 1_700_000_000_000_000_000, 3, 1232);
+    let channel = ChannelSequence::resume(7, 3, 42);
+    let mut b = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
     b.push(&Sixteen).unwrap();
-    let out = b.finish().expect("datagram has messages");
+    let out = b
+        .finish(1_700_000_000_000_000_000)
+        .expect("datagram has messages");
 
     assert_eq!(&out[0..2], &TEST_MAGIC.to_le_bytes(), "offset 0: Magic");
     assert_eq!(out[2], SCHEMA_VERSION, "offset 2: Schema Version");
@@ -72,9 +75,27 @@ fn header_fields_land_at_their_spec_offsets() {
 }
 
 #[test]
+fn the_send_timestamp_comes_from_finish_not_construction() {
+    // `finish` takes the send timestamp; nothing constructed with `new` should
+    // leak into offset 12. Building with one implausible value and finishing
+    // with another proves which one wins.
+    let channel = ChannelSequence::new(0, 0);
+    let mut b = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
+    b.push(&Sixteen).unwrap();
+    let out = b.finish(123_456_789).expect("datagram has messages");
+
+    assert_eq!(
+        &out[12..20],
+        &123_456_789u64.to_le_bytes(),
+        "offset 12: Send Timestamp must come from finish's argument"
+    );
+}
+
+#[test]
 fn an_mtu_above_the_mandated_cap_is_clamped() {
     // 1448 is a plausible deployment default and exceeds the mandated cap.
-    let b = DatagramBuilder::new(TEST_MAGIC, 0, 0, 0, 0, 1448);
+    let channel = ChannelSequence::new(0, 0);
+    let b = DatagramBuilder::new(TEST_MAGIC, channel, 1448);
     assert_eq!(
         b.remaining(),
         MAX_DATAGRAM_SIZE - DATAGRAM_HEADER_SIZE,
@@ -83,10 +104,23 @@ fn an_mtu_above_the_mandated_cap_is_clamped() {
 }
 
 #[test]
+fn capacity_reports_the_clamped_value() {
+    // 9000 is a plausible jumbo-frame MTU and exceeds the mandated cap.
+    let channel = ChannelSequence::new(0, 0);
+    let b = DatagramBuilder::new(TEST_MAGIC, channel, 9000);
+    assert_eq!(
+        b.capacity(),
+        MAX_DATAGRAM_SIZE,
+        "capacity() must report what actually took effect, not the requested mtu"
+    );
+}
+
+#[test]
 fn a_finished_datagram_never_exceeds_the_cap() {
-    let mut b = DatagramBuilder::new(TEST_MAGIC, 0, 0, 0, 0, 1448);
+    let channel = ChannelSequence::new(0, 0);
+    let mut b = DatagramBuilder::new(TEST_MAGIC, channel, 1448);
     while b.push(&Sixteen).is_ok() {}
-    let out = b.finish().expect("datagram has messages");
+    let out = b.finish(0).expect("datagram has messages");
     assert!(
         out.len() <= MAX_DATAGRAM_SIZE,
         "finished datagram {} exceeds {MAX_DATAGRAM_SIZE}",
@@ -96,11 +130,12 @@ fn a_finished_datagram_never_exceeds_the_cap() {
 
 #[test]
 fn a_message_that_does_not_fit_is_refused_rather_than_truncated() {
-    let mut b = DatagramBuilder::new(TEST_MAGIC, 0, 0, 0, 0, 1232);
+    let channel = ChannelSequence::new(0, 0);
+    let mut b = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
     while b.push(&Sixteen).is_ok() {}
     assert!(matches!(
         b.push(&Sixteen),
-        Err(DecodeError::DatagramFull { .. })
+        Err(EncodeError::DatagramFull { .. })
     ));
 }
 
@@ -109,7 +144,8 @@ fn message_count_stops_at_255() {
     // Message Count is a u8. A 256th message would wrap it to 0 and every
     // subscriber would mis-parse the rest of the datagram. A 4-byte message
     // makes the cap reachable: (1232 - 24) / 4 = 302 slots, well past 255.
-    let mut b = DatagramBuilder::new(TEST_MAGIC, 0, 0, 0, 0, 1232);
+    let channel = ChannelSequence::new(0, 0);
+    let mut b = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
     let mut pushed = 0usize;
     while b.push(&HeaderOnly).is_ok() {
         pushed += 1;
@@ -120,18 +156,48 @@ fn message_count_stops_at_255() {
     );
     assert!(matches!(
         b.push(&HeaderOnly),
-        Err(DecodeError::MessageCountExhausted { max: 255 })
+        Err(EncodeError::MessageCountExhausted { max: 255 })
     ));
-    let out = b.finish().expect("datagram has messages");
+    let out = b.finish(0).expect("datagram has messages");
     assert_eq!(out[20], 255, "offset 20: Message Count");
     assert!(out.len() <= MAX_DATAGRAM_SIZE);
 }
 
 #[test]
+fn a_failed_push_leaves_the_builder_unchanged() {
+    // On Err the builder must be unchanged, so a caller can finish the
+    // current datagram and retry the same message on a fresh one. Two
+    // builders filled identically, where only one also has an extra failing
+    // push attempted on it, must finish to the same bytes.
+    let build_full = || {
+        let channel = ChannelSequence::new(5, 1);
+        let mut b = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
+        while b.push(&Sixteen).is_ok() {}
+        b
+    };
+
+    let mut with_extra_attempt = build_full();
+    assert!(matches!(
+        with_extra_attempt.push(&Sixteen),
+        Err(EncodeError::DatagramFull { .. })
+    ));
+    let with_extra_attempt_bytes = with_extra_attempt.finish(999);
+
+    let baseline = build_full();
+    let baseline_bytes = baseline.finish(999);
+
+    assert_eq!(
+        with_extra_attempt_bytes, baseline_bytes,
+        "a failed push must not mutate the builder"
+    );
+}
+
+#[test]
 fn the_snapshot_flag_is_set_only_by_push_snapshot() {
-    let mut plain = DatagramBuilder::new(TEST_MAGIC, 0, 0, 0, 0, 1232);
+    let channel = ChannelSequence::new(0, 0);
+    let mut plain = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
     plain.push(&Sixteen).unwrap();
-    let out = plain.finish().expect("datagram has messages");
+    let out = plain.finish(0).expect("datagram has messages");
     let flags = u16::from_le_bytes([out[DATAGRAM_HEADER_SIZE + 2], out[DATAGRAM_HEADER_SIZE + 3]]);
     assert_eq!(
         flags & 0x0001,
@@ -139,17 +205,19 @@ fn the_snapshot_flag_is_set_only_by_push_snapshot() {
         "mktdata and refdata messages clear bit 0"
     );
 
-    let mut snap = DatagramBuilder::new(TEST_MAGIC, 0, 0, 0, 0, 1232);
+    let channel = ChannelSequence::new(0, 0);
+    let mut snap = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
     snap.push_snapshot(&Sixteen).unwrap();
-    let out = snap.finish().expect("datagram has messages");
+    let out = snap.finish(0).expect("datagram has messages");
     let flags = u16::from_le_bytes([out[DATAGRAM_HEADER_SIZE + 2], out[DATAGRAM_HEADER_SIZE + 3]]);
     assert_eq!(flags & 0x0001, 1, "snapshot-port messages set bit 0");
 
     // A message that sets the snapshot bit itself must still have it cleared
     // by plain push(): the builder owns Flags, not the message.
-    let mut fights_back = DatagramBuilder::new(TEST_MAGIC, 0, 0, 0, 0, 1232);
+    let channel = ChannelSequence::new(0, 0);
+    let mut fights_back = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
     fights_back.push(&SelfFlagged).unwrap();
-    let out = fights_back.finish().expect("datagram has messages");
+    let out = fights_back.finish(0).expect("datagram has messages");
     let flags = u16::from_le_bytes([out[DATAGRAM_HEADER_SIZE + 2], out[DATAGRAM_HEADER_SIZE + 3]]);
     assert_eq!(
         flags & 0x0001,
@@ -160,9 +228,10 @@ fn the_snapshot_flag_is_set_only_by_push_snapshot() {
 
 #[test]
 fn decode_rejects_a_schema_version_it_does_not_implement() {
-    let mut b = DatagramBuilder::new(TEST_MAGIC, 0, 0, 0, 0, 1232);
+    let channel = ChannelSequence::new(0, 0);
+    let mut b = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
     b.push(&Sixteen).unwrap();
-    let mut out = b.finish().expect("datagram has messages");
+    let mut out = b.finish(0).expect("datagram has messages");
     out[2] = 2; // the generation that never reached the wire
     assert_eq!(
         DatagramHeader::decode(&out),
@@ -172,9 +241,10 @@ fn decode_rejects_a_schema_version_it_does_not_implement() {
 
 #[test]
 fn decode_round_trips_a_built_datagram() {
-    let mut b = DatagramBuilder::new(TEST_MAGIC, 9, 1234, 5678, 2, 1232);
+    let channel = ChannelSequence::resume(9, 2, 1234);
+    let mut b = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
     b.push(&Sixteen).unwrap();
-    let out = b.finish().expect("datagram has messages");
+    let out = b.finish(5678).expect("datagram has messages");
     let h = DatagramHeader::decode(&out).unwrap();
     assert_eq!(h.channel_id, 9);
     assert_eq!(h.sequence_number, 1234);
@@ -260,7 +330,8 @@ impl AppMessage for TooSmallForMessageHeader {
 #[test]
 #[should_panic(expected = "AppMessage::SIZE must include the 4-byte message header")]
 fn push_panics_when_size_excludes_the_message_header() {
-    let mut b = DatagramBuilder::new(TEST_MAGIC, 0, 0, 0, 0, 1232);
+    let channel = ChannelSequence::new(0, 0);
+    let mut b = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
     let _ = b.push(&TooSmallForMessageHeader);
 }
 
@@ -278,7 +349,8 @@ impl AppMessage for TooLargeForLengthField {
 fn push_panics_when_size_cannot_fit_the_u8_length_field() {
     // mtu of 1232 gives the builder plenty of capacity; the assert must fire
     // before any capacity check, which it does since it is the first statement.
-    let mut b = DatagramBuilder::new(TEST_MAGIC, 0, 0, 0, 0, 1232);
+    let channel = ChannelSequence::new(0, 0);
+    let mut b = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
     let _ = b.push(&TooLargeForLengthField);
 }
 
@@ -286,10 +358,11 @@ fn push_panics_when_size_cannot_fit_the_u8_length_field() {
 fn a_tiny_mtu_clamps_capacity_up_to_the_header() {
     // Capacity clamps UP to the header as well as down to the cap, so a
     // degenerate mtu cannot make buf longer than capacity.
-    let b = DatagramBuilder::new(TEST_MAGIC, 0, 0, 0, 0, 4);
+    let channel = ChannelSequence::new(0, 0);
+    let b = DatagramBuilder::new(TEST_MAGIC, channel, 4);
     assert_eq!(b.remaining(), 0);
     // Nothing was pushed, so finish() must not hand back an emittable
     // datagram: the Message Count range is 1-255, and a 0-message datagram
     // is exactly what every conformant subscriber discards.
-    assert!(b.finish().is_none());
+    assert!(b.finish(0).is_none());
 }

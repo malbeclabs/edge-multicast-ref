@@ -108,6 +108,8 @@ fn instrument_definition_v1_golden_vector_decodes_to_canonical_values() {
 fn manifest_summary_matches_its_golden_vector() {
     let mut b = [0u8; ManifestSummary::SIZE];
     canonical_manifest_summary().encode_into(&mut b);
+    // encode_into honours Channel ID directly now, so the encoder's
+    // unmodified output is compared against the vector.
     assert_eq!(b.to_vec(), golden("manifest-summary-v3.bin"));
 }
 

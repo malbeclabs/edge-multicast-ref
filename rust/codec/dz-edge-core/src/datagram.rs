@@ -1,10 +1,12 @@
 //! The 24-byte datagram header and the builder that packs messages into one
 //! UDP payload.
 
+use crate::channel::ChannelSequence;
 use crate::constants::{
     DATAGRAM_HEADER_SIZE, FLAG_SNAPSHOT, MAX_DATAGRAM_SIZE, MSG_HEADER_SIZE, SCHEMA_VERSION,
     SUPPORTED_SCHEMA_VERSIONS,
 };
+use crate::encode_error::EncodeError;
 use crate::error::DecodeError;
 use crate::message::AppMessage;
 
@@ -38,6 +40,10 @@ impl DatagramHeader {
     /// - `Magic`, because only the caller knows which feed it expects. A
     ///   caller must compare `header.magic` itself to reject a datagram
     ///   misrouted from another feed.
+    ///   [`Datagram::decode`](crate::walk::Datagram::decode) is the entry
+    ///   point for received traffic, precisely because it takes the expected
+    ///   magic as a required argument and performs that comparison for the
+    ///   caller.
     /// - The message count, because whether a zero count makes the datagram
     ///   malformed is a property of the datagram, not the header. A caller
     ///   doing sequence-gap or reset accounting on a malformed datagram still
@@ -101,7 +107,6 @@ pub struct DatagramBuilder {
     magic: u16,
     channel_id: u8,
     sequence_number: u64,
-    send_timestamp_ns: u64,
     reset_count: u8,
     capacity: usize,
     msg_count: u8,
@@ -109,24 +114,16 @@ pub struct DatagramBuilder {
 
 impl DatagramBuilder {
     #[must_use]
-    pub fn new(
-        magic: u16,
-        channel_id: u8,
-        sequence_number: u64,
-        send_timestamp_ns: u64,
-        reset_count: u8,
-        mtu: u16,
-    ) -> Self {
+    pub fn new(magic: u16, sequence: ChannelSequence, mtu: u16) -> Self {
         let capacity = (mtu as usize).clamp(DATAGRAM_HEADER_SIZE, MAX_DATAGRAM_SIZE);
         let mut buf = Vec::with_capacity(capacity);
         buf.resize(DATAGRAM_HEADER_SIZE, 0);
         Self {
             buf,
             magic,
-            channel_id,
-            sequence_number,
-            send_timestamp_ns,
-            reset_count,
+            channel_id: sequence.channel_id(),
+            sequence_number: sequence.sequence_number(),
+            reset_count: sequence.reset_count(),
             capacity,
             msg_count: 0,
         }
@@ -138,23 +135,43 @@ impl DatagramBuilder {
         self.capacity.saturating_sub(self.buf.len())
     }
 
+    /// The clamped capacity this builder was constructed with: `mtu`, clamped
+    /// to at least the datagram header and at most `MAX_DATAGRAM_SIZE`.
+    ///
+    /// An operator who configured a larger value than the mandated cap can log
+    /// what actually took effect, without reproducing the header arithmetic
+    /// themselves.
+    #[must_use]
+    pub const fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Whether the datagram holds no messages yet. This is not "no bytes": the
+    /// underlying buffer always holds at least the 24-byte header, even when
+    /// empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.msg_count == 0
     }
 
     /// Append a message with the snapshot flag cleared.
-    pub fn push<M: AppMessage>(&mut self, msg: &M) -> Result<(), DecodeError> {
+    ///
+    /// On `Err` the builder is unchanged, so a caller may finish the current
+    /// datagram and retry the same message on a fresh one.
+    pub fn push<M: AppMessage>(&mut self, msg: &M) -> Result<(), EncodeError> {
         self.push_with_flags(msg, 0)
     }
 
     /// Append a message with the snapshot flag set. Correct only on the
     /// `snapshot` port role.
-    pub fn push_snapshot<M: AppMessage>(&mut self, msg: &M) -> Result<(), DecodeError> {
+    ///
+    /// On `Err` the builder is unchanged, so a caller may finish the current
+    /// datagram and retry the same message on a fresh one.
+    pub fn push_snapshot<M: AppMessage>(&mut self, msg: &M) -> Result<(), EncodeError> {
         self.push_with_flags(msg, FLAG_SNAPSHOT)
     }
 
-    fn push_with_flags<M: AppMessage>(&mut self, msg: &M, flags: u16) -> Result<(), DecodeError> {
+    fn push_with_flags<M: AppMessage>(&mut self, msg: &M, flags: u16) -> Result<(), EncodeError> {
         // `SIZE` includes the 4-byte message header, so anything smaller is a broken
         // `AppMessage` impl rather than a runtime condition. `M::SIZE` is an associated
         // const, so for any concrete type this folds away at compile time.
@@ -172,12 +189,12 @@ impl DatagramBuilder {
         // Message Count is a u8; a 256th message would wrap it to 0 and every
         // subscriber would mis-parse the rest of the datagram.
         if self.msg_count == u8::MAX {
-            return Err(DecodeError::MessageCountExhausted { max: u8::MAX });
+            return Err(EncodeError::MessageCountExhausted { max: u8::MAX });
         }
         if M::SIZE > self.remaining() {
-            return Err(DecodeError::DatagramFull {
+            return Err(EncodeError::DatagramFull {
                 attempted: self.buf.len() + M::SIZE,
-                max: self.capacity,
+                capacity: self.capacity,
             });
         }
         let start = self.buf.len();
@@ -190,6 +207,10 @@ impl DatagramBuilder {
         // own bytes cannot disagree with the associated consts the builder framed it by.
         self.buf[start] = M::TYPE_ID;
         self.buf[start + 1] = M::SIZE as u8;
+        // The builder owns a message's redundant Channel ID copy too, for the
+        // same reason: a message's own bytes cannot disagree with the header
+        // that frames it.
+        M::stamp_channel_id(&mut self.buf[start..start + M::SIZE], self.channel_id);
         self.msg_count += 1;
         Ok(())
     }
@@ -202,8 +223,13 @@ impl DatagramBuilder {
     /// `msg_count = 0` that every conformant subscriber discards, `finish`
     /// returns `None`. `None` is a normal outcome here, not an error - that is
     /// why this returns `Option` rather than `Result`.
+    ///
+    /// `send_timestamp_ns` is the instant the datagram left the host. Read the
+    /// clock as late as possible, immediately before transmitting: this is the
+    /// value a latency measurement is built on, and a datagram carrying several
+    /// messages can take a while to pack.
     #[must_use]
-    pub fn finish(mut self) -> Option<Vec<u8>> {
+    pub fn finish(mut self, send_timestamp_ns: u64) -> Option<Vec<u8>> {
         if self.msg_count == 0 {
             return None;
         }
@@ -212,7 +238,7 @@ impl DatagramBuilder {
         self.buf[2] = SCHEMA_VERSION;
         self.buf[3] = self.channel_id;
         self.buf[4..12].copy_from_slice(&self.sequence_number.to_le_bytes());
-        self.buf[12..20].copy_from_slice(&self.send_timestamp_ns.to_le_bytes());
+        self.buf[12..20].copy_from_slice(&send_timestamp_ns.to_le_bytes());
         self.buf[20] = self.msg_count;
         self.buf[21] = self.reset_count;
         self.buf[22..24].copy_from_slice(&len.to_le_bytes());
