@@ -1,4 +1,4 @@
-use dz_edge_core::{AppMessage, EndOfSession, Heartbeat};
+use dz_edge_core::{AppMessage, DecodeError, EndOfSession, Heartbeat};
 
 #[test]
 fn heartbeat_matches_its_spec_layout() {
@@ -31,9 +31,23 @@ fn end_of_session_matches_its_spec_layout() {
 }
 
 #[test]
-fn decode_rejects_a_declared_length_that_is_not_the_fixed_size() {
+fn heartbeat_decode_rejects_a_declared_length_that_is_not_the_fixed_size() {
     let mut buf = [0u8; Heartbeat::SIZE];
     Heartbeat { channel_id: 0, timestamp_ns: 0 }.encode_into(&mut buf);
     buf[1] = 20; // lie about the length
-    assert!(Heartbeat::decode(&buf).is_err());
+    assert!(matches!(
+        Heartbeat::decode(&buf),
+        Err(DecodeError::LengthMismatch { type_id: 0x01, declared: 20, expected: 16 })
+    ));
+}
+
+#[test]
+fn end_of_session_decode_rejects_a_declared_length_that_is_not_the_fixed_size() {
+    let mut buf = [0u8; EndOfSession::SIZE];
+    EndOfSession { timestamp_ns: 0 }.encode_into(&mut buf);
+    buf[1] = 20; // lie about the length
+    assert!(matches!(
+        EndOfSession::decode(&buf),
+        Err(DecodeError::LengthMismatch { type_id: 0x06, declared: 20, expected: 12 })
+    ));
 }
