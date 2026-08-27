@@ -7,10 +7,14 @@
 
 pub mod constants;
 pub mod datagram;
+pub mod end_of_session;
 pub mod error;
+pub mod heartbeat;
 pub mod message;
 
 pub use constants::*;
 pub use datagram::{DatagramBuilder, DatagramHeader};
+pub use end_of_session::EndOfSession;
 pub use error::DecodeError;
+pub use heartbeat::Heartbeat;
 pub use message::AppMessage;

@@ -56,7 +56,7 @@ impl DatagramHeader {
 
 /// Accumulates application messages into one datagram.
 ///
-/// Capacity is `min(mtu, MAX_DATAGRAM_SIZE)`. The clamp is the point: the cap
+/// Capacity is `mtu` clamped to at least the datagram header and at most `MAX_DATAGRAM_SIZE`. The clamp is the point: the cap
 /// is mandated by every feed spec, so no configuration key and no operator can
 /// raise it. A deployment default above the cap is representable, which is why
 /// the limit lives here and not in a documentation note.
