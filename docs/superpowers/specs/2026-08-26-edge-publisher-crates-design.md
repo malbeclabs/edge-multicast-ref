@@ -85,13 +85,21 @@ publisher's refdata module: *"the emission is a synchronized burst."* Another
 paces at 80% of the cycle period, because the period is a maximum on the
 interval between retransmissions of any single definition, not a lap target.
 
-**Two publishers transmit on a reserved type ID.** `0x05` is marked *(reserved)*
-in the market-by-price, market-by-order and order-intent specs and defined by
-none; no spec mentions `ChannelReset`. Two publishers define and transmit one
-there, one as a startup handshake on both ports. Conformant subscribers skip it,
-but the ID is occupied on live wire and the supplement already defines reset as
-header-only via `Reset Count`. `dz-edge-core` emits nothing at `0x05`. Whether
-that handshake earns a real identifier is an upstream question.
+**Two publishers transmit on an undocumented type ID.** `0x05` is marked
+*(reserved)* in the market-by-price, market-by-order and order-intent specs. The
+top-of-book spec neither reserves nor defines it: its message table steps from
+`0x04` straight to `0x06`, leaving the ID unlisted. The reference top-of-book
+parser fills that silence, decoding `0x05` as `ChannelReset` (12 bytes, either
+port role, "publisher startup, drop cached state"), and two publishers emit one
+there, one as a startup handshake on both ports. On top-of-book that agrees with
+our own decoder rather than intruding on reserved space, so type ID space is
+per-feed and a crate-wide rule against `0x05` would be wrong: `dz-edge-core`
+constrains nothing at that ID and defines no message at it. What is missing is
+spec coverage, and the specs disagree with each other about it: the perp-stats
+spec excludes `0x05` on the grounds that it "is reserved there", which the
+top-of-book table does not bear out. The supplement already defines reset as
+header-only via `Reset Count`, so whether `ChannelReset` earns a documented
+identifier on top-of-book is an upstream question.
 
 ### Instrumentation
 
