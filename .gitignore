@@ -23,4 +23,7 @@ Thumbs.db
 
 # Rust
 Cargo.lock
+# ...but the Rust workspace's is tracked, so CI and every developer build
+# resolve the same dependency versions for a given commit.
+!rust/Cargo.lock
 .worktrees/

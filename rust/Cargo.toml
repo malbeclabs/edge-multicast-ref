@@ -17,6 +17,9 @@ authors = ["Malbec Labs"]
 
 [workspace.dependencies]
 thiserror = "1.0"
-# Pinned: two libraries in one binary must not disagree about the exposition format.
+# One 0.14.x is resolved for the whole graph, so this crate and a consumer
+# that also depends on prometheus link the same copy and cannot disagree
+# about the exposition format. The committed lockfile is what makes any two
+# builds of the same commit resolve identically.
 prometheus = "0.14.0"
 tiny_http = "0.12"
