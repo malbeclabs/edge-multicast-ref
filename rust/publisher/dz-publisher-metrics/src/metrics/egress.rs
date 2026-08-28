@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use dz_edge_core::PortRole;
 use prometheus::{GaugeVec, IntCounterVec, IntGaugeVec, Registry};
 
-use crate::labels::EgressErrorReason;
+use crate::labels::{channel_id_label, EgressErrorReason, EgressMessageType};
 use crate::opts::opts;
 
 /// Metrics for the path from the publisher onto the wire.
@@ -30,6 +30,7 @@ impl EgressMetrics {
         registry: &Registry,
         labels: &HashMap<String, String>,
         port_roles: &[PortRole],
+        channel_ids: &[u8],
     ) -> Self {
         let datagrams_total = IntCounterVec::new(
             opts(
@@ -48,8 +49,6 @@ impl EgressMetrics {
             datagrams_total.with_label_values(&[port_role.as_str()]);
         }
 
-        // Not pre-created: `message_type` is the upstream source's own
-        // vocabulary, not a closed set known at construction.
         let messages_total = IntCounterVec::new(
             opts(
                 "dz_publisher_egress_messages_total",
@@ -62,6 +61,17 @@ impl EgressMetrics {
         registry
             .register(Box::new(messages_total.clone()))
             .expect("static metric registration");
+        // Outbound `message_type` is this feed family's own vocabulary, so
+        // both dimensions are closed sets. Only pairs the specification
+        // permits are pre-created: a quote on the refdata port is not a
+        // series that can ever be written to.
+        for port_role in port_roles {
+            for message_type in EgressMessageType::ALL {
+                if message_type.is_valid_on(*port_role) {
+                    messages_total.with_label_values(&[port_role.as_str(), message_type.as_str()]);
+                }
+            }
+        }
 
         let bytes_total = IntCounterVec::new(
             opts(
@@ -99,8 +109,6 @@ impl EgressMetrics {
             }
         }
 
-        // Not pre-created: `channel_id` is a deployment choice, not a
-        // closed set known at construction.
         let sequence_current = IntGaugeVec::new(
             opts(
                 "dz_publisher_egress_sequence_current",
@@ -115,9 +123,13 @@ impl EgressMetrics {
         registry
             .register(Box::new(sequence_current.clone()))
             .expect("static metric registration");
+        for port_role in port_roles {
+            for channel_id in channel_ids {
+                sequence_current
+                    .with_label_values(&[port_role.as_str(), channel_id_label(*channel_id)]);
+            }
+        }
 
-        // Not pre-created: `channel_id` is a deployment choice, not a
-        // closed set known at construction.
         let heartbeat_last_sent_timestamp_seconds = GaugeVec::new(
             opts(
                 "dz_publisher_egress_heartbeat_last_sent_timestamp_seconds",
@@ -130,6 +142,10 @@ impl EgressMetrics {
         registry
             .register(Box::new(heartbeat_last_sent_timestamp_seconds.clone()))
             .expect("static metric registration");
+        for channel_id in channel_ids {
+            heartbeat_last_sent_timestamp_seconds
+                .with_label_values(&[channel_id_label(*channel_id)]);
+        }
 
         Self {
             datagrams_total,
@@ -149,9 +165,9 @@ impl EgressMetrics {
     }
 
     /// Records one message sent on `port_role`.
-    pub fn message(&self, port_role: PortRole, message_type: &str) {
+    pub fn message(&self, port_role: PortRole, message_type: EgressMessageType) {
         self.messages_total
-            .with_label_values(&[port_role.as_str(), message_type])
+            .with_label_values(&[port_role.as_str(), message_type.as_str()])
             .inc();
     }
 
@@ -170,16 +186,22 @@ impl EgressMetrics {
     }
 
     /// Sets the current outbound sequence number for `port_role` and Channel ID.
-    pub fn set_sequence(&self, port_role: PortRole, channel_id: u8, seq: i64) {
+    ///
+    /// `Sequence Number` is a `u64` on the wire; a Prometheus gauge is
+    /// `i64`. The saturating conversion lives here so the lossy step is
+    /// done once, by the crate that owns the contract, rather than as an
+    /// `as i64` at every call site. A publisher would have to send 9.2
+    /// quintillion datagrams on one channel instance to reach the clamp.
+    pub fn set_sequence(&self, port_role: PortRole, channel_id: u8, seq: u64) {
         self.sequence_current
-            .with_label_values(&[port_role.as_str(), &channel_id.to_string()])
-            .set(seq);
+            .with_label_values(&[port_role.as_str(), channel_id_label(channel_id)])
+            .set(i64::try_from(seq).unwrap_or(i64::MAX));
     }
 
     /// Sets the Unix timestamp the last heartbeat was sent for a Channel ID.
     pub fn set_heartbeat_last_sent(&self, channel_id: u8, unix_seconds: f64) {
         self.heartbeat_last_sent_timestamp_seconds
-            .with_label_values(&[&channel_id.to_string()])
+            .with_label_values(&[channel_id_label(channel_id)])
             .set(unix_seconds);
     }
 }

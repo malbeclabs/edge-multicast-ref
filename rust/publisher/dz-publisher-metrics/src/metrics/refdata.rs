@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use prometheus::{Gauge, Histogram, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Registry};
 
 use crate::buckets::REFDATA_LOAD_DURATION_BUCKETS;
+use crate::labels::channel_id_label;
 use crate::labels::RefdataLoadErrorReason;
 use crate::opts::{histogram_opts, opts};
 
@@ -20,7 +21,11 @@ pub struct RefdataMetrics {
 }
 
 impl RefdataMetrics {
-    pub(crate) fn new(registry: &Registry, labels: &HashMap<String, String>) -> Self {
+    pub(crate) fn new(
+        registry: &Registry,
+        labels: &HashMap<String, String>,
+        channel_ids: &[u8],
+    ) -> Self {
         let definitions_emitted_total = IntCounter::with_opts(opts(
             "dz_publisher_refdata_definitions_emitted_total",
             "Instrument definitions emitted on the reference-data feed.",
@@ -104,8 +109,6 @@ impl RefdataMetrics {
             .register(Box::new(delistings_total.clone()))
             .expect("static metric registration");
 
-        // Not pre-created: `channel_id` is a deployment choice, not a
-        // closed set known at construction.
         let manifest_seq = IntGaugeVec::new(
             opts(
                 "dz_publisher_refdata_manifest_seq",
@@ -118,9 +121,10 @@ impl RefdataMetrics {
         registry
             .register(Box::new(manifest_seq.clone()))
             .expect("static metric registration");
+        for channel_id in channel_ids {
+            manifest_seq.with_label_values(&[channel_id_label(*channel_id)]);
+        }
 
-        // Not pre-created: `channel_id` is a deployment choice, not a
-        // closed set known at construction.
         let manifest_valid = IntGaugeVec::new(
             opts(
                 "dz_publisher_refdata_manifest_valid",
@@ -133,6 +137,9 @@ impl RefdataMetrics {
         registry
             .register(Box::new(manifest_valid.clone()))
             .expect("static metric registration");
+        for channel_id in channel_ids {
+            manifest_valid.with_label_values(&[channel_id_label(*channel_id)]);
+        }
 
         Self {
             definitions_emitted_total,
@@ -185,16 +192,19 @@ impl RefdataMetrics {
     }
 
     /// Sets the current manifest sequence number for a Channel ID.
-    pub fn set_manifest_seq(&self, channel_id: u8, seq: i64) {
+    /// `Sequence Number` is a `u64` on the wire and a Prometheus gauge is
+    /// `i64`; the saturating conversion is done here so the lossy step is
+    /// not repeated as an `as i64` at every call site.
+    pub fn set_manifest_seq(&self, channel_id: u8, seq: u64) {
         self.manifest_seq
-            .with_label_values(&[&channel_id.to_string()])
-            .set(seq);
+            .with_label_values(&[channel_id_label(channel_id)])
+            .set(i64::try_from(seq).unwrap_or(i64::MAX));
     }
 
     /// Sets whether the current manifest for a Channel ID is valid.
     pub fn set_manifest_valid(&self, channel_id: u8, valid: bool) {
         self.manifest_valid
-            .with_label_values(&[&channel_id.to_string()])
+            .with_label_values(&[channel_id_label(channel_id)])
             .set(i64::from(valid));
     }
 }

@@ -4,8 +4,9 @@
 
 use dz_edge_core::PortRole;
 use dz_publisher_metrics::{
-    EgressErrorReason, EventKind, ExitReason, InconsistencyKind, ParseErrorReason,
-    PublisherMetrics, ReconnectReason, RecoveryOutcome, RefdataLoadErrorReason, TimestampKind,
+    EgressErrorReason, EgressMessageType, EventKind, ExitReason, InconsistencyKind,
+    ParseErrorReason, PublisherMetrics, PublisherMetricsConfig, ReconnectReason, RecoveryOutcome,
+    RefdataLoadErrorReason, TimestampKind,
 };
 
 const NORMATIVE_NAMES: &[&str] = &[
@@ -73,7 +74,8 @@ fn touch_every_family(m: &PublisherMetrics) {
     m.refdata().set_manifest_valid(1, true);
 
     m.egress().datagram(PortRole::Mktdata);
-    m.egress().message(PortRole::Mktdata, "trade");
+    m.egress()
+        .message(PortRole::Mktdata, EgressMessageType::Trade);
     m.egress().bytes(PortRole::Mktdata, 1);
     m.egress()
         .error(PortRole::Mktdata, EgressErrorReason::SocketError);
@@ -86,7 +88,8 @@ fn touch_every_family(m: &PublisherMetrics) {
     m.latency()
         .observe_recv_to_send(EventKind::BookUpdate, 0.001);
     m.latency().observe_book_update_duration(0.001);
-    m.latency().observe_encode_duration("trade", 0.001);
+    m.latency()
+        .observe_encode_duration(EgressMessageType::Trade, 0.001);
 
     m.process().set_build_info("1.0.0", "abc123", "1.88.0");
     m.process().set_uptime(1.0);
@@ -96,7 +99,13 @@ fn touch_every_family(m: &PublisherMetrics) {
 
 #[test]
 fn every_normative_family_renders_under_its_exact_name() {
-    let metrics = PublisherMetrics::new("test-venue", 7, &[PortRole::Mktdata]);
+    let metrics = PublisherMetrics::new(&PublisherMetricsConfig {
+        venue: "test-venue",
+        source_id: 7,
+        port_roles: &[PortRole::Mktdata],
+        connections: &[],
+        channel_ids: &[],
+    });
     touch_every_family(&metrics);
     let rendered = metrics.render();
 

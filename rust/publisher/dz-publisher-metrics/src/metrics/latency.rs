@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use prometheus::{Histogram, HistogramVec, IntGauge, Registry};
 
 use crate::buckets::LATENCY_BUCKETS;
-use crate::labels::{EventKind, TimestampKind};
+use crate::labels::{EgressMessageType, EventKind, TimestampKind};
 use crate::opts::{histogram_opts, opts};
 
 /// Latency metrics along the path from the venue to this publisher's own send.
@@ -83,8 +83,6 @@ impl LatencyMetrics {
             .register(Box::new(book_update_duration_seconds.clone()))
             .expect("static metric registration");
 
-        // Not pre-created: `message_type` is the upstream source's own
-        // vocabulary, not a closed set known at construction.
         let encode_duration_seconds = HistogramVec::new(
             histogram_opts(
                 "dz_publisher_encode_duration_seconds",
@@ -98,6 +96,12 @@ impl LatencyMetrics {
         registry
             .register(Box::new(encode_duration_seconds.clone()))
             .expect("static metric registration");
+        // Outbound `message_type` is a closed enum: pre-create every child
+        // so the family exists from startup. This one is not crossed with
+        // port role, so every variant applies.
+        for message_type in EgressMessageType::ALL {
+            encode_duration_seconds.with_label_values(&[message_type.as_str()]);
+        }
 
         Self {
             venue_to_recv_latency_seconds,
@@ -133,9 +137,9 @@ impl LatencyMetrics {
     }
 
     /// Records the duration of encoding one outbound message.
-    pub fn observe_encode_duration(&self, message_type: &str, seconds: f64) {
+    pub fn observe_encode_duration(&self, message_type: EgressMessageType, seconds: f64) {
         self.encode_duration_seconds
-            .with_label_values(&[message_type])
+            .with_label_values(&[message_type.as_str()])
             .observe(seconds);
     }
 }

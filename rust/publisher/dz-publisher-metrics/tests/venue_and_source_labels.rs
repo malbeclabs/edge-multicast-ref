@@ -1,11 +1,17 @@
 //! `venue` and `source_id` are applied to every series `PublisherMetrics`
 //! exposes; there must be no path to a metric that skips them.
 
-use dz_publisher_metrics::PublisherMetrics;
+use dz_publisher_metrics::{PublisherMetrics, PublisherMetricsConfig};
 
 #[test]
 fn every_family_carries_venue_and_source_id() {
-    let metrics = PublisherMetrics::new("test-venue", 42, &[dz_edge_core::PortRole::Mktdata]);
+    let metrics = PublisherMetrics::new(&PublisherMetricsConfig {
+        venue: "test-venue",
+        source_id: 42,
+        port_roles: &[dz_edge_core::PortRole::Mktdata],
+        connections: &[],
+        channel_ids: &[],
+    });
 
     // Touch one representative from each accessor, including both a plain
     // metric and a vector metric, so their samples exist in the render.

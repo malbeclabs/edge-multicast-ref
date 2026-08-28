@@ -17,7 +17,11 @@ pub struct IngressMetrics {
 }
 
 impl IngressMetrics {
-    pub(crate) fn new(registry: &Registry, labels: &HashMap<String, String>) -> Self {
+    pub(crate) fn new(
+        registry: &Registry,
+        labels: &HashMap<String, String>,
+        connections: &[&str],
+    ) -> Self {
         // Not pre-created: `message_type` is the upstream source's own
         // vocabulary and `connection` is a deployment choice. Neither is a
         // closed set known at construction, so this family only appears
@@ -48,8 +52,9 @@ impl IngressMetrics {
         let duplicates_total = IntCounter::with_opts(opts(
             "dz_publisher_ingress_duplicates_total",
             "Ingress messages discarded as duplicates of an already-published message. With several \
-             connections taking first-copy-wins, the ratio of this to published messages is the health \
-             signal for that redundancy: it should track close to the redundant connection count, and a \
+             connections taking first-copy-wins, every copy after the first is discarded, so the ratio \
+             of this to published messages is the health signal for that redundancy: it should track \
+             close to one less than the connection count (three connections give a ratio of two), and a \
              fall toward zero means the redundancy has silently stopped doing anything.",
             labels,
         ))
@@ -77,8 +82,6 @@ impl IngressMetrics {
             parse_errors_total.with_label_values(&[reason.as_str()]);
         }
 
-        // Not pre-created: `connection` is a deployment choice, not a
-        // closed set known at construction.
         let connection_state = IntGaugeVec::new(
             opts(
                 "dz_publisher_ingress_connection_state",
@@ -91,6 +94,14 @@ impl IngressMetrics {
         registry
             .register(Box::new(connection_state.clone()))
             .expect("static metric registration");
+        // Pre-created at 0 for every declared connection. This family is
+        // the one an operator alerts on with `== 0`, and a publisher whose
+        // upstream never came up at startup would otherwise never create
+        // the series at all - so the alert would stay silent in exactly
+        // the case it exists for.
+        for connection in connections {
+            connection_state.with_label_values(&[connection]);
+        }
 
         let reconnects_total = IntCounterVec::new(
             opts(

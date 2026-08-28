@@ -13,7 +13,7 @@
 //! their absence keeps meaning something.
 
 use dz_edge_core::PortRole;
-use dz_publisher_metrics::PublisherMetrics;
+use dz_publisher_metrics::{PublisherMetrics, PublisherMetricsConfig};
 
 /// Finds the sample line for `metric` (an exact family name, or a
 /// histogram sub-series such as `..._count`) carrying every label in
@@ -43,7 +43,13 @@ fn assert_zero(rendered: &str, metric: &str, labels: &[(&str, &str)]) {
 
 #[test]
 fn every_closed_label_family_renders_zero_at_construction() {
-    let metrics = PublisherMetrics::new("test-venue", 1, &[PortRole::Mktdata, PortRole::Refdata]);
+    let metrics = PublisherMetrics::new(&PublisherMetricsConfig {
+        venue: "test-venue",
+        source_id: 1,
+        port_roles: &[PortRole::Mktdata, PortRole::Refdata],
+        connections: &[],
+        channel_ids: &[],
+    });
     let rendered = metrics.render();
 
     for reason in ["schema", "unknown_field", "malformed", "truncated"] {
@@ -149,7 +155,13 @@ fn every_closed_label_family_renders_zero_at_construction() {
 
 #[test]
 fn egress_datagrams_total_only_covers_the_supplied_port_roles() {
-    let metrics = PublisherMetrics::new("test-venue", 1, &[PortRole::Mktdata, PortRole::Refdata]);
+    let metrics = PublisherMetrics::new(&PublisherMetricsConfig {
+        venue: "test-venue",
+        source_id: 1,
+        port_roles: &[PortRole::Mktdata, PortRole::Refdata],
+        connections: &[],
+        channel_ids: &[],
+    });
     let rendered = metrics.render();
 
     for port_role in ["mktdata", "refdata"] {
@@ -172,19 +184,21 @@ fn egress_datagrams_total_only_covers_the_supplied_port_roles() {
 
 #[test]
 fn open_label_families_are_absent_until_touched_then_present() {
+    // What is left after the config makes every other label value
+    // knowable: the upstream source's own message vocabulary, which only
+    // that source can enumerate, and the build labels the caller supplies.
     const OPEN_LABEL_FAMILIES: &[&str] = &[
         "dz_publisher_ingress_messages_total",
-        "dz_publisher_encode_duration_seconds",
-        "dz_publisher_egress_messages_total",
-        "dz_publisher_ingress_connection_state",
-        "dz_publisher_egress_sequence_current",
-        "dz_publisher_egress_heartbeat_last_sent_timestamp_seconds",
-        "dz_publisher_refdata_manifest_seq",
-        "dz_publisher_refdata_manifest_valid",
         "dz_publisher_build_info",
     ];
 
-    let metrics = PublisherMetrics::new("test-venue", 1, &[PortRole::Mktdata]);
+    let metrics = PublisherMetrics::new(&PublisherMetricsConfig {
+        venue: "test-venue",
+        source_id: 1,
+        port_roles: &[PortRole::Mktdata],
+        connections: &["primary"],
+        channel_ids: &[1],
+    });
     let rendered = metrics.render();
     for name in OPEN_LABEL_FAMILIES {
         assert!(
@@ -195,13 +209,6 @@ fn open_label_families_are_absent_until_touched_then_present() {
     }
 
     metrics.ingress().message("trade", "primary");
-    metrics.latency().observe_encode_duration("trade", 0.001);
-    metrics.egress().message(PortRole::Mktdata, "trade");
-    metrics.ingress().set_connection_state("primary", true);
-    metrics.egress().set_sequence(PortRole::Mktdata, 1, 1);
-    metrics.egress().set_heartbeat_last_sent(1, 1.0);
-    metrics.refdata().set_manifest_seq(1, 1);
-    metrics.refdata().set_manifest_valid(1, true);
     metrics
         .process()
         .set_build_info("1.0.0", "abc123", "1.88.0");
@@ -216,8 +223,139 @@ fn open_label_families_are_absent_until_touched_then_present() {
 }
 
 #[test]
+fn declared_connections_render_at_zero_from_startup() {
+    // The alert that means "my feed is down" is `== 0` on this series. A
+    // publisher whose upstream never came up would never touch it, so
+    // without pre-creation the series would not exist and the alert could
+    // not fire in the one case it exists for.
+    let metrics = PublisherMetrics::new(&PublisherMetricsConfig {
+        venue: "test-venue",
+        source_id: 1,
+        port_roles: &[PortRole::Mktdata],
+        connections: &["primary", "backup"],
+        channel_ids: &[],
+    });
+    let rendered = metrics.render();
+
+    for connection in ["primary", "backup"] {
+        assert_zero(
+            &rendered,
+            "dz_publisher_ingress_connection_state",
+            &[("connection", connection)],
+        );
+    }
+}
+
+#[test]
+fn declared_channel_ids_render_at_zero_from_startup() {
+    let metrics = PublisherMetrics::new(&PublisherMetricsConfig {
+        venue: "test-venue",
+        source_id: 1,
+        port_roles: &[PortRole::Mktdata],
+        connections: &[],
+        channel_ids: &[0, 7],
+    });
+    let rendered = metrics.render();
+
+    for channel_id in ["0", "7"] {
+        assert_zero(
+            &rendered,
+            "dz_publisher_egress_sequence_current",
+            &[("port_role", "mktdata"), ("channel_id", channel_id)],
+        );
+        assert_zero(
+            &rendered,
+            "dz_publisher_egress_heartbeat_last_sent_timestamp_seconds",
+            &[("channel_id", channel_id)],
+        );
+        assert_zero(
+            &rendered,
+            "dz_publisher_refdata_manifest_seq",
+            &[("channel_id", channel_id)],
+        );
+        assert_zero(
+            &rendered,
+            "dz_publisher_refdata_manifest_valid",
+            &[("channel_id", channel_id)],
+        );
+    }
+}
+
+#[test]
+fn egress_message_types_are_precreated_only_on_the_port_roles_that_permit_them() {
+    let metrics = PublisherMetrics::new(&PublisherMetricsConfig {
+        venue: "test-venue",
+        source_id: 1,
+        port_roles: &[PortRole::Mktdata, PortRole::Refdata],
+        connections: &[],
+        channel_ids: &[],
+    });
+    let rendered = metrics.render();
+
+    for message_type in ["heartbeat", "end_of_session", "quote", "trade"] {
+        assert_zero(
+            &rendered,
+            "dz_publisher_egress_messages_total",
+            &[("port_role", "mktdata"), ("message_type", message_type)],
+        );
+    }
+    for message_type in ["instrument_definition", "manifest_summary"] {
+        assert_zero(
+            &rendered,
+            "dz_publisher_egress_messages_total",
+            &[("port_role", "refdata"), ("message_type", message_type)],
+        );
+    }
+
+    // A quote on the refdata port is not a series that can ever be written
+    // to, so pre-creation must not assert one.
+    let has_impossible_pair = rendered.lines().any(|line| {
+        line.starts_with("dz_publisher_egress_messages_total{")
+            && line.contains("port_role=\"refdata\"")
+            && line.contains("message_type=\"quote\"")
+    });
+    assert!(
+        !has_impossible_pair,
+        "the specification does not permit a quote on the refdata port:\n{rendered}"
+    );
+}
+
+#[test]
+fn every_egress_message_type_precreates_an_encode_duration_series() {
+    let metrics = PublisherMetrics::new(&PublisherMetricsConfig {
+        venue: "test-venue",
+        source_id: 1,
+        port_roles: &[PortRole::Mktdata],
+        connections: &[],
+        channel_ids: &[],
+    });
+    let rendered = metrics.render();
+
+    for message_type in [
+        "heartbeat",
+        "end_of_session",
+        "quote",
+        "trade",
+        "instrument_definition",
+        "manifest_summary",
+    ] {
+        assert_zero(
+            &rendered,
+            "dz_publisher_encode_duration_seconds_count",
+            &[("message_type", message_type)],
+        );
+    }
+}
+
+#[test]
 fn set_build_info_renders_the_gauge_at_one_with_its_labels() {
-    let metrics = PublisherMetrics::new("test-venue", 1, &[]);
+    let metrics = PublisherMetrics::new(&PublisherMetricsConfig {
+        venue: "test-venue",
+        source_id: 1,
+        port_roles: &[],
+        connections: &[],
+        channel_ids: &[],
+    });
     metrics
         .process()
         .set_build_info("1.2.3", "deadbeef", "1.88.0");

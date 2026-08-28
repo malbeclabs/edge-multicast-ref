@@ -45,14 +45,43 @@ use prometheus::{Registry, TextEncoder};
 pub use buckets::{LATENCY_BUCKETS, REFDATA_LOAD_DURATION_BUCKETS};
 pub use error::MetricsError;
 pub use labels::{
-    EgressErrorReason, EventKind, ExitReason, InconsistencyKind, ParseErrorReason, ReconnectReason,
-    RecoveryOutcome, RefdataLoadErrorReason, TimestampKind,
+    EgressErrorReason, EgressMessageType, EventKind, ExitReason, InconsistencyKind,
+    ParseErrorReason, ReconnectReason, RecoveryOutcome, RefdataLoadErrorReason, TimestampKind,
 };
 pub use metrics::{
     BookMetrics, EgressMetrics, IngressMetrics, LatencyMetrics, ProcessMetrics, RefdataMetrics,
 };
 pub use server::{serve, MetricsServer};
 pub use venue_registry::VenueRegistry;
+
+/// What one publisher process operates: the identity that labels every
+/// series, and the sets that make its label values knowable at startup.
+///
+/// This is a struct rather than a positional argument list because every
+/// field here exists to pre-create series, and a reader of the call site
+/// should be able to see which set is which.
+pub struct PublisherMetricsConfig<'a> {
+    /// The venue this publisher sources from. Applied as a constant label
+    /// to every series, normative and venue-specific alike.
+    pub venue: &'a str,
+    /// This publisher's source identifier, applied as a constant label
+    /// alongside `venue`.
+    pub source_id: u16,
+    /// Exactly the port roles this publisher operates. Passing a role it
+    /// does not operate asserts a channel that does not exist.
+    pub port_roles: &'a [PortRole],
+    /// The names of every ingress connection this publisher opens.
+    ///
+    /// `dz_publisher_ingress_connection_state` is pre-created at 0 for
+    /// each, so the `== 0` alert that means "my feed is down" can fire on
+    /// a publisher whose upstream never came up at all - the case the
+    /// metric most exists for. Leaving this empty leaves that alert unable
+    /// to fire until the first successful connection.
+    pub connections: &'a [&'a str],
+    /// Every Channel ID this publisher sends on, so the sequence,
+    /// heartbeat and manifest gauges exist from startup.
+    pub channel_ids: &'a [u8],
+}
 
 /// The complete normative metric set for one publisher process.
 ///
@@ -77,33 +106,26 @@ impl PublisherMetrics {
     /// series this crate exposes, both the normative set and anything
     /// registered through [`Self::venue_registry`].
     ///
-    /// `port_roles` is exactly the set of port roles this publisher
-    /// operates (for example `&[PortRole::Mktdata, PortRole::Refdata]`).
-    /// Every family labelled by `port_role` - and, crossed with it,
-    /// `egress_errors_total` - is pre-created for exactly those roles at
-    /// construction, so it renders at 0 from startup instead of only
-    /// appearing once first touched. Passing a role this publisher does
-    /// not operate would assert a channel that does not exist, so pass
-    /// only the roles actually in use.
+    /// Every family whose label values the config makes knowable is
+    /// pre-created here, so it renders at 0 from startup rather than
+    /// appearing only once first touched: absence in the exposition should
+    /// mean "this publisher has emitted nothing on this series yet", not
+    /// "this publisher's build does not know about this series", and an
+    /// alert on `== 0` cannot fire on a series that does not exist.
     ///
-    /// Every other family whose labels are entirely closed enums is also
-    /// pre-created here, for the same reason: absence in the exposition
-    /// should mean "this publisher has emitted nothing on this series
-    /// yet", not "this publisher's build does not know about this
-    /// series". Families labelled by an open-ended value - the upstream
-    /// source's own `message_type` vocabulary, a `connection` or
-    /// `channel_id` chosen by deployment, or caller-supplied `build_info`
-    /// labels - are deliberately left uncreated until first touched; see
-    /// the per-field comments in `metrics/*.rs`.
+    /// The only families still left uncreated are those labelled by a
+    /// value no one can enumerate at startup: the upstream source's own
+    /// `message_type` vocabulary on ingress, and caller-supplied
+    /// `build_info` labels.
     #[must_use]
-    pub fn new(venue: &str, source_id: u16, port_roles: &[PortRole]) -> Self {
+    pub fn new(config: &PublisherMetricsConfig<'_>) -> Self {
         let registry = Registry::new();
-        let labels = opts::const_labels(venue, source_id);
+        let labels = opts::const_labels(config.venue, config.source_id);
 
-        let ingress = IngressMetrics::new(&registry, &labels);
+        let ingress = IngressMetrics::new(&registry, &labels, config.connections);
         let book = BookMetrics::new(&registry, &labels);
-        let refdata = RefdataMetrics::new(&registry, &labels);
-        let egress = EgressMetrics::new(&registry, &labels, port_roles);
+        let refdata = RefdataMetrics::new(&registry, &labels, config.channel_ids);
+        let egress = EgressMetrics::new(&registry, &labels, config.port_roles, config.channel_ids);
         let latency = LatencyMetrics::new(&registry, &labels);
         let process = ProcessMetrics::new(&registry, &labels);
 
@@ -115,7 +137,7 @@ impl PublisherMetrics {
             egress,
             latency,
             process,
-            venue_registry: VenueRegistry::new(),
+            venue_registry: VenueRegistry::new(&labels),
         }
     }
 
@@ -159,10 +181,23 @@ impl PublisherMetrics {
 
     /// Renders the Prometheus text exposition of both the normative set and
     /// the venue registry.
+    /// A venue family whose gathered name lands in the normative
+    /// namespace is dropped here rather than emitted. Registration already
+    /// rejects those names, but it can only inspect what a collector
+    /// *describes*; nothing binds a `Collector` to emit the same names it
+    /// describes. Emitting one would produce two `# TYPE` blocks for a
+    /// single family, which makes Prometheus reject the whole scrape - so
+    /// one misbehaving venue collector would take every metric down with
+    /// it, not just its own.
     #[must_use]
     pub fn render(&self) -> String {
         let mut families = self.registry.gather();
-        families.extend(self.venue_registry.gather());
+        families.extend(
+            self.venue_registry
+                .gather()
+                .into_iter()
+                .filter(|family| !venue_registry::is_reserved_name(family.name())),
+        );
 
         let encoder = TextEncoder::new();
         encoder
@@ -171,6 +206,11 @@ impl PublisherMetrics {
     }
 }
 
-// Re-exported so a caller doesn't need a direct `prometheus` dependency just
-// to name the type `PortRole` methods already take.
+// Re-exported so a caller doesn't need a direct dependency just to name a
+// type this crate's methods already take. For `prometheus` that is not only
+// convenience: `VenueRegistry::register` takes a `Box<dyn Collector>`, and a
+// caller whose own manifest resolved a different major would hit the
+// famously opaque "expected `Box<dyn Collector>`, found `Box<dyn Collector>`".
+// Going through this re-export makes the version this crate links reachable.
 pub use dz_edge_core::PortRole;
+pub use prometheus;

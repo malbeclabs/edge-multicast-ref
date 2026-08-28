@@ -4,6 +4,10 @@
 //! enums rather than a free-form string, so the taxonomy a dashboard groups
 //! by cannot drift one call site at a time.
 
+use std::sync::LazyLock;
+
+use dz_edge_core::PortRole;
+
 /// Why an ingress message failed to parse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ParseErrorReason {
@@ -258,4 +262,78 @@ impl ExitReason {
             Self::Panic => "panic",
         }
     }
+}
+
+/// A message type this feed family defines.
+///
+/// Unlike the ingress side, where `message_type` is whatever the upstream
+/// source calls its messages, an outbound message type is this family's own
+/// vocabulary: the set is fixed by the wire specifications, so it is an enum
+/// here rather than a string a call site could spell three ways.
+///
+/// A variant exists for every message type these crates can encode. A new
+/// feed's message types are added here in the same change that adds them to
+/// the codec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EgressMessageType {
+    Heartbeat,
+    EndOfSession,
+    Quote,
+    Trade,
+    InstrumentDefinition,
+    ManifestSummary,
+}
+
+impl EgressMessageType {
+    /// Every variant, in no particular order. Used to pre-create every
+    /// child series of this closed-label family at construction.
+    pub(crate) const ALL: [Self; 6] = [
+        Self::Heartbeat,
+        Self::EndOfSession,
+        Self::Quote,
+        Self::Trade,
+        Self::InstrumentDefinition,
+        Self::ManifestSummary,
+    ];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Heartbeat => "heartbeat",
+            Self::EndOfSession => "end_of_session",
+            Self::Quote => "quote",
+            Self::Trade => "trade",
+            Self::InstrumentDefinition => "instrument_definition",
+            Self::ManifestSummary => "manifest_summary",
+        }
+    }
+
+    /// The port roles the specification permits this message type on.
+    ///
+    /// Mirrors the `PORT_ROLES` each message declares in the codec crates,
+    /// and is used to keep pre-creation honest: a `quote` on the refdata
+    /// port is not a series that can ever be written to.
+    pub(crate) const fn port_roles(self) -> &'static [PortRole] {
+        match self {
+            Self::Heartbeat | Self::EndOfSession | Self::Quote | Self::Trade => {
+                &[PortRole::Mktdata]
+            }
+            Self::InstrumentDefinition | Self::ManifestSummary => &[PortRole::Refdata],
+        }
+    }
+
+    pub(crate) fn is_valid_on(self, port_role: PortRole) -> bool {
+        self.port_roles().contains(&port_role)
+    }
+}
+
+/// Decimal label values for every `u8` Channel ID, built once.
+///
+/// `channel_id` is a label on per-datagram code paths this crate measures in
+/// microseconds; formatting it per call put a heap allocation on that path.
+static CHANNEL_ID_LABELS: LazyLock<[String; 256]> =
+    LazyLock::new(|| std::array::from_fn(|id| id.to_string()));
+
+pub(crate) fn channel_id_label(channel_id: u8) -> &'static str {
+    &CHANNEL_ID_LABELS[channel_id as usize]
 }
