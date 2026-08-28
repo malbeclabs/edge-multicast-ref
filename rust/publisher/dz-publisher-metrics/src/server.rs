@@ -1,11 +1,17 @@
 use std::io;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use tiny_http::{Method, Response, StatusCode};
 
 use crate::PublisherMetrics;
+
+/// How many responses may be in flight at once. A metrics endpoint serves
+/// one scraper every few seconds; this is headroom for overlapping scrapes,
+/// not a concurrency target.
+const MAX_IN_FLIGHT_RESPONSES: usize = 8;
 
 /// A background HTTP endpoint serving `GET /metrics`.
 ///
@@ -51,13 +57,40 @@ pub fn serve(metrics: Arc<PublisherMetrics>, addr: SocketAddr) -> io::Result<Met
 
     let worker_server = Arc::clone(&server);
     let handle = std::thread::spawn(move || {
+        let in_flight = Arc::new(AtomicUsize::new(0));
+
         for request in worker_server.incoming_requests() {
-            let response = if *request.method() == Method::Get && request.url() == "/metrics" {
+            // `url()` carries the query string, so an exact comparison
+            // would 404 a scrape config that appends one - a confusing
+            // "target is up but returns 404" with nothing to explain it.
+            let path = request.url().split('?').next().unwrap_or_default();
+
+            let response = if *request.method() == Method::Get && path == "/metrics" {
                 Response::from_string(metrics.render()).boxed()
             } else {
                 Response::empty(StatusCode(404)).boxed()
             };
-            let _ = request.respond(response);
+
+            // Written on a short-lived thread, never on this one.
+            // `respond` writes the whole body synchronously, so a peer
+            // whose receive window fills and stays full - a scraper killed
+            // mid-scrape, a blackholed route, a paused container - would
+            // block the accept loop forever, and every later scrape with
+            // it. The publisher would keep running and look healthy while
+            // its metrics went permanently dark.
+            //
+            // Threads are capped so a stream of stuck peers cannot spawn
+            // without bound; past the cap the request is dropped, which
+            // closes the connection.
+            if in_flight.fetch_add(1, Ordering::AcqRel) >= MAX_IN_FLIGHT_RESPONSES {
+                in_flight.fetch_sub(1, Ordering::AcqRel);
+                continue;
+            }
+            let done = Arc::clone(&in_flight);
+            std::thread::spawn(move || {
+                let _ = request.respond(response);
+                done.fetch_sub(1, Ordering::AcqRel);
+            });
         }
     });
 
