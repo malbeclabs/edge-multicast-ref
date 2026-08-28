@@ -85,21 +85,35 @@ publisher's refdata module: *"the emission is a synchronized burst."* Another
 paces at 80% of the cycle period, because the period is a maximum on the
 interval between retransmissions of any single definition, not a lap target.
 
-**Two publishers transmit on an undocumented type ID.** `0x05` is marked
-*(reserved)* in the market-by-price, market-by-order and order-intent specs. The
-top-of-book spec neither reserves nor defines it: its message table steps from
-`0x04` straight to `0x06`, leaving the ID unlisted. The reference top-of-book
-parser fills that silence, decoding `0x05` as `ChannelReset` (12 bytes, either
-port role, "publisher startup, drop cached state"), and two publishers emit one
-there, one as a startup handshake on both ports. On top-of-book that agrees with
-our own decoder rather than intruding on reserved space, so type ID space is
-per-feed and a crate-wide rule against `0x05` would be wrong: `dz-edge-core`
-constrains nothing at that ID and defines no message at it. What is missing is
-spec coverage, and the specs disagree with each other about it: the perp-stats
-spec excludes `0x05` on the grounds that it "is reserved there", which the
-top-of-book table does not bear out. The supplement already defines reset as
-header-only via `Reset Count`, so whether `ChannelReset` earns a documented
-identifier on top-of-book is an upstream question.
+**Publishers transmit at `0x05`, and three feeds answer for it three different
+ways.** Two publishers define and transmit a `ChannelReset` there, one as a
+startup handshake on both ports. What that means depends on which feed it lands
+on:
+
+- **Top-of-book** neither reserves nor defines `0x05`: its message table steps
+  from `0x04` straight to `0x06`, leaving the ID unlisted. The reference
+  top-of-book parser fills that silence, decoding `0x05` as `ChannelReset`
+  (12 bytes, either port role, "publisher startup, drop cached state"). There
+  the emission agrees with our own decoder rather than intruding on reserved
+  space, and what is missing is spec coverage.
+- **Perp-stats** names the ID and excludes it: type IDs `0x03`, `0x04`, `0x05`
+  and `0x08` are *"intentionally not carried on this feed"*, so that a datagram
+  misrouted from a sibling feed cannot cross-decode. An emission there is
+  documented as excluded rather than undocumented, and remains a live finding.
+  It is constructed conditionally, so whether it reaches the wire today is a
+  deployment question rather than a code one.
+- **Market-by-price** marks `0x05` *(reserved)*, as market-by-order and
+  order-intent also do, and its parser records the slot as intentionally unused
+  for that same cross-decoding reason. Its spec carries reset in the header via
+  `Reset Count` instead. That is the resolved shape: what a startup handshake
+  would announce is already carried normatively, so no message type is needed
+  for it.
+
+Three feeds resolving three ways is the argument for per-feed type ID space
+rather than against it, and a crate-wide rule would be wrong: `dz-edge-core`
+constrains nothing at `0x05` and defines no message at it. Whether
+`ChannelReset` earns a documented identifier on top-of-book, and what becomes of
+the perp-stats emission, are upstream questions.
 
 ### Instrumentation
 
