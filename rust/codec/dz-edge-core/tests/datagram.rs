@@ -15,6 +15,9 @@ impl AppMessage for Sixteen {
         dst[2..4].copy_from_slice(&0u16.to_le_bytes());
         dst[4..].fill(0);
     }
+
+    // Sixteen carries no redundant Channel ID.
+    fn stamp_channel_id(_dst: &mut [u8], _channel_id: u8) {}
 }
 
 struct SelfFlagged;
@@ -28,6 +31,9 @@ impl AppMessage for SelfFlagged {
         dst[2..4].copy_from_slice(&0x0001u16.to_le_bytes());
         dst[4..].fill(0);
     }
+
+    // SelfFlagged carries no redundant Channel ID.
+    fn stamp_channel_id(_dst: &mut [u8], _channel_id: u8) {}
 }
 
 struct HeaderOnly;
@@ -39,6 +45,9 @@ impl AppMessage for HeaderOnly {
         dst[1] = Self::SIZE as u8;
         dst[2..4].copy_from_slice(&0u16.to_le_bytes());
     }
+
+    // HeaderOnly carries no redundant Channel ID.
+    fn stamp_channel_id(_dst: &mut [u8], _channel_id: u8) {}
 }
 
 #[test]
@@ -325,6 +334,9 @@ impl AppMessage for TooSmallForMessageHeader {
     fn encode_into(&self, dst: &mut [u8]) {
         dst.fill(0);
     }
+
+    // TooSmallForMessageHeader carries no redundant Channel ID.
+    fn stamp_channel_id(_dst: &mut [u8], _channel_id: u8) {}
 }
 
 #[test]
@@ -342,6 +354,9 @@ impl AppMessage for TooLargeForLengthField {
     fn encode_into(&self, dst: &mut [u8]) {
         dst.fill(0);
     }
+
+    // TooLargeForLengthField carries no redundant Channel ID.
+    fn stamp_channel_id(_dst: &mut [u8], _channel_id: u8) {}
 }
 
 #[test]

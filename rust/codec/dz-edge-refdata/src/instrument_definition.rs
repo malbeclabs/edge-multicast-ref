@@ -79,6 +79,9 @@ impl AppMessage for InstrumentDefinition {
         dst[127] = self.price_bound;
         dst[128..130].copy_from_slice(&self.manifest_seq.to_le_bytes());
     }
+
+    // InstrumentDefinition carries no redundant Channel ID.
+    fn stamp_channel_id(_dst: &mut [u8], _channel_id: u8) {}
 }
 
 impl InstrumentDefinition {

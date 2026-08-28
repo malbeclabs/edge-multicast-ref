@@ -14,6 +14,9 @@ impl AppMessage for Sixteen {
         dst[2..4].copy_from_slice(&0u16.to_le_bytes());
         dst[4..].fill(0);
     }
+
+    // Sixteen carries no redundant Channel ID.
+    fn stamp_channel_id(_dst: &mut [u8], _channel_id: u8) {}
 }
 
 #[test]

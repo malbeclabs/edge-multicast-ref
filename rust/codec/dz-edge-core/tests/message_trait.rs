@@ -13,6 +13,9 @@ impl AppMessage for Fake {
     fn encode_into(&self, dst: &mut [u8]) {
         dst[..Self::SIZE].fill(0xAB);
     }
+
+    // Fake carries no redundant Channel ID.
+    fn stamp_channel_id(_dst: &mut [u8], _channel_id: u8) {}
 }
 
 #[test]

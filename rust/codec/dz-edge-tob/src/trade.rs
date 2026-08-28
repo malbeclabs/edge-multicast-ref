@@ -45,6 +45,9 @@ impl AppMessage for Trade {
         dst[36..44].copy_from_slice(&self.trade_id.to_le_bytes());
         dst[44..52].copy_from_slice(&self.cumulative_volume.to_le_bytes());
     }
+
+    // Trade carries no redundant Channel ID.
+    fn stamp_channel_id(_dst: &mut [u8], _channel_id: u8) {}
 }
 
 impl Trade {

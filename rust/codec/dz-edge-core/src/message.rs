@@ -19,10 +19,13 @@ pub trait AppMessage {
     /// Stamp the datagram's `Channel ID` into a message that carries one
     /// redundantly with the datagram header.
     ///
-    /// The default does nothing. A message with such a field overrides this and
-    /// writes it at its own offset, so the offset stays private to the message
-    /// that owns it and this trait names the behaviour rather than a byte
-    /// position. The builder calls this after `encode_into`, so a caller-supplied
-    /// value cannot disagree with the header that frames it.
-    fn stamp_channel_id(_dst: &mut [u8], _channel_id: u8) {}
+    /// Every message type must implement this. A message carrying a `Channel
+    /// ID` redundant with the datagram header writes it at its own offset, so
+    /// the offset stays private to the message that owns it and this trait
+    /// still names a behaviour rather than a byte position. A message with no
+    /// such field writes an empty body - an explicit statement that it has
+    /// nothing to stamp, rather than an inherited default silently doing
+    /// nothing. The builder calls this after `encode_into`, so a
+    /// caller-supplied value cannot disagree with the header that frames it.
+    fn stamp_channel_id(dst: &mut [u8], channel_id: u8);
 }
