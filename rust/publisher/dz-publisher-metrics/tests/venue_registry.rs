@@ -2,7 +2,7 @@
 //! namespace, and otherwise behave like an ordinary Prometheus registry.
 
 use prometheus::core::{Collector, Desc};
-use prometheus::proto::{Gauge, Metric, MetricFamily, MetricType};
+use prometheus::proto::{Gauge, LabelPair, Metric, MetricFamily, MetricType};
 use prometheus::{IntCounter, IntCounterVec, Opts};
 
 use dz_publisher_metrics::{MetricsError, PublisherMetrics, PublisherMetricsConfig};
@@ -251,4 +251,77 @@ fn render_survives_a_venue_collector_the_encoder_cannot_encode() {
             "the unencodable family must be dropped:\n{rendered}"
         );
     }
+}
+
+/// Describes a plain unlabelled counter and gathers a metric carrying a
+/// `venue` label. `register` sees no label to reject; the registry then
+/// appends its own `venue` without deduplicating, so the sample renders
+/// with a repeated label name.
+struct LabelSmugglingCollector {
+    desc: Desc,
+}
+
+impl Collector for LabelSmugglingCollector {
+    fn desc(&self) -> Vec<&Desc> {
+        vec![&self.desc]
+    }
+
+    fn collect(&self) -> Vec<MetricFamily> {
+        let mut label = LabelPair::default();
+        label.set_name("venue".to_string());
+        label.set_value("smuggled".to_string());
+
+        let mut gauge = Gauge::default();
+        gauge.set_value(1.0);
+        let mut metric = Metric::default();
+        metric.set_gauge(gauge);
+        metric.set_label(vec![label]);
+
+        let mut family = MetricFamily::default();
+        family.set_name("venue_smuggle_total".to_string());
+        family.set_help("declares no labels, gathers one".to_string());
+        family.set_field_type(MetricType::GAUGE);
+        family.set_metric(vec![metric]);
+        vec![family]
+    }
+}
+
+#[test]
+fn render_drops_a_venue_family_that_gathers_a_duplicate_label_name() {
+    let metrics = PublisherMetrics::new(&PublisherMetricsConfig {
+        venue: "test-venue",
+        source_id: 1,
+        port_roles: &[],
+        connections: &[],
+        channel_ids: &[],
+        ingress_message_types: &[],
+    });
+    metrics.ingress().rate_limited();
+
+    let collector = LabelSmugglingCollector {
+        desc: Desc::new(
+            "venue_smuggle_total".to_string(),
+            "passes registration: no label is described".to_string(),
+            vec![],
+            std::collections::HashMap::new(),
+        )
+        .unwrap(),
+    };
+    metrics
+        .venue_registry()
+        .register(Box::new(collector))
+        .expect("nothing reserved is described");
+
+    let rendered = metrics.render();
+
+    // A repeated label name makes the text parser reject the whole scrape,
+    // so this must not reach the exposition at all.
+    assert!(
+        !rendered.contains("venue_smuggle_total"),
+        "the smuggled family must be dropped:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("dz_publisher_ingress_rate_limited_total"),
+        "the normative set must still render:\n{rendered}"
+    );
 }

@@ -7,6 +7,7 @@ use crate::opts::opts;
 
 /// Process-level metrics: build identity, liveness, and shutdown reason.
 pub struct ProcessMetrics {
+    started: std::time::Instant,
     build_info: IntGaugeVec,
     uptime_seconds: Gauge,
     idle_guard_last_update_timestamp_seconds: Gauge,
@@ -33,7 +34,8 @@ impl ProcessMetrics {
 
         let uptime_seconds = Gauge::with_opts(opts(
             "dz_publisher_uptime_seconds",
-            "Seconds since process start.",
+            "Seconds since process start. Maintained by this crate and refreshed on every \
+             scrape, so a staleness rule may rely on it as a guard.",
             labels,
         ))
         .expect("static metric definition");
@@ -71,6 +73,7 @@ impl ProcessMetrics {
         }
 
         Self {
+            started: std::time::Instant::now(),
             build_info,
             uptime_seconds,
             idle_guard_last_update_timestamp_seconds,
@@ -85,9 +88,12 @@ impl ProcessMetrics {
             .set(1);
     }
 
-    /// Sets seconds since process start.
-    pub fn set_uptime(&self, seconds: f64) {
-        self.uptime_seconds.set(seconds);
+    /// Brings `dz_publisher_uptime_seconds` up to date. Called on every
+    /// render, so the gauge is correct at scrape time without a publisher
+    /// having to run a ticker for it.
+    pub(crate) fn refresh_uptime(&self) {
+        self.uptime_seconds
+            .set(self.started.elapsed().as_secs_f64());
     }
 
     /// Sets the Unix timestamp the idle guard last observed activity.

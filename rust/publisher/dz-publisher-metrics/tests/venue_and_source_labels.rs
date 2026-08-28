@@ -21,7 +21,6 @@ fn every_family_carries_venue_and_source_id() {
     metrics.refdata().new_listing();
     metrics.egress().datagram(dz_edge_core::PortRole::Mktdata);
     metrics.latency().observe_book_update_duration(0.001);
-    metrics.process().set_uptime(1.0);
 
     let rendered = metrics.render();
 

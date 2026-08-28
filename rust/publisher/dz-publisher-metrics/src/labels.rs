@@ -310,9 +310,15 @@ impl EgressMessageType {
 
     /// The port roles the specification permits this message type on.
     ///
-    /// Mirrors the `PORT_ROLES` each message declares in the codec crates,
-    /// and is used to keep pre-creation honest: a `quote` on the refdata
-    /// port is not a series that can ever be written to.
+    /// This is a second copy of what `AppMessage::PORT_ROLES` declares in
+    /// the codec crates, kept because a metric label is not a wire concern
+    /// and this crate does not otherwise depend on the message types. The
+    /// copy is held to the original by `port_roles_match_the_codec` in
+    /// `tests/enum_tokens.rs`, which fails if the two disagree or if a
+    /// message type is added to the codec without an entry here.
+    ///
+    /// It keeps pre-creation honest: a `quote` on the refdata port is not
+    /// a series that can ever be written to.
     pub(crate) const fn port_roles(self) -> &'static [PortRole] {
         match self {
             Self::Heartbeat | Self::EndOfSession | Self::Quote | Self::Trade => {
@@ -336,4 +342,45 @@ static CHANNEL_ID_LABELS: LazyLock<[String; 256]> =
 
 pub(crate) fn channel_id_label(channel_id: u8) -> &'static str {
     &CHANNEL_ID_LABELS[channel_id as usize]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// This crate keeps its own copy of each message type's permitted port
+    /// roles, because a metric label is not a wire concern and the library
+    /// does not otherwise depend on the feed crates. This holds the copy to
+    /// the original: it fails if the two disagree, and it fails if a message
+    /// type is added to the codec without an entry here.
+    #[test]
+    fn port_roles_match_the_codec() {
+        use dz_edge_core::{AppMessage, EndOfSession, Heartbeat};
+        use dz_edge_refdata::{InstrumentDefinition, ManifestSummary};
+        use dz_edge_tob::{Quote, Trade};
+
+        fn check<M: AppMessage>(message_type: EgressMessageType) {
+            assert_eq!(
+                message_type.port_roles(),
+                M::PORT_ROLES,
+                "{} disagrees with the codec about its port roles",
+                message_type.as_str()
+            );
+        }
+
+        check::<Heartbeat>(EgressMessageType::Heartbeat);
+        check::<EndOfSession>(EgressMessageType::EndOfSession);
+        check::<Quote>(EgressMessageType::Quote);
+        check::<Trade>(EgressMessageType::Trade);
+        check::<InstrumentDefinition>(EgressMessageType::InstrumentDefinition);
+        check::<ManifestSummary>(EgressMessageType::ManifestSummary);
+
+        // Every variant is covered above. A message type added to the codec
+        // with no entry here would be pre-created nowhere, silently.
+        assert_eq!(
+            EgressMessageType::ALL.len(),
+            6,
+            "a new message type needs a port-role entry and a line in this test"
+        );
+    }
 }

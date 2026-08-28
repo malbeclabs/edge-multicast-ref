@@ -52,6 +52,8 @@ name = "dz-publisher-metrics"
 version = "0.1.0"
 dependencies = [
  "dz-edge-core",
+ "dz-edge-refdata",
+ "dz-edge-tob",
  "prometheus",
  "thiserror 1.0.69",
  "tiny_http",

@@ -93,7 +93,7 @@ fn touch_every_family(m: &PublisherMetrics) {
         .observe_encode_duration(EgressMessageType::Trade, 0.001);
 
     m.process().set_build_info("1.0.0", "abc123", "1.88.0");
-    m.process().set_uptime(1.0);
+
     m.process().set_idle_guard_last_update(1.0);
     m.process().exit(ExitReason::Signal);
 }

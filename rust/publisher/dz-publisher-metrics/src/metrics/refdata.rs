@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use dz_edge_core::PortRole;
 use prometheus::{Gauge, Histogram, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Registry};
 
 use crate::buckets::REFDATA_LOAD_DURATION_BUCKETS;
@@ -25,7 +26,14 @@ impl RefdataMetrics {
         registry: &Registry,
         labels: &HashMap<String, String>,
         channel_ids: &[u8],
+        port_roles: &[PortRole],
     ) -> Self {
+        // The manifest gauges belong to the refdata port. On a publisher
+        // that does not operate one there is no manifest to report, and
+        // `manifest_valid` pre-created at 0 is a wrong value rather than a
+        // missing one: `== 0` on a gauge whose HELP reads "1 valid, 0 not"
+        // is the obvious alert, and it would fire forever.
+        let serves_refdata = port_roles.contains(&PortRole::Refdata);
         let definitions_emitted_total = IntCounter::with_opts(opts(
             "dz_publisher_refdata_definitions_emitted_total",
             "Instrument definitions emitted on the reference-data feed.",
@@ -121,8 +129,10 @@ impl RefdataMetrics {
         registry
             .register(Box::new(manifest_seq.clone()))
             .expect("static metric registration");
-        for channel_id in channel_ids {
-            manifest_seq.with_label_values(&[channel_id_label(*channel_id)]);
+        if serves_refdata {
+            for channel_id in channel_ids {
+                manifest_seq.with_label_values(&[channel_id_label(*channel_id)]);
+            }
         }
 
         let manifest_valid = IntGaugeVec::new(
@@ -137,8 +147,10 @@ impl RefdataMetrics {
         registry
             .register(Box::new(manifest_valid.clone()))
             .expect("static metric registration");
-        for channel_id in channel_ids {
-            manifest_valid.with_label_values(&[channel_id_label(*channel_id)]);
+        if serves_refdata {
+            for channel_id in channel_ids {
+                manifest_valid.with_label_values(&[channel_id_label(*channel_id)]);
+            }
         }
 
         Self {

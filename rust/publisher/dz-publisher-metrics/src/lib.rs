@@ -40,6 +40,7 @@ mod opts;
 mod server;
 mod venue_registry;
 
+use prometheus::proto::LabelPair;
 use prometheus::{Registry, TextEncoder};
 
 pub use buckets::{LATENCY_BUCKETS, REFDATA_LOAD_DURATION_BUCKETS};
@@ -139,7 +140,8 @@ impl PublisherMetrics {
             config.ingress_message_types,
         );
         let book = BookMetrics::new(&registry, &labels);
-        let refdata = RefdataMetrics::new(&registry, &labels, config.channel_ids);
+        let refdata =
+            RefdataMetrics::new(&registry, &labels, config.channel_ids, config.port_roles);
         let egress = EgressMetrics::new(&registry, &labels, config.port_roles, config.channel_ids);
         let latency = LatencyMetrics::new(&registry, &labels);
         let process = ProcessMetrics::new(&registry, &labels);
@@ -212,6 +214,15 @@ impl PublisherMetrics {
     ///   panics on, unwinding whichever thread called `render`.
     #[must_use]
     pub fn render(&self) -> String {
+        // Owned here rather than left to a caller's ticker. Three HELP
+        // strings in this crate tell an operator to guard a staleness rule
+        // on `dz_publisher_uptime_seconds`, and a publisher that never
+        // wired that ticker would leave the guard false forever and every
+        // one of those alerts silently unable to fire - the failure this
+        // crate's pre-creation work exists to eliminate, arriving through
+        // the guard it recommends.
+        self.process.refresh_uptime();
+
         let mut families = self.registry.gather();
         families.extend(
             self.venue_registry
@@ -227,13 +238,45 @@ impl PublisherMetrics {
     }
 }
 
-/// Whether a venue-registry family can be encoded without taking the rest
+/// Whether a venue-registry family can be emitted without taking the rest
 /// of the exposition with it. See [`PublisherMetrics::render`].
 fn is_encodable_venue_family(family: &prometheus::proto::MetricFamily) -> bool {
-    !venue_registry::is_reserved_name(family.name())
-        && !family.name().is_empty()
+    is_valid_metric_name(family.name())
+        && !venue_registry::is_reserved_name(family.name())
         && !family.get_metric().is_empty()
         && family.get_field_type() != prometheus::proto::MetricType::UNTYPED
+        // `register` rejects a *described* reserved label, but nothing
+        // requires a collector to gather what it described. This registry
+        // appends its constant labels without deduplicating, so a metric
+        // that gathers a `venue` of its own renders carrying `venue`
+        // twice, and the text parser rejects a sample with a repeated
+        // label name - taking the whole scrape with it, which is what
+        // every other condition here exists to prevent. Testing for the
+        // duplicate rather than for the reserved name is what keeps the
+        // constant labels this registry legitimately adds from tripping
+        // it, and catches any other repeated name at the same time.
+        && !family.get_metric().iter().any(has_duplicate_label_name)
+}
+
+/// Whether a metric carries the same label name twice, which makes the
+/// text parser reject the entire scrape rather than only this sample.
+fn has_duplicate_label_name(metric: &prometheus::proto::Metric) -> bool {
+    let mut names: Vec<&str> = metric.get_label().iter().map(LabelPair::name).collect();
+    names.sort_unstable();
+    names.windows(2).any(|pair| pair[0] == pair[1])
+}
+
+/// Whether a name is one Prometheus will accept: `[a-zA-Z_:][a-zA-Z0-9_:]*`.
+///
+/// A family whose gathered name is not a valid metric name is the same
+/// "the collector did not gather what it described" class as the rest, and
+/// renders an exposition no parser will read.
+fn is_valid_metric_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == ':')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
 }
 
 // Re-exported so a caller doesn't need a direct dependency just to name a

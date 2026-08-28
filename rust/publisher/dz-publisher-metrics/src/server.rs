@@ -58,11 +58,8 @@ pub fn serve(metrics: Arc<PublisherMetrics>, addr: SocketAddr) -> io::Result<Met
             // "target is up but returns 404" with nothing to explain it.
             let path = request.url().split('?').next().unwrap_or_default();
 
-            let response = if *request.method() == Method::Get && path == "/metrics" {
-                Response::from_string(metrics.render()).boxed()
-            } else {
-                Response::empty(StatusCode(404)).boxed()
-            };
+            let is_metrics = *request.method() == Method::Get && path == "/metrics";
+            let metrics = Arc::clone(&metrics);
 
             // Every request leaves this thread, and nothing here may drop
             // one. `respond` writes the whole body synchronously, so a peer
@@ -72,17 +69,28 @@ pub fn serve(metrics: Arc<PublisherMetrics>, addr: SocketAddr) -> io::Result<Met
             // with it. The publisher would keep running and look healthy
             // while its metrics went permanently dark.
             //
-            // Dropping a request is not an escape: `tiny_http`'s `Drop for
-            // Request` writes a 500 through the same synchronous path, so
-            // disposing of one here would block exactly as responding does.
-            // Handing every request to its own thread is what keeps this
-            // loop free, and it is why there is no in-flight cap: a cap
-            // would have to dispose of the requests past it, on this
+            // `render` runs on the spawned thread for the same reason, not
+            // for speed: it calls `gather`, which calls `collect` on every
+            // venue-registered collector. That is arbitrary code this crate
+            // does not control, and a collector that blocks on a contended
+            // lock or an I/O call someone put in `collect` would wedge this
+            // loop exactly as a stalled peer would.
+            //
+            // Dropping a request is not an escape either: `tiny_http`'s
+            // `Drop for Request` writes a 500 through the same synchronous
+            // path, so disposing of one here would block just as
+            // responding does. That is why there is no in-flight cap - a
+            // cap would have to dispose of the requests past it, on this
             // thread, which is the thing that cannot be done safely. A
-            // stalled peer therefore costs one thread until its socket
-            // times out, and this endpoint is bound to a non-public
-            // interface serving one scraper every few seconds.
+            // stalled peer costs one thread until its socket times out,
+            // and this endpoint is bound to a non-public interface serving
+            // one scraper every few seconds.
             std::thread::spawn(move || {
+                let response = if is_metrics {
+                    Response::from_string(metrics.render()).boxed()
+                } else {
+                    Response::empty(StatusCode(404)).boxed()
+                };
                 let _ = request.respond(response);
             });
         }

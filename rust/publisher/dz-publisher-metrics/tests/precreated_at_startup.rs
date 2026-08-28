@@ -297,7 +297,7 @@ fn declared_channel_ids_render_at_zero_from_startup() {
     let metrics = PublisherMetrics::new(&PublisherMetricsConfig {
         venue: "test-venue",
         source_id: 1,
-        port_roles: &[PortRole::Mktdata],
+        port_roles: &[PortRole::Mktdata, PortRole::Refdata],
         connections: &[],
         channel_ids: &[0, 7],
         ingress_message_types: &[],
@@ -431,6 +431,13 @@ fn the_heartbeat_gauge_is_precreated_only_where_a_heartbeat_is_permitted() {
     // the gauge stays 0 forever, and the staleness rule in its own HELP
     // text would fire on that series permanently. The uptime guard
     // suppresses the startup window, not a series that is never set.
+    //
+    // The other half of why this gauge carries `port_role` - that two
+    // roles on one Channel ID must not fold onto one series and hide the
+    // staler port's age - has no test yet, because `is_valid_on` permits a
+    // heartbeat on `mktdata` alone and the two-role case cannot be built
+    // without going around the guard above. It comes back with the guard,
+    // when a depth feed permits heartbeats on the snapshot role.
     let metrics = PublisherMetrics::new(&PublisherMetricsConfig {
         venue: "test-venue",
         source_id: 1,
@@ -457,5 +464,34 @@ fn the_heartbeat_gauge_is_precreated_only_where_a_heartbeat_is_permitted() {
             "no heartbeat is permitted on {port_role}, so pre-creating the series would leave \
              it at 0 forever:\n{rendered}"
         );
+    }
+}
+
+#[test]
+fn the_manifest_gauges_are_absent_without_a_refdata_port() {
+    // The manifest belongs to the refdata port. A publisher that does not
+    // operate one has no manifest to report, and `manifest_valid`
+    // pre-created at 0 is a wrong value rather than a missing one: `== 0`
+    // on a gauge whose HELP reads "1 valid, 0 not" is the obvious alert,
+    // and it would fire forever on a publisher with nothing to be invalid
+    // about.
+    let metrics = PublisherMetrics::new(&PublisherMetricsConfig {
+        venue: "test-venue",
+        source_id: 1,
+        port_roles: &[PortRole::Mktdata],
+        connections: &[],
+        channel_ids: &[3],
+        ingress_message_types: &[],
+    });
+    let rendered = metrics.render();
+
+    for name in [
+        "dz_publisher_refdata_manifest_seq",
+        "dz_publisher_refdata_manifest_valid",
+    ] {
+        let present = rendered
+            .lines()
+            .any(|line| line.starts_with(&format!("{name}{{")));
+        assert!(!present, "{name} must not be pre-created here:\n{rendered}");
     }
 }
