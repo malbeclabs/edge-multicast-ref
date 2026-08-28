@@ -43,7 +43,7 @@ impl ProcessMetrics {
 
         let idle_guard_last_update_timestamp_seconds = Gauge::with_opts(opts(
             "dz_publisher_idle_guard_last_update_timestamp_seconds",
-            "Unix timestamp the idle guard last observed activity.",
+            "Unix timestamp the idle guard last observed activity. Registered from startup and so 0 until the first is recorded; guard any staleness rule on `and on() dz_publisher_uptime_seconds > 60`, or `time() - this` reads as an age of decades before it has ever been set.",
             labels,
         ))
         .expect("static metric definition");

@@ -81,6 +81,16 @@ pub struct PublisherMetricsConfig<'a> {
     /// Every Channel ID this publisher sends on, so the sequence,
     /// heartbeat and manifest gauges exist from startup.
     pub channel_ids: &'a [u8],
+    /// The upstream source's own message-type names that this publisher
+    /// counts individually on `dz_publisher_ingress_messages_total`.
+    ///
+    /// Anything the upstream sends that is not named here is counted under
+    /// `other`. The label is the source's vocabulary and this crate cannot
+    /// enumerate it, but an unbounded label on the highest-frequency path
+    /// is the cardinality blow-up the crate refuses elsewhere: many
+    /// upstream APIs name a message after the subscription that carried
+    /// it, which is one series per instrument.
+    pub ingress_message_types: &'a [&'a str],
 }
 
 /// The complete normative metric set for one publisher process.
@@ -122,7 +132,12 @@ impl PublisherMetrics {
         let registry = Registry::new();
         let labels = opts::const_labels(config.venue, config.source_id);
 
-        let ingress = IngressMetrics::new(&registry, &labels, config.connections);
+        let ingress = IngressMetrics::new(
+            &registry,
+            &labels,
+            config.connections,
+            config.ingress_message_types,
+        );
         let book = BookMetrics::new(&registry, &labels);
         let refdata = RefdataMetrics::new(&registry, &labels, config.channel_ids);
         let egress = EgressMetrics::new(&registry, &labels, config.port_roles, config.channel_ids);
@@ -181,14 +196,20 @@ impl PublisherMetrics {
 
     /// Renders the Prometheus text exposition of both the normative set and
     /// the venue registry.
-    /// A venue family whose gathered name lands in the normative
-    /// namespace is dropped here rather than emitted. Registration already
-    /// rejects those names, but it can only inspect what a collector
-    /// *describes*; nothing binds a `Collector` to emit the same names it
-    /// describes. Emitting one would produce two `# TYPE` blocks for a
-    /// single family, which makes Prometheus reject the whole scrape - so
-    /// one misbehaving venue collector would take every metric down with
-    /// it, not just its own.
+    /// Venue families are filtered before encoding, and a family that
+    /// fails the filter is dropped rather than propagated.
+    ///
+    /// Registration can only inspect what a collector *describes*; nothing
+    /// binds a `Collector` to gather what it described. Three things a
+    /// venue collector can gather would otherwise take down every metric
+    /// this publisher exposes, not just its own:
+    ///
+    /// - a name in the normative namespace, which produces two `# TYPE`
+    ///   blocks for one family and makes the text parser reject the scrape;
+    /// - a family with no name or no metrics, which the encoder rejects,
+    ///   turning the whole render into an error;
+    /// - an `UNTYPED` family, which the text encoder does not implement and
+    ///   panics on, unwinding whichever thread called `render`.
     #[must_use]
     pub fn render(&self) -> String {
         let mut families = self.registry.gather();
@@ -196,7 +217,7 @@ impl PublisherMetrics {
             self.venue_registry
                 .gather()
                 .into_iter()
-                .filter(|family| !venue_registry::is_reserved_name(family.name())),
+                .filter(is_encodable_venue_family),
         );
 
         let encoder = TextEncoder::new();
@@ -204,6 +225,15 @@ impl PublisherMetrics {
             .encode_to_string(&families)
             .expect("text encoding of well-formed metric families cannot fail")
     }
+}
+
+/// Whether a venue-registry family can be encoded without taking the rest
+/// of the exposition with it. See [`PublisherMetrics::render`].
+fn is_encodable_venue_family(family: &prometheus::proto::MetricFamily) -> bool {
+    !venue_registry::is_reserved_name(family.name())
+        && !family.name().is_empty()
+        && !family.get_metric().is_empty()
+        && family.get_field_type() != prometheus::proto::MetricType::UNTYPED
 }
 
 // Re-exported so a caller doesn't need a direct dependency just to name a

@@ -1,11 +1,18 @@
 use std::collections::HashMap;
 
 use prometheus::core::Collector;
+use prometheus::proto::LabelPair;
 use prometheus::Registry;
 
 use crate::error::{MetricsError, Result};
 
 const RESERVED_PREFIX: &str = "dz_publisher_";
+
+/// The label names this crate applies to every series as constant labels.
+/// A venue collector that carries either one produces a sample with a
+/// repeated label name once `gather` adds ours, which the Prometheus text
+/// parser rejects for the whole scrape.
+const RESERVED_LABELS: [&str; 2] = ["venue", "source_id"];
 
 pub(crate) fn is_reserved_name(name: &str) -> bool {
     name.starts_with(RESERVED_PREFIX)
@@ -42,13 +49,33 @@ impl VenueRegistry {
     /// # Errors
     ///
     /// Returns [`MetricsError::ReservedNamePrefix`] if any metric the
-    /// collector describes begins with `dz_publisher_`, and
-    /// [`MetricsError::Prometheus`] if the underlying registration fails
-    /// (for example, a duplicate descriptor).
+    /// collector describes begins with `dz_publisher_`,
+    /// [`MetricsError::ReservedLabelName`] if it carries `venue` or
+    /// `source_id` as a label of its own, and [`MetricsError::Prometheus`]
+    /// if the underlying registration fails (for example, a duplicate
+    /// descriptor).
     pub fn register(&self, collector: Box<dyn Collector>) -> Result<()> {
         for desc in collector.desc() {
             if is_reserved_name(&desc.fq_name) {
                 return Err(MetricsError::ReservedNamePrefix(desc.fq_name.clone()));
+            }
+            // This registry applies venue and source_id as constant labels.
+            // A collector carrying either name itself renders as
+            // `venue_widget_total{venue="other",venue="ours"}`, and the
+            // text parser rejects a sample with a repeated label name -
+            // failing the entire scrape, not just this series.
+            let own_labels = desc
+                .variable_labels
+                .iter()
+                .map(String::as_str)
+                .chain(desc.const_label_pairs.iter().map(LabelPair::name));
+            for label in own_labels {
+                if RESERVED_LABELS.contains(&label) {
+                    return Err(MetricsError::ReservedLabelName {
+                        metric: desc.fq_name.clone(),
+                        label: label.to_string(),
+                    });
+                }
             }
         }
         self.registry.register(collector)?;

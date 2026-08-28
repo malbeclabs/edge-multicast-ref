@@ -80,7 +80,8 @@ fn touch_every_family(m: &PublisherMetrics) {
     m.egress()
         .error(PortRole::Mktdata, EgressErrorReason::SocketError);
     m.egress().set_sequence(PortRole::Mktdata, 1, 1);
-    m.egress().set_heartbeat_last_sent(1, 1.0);
+    m.egress()
+        .set_heartbeat_last_sent(PortRole::Mktdata, 1, 1.0);
 
     m.latency()
         .observe_venue_to_recv(TimestampKind::ExchangeRecv, 0.001);
@@ -105,6 +106,7 @@ fn every_normative_family_renders_under_its_exact_name() {
         port_roles: &[PortRole::Mktdata],
         connections: &[],
         channel_ids: &[],
+        ingress_message_types: &[],
     });
     touch_every_family(&metrics);
     let rendered = metrics.render();

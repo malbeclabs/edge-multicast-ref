@@ -49,6 +49,7 @@ fn every_closed_label_family_renders_zero_at_construction() {
         port_roles: &[PortRole::Mktdata, PortRole::Refdata],
         connections: &[],
         channel_ids: &[],
+        ingress_message_types: &[],
     });
     let rendered = metrics.render();
 
@@ -161,6 +162,7 @@ fn egress_datagrams_total_only_covers_the_supplied_port_roles() {
         port_roles: &[PortRole::Mktdata, PortRole::Refdata],
         connections: &[],
         channel_ids: &[],
+        ingress_message_types: &[],
     });
     let rendered = metrics.render();
 
@@ -183,14 +185,10 @@ fn egress_datagrams_total_only_covers_the_supplied_port_roles() {
 }
 
 #[test]
-fn open_label_families_are_absent_until_touched_then_present() {
-    // What is left after the config makes every other label value
-    // knowable: the upstream source's own message vocabulary, which only
-    // that source can enumerate, and the build labels the caller supplies.
-    const OPEN_LABEL_FAMILIES: &[&str] = &[
-        "dz_publisher_ingress_messages_total",
-        "dz_publisher_build_info",
-    ];
+fn the_only_open_label_family_is_absent_until_touched_then_present() {
+    // Everything else the config makes knowable. What is left is the build
+    // labels, which only the caller can supply.
+    const NAME: &str = "dz_publisher_build_info";
 
     let metrics = PublisherMetrics::new(&PublisherMetricsConfig {
         venue: "test-venue",
@@ -198,28 +196,75 @@ fn open_label_families_are_absent_until_touched_then_present() {
         port_roles: &[PortRole::Mktdata],
         connections: &["primary"],
         channel_ids: &[1],
+        ingress_message_types: &["trade"],
     });
-    let rendered = metrics.render();
-    for name in OPEN_LABEL_FAMILIES {
-        assert!(
-            !rendered.contains(&format!("# TYPE {name} ")),
-            "{name} is labelled by an open-ended value and must be absent until touched, \
-             but rendered:\n{rendered}"
-        );
-    }
 
-    metrics.ingress().message("trade", "primary");
+    let rendered = metrics.render();
+    assert!(
+        !rendered.contains(&format!("# TYPE {NAME} ")),
+        "{NAME} is labelled by caller-supplied values and must be absent until touched, \
+         but rendered:\n{rendered}"
+    );
+
     metrics
         .process()
         .set_build_info("1.0.0", "abc123", "1.88.0");
 
     let rendered = metrics.render();
-    for name in OPEN_LABEL_FAMILIES {
-        assert!(
-            rendered.contains(&format!("# TYPE {name} ")),
-            "{name} should render once touched, but did not appear in:\n{rendered}"
+    assert!(
+        rendered.contains(&format!("# TYPE {NAME} ")),
+        "{NAME} should render once touched, but did not appear in:\n{rendered}"
+    );
+}
+
+#[test]
+fn declared_ingress_message_types_render_at_zero_and_the_rest_fall_to_other() {
+    // The label is the upstream source's vocabulary, so the crate cannot
+    // enumerate it - but leaving it open puts an unbounded label on the
+    // highest-frequency path. Sources that name a message after the
+    // subscription that carried it would give one series per instrument.
+    let metrics = PublisherMetrics::new(&PublisherMetricsConfig {
+        venue: "test-venue",
+        source_id: 1,
+        port_roles: &[PortRole::Mktdata],
+        connections: &["primary"],
+        channel_ids: &[],
+        ingress_message_types: &["trade", "book_delta"],
+    });
+
+    let rendered = metrics.render();
+    for message_type in ["trade", "book_delta", "other"] {
+        assert_zero(
+            &rendered,
+            "dz_publisher_ingress_messages_total",
+            &[("message_type", message_type), ("connection", "primary")],
         );
     }
+
+    metrics.ingress().message("trade", "primary");
+    metrics.ingress().message("trades.BTC-PERP", "primary");
+    metrics.ingress().message("trades.ETH-PERP", "primary");
+
+    let rendered = metrics.render();
+    let has_instrument_series = rendered
+        .lines()
+        .any(|line| line.contains("message_type=\"trades."));
+    assert!(
+        !has_instrument_series,
+        "an undeclared message type must not create a series of its own:\n{rendered}"
+    );
+
+    let other = rendered
+        .lines()
+        .find(|line| {
+            line.starts_with("dz_publisher_ingress_messages_total{")
+                && line.contains("message_type=\"other\"")
+        })
+        .unwrap_or_else(|| panic!("the other bucket must render:\n{rendered}"));
+    assert!(
+        other.ends_with(" 2"),
+        "both undeclared messages count: {other}"
+    );
 }
 
 #[test]
@@ -234,6 +279,7 @@ fn declared_connections_render_at_zero_from_startup() {
         port_roles: &[PortRole::Mktdata],
         connections: &["primary", "backup"],
         channel_ids: &[],
+        ingress_message_types: &[],
     });
     let rendered = metrics.render();
 
@@ -254,6 +300,7 @@ fn declared_channel_ids_render_at_zero_from_startup() {
         port_roles: &[PortRole::Mktdata],
         connections: &[],
         channel_ids: &[0, 7],
+        ingress_message_types: &[],
     });
     let rendered = metrics.render();
 
@@ -266,7 +313,7 @@ fn declared_channel_ids_render_at_zero_from_startup() {
         assert_zero(
             &rendered,
             "dz_publisher_egress_heartbeat_last_sent_timestamp_seconds",
-            &[("channel_id", channel_id)],
+            &[("port_role", "mktdata"), ("channel_id", channel_id)],
         );
         assert_zero(
             &rendered,
@@ -289,6 +336,7 @@ fn egress_message_types_are_precreated_only_on_the_port_roles_that_permit_them()
         port_roles: &[PortRole::Mktdata, PortRole::Refdata],
         connections: &[],
         channel_ids: &[],
+        ingress_message_types: &[],
     });
     let rendered = metrics.render();
 
@@ -328,6 +376,7 @@ fn every_egress_message_type_precreates_an_encode_duration_series() {
         port_roles: &[PortRole::Mktdata],
         connections: &[],
         channel_ids: &[],
+        ingress_message_types: &[],
     });
     let rendered = metrics.render();
 
@@ -355,6 +404,7 @@ fn set_build_info_renders_the_gauge_at_one_with_its_labels() {
         port_roles: &[],
         connections: &[],
         channel_ids: &[],
+        ingress_message_types: &[],
     });
     metrics
         .process()
@@ -371,4 +421,41 @@ fn set_build_info_renders_the_gauge_at_one_with_its_labels() {
         ],
     );
     assert!(line.ends_with(" 1"), "expected build_info to be 1: {line}");
+}
+
+#[test]
+fn the_heartbeat_gauge_separates_the_port_roles_of_one_channel_id() {
+    // A channel instance is keyed on the destination port, so the same
+    // Channel ID heartbeating on two port roles is two instances. Keyed on
+    // channel_id alone, the second write would overwrite the first and the
+    // staler port's age would disappear behind the fresher one: a wrong
+    // value rather than a missing one.
+    let metrics = PublisherMetrics::new(&PublisherMetricsConfig {
+        venue: "test-venue",
+        source_id: 1,
+        port_roles: &[PortRole::Mktdata, PortRole::Refdata],
+        connections: &[],
+        channel_ids: &[1],
+        ingress_message_types: &[],
+    });
+
+    metrics
+        .egress()
+        .set_heartbeat_last_sent(PortRole::Mktdata, 1, 1_000.0);
+    metrics
+        .egress()
+        .set_heartbeat_last_sent(PortRole::Refdata, 1, 2_000.0);
+
+    let rendered = metrics.render();
+    for (port_role, expected) in [("mktdata", "1000"), ("refdata", "2000")] {
+        let line = find_sample(
+            &rendered,
+            "dz_publisher_egress_heartbeat_last_sent_timestamp_seconds",
+            &[("port_role", port_role), ("channel_id", "1")],
+        );
+        assert!(
+            line.ends_with(expected),
+            "{port_role} kept its own value: {line}"
+        );
+    }
 }

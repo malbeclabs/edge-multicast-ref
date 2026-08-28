@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use prometheus::{IntCounter, IntCounterVec, IntGaugeVec, Registry};
 
@@ -14,22 +14,26 @@ pub struct IngressMetrics {
     connection_state: IntGaugeVec,
     reconnects_total: IntCounterVec,
     rate_limited_total: IntCounter,
+    message_types: HashSet<String>,
 }
+
+/// The bucket every message type the publisher did not declare is counted
+/// under. See [`IngressMetrics::message`].
+const OTHER_MESSAGE_TYPE: &str = "other";
 
 impl IngressMetrics {
     pub(crate) fn new(
         registry: &Registry,
         labels: &HashMap<String, String>,
         connections: &[&str],
+        message_types: &[&str],
     ) -> Self {
-        // Not pre-created: `message_type` is the upstream source's own
-        // vocabulary and `connection` is a deployment choice. Neither is a
-        // closed set known at construction, so this family only appears
-        // once a message has actually been observed.
         let messages_total = IntCounterVec::new(
             opts(
                 "dz_publisher_ingress_messages_total",
-                "Upstream messages received, by the upstream source's own message_type vocabulary and by connection.",
+                "Upstream messages received, by the upstream source's own message_type vocabulary \
+                 and by connection. Only the message types the publisher declared are counted \
+                 under their own name; anything else falls to `other`.",
                 labels,
             ),
             &["message_type", "connection"],
@@ -38,6 +42,18 @@ impl IngressMetrics {
         registry
             .register(Box::new(messages_total.clone()))
             .expect("static metric registration");
+        // Both dimensions are declared sets, so this family is pre-created
+        // like the others, `other` included: a series that only appears
+        // once something unexpected arrives is one nobody has a panel for.
+        for connection in connections {
+            for message_type in message_types
+                .iter()
+                .copied()
+                .chain(std::iter::once(OTHER_MESSAGE_TYPE))
+            {
+                messages_total.with_label_values(&[message_type, connection]);
+            }
+        }
 
         let bytes_total = IntCounter::with_opts(opts(
             "dz_publisher_ingress_bytes_total",
@@ -140,12 +156,29 @@ impl IngressMetrics {
             connection_state,
             reconnects_total,
             rate_limited_total,
+            message_types: message_types.iter().map(|t| (*t).to_string()).collect(),
         }
     }
 
     /// Records one ingress message. `message_type` is the upstream source's
     /// own vocabulary, not a taxonomy this crate owns.
+    /// A `message_type` the publisher did not declare is counted under
+    /// `other` rather than creating a series of its own.
+    ///
+    /// The label is the upstream source's vocabulary, so this crate cannot
+    /// enumerate it - but it also cannot leave it open. Many upstream APIs
+    /// name a message after the subscription that carried it, so the
+    /// natural call passes something like `trades.BTC-PERP`, which is one
+    /// series per instrument on the highest-frequency path in the crate.
+    /// That is the cardinality this crate refuses elsewhere by not
+    /// offering an `instrument_id` parameter at all; declaring the set
+    /// closes the same door here.
     pub fn message(&self, message_type: &str, connection: &str) {
+        let message_type = if self.message_types.contains(message_type) {
+            message_type
+        } else {
+            OTHER_MESSAGE_TYPE
+        };
         self.messages_total
             .with_label_values(&[message_type, connection])
             .inc();

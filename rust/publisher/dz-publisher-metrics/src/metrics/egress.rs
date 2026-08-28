@@ -133,18 +133,24 @@ impl EgressMetrics {
         let heartbeat_last_sent_timestamp_seconds = GaugeVec::new(
             opts(
                 "dz_publisher_egress_heartbeat_last_sent_timestamp_seconds",
-                "Unix timestamp the last heartbeat was sent, by Channel ID.",
+                "Unix timestamp the last heartbeat was sent, by port role and Channel ID. This is \
+                 pre-created at 0, so guard any staleness rule on the process having run long \
+                 enough to have sent one, for example `and on() dz_publisher_uptime_seconds > 60`; \
+                 without that, `time() - this` is an age of decades from startup until the first \
+                 heartbeat.",
                 labels,
             ),
-            &["channel_id"],
+            &["port_role", "channel_id"],
         )
         .expect("static metric definition");
         registry
             .register(Box::new(heartbeat_last_sent_timestamp_seconds.clone()))
             .expect("static metric registration");
-        for channel_id in channel_ids {
-            heartbeat_last_sent_timestamp_seconds
-                .with_label_values(&[channel_id_label(*channel_id)]);
+        for port_role in port_roles {
+            for channel_id in channel_ids {
+                heartbeat_last_sent_timestamp_seconds
+                    .with_label_values(&[port_role.as_str(), channel_id_label(*channel_id)]);
+            }
         }
 
         Self {
@@ -198,10 +204,16 @@ impl EgressMetrics {
             .set(i64::try_from(seq).unwrap_or(i64::MAX));
     }
 
-    /// Sets the Unix timestamp the last heartbeat was sent for a Channel ID.
-    pub fn set_heartbeat_last_sent(&self, channel_id: u8, unix_seconds: f64) {
+    /// Sets the Unix timestamp the last heartbeat was sent, for `port_role`
+    /// and Channel ID.
+    ///
+    /// Carries `port_role` like every other series here: a channel instance
+    /// is keyed on the destination port, so once a Channel ID heartbeats on
+    /// two port roles, one label would fold both onto one gauge and hide
+    /// the staler port's age behind the fresher one.
+    pub fn set_heartbeat_last_sent(&self, port_role: PortRole, channel_id: u8, unix_seconds: f64) {
         self.heartbeat_last_sent_timestamp_seconds
-            .with_label_values(&[channel_id_label(channel_id)])
+            .with_label_values(&[port_role.as_str(), channel_id_label(channel_id)])
             .set(unix_seconds);
     }
 }

@@ -25,6 +25,7 @@ fn answers_metrics_with_a_known_name_and_404s_elsewhere() {
         port_roles: &[],
         connections: &[],
         channel_ids: &[],
+        ingress_message_types: &[],
     }));
     metrics.ingress().rate_limited();
 
@@ -51,6 +52,7 @@ fn answers_metrics_with_a_query_string() {
         port_roles: &[],
         connections: &[],
         channel_ids: &[],
+        ingress_message_types: &[],
     }));
     metrics.ingress().rate_limited();
 
@@ -75,6 +77,7 @@ fn a_stalled_scraper_does_not_wedge_the_endpoint() {
         port_roles: &[],
         connections: &[],
         channel_ids: &[],
+        ingress_message_types: &[],
     }));
 
     let server = serve(Arc::clone(&metrics), "127.0.0.1:0".parse().unwrap())

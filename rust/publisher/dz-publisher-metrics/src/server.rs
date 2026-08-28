@@ -1,17 +1,11 @@
 use std::io;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use tiny_http::{Method, Response, StatusCode};
 
 use crate::PublisherMetrics;
-
-/// How many responses may be in flight at once. A metrics endpoint serves
-/// one scraper every few seconds; this is headroom for overlapping scrapes,
-/// not a concurrency target.
-const MAX_IN_FLIGHT_RESPONSES: usize = 8;
 
 /// A background HTTP endpoint serving `GET /metrics`.
 ///
@@ -20,6 +14,7 @@ const MAX_IN_FLIGHT_RESPONSES: usize = 8;
 /// This endpoint must be bound to a non-public interface: it describes a
 /// live trading data path, including its instrument set and its timing, and
 /// exposing it publicly leaks both.
+#[must_use = "the endpoint stops serving as soon as this value is dropped"]
 pub struct MetricsServer {
     server: Arc<tiny_http::Server>,
     handle: Option<JoinHandle<()>>,
@@ -57,8 +52,6 @@ pub fn serve(metrics: Arc<PublisherMetrics>, addr: SocketAddr) -> io::Result<Met
 
     let worker_server = Arc::clone(&server);
     let handle = std::thread::spawn(move || {
-        let in_flight = Arc::new(AtomicUsize::new(0));
-
         for request in worker_server.incoming_requests() {
             // `url()` carries the query string, so an exact comparison
             // would 404 a scrape config that appends one - a confusing
@@ -71,25 +64,26 @@ pub fn serve(metrics: Arc<PublisherMetrics>, addr: SocketAddr) -> io::Result<Met
                 Response::empty(StatusCode(404)).boxed()
             };
 
-            // Written on a short-lived thread, never on this one.
-            // `respond` writes the whole body synchronously, so a peer
+            // Every request leaves this thread, and nothing here may drop
+            // one. `respond` writes the whole body synchronously, so a peer
             // whose receive window fills and stays full - a scraper killed
             // mid-scrape, a blackholed route, a paused container - would
-            // block the accept loop forever, and every later scrape with
-            // it. The publisher would keep running and look healthy while
-            // its metrics went permanently dark.
+            // block the accept loop forever and take every later scrape
+            // with it. The publisher would keep running and look healthy
+            // while its metrics went permanently dark.
             //
-            // Threads are capped so a stream of stuck peers cannot spawn
-            // without bound; past the cap the request is dropped, which
-            // closes the connection.
-            if in_flight.fetch_add(1, Ordering::AcqRel) >= MAX_IN_FLIGHT_RESPONSES {
-                in_flight.fetch_sub(1, Ordering::AcqRel);
-                continue;
-            }
-            let done = Arc::clone(&in_flight);
+            // Dropping a request is not an escape: `tiny_http`'s `Drop for
+            // Request` writes a 500 through the same synchronous path, so
+            // disposing of one here would block exactly as responding does.
+            // Handing every request to its own thread is what keeps this
+            // loop free, and it is why there is no in-flight cap: a cap
+            // would have to dispose of the requests past it, on this
+            // thread, which is the thing that cannot be done safely. A
+            // stalled peer therefore costs one thread until its socket
+            // times out, and this endpoint is bound to a non-public
+            // interface serving one scraper every few seconds.
             std::thread::spawn(move || {
                 let _ = request.respond(response);
-                done.fetch_sub(1, Ordering::AcqRel);
             });
         }
     });

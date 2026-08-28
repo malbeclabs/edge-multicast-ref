@@ -81,7 +81,7 @@ impl RefdataMetrics {
 
         let last_refresh_timestamp_seconds = Gauge::with_opts(opts(
             "dz_publisher_refdata_last_refresh_timestamp_seconds",
-            "Unix timestamp of the last successful reference-data refresh.",
+            "Unix timestamp of the last successful reference-data refresh. Registered from startup and so 0 until the first is recorded; guard any staleness rule on `and on() dz_publisher_uptime_seconds > 60`, or `time() - this` reads as an age of decades before it has ever been set.",
             labels,
         ))
         .expect("static metric definition");
