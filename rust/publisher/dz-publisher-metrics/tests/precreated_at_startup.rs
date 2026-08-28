@@ -424,38 +424,38 @@ fn set_build_info_renders_the_gauge_at_one_with_its_labels() {
 }
 
 #[test]
-fn the_heartbeat_gauge_separates_the_port_roles_of_one_channel_id() {
-    // A channel instance is keyed on the destination port, so the same
-    // Channel ID heartbeating on two port roles is two instances. Keyed on
-    // channel_id alone, the second write would overwrite the first and the
-    // staler port's age would disappear behind the fresher one: a wrong
-    // value rather than a missing one.
+fn the_heartbeat_gauge_is_precreated_only_where_a_heartbeat_is_permitted() {
+    // The gauge carries port_role so that a Channel ID heartbeating on two
+    // port roles does not fold onto one series. Pre-creation still has to
+    // respect where a heartbeat can go: on a role that never receives one
+    // the gauge stays 0 forever, and the staleness rule in its own HELP
+    // text would fire on that series permanently. The uptime guard
+    // suppresses the startup window, not a series that is never set.
     let metrics = PublisherMetrics::new(&PublisherMetricsConfig {
         venue: "test-venue",
         source_id: 1,
-        port_roles: &[PortRole::Mktdata, PortRole::Refdata],
+        port_roles: &[PortRole::Mktdata, PortRole::Refdata, PortRole::Snapshot],
         connections: &[],
         channel_ids: &[1],
         ingress_message_types: &[],
     });
-
-    metrics
-        .egress()
-        .set_heartbeat_last_sent(PortRole::Mktdata, 1, 1_000.0);
-    metrics
-        .egress()
-        .set_heartbeat_last_sent(PortRole::Refdata, 1, 2_000.0);
-
     let rendered = metrics.render();
-    for (port_role, expected) in [("mktdata", "1000"), ("refdata", "2000")] {
-        let line = find_sample(
-            &rendered,
-            "dz_publisher_egress_heartbeat_last_sent_timestamp_seconds",
-            &[("port_role", port_role), ("channel_id", "1")],
-        );
+
+    assert_zero(
+        &rendered,
+        "dz_publisher_egress_heartbeat_last_sent_timestamp_seconds",
+        &[("port_role", "mktdata"), ("channel_id", "1")],
+    );
+
+    for port_role in ["refdata", "snapshot"] {
+        let present = rendered.lines().any(|line| {
+            line.starts_with("dz_publisher_egress_heartbeat_last_sent_timestamp_seconds{")
+                && line.contains(&format!("port_role=\"{port_role}\""))
+        });
         assert!(
-            line.ends_with(expected),
-            "{port_role} kept its own value: {line}"
+            !present,
+            "no heartbeat is permitted on {port_role}, so pre-creating the series would leave \
+             it at 0 forever:\n{rendered}"
         );
     }
 }

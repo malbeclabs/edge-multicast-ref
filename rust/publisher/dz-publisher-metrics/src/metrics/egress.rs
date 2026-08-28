@@ -146,7 +146,15 @@ impl EgressMetrics {
         registry
             .register(Box::new(heartbeat_last_sent_timestamp_seconds.clone()))
             .expect("static metric registration");
+        // Gated the same way `messages_total` is, and for a sharper
+        // reason: this gauge stays 0 on a role no heartbeat is permitted
+        // on, so the staleness rule in its own HELP text would fire on
+        // that series permanently. The uptime guard suppresses the startup
+        // window; it cannot suppress a series that is never set.
         for port_role in port_roles {
+            if !EgressMessageType::Heartbeat.is_valid_on(*port_role) {
+                continue;
+            }
             for channel_id in channel_ids {
                 heartbeat_last_sent_timestamp_seconds
                     .with_label_values(&[port_role.as_str(), channel_id_label(*channel_id)]);

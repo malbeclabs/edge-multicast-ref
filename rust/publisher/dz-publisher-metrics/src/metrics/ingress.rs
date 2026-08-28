@@ -42,9 +42,17 @@ impl IngressMetrics {
         registry
             .register(Box::new(messages_total.clone()))
             .expect("static metric registration");
-        // Both dimensions are declared sets, so this family is pre-created
-        // like the others, `other` included: a series that only appears
-        // once something unexpected arrives is one nobody has a panel for.
+        // Pre-created over both declared sets, `other` included: a series
+        // that only appears once something unexpected arrives is one
+        // nobody has a panel for.
+        //
+        // Only `message_type` is enforced on record, and the asymmetry is
+        // deliberate. It is the upstream source's vocabulary, so an
+        // unexpected value is ordinary and unbounded. A `connection` name
+        // is the publisher author's own, so an undeclared one is a typo in
+        // their config rather than data they do not control - and there
+        // the series naming the mistake is worth more than one folded into
+        // a bucket, which would hide it.
         for connection in connections {
             for message_type in message_types
                 .iter()
