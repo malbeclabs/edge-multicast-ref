@@ -1,5 +1,5 @@
 use dz_edge_core::{
-    AppMessage, Datagram, DatagramBuilder, DecodeError, EndOfSession, Heartbeat,
+    AppMessage, ChannelSequence, Datagram, DatagramBuilder, DecodeError, EndOfSession, Heartbeat,
     DATAGRAM_HEADER_SIZE, SCHEMA_VERSION,
 };
 
@@ -21,7 +21,8 @@ fn header_bytes(magic: u16, schema_version: u8, msg_count: u8, datagram_len: u16
 
 #[test]
 fn walks_heartbeats_and_end_of_session_in_order() {
-    let mut b = DatagramBuilder::new(TEST_MAGIC, 3, 10, 999, 0, 1232);
+    let channel = ChannelSequence::resume(3, 0, 10);
+    let mut b = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
     let hb1 = Heartbeat {
         channel_id: 3,
         timestamp_ns: 111,
@@ -34,7 +35,7 @@ fn walks_heartbeats_and_end_of_session_in_order() {
     b.push(&hb1).unwrap();
     b.push(&hb2).unwrap();
     b.push(&eos).unwrap();
-    let out = b.finish().expect("datagram has messages");
+    let out = b.finish(999).expect("datagram has messages");
 
     let dg = Datagram::decode(&out, TEST_MAGIC).unwrap();
     let msgs: Vec<_> = dg.messages().collect();
@@ -42,11 +43,26 @@ fn walks_heartbeats_and_end_of_session_in_order() {
 
     assert_eq!(msgs[0].type_id, Heartbeat::TYPE_ID);
     assert_eq!(msgs[0].bytes.len(), Heartbeat::SIZE);
-    assert_eq!(Heartbeat::decode(msgs[0].bytes).unwrap(), hb1);
+    // The builder stamps Channel ID from the datagram, so the decoded value is
+    // 3 (the channel this datagram was built for), overwriting whatever
+    // encode_into wrote from the message's own channel_id field.
+    assert_eq!(
+        Heartbeat::decode(msgs[0].bytes).unwrap(),
+        Heartbeat {
+            channel_id: 3,
+            timestamp_ns: hb1.timestamp_ns
+        }
+    );
 
     assert_eq!(msgs[1].type_id, Heartbeat::TYPE_ID);
     assert_eq!(msgs[1].bytes.len(), Heartbeat::SIZE);
-    assert_eq!(Heartbeat::decode(msgs[1].bytes).unwrap(), hb2);
+    assert_eq!(
+        Heartbeat::decode(msgs[1].bytes).unwrap(),
+        Heartbeat {
+            channel_id: 3,
+            timestamp_ns: hb2.timestamp_ns
+        }
+    );
 
     assert_eq!(msgs[2].type_id, EndOfSession::TYPE_ID);
     assert_eq!(msgs[2].bytes.len(), EndOfSession::SIZE);
@@ -60,16 +76,18 @@ fn flags_reflect_push_vs_push_snapshot() {
         timestamp_ns: 0,
     };
 
-    let mut plain = DatagramBuilder::new(TEST_MAGIC, 0, 0, 0, 0, 1232);
+    let channel = ChannelSequence::new(0, 0);
+    let mut plain = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
     plain.push(&hb).unwrap();
-    let out = plain.finish().expect("datagram has messages");
+    let out = plain.finish(0).expect("datagram has messages");
     let dg = Datagram::decode(&out, TEST_MAGIC).unwrap();
     let msg = dg.messages().next().unwrap();
     assert_eq!(msg.flags, 0, "push() must clear the snapshot bit");
 
-    let mut snap = DatagramBuilder::new(TEST_MAGIC, 0, 0, 0, 0, 1232);
+    let channel = ChannelSequence::new(0, 0);
+    let mut snap = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
     snap.push_snapshot(&hb).unwrap();
-    let out = snap.finish().expect("datagram has messages");
+    let out = snap.finish(0).expect("datagram has messages");
     let dg = Datagram::decode(&out, TEST_MAGIC).unwrap();
     let msg = dg.messages().next().unwrap();
     assert_eq!(msg.flags, 1, "push_snapshot() must set the snapshot bit");
@@ -79,8 +97,9 @@ fn flags_reflect_push_vs_push_snapshot() {
 fn an_empty_builder_yields_no_datagram() {
     // Message Count is 1-255, so a tick with nothing to send produces no
     // datagram at all rather than one every conformant subscriber discards.
-    let b = DatagramBuilder::new(TEST_MAGIC, 0, 0, 0, 0, 1232);
-    assert!(b.finish().is_none());
+    let channel = ChannelSequence::new(0, 0);
+    let b = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
+    assert!(b.finish(0).is_none());
 }
 
 #[test]
@@ -100,13 +119,14 @@ fn a_hand_built_zero_message_datagram_is_refused() {
 
 #[test]
 fn a_magic_mismatch_is_rejected() {
-    let mut b = DatagramBuilder::new(TEST_MAGIC, 0, 0, 0, 0, 1232);
+    let channel = ChannelSequence::new(0, 0);
+    let mut b = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
     b.push(&Heartbeat {
         channel_id: 0,
         timestamp_ns: 0,
     })
     .unwrap();
-    let out = b.finish().expect("datagram has messages");
+    let out = b.finish(0).expect("datagram has messages");
 
     assert!(matches!(
         Datagram::decode(&out, 0x1234),
@@ -119,13 +139,14 @@ fn a_magic_mismatch_is_rejected() {
 
 #[test]
 fn a_truncated_buffer_is_rejected() {
-    let mut b = DatagramBuilder::new(TEST_MAGIC, 0, 0, 0, 0, 1232);
+    let channel = ChannelSequence::new(0, 0);
+    let mut b = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
     b.push(&Heartbeat {
         channel_id: 0,
         timestamp_ns: 0,
     })
     .unwrap();
-    let out = b.finish().expect("datagram has messages");
+    let out = b.finish(0).expect("datagram has messages");
     let full_len = out.len();
     // Chop bytes off the end without correcting the header's declared length,
     // so datagram_len ends up larger than the buffer actually holds.
@@ -140,13 +161,14 @@ fn a_truncated_buffer_is_rejected() {
 
 #[test]
 fn trailing_bytes_past_datagram_len_are_ignored() {
-    let mut b = DatagramBuilder::new(TEST_MAGIC, 0, 0, 0, 0, 1232);
+    let channel = ChannelSequence::new(0, 0);
+    let mut b = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
     b.push(&Heartbeat {
         channel_id: 0,
         timestamp_ns: 42,
     })
     .unwrap();
-    let mut out = b.finish().expect("datagram has messages");
+    let mut out = b.finish(0).expect("datagram has messages");
     // Garbage past datagram_len; a real datagram, or a buffer reused across
     // receives, could easily carry stale trailing bytes like this.
     out.extend_from_slice(&[0xAA; 16]);
@@ -159,13 +181,14 @@ fn trailing_bytes_past_datagram_len_are_ignored() {
 
 #[test]
 fn an_unsupported_schema_version_is_rejected() {
-    let mut b = DatagramBuilder::new(TEST_MAGIC, 0, 0, 0, 0, 1232);
+    let channel = ChannelSequence::new(0, 0);
+    let mut b = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
     b.push(&Heartbeat {
         channel_id: 0,
         timestamp_ns: 0,
     })
     .unwrap();
-    let mut out = b.finish().expect("datagram has messages");
+    let mut out = b.finish(0).expect("datagram has messages");
     out[2] = 2; // the generation that never reached the wire
 
     assert!(matches!(
@@ -236,13 +259,14 @@ fn a_declared_length_past_the_datagram_end_overruns() {
 
 #[test]
 fn header_claims_more_messages_than_are_present() {
-    let mut b = DatagramBuilder::new(TEST_MAGIC, 0, 0, 0, 0, 1232);
+    let channel = ChannelSequence::new(0, 0);
+    let mut b = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
     b.push(&Heartbeat {
         channel_id: 0,
         timestamp_ns: 0,
     })
     .unwrap();
-    let mut out = b.finish().expect("datagram has messages");
+    let mut out = b.finish(0).expect("datagram has messages");
     out[20] = 2; // claims two messages though only one is present
 
     assert!(matches!(
@@ -261,7 +285,8 @@ fn header_claims_fewer_messages_than_are_present_and_the_rest_is_ignored() {
     // count is exactly as unreachable as any other filler byte would be.
     // The reference parser reads only MsgCount messages and has no way to
     // notice, let alone reject, what looks like an extra message after that.
-    let mut b = DatagramBuilder::new(TEST_MAGIC, 0, 0, 0, 0, 1232);
+    let channel = ChannelSequence::new(0, 0);
+    let mut b = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
     b.push(&Heartbeat {
         channel_id: 0,
         timestamp_ns: 0,
@@ -272,7 +297,7 @@ fn header_claims_fewer_messages_than_are_present_and_the_rest_is_ignored() {
         timestamp_ns: 0,
     })
     .unwrap();
-    let mut out = b.finish().expect("datagram has messages");
+    let mut out = b.finish(0).expect("datagram has messages");
     out[20] = 1; // claims one message though two are present
 
     let dg = Datagram::decode(&out, TEST_MAGIC).unwrap();
@@ -287,13 +312,14 @@ fn a_few_filler_bytes_inside_the_declared_length_are_ignored() {
     // exactly `MsgCount` messages and ignores whatever remains inside the
     // declared length. A publisher that pads must not have its traffic
     // dropped here while the reference parser accepts it.
-    let mut b = DatagramBuilder::new(TEST_MAGIC, 0, 0, 0, 0, 1232);
+    let channel = ChannelSequence::new(0, 0);
+    let mut b = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
     b.push(&Heartbeat {
         channel_id: 0,
         timestamp_ns: 7,
     })
     .unwrap();
-    let mut out = b.finish().expect("datagram has messages");
+    let mut out = b.finish(0).expect("datagram has messages");
     // Filler *inside* the declared length, unlike
     // `trailing_bytes_past_datagram_len_are_ignored`, which appends bytes
     // the header's declared length does not cover at all.
@@ -361,6 +387,30 @@ fn an_unknown_type_id_is_yielded_not_rejected() {
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0].type_id, 0x7F);
     assert_eq!(msgs[0].bytes.len(), 16);
+}
+
+#[test]
+fn the_builder_stamps_heartbeats_channel_id_from_the_datagram() {
+    // A Heartbeat claiming channel 9 inside a datagram built for channel 3
+    // must encode with 3 at the message's Channel ID offset and decode as 3:
+    // the builder owns this redundant copy, not the caller.
+    let hb = Heartbeat {
+        channel_id: 9,
+        timestamp_ns: 555,
+    };
+    let channel = ChannelSequence::new(3, 0);
+    let mut b = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
+    b.push(&hb).unwrap();
+    let out = b.finish(0).expect("datagram has messages");
+
+    let msg = &out[DATAGRAM_HEADER_SIZE..];
+    assert_eq!(
+        msg[4], 3,
+        "message offset 4: Channel ID stamped by the builder"
+    );
+
+    let decoded = Heartbeat::decode(msg).unwrap();
+    assert_eq!(decoded.channel_id, 3);
 }
 
 #[test]

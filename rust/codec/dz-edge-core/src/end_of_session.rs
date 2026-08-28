@@ -19,6 +19,9 @@ impl AppMessage for EndOfSession {
         dst[2..4].copy_from_slice(&0u16.to_le_bytes());
         dst[4..12].copy_from_slice(&self.timestamp_ns.to_le_bytes());
     }
+
+    // EndOfSession carries no redundant Channel ID.
+    fn stamp_channel_id(_dst: &mut [u8], _channel_id: u8) {}
 }
 
 impl EndOfSession {

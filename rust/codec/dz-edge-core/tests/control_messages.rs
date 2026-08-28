@@ -2,8 +2,11 @@ use dz_edge_core::{AppMessage, DecodeError, EndOfSession, Heartbeat};
 
 #[test]
 fn heartbeat_matches_its_spec_layout() {
+    // encode_into honours Channel ID at its own offset. A DatagramBuilder
+    // overwrites it afterwards via stamp_channel_id when framing the
+    // message, but a standalone encode_into call writes the caller's value.
     let hb = Heartbeat {
-        channel_id: 7,
+        channel_id: 9,
         timestamp_ns: 0x0102_0304_0506_0708,
     };
     let mut buf = [0u8; Heartbeat::SIZE];
@@ -12,7 +15,7 @@ fn heartbeat_matches_its_spec_layout() {
     assert_eq!(buf.len(), 16);
     assert_eq!(buf[0], 0x01, "offset 0: Type");
     assert_eq!(buf[1], 16, "offset 1: Length");
-    assert_eq!(buf[4], 7, "offset 4: Channel ID");
+    assert_eq!(buf[4], 9, "offset 4: Channel ID, honoured by encode_into");
     assert_eq!(&buf[5..8], &[0, 0, 0], "offset 5: Reserved, 3 bytes");
     assert_eq!(
         &buf[8..16],
@@ -21,6 +24,19 @@ fn heartbeat_matches_its_spec_layout() {
     );
 
     assert_eq!(Heartbeat::decode(&buf).unwrap(), hb);
+}
+
+#[test]
+fn heartbeat_encode_into_round_trips_channel_id() {
+    // A standalone encode/decode round trip (no DatagramBuilder involved)
+    // must honour the public channel_id field honestly.
+    let hb = Heartbeat {
+        channel_id: 7,
+        timestamp_ns: 42,
+    };
+    let mut buf = [0u8; Heartbeat::SIZE];
+    hb.encode_into(&mut buf);
+    assert_eq!(Heartbeat::decode(&buf).unwrap().channel_id, 7);
 }
 
 #[test]

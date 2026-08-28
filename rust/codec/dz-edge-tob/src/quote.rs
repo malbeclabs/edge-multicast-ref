@@ -47,6 +47,9 @@ impl AppMessage for Quote {
         dst[54..56].copy_from_slice(&self.ask_source_count.to_le_bytes());
         dst[56..60].fill(0);
     }
+
+    // Quote carries no redundant Channel ID.
+    fn stamp_channel_id(_dst: &mut [u8], _channel_id: u8) {}
 }
 
 impl Quote {

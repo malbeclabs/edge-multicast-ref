@@ -1,4 +1,4 @@
-use dz_edge_core::{AppMessage, DecodeError, SCHEMA_VERSION, SCHEMA_VERSION_V1};
+use dz_edge_core::{pad_ascii, AppMessage, DecodeError, Fit, SCHEMA_VERSION, SCHEMA_VERSION_V1};
 
 pub const SYMBOL_LEN: usize = 64;
 /// The schema-1 `Symbol` width, before the 2.0.0 widening.
@@ -79,6 +79,9 @@ impl AppMessage for InstrumentDefinition {
         dst[127] = self.price_bound;
         dst[128..130].copy_from_slice(&self.manifest_seq.to_le_bytes());
     }
+
+    // InstrumentDefinition carries no redundant Channel ID.
+    fn stamp_channel_id(_dst: &mut [u8], _channel_id: u8) {}
 }
 
 impl InstrumentDefinition {
@@ -86,6 +89,14 @@ impl InstrumentDefinition {
     ///
     /// Schema 2 is refused: the 128-byte layout was superseded before any
     /// publisher emitted it, so accepting it would invent a generation.
+    ///
+    /// This is the only `decode` in the message family that takes a
+    /// `schema_version`, because `InstrumentDefinition` is the only message
+    /// whose layout changed between generations: `Symbol` widened and `Source
+    /// ID` was added at the 3.0.0 cut. Every other message has one layout, so
+    /// its `decode` has nothing to branch on. That asymmetry is deliberate;
+    /// adding an ignored `schema_version` parameter to the other decoders,
+    /// purely to make the family's signatures uniform, is not wanted.
     pub fn decode(buf: &[u8], schema_version: u8) -> Result<Self, DecodeError> {
         match schema_version {
             SCHEMA_VERSION => Self::decode_v3(buf),
@@ -220,5 +231,33 @@ impl InstrumentDefinition {
             price_bound: buf[77],
             manifest_seq: u16::from_le_bytes([buf[78], buf[79]]),
         })
+    }
+
+    /// Set `symbol` from a string, NUL-padding or truncating it to fit
+    /// `SYMBOL_LEN`, reporting whether the value fit as ASCII.
+    ///
+    /// A publisher should call this (and `set_leg1`/`set_leg2`) once per
+    /// reference-data load and log any non-`Fitted` result, rather than
+    /// silently encoding a value the field cannot honestly represent.
+    pub fn set_symbol(&mut self, value: &str) -> Fit {
+        let (field, fit) = pad_ascii::<SYMBOL_LEN>(value);
+        self.symbol = field;
+        fit
+    }
+
+    /// Set `leg1` from a string, NUL-padding or truncating it to fit
+    /// `LEG_LEN`, reporting whether the value fit as ASCII.
+    pub fn set_leg1(&mut self, value: &str) -> Fit {
+        let (field, fit) = pad_ascii::<LEG_LEN>(value);
+        self.leg1 = field;
+        fit
+    }
+
+    /// Set `leg2` from a string, NUL-padding or truncating it to fit
+    /// `LEG_LEN`, reporting whether the value fit as ASCII.
+    pub fn set_leg2(&mut self, value: &str) -> Fit {
+        let (field, fit) = pad_ascii::<LEG_LEN>(value);
+        self.leg2 = field;
+        fit
     }
 }

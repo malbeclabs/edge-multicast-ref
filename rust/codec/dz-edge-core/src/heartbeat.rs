@@ -6,7 +6,12 @@ use crate::message::AppMessage;
 /// traffic, so a subscriber can tell a quiet channel from a dead one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Heartbeat {
-    /// Redundant with the datagram header; useful for standalone logging.
+    /// Redundant with the datagram header's own `Channel ID`. Honoured by
+    /// `encode_into`, which writes this value at its own offset. When the
+    /// message is framed by a `DatagramBuilder`, `stamp_channel_id`
+    /// overwrites it afterwards with the datagram's own `Channel ID`, so a
+    /// builder-framed message can never disagree with its header. `decode`
+    /// populates this field from whatever is actually on the wire.
     pub channel_id: u8,
     pub timestamp_ns: u64,
 }
@@ -23,6 +28,11 @@ impl AppMessage for Heartbeat {
         dst[4] = self.channel_id;
         dst[5..8].fill(0);
         dst[8..16].copy_from_slice(&self.timestamp_ns.to_le_bytes());
+    }
+
+    // Channel ID at offset 4.
+    fn stamp_channel_id(dst: &mut [u8], channel_id: u8) {
+        dst[4] = channel_id;
     }
 }
 
