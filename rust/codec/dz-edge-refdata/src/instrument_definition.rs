@@ -1,4 +1,6 @@
-use dz_edge_core::{pad_ascii, AppMessage, DecodeError, Fit, SCHEMA_VERSION, SCHEMA_VERSION_V1};
+use dz_edge_core::{
+    pad_ascii, AppMessage, DecodeError, Fit, PortRole, SCHEMA_VERSION, SCHEMA_VERSION_V1,
+};
 
 pub const SYMBOL_LEN: usize = 64;
 /// The schema-1 `Symbol` width, before the 2.0.0 widening.
@@ -56,6 +58,7 @@ pub struct InstrumentDefinition {
 impl AppMessage for InstrumentDefinition {
     const TYPE_ID: u8 = 0x02;
     const SIZE: usize = 130;
+    const PORT_ROLES: &'static [PortRole] = &[PortRole::Refdata];
 
     fn encode_into(&self, dst: &mut [u8]) {
         debug_assert_eq!(dst.len(), Self::SIZE);

@@ -1,4 +1,4 @@
-use dz_edge_core::{AppMessage, DecodeError};
+use dz_edge_core::{AppMessage, DecodeError, PortRole};
 
 // `Fake` writes only `dst[..SIZE]`, matching the trait's documented contract
 // exactly (see `message.rs`): a `dst` longer than `SIZE` has its first `SIZE`
@@ -10,6 +10,7 @@ struct Fake;
 impl AppMessage for Fake {
     const TYPE_ID: u8 = 0x01;
     const SIZE: usize = 16;
+    const PORT_ROLES: &'static [PortRole] = &[PortRole::Mktdata];
     fn encode_into(&self, dst: &mut [u8]) {
         dst[..Self::SIZE].fill(0xAB);
     }

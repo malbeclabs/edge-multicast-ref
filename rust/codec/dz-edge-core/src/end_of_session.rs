@@ -1,6 +1,7 @@
 use crate::constants::{SIZE_END_OF_SESSION, TYPE_END_OF_SESSION};
 use crate::error::DecodeError;
 use crate::message::AppMessage;
+use crate::port_role::PortRole;
 
 /// `0x06 EndOfSession` (12 bytes). No more data for this session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,6 +12,7 @@ pub struct EndOfSession {
 impl AppMessage for EndOfSession {
     const TYPE_ID: u8 = TYPE_END_OF_SESSION;
     const SIZE: usize = SIZE_END_OF_SESSION;
+    const PORT_ROLES: &'static [PortRole] = &[PortRole::Mktdata];
 
     fn encode_into(&self, dst: &mut [u8]) {
         debug_assert_eq!(dst.len(), Self::SIZE);

@@ -1,4 +1,4 @@
-use dz_edge_core::{AppMessage, DecodeError};
+use dz_edge_core::{AppMessage, DecodeError, PortRole};
 
 /// `0x07 ManifestSummary` (24 bytes), on the `refdata` port role.
 ///
@@ -24,6 +24,7 @@ pub struct ManifestSummary {
 impl AppMessage for ManifestSummary {
     const TYPE_ID: u8 = 0x07;
     const SIZE: usize = 24;
+    const PORT_ROLES: &'static [PortRole] = &[PortRole::Refdata];
 
     fn encode_into(&self, dst: &mut [u8]) {
         debug_assert_eq!(dst.len(), Self::SIZE);

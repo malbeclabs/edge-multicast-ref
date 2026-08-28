@@ -1,5 +1,7 @@
-use dz_edge_core::{AppMessage, DecodeError};
-use dz_edge_tob::{Quote, Trade, MAGIC_TOB};
+use dz_edge_core::{
+    AppMessage, ChannelSequence, DatagramBuilder, DecodeError, EncodeError, PortRole, ResetCount,
+};
+use dz_edge_tob::{Quote, TopOfBook, Trade, MAGIC_TOB};
 
 #[test]
 fn magic_tob_matches_the_spec() {
@@ -237,4 +239,25 @@ fn trade_decode_rejects_a_buffer_shorter_than_the_fixed_size() {
         Trade::decode(&b[..51]),
         Err(DecodeError::ShortBuffer { need: 52, got: 51 })
     ));
+}
+
+#[test]
+fn a_quote_on_mktdata_succeeds() {
+    let channel = ChannelSequence::new(0, ResetCount(0));
+    let mut b = DatagramBuilder::<TopOfBook>::new(channel, PortRole::Mktdata, 1232);
+    b.push(&sample_quote()).unwrap();
+}
+
+#[test]
+fn a_quote_pushed_into_a_refdata_builder_is_a_countable_error() {
+    let channel = ChannelSequence::new(0, ResetCount(0));
+    let mut b = DatagramBuilder::<TopOfBook>::new(channel, PortRole::Refdata, 1232);
+    let err = b.push(&sample_quote()).unwrap_err();
+    assert_eq!(
+        err,
+        EncodeError::WrongPortRole {
+            message: core::any::type_name::<Quote>(),
+            role: "refdata",
+        }
+    );
 }

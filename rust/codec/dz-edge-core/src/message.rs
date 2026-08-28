@@ -1,3 +1,5 @@
+use crate::port_role::PortRole;
+
 /// Implemented by every fixed-size application message in the feed family.
 /// `DatagramBuilder` uses it to pack messages without knowing their types.
 pub trait AppMessage {
@@ -6,6 +8,13 @@ pub trait AppMessage {
 
     /// Fixed on-the-wire size in bytes, including the 4-byte message header.
     const SIZE: usize;
+
+    /// The port roles this message may be carried on.
+    ///
+    /// Taken from the feed specifications' own message tables. The builder
+    /// refuses a message on a role it does not list, so a spec violation fails
+    /// at the push rather than on a capture after a deploy.
+    const PORT_ROLES: &'static [PortRole];
 
     /// Encode into `dst`, which MUST be exactly `SIZE` bytes.
     ///

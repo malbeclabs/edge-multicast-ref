@@ -1,6 +1,7 @@
 use crate::constants::{SIZE_HEARTBEAT, TYPE_HEARTBEAT};
 use crate::error::DecodeError;
 use crate::message::AppMessage;
+use crate::port_role::PortRole;
 
 /// `0x01 Heartbeat` (16 bytes). Sent on `mktdata` when there is no other
 /// traffic, so a subscriber can tell a quiet channel from a dead one.
@@ -19,6 +20,7 @@ pub struct Heartbeat {
 impl AppMessage for Heartbeat {
     const TYPE_ID: u8 = TYPE_HEARTBEAT;
     const SIZE: usize = SIZE_HEARTBEAT;
+    const PORT_ROLES: &'static [PortRole] = &[PortRole::Mktdata];
 
     fn encode_into(&self, dst: &mut [u8]) {
         debug_assert_eq!(dst.len(), Self::SIZE);

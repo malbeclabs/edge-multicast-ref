@@ -1,4 +1,4 @@
-use dz_edge_core::{AppMessage, DecodeError};
+use dz_edge_core::{AppMessage, DecodeError, PortRole};
 
 pub const AGGRESSOR_UNKNOWN: u8 = 0;
 pub const AGGRESSOR_BUY: u8 = 1;
@@ -29,6 +29,7 @@ pub struct Trade {
 impl AppMessage for Trade {
     const TYPE_ID: u8 = 0x04;
     const SIZE: usize = 52;
+    const PORT_ROLES: &'static [PortRole] = &[PortRole::Mktdata];
 
     fn encode_into(&self, dst: &mut [u8]) {
         debug_assert_eq!(dst.len(), Self::SIZE);

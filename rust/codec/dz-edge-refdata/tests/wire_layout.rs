@@ -1,12 +1,17 @@
 use dz_edge_core::{
-    AppMessage, ChannelSequence, DatagramBuilder, DecodeError, Fit, SCHEMA_VERSION,
-    SCHEMA_VERSION_V1,
+    AppMessage, ChannelSequence, DatagramBuilder, DecodeError, EncodeError, Feed, Fit, PortRole,
+    ResetCount, SCHEMA_VERSION, SCHEMA_VERSION_V1,
 };
 use dz_edge_refdata::{InstrumentDefinition, ManifestSummary, LEG_LEN, SIZE_V1, SYMBOL_LEN};
 
-// These tests only need *a* magic value; they must not depend on
-// dz-edge-tob, which owns the real MAGIC_TOB.
-const TEST_MAGIC: u16 = 0x445A;
+// Refdata's tests cannot name a particular feed - reference data is a
+// supplement adopted by every feed in the family, not tied to any one of
+// them. A test-local feed stands in for whichever feed would carry it.
+struct TestFeed;
+impl Feed for TestFeed {
+    const MAGIC: u16 = 0x445A;
+    const NAME: &'static str = "test";
+}
 
 fn sample() -> InstrumentDefinition {
     let mut symbol = [0u8; SYMBOL_LEN];
@@ -313,8 +318,8 @@ fn the_builder_stamps_manifest_summarys_channel_id_from_the_datagram() {
         instrument_count: 1234,
         timestamp_ns: 88,
     };
-    let channel = ChannelSequence::new(3, 0);
-    let mut b = DatagramBuilder::new(TEST_MAGIC, channel, 1232);
+    let channel = ChannelSequence::new(3, ResetCount(0));
+    let mut b = DatagramBuilder::<TestFeed>::new(channel, PortRole::Refdata, 1232);
     b.push(&m).unwrap();
     let out = b.finish(0).expect("datagram has messages");
 
@@ -385,4 +390,25 @@ fn set_leg2_reports_unrepresentable_for_an_interior_nul() {
     let fit = d.set_leg2("US\0DT");
     assert_eq!(fit, Fit::Unrepresentable);
     assert_eq!(&d.leg2[..5], b"US\0DT");
+}
+
+#[test]
+fn an_instrument_definition_on_refdata_succeeds() {
+    let channel = ChannelSequence::new(0, ResetCount(0));
+    let mut b = DatagramBuilder::<TestFeed>::new(channel, PortRole::Refdata, 1232);
+    b.push(&sample()).unwrap();
+}
+
+#[test]
+fn an_instrument_definition_pushed_into_a_mktdata_builder_is_a_countable_error() {
+    let channel = ChannelSequence::new(0, ResetCount(0));
+    let mut b = DatagramBuilder::<TestFeed>::new(channel, PortRole::Mktdata, 1232);
+    let err = b.push(&sample()).unwrap_err();
+    assert_eq!(
+        err,
+        EncodeError::WrongPortRole {
+            message: core::any::type_name::<InstrumentDefinition>(),
+            role: "mktdata",
+        }
+    );
 }
