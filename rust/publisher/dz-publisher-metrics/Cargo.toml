@@ -1,0 +1,20 @@
+[package]
+name = "dz-publisher-metrics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The normative set of Prometheus metrics a DoubleZero Edge publisher must emit"
+
+[dependencies]
+dz-edge-core = { path = "../../codec/dz-edge-core" }
+prometheus = { workspace = true }
+thiserror = { workspace = true }
+tiny_http = { workspace = true }
+
+[dev-dependencies]
+# Only so the port-role table below can be held to the codec's own
+# `AppMessage::PORT_ROLES`; nothing in the library depends on the feeds.
+dz-edge-refdata = { path = "../../codec/dz-edge-refdata" }
+dz-edge-tob = { path = "../../codec/dz-edge-tob" }

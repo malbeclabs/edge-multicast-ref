@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'rust/codec/**'
+      - 'rust/publisher/**'
       - 'rust/Cargo.toml'
       - 'rust/Cargo.lock'
       - 'testdata/golden/**'

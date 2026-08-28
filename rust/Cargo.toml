@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["codec/dz-edge-core", "codec/dz-edge-tob", "codec/dz-edge-refdata"]
+members = [
+    "codec/dz-edge-core",
+    "codec/dz-edge-tob",
+    "codec/dz-edge-refdata",
+    "publisher/dz-publisher-metrics",
+]
 exclude = ["kernel-receiver", "xdp-receiver"]
 
 [workspace.package]
@@ -12,3 +17,9 @@ authors = ["Malbec Labs"]
 
 [workspace.dependencies]
 thiserror = "1.0"
+# One 0.14.x is resolved for the whole graph, so this crate and a consumer
+# that also depends on prometheus link the same copy and cannot disagree
+# about the exposition format. The committed lockfile is what makes any two
+# builds of the same commit resolve identically.
+prometheus = "0.14.0"
+tiny_http = "0.12"
