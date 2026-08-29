@@ -48,7 +48,7 @@ func TestMetricsNamespaceAndDefectCounters(t *testing.T) {
 
 	names = gatheredNames(t, m)
 	for _, want := range []string{
-		"dz_mbp_parser_frame_seq_gaps_total",
+		"dz_mbp_parser_datagram_seq_gaps_total",
 		"dz_mbp_parser_snapshot_flag_mismatch_total",
 		"dz_mbp_parser_malformed_total",
 		"dz_mbp_parser_skipped_messages_total",
@@ -66,10 +66,10 @@ func TestMetricsNamespaceAndDefectCounters(t *testing.T) {
 	}
 }
 
-// TestFramesTotal_LabelsSchemaVersion proves frames_total is registered and
+// TestDatagramsTotal_LabelsSchemaVersion proves datagrams_total is registered and
 // counts per port and wire schema version independently, which is what makes
 // a publisher's v1-to-v3 cutover observable.
-func TestFramesTotal_LabelsSchemaVersion(t *testing.T) {
+func TestDatagramsTotal_LabelsSchemaVersion(t *testing.T) {
 	m := NewMetrics("test", "test")
 
 	m.FramesTotal.WithLabelValues("refdata", "1").Inc()
@@ -79,7 +79,7 @@ func TestFramesTotal_LabelsSchemaVersion(t *testing.T) {
 	// A CounterVec reports no metric family until a label set is observed
 	// (see the comment above), so the registration check runs after the
 	// increments rather than before.
-	mustContain(t, gatheredNames(t, m), "dz_mbp_parser_frames_total")
+	mustContain(t, gatheredNames(t, m), "dz_mbp_parser_datagrams_total")
 
 	if got := readCounterVec(t, m.FramesTotal, "refdata", "1"); got != 1 {
 		t.Errorf("v1 frames: got %v want 1", got)

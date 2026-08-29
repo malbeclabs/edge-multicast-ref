@@ -91,8 +91,8 @@ func newMetrics() *metrics {
 	}, []string{"channel", "reason"})
 
 	m.frameHeaderErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "dz_subscriber_frame_header_errors_total",
-		Help: "Frames rejected by header validation, by reason.",
+		Name: "dz_subscriber_datagram_header_errors_total",
+		Help: "Datagrams rejected by header validation, by reason.",
 	}, []string{"reason"})
 
 	m.records = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -133,18 +133,18 @@ func newMetrics() *metrics {
 	}, []string{"type"})
 
 	m.frameSeqGaps = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "dz_subscriber_frame_seq_gaps_total",
-		Help: "Number of UDP frame header sequence discontinuities (real datagram loss events), by port and publisher.",
+		Name: "dz_subscriber_datagram_seq_gaps_total",
+		Help: "Number of UDP datagram header sequence discontinuities (real datagram loss events), by port and publisher.",
 	}, []string{"port", "source_ip", "channel_id"})
 
 	m.framesMissing = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "dz_subscriber_frames_missing_total",
-		Help: "Total UDP frames missing (sum of gap magnitudes in header seq), by port and publisher.",
+		Name: "dz_subscriber_datagrams_missing_total",
+		Help: "Total UDP datagrams missing (sum of gap magnitudes in header seq), by port and publisher.",
 	}, []string{"port", "source_ip", "channel_id"})
 
 	m.framesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "dz_subscriber_frames_total",
-		Help: "Successfully parsed frames, by port and wire schema version.",
+		Name: "dz_subscriber_datagrams_total",
+		Help: "Successfully parsed datagrams, by port and wire schema version.",
 	}, []string{"port", "schema_version"})
 
 	m.socketClients = prometheus.NewGauge(prometheus.GaugeOpts{

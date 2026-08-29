@@ -102,18 +102,18 @@ func NewMetrics(version, commit string) *Metrics {
 	})
 
 	m.FrameSeqGaps = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: metricsNamespace, Name: "frame_seq_gaps_total",
-		Help: "Number of UDP frame header sequence discontinuities (real datagram loss events), by port and publisher.",
+		Namespace: metricsNamespace, Name: "datagram_seq_gaps_total",
+		Help: "Number of UDP datagram header sequence discontinuities (real datagram loss events), by port and publisher.",
 	}, []string{"port", "source_ip", "channel_id"})
 
 	m.FramesMissing = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: metricsNamespace, Name: "frames_missing_total",
-		Help: "Total UDP frames missing (sum of gap magnitudes in header seq), by port and publisher.",
+		Namespace: metricsNamespace, Name: "datagrams_missing_total",
+		Help: "Total UDP datagrams missing (sum of gap magnitudes in header seq), by port and publisher.",
 	}, []string{"port", "source_ip", "channel_id"})
 
 	m.FramesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: metricsNamespace, Name: "frames_total",
-		Help: "Successfully parsed frames, by port and wire schema version.",
+		Namespace: metricsNamespace, Name: "datagrams_total",
+		Help: "Successfully parsed datagrams, by port and wire schema version.",
 	}, []string{"port", "schema_version"})
 
 	m.BuildInfo = prometheus.NewGaugeVec(prometheus.GaugeOpts{
