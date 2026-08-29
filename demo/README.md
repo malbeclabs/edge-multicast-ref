@@ -27,7 +27,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-First boot builds the parser and bot images (a minute or two). ClickHouse loads `clickhouse/init/01_schema.sql` the first time and then skips it on subsequent boots. Grafana picks up the datasource + dashboard from `grafana/provisioning/`.
+First boot builds the parser and book-builder images (a minute or two). ClickHouse loads `clickhouse/init/01_schema.sql` the first time and then skips it on subsequent boots. Grafana picks up the datasource + dashboard from `grafana/provisioning/`.
 
 Reach Grafana at `http://localhost:3000` on the host. To reach it from your laptop, SSH-tunnel:
 
@@ -67,17 +67,17 @@ All tunables live in `.env`:
 | `DZ_MARKETDATA_PORT` | `7001` | UDP port for quotes/trades |
 | `DZ_REFDATA_PORT` | `7002` | UDP port for instrument definitions |
 | `DZ_INTERFACE` | `doublezero1` | Interface to join multicast on |
-| `DZ_SYMBOLS` | empty (all) | Comma-separated filter for the bot |
+| `DZ_SYMBOLS` | empty (all) | Comma-separated filter for the book-builder |
 | `GF_ADMIN_PASSWORD` | `admin` | Grafana admin password |
 | `GRAFANA_HOST_PORT` | `3000` | Bound to `127.0.0.1` only |
 | `CLICKHOUSE_HTTP_PORT` | `8123` | Bound to `127.0.0.1` only |
-| `BOT_METRICS_PORT` | `9091` | Bot Prometheus scrape endpoint |
+| `BOT_METRICS_PORT` | `9091` | Book-builder Prometheus scrape endpoint |
 | `PARSER_METRICS_PORT` | `9090` | Parser Prometheus scrape endpoint |
 | `DZ_MBP_MULTICAST_GROUP` | `239.10.10.30` | Market-by-Price group |
 | `DZ_MBP_MKTDATA_PORT` | `7021` | Market-by-Price deltas |
 | `DZ_MBP_REFDATA_PORT` | `7022` | Market-by-Price instrument definitions |
 | `DZ_MBP_SNAPSHOT_PORT` | `7023` | Market-by-Price snapshot groups |
-| `DZ_MBP_SYMBOLS` | empty (all) | Filters what the bot persists, never what it tracks |
+| `DZ_MBP_SYMBOLS` | empty (all) | Filters what the book-builder persists, never what it tracks |
 | `DZ_MBP_DEPTH` | `20` | Price levels per side to read out |
 | `DZ_MBP_COALESCE_MS` | `50` | Minimum gap between snapshot writes per instrument |
 
@@ -125,9 +125,9 @@ FROM topofbook.quotes WHERE recv_ts > now() - INTERVAL 5 MINUTE;
 |---|---|---|
 | Grafana | http://localhost:3000 | admin / `$GF_ADMIN_PASSWORD` |
 | ClickHouse HTTP | http://localhost:8123 | `SELECT now()` → `200 OK` |
-| Bot metrics | http://localhost:9091/metrics | `dz_bot_*` |
+| Book-builder metrics | http://localhost:9091/metrics | `dz_bot_*` |
 | Parser metrics | http://localhost:9090/metrics | `dz_subscriber_*` (host-networked so no port mapping needed) |
-| Market-by-Price bot metrics | http://localhost:9094/metrics | `dz_mbp_bot_*` |
+| Market-by-Price book-builder metrics | http://localhost:9094/metrics | `dz_mbp_bot_*` |
 | Market-by-Price parser metrics | http://localhost:9095/metrics | `dz_mbp_parser_*` (host-networked) |
 
 All host ports bind `127.0.0.1` only. Edit `docker-compose.yml` if you want public access (not recommended).
@@ -149,5 +149,5 @@ docker compose down -v
 
 - **Not production-hardened.** ClickHouse runs with no auth, one node, loose ulimits. Grafana has a single admin user. Fine for a demo on a trusted host; don't expose any port to the public internet.
 - **Wire latency is relative.** `wire_latency_ms` is publisher wall-clock minus subscriber wall-clock. It folds in NTP skew between hosts; treat it as a trend indicator, not an absolute latency measurement.
-- **Tick fidelity depends on the bot.** The bot writes every record to ClickHouse, so tick resolution is preserved. The Prometheus gauges are last-write-wins at scrape time (15s), so don't use them for tick-level analysis — use ClickHouse.
-- **One bot per parser socket.** Multiple bots can connect to the parser socket (it's broadcast), but if you want that behavior just scale the `bot` service and point them all at the same socket volume.
+- **Tick fidelity depends on the book-builder.** The book-builder writes every record to ClickHouse, so tick resolution is preserved. The Prometheus gauges are last-write-wins at scrape time (15s), so don't use them for tick-level analysis — use ClickHouse.
+- **One book-builder per parser socket.** Multiple book-builders can connect to the parser socket (it's broadcast), but if you want that behavior just scale the `bot` service and point them all at the same socket volume.

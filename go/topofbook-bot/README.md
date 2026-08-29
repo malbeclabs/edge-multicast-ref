@@ -1,4 +1,4 @@
-# Top-of-Book Bot
+# Top-of-Book Book-builder
 
 > Implements the [Top-of-Book & Trades Feed](https://github.com/malbeclabs/edge-feed-spec/blob/main/top-of-book/spec.md) spec.
 
@@ -16,7 +16,7 @@ topofbook-parser  ──unix socket JSONL──▶  topofbook-bot  ──/metric
 - Tracks per-symbol bid/ask price and size, spread, and last trade
 - Emits a `dz_bot_*` Prometheus scrape endpoint
 
-The bot is single-host, single-process, and does no persistence. Historical storage, complex strategies, risk — all out of scope. This is the smallest interesting consumer.
+The book-builder is single-host, single-process, and does no persistence. Historical storage, complex strategies, risk — all out of scope. This is the smallest interesting consumer.
 
 ## Quick start
 
@@ -31,7 +31,7 @@ dz-topofbook-parser \
   --output unix:///tmp/topofbook.sock \
   --metrics-addr 127.0.0.1:9090
 
-# Bot side:
+# Book-builder side:
 ./dz-topofbook-bot \
   --socket /tmp/topofbook.sock \
   --symbol BTC,ETH,SOL \
@@ -57,7 +57,7 @@ curl -s http://127.0.0.1:9091/metrics | grep dz_bot_bid_price
 | `-v` | no | false | Enable debug logging |
 | `--version` | no | | Print version and exit |
 
-**Empty `--symbol`:** the bot accepts every record it sees. On a venue with hundreds of instruments this means the per-symbol gauges will have one series per symbol. For Grafana demos and small subscribe lists (< 100 symbols) this is fine.
+**Empty `--symbol`:** the book-builder accepts every record it sees. On a venue with hundreds of instruments this means the per-symbol gauges will have one series per symbol. For Grafana demos and small subscribe lists (< 100 symbols) this is fine.
 
 ## Metrics
 
@@ -79,7 +79,7 @@ All prefixed `dz_bot_`. Per-symbol gauges use the `symbol` label; cardinality is
 | `records_dropped_total` | counter | `reason` | Records dropped (`reason=filter` for symbol mismatch) |
 | `decode_errors_total` | counter | — | Lines that failed JSON decode |
 | `socket_reconnects_total` | counter | `reason` | Reconnects by trigger (`eof`, `read_error`, `dial_failed`) |
-| `socket_to_bot_latency_seconds` | histogram | `type` | Publisher `send_ts` → bot receive. Wall-clock across 3 hosts; includes clock skew |
+| `socket_to_bot_latency_seconds` | histogram | `type` | Publisher `send_ts` → book-builder receive. Wall-clock across 3 hosts; includes clock skew |
 
 ### Top-of-book state (per subscribed symbol)
 
@@ -97,18 +97,18 @@ All prefixed `dz_bot_`. Per-symbol gauges use the `symbol` label; cardinality is
 
 ### Latency caveat
 
-`socket_to_bot_latency_seconds` compares the publisher's wall-clock timestamp to the bot's wall-clock receipt time. It includes:
+`socket_to_bot_latency_seconds` compares the publisher's wall-clock timestamp to the book-builder's wall-clock receipt time. It includes:
 
 1. Publisher → subscriber host wire time (the bulk, typically geographic)
 2. Parser decode + sink write delay (sub-ms)
-3. Socket read delay at the bot (sub-ms)
-4. NTP skew between the publisher host and the bot host
+3. Socket read delay at the book-builder (sub-ms)
+4. NTP skew between the publisher host and the book-builder host
 
 It is a useful trend indicator and relative health signal. Absolute latency attribution requires single-host measurements or a shared time source.
 
 ## Reconnect behavior
 
-The bot exponentially backs off on connect failure (250ms → 5s cap). On successful connect the backoff resets. The `socket_reconnects_total` counter records each reconnect with a `reason` label so you can differentiate parser restarts (`eof`) from parser crashes (`read_error`) from parser-missing-on-boot (`dial_failed`).
+The book-builder exponentially backs off on connect failure (250ms → 5s cap). On successful connect the backoff resets. The `socket_reconnects_total` counter records each reconnect with a `reason` label so you can differentiate parser restarts (`eof`) from parser crashes (`read_error`) from parser-missing-on-boot (`dial_failed`).
 
 ## Building
 
@@ -147,5 +147,5 @@ go test -v .
 - Single flat Go package, minimal external deps (only `prometheus/client_golang`).
 - No persistence. State is in-memory gauges; Prometheus is the storage layer.
 - The `Record` struct is a direct copy of the parser's output shape, not a shared import. Keeps the example self-contained — readers can understand the whole thing top-to-bottom without chasing cross-module imports.
-- Reconnect loop is unconditional. If the parser restarts, the bot reconnects and resumes. No heartbeat tracking — a dead feed will show staleness via `last_update_timestamp_seconds`.
+- Reconnect loop is unconditional. If the parser restarts, the book-builder reconnects and resumes. No heartbeat tracking — a dead feed will show staleness via `last_update_timestamp_seconds`.
 - Symbol filter is case-sensitive and matches the publisher's symbol encoding verbatim.

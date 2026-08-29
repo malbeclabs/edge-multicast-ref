@@ -2,13 +2,13 @@
 
 > Implements the [Top-of-Book & Trades Feed](https://github.com/malbeclabs/edge-feed-spec/blob/main/top-of-book/spec.md) spec.
 
-A multicast subscriber and reusable Go parser for DoubleZero Top-of-Book (DZ-TOB v0.1.0) wire-format frames. The CLI writes decoded market data records to a file or Unix socket; the `tob` package exposes the same parser for in-process consumers.
+A multicast subscriber and reusable Go parser for DoubleZero Top-of-Book (DZ-TOB v0.1.0) wire-format datagrams. The CLI writes decoded market data records to a file or Unix socket; the `tob` package exposes the same parser for in-process consumers.
 
-**Dual wire schema support.** `InstrumentDefinition` is decoded at schema versions 1 and 3, selected per frame from the frame header's Schema Version byte — not a build-time or CLI setting. v3 inserts `Source ID` (`u16`) after `Instrument ID` and widens `Symbol` from 16 to 64 bytes; all other fields are unchanged. There is no version 2: that layout was specified upstream and superseded before any publisher emitted it, so the accepted versions are the set `{1, 3}` and version 2 is rejected exactly like version 0. A frame whose declared Schema Version disagrees with the length its `InstrumentDefinition` body actually carries is counted and skipped (as `parse_errors_total{reason="truncated"}`, matching marketbyorder and marketbyprice), not guessed at. An unsupported Schema Version itself is a separate fault and lands in `parse_errors_total{reason="schema_version"}`. `frames_total{port,schema_version}` (see [Metrics](#metrics)) is how to watch a publisher's v1-to-v3 cutover in production.
+**Dual wire schema support.** `InstrumentDefinition` is decoded at schema versions 1 and 3, selected per datagram from the datagram header's Schema Version byte — not a build-time or CLI setting. v3 inserts `Source ID` (`u16`) after `Instrument ID` and widens `Symbol` from 16 to 64 bytes; all other fields are unchanged. There is no version 2: that layout was specified upstream and superseded before any publisher emitted it, so the accepted versions are the set `{1, 3}` and version 2 is rejected exactly like version 0. A datagram whose declared Schema Version disagrees with the length its `InstrumentDefinition` body actually carries is counted and skipped (as `parse_errors_total{reason="truncated"}`, matching marketbyorder and marketbyprice), not guessed at. An unsupported Schema Version itself is a separate fault and lands in `parse_errors_total{reason="schema_version"}`. `datagrams_total{port,schema_version}` (see [Metrics](#metrics)) is how to watch a publisher's v1-to-v3 cutover in production.
 
 ## What it does
 
-Joins a multicast group on two UDP ports (marketdata + refdata), decodes the binary DZ-TOB protocol, and outputs structured records (quotes, trades, instrument definitions, heartbeats) as JSON lines, CSV, or a broadcast Unix socket that trading bots connect to.
+Joins a multicast group on two UDP ports (marketdata + refdata), decodes the binary DZ-TOB protocol, and outputs structured records (quotes, trades, instrument definitions, heartbeats) as JSON lines, CSV, or a broadcast Unix socket that trading book-builders connect to.
 
 ```
 multicast group (UDP)
@@ -122,7 +122,7 @@ quote,2026-04-11T05:26:06.699Z,0,5241,40,SEI,0.055615,14572,0.055631,7874,...
 
 ### Unix socket
 
-Broadcast to all connected clients. Trader bots connect and read one record per line. Drop-on-slow-consumer: a stalled bot gets gaps rather than blocking the feed for everyone else.
+Broadcast to all connected clients. Trader book-builders connect and read one record per line. Drop-on-slow-consumer: a stalled book-builder gets gaps rather than blocking the feed for everyone else.
 
 ```bash
 socat UNIX-CONNECT:/tmp/topofbook.sock - | jq .
@@ -149,10 +149,10 @@ Scrape `http://127.0.0.1:9090/metrics`. Liveness probe at `/healthz`.
 |---|---|---|---|
 | `ingress_packets_total` | counter | `channel` | UDP datagrams received |
 | `ingress_bytes_total` | counter | `channel` | UDP bytes received |
-| `parse_errors_total` | counter | `channel`, `reason` | Frame decode failures (reasons: `bad_magic`, `schema_version`, `frame_length`, `truncated`, `other`) |
-| `frame_header_errors_total` | counter | `reason` | Header validation failures (reserved; not yet emitted) |
+| `parse_errors_total` | counter | `channel`, `reason` | Datagram decode failures (reasons: `bad_magic`, `schema_version`, `frame_length`, `truncated`, `other`) |
+| `datagram_header_errors_total` | counter | `reason` | Header validation failures (reserved; not yet emitted) |
 | `records_total` | counter | `type` | Decoded records emitted to sink (types: `quote`, `trade`, `instrument_def`, `heartbeat`, ...) |
-| `frames_total` | counter | `port`, `schema_version` | Successfully parsed frames, by port and wire Schema Version. The way to watch a publisher's v1-to-v3 cutover: `schema_version="3"` climbing while `schema_version="1"` goes flat, then to zero, is when the v1 decode path can be retired. `schema_version="2"` should never appear; a nonzero count there means a publisher is emitting a version this parser believes does not exist |
+| `datagrams_total` | counter | `port`, `schema_version` | Successfully parsed datagrams, by port and wire Schema Version. The way to watch a publisher's v1-to-v3 cutover: `schema_version="3"` climbing while `schema_version="1"` goes flat, then to zero, is when the v1 decode path can be retired. `schema_version="2"` should never appear; a nonzero count there means a publisher is emitting a version this parser believes does not exist |
 | `source_latency_seconds` | histogram | `type` | Block/venue `source_ts` → kernel receive. End-to-end; crosses validator and local clocks |
 | `send_latency_seconds` | histogram | `type` | Publisher egress `send_ts` → kernel receive |
 | `buffered_messages` | gauge | — | Messages awaiting instrument definitions (cold-start buffer) |
