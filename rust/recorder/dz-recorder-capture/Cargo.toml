@@ -1,0 +1,31 @@
+[package]
+name = "dz-recorder-capture"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Live multicast capture as a Source, with kernel receive timestamps and its own drop accounting"
+
+[dependencies]
+dz-recorder-core = { path = "../dz-recorder-core" }
+dz-edge-core = { path = "../../codec/dz-edge-core" }
+thiserror = { workspace = true }
+nix = { workspace = true }
+pcap = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[features]
+# The tests that need a real multicast socket. Off by default, because CI has
+# no multicast route and a capture test that can only run by hand is not a gate.
+loopback-tests = []
+# AF_PACKET mode. Off by default so the crate builds and its tests run where
+# libpcap-dev is absent, which is why socket mode was built first: it needs no
+# CAP_NET_RAW and therefore gates in CI.
+afpacket = ["pcap"]
+# The AF_PACKET tests that need a real device: CAP_NET_RAW, and a host that
+# delivers multicast to itself. Off by default for the same reason
+# loopback-tests is — a live capture is not a CI gate.
+afpacket-live-tests = ["afpacket"]

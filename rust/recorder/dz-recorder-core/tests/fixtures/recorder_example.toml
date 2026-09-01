@@ -1,0 +1,35 @@
+# Every value here is a placeholder, and every address is from a range reserved
+# for documentation: 233.252.0.0/24 is MCAST-TEST-NET and 192.0.2.0/24 is RFC
+# 5737. Neither RFC 1918 space nor 239.0.0.0/8 belongs in a public example —
+# the second is administratively-scoped multicast that operators really use, so
+# an example carrying it is one somebody can paste into a live collision.
+
+site     = "site-a"
+recorder = "recorder-01"
+env      = "test"
+
+[[feed]]
+spec             = "top-of-book"
+multicast_group  = "233.252.0.10"
+interface        = "eth0"
+mktdata_port     = 40000
+refdata_port     = 40001
+expected_sources = ["192.0.2.1", "192.0.2.2"]
+
+[capture]
+mode   = "afpacket"
+buffer = "64MiB"
+
+[archive]
+staging_dir     = "/var/tmp/dz-recorder/staging"
+completed_dir   = "/var/tmp/dz-recorder/completed"
+rotate_bytes    = "256MiB"
+rotate_interval = "60s"
+compression     = "zstd"
+staging_max     = "64GiB"
+
+[health]
+walk_messages = false
+
+[metrics]
+listen_addr = "127.0.0.1:9100"

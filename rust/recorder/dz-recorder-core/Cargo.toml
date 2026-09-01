@@ -1,0 +1,15 @@
+[package]
+name = "dz-recorder-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The types, traits and configuration every DoubleZero Edge recorder crate speaks"
+
+[dependencies]
+dz-edge-core = { path = "../../codec/dz-edge-core" }
+thiserror = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+sha2 = { workspace = true }

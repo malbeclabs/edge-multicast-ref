@@ -62,7 +62,7 @@ Four things were checked against the code rather than assumed. Each changes a ta
 
 **2. `pcap-file` 2.0.0 covers every pcapng element the spec asks for.** Verified in the vendored source: `SectionHeaderOption::{Hardware, OS, UserApplication, Comment}`, `InterfaceDescriptionOption::{IfName, IfDescription, IfTsResol}`, `EnhancedPacketOption::DropCount` (option code 4), and `InterfaceStatisticsOption::{IsbIfRecv, IsbIfDrop}`. Pin `2.0.0`; `3.0.0-rc1` is the only newer release and it is a release candidate.
 
-**3. `nix` covers socket mode completely and AF_PACKET not at all.** `sockopt::{ReceiveTimestampns, RxqOvfl, Ipv4PacketInfo, Ipv4Ttl}` and `ControlMessageOwned::{ScmTimestampns, RxqOvfl, Ipv4PacketInfo}` all exist — socket mode needs no `unsafe` and no C dependency. But `nix` exposes neither `PACKET_STATISTICS` nor `SO_ATTACH_FILTER`, which AF_PACKET mode needs for its drop counter and its BPF filter. Doing it by hand means `libc::getsockopt` and `unsafe` in `dz-recorder-capture`.
+**3. `nix` covers socket mode completely and AF_PACKET not at all.** `sockopt::{ReceiveTimestampns, RxqOvfl, Ipv4PacketInfo, Ipv4RecvTtl}` and `ControlMessageOwned::{ScmTimestampns, RxqOvfl, Ipv4PacketInfo, Ipv4Ttl}` all exist — note that the *option* for `IP_RECVTTL` is `Ipv4RecvTtl` and that `sockopt::Ipv4Ttl` is `IP_TTL`, the outgoing TTL, which is not what a receiver wants — socket mode needs no `unsafe` and no C dependency. But `nix` exposes neither `PACKET_STATISTICS` nor `SO_ATTACH_FILTER`, which AF_PACKET mode needs for its drop counter and its BPF filter. Doing it by hand means `libc::getsockopt` and `unsafe` in `dz-recorder-capture`.
 
 **4. Therefore AF_PACKET goes through the `pcap` crate, and socket mode is built first.** libpcap gives the mmap ring, BPF filter compilation, and `stats()` (received / dropped / if_dropped) — the last of which is exactly `epb_dropcount` and the ISB pair — while keeping the `unsafe` inside the FFI crate so `#![forbid(unsafe_code)]` survives. The cost is a build-time `libpcap-dev`, which is **not installed on this workstation** (only the `libpcap0.8t64` runtime is), so the AF_PACKET task carries an install step and a CI package line. Socket mode is built first because it needs no `CAP_NET_RAW` and therefore runs in CI, which is what makes the round-trip test a gate rather than a manual ritual.
 
@@ -444,7 +444,13 @@ fn a_full_staging_directory_evicts_the_oldest_and_never_blocks() {
     for _ in 0..6 { a.rotate_a_full_segment(); }
     assert_eq!(a.segments_on_disk(), 4);
     assert_eq!(a.segments_evicted_total(), 2);
-    assert_eq!(a.write_blocked_nanos(), 0, "the capture path is never blocked");
+    // Time what the write path actually does, and assert a per-datagram budget
+    // against a *non-zero* total. A counter that only accumulates somewhere the
+    // write path cannot reach is structurally incapable of being non-zero, so
+    // asserting it is zero asserts nothing: the rule this test exists for would
+    // still pass with the write path stalled for minutes.
+    assert!(a.write_path_nanos() > 0, "the write path was actually timed");
+    assert!(a.write_path_max_nanos() < 1_000_000, "no single write stalled");
 }
 
 #[test]
