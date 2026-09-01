@@ -418,3 +418,27 @@ fn a_datagram_whose_destination_was_not_reported_is_admitted() {
     let synth = synthesiser();
     assert!(synth.admits(&ArrivalMetadata::default()));
 }
+
+#[test]
+fn the_loopback_device_resolves_to_its_own_address() {
+    // Every host has one, and its address is fixed by convention, so this is
+    // the one device name a test can assert an address for.
+    assert_eq!(
+        dz_recorder_capture::device_address("lo"),
+        Ok(Ipv4Addr::LOCALHOST)
+    );
+}
+
+#[test]
+fn a_device_the_host_does_not_have_is_refused_by_name() {
+    // Refused at startup, where an operator can read it. The alternative is a
+    // membership joined by route discovery: it leaves by the default route,
+    // never reaches the interface the feed arrives on, and the feed is then
+    // silent in a way that looks exactly like a clean one.
+    let error = dz_recorder_capture::device_address("dz-no-such-device0")
+        .expect_err("no host has this interface");
+    assert!(
+        error.to_string().contains("dz-no-such-device0"),
+        "the refusal has to name the device: {error}"
+    );
+}

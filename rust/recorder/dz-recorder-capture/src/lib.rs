@@ -16,9 +16,11 @@
 
 #[cfg(feature = "afpacket")]
 pub mod afpacket;
+pub mod device;
 pub mod rejoin;
 pub mod socket;
 
+pub use device::{device_address, DeviceAddressError};
 pub use rejoin::Rejoiner;
 pub use socket::{
     bind_multicast, bind_or_retry, Arrival, ArrivalMetadata, BindPlan, CaptureStats,

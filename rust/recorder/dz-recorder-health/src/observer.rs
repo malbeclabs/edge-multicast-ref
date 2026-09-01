@@ -258,6 +258,28 @@ impl HealthObserver {
         }
     }
 
+    /// Carries the capture's own counters across, as deltas over a sweep.
+    ///
+    /// These are the capture crate's counters and not this tier's: a membership
+    /// replaced, a replacement that failed, a datagram from a source nobody
+    /// declared, a datagram addressed to a group this handle did not join. The
+    /// tier pre-creates every one of them, so left unfed they read as a healthy
+    /// zero for the life of the process — and the rejoin counters are the
+    /// diagnostic for the exact failure they exist for: a stranded membership
+    /// on a socket that stays open, readable and permanently silent.
+    pub fn record_capture_deltas(&self, deltas: CaptureDeltas) {
+        self.feed_children.rejoins.inc_by(deltas.rejoins);
+        self.feed_children
+            .rejoin_failures
+            .inc_by(deltas.rejoin_failures);
+        self.feed_children
+            .unexpected_source_datagrams
+            .inc_by(deltas.unexpected_source_datagrams);
+        self.feed_children
+            .foreign_group_datagrams
+            .inc_by(deltas.foreign_group_datagrams);
+    }
+
     /// Records one completed archive segment deleted to stay inside the staging
     /// budget.
     ///
@@ -388,6 +410,18 @@ impl HealthObserver {
         self.feed_children.instances_evicted.inc();
         true
     }
+}
+
+/// One sweep's worth of the capture's own counters, as deltas.
+///
+/// Deltas rather than totals, because these counters are cumulative on both
+/// sides and a total handed to a counter would count every earlier sweep again.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct CaptureDeltas {
+    pub rejoins: u64,
+    pub rejoin_failures: u64,
+    pub unexpected_source_datagrams: u64,
+    pub foreign_group_datagrams: u64,
 }
 
 /// Nanoseconds, saturating rather than wrapping: a `Duration` above 584 years is

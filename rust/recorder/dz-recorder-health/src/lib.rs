@@ -33,4 +33,4 @@ pub use metrics::{
     HealthMetricsConfig, LatencyDropReason, RecvTimestampKind, UnreadableReason,
     HEARTBEAT_INTERVAL_BUCKETS, OTHER_VALUE, SEND_TO_RECV_BUCKETS,
 };
-pub use observer::{HealthObserver, InstanceLimits};
+pub use observer::{CaptureDeltas, HealthObserver, InstanceLimits};

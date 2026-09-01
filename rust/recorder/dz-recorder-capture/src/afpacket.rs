@@ -42,7 +42,7 @@ use crate::socket::{
     bind_or_retry, bump, hand_over, rejoin, Arrival, BindPlan, CaptureCounters, CaptureStats,
     Captured, Extent, Offered, PendingLoss, PortBinding, SourceGate, SourceKey, SourceVerdict,
 };
-use crate::OverflowTracker;
+use crate::{OverflowTracker, Waited};
 use dz_edge_core::{PortRole, MAX_DATAGRAM_SIZE};
 use dz_recorder_core::{RecordedDatagram, RecvTsKind, Source, SourceError, MAX_LINK_HEADER_SIZE};
 use nix::errno::Errno;
@@ -1213,6 +1213,51 @@ impl AfPacketSource {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
+    }
+}
+
+impl AfPacketSource {
+    /// The bounded form of [`Source::next`], for a caller that has to make
+    /// progress on a schedule.
+    ///
+    /// `Source::next` blocks until a datagram arrives or the handle stops,
+    /// which is right for a recorder and wrong for anything holding a second
+    /// flag — a signal handler's, say. A caller that cannot re-check its own
+    /// flag until a datagram arrives cannot be shut down while the feed is
+    /// quiet, and setting *this* source's stop flag instead is not the same
+    /// thing: that ends the source before its queued datagrams have been handed
+    /// over, which is the drain-before-stop ordering a clean shutdown depends
+    /// on.
+    ///
+    /// The wait ends early on the stop flag and on a lost handle, exactly as
+    /// the unbounded form does. Mirrors `SocketSource::next_within`.
+    pub fn next_within(&mut self, timeout: Duration) -> Result<Waited<'_>, SourceError> {
+        if let Some(done) = self.current.take() {
+            let _ = self.pool.try_send(done.into_buffer());
+        }
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(reason) = self.take_fatal() {
+                return Err(SourceError::HandleLost(reason));
+            }
+            if self.stop.load(Ordering::Relaxed) {
+                return Ok(Waited::Ended);
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Ok(Waited::TimedOut);
+            }
+            // Never past the deadline, and never past the poll interval either,
+            // so the stop flag is still observed on the same cadence.
+            match self.rx.recv_timeout(left.min(self.poll_interval)) {
+                Ok(captured) => {
+                    let held = self.current.insert(captured);
+                    return Ok(Waited::Datagram(held.recorded()));
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => return Ok(Waited::Ended),
+            }
+        }
     }
 }
 

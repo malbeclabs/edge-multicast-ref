@@ -1,0 +1,35 @@
+[package]
+name = "dz-recorder"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The recorder: captures an edge feed, archives the bytes, and says how it is doing"
+
+[dependencies]
+dz-recorder-core = { path = "../dz-recorder-core" }
+dz-recorder-capture = { path = "../dz-recorder-capture" }
+dz-recorder-archive = { path = "../dz-recorder-archive" }
+dz-recorder-health = { path = "../dz-recorder-health" }
+dz-edge-core = { path = "../../codec/dz-edge-core" }
+thiserror = { workspace = true }
+tiny_http = { workspace = true }
+# The only way to stop a recorder without losing the segment it holds. std has no
+# safe signal API and this crate forbids unsafe, so the handler is a dependency
+# rather than a syscall — the same one and the same feature the receivers in this
+# repository already use.
+ctrlc = { version = "3", features = ["termination"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[features]
+# AF_PACKET capture, which needs libpcap-dev at build time. Off by default so the
+# binary builds where that package is not installed; a configuration asking for
+# it then fails at startup rather than silently recording through the fallback.
+afpacket = ["dz-recorder-capture/afpacket"]
+# The shutdown test at binary altitude. It needs IP_MULTICAST_LOOP delivery to
+# this host, which is a property of the host rather than of the build, so it is
+# off by default and CI enables it in the job that has already probed for it.
+socket-e2e = []
