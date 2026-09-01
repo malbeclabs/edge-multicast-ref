@@ -1,4 +1,4 @@
-# DZ Market-by-Order Bot
+# DZ Market-by-Order Book-builder
 
 > Implements the [Market-by-Order Feed](https://github.com/malbeclabs/edge-feed-spec/blob/main/market-by-order/spec.md) spec.
 
@@ -8,7 +8,7 @@ Sibling to [topofbook-bot](../topofbook-bot/). Documentation will land as the im
 
 ## Sharded dispatch
 
-The bot shards record application across N worker goroutines keyed by
+The book-builder shards record application across N worker goroutines keyed by
 `instrument_id % N`. A single coordinator goroutine owns channel-scoped state
 (`reset_count`, manifest, `snapshot_id → shard` routing) and forwards each
 record to the owning shard; each shard exclusively owns its instruments,

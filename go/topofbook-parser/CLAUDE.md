@@ -2,7 +2,7 @@
 
 ## What this is
 
-A standalone Go binary that subscribes to a DoubleZero Edge multicast group carrying DZ Top-of-Book (DZ-TOB v0.1.0) market data frames, decodes them, and writes structured records to a file or Unix socket. It lives in the `edge-multicast-ref` repo alongside Rust XDP/kernel-receiver implementations for Solana shreds — same multicast infrastructure, different feed type and parser.
+A standalone Go binary that subscribes to a DoubleZero Edge multicast group carrying DZ Top-of-Book (DZ-TOB v0.1.0) market data datagrams, decodes them, and writes structured records to a file or Unix socket. It lives in the `edge-multicast-ref` repo alongside Rust XDP/kernel-receiver implementations for Solana shreds — same multicast infrastructure, different feed type and parser.
 
 This tool has no dependency on `doublezerod` or any DoubleZero library. It is a plain multicast UDP subscriber.
 
@@ -31,9 +31,9 @@ Runs until SIGINT/SIGTERM. One feed per process. The `--interface` flag is impor
 
 ## Wire format: DZ-TOB v0.1.0
 
-Fixed-layout, little-endian binary protocol. One UDP datagram = one frame. No varints, no length-prefixed strings, no schema negotiation. The decoder is a straight positional reader.
+Fixed-layout, little-endian binary protocol. One UDP datagram carries a 24-byte header and N messages. No varints, no length-prefixed strings, no schema negotiation. The decoder is a straight positional reader.
 
-### Frame header (24 bytes)
+### Datagram header (24 bytes)
 
 ```
 magic          u16   0x445A ("DZ", on wire: 5A 44)
@@ -115,7 +115,7 @@ Key state transitions logged at INFO:
 
 ## Publisher counterpart
 
-The publisher side of this wire format is [packethog/order_book_server](https://github.com/packethog/order_book_server) on the `binary-multicast-protocol` branch. It's a Rust program that reconstructs order books from a venue's native event stream and emits DZ-TOB frames onto a multicast group. The two implementations share no code — the wire format spec is the contract.
+The publisher side of this wire format is [packethog/order_book_server](https://github.com/packethog/order_book_server) on the `binary-multicast-protocol` branch. It's a Rust program that reconstructs order books from a venue's native event stream and emits DZ-TOB datagrams onto a multicast group. The two implementations share no code — the wire format spec is the contract.
 
 A Wireshark Lua dissector for the wire format is at `order_book_server/spec/dz_topofbook.lua` in that repo.
 
@@ -124,9 +124,9 @@ A Wireshark Lua dissector for the wire format is at `order_book_server/spec/dz_t
 This tool is part of a proof-of-concept for permissionless crypto market data over DoubleZero Edge:
 
 1. **Permissionless node** — a non-validating venue node reads blocks from the gossip network and writes event files to disk. No data license required.
-2. **Publisher** (order_book_server) — reconstructs the order book, emits DZ-TOB frames onto a multicast group via the DoubleZero tunnel.
+2. **Publisher** (order_book_server) — reconstructs the order book, emits DZ-TOB datagrams onto a multicast group via the DoubleZero tunnel.
 3. **DoubleZero Edge** — multicast transport. DZDs replicate at the switch level over dedicated fiber.
-4. **This tool** — subscriber. Decodes frames, writes records.
+4. **This tool** — subscriber. Decodes datagrams, writes records.
 5. **Trader bots** — connect to the Unix socket sink and consume the feed.
 
 Per-venue runbooks and the end-to-end POC writeup live in the `malbeclabs/doublezero` and `malbeclabs/infra` repos.

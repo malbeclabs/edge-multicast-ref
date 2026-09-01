@@ -13,7 +13,7 @@ Two properties of that envelope matter here:
 - **`snapshot_level` records carry no `instrument_id`.** The wire omits it because the containing `SnapshotBegin` implies it. The coordinator stamps the identity from the currently-open snapshot group before routing.
 - **An absent `order_count` means the `0xFFFF` sentinel, not zero.** The parser omits the key when the venue does not expose a count. Zero is a real count and is emitted as `0`.
 
-The bot reconnects to the socket with exponential backoff (250 ms doubling to 5 s) and survives the parser restarting under it.
+The book-builder reconnects to the socket with exponential backoff (250 ms doubling to 5 s) and survives the parser restarting under it.
 
 ## State machine
 
@@ -53,7 +53,7 @@ An `order_count` of `0xFFFF` on the wire reads out as `0`, because the sentinel 
 
 ## Persistence
 
-When `--clickhouse-url` is non-empty, the bot writes to five ClickHouse tables:
+When `--clickhouse-url` is non-empty, the book-builder writes to five ClickHouse tables:
 
 | Table | Source | Contents |
 |---|---|---|
@@ -72,9 +72,9 @@ When `--clickhouse-url` is non-empty, the bot writes to five ClickHouse tables:
 
 **`events` is an applied-delta log, not a wire capture.** A delta that arrives while an instrument is `awaiting-snapshot` or `gap` is buffered rather than applied, so it produces no row at the time it is seen. When a snapshot later commits, `replayBuffer` replays that buffer against the now-`ready` book and each replayed delta produces its row then, ordered after the snapshot commit it was applied on top of. So every delta the book applies appears exactly once, and `mktdata_seq` stays continuous across bootstraps and gap recoveries. What `events` does not contain is deltas the book never applied: duplicates, records discarded below the snapshot anchor, and the `per_instrument_gap` and `malformed_delta` cases above.
 
-**An empty `--clickhouse-url` disables persistence entirely**, not just partially: the client is `nil`, every writer call returns before it builds a row, and the bot runs exactly as it did before persistence existed — no writes attempted, no errors, and every `clickhouse_*` metric plus `snapshot_writes_total` holds at `0`. The nil client is handed to the writers through a guard rather than assigned directly, because a typed nil pointer stored in an interface is not `== nil` and would silently defeat every one of those checks.
+**An empty `--clickhouse-url` disables persistence entirely**, not just partially: the client is `nil`, every writer call returns before it builds a row, and the book-builder runs exactly as it did before persistence existed — no writes attempted, no errors, and every `clickhouse_*` metric plus `snapshot_writes_total` holds at `0`. The nil client is handed to the writers through a guard rather than assigned directly, because a typed nil pointer stored in an interface is not `== nil` and would silently defeat every one of those checks.
 
-**`--clickhouse-batch-size`, `--clickhouse-batch-interval` and `--clickhouse-buffer-size` must all be positive.** The client rejects a non-positive value at construction and the bot exits with the offending table named. They are validated rather than clamped because each failure mode is bad in its own way: a non-positive interval panics the batcher's ticker in a goroutine that nothing recovers, and a non-positive buffer makes the queue unbuffered, so the deliberately non-blocking enqueue drops very nearly every row to a counter.
+**`--clickhouse-batch-size`, `--clickhouse-batch-interval` and `--clickhouse-buffer-size` must all be positive.** The client rejects a non-positive value at construction and the book-builder exits with the offending table named. They are validated rather than clamped because each failure mode is bad in its own way: a non-positive interval panics the batcher's ticker in a goroutine that nothing recovers, and a non-positive buffer makes the queue unbuffered, so the deliberately non-blocking enqueue drops very nearly every row to a counter.
 
 **A write failure is counted and dropped, never propagated to the feed.** A batch that fails to insert increments `clickhouse_write_errors_total{table,reason}` and `clickhouse_rows_dropped_total{table,reason="write_failed"}`, then the batch is discarded. The batching client is the asynchronous boundary between the book engine and ClickHouse, so a wedged or unreachable database degrades to data loss for that table — it never backpressures into the socket read loop or slows the feed.
 
@@ -116,7 +116,7 @@ Namespace `dz_mbp_bot`.
 | `uptime_seconds` | Seconds since process start. |
 | `socket_connected` | 1 while connected to the parser socket. |
 | `socket_reconnects_total{reason}` | Socket reconnections. |
-| `socket_to_bot_latency_seconds{type}` | Parser kernel receive to bot dispatch. |
+| `socket_to_bot_latency_seconds{type}` | Parser kernel receive to book-builder dispatch. |
 | `records_total{type}` | Records consumed, by record type. |
 | `decode_errors_total` | Unparseable lines from the socket. |
 | `book_divergence_total{kind}` | Publisher/subscriber disagreements on a `LevelUpdate`: `new_on_present`, `change_on_absent`, `delete_nonzero_qty`, `zero_qty_wrong_action`. Counted without altering the applied result. |
@@ -148,10 +148,10 @@ Every metric listed above is written by code in this binary — no collector is 
 ## Architecture
 
 ```
-parser socket → Bot (read loop) → Coordinator (1 goroutine) → N Shards → Instrument
+parser socket → Book-builder (read loop) → Coordinator (1 goroutine) → N Shards → Instrument
 ```
 
-The **Coordinator** owns channel-scoped state and routes each record to exactly one shard, or broadcasts it. It is not safe for concurrent callers: the bot read loop is the only caller. It also runs two barriers — a **reset barrier** on a `Reset Count` change, which drains every shard, wipes all state, and re-dispatches the triggering record as the first record of the new era; and a **FIFO fence** for channel-scoped records like `EndOfSession`, which orders them strictly after all preceding instrument records.
+The **Coordinator** owns channel-scoped state and routes each record to exactly one shard, or broadcasts it. It is not safe for concurrent callers: the book-builder read loop is the only caller. It also runs two barriers — a **reset barrier** on a `Reset Count` change, which drains every shard, wipes all state, and re-dispatches the triggering record as the first record of the new era; and a **FIFO fence** for channel-scoped records like `EndOfSession`, which orders them strictly after all preceding instrument records.
 
 Snapshot routing follows the **currently-open group**, never `{channel, snapshot_id}`. `Snapshot ID` is monotonic per `(channel_id, instrument_id)`, not per channel, so two instruments routinely hold the same value within one cycle and an id-keyed route delivers levels to the wrong shard, where they are silently dropped.
 
