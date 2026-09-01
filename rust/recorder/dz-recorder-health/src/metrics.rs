@@ -304,6 +304,10 @@ pub struct HealthMetrics {
     instances_refused_total: IntCounterVec,
     declared_instances_evicted_total: IntCounterVec,
     capture_drops_handle_total: IntCounterVec,
+    rejoins_feed_total: IntCounterVec,
+    rejoin_failures_total: IntCounterVec,
+    unexpected_source_datagrams_total: IntCounterVec,
+    foreign_group_datagrams_total: IntCounterVec,
     datagrams_unexpected_role_total: IntCounterVec,
 
     segments_evicted_total: IntCounter,
@@ -332,6 +336,10 @@ pub(crate) struct FeedChildren {
     pub(crate) instances_refused: IntCounter,
     pub(crate) declared_evicted: IntCounter,
     pub(crate) capture_drops_handle: IntCounter,
+    pub(crate) rejoins: IntCounter,
+    pub(crate) rejoin_failures: IntCounter,
+    pub(crate) unexpected_source_datagrams: IntCounter,
+    pub(crate) foreign_group_datagrams: IntCounter,
     pub(crate) unexpected_role: IntCounter,
 }
 
@@ -661,6 +669,45 @@ impl HealthMetrics {
                 &labels,
                 &["feed"],
             ),
+            rejoins_feed_total: counter_vec(
+                &registry,
+                "dz_recorder_capture_rejoins_total",
+                "Group memberships this recorder replaced, per feed. The capture counts these \
+                 for the handle rather than per port role, so this is the grain the number \
+                 actually has; dz_recorder_rejoins_total is the per-role series, populated only \
+                 by a caller that knows the role.",
+                &labels,
+                &["feed"],
+            ),
+            rejoin_failures_total: counter_vec(
+                &registry,
+                "dz_recorder_rejoin_failures_total",
+                "Attempts to replace a group membership that failed, per feed. Read beside \
+                 dz_recorder_rejoins_total: rejoins alone say a membership was being replaced, \
+                 and these say the replacement did not take — which is the state where the \
+                 socket is open, readable and permanently silent.",
+                &labels,
+                &["feed"],
+            ),
+            unexpected_source_datagrams_total: counter_vec(
+                &registry,
+                "dz_recorder_unexpected_source_datagrams_total",
+                "Datagrams from a source address the operator did not declare, per feed. \
+                 Counted and archived, never dropped: a wrongly recorded datagram is filterable \
+                 afterwards on its source and a wrongly dropped one is gone.",
+                &labels,
+                &["feed"],
+            ),
+            foreign_group_datagrams_total: counter_vec(
+                &registry,
+                "dz_recorder_foreign_group_datagrams_total",
+                "Datagrams delivered to a capture handle that were addressed to a group it did \
+                 not join, per feed. The bind refuses them, so this is expected to stay at zero \
+                 for the life of the process; a non-zero rate means the bind stopped filtering \
+                 and this recorder is archiving somebody else's feed.",
+                &labels,
+                &["feed"],
+            ),
             datagrams_unexpected_role_total: counter_vec(
                 &registry,
                 "dz_recorder_datagrams_unexpected_role_total",
@@ -834,6 +881,12 @@ impl HealthMetrics {
         self.declared_instances_evicted_total
             .with_label_values(&[name]);
         self.capture_drops_handle_total.with_label_values(&[name]);
+        self.rejoins_feed_total.with_label_values(&[name]);
+        self.rejoin_failures_total.with_label_values(&[name]);
+        self.unexpected_source_datagrams_total
+            .with_label_values(&[name]);
+        self.foreign_group_datagrams_total
+            .with_label_values(&[name]);
         self.datagrams_unexpected_role_total
             .with_label_values(&[name]);
 
@@ -938,6 +991,17 @@ impl HealthMetrics {
                 .declared_instances_evicted_total
                 .with_label_values(&[feed]),
             capture_drops_handle: self.capture_drops_handle_total.with_label_values(&[feed]),
+            // Feed-scoped here as well as per role: the capture counts rejoins
+            // for the handle, and a per-role split of a number the source
+            // cannot attribute would be a guess written down as a measurement.
+            rejoins: self.rejoins_feed_total.with_label_values(&[feed]),
+            rejoin_failures: self.rejoin_failures_total.with_label_values(&[feed]),
+            unexpected_source_datagrams: self
+                .unexpected_source_datagrams_total
+                .with_label_values(&[feed]),
+            foreign_group_datagrams: self
+                .foreign_group_datagrams_total
+                .with_label_values(&[feed]),
             unexpected_role: self
                 .datagrams_unexpected_role_total
                 .with_label_values(&[feed]),

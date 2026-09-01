@@ -67,6 +67,14 @@ jobs:
         run: cargo clippy -p dz-recorder-capture --features afpacket --all-targets -- -D warnings
       - name: Test (afpacket)
         run: cargo test -p dz-recorder-capture --features afpacket
+      # The binary's own afpacket arms. Without this line every
+      # `#[cfg(feature = "afpacket")]` block in runner.rs and startup.rs is
+      # neither type-checked nor run — in the *default* capture mode, which is
+      # how a quiet feed that could not be shut down stayed invisible.
+      - name: Clippy (dz-recorder, afpacket)
+        run: cargo clippy -p dz-recorder --features afpacket --all-targets -- -D warnings
+      - name: Test (dz-recorder, afpacket)
+        run: cargo test -p dz-recorder --features afpacket
       # The live capture needs CAP_NET_RAW and a real device, so
       # afpacket-live-tests is compiled here and run by hand: a test that can
       # only run by hand must not be able to fail the build.
@@ -108,3 +116,9 @@ jobs:
       - name: Test (loopback capture)
         working-directory: rust
         run: cargo test -p dz-recorder-capture --features loopback-tests
+      # The shutdown sequence at binary altitude: a real process, a real
+      # SIGTERM, and an object on the disk afterwards. It belongs in this job
+      # because it needs the same multicast-capable runner the probe proved.
+      - name: Test (shutdown, real process)
+        working-directory: rust
+        run: cargo test -p dz-recorder --features socket-e2e

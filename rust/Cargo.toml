@@ -12,6 +12,7 @@ members = [
     "recorder/dz-recorder-health",
     "recorder/dz-recorder-loss",
     "recorder/dz-recorder-e2e",
+    "recorder/dz-recorder",
 ]
 exclude = ["kernel-receiver", "xdp-receiver"]
 
