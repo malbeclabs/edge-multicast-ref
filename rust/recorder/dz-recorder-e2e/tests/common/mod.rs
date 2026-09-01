@@ -14,6 +14,11 @@
 #![allow(dead_code)]
 #![forbid(unsafe_code)]
 
+/// Validation against edge-feed-spec's own rule set. Behind the feature,
+/// because it needs a tool built from that repository.
+#[cfg(feature = "conformance")]
+pub mod conformance;
+
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 use std::time::Duration;

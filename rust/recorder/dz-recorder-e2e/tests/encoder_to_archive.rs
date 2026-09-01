@@ -365,7 +365,7 @@ fn a_port_role_joined_and_silent_is_stated_in_the_manifest_rather_than_absent() 
 }
 
 #[test]
-fn the_snapshot_port_role_round_trips_although_no_message_type_can_be_encoded_for_it() {
+fn the_snapshot_port_role_is_declared_in_the_manifest_although_this_feed_never_uses_it() {
     // The one datagram in this suite the encoder could not supply. No message
     // type in `dz-edge-core`, `dz-edge-tob` or `dz-edge-refdata` lists
     // `PortRole::Snapshot`, because the snapshot port role belongs to the depth
@@ -422,4 +422,15 @@ fn the_snapshot_port_role_round_trips_although_no_message_type_can_be_encoded_fo
         vec![FLAG_SNAPSHOT],
         "the snapshot bit is set on the snapshot port role"
     );
+}
+
+#[cfg(feature = "conformance")]
+#[test]
+fn what_the_publisher_wrote_and_the_recorder_kept_is_valid_by_the_spec() {
+    // The correct stream only: the suites below deliberately archive datagrams
+    // the specification forbids, because a recorder that refused them would
+    // destroy the evidence of the publisher defect. Those belong in front of
+    // the rule set as findings, not as a passing gate.
+    let archive = record(&correct_stream(), ALL_ROLES);
+    common::conformance::conformance_of(&archive, "tob").assert_clean();
 }

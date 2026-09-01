@@ -1,5 +1,19 @@
 use dz_edge_core::{AppMessage, DecodeError, PortRole};
 
+/// The publisher's upstream does not distinguish an insertion from a change.
+///
+/// It covers that ambiguity and nothing else: a removal is always determinable,
+/// because the publisher knows the quantity reached zero, so `Unknown` is not a
+/// conformant `Action` for one.
+pub const ACTION_UNKNOWN: u8 = 0;
+/// No quantity rested at this price before.
+pub const ACTION_NEW: u8 = 1;
+/// Some did.
+pub const ACTION_CHANGE: u8 = 2;
+/// The level is being removed. The only `Action` that may carry
+/// `qty_raw = 0`, and the only one that may not carry anything else.
+pub const ACTION_DELETE: u8 = 3;
+
 /// `0x40 LevelUpdate` (48 bytes). One price level's aggregate quantity, after
 /// the change.
 ///
@@ -10,9 +24,28 @@ use dz_edge_core::{AppMessage, DecodeError, PortRole};
 /// at that price and correct everywhere else, which is what makes the loss
 /// bounded and detectable.
 ///
-/// `action`, `level_index` and `update_reason` are informational. They must not
-/// gate the apply — two subscribers receiving the same message must reach the
-/// same book, and one branching on a field the other ignored would not.
+/// `action`, `level_index` and `update_reason` are informational **to the
+/// subscriber**: they must not gate the apply, because every `LevelUpdate`
+/// states the complete resulting state of one level, so applying by quantity
+/// alone always produces the correct book regardless of what `Action` claims.
+///
+/// That is not the same as saying a publisher may write anything there.
+/// `qty_raw = 0` and [`ACTION_DELETE`] must come together in both directions —
+/// a deletion carrying any other `Action`, and a `Delete` carrying a non-zero
+/// quantity, are both violations the specification names. The failure it exists
+/// for is specific and has happened: a publisher numbering the `Action` table
+/// from `New` instead of `Unknown` emits every removal as a `Change` carrying
+/// zero, which is self-consistent and therefore invisible to any round-trip
+/// test — subscribers apply by quantity and build correct books, while every
+/// consumer reading `Action` is quietly wrong.
+///
+/// This type does not refuse that pairing, and the difference from
+/// [`BookClear`](crate::BookClear)'s refusal is the point: a bounded clear of
+/// both sides has no meaning two implementations would agree on, while this one
+/// has a defined meaning — apply by quantity — and is merely a defect in a
+/// field beside it. Refusing it would destroy the evidence of a publisher bug
+/// instead of recording it, which is the one thing this family of crates is
+/// most careful not to do.
 ///
 /// Prices carry the instrument's Price Exponent and quantities its Qty
 /// Exponent, both from `InstrumentDefinition`. This type does no scaling: the

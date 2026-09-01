@@ -122,3 +122,45 @@ jobs:
       - name: Test (shutdown, real process)
         working-directory: rust
         run: cargo test -p dz-recorder --features socket-e2e
+
+  # The specification's own rule set, over what this repository's publisher
+  # writes and its recorder keeps. Everything else here compares the chain
+  # against itself, which cannot catch both halves agreeing on something the
+  # spec forbids — and that class of bug has shipped before, which is why the
+  # tool exists.
+  #
+  # The tool lives in edge-feed-spec, a separate public repository, and is
+  # pinned: an unpinned checkout means the rule set changes under this
+  # repository without a commit here, so a rule-set update should be a
+  # deliberate bump rather than a build that broke overnight.
+  conformance:
+    runs-on: ubuntu-latest
+    env:
+      # conformance: don't score a publisher's clean shutdown as non-conformance (#48)
+      SPEC_REF: e68184bc25e25f1a9f0c26c465fdaf3bb5f23268
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: malbeclabs/edge-feed-spec
+          ref: ${{ env.SPEC_REF }}
+          path: edge-feed-spec
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: edge-feed-spec/tools/conformance/go.mod
+      - name: Build dz-conformance
+        working-directory: edge-feed-spec/tools/conformance
+        run: go build -o "$RUNNER_TEMP/dz-conformance" .
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Clippy (conformance)
+        working-directory: rust
+        run: cargo clippy -p dz-recorder-e2e --features conformance --all-targets -- -D warnings
+      # The suite fails rather than skips when the tool is absent, so this line
+      # is a gate and not a hope.
+      - name: Test (against the specification's rule set)
+        working-directory: rust
+        env:
+          DZ_CONFORMANCE_BIN: ${{ runner.temp }}/dz-conformance
+        run: cargo test -p dz-recorder-e2e --features conformance

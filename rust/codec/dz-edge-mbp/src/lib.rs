@@ -20,7 +20,9 @@
 //! and not a drifting one. And **`Action`, `Level Index` and `Update Reason`
 //! are informational**: they must not gate the apply, because a subscriber that
 //! branched on them would disagree with one that did not about a book they both
-//! received identically.
+//! received identically. Informational to the *subscriber*, that is — a
+//! publisher still owes `Action = Delete` on every zero quantity and no other,
+//! which is a rule the specification names and a bug that has shipped.
 
 #![forbid(unsafe_code)]
 
@@ -31,7 +33,7 @@ pub mod snapshot;
 pub use book_clear::{
     BookClear, CLEAR_ASK, CLEAR_BID, CLEAR_BOTH, SCOPE_ENTIRE_SIDE, SCOPE_FROM_PRICE,
 };
-pub use level_update::LevelUpdate;
+pub use level_update::{LevelUpdate, ACTION_CHANGE, ACTION_DELETE, ACTION_NEW, ACTION_UNKNOWN};
 pub use snapshot::{SnapshotBegin, SnapshotEnd, SnapshotLevel};
 
 /// Datagram delimiter for the market-by-price feed: "BD", little-endian on the

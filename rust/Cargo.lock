@@ -260,6 +260,7 @@ name = "dz-recorder-e2e"
 version = "0.1.0"
 dependencies = [
  "dz-edge-core",
+ "dz-edge-mbp",
  "dz-edge-refdata",
  "dz-edge-tob",
  "dz-recorder-archive",
