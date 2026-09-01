@@ -9,6 +9,7 @@ members = [
     "recorder/dz-recorder-archive",
     "recorder/dz-recorder-replay",
     "recorder/dz-recorder-capture",
+    "recorder/dz-recorder-health",
 ]
 exclude = ["kernel-receiver", "xdp-receiver"]
 

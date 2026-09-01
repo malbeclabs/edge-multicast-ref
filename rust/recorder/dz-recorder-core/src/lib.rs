@@ -29,5 +29,5 @@ pub use config::{
 pub use datagram::{CaptureDropScope, ChannelInstance, RecordedDatagram, RecvTsKind};
 pub use error::{SinkError, SourceError};
 pub use identity::RecorderIdentity;
-pub use sequence::{SequenceOutcome, SequenceTracker, REORDER_WINDOW};
+pub use sequence::{SequenceOutcome, SequenceTracker, MAX_FORWARD_JUMP, REORDER_WINDOW};
 pub use traits::{CompletedSegment, Observer, Sink, Source};

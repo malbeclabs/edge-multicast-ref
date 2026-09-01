@@ -201,6 +201,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dz-recorder-health"
+version = "0.1.0"
+dependencies = [
+ "dz-edge-core",
+ "dz-recorder-core",
+ "prometheus",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "dz-recorder-replay"
 version = "0.1.0"
 dependencies = [

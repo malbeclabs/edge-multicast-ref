@@ -169,6 +169,20 @@ pub struct FeedConfig {
     /// Empty means no expectation stated. See [`Self::admits_every_source`].
     #[serde(default)]
     pub expected_sources: Vec<Ipv4Addr>,
+    /// The `Channel ID`s this feed shards on, if an operator states them.
+    ///
+    /// Like `expected_sources`, this gates counting and alerting and never the
+    /// archive: a datagram on an undeclared channel is recorded exactly as any
+    /// other. What it buys is that the pair `(source, channel)` decides whether
+    /// an instance is a declared one — whose series are pre-created and survive
+    /// eviction — so a sender spoofing a declared address cannot keep series
+    /// alive on channels the feed never carried.
+    ///
+    /// Empty means unstated, and then every channel from a declared source is
+    /// declared. Reading unstated as "none" would make every publisher a
+    /// stranger on its own recorder.
+    #[serde(default)]
+    pub expected_channel_ids: Vec<u8>,
 }
 
 impl FeedConfig {

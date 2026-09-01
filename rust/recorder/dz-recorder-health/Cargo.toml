@@ -1,0 +1,18 @@
+[package]
+name = "dz-recorder-health"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The header-only health tier: what a recorder can say about a feed, and about itself, in minutes rather than hours"
+
+[dependencies]
+dz-recorder-core = { path = "../dz-recorder-core" }
+dz-edge-core = { path = "../../codec/dz-edge-core" }
+thiserror = { workspace = true }
+prometheus = { workspace = true }
+
+# No dev-dependencies. The whole tier is pure logic over a `RecordedDatagram`,
+# so its tests need no temporary directory, no privileges and no network — which
+# is the property that makes every one of them a CI gate.
