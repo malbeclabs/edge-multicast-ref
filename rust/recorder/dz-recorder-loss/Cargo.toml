@@ -1,0 +1,21 @@
+[package]
+name = "dz-recorder-loss"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Sequence-loss detection over any Source: the rows a Sequence column is fed by"
+
+[dependencies]
+dz-recorder-core = { path = "../dz-recorder-core" }
+dz-edge-core = { path = "../../codec/dz-edge-core" }
+thiserror = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+dz-recorder-archive = { path = "../dz-recorder-archive" }
+dz-recorder-replay = { path = "../dz-recorder-replay" }
+dz-recorder-health = { path = "../dz-recorder-health" }
+dz-edge-tob = { path = "../../codec/dz-edge-tob" }
+tempfile = { workspace = true }
