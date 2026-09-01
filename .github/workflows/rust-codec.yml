@@ -1,17 +1,23 @@
 name: rust-codec
 
+# Unfiltered, and deliberately. A paths-filtered workflow reports nothing on a
+# pull request that touches none of its paths, and a *required* check that never
+# reports blocks that pull request for ever — so a filter here is the thing that
+# keeps these jobs out of the branch ruleset, which is the difference between a
+# gate and a red X somebody may notice. go-tests.yml runs unfiltered for the
+# same reason, and its checks are required.
+#
+# The cost is a Rust build on pull requests that change no Rust. That is minutes
+# of a runner; the alternative is a test suite nothing enforces.
 on:
   pull_request:
-    paths:
-      - 'rust/codec/**'
-      - 'rust/publisher/**'
-      - 'rust/recorder/**'
-      - 'rust/Cargo.toml'
-      - 'rust/Cargo.lock'
-      - 'testdata/golden/**'
-      - '.github/workflows/rust-codec.yml'
   push:
     branches: [main]
+
+# The default token is broader than any job here needs, and every one of them
+# executes each dependency's build.rs. Matches go-tests.yml.
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -21,6 +27,11 @@ jobs:
         working-directory: rust
     steps:
       - uses: actions/checkout@v4
+      # Before the toolchain, because it needs none and a breach here is cheaper
+      # to learn about in ten seconds than after a build.
+      - name: Public-repository rules
+        working-directory: .
+        run: ./scripts/check-public-repo-rules.sh
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -32,16 +43,14 @@ jobs:
         run: cargo test --all
       - name: Test (release)
         run: cargo test --all --release
-      # Compiled, not run: the loopback tests need a multicast route and
-      # IP_MULTICAST_LOOP delivery to this host, which the runner has not got.
-      # Compiling them is still a gate — a socket test that stops building is a
-      # test nobody runs by hand either.
+      # Socket mode's own loopback test stays compile-only here: the job below
+      # is the one that has established it can deliver multicast to itself.
       - name: Build (loopback tests)
         run: cargo test -p dz-recorder-capture --features loopback-tests --no-run
 
-  # AF_PACKET mode is a separate job because it needs libpcap-dev at build time.
-  # Without it nothing compiles afpacket.rs at all, and 1,400 lines of the
-  # default capture mode would be gated by nothing.
+  # AF_PACKET mode is a separate job because it needs libpcap-dev at build
+  # time, and the job above must stay the gate that needs no system package:
+  # that independence is the whole reason socket mode was built first.
   afpacket:
     runs-on: ubuntu-latest
     defaults:
@@ -58,7 +67,44 @@ jobs:
         run: cargo clippy -p dz-recorder-capture --features afpacket --all-targets -- -D warnings
       - name: Test (afpacket)
         run: cargo test -p dz-recorder-capture --features afpacket
-      # afpacket-live-tests needs CAP_NET_RAW and a real device, so it is
-      # compiled here and run by hand.
+      # The live capture needs CAP_NET_RAW and a real device, so
+      # afpacket-live-tests is compiled here and run by hand: a test that can
+      # only run by hand must not be able to fail the build.
       - name: Build (afpacket live tests)
         run: cargo test -p dz-recorder-capture --features afpacket-live-tests --no-run
+
+  # The end-to-end suite where a publisher's encoder meets a recorder's capture,
+  # archive and replay over a real socket. It runs on every pull request because
+  # it is the only test that proves the two halves agree about the wire rather
+  # than about each other's fixtures.
+  #
+  # Running is not blocking. Whether a red run can stop a merge is decided by
+  # the branch ruleset's required checks, which this file cannot set: dropping
+  # the paths filter above is what makes these jobs eligible to be listed there,
+  # and listing them is an administrator's action.
+  #
+  # The probe runs first and deliberately does not skip: a runner that cannot
+  # deliver multicast to itself fails here in one line, rather than failing
+  # inside a capture with an errno to interpret — or worse, passing while
+  # gating nothing.
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Can this runner deliver multicast to itself?
+        run: ./scripts/probe-loopback-multicast.py
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Clippy (socket-e2e)
+        working-directory: rust
+        run: cargo clippy -p dz-recorder-e2e --features socket-e2e --all-targets -- -D warnings
+      - name: Test (encoder to archive, no socket)
+        working-directory: rust
+        run: cargo test -p dz-recorder-e2e
+      - name: Test (over a real socket)
+        working-directory: rust
+        run: cargo test -p dz-recorder-e2e --features socket-e2e -- --test-threads=1
+      - name: Test (loopback capture)
+        working-directory: rust
+        run: cargo test -p dz-recorder-capture --features loopback-tests

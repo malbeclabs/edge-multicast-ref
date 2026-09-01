@@ -1,9 +1,12 @@
 //! The one thing that cannot be proved without a socket: that a real datagram
 //! comes back out of [`SocketSource`] with a kernel stamp on it.
 //!
-//! Behind the `loopback-tests` feature. It needs a host with a multicast route
-//! and `IP_MULTICAST_LOOP` delivery to itself, which CI does not have, and a
-//! capture test that can only run by hand must not be able to fail the build.
+//! Behind the `loopback-tests` feature, off by default so that the default
+//! build asks nothing of the host: this needs a multicast route and
+//! `IP_MULTICAST_LOOP` delivery to itself, and a workstation or container
+//! without one must still be able to test the workspace. CI compiles this suite
+//! in the main job and runs it in the end-to-end job, behind a probe that
+//! proves the runner can deliver multicast to itself.
 #![cfg(feature = "loopback-tests")]
 
 use dz_edge_core::PortRole;

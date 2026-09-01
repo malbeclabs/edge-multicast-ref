@@ -1,0 +1,39 @@
+[package]
+name = "dz-recorder-e2e"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "End-to-end tests where a publisher's encoder meets a recorder's capture, archive and replay"
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+dz-edge-core = { path = "../../codec/dz-edge-core" }
+dz-edge-tob = { path = "../../codec/dz-edge-tob" }
+# No message type in `dz-edge-core` or `dz-edge-tob` lists the `refdata` port
+# role, so without this the real encoder cannot produce a `refdata` datagram at
+# all and the round trip would cover one port role out of three.
+dz-edge-refdata = { path = "../../codec/dz-edge-refdata" }
+dz-recorder-core = { path = "../dz-recorder-core" }
+dz-recorder-archive = { path = "../dz-recorder-archive" }
+dz-recorder-replay = { path = "../dz-recorder-replay" }
+dz-recorder-capture = { path = "../dz-recorder-capture" }
+tempfile = { workspace = true }
+# `SegmentManifest` is `Deserialize`, so the per-instance coverage rows are
+# asserted as the typed values the index table holds rather than found by a text
+# search over the JSON.
+serde_json = { workspace = true }
+
+[features]
+# The tests that open a real multicast socket and send over the loopback path.
+#
+# Off by default so that `cargo test` needs nothing of the host: a workstation
+# or container with no multicast route must still be able to build and test this
+# workspace. CI turns it on in a job of its own, behind a probe that proves the
+# runner can deliver multicast to itself, so these tests do run on every pull
+# request — being off by default is a statement about the default build and not
+# about whether anything exercises them.
+socket-e2e = []
