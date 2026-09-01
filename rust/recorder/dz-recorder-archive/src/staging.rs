@@ -129,6 +129,12 @@ struct Residue {
     /// of the window it holds, and the object it is about to become is one
     /// nothing else can produce.
     queued: bool,
+    /// The sequence number in a working segment's name, which is what orders
+    /// the queue. Modification time cannot: two rotations inside one clock tick
+    /// — which is what a loaded host produces — leaves it unable to say which
+    /// segment is the newer, and protecting the wrong one evicts the segment
+    /// just closed out from under the compressor.
+    seq: Option<u64>,
 }
 
 pub struct StagingWatermark {
@@ -337,12 +343,21 @@ impl StagingWatermark {
         // already bounds, and leaves the queue itself as short as the budget
         // requires.
         let newest_queued = newest_queued(&residue).cloned();
-        let by_priority = residue.iter().filter(|r| r.evictable && !r.queued).chain(
-            residue
-                .iter()
-                .filter(|r| r.evictable && r.queued)
-                .filter(|r| Some(&r.path) != newest_queued.as_ref()),
-        );
+        // The queue is ordered by segment sequence for the reason newest_queued
+        // is: modification time cannot separate two rotations inside one clock
+        // tick, and "oldest first" then means whichever the directory listing
+        // happened to return first. An orphan has no queue position and keeps
+        // its own order, which is all a file with no sequence in its name has.
+        let mut queued: Vec<&Residue> = residue
+            .iter()
+            .filter(|r| r.evictable && r.queued)
+            .filter(|r| Some(&r.path) != newest_queued.as_ref())
+            .collect();
+        queued.sort_by_key(|r| r.seq);
+        let by_priority = residue
+            .iter()
+            .filter(|r| r.evictable && !r.queued)
+            .chain(queued);
         for partial in by_priority {
             if total <= self.staging_max {
                 break;
@@ -415,7 +430,9 @@ impl StagingWatermark {
                 // symlink_metadata, for the reason file_len gives.
                 let metadata = fs::symlink_metadata(&path).ok();
                 let queued = self.is_queued(&path);
+                let seq = working_segment_seq(&name);
                 residue.push(Residue {
+                    seq,
                     bytes: metadata.as_ref().map_or(0, std::fs::Metadata::len),
                     modified: metadata
                         .and_then(|m| m.modified().ok())
@@ -449,12 +466,22 @@ fn governed_bytes(objects: &[SegmentObject], residue: &[Residue]) -> u64 {
 }
 
 /// The most recent segment handed to the compressor and not yet started on.
+///
+/// By sequence number and never by clock: the numbers are a total order this
+/// run assigned itself, and two segments rotated inside one timestamp tick are
+/// indistinguishable by modification time — at which point the protected one is
+/// whichever `read_dir` happened to return last, and the segment just closed is
+/// the one evicted.
+///
+/// A queued file whose name carries no sequence number cannot be the newest:
+/// the compressor is only ever handed segments under a working name.
 fn newest_queued(residue: &[Residue]) -> Option<&PathBuf> {
     residue
         .iter()
         .filter(|r| r.queued)
-        .max_by_key(|r| r.modified)
-        .map(|r| &r.path)
+        .filter_map(|r| r.seq.map(|seq| (seq, &r.path)))
+        .max_by_key(|(seq, _)| *seq)
+        .map(|(_, path)| path)
 }
 
 /// The bytes of the file itself, never of what it points at.
@@ -525,9 +552,19 @@ mod tests {
         let path = dir.join(open_segment_name(seq));
         let mut f = fs::File::create(&path).expect("a segment file");
         f.write_all(&vec![0u8; bytes]).expect("its bytes");
-        // The queue's order is modification time, and a test that writes three
-        // files inside one timestamp tick is a test that asserts nothing.
+        // Spaced in time as well as in sequence, so a test that means to vary
+        // only one of the two is not silently varying both.
         sleep(Duration::from_millis(10));
+        path
+    }
+
+    /// The same, with the modification time pinned, so several segments can
+    /// share one timestamp the way two rotations inside a clock tick do.
+    fn segment_at(dir: &Path, seq: u64, bytes: usize, at: SystemTime) -> PathBuf {
+        let path = dir.join(open_segment_name(seq));
+        let mut f = fs::File::create(&path).expect("a segment file");
+        f.write_all(&vec![0u8; bytes]).expect("its bytes");
+        f.set_modified(at).expect("a pinned modification time");
         path
     }
 
@@ -559,6 +596,42 @@ mod tests {
             2000,
             "a queue of three counts two: the newest is the bounded transient"
         );
+    }
+
+    #[test]
+    fn the_newest_queued_segment_is_the_highest_numbered_one_and_not_the_latest_clock_reading() {
+        // Two segments rotated inside one timestamp tick — which is what a
+        // loaded machine produces, and what CI produced — leaves modification
+        // time unable to order them at all. Ordering by it then picks an
+        // arbitrary one to protect, the segment just closed is evicted out from
+        // under the compressor, and the publication fails on a source that is
+        // gone. The names carry the segment sequence, which is a total order
+        // and needs no clock.
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let staging = dir.path().join("staging");
+        let completed = dir.path().join("completed");
+        fs::create_dir_all(&staging).expect("staging");
+        fs::create_dir_all(&completed).expect("completed");
+
+        let queued = Arc::new(InFlight::default());
+        let mut w = StagingWatermark::new(staging.clone(), completed, 1500);
+        w.track_open_segment(99);
+        w.track_queued(Arc::clone(&queued));
+
+        let paths: Vec<PathBuf> = (1..=3)
+            .map(|seq| segment_at(&staging, seq, 1000, SystemTime::UNIX_EPOCH))
+            .collect();
+        for path in &paths {
+            queued.enter(path.clone());
+        }
+
+        w.enforce().expect("eviction");
+
+        assert!(
+            paths[2].exists(),
+            "the segment just closed was evicted because three files shared one timestamp"
+        );
+        assert!(!paths[0].exists(), "the oldest was not evicted");
     }
 
     #[test]

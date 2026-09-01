@@ -100,6 +100,74 @@ impl DatagramHeader {
             datagram_len: datagram_len as u16,
         })
     }
+
+    /// Read the header without judging anything but the buffer's length.
+    ///
+    /// [`decode`](Self::decode) refuses an unsupported schema version and a
+    /// declared length outside the mandated range, which is correct for a
+    /// consumer: the spec says a subscriber must discard a datagram whose
+    /// version it does not implement. It is wrong for anything whose job is to
+    /// *count* those datagrams. A health tier is required to report magic and
+    /// schema version by value rather than judged, and to check the declared
+    /// length against the cap — and through `decode` both of those datagrams
+    /// are simply undecodable, so the tier learns nothing about exactly the
+    /// traffic most worth knowing about.
+    ///
+    /// The returned header therefore carries **no validation whatever** beyond
+    /// its own presence. Nothing here may be treated as a decoded header:
+    /// `schema_version` may name a version this build cannot parse,
+    /// `datagram_len` may be absurd, and `magic` may belong to another feed.
+    /// [`schema_is_supported`](Self::schema_is_supported) and
+    /// [`declared_len_is_in_range`](Self::declared_len_is_in_range) are the two
+    /// judgements `decode` makes, exposed so that a caller counting them states
+    /// the same rule rather than reinventing it.
+    ///
+    /// This does not walk messages and does not look past the 24th byte.
+    pub fn peek(buf: &[u8]) -> Result<Self, DecodeError> {
+        if buf.len() < DATAGRAM_HEADER_SIZE {
+            return Err(DecodeError::ShortBuffer {
+                need: DATAGRAM_HEADER_SIZE,
+                got: buf.len(),
+            });
+        }
+        Ok(Self {
+            magic: u16::from_le_bytes([buf[0], buf[1]]),
+            schema_version: buf[2],
+            channel_id: buf[3],
+            sequence_number: u64::from_le_bytes(
+                buf[4..12]
+                    .try_into()
+                    .expect("range width matches the target array"),
+            ),
+            send_timestamp_ns: u64::from_le_bytes(
+                buf[12..20]
+                    .try_into()
+                    .expect("range width matches the target array"),
+            ),
+            msg_count: buf[20],
+            reset_count: buf[21],
+            datagram_len: u16::from_le_bytes([buf[22], buf[23]]),
+        })
+    }
+
+    /// Whether this build implements the schema version in the header.
+    ///
+    /// A [`peek`](Self::peek)ed header may say no; a [`decode`](Self::decode)d
+    /// one always says yes.
+    #[must_use]
+    pub fn schema_is_supported(&self) -> bool {
+        SUPPORTED_SCHEMA_VERSIONS.contains(&self.schema_version)
+    }
+
+    /// Whether the declared datagram length is within the mandated range.
+    ///
+    /// Below the header size or above the cap is a publisher violation worth
+    /// counting, which is why it is a question and not a refusal.
+    #[must_use]
+    pub fn declared_len_is_in_range(&self) -> bool {
+        let declared = self.datagram_len as usize;
+        (DATAGRAM_HEADER_SIZE..=MAX_DATAGRAM_SIZE).contains(&declared)
+    }
 }
 
 /// Accumulates application messages into one datagram.

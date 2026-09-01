@@ -15,6 +15,9 @@ interface        = "eth0"
 mktdata_port     = 40000
 refdata_port     = 40001
 expected_sources = ["192.0.2.1", "192.0.2.2"]
+# The pair (source, channel) is what makes an instance a declared one. Omit the
+# key to state nothing, which admits every channel from a declared source.
+expected_channel_ids = [0, 1]
 
 [capture]
 mode   = "afpacket"

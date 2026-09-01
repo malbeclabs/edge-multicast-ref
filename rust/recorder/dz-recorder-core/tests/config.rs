@@ -322,3 +322,19 @@ fn one_port_number_on_two_different_groups_is_ordinary() {
     )
     .is_ok());
 }
+
+#[test]
+fn the_declared_channels_are_read_and_an_absent_key_states_nothing() {
+    // Two different facts, and a config that could not tell them apart would
+    // make every publisher a stranger on its own recorder the moment the key
+    // was introduced.
+    let cfg = RecorderConfig::parse(&example()).unwrap();
+    assert_eq!(cfg.feed[0].expected_channel_ids, vec![0, 1]);
+
+    let without = example().replace("expected_channel_ids = [0, 1]\n", "");
+    let cfg = RecorderConfig::parse(&without).unwrap();
+    assert!(
+        cfg.feed[0].expected_channel_ids.is_empty(),
+        "an absent key is an absent declaration, not a declaration of none"
+    );
+}
