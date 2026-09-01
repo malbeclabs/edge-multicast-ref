@@ -18,8 +18,10 @@ pcap = { workspace = true, optional = true }
 tempfile = { workspace = true }
 
 [features]
-# The tests that need a real multicast socket. Off by default, because CI has
-# no multicast route and a capture test that can only run by hand is not a gate.
+# The tests that need a real multicast socket. Off by default so that the
+# default build asks nothing of the host; CI enables them in the end-to-end job,
+# behind a probe that proves the runner can deliver multicast to itself, and
+# compiles them in the main job so they cannot rot unnoticed.
 loopback-tests = []
 # AF_PACKET mode. Off by default so the crate builds and its tests run where
 # libpcap-dev is absent, which is why socket mode was built first: it needs no
