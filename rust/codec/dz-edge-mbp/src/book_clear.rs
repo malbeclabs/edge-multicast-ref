@@ -38,6 +38,23 @@ impl AppMessage for BookClear {
     const SIZE: usize = 36;
     const PORT_ROLES: &'static [PortRole] = &[PortRole::Mktdata];
 
+    /// The one pairing this feed forbids, refused where it is written.
+    ///
+    /// `decode` refuses the same bytes, and the two are not redundant: that one
+    /// governs what someone else sent us, this one governs what we emit. A
+    /// publisher emitting it produces a clear every conformant subscriber
+    /// discards, so the levels it meant to remove stay in every book — a defect
+    /// whose only symptom is a book that quietly did not change.
+    fn validate(&self) -> Result<(), dz_edge_core::EncodeError> {
+        if self.scope == SCOPE_FROM_PRICE && self.clear_side == CLEAR_BOTH {
+            return Err(dz_edge_core::EncodeError::MalformedMessage {
+                message: core::any::type_name::<Self>(),
+                what: "a clear bounded by one price cannot apply to both sides",
+            });
+        }
+        Ok(())
+    }
+
     fn encode_into(&self, dst: &mut [u8]) {
         debug_assert_eq!(dst.len(), Self::SIZE);
         dst[0] = Self::TYPE_ID;

@@ -396,3 +396,54 @@ fn the_conformance_gate_fails_a_stream_the_spec_forbids() {
         verdict.stderr
     );
 }
+
+#[cfg(feature = "conformance")]
+#[test]
+fn the_conformance_gate_fails_a_snapshot_the_spec_forbids() {
+    // The control above exercises `mktdata` alone, so it cannot rule out the
+    // vacuity it exists for on the other two ports: a `-snapshot-port` that is
+    // set but wrong evaluates zero snapshot frames and still exits 0, because
+    // the tool warns about a starved rule only when the flag is unset. This one
+    // proves the snapshot port is reaching the rule set.
+    //
+    // The violation is structural and loss cannot explain it: the Begin is
+    // present in the same stream, and a level claims to belong to a different
+    // snapshot than the one it opened.
+    let mut wire = Wire::new();
+    let snapshot = fresh(SNAPSHOT_CHANNEL);
+    let payload = datagram(snapshot, PortRole::Snapshot, |b| {
+        b.push(&SnapshotBegin {
+            instrument_id: INSTRUMENT,
+            anchor_seq: ANCHOR_SEQ,
+            total_levels: 1,
+            snapshot_id: SNAPSHOT_ID,
+            last_instrument_seq: 4,
+            timestamp_ns: 1_772_000_000_000_000_300,
+            depth_bound: 50,
+        })
+        .expect("the encoder does not judge a group");
+        let mut level = snapshot_level(9_999_500, 12_500, SIDE_BID);
+        level.snapshot_id = SNAPSHOT_ID + 1; // belongs to no open group
+        b.push(&level).expect("nor does it judge a level's id");
+        b.push(&SnapshotEnd {
+            instrument_id: INSTRUMENT,
+            anchor_seq: ANCHOR_SEQ,
+            snapshot_id: SNAPSHOT_ID,
+        })
+        .expect("and the end closes it");
+    });
+    wire.arrive(payload, PUBLISHER_A, PortRole::Snapshot);
+
+    let archive = record(&wire.sent, ALL_ROLES);
+    let verdict = common::conformance::conformance_of(&archive, "mbp");
+    assert_eq!(
+        verdict.code, 1,
+        "the snapshot port reached no rule, so a clean exit there means nothing:\n{}",
+        verdict.stderr
+    );
+    assert!(
+        verdict.stderr.contains("MBP.SNAP.GROUP_STRUCTURE"),
+        "and it has to be the rule this snapshot breaks:\n{}",
+        verdict.stderr
+    );
+}

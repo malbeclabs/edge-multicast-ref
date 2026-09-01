@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"testing"
@@ -28,7 +29,12 @@ func goldenBytes(t *testing.T, name string) []byte {
 }
 
 // header asserts the 4-byte application message header and returns the body.
-func header(t *testing.T, buf []byte, wantType uint8, wantSize int) []byte {
+//
+// wantFlags is the on-wire Flags field, which is not decoration: bit 0 is set on
+// every message travelling the snapshot port, and a message carrying the wrong
+// value is one this parser counts as a SnapshotFlagMismatch defect. The vectors
+// have to state it or an implementation transcribing them inherits the bug.
+func header(t *testing.T, buf []byte, wantType uint8, wantSize int, wantFlags uint16) []byte {
 	t.Helper()
 	if len(buf) != wantSize {
 		t.Fatalf("golden is %d bytes, want %d", len(buf), wantSize)
@@ -39,11 +45,14 @@ func header(t *testing.T, buf []byte, wantType uint8, wantSize int) []byte {
 	if int(buf[1]) != wantSize {
 		t.Fatalf("declared length %d, want %d", buf[1], wantSize)
 	}
+	if got := binary.LittleEndian.Uint16(buf[2:4]); got != wantFlags {
+		t.Fatalf("flags 0x%04x, want 0x%04x", got, wantFlags)
+	}
 	return buf[messageHeaderSize:]
 }
 
 func TestGoldenLevelUpdate(t *testing.T) {
-	body := header(t, goldenBytes(t, "level-update-v3.bin"), msgTypeLevelUpdate, 48)
+	body := header(t, goldenBytes(t, "level-update-v3.bin"), msgTypeLevelUpdate, 48, 0)
 	b, err := ParseLevelUpdate(body)
 	if err != nil {
 		t.Fatalf("ParseLevelUpdate: %v", err)
@@ -63,7 +72,7 @@ func TestGoldenLevelUpdate(t *testing.T) {
 }
 
 func TestGoldenBookClear(t *testing.T) {
-	body := header(t, goldenBytes(t, "book-clear-v3.bin"), msgTypeBookClear, 36)
+	body := header(t, goldenBytes(t, "book-clear-v3.bin"), msgTypeBookClear, 36, 0)
 	b, err := ParseBookClear(body)
 	if err != nil {
 		t.Fatalf("ParseBookClear: %v", err)
@@ -80,7 +89,7 @@ func TestGoldenBookClear(t *testing.T) {
 }
 
 func TestGoldenSnapshotBegin(t *testing.T) {
-	body := header(t, goldenBytes(t, "snapshot-begin-v3.bin"), msgTypeSnapshotBegin, 40)
+	body := header(t, goldenBytes(t, "snapshot-begin-v3.bin"), msgTypeSnapshotBegin, 40, flagSnapshot)
 	b, err := ParseSnapshotBegin(body)
 	if err != nil {
 		t.Fatalf("ParseSnapshotBegin: %v", err)
@@ -97,7 +106,7 @@ func TestGoldenSnapshotBegin(t *testing.T) {
 }
 
 func TestGoldenSnapshotLevel(t *testing.T) {
-	body := header(t, goldenBytes(t, "snapshot-level-v3.bin"), msgTypeSnapshotLevel, 32)
+	body := header(t, goldenBytes(t, "snapshot-level-v3.bin"), msgTypeSnapshotLevel, 32, flagSnapshot)
 	b, err := ParseSnapshotLevel(body)
 	if err != nil {
 		t.Fatalf("ParseSnapshotLevel: %v", err)
@@ -111,7 +120,7 @@ func TestGoldenSnapshotLevel(t *testing.T) {
 }
 
 func TestGoldenSnapshotEnd(t *testing.T) {
-	body := header(t, goldenBytes(t, "snapshot-end-v3.bin"), msgTypeSnapshotEnd, 20)
+	body := header(t, goldenBytes(t, "snapshot-end-v3.bin"), msgTypeSnapshotEnd, 20, flagSnapshot)
 	b, err := ParseSnapshotEnd(body)
 	if err != nil {
 		t.Fatalf("ParseSnapshotEnd: %v", err)

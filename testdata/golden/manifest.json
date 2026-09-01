@@ -18,7 +18,8 @@
         "ask_qty": 7250,
         "bid_source_count": 3,
         "ask_source_count": 4
-      }
+      },
+      "flags_on_wire": 0
     },
     {
       "file": "trade-v3.bin",
@@ -36,7 +37,8 @@
         "trade_qty": 500,
         "trade_id": 987654321,
         "cumulative_volume": 1000000
-      }
+      },
+      "flags_on_wire": 0
     },
     {
       "file": "instrument-definition-v3.bin",
@@ -61,7 +63,8 @@
         "settle_type": 0,
         "price_bound": 0,
         "manifest_seq": 9
-      }
+      },
+      "flags_on_wire": 0
     },
     {
       "file": "instrument-definition-v1.bin",
@@ -87,7 +90,8 @@
         "settle_type": 0,
         "price_bound": 0,
         "manifest_seq": 9
-      }
+      },
+      "flags_on_wire": 0
     },
     {
       "file": "manifest-summary-v3.bin",
@@ -101,7 +105,8 @@
         "manifest_seq": 9,
         "instrument_count": 1234,
         "timestamp_ns": 1700000000000000002
-      }
+      },
+      "flags_on_wire": 0
     },
     {
       "file": "level-update-v3.bin",
@@ -124,7 +129,8 @@
         "level_index": 6,
         "update_reason": 2,
         "level_flags": 8
-      }
+      },
+      "flags_on_wire": 0
     },
     {
       "file": "book-clear-v3.bin",
@@ -143,7 +149,8 @@
         "from_price_raw": 10000500,
         "timestamp_ns": 1700000000000000004,
         "clear_reason": 3
-      }
+      },
+      "flags_on_wire": 0
     },
     {
       "file": "snapshot-begin-v3.bin",
@@ -160,7 +167,9 @@
         "last_instrument_seq": 4241,
         "timestamp_ns": 1700000000000000005,
         "depth_bound": 50
-      }
+      },
+      "flags_on_wire": 1,
+      "note": "Flags bit 0 is set because this message travels the snapshot port. The builder stamps it at push, after the body is encoded, so a vector taken from the encoder alone would carry 0 and every subscriber would count it as a snapshot-flag mismatch."
     },
     {
       "file": "snapshot-level-v3.bin",
@@ -169,7 +178,7 @@
       "size": 32,
       "schema_version": 3,
       "feed": "market-by-price",
-      "note": "The Instrument ID is implied by the containing SnapshotBegin and is not repeated. Quantity is non-zero by rule; an empty level is represented by its absence.",
+      "note": "The Instrument ID is implied by the containing SnapshotBegin and is not repeated. Quantity is non-zero by rule; an empty level is represented by its absence. Flags bit 0 is set because this message travels the snapshot port. The builder stamps it at push, after the body is encoded, so a vector taken from the encoder alone would carry 0 and every subscriber would count it as a snapshot-flag mismatch.",
       "fields": {
         "snapshot_id": 77,
         "price_raw": 9999500,
@@ -177,7 +186,8 @@
         "order_count": 3,
         "side": 0,
         "level_flags": 4
-      }
+      },
+      "flags_on_wire": 1
     },
     {
       "file": "snapshot-end-v3.bin",
@@ -190,7 +200,9 @@
         "instrument_id": 1,
         "anchor_seq": 918273645,
         "snapshot_id": 77
-      }
+      },
+      "flags_on_wire": 1,
+      "note": "Flags bit 0 is set because this message travels the snapshot port. The builder stamps it at push, after the body is encoded, so a vector taken from the encoder alone would carry 0 and every subscriber would count it as a snapshot-flag mismatch."
     }
   ]
 }

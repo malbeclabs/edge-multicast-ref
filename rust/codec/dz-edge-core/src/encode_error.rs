@@ -21,4 +21,22 @@ pub enum EncodeError {
         message: &'static str,
         role: &'static str,
     },
+
+    /// The message's fields are individually representable and their
+    /// combination is one its own specification forbids.
+    ///
+    /// Refused at the push for the same reason a wrong port role is: a
+    /// publisher that emits it produces a message every conformant subscriber
+    /// discards, and the effect it meant to have — a level removed, a side
+    /// cleared — silently does not happen. Failing here costs one message;
+    /// failing on a capture after a deploy costs however long it takes somebody
+    /// to notice a book that never changed.
+    ///
+    /// Recoverable, like the others: the send path counts it and drops the
+    /// message rather than aborting, because a publisher that panics goes dark.
+    #[error("{message} is malformed: {what}")]
+    MalformedMessage {
+        message: &'static str,
+        what: &'static str,
+    },
 }

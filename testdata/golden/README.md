@@ -25,6 +25,14 @@ change made on one side fails on the other.
 Hand-transcribing them from the spec tables would settle the remainder, and is
 worth doing when the spec text is next open.
 
+**A vector is the message on the wire, not the encoder's output.** The three
+snapshot vectors carry `Flags` bit 0, which the builder stamps at push time —
+after the body is encoded — because every message travelling the snapshot port
+must set it. A vector taken from the encoder alone would carry zero, and an
+implementation transcribing it would ship a message every subscriber counts as a
+snapshot-flag mismatch. `manifest.json` records `flags_on_wire` for every vector
+so this is a stated value rather than a byte someone has to notice.
+
 `manifest.json` carries each vector's field values, so an implementation in any
 language can check both directions without re-reading the specs.
 

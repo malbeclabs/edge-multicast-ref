@@ -13,7 +13,7 @@ use dz_edge_core::{
 };
 use dz_edge_mbp::{
     BookClear, LevelUpdate, MarketByPrice, SnapshotBegin, SnapshotEnd, SnapshotLevel, CLEAR_BID,
-    MAGIC_MBP, SCOPE_ENTIRE_SIDE, SIDE_ASK, SIDE_BID,
+    CLEAR_BOTH, MAGIC_MBP, SCOPE_ENTIRE_SIDE, SCOPE_FROM_PRICE, SIDE_ASK, SIDE_BID,
 };
 
 const CHANNEL: u8 = 7;
@@ -198,4 +198,34 @@ fn a_sibling_feeds_magic_refuses_this_feeds_datagram() {
         .expect("one message");
     let out = b.finish(1).expect("a datagram");
     assert!(Datagram::decode(&out, dz_edge_tob::MAGIC_TOB).is_err());
+}
+
+#[test]
+fn a_bounded_clear_of_both_sides_is_refused_at_the_push() {
+    // `decode` refuses the same bytes, and the two are not redundant: that one
+    // governs what somebody else sent, this one governs what this build emits.
+    // Without it a publisher ships a clear every conformant subscriber
+    // discards, and the levels it meant to remove stay in every book — a defect
+    // whose only symptom is a book that quietly did not change.
+    let mut b = builder(PortRole::Mktdata);
+    let err = b
+        .push(&BookClear {
+            instrument_id: 1,
+            source_id: 2,
+            clear_side: CLEAR_BOTH,
+            scope: SCOPE_FROM_PRICE,
+            per_instrument_seq: 3,
+            from_price_raw: 10_000_000,
+            timestamp_ns: 1,
+            clear_reason: 0,
+        })
+        .expect_err("the specification forbids this pairing");
+    assert!(matches!(err, EncodeError::MalformedMessage { .. }), "{err}");
+}
+
+#[test]
+fn a_clear_the_specification_allows_still_pushes() {
+    // The neighbouring combination, so the refusal above is not a blanket one.
+    let mut b = builder(PortRole::Mktdata);
+    b.push(&book_clear()).expect("an ordinary clear");
 }

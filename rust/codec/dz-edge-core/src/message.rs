@@ -16,6 +16,24 @@ pub trait AppMessage {
     /// at the push rather than on a capture after a deploy.
     const PORT_ROLES: &'static [PortRole];
 
+    /// Whether this message's fields may be sent together.
+    ///
+    /// Defaulted to `Ok`, because most message types constrain no combination
+    /// and a required method would be ceremony on every one of them. A type
+    /// whose specification forbids a pairing implements it, and the builder
+    /// refuses the push — the same argument as `PORT_ROLES`: a violation fails
+    /// where it is written rather than on a capture after a deploy.
+    ///
+    /// Not a substitute for a decoder's own refusal. A decoder meets bytes
+    /// somebody else encoded, and this only governs what this build emits.
+    ///
+    /// # Errors
+    ///
+    /// [`EncodeError::MalformedMessage`], naming the combination.
+    fn validate(&self) -> Result<(), crate::EncodeError> {
+        Ok(())
+    }
+
     /// Encode into `dst`, which MUST be exactly `SIZE` bytes.
     ///
     /// Implementations guard this with a `debug_assert!`, so an over-long slice

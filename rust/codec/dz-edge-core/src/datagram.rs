@@ -245,6 +245,9 @@ impl<F: Feed> DatagramBuilder<F> {
     /// On `Err` the builder is unchanged, so a caller may finish the current
     /// datagram and retry the same message on a fresh one.
     pub fn push<M: AppMessage>(&mut self, msg: &M) -> Result<(), EncodeError> {
+        // Before the port role and before the capacity check: a message that
+        // may not be sent at all is not made sendable by a bigger datagram.
+        msg.validate()?;
         let flags = if self.port_role == PortRole::Snapshot {
             FLAG_SNAPSHOT
         } else {

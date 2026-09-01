@@ -7,7 +7,7 @@
 //! is a wire change and must be justified against edge-feed-spec, never
 //! adjusted to match code that started failing.
 
-use dz_edge_core::AppMessage;
+use dz_edge_core::{AppMessage, PortRole, FLAG_SNAPSHOT};
 use dz_edge_mbp::{
     BookClear, LevelUpdate, SnapshotBegin, SnapshotEnd, SnapshotLevel, CLEAR_ASK, SCOPE_FROM_PRICE,
     SIDE_ASK, SIDE_BID,
@@ -84,32 +84,53 @@ pub fn canonical_snapshot_end() -> SnapshotEnd {
     }
 }
 
-fn encoded<M: AppMessage>(message: &M) -> Vec<u8> {
+/// The message as it appears **on the wire**, which for a snapshot-port message
+/// is not what `encode_into` alone produces.
+///
+/// `Flags` bit 0 is set on every message travelling the snapshot port, and the
+/// builder stamps it at `push` — after `encode_into` has run. A golden vector is
+/// the specification's meaning made concrete, and the meaning includes the port
+/// the message travels on, so a vector transcribed from `encode_into` alone
+/// ships a per-message defect: the Go parser counts it as
+/// `SnapshotFlagMismatch`, and an implementation copying these bytes would
+/// inherit it.
+fn on_the_wire<M: AppMessage>(message: &M) -> Vec<u8> {
     let mut buf = vec![0u8; M::SIZE];
     message.encode_into(&mut buf);
+    assert_eq!(
+        M::PORT_ROLES.len(),
+        1,
+        "a vector for a message carried on several roles would need one per role"
+    );
+    let flags = if M::PORT_ROLES[0] == PortRole::Snapshot {
+        FLAG_SNAPSHOT
+    } else {
+        0
+    };
+    buf[2..4].copy_from_slice(&flags.to_le_bytes());
     buf
 }
 
 #[test]
 fn the_encoder_reproduces_every_golden_vector() {
     assert_eq!(
-        encoded(&canonical_level_update()),
+        on_the_wire(&canonical_level_update()),
         golden("level-update-v3.bin")
     );
     assert_eq!(
-        encoded(&canonical_book_clear()),
+        on_the_wire(&canonical_book_clear()),
         golden("book-clear-v3.bin")
     );
     assert_eq!(
-        encoded(&canonical_snapshot_begin()),
+        on_the_wire(&canonical_snapshot_begin()),
         golden("snapshot-begin-v3.bin")
     );
     assert_eq!(
-        encoded(&canonical_snapshot_level()),
+        on_the_wire(&canonical_snapshot_level()),
         golden("snapshot-level-v3.bin")
     );
     assert_eq!(
-        encoded(&canonical_snapshot_end()),
+        on_the_wire(&canonical_snapshot_end()),
         golden("snapshot-end-v3.bin")
     );
 }
@@ -138,6 +159,34 @@ fn the_decoder_reads_every_golden_vector_back() {
         SnapshotEnd::decode(&golden("snapshot-end-v3.bin")).expect("decodes"),
         canonical_snapshot_end()
     );
+}
+
+#[test]
+fn every_snapshot_vector_carries_the_flag_its_port_requires() {
+    // Asserted on the bytes rather than on the encoder, because the encoder is
+    // not where the flag comes from: an implementation reading these files has
+    // only the bytes, and the bit is the difference between a conformant
+    // snapshot message and one every subscriber counts as a defect.
+    for name in [
+        "snapshot-begin-v3.bin",
+        "snapshot-level-v3.bin",
+        "snapshot-end-v3.bin",
+    ] {
+        let buf = golden(name);
+        assert_eq!(
+            u16::from_le_bytes([buf[2], buf[3]]),
+            FLAG_SNAPSHOT,
+            "{name} must carry Flags bit 0"
+        );
+    }
+    for name in ["level-update-v3.bin", "book-clear-v3.bin"] {
+        let buf = golden(name);
+        assert_eq!(
+            u16::from_le_bytes([buf[2], buf[3]]),
+            0,
+            "{name} travels the mktdata port and must not claim otherwise"
+        );
+    }
 }
 
 #[test]
