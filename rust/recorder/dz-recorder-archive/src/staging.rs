@@ -162,6 +162,13 @@ pub struct StagingWatermark {
     /// behind this watermark to report it to.
     faults: Option<Arc<Faults>>,
     segments_evicted_total: u64,
+    /// Of those, the ones that were a published object rather than a working
+    /// segment. Split because the two are different losses: an object is
+    /// history a shipper had not taken yet, and a working segment is a window
+    /// that never became an object at all. A counter that adds them tells an
+    /// operator that something was given up and not what, and a test asserting
+    /// the sum cannot say which kind it got.
+    objects_evicted_total: u64,
     bytes_evicted_total: u64,
 }
 
@@ -177,6 +184,7 @@ impl StagingWatermark {
             queued: None,
             faults: None,
             segments_evicted_total: 0,
+            objects_evicted_total: 0,
             bytes_evicted_total: 0,
         }
     }
@@ -267,6 +275,19 @@ impl StagingWatermark {
         self.segments_evicted_total
     }
 
+    /// Published objects evicted, a subset of
+    /// [`segments_evicted_total`](Self::segments_evicted_total).
+    ///
+    /// The remainder is working segments — an orphan a failed publication left,
+    /// or one queued behind a compressor that fell far enough behind for the
+    /// budget to reach it. Whether that remainder is zero depends on the
+    /// compressor's scheduling, so it is the number to watch and never the
+    /// number to assert.
+    #[must_use]
+    pub fn objects_evicted_total(&self) -> u64 {
+        self.objects_evicted_total
+    }
+
     #[must_use]
     pub fn bytes_evicted_total(&self) -> u64 {
         self.bytes_evicted_total
@@ -323,6 +344,7 @@ impl StagingWatermark {
                     let _ = fs::remove_file(&object.manifest_path);
                     total = total.saturating_sub(object.bytes);
                     self.segments_evicted_total += 1;
+                    self.objects_evicted_total += 1;
                     self.bytes_evicted_total += object.bytes;
                 }
                 Err(e) => failure = failure.or(Some(e)),

@@ -236,6 +236,13 @@ impl ArchiveWriter {
         self.watermark.segments_evicted_total()
     }
 
+    /// Published objects evicted, a subset of
+    /// [`segments_evicted_total`](Self::segments_evicted_total).
+    #[must_use]
+    pub fn objects_evicted_total(&self) -> u64 {
+        self.watermark.objects_evicted_total()
+    }
+
     #[must_use]
     pub fn datagrams_written_total(&self) -> u64 {
         self.datagrams_written_total
