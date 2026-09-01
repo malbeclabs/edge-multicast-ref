@@ -191,6 +191,28 @@ impl Synthesiser {
         }
     }
 
+    /// Whether a datagram this handle was given is one this handle asked for.
+    ///
+    /// `bind_multicast` binds the group, so the kernel already refuses
+    /// everything addressed elsewhere and `foreign_group_datagrams` is expected
+    /// to stay at zero for the life of the process. This is the check that says
+    /// so out loud: it costs one comparison against what `IP_PKTINFO` reports,
+    /// and it is what would catch a bind that stopped filtering — a wildcard
+    /// bind restored, or a platform whose semantics are not the ones measured
+    /// here. Recording another group's datagrams is not a failure that
+    /// announces itself: `ChannelInstance` carries no group, so two sequence
+    /// spaces merge into one coverage row and neither is answerable
+    /// afterwards.
+    ///
+    /// A datagram whose destination the kernel did not report is admitted. The
+    /// alternative is discarding our own traffic on the strength of a control
+    /// message that was missing, and `cmsg_truncations` already counts that
+    /// case.
+    #[must_use]
+    pub fn admits(&self, meta: &ArrivalMetadata) -> bool {
+        meta.local_dst.is_none_or(|dst| dst == *self.joined.ip())
+    }
+
     /// `fallback_ts_ns` is a closure so the clock is only read when the kernel
     /// did not stamp the datagram, and so this stays testable without one.
     pub fn arrival<F>(
@@ -404,6 +426,7 @@ pub struct CaptureCounters {
     pub(crate) overflow_drops: AtomicU64,
     pub(crate) queue_drops: AtomicU64,
     pub(crate) unexpected_source_datagrams: AtomicU64,
+    pub(crate) foreign_group_datagrams: AtomicU64,
     pub(crate) source_evictions: AtomicU64,
     pub(crate) truncated_datagrams: AtomicU64,
     pub(crate) cmsg_truncations: AtomicU64,
@@ -425,6 +448,10 @@ pub struct CaptureStats {
     /// never waits for it.
     pub queue_drops: u64,
     pub unexpected_source_datagrams: u64,
+    /// Datagrams delivered to this handle that were addressed somewhere other
+    /// than the group it joined. Not loss: they were never this recorder's to
+    /// keep, and a non-zero rate here is a shared port, not a fault.
+    pub foreign_group_datagrams: u64,
     pub source_evictions: u64,
     /// Datagrams the capture could not hold whole. The archive holds what was
     /// captured and declares the length that arrived, and this counter is what
@@ -447,6 +474,7 @@ impl CaptureCounters {
             overflow_drops: read(&self.overflow_drops),
             queue_drops: read(&self.queue_drops),
             unexpected_source_datagrams: read(&self.unexpected_source_datagrams),
+            foreign_group_datagrams: read(&self.foreign_group_datagrams),
             source_evictions: read(&self.source_evictions),
             truncated_datagrams: read(&self.truncated_datagrams),
             cmsg_truncations: read(&self.cmsg_truncations),
@@ -520,9 +548,22 @@ pub fn bind_multicast(plan: &BindPlan) -> Result<OwnedFd, Errno> {
     setsockopt(&fd, ReuseAddr, &true)?;
     setsockopt(&fd, ReusePort, &true)?;
 
+    // The group, not the wildcard. Binding the wildcard address leaves
+    // `IP_MULTICAST_ALL` at its default, and Linux then delivers to this handle
+    // every group *any* socket on the host has joined, plus unicast to the same
+    // port — so two feeds sharing a port on different groups would record each
+    // other, and `ChannelInstance` carries no group to tell them apart
+    // afterwards. Binding the group makes the kernel the filter: measured on
+    // loopback, a wildcard-bound handle receives both groups and a
+    // group-bound one receives only its own.
+    //
+    // Many group:port pairs still bind at once, including the same pair twice,
+    // which is what `SO_REUSEADDR` and `SO_REUSEPORT` above are for: the
+    // recorder runs one handle per binding and must never displace another
+    // subscriber.
     bind(
         fd.as_raw_fd(),
-        &SockaddrIn::from(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, plan.binding.port)),
+        &SockaddrIn::from(SocketAddrV4::new(plan.binding.group, plan.binding.port)),
     )?;
 
     setsockopt(&fd, ReceiveTimestampns, &true)?;
@@ -873,6 +914,20 @@ impl Drain {
                 return Step::HandleLost;
             }
         };
+
+        // Addressed to a group this handle did not join, or to the interface
+        // itself. Dropped before anything else looks at it: it is not this
+        // recorder's traffic, so it is not archived, not offered to the gate,
+        // and — the part that matters — not owed to the next datagram as loss.
+        //
+        // Quiet rather than Handed, because our group has still said nothing.
+        // A silence the rejoin cadence must be able to see is exactly what a
+        // stranded membership on a busy shared port looks like.
+        if !synth.admits(&meta) {
+            bump(&self.counters.foreign_group_datagrams, 1);
+            self.recycle(buf);
+            return Step::Quiet;
+        }
 
         let src = address.map_or_else(
             || SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0),

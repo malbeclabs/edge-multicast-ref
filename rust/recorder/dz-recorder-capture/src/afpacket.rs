@@ -44,9 +44,7 @@ use crate::socket::{
 };
 use crate::OverflowTracker;
 use dz_edge_core::{PortRole, MAX_DATAGRAM_SIZE};
-use dz_recorder_core::{
-    RecordedDatagram, RecvTsKind, Source, SourceError, ETHERNET_IPV4_UDP_HEADER_SIZE,
-};
+use dz_recorder_core::{RecordedDatagram, RecvTsKind, Source, SourceError, MAX_LINK_HEADER_SIZE};
 use nix::errno::Errno;
 use nix::sys::socket::{recv, MsgFlags};
 use std::collections::BTreeSet;
@@ -532,8 +530,9 @@ pub struct AfPacketSourceConfig {
     pub bindings: Vec<PortBinding>,
     /// The `AF_PACKET` ring.
     pub buffer_bytes: u64,
-    /// The mandated datagram cap plus the 42 bytes of Ethernet, IPv4 and UDP
-    /// that precede it.
+    /// The mandated datagram cap plus the longest Ethernet, IPv4 and UDP
+    /// headers that can precede it — 82, not the synthesised 42: an IPv4 header
+    /// carrying options is what the difference is for.
     pub snaplen: usize,
     /// The capture read timeout, and the granularity at which the drain thread
     /// observes the stop flag.
@@ -567,7 +566,7 @@ impl AfPacketSourceConfig {
             interface,
             bindings,
             buffer_bytes: 64 * 1024 * 1024,
-            snaplen: MAX_DATAGRAM_SIZE + ETHERNET_IPV4_UDP_HEADER_SIZE,
+            snaplen: MAX_DATAGRAM_SIZE + MAX_LINK_HEADER_SIZE,
             read_timeout: Duration::from_millis(100),
             queue_capacity: 8192,
             stats_poll_batch: 64,
@@ -753,7 +752,20 @@ impl RingDrain {
         while !stop.load(Ordering::Relaxed) {
             let mut buf = ledger.take_buffer();
             match read_one(&mut cap, &mut buf) {
-                Read::Quiet => ledger.recycle(buf),
+                // The ring keeps dropping while the feed is quiet — a burst
+                // that overflows it and then silence is the shape of the
+                // outage most worth alerting on — and stats() is only read on
+                // the delivery path, so those drops would stay invisible until
+                // a datagram happened to arrive. The delta an alert fires on
+                // would arrive after the burst it describes, or never.
+                //
+                // A quiet read is also when there is budget for the syscall: it
+                // costs one poll per read timeout, and only while nothing is
+                // being delivered.
+                Read::Quiet => {
+                    ledger.recycle(buf);
+                    ledger.poll_ring(|| cap.stats().ok());
+                }
                 // Deliberate, and the flag it answers is already set.
                 Read::Broken => return,
                 Read::Skipped(skip) => {
@@ -1010,14 +1022,15 @@ impl AfPacketSource {
             .immediate_mode(true)
             .precision(Precision::Nano)
             .buffer_size(clamp_i32(config.buffer_bytes))
-            // Never above the mandated cap plus its link headers: the same
-            // discipline the configuration applies, for the same reason — a
-            // capture length that can express a larger datagram is how the cap
-            // drifts.
+            // Never above the mandated cap plus the longest link headers that
+            // can precede it: the same discipline the configuration applies,
+            // for the same reason — a capture length that can express a larger
+            // datagram is how the cap drifts. Clamping to the *synthesised*
+            // header size instead is the other way to be wrong: it cuts the
+            // tail off a compliant datagram whose IPv4 header carries options,
+            // and the recorder then reports the publisher for it.
             .snaplen(clamp_i32(
-                config
-                    .snaplen
-                    .min(MAX_DATAGRAM_SIZE + ETHERNET_IPV4_UDP_HEADER_SIZE),
+                config.snaplen.min(MAX_DATAGRAM_SIZE + MAX_LINK_HEADER_SIZE),
             ))
             // Requested, and honoured only while immediate mode is off: with it
             // on, libpcap on Linux parks in poll with no timeout, and
@@ -1306,6 +1319,33 @@ mod tests {
 
     fn buffer() -> Vec<u8> {
         vec![0u8; MAX_DATAGRAM_SIZE]
+    }
+
+    #[test]
+    fn a_ring_drop_during_silence_is_counted_before_the_feed_speaks_again() {
+        // The alerting case: a burst overflows the ring and the feed then goes
+        // quiet. Polling only on the delivery path leaves those drops
+        // unaccounted until a datagram happens to arrive — which, for the
+        // outage worth alerting on, may be a long time or never. The quiet read
+        // is where the drain polls instead.
+        let (tx, _rx) = mpsc::sync_channel(4);
+        let counters = Arc::new(CaptureCounters::default());
+        let mut ledger = ledger(tx, &counters);
+
+        ledger.poll_ring(|| Some(stat(100, 0, 0)));
+        assert_eq!(counters.snapshot().overflow_drops, 0, "the baseline");
+
+        // No datagram between these two polls: exactly what a quiet read is.
+        ledger.poll_ring(|| Some(stat(100, 7, 0)));
+
+        assert_eq!(
+            counters.snapshot().overflow_drops,
+            7,
+            "a drop nothing delivered is still a drop"
+        );
+        // Owed, not lost: it still has to reach the archive on the next
+        // datagram that gets through, which is what epb_dropcount means.
+        assert_eq!(ledger.pending.owed(), 7);
     }
 
     #[test]

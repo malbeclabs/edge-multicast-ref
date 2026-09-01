@@ -476,6 +476,26 @@ fn the_port_role_is_read_off_the_destination_port() {
 /// Behind `afpacket-live-tests`. It needs `CAP_NET_RAW` and a host that
 /// delivers multicast to itself on the loopback interface, and a capture test
 /// that can only run by hand must not be able to fail the build.
+#[test]
+fn the_default_capture_length_holds_a_capped_datagram_behind_ipv4_options() {
+    // 14 + 60 + 8, not 14 + 20 + 8. A datagram at the mandated cap whose IPv4
+    // header carries the full 40 bytes of options is 1314 bytes on the wire; a
+    // capture length of cap + 42 keeps 1274 of them and loses the payload tail.
+    // What makes that worse than a lost tail is the accounting: the frame comes
+    // back short, truncated_datagrams counts it, and a compliant publisher is
+    // reported for a violation the recorder committed. This is also the snaplen
+    // the archive declares in every interface description block.
+    let config = AfPacketSourceConfig::new(
+        "placeholder0",
+        Ipv4Addr::new(192, 0, 2, 20),
+        vec![PortBinding::new(PortRole::Mktdata, GROUP, MKTDATA_PORT)],
+    );
+    assert_eq!(
+        config.snaplen,
+        dz_edge_core::MAX_DATAGRAM_SIZE + 14 + 60 + 8
+    );
+}
+
 #[cfg(feature = "afpacket-live-tests")]
 mod live {
     use super::{bindings, GROUP, MKTDATA_PORT};

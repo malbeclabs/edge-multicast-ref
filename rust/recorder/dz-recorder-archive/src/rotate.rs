@@ -89,6 +89,10 @@ impl ArchiveWriter {
         // compressor says it is holding, rather than every file that shares its
         // name shape.
         watermark.track_in_flight(compressor.in_flight());
+        watermark.track_queued(compressor.queued());
+        // So a budget that cannot be met reaches last_error rather than being
+        // known only to the sweep that discovered it.
+        watermark.track_faults(Arc::clone(&faults));
         sweep_dead_temps(&cfg.staging_dir, &faults);
         // Before this run's sequence starts at 0 again, so that a segment a dead
         // run left under a working name is accounted and evictable rather than

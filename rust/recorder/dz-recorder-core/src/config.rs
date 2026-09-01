@@ -27,6 +27,16 @@ use thiserror::Error;
 /// are also what the capture length has to leave room for.
 pub const ETHERNET_IPV4_UDP_HEADER_SIZE: usize = 14 + 20 + 8;
 
+/// The longest those same headers can be: 14 + 60 + 8, an IPv4 header carrying
+/// the full 40 bytes of options.
+///
+/// The synthesised case above is not a bound. A capture length sized to it
+/// slices the tail off a compliant datagram at the cap whose IPv4 header
+/// carries options — and the recorder then counts that datagram as a publisher
+/// over the cap, which is a finding it manufactured itself. The archive already
+/// declares its snaplen from this constant.
+pub const MAX_LINK_HEADER_SIZE: usize = 14 + 60 + 8;
+
 /// Loading a configuration failed.
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -233,15 +243,18 @@ impl Default for CaptureConfig {
 
 impl CaptureConfig {
     /// The capture length: the mandated datagram cap plus the 42 bytes of
-    /// Ethernet, IPv4 and UDP header that precede the payload.
+    /// The mandated cap plus the longest link headers that can precede it.
     ///
     /// Computed, never configured. Every feed spec mandates the cap, so no key
     /// may raise it — the same discipline the publisher's builder applies, for
     /// the same reason: a key that can express a larger value is how the cap
-    /// drifted the first time.
+    /// drifted the first time. What the headers may be is not the same
+    /// question: sizing to the synthesised 42 truncates a compliant datagram
+    /// whose IPv4 header carries options, and truncation is what the recorder
+    /// reports as a publisher violation.
     #[must_use]
     pub const fn snaplen(&self) -> usize {
-        MAX_DATAGRAM_SIZE + ETHERNET_IPV4_UDP_HEADER_SIZE
+        MAX_DATAGRAM_SIZE + MAX_LINK_HEADER_SIZE
     }
 }
 

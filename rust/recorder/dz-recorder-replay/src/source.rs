@@ -41,6 +41,14 @@ const IP_PROTO_UDP: u8 = 17;
 /// the writer states `if_tsresol` at all.
 const DEFAULT_TS_RESOL: u8 = 6;
 
+/// The bound on interface description blocks one section may declare.
+///
+/// A recorder writes three, one per port role. `mergecap` output and a foreign
+/// capture can carry more, and a generous bound costs nothing to a real file
+/// while keeping a crafted one from growing this reader's memory. The archive's
+/// own `CoverageTracker` caps its instance set for the same reason.
+const MAX_INTERFACES: usize = 4096;
+
 /// Why the stream ended, which a reader has to know before trusting a count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Termination {
@@ -476,7 +484,26 @@ impl ArchiveSource {
                 }
                 // Both of these appear in the block stream after the first
                 // section header, which the reader consumed on construction.
-                Ok(Block::InterfaceDescription(idb)) => self.interfaces.push(interface_meta(&idb)),
+                Ok(Block::InterfaceDescription(idb)) => {
+                    // Capped, because this is the one set in the replay path an
+                    // archive can grow: a `.pcapng.zst` of nothing but interface
+                    // description blocks compresses thousands to one, so a small
+                    // file walks this Vec toward the memory of whatever is
+                    // replaying it. Three roles are what a recorder writes and a
+                    // foreign capture has its own; a file past this bound is not
+                    // an archive with many interfaces, it is a file built to be
+                    // read. Rejected the way a malformed block is, so a replay
+                    // that stopped early can never read as a complete one.
+                    if self.interfaces.len() >= MAX_INTERFACES {
+                        let e = SourceError::MalformedArchive(format!(
+                            "the archive declares more than {MAX_INTERFACES} interfaces"
+                        ));
+                        self.termination = Termination::Rejected;
+                        self.last_error = Some(e.to_string());
+                        return Err(e);
+                    }
+                    self.interfaces.push(interface_meta(&idb));
+                }
                 Ok(Block::SectionHeader(shb)) => {
                     // A new section restates everything: `mergecap` produces
                     // one per input, and its interfaces are its own.

@@ -24,7 +24,7 @@ pub mod traits;
 
 pub use config::{
     ArchiveConfig, CaptureConfig, CaptureMode, Compression, ConfigError, FeedConfig, HealthConfig,
-    MetricsConfig, RecorderConfig, ETHERNET_IPV4_UDP_HEADER_SIZE,
+    MetricsConfig, RecorderConfig, ETHERNET_IPV4_UDP_HEADER_SIZE, MAX_LINK_HEADER_SIZE,
 };
 pub use datagram::{CaptureDropScope, ChannelInstance, RecordedDatagram, RecvTsKind};
 pub use error::{SinkError, SourceError};

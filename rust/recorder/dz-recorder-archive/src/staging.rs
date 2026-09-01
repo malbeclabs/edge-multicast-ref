@@ -21,7 +21,7 @@ use std::time::SystemTime;
 
 use dz_recorder_core::SinkError;
 
-use crate::compress::InFlight;
+use crate::compress::{Faults, InFlight};
 
 const SEGMENT_PREFIX: &str = "segment-";
 const PCAPNG_SUFFIX: &str = ".pcapng";
@@ -124,6 +124,11 @@ struct Residue {
     /// all — a budget honest about the disk must not become a licence to remove
     /// somebody's data.
     evictable: bool,
+    /// Submitted to the compressor and not yet picked up. Counted like any
+    /// other history and evictable like it, but taken last: it is the only copy
+    /// of the window it holds, and the object it is about to become is one
+    /// nothing else can produce.
+    queued: bool,
 }
 
 pub struct StagingWatermark {
@@ -143,6 +148,13 @@ pub struct StagingWatermark {
     /// not take: its source is the compressor's input, and taking it destroys an
     /// object that was about to land.
     in_flight: Option<Arc<InFlight>>,
+    /// What the compressor has been handed and has not started on. The budget
+    /// counts it — an unbounded queue nothing counts is an unbounded disk — and
+    /// evicts it only after everything else.
+    queued: Option<Arc<InFlight>>,
+    /// Where a budget that cannot be met is reported, when there is a writer
+    /// behind this watermark to report it to.
+    faults: Option<Arc<Faults>>,
     segments_evicted_total: u64,
     bytes_evicted_total: u64,
 }
@@ -156,6 +168,8 @@ impl StagingWatermark {
             staging_max,
             open_segment_seq: 0,
             in_flight: None,
+            queued: None,
+            faults: None,
             segments_evicted_total: 0,
             bytes_evicted_total: 0,
         }
@@ -171,6 +185,14 @@ impl StagingWatermark {
         self.in_flight = Some(in_flight);
     }
 
+    pub(crate) fn track_queued(&mut self, queued: Arc<InFlight>) {
+        self.queued = Some(queued);
+    }
+
+    pub(crate) fn track_faults(&mut self, faults: Arc<Faults>) {
+        self.faults = Some(faults);
+    }
+
     /// Objects, oldest first: published, and retained after a publication that
     /// could not land.
     #[must_use]
@@ -180,11 +202,20 @@ impl StagingWatermark {
 
     /// Every byte the budget governs.
     ///
-    /// Two files are excluded and no others: the segment being appended to, and
-    /// a segment the compressor is publishing right now. Both are bounded — by
-    /// `rotate_bytes` and by a single compression — and counting an uncompressed
-    /// transient would let it evict history eviction was not asked to touch. A
-    /// segment still under a working name that is *neither* of those is an
+    /// Three files are excluded and no others: the segment being appended to,
+    /// the segment the compressor is publishing right now, and the newest one
+    /// waiting in its queue. Each is a single file bounded by `rotate_bytes`,
+    /// and counting an uncompressed transient — one about to shrink by an order
+    /// of magnitude — is how it evicts history eviction was not asked to touch.
+    ///
+    /// The *rest* of that queue is counted, and that is the difference that
+    /// matters: the queue has no bound of its own. A publication that stalls —
+    /// a hung completed_dir mount, compression slower than rotation — puts
+    /// every later segment behind it, and excluding those is a staging
+    /// directory that grows without bound while this method reports it
+    /// comfortably under budget.
+    ///
+    /// A segment still under a working name that is none of the three is an
     /// orphan, and it is counted and evictable, because bytes nothing accounts
     /// for are bytes nothing bounds.
     ///
@@ -194,7 +225,25 @@ impl StagingWatermark {
     #[must_use]
     pub fn bytes_on_disk(&self) -> u64 {
         let (objects, residue) = self.scan();
-        objects.iter().map(|o| o.bytes).sum::<u64>() + residue.iter().map(|r| r.bytes).sum::<u64>()
+        governed_bytes(&objects, &residue)
+    }
+
+    /// The bytes on the disk that eviction cannot reach.
+    ///
+    /// A file in either directory that this module cannot name is not ours to
+    /// delete — `completed_dir` is a directory a shipper writes into, and a
+    /// budget that doubles as a licence to delete somebody else's data is worse
+    /// than an unbounded one. Counted, because bytes nothing bounds are the
+    /// thing the watermark exists to report, and separated, because evicting
+    /// our own history does not reclaim one byte of them.
+    #[must_use]
+    pub fn unreclaimable_bytes(&self) -> u64 {
+        self.scan()
+            .1
+            .iter()
+            .filter(|r| !r.evictable)
+            .map(|r| r.bytes)
+            .sum()
     }
 
     #[must_use]
@@ -224,8 +273,32 @@ impl StagingWatermark {
     /// copy of the window it holds, so it is the last history worth giving up.
     pub fn enforce(&mut self) -> Result<(), SinkError> {
         let (objects, residue) = self.scan();
-        let mut total = objects.iter().map(|o| o.bytes).sum::<u64>()
-            + residue.iter().map(|r| r.bytes).sum::<u64>();
+        let unreclaimable: u64 = residue
+            .iter()
+            .filter(|r| !r.evictable)
+            .map(|r| r.bytes)
+            .sum();
+        // Only what eviction can actually take. Counting the rest in here is
+        // how one stray file in completed_dir — a shipper's own, a mount point,
+        // anything this module cannot name — at or over the budget makes every
+        // sweep delete the entire archive and still report success: the total
+        // never falls below a floor eviction cannot move, so the loop runs to
+        // the end every time, and the disk is no emptier for it.
+        let mut total = governed_bytes(&objects, &residue) - unreclaimable;
+
+        // Said out loud, because the budget is not being met and no amount of
+        // eviction will meet it. The disk is bounded by this plus staging_max,
+        // and that is a fact an operator has to be told rather than one the
+        // recorder should act on by deleting what it can reach.
+        if unreclaimable > self.staging_max {
+            if let Some(faults) = &self.faults {
+                faults.record(format!(
+                    "staging holds {unreclaimable} bytes eviction cannot reach, over a budget of {}",
+                    self.staging_max
+                ));
+            }
+        }
+
         if total <= self.staging_max {
             return Ok(());
         }
@@ -249,7 +322,28 @@ impl StagingWatermark {
                 Err(e) => failure = failure.or(Some(e)),
             }
         }
-        for partial in residue.iter().filter(|r| r.evictable) {
+        // Orphans first and queued segments last, for the reason objects come
+        // before either: a queued segment is the only copy of the window it
+        // holds and an object nothing else can now produce, so it is the last
+        // history worth giving up — but it is still history the budget can
+        // reach, which is what keeps a stalled publication from filling the
+        // disk.
+        //
+        // All but the newest of them. The queue is what has to be bounded, not
+        // the segment that was just closed: taking that one costs the most
+        // recent window — the one an operator is most likely to be asking about
+        // — and hands the compressor a publication that can only fail. Keeping
+        // it bounds the disk at the budget plus one segment, which `rotate_bytes`
+        // already bounds, and leaves the queue itself as short as the budget
+        // requires.
+        let newest_queued = newest_queued(&residue).cloned();
+        let by_priority = residue.iter().filter(|r| r.evictable && !r.queued).chain(
+            residue
+                .iter()
+                .filter(|r| r.evictable && r.queued)
+                .filter(|r| Some(&r.path) != newest_queued.as_ref()),
+        );
+        for partial in by_priority {
             if total <= self.staging_max {
                 break;
             }
@@ -273,6 +367,10 @@ impl StagingWatermark {
         self.in_flight
             .as_ref()
             .is_some_and(|in_flight| in_flight.holds(path))
+    }
+
+    fn is_queued(&self, path: &Path) -> bool {
+        self.queued.as_ref().is_some_and(|q| q.holds(path))
     }
 
     /// Both directories, classified. Objects come back oldest first, partial
@@ -314,13 +412,16 @@ impl StagingWatermark {
                     // it.
                     continue;
                 }
-                let metadata = entry.metadata().ok();
+                // symlink_metadata, for the reason file_len gives.
+                let metadata = fs::symlink_metadata(&path).ok();
+                let queued = self.is_queued(&path);
                 residue.push(Residue {
                     bytes: metadata.as_ref().map_or(0, std::fs::Metadata::len),
                     modified: metadata
                         .and_then(|m| m.modified().ok())
                         .unwrap_or(SystemTime::UNIX_EPOCH),
-                    evictable: is_recovered_segment(&name) || is_working_segment(&name),
+                    evictable: queued || is_recovered_segment(&name) || is_working_segment(&name),
+                    queued,
                     path,
                 });
             }
@@ -331,8 +432,38 @@ impl StagingWatermark {
     }
 }
 
+/// What the budget counts, over both directories.
+///
+/// The newest queued segment is left out with the open one and the one being
+/// published: three bounded transients, for the same reason in all three cases.
+/// Everything queued behind it is in, because that backlog is the part with no
+/// bound of its own.
+fn governed_bytes(objects: &[SegmentObject], residue: &[Residue]) -> u64 {
+    let newest = newest_queued(residue);
+    objects.iter().map(|o| o.bytes).sum::<u64>()
+        + residue
+            .iter()
+            .filter(|r| Some(&r.path) != newest)
+            .map(|r| r.bytes)
+            .sum::<u64>()
+}
+
+/// The most recent segment handed to the compressor and not yet started on.
+fn newest_queued(residue: &[Residue]) -> Option<&PathBuf> {
+    residue
+        .iter()
+        .filter(|r| r.queued)
+        .max_by_key(|r| r.modified)
+        .map(|r| &r.path)
+}
+
+/// The bytes of the file itself, never of what it points at.
+///
+/// `metadata` follows a symlink, so a link in either directory would charge the
+/// budget for a file on another filesystem — and eviction, deleting the link,
+/// would reclaim the length of the link and not the length that was counted.
 fn file_len(path: &Path) -> u64 {
-    fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+    fs::symlink_metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
 /// `segment-{seq}.pcapng`: a segment under its working name.
@@ -380,4 +511,88 @@ fn object_of(dir: &Path, manifest: &str) -> Option<PathBuf> {
         .into_iter()
         .map(|suffix| dir.join(format!("{stem}{suffix}")))
         .find(|path| path.exists())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::thread::sleep;
+    use std::time::Duration;
+
+    /// A working-segment name, so the file is history the budget can classify.
+    fn segment(dir: &Path, seq: u64, bytes: usize) -> PathBuf {
+        let path = dir.join(open_segment_name(seq));
+        let mut f = fs::File::create(&path).expect("a segment file");
+        f.write_all(&vec![0u8; bytes]).expect("its bytes");
+        // The queue's order is modification time, and a test that writes three
+        // files inside one timestamp tick is a test that asserts nothing.
+        sleep(Duration::from_millis(10));
+        path
+    }
+
+    #[test]
+    fn a_stalled_publication_queue_is_counted_after_its_first_segment() {
+        // The unbounded half of the archive. A publication that stalls leaves
+        // every later rotation sitting in an unbounded job queue: excluded from
+        // the budget, those bytes grow the disk without limit while
+        // bytes_on_disk reports it under. Counted from the second one, because
+        // the first is a bounded transient like the open segment beside it.
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let staging = dir.path().join("staging");
+        let completed = dir.path().join("completed");
+        fs::create_dir_all(&staging).expect("staging");
+        fs::create_dir_all(&completed).expect("completed");
+
+        let queued = Arc::new(InFlight::default());
+        let mut w = StagingWatermark::new(staging.clone(), completed, u64::MAX);
+        // Not the open segment: 99 is what the writer is holding.
+        w.track_open_segment(99);
+        w.track_queued(Arc::clone(&queued));
+
+        for seq in 1..=3 {
+            queued.enter(segment(&staging, seq, 1000));
+        }
+
+        assert_eq!(
+            w.bytes_on_disk(),
+            2000,
+            "a queue of three counts two: the newest is the bounded transient"
+        );
+    }
+
+    #[test]
+    fn eviction_bounds_the_queue_without_taking_the_segment_just_closed() {
+        // The other half of the same rule. The queue has to be reachable or the
+        // disk is unbounded, and the newest segment has to survive or every
+        // rotation hands the compressor a publication that can only fail — and
+        // costs the most recent window, which is the one an operator is most
+        // likely to be asking about.
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let staging = dir.path().join("staging");
+        let completed = dir.path().join("completed");
+        fs::create_dir_all(&staging).expect("staging");
+        fs::create_dir_all(&completed).expect("completed");
+
+        let queued = Arc::new(InFlight::default());
+        let mut w = StagingWatermark::new(staging.clone(), completed, 1500);
+        w.track_open_segment(99);
+        w.track_queued(Arc::clone(&queued));
+
+        let paths: Vec<PathBuf> = (1..=3).map(|seq| segment(&staging, seq, 1000)).collect();
+        for path in &paths {
+            queued.enter(path.clone());
+        }
+
+        w.enforce().expect("eviction");
+
+        assert!(
+            !paths[0].exists(),
+            "the oldest queued segment was not evicted"
+        );
+        assert!(
+            paths[2].exists(),
+            "the segment just closed was evicted out from under the compressor"
+        );
+    }
 }

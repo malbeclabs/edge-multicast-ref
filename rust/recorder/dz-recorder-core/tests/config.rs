@@ -71,7 +71,13 @@ fn no_key_can_raise_the_datagram_size_cap() {
         "the capture length is computed from it"
     );
     let cfg = RecorderConfig::parse(&toml).unwrap();
-    assert_eq!(cfg.capture.snaplen(), dz_edge_core::MAX_DATAGRAM_SIZE + 42);
+    // The longest headers, not the synthesised ones: 14 + 60 + 8. A capture
+    // length of cap + 42 cuts the tail off a compliant datagram at the cap
+    // whose IPv4 header carries options, and the recorder then counts that
+    // datagram as a publisher over the cap — a finding it manufactured. This is
+    // also the snaplen the archive declares in every interface block, and the
+    // two disagreeing is a segment whose blocks are longer than it admits.
+    assert_eq!(cfg.capture.snaplen(), dz_edge_core::MAX_DATAGRAM_SIZE + 82);
 }
 
 #[test]

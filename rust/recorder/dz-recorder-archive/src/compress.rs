@@ -88,22 +88,27 @@ impl Faults {
     }
 }
 
-/// The segments the compressor is holding right now.
+/// A set of segment paths the compressor can answer for.
 ///
-/// The budget has to leave a segment that is genuinely mid-publication alone:
-/// its source is the compressor's input, and evicting it destroys an object that
-/// was about to land. It also has to count every other segment still under a
-/// working name, because one the compressor has already finished with is an
-/// orphan nothing will ever publish and nothing else can reach. Only the
-/// compressor knows which is which, so it says so here rather than leaving it to
-/// be guessed from a file name.
+/// Two of these exist, and the difference between them is the whole of the
+/// budget's relationship with the compressor. **In flight** is the one segment
+/// being read right now: evicting it destroys an object that was about to land,
+/// so the budget leaves it alone. **Queued** is everything submitted behind it:
+/// counted and evictable like any other history, because the job queue is
+/// unbounded and a publication that stalls would otherwise grow staging without
+/// bound while the budget reported it under.
+///
+/// Everything else still under a working name is an orphan — one the compressor
+/// has finished with, or one a dead run left — and only the compressor knows
+/// which is which, so it says so here rather than leaving it to be guessed from
+/// a file name.
 #[derive(Debug, Default)]
 pub(crate) struct InFlight {
     paths: Mutex<HashSet<PathBuf>>,
 }
 
 impl InFlight {
-    fn enter(&self, path: PathBuf) {
+    pub(crate) fn enter(&self, path: PathBuf) {
         self.lock().insert(path);
     }
 
@@ -160,6 +165,7 @@ pub(crate) struct Compressor {
     completed: Receiver<Result<Published, SinkError>>,
     faults: Arc<Faults>,
     in_flight: Arc<InFlight>,
+    queued: Arc<InFlight>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -171,11 +177,27 @@ impl Compressor {
         let thread_faults = Arc::clone(&faults);
         let in_flight = Arc::new(InFlight::default());
         let thread_in_flight = Arc::clone(&in_flight);
+        let queued = Arc::new(InFlight::default());
+        let thread_queued = Arc::clone(&queued);
         let thread = std::thread::Builder::new()
             .name("dz-recorder-compress".to_owned())
             .spawn(move || {
                 for job in jobs_rx {
                     let source = job.source.clone();
+                    // In flight only once this thread is actually reading it,
+                    // and queued until then. Entering at submission instead is
+                    // what makes an unbounded job queue invisible to the
+                    // budget: a stalled publication — a hung completed_dir
+                    // mount, compression slower than rotation — would grow
+                    // staging without bound while bytes_on_disk reported it
+                    // comfortably under.
+                    //
+                    // In this order, so the path is never in neither set: a
+                    // moment as both is an accounting the budget can read
+                    // safely, and a moment as neither is a file it would treat
+                    // as an orphan.
+                    thread_in_flight.enter(source.clone());
+                    thread_queued.leave(&source);
                     // A publication that failed must not end the thread: the
                     // next segment still has to land.
                     let done = publish(&job, &thread_faults);
@@ -194,6 +216,7 @@ impl Compressor {
             completed: done_rx,
             faults,
             in_flight,
+            queued,
             thread: Some(thread),
         }
     }
@@ -210,9 +233,17 @@ impl Compressor {
         Arc::clone(&self.in_flight)
     }
 
+    /// What has been submitted and not yet picked up, so the budget counts it,
+    /// can reach it, and takes it only after everything else.
+    pub(crate) fn queued(&self) -> Arc<InFlight> {
+        Arc::clone(&self.queued)
+    }
+
+    /// A submitted segment is queued, not in flight: counted by the budget and
+    /// evictable by it, but only after every other kind of history.
     pub(crate) fn submit(&self, job: Job) -> Result<(), SinkError> {
         let source = job.source.clone();
-        self.in_flight.enter(source.clone());
+        self.queued.enter(source.clone());
         match self
             .jobs
             .as_ref()
@@ -222,8 +253,8 @@ impl Compressor {
             Ok(()) => Ok(()),
             Err(_) => {
                 // Nothing will publish it, so it is history the budget accounts
-                // for from here on.
-                self.in_flight.leave(&source);
+                // for from here on — as an orphan rather than as a queue entry.
+                self.queued.leave(&source);
                 Err(SinkError::Compress(
                     "the compressor thread is gone".to_owned(),
                 ))

@@ -13,11 +13,12 @@ use std::net::Ipv4Addr;
 use common::{channel_id, declared_len, record, replay, schema_version, sequence_number};
 use dz_edge_core::{PortRole, MAX_DATAGRAM_SIZE, SUPPORTED_SCHEMA_VERSIONS};
 use dz_recorder_archive::Compression;
+use dz_recorder_core::Source;
 use dz_recorder_replay::synthetic::{
     StarvationWindow, SyntheticPublisher, OVERSIZED_DECLARED_LEN, SECOND_SOURCE, SILENT_CHANNEL_ID,
     UNKNOWN_SCHEMA_VERSION,
 };
-use dz_recorder_replay::{Fault, OwnedDatagram};
+use dz_recorder_replay::{ArchiveSource, Fault, OwnedDatagram, Termination};
 
 const MKTDATA_ONLY: &[PortRole] = &[PortRole::Mktdata];
 const ZSTD: Compression = Compression::Zstd { level: 1 };
@@ -263,4 +264,52 @@ fn forward_gaps(seqs: &[u64]) -> Vec<u64> {
 
 fn descends_somewhere(seqs: &[u64]) -> bool {
     seqs.windows(2).any(|w| w[1] < w[0])
+}
+
+#[test]
+fn an_archive_of_nothing_but_interface_blocks_is_refused_rather_than_grown() {
+    // The one set in this reader an archive can make grow. Interface
+    // description blocks are tiny and identical, so they compress thousands to
+    // one: a file small enough to be shipped without comment expands into as
+    // much memory as whatever is replaying it will give up. The bound is
+    // generous — a recorder writes three — and what matters is that passing it
+    // ends the replay as Rejected, so a stream that stopped early can never be
+    // read as a complete one.
+    use pcap_file::pcapng::blocks::interface_description::InterfaceDescriptionBlock;
+    use pcap_file::pcapng::PcapNgWriter;
+    use pcap_file::DataLink;
+
+    let tmp = tempfile::tempdir().expect("a temporary directory");
+    let path = tmp.path().join("interfaces-only.pcapng");
+    {
+        let mut writer =
+            PcapNgWriter::new(std::fs::File::create(&path).expect("create")).expect("section");
+        for _ in 0..5_000 {
+            writer
+                .write_pcapng_block(InterfaceDescriptionBlock {
+                    linktype: DataLink::ETHERNET,
+                    snaplen: 1314,
+                    options: vec![],
+                })
+                .expect("interface description");
+        }
+    }
+
+    let mut source = ArchiveSource::open(&path).expect("the file is well-formed pcapng");
+    let mut refused = None;
+    loop {
+        match Source::next(&mut source) {
+            Ok(Some(_)) => {}
+            Ok(None) => break,
+            Err(e) => {
+                refused = Some(e.to_string());
+                break;
+            }
+        }
+    }
+    assert!(
+        refused.is_some_and(|e| e.contains("interfaces")),
+        "an archive of nothing but interface blocks was accepted"
+    );
+    assert_eq!(source.terminated_by(), Termination::Rejected);
 }

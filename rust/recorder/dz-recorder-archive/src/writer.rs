@@ -41,7 +41,7 @@ pub const LINK_HEADER_LEN: usize = 42;
 /// slices the headers off the frame as they arrived, so an IPv4 header with
 /// options is longer, and a scratch buffer sized for the synthesised case
 /// reallocates on the record path for exactly those datagrams.
-pub const MAX_LINK_HEADER_LEN: usize = 14 + 60 + 8;
+pub const MAX_LINK_HEADER_LEN: usize = dz_recorder_core::MAX_LINK_HEADER_SIZE;
 
 /// Every port role, in the order that fixes `interface_id`.
 ///

@@ -372,3 +372,49 @@ fn a_bounded_wait_reports_a_quiet_feed_as_quiet_and_not_as_ended() {
         "the stop flag ends the wait early rather than burning the timeout"
     );
 }
+
+#[test]
+fn a_datagram_addressed_to_another_group_is_not_admitted() {
+    // A shared port with two groups on it. Without this the archive holds both
+    // feeds and the coverage row keyed on (source, channel id, port) merges two
+    // sequence spaces, so neither is answerable afterwards. The bind is what
+    // makes this unreachable on Linux; the check is what says so.
+    let synth = synthesiser();
+    let elsewhere = ArrivalMetadata {
+        local_dst: Some(Ipv4Addr::new(233, 252, 0, 2)),
+        ..ArrivalMetadata::default()
+    };
+    assert!(!synth.admits(&elsewhere));
+}
+
+#[test]
+fn a_unicast_datagram_to_the_same_port_is_not_admitted() {
+    // The other way a wildcard bind fills an archive with traffic nobody asked
+    // it to keep: the interface's own address, not a group at all.
+    let synth = synthesiser();
+    let unicast = ArrivalMetadata {
+        local_dst: Some(Ipv4Addr::new(192, 0, 2, 10)),
+        ..ArrivalMetadata::default()
+    };
+    assert!(!synth.admits(&unicast));
+}
+
+#[test]
+fn a_datagram_addressed_to_the_joined_group_is_admitted() {
+    let synth = synthesiser();
+    let ours = ArrivalMetadata {
+        local_dst: Some(GROUP),
+        ..ArrivalMetadata::default()
+    };
+    assert!(synth.admits(&ours));
+}
+
+#[test]
+fn a_datagram_whose_destination_was_not_reported_is_admitted() {
+    // IP_PKTINFO is a control message, and a control buffer too small for what
+    // the kernel sent loses it. Discarding our own traffic on the strength of a
+    // message that was missing would be the recorder manufacturing the loss it
+    // exists to measure; cmsg_truncations is where that case is already counted.
+    let synth = synthesiser();
+    assert!(synth.admits(&ArrivalMetadata::default()));
+}

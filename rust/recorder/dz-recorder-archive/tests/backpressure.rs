@@ -531,3 +531,61 @@ fn a_failed_flush_abandons_the_segment_and_still_tells_the_caller() {
     drop(w);
     drop(tmp);
 }
+
+#[test]
+fn a_file_eviction_cannot_reach_does_not_cost_the_whole_archive() {
+    // completed_dir is a directory a shipper writes into, so it can hold a file
+    // this crate did not write and must not delete. Counting those bytes
+    // against the budget makes the total unreachable: every sweep deletes every
+    // object, the total never falls, and the disk is no emptier — the archive is
+    // gone and the file that displaced it is still there.
+    let segment = one_segment_footprint();
+    let mut a = Archive::with(segment * 4);
+    a.rotate_a_full_segment(at_secs(61));
+    a.rotate_a_full_segment(at_secs(122));
+    let before = a.segments_on_disk();
+    assert_eq!(before, 2, "two objects to lose");
+
+    // One stray file, on its own over the whole budget.
+    std::fs::write(
+        a.completed.join("shipper.state"),
+        vec![0u8; (segment * 8) as usize],
+    )
+    .unwrap();
+    a.w.sweep_staging();
+
+    assert_eq!(
+        a.segments_on_disk(),
+        before,
+        "the archive was evicted to make room for bytes eviction cannot reach"
+    );
+    let reported = a.w.last_error().unwrap_or_default();
+    assert!(
+        reported.contains("eviction cannot reach"),
+        "a budget that cannot be met has to be said out loud, got {reported:?}"
+    );
+}
+
+#[test]
+fn a_symlink_is_worth_its_own_length_and_not_its_targets() {
+    // metadata follows a symlink, so a link into another filesystem would charge
+    // the budget for bytes that deleting the link does not reclaim: the same
+    // unreachable total, reached a different way.
+    let segment = one_segment_footprint();
+    let mut a = Archive::with(segment * 4);
+    a.rotate_a_full_segment(at_secs(61));
+    a.rotate_a_full_segment(at_secs(122));
+
+    let elsewhere = a.completed.join("big.bin");
+    std::fs::write(&elsewhere, vec![0u8; (segment * 8) as usize]).unwrap();
+    let counted_with_the_file = a.w.bytes_on_disk();
+    std::fs::remove_file(&elsewhere).unwrap();
+    std::os::unix::fs::symlink("/nonexistent/big.bin", a.completed.join("link.bin")).unwrap();
+
+    assert!(
+        a.w.bytes_on_disk() < counted_with_the_file / 2,
+        "the budget was charged for what the link points at"
+    );
+    a.w.sweep_staging();
+    assert_eq!(a.segments_on_disk(), 2, "and evicted the archive for it");
+}
