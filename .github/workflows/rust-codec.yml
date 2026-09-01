@@ -5,6 +5,7 @@ on:
     paths:
       - 'rust/codec/**'
       - 'rust/publisher/**'
+      - 'rust/recorder/**'
       - 'rust/Cargo.toml'
       - 'rust/Cargo.lock'
       - 'testdata/golden/**'
@@ -31,3 +32,33 @@ jobs:
         run: cargo test --all
       - name: Test (release)
         run: cargo test --all --release
+      # Compiled, not run: the loopback tests need a multicast route and
+      # IP_MULTICAST_LOOP delivery to this host, which the runner has not got.
+      # Compiling them is still a gate — a socket test that stops building is a
+      # test nobody runs by hand either.
+      - name: Build (loopback tests)
+        run: cargo test -p dz-recorder-capture --features loopback-tests --no-run
+
+  # AF_PACKET mode is a separate job because it needs libpcap-dev at build time.
+  # Without it nothing compiles afpacket.rs at all, and 1,400 lines of the
+  # default capture mode would be gated by nothing.
+  afpacket:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install libpcap
+        run: sudo apt-get update && sudo apt-get install -y libpcap-dev
+      - name: Clippy (afpacket)
+        run: cargo clippy -p dz-recorder-capture --features afpacket --all-targets -- -D warnings
+      - name: Test (afpacket)
+        run: cargo test -p dz-recorder-capture --features afpacket
+      # afpacket-live-tests needs CAP_NET_RAW and a real device, so it is
+      # compiled here and run by hand.
+      - name: Build (afpacket live tests)
+        run: cargo test -p dz-recorder-capture --features afpacket-live-tests --no-run

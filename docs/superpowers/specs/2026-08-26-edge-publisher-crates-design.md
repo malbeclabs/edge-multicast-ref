@@ -378,8 +378,10 @@ edge-multicast-ref/
     publisher/   dz-publisher-metrics, -egress, -refdata, -runtime
     ingress/     dz-ingress-core, -websocket, -fix, -multicast, -rest,
                  -filetail, -uds
-    conformance/ the hand-transcribed suite, moved in from a venue repository
-    receivers/   kernel-receiver, xdp-receiver (existing)
+    conformance/ the hand-transcribed rule suite
+    recorder/    dz-recorder-core, -capture, -archive, -replay, -health,
+                 dz-recorder
+    receivers/   kernel-receiver, xdp-receiver
   go/
     edge/        core, refdata, tob, mbp, mbo
     internal/feed/

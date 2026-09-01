@@ -366,9 +366,12 @@ writing the same archive format. It needs no `CAP_NET_RAW`, which is the case
 where `AF_PACKET` is simply unavailable, and it is the right mode when the
 question is about a consumer's own stack rather than about the publisher. It
 synthesises the headers as described above, taking what it can from
-`IP_RECVTTL` and `IP_PKTINFO`, writing zero for what the kernel did not report,
-and recording the fact in the archive so that no reader mistakes a synthesised
-field for a captured one.
+`IP_RECVTTL` and `IP_PKTINFO`, and recording the fact in the archive so that no
+reader mistakes a synthesised field for a captured one. A synthesised header
+field the kernel did not report is written as zero, because an IPv4 header has
+no way to express *absent* — which is a statement about the bytes in the
+archive and not about the recorder's own knowledge, where an unobserved value
+stays unobserved rather than becoming a zero somebody will later average.
 
 ### Capture frameworks considered
 
@@ -584,7 +587,14 @@ What it checks, all from the 24-byte header:
 - sequence continuity per channel instance: gaps, reordering, duplicates
 - `Reset Count` transitions, and backward sequence motion that is not a reset
 - `send_timestamp_ns` → `recv_ts_ns`, as a histogram, per port role
-- heartbeat cadence and channel silence, per instance
+- heartbeat cadence and channel silence, per instance — with one inference
+  stated rather than assumed: the header does not identify a message type, so a
+  heartbeat is recognised by the only shape the header decides, a single message
+  in a datagram of exactly the heartbeat's length. No other message in the
+  family is that size today, so it is exact; if one is ever defined, the failure
+  is a wider cadence histogram rather than a silence that goes unseen. The exact
+  answer belongs to the opt-in message-walk mode below, which is where a message
+  type can actually be read
 - declared datagram length against the 1232-byte cap, and against the received length
 - magic and schema version, counted by value rather than judged
 - its own losses: capture drops, interface drops, rejoins, segments evicted
@@ -592,8 +602,15 @@ What it checks, all from the 24-byte header:
 Metrics are `dz_recorder_*`, mirroring the `dz_publisher_*` decision in the
 `2026-08-26` design and for the same reason: the names are normative, the
 crates that own the hot paths record them internally, and a recorder emits them
-whether or not anyone thought about it. Labels are `site`, `recorder`, `feed`,
-`channel`, `role`, `source` — never a venue.
+whether or not anyone thought about it. The identity labels are `site`,
+`recorder`, `feed`, `channel`, `port_role`, `source` — never a venue — and a
+family may carry a taxonomy dimension beside them (`kind`, `reason`, and the
+by-value `magic` and `schema_version`), the way the publisher set does.
+
+`port_role` and not `role`, because that is the glossary's term and because
+`dz_publisher_*` already spells it that way: a dashboard joining a publisher
+series to a recorder series over the same feed cannot join on a dimension the
+two sides name differently.
 
 **What the health tier deliberately does not do:** walk the messages inside a
 datagram, track a per-instrument sequence, build a book, or resolve reference

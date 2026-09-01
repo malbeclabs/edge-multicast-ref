@@ -1,0 +1,19 @@
+[package]
+name = "dz-recorder-replay"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Read a DoubleZero Edge recorder archive back as a Source"
+
+[dependencies]
+dz-recorder-core = { path = "../dz-recorder-core" }
+dz-edge-core = { path = "../../codec/dz-edge-core" }
+thiserror = { workspace = true }
+pcap-file = { workspace = true }
+zstd = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+dz-recorder-archive = { path = "../dz-recorder-archive" }

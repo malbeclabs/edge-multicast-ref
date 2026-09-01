@@ -5,6 +5,10 @@ members = [
     "codec/dz-edge-tob",
     "codec/dz-edge-refdata",
     "publisher/dz-publisher-metrics",
+    "recorder/dz-recorder-core",
+    "recorder/dz-recorder-archive",
+    "recorder/dz-recorder-replay",
+    "recorder/dz-recorder-capture",
 ]
 exclude = ["kernel-receiver", "xdp-receiver"]
 
@@ -23,3 +27,28 @@ thiserror = "1.0"
 # builds of the same commit resolve identically.
 prometheus = "0.14.0"
 tiny_http = "0.12"
+
+# The recorder crates. Versions are pinned here so that the four of them
+# cannot disagree about the archive format or the receive path.
+#
+# pcap-file is pinned exactly: 2.0.0 carries every pcapng element the design
+# asks for, and 3.0.0-rc1 is the only newer release. A release candidate is
+# not what the archive format sits on.
+pcap-file = "=2.0.0"
+zstd = "0.13"
+sha2 = "0.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+# socket and net carry sockopt::{ReceiveTimestampns, RxqOvfl, Ipv4PacketInfo,
+# Ipv4Ttl} and the matching ControlMessageOwned variants, which is all of
+# socket mode with no unsafe and no C dependency.
+nix = { version = "0.30", features = ["socket", "net", "time", "uio"] }
+# AF_PACKET mode goes through libpcap rather than reaching past it to a raw
+# socket. libpcap gives the mmap ring, BPF compilation and the drop counters,
+# keeps every unsafe block inside the FFI crate, and is the seam that makes an
+# accelerated capture framework a link-time change if the measured load ever
+# justifies one. Optional, because it needs libpcap-dev at build time and the
+# tests that do not touch it must still run where that is absent.
+pcap = "2.5"
+tempfile = "3"
