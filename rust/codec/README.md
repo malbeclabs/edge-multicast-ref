@@ -7,6 +7,7 @@ The DoubleZero Edge wire format. One crate for what every feed shares, one per f
 | [`dz-edge-core`](dz-edge-core/) | Datagram and message headers, sequencing, receive-side walk, decimal conversion, control messages |
 | [`dz-edge-tob`](dz-edge-tob/) | Top-of-Book: `Quote` (`0x03`), `Trade` (`0x04`) |
 | [`dz-edge-refdata`](dz-edge-refdata/) | Reference data: `InstrumentDefinition` (`0x02`), `ManifestSummary` (`0x07`) |
+| [`dz-edge-mbp`](dz-edge-mbp/) | Market-by-Price, the first depth feed: `LevelUpdate` (`0x40`), `BookClear` (`0x41`), `SnapshotBegin` (`0x20`), `SnapshotLevel` (`0x42`), `SnapshotEnd` (`0x22`) |
 
 The format is specified in [edge-feed-spec](https://github.com/malbeclabs/edge-feed-spec); where these crates disagree with it, they have a bug.
 

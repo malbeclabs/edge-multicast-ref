@@ -68,4 +68,15 @@ pub enum DecodeError {
 
     #[error("datagram header declares {declared} messages but {found} were found")]
     MessageCountMismatch { declared: u8, found: usize },
+
+    /// A body whose fields are individually readable but whose combination the
+    /// feed's own rules forbid.
+    ///
+    /// Distinct from every variant above, which are all failures of framing: a
+    /// message reaching this one was framed correctly and says something that
+    /// cannot be true. It is refused rather than interpreted, because the
+    /// alternative is two implementations guessing differently about the same
+    /// bytes and disagreeing about a book they both received.
+    #[error("malformed body for type {type_id:#04x}: {what}")]
+    MalformedBody { type_id: u8, what: &'static str },
 }

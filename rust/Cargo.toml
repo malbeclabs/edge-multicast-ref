@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "codec/dz-edge-core",
     "codec/dz-edge-tob",
+    "codec/dz-edge-mbp",
     "codec/dz-edge-refdata",
     "publisher/dz-publisher-metrics",
     "recorder/dz-recorder-core",

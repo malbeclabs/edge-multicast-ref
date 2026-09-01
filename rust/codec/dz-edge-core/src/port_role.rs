@@ -4,11 +4,12 @@
 pub enum PortRole {
     Mktdata,
     Refdata,
-    /// No message type in these crates lists this role yet, because the
-    /// snapshot port role belongs to the depth feeds, which are not
-    /// implemented here. A builder constructed with this role will refuse
-    /// every message currently defined; the first depth feed's message types
-    /// will list it.
+    /// The depth feeds' third port, carrying book state rather than book
+    /// changes. `dz-edge-mbp`'s `SnapshotBegin`, `SnapshotLevel` and
+    /// `SnapshotEnd` are the message types that list it; a builder constructed
+    /// with this role refuses every other message these crates define, which is
+    /// what keeps a live update off the snapshot port and a snapshot off the
+    /// live one.
     Snapshot,
 }
 

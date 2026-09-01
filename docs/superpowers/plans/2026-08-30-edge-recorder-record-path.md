@@ -1,6 +1,6 @@
 # Edge Recorder: the Record Path — Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Land `dz-recorder-core`, `dz-recorder-archive`, `dz-recorder-replay` and `dz-recorder-capture`, so any host receiving any feed in the family can archive the bytes it received — with its own losses recorded inside the archive — and replay them back byte-identically.
 
@@ -9,6 +9,16 @@
 **Tech Stack:** Rust 2021. `pcap-file` 2.0 (pcapng blocks), `zstd` 0.13, `sha2`, `nix` (socket mode), `pcap` (AF_PACKET mode, libpcap FFI), `serde`/`toml` (config), `thiserror`. No async runtime in the record path.
 
 **Spec:** `docs/superpowers/specs/2026-08-28-edge-recorder-crates-design.md`
+
+> **Status: landed.** Plan 1 merged as #60 and plan 2 as #61, #62, #63 and #65,
+> and the boxes below are ticked against what is on `main`. One item is not, and
+> it is the cross-language golden vector in task 11: it waits on the Go capture
+> reader moving to pcapng, which is the spec's own step 2 and has not happened.
+> The rest of the plan's *scope* also grew in review — twenty-seven defects
+> across five rounds, chiefly fields the wire controls reaching counters that
+> cannot be walked back — and those changes are in the commits rather than here,
+> because a plan is a record of what was decided before the work and not a
+> summary of it.
 
 **Scope:** This is plan 1 of three, covering the spec's *Order of work* steps 1–3.
 
@@ -83,7 +93,7 @@ Four things were checked against the code rather than assumed. Each changes a ta
 - Consumes: `dz_edge_core::PortRole`.
 - Produces: `RecordedDatagram<'a>`, `RecvTsKind`, `ChannelInstance`, `Source`, `Sink`, `Observer`, `CompletedSegment`, `SourceError`, `SinkError`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 // rust/recorder/dz-recorder-core/tests/recorded_datagram.rs
@@ -134,7 +144,7 @@ fn a_recorded_datagram_borrows_its_payload() {
 }
 ```
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 `RecordedDatagram` borrows its payload from the receive buffer — the record path must not allocate per datagram. `ttl` is `Option<u8>` because socket mode gets it only if `IP_RECVTTL` was honoured and AF_PACKET always has it; `None` means *not observed*, never *zero*.
 
@@ -171,7 +181,7 @@ pub struct RecordedDatagram<'a> {
 
 The three traits are exactly the spec's. `Sink::rotate` returns `Result<Option<CompletedSegment>, SinkError>`; `None` means the segment held nothing and no object was produced, which is not an error and must not be logged as one.
 
-- [ ] **Step 3: Verify** — `cargo test -p dz-recorder-core`, `cargo clippy -p dz-recorder-core --all-targets`.
+- [x] **Step 3: Verify** — `cargo test -p dz-recorder-core`, `cargo clippy -p dz-recorder-core --all-targets`.
 
 ---
 
@@ -186,7 +196,7 @@ The three traits are exactly the spec's. `Sink::rotate` returns `Result<Option<C
 **Interfaces:**
 - Produces: `RecorderConfig`, `FeedConfig`, `CaptureConfig`, `ArchiveConfig`, `RecorderIdentity`, `config_hash()`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 #[test]
@@ -226,13 +236,13 @@ fn the_config_hash_ignores_comments_and_key_order() {
 }
 ```
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 The TOML shape is the spec's, verbatim, with `#[serde(deny_unknown_fields)]` on every struct. `snaplen` is `MAX_DATAGRAM_SIZE + 42` (14 Ethernet + 20 IPv4 + 8 UDP), computed, never configured — the same discipline `DatagramBuilder` applies to the cap. `config_hash` is the sha256 of the *parsed* config serialised canonically, not of the file bytes, so a comment or a reordering does not invalidate provenance.
 
 `RecorderIdentity` is `{ site, recorder, env, build_version, build_commit, config_hash }` and is what fills the Section Header block options.
 
-- [ ] **Step 3: Verify** — `cargo test -p dz-recorder-core`.
+- [x] **Step 3: Verify** — `cargo test -p dz-recorder-core`.
 
 ---
 
@@ -248,7 +258,7 @@ The TOML shape is the spec's, verbatim, with `#[serde(deny_unknown_fields)]` on 
 - Consumes: `RecordedDatagram`, `RecorderIdentity`, `pcap_file::pcapng`.
 - Produces: `SegmentWriter`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 #[test]
@@ -300,7 +310,7 @@ fn a_datagram_is_written_whole_and_verbatim() {
 }
 ```
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 One Section Header block per segment, one Interface Description block per port role in a fixed order (so `interface_id` is stable across segments and a reader can map it without options), one Enhanced Packet Block per datagram.
 
@@ -308,7 +318,7 @@ Ethernet + IPv4 + UDP headers are prepended to the payload. In AF_PACKET mode th
 
 `IfTsResol(9)` on every IDB. `DropCount` is written only when the delta is non-zero.
 
-- [ ] **Step 3: Verify** — `cargo test -p dz-recorder-archive`; open a written segment with `capinfos` and `tshark -r` and confirm both read it.
+- [x] **Step 3: Verify** — `cargo test -p dz-recorder-archive`; open a written segment with `capinfos` and `tshark -r` and confirm both read it.
 
 ---
 
@@ -319,7 +329,7 @@ Ethernet + IPv4 + UDP headers are prepended to the payload. In AF_PACKET mode th
 - Create: `rust/recorder/dz-recorder-archive/src/compress.rs`
 - Test: `rust/recorder/dz-recorder-archive/tests/rotation.rs`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 #[test]
@@ -370,13 +380,13 @@ fn the_hash_is_of_the_object_that_lands() {
 }
 ```
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 On rotation: fsync, close, move to a temp name in the staging directory, hand to the compressor thread. The compressor writes `<start_ns>-<end_ns>-<segment_seq>.pcapng.zst`, hashes what it wrote, writes the manifest beside it, then moves both into `completed_dir` — the move is last and it is the publication, so the shipper never sees a partial object.
 
 The Interface Statistics blocks are appended before the close, from counters the writer already holds. `segment_seq` is monotonic per recorder run and starts at 0.
 
-- [ ] **Step 3: Verify** — `cargo test -p dz-recorder-archive`; `zstd -t` and `capinfos` on a completed object.
+- [x] **Step 3: Verify** — `cargo test -p dz-recorder-archive`; `zstd -t` and `capinfos` on a completed object.
 
 ---
 
@@ -386,7 +396,7 @@ The Interface Statistics blocks are appended before the close, from counters the
 - Create: `rust/recorder/dz-recorder-archive/src/manifest.rs`
 - Test: `rust/recorder/dz-recorder-archive/tests/manifest.rs`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 #[test]
@@ -415,13 +425,13 @@ fn drop_totals_are_visible_before_the_archive_is_trusted() {
 }
 ```
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 Computed from state the writer already holds, never by re-reading the segment.
 
 **One deliberate exception to "the record path never parses":** the per-instance coverage needs `sequence_number`, `channel_id` and `reset_count`, which are three fixed offsets in the first 24 bytes. Read them as bare little-endian integers at their offsets — **not** via `DatagramHeader::decode`, which would reject an unknown schema version and thereby drop the coverage row for exactly the datagram most worth knowing about. The archive still holds the bytes either way; this only decides whether the manifest can describe them. Guard it with `payload.len() >= 24` and count a short datagram rather than skipping it silently.
 
-- [ ] **Step 3: Verify** — `cargo test -p dz-recorder-archive`.
+- [x] **Step 3: Verify** — `cargo test -p dz-recorder-archive`.
 
 ---
 
@@ -431,7 +441,7 @@ Computed from state the writer already holds, never by re-reading the segment.
 - Create: `rust/recorder/dz-recorder-archive/src/staging.rs`
 - Test: `rust/recorder/dz-recorder-archive/tests/backpressure.rs`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 #[test]
@@ -472,11 +482,11 @@ fn a_write_error_drops_and_counts_rather_than_propagating_to_the_drain_thread() 
 }
 ```
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 `staging_max` is enforced on rotation and on a periodic sweep, never on the write path. Eviction deletes the oldest completed-but-unshipped segment and its manifest together, and counts. The open segment is never a candidate.
 
-- [ ] **Step 3: Verify** — `cargo test -p dz-recorder-archive`.
+- [x] **Step 3: Verify** — `cargo test -p dz-recorder-archive`.
 
 ---
 
@@ -487,7 +497,7 @@ fn a_write_error_drops_and_counts_rather_than_propagating_to_the_drain_thread() 
 - Create: `rust/recorder/dz-recorder-replay/src/lib.rs`
 - Test: `rust/recorder/dz-recorder-replay/tests/round_trip.rs`
 
-- [ ] **Step 1: Write the failing test — this is the whole contract in one test**
+- [x] **Step 1: Write the failing test — this is the whole contract in one test**
 
 ```rust
 #[test]
@@ -529,11 +539,11 @@ fn a_truncated_segment_replays_what_survived_and_says_so() {
 }
 ```
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 Reads pcapng through `pcap-file`, transparently `zstd`-decoding by extension. Recovers `src`, `dst` and `ttl` from the IP/UDP headers in the block data; `role` from the Interface Description block the packet references; `drop_delta` from `DropCount` (absent means 0); `recv_ts_kind` from the Section Header comment written in Task 3.
 
-- [ ] **Step 3: Verify** — `cargo test -p dz-recorder-replay`.
+- [x] **Step 3: Verify** — `cargo test -p dz-recorder-replay`.
 
 ---
 
@@ -546,7 +556,7 @@ Reads pcapng through `pcap-file`, transparently `zstd`-decoding by extension. Re
 - Create: `rust/recorder/dz-recorder-capture/src/rejoin.rs`
 - Test: `rust/recorder/dz-recorder-capture/tests/socket_mode.rs`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 #[test]
@@ -600,13 +610,13 @@ fn a_datagram_from_an_unexpected_source_is_delivered() {
 }
 ```
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 Port the drain thread, `bind_multicast`, `bind_or_retry` and the rejoin policy. Add `sockopt::RxqOvfl` and read `ControlMessageOwned::RxqOvfl` alongside `ScmTimestampns` in the same `recvmsg`; add `Ipv4Ttl` and `Ipv4PacketInfo` so the synthesised headers carry an observed TTL and the real destination address rather than a guess.
 
 One drain thread per port role. Each pushes into a bounded channel the record loop drains; **if that channel is full the datagram is dropped and counted, and the drain thread does not wait** — the same rule as the staging watermark, applied one layer up.
 
-- [ ] **Step 3: Verify** — `cargo test -p dz-recorder-capture`; a loopback-interface integration test with `IP_MULTICAST_LOOP`, gated behind a feature so CI without multicast still passes.
+- [x] **Step 3: Verify** — `cargo test -p dz-recorder-capture`; a loopback-interface integration test with `IP_MULTICAST_LOOP`, gated behind a feature so CI without multicast still passes.
 
 ---
 
@@ -619,7 +629,7 @@ One drain thread per port role. Each pushes into a bounded channel the record lo
 
 **Build requirement:** `libpcap-dev`. Not present on this workstation — only the `libpcap0.8t64` runtime is — so `sudo apt-get install -y libpcap-dev` is step 0 of this task and a CI package line is part of it.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 #[test]
@@ -661,7 +671,7 @@ fn a_non_ipv4_or_non_udp_frame_that_slips_the_filter_is_skipped_not_archived() {
 }
 ```
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 `pcap::Capture::from_device(iface)` with `.immediate_mode(true)`, `.precision(Precision::Nano)`, `.buffer_size(cfg.capture.buffer)`, `.snaplen(snaplen)` and the compiled filter. `stats()` is polled per read batch, not per datagram, and the delta since the previous poll is attributed to the first datagram of the batch — which is what `epb_dropcount` means and is the best attribution the ring can offer.
 
@@ -671,7 +681,7 @@ The multicast socket is still opened and joined, and its receive path is drained
 
 Keep the `libpcap` seam. The spec's *Capture frameworks considered* rejects an accelerated capture framework on the measured load, and the only reason that rejection is cheap to revisit is that such a framework ships a `libpcap` shim: swapping it in is a link-time and deployment change with this `Source` untouched. Reaching past `libpcap` to raw `AF_PACKET` for a few microseconds would close that door and buy nothing measurable.
 
-- [ ] **Step 3: Verify** — `cargo test -p dz-recorder-capture --features afpacket`; a live run against a real interface needing `CAP_NET_RAW`, documented in the crate README as not a CI test.
+- [x] **Step 3: Verify** — `cargo test -p dz-recorder-capture --features afpacket`; a live run against a real interface needing `CAP_NET_RAW`, documented in the crate README as not a CI test.
 
 ---
 
@@ -681,7 +691,7 @@ Keep the `libpcap` seam. The spec's *Capture frameworks considered* rejects an a
 - Create: `rust/recorder/dz-recorder-replay/tests/faults.rs`
 - Create: `rust/recorder/dz-recorder-replay/src/synthetic.rs` (the synthetic publisher, shared by every test above)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 // Each fault maps to exactly one counter, asserted, so a fault that moves no
@@ -729,17 +739,17 @@ fn a_starved_recorder_accounts_for_its_own_gap_in_the_archive() {
 }
 ```
 
-- [ ] **Step 2: Implement** — the synthetic publisher emits a known datagram stream over loopback multicast, or straight into the `Sink` where no socket is wanted.
+- [x] **Step 2: Implement** — the synthetic publisher emits a known datagram stream over loopback multicast, or straight into the `Sink` where no socket is wanted.
 
-- [ ] **Step 3: Verify** — `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`.
+- [x] **Step 3: Verify** — `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`.
 
 ---
 
 ### Task 11: cross-language check and documentation
 
 - [ ] Write a pcapng segment with the Rust writer; read it with `tshark -r` and with a Go `gopacket/pcapgo` reader; assert the same datagram count, the same first and last `sequence_number`, and the same receive timestamps to the nanosecond. The archive is an interface between two languages and needs the same golden-vector discipline the codec has.
-- [ ] `rust/recorder/README.md`: what each crate is for, the two capture modes and when each is right, the `libpcap-dev` build requirement, and a worked local run using the synthetic publisher and `IP_MULTICAST_LOOP` so the whole path is exercisable on one host with no network and no credentials.
-- [ ] Add `recorder/` to the repository-layout table in `docs/superpowers/specs/2026-08-26-edge-publisher-crates-design.md`, which lists `codec/`, `publisher/`, `ingress/`, `conformance/` and `receivers/` and predates this design.
+- [x] `rust/recorder/README.md`: what each crate is for, the two capture modes and when each is right, the `libpcap-dev` build requirement, and a worked local run using the synthetic publisher and `IP_MULTICAST_LOOP` so the whole path is exercisable on one host with no network and no credentials.
+- [x] Add `recorder/` to the repository-layout table in `docs/superpowers/specs/2026-08-26-edge-publisher-crates-design.md`, which lists `codec/`, `publisher/`, `ingress/`, `conformance/` and `receivers/` and predates this design.
 
 ---
 
