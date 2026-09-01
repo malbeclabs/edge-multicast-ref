@@ -822,17 +822,24 @@ report a clean archive of nothing.
 
 ## Order of work
 
-| Step | Work | Risk |
-|---|---|---|
-| 1 | `dz-recorder-core`, `-capture`, `-archive`, `-replay`; round-trip test | none; nothing runs on a host yet, and every test is a CI test needing no privileges and no network |
-| 2 | The Go capture reader moves to pcapng | none; classic-`pcap` fixtures still read |
-| 3 | Run the recorder on one host and compare its archive, datagram for datagram, against a capture taken at the same point by independent tooling | one host, and the comparison *is* the acceptance test — a byte-level control, not an inspection |
-| 4 | `-health` and `dz_recorder_*` | the first step that makes a claim rather than matching one; alerts and dashboards land, and capture loss becomes visible for the first time |
-| 5 | Object layout, manifest and index table | the first storage cost; the retention policy is decided here |
-| 6 | Roll out one host at a time, each proven before the next | bounded to one host per change, with a rollback that does not depend on the new path being healthy |
-| 7 | Analysis tier: replay into conformance plus the row loaders | none; re-runnable by construction, and it needs only an archive |
-| 8 | Cross-site join | the payoff |
-| 9 | Point the dashboards at the analysis tier's rows | the rows must be proven equivalent to what a dashboard already shows before anything is switched over |
+| Step | Work | Status | Risk |
+|---|---|---|---|
+| 1 | `dz-recorder-core`, `-capture`, `-archive`, `-replay`; round-trip test | **done** (#60) | none; nothing runs on a host yet, and every test is a CI test needing no privileges and no network |
+| 2 | The Go capture reader moves to pcapng | not started | none; classic-`pcap` fixtures still read |
+| 3 | Run the recorder on one host and compare its archive, datagram for datagram, against a capture taken at the same point by independent tooling | not started | one host, and the comparison *is* the acceptance test — a byte-level control, not an inspection |
+| 4 | `-health` and `dz_recorder_*` | **done** (#61) | the first step that makes a claim rather than matching one; alerts and dashboards land, and capture loss becomes visible for the first time |
+| 5 | Object layout, manifest and index table | object key and manifest **done** (#60, #61); the index table and the shipper contract are not | the first storage cost; the retention policy is decided here |
+| 6 | Roll out one host at a time, each proven before the next | not started | bounded to one host per change, with a rollback that does not depend on the new path being healthy |
+| 7 | Analysis tier: replay into conformance plus the row loaders | sequence loss **done** (#63); `dz-edge-mbp` **done**; the state machine, book, fingerprint, conformance runner and loaders are not | none; re-runnable by construction, and it needs only an archive |
+| 8 | Cross-site join | not started | the payoff |
+| 9 | Point the dashboards at the analysis tier's rows | not started | the rows must be proven equivalent to what a dashboard already shows before anything is switched over |
+
+Steps 4 and 7 ran ahead of 2, 3 and 6, which the paragraph below anticipated for
+7 and did not for 4: the health tier landed before any host ran the recorder,
+because everything in it is testable without one. What has *not* moved is the
+part that needs a host — the acceptance comparison at step 3 and the rollout at
+step 6 — and no claim in this document about running recorders should be read as
+describing something that has happened.
 
 Three properties of this order are deliberate. **Nothing runs on a host before
 step 3**, and step 3 is one host. **The health tier comes before the object

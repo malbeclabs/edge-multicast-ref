@@ -13,6 +13,7 @@ publish = false
 [dev-dependencies]
 dz-edge-core = { path = "../../codec/dz-edge-core" }
 dz-edge-tob = { path = "../../codec/dz-edge-tob" }
+dz-edge-mbp = { path = "../../codec/dz-edge-mbp" }
 # No message type in `dz-edge-core` or `dz-edge-tob` lists the `refdata` port
 # role, so without this the real encoder cannot produce a `refdata` datagram at
 # all and the round trip would cover one port role out of three.
@@ -37,3 +38,9 @@ serde_json = { workspace = true }
 # request — being off by default is a statement about the default build and not
 # about whether anything exercises them.
 socket-e2e = []
+# Validation against edge-feed-spec's own `dz-conformance`, which lives in that
+# repository and is not vendored here. Off by default because the tool has to be
+# built and pointed at through DZ_CONFORMANCE_BIN; on, the tests fail rather
+# than skip when it is absent, because a conformance gate that passes when it
+# could not run reports a clean feed for a stream nobody validated.
+conformance = []

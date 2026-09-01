@@ -171,10 +171,12 @@ system whose whole purpose is attribution, silently losing a finding is worse
 than raising a false one, so the wire value is kept as a fact and never used as a
 key.
 
-The index is the loader's to assign, not a query's to derive: it increments per
-channel instance whenever the reset count changes in receive order, which the
-archive's segment sequence supplies. A window function cannot be trusted with it
-because a query's window may not contain the transition.
+The index is not the wire value and not a window function over these rows: a
+query's window may not contain the transition, so the rank it computes depends
+on how much of the stream the query happened to select. How it *is* assigned is
+settled below, under **Numbering the eras**, and the short version is that the
+loader records where each era opened and the index is a rank over those
+openings — a table with one row per reset rather than one per datagram.
 
 `ReplacingMergeTree` because reprocessing is keyed on `(object_key,
 object_sha256)`: a re-run after an analyser fix replaces rather than duplicates.
@@ -485,6 +487,91 @@ received. That is a cross-site read, so a gap row is complete only after the
 join below — which is why `verdict` has an `unverifiable` value and why a row
 may be written before it can say `publisher`.
 
+## Numbering the eras
+
+`Reset Count` is a `u8` and the specification is explicit that it wraps —
+`255`→`0` is a reset like any other, and it must never be compared for ordering.
+Two eras on a long-lived instance therefore share a number, and the section
+above measures what partitioning by it costs: a gap of five datagrams detected
+as **zero**, because the earlier era's rows sit at exactly those sequence
+numbers. The wire value is kept as a fact and never used as a key.
+
+The question left open was how a loader assigns the monotonic index while
+staying **idempotent on `(object key, sha256)`**. Those two requirements pull
+against each other: a counter carried across objects makes the loader stateful,
+so re-running one object needs the state as of that object rather than the state
+now, and loading two objects out of order gives two different numberings of the
+same history. A loader that is not a pure function of the object it is given is
+one whose output cannot be reproduced, which is the property this whole tier
+rests on.
+
+**The decision: the loader records where each era *opened*, and the index is a
+dense rank over those openings.** One new table, one row per reset rather than
+one per datagram:
+
+```sql
+CREATE TABLE recorder.era (
+    site           LowCardinality(String),
+    recorder       LowCardinality(String),
+    feed           LowCardinality(String),
+    source_addr    IPv4,
+    channel_id     UInt8,
+    dst_port       UInt16,
+    anchor_ts      DateTime64(9),  -- receive stamp of the era's first datagram
+    anchor_seq     UInt64,         -- its sequence number
+    reset_count    UInt8,          -- the wire value, as a fact
+    segment_seq    UInt64,
+    anchor_certain Bool,           -- see below
+    object_key     String,
+    object_sha256  String
+)
+ENGINE = ReplacingMergeTree
+ORDER BY (source_addr, channel_id, dst_port, anchor_ts);
+```
+
+Three properties follow, and each one is why an alternative was rejected.
+
+**The loader stays pure.** Every row above is observable inside the object being
+loaded: a transition is a datagram whose `Reset Count` differs from the previous
+datagram's *within that object*. No cross-object cursor, no dependence on load
+order, and re-running an object replaces its own rows and nothing else.
+
+**The rank is a view, not a stored truth.** `era_index` is
+`dense_rank() OVER (PARTITION BY instance ORDER BY anchor_ts)` over `era`. The
+objection to a window function in the section above was about ranking over
+`datagram` rows, where a query's window may not contain a transition. It does not
+apply here: `era` holds *every* opening by construction, so the rank over it is
+complete whatever the query selects. Recomputable, and never a number anybody
+has to trust because it was written down once.
+
+**A `datagram` row joins to its era by range**, on
+`(instance, anchor_ts ≤ recv_ts)` taking the latest anchor. The rows themselves
+carry only what the object states — `reset_count` and `segment_seq` — so nothing
+in the expensive table depends on anything outside its own object.
+
+### The case that must not be guessed
+
+An object's *first* era for an instance may be a continuation of one that opened
+in an earlier object, or a new era that happens to carry the same `Reset Count`.
+The evidence is adjacency: `segment_coverage` makes `segment_seq` dense per
+recorder run, so if the immediately preceding segment exists and its last
+`Reset Count` for that instance matches, this is a continuation and no `era` row
+is written. If that segment is **missing** — evicted under the staging budget,
+lost with a shipper, never written because the recorder was down — the two
+readings are indistinguishable from what the archive holds.
+
+That case writes an `era` row with `anchor_certain = false`. It is deliberately
+neither of the two guesses: treating it as a continuation merges two sequence
+spaces and hides every gap between them, and treating it as new invents an era
+boundary that may not exist, which puts a false reset in front of an operator.
+A gap whose era carries `anchor_certain = false` on either side is reported
+`unverifiable`, which is the same answer this design already gives whenever
+coverage cannot rule out an alternative explanation — and the same reason:
+a finding that might be an artefact of what we failed to keep is not a finding.
+
+`segment_coverage` already carries `reset_counts_seen`, so the adjacency check
+costs one row lookup and no object is opened for it.
+
 ## Cross-site, which needs no new table
 
 `(channel instance, sequence number)` identifies a datagram independently of who
@@ -553,11 +640,8 @@ Stated plainly, because the analysis tier is plan 3 and none of it is built:
   `conformance_finding` are tens of bytes against a 1232-byte datagram and are
   worth keeping indefinitely. Expire the base rows on the same window as the raw
   `mktdata` objects, and keep the derived ones.
-- **A `Reset Count` wrap decision.** It is a `u8`. A long-lived instance wraps,
-  and two eras then share a number. Either the loader carries a monotonic era
-  index derived at load time, or every query above silently merges two spaces
-  once per 256 resets. This is the one open question here worth settling before
-  the loader is written rather than after.
+- ~~**A `Reset Count` wrap decision.**~~ Settled: see **Numbering the eras**.
+  The `era` table and the rank over it are part of the loader's scope.
 
 ---
 

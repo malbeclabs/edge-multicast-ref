@@ -169,6 +169,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dz-edge-mbp"
+version = "0.1.0"
+dependencies = [
+ "dz-edge-core",
+ "dz-edge-tob",
+]
+
+[[package]]
 name = "dz-edge-refdata"
 version = "0.1.0"
 dependencies = [
@@ -252,6 +260,7 @@ name = "dz-recorder-e2e"
 version = "0.1.0"
 dependencies = [
  "dz-edge-core",
+ "dz-edge-mbp",
  "dz-edge-refdata",
  "dz-edge-tob",
  "dz-recorder-archive",

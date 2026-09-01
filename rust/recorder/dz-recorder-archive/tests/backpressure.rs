@@ -101,7 +101,13 @@ fn a_full_staging_directory_evicts_the_oldest_and_never_blocks() {
         a.rotate_a_full_segment(at_secs(61 * (i + 1)));
     }
     assert_eq!(a.segments_on_disk(), 4);
-    assert_eq!(a.w.segments_evicted_total(), 2);
+    // Objects, not segments. The budget counts the compressor's backlog, whose
+    // size depends on how far behind it is, so a run where two segments queue
+    // at once can reach a working segment as well — a different loss, and one
+    // this assertion must not silently accept or silently forbid. Two objects
+    // is the invariant: six rotations, four kept.
+    assert_eq!(a.w.objects_evicted_total(), 2);
+    assert!(a.w.segments_evicted_total() >= 2);
     assert!(
         mean_write_path_nanos(&a.w) < WRITE_PATH_BUDGET_NANOS,
         "the capture path is never blocked: {} ns per datagram over {} datagrams",
