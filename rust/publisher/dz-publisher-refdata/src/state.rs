@@ -262,7 +262,12 @@ fn decode_symbol(text: &str) -> Option<[u8; SYMBOL_LEN]> {
         return None;
     }
     let mut symbol = [0u8; SYMBOL_LEN];
-    for (byte, pair) in symbol.iter_mut().zip(digits.chunks_exact(2)) {
+    // `as_chunks` rather than `chunks_exact`: the pair arrives as `[u8; 2]`, so
+    // the two indexes below cannot panic and the length check above is the only
+    // thing standing between the input and the output.
+    let (pairs, rest) = digits.as_chunks::<2>();
+    debug_assert!(rest.is_empty(), "the length was checked above");
+    for (byte, pair) in symbol.iter_mut().zip(pairs) {
         let high = nibble(pair[0])?;
         let low = nibble(pair[1])?;
         *byte = (high << 4) | low;
