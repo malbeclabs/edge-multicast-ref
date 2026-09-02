@@ -11,7 +11,7 @@
 set -uo pipefail
 fail=0
 
-ROOTS=(rust/codec rust/publisher rust/recorder)
+ROOTS=(rust/codec rust/adapter rust/publisher rust/recorder)
 
 # A gate that cannot find what it was told to scan reports nothing and passes,
 # which is the same output as a clean tree and the opposite conclusion. A

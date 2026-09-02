@@ -162,6 +162,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dz-adapter-core"
+version = "0.1.0"
+dependencies = [
+ "dz-edge-mbp",
+ "dz-edge-refdata",
+ "dz-edge-tob",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "dz-edge-core"
 version = "0.1.0"
 dependencies = [
@@ -194,6 +204,7 @@ dependencies = [
 name = "dz-publisher-metrics"
 version = "0.1.0"
 dependencies = [
+ "dz-adapter-core",
  "dz-edge-core",
  "dz-edge-refdata",
  "dz-edge-tob",

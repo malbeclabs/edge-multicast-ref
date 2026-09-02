@@ -1,0 +1,22 @@
+[package]
+name = "dz-adapter-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The trait a venue implements to turn its own data source into DoubleZero Edge messages"
+
+# This is the one crate a venue repository compiles against, so everything
+# listed here is inherited by every venue. `tests/dependencies.rs` fails if a
+# second entry appears. Read its header before adding one.
+[dependencies]
+thiserror = { workspace = true }
+
+# Dev-dependencies are not inherited by a consumer, so the rule above does not
+# reach them. These exist so the enumerations this crate mirrors can be held to
+# the originals rather than kept in step by hand.
+[dev-dependencies]
+dz-edge-mbp = { path = "../../codec/dz-edge-mbp" }
+dz-edge-refdata = { path = "../../codec/dz-edge-refdata" }
+dz-edge-tob = { path = "../../codec/dz-edge-tob" }

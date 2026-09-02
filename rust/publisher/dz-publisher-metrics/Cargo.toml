@@ -18,3 +18,8 @@ tiny_http = { workspace = true }
 # `AppMessage::PORT_ROLES`; nothing in the library depends on the feeds.
 dz-edge-refdata = { path = "../../codec/dz-edge-refdata" }
 dz-edge-tob = { path = "../../codec/dz-edge-tob" }
+# The dependency goes this way round and must stay this way round: the adapter
+# boundary mirrors two of the label taxonomies here, and it is this crate that
+# holds the copies to the originals. `dz-adapter-core` depending on this one
+# would put a Prometheus client in every venue repository.
+dz-adapter-core = { path = "../../adapter/dz-adapter-core" }

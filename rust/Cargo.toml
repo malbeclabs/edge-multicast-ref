@@ -5,6 +5,7 @@ members = [
     "codec/dz-edge-tob",
     "codec/dz-edge-mbp",
     "codec/dz-edge-refdata",
+    "adapter/dz-adapter-core",
     "publisher/dz-publisher-metrics",
     "recorder/dz-recorder-core",
     "recorder/dz-recorder-archive",

@@ -81,29 +81,72 @@ by reasoning, and each is a task below that would otherwise be written wrong.
 
 ### 1. `dz-adapter-core`: the value types
 
-- [ ] New crate `rust/adapter/dz-adapter-core`, added to workspace `members`.
-- [ ] `InstrumentRef` — opaque, `Copy`, constructible only inside the workspace.
-- [ ] `Scalar<'a>` — `Text(&'a str)` and `Fixed { mantissa: i64, exponent: i8 }`.
-- [ ] `SideUpdate<'a>` — `Unchanged` / `Gone` / `Updated { px, qty, source_count }`.
-- [ ] `Presence`, `Side`, `Aggressor`, `TradeFlags`, `ClearScope`.
-- [ ] `ParseError` with exactly the four variants of `ParseErrorReason`, and a
+- [x] New crate `rust/adapter/dz-adapter-core`, added to workspace `members`.
+- [x] `InstrumentRef` — opaque, `Copy`, constructible only inside the workspace.
+- [x] `Scalar<'a>` — `Text(&'a str)` and `Fixed { mantissa: i64, exponent: i8 }`.
+- [x] `SideUpdate<'a>` — `Unchanged` / `Gone` / `Updated { px, qty, source_count }`.
+- [x] `Presence`, `Side`, `Aggressor`, `TradeFlags`, `ClearScope`.
+- [x] `ParseError` with exactly the four variants of `ParseErrorReason`, and a
       test that fails if the two enums ever differ in arity or token.
-- [ ] `AdapterError`, `Payload<'a>`, `ConnectionId`, `DisconnectReason`.
+- [x] `AdapterError`, `Payload<'a>`, `ConnectionId`, `DisconnectReason`.
 
 **Test:** the crate's dependency list is asserted from `cargo metadata` — a test
 that fails the moment a third dependency appears.
 
 ### 2. `dz-adapter-core`: the sinks and the trait
 
-- [ ] `EventSink`, `ListingSink`, `SnapshotSink`, `UpstreamSink` — all
+- [x] `EventSink`, `ListingSink`, `SnapshotSink`, `UpstreamSink` — all
       `dyn`-safe, all sink-passing, none allocating per event.
-- [ ] `Event<'a>`, `#[non_exhaustive]`, top-of-book and depth variants.
-- [ ] `Adapter`, object-safe, with `snapshot` defaulted.
-- [ ] Rustdoc on every method stating what the implementor must *not* decide.
+- [x] `Event<'a>`, `#[non_exhaustive]`, top-of-book and depth variants.
+- [x] `Adapter`, object-safe, with `snapshot` defaulted.
+- [x] Rustdoc on every method stating what the implementor must *not* decide.
 
 **Test:** a compile-time assertion that `Box<dyn Adapter>` exists; a doc test of
 a ten-line adapter that ignores its payloads, proving the trait can be
 implemented without importing anything else.
+
+> **Tasks 1 and 2: landed.** 28 tests in the crate, 6 more in
+> `dz-publisher-metrics`, `clippy --all-targets -D warnings` and `fmt --check`
+> clean, `cargo test --all` green in both profiles. Four things came out
+> differently from the text above, and each is a decision rather than a slip.
+>
+> **The crate depends on `thiserror` and nothing else** — not on `dz-edge-core`
+> either. Nothing in the boundary needed it: the codec's own types appear only
+> in the lowering, and the tables this crate mirrors are held to the codec
+> through dev-dependencies, which a venue does not inherit. Stricter than the
+> spec asked for, in the same direction.
+>
+> **The dependency test reads the manifest rather than `cargo metadata`.**
+> Walking the resolved graph needs a JSON parser, which would be a
+> dev-dependency added in order to check that dependencies are not added. The
+> manifest reader covers direct dependencies exactly, the transitive closure is
+> pinned by the allowed set being `thiserror` alone, and the test says so — plus
+> a second test proving the reader finds a dependency it is shown, because a
+> reader that silently found nothing would pass no matter what was added.
+>
+> **The taxonomy cross-check lives in `dz-publisher-metrics`.** It can only live
+> there: the dependency runs that way round, and `ParseErrorReason::ALL` is
+> `pub(crate)` besides. Both directions are exhaustive matches rather than
+> lists, so a variant added on either side fails to compile — including the
+> direction that is easy to forget, a label with a panel that no adapter can
+> ever report.
+>
+> **The market-by-order variants of `Event` are absent, not guessed.**
+> `#[non_exhaustive]` makes *adding a variant* a minor version but *adding a
+> field to one* a breaking change. `dz-edge-mbo` does not exist, so specifying
+> their fields now against nothing would buy exactly the breaking change the
+> attribute exists to avoid, for consumers pinned to a tag. They land with the
+> codec crate.
+>
+> Two things were added that the tasks did not name and the work required.
+> `EventSink::upstream_message` — an adapter names the upstream message type it
+> recognised, which is what `dz_publisher_ingress_messages_total` counts, so the
+> series comes from implementing the trait rather than from remembering to
+> record it. And `rust/adapter` was added to the scan roots in
+> `scripts/check-public-repo-rules.sh`: that script fails loudly for a root that
+> has gone missing and cannot know about one that should have been added, so a
+> new directory under `rust/` is outside every rule it enforces until someone
+> puts it in.
 
 ### 3. `dz-publisher-lowering`: top-of-book
 
