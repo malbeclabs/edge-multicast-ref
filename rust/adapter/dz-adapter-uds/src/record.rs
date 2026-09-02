@@ -95,6 +95,33 @@ pub enum RecordError {
     Malformed { detail: &'static str },
 }
 
+/// Why one event could not be written down.
+///
+/// Separate from [`RecordError`], which is the read side, for the reason the
+/// codec crates keep their two apart: a writer's caller should not have to name
+/// a decode type, and neither enum should carry a variant the other direction
+/// cannot reach.
+#[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
+pub enum RecordWriteError {
+    /// An [`Event`] variant this encoding does not cover.
+    ///
+    /// `Event` is `#[non_exhaustive]` and this crate is not the one that
+    /// defines it, so a variant added there compiles here and arrives at the
+    /// wildcard arm — a runtime case, not the build failure this method's
+    /// documentation used to claim.
+    ///
+    /// Recoverable, and it used to be a `todo!`. Three things could happen to
+    /// an event this cannot write, and the panic was the worst of them: a
+    /// recorder that panics stops recording every feed it holds, over one event
+    /// kind. Silently skipping is the second worst, and is what the old comment
+    /// was right to reject — a reference stream missing an event kind reads
+    /// exactly like a publisher that never emitted one. So it is refused,
+    /// named, and left for the caller to count, which is what the codec crates
+    /// do with a message a feed does not carry.
+    #[error("this encoding does not cover the {kind} event")]
+    UnsupportedEvent { kind: String },
+}
+
 /// A reader over one record's bytes.
 struct Reader<'a> {
     bytes: &'a [u8],
@@ -364,13 +391,19 @@ impl RecordWriter {
 
     /// Encode one event, appending the whole record to `out`.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Never for an event this encoding covers. A `#[non_exhaustive]` variant
-    /// added to `Event` and not added here is a compile error at the match,
-    /// which is why there is no error case: an event this cannot write is a
-    /// build failure rather than a runtime one.
-    pub fn write(&mut self, symbol: &str, event: &Event<'_>, out: &mut Vec<u8>) {
+    /// [`RecordWriteError::UnsupportedEvent`] for an `Event` variant this
+    /// encoding does not cover. `Event` is `#[non_exhaustive]` and lives in
+    /// another crate, so a variant added to it does *not* fail this build — it
+    /// reaches the wildcard arm at runtime. Nothing is appended to `out` in that
+    /// case, so a refused event leaves no partial record behind.
+    pub fn write(
+        &mut self,
+        symbol: &str,
+        event: &Event<'_>,
+        out: &mut Vec<u8>,
+    ) -> Result<(), RecordWriteError> {
         self.body.clear();
         self.body.push(VERSION);
 
@@ -483,15 +516,25 @@ impl RecordWriter {
                 }
             }
             // `Event` is `#[non_exhaustive]`, so a variant added upstream lands
-            // here rather than being written as something else. It is a
-            // `todo!` and not a silent skip because a reference stream missing
-            // an event kind reports the publisher dropping every one of them.
-            other => todo!("this encoding does not cover {other:?} yet"),
+            // here rather than being written as something else. Refused rather
+            // than skipped, because a reference stream missing an event kind
+            // reports the publisher dropping every one of them — and rather
+            // than panicked, because a recorder that goes down over one event
+            // kind stops recording every feed it holds. See
+            // [`RecordWriteError::UnsupportedEvent`].
+            other => {
+                // Nothing has reached `out`, so there is no partial record to
+                // take back.
+                return Err(RecordWriteError::UnsupportedEvent {
+                    kind: format!("{other:?}"),
+                });
+            }
         }
 
         let len = u32::try_from(self.body.len()).expect("one event is far below 4 GiB");
         out.extend_from_slice(&len.to_le_bytes());
         out.extend_from_slice(&self.body);
+        Ok(())
     }
 
     fn str(&mut self, text: &str) {

@@ -197,7 +197,9 @@ fn lowered_through_the_encoding(events: &[Event<'_>]) -> Vec<Vec<u8>> {
     let mut writer = RecordWriter::new();
     let mut stream = Vec::new();
     for event in events {
-        writer.write(SYMBOL, event, &mut stream);
+        writer
+            .write(SYMBOL, event, &mut stream)
+            .expect("this encoding covers every event these tests write");
     }
 
     let mut sink = Lowered {
@@ -378,15 +380,17 @@ fn one_payload_holding_several_records_yields_every_one() {
     let mut writer = RecordWriter::new();
     let mut stream = Vec::new();
     for ts in 1..=3 {
-        writer.write(
-            SYMBOL,
-            &Event::Clear {
-                instrument: handle(),
-                source_ts_ns: ts,
-                scope: ClearScope::BothSides,
-            },
-            &mut stream,
-        );
+        writer
+            .write(
+                SYMBOL,
+                &Event::Clear {
+                    instrument: handle(),
+                    source_ts_ns: ts,
+                    scope: ClearScope::BothSides,
+                },
+                &mut stream,
+            )
+            .expect("this encoding covers every event these tests write");
     }
 
     let mut adapter = admitted_adapter();
@@ -410,15 +414,17 @@ fn a_record_split_across_payloads_is_truncated_and_not_silently_dropped() {
     // A reader that ignored a partial tail would lose one event per read on a
     // stream that never aligns, and lose it silently.
     let mut stream = Vec::new();
-    RecordWriter::new().write(
-        SYMBOL,
-        &Event::Clear {
-            instrument: handle(),
-            source_ts_ns: 1,
-            scope: ClearScope::BothSides,
-        },
-        &mut stream,
-    );
+    RecordWriter::new()
+        .write(
+            SYMBOL,
+            &Event::Clear {
+                instrument: handle(),
+                source_ts_ns: 1,
+                scope: ClearScope::BothSides,
+            },
+            &mut stream,
+        )
+        .expect("this encoding covers every event these tests write");
     let cut = stream.len() - 2;
 
     let mut adapter = admitted_adapter();
@@ -449,17 +455,25 @@ fn an_unknown_version_or_kind_is_skipped_and_the_stream_continues() {
         source_ts_ns: 1,
         scope: ClearScope::BothSides,
     };
-    writer.write(SYMBOL, &clear, &mut stream);
+    writer
+        .write(SYMBOL, &clear, &mut stream)
+        .expect("this encoding covers every event these tests write");
     let one = stream.len();
 
     // A record from a newer writer: the same bytes with the version bumped.
-    writer.write(SYMBOL, &clear, &mut stream);
+    writer
+        .write(SYMBOL, &clear, &mut stream)
+        .expect("this encoding covers every event these tests write");
     stream[one + 4] = VERSION + 1;
     // And one whose event kind this build does not implement.
-    writer.write(SYMBOL, &clear, &mut stream);
+    writer
+        .write(SYMBOL, &clear, &mut stream)
+        .expect("this encoding covers every event these tests write");
     let third = one * 2;
     stream[third + 5] = 200;
-    writer.write(SYMBOL, &clear, &mut stream);
+    writer
+        .write(SYMBOL, &clear, &mut stream)
+        .expect("this encoding covers every event these tests write");
 
     let mut adapter = admitted_adapter();
     let mut sink = Counting::default();
@@ -483,15 +497,17 @@ fn a_record_for_an_instrument_this_runtime_did_not_admit_is_ordinary() {
     // The selection policy is the runtime's, and a source offering more than it
     // admits is the normal case rather than an error.
     let mut stream = Vec::new();
-    RecordWriter::new().write(
-        "SOMETHING-ELSE",
-        &Event::Clear {
-            instrument: handle(),
-            source_ts_ns: 1,
-            scope: ClearScope::BothSides,
-        },
-        &mut stream,
-    );
+    RecordWriter::new()
+        .write(
+            "SOMETHING-ELSE",
+            &Event::Clear {
+                instrument: handle(),
+                source_ts_ns: 1,
+                scope: ClearScope::BothSides,
+            },
+            &mut stream,
+        )
+        .expect("this encoding covers every event these tests write");
 
     let mut adapter = admitted_adapter();
     let mut sink = Counting::default();
@@ -515,15 +531,17 @@ fn a_body_carrying_more_than_its_shape_is_malformed_rather_than_tolerated() {
     // the version exists to catch. Tolerating trailing bytes would let half a
     // fleet ignore a field the other half started sending.
     let mut stream = Vec::new();
-    RecordWriter::new().write(
-        SYMBOL,
-        &Event::Clear {
-            instrument: handle(),
-            source_ts_ns: 1,
-            scope: ClearScope::BothSides,
-        },
-        &mut stream,
-    );
+    RecordWriter::new()
+        .write(
+            SYMBOL,
+            &Event::Clear {
+                instrument: handle(),
+                source_ts_ns: 1,
+                scope: ClearScope::BothSides,
+            },
+            &mut stream,
+        )
+        .expect("this encoding covers every event these tests write");
     // Grow the declared length by one and append a byte, so the record is
     // structurally complete and one byte too long.
     let declared = u32::from_le_bytes(stream[..4].try_into().expect("four")) + 1;
@@ -540,19 +558,21 @@ fn a_tag_outside_its_range_is_malformed_and_names_what_it_was() {
     // outside one is the failure the boundary's own enums exist to prevent -
     // reached here from the outside, by a writer we do not control.
     let mut stream = Vec::new();
-    RecordWriter::new().write(
-        SYMBOL,
-        &Event::Level {
-            instrument: handle(),
-            source_ts_ns: 1,
-            side: Side::Bid,
-            px: Scalar::fixed(4_100, PRICE_EXPONENT),
-            qty: Scalar::fixed(500, QTY_EXPONENT),
-            order_count: None,
-            presence: Presence::New,
-        },
-        &mut stream,
-    );
+    RecordWriter::new()
+        .write(
+            SYMBOL,
+            &Event::Level {
+                instrument: handle(),
+                source_ts_ns: 1,
+                side: Side::Bid,
+                px: Scalar::fixed(4_100, PRICE_EXPONENT),
+                qty: Scalar::fixed(500, QTY_EXPONENT),
+                order_count: None,
+                presence: Presence::New,
+            },
+            &mut stream,
+        )
+        .expect("this encoding covers every event these tests write");
 
     // The side byte sits after the header, the symbol and the timestamp.
     let side_at = 4 + 1 + 1 + 2 + SYMBOL.len() + 8;

@@ -26,7 +26,9 @@
 
 pub mod record;
 
-pub use record::{decode, record_len, RecordError, RecordWriter, HEADER, VERSION};
+pub use record::{
+    decode, record_len, RecordError, RecordWriteError, RecordWriter, HEADER, VERSION,
+};
 
 use std::collections::HashMap;
 

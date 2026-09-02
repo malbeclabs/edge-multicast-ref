@@ -73,7 +73,11 @@ fn main() -> std::io::Result<()> {
     let mut writer = RecordWriter::new();
     for (n, event) in events.iter().enumerate() {
         let mut bytes = Vec::new();
-        writer.write(&symbol, event, &mut bytes);
+        // A refusal names the event and costs that record, not the stream:
+        // what a recorder does with one is count it and keep going.
+        if let Err(refused) = writer.write(&symbol, event, &mut bytes) {
+            eprintln!("dz-adapter-uds: {refused}");
+        }
         // Zero-padded, because a replay reads its directory in name order and
         // `10` sorts before `9`.
         let path = dir.join(format!("{n:04}.record"));
