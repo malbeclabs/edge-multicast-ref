@@ -409,15 +409,15 @@ only property that matters.
 
 ### 9. `dz-recorder-relower`: Mode C
 
-- [ ] New crate `rust/recorder/dz-recorder-relower`, linking
+- [x] New crate `rust/recorder/dz-recorder-relower`, linking
       `dz-publisher-lowering` and **not** `dz-publisher-runtime`.
-- [ ] `InstrumentTable` reconstructed from `InstrumentDefinition` and
+- [x] `InstrumentTable` reconstructed from `InstrumentDefinition` and
       `ManifestSummary` messages found in an archive, never from live state.
-- [ ] Re-run an adapter over an archived upstream-payload stream, lower, and
+- [x] Re-run an adapter over an archived upstream-payload stream, lower, and
       join against the messages decoded from a multicast archive, keyed on
       `(Instrument ID, Per-Instrument Seq)` for depth and
       `(Instrument ID, source timestamp, Update Flags)` for top-of-book.
-- [ ] Report the four findings the spec names: missing on the wire, absent from
+- [x] Report the four findings the spec names: missing on the wire, absent from
       the re-lowering, present in both with fields differing (named by field),
       and identical but differently timed.
 
@@ -426,6 +426,39 @@ only property that matters.
 injected deliberately and asserted — including that the fourth, framing and
 pacing differences only, produces **no** finding. That last one is the test that
 keeps the tool usable.
+
+> **Task 9: landed.** 41 tests. The four findings are each injected and
+> asserted, and the fourth — framing and pacing only — produces no finding over
+> a window batched five-per-datagram against one, with the sequence offset by
+> 9,000, a different era, and a send clock a hundred seconds out. That test also
+> asserts four *identical* pairings, because a clean report over an empty join
+> would otherwise pass it.
+>
+> **Reference data comes from the archive, and the API is what enforces it.**
+> There is no entry point that accepts an `InstrumentTable` or a `SourceId`, so
+> the requirement is the shape of the crate rather than a doc comment. The table
+> is keyed on `Symbol`, because that is the only key both sides can state — an
+> adapter cannot name an `Instrument ID` and the wire does not carry a handle.
+> An instrument with no definition in the archive is **declined**, not invented:
+> minting an id here would turn our own gap into a stream of "the publisher
+> dropped it".
+>
+> **Six things make the comparison less deterministic than the design claims,
+> and each is detected and reported rather than papered over.** The two worth
+> naming: `Per-Instrument Seq` is only deterministic if the window opens on an
+> era boundary — a window that opened mid-era carries a numbering offset and
+> then every depth key is wrong in both directions, which the tool detects from
+> the lowest sequence on the wire. And **the contract factor is not on the wire
+> and is not derivable**: `Contract Value` is what a contract is worth, while
+> `quoted_per_contract` is how much of the underlying a contract *is*, so for a
+> per-contract venue the re-lowering applies no factor and every price differs.
+> That is the one place this task's own text — "where the definition carries
+> what is needed" — is not satisfiable, and it is the same gap the boundary work
+> found from the other side.
+>
+> A duplicated datagram reports as absent from the re-lowering, because the
+> comparison holds no datagram identity and cannot tell a network duplicate from
+> a publisher sending twice. Stated, and asserted.
 
 ### 10. Documentation
 

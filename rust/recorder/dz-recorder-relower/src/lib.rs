@@ -85,11 +85,11 @@ pub mod relower;
 pub mod wire;
 
 pub use archive::{ArchivedPayload, PayloadArchive, PayloadLog};
-pub use compare::{compare, compare_archives, RelowerReport, Summary};
+pub use compare::{compare, compare_archives, key_overlap, RelowerReport, Summary};
 pub use diff::FieldDiff;
 pub use error::RelowerError;
 pub use finding::{Caveat, Finding, Outcome};
 pub use join::{JoinKey, TopOfBookTie};
 pub use refdata::{ArchivedInstrument, ArchivedRefdata, MissingDefinition};
-pub use relower::{relower, LoweredMessage, ParseFailure, Refusal, ReLowered, ReLoweredProvenance};
+pub use relower::{relower, LoweredMessage, ParseFailure, ReLowered, ReLoweredProvenance, Refusal};
 pub use wire::{MessageBody, Skipped, WireCapture, WireMessage, WireProvenance};
