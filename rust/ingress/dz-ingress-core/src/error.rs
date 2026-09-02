@@ -230,4 +230,24 @@ pub enum ConfigError {
     /// than merely staying down.
     #[error("`[ingress] {key}` must be greater than zero")]
     ZeroDuration { key: &'static str },
+
+    /// A send rate finer than the clock that paces it.
+    ///
+    /// The limiter spaces sends by a whole number of nanoseconds, so a rate
+    /// above one per nanosecond has no interval to be paced at: the division
+    /// gives zero and every send goes immediately. Refused rather than
+    /// silently unpaced, because the number was written by somebody who wanted
+    /// pacing — a rate this size is a keystroke, not a decision, and the
+    /// failure it would otherwise produce is a publisher hammering a venue
+    /// while its configuration says it is being polite.
+    #[error(
+        "`[ingress] {key}` is {stated} per second, which is finer than the \
+         nanosecond the limiter paces by; the most it can express is \
+         {most} per second, and `0` disables pacing"
+    )]
+    RateTooFine {
+        key: &'static str,
+        stated: u32,
+        most: u32,
+    },
 }

@@ -17,6 +17,7 @@ use serde::{Deserialize, Deserializer};
 use crate::backoff::BackoffPolicy;
 use crate::error::ConfigError;
 use crate::kind::Kind;
+use crate::limit::RateLimiter;
 
 /// The `[ingress]` table.
 ///
@@ -119,6 +120,16 @@ impl IngressConfig {
             // which reads in the metrics exactly like a venue refusing us.
             return Err(ConfigError::ZeroDuration {
                 key: "idle_timeout",
+            });
+        }
+        // After the durations and before the transport, for the same reason
+        // they are in that order: a rate the clock cannot express is wrong
+        // whichever transport runs.
+        if self.rate_limit_per_second > RateLimiter::FINEST_PER_SECOND {
+            return Err(ConfigError::RateTooFine {
+                key: "rate_limit_per_second",
+                stated: self.rate_limit_per_second,
+                most: RateLimiter::FINEST_PER_SECOND,
             });
         }
         let backoff =

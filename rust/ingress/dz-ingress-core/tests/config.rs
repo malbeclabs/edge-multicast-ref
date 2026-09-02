@@ -116,6 +116,53 @@ fn a_transposed_backoff_pair_is_refused_rather_than_clamped() {
 }
 
 #[test]
+fn a_send_rate_finer_than_the_clock_is_refused_rather_than_silently_unpaced() {
+    // Integer division by a rate above a billion gives an interval of zero, so
+    // every send would go immediately while the configuration said the
+    // publisher was pacing itself. A rate this size is a keystroke rather than
+    // a decision — the failure it produces is a publisher hammering a venue
+    // while its own file says it is being polite — so it is refused at startup,
+    // naming both what was written and the most that can be expressed.
+    let config = parse(
+        r#"
+        kind                  = "websocket"
+        rate_limit_per_second = 2000000000
+        "#,
+    )
+    .expect("the value parses");
+    let error = config
+        .resolve()
+        .expect_err("a rate finer than the clock is not a rate");
+    assert!(
+        matches!(
+            error,
+            ConfigError::RateTooFine {
+                key: "rate_limit_per_second",
+                stated: 2_000_000_000,
+                most: 1_000_000_000,
+            }
+        ),
+        "{error}"
+    );
+    // And the boundary itself is accepted: one send per nanosecond is the
+    // finest the clock can space, not one past it. Asserted as *not this
+    // refusal* rather than as success, because whether a transport is linked
+    // into this test binary is a different question and a feature away.
+    let config = parse(
+        r#"
+        kind                  = "websocket"
+        rate_limit_per_second = 1000000000
+        "#,
+    )
+    .expect("the value parses");
+    let refused = config.resolve().err();
+    assert!(
+        !matches!(refused, Some(ConfigError::RateTooFine { .. })),
+        "the finest rate the clock can space was refused: {refused:?}"
+    );
+}
+
+#[test]
 fn a_zero_idle_guard_is_refused() {
     // A zero guard ends every connection the instant it comes up, which reads
     // in the metrics exactly like a venue refusing us.

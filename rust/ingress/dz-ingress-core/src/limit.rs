@@ -50,12 +50,33 @@ pub struct RateLimiter {
 }
 
 impl RateLimiter {
+    /// The finest rate this limiter can pace, one send per nanosecond.
+    ///
+    /// Above it the interval divides to zero and every send goes immediately,
+    /// so the limiter would report itself enabled while pacing nothing.
+    /// `Policy` refuses a configured rate above this — see
+    /// [`ConfigError::RateTooFine`](crate::ConfigError::RateTooFine) — and the
+    /// constructor below clamps, so neither route can produce a limiter that
+    /// says it is pacing when it is not.
+    pub const FINEST_PER_SECOND: u32 = 1_000_000_000;
+
     /// A limiter for `per_second` messages, or none at all for `0`.
+    ///
+    /// A rate above [`FINEST_PER_SECOND`](Self::FINEST_PER_SECOND) is clamped
+    /// to it rather than accepted as a zero interval. `0` and *too fast to
+    /// pace* are different states and only one of them is "no pacing": an
+    /// interval of zero would leave [`is_enabled`](Self::is_enabled) answering
+    /// true about a limiter that never delays anything, and a limiter that
+    /// lies about itself is worse than either behaviour it could have had.
+    /// Configuration refuses the value before it reaches here; this is what
+    /// makes the type honest for every other caller.
     #[must_use]
     pub const fn new(per_second: u32) -> Self {
         Self {
             interval_ns: if per_second == 0 {
                 None
+            } else if per_second >= Self::FINEST_PER_SECOND {
+                Some(1)
             } else {
                 Some(1_000_000_000 / per_second as u64)
             },
@@ -91,6 +112,30 @@ impl RateLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rate_finer_than_the_clock_paces_at_the_clock_and_does_not_claim_more() {
+        // The silent misconfiguration this exists to refuse: integer division
+        // by a rate above a billion gives an interval of zero, and a limiter
+        // with a zero interval delays nothing while `is_enabled` still answers
+        // true. Whatever it does, it must not say one thing and do another.
+        let mut limiter = RateLimiter::new(RateLimiter::FINEST_PER_SECOND * 2);
+        assert!(limiter.is_enabled(), "the operator asked for pacing");
+        // Charged twice at the same instant: the second send is spaced by the
+        // finest interval the clock has rather than let through.
+        assert_eq!(limiter.charge(0), Duration::ZERO);
+        assert_eq!(limiter.charge(0), Duration::from_nanos(1));
+    }
+
+    #[test]
+    fn zero_is_no_pacing_and_says_so() {
+        // The other state, kept distinct: *too fast to pace* and *not pacing*
+        // are different answers to `is_enabled`.
+        let mut limiter = RateLimiter::new(0);
+        assert!(!limiter.is_enabled());
+        assert_eq!(limiter.charge(0), Duration::ZERO);
+        assert_eq!(limiter.charge(0), Duration::ZERO);
+    }
 
     #[test]
     fn a_zero_rate_paces_nothing() {
