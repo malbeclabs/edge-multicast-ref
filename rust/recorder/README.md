@@ -39,11 +39,18 @@ rather than synthesised, and a datagram the recorder's own socket would have
 lost to receive-queue overflow is still in the archive, correctly attributed.
 The multicast socket is still opened and joined — the network has no reason to
 deliver the traffic otherwise — and its receive path is drained and discarded.
-Needs `CAP_NET_RAW`.
+Needs `CAP_NET_RAW`, and an Ethernet capture device: the parse reads a 14-byte
+Ethernet header, so a handle on any other datalink is refused at open, naming
+the datalink and the mode that does record on it. A device with no link layer of
+its own is what the refusal exists for — an `ipip` tunnel and a `tun` device
+both open on `DLT_RAW`, bare IP with no warning of any kind, and a cooked-mode
+device opens on `LINUX_SLL` (`tcpdump -ni <device>` prints its `link-type`).
+Without the refusal every frame fails the parse, nothing is archived, and the
+recorder reports itself healthy against a live feed.
 
-**Socket mode is the fallback**, for where `CAP_NET_RAW` is unavailable, and it
-is the right mode when the question is about a consumer's own stack rather than
-about the publisher. It synthesises the Ethernet, IPv4 and UDP headers and
+**Socket mode is the fallback**, for where `CAP_NET_RAW` is unavailable or the
+feed arrives on a cooked-mode device, and it is the right mode when the question
+is about a consumer's own stack rather than about the publisher. It synthesises the Ethernet, IPv4 and UDP headers and
 records that fact in the archive, so no reader mistakes a synthesised field for
 a captured one. A field the kernel did not report is written as zero in the
 synthesised header, because an IPv4 header has no way to express *absent*; the

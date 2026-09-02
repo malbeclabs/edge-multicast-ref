@@ -13,8 +13,9 @@
 
 use dz_edge_core::PortRole;
 use dz_recorder_capture::afpacket::{
-    bpf_filter_for, classify_frame, precision_from_savefile_magic, stamp_ns, AfPacketSource,
-    AfPacketSourceConfig, FeedFilter, FrameSkip, PortMap, Precision, RingAccounting, Stat,
+    bpf_filter_for, classify_frame, datalink_refusal, precision_from_savefile_magic, stamp_ns,
+    AfPacketSource, AfPacketSourceConfig, FeedFilter, FrameSkip, Linktype, PortMap, Precision,
+    RingAccounting, Stat, PARSED_DATALINK,
 };
 use dz_recorder_capture::{PendingLoss, PortBinding};
 use std::net::Ipv4Addr;
@@ -166,6 +167,89 @@ fn a_capture_with_no_port_roles_is_refused_rather_than_compiled() {
     // configuration costs nothing; discovering it from an archive costs a disk.
     let config = AfPacketSourceConfig::new("tun0", Ipv4Addr::new(192, 0, 2, 7), Vec::new());
     assert!(AfPacketSource::open(&config).is_err());
+}
+
+#[test]
+fn the_datalink_the_parse_reads_is_the_one_the_archive_declares() {
+    // Every offset in the parse is counted from a 14-byte Ethernet header, and
+    // every interface description block the archive writes says LINKTYPE_ETHERNET.
+    assert_eq!(PARSED_DATALINK, Linktype::ETHERNET);
+    assert_eq!(datalink_refusal("placeholder0", Linktype::ETHERNET), None);
+}
+
+#[test]
+fn a_datalink_the_parse_cannot_read_is_refused_rather_than_drained() {
+    // The failure this refusal exists for: a feed arriving over a tunnel, which
+    // has no link layer of its own, so libpcap opens it on bare IP or in cooked
+    // mode. Both are reachable in practice and neither warns — an `ipip` tunnel
+    // and a `tun` device come up on DLT_RAW. Without the refusal the recorder
+    // starts cleanly, logs every feed as recording, skips every frame, and
+    // holds every metric at zero against a live feed.
+    for link in [
+        Linktype::LINUX_SLL,
+        Linktype::LINUX_SLL2,
+        Linktype::RAW,
+        Linktype::NULL,
+    ] {
+        let reason = datalink_refusal("dz0", link).expect("a datalink the parse cannot read");
+        assert!(reason.contains("dz0"), "{reason}");
+        // Named where libpcap has a name for the value the handle reported, and
+        // the number where it has none — `Linktype::RAW` is one such, because
+        // the handle reports a DLT_ value and libpcap names LINKTYPE_RAW's
+        // number under no DLT_ at all.
+        let named = link
+            .get_name()
+            .unwrap_or_else(|_| format!("DLT {}", link.0));
+        assert!(
+            reason.contains(&named),
+            "the operator matches this against tcpdump's own link-type line: {reason}"
+        );
+        assert!(
+            reason.contains("socket"),
+            "a refusal an operator cannot act on is a stall: {reason}"
+        );
+    }
+}
+
+#[test]
+fn a_bare_ip_frame_is_read_as_a_link_header_and_skipped() {
+    // DLT_RAW, which is what an `ipip` tunnel and a `tun` device open on: the
+    // frame starts at the IPv4 header, so the two bytes the parse reads as an
+    // EtherType are the first half of the source address. 192.0.2.1 makes them
+    // 0xc000, the frame is skipped, and nothing says so outside this crate.
+    let mut raw_ip = vec![
+        0x45, 0x00, 0x00, 0x34, 0x00, 0x00, 0x00, 0x00, 0x1f, 0x11, 0x00, 0x00, 192, 0, 2, 1, 233,
+        252, 0, 10,
+    ];
+    raw_ip.extend_from_slice(&[0x9c, 0x68, 0x9c, 0x40, 0x00, 0x20, 0x00, 0x00]);
+    raw_ip.extend_from_slice(&[7u8; 24]);
+    let len = raw_ip.len();
+    assert_eq!(classify_frame(&raw_ip, len), Err(FrameSkip::NotIpv4));
+}
+
+#[test]
+fn a_cooked_mode_frame_is_what_the_refusal_at_open_prevents() {
+    // A cooked v1 header is 16 bytes with the protocol at offset 14, so the two
+    // bytes the parse reads as an EtherType are part of a link-layer address and
+    // are never 0x0800. Every frame off such a handle fails here, and a skip
+    // counted inside the capture crate reaches neither /metrics nor a log: the
+    // recorder is indistinguishable from one watching a dark feed.
+    let mut cooked = vec![
+        0x00, 0x00, // packet type: sent to us
+        0x00, 0x01, // ARPHRD_ETHER
+        0x00, 0x06, // address length
+        0x02, 0x00, 0x00, 0x00, 0x00, 0x01, // address
+        0x00, 0x00, // address padding
+        0x08, 0x00, // protocol: IPv4, at offset 14 rather than 12
+    ];
+    cooked.extend_from_slice(&[
+        0x45, 0x00, 0x00, 0x34, 0x00, 0x00, 0x00, 0x00, 0x1f, 0x11, 0x00, 0x00, 192, 0, 2, 1, 233,
+        252, 0, 10,
+    ]);
+    cooked.extend_from_slice(&[0x9c, 0x68, 0x9c, 0x40, 0x00, 0x20, 0x00, 0x00]);
+    cooked.extend_from_slice(&[7u8; 24]);
+    let len = cooked.len();
+    assert_eq!(classify_frame(&cooked, len), Err(FrameSkip::NotIpv4));
 }
 
 #[test]
@@ -500,7 +584,9 @@ fn the_default_capture_length_holds_a_capped_datagram_behind_ipv4_options() {
 mod live {
     use super::{bindings, GROUP, MKTDATA_PORT};
     use dz_edge_core::PortRole;
-    use dz_recorder_capture::afpacket::{AfPacketSource, AfPacketSourceConfig, Precision};
+    use dz_recorder_capture::afpacket::{
+        AfPacketSource, AfPacketSourceConfig, Linktype, Precision,
+    };
     use dz_recorder_capture::PortBinding;
     use dz_recorder_core::{RecvTsKind, Source};
     use std::net::{Ipv4Addr, UdpSocket};
@@ -522,6 +608,11 @@ mod live {
              --features afpacket-live-tests --no-run and run the test binary under sudo",
         );
         assert_eq!(source.precision(), Precision::Nano);
+        assert_eq!(
+            source.datalink(),
+            Linktype::ETHERNET,
+            "a handle on any other datalink is refused at open, not opened"
+        );
         assert!(source.filter().starts_with("udp and dst host "));
     }
 
