@@ -21,7 +21,7 @@ use std::time::SystemTime;
 
 use dz_recorder_core::SinkError;
 
-use crate::compress::{Faults, InFlight};
+use crate::compress::{Custody, Faults, Phase};
 
 const SEGMENT_PREFIX: &str = "segment-";
 const PCAPNG_SUFFIX: &str = ".pcapng";
@@ -149,15 +149,20 @@ pub struct StagingWatermark {
     /// counts and `enforce` can never reach — the unbounded disk this module's
     /// naming scheme exists to prevent.
     open_segment_seq: u64,
-    /// What the compressor is holding, when there is a compressor behind this
-    /// watermark. A segment mid-publication is the one other file eviction must
-    /// not take: its source is the compressor's input, and taking it destroys an
-    /// object that was about to land.
-    in_flight: Option<Arc<InFlight>>,
-    /// What the compressor has been handed and has not started on. The budget
-    /// counts it — an unbounded queue nothing counts is an unbounded disk — and
-    /// evicts it only after everything else.
-    queued: Option<Arc<InFlight>>,
+    /// What the compressor holds and in which phase, when there is a compressor
+    /// behind this watermark.
+    ///
+    /// A segment mid-publication is the one other file eviction must not take:
+    /// its source is the compressor's input, and taking it destroys an object
+    /// that was about to land. A queued one the budget does count — an
+    /// unbounded queue nothing counts is an unbounded disk — and evicts only
+    /// after everything else.
+    ///
+    /// One handle rather than the two this used to hold, for the reason
+    /// [`Custody`] gives: two sets meant two reads, and a transition landing
+    /// between them showed this scan a segment in neither phase, which its name
+    /// then made evictable while the compressor was reading it.
+    custody: Option<Arc<Custody>>,
     /// Where a budget that cannot be met is reported, when there is a writer
     /// behind this watermark to report it to.
     faults: Option<Arc<Faults>>,
@@ -180,8 +185,7 @@ impl StagingWatermark {
             completed_dir,
             staging_max,
             open_segment_seq: 0,
-            in_flight: None,
-            queued: None,
+            custody: None,
             faults: None,
             segments_evicted_total: 0,
             objects_evicted_total: 0,
@@ -195,12 +199,8 @@ impl StagingWatermark {
         self.open_segment_seq = segment_seq;
     }
 
-    pub(crate) fn track_in_flight(&mut self, in_flight: Arc<InFlight>) {
-        self.in_flight = Some(in_flight);
-    }
-
-    pub(crate) fn track_queued(&mut self, queued: Arc<InFlight>) {
-        self.queued = Some(queued);
+    pub(crate) fn track_custody(&mut self, custody: Arc<Custody>) {
+        self.custody = Some(custody);
     }
 
     pub(crate) fn track_faults(&mut self, faults: Arc<Faults>) {
@@ -384,13 +384,21 @@ impl StagingWatermark {
             if total <= self.staging_max {
                 break;
             }
-            match fs::remove_file(&partial.path) {
-                Ok(()) => {
+            // Through the guard rather than straight to the filesystem: the
+            // phase in hand was read during a scan that has since walked two
+            // directories, and a queued segment the compressor has picked up in
+            // the meantime is one whose source it is reading now.
+            match self.remove_evictable(&partial.path) {
+                // Left alone because it is being published. It stays counted,
+                // so the loop keeps looking rather than stopping at a total it
+                // has decided not to reduce.
+                None => continue,
+                Some(Ok(())) => {
                     total = total.saturating_sub(partial.bytes);
                     self.segments_evicted_total += 1;
                     self.bytes_evicted_total += partial.bytes;
                 }
-                Err(e) => failure = failure.or(Some(e)),
+                Some(Err(e)) => failure = failure.or(Some(e)),
             }
         }
 
@@ -400,14 +408,27 @@ impl StagingWatermark {
         }
     }
 
-    fn is_in_flight(&self, path: &Path) -> bool {
-        self.in_flight
-            .as_ref()
-            .is_some_and(|in_flight| in_flight.holds(path))
+    /// Deletes a file the budget has decided to give up, unless the compressor
+    /// has started reading it since the scan. See
+    /// [`Custody::remove_unless_in_flight`].
+    ///
+    /// With no compressor behind this watermark there is nothing to race with
+    /// and the unlink is plain.
+    fn remove_evictable(&self, path: &Path) -> Option<std::io::Result<()>> {
+        match &self.custody {
+            Some(custody) => custody.remove_unless_in_flight(path),
+            None => Some(fs::remove_file(path)),
+        }
     }
 
-    fn is_queued(&self, path: &Path) -> bool {
-        self.queued.as_ref().is_some_and(|q| q.holds(path))
+    /// The one look this scan takes at what the compressor holds.
+    ///
+    /// Called once per path and its answer used for both decisions — skip it
+    /// because it is being read, or count it because it is only queued. Asking
+    /// twice is the bug this replaced: the two questions were two reads, and a
+    /// handover landing between them answered "neither" to both.
+    fn custody_phase(&self, path: &Path) -> Option<Phase> {
+        self.custody.as_ref().and_then(|c| c.phase(path))
     }
 
     /// Both directories, classified. Objects come back oldest first, partial
@@ -429,7 +450,8 @@ impl StagingWatermark {
                 // The open segment is one path and not one name shape: the same
                 // name anywhere else is a file the budget has to answer for.
                 let is_open = dir == &self.staging_dir && name == open_segment;
-                if is_open || is_compressor_temp(&name) || self.is_in_flight(&path) {
+                let phase = self.custody_phase(&path);
+                if is_open || is_compressor_temp(&name) || phase == Some(Phase::InFlight) {
                     continue;
                 }
                 if let Some((start_ns, _end_ns, segment_seq)) = parse_object_key(&path) {
@@ -451,7 +473,7 @@ impl StagingWatermark {
                 }
                 // symlink_metadata, for the reason file_len gives.
                 let metadata = fs::symlink_metadata(&path).ok();
-                let queued = self.is_queued(&path);
+                let queued = phase == Some(Phase::Queued);
                 let seq = working_segment_seq(&name);
                 residue.push(Residue {
                     seq,
@@ -603,14 +625,14 @@ mod tests {
         fs::create_dir_all(&staging).expect("staging");
         fs::create_dir_all(&completed).expect("completed");
 
-        let queued = Arc::new(InFlight::default());
+        let custody = Arc::new(Custody::default());
         let mut w = StagingWatermark::new(staging.clone(), completed, u64::MAX);
         // Not the open segment: 99 is what the writer is holding.
         w.track_open_segment(99);
-        w.track_queued(Arc::clone(&queued));
+        w.track_custody(Arc::clone(&custody));
 
         for seq in 1..=3 {
-            queued.enter(segment(&staging, seq, 1000));
+            custody.queue(segment(&staging, seq, 1000));
         }
 
         assert_eq!(
@@ -635,16 +657,16 @@ mod tests {
         fs::create_dir_all(&staging).expect("staging");
         fs::create_dir_all(&completed).expect("completed");
 
-        let queued = Arc::new(InFlight::default());
+        let custody = Arc::new(Custody::default());
         let mut w = StagingWatermark::new(staging.clone(), completed, 1500);
         w.track_open_segment(99);
-        w.track_queued(Arc::clone(&queued));
+        w.track_custody(Arc::clone(&custody));
 
         let paths: Vec<PathBuf> = (1..=3)
             .map(|seq| segment_at(&staging, seq, 1000, SystemTime::UNIX_EPOCH))
             .collect();
         for path in &paths {
-            queued.enter(path.clone());
+            custody.queue(path.clone());
         }
 
         w.enforce().expect("eviction");
@@ -669,14 +691,14 @@ mod tests {
         fs::create_dir_all(&staging).expect("staging");
         fs::create_dir_all(&completed).expect("completed");
 
-        let queued = Arc::new(InFlight::default());
+        let custody = Arc::new(Custody::default());
         let mut w = StagingWatermark::new(staging.clone(), completed, 1500);
         w.track_open_segment(99);
-        w.track_queued(Arc::clone(&queued));
+        w.track_custody(Arc::clone(&custody));
 
         let paths: Vec<PathBuf> = (1..=3).map(|seq| segment(&staging, seq, 1000)).collect();
         for path in &paths {
-            queued.enter(path.clone());
+            custody.queue(path.clone());
         }
 
         w.enforce().expect("eviction");
