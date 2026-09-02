@@ -33,7 +33,7 @@ fn table() -> InstrumentTable {
 #[test]
 fn every_pair_of_sides_produces_the_byte_the_live_publishers_produce() {
     let instruments = table();
-    let lowering = Lowering::new(&instruments, 1);
+    let lowering = Lowering::new(&instruments, source_id());
     let instrument = dz_adapter_core::InstrumentRef::from_admission(0);
 
     // | book state    | update_flags                  |
@@ -91,7 +91,7 @@ fn an_encoder_writing_both_updated_bits_is_wrong_for_three_of_the_four() {
     let unconditional = QUOTE_BID_UPDATED | QUOTE_ASK_UPDATED;
 
     let instruments = table();
-    let lowering = Lowering::new(&instruments, 1);
+    let lowering = Lowering::new(&instruments, source_id());
     let instrument = dz_adapter_core::InstrumentRef::from_admission(0);
 
     let one_sided_or_empty = [
@@ -123,7 +123,7 @@ fn a_side_never_sets_both_of_its_bits() {
     // derivation that ever set both would make a gone side indistinguishable
     // from a quoted one for any subscriber testing a single bit.
     let instruments = table();
-    let lowering = Lowering::new(&instruments, 1);
+    let lowering = Lowering::new(&instruments, source_id());
     let instrument = dz_adapter_core::InstrumentRef::from_admission(0);
 
     for bid in [present("0.41"), SideUpdate::Gone] {
@@ -148,13 +148,53 @@ fn a_side_never_sets_both_of_its_bits() {
 }
 
 #[test]
+fn no_pair_of_sides_can_produce_an_empty_flags_byte() {
+    // **The one thing the specification's conformance subscriber grades a
+    // violation on this byte.** Its `TOB.QUOTE.UPDATE_FLAGS_COHERENCE` fires
+    // when bits 0-3 are all zero — "a quote that claims nothing changed" — and
+    // the same rule's implementation states that it deliberately does *not*
+    // couple the gone bit to the updated bit, because either pairing occurs on
+    // conformant publishers.
+    //
+    // So the convention this lowering follows is a free choice, and this is the
+    // part that is not: every quote must flag something. Two cases per side is
+    // what makes it unreachable — a side is present or it is gone, and each
+    // sets a bit. A third case meaning "unchanged" would have set none, and a
+    // quote with both sides unchanged would have been a violation on the wire.
+    let instruments = table();
+    let lowering = Lowering::new(&instruments, source_id());
+    let instrument = dz_adapter_core::InstrumentRef::from_admission(0);
+
+    for bid in [present("0.41"), SideUpdate::Gone] {
+        for ask in [present("0.43"), SideUpdate::Gone] {
+            let flags = lowering
+                .lower_quote(instrument, 7, bid, ask)
+                .expect("lowers")
+                .update_flags;
+            assert_ne!(
+                flags & 0x0F,
+                0,
+                "a quote that flags nothing is a conformance violation"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_gone_side_is_zeroed_and_only_the_flag_says_so() {
     // Zero is an in-range price on the wire, so the zeros a gone side carries
     // mean nothing on their own. This is the assertion that makes the flag
     // load-bearing rather than decorative, and it is why an adapter must not be
     // able to write one.
+    //
+    // The price half is a **must**: the conformance subscriber's
+    // `TOB.QUOTE.GONE_VS_ZERO_PRICE` refuses a gone side carrying a non-zero
+    // price. The quantity half is not mandated by anything - the same rule's
+    // implementation says so - and is written anyway, because both existing
+    // publishers write it and a subscriber reading size without checking the
+    // flag is better served by a zero than by a stale number.
     let instruments = table();
-    let lowering = Lowering::new(&instruments, 1);
+    let lowering = Lowering::new(&instruments, source_id());
     let instrument = dz_adapter_core::InstrumentRef::from_admission(0);
 
     let quote = lowering
@@ -182,7 +222,7 @@ fn a_gone_side_is_zeroed_and_only_the_flag_says_so() {
 #[test]
 fn a_venues_source_count_reaches_the_wire_and_its_absence_is_zero() {
     let instruments = table();
-    let lowering = Lowering::new(&instruments, 1);
+    let lowering = Lowering::new(&instruments, source_id());
     let instrument = dz_adapter_core::InstrumentRef::from_admission(0);
 
     let counted = lowering
@@ -203,4 +243,10 @@ fn a_venues_source_count_reaches_the_wire_and_its_absence_is_zero() {
     // that does not expose it is truthfully unavailable rather than claiming
     // none. Neither existing publisher exposes it on top-of-book.
     assert_eq!(counted.ask_source_count, 0);
+}
+
+/// An assigned production id, which is what a publisher runs under. Zero would
+/// be refused by the type - see `tests/source_id.rs`.
+fn source_id() -> dz_publisher_lowering::SourceId {
+    dz_publisher_lowering::SourceId::new(7).expect("7 is in the assigned range")
 }

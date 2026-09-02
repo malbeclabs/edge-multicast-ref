@@ -209,6 +209,39 @@ whose exponent cannot be rescaled exactly is refused rather than rounded.
 > either is refused, once, countably, instead of resolving to whichever
 > `Instrument ID` moved into that slot.
 >
+> **The specification's own conformance subscriber was read afterwards, and it
+> settles one of these decisions and leaves the other free.** Its rule catalog
+> carries two rules on the flags byte. `TOB.QUOTE.UPDATE_FLAGS_COHERENCE`
+> states, in the rule's own implementation, that the specification defines the
+> four bits independently and does **not** couple *gone* to *updated*, and that
+> asserting either pairing would false-positive on conformant publishers — so
+> following the two live publishers is a free choice rather than a risk. What
+> the same rule *does* grade a violation is a flags byte with bits 0-3 all
+> zero, "a quote that claims nothing changed": which is exactly what the
+> three-case `SideUpdate` produced for a quote with both sides unchanged.
+> Dropping `Unchanged` removed the one way this lowering could have emitted a
+> non-conformant quote, and that is now pinned by
+> `no_pair_of_sides_can_produce_an_empty_flags_byte`.
+> `TOB.QUOTE.GONE_VS_ZERO_PRICE` grades the price half of a gone side a
+> **must**, which the lowering satisfies; the quantity half is mandated by
+> nothing and written anyway.
+>
+> **`Source ID` is a checked type, because three quarters of a `u16` is a
+> conformance violation.** `TOB.QUOTE.SOURCE_ID_REGISTRY` refuses `0`
+> unconditionally — the registry reserves it, and it is what an unset
+> configuration key hands you — and the registry also reserves `1024`–`32767`
+> for future assignment. So `Lowering::new` takes a `SourceId` whose
+> constructor admits only the assigned and the private ranges, and a publisher
+> with no valid identity fails at startup instead of failing conformance on
+> every message it ever sends. Which *assigned* id belongs to a given publisher
+> needs the registry itself, and is deferred exactly as the conformance
+> subscriber defers it.
+>
+> **`Trade ID` has no conformance rule.** `TOB.TRADE.FIELDS` checks the
+> aggressor enum, the unused qualifier bits and the source id, and nothing
+> checks the identifier. Worth knowing where the tool's silence is: a venue
+> that publishes a wrong `Trade ID` fails nothing.
+>
 > **The lowering refusal has no normative metric family yet.**
 > `LoweringError::reason()` keeps `unknown_instrument` and the three
 > `ScaleError` cases distinguishable, but the normative set in
@@ -231,6 +264,18 @@ whose exponent cannot be rescaled exactly is refused rather than rounded.
 asserted by exhausting `Presence` against zero and non-zero quantity. A snapshot
 pulled from a fake adapter frames as begin, N levels, end, with the level count
 and the last sequence the begin declared.
+
+> **This task has no independent control, and that is the reason to be careful
+> with it.** The specification's conformance subscriber has 32 rules for
+> market-by-price against 68 for market-by-order, and the gap is not an artifact
+> of counting: the enum ranges on `LevelUpdate`'s `Side` and `Action` are
+> registered market-by-order-only because their emit paths read market-by-order
+> messages, and `testdata/` has no conformant market-by-price capture at all.
+> So the very defect class this whole boundary was shaped around — an `Action`
+> table numbered from the wrong value — is the one that feed's conformance does
+> not yet check. Until it does, the derivation table in this task is the only
+> control there is, which is why it is written as a table over exhausted
+> `Presence` values rather than as a few examples.
 
 ### 5. Lowering is one implementation, and `0x04` proves it
 

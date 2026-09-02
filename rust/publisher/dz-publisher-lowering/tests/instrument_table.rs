@@ -51,7 +51,7 @@ fn a_handle_the_table_never_held_is_refused_rather_than_resolved() {
         LoweringError::UnknownInstrument
     );
 
-    let lowering = Lowering::new(&instruments, 1);
+    let lowering = Lowering::new(&instruments, source_id());
     let error = lowering
         .lower_quote(forged, 7, present(), SideUpdate::Gone)
         .expect_err("an unheld handle cannot be lowered");
@@ -98,4 +98,10 @@ fn withdrawing_twice_and_withdrawing_nothing_are_both_the_state_asked_for() {
     instruments.withdraw(InstrumentRef::from_admission(9_999));
 
     assert!(instruments.is_empty());
+}
+
+/// An assigned production id, which is what a publisher runs under. Zero would
+/// be refused by the type - see `tests/source_id.rs`.
+fn source_id() -> dz_publisher_lowering::SourceId {
+    dz_publisher_lowering::SourceId::new(7).expect("7 is in the assigned range")
 }

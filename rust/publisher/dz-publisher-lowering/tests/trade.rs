@@ -21,7 +21,7 @@ fn table() -> InstrumentTable {
 #[test]
 fn a_trade_lowers_its_price_quantity_and_identity() {
     let instruments = table();
-    let lowering = Lowering::new(&instruments, 7);
+    let lowering = Lowering::new(&instruments, source_id());
 
     let trade = lowering
         .lower_trade(
@@ -54,7 +54,7 @@ fn what_a_venue_does_not_publish_reaches_the_wire_as_the_specifications_sentinel
     // one of them has no venue trade identifier to pass through either. Each
     // absence has a defined value, and none of them is a guess.
     let instruments = table();
-    let lowering = Lowering::new(&instruments, 7);
+    let lowering = Lowering::new(&instruments, source_id());
 
     let trade = lowering
         .lower_trade(
@@ -81,7 +81,7 @@ fn what_a_venue_does_not_publish_reaches_the_wire_as_the_specifications_sentinel
 #[test]
 fn each_aggressor_reaches_its_own_byte() {
     let instruments = table();
-    let lowering = Lowering::new(&instruments, 7);
+    let lowering = Lowering::new(&instruments, source_id());
 
     for (aggressor, expected) in [
         (Aggressor::Unknown, AGGRESSOR_UNKNOWN),
@@ -109,7 +109,7 @@ fn each_qualifier_sets_its_own_bit_and_nothing_else() {
     // Three booleans in, three defined bits out. A bit nobody defined has no
     // way to be set because there is no fourth boolean to set it with.
     let instruments = table();
-    let lowering = Lowering::new(&instruments, 7);
+    let lowering = Lowering::new(&instruments, source_id());
 
     let cases = [
         (
@@ -165,7 +165,7 @@ fn a_cumulative_volume_too_precise_for_the_exponent_names_its_own_field() {
     // The field name is what sends an operator to the right place, and a
     // running total is scaled at the quantity exponent like any other quantity.
     let instruments = table();
-    let lowering = Lowering::new(&instruments, 7);
+    let lowering = Lowering::new(&instruments, source_id());
 
     let error = lowering
         .lower_trade(
@@ -182,4 +182,10 @@ fn a_cumulative_volume_too_precise_for_the_exponent_names_its_own_field() {
 
     assert_eq!(error.field(), Some("cumulative_volume"));
     assert_eq!(error.reason(), "too_precise");
+}
+
+/// An assigned production id, which is what a publisher runs under. Zero would
+/// be refused by the type - see `tests/source_id.rs`.
+fn source_id() -> dz_publisher_lowering::SourceId {
+    dz_publisher_lowering::SourceId::new(7).expect("7 is in the assigned range")
 }

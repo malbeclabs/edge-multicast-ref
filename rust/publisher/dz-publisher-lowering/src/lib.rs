@@ -21,6 +21,9 @@
 //!   [`Lowering::lower_quote`].
 //! - **Trade qualifiers and the aggressor byte**, from the boundary's booleans
 //!   and its three-case enum, so a bit nobody defined has no way to be set.
+//! - **The publisher's own `Source ID`**, checked once against the registry's
+//!   reserved ranges rather than passed as a `u16` per message. See
+//!   [`SourceId`].
 //!
 //! # Why this is not part of the runtime
 //!
@@ -42,9 +45,11 @@
 pub mod error;
 pub mod instrument;
 pub mod scale;
+pub mod source;
 pub mod tob;
 
 pub use error::LoweringError;
 pub use instrument::{Instrument, InstrumentTable};
 pub use scale::{price_at, qty_at};
+pub use source::SourceId;
 pub use tob::Lowering;

@@ -10,6 +10,7 @@ use dz_edge_tob::{
 use crate::error::LoweringError;
 use crate::instrument::{Instrument, InstrumentTable};
 use crate::scale::{price_at, qty_at};
+use crate::source::SourceId;
 
 /// Everything the lowering needs that is not in the event.
 ///
@@ -18,7 +19,7 @@ use crate::scale::{price_at, qty_at};
 #[derive(Debug, Clone, Copy)]
 pub struct Lowering<'t> {
     instruments: &'t InstrumentTable,
-    source_id: u16,
+    source_id: SourceId,
 }
 
 impl<'t> Lowering<'t> {
@@ -27,9 +28,12 @@ impl<'t> Lowering<'t> {
     /// The `Source ID` is the publisher's registered identity and is the same
     /// for every message a process sends, which is why it is here and not in
     /// any event: there is no per-event decision to make about it, so there is
-    /// no per-event parameter for one.
+    /// no per-event parameter for one. It arrives as a [`SourceId`] rather than
+    /// a `u16` because the registry reserves most of that space, and a value it
+    /// does not admit is a startup error rather than something to discover one
+    /// message at a time.
     #[must_use]
-    pub const fn new(instruments: &'t InstrumentTable, source_id: u16) -> Self {
+    pub const fn new(instruments: &'t InstrumentTable, source_id: SourceId) -> Self {
         Self {
             instruments,
             source_id,
@@ -71,7 +75,7 @@ impl<'t> Lowering<'t> {
 
         Ok(Quote {
             instrument_id: inst.instrument_id,
-            source_id: self.source_id,
+            source_id: self.source_id.get(),
             update_flags: bid.flag | ask.flag,
             source_timestamp_ns: source_ts_ns,
             bid_price: bid.price,
@@ -127,7 +131,7 @@ impl<'t> Lowering<'t> {
 
         Ok(Trade {
             instrument_id: inst.instrument_id,
-            source_id: self.source_id,
+            source_id: self.source_id.get(),
             aggressor_side: aggressor_byte(aggressor),
             trade_flags: trade_flags_byte(flags),
             source_timestamp_ns: source_ts_ns,

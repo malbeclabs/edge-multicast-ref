@@ -35,7 +35,7 @@ fn the_two_scalar_shapes_carrying_one_value_lower_to_identical_bytes() {
     // could drift; this asserts there is nothing to drift, because both shapes
     // reach the same bytes through the same rescale.
     let instruments = table();
-    let lowering = Lowering::new(&instruments, 1);
+    let lowering = Lowering::new(&instruments, source_id());
     let instrument = InstrumentRef::from_admission(0);
 
     // 0.41 stated as text, and stated as an integer at an exponent of the
@@ -71,7 +71,7 @@ fn a_value_too_precise_for_the_exponent_is_refused_rather_than_rounded() {
     // used - and the alternative is not hypothetical: one publisher's live path
     // rounds here, and reports nothing.
     let instruments = table();
-    let lowering = Lowering::new(&instruments, 1);
+    let lowering = Lowering::new(&instruments, source_id());
     let instrument = InstrumentRef::from_admission(0);
 
     // Five decimal places at an exponent that carries four.
@@ -199,4 +199,10 @@ fn zero_is_zero_at_every_exponent() {
     // gives the right answer.
     assert_eq!(price_at(Scalar::fixed(0, 120), PRICE_EXPONENT), Ok(0));
     assert_eq!(price_at(Scalar::fixed(0, -120), PRICE_EXPONENT), Ok(0));
+}
+
+/// An assigned production id, which is what a publisher runs under. Zero would
+/// be refused by the type - see `tests/source_id.rs`.
+fn source_id() -> dz_publisher_lowering::SourceId {
+    dz_publisher_lowering::SourceId::new(7).expect("7 is in the assigned range")
 }
