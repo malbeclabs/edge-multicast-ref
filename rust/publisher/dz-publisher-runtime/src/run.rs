@@ -35,8 +35,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use dz_adapter_core::{
-    Adapter, AdapterError, ConnectionId, DisconnectReason, Event, EventSink, InstrumentRef,
-    ListingSink, ParseError, Payload, SnapshotSink, UpstreamSink,
+    Adapter, AdapterError, ConnectionId, Desync, DisconnectReason, Event, EventSink, InstrumentRef,
+    ListingSink, ParseError, Payload, SnapshotSink, UpstreamSink, VenueTimestampKind,
 };
 use dz_edge_core::{PortRole, MAX_DATAGRAM_SIZE};
 use dz_edge_mbp::MarketByPrice;
@@ -303,7 +303,11 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
     // tick.
     {
         let mut held = adapter.lock().unwrap_or_else(|held| held.into_inner());
-        publisher.borrow_mut().poll_listings(&mut **held);
+        let mut publisher = publisher.borrow_mut();
+        // Which venue clock this adapter's timestamps carry, read once: it is a
+        // property of the adapter and not of a message.
+        publisher.declare_venue_timestamps(&**held);
+        publisher.poll_listings(&mut **held);
     }
 
     let exit = runtime.block_on(async {
@@ -519,13 +523,28 @@ async fn signalled() {
 /// note.
 struct SharedSink<'a, S: StateStore, K: Clock + Clone>(&'a RefCell<Publisher<S, K>>);
 
+/// **Every method, and that is the point of writing them all out.** A wrapper
+/// that forwards some of a trait and defaults the rest compiles, runs, and
+/// silently drops whatever it forgot — the driver's own wrapper did exactly that
+/// with `desynchronised` until it was noticed, which meant an adapter could say
+/// its book had diverged and nothing downstream would hear it. So each method
+/// is here explicitly rather than inherited, and a method added to `EventSink`
+/// should be added here in the same change.
 impl<S: StateStore, K: Clock + Clone> EventSink for SharedSink<'_, S, K> {
     fn upstream_message(&mut self, message_type: &'static str) {
         self.0.borrow_mut().upstream_message(message_type);
     }
 
+    fn payload_scope(&mut self, recv_ts_ns: Option<u64>) {
+        self.0.borrow_mut().payload_scope(recv_ts_ns);
+    }
+
     fn event(&mut self, event: Event<'_>) {
         self.0.borrow_mut().event(event);
+    }
+
+    fn desynchronised(&mut self, instrument: dz_adapter_core::InstrumentRef, reason: Desync) {
+        self.0.borrow_mut().desynchronised(instrument, reason);
     }
 }
 
@@ -575,6 +594,16 @@ impl Adapter for SharedAdapter {
 
     fn poll_listings(&mut self, out: &mut dyn ListingSink) {
         self.held().poll_listings(out);
+    }
+
+    /// Forwarded rather than defaulted, and the default is why: it is `None`,
+    /// so a wrapper that inherited it would answer "this venue publishes no
+    /// clock of its own" for every venue — leaving the venue-to-receive
+    /// latency family at zero across all four of its pre-created children,
+    /// which is the shape of a stopped feed rather than of a missing
+    /// declaration.
+    fn source_timestamp_kind(&self) -> Option<VenueTimestampKind> {
+        self.held().source_timestamp_kind()
     }
 
     fn on_connected(

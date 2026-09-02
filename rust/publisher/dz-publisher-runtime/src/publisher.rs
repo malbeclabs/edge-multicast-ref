@@ -54,14 +54,15 @@
 
 use std::sync::Arc;
 
-use dz_adapter_core::{Adapter, Desync, Event, EventSink, InstrumentRef};
+use dz_adapter_core::{Adapter, Desync, Event, EventSink, InstrumentRef, VenueTimestampKind};
 use dz_edge_core::fixed_point::ScaleError;
 use dz_edge_mbp::MarketByPrice;
 use dz_edge_refdata::{InstrumentDefinition, ManifestSummary};
 use dz_edge_tob::TopOfBook;
 use dz_publisher_lowering::{DepthLowering, Lowering, LoweringError, Snapshot, SourceId};
 use dz_publisher_metrics::{
-    EgressMessageType, LoweringRefusalReason, PublisherMetrics, RefdataLoadErrorReason,
+    EgressMessageType, EventKind, LoweringRefusalReason, PublisherMetrics, RefdataLoadErrorReason,
+    TimestampKind,
 };
 use dz_publisher_refdata::{Counts, Registry, StateStore};
 
@@ -353,6 +354,17 @@ pub struct Publisher<S: StateStore, K: Clock + Clone> {
     /// Instruments announced as discarded, each with the anchor its
     /// `InstrumentReset` promised. See [`Self::owed_snapshots`].
     owed: Vec<(InstrumentRef, u64)>,
+    /// The receive stamp of the payload currently being mapped, stated by the
+    /// transport's wrapper before the adapter is handed anything and withdrawn
+    /// when the mapping ends. `None` means no payload is in force — a snapshot
+    /// pulled on the runtime's own cadence, a definition from the refdata
+    /// cycle — and neither latency family is observed for those, because
+    /// neither arrived from upstream.
+    payload_recv_ts_ns: Option<u64>,
+    /// Which venue clock this adapter's `source_ts_ns` values carry, read once
+    /// at startup. `None` for a venue that publishes none, which is a real
+    /// answer and not a missing one.
+    venue_timestamp_kind: Option<TimestampKind>,
     /// Monotonic. When the adapter's listings were last drained.
     last_poll_ns: Option<u64>,
     seeded: bool,
@@ -399,6 +411,8 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
             refusals: Refusals::default(),
             unroutable: 0,
             owed: Vec::new(),
+            payload_recv_ts_ns: None,
+            venue_timestamp_kind: None,
             last_poll_ns: None,
             seeded: false,
         }
@@ -429,6 +443,20 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
         owed.sort_unstable_by_key(|(instrument, anchor)| (*instrument, std::cmp::Reverse(*anchor)));
         owed.dedup_by_key(|(instrument, _)| *instrument);
         owed
+    }
+
+    /// Read the adapter's venue-timestamp declaration, once, at startup.
+    ///
+    /// Once rather than per event because it is a property of the adapter and
+    /// not of a message — which is also this boundary's limit: a venue exposing
+    /// a matching-engine stamp on trades and a gateway stamp on quotes cannot
+    /// say which an individual event used, so the gauge that counts how many
+    /// kinds are available can only ever read 0 or 1 through here.
+    pub fn declare_venue_timestamps(&mut self, adapter: &dyn Adapter) {
+        self.venue_timestamp_kind = adapter.source_timestamp_kind().map(timestamp_kind);
+        self.metrics
+            .latency()
+            .set_venue_timestamps_available(i64::from(self.venue_timestamp_kind.is_some()));
     }
 
     /// Record build identity, once, at startup.
@@ -793,6 +821,73 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
             .process()
             .set_idle_guard_last_update(unix_seconds(now_unix_ns));
     }
+
+    /// The two families that measure from a payload's arrival.
+    ///
+    /// Observed only for a message whose event arrived **inside a payload
+    /// scope**: a snapshot pulled on the runtime's cadence, a definition from
+    /// the refdata cycle and a heartbeat never came from upstream, so a
+    /// latency measured for one would be measuring this process against
+    /// itself.
+    ///
+    /// Both differences are taken against the **wall** clock, because
+    /// `recv_ts_ns` is a wall or kernel reading and nothing in the types stops
+    /// the wrong pairing. A monotonic reading differenced against a wall stamp
+    /// is a number with no meaning that a histogram will happily accept.
+    ///
+    /// `venue_to_recv` needs a kind to label the observation with, so an
+    /// adapter that reads a venue clock and does not declare which one leaves
+    /// it unobserved rather than mislabelled.
+    fn observe_arrival_latency(&mut self, source_ts_ns: u64, kind: EventKind, sent_unix_ns: u64) {
+        let Some(recv_ts_ns) = self.payload_recv_ts_ns else {
+            return;
+        };
+        let latency = self.metrics.latency();
+        // Saturating, because a venue clock ahead of ours is a clock-skew
+        // observation and not a negative duration. Zero is the honest floor.
+        latency.observe_recv_to_send(kind, seconds(sent_unix_ns.saturating_sub(recv_ts_ns)));
+        if let Some(kind) = self.venue_timestamp_kind {
+            latency.observe_venue_to_recv(kind, seconds(recv_ts_ns.saturating_sub(source_ts_ns)));
+        }
+    }
+}
+
+/// A nanosecond difference as the seconds a histogram takes.
+const fn seconds(nanos: u64) -> f64 {
+    nanos as f64 / 1_000_000_000.0
+}
+
+/// The event-kind label for the send-side latency family.
+///
+/// The mapping the label's own vocabulary implies: everything that changes a
+/// book is a book update, and a trade is a trade. `Event` is
+/// `#[non_exhaustive]`, so a variant added upstream lands on the wildcard —
+/// which is why it is written as an exhaustive-looking match with the wildcard
+/// last and a comment rather than as a lookup: a new variant is a decision
+/// somebody has to make here.
+const fn event_kind(event: &Event<'_>) -> EventKind {
+    match event {
+        Event::Quote { .. } | Event::Level { .. } | Event::Clear { .. } => EventKind::BookUpdate,
+        Event::Trade { .. } => EventKind::Trade,
+        // A new feed's message is a book update until somebody decides
+        // otherwise, which is the safer default: the alternative labels it a
+        // trade and puts it in a panel counting executions.
+        _ => EventKind::BookUpdate,
+    }
+}
+
+/// The metric label for what an adapter declared.
+///
+/// Exhaustive, so a fifth kind on either side fails to compile here. The two
+/// copies exist because `dz-adapter-core` must depend on nothing, and they are
+/// held to each other by a test in the transport crate.
+const fn timestamp_kind(kind: VenueTimestampKind) -> TimestampKind {
+    match kind {
+        VenueTimestampKind::ExchangeRecv => TimestampKind::ExchangeRecv,
+        VenueTimestampKind::MatchingEngine => TimestampKind::MatchingEngine,
+        VenueTimestampKind::GatewaySend => TimestampKind::GatewaySend,
+        VenueTimestampKind::BlockTime => TimestampKind::BlockTime,
+    }
 }
 
 /// Time an encode and a send, and record it under the message type's own label.
@@ -922,7 +1017,21 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
         }
     }
 
+    /// The transport states which payload is being mapped, and withdraws it.
+    ///
+    /// Not something an adapter passes through: the wrapper the driver builds
+    /// opens the scope before the adapter is handed anything and closes it on
+    /// drop, so a parse error, an early return and an unwind all close it.
+    /// There is nothing for an adapter to remember, which is why it cannot
+    /// forget.
+    fn payload_scope(&mut self, recv_ts_ns: Option<u64>) {
+        self.payload_recv_ts_ns = recv_ts_ns;
+    }
+
     fn event(&mut self, event: Event<'_>) {
+        // Read once, before the match, so every arm labels its observation the
+        // same way and a new arm cannot forget to.
+        let kind = event_kind(&event);
         let now_mono = dz_publisher_refdata::Clock::monotonic_ns(&self.clock);
         let now_unix = self.clock.unix_ns();
         let lowering = self.lowering;
@@ -959,6 +1068,7 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                         });
                         if sent.is_ok() {
                             self.published(now_mono, now_unix);
+                            self.observe_arrival_latency(source_ts_ns, kind, now_unix);
                         }
                     }
                     Err(error) => self.refusals.record(error, &self.metrics),
@@ -1049,6 +1159,7 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                         });
                         if sent.is_ok() {
                             self.published(now_mono, now_unix);
+                            self.observe_arrival_latency(source_ts_ns, kind, now_unix);
                         }
                     }
                     Err(error) => self.refusals.record(error, &self.metrics),
@@ -1081,6 +1192,7 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                         });
                         if sent.is_ok() {
                             self.published(now_mono, now_unix);
+                            self.observe_arrival_latency(source_ts_ns, kind, now_unix);
                         }
                     }
                     Err(error) => self.refusals.record(error, &self.metrics),
