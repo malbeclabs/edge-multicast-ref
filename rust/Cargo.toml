@@ -6,6 +6,7 @@ members = [
     "codec/dz-edge-mbp",
     "codec/dz-edge-refdata",
     "adapter/dz-adapter-core",
+    "adapter/dz-adapter-uds",
     "publisher/dz-publisher-metrics",
     "publisher/dz-publisher-lowering",
     "publisher/dz-publisher-egress",

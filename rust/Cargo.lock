@@ -184,6 +184,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "dz-adapter-uds"
+version = "0.1.0"
+dependencies = [
+ "dz-adapter-core",
+ "dz-edge-core",
+ "dz-edge-mbp",
+ "dz-edge-tob",
+ "dz-publisher-lowering",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "dz-edge-core"
 version = "0.1.0"
 dependencies = [

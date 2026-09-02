@@ -464,15 +464,43 @@ the audit's own failure, as a test.
 
 ### 8. The UDS adapter
 
-- [ ] A framed normalized-event encoding: length-delimited, one event per
-      frame, versioned in a header byte.
-- [ ] `UdsAdapter`, a built-in `Adapter` reading that framing from a Unix
-      socket, so a non-Rust integration can be the source.
-- [ ] The same framing, written: a `TeeEncoder` plan 2 uses for `[adapter.tee]`.
+- [x] A length-delimited normalized-event **record** encoding, one event per
+      record, versioned in a header byte.
+- [x] `UdsAdapter`, a built-in `Adapter` reading that encoding, so a non-Rust
+      integration can be the source.
+- [x] The same encoding, written: a `RecordWriter` plan 2 uses for
+      `[adapter.tee]`.
 
-**Test:** round-trip every `Event` variant through the framing and lower both
-copies — the framing is lossless with respect to the lowering, which is the
+**Test:** round-trip every `Event` variant through the encoding and lower both
+copies — the encoding is lossless with respect to the lowering, which is the
 only property that matters.
+
+> **Task 8: landed** as `dz-adapter-uds`, 8 tests. Two notes on what it is
+> called and what it does not do.
+>
+> **"Record", not "frame".** This plan's own vocabulary rule is `datagram`
+> never `frame`, and a length-delimited unit here is neither — calling it a
+> frame would put a third meaning on a word the glossary already narrowed to
+> one.
+>
+> **It opens no socket.** Reading bytes off a Unix socket is a transport's job
+> and belongs to `dz-ingress-*`; the adapter is handed payloads and asked what
+> they mean, exactly as every other adapter is. That is why it is testable with
+> no socket at all, and it is the same split the boundary rests on everywhere
+> else.
+>
+> **A record names the instrument by symbol.** An `InstrumentRef` is a dense
+> index into one runtime's admitted table, so a record carrying one would mean
+> something only inside the process that minted it — and the whole point is that
+> the writer is somewhere else. The symbol is the only identity two sides can
+> both state, which is the same conclusion task 9 reached independently.
+>
+> Length first, version second, and that ordering is the design: a reader that
+> does not know the version can still find the next record. So an unknown
+> version or an unknown event kind is **skipped** and the stream continues,
+> while a body carrying more bytes than its shape is malformed rather than
+> tolerated — a writer that added a field and a reader that ignored it is
+> exactly what the version exists to catch.
 
 ### 9. `dz-recorder-relower`: Mode C
 
@@ -529,12 +557,28 @@ keeps the tool usable.
 
 ### 10. Documentation
 
-- [ ] `rust/adapter/README.md`: what a venue implements, in one page, with the
+- [x] `rust/adapter/README.md`: what a venue implements, in one page, with the
       ten-line adapter from task 2 as the example.
-- [ ] `rust/publisher/README.md`: the planned-crates table gains the two that
+- [x] `rust/publisher/README.md`: the planned-crates table gains the two that
       landed; `dz-ingress-*` stays planned.
-- [ ] `docs/README.md`: this spec and plan in the index.
-- [ ] `rust/README.md`: the workspace table gains `adapter/`.
+- [x] `docs/README.md`: this spec and plan in the index.
+- [x] `rust/README.md`: the workspace table gains `adapter/`.
+
+> **Task 10: landed**, and it needed one more page than the checklist named:
+> `rust/ingress/README.md`, because that directory now exists and a reader
+> arriving at it would otherwise have to infer why the transport is not in
+> `adapter/`.
+>
+> `dz-ingress-*` did **not** stay planned — the websocket transport landed, so
+> the publisher's planned table now names what actually remains: the other
+> transports, market-by-order behind its missing codec crate, and the egress
+> tee, which was waiting on a framing that task 8 has now written.
+>
+> One correction rather than an addition: `rust/README.md` claimed CI ran on
+> changes under a list of paths. There is no path filter — CI runs on every pull
+> request, which is what keeps a codec change from breaking a publisher
+> silently. The claim was stale before this task and is now what the workflow
+> does.
 
 ---
 
