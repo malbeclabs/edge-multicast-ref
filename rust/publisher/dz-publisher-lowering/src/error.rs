@@ -89,7 +89,11 @@ impl LoweringError {
     /// Attach a field name to a scaling refusal, for use as a `map_err`
     /// argument so the field is named once per call site rather than in every
     /// arm of the conversion.
-    pub(crate) fn scale(field: &'static str) -> impl Fn(ScaleError) -> Self {
+    ///
+    /// Public because the reference-data owner converts the scalars a venue
+    /// states in its listing — the tick, the lot — through the same functions
+    /// and owes the same named refusals.
+    pub fn scale(field: &'static str) -> impl Fn(ScaleError) -> Self {
         move |source| Self::Scale { field, source }
     }
 }

@@ -36,7 +36,7 @@ fn the_two_scalar_shapes_carrying_one_value_lower_to_identical_bytes() {
     // could drift; this asserts there is nothing to drift, because both shapes
     // reach the same bytes through the same rescale.
     let instruments = table();
-    let lowering = Lowering::new(&instruments, source_id());
+    let lowering = Lowering::new(source_id());
     let instrument = InstrumentRef::from_admission(0);
 
     // 0.41 stated as text, and stated as an integer at an exponent of the
@@ -54,10 +54,10 @@ fn the_two_scalar_shapes_carrying_one_value_lower_to_identical_bytes() {
     };
 
     let from_text = lowering
-        .lower_quote(instrument, 7, as_text, SideUpdate::Gone)
+        .lower_quote(&instruments, instrument, 7, as_text, SideUpdate::Gone)
         .expect("exact at this exponent");
     let from_integers = lowering
-        .lower_quote(instrument, 7, as_integers, SideUpdate::Gone)
+        .lower_quote(&instruments, instrument, 7, as_integers, SideUpdate::Gone)
         .expect("exact at this exponent");
 
     assert_eq!(from_text, from_integers);
@@ -72,12 +72,13 @@ fn a_value_too_precise_for_the_exponent_is_refused_rather_than_rounded() {
     // used - and the alternative is not hypothetical: one publisher's live path
     // rounds here, and reports nothing.
     let instruments = table();
-    let lowering = Lowering::new(&instruments, source_id());
+    let lowering = Lowering::new(source_id());
     let instrument = InstrumentRef::from_admission(0);
 
     // Five decimal places at an exponent that carries four.
     for px in [Scalar::text("0.41005"), Scalar::fixed(41_005, -5)] {
         let refused = lowering.lower_quote(
+            &instruments,
             instrument,
             7,
             SideUpdate::Present {

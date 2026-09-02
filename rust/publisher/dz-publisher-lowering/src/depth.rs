@@ -20,20 +20,23 @@ use crate::source::SourceId;
 /// reason: `Per-Instrument Seq` is a counter, top-of-book has no such field,
 /// and folding the two together would make the stateless path carry state for
 /// nothing and stop it being `Copy`.
+///
+/// The instrument table arrives per call rather than being held — see
+/// [`Lowering`](crate::Lowering) for why, and note that this is the type the
+/// reason is really about: rebuilding it to release a borrow would restart the
+/// sequence it carries.
 #[derive(Debug)]
-pub struct DepthLowering<'t> {
-    instruments: &'t InstrumentTable,
+pub struct DepthLowering {
     source_id: SourceId,
     seq: PerInstrumentSeq,
     next_snapshot_id: u32,
 }
 
-impl<'t> DepthLowering<'t> {
-    /// Bind a table and the publisher's own `Source ID`.
+impl DepthLowering {
+    /// Bind the publisher's own `Source ID`.
     #[must_use]
-    pub const fn new(instruments: &'t InstrumentTable, source_id: SourceId) -> Self {
+    pub const fn new(source_id: SourceId) -> Self {
         Self {
-            instruments,
             source_id,
             seq: PerInstrumentSeq::new(),
             // Snapshot ids tie a begin, its levels and its end together, so
@@ -96,6 +99,7 @@ impl<'t> DepthLowering<'t> {
     #[allow(clippy::too_many_arguments)]
     pub fn lower_level(
         &mut self,
+        instruments: &InstrumentTable,
         instrument: InstrumentRef,
         source_ts_ns: u64,
         side: Side,
@@ -104,7 +108,7 @@ impl<'t> DepthLowering<'t> {
         order_count: Option<u16>,
         presence: Presence,
     ) -> Result<LevelUpdate, LoweringError> {
-        let inst = *self.instruments.get(instrument)?;
+        let inst = *instruments.get(instrument)?;
 
         let price_raw = price_for(&inst, px, "price")?;
         let qty_raw = qty_for(&inst, qty, "qty")?;
@@ -150,11 +154,12 @@ impl<'t> DepthLowering<'t> {
     /// As [`lower_level`](Self::lower_level).
     pub fn lower_clear(
         &mut self,
+        instruments: &InstrumentTable,
         instrument: InstrumentRef,
         source_ts_ns: u64,
         scope: ClearScope<'_>,
     ) -> Result<BookClear, LoweringError> {
-        let inst = *self.instruments.get(instrument)?;
+        let inst = *instruments.get(instrument)?;
 
         let (clear_side, wire_scope, from_price_raw) = match scope {
             ClearScope::EntireSide(side) => (side_clear_byte(side), SCOPE_ENTIRE_SIDE, 0),
@@ -179,11 +184,6 @@ impl<'t> DepthLowering<'t> {
             // Informational, and not expressible at the boundary.
             clear_reason: 0,
         })
-    }
-
-    /// The table, for the snapshot framer in the sibling module.
-    pub(crate) const fn table(&self) -> &InstrumentTable {
-        self.instruments
     }
 
     /// The sequence, read-only, for the framer's `Last Instrument Seq`.

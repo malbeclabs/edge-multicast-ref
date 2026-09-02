@@ -5,7 +5,7 @@ use dz_edge_mbp::{SnapshotBegin, SnapshotEnd, SnapshotLevel, SIDE_ASK, SIDE_BID,
 
 use crate::depth::DepthLowering;
 use crate::error::LoweringError;
-use crate::instrument::Instrument;
+use crate::instrument::{Instrument, InstrumentTable};
 use crate::scale::{price_for, qty_for};
 
 /// One instrument's book state, framed.
@@ -144,7 +144,7 @@ impl SnapshotFramer {
     }
 }
 
-impl DepthLowering<'_> {
+impl DepthLowering {
     /// Open a snapshot for one instrument, to hand to
     /// [`Adapter::snapshot`](dz_adapter_core::Adapter::snapshot).
     ///
@@ -166,12 +166,13 @@ impl DepthLowering<'_> {
     /// hold.
     pub fn open_snapshot(
         &mut self,
+        instruments: &InstrumentTable,
         instrument: InstrumentRef,
         anchor_seq: u64,
         timestamp_ns: u64,
         depth_bound: u32,
     ) -> Result<SnapshotFramer, LoweringError> {
-        let inst = *self.table().get(instrument)?;
+        let inst = *instruments.get(instrument)?;
         let last_instrument_seq = self.sequence().last(instrument);
         let snapshot_id = self.take_snapshot_id();
 

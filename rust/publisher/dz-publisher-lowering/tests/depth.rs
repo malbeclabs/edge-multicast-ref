@@ -44,7 +44,7 @@ fn the_action_table_is_exhausted_against_zero_and_non_zero_quantity() {
     // it. The values below are transcribed from the specification's own table,
     // not read off the derivation they check.
     let instruments = table();
-    let mut lowering = DepthLowering::new(&instruments, source_id());
+    let mut lowering = DepthLowering::new(source_id());
 
     let cases = [
         (Presence::Unknown, "0", ACTION_DELETE),
@@ -58,6 +58,7 @@ fn the_action_table_is_exhausted_against_zero_and_non_zero_quantity() {
     for (presence, qty, expected) in cases {
         let level = lowering
             .lower_level(
+                &instruments,
                 handle(),
                 1,
                 Side::Bid,
@@ -93,11 +94,12 @@ fn a_removal_is_reachable_from_every_presence_and_no_other_action_is() {
     // then sends a zero quantity does not get `New` on the wire. It cannot,
     // because the quantity is read first and unconditionally.
     let instruments = table();
-    let mut lowering = DepthLowering::new(&instruments, source_id());
+    let mut lowering = DepthLowering::new(source_id());
 
     for presence in [Presence::Unknown, Presence::New, Presence::Change] {
         let level = lowering
             .lower_level(
+                &instruments,
                 handle(),
                 1,
                 Side::Ask,
@@ -120,10 +122,11 @@ fn order_count_absent_is_this_feeds_sentinel_and_not_top_of_books() {
     // fact on one plane and as absence on the other, so the two must never
     // share a helper that picks a side.
     let instruments = table();
-    let mut lowering = DepthLowering::new(&instruments, source_id());
+    let mut lowering = DepthLowering::new(source_id());
 
     let absent = lowering
         .lower_level(
+            &instruments,
             handle(),
             1,
             Side::Bid,
@@ -137,6 +140,7 @@ fn order_count_absent_is_this_feeds_sentinel_and_not_top_of_books() {
 
     let real_zero = lowering
         .lower_level(
+            &instruments,
             handle(),
             1,
             Side::Bid,
@@ -163,10 +167,11 @@ fn the_sequence_starts_at_one_is_dense_and_is_shared_with_clears() {
     // numbers are contiguous and if both message types that mutate the book
     // take theirs from the same counter.
     let instruments = table();
-    let mut lowering = DepthLowering::new(&instruments, source_id());
+    let mut lowering = DepthLowering::new(source_id());
 
     let first = lowering
         .lower_level(
+            &instruments,
             handle(),
             1,
             Side::Bid,
@@ -182,7 +187,7 @@ fn the_sequence_starts_at_one_is_dense_and_is_shared_with_clears() {
     );
 
     let clear = lowering
-        .lower_clear(handle(), 2, ClearScope::BothSides)
+        .lower_clear(&instruments, handle(), 2, ClearScope::BothSides)
         .expect("lowers");
     assert_eq!(
         clear.per_instrument_seq, 2,
@@ -191,6 +196,7 @@ fn the_sequence_starts_at_one_is_dense_and_is_shared_with_clears() {
 
     let third = lowering
         .lower_level(
+            &instruments,
             handle(),
             3,
             Side::Ask,
@@ -220,15 +226,15 @@ fn each_instrument_has_its_own_series() {
         qty_exponent: QTY_EXPONENT,
         quoted_per_contract: None,
     });
-    let mut lowering = DepthLowering::new(&instruments, source_id());
+    let mut lowering = DepthLowering::new(source_id());
 
     for instrument in [first, second, first] {
-        let _ = lowering.lower_clear(instrument, 1, ClearScope::BothSides);
+        let _ = lowering.lower_clear(&instruments, instrument, 1, ClearScope::BothSides);
     }
 
     assert_eq!(
         lowering
-            .lower_clear(second, 2, ClearScope::BothSides)
+            .lower_clear(&instruments, second, 2, ClearScope::BothSides)
             .expect("lowers")
             .per_instrument_seq,
         2,
@@ -243,9 +249,10 @@ fn a_refused_message_consumes_no_sequence_number() {
     // theoretical: a price the instrument's exponent cannot state exactly is
     // refused rather than rounded.
     let instruments = table();
-    let mut lowering = DepthLowering::new(&instruments, source_id());
+    let mut lowering = DepthLowering::new(source_id());
 
     let refused = lowering.lower_level(
+        &instruments,
         handle(),
         1,
         Side::Bid,
@@ -258,6 +265,7 @@ fn a_refused_message_consumes_no_sequence_number() {
 
     let next = lowering
         .lower_level(
+            &instruments,
             handle(),
             2,
             Side::Bid,
@@ -276,15 +284,15 @@ fn a_refused_message_consumes_no_sequence_number() {
 #[test]
 fn ending_an_era_restarts_every_series_at_one() {
     let instruments = table();
-    let mut lowering = DepthLowering::new(&instruments, source_id());
+    let mut lowering = DepthLowering::new(source_id());
 
-    let _ = lowering.lower_clear(handle(), 1, ClearScope::BothSides);
-    let _ = lowering.lower_clear(handle(), 2, ClearScope::BothSides);
+    let _ = lowering.lower_clear(&instruments, handle(), 1, ClearScope::BothSides);
+    let _ = lowering.lower_clear(&instruments, handle(), 2, ClearScope::BothSides);
     lowering.sequence_mut().end_era();
 
     assert_eq!(
         lowering
-            .lower_clear(handle(), 3, ClearScope::BothSides)
+            .lower_clear(&instruments, handle(), 3, ClearScope::BothSides)
             .expect("lowers")
             .per_instrument_seq,
         1,
@@ -295,7 +303,7 @@ fn ending_an_era_restarts_every_series_at_one() {
 #[test]
 fn every_clear_scope_reaches_its_own_pair_of_bytes() {
     let instruments = table();
-    let mut lowering = DepthLowering::new(&instruments, source_id());
+    let mut lowering = DepthLowering::new(source_id());
 
     let cases = [
         (
@@ -323,7 +331,9 @@ fn every_clear_scope_reaches_its_own_pair_of_bytes() {
     ];
 
     for (scope, side, wire_scope, from_price) in cases {
-        let clear = lowering.lower_clear(handle(), 1, scope).expect("lowers");
+        let clear = lowering
+            .lower_clear(&instruments, handle(), 1, scope)
+            .expect("lowers");
         assert_eq!(clear.clear_side, side, "{scope:?}");
         assert_eq!(clear.scope, wire_scope, "{scope:?}");
         assert_eq!(clear.from_price_raw, from_price, "{scope:?}");
@@ -341,11 +351,12 @@ fn a_price_bounded_clear_of_both_sides_cannot_be_lowered_because_it_cannot_be_st
     // carries a price is lowered and then validated, and the validation the
     // codec would have failed passes for all of them.
     let instruments = table();
-    let mut lowering = DepthLowering::new(&instruments, source_id());
+    let mut lowering = DepthLowering::new(source_id());
 
     for side in [Side::Bid, Side::Ask] {
         let clear = lowering
             .lower_clear(
+                &instruments,
                 handle(),
                 1,
                 ClearScope::FromPrice {
@@ -364,12 +375,13 @@ fn a_price_bounded_clear_of_both_sides_cannot_be_lowered_because_it_cannot_be_st
 #[test]
 fn an_unheld_handle_is_refused_before_a_number_is_taken() {
     let instruments = table();
-    let mut lowering = DepthLowering::new(&instruments, source_id());
+    let mut lowering = DepthLowering::new(source_id());
     let forged = InstrumentRef::from_admission(9_999);
 
     assert_eq!(
         lowering
             .lower_level(
+                &instruments,
                 forged,
                 1,
                 Side::Bid,
@@ -383,7 +395,7 @@ fn an_unheld_handle_is_refused_before_a_number_is_taken() {
     );
     assert_eq!(
         lowering
-            .lower_clear(forged, 1, ClearScope::BothSides)
+            .lower_clear(&instruments, forged, 1, ClearScope::BothSides)
             .expect_err("not held"),
         LoweringError::UnknownInstrument
     );
@@ -391,7 +403,7 @@ fn an_unheld_handle_is_refused_before_a_number_is_taken() {
     // And the held instrument's series is untouched by either refusal.
     assert_eq!(
         lowering
-            .lower_clear(handle(), 1, ClearScope::BothSides)
+            .lower_clear(&instruments, handle(), 1, ClearScope::BothSides)
             .expect("lowers")
             .per_instrument_seq,
         1
@@ -401,11 +413,12 @@ fn an_unheld_handle_is_refused_before_a_number_is_taken() {
 #[test]
 fn a_side_reaches_its_own_byte() {
     let instruments = table();
-    let mut lowering = DepthLowering::new(&instruments, source_id());
+    let mut lowering = DepthLowering::new(source_id());
 
     for (side, expected) in [(Side::Bid, SIDE_BID), (Side::Ask, SIDE_ASK)] {
         let level = lowering
             .lower_level(
+                &instruments,
                 handle(),
                 1,
                 side,

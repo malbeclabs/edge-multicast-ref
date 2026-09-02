@@ -198,7 +198,10 @@ impl EgressPolicy {
             Some(pinned) => pinned,
             None => route
                 .source_for(destination)
-                .map_err(|source| PolicyError::NoRoute { destination, source })?,
+                .map_err(|source| PolicyError::NoRoute {
+                    destination,
+                    source,
+                })?,
         };
         // The wildcard address is what a socket that was never routed reports,
         // and binding to it hands the source-address choice back to the kernel

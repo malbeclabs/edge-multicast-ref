@@ -153,10 +153,11 @@ fn a_quote_for_a_per_contract_instrument_reaches_the_wire_in_underlying_units() 
     // the units its `InstrumentDefinition` declared.
     let mut instruments = InstrumentTable::new();
     instruments.admit(per_contract(contract()));
-    let lowering = Lowering::new(&instruments, source_id());
+    let lowering = Lowering::new(source_id());
 
     let quote = lowering
         .lower_quote(
+            &instruments,
             InstrumentRef::from_admission(0),
             1,
             SideUpdate::Present {

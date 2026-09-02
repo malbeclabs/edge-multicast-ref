@@ -100,11 +100,11 @@ impl Adapter for FakeBook {
 #[test]
 fn a_pulled_snapshot_frames_as_begin_then_its_levels_then_end() {
     let instruments = table();
-    let mut lowering = DepthLowering::new(&instruments, source_id());
+    let mut lowering = DepthLowering::new(source_id());
     let adapter = FakeBook::two_sided();
 
     let mut framer = lowering
-        .open_snapshot(handle(), 9_001, 1_700_000_000, 25)
+        .open_snapshot(&instruments, handle(), 9_001, 1_700_000_000, 25)
         .expect("the table holds this instrument");
     adapter
         .snapshot(handle(), &mut framer)
@@ -194,9 +194,10 @@ fn the_begin_declares_the_sequence_the_deltas_have_reached() {
     use dz_adapter_core::{ClearScope, Presence};
 
     let instruments = table();
-    let mut lowering = DepthLowering::new(&instruments, source_id());
+    let mut lowering = DepthLowering::new(source_id());
 
     let _ = lowering.lower_level(
+        &instruments,
         handle(),
         1,
         Side::Bid,
@@ -205,9 +206,11 @@ fn the_begin_declares_the_sequence_the_deltas_have_reached() {
         None,
         Presence::New,
     );
-    let _ = lowering.lower_clear(handle(), 2, ClearScope::BothSides);
+    let _ = lowering.lower_clear(&instruments, handle(), 2, ClearScope::BothSides);
 
-    let framer = lowering.open_snapshot(handle(), 9_002, 1, 0).expect("held");
+    let framer = lowering
+        .open_snapshot(&instruments, handle(), 9_002, 1, 0)
+        .expect("held");
     let snapshot = framer.finish().expect("an empty book frames");
     assert_eq!(snapshot.begin.last_instrument_seq, 2);
     assert_eq!(snapshot.begin.total_levels, 0, "an empty book is a book");
@@ -223,9 +226,10 @@ fn opening_a_snapshot_does_not_reset_the_delta_series() {
     use dz_adapter_core::Presence;
 
     let instruments = table();
-    let mut lowering = DepthLowering::new(&instruments, source_id());
+    let mut lowering = DepthLowering::new(source_id());
 
     let _ = lowering.lower_level(
+        &instruments,
         handle(),
         1,
         Side::Bid,
@@ -235,13 +239,14 @@ fn opening_a_snapshot_does_not_reset_the_delta_series() {
         Presence::New,
     );
     let _ = lowering
-        .open_snapshot(handle(), 9_003, 1, 0)
+        .open_snapshot(&instruments, handle(), 9_003, 1, 0)
         .expect("held")
         .finish()
         .expect("frames");
 
     let after = lowering
         .lower_level(
+            &instruments,
             handle(),
             2,
             Side::Bid,
@@ -263,14 +268,18 @@ fn two_snapshots_for_one_instrument_carry_different_ids() {
     // wrong book, so it has to move even when nothing else about the
     // instrument has.
     let instruments = table();
-    let mut lowering = DepthLowering::new(&instruments, source_id());
+    let mut lowering = DepthLowering::new(source_id());
     let adapter = FakeBook::two_sided();
 
-    let mut first = lowering.open_snapshot(handle(), 1, 1, 0).expect("held");
+    let mut first = lowering
+        .open_snapshot(&instruments, handle(), 1, 1, 0)
+        .expect("held");
     adapter.snapshot(handle(), &mut first).expect("writes");
     let first = first.finish().expect("frames");
 
-    let mut second = lowering.open_snapshot(handle(), 2, 2, 0).expect("held");
+    let mut second = lowering
+        .open_snapshot(&instruments, handle(), 2, 2, 0)
+        .expect("held");
     adapter.snapshot(handle(), &mut second).expect("writes");
     let second = second.finish().expect("frames");
 
@@ -313,9 +322,11 @@ fn a_level_that_cannot_be_stated_exactly_refuses_the_whole_snapshot() {
     }
 
     let instruments = table();
-    let mut lowering = DepthLowering::new(&instruments, source_id());
+    let mut lowering = DepthLowering::new(source_id());
 
-    let mut framer = lowering.open_snapshot(handle(), 1, 1, 0).expect("held");
+    let mut framer = lowering
+        .open_snapshot(&instruments, handle(), 1, 1, 0)
+        .expect("held");
     TooPrecise.snapshot(handle(), &mut framer).expect("writes");
 
     let error = framer.finish().expect_err("a fifth decimal place at -4");
@@ -326,11 +337,11 @@ fn a_level_that_cannot_be_stated_exactly_refuses_the_whole_snapshot() {
 #[test]
 fn an_unheld_handle_cannot_open_a_snapshot() {
     let instruments = table();
-    let mut lowering = DepthLowering::new(&instruments, source_id());
+    let mut lowering = DepthLowering::new(source_id());
 
     assert_eq!(
         lowering
-            .open_snapshot(InstrumentRef::from_admission(9_999), 1, 1, 0)
+            .open_snapshot(&instruments, InstrumentRef::from_admission(9_999), 1, 1, 0)
             .expect_err("not held"),
         LoweringError::UnknownInstrument
     );
@@ -343,13 +354,15 @@ fn an_adapter_that_is_not_ready_is_the_runtimes_to_skip() {
     // between one dormant instrument and a restart loop. The framer is simply
     // discarded, and the only cost is a snapshot id.
     let instruments = table();
-    let mut lowering = DepthLowering::new(&instruments, source_id());
+    let mut lowering = DepthLowering::new(source_id());
     let adapter = FakeBook {
         bootstrapped: false,
         ..FakeBook::two_sided()
     };
 
-    let mut framer = lowering.open_snapshot(handle(), 1, 1, 0).expect("held");
+    let mut framer = lowering
+        .open_snapshot(&instruments, handle(), 1, 1, 0)
+        .expect("held");
     assert!(matches!(
         adapter.snapshot(handle(), &mut framer),
         Err(AdapterError::NotReady { .. })

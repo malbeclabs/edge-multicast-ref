@@ -34,7 +34,7 @@ fn table() -> InstrumentTable {
 #[test]
 fn every_pair_of_sides_produces_the_byte_the_live_publishers_produce() {
     let instruments = table();
-    let lowering = Lowering::new(&instruments, source_id());
+    let lowering = Lowering::new(source_id());
     let instrument = dz_adapter_core::InstrumentRef::from_admission(0);
 
     // | book state    | update_flags                  |
@@ -72,7 +72,7 @@ fn every_pair_of_sides_produces_the_byte_the_live_publishers_produce() {
 
     for (state, bid, ask, expected) in cases {
         let quote = lowering
-            .lower_quote(instrument, 7, bid, ask)
+            .lower_quote(&instruments, instrument, 7, bid, ask)
             .expect("the table's instrument and exact decimals");
         assert_eq!(
             quote.update_flags, expected,
@@ -92,7 +92,7 @@ fn an_encoder_writing_both_updated_bits_is_wrong_for_three_of_the_four() {
     let unconditional = QUOTE_BID_UPDATED | QUOTE_ASK_UPDATED;
 
     let instruments = table();
-    let lowering = Lowering::new(&instruments, source_id());
+    let lowering = Lowering::new(source_id());
     let instrument = dz_adapter_core::InstrumentRef::from_admission(0);
 
     let one_sided_or_empty = [
@@ -103,7 +103,7 @@ fn an_encoder_writing_both_updated_bits_is_wrong_for_three_of_the_four() {
 
     for (bid, ask) in one_sided_or_empty {
         let quote = lowering
-            .lower_quote(instrument, 7, bid, ask)
+            .lower_quote(&instruments, instrument, 7, bid, ask)
             .expect("lowers");
         assert_ne!(
             quote.update_flags, unconditional,
@@ -112,7 +112,13 @@ fn an_encoder_writing_both_updated_bits_is_wrong_for_three_of_the_four() {
     }
 
     let two_sided = lowering
-        .lower_quote(instrument, 7, present("0.41"), present("0.43"))
+        .lower_quote(
+            &instruments,
+            instrument,
+            7,
+            present("0.41"),
+            present("0.43"),
+        )
         .expect("lowers");
     assert_eq!(two_sided.update_flags, unconditional);
 }
@@ -124,13 +130,13 @@ fn a_side_never_sets_both_of_its_bits() {
     // derivation that ever set both would make a gone side indistinguishable
     // from a quoted one for any subscriber testing a single bit.
     let instruments = table();
-    let lowering = Lowering::new(&instruments, source_id());
+    let lowering = Lowering::new(source_id());
     let instrument = dz_adapter_core::InstrumentRef::from_admission(0);
 
     for bid in [present("0.41"), SideUpdate::Gone] {
         for ask in [present("0.43"), SideUpdate::Gone] {
             let flags = lowering
-                .lower_quote(instrument, 7, bid, ask)
+                .lower_quote(&instruments, instrument, 7, bid, ask)
                 .expect("lowers")
                 .update_flags;
 
@@ -163,13 +169,13 @@ fn no_pair_of_sides_can_produce_an_empty_flags_byte() {
     // sets a bit. A third case meaning "unchanged" would have set none, and a
     // quote with both sides unchanged would have been a violation on the wire.
     let instruments = table();
-    let lowering = Lowering::new(&instruments, source_id());
+    let lowering = Lowering::new(source_id());
     let instrument = dz_adapter_core::InstrumentRef::from_admission(0);
 
     for bid in [present("0.41"), SideUpdate::Gone] {
         for ask in [present("0.43"), SideUpdate::Gone] {
             let flags = lowering
-                .lower_quote(instrument, 7, bid, ask)
+                .lower_quote(&instruments, instrument, 7, bid, ask)
                 .expect("lowers")
                 .update_flags;
             assert_ne!(
@@ -195,11 +201,17 @@ fn a_gone_side_is_zeroed_and_only_the_flag_says_so() {
     // publishers write it and a subscriber reading size without checking the
     // flag is better served by a zero than by a stale number.
     let instruments = table();
-    let lowering = Lowering::new(&instruments, source_id());
+    let lowering = Lowering::new(source_id());
     let instrument = dz_adapter_core::InstrumentRef::from_admission(0);
 
     let quote = lowering
-        .lower_quote(instrument, 7, SideUpdate::Gone, present("0.43"))
+        .lower_quote(
+            &instruments,
+            instrument,
+            7,
+            SideUpdate::Gone,
+            present("0.43"),
+        )
         .expect("lowers");
 
     assert_eq!(quote.bid_price, 0);
@@ -210,7 +222,13 @@ fn a_gone_side_is_zeroed_and_only_the_flag_says_so() {
     // And a real bid at zero is byte-identical apart from that one bit, which
     // is the whole hazard in one assertion.
     let at_zero = lowering
-        .lower_quote(instrument, 7, present("0.0000"), present("0.43"))
+        .lower_quote(
+            &instruments,
+            instrument,
+            7,
+            present("0.0000"),
+            present("0.43"),
+        )
         .expect("lowers");
     assert_eq!(at_zero.bid_price, quote.bid_price);
     assert_eq!(
@@ -223,11 +241,12 @@ fn a_gone_side_is_zeroed_and_only_the_flag_says_so() {
 #[test]
 fn a_venues_source_count_reaches_the_wire_and_its_absence_is_zero() {
     let instruments = table();
-    let lowering = Lowering::new(&instruments, source_id());
+    let lowering = Lowering::new(source_id());
     let instrument = dz_adapter_core::InstrumentRef::from_admission(0);
 
     let counted = lowering
         .lower_quote(
+            &instruments,
             instrument,
             7,
             SideUpdate::Present {

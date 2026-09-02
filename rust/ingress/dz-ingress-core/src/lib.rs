@@ -69,11 +69,13 @@ pub mod limit;
 pub mod observer;
 
 pub use backoff::{Backoff, BackoffPolicy};
+#[cfg(feature = "tokio")]
+pub use clock::TokioClock;
 pub use clock::{BoxFuture, Clock};
 pub use config::{IngressConfig, Policy};
 pub use driver::{Driver, UpstreamQueue};
 pub use error::{ConfigError, IngressError};
-pub use input::{Input, Received, TimestampKind, UpstreamMessage};
+pub use input::{Input, Received, StampSource, UpstreamMessage};
 pub use kind::Kind;
 pub use limit::RateLimiter;
 pub use observer::IngressObserver;

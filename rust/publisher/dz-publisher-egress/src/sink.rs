@@ -199,21 +199,30 @@ impl DatagramSink for Tee {
     ///
     /// # Errors
     ///
-    /// [`SinkError::NotRegistered`], and only that, when no member is live. A
-    /// member's own failure is counted and absorbed; see [`Tee`].
+    /// [`SinkError::NotRegistered`], and only that, when there was no live
+    /// member to offer it to. A member's own failure is counted and absorbed;
+    /// see [`Tee`].
+    ///
+    /// The emptiness is checked before the offering rather than after, which
+    /// makes the rule exactly *a send with somewhere to go never fails*. The
+    /// alternative — reporting it once nothing is left — would have a fan-out
+    /// of one propagate every hard failure of its member and a fan-out of two
+    /// propagate none, so what a caller had to handle would depend on how many
+    /// destinations were configured. The collapse is not lost by deferring it:
+    /// it is the next send's outcome, and [`Self::live`] says so in between.
     fn send(&mut self, datagram: &[u8]) -> Result<(), SinkError> {
-        let mut delivered = 0usize;
+        if self.live() == 0 {
+            return Err(SinkError::NotRegistered);
+        }
         for member in &mut self.members {
             if !member.live {
                 continue;
             }
             match member.sink.send(datagram) {
-                Ok(()) => delivered += 1,
+                Ok(()) => {}
                 Err(error) => {
                     member.failures += 1;
-                    self.metrics
-                        .egress()
-                        .error(self.port_role, error.reason());
+                    self.metrics.egress().error(self.port_role, error.reason());
                     if !error.is_transient() {
                         member.live = false;
                         if member.sink.failure_scope() == FailureScope::Process
@@ -224,9 +233,6 @@ impl DatagramSink for Tee {
                     }
                 }
             }
-        }
-        if delivered == 0 && self.live() == 0 {
-            return Err(SinkError::NotRegistered);
         }
         Ok(())
     }

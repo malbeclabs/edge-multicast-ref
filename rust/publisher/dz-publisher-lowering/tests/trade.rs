@@ -22,10 +22,11 @@ fn table() -> InstrumentTable {
 #[test]
 fn a_trade_lowers_its_price_quantity_and_identity() {
     let instruments = table();
-    let lowering = Lowering::new(&instruments, source_id());
+    let lowering = Lowering::new(source_id());
 
     let trade = lowering
         .lower_trade(
+            &instruments,
             InstrumentRef::from_admission(0),
             1_700_000_000_000_000_000,
             Scalar::text("0.41"),
@@ -55,10 +56,11 @@ fn what_a_venue_does_not_publish_reaches_the_wire_as_the_specifications_sentinel
     // one of them has no venue trade identifier to pass through either. Each
     // absence has a defined value, and none of them is a guess.
     let instruments = table();
-    let lowering = Lowering::new(&instruments, source_id());
+    let lowering = Lowering::new(source_id());
 
     let trade = lowering
         .lower_trade(
+            &instruments,
             InstrumentRef::from_admission(0),
             1,
             Scalar::text("0.41"),
@@ -82,7 +84,7 @@ fn what_a_venue_does_not_publish_reaches_the_wire_as_the_specifications_sentinel
 #[test]
 fn each_aggressor_reaches_its_own_byte() {
     let instruments = table();
-    let lowering = Lowering::new(&instruments, source_id());
+    let lowering = Lowering::new(source_id());
 
     for (aggressor, expected) in [
         (Aggressor::Unknown, AGGRESSOR_UNKNOWN),
@@ -91,6 +93,7 @@ fn each_aggressor_reaches_its_own_byte() {
     ] {
         let trade = lowering
             .lower_trade(
+                &instruments,
                 InstrumentRef::from_admission(0),
                 1,
                 Scalar::text("0.41"),
@@ -110,7 +113,7 @@ fn each_qualifier_sets_its_own_bit_and_nothing_else() {
     // Three booleans in, three defined bits out. A bit nobody defined has no
     // way to be set because there is no fourth boolean to set it with.
     let instruments = table();
-    let lowering = Lowering::new(&instruments, source_id());
+    let lowering = Lowering::new(source_id());
 
     let cases = [
         (
@@ -147,6 +150,7 @@ fn each_qualifier_sets_its_own_bit_and_nothing_else() {
     for (flags, expected) in cases {
         let trade = lowering
             .lower_trade(
+                &instruments,
                 InstrumentRef::from_admission(0),
                 1,
                 Scalar::text("0.41"),
@@ -166,10 +170,11 @@ fn a_cumulative_volume_too_precise_for_the_exponent_names_its_own_field() {
     // The field name is what sends an operator to the right place, and a
     // running total is scaled at the quantity exponent like any other quantity.
     let instruments = table();
-    let lowering = Lowering::new(&instruments, source_id());
+    let lowering = Lowering::new(source_id());
 
     let error = lowering
         .lower_trade(
+            &instruments,
             InstrumentRef::from_admission(0),
             1,
             Scalar::text("0.41"),

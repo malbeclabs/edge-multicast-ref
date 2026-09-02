@@ -14,16 +14,23 @@ use crate::source::SourceId;
 
 /// Everything the lowering needs that is not in the event.
 ///
-/// Borrowed rather than owned: the table belongs to the reference-data owner,
-/// which goes on admitting and withdrawing instruments while this reads it.
+/// # Why the table is an argument and not a field
+///
+/// It was a field first, and that was wrong: holding `&InstrumentTable` for
+/// this type's lifetime borrows the table immutably for as long as a publisher
+/// is lowering anything, and the reference-data owner needs it mutably to admit
+/// and withdraw instruments. A publisher would have had to stop lowering to
+/// admit an instrument — and for [`DepthLowering`](crate::DepthLowering), which
+/// carries the per-instrument sequence, rebuilding it to release the borrow
+/// would restart that sequence, which no subscriber can be told apart from a
+/// channel reset.
 #[derive(Debug, Clone, Copy)]
-pub struct Lowering<'t> {
-    instruments: &'t InstrumentTable,
+pub struct Lowering {
     source_id: SourceId,
 }
 
-impl<'t> Lowering<'t> {
-    /// Bind a table and the publisher's own `Source ID`.
+impl Lowering {
+    /// Bind the publisher's own `Source ID`.
     ///
     /// The `Source ID` is the publisher's registered identity and is the same
     /// for every message a process sends, which is why it is here and not in
@@ -33,11 +40,8 @@ impl<'t> Lowering<'t> {
     /// does not admit is a startup error rather than something to discover one
     /// message at a time.
     #[must_use]
-    pub const fn new(instruments: &'t InstrumentTable, source_id: SourceId) -> Self {
-        Self {
-            instruments,
-            source_id,
-        }
+    pub const fn new(source_id: SourceId) -> Self {
+        Self { source_id }
     }
 
     /// `Event::Quote` to `0x03 Quote`.
@@ -63,12 +67,13 @@ impl<'t> Lowering<'t> {
     /// that cannot be stated exactly at this instrument's exponent.
     pub fn lower_quote(
         &self,
+        instruments: &InstrumentTable,
         instrument: InstrumentRef,
         source_ts_ns: u64,
         bid: SideUpdate<'_>,
         ask: SideUpdate<'_>,
     ) -> Result<Quote, LoweringError> {
-        let inst = self.instruments.get(instrument)?;
+        let inst = instruments.get(instrument)?;
 
         let bid = lower_side(inst, bid, Sides::BID)?;
         let ask = lower_side(inst, ask, Sides::ASK)?;
@@ -112,6 +117,7 @@ impl<'t> Lowering<'t> {
     #[allow(clippy::too_many_arguments)]
     pub fn lower_trade(
         &self,
+        instruments: &InstrumentTable,
         instrument: InstrumentRef,
         source_ts_ns: u64,
         px: Scalar<'_>,
@@ -121,7 +127,7 @@ impl<'t> Lowering<'t> {
         cumulative_volume: Option<Scalar<'_>>,
         flags: TradeFlags,
     ) -> Result<Trade, LoweringError> {
-        let inst = self.instruments.get(instrument)?;
+        let inst = instruments.get(instrument)?;
 
         let cumulative_volume = match cumulative_volume {
             Some(volume) => qty_for(inst, volume, "cumulative_volume")?,

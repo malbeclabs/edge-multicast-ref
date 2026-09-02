@@ -103,6 +103,35 @@ impl InstrumentTable {
             .ok_or(LoweringError::UnknownInstrument)
     }
 
+    /// Restate an admitted instrument in place, keeping its handle.
+    ///
+    /// **For a venue that changed what it says about an instrument it is still
+    /// streaming** — a re-declared exponent, or a contract factor the venue
+    /// revised. The handle has to survive, because the adapter is carrying it:
+    /// withdrawing and re-admitting would strand every copy it holds, and
+    /// leaving the table alone while republishing the definition would put a
+    /// definition on the wire declaring one scale while quotes went out at
+    /// another, which is the worst of the three outcomes and the only silent
+    /// one.
+    ///
+    /// Returns whether the handle was held. `false` is not an error: an
+    /// instrument that has been withdrawn has nothing to restate, and the
+    /// caller wanted the state it already has.
+    ///
+    /// This is a decision the caller has to have made, not a convenience — a
+    /// scale that changes under a subscriber is a barrier event, and whether
+    /// this is the right answer or a delist-and-relist is the reference-data
+    /// owner's call.
+    pub fn replace(&mut self, handle: InstrumentRef, instrument: Instrument) -> bool {
+        match self.slots.get_mut(handle.index() as usize) {
+            Some(slot @ Some(_)) => {
+                *slot = Some(instrument);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// How many instruments the table currently holds.
     ///
     /// Withdrawn slots are not counted, so this is the published set and not

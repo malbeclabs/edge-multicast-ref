@@ -24,6 +24,12 @@ egress crate or the refdata crate; those are the publisher-crates design's own
 steps and this plan consumes them where they exist and stubs them where they do
 not.
 
+> **Plan 2's crates landed early, out of order.** `dz-publisher-egress`,
+> `dz-publisher-refdata`, `dz-ingress-core` and `dz-ingress-websocket` are in
+> the workspace. What is still missing before a venue can *run* is
+> `dz-publisher-runtime`: the config composition, the adapter registry of task
+> 7, the guards, and the shutdown that sends `EndOfSession`.
+
 | Plan | Lands | Delivers |
 |---|---|---|
 | **1 — the interface** (this one) | `dz-adapter-core`, `dz-publisher-lowering`, the registry and config binding, `dz-recorder-relower` | a venue can write an adapter and prove its mapping in CI; an archive can be re-lowered and diffed |
