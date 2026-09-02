@@ -23,10 +23,15 @@
 /// on each: a value too precise for the exponent means the exponent is wrong for
 /// this instrument, a value that is not a decimal at all means the upstream
 /// changed its format, and a value that does not fit means the field is too
-/// narrow. A venue converting inline reports none of the three, and one existing
-/// publisher holds two implementations of this conversion — one exact, one
-/// through `f64` with a `.round()` — of which the rounding one is on its live
-/// path and the exact one carries `#![allow(dead_code)]`.
+/// narrow. A venue converting inline reports none of the three.
+///
+/// That is not a hypothetical cost. One existing publisher holds two
+/// implementations of this conversion: an exact, string-only one that refuses
+/// what it cannot represent, and one through `f64` with a `.round()`. The
+/// rounding one is what its live market-data path calls, and it takes the
+/// failure as `.unwrap_or(0)` — so a value it cannot convert is published as a
+/// price of zero, with the side's *updated* flag set, which is a real-looking
+/// quote at nothing rather than a counted refusal.
 ///
 /// [`Fixed`](Self::Fixed) is for a venue whose own book already holds integers.
 /// Forcing it to render them back to a decimal string for this interface to

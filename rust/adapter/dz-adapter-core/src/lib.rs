@@ -12,13 +12,28 @@
 //!
 //! That is the whole design, and it comes from what the existing publishers
 //! did. Every defect a fleet-wide audit found was a publisher re-deciding
-//! something a specification had already decided, and the two that survived
-//! into live traffic were bytes a venue was still allowed to author: a quote
-//! encoder writing both `Update Flags` bits unconditionally, and a level
-//! encoder numbering the `Action` table from `New` so that every removal went
-//! out as a `Change` carrying zero. Both are self-consistent, so both are
-//! invisible to any test that encodes and then decodes. Neither is reachable
-//! from here.
+//! something a specification had already decided, and the ones worth naming are
+//! the ones that were bytes a venue was still allowed to author.
+//!
+//! **A level encoder numbered the `Action` table from `New`**, so every removal
+//! went out as a `Change` carrying zero. That one reached live traffic; its
+//! publisher's own design notes count it as one of two bugs that landed, and
+//! both landed from the same cause — a wire value table transcribed wrongly and
+//! then checked only against itself. It is fixed, and the fix was structural: a
+//! test that transcribes the specification's tables as literals, which is the
+//! same technique as `tests/wire_vocabularies.rs` here.
+//!
+//! **A scaling failure became a price of zero on the wire.** The other
+//! publisher's live market-data path converts the venue's decimal through `f64`
+//! and `.round()`, and takes the failure as `.unwrap_or(0)` — while the same
+//! repository holds an exact, string-only, exact-or-refuse conversion that the
+//! path does not call. Zero is an in-range price, and the same publisher's
+//! quote sets the *updated* flag for a side it has a level for, so a conversion
+//! that fails publishes a real-looking bid at nothing.
+//!
+//! Both are self-consistent, so both are invisible to any test that encodes and
+//! then decodes. Neither is reachable from here: there is no `Action` to
+//! author, and no integer at the instrument's exponent to arrive at.
 //!
 //! # Three properties, and what each one buys
 //!

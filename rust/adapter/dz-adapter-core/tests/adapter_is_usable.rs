@@ -181,19 +181,20 @@ impl Adapter for LineAdapter {
                     bid: if bid == "-" {
                         SideUpdate::Gone
                     } else {
-                        SideUpdate::Updated {
+                        SideUpdate::Present {
                             px: Scalar::text(bid),
                             qty: Scalar::text("1"),
                             source_count: None,
                         }
                     },
-                    // The side this venue did not send is stated as unchanged
-                    // rather than repeated, which is the case an encoder
-                    // writing both update bits unconditionally cannot express.
-                    ask: if ask == "=" {
-                        SideUpdate::Unchanged
+                    // Both sides are read out of this adapter's own view every
+                    // time. A venue with nothing new to say emits no quote at
+                    // all rather than a quote that says nothing, because the
+                    // wire has no way to carry "this side did not move".
+                    ask: if ask == "-" {
+                        SideUpdate::Gone
                     } else {
-                        SideUpdate::Updated {
+                        SideUpdate::Present {
                             px: Scalar::text(ask),
                             qty: Scalar::text("1"),
                             source_count: None,
@@ -292,7 +293,7 @@ fn an_adapter_is_object_safe_and_drives_end_to_end() {
 
     let mut events = Events::default();
     adapter
-        .on_payload(&payload("quote 0.41 =", conn), &mut events)
+        .on_payload(&payload("quote 0.41 -", conn), &mut events)
         .expect("quote");
     adapter
         .on_payload(&payload("level 0.41 5", conn), &mut events)
@@ -348,7 +349,7 @@ fn a_declined_listing_is_ordinary() {
     let mut events = Events::default();
     adapter
         .on_payload(
-            &payload("quote 0.41 =", ConnectionId::new("mktdata")),
+            &payload("quote 0.41 -", ConnectionId::new("mktdata")),
             &mut events,
         )
         .expect("a payload for an unadmitted instrument is not an error");

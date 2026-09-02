@@ -25,13 +25,18 @@ use crate::scalar::Scalar;
 pub enum Event<'a> {
     /// A two-sided top-of-book update.
     ///
-    /// Both sides are always stated, each as one of three cases, and that is
-    /// the whole point: `Update Flags` is derived from the pair above this
-    /// boundary. An existing publisher's encoder writes both update bits
-    /// unconditionally on every quote, on a live feed, so every subscriber
-    /// reading the field is told both sides changed whenever either did. From
-    /// here that byte is not reachable, and [`SideUpdate::Unchanged`] is how a
-    /// venue says the thing that encoder cannot.
+    /// **Both sides are always stated**, and that is the whole point: `Update
+    /// Flags` is derived from the pair above this boundary, so the byte cannot
+    /// be authored here. A venue that only knows one side of its book does not
+    /// have a quote to emit.
+    ///
+    /// There is no way to say *this side did not change*, because the wire has
+    /// no way to carry it: `Update Flags` states which sides are **present**,
+    /// not which moved. A quote that would restate the top unchanged is
+    /// therefore not an event at all, and suppressing it belongs to the
+    /// adapter, which is the layer holding the book — both existing publishers
+    /// already do exactly that, one counting the suppressions and one
+    /// deduplicating on the encoded top.
     Quote {
         instrument: InstrumentRef,
         /// The venue's own timestamp for this event, in nanoseconds.
@@ -85,23 +90,42 @@ pub enum Event<'a> {
     },
 }
 
-/// What happened to one side of a two-sided quote.
+/// One side of a two-sided quote: what rests there, or that nothing does.
 ///
-/// The three cases are what `Update Flags` is derived from, and a venue always
-/// knows which of them it has. There is no fourth, and no way to state a raw
-/// flags byte.
+/// **Two cases, because the wire has two states per side.** `Update Flags`
+/// carries an *updated* bit and a *gone* bit for each side, and they are
+/// mutually exclusive: a gone side is not an updated side. So the bit says the
+/// side is present, not that it changed, and the pair of cases below is exactly
+/// what the byte can express.
+///
+/// That is not a reading of the specification, which fixes the bit positions
+/// and stops — it is what both existing publishers derive, independently, on
+/// live feeds. One states the table in its own encoder as normative for its
+/// feed and pins the absent side's zeros byte for byte; the other reaches the
+/// same four values from whether each side of a truncated book is empty. A
+/// third convention invented here would put this repository's lowering at odds
+/// with both.
+///
+/// The consequence worth stating: a venue cannot say *unchanged*. See
+/// [`Event::Quote`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SideUpdate<'a> {
-    /// This side did not move. The subscriber keeps what it holds.
-    Unchanged,
-    /// This side has no resting quantity: the book is one-sided here.
+    /// Nothing rests on this side: the book is one-sided, or empty, here.
+    ///
+    /// The lowering writes a zero price and quantity, which the specification
+    /// requires — and which is why the flag is load-bearing rather than
+    /// decorative. Zero is an in-range price on the wire, so a subscriber that
+    /// ignores the flags reads a phantom quote at nothing. One publisher's
+    /// encoder documents that hazard and holds it with a byte-level test.
     Gone,
-    /// This side is now the stated price and quantity.
-    Updated {
+    /// This side rests at the stated price and quantity.
+    Present {
         px: Scalar<'a>,
         qty: Scalar<'a>,
         /// How many distinct sources contribute to this side, for a venue that
-        /// aggregates several. `None` where the venue does not say.
+        /// aggregates several. `None` where the venue does not say, which the
+        /// wire's own sentinel for that field is zero — neither publisher
+        /// exposes it on top-of-book today.
         source_count: Option<u16>,
     },
 }
@@ -127,9 +151,10 @@ pub enum Aggressor {
 /// The trade qualifiers the specification defines.
 ///
 /// Three booleans rather than the wire's flags byte, for the same reason
-/// [`SideUpdate`] is three cases rather than two bits: a venue that can write a
+/// [`SideUpdate`] is two cases rather than two bits: a venue that can write a
 /// byte can write a bit nobody defined, and a byte a venue composes is a byte no
-/// test compares against anything.
+/// test compares against anything. Neither existing publisher sets a qualifier
+/// today, so every one of these is reachable only through a venue that starts.
 ///
 /// `sweep` keeps its externally defined name: it is what the field is called on
 /// the wire and what the term means in the market it describes.
@@ -161,11 +186,14 @@ impl TradeFlags {
 /// removal carrying quantity — are therefore not merely refused but
 /// unrepresentable.
 ///
-/// This is the one shipped defect this crate was shaped around. A publisher
-/// numbering the action table from `New` instead of `Unknown` emits every
-/// removal as a change carrying zero: self-consistent, invisible to any test
-/// that encodes and decodes, and quietly wrong for every consumer that reads the
-/// field.
+/// This is the one shipped defect this crate was shaped around, and it is the
+/// one that genuinely reached live traffic. A publisher numbering the action
+/// table from `New` instead of `Unknown` emitted every removal as a change
+/// carrying zero: self-consistent, invisible to any test that encodes and
+/// decodes, and quietly wrong for every consumer reading the field. It is fixed
+/// there now, and the derivation that replaced it — zero is a removal, and
+/// nothing else is — is the one the lowering above this boundary performs, for
+/// every venue, once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Presence {
     /// The upstream does not distinguish an insertion from a change.
@@ -240,7 +268,7 @@ mod tests {
         let quote = Event::Quote {
             instrument: InstrumentRef::from_admission(0),
             source_ts_ns: 1,
-            bid: SideUpdate::Updated {
+            bid: SideUpdate::Present {
                 px: Scalar::text("1.00"),
                 qty: Scalar::text("5"),
                 source_count: None,
@@ -249,10 +277,33 @@ mod tests {
         };
         match quote {
             Event::Quote { bid, ask, .. } => {
-                assert!(matches!(bid, SideUpdate::Updated { .. }));
+                assert!(matches!(bid, SideUpdate::Present { .. }));
                 assert_eq!(ask, SideUpdate::Gone);
             }
             _ => panic!("expected a quote"),
+        }
+    }
+
+    #[test]
+    fn a_side_has_exactly_the_two_states_the_wire_carries() {
+        // Written as an exhaustive match rather than a count, so a third case
+        // added later fails here — and the failure is the right one to have,
+        // because a third case needs a wire state that does not exist. The
+        // updated and gone bits are mutually exclusive per side, so a side is
+        // present or it is not.
+        for side in [
+            SideUpdate::Gone,
+            SideUpdate::Present {
+                px: Scalar::text("1"),
+                qty: Scalar::text("1"),
+                source_count: None,
+            },
+        ] {
+            let present = match side {
+                SideUpdate::Gone => false,
+                SideUpdate::Present { .. } => true,
+            };
+            assert_eq!(present, matches!(side, SideUpdate::Present { .. }));
         }
     }
 }
