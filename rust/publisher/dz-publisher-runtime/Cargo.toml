@@ -42,6 +42,21 @@ tokio = { version = "1", default-features = false, features = [
 ] }
 
 [dev-dependencies]
+# One marker feature, and no transport crate. `Kind::is_linked` answers "is
+# that transport built into this binary?" from a `cfg!` on a feature that the
+# *transport crate* turns on, which is what lets the core answer the question
+# while depending on none of them - so a crate like this one, which links no
+# transport, sees every kind in the family as unlinked and cannot resolve an
+# `[ingress]` section at all.
+#
+# Turning `uds` on for the test build is what lets a test assert that a valid
+# document resolves end to end. It is a dev-dependency, so a venue does not
+# inherit it and the library build still links no transport; and the
+# distinction it papers over is asserted directly by
+# `a_transport_this_binary_was_not_built_with_is_a_different_error`, which uses
+# a kind the feature does not cover.
+dz-ingress-core = { path = "../../ingress/dz-ingress-core", features = ["uds"] }
+
 # Decoding what the wiring actually put on the wire. The end-to-end test asserts
 # datagrams by decoding them with the codec rather than by inspecting the
 # runtime's own state, which is the only way the assertion is about the wire.

@@ -383,17 +383,54 @@ test is the whole task.
 
 ### 7. The registry and the config binding
 
-- [ ] `AdapterRegistry`: `&'static str` → constructor, in `dz-publisher-runtime`
+- [x] `AdapterRegistry`: `&'static str` → constructor, in `dz-publisher-runtime`
       (or a `dz-publisher-compose` crate if the runtime has not landed).
-- [ ] `[adapter] kind` resolves against it. An unregistered `kind` is a startup
+- [x] `[adapter] kind` resolves against it. An unregistered `kind` is a startup
       error **naming every registered kind**, never a fallback and never a
       default.
-- [ ] `deny_unknown_fields` on `[adapter]` and every section under it.
-- [ ] `[adapter.tee]` parsed, defaulted off, plumbed nowhere yet.
+- [x] `deny_unknown_fields` on `[adapter]` and every section under it.
+- [x] `[adapter.tee]` parsed, defaulted off, plumbed nowhere yet.
 
 **Tests:** an unknown `kind` fails and the message lists the registry; a
 misspelled `[adapter.upstrem]` fails to load rather than silently defaulting —
 the audit's own failure, as a test.
+
+> **Task 7: landed**, inside `dz-publisher-runtime`, which is the crate a venue
+> links and calls from a short `main`. 70 tests.
+>
+> Both tests this task named exist by name, and the misspelling one is paired
+> with a control — a test that only proves a misspelling fails would pass
+> against a parser that refused everything. Three more guard the shape of the
+> refusal rather than its existence: an unknown kind never falls back to the
+> only registered adapter (the most tempting fallback there is), an empty
+> registry says so in words rather than printing an empty list, and a kind
+> registered twice panics rather than shadowing one adapter with another.
+>
+> **The registry constructor returns the transport as well as the adapter**, and
+> that is one thing the design's `main` sketch was short of. `[adapter.upstream]`
+> is the venue's own keys, so only the adapter's code knows its endpoint key —
+> and a runtime that built the transport itself would have to depend on every
+> transport crate, which would make the linked-transport check always true.
+> `[ingress] kind` is still resolved against the closed set and handed to the
+> constructor. What the runtime cannot check is that the venue built the
+> matching transport, and that is documented rather than hidden.
+>
+> **Teardown order**, transcribed as a list a test asserts against: ingress
+> stopped, admissions closed, the final manifest with `Valid = 0` on refdata,
+> `EndOfSession` on mktdata, both roles flushed, the exit reason recorded.
+> The manifest goes before `EndOfSession` because a subscriber that stops at the
+> terminal statement would otherwise never see it. Sockets and the state claim
+> are released by `Drop` rather than by a step — a teardown whose correctness
+> depended on a close call only works on the polite path.
+>
+> Three things it needed and could not have, none invented: there is still no
+> metric family for a lowering refusal, so the five reasons are exposed and
+> reported rather than mapped onto a series that would then mean two things;
+> `recv_to_send` and `venue_to_recv` latency cannot be observed at all, because
+> `EventSink` does not carry the payload's receive stamp and nothing at the
+> boundary declares a timestamp kind; and the duration parser is now its third
+> copy, which the second copy's own doc named as the point at which it needs one
+> home.
 
 ### 8. The UDS adapter
 
