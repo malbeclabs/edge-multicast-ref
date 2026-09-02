@@ -12,6 +12,7 @@ Older documents also predate [GLOSSARY.md](https://github.com/malbeclabs/edge-fe
 |---|---|
 | [Shared publisher crates](superpowers/specs/2026-08-26-edge-publisher-crates-design.md) | The design behind [`rust/codec`](../rust/codec/) and [`rust/publisher`](../rust/publisher/) |
 | [Codec crates: Top-of-Book path](superpowers/plans/2026-08-26-codec-crates-top-of-book.md) | Plan for the first three codec crates |
+| [The venue adapter interface](superpowers/specs/2026-09-02-venue-adapter-interface-design.md) · [plan](superpowers/plans/2026-09-02-venue-adapter-interface.md) | The trait a venue repository implements to turn its own source into our messages, and how the recorder re-lowers it to compare against multicast |
 
 ## Feeds
 
