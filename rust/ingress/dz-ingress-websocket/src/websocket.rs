@@ -11,12 +11,23 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
 use tokio::time::{timeout, Instant};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::handshake::client::Request;
+use tokio_tungstenite::tungstenite::http::{HeaderName, HeaderValue};
 use tokio_tungstenite::tungstenite::protocol::{Message, WebSocketConfig};
 use tokio_tungstenite::tungstenite::Error as WsError;
 use tokio_tungstenite::{Connector, MaybeTlsStream, WebSocketStream};
 
 /// The open connection.
 type Stream = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+/// What computes the upgrade request's headers for one connect attempt.
+///
+/// `Send` because [`Input`] is: a transport is held by a driver that a binary
+/// is free to run on a multi-threaded runtime, so a provider that could not
+/// cross a thread would make this struct the one `Input` implementation that
+/// cannot be one. It is the venue's own signing routine either way, and a
+/// signing routine that is not `Send` is a design to fix there.
+type HeaderProvider = Box<dyn Fn() -> Result<Vec<(String, String)>, String> + Send>;
 
 /// How often to ping when nothing has arrived, and therefore also how long a
 /// ping may go unanswered.
@@ -54,6 +65,10 @@ pub struct WebSocketInput {
     /// The scheme, host and port of `endpoint`, and nothing else. See the
     /// `Debug` implementation for why the rest is dropped.
     authority: String,
+    /// Computes the headers for each connect attempt, when the venue
+    /// authenticates its upgrade. See [`WebSocketInput::with_headers`] for why
+    /// this is a closure and not a list of headers.
+    headers: Option<HeaderProvider>,
     ping_interval: Duration,
     max_message_bytes: usize,
     stream: Option<Stream>,
@@ -106,6 +121,7 @@ impl WebSocketInput {
             connection,
             endpoint,
             authority,
+            headers: None,
             ping_interval: DEFAULT_PING_INTERVAL,
             max_message_bytes: DEFAULT_MAX_MESSAGE_BYTES,
             stream: None,
@@ -128,6 +144,106 @@ impl WebSocketInput {
     pub const fn with_max_message_bytes(mut self, bytes: usize) -> Self {
         self.max_message_bytes = bytes;
         self
+    }
+
+    /// Headers for the upgrade request, computed again for **every** connect
+    /// attempt.
+    ///
+    /// A closure and not a list of headers because the recomputation is the
+    /// point. A venue that authenticates the upgrade signs a fresh millisecond
+    /// timestamp — a key, a timestamp and a signature over it is the common
+    /// shape — and rejects a handshake carrying an older one. Headers computed
+    /// once at construction therefore give a publisher that connects and then
+    /// can never reconnect: the fault appears the first time the venue drops
+    /// the connection, which is hours after anyone was watching.
+    ///
+    /// Optional. A venue that needs no credential leaves it unset and the
+    /// request goes out exactly as the library built it.
+    ///
+    /// Each name is set rather than appended, so the last of a repeated name
+    /// wins. Two values for one credential header is a mistake either way, and
+    /// sending both is the worse of the two ways to be wrong.
+    ///
+    /// **The provider must not name a key in the error it returns.** That text
+    /// reaches an [`IngressError`] detail and from there a log line, and it is
+    /// the one string on this path that this crate cannot keep credentials out
+    /// of, because the provider wrote it.
+    ///
+    /// # What a connect makes of it
+    ///
+    /// Nothing runs here, so this call cannot fail. [`Input::connect`] is what
+    /// reports the two ways the provider can be unusable, and they are not
+    /// reported the same way:
+    ///
+    /// - **An error from the provider is [`IngressError::Connect`] with
+    ///   [`ConnectFailureReason::Unauthorized`], and so retried.** The case
+    ///   that decides it is a signing key whose file the mounting agent has not
+    ///   written yet: a publisher that stopped for that would have stopped for
+    ///   a condition which clears in seconds. `Unauthorized` rather than
+    ///   `Rejected` because a reason is an operator's next action and not a
+    ///   record of who said no — *look at the credential* is what a 401 asks
+    ///   for as well, and one series is what puts the two in front of the same
+    ///   person. Not `Ended`, because nothing was established.
+    /// - **A name or a value that is not valid HTTP is
+    ///   [`IngressError::Fatal`].** A name is a literal in the venue's code and
+    ///   is the same string on the next attempt, so retrying it under a backoff
+    ///   only hides it — the reason [`new`](Self::new) refuses a misspelled
+    ///   endpoint at startup rather than at the first connect. A value *is*
+    ///   recomputed, and it is still fatal: a signing routine that puts a
+    ///   control character in a header value puts one there every time, and
+    ///   nothing here can tell that from a value which would have been fine a
+    ///   second later. Of the two mistakes available, the loud one is the
+    ///   recoverable one — the runtime's restart policy acts on it, and a
+    ///   dashboard nobody reads does not.
+    ///
+    /// A rejected pair is reported by its **position** in the provider's list
+    /// and never by its content. The way a name comes to be invalid is a value
+    /// written into the name slot — a base64 signature is not a valid header
+    /// name — so printing the name would put the signature in the log line
+    /// this type's [`Debug`] exists to keep it out of. A value's *name* is
+    /// printed once it has parsed: it is part of the venue's published API, and
+    /// it is what says which of three headers to go and look at.
+    #[must_use]
+    pub fn with_headers(
+        mut self,
+        provider: impl Fn() -> Result<Vec<(String, String)>, String> + Send + 'static,
+    ) -> Self {
+        self.headers = Some(Box::new(provider));
+        self
+    }
+
+    /// The provider's headers, on the request the handshake is about to send.
+    ///
+    /// Takes the request by value and hands it back, so that there is no
+    /// half-populated request to connect with by mistake.
+    fn authenticate(&self, mut request: Request) -> Result<Request, IngressError> {
+        let Some(provider) = self.headers.as_ref() else {
+            return Ok(request);
+        };
+        let headers = provider().map_err(|error| {
+            IngressError::connect(
+                ConnectFailureReason::Unauthorized,
+                format!(
+                    "{}: the upgrade could not be signed: {error}",
+                    self.authority
+                ),
+            )
+        })?;
+        for (position, (name, value)) in headers.iter().enumerate() {
+            let name = HeaderName::try_from(name.as_str()).map_err(|_| {
+                IngressError::fatal(format!(
+                    "the name of the header at position {position} is not a valid \
+                     HTTP header name (its text is withheld: see `with_headers`)"
+                ))
+            })?;
+            let value = HeaderValue::try_from(value.as_str()).map_err(|_| {
+                IngressError::fatal(format!(
+                    "the value computed for `{name}` is not a valid HTTP header value"
+                ))
+            })?;
+            request.headers_mut().insert(name, value);
+        }
+        Ok(request)
     }
 
     /// The TLS connector, with the provider named rather than discovered.
@@ -166,19 +282,28 @@ impl WebSocketInput {
     }
 }
 
-/// Prints the connection, the host and whether it is up — and **not the
-/// endpoint**.
+/// Prints the connection, the host and whether it is up — and **neither the
+/// endpoint nor anything a header provider computed**.
 ///
 /// A venue endpoint carrying a key in its query string is a shape several APIs
 /// use, and configuration keeps credentials in files precisely so that they do
 /// not end up in a log line. A derived implementation would put one there the
 /// first time somebody logged this struct.
+///
+/// The same standard covers [`WebSocketInput::with_headers`], where a signature
+/// is one of the values: whether the upgrade is signed is printed, because that
+/// is what an operator reading a 401 wants to know, and what it is signed with
+/// is not.
 impl core::fmt::Debug for WebSocketInput {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("WebSocketInput")
             .field("connection", &self.connection)
             .field("authority", &self.authority)
             .field("connected", &self.stream.is_some())
+            // Whether the upgrade is signed, which is a real question when a
+            // venue answers with a 401 - and the only part of a credential
+            // that is safe to print.
+            .field("authenticated", &self.headers.is_some())
             .finish()
     }
 }
@@ -195,6 +320,10 @@ impl Input for WebSocketInput {
                 .as_str()
                 .into_client_request()
                 .map_err(|error| IngressError::fatal(format!("endpoint unusable: {error}")))?;
+            // Signed here and not at construction: the signature covers a
+            // timestamp, and a reconnect an hour later must not carry the one
+            // the process started with. See `with_headers`.
+            let request = self.authenticate(request)?;
             let connector = self.tls_connector()?;
             let config = WebSocketConfig::default().max_message_size(Some(self.max_message_bytes));
             // Nagle off. A subscription message that sits in a kernel buffer
@@ -537,5 +666,23 @@ mod tests {
         let rendered = format!("{input:?}");
         assert!(!rendered.contains("api_key"), "{rendered}");
         assert!(rendered.contains("example.com"), "{rendered}");
+    }
+
+    #[test]
+    fn a_debug_line_says_that_the_upgrade_is_signed_and_not_what_with() {
+        // The signature is the credential, so the same rule as the endpoint's
+        // query string applies to it. Whether there is one at all is worth
+        // printing: it is the first question a 401 raises.
+        let input = WebSocketInput::new(ConnectionId::new("mktdata"), "wss://example.com/stream")
+            .expect("a well-formed endpoint")
+            .with_headers(|| {
+                Ok(vec![(
+                    "x-venue-access-signature".to_string(),
+                    "not-a-real-signature".to_string(),
+                )])
+            });
+        let rendered = format!("{input:?}");
+        assert!(!rendered.contains("not-a-real-signature"), "{rendered}");
+        assert!(rendered.contains("authenticated: true"), "{rendered}");
     }
 }

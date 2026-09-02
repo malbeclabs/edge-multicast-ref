@@ -15,12 +15,16 @@
 //! tests: that the connector is constructible at all, which is where the
 //! provider-selection panic would land.
 //!
-//! What each test proves is in its own comment. The two that matter most are
-//! the ping grace, because a half-open socket produces no error and no data and
-//! so cannot be found any other way, and the driver test, because it is the
-//! only place the two halves are exercised over a real socket.
+//! What each test proves is in its own comment. Three matter more than the
+//! rest, and each for the same reason — the failure it covers is invisible to
+//! every other test here. The ping grace, because a half-open socket produces
+//! no error and no data. The driver test, because it is the only place the two
+//! halves are exercised over a real socket. And the second of the two signed
+//! upgrades, because headers computed once at construction pass every test that
+//! connects only the once.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -35,6 +39,7 @@ use dz_ingress_core::{
 use dz_ingress_websocket::WebSocketInput;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
+use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Message};
 
@@ -63,6 +68,13 @@ enum Serve {
     Hold(Duration),
 }
 
+/// The upgrade request's headers, per accepted connection, in accept order.
+///
+/// One entry per handshake rather than one set for the server, because what a
+/// reconnect carries is only visible by comparing the second entry with the
+/// first.
+type Upgrades = Arc<Mutex<Vec<Vec<(String, String)>>>>;
+
 /// Binds loopback and serves each script on one accepted connection, in order.
 ///
 /// Returns the address and the messages the client sent, so a test can assert
@@ -70,19 +82,52 @@ enum Serve {
 /// run out the listener is dropped, so the next connect is refused rather than
 /// hanging in a backlog — which is what lets a test say "and then no more".
 async fn serve(scripts: Vec<Vec<Serve>>) -> (SocketAddr, Arc<Mutex<Vec<String>>>) {
+    let (address, received, _upgrades) = serve_recording_upgrades(scripts).await;
+    (address, received)
+}
+
+/// [`serve`], and also what each handshake's HTTP request carried.
+///
+/// The headers are read in the handshake callback and not from the socket,
+/// because that is the only place they exist: `tungstenite` consumes the
+/// upgrade request and hands back a stream.
+async fn serve_recording_upgrades(
+    scripts: Vec<Vec<Serve>>,
+) -> (SocketAddr, Arc<Mutex<Vec<String>>>, Upgrades) {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("loopback is bindable without a privilege");
     let address = listener.local_addr().expect("a bound address");
     let received = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&received);
+    let upgrades: Upgrades = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&upgrades);
 
     tokio::spawn(async move {
         for script in scripts {
             let Ok((socket, _peer)) = listener.accept().await else {
                 return;
             };
-            let mut stream = match tokio_tungstenite::accept_async(socket).await {
+            let record = Arc::clone(&seen);
+            // The callback's error type is the library's rejection response,
+            // which is large and never built here: this closure only reads.
+            #[allow(clippy::result_large_err)]
+            let observe = move |request: &Request, response: Response| {
+                record.lock().expect("the recorder").push(
+                    request
+                        .headers()
+                        .iter()
+                        .map(|(name, value)| {
+                            (
+                                name.as_str().to_string(),
+                                value.to_str().unwrap_or("<not text>").to_string(),
+                            )
+                        })
+                        .collect(),
+                );
+                Ok(response)
+            };
+            let mut stream = match tokio_tungstenite::accept_hdr_async(socket, observe).await {
                 Ok(stream) => stream,
                 Err(_) => continue,
             };
@@ -116,11 +161,39 @@ async fn serve(scripts: Vec<Vec<Serve>>) -> (SocketAddr, Arc<Mutex<Vec<String>>>
         drop(listener);
     });
 
-    (address, received)
+    (address, received, upgrades)
+}
+
+/// What the server saw for one header on the nth handshake, if anything.
+///
+/// Case-insensitive because HTTP is, and because `http` lowercases every name
+/// it parses — a test that asserted on the venue's own capitalisation would be
+/// asserting about that normalisation and not about this transport.
+fn upgrade_header(upgrades: &Upgrades, handshake: usize, name: &str) -> Option<String> {
+    upgrades
+        .lock()
+        .expect("the recorder")
+        .get(handshake)?
+        .iter()
+        .find(|(seen, _)| seen.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.clone())
 }
 
 fn endpoint(address: SocketAddr) -> String {
     format!("ws://{address}")
+}
+
+/// An address nothing is listening on.
+///
+/// Bound to learn a free port and then dropped. Some of the tests below use it
+/// as a discriminator rather than as a server: a connect that gets as far as
+/// the socket fails as `Refused`, so a test asserting some other outcome has
+/// proved the request was refused before any of it went out.
+async fn dead_address() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("loopback");
+    let address = listener.local_addr().expect("a bound address");
+    drop(listener);
+    address
 }
 
 /// Receives one payload and copies it out, so that the borrow of the transport
@@ -292,10 +365,7 @@ async fn a_refused_connect_is_retryable_and_not_fatal() {
     // A venue that is down must not stop the driver: it should keep trying at
     // the ceiling and leave the alerting to the connection-state gauge, which
     // is pre-created at 0 for exactly this case.
-    // Bound to learn a port, then dropped, so nothing is listening on it.
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("loopback");
-    let address = listener.local_addr().expect("a bound address");
-    drop(listener);
+    let address = dead_address().await;
     let mut input = WebSocketInput::new(CONNECTION, endpoint(address)).expect("an endpoint");
     let error = input
         .connect(Duration::from_secs(1))
@@ -334,6 +404,212 @@ async fn a_handshake_the_far_side_answers_with_http_is_a_retryable_connect_error
         .expect_err("the upgrade was refused");
     assert!(!error.is_fatal(), "{error}");
     assert!(error.to_string().contains("401"), "{error}");
+}
+
+// ---------------------------------------------------------------------------
+// The signed upgrade
+// ---------------------------------------------------------------------------
+//
+// A venue that authenticates its websocket does it on the HTTP upgrade, with a
+// key, a timestamp and a signature over that timestamp. The names below are
+// stand-ins for that triple: nothing venue-specific lives in this crate, and
+// the property being tested is the same for any of them.
+
+#[tokio::test]
+async fn the_headers_the_provider_computed_reach_the_venue_on_the_upgrade() {
+    let (address, _sent, upgrades) =
+        serve_recording_upgrades(vec![vec![Serve::Close(CloseCode::Normal)]]).await;
+
+    let mut input = WebSocketInput::new(CONNECTION, endpoint(address))
+        .expect("an endpoint")
+        .with_headers(|| {
+            Ok(vec![
+                (
+                    "x-venue-access-key".to_string(),
+                    "not-a-real-key".to_string(),
+                ),
+                (
+                    "x-venue-access-timestamp".to_string(),
+                    "1700000000000".to_string(),
+                ),
+                (
+                    "x-venue-access-signature".to_string(),
+                    "not-a-real-signature".to_string(),
+                ),
+            ])
+        });
+    input
+        .connect(Duration::from_secs(5))
+        .await
+        .expect("loopback accepts");
+
+    // Asserted from the server's side of the handshake, because that is the
+    // only place that says the headers were actually sent rather than merely
+    // stored.
+    for (name, expected) in [
+        ("x-venue-access-key", "not-a-real-key"),
+        ("x-venue-access-timestamp", "1700000000000"),
+        ("x-venue-access-signature", "not-a-real-signature"),
+    ] {
+        assert_eq!(
+            upgrade_header(&upgrades, 0, name).as_deref(),
+            Some(expected),
+            "the venue did not see {name}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_provider_runs_again_on_a_reconnect_and_the_second_upgrade_is_the_new_one() {
+    // The reason the provider is a closure and not a list. A venue signs a
+    // fresh millisecond timestamp, so a reconnect that replayed the first
+    // connect's signature would be rejected - and it is the *second* connect
+    // that fails, which is hours after anybody was watching the publisher
+    // start. The counter here stands in for that timestamp: a signature
+    // computed once would arrive twice as `1`.
+    let (address, _sent, upgrades) = serve_recording_upgrades(vec![
+        vec![Serve::Close(CloseCode::Normal)],
+        vec![Serve::Close(CloseCode::Normal)],
+    ])
+    .await;
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&calls);
+    let mut input = WebSocketInput::new(CONNECTION, endpoint(address))
+        .expect("an endpoint")
+        .with_headers(move || {
+            let nth = counted.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok(vec![(
+                "x-venue-access-timestamp".to_string(),
+                nth.to_string(),
+            )])
+        });
+
+    input
+        .connect(Duration::from_secs(5))
+        .await
+        .expect("loopback accepts");
+    // The same object reconnecting, which is what a driver does: `Input` is
+    // documented as having to connect again after a shutdown.
+    input.shutdown().await;
+    input
+        .connect(Duration::from_secs(5))
+        .await
+        .expect("loopback accepts again");
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "the provider ran once and its output was reused"
+    );
+    assert_eq!(
+        upgrade_header(&upgrades, 0, "x-venue-access-timestamp").as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        upgrade_header(&upgrades, 1, "x-venue-access-timestamp").as_deref(),
+        Some("2"),
+        "the reconnect replayed the first connect's headers"
+    );
+}
+
+#[tokio::test]
+async fn a_provider_that_cannot_sign_yet_is_a_retryable_unauthorized() {
+    // The case this classification is for: a signing key whose file the
+    // mounting agent has not written yet. Retryable, because a publisher that
+    // stopped for it would stop for a condition that clears in seconds - and
+    // `unauthorized`, because the operator's next action is the one a 401 asks
+    // for as well.
+    let mut input = WebSocketInput::new(CONNECTION, endpoint(dead_address().await))
+        .expect("an endpoint")
+        .with_headers(|| Err("the key file is not readable yet".to_string()));
+
+    let error = input
+        .connect(Duration::from_secs(5))
+        .await
+        .expect_err("nothing can be signed");
+    assert!(!error.is_fatal(), "{error}");
+    assert_eq!(
+        error.disconnect_reason(),
+        None,
+        "nothing was established, so nothing ended"
+    );
+    // Nothing is listening on that address, so a `Refused` here would mean the
+    // handshake was attempted unsigned.
+    assert!(
+        matches!(
+            error,
+            IngressError::Connect {
+                reason: ConnectFailureReason::Unauthorized,
+                ..
+            }
+        ),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("not readable yet"),
+        "the provider's own account of the failure is the only one there is: {error}"
+    );
+}
+
+#[tokio::test]
+async fn a_header_name_that_is_not_valid_http_stops_the_driver_and_is_not_printed() {
+    // Retrying cannot make a name valid, so this is the endpoint case again:
+    // fail where it is diagnosable rather than under a backoff nobody reads.
+    // And the way a name comes to be invalid is a value written into the name
+    // slot - a base64 signature is not a valid header name - so the message
+    // must not repeat it.
+    let leaked = "AAAA/not-a-real-signature=";
+    let mut input = WebSocketInput::new(CONNECTION, endpoint(dead_address().await))
+        .expect("an endpoint")
+        .with_headers(move || Ok(vec![(leaked.to_string(), "1".to_string())]));
+
+    let error = input
+        .connect(Duration::from_secs(5))
+        .await
+        .expect_err("that is not a header name");
+    // Nothing is listening, so anything retryable would mean the request went
+    // out with the bad pair dropped or mangled.
+    assert!(error.is_fatal(), "{error}");
+    assert!(
+        !error.to_string().contains(leaked),
+        "a credential reached a log line: {error}"
+    );
+    assert!(
+        error.to_string().contains("position 0"),
+        "the entry has to be identifiable without printing it: {error}"
+    );
+}
+
+#[tokio::test]
+async fn a_header_value_that_is_not_valid_http_stops_the_driver_and_names_only_the_header() {
+    // A value is recomputed every attempt, so in principle the next one could
+    // differ. Still fatal: a signing routine that emits a control character
+    // emits one every time, and of the two possible mistakes the loud one is
+    // the recoverable one. The name is printed once it has parsed - it is what
+    // says which of three headers to go and look at - and the value never is.
+    let mut input = WebSocketInput::new(CONNECTION, endpoint(dead_address().await))
+        .expect("an endpoint")
+        .with_headers(|| {
+            Ok(vec![(
+                "x-venue-access-signature".to_string(),
+                "not-a-real\nsignature".to_string(),
+            )])
+        });
+
+    let error = input
+        .connect(Duration::from_secs(5))
+        .await
+        .expect_err("that is not a header value");
+    assert!(error.is_fatal(), "{error}");
+    assert!(
+        error.to_string().contains("x-venue-access-signature"),
+        "{error}"
+    );
+    assert!(
+        !error.to_string().contains("not-a-real"),
+        "a credential reached a log line: {error}"
+    );
 }
 
 // ---------------------------------------------------------------------------
