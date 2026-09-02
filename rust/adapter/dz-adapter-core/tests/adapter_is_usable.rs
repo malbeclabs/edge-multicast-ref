@@ -12,6 +12,7 @@ use dz_adapter_core::{
     Adapter, AdapterError, AssetClass, ConnectionId, DisconnectReason, Event, EventSink,
     InstrumentRef, InstrumentSpec, ListingSink, MarketModel, ParseError, Payload, Presence,
     PriceBound, Scalar, SettleType, Side, SideUpdate, SnapshotSink, TradeFlags, UpstreamSink,
+    VenueTimestampKind,
 };
 
 // ---------------------------------------------------------------- the runtime
@@ -55,11 +56,18 @@ struct Events {
     levels: usize,
     trades: usize,
     clears: usize,
+    /// Every payload scope this sink was told about, in order. Nothing here
+    /// opens one: the driver does, and this is how a test tells the difference.
+    scopes: Vec<Option<u64>>,
 }
 
 impl EventSink for Events {
     fn upstream_message(&mut self, message_type: &'static str) {
         self.message_types.push(message_type);
+    }
+
+    fn payload_scope(&mut self, recv_ts_ns: Option<u64>) {
+        self.scopes.push(recv_ts_ns);
     }
 
     fn event(&mut self, event: Event<'_>) {
@@ -432,4 +440,102 @@ fn a_top_of_book_adapter_needs_no_snapshot_and_no_connection() {
         .snapshot(InstrumentRef::from_admission(0), &mut levels)
         .is_ok());
     assert!(levels.0.is_empty());
+}
+
+#[test]
+fn a_sink_is_told_no_payload_scope_by_the_adapter_itself() {
+    // Where the receive stamp comes from, stated as a test. `on_payload` is
+    // called here the way a venue's own mapping test calls it - directly, with
+    // a payload the test built - and the sink hears nothing about it. The
+    // adapter is not asked to pass its payload through to the events it emits,
+    // so it cannot forget to and cannot get it wrong; the layer that holds both
+    // the payload and the sink is the one that says, and that layer is the
+    // driver.
+    let mut adapter = LineAdapter::default();
+    let mut listings = Listings {
+        cap: 4,
+        ..Listings::default()
+    };
+    adapter.poll_listings(&mut listings);
+    let mut events = Events::default();
+
+    adapter
+        .on_payload(
+            &Payload {
+                bytes: b"quote 0.40 0.60",
+                recv_ts_ns: 1_760_000_000_000_000_000,
+                connection: ConnectionId::new("mktdata"),
+            },
+            &mut events,
+        )
+        .expect("a readable line");
+
+    assert_eq!(events.quotes, 1, "the event was emitted");
+    assert!(
+        events.scopes.is_empty(),
+        "an adapter stated a receive stamp, which is not its to state"
+    );
+}
+
+#[test]
+fn a_venue_that_publishes_no_clock_of_its_own_declares_nothing() {
+    // The default, and it is a real answer rather than a placeholder: a venue
+    // with no timestamp in its payloads has none to name. What it costs is that
+    // the venue-to-receive latency family has no `timestamp_kind` to be
+    // recorded under and stays empty, which the method's own docstring states.
+    struct NoClock;
+
+    impl Adapter for NoClock {
+        fn message_types(&self) -> &[&'static str] {
+            &[]
+        }
+        fn poll_listings(&mut self, _out: &mut dyn ListingSink) {}
+        fn on_payload(
+            &mut self,
+            _payload: &Payload<'_>,
+            _out: &mut dyn EventSink,
+        ) -> Result<(), ParseError> {
+            Ok(())
+        }
+    }
+
+    let adapter: Box<dyn Adapter> = Box::new(NoClock);
+    assert_eq!(adapter.source_timestamp_kind(), None);
+}
+
+#[test]
+fn an_adapter_that_reads_a_venue_clock_declares_which_one() {
+    // And the declaration survives the `Box<dyn Adapter>` a runtime holds one
+    // behind, which is where it will be read.
+    struct MatchingEngineClock;
+
+    impl Adapter for MatchingEngineClock {
+        fn message_types(&self) -> &[&'static str] {
+            &[]
+        }
+        fn source_timestamp_kind(&self) -> Option<VenueTimestampKind> {
+            Some(VenueTimestampKind::MatchingEngine)
+        }
+        fn poll_listings(&mut self, _out: &mut dyn ListingSink) {}
+        fn on_payload(
+            &mut self,
+            _payload: &Payload<'_>,
+            _out: &mut dyn EventSink,
+        ) -> Result<(), ParseError> {
+            Ok(())
+        }
+    }
+
+    let adapter: Box<dyn Adapter> = Box::new(MatchingEngineClock);
+    assert_eq!(
+        adapter.source_timestamp_kind(),
+        Some(VenueTimestampKind::MatchingEngine)
+    );
+    // The label value, which is the whole reason the kind crosses the boundary.
+    assert_eq!(
+        adapter
+            .source_timestamp_kind()
+            .map(VenueTimestampKind::as_str),
+        Some("matching_engine")
+    );
 }

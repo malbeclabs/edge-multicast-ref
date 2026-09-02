@@ -39,6 +39,50 @@ pub trait EventSink {
     /// the stack.
     fn event(&mut self, event: Event<'_>);
 
+    /// The receive stamp of the payload whose events follow, and its end.
+    ///
+    /// `Some(recv_ts_ns)` is
+    /// [`Payload::recv_ts_ns`](crate::Payload::recv_ts_ns) for the payload
+    /// about to be mapped; `None` says that mapping has finished and no
+    /// payload is in force. An event reported between the two is attributable
+    /// to that payload; an event reported outside them — a runtime's own tick,
+    /// a replay, a sink written to by something that is not an adapter — is
+    /// attributable to nothing, and a sink that holds this in an `Option` gets
+    /// that distinction for free rather than carrying a stale reading.
+    ///
+    /// # Why this is not a parameter on [`event`](Self::event)
+    ///
+    /// It is the other half of two latency families and an adapter has no part
+    /// in either. `dz_publisher_venue_to_recv_latency_seconds` is
+    /// `recv_ts_ns` minus the venue's own timestamp — which arrives as
+    /// `Event::source_ts_ns`, so a sink needs both at once — and
+    /// `dz_publisher_recv_to_send_latency_seconds` is `recv_ts_ns` to the
+    /// moment the datagram left. Neither is something an adapter can compute,
+    /// and both are lost if the payload cannot be reached from the sink.
+    ///
+    /// **So the runtime calls this, and an adapter never does.** An adapter is
+    /// handed a sink for the duration of one
+    /// [`Adapter::on_payload`](crate::Adapter::on_payload) and decides for
+    /// itself when and whether to write to it; asking it to also pass its own
+    /// payload through would be a convention every implementation had to
+    /// remember, and the failure of forgetting would be a silent zero rather
+    /// than a compile error. A driver holds the payload and the sink, so it can
+    /// state this once around the call and be right for every event the adapter
+    /// emits, including none.
+    ///
+    /// # Defaulted, and what a default costs
+    ///
+    /// Ignoring this is a sink that cannot attribute an event to a payload, and
+    /// the cost is precisely the two families above: they exist, are pre-created
+    /// at every label value, and stay at zero — which is indistinguishable from
+    /// a publisher whose data has stopped. It is defaulted rather than required
+    /// because a sink that merely records events — a test harness, an offline
+    /// re-lowering — has no clock to measure against and nothing to do with it.
+    /// A runtime that transmits should implement it.
+    fn payload_scope(&mut self, recv_ts_ns: Option<u64>) {
+        let _ = recv_ts_ns;
+    }
+
     /// This adapter no longer trusts its own book for one instrument.
     ///
     /// **The one thing a venue knows that nothing else can.** An adapter owns

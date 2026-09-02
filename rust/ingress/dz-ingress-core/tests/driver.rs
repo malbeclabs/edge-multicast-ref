@@ -23,7 +23,7 @@ use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use dz_adapter_core::{
-    Adapter, AdapterError, ConnectionId, DisconnectReason, Event, EventSink, InstrumentRef,
+    Adapter, AdapterError, ConnectionId, Desync, DisconnectReason, Event, EventSink, InstrumentRef,
     ListingSink, ParseError, Payload, Scalar, SideUpdate, UpstreamSink,
 };
 use dz_ingress_core::{
@@ -36,6 +36,17 @@ const CONNECTION: ConnectionId = ConnectionId::new("mktdata");
 /// A wall-clock reading distinctive enough that a payload carrying it cannot
 /// have got it from anywhere else.
 const WALL_NS: u64 = 1_760_000_000_123_456_789;
+
+/// Two transport-supplied receive stamps, far enough apart that an event
+/// attributed to the wrong one could not be mistaken for plausible.
+const RECV_A: u64 = 1_760_000_000_100_000_000;
+const RECV_B: u64 = 1_760_000_000_200_000_000;
+
+/// The venue's own timestamp the scripted adapter puts on its events: 250
+/// microseconds before `RECV_A`, so that the interval
+/// `dz_publisher_venue_to_recv_latency_seconds` measures is a number a test can
+/// state rather than a sign it can only check.
+const VENUE_TS_NS: u64 = RECV_A - 250_000;
 
 // ---------------------------------------------------------------------------
 // Running a future without a runtime
@@ -284,6 +295,25 @@ impl Input for ScriptedInput {
 /// rather than a malformed fixture.
 const UNREADABLE: &[u8] = b"not-readable";
 
+/// A payload this adapter maps to nothing at all. Ordinary rather than
+/// exceptional: a heartbeat, an acknowledgement, or an update for an instrument
+/// it holds no handle for.
+const SILENT: &[u8] = b"heartbeat";
+
+/// A payload carrying three upstream messages, which is three events out of one
+/// receive stamp.
+const BATCH: &[u8] = b"batch-of-three";
+
+/// A payload the adapter answers by trying to state a receive stamp of its own.
+const FORGED: &[u8] = b"forge-a-stamp";
+
+/// The stamp it tries to state. Nowhere near a real reading, so a test can tell
+/// at a glance whether it got anywhere.
+const FORGED_STAMP: u64 = 1;
+
+/// A payload after which the adapter no longer trusts its own book.
+const DIVERGED: &[u8] = b"upstream-gap";
+
 #[derive(Default)]
 struct RecordingAdapter {
     connected: Vec<ConnectionId>,
@@ -332,17 +362,42 @@ impl Adapter for RecordingAdapter {
         if payload.bytes == UNREADABLE {
             return Err(ParseError::malformed("bid_px"));
         }
-        out.upstream_message("quote");
-        out.event(Event::Quote {
-            instrument: InstrumentRef::from_admission(0),
-            source_ts_ns: 7,
-            bid: SideUpdate::Present {
-                px: Scalar::text("1.00"),
-                qty: Scalar::text("5"),
-                source_count: None,
-            },
-            ask: SideUpdate::Gone,
-        });
+        if payload.bytes == SILENT {
+            return Ok(());
+        }
+        if payload.bytes == DIVERGED {
+            // The one thing only the adapter can know. It has to reach the
+            // runtime, which is the layer that pauses the instrument and
+            // schedules the recovery a subscriber needs.
+            out.desynchronised(InstrumentRef::from_admission(0), Desync::UpstreamGap);
+            return Ok(());
+        }
+        if payload.bytes == FORGED {
+            // The one thing an adapter must not be able to do. This is the sink
+            // the driver handed over, so the call goes to the wrapper and stops
+            // there - an adapter's guess at when a payload arrived is never
+            // what a latency is measured from.
+            out.payload_scope(Some(FORGED_STAMP));
+        }
+        // A payload carrying a batch is several upstream messages, and the
+        // boundary's contract is one `upstream_message` per member.
+        let members = if payload.bytes == BATCH { 3 } else { 1 };
+        for member in 0..members {
+            out.upstream_message("quote");
+            out.event(Event::Quote {
+                instrument: InstrumentRef::from_admission(0),
+                // Each member of a batch carries its own venue timestamp, so an
+                // event attributed to the wrong one is visible rather than
+                // merely uncounted.
+                source_ts_ns: VENUE_TS_NS + member,
+                bid: SideUpdate::Present {
+                    px: Scalar::text("1.00"),
+                    qty: Scalar::text("5"),
+                    source_count: None,
+                },
+                ask: SideUpdate::Gone,
+            });
+        }
         Ok(())
     }
 }
@@ -351,10 +406,39 @@ impl Adapter for RecordingAdapter {
 // The sinks
 // ---------------------------------------------------------------------------
 
+/// The venue's own timestamp on an event, whichever variant carries it.
+fn source_ts_ns(event: Event<'_>) -> u64 {
+    match event {
+        Event::Quote { source_ts_ns, .. }
+        | Event::Trade { source_ts_ns, .. }
+        | Event::Level { source_ts_ns, .. }
+        | Event::Clear { source_ts_ns, .. } => source_ts_ns,
+        // `Event` is `#[non_exhaustive]`: a variant added later is one this
+        // suite has not been taught to read, and reading it as zero here would
+        // be a latency of half a century rather than a test failure.
+        _ => panic!("an event variant this suite cannot read"),
+    }
+}
+
+/// The runtime's own sink, holding the payload attribution the way a runtime
+/// has to hold it.
 #[derive(Default)]
 struct RecordingEvents {
     message_types: Vec<&'static str>,
     events: usize,
+    /// The payload being mapped: `Some` between the two halves of one scope,
+    /// `None` outside. This is the whole of what a runtime keeps.
+    in_force: Option<u64>,
+    /// Every scope transition, in order, so that a test can assert the pairing
+    /// and not just the value.
+    scopes: Vec<Option<u64>>,
+    /// Every instrument the adapter stopped trusting its book for, in order.
+    desynchronised: Vec<(InstrumentRef, Desync)>,
+    /// One entry per event: the payload receive stamp it was attributable to,
+    /// and the venue timestamp it carried itself. Those are the two halves of
+    /// `dz_publisher_venue_to_recv_latency_seconds`, and the first half is the
+    /// one that could not be reached from here before.
+    attributed: Vec<(Option<u64>, u64)>,
 }
 
 impl EventSink for RecordingEvents {
@@ -362,8 +446,18 @@ impl EventSink for RecordingEvents {
         self.message_types.push(message_type);
     }
 
-    fn event(&mut self, _event: Event<'_>) {
+    fn event(&mut self, event: Event<'_>) {
         self.events += 1;
+        self.attributed.push((self.in_force, source_ts_ns(event)));
+    }
+
+    fn desynchronised(&mut self, instrument: InstrumentRef, reason: Desync) {
+        self.desynchronised.push((instrument, reason));
+    }
+
+    fn payload_scope(&mut self, recv_ts_ns: Option<u64>) {
+        self.scopes.push(recv_ts_ns);
+        self.in_force = recv_ts_ns;
     }
 }
 
@@ -1053,4 +1147,208 @@ fn nothing_in_this_crate_can_report_a_duplicate() {
     );
 
     assert_eq!(outcome.observer.recorded().duplicates, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Attributing an event to the payload that produced it
+// ---------------------------------------------------------------------------
+//
+// The two latency families that measure from a payload's arrival —
+// `dz_publisher_venue_to_recv_latency_seconds` and
+// `dz_publisher_recv_to_send_latency_seconds` — need the payload's receive
+// stamp at the moment an event reaches the runtime's sink. `EventSink` had no
+// way to carry it, and asking the adapter to pass it through would have been a
+// convention every venue had to remember, whose failure is a silent zero.
+//
+// So the driver states it, and every test below drives a real
+// `Adapter::on_payload` through `Driver::run` rather than constructing the
+// driver's wrapper: the wrapper is private, which is itself the guarantee that
+// nothing but the driver can open a scope.
+
+#[test]
+fn an_event_reaches_the_sink_attributable_to_the_payload_that_produced_it() {
+    let outcome = run(
+        policy(),
+        RecordingAdapter::default(),
+        vec![Connection::live(vec![
+            Read::Stamped(b"one", RECV_A),
+            Read::Ended(DisconnectReason::RemoteClose),
+        ])],
+    );
+
+    // The scope opened with the payload's own stamp and closed after it, and
+    // the one event in between carries both halves of the venue-to-receive
+    // interval.
+    assert_eq!(outcome.events.scopes, vec![Some(RECV_A), None]);
+    assert_eq!(outcome.events.attributed, vec![(Some(RECV_A), VENUE_TS_NS)]);
+
+    // The observation itself, computed the way the runtime will compute it.
+    let (recv, source) = outcome.events.attributed[0];
+    assert_eq!(
+        recv.expect("an event inside a payload scope") - source,
+        250_000,
+        "the venue-to-receive interval is not derivable from what the sink was given"
+    );
+}
+
+#[test]
+fn several_events_from_one_payload_are_every_one_attributed_to_it() {
+    // A payload carrying a batch is one receive stamp and several events. The
+    // scope is opened once, not once per event, so an adapter that emits ten
+    // events from one payload does not pay ten times for the attribution and
+    // cannot attribute the tenth to anything else.
+    let outcome = run(
+        policy(),
+        RecordingAdapter::default(),
+        vec![Connection::live(vec![
+            Read::Stamped(BATCH, RECV_A),
+            Read::Ended(DisconnectReason::RemoteClose),
+        ])],
+    );
+
+    assert_eq!(outcome.events.events, 3);
+    assert_eq!(
+        outcome.events.attributed,
+        vec![
+            (Some(RECV_A), VENUE_TS_NS),
+            (Some(RECV_A), VENUE_TS_NS + 1),
+            (Some(RECV_A), VENUE_TS_NS + 2),
+        ]
+    );
+    assert_eq!(outcome.events.scopes, vec![Some(RECV_A), None]);
+}
+
+#[test]
+fn a_payload_that_produces_nothing_attributes_nothing() {
+    // Emitting nothing is ordinary — a heartbeat, an acknowledgement — and the
+    // scope still opens and closes around it. What must not happen is an
+    // observation: no event means no latency to record, and a family that moved
+    // on a keepalive would be measuring our own idle time.
+    let outcome = run(
+        policy(),
+        RecordingAdapter::default(),
+        vec![Connection::live(vec![
+            Read::Stamped(SILENT, RECV_A),
+            Read::Ended(DisconnectReason::RemoteClose),
+        ])],
+    );
+
+    assert_eq!(outcome.events.events, 0);
+    assert!(outcome.events.attributed.is_empty());
+    assert_eq!(outcome.events.scopes, vec![Some(RECV_A), None]);
+}
+
+#[test]
+fn two_payloads_in_a_row_do_not_cross_attribute() {
+    // The failure this shape exists to make impossible: a stamp left in force
+    // after its payload is over, so that the next event is measured against an
+    // arrival that is not its own. Every scope is closed before the next opens.
+    let outcome = run(
+        policy(),
+        RecordingAdapter::default(),
+        vec![Connection::live(vec![
+            Read::Stamped(b"one", RECV_A),
+            Read::Stamped(b"two", RECV_B),
+            Read::Ended(DisconnectReason::RemoteClose),
+        ])],
+    );
+
+    assert_eq!(
+        outcome.events.attributed,
+        vec![(Some(RECV_A), VENUE_TS_NS), (Some(RECV_B), VENUE_TS_NS)]
+    );
+    assert_eq!(
+        outcome.events.scopes,
+        vec![Some(RECV_A), None, Some(RECV_B), None]
+    );
+}
+
+#[test]
+fn a_payload_the_adapter_could_not_read_still_closes_its_scope() {
+    // The scope is closed from `Drop`, so there is no way out of the mapping
+    // that leaves a stamp in force — including the path where the adapter
+    // returned a parse error, which is the one an adapter reaches most often.
+    let outcome = run(
+        policy(),
+        RecordingAdapter::default(),
+        vec![Connection::live(vec![
+            Read::Stamped(UNREADABLE, RECV_A),
+            Read::Ended(DisconnectReason::RemoteClose),
+        ])],
+    );
+
+    assert_eq!(outcome.observer.recorded().parse_errors, vec!["malformed"]);
+    assert_eq!(outcome.events.scopes, vec![Some(RECV_A), None]);
+    assert!(outcome.events.attributed.is_empty());
+}
+
+#[test]
+fn an_adapter_cannot_state_a_receive_stamp_of_its_own() {
+    // Why an adapter cannot get this wrong, stated as a test rather than as a
+    // docstring. The sink an adapter holds is the driver's wrapper, and the
+    // wrapper does not forward the scope report: the forged stamp reaches it
+    // and stops. What the runtime's sink sees is the transport's reading and
+    // nothing else.
+    let outcome = run(
+        policy(),
+        RecordingAdapter::default(),
+        vec![Connection::live(vec![
+            Read::Stamped(FORGED, RECV_A),
+            Read::Ended(DisconnectReason::RemoteClose),
+        ])],
+    );
+
+    assert_eq!(outcome.events.attributed, vec![(Some(RECV_A), VENUE_TS_NS)]);
+    assert_eq!(outcome.events.scopes, vec![Some(RECV_A), None]);
+    assert!(
+        !outcome.events.scopes.contains(&Some(FORGED_STAMP)),
+        "an adapter's own stamp reached the runtime's sink"
+    );
+}
+
+#[test]
+fn the_driver_stamps_a_payload_the_transport_had_no_timestamp_for() {
+    // The other half of where a stamp comes from: a transport with no kernel
+    // timestamp gets the driver's own wall-clock reading, and the attribution
+    // is the same reading the adapter was handed. Two sources, one value —
+    // which is what stops the two families disagreeing with each other.
+    let outcome = run(
+        policy(),
+        RecordingAdapter::default(),
+        vec![Connection::live(vec![
+            Read::Payload(b"one"),
+            Read::Ended(DisconnectReason::RemoteClose),
+        ])],
+    );
+
+    assert_eq!(outcome.events.scopes, vec![Some(WALL_NS), None]);
+    assert_eq!(
+        outcome.adapter.payloads,
+        vec![(b"one".to_vec(), WALL_NS)],
+        "the adapter and the sink were told about the same arrival"
+    );
+}
+
+#[test]
+fn a_book_the_adapter_stopped_trusting_reaches_the_runtime_through_the_wrapper() {
+    // The sink the adapter writes into is the driver's, so every report on it
+    // has to be forwarded or it is lost. This one is the one thing no other
+    // layer can know, and the cost of losing it is a subscriber applying deltas
+    // to a book the publisher has already given up on.
+    let outcome = run(
+        policy(),
+        RecordingAdapter::default(),
+        vec![Connection::live(vec![
+            Read::Stamped(DIVERGED, RECV_A),
+            Read::Ended(DisconnectReason::RemoteClose),
+        ])],
+    );
+
+    assert_eq!(
+        outcome.events.desynchronised,
+        vec![(InstrumentRef::from_admission(0), Desync::UpstreamGap)]
+    );
+    // Reported from inside the payload's own scope, like every other report the
+    // adapter makes about it.
+    assert_eq!(outcome.events.scopes, vec![Some(RECV_A), None]);
 }

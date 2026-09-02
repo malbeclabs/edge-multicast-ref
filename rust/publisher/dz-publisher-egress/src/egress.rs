@@ -345,9 +345,12 @@ impl<F: Feed, S: DatagramSink> ChannelEgress<F, S> {
     /// from the composer's side. A failure absorbed by a [`Tee`](crate::Tee) is
     /// counted there instead and never reaches here, so nothing is counted
     /// twice.
+    ///
+    /// Unconditional: [`EgressError::reason`] is total, so there is no failure
+    /// this crate produces that reaches the metric and is then dropped.
     fn record(&self, error: &EgressError) {
-        if let Some(reason) = error.reason() {
-            self.metrics.egress().error(self.endpoint.port_role, reason);
-        }
+        self.metrics
+            .egress()
+            .error(self.endpoint.port_role, error.reason());
     }
 }

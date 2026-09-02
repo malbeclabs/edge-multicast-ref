@@ -68,6 +68,129 @@ impl ReconnectReason {
     }
 }
 
+/// Why an ingress connection was never established.
+///
+/// # A proposed addition to the normative set
+///
+/// The governing playbook does not carry this taxonomy yet. It exists because
+/// [`ReconnectReason`]'s four values all describe *a session that existed and
+/// then stopped*, and none of them describes one that never started: a connect
+/// the far side refused, a host that did not resolve, a TLS negotiation that
+/// failed, and a handshake answered with a rejection are all invisible to
+/// `dz_publisher_ingress_reconnects_total`, and folding any of them into
+/// `remote_close` would make that counter mean two things in exactly the
+/// incident where it is being read. Until this is added, the only series that
+/// says anything about a publisher whose upstream never came up is
+/// `dz_publisher_ingress_connection_state` staying at 0, which says *that* it
+/// is down and nothing about *why*.
+///
+/// The seven values are the cases an operator acts differently on, not a
+/// transcription of one transport's error enumeration. The split between the
+/// three handshake rejections is the sharpest of them: a rejection for bad
+/// credentials is a secret to replace, one for too many connections is a
+/// deployment to pace, and putting both under one value is what currently
+/// leaves the status a venue gave in a log line where no dashboard reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConnectFailureReason {
+    /// The far side refused the connection, or the path to it was
+    /// unreachable.
+    Refused,
+    /// The endpoint's host did not resolve.
+    Unresolved,
+    /// TLS negotiation failed: an untrusted chain, a name that did not match,
+    /// no shared cipher suite.
+    Tls,
+    /// No connection within the configured connect budget.
+    Timeout,
+    /// The handshake was answered with a credential rejection.
+    Unauthorized,
+    /// The handshake was answered with a refusal to accept another
+    /// connection right now.
+    ///
+    /// Distinct from `dz_publisher_ingress_rate_limited_total`, which counts
+    /// the venue pacing an *established* connection.
+    RateLimit,
+    /// The handshake was answered with any other refusal.
+    ///
+    /// The bucket that keeps this vocabulary closed, in the same way `other`
+    /// bounds the ingress `message_type` label: a status nobody enumerated is
+    /// counted here rather than creating a series per status code.
+    Rejected,
+}
+
+impl ConnectFailureReason {
+    /// Every variant, in no particular order. Used to pre-create every
+    /// child series of this closed-label family at construction.
+    pub(crate) const ALL: [Self; 7] = [
+        Self::Refused,
+        Self::Unresolved,
+        Self::Tls,
+        Self::Timeout,
+        Self::Unauthorized,
+        Self::RateLimit,
+        Self::Rejected,
+    ];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Refused => "refused",
+            Self::Unresolved => "unresolved",
+            Self::Tls => "tls",
+            Self::Timeout => "timeout",
+            Self::Unauthorized => "unauthorized",
+            Self::RateLimit => "rate_limit",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
+/// Why an adapter method failed when the driver called it.
+///
+/// # A proposed addition to the normative set
+///
+/// The governing playbook does not carry this taxonomy yet. An adapter that
+/// cannot answer a connect — a subscription it could not compose, a credential
+/// it could not read yet — is a real failure that is retried under the
+/// reconnect backoff and counted nowhere: it is not a parse error, because no
+/// payload was read, and it is not a reconnect, because the connection is torn
+/// down before it was ever subscribed. Until this is added the number lives in
+/// a counter on the observer and reaches an operator only as a log line.
+///
+/// These three values mirror `dz_adapter_core::AdapterError`, whose variants
+/// *are* the three different actions an operator takes. The mirror is a second
+/// declaration rather than a dependency, for the same reason
+/// [`ParseErrorReason`] is: the boundary crate a venue links must not inherit a
+/// Prometheus client to name a failure. The copies are held to each other by
+/// `tests/adapter_taxonomy.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AdapterErrorReason {
+    /// The adapter cannot answer yet and expects to be able to later. Retried,
+    /// and not a fault on its own — a rate that stays flat here is the signal,
+    /// not a single count.
+    NotReady,
+    /// The adapter was asked about an instrument it does not hold: the
+    /// runtime's admitted set and the adapter's own disagree.
+    UnknownInstrument,
+    /// The adapter failed at something it should have been able to do.
+    Internal,
+}
+
+impl AdapterErrorReason {
+    /// Every variant, in no particular order. Used to pre-create every
+    /// child series of this closed-label family at construction.
+    pub(crate) const ALL: [Self; 3] = [Self::NotReady, Self::UnknownInstrument, Self::Internal];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotReady => "not_ready",
+            Self::UnknownInstrument => "unknown_instrument",
+            Self::Internal => "internal",
+        }
+    }
+}
+
 /// The kind of book inconsistency detected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InconsistencyKind {
@@ -149,7 +272,91 @@ impl RefdataLoadErrorReason {
     }
 }
 
+/// Why a normalized event could not be lowered to the wire.
+///
+/// # A proposed addition to the normative set
+///
+/// The governing playbook carries no family for a lowering refusal, and every
+/// existing family is a worse home than none:
+/// `dz_publisher_ingress_parse_errors_total` is about reading an upstream
+/// payload and its four reasons name none of these, and
+/// `dz_publisher_egress_errors_total`'s reasons are about a datagram, a port
+/// role and a socket — a value the wire cannot state exactly never reached a
+/// datagram at all. Folding a lowering refusal into either makes a panel an
+/// operator is already reading mean two things.
+///
+/// The five values are kept apart because each is a different operator action,
+/// and the distinction is lost the moment they are merged: too much precision
+/// means the instrument's exponent is wrong, a value that is not a decimal
+/// means the upstream changed its format, a value that does not fit means the
+/// wire field is too narrow for what the venue quoted, a contract size that
+/// does not divide means the size is wrong or the venue has started quoting on
+/// a finer grid than its own contract admits, and an unknown handle means the
+/// adapter is carrying one the instrument table does not hold.
+///
+/// Every one of them is per-event: the event is counted, dropped, and the next
+/// one taken. One instrument whose exponent is wrong must not darken a feed,
+/// which is why this is a counter and not a guard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LoweringRefusalReason {
+    /// The event names an instrument the table does not hold: a handle that was
+    /// forged, or one that outlived its instrument's withdrawal.
+    UnknownInstrument,
+    /// The instrument's declared contract size does not divide the value the
+    /// venue quoted exactly.
+    InexactContract,
+    /// More precision than the instrument's exponent can state.
+    TooPrecise,
+    /// Not a decimal number in the accepted grammar.
+    Malformed,
+    /// Exact, and past what the wire's integer can hold.
+    Overflow,
+}
+
+impl LoweringRefusalReason {
+    /// Every variant, in no particular order. Used to pre-create every
+    /// child series of this closed-label family at construction.
+    pub(crate) const ALL: [Self; 5] = [
+        Self::UnknownInstrument,
+        Self::InexactContract,
+        Self::TooPrecise,
+        Self::Malformed,
+        Self::Overflow,
+    ];
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UnknownInstrument => "unknown_instrument",
+            Self::InexactContract => "inexact_contract",
+            Self::TooPrecise => "too_precise",
+            Self::Malformed => "malformed",
+            Self::Overflow => "overflow",
+        }
+    }
+}
+
 /// Why an egress send failed.
+///
+/// # Two of these are proposed additions to the normative set
+///
+/// The governing playbook fixes five values here.
+/// [`NotCarriedByFeed`](Self::NotCarriedByFeed) and
+/// [`MalformedMessage`](Self::MalformedMessage) are proposed sixth and seventh:
+/// both are the codec refusing a message on this send path, per-message and
+/// recoverable exactly like the other five, and both are counted with the
+/// `port_role` the send was on — so they belong on this family rather than on
+/// one of their own, which would split "a message did not reach the wire"
+/// across two families and make every panel and alert sum both.
+///
+/// What neither could be is an existing value. Each is a *different mistake*
+/// from [`WrongPortRole`](Self::WrongPortRole), which is the nearest, and an
+/// operator acts differently on each: a wrong port role is a send path wired to
+/// the wrong socket, a message the feed does not carry is a publisher composing
+/// for a feed it is not emitting, and a malformed message is a field
+/// combination its own specification forbids. Folding either into
+/// `wrong_port_role` would make the value an operator reads as "this went to
+/// the wrong port" mean three things.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EgressErrorReason {
     MtuExceeded,
@@ -157,17 +364,26 @@ pub enum EgressErrorReason {
     SocketError,
     NotRegistered,
     WrongPortRole,
+    /// The feed this datagram carries does not define this message type. A
+    /// proposed addition; see the enum documentation.
+    NotCarriedByFeed,
+    /// The message's fields are individually representable and their
+    /// combination is one its own specification forbids. A proposed addition;
+    /// see the enum documentation.
+    MalformedMessage,
 }
 
 impl EgressErrorReason {
     /// Every variant, in no particular order. Used to pre-create every
     /// child series of this closed-label family at construction.
-    pub(crate) const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 7] = [
         Self::MtuExceeded,
         Self::SendWouldBlock,
         Self::SocketError,
         Self::NotRegistered,
         Self::WrongPortRole,
+        Self::NotCarriedByFeed,
+        Self::MalformedMessage,
     ];
 
     #[must_use]
@@ -178,6 +394,8 @@ impl EgressErrorReason {
             Self::SocketError => "socket_error",
             Self::NotRegistered => "not_registered",
             Self::WrongPortRole => "wrong_port_role",
+            Self::NotCarriedByFeed => "not_carried_by_feed",
+            Self::MalformedMessage => "malformed_message",
         }
     }
 }

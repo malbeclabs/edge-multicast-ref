@@ -49,6 +49,12 @@
 //! - [`Adapter::on_payload`](dz_adapter_core::Adapter::on_payload) can be a
 //!   pure function of its bytes because the bytes arrive from here, already
 //!   stamped, already counted.
+//! - [`EventSink::payload_scope`](dz_adapter_core::EventSink::payload_scope) is
+//!   supplied from here, so a runtime can measure from a payload's arrival
+//!   without an adapter passing its payload through to every event it emits.
+//!   The driver holds the stamp; the adapter is never asked for it, and — since
+//!   the wrapper it writes into does not forward that report — cannot state one
+//!   of its own.
 //!
 //! # Vocabulary
 //!

@@ -69,6 +69,12 @@
 //!
 //! # What is still a hole
 //!
+//! Two entries left this list. `dz_publisher_lowering_refusals_total{reason}`
+//! and `dz_publisher_ingress_adapter_errors_total{reason}` now exist and every
+//! refusal reaches one — as **proposed** additions to the normative set rather
+//! than families the governing playbook already carries, which the metrics
+//! crate keeps in a list of its own and says in each help text.
+//!
 //! Four things, and each is a missing piece elsewhere rather than an unfinished
 //! one here:
 //!

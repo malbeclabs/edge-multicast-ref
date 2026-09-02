@@ -16,7 +16,9 @@ use std::sync::Arc;
 
 use dz_adapter_core::{AdapterError, DisconnectReason, ParseError};
 use dz_ingress_core::IngressObserver;
-use dz_publisher_metrics::{ParseErrorReason, PublisherMetrics, ReconnectReason};
+use dz_publisher_metrics::{
+    AdapterErrorReason, ParseErrorReason, PublisherMetrics, ReconnectReason,
+};
 
 /// [`IngressObserver`] over the normative registry.
 pub struct MetricsObserver {
@@ -42,10 +44,10 @@ impl MetricsObserver {
     /// adapter that cannot compose its own subscription is a real, retried
     /// failure that is not a parse error and is not one of the four reconnect
     /// reasons, all of which describe a session that ended rather than one that
-    /// never got going. The metric name set is closed by a governing playbook,
-    /// so this crate does not invent `dz_publisher_ingress_adapter_errors_total`
-    /// — it keeps the number, reports it in a log line, and the gap is named in
-    /// the crate documentation.
+    /// never got going. `dz_publisher_ingress_adapter_errors_total{reason}` now
+    /// exists and every failure reaches it; the number stays because the exit
+    /// report prints it and because a count a process can read back out of
+    /// itself is what lets a test assert one without scraping.
     #[must_use]
     pub fn adapter_errors(&self) -> u64 {
         self.adapter_errors.get()
@@ -96,7 +98,15 @@ impl IngressObserver for MetricsObserver {
         self.metrics.ingress().rate_limited();
     }
 
-    fn adapter_error(&self, _error: AdapterError) {
+    fn adapter_error(&self, error: AdapterError) {
+        // Exhaustive, so a fourth `AdapterError` is a build failure here rather
+        // than a refusal counted under whichever bucket a fallback arm named.
+        let reason = match error {
+            AdapterError::NotReady { .. } => AdapterErrorReason::NotReady,
+            AdapterError::UnknownInstrument => AdapterErrorReason::UnknownInstrument,
+            AdapterError::Internal { .. } => AdapterErrorReason::Internal,
+        };
+        self.metrics.ingress().adapter_error(reason);
         self.adapter_errors.set(self.adapter_errors.get() + 1);
     }
 }

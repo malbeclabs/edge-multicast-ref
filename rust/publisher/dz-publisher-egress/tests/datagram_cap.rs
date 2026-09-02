@@ -108,7 +108,7 @@ fn a_message_no_datagram_can_carry_is_refused_as_mtu_exceeded_not_truncated() {
         .push(7, &Small, EgressMessageType::Quote, 0)
         .expect_err("a 16-byte message cannot fit in 0 bytes of capacity");
 
-    assert_eq!(error.reason(), Some(EgressErrorReason::MtuExceeded));
+    assert_eq!(error.reason(), EgressErrorReason::MtuExceeded);
     assert!(
         matches!(
             error,

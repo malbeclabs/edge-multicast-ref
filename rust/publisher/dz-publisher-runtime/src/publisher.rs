@@ -60,7 +60,9 @@ use dz_edge_mbp::MarketByPrice;
 use dz_edge_refdata::{InstrumentDefinition, ManifestSummary};
 use dz_edge_tob::TopOfBook;
 use dz_publisher_lowering::{DepthLowering, Lowering, LoweringError, Snapshot, SourceId};
-use dz_publisher_metrics::{EgressMessageType, PublisherMetrics, RefdataLoadErrorReason};
+use dz_publisher_metrics::{
+    EgressMessageType, LoweringRefusalReason, PublisherMetrics, RefdataLoadErrorReason,
+};
 use dz_publisher_refdata::{Counts, Registry, StateStore};
 
 use crate::clock::Clock;
@@ -183,9 +185,15 @@ pub enum SnapshotError {
 /// way — `EgressError::reason` returns `None` for the one failure the closed set
 /// has no reason for, and keeps the failure distinguishable in the error.
 ///
-/// So this crate keeps the numbers, reports them, and does not invent a series.
-/// **What is owed is a playbook addition:**
-/// `dz_publisher_lowering_refusals_total{reason}` with these five values.
+/// The family now exists — `dz_publisher_lowering_refusals_total{reason}`, with
+/// exactly these five values — and every refusal reaches it. The counts stay
+/// because the exit report prints them, and because a number a process can read
+/// back out of itself is what makes a test able to assert one without scraping.
+///
+/// It is a **proposed** addition to the normative set rather than one the
+/// governing playbook already carries: the metrics crate keeps proposals in a
+/// list of their own for exactly that reason, and each says so in its own help
+/// text.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Refusals {
     /// An event naming a handle the instrument table does not hold: forged, or
@@ -208,16 +216,36 @@ impl Refusals {
     /// `LoweringError::reason`'s token, so that a reason added on either side
     /// fails to compile here instead of being counted under whichever bucket a
     /// fallback arm named.
-    fn record(&mut self, error: LoweringError) {
-        match error {
-            LoweringError::UnknownInstrument => self.unknown_instrument += 1,
-            LoweringError::InexactContract { .. } => self.inexact_contract += 1,
+    fn record(&mut self, error: LoweringError, metrics: &PublisherMetrics) {
+        // One match for both the count and the label, so the two cannot
+        // disagree about which reason a refusal was. Splitting them into two
+        // matches is how a series and a report come to tell different stories
+        // about the same event.
+        let reason = match error {
+            LoweringError::UnknownInstrument => {
+                self.unknown_instrument += 1;
+                LoweringRefusalReason::UnknownInstrument
+            }
+            LoweringError::InexactContract { .. } => {
+                self.inexact_contract += 1;
+                LoweringRefusalReason::InexactContract
+            }
             LoweringError::Scale { source, .. } => match source {
-                ScaleError::TooPrecise { .. } => self.too_precise += 1,
-                ScaleError::Malformed => self.malformed += 1,
-                ScaleError::Overflow => self.overflow += 1,
+                ScaleError::TooPrecise { .. } => {
+                    self.too_precise += 1;
+                    LoweringRefusalReason::TooPrecise
+                }
+                ScaleError::Malformed => {
+                    self.malformed += 1;
+                    LoweringRefusalReason::Malformed
+                }
+                ScaleError::Overflow => {
+                    self.overflow += 1;
+                    LoweringRefusalReason::Overflow
+                }
             },
-        }
+        };
+        metrics.lowering().refusal(reason);
     }
 
     /// Every reason and its count, in the tokens `LoweringError::reason` uses.
@@ -890,7 +918,7 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                     self.published(now_mono, now_unix);
                 }
             }
-            Err(error) => self.refusals.record(error),
+            Err(error) => self.refusals.record(error, &self.metrics),
         }
     }
 
@@ -933,7 +961,7 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                             self.published(now_mono, now_unix);
                         }
                     }
-                    Err(error) => self.refusals.record(error),
+                    Err(error) => self.refusals.record(error, &self.metrics),
                 }
             }
 
@@ -979,7 +1007,7 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                             self.published(now_mono, now_unix);
                         }
                     }
-                    Err(error) => self.refusals.record(error),
+                    Err(error) => self.refusals.record(error, &self.metrics),
                 }
             }
 
@@ -1023,7 +1051,7 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                             self.published(now_mono, now_unix);
                         }
                     }
-                    Err(error) => self.refusals.record(error),
+                    Err(error) => self.refusals.record(error, &self.metrics),
                 }
             }
 
@@ -1055,7 +1083,7 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                             self.published(now_mono, now_unix);
                         }
                     }
-                    Err(error) => self.refusals.record(error),
+                    Err(error) => self.refusals.record(error, &self.metrics),
                 }
             }
 

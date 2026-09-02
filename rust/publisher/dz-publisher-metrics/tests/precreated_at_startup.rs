@@ -69,6 +69,44 @@ fn every_closed_label_family_renders_zero_at_construction() {
         );
     }
 
+    for reason in [
+        "refused",
+        "unresolved",
+        "tls",
+        "timeout",
+        "unauthorized",
+        "rate_limit",
+        "rejected",
+    ] {
+        assert_zero(
+            &rendered,
+            "dz_publisher_ingress_connect_failures_total",
+            &[("reason", reason)],
+        );
+    }
+
+    for reason in ["not_ready", "unknown_instrument", "internal"] {
+        assert_zero(
+            &rendered,
+            "dz_publisher_ingress_adapter_errors_total",
+            &[("reason", reason)],
+        );
+    }
+
+    for reason in [
+        "unknown_instrument",
+        "inexact_contract",
+        "too_precise",
+        "malformed",
+        "overflow",
+    ] {
+        assert_zero(
+            &rendered,
+            "dz_publisher_lowering_refusals_total",
+            &[("reason", reason)],
+        );
+    }
+
     for kind in [
         "missing_level",
         "crossed_book",
@@ -123,6 +161,8 @@ fn every_closed_label_family_renders_zero_at_construction() {
             "socket_error",
             "not_registered",
             "wrong_port_role",
+            "not_carried_by_feed",
+            "malformed_message",
         ] {
             assert_zero(
                 &rendered,
@@ -493,5 +533,80 @@ fn the_manifest_gauges_are_absent_without_a_refdata_port() {
             .lines()
             .any(|line| line.starts_with(&format!("{name}{{")));
         assert!(!present, "{name} must not be pre-created here:\n{rendered}");
+    }
+}
+
+#[test]
+fn the_proposed_egress_reasons_are_precreated_only_on_the_supplied_port_roles() {
+    // The two proposed values are pre-created on exactly the roles the
+    // publisher operates, like the five before them. A `malformed_message` on
+    // the snapshot port of a publisher with no snapshot port is a series
+    // nothing can ever write to, and a panel that stays empty for a reason
+    // nobody can find.
+    let metrics = PublisherMetrics::new(&PublisherMetricsConfig {
+        venue: "test-venue",
+        source_id: 1,
+        port_roles: &[PortRole::Mktdata],
+        connections: &[],
+        channel_ids: &[],
+        ingress_message_types: &[],
+    });
+    let rendered = metrics.render();
+
+    for reason in ["not_carried_by_feed", "malformed_message"] {
+        assert_zero(
+            &rendered,
+            "dz_publisher_egress_errors_total",
+            &[("port_role", "mktdata"), ("reason", reason)],
+        );
+
+        let has_snapshot = rendered.lines().any(|line| {
+            line.starts_with("dz_publisher_egress_errors_total{")
+                && line.contains("port_role=\"snapshot\"")
+                && line.contains(&format!("reason=\"{reason}\""))
+        });
+        assert!(
+            !has_snapshot,
+            "snapshot was not supplied to PublisherMetrics::new, so {reason} on it can never be \
+             written:\n{rendered}"
+        );
+    }
+}
+
+#[test]
+fn the_proposed_families_carry_no_port_role_or_connection_label() {
+    // Sized deliberately. A connect failure is a property of the upstream and
+    // a lowering refusal is a property of an instrument's exponents; neither
+    // is a property of a port role, and a label that is not a dimension of
+    // what is being counted multiplies the series for nothing. `connection`
+    // is left off `connect_failures_total` for the same reason it is left off
+    // `reconnects_total`, which is its sibling: the two must aggregate the
+    // same way.
+    let metrics = PublisherMetrics::new(&PublisherMetricsConfig {
+        venue: "test-venue",
+        source_id: 1,
+        port_roles: &[PortRole::Mktdata],
+        connections: &["primary"],
+        channel_ids: &[],
+        ingress_message_types: &[],
+    });
+    let rendered = metrics.render();
+
+    for name in [
+        "dz_publisher_ingress_connect_failures_total",
+        "dz_publisher_ingress_adapter_errors_total",
+        "dz_publisher_lowering_refusals_total",
+    ] {
+        for line in rendered
+            .lines()
+            .filter(|line| line.starts_with(&format!("{name}{{")))
+        {
+            for label in ["port_role=", "connection=", "channel_id=", "instrument_id="] {
+                assert!(
+                    !line.contains(label),
+                    "{name} must not carry {label}: {line}"
+                );
+            }
+        }
     }
 }

@@ -23,6 +23,26 @@
 //! [`labels`]), not a string, so the taxonomy a dashboard groups by cannot
 //! drift one call site at a time.
 //!
+//! # Proposed additions the playbook does not yet carry
+//!
+//! Three families and two label values here are **not** normative. Each exists
+//! because a piece of work in this workspace produced a number with nowhere to
+//! go and refused to invent a series for it, leaving the count exposed on a
+//! struct or in a log line instead. They are marked as proposals in their own
+//! documentation and in their `HELP` text, and each one states what it counts
+//! and why no existing family could hold it, so that whoever updates the
+//! playbook has the argument rather than only the name:
+//!
+//! - `dz_publisher_lowering_refusals_total{reason}` - see
+//!   [`LoweringRefusalReason`].
+//! - `dz_publisher_ingress_connect_failures_total{reason}` - see
+//!   [`ConnectFailureReason`].
+//! - `dz_publisher_ingress_adapter_errors_total{reason}` - see
+//!   [`AdapterErrorReason`].
+//! - `not_carried_by_feed` and `malformed_message` on the normative
+//!   `dz_publisher_egress_errors_total{port_role,reason}` - see
+//!   [`EgressErrorReason`].
+//!
 //! # Venue-specific metrics
 //!
 //! A publisher's own venue integration may need series the normative set
@@ -46,11 +66,13 @@ use prometheus::{Registry, TextEncoder};
 pub use buckets::{LATENCY_BUCKETS, REFDATA_LOAD_DURATION_BUCKETS};
 pub use error::MetricsError;
 pub use labels::{
-    EgressErrorReason, EgressMessageType, EventKind, ExitReason, InconsistencyKind,
-    ParseErrorReason, ReconnectReason, RecoveryOutcome, RefdataLoadErrorReason, TimestampKind,
+    AdapterErrorReason, ConnectFailureReason, EgressErrorReason, EgressMessageType, EventKind,
+    ExitReason, InconsistencyKind, LoweringRefusalReason, ParseErrorReason, ReconnectReason,
+    RecoveryOutcome, RefdataLoadErrorReason, TimestampKind,
 };
 pub use metrics::{
-    BookMetrics, EgressMetrics, IngressMetrics, LatencyMetrics, ProcessMetrics, RefdataMetrics,
+    BookMetrics, EgressMetrics, IngressMetrics, LatencyMetrics, LoweringMetrics, ProcessMetrics,
+    RefdataMetrics,
 };
 pub use server::{serve, MetricsServer};
 pub use venue_registry::VenueRegistry;
@@ -102,6 +124,7 @@ pub struct PublisherMetricsConfig<'a> {
 pub struct PublisherMetrics {
     registry: Registry,
     ingress: IngressMetrics,
+    lowering: LoweringMetrics,
     book: BookMetrics,
     refdata: RefdataMetrics,
     egress: EgressMetrics,
@@ -139,6 +162,7 @@ impl PublisherMetrics {
             config.connections,
             config.ingress_message_types,
         );
+        let lowering = LoweringMetrics::new(&registry, &labels);
         let book = BookMetrics::new(&registry, &labels);
         let refdata =
             RefdataMetrics::new(&registry, &labels, config.channel_ids, config.port_roles);
@@ -149,6 +173,7 @@ impl PublisherMetrics {
         Self {
             registry,
             ingress,
+            lowering,
             book,
             refdata,
             egress,
@@ -161,6 +186,14 @@ impl PublisherMetrics {
     #[must_use]
     pub fn ingress(&self) -> &IngressMetrics {
         &self.ingress
+    }
+
+    /// The families for the step between ingress and egress. Every family
+    /// here is a proposed addition to the normative set rather than one the
+    /// governing playbook carries; see [`LoweringMetrics`].
+    #[must_use]
+    pub fn lowering(&self) -> &LoweringMetrics {
+        &self.lowering
     }
 
     #[must_use]

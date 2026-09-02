@@ -233,7 +233,7 @@ fn an_unregistered_channel_instance_is_refused_and_counted() {
         .expect_err("channel 3 was never registered");
 
     assert!(matches!(error, EgressError::NotRegistered { .. }));
-    assert_eq!(error.reason(), Some(EgressErrorReason::NotRegistered));
+    assert_eq!(error.reason(), EgressErrorReason::NotRegistered);
     assert_eq!(sink.accepted_count(), 0);
     assert_eq!(
         sample(

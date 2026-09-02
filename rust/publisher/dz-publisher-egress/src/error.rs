@@ -2,9 +2,9 @@
 //!
 //! Every failure below carries the `reason` label value it is counted under, so
 //! that the label a dashboard groups by is decided once, here, rather than at
-//! each call site that catches the error. The one exception is stated on
-//! [`EgressError::reason`] and is a gap in the normative set rather than a
-//! choice.
+//! each call site that catches the error. There is no exception: two of the
+//! label values are additions the governing playbook does not yet carry, and
+//! [`EgressError::reason`] states which and why.
 
 use std::io;
 
@@ -118,20 +118,30 @@ pub enum EgressError {
 }
 
 impl EgressError {
-    /// The `reason` label value this failure is counted under, or `None` for
-    /// the one failure the normative set has no reason for.
+    /// The `reason` label value this failure is counted under.
     ///
-    /// # The gap
+    /// Total, and it did not used to be: this returned `Option` while
+    /// [`EncodeError::NotCarriedByFeed`] and [`EncodeError::MalformedMessage`]
+    /// had no label value between them, and a `None` here meant a failure that
+    /// reached the wire's own error type and then reached no series at all.
+    /// `EgressErrorReason` now carries a value for each, so every way a message
+    /// can fail to reach the wire is counted, and the `Option` that existed
+    /// only to hold the gap open is gone.
     ///
-    /// `EgressErrorReason` has five values and
-    /// [`EncodeError::MalformedMessage`] fits none of them. It is not an MTU
-    /// problem, not a socket problem, not an unregistered channel instance, and
-    /// labelling it `wrong_port_role` would put a message the specification
-    /// forbids the *combination* of into the bucket an operator reads as "this
-    /// message was sent to the wrong port". The metric-name and label-value set
-    /// is closed by a governing playbook, so this crate does not invent a sixth
-    /// value; what it owes instead is that the failure stays distinguishable in
-    /// the returned error until the normative set grows one.
+    /// Neither new value is folded into `wrong_port_role`, which is the nearest
+    /// existing one — both are the specification refusing a placement — because
+    /// they are three different mistakes and an operator acts differently on
+    /// each: a wrong role is a send path wired to the wrong socket, a message
+    /// the feed does not carry is a publisher composing for a feed it is not
+    /// emitting, and a malformed message is a field combination its own
+    /// specification forbids. They are label values on
+    /// `dz_publisher_egress_errors_total` rather than families of their own,
+    /// because both are per-message send failures carrying the same `port_role`
+    /// as the other five: a separate family would split "a message did not
+    /// reach the wire" in two and make every panel sum both.
+    ///
+    /// Both are proposed additions the governing playbook does not yet carry;
+    /// see [`EgressErrorReason`].
     ///
     /// [`EncodeError::MessageCountExhausted`] maps to `mtu_exceeded` as the
     /// nearest existing value, and is unreachable through
@@ -140,26 +150,18 @@ impl EgressError {
     /// way to observe it is to drive a [`dz_edge_core::DatagramBuilder`]
     /// directly.
     #[must_use]
-    pub const fn reason(&self) -> Option<EgressErrorReason> {
+    pub const fn reason(&self) -> EgressErrorReason {
         match self {
             Self::Refused { source } => match source {
                 EncodeError::DatagramFull { .. } | EncodeError::MessageCountExhausted { .. } => {
-                    Some(EgressErrorReason::MtuExceeded)
+                    EgressErrorReason::MtuExceeded
                 }
-                EncodeError::WrongPortRole { .. } => Some(EgressErrorReason::WrongPortRole),
-                // Two refusals with no normative reason between them, and
-                // neither is folded into a value that would then mean two
-                // things. A message a feed does not carry is the nearest thing
-                // to a wrong port role — both are the specification refusing a
-                // placement — but they are different mistakes and an operator
-                // acts differently: a wrong role is a send path wired to the
-                // wrong socket, and a message the feed does not carry is a
-                // publisher composing for a feed it is not emitting. The
-                // playbook is owed a value for each.
-                EncodeError::NotCarriedByFeed { .. } | EncodeError::MalformedMessage { .. } => None,
+                EncodeError::WrongPortRole { .. } => EgressErrorReason::WrongPortRole,
+                EncodeError::NotCarriedByFeed { .. } => EgressErrorReason::NotCarriedByFeed,
+                EncodeError::MalformedMessage { .. } => EgressErrorReason::MalformedMessage,
             },
-            Self::NotRegistered { .. } => Some(EgressErrorReason::NotRegistered),
-            Self::Sink { source } => Some(source.reason()),
+            Self::NotRegistered { .. } => EgressErrorReason::NotRegistered,
+            Self::Sink { source } => source.reason(),
         }
     }
 }

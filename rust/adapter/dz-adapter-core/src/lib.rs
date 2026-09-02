@@ -95,6 +95,7 @@ pub mod instrument;
 pub mod payload;
 pub mod scalar;
 pub mod sink;
+pub mod timestamp;
 
 pub use adapter::Adapter;
 pub use error::{AdapterError, ParseError};
@@ -105,3 +106,4 @@ pub use instrument::{
 pub use payload::{ConnectionId, DisconnectReason, Payload};
 pub use scalar::Scalar;
 pub use sink::{EventSink, ListingSink, SnapshotSink, UpstreamSink};
+pub use timestamp::VenueTimestampKind;

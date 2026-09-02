@@ -393,6 +393,8 @@ struct CountingAdapter {
     connects: usize,
     disconnects: Vec<DisconnectReason>,
     payloads: Vec<Vec<u8>>,
+    /// The receive stamp of every payload, as the adapter was handed it.
+    recv_stamps: Vec<u64>,
 }
 
 impl Adapter for CountingAdapter {
@@ -422,6 +424,7 @@ impl Adapter for CountingAdapter {
         out: &mut dyn EventSink,
     ) -> Result<(), ParseError> {
         self.payloads.push(payload.bytes.to_vec());
+        self.recv_stamps.push(payload.recv_ts_ns);
         out.upstream_message("quote");
         Ok(())
     }
@@ -448,6 +451,9 @@ impl IngressObserver for Discard {
 #[derive(Default)]
 struct CountingEvents {
     messages: usize,
+    /// Every payload scope the driver stated, in order: the stamp it opened
+    /// with, then the `None` that closed it.
+    scopes: Vec<Option<u64>>,
 }
 
 impl EventSink for CountingEvents {
@@ -456,6 +462,10 @@ impl EventSink for CountingEvents {
     }
 
     fn event(&mut self, _event: Event<'_>) {}
+
+    fn payload_scope(&mut self, recv_ts_ns: Option<u64>) {
+        self.scopes.push(recv_ts_ns);
+    }
 }
 
 #[tokio::test]
@@ -516,6 +526,25 @@ async fn the_driver_subscribes_again_on_every_reconnect_over_a_real_socket() {
         vec![b"first".to_vec(), b"second".to_vec()]
     );
     assert_eq!(events.messages, 2);
+    // The receive stamp reached the sink over a real socket, and it is the same
+    // reading the adapter was handed: the two latency families that measure
+    // from a payload's arrival need it here, and nothing about it is passed
+    // through the adapter. One scope per payload, each closed before the next
+    // opened - the transport has no kernel timestamp, so these are the driver's
+    // own wall-clock readings.
+    assert_eq!(
+        events.scopes,
+        vec![
+            Some(adapter.recv_stamps[0]),
+            None,
+            Some(adapter.recv_stamps[1]),
+            None
+        ]
+    );
+    assert!(
+        adapter.recv_stamps.iter().all(|stamp| *stamp > 0),
+        "a payload arrived with no receive stamp at all"
+    );
     // Both connections ended in a close from the far side, and each was
     // counted once.
     assert_eq!(

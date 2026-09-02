@@ -162,6 +162,20 @@ impl AppMessage for SnapshotOnly {
     fn stamp_channel_id(_dst: &mut [u8], _channel_id: u8) {}
 }
 
+/// 16 bytes, mktdata only, and a `TYPE_ID` deliberately absent from every
+/// feed's `CARRIES` table above — so a push of it is refused as a message the
+/// feed does not carry, whatever the port role.
+pub struct Uncarried;
+impl AppMessage for Uncarried {
+    const TYPE_ID: u8 = 0x15;
+    const SIZE: usize = 16;
+    const PORT_ROLES: &'static [PortRole] = &[PortRole::Mktdata];
+    fn encode_into(&self, dst: &mut [u8]) {
+        dst.fill(0);
+    }
+    fn stamp_channel_id(_dst: &mut [u8], _channel_id: u8) {}
+}
+
 /// A message whose fields are individually representable and whose combination
 /// its own specification forbids.
 pub struct Contradictory;

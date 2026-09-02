@@ -170,13 +170,17 @@ fn bytes_duplicates_and_rate_limits_reach_their_own_families() {
 }
 
 #[test]
-fn an_adapter_failure_is_counted_where_the_closed_family_set_has_nowhere_for_it() {
-    // `adapter_error` has a caller in the transport half and no family. An
-    // adapter that cannot compose its own subscription is a real, retried
-    // failure: it is not a parse error, and the four reconnect reasons all
-    // describe a session that ended rather than one that never got going. The
-    // metric name set is closed by a governing playbook, so the number is kept
-    // and reported rather than a sixth series invented.
+fn an_adapter_failure_reaches_the_family_that_was_added_for_it() {
+    // An adapter that cannot compose its own subscription is a real, retried
+    // failure, and for a while it had nowhere to be counted: it is not a parse
+    // error, and the four reconnect reasons all describe a session that ended
+    // rather than one that never got going. This test used to assert that
+    // silence, and that no series had been invented in its place.
+    //
+    // `dz_publisher_ingress_adapter_errors_total{reason}` now exists and each
+    // reason reaches its own value. The count stays because the exit report
+    // prints it, and because a number a process can read back out of itself is
+    // what lets this test assert one without scraping.
     let metrics = metrics();
     let observer = MetricsObserver::new(Arc::clone(&metrics));
     assert_eq!(observer.adapter_errors(), 0);
@@ -187,9 +191,29 @@ fn an_adapter_failure_is_counted_where_the_closed_family_set_has_nowhere_for_it(
     observer.adapter_error(AdapterError::UnknownInstrument);
 
     assert_eq!(observer.adapter_errors(), 2);
+
     let exposition = metrics.render();
     assert!(
-        !exposition.contains("adapter_error"),
-        "a series was invented for a failure the closed set has no reason for"
+        exposition.contains("dz_publisher_ingress_adapter_errors_total"),
+        "the family the failure is counted under"
     );
+    // Each under its own reason rather than both under one, which is the whole
+    // reason the label exists: an adapter that is not ready yet and one asked
+    // about an instrument it does not hold are different operator actions.
+    for line in [
+        r#"dz_publisher_ingress_adapter_errors_total{reason="not_ready"#,
+        r#"dz_publisher_ingress_adapter_errors_total{reason="unknown_instrument"#,
+    ] {
+        let found = exposition
+            .lines()
+            .find(|rendered| rendered.starts_with(line))
+            .unwrap_or_else(|| panic!("no series for {line}"));
+        assert!(found.ends_with(" 1"), "{found}");
+    }
+    // And the reason nothing reported stays pre-created at zero, so a panel for
+    // it is empty because it did not happen rather than because it does not
+    // exist.
+    assert!(exposition.lines().any(|rendered| rendered
+        .starts_with(r#"dz_publisher_ingress_adapter_errors_total{reason="internal"#)
+        && rendered.ends_with(" 0")));
 }

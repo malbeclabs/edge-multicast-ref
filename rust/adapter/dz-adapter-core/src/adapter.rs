@@ -4,6 +4,7 @@ use crate::error::{AdapterError, ParseError};
 use crate::instrument::InstrumentRef;
 use crate::payload::{ConnectionId, DisconnectReason, Payload};
 use crate::sink::{EventSink, ListingSink, SnapshotSink, UpstreamSink};
+use crate::timestamp::VenueTimestampKind;
 
 /// What a venue implements.
 ///
@@ -39,6 +40,45 @@ pub trait Adapter: Send {
     /// message type named after the subscription that carried it is one series
     /// per instrument, which is the cardinality this label is guarded against.
     fn message_types(&self) -> &[&'static str];
+
+    /// Which of the venue's own clocks the `source_ts_ns` on this adapter's
+    /// events was read from, or `None` where the venue publishes no timestamp
+    /// of its own.
+    ///
+    /// One answer for the adapter rather than one per event, because
+    /// [`Event`](crate::Event) carries one `source_ts_ns` field and a venue
+    /// reads it out of the same place in every payload. The value is a metric
+    /// label: it is the `timestamp_kind` of
+    /// `dz_publisher_venue_to_recv_latency_seconds`, whose other half is the
+    /// payload's own receive stamp — see
+    /// [`EventSink::payload_scope`](crate::EventSink::payload_scope) for how
+    /// that reaches a sink.
+    ///
+    /// Declared here rather than derived from the events, and read once at
+    /// startup, for the reason [`message_types`](Self::message_types) is
+    /// declared: a child series that appears the first time one is observed is
+    /// a panel that is empty for two indistinguishable reasons.
+    ///
+    /// # Defaulted, and what a default costs
+    ///
+    /// `None` is a real answer and not a placeholder: a venue that publishes no
+    /// timestamp of its own has nothing to declare, and an adapter for one
+    /// would otherwise have to name a clock it never read. It is also what an
+    /// adapter written against an earlier tag of this crate answers, which is
+    /// why the method could be added at all.
+    ///
+    /// What it costs is stated rather than hidden. An adapter that does read a
+    /// venue timestamp into `source_ts_ns` and leaves this defaulted publishes
+    /// a latency the runtime cannot label, so
+    /// `dz_publisher_venue_to_recv_latency_seconds` stays at zero across all
+    /// four of its pre-created children — the shape of a feed that has stopped
+    /// — and `dz_publisher_venue_timestamps_available` reads 0, which claims
+    /// the venue exposes no clock at all. Neither is a failure the runtime can
+    /// detect: `source_ts_ns` is a bare `u64` and a stamp read from the venue
+    /// is indistinguishable from one an adapter filled in.
+    fn source_timestamp_kind(&self) -> Option<VenueTimestampKind> {
+        None
+    }
 
     /// Offer the instruments this adapter wants published, and withdraw the
     /// ones that have ended.

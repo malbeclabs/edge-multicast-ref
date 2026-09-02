@@ -14,7 +14,8 @@
 use std::time::Duration;
 
 use dz_adapter_core::{
-    Adapter, ConnectionId, DisconnectReason, Event, EventSink, Payload, UpstreamSink,
+    Adapter, ConnectionId, Desync, DisconnectReason, Event, EventSink, InstrumentRef, Payload,
+    UpstreamSink,
 };
 
 use crate::backoff::Backoff;
@@ -108,20 +109,72 @@ impl UpstreamSink for UpstreamQueue {
     }
 }
 
-/// The event sink the adapter is handed, wrapping the runtime's.
+/// The event sink the adapter is handed for **one** payload, wrapping the
+/// runtime's.
+///
+/// Two jobs, and both are things only the layer holding the payload can do.
 ///
 /// `dz_publisher_ingress_messages_total` is recorded from here rather than by
 /// the adapter, which is what the boundary's docstring promises: an adapter
 /// gets the series by naming its message type, not by constructing a metric.
 /// Counting it here also puts it in the one place that knows which connection
 /// delivered it.
-struct CountingSink<'a> {
+///
+/// And the payload's own receive stamp is stated on the runtime's sink for
+/// exactly as long as this exists — opened by [`open`](Self::open) before the
+/// adapter is handed anything, closed by [`Drop`] when the mapping is over,
+/// whether it returned, failed to parse, or unwound. That is the whole
+/// mechanism behind `EventSink::payload_scope`, and it is what lets a runtime
+/// measure `dz_publisher_venue_to_recv_latency_seconds` and
+/// `dz_publisher_recv_to_send_latency_seconds` from an event it was handed. The
+/// adapter passes nothing through and cannot forget to: it is not asked.
+///
+/// **An adapter cannot state a receive stamp of its own**, either. The scope
+/// method is deliberately *not* forwarded, so a `payload_scope` call arriving
+/// from the adapter — this is the sink it holds — reaches this wrapper and stops
+/// here. Attribution is the driver's reading of its own clock, or the
+/// transport's, and there is no path by which an adapter's guess can be
+/// recorded as one.
+struct PayloadSink<'a> {
     inner: &'a mut dyn EventSink,
     observer: &'a dyn IngressObserver,
     connection: &'static str,
 }
 
-impl EventSink for CountingSink<'_> {
+impl<'a> PayloadSink<'a> {
+    /// Open the scope for one payload and hand back the sink for it.
+    ///
+    /// The stamp is stated *before* the adapter can write anything, so the
+    /// first event of the payload is as attributable as the last.
+    fn open(
+        inner: &'a mut dyn EventSink,
+        observer: &'a dyn IngressObserver,
+        connection: &'static str,
+        recv_ts_ns: u64,
+    ) -> Self {
+        inner.payload_scope(Some(recv_ts_ns));
+        Self {
+            inner,
+            observer,
+            connection,
+        }
+    }
+}
+
+impl Drop for PayloadSink<'_> {
+    /// Close the scope.
+    ///
+    /// In `Drop` rather than at the end of the driver's own block so that there
+    /// is no path out of the mapping that leaves the stamp in force: an adapter
+    /// that returned a parse error, or panicked and unwound through here, must
+    /// not leave the next event the runtime sees — from a tick, or from the
+    /// snapshot rotation — attributed to a payload that is over.
+    fn drop(&mut self) {
+        self.inner.payload_scope(None);
+    }
+}
+
+impl EventSink for PayloadSink<'_> {
     fn upstream_message(&mut self, message_type: &'static str) {
         self.observer.message(message_type, self.connection);
         self.inner.upstream_message(message_type);
@@ -130,6 +183,19 @@ impl EventSink for CountingSink<'_> {
     fn event(&mut self, event: Event<'_>) {
         self.inner.event(event);
     }
+
+    /// Forwarded, because the runtime's recovery depends on it: the adapter is
+    /// the only layer that can tell its own book has stopped being right, and a
+    /// wrapper that swallowed the report would leave a subscriber applying
+    /// deltas to a book the publisher already knows is diverged.
+    fn desynchronised(&mut self, instrument: InstrumentRef, reason: Desync) {
+        self.inner.desynchronised(instrument, reason);
+    }
+
+    /// **Not forwarded, and that is the mechanism.** The receive stamp is the
+    /// driver's to state — see this type's own note. An adapter calling this
+    /// reaches here and no further.
+    fn payload_scope(&mut self, _recv_ts_ns: Option<u64>) {}
 }
 
 /// How one pass through connect, subscribe and receive ended.
@@ -189,6 +255,12 @@ enum Stop {
 ///   is how that becomes a ban.
 /// - **The idle guard measures time since the last payload**, not since the
 ///   last anything. See [`Received::Liveness`].
+/// - **Every event the adapter emits is attributable to the payload that
+///   produced it**, and nothing else is. The driver states the payload's
+///   receive stamp on the runtime's sink through
+///   [`EventSink::payload_scope`](dz_adapter_core::EventSink::payload_scope)
+///   around the `on_payload` call and withdraws it afterwards, because it holds
+///   the stamp and the adapter is not asked to carry one. See [`PayloadSink`].
 pub struct Driver<'a> {
     input: &'a mut dyn Input,
     adapter: &'a mut dyn Adapter,
@@ -354,17 +426,23 @@ impl<'a> Driver<'a> {
                         connection,
                     };
                     self.observer.bytes(bytes.len() as u64);
-                    let mut sink = CountingSink {
-                        inner: &mut *events,
-                        observer: self.observer,
-                        connection: connection.as_str(),
-                    };
-                    if let Err(error) = self.adapter.on_payload(&payload, &mut sink) {
-                        // Counted, and that is all. Not retried: the same bytes
-                        // through the same adapter produce the same error. Not
-                        // fatal to the connection: one unreadable message must
-                        // not darken a feed.
-                        self.observer.parse_error(error);
+                    // The scope opens here and closes when `sink` is dropped at
+                    // the end of this arm, so every event the adapter emits -
+                    // and only those - is attributable to this payload.
+                    {
+                        let mut sink = PayloadSink::open(
+                            &mut *events,
+                            self.observer,
+                            connection.as_str(),
+                            payload.recv_ts_ns,
+                        );
+                        if let Err(error) = self.adapter.on_payload(&payload, &mut sink) {
+                            // Counted, and that is all. Not retried: the same
+                            // bytes through the same adapter produce the same
+                            // error. Not fatal to the connection: one unreadable
+                            // message must not darken a feed.
+                            self.observer.parse_error(error);
+                        }
                     }
                     delivered = true;
                     last_payload_ns = self.clock.steady_ns();

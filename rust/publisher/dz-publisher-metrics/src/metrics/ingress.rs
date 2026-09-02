@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use prometheus::{IntCounter, IntCounterVec, IntGaugeVec, Registry};
 
-use crate::labels::{ParseErrorReason, ReconnectReason};
+use crate::labels::{AdapterErrorReason, ConnectFailureReason, ParseErrorReason, ReconnectReason};
 use crate::opts::opts;
 
 /// Metrics for the path from the upstream source into the publisher.
@@ -13,6 +13,8 @@ pub struct IngressMetrics {
     parse_errors_total: IntCounterVec,
     connection_state: IntGaugeVec,
     reconnects_total: IntCounterVec,
+    connect_failures_total: IntCounterVec,
+    adapter_errors_total: IntCounterVec,
     rate_limited_total: IntCounter,
     message_types: HashSet<String>,
 }
@@ -146,6 +148,57 @@ impl IngressMetrics {
             reconnects_total.with_label_values(&[reason.as_str()]);
         }
 
+        let connect_failures_total = IntCounterVec::new(
+            opts(
+                "dz_publisher_ingress_connect_failures_total",
+                "Ingress connect attempts that never produced a connection, by reason. A proposed \
+                 addition to the normative set, not yet in the governing playbook: the four \
+                 reasons `dz_publisher_ingress_reconnects_total` counts by all describe a session \
+                 that existed and then stopped, so a refused connect, a host that did not \
+                 resolve, a failed TLS negotiation and a rejected handshake are counted nowhere \
+                 and only `dz_publisher_ingress_connection_state` staying at 0 says the upstream \
+                 is down - never why.",
+                labels,
+            ),
+            &["reason"],
+        )
+        .expect("static metric definition");
+        registry
+            .register(Box::new(connect_failures_total.clone()))
+            .expect("static metric registration");
+        // `reason` is a closed enum: pre-create every child so the family
+        // exists at 0 from startup. Sharper here than elsewhere - a
+        // publisher whose upstream never came up at all is the case this
+        // family exists for, and it is exactly the case in which nothing
+        // would ever touch the series.
+        for reason in ConnectFailureReason::ALL {
+            connect_failures_total.with_label_values(&[reason.as_str()]);
+        }
+
+        let adapter_errors_total = IntCounterVec::new(
+            opts(
+                "dz_publisher_ingress_adapter_errors_total",
+                "Times an adapter method failed when the driver called it, by reason. A proposed \
+                 addition to the normative set, not yet in the governing playbook: an adapter \
+                 that cannot answer a connect - a subscription it could not compose, a credential \
+                 it could not read yet - is retried under the reconnect backoff and fits no \
+                 existing family, being neither a parse error (no payload was read) nor a \
+                 reconnect (the connection is torn down before it was ever subscribed).",
+                labels,
+            ),
+            &["reason"],
+        )
+        .expect("static metric definition");
+        registry
+            .register(Box::new(adapter_errors_total.clone()))
+            .expect("static metric registration");
+        // `reason` is a closed enum: pre-create every child so the family
+        // exists at 0 from startup rather than appearing only after the
+        // first adapter failure.
+        for reason in AdapterErrorReason::ALL {
+            adapter_errors_total.with_label_values(&[reason.as_str()]);
+        }
+
         let rate_limited_total = IntCounter::with_opts(opts(
             "dz_publisher_ingress_rate_limited_total",
             "Times the upstream source rate-limited this publisher's ingress connection.",
@@ -163,6 +216,8 @@ impl IngressMetrics {
             parse_errors_total,
             connection_state,
             reconnects_total,
+            connect_failures_total,
+            adapter_errors_total,
             rate_limited_total,
             message_types: message_types.iter().map(|t| (*t).to_string()).collect(),
         }
@@ -219,6 +274,31 @@ impl IngressMetrics {
     /// Records one ingress reconnect.
     pub fn reconnect(&self, reason: ReconnectReason) {
         self.reconnects_total
+            .with_label_values(&[reason.as_str()])
+            .inc();
+    }
+
+    /// Records one connect attempt that never produced a connection.
+    ///
+    /// Not a reconnect: nothing was established, so nothing ended, and
+    /// [`Self::reconnect`] would be counting a session that never existed.
+    /// This is the counterpart to `connection_state` staying at 0 - the gauge
+    /// says the upstream is down, this says why.
+    ///
+    /// Counts the family this crate proposes rather than one the playbook
+    /// carries; see [`ConnectFailureReason`].
+    pub fn connect_failure(&self, reason: ConnectFailureReason) {
+        self.connect_failures_total
+            .with_label_values(&[reason.as_str()])
+            .inc();
+    }
+
+    /// Records one adapter method failure.
+    ///
+    /// Counts the family this crate proposes rather than one the playbook
+    /// carries; see [`AdapterErrorReason`].
+    pub fn adapter_error(&self, reason: AdapterErrorReason) {
+        self.adapter_errors_total
             .with_label_values(&[reason.as_str()])
             .inc();
     }

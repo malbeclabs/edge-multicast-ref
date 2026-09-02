@@ -10,7 +10,7 @@ use dz_publisher_metrics::{EgressErrorReason, EgressMessageType};
 
 use common::{
     doc_source, first_msg_flags, metrics, sample, Contradictory, FakeSink, Small, SnapshotOnly,
-    TestFeed,
+    TestFeed, Uncarried,
 };
 
 /// Message header flag bit 0, set on the snapshot port and cleared elsewhere.
@@ -67,7 +67,7 @@ fn a_message_pushed_on_the_wrong_port_role_is_a_countable_error_not_a_panic() {
         ),
         "got {error:?}"
     );
-    assert_eq!(error.reason(), Some(EgressErrorReason::WrongPortRole));
+    assert_eq!(error.reason(), EgressErrorReason::WrongPortRole);
     assert_eq!(sink.accepted_count(), 0);
     assert_eq!(
         sample(
@@ -96,16 +96,13 @@ fn a_refused_message_leaves_the_publisher_sending() {
 }
 
 #[test]
-fn a_malformed_message_is_refused_and_stays_distinguishable() {
-    // The gap this crate reports rather than papers over: `EgressErrorReason`
-    // has five values and none of them describes a message whose *combination*
-    // of fields its own specification forbids. Labelling it `wrong_port_role`
-    // would put it in the bucket an operator reads as "sent to the wrong port",
-    // and the metric-name and label-value set is closed by a governing playbook,
-    // so no sixth value is invented here.
-    //
-    // What is owed instead is that the failure stays distinguishable in the
-    // returned error, and that it is not miscounted as something else.
+fn a_malformed_message_is_refused_and_counted_as_malformed_message() {
+    // The gap this used to report rather than paper over: `EgressErrorReason`
+    // had five values and none of them described a message whose *combination*
+    // of fields its own specification forbids, so `reason()` returned `None`
+    // and the refusal reached no series at all. It now has its own value,
+    // proposed as an addition to the closed set rather than folded into
+    // `wrong_port_role`, which an operator reads as "sent to the wrong port".
     let (mut egress, sink, metrics) = egress(PortRole::Mktdata);
 
     let error = egress
@@ -121,18 +118,23 @@ fn a_malformed_message_is_refused_and_stays_distinguishable() {
         ),
         "got {error:?}"
     );
-    assert_eq!(
-        error.reason(),
-        None,
-        "no normative reason describes a malformed message"
-    );
+    assert_eq!(error.reason(), EgressErrorReason::MalformedMessage);
     assert_eq!(sink.accepted_count(), 0);
+    assert_eq!(
+        sample(
+            &metrics,
+            "dz_publisher_egress_errors_total",
+            &[("port_role", "mktdata"), ("reason", "malformed_message")],
+        ),
+        1,
+    );
     for reason in [
         "mtu_exceeded",
         "send_would_block",
         "socket_error",
         "not_registered",
         "wrong_port_role",
+        "not_carried_by_feed",
     ] {
         assert_eq!(
             sample(
@@ -144,6 +146,78 @@ fn a_malformed_message_is_refused_and_stays_distinguishable() {
             "a malformed message must not be counted as {reason}",
         );
     }
+}
+
+#[test]
+fn a_message_the_feed_does_not_carry_is_counted_as_not_carried_by_feed() {
+    // The second failure that used to have no reason. It is the nearest thing
+    // to a wrong port role — both are the specification refusing a placement —
+    // and it is a different mistake: a wrong role is a send path wired to the
+    // wrong socket, and this is a publisher composing for a feed it is not
+    // emitting. Folding the two together would make one value mean both.
+    let (mut egress, sink, metrics) = egress(PortRole::Mktdata);
+
+    let error = egress
+        .push(7, &Uncarried, EgressMessageType::Quote, 0)
+        .expect_err("a Type ID this feed's table does not list");
+
+    assert!(
+        matches!(
+            error,
+            EgressError::Refused {
+                source: EncodeError::NotCarriedByFeed { type_id: 0x15, .. }
+            }
+        ),
+        "got {error:?}"
+    );
+    assert_eq!(error.reason(), EgressErrorReason::NotCarriedByFeed);
+    assert_eq!(sink.accepted_count(), 0);
+    assert_eq!(
+        sample(
+            &metrics,
+            "dz_publisher_egress_errors_total",
+            &[("port_role", "mktdata"), ("reason", "not_carried_by_feed")],
+        ),
+        1,
+    );
+    for reason in [
+        "mtu_exceeded",
+        "send_would_block",
+        "socket_error",
+        "not_registered",
+        "wrong_port_role",
+        "malformed_message",
+    ] {
+        assert_eq!(
+            sample(
+                &metrics,
+                "dz_publisher_egress_errors_total",
+                &[("port_role", "mktdata"), ("reason", reason)],
+            ),
+            0,
+            "a message the feed does not carry must not be counted as {reason}",
+        );
+    }
+}
+
+#[test]
+fn the_two_refusals_that_had_no_reason_reach_two_distinct_values() {
+    // Stated once, as literals, rather than left implied by the two tests
+    // above: the point of proposing two values instead of one is that they do
+    // not collapse. A single value would have been the cheaper change and it
+    // would have made the panel mean two things.
+    let (mut egress, _sink, _metrics) = egress(PortRole::Mktdata);
+
+    let malformed = egress
+        .push(7, &Contradictory, EgressMessageType::Quote, 0)
+        .expect_err("malformed");
+    let uncarried = egress
+        .push(7, &Uncarried, EgressMessageType::Quote, 0)
+        .expect_err("not carried");
+
+    assert_ne!(malformed.reason(), uncarried.reason());
+    assert_eq!(malformed.reason().as_str(), "malformed_message");
+    assert_eq!(uncarried.reason().as_str(), "not_carried_by_feed");
 }
 
 #[test]
