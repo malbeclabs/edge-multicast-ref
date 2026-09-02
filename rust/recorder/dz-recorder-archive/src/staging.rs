@@ -382,17 +382,7 @@ impl StagingWatermark {
             if total <= self.staging_max {
                 break;
             }
-            // Through the guard rather than straight to the filesystem: the
-            // phase in hand was read during a scan that has since walked two
-            // directories, and a queued segment the compressor has picked up in
-            // the meantime is one whose source it is reading now.
-            let Some(outcome) = self.remove_evictable(&partial.path) else {
-                // Left alone because it is being published. It stays counted,
-                // so the loop keeps looking rather than stopping at a total it
-                // has decided not to reduce.
-                continue;
-            };
-            let (reclaimed, error) = self.account_removal(partial.bytes, false, outcome);
+            let (reclaimed, error) = self.evict_candidate(&partial.path, partial.bytes);
             total = total.saturating_sub(reclaimed);
             failure = failure.or(error);
         }
@@ -400,6 +390,41 @@ impl StagingWatermark {
         match failure {
             Some(e) => Err(SinkError::Io(e)),
             None => Ok(()),
+        }
+    }
+
+    /// One candidate: unlink it unless the compressor is reading it, and say
+    /// what the running total should lose either way.
+    ///
+    /// The refusal is the case worth arguing. The phase this sweep decided on
+    /// came from a scan that has since walked two directories, stat'd
+    /// everything in them and sorted the result, so a queued segment the
+    /// compressor picked up in the meantime is one whose source it is reading
+    /// now — [`remove_evictable`](Self::remove_evictable) leaves it alone, and
+    /// the question is what the total does.
+    ///
+    /// **It falls, by that segment's bytes.** A fresh scan would not have
+    /// counted them at all: an in-flight segment is excluded from
+    /// `governed_bytes` the way the open segment is, because it is a bounded
+    /// transient the compressor is about to remove itself. Keeping them in the
+    /// total makes the loop go on evicting *other* history to reach a number
+    /// the budget has effectively already reached — the sweep gives up a
+    /// segment to pay for bytes that were about to be reclaimed for free.
+    ///
+    /// The cost of being wrong this way is bounded and the cost of being wrong
+    /// the other way is not, which is what settles it. Under-count and staging
+    /// stays over budget by at most one segment until the next sweep — a
+    /// tolerance the design already has, since the newest queued segment is
+    /// protected and the open one is excluded. Over-count and history is gone,
+    /// and this module's own rule is that a wrongly kept datagram is
+    /// filterable afterwards while a wrongly dropped one is not.
+    ///
+    /// No counter moves: this recorder did not give that segment up, and it is
+    /// not going to be given up at all.
+    fn evict_candidate(&mut self, path: &Path, bytes: u64) -> (u64, Option<std::io::Error>) {
+        match self.remove_evictable(path) {
+            None => (bytes, None),
+            Some(outcome) => self.account_removal(bytes, false, outcome),
         }
     }
 
@@ -850,6 +875,59 @@ mod tests {
         let orphan = segment(&staging, 3, 1000);
         assert!(matches!(alone.remove_evictable(&orphan), Some(Ok(()))));
         assert!(!orphan.exists());
+    }
+
+    #[test]
+    fn a_candidate_the_compressor_took_over_stops_costing_the_budget_other_history() {
+        // What the running total does when the guard refuses. The bytes leave
+        // the total even though the file stays, because a fresh scan would not
+        // have counted them: an in-flight segment is a bounded transient the
+        // compressor removes itself, excluded from `governed_bytes` the way the
+        // open segment is. Keeping them in would make the sweep evict *other*
+        // history to pay for bytes that were about to be reclaimed for free.
+        //
+        // Tested on the candidate step rather than through `enforce`, for the
+        // same reason the guard itself is: reaching the refusal needs the
+        // compressor to pick a queued segment up *between* the scan and the
+        // unlink, and no single-threaded test can place itself inside that
+        // window. This is the decision that window reaches.
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let staging = dir.path().join("staging");
+        let completed = dir.path().join("completed");
+        fs::create_dir_all(&staging).expect("staging");
+        fs::create_dir_all(&completed).expect("completed");
+
+        let custody = Arc::new(Custody::default());
+        let mut w = StagingWatermark::new(staging.clone(), completed, 1500);
+        w.track_custody(Arc::clone(&custody));
+
+        let being_read = segment(&staging, 1, 1000);
+        custody.start(&being_read);
+
+        let (reclaimed, error) = w.evict_candidate(&being_read, 1000);
+        assert_eq!(
+            reclaimed, 1000,
+            "the sweep will go on evicting history to reach a total the budget has reached"
+        );
+        assert!(
+            error.is_none(),
+            "nothing failed: the file was left on purpose"
+        );
+        assert!(
+            being_read.exists(),
+            "the segment being published was deleted"
+        );
+        // Nothing was given up, so nothing may be counted as given up.
+        assert_eq!(w.segments_evicted_total(), 0);
+        assert_eq!(w.bytes_evicted_total(), 0);
+
+        // And a queued one is still taken, and still counted.
+        let queued = segment(&staging, 2, 1000);
+        custody.queue(queued.clone());
+        let (reclaimed, error) = w.evict_candidate(&queued, 1000);
+        assert_eq!((reclaimed, error.is_none()), (1000, true));
+        assert!(!queued.exists());
+        assert_eq!(w.segments_evicted_total(), 1);
     }
 
     #[test]
