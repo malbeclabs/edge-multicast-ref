@@ -9,6 +9,8 @@ description = "The publisher a venue links: config composition, the adapter regi
 
 [dependencies]
 dz-adapter-core = { path = "../../adapter/dz-adapter-core" }
+# The built-in adapter, so `[adapter] kind = "uds"` resolves without a venue.
+dz-adapter-uds = { path = "../../adapter/dz-adapter-uds" }
 dz-edge-core = { path = "../../codec/dz-edge-core" }
 dz-edge-mbp = { path = "../../codec/dz-edge-mbp" }
 dz-edge-refdata = { path = "../../codec/dz-edge-refdata" }

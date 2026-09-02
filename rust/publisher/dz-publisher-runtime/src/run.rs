@@ -41,7 +41,7 @@ use dz_adapter_core::{
 use dz_edge_core::{PortRole, MAX_DATAGRAM_SIZE};
 use dz_edge_mbp::MarketByPrice;
 use dz_edge_tob::TopOfBook;
-use dz_ingress_core::Driver;
+use dz_ingress_core::{Driver, Input};
 use dz_publisher_egress::{EraStore, FailureScope, KernelRoute, MulticastTransmitter, Tee};
 use dz_publisher_metrics::{PublisherMetrics, PublisherMetricsConfig};
 use dz_publisher_refdata::{CycleSchedule, FileStore, Registry, RegistryConfig, StateStore};
@@ -157,7 +157,31 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
     // because a message has not arrived yet.
     let cx = AdapterContext::new(&config.adapter, config.ingress_kind, &config.venue);
     let venue = registry.open(&cx)?;
-    let mut input = venue.input;
+    // **`[adapter.replay]` substitutes for the transport, not for the
+    // adapter.** An offline run exercises this whole function — the config, the
+    // registry, the venue's own adapter, the lowering, the sockets — with
+    // recorded upstream bytes in place of a live venue. The adapter cannot tell
+    // the difference, which is the property that makes the exercise worth
+    // anything; the transport the venue built is dropped unused, and a line
+    // says so rather than leaving an operator to wonder why nothing connected.
+    let mut input: Box<dyn Input> = match &config.adapter.replay {
+        replay if replay.enabled => {
+            let path = replay
+                .path
+                .as_deref()
+                .ok_or(StartupError::ReplayWithoutPath)?;
+            let replaying = crate::ReplayInput::open(venue.input.connection(), path)
+                .map_err(|source| StartupError::Replay { source })?;
+            eprintln!(
+                "replaying {} payloads from {}: {}",
+                replaying.remaining(),
+                path.display(),
+                replaying.names().join(", ")
+            );
+            Box::new(replaying)
+        }
+        _ => venue.input,
+    };
     let adapter = Arc::new(Mutex::new(venue.adapter));
     let (message_types, connection) = {
         let held = adapter.lock().unwrap_or_else(|held| held.into_inner());
@@ -268,6 +292,19 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
         .enable_io()
         .build()
         .map_err(|source| StartupError::Runtime { source })?;
+
+    // **Admit before anything can arrive.** The tick loop polls listings on its
+    // own cadence, and it starts alongside the driver — so on a live feed the
+    // first payloads of every restart reach an adapter holding no handles and
+    // are dropped as events for instruments nobody admitted. Continuous traffic
+    // hides that; a finite replay does not, which is how it was found. One poll
+    // here costs a startup that is already opening sockets, and it means the
+    // first payload is the first payload rather than the first one after a
+    // tick.
+    {
+        let mut held = adapter.lock().unwrap_or_else(|held| held.into_inner());
+        publisher.borrow_mut().poll_listings(&mut **held);
+    }
 
     let exit = runtime.block_on(async {
         let mut shared_adapter = SharedAdapter::new(Arc::clone(&adapter), message_types.clone());

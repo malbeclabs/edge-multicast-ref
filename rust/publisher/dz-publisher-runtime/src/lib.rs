@@ -123,6 +123,7 @@ pub mod observer;
 pub mod pipeline;
 pub mod publisher;
 pub mod registry;
+pub mod replay;
 pub mod run;
 
 pub use clock::{Clock, ManualClock, SystemClock};
@@ -138,4 +139,5 @@ pub use publisher::{
     Feeds, Publisher, Refusals, SnapshotError, Teardown, TeardownStep, LISTING_POLL,
 };
 pub use registry::{AdapterContext, AdapterRegistry, Venue};
+pub use replay::ReplayInput;
 pub use run::run;

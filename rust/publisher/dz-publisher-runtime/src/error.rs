@@ -257,4 +257,22 @@ pub enum StartupError {
     /// No configuration file was named.
     #[error("no configuration file: {usage}")]
     NoConfigPath { usage: &'static str },
+
+    /// `[adapter.replay] enabled = true` with no `path`.
+    ///
+    /// Named rather than defaulted to a directory: a replay that silently read
+    /// the working directory would publish whatever happened to be there, and a
+    /// publisher's whole purpose is that what it sends is what a venue said.
+    #[error("[adapter.replay] is enabled but names no path")]
+    ReplayWithoutPath,
+
+    /// The replay directory could not be read, or holds no payload.
+    ///
+    /// A startup error rather than a driver retry: no amount of reconnecting
+    /// will put a file there.
+    #[error("the replay directory cannot be used: {source}")]
+    Replay {
+        #[source]
+        source: dz_ingress_core::IngressError,
+    },
 }

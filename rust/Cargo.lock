@@ -300,6 +300,7 @@ name = "dz-publisher-runtime"
 version = "0.1.0"
 dependencies = [
  "dz-adapter-core",
+ "dz-adapter-uds",
  "dz-edge-core",
  "dz-edge-mbp",
  "dz-edge-refdata",

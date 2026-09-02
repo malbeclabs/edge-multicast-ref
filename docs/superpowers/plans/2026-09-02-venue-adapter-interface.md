@@ -635,10 +635,33 @@ And `check-public-repo-rules.sh` refused the first group the example used. A
 multicast address outside MCAST-TEST-NET in a public repository is exactly what
 that gate is for, and it caught it before the commit rather than after.
 
-**`[adapter.replay]` is a config key with no implementation.** It parses, and
-`run()` does not read it. So the example composes the publisher itself rather
-than going through `run()`, which is why `run()` is still the one path with no
-live exercise at all.
+**`run()` ran too**, once `[adapter.replay]` had an implementation behind it —
+it parsed and nothing read it. `examples/replay.sh` writes a config document,
+records a directory of normalized-event payloads with the built-in encoding,
+and runs `run()` over them: the real config, the real registry, the real
+adapter, the real lowering, real sockets, the real teardown. The Go subscriber
+decoded both quotes, the trade, the definitions, the manifest cadence, the
+heartbeats and the `EndOfSession`.
+
+`[adapter.replay]` substitutes for the **transport**, not for the adapter: a
+replay *is* a transport, so it is an `Input`, and the adapter cannot tell the
+difference. That is the property that makes the exercise worth anything.
+
+**Two more things only running it could find.**
+
+Listings were polled on the tick loop, which starts *alongside* the driver — so
+the first payloads of every restart reached an adapter holding no handles and
+were dropped as events for instruments nobody had admitted. Continuous traffic
+hides that completely; a finite replay does not. `run()` now admits once before
+the driver starts.
+
+And a replay has no handshake. A live connection spends time — a socket, a
+negotiation, a subscription answered — and the publisher spends it publishing
+reference data. A replay yields its first payload in microseconds, so the first
+market-data messages went out before any `InstrumentDefinition` had, leaving a
+subscriber holding a quote for an `Instrument ID` it could not resolve. That is
+the ordering a live feed gets for free and an offline run has to buy, so the
+replay settles before its first payload.
 
 ## Acceptance
 
