@@ -16,6 +16,18 @@
 //! that makes the exercise worth anything — and it is the same property that
 //! lets the same adapter be re-run offline over an archive.
 //!
+//! # What a venue has to link for it
+//!
+//! `[ingress] kind = "uds"` resolves only in a binary that links the transport
+//! marker for it, because [`Kind::is_linked`](dz_ingress_core::Kind) is what
+//! keeps a configuration file from naming a transport the binary does not
+//! contain. Those markers are turned on by whoever assembles the binary, not
+//! by this crate, so a venue whose `main` wants a replay run depends on
+//! `dz-ingress-core` with `features = ["uds"]` — a dev dependency is enough
+//! when, as here, the replay is only ever an example or a test. Without it
+//! startup refuses and names what the binary does link, which is the honest
+//! failure and not an obvious one to read the first time.
+//!
 //! # What it does not pretend to be
 //!
 //! It is not the archive format the offline re-lowering will read. That format
