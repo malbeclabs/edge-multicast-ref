@@ -9,6 +9,7 @@ DoubleZero delivers data as GRE-encapsulated UDP multicast. The kernel handles G
 | **[Publishing a feed](#publishing-a-feed)** | Rust crates a venue publisher is built from | [`rust/codec`](rust/codec/), [`rust/publisher`](rust/publisher/) |
 | **[Subscribing to market data](#subscribing-to-market-data)** | Parsers, book-builders, demo stack | [`go/`](go/), [`demo/`](demo/) |
 | **[Subscribing to Solana shreds](#subscribing-to-solana-shreds)** | Receive-only receivers, kernel sockets and XDP | [`rust/`](rust/), [`go/`](go/) |
+| **[Recording a feed](#recording-a-feed)** | Keeps the bytes that arrived, with the recorder's own losses inside the archive | [`rust/recorder`](rust/recorder/) |
 
 Wire formats are specified in [edge-feed-spec](https://github.com/malbeclabs/edge-feed-spec), which is also the authority for vocabulary here.
 
@@ -39,6 +40,7 @@ Crates a publisher depends on from its own repository. See [rust/README.md](rust
 | [`dz-edge-core`](rust/codec/dz-edge-core/) | Datagram and message headers, sequencing, receive-side walk, decimal conversion |
 | [`dz-edge-tob`](rust/codec/dz-edge-tob/) | Top-of-Book: `Quote`, `Trade` |
 | [`dz-edge-refdata`](rust/codec/dz-edge-refdata/) | Reference data: `InstrumentDefinition`, `ManifestSummary` |
+| [`dz-edge-mbp`](rust/codec/dz-edge-mbp/) | Market-by-Price, the first depth feed: `LevelUpdate`, `BookClear`, and the three snapshot messages |
 | [`dz-publisher-metrics`](rust/publisher/dz-publisher-metrics/) | The normative `dz_publisher_*` Prometheus set |
 
 ## Subscribing to market data
@@ -74,11 +76,41 @@ Two packet types on the shred feed: shred packets on port 7733 (~1247–1272 byt
 
 Kernel sockets are the simple path, XDP the fast one.
 
+## Recording a feed
+
+A recorder keeps the bytes of a feed **and its own losses**, so that *did the
+publisher send what the spec says it must, and did it arrive?* can be answered
+after the fact — hours later, or against a rule that did not exist when the
+traffic passed. Without the bytes there is nothing left to ask; without the
+recorder's own losses, every gap it caused is charged to the publisher.
+
+It decodes nothing on the record path. A decoder rejects the datagram most worth
+keeping, so a datagram whose bytes we cannot explain is archived anyway. See
+[rust/recorder/README.md](rust/recorder/README.md).
+
+| Crate | Owns |
+|---|---|
+| [`dz-recorder-core`](rust/recorder/dz-recorder-core/) | The types every other crate speaks, the `Source`/`Sink`/`Observer` traits, and the configuration |
+| [`dz-recorder-capture`](rust/recorder/dz-recorder-capture/) | Live capture: membership, kernel receive timestamps, drop accounting, rejoin |
+| [`dz-recorder-archive`](rust/recorder/dz-recorder-archive/) | The pcapng writer: rotation, compression, hashing, manifest, staging watermark |
+| [`dz-recorder-replay`](rust/recorder/dz-recorder-replay/) | An archive read back as a `Source`, plus the synthetic publisher the tests use |
+| [`dz-recorder-health`](rust/recorder/dz-recorder-health/) | The header-only observer and the normative `dz_recorder_*` Prometheus set |
+| [`dz-recorder-loss`](rust/recorder/dz-recorder-loss/) | Sequence loss over any `Source`, live or replayed, under one rule set |
+| [`dz-recorder-e2e`](rust/recorder/dz-recorder-e2e/) | The chain end to end, and the specification's own rule set applied to it |
+| [`dz-recorder`](rust/recorder/dz-recorder/) | The binary that wires capture, archive and health together |
+
+Two capture modes sit behind one `Source`. **`AF_PACKET` is the default**: it
+records what the network delivered, so a datagram the recorder's own socket
+would have lost to receive-queue overflow is still in the archive and correctly
+attributed. Socket mode is the fallback where `CAP_NET_RAW` is unavailable; it
+synthesises the IP and UDP headers and records that it did, so no reader
+mistakes a synthesised field for a captured one.
+
 ## Repository layout
 
 | Path | |
 |---|---|
-| [`rust/codec`](rust/codec/), [`rust/publisher`](rust/publisher/) | Publisher crates, one Cargo workspace ([README](rust/README.md)) |
+| [`rust/codec`](rust/codec/), [`rust/publisher`](rust/publisher/), [`rust/recorder`](rust/recorder/) | Publisher, codec and recorder crates, one Cargo workspace ([README](rust/README.md)) |
 | `rust/kernel-receiver`, `rust/xdp-receiver` | Shred receivers, excluded from that workspace |
 | [`go/`](go/) | Parsers, book-builders, Go shred receivers |
 | [`gre-decap/`](gre-decap/) | XDP GRE decapsulator |
