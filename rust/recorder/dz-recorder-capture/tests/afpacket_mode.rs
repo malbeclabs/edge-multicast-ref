@@ -185,28 +185,48 @@ fn a_datalink_the_parse_cannot_read_is_refused_rather_than_drained() {
     // and a `tun` device come up on DLT_RAW. Without the refusal the recorder
     // starts cleanly, logs every feed as recording, skips every frame, and
     // holds every metric at zero against a live feed.
-    for link in [
-        Linktype::LINUX_SLL,
-        Linktype::LINUX_SLL2,
-        Linktype::RAW,
-        Linktype::NULL,
+    // The expected text is written out rather than computed, because computing
+    // it with the same rule the code uses cannot tell the two branches apart —
+    // and it is the branch that matters here. `DLT_RAW` is **12**, which is
+    // what a `tun` or `ipip` handle reports and what libpcap names `RAW (Raw
+    // IP)`; `Linktype::RAW` is **101**, the `LINKTYPE_` value of that name,
+    // which libpcap names under no `DLT_` at all and which therefore takes the
+    // bare-number branch. Both are listed: the first is the message an operator
+    // on a tunnel actually reads, the second is the fallback for a value
+    // libpcap cannot name, and before this only the second was covered.
+    const DLT_RAW: Linktype = Linktype(12);
+    for (link, expected) in [
+        (Linktype::LINUX_SLL, "LINUX_SLL (Linux cooked v1)"),
+        (Linktype::LINUX_SLL2, "LINUX_SLL2 (Linux cooked v2)"),
+        (DLT_RAW, "RAW (Raw IP)"),
+        (Linktype::RAW, "DLT 101"),
+        (Linktype::NULL, "NULL (BSD loopback)"),
     ] {
         let reason = datalink_refusal("dz0", link).expect("a datalink the parse cannot read");
         assert!(reason.contains("dz0"), "{reason}");
-        // Named where libpcap has a name for the value the handle reported, and
-        // the number where it has none — `Linktype::RAW` is one such, because
-        // the handle reports a DLT_ value and libpcap names LINKTYPE_RAW's
-        // number under no DLT_ at all.
-        let named = link
-            .get_name()
-            .unwrap_or_else(|_| format!("DLT {}", link.0));
         assert!(
-            reason.contains(&named),
-            "the operator matches this against tcpdump's own link-type line: {reason}"
+            reason.contains(expected),
+            "the operator matches this against tcpdump's own link-type line, \
+             which prints `{expected}`: {reason}"
+        );
+        // And the remedy is one an operator can take on this feed alone. The
+        // device comes first because `capture.mode` is recorder-wide: a message
+        // that led with it would be telling somebody to downgrade every other
+        // feed, and to break the startup of each one whose `interface` names a
+        // device.
+        let device_first = reason
+            .find("point this feed at a device")
+            .unwrap_or_else(|| panic!("the per-feed remedy is missing: {reason}"));
+        let mode_second = reason
+            .find("`capture.mode`")
+            .unwrap_or_else(|| panic!("the mode is missing: {reason}"));
+        assert!(
+            device_first < mode_second,
+            "the recorder-wide remedy may not be the first one offered: {reason}"
         );
         assert!(
-            reason.contains("socket"),
-            "a refusal an operator cannot act on is a stall: {reason}"
+            reason.contains("recorder-wide"),
+            "an operator taking the mode has to be told it applies to every feed: {reason}"
         );
     }
 }
@@ -584,9 +604,7 @@ fn the_default_capture_length_holds_a_capped_datagram_behind_ipv4_options() {
 mod live {
     use super::{bindings, GROUP, MKTDATA_PORT};
     use dz_edge_core::PortRole;
-    use dz_recorder_capture::afpacket::{
-        AfPacketSource, AfPacketSourceConfig, Linktype, Precision,
-    };
+    use dz_recorder_capture::afpacket::{AfPacketSource, AfPacketSourceConfig, Precision};
     use dz_recorder_capture::PortBinding;
     use dz_recorder_core::{RecvTsKind, Source};
     use std::net::{Ipv4Addr, UdpSocket};
@@ -608,12 +626,12 @@ mod live {
              --features afpacket-live-tests --no-run and run the test binary under sudo",
         );
         assert_eq!(source.precision(), Precision::Nano);
-        assert_eq!(
-            source.datalink(),
-            Linktype::ETHERNET,
-            "a handle on any other datalink is refused at open, not opened"
-        );
         assert!(source.filter().starts_with("udp and dst host "));
+        // Nothing here asserts the datalink. `lo` reports EN10MB, so an
+        // assertion that the handle is on Ethernet would hold with the refusal
+        // in `open` deleted — it is `datalink_refusal`'s own test that pins the
+        // refusal, on the values a real tunnel reports and a loopback device
+        // never will.
     }
 
     #[test]

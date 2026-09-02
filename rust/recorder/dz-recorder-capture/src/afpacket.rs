@@ -325,6 +325,17 @@ pub const PARSED_DATALINK: Linktype = Linktype::ETHERNET;
 /// what the network delivered to the interface; a mode swapped in underneath
 /// the operator archives what one socket survived, and `/metrics` would still
 /// name the mode they asked for.
+///
+/// # Why the message names the device before it names the mode
+///
+/// `interface` is per `[[feed]]` and `capture.mode` is one `[capture]` table
+/// for the whole recorder, so "switch to socket mode" is not a fix for one
+/// feed's device: on a recorder with more than one feed it downgrades every
+/// Ethernet feed to synthesised headers, and `resolve_interface` then refuses
+/// every `feed.interface` that names a device with
+/// `StartupError::InterfaceIsNotAnAddress` — a remedy that does not start.
+/// So the per-feed remedy comes first, the mode second, and the mode carries
+/// both of the things an operator has to know before taking it.
 #[must_use]
 pub fn datalink_refusal(device: &str, link: Linktype) -> Option<String> {
     if link == PARSED_DATALINK {
@@ -335,10 +346,12 @@ pub fn datalink_refusal(device: &str, link: Linktype) -> Option<String> {
          (Ethernet) only: every frame would fail the parse, nothing would be archived, and \
          the recorder would report itself healthy against a live feed. A device with no link \
          layer of its own — a tunnel — is opened on bare IP or in cooked mode, and neither \
-         carries the Ethernet header this mode captures and the archive keeps. Set \
-         `capture.mode` = \"socket\", which records on this device and declares its \
-         synthesised headers as synthesised, and state the interface's address in \
-         `feed.interface`.",
+         carries the Ethernet header this mode captures and the archive keeps. Either point \
+         this feed at a device that has an Ethernet link layer, or run this recorder in \
+         socket mode, which records on any device and declares its synthesised headers as \
+         synthesised. Socket mode is `capture.mode` = \"socket\" and it is recorder-wide: \
+         it applies to every feed in this configuration, and in that mode every \
+         `feed.interface` has to be the interface's address rather than its device name.",
         describe_datalink(link),
     ))
 }
@@ -1068,7 +1081,6 @@ pub struct AfPacketSource {
     current: Option<Captured>,
     poll_interval: Duration,
     precision: Precision,
-    datalink: Linktype,
     filter: String,
 }
 
@@ -1119,8 +1131,11 @@ impl AfPacketSource {
 
         // Before the precision probe, because it costs no file and refuses the
         // handle for the same kind of reason.
-        let datalink = cap.get_datalink();
-        if let Some(reason) = datalink_refusal(device, datalink) {
+        // Not kept on the source afterwards. An accessor for it could only
+        // ever return `PARSED_DATALINK` — this line is what guarantees that —
+        // so it would be public surface no caller can learn anything from, and
+        // a test asserting it would pass with this check deleted.
+        if let Some(reason) = datalink_refusal(device, cap.get_datalink()) {
             return Err(io_error(reason));
         }
 
@@ -1153,7 +1168,6 @@ impl AfPacketSource {
             current: None,
             poll_interval: config.read_timeout.max(Duration::from_millis(1)),
             precision,
-            datalink,
             filter,
         };
         match source.spawn_all(config, cap, tx, pool_rx) {
@@ -1228,14 +1242,6 @@ impl AfPacketSource {
     #[must_use]
     pub const fn precision(&self) -> Precision {
         self.precision
-    }
-
-    /// The datalink this handle was accepted on, read off the handle rather
-    /// than assumed of the device — and, since anything else is refused at
-    /// open, always [`PARSED_DATALINK`].
-    #[must_use]
-    pub const fn datalink(&self) -> Linktype {
-        self.datalink
     }
 
     /// The compiled BPF expression, for the archive's provenance.

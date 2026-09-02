@@ -49,13 +49,15 @@ Without the refusal every frame fails the parse, nothing is archived, and the
 recorder reports itself healthy against a live feed.
 
 **Socket mode is the fallback**, for where `CAP_NET_RAW` is unavailable or the
-feed arrives on a cooked-mode device, and it is the right mode when the question
-is about a consumer's own stack rather than about the publisher. It synthesises the Ethernet, IPv4 and UDP headers and
-records that fact in the archive, so no reader mistakes a synthesised field for
-a captured one. A field the kernel did not report is written as zero in the
-synthesised header, because an IPv4 header has no way to express *absent*; the
-recorder's own knowledge of it stays unobserved rather than becoming a zero
-somebody will later average.
+capture device carries no Ethernet header the parse can read — a tunnel on bare
+IP as much as a cooked-mode device, which is the case the refusal above exists
+for — and it is the right mode when the question is about a consumer's own stack
+rather than about the publisher. It synthesises the Ethernet, IPv4 and UDP
+headers and records that fact in the archive, so no reader mistakes a
+synthesised field for a captured one. A field the kernel did not report is
+written as zero in the synthesised header, because an IPv4 header has no way to
+express *absent*; the recorder's own knowledge of it stays unobserved rather
+than becoming a zero somebody will later average.
 
 ## Build
 
