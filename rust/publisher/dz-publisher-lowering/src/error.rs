@@ -36,6 +36,19 @@ pub enum LoweringError {
     #[error("event names an instrument the table does not hold")]
     UnknownInstrument,
 
+    /// A price or quantity could not be converted from the venue's contract
+    /// units to the wire's exactly.
+    ///
+    /// Its own variant rather than a [`ScaleError`] case, because it is not a
+    /// failure to read a decimal and an operator does something different
+    /// about it: the instrument's declared contract size does not divide the
+    /// value the venue quoted, which means either the size is wrong for this
+    /// instrument or the venue has started quoting on a finer grid than its
+    /// own contract admits. Counting it as `malformed` would send someone to
+    /// look at the upstream's format, which is the one thing that is fine.
+    #[error("{field}: the contract size does not divide this value exactly")]
+    InexactContract { field: &'static str },
+
     /// A price or quantity could not be represented exactly at the instrument's
     /// exponent.
     ///
@@ -55,6 +68,7 @@ impl LoweringError {
     pub const fn reason(self) -> &'static str {
         match self {
             Self::UnknownInstrument => "unknown_instrument",
+            Self::InexactContract { .. } => "inexact_contract",
             Self::Scale { source, .. } => match source {
                 ScaleError::TooPrecise { .. } => "too_precise",
                 ScaleError::Malformed => "malformed",
@@ -68,7 +82,7 @@ impl LoweringError {
     pub const fn field(self) -> Option<&'static str> {
         match self {
             Self::UnknownInstrument => None,
-            Self::Scale { field, .. } => Some(field),
+            Self::InexactContract { field } | Self::Scale { field, .. } => Some(field),
         }
     }
 

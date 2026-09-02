@@ -5,7 +5,8 @@ use dz_edge_mbp::{SnapshotBegin, SnapshotEnd, SnapshotLevel, SIDE_ASK, SIDE_BID,
 
 use crate::depth::DepthLowering;
 use crate::error::LoweringError;
-use crate::scale::{price_at, qty_at};
+use crate::instrument::Instrument;
+use crate::scale::{price_for, qty_for};
 
 /// One instrument's book state, framed.
 ///
@@ -43,8 +44,10 @@ pub struct Snapshot {
 #[derive(Debug)]
 pub struct SnapshotFramer {
     instrument_id: u32,
-    price_exponent: i8,
-    qty_exponent: i8,
+    /// The whole instrument rather than its two exponents, because a venue
+    /// quoting per contract needs the factor applied here too - a snapshot in
+    /// different units from the deltas it anchors is a book that never existed.
+    instrument: Instrument,
     anchor_seq: u64,
     snapshot_id: u32,
     last_instrument_seq: u32,
@@ -62,23 +65,17 @@ impl SnapshotSink for SnapshotFramer {
             return;
         }
 
-        let price_raw = match price_at(px, self.price_exponent) {
+        let price_raw = match price_for(&self.instrument, px, "snapshot_price") {
             Ok(raw) => raw,
-            Err(source) => {
-                self.refused = Some(LoweringError::Scale {
-                    field: "snapshot_price",
-                    source,
-                });
+            Err(error) => {
+                self.refused = Some(error);
                 return;
             }
         };
-        let qty_raw = match qty_at(qty, self.qty_exponent) {
+        let qty_raw = match qty_for(&self.instrument, qty, "snapshot_qty") {
             Ok(raw) => raw,
-            Err(source) => {
-                self.refused = Some(LoweringError::Scale {
-                    field: "snapshot_qty",
-                    source,
-                });
+            Err(error) => {
+                self.refused = Some(error);
                 return;
             }
         };
@@ -180,8 +177,7 @@ impl DepthLowering<'_> {
 
         Ok(SnapshotFramer {
             instrument_id: inst.instrument_id,
-            price_exponent: inst.price_exponent,
-            qty_exponent: inst.qty_exponent,
+            instrument: inst,
             anchor_seq,
             snapshot_id,
             last_instrument_seq,

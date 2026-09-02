@@ -1,0 +1,13 @@
+[package]
+name = "dz-ingress-websocket"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "A WebSocket Input for dz-ingress-core"
+
+[dependencies]
+dz-adapter-core = { path = "../../adapter/dz-adapter-core" }
+dz-ingress-core = { path = "../dz-ingress-core" }
+thiserror = { workspace = true }

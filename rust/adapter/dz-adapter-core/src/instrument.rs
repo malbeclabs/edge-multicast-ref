@@ -75,7 +75,47 @@ pub struct InstrumentSpec<'a> {
     /// The minimum quantity increment.
     pub lot_size: Scalar<'a>,
     /// The value of one contract, where the venue defines one.
+    ///
+    /// A field of the published definition, and distinct from
+    /// [`quoted_per_contract`](Self::quoted_per_contract) below — that one is a
+    /// conversion factor this boundary applies, this one is a number a
+    /// subscriber reads.
     pub contract_value: Option<Scalar<'a>>,
+    /// How much of the underlying **one contract is**, when the venue quotes
+    /// per contract and the two exponents above describe the underlying.
+    ///
+    /// `None` — the ordinary case — means the venue's own numbers are already
+    /// in the units the exponents describe, and nothing is converted.
+    ///
+    /// # Why this field has to exist
+    ///
+    /// The rest of this crate is built on [`Scalar`] carrying a value the
+    /// runtime converts. But `Scalar::Fixed` states `mantissa × 10^exponent`,
+    /// which is a *decimal* rescale and nothing else — and a venue that quotes
+    /// a contract whose size is not a power of ten needs a conversion no
+    /// exponent can express. Without this field such a venue has two ways to
+    /// bridge the gap and no way to say which it took: state the wire's
+    /// exponents and convert inside the adapter, or state its own units and
+    /// hope. Both were tried, by two independent implementations of one venue,
+    /// and they produced different bytes for the same book — with matching
+    /// exponents, so nothing could see it.
+    ///
+    /// Converting inside the adapter is the worse of the two, and not by a
+    /// little: the conversion is exact-or-refuse, and a refusal that happens
+    /// inside a venue is a log line, while a refusal that happens above this
+    /// boundary is counted by reason. That is the same argument that moved
+    /// decimal scaling out of the venue, reaching the same conclusion about the
+    /// same failure. So the venue states the factor and the layer above applies
+    /// it.
+    ///
+    /// # What it means, exactly
+    ///
+    /// A price the adapter states is **per contract** and is divided by this;
+    /// a quantity is **in contracts** and is multiplied by it. Both exactly, or
+    /// the message is refused and counted. An adapter that sets this field
+    /// states its prices and quantities in its own book's units and touches no
+    /// scale at all, which is the whole point.
+    pub quoted_per_contract: Option<Scalar<'a>>,
     /// Expiry as a nanosecond timestamp, for an instrument that has one.
     pub expiry_ns: Option<u64>,
     pub settle_type: SettleType,

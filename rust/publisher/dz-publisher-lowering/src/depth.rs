@@ -10,7 +10,7 @@ use dz_edge_mbp::{
 
 use crate::error::LoweringError;
 use crate::instrument::InstrumentTable;
-use crate::scale::{price_at, qty_at};
+use crate::scale::{price_for, qty_for};
 use crate::seq::PerInstrumentSeq;
 use crate::source::SourceId;
 
@@ -106,8 +106,8 @@ impl<'t> DepthLowering<'t> {
     ) -> Result<LevelUpdate, LoweringError> {
         let inst = *self.instruments.get(instrument)?;
 
-        let price_raw = price_at(px, inst.price_exponent).map_err(LoweringError::scale("price"))?;
-        let qty_raw = qty_at(qty, inst.qty_exponent).map_err(LoweringError::scale("qty"))?;
+        let price_raw = price_for(&inst, px, "price")?;
+        let qty_raw = qty_for(&inst, qty, "qty")?;
 
         Ok(LevelUpdate {
             instrument_id: inst.instrument_id,
@@ -162,7 +162,7 @@ impl<'t> DepthLowering<'t> {
             ClearScope::FromPrice { side, px } => (
                 side_clear_byte(side),
                 SCOPE_FROM_PRICE,
-                price_at(px, inst.price_exponent).map_err(LoweringError::scale("from_price"))?,
+                price_for(&inst, px, "from_price")?,
             ),
         };
 

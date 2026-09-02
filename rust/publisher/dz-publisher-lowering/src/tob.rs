@@ -9,7 +9,7 @@ use dz_edge_tob::{
 
 use crate::error::LoweringError;
 use crate::instrument::{Instrument, InstrumentTable};
-use crate::scale::{price_at, qty_at};
+use crate::scale::{price_for, qty_for};
 use crate::source::SourceId;
 
 /// Everything the lowering needs that is not in the event.
@@ -124,8 +124,7 @@ impl<'t> Lowering<'t> {
         let inst = self.instruments.get(instrument)?;
 
         let cumulative_volume = match cumulative_volume {
-            Some(volume) => qty_at(volume, inst.qty_exponent)
-                .map_err(LoweringError::scale("cumulative_volume"))?,
+            Some(volume) => qty_for(inst, volume, "cumulative_volume")?,
             None => 0,
         };
 
@@ -135,9 +134,8 @@ impl<'t> Lowering<'t> {
             aggressor_side: aggressor_byte(aggressor),
             trade_flags: trade_flags_byte(flags),
             source_timestamp_ns: source_ts_ns,
-            trade_price: price_at(px, inst.price_exponent)
-                .map_err(LoweringError::scale("trade_price"))?,
-            trade_qty: qty_at(qty, inst.qty_exponent).map_err(LoweringError::scale("trade_qty"))?,
+            trade_price: price_for(inst, px, "trade_price")?,
+            trade_qty: qty_for(inst, qty, "trade_qty")?,
             trade_id: trade_id.unwrap_or(0),
             cumulative_volume,
         })
@@ -200,9 +198,8 @@ fn lower_side(
             qty,
             source_count,
         } => Ok(LoweredSide {
-            price: price_at(px, inst.price_exponent)
-                .map_err(LoweringError::scale(wire.price_field))?,
-            qty: qty_at(qty, inst.qty_exponent).map_err(LoweringError::scale(wire.qty_field))?,
+            price: price_for(inst, px, wire.price_field)?,
+            qty: qty_for(inst, qty, wire.qty_field)?,
             // The wire's sentinel for "the venue does not expose this" is zero
             // itself, and a present side has at least one resting order, so a
             // true zero cannot coexist with a quoted side.

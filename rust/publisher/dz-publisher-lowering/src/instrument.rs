@@ -3,6 +3,7 @@
 
 use dz_adapter_core::InstrumentRef;
 
+use crate::contract::ContractSize;
 use crate::error::LoweringError;
 
 /// The three things about an admitted instrument that lowering an event needs.
@@ -24,6 +25,14 @@ pub struct Instrument {
     pub price_exponent: i8,
     /// The exponent every quantity for this instrument is carried at.
     pub qty_exponent: i8,
+    /// How much of the underlying one contract is, for a venue that quotes per
+    /// contract and states the underlying's exponents above.
+    ///
+    /// `None` — the ordinary case — means the venue's numbers are already in
+    /// the units the exponents describe. Read off the venue's
+    /// `InstrumentSpec` at admission, so the hot path applies a factor rather
+    /// than parsing one.
+    pub quoted_per_contract: Option<ContractSize>,
 }
 
 /// `InstrumentRef` to [`Instrument`]: the runtime's own admitted set, as the

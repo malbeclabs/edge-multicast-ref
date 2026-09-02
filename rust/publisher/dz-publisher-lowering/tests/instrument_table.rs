@@ -14,6 +14,7 @@ fn instrument(instrument_id: u32) -> Instrument {
         instrument_id,
         price_exponent: -4,
         qty_exponent: -2,
+        quoted_per_contract: None,
     }
 }
 

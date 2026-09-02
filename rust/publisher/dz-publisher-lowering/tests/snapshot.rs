@@ -26,6 +26,7 @@ fn table() -> InstrumentTable {
         instrument_id: INSTRUMENT_ID,
         price_exponent: PRICE_EXPONENT,
         qty_exponent: QTY_EXPONENT,
+        quoted_per_contract: None,
     });
     instruments
 }

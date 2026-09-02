@@ -1,0 +1,15 @@
+[package]
+name = "dz-publisher-refdata"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Reference data: instrument identity, the selection policy, and the definition cycle"
+
+[dependencies]
+dz-adapter-core = { path = "../../adapter/dz-adapter-core" }
+dz-edge-core = { path = "../../codec/dz-edge-core" }
+dz-edge-refdata = { path = "../../codec/dz-edge-refdata" }
+dz-publisher-lowering = { path = "../dz-publisher-lowering" }
+thiserror = { workspace = true }

@@ -134,6 +134,9 @@ impl Adapter for LineAdapter {
             tick_size: Scalar::text("0.01"),
             lot_size: Scalar::text("1"),
             contract_value: None,
+            // This venue's own numbers are already in the units its exponents
+            // describe, which is the ordinary case.
+            quoted_per_contract: None,
             expiry_ns: None,
             settle_type: SettleType::Cash,
             price_bound: PriceBound::UnitInterval,

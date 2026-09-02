@@ -21,6 +21,7 @@ fn table() -> InstrumentTable {
         instrument_id: 41,
         price_exponent: PRICE_EXPONENT,
         qty_exponent: QTY_EXPONENT,
+        quoted_per_contract: None,
     });
     instruments
 }
@@ -211,11 +212,13 @@ fn each_instrument_has_its_own_series() {
         instrument_id: 41,
         price_exponent: PRICE_EXPONENT,
         qty_exponent: QTY_EXPONENT,
+        quoted_per_contract: None,
     });
     let second = instruments.admit(Instrument {
         instrument_id: 42,
         price_exponent: PRICE_EXPONENT,
         qty_exponent: QTY_EXPONENT,
+        quoted_per_contract: None,
     });
     let mut lowering = DepthLowering::new(&instruments, source_id());
 
