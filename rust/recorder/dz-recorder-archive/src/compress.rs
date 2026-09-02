@@ -88,20 +88,6 @@ impl Faults {
     }
 }
 
-/// A set of segment paths the compressor can answer for.
-///
-/// Two of these exist, and the difference between them is the whole of the
-/// budget's relationship with the compressor. **In flight** is the one segment
-/// being read right now: evicting it destroys an object that was about to land,
-/// so the budget leaves it alone. **Queued** is everything submitted behind it:
-/// counted and evictable like any other history, because the job queue is
-/// unbounded and a publication that stalls would otherwise grow staging without
-/// bound while the budget reported it under.
-///
-/// Everything else still under a working name is an orphan — one the compressor
-/// has finished with, or one a dead run left — and only the compressor knows
-/// which is which, so it says so here rather than leaving it to be guessed from
-/// a file name.
 /// Which half of the handover a segment the compressor holds is in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Phase {
@@ -135,6 +121,12 @@ pub(crate) enum Phase {
 /// One map behind one lock makes that state unrepresentable rather than
 /// unlikely: a reader takes a single atomic look and gets `Queued`, `InFlight`
 /// or nothing, which are the only three states that ever hold.
+///
+/// Nothing is the answer that matters as much as the other two: a segment still
+/// under a working name that this does not hold is an orphan — one the
+/// compressor has finished with, or one a dead run left — and only the
+/// compressor knows which is which, so it says so here rather than leaving it
+/// to be guessed from a file name.
 #[derive(Debug, Default)]
 pub(crate) struct Custody {
     paths: Mutex<HashMap<PathBuf, Phase>>,

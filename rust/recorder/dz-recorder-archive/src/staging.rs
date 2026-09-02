@@ -337,18 +337,16 @@ impl StagingWatermark {
             if total <= self.staging_max {
                 break;
             }
-            match fs::remove_file(&object.path) {
-                Ok(()) => {
-                    // The manifest may already be gone if a shipper took it;
-                    // that is not a failure of eviction.
-                    let _ = fs::remove_file(&object.manifest_path);
-                    total = total.saturating_sub(object.bytes);
-                    self.segments_evicted_total += 1;
-                    self.objects_evicted_total += 1;
-                    self.bytes_evicted_total += object.bytes;
-                }
-                Err(e) => failure = failure.or(Some(e)),
+            let outcome = fs::remove_file(&object.path);
+            if !matches!(&outcome, Err(e) if e.kind() != std::io::ErrorKind::NotFound) {
+                // The manifest may already be gone if a shipper took it; that
+                // is not a failure of eviction. Nor is the object itself being
+                // gone — see `account_removal`.
+                let _ = fs::remove_file(&object.manifest_path);
             }
+            let (reclaimed, error) = self.account_removal(object.bytes, true, outcome);
+            total = total.saturating_sub(reclaimed);
+            failure = failure.or(error);
         }
         // Orphans first and queued segments last, for the reason objects come
         // before either: a queued segment is the only copy of the window it
@@ -388,23 +386,63 @@ impl StagingWatermark {
             // phase in hand was read during a scan that has since walked two
             // directories, and a queued segment the compressor has picked up in
             // the meantime is one whose source it is reading now.
-            match self.remove_evictable(&partial.path) {
+            let Some(outcome) = self.remove_evictable(&partial.path) else {
                 // Left alone because it is being published. It stays counted,
                 // so the loop keeps looking rather than stopping at a total it
                 // has decided not to reduce.
-                None => continue,
-                Some(Ok(())) => {
-                    total = total.saturating_sub(partial.bytes);
-                    self.segments_evicted_total += 1;
-                    self.bytes_evicted_total += partial.bytes;
-                }
-                Some(Err(e)) => failure = failure.or(Some(e)),
-            }
+                continue;
+            };
+            let (reclaimed, error) = self.account_removal(partial.bytes, false, outcome);
+            total = total.saturating_sub(reclaimed);
+            failure = failure.or(error);
         }
 
         match failure {
             Some(e) => Err(SinkError::Io(e)),
             None => Ok(()),
+        }
+    }
+
+    /// What a removal meant for the budget: the bytes that are no longer on the
+    /// disk, and the error worth reporting.
+    ///
+    /// Three outcomes, and the middle one is the one this exists for.
+    ///
+    /// **Gone because we took it.** The bytes fall and the counters move: this
+    /// recorder gave up that history and an operator has to be able to see how
+    /// much.
+    ///
+    /// **Already gone.** The paths a sweep unlinks come from a scan that ran
+    /// before the walk of two directories, the stat of everything in them and
+    /// the sort, and two things legitimately remove a file inside that window: a
+    /// shipper taking an object out of `completed_dir`, and a publication
+    /// unlinking its own source as it lands. The bytes are off the disk either
+    /// way, so the total has to fall — a loop that does not lower it keeps
+    /// evicting real history to reach a number it has already reached — and
+    /// nothing failed, so nothing may reach `last_error`, which is where an
+    /// operator looks for a disk that is actually in trouble. The counters stay
+    /// put: this recorder did not give that segment up, and a counter that says
+    /// it did is a loss reported twice.
+    ///
+    /// **A real error.** Reported, and the bytes stay counted, because they are
+    /// still there.
+    fn account_removal(
+        &mut self,
+        bytes: u64,
+        published_object: bool,
+        outcome: std::io::Result<()>,
+    ) -> (u64, Option<std::io::Error>) {
+        match outcome {
+            Ok(()) => {
+                self.segments_evicted_total += 1;
+                if published_object {
+                    self.objects_evicted_total += 1;
+                }
+                self.bytes_evicted_total += bytes;
+                (bytes, None)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (bytes, None),
+            Err(e) => (0, Some(e)),
         }
     }
 
@@ -676,6 +714,200 @@ mod tests {
             "the segment just closed was evicted because three files shared one timestamp"
         );
         assert!(!paths[0].exists(), "the oldest was not evicted");
+    }
+
+    #[test]
+    fn a_segment_being_published_survives_a_sweep_that_has_to_evict() {
+        // The loss this whole change exists to prevent, asserted where it is
+        // wired in and not only on the type.
+        //
+        // What it covers and what it does not, because the difference is the
+        // reason the guard below it also exists. Marking the segment in flight
+        // before the sweep is the state `scan` itself skips, so this is the
+        // property test: an `enforce` that cannot meet its budget does not take
+        // a segment mid-publication. `remove_evictable`'s guard covers a
+        // different moment — the compressor picking a *queued* segment up after
+        // the scan classified it and before the loop reaches its path — and no
+        // single-threaded test can place itself inside that window;
+        // `Custody::remove_unless_in_flight`'s own test is what pins it.
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let staging = dir.path().join("staging");
+        let completed = dir.path().join("completed");
+        fs::create_dir_all(&staging).expect("staging");
+        fs::create_dir_all(&completed).expect("completed");
+
+        let custody = Arc::new(Custody::default());
+        // A budget the sweep cannot meet, so the loop runs to the end and gives
+        // up everything it is allowed to: what survives, survives because it
+        // may not be taken rather than because the total fell first.
+        let mut w = StagingWatermark::new(staging.clone(), completed, 100);
+        w.track_open_segment(99);
+        w.track_custody(Arc::clone(&custody));
+
+        let paths: Vec<PathBuf> = (1..=3).map(|seq| segment(&staging, seq, 1000)).collect();
+        for path in &paths {
+            custody.queue(path.clone());
+        }
+        // The oldest is the one eviction reaches for first, which is what makes
+        // this worth writing: the compressor is reading precisely the file the
+        // budget wants most.
+        custody.start(&paths[0]);
+
+        w.enforce().expect("eviction");
+
+        assert!(
+            paths[0].exists(),
+            "the segment being published was evicted out from under the compressor"
+        );
+        assert!(
+            !paths[1].exists(),
+            "the queue was not bounded: the sweep took nothing at all"
+        );
+        assert!(
+            paths[2].exists(),
+            "the segment just closed is still protected, budget or no budget"
+        );
+    }
+
+    #[test]
+    fn a_segment_being_published_is_not_counted_and_the_queue_behind_it_is() {
+        // The other half of the accounting rule, and it had no test: the file
+        // the compressor is reading is a bounded transient like the open
+        // segment beside it, so it stays out of the total, while everything
+        // submitted behind it stays in — an unbounded queue nothing counts is
+        // an unbounded disk.
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let staging = dir.path().join("staging");
+        let completed = dir.path().join("completed");
+        fs::create_dir_all(&staging).expect("staging");
+        fs::create_dir_all(&completed).expect("completed");
+
+        let custody = Arc::new(Custody::default());
+        let mut w = StagingWatermark::new(staging.clone(), completed, u64::MAX);
+        w.track_open_segment(99);
+        w.track_custody(Arc::clone(&custody));
+
+        let paths: Vec<PathBuf> = (1..=3).map(|seq| segment(&staging, seq, 1000)).collect();
+        for path in &paths {
+            custody.queue(path.clone());
+        }
+        assert_eq!(
+            w.bytes_on_disk(),
+            2000,
+            "a queue of three counts two: the newest is the bounded transient"
+        );
+
+        custody.start(&paths[0]);
+        assert_eq!(
+            w.bytes_on_disk(),
+            1000,
+            "the segment being read is counted, so the budget can evict to reach a \
+             total only the compressor can lower"
+        );
+    }
+
+    #[test]
+    fn the_removal_the_sweep_calls_refuses_a_segment_in_flight() {
+        // The guard at the point `enforce` actually calls, which is the one
+        // place a plain `fs::remove_file` would still compile and still pass
+        // every other test in this crate — because `scan` skipping in-flight
+        // paths would go on protecting the file in every single-threaded run.
+        // The moment it does not protect is the one this guard is for: the
+        // compressor picking a queued segment up after the scan classified it,
+        // which is a window a test cannot place itself inside. So the wiring is
+        // asserted directly instead.
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let staging = dir.path().join("staging");
+        let completed = dir.path().join("completed");
+        fs::create_dir_all(&staging).expect("staging");
+        fs::create_dir_all(&completed).expect("completed");
+
+        let custody = Arc::new(Custody::default());
+        let mut w = StagingWatermark::new(staging.clone(), completed, 1500);
+        w.track_custody(Arc::clone(&custody));
+
+        let being_read = segment(&staging, 1, 1000);
+        custody.start(&being_read);
+        assert!(
+            w.remove_evictable(&being_read).is_none(),
+            "the sweep was handed an outcome for a file it must not touch"
+        );
+        assert!(
+            being_read.exists(),
+            "the segment the compressor is reading was deleted by the sweep"
+        );
+
+        // And a queued one is still the budget's to take, or the queue is
+        // unbounded and the disk with it.
+        let queued = segment(&staging, 2, 1000);
+        custody.queue(queued.clone());
+        assert!(matches!(w.remove_evictable(&queued), Some(Ok(()))));
+        assert!(!queued.exists());
+
+        // With no compressor behind the watermark there is nothing to race
+        // with, and the unlink is plain.
+        let alone = StagingWatermark::new(staging.clone(), dir.path().join("completed"), 1500);
+        let orphan = segment(&staging, 3, 1000);
+        assert!(matches!(alone.remove_evictable(&orphan), Some(Ok(()))));
+        assert!(!orphan.exists());
+    }
+
+    #[test]
+    fn a_removal_that_found_nothing_to_remove_is_reclaimed_bytes_and_not_a_fault() {
+        // The three outcomes of one unlink, decided in one place because both
+        // loops have to agree about them.
+        //
+        // Tested here rather than through `enforce` on purpose: the case is a
+        // file that was present when the scan classified it and gone when the
+        // loop reached it — a shipper taking an object, or a publication
+        // unlinking its own source — and a test that deletes the file before
+        // calling `enforce` does not reproduce it at all, because the scan
+        // simply never sees the file. This is the decision that case reaches.
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let mut w = StagingWatermark::new(
+            dir.path().join("staging"),
+            dir.path().join("completed"),
+            1500,
+        );
+
+        // Gone because we took it: the bytes fall and the loss is counted, an
+        // object under both counters and a working segment under one.
+        let (reclaimed, error) = w.account_removal(1000, true, Ok(()));
+        assert_eq!((reclaimed, error.is_none()), (1000, true));
+        assert_eq!(
+            (w.segments_evicted_total(), w.objects_evicted_total()),
+            (1, 1)
+        );
+
+        // Already gone. The bytes are off the disk, so the total has to fall or
+        // the loop evicts real history to reach a number it has reached; and
+        // nothing failed, so nothing may reach `last_error`.
+        let gone = std::io::Error::from(std::io::ErrorKind::NotFound);
+        let (reclaimed, error) = w.account_removal(1000, true, Err(gone));
+        assert_eq!(reclaimed, 1000, "bytes nothing can reclaim twice");
+        assert!(
+            error.is_none(),
+            "a file that had already left was reported as an I/O fault"
+        );
+        assert_eq!(
+            (w.segments_evicted_total(), w.objects_evicted_total()),
+            (1, 1),
+            "a segment this recorder did not give up was counted as given up"
+        );
+        assert_eq!(w.bytes_evicted_total(), 1000);
+
+        // A real error: still there, still counted, and said out loud.
+        let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let (reclaimed, error) = w.account_removal(1000, false, Err(denied));
+        assert_eq!(
+            reclaimed, 0,
+            "bytes that are still on the disk stopped counting"
+        );
+        assert_eq!(
+            error.map(|e| e.kind()),
+            Some(std::io::ErrorKind::PermissionDenied),
+            "a disk that is actually in trouble has to reach last_error"
+        );
     }
 
     #[test]
