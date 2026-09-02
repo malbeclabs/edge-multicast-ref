@@ -9,7 +9,7 @@
 //! consumed as tagged releases, and a boundary whose every extension is a
 //! breaking change strands its consumers on old tags.
 
-use crate::event::{Event, Side};
+use crate::event::{Desync, Event, Side};
 use crate::instrument::{InstrumentRef, InstrumentSpec};
 use crate::scalar::Scalar;
 
@@ -38,6 +38,43 @@ pub trait EventSink {
     /// and a reference to it would be an indirection to something already on
     /// the stack.
     fn event(&mut self, event: Event<'_>);
+
+    /// This adapter no longer trusts its own book for one instrument.
+    ///
+    /// **The one thing a venue knows that nothing else can.** An adapter owns
+    /// its book, so it is the only layer that can tell it has stopped being
+    /// right: a delta it could not route, a size it could not read, an upstream
+    /// that resynchronised underneath it. Everything above this boundary sees
+    /// only the events that did come out.
+    ///
+    /// What happens next is not the adapter's to decide, and that is why this
+    /// says nothing about it. The runtime pauses the instrument, announces the
+    /// discard on the wire, and schedules the recovery snapshot a subscriber
+    /// needs before it can apply another delta — spec-timed work, on a port
+    /// this boundary cannot reach.
+    ///
+    /// # Why the alternatives are worse
+    ///
+    /// The three things an adapter can do without this are all wrong. Publish
+    /// on, and every later absolute quantity at that price is wrong for the
+    /// rest of the era — a level update states the resting quantity, so a
+    /// subscriber that missed one is not corrected by the next. Emit a clear,
+    /// and it has told subscribers the levels are gone when they are not:
+    /// `Event::Clear` is documented as **not** a resynchronisation signal
+    /// precisely so that a subscriber applying one stays ready. Or drop the
+    /// event silently, which is publishing on with less evidence.
+    ///
+    /// # Defaulted, and what a default costs
+    ///
+    /// Ignoring this is a runtime that has not implemented recovery, and the
+    /// cost is a subscriber applying deltas to a book the publisher already
+    /// knows is diverged. It is defaulted rather than required only because a
+    /// sink that merely records events — a test harness, an offline
+    /// re-lowering — has nothing to do with it. A runtime that transmits must
+    /// implement it.
+    fn desynchronised(&mut self, instrument: InstrumentRef, reason: Desync) {
+        let _ = (instrument, reason);
+    }
 }
 
 /// Where an adapter declares the instruments it wants published.

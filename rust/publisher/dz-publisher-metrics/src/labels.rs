@@ -287,12 +287,13 @@ pub enum EgressMessageType {
     SnapshotBegin,
     SnapshotLevel,
     SnapshotEnd,
+    InstrumentReset,
 }
 
 impl EgressMessageType {
     /// Every variant, in no particular order. Used to pre-create every
     /// child series of this closed-label family at construction.
-    pub(crate) const ALL: [Self; 11] = [
+    pub(crate) const ALL: [Self; 12] = [
         Self::Heartbeat,
         Self::EndOfSession,
         Self::Quote,
@@ -304,6 +305,7 @@ impl EgressMessageType {
         Self::SnapshotBegin,
         Self::SnapshotLevel,
         Self::SnapshotEnd,
+        Self::InstrumentReset,
     ];
 
     #[must_use]
@@ -320,6 +322,7 @@ impl EgressMessageType {
             Self::SnapshotBegin => "snapshot_begin",
             Self::SnapshotLevel => "snapshot_level",
             Self::SnapshotEnd => "snapshot_end",
+            Self::InstrumentReset => "instrument_reset",
         }
     }
 
@@ -341,7 +344,8 @@ impl EgressMessageType {
             | Self::Quote
             | Self::Trade
             | Self::LevelUpdate
-            | Self::BookClear => &[PortRole::Mktdata],
+            | Self::BookClear
+            | Self::InstrumentReset => &[PortRole::Mktdata],
             Self::InstrumentDefinition | Self::ManifestSummary => &[PortRole::Refdata],
             // The snapshot port carries one book state cut across datagrams,
             // and nothing else does. A snapshot message on the market-data
@@ -378,7 +382,9 @@ mod tests {
     #[test]
     fn port_roles_match_the_codec() {
         use dz_edge_core::{AppMessage, EndOfSession, Heartbeat};
-        use dz_edge_mbp::{BookClear, LevelUpdate, SnapshotBegin, SnapshotEnd, SnapshotLevel};
+        use dz_edge_mbp::{
+            BookClear, InstrumentReset, LevelUpdate, SnapshotBegin, SnapshotEnd, SnapshotLevel,
+        };
         use dz_edge_refdata::{InstrumentDefinition, ManifestSummary};
         use dz_edge_tob::{Quote, Trade};
 
@@ -402,12 +408,13 @@ mod tests {
         check::<SnapshotBegin>(EgressMessageType::SnapshotBegin);
         check::<SnapshotLevel>(EgressMessageType::SnapshotLevel);
         check::<SnapshotEnd>(EgressMessageType::SnapshotEnd);
+        check::<InstrumentReset>(EgressMessageType::InstrumentReset);
 
         // Every variant is covered above. A message type added to the codec
         // with no entry here would be pre-created nowhere, silently.
         assert_eq!(
             EgressMessageType::ALL.len(),
-            11,
+            12,
             "a new message type needs a port-role entry and a line in this test"
         );
     }

@@ -51,7 +51,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use dz_edge_core::{AppMessage, EndOfSession, Heartbeat, PortRole, ResetCount, MAX_DATAGRAM_SIZE};
-use dz_edge_mbp::{BookClear, LevelUpdate};
+use dz_edge_mbp::{BookClear, InstrumentReset, LevelUpdate};
 use dz_edge_refdata::{InstrumentDefinition, ManifestSummary};
 use dz_edge_tob::{Quote, Trade};
 use dz_publisher_egress::{ChannelEgress, EgressEndpoint, EgressError, Tee};
@@ -239,6 +239,33 @@ impl<F: EmittedFeed> FeedPipeline<F> {
     /// # Errors
     ///
     /// As [`send_quote`](Self::send_quote).
+    /// `0x14 InstrumentReset` on the market-data port role.
+    ///
+    /// **The anchor has to be the number this datagram takes**, and this is the
+    /// only layer that knows it — which is why the caller composes the message
+    /// with [`DepthLowering::lower_instrument_reset`](dz_publisher_lowering::DepthLowering::lower_instrument_reset)
+    /// against [`mktdata_sequence`](Self::mktdata_sequence) rather than being
+    /// handed a number. Stated here because a caller that read it off the last
+    /// delta would be one behind, which is the off-by-one the specification's
+    /// own conformance subscriber grades a violation.
+    ///
+    /// # Errors
+    ///
+    /// As [`send_book_clear`](Self::send_book_clear).
+    pub fn send_instrument_reset(
+        &mut self,
+        reset: &InstrumentReset,
+        now_mono_ns: u64,
+        send_ts_ns: u64,
+    ) -> Result<(), EgressError> {
+        self.send_mktdata(
+            reset,
+            EgressMessageType::InstrumentReset,
+            now_mono_ns,
+            send_ts_ns,
+        )
+    }
+
     pub fn send_book_clear(
         &mut self,
         clear: &BookClear,

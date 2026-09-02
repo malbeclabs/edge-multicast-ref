@@ -27,11 +27,16 @@
 #![forbid(unsafe_code)]
 
 pub mod book_clear;
+pub mod instrument_reset;
 pub mod level_update;
 pub mod snapshot;
 
 pub use book_clear::{
     BookClear, CLEAR_ASK, CLEAR_BID, CLEAR_BOTH, SCOPE_ENTIRE_SIDE, SCOPE_FROM_PRICE,
+};
+pub use instrument_reset::{
+    InstrumentReset, RESET_OTHER, RESET_PUBLISHER_INCONSISTENCY, RESET_UNSPECIFIED,
+    RESET_UPSTREAM_GAP, RESET_VENUE_RESYNC,
 };
 pub use level_update::{LevelUpdate, ACTION_CHANGE, ACTION_DELETE, ACTION_NEW, ACTION_UNKNOWN};
 pub use snapshot::{SnapshotBegin, SnapshotEnd, SnapshotLevel};

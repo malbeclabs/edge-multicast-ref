@@ -447,6 +447,25 @@ async fn tick_loop<S: StateStore, K: Clock + Clone>(
             {
                 let mut held = adapter.lock().unwrap_or_else(|held| held.into_inner());
                 publisher.poll_listings(&mut **held);
+                // The recovery snapshots an `InstrumentReset` obliged. Drained
+                // here rather than inside the adapter's own callback because
+                // capturing a book is a walk of it, and because a snapshot has
+                // to be captured *after* the reset that announced it — a
+                // subscriber discards any snapshot for the instrument with an
+                // older anchor.
+                //
+                // A capture that refuses is not retried: the reset already
+                // reached the wire, so the instrument is waiting, and the next
+                // consistency check will announce it again with a fresh anchor.
+                // Retrying here would hold a tick open on a book that is not
+                // ready.
+                for (instrument, anchor) in publisher.owed_snapshots() {
+                    if let Err(error) =
+                        publisher.snapshot_anchored_at(&**held, instrument, anchor, 0)
+                    {
+                        eprintln!("dz-publisher-runtime: a recovery snapshot was refused: {error}");
+                    }
+                }
             }
             publisher.tick()
         };

@@ -54,7 +54,7 @@
 
 use std::sync::Arc;
 
-use dz_adapter_core::{Adapter, Event, EventSink, InstrumentRef};
+use dz_adapter_core::{Adapter, Desync, Event, EventSink, InstrumentRef};
 use dz_edge_core::fixed_point::ScaleError;
 use dz_edge_mbp::MarketByPrice;
 use dz_edge_refdata::{InstrumentDefinition, ManifestSummary};
@@ -322,6 +322,9 @@ pub struct Publisher<S: StateStore, K: Clock + Clone> {
     forwarded: Counts,
     refusals: Refusals,
     unroutable: u64,
+    /// Instruments announced as discarded, each with the anchor its
+    /// `InstrumentReset` promised. See [`Self::owed_snapshots`].
+    owed: Vec<(InstrumentRef, u64)>,
     /// Monotonic. When the adapter's listings were last drained.
     last_poll_ns: Option<u64>,
     seeded: bool,
@@ -367,9 +370,37 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
             forwarded: Counts::default(),
             refusals: Refusals::default(),
             unroutable: 0,
+            owed: Vec::new(),
             last_poll_ns: None,
             seeded: false,
         }
+    }
+
+    /// The instruments owing a recovery snapshot, each with the anchor its
+    /// reset promised, drained.
+    ///
+    /// **The anchor travels with the debt, and that is not an optimisation.**
+    /// The specification obliges a snapshot with `Anchor Seq` *equal to* the
+    /// value the reset named — not equal to wherever the stream has reached by
+    /// the time the book is captured. Those differ by at least one, because the
+    /// reset's own datagram advanced the sequence, and a snapshot anchored a
+    /// number later is one a subscriber discards: it records the reset's anchor
+    /// as the minimum it will accept. The instrument would then wait forever,
+    /// having been told to expect something that never came.
+    ///
+    /// Draining rather than reading, and keeping the **latest** anchor for an
+    /// instrument owed twice: the second reset supersedes the first, and a
+    /// snapshot at the older anchor is one the second reset has already told
+    /// subscribers to discard.
+    pub fn owed_snapshots(&mut self) -> Vec<(InstrumentRef, u64)> {
+        let mut owed = std::mem::take(&mut self.owed);
+        // Instrument ascending, anchor **descending**, so the first entry for
+        // each instrument is its latest reset — which is the one `dedup_by_key`
+        // keeps. Sorting both ascending would keep the earliest anchor, the one
+        // the later reset has already told subscribers to discard.
+        owed.sort_unstable_by_key(|(instrument, anchor)| (*instrument, std::cmp::Reverse(*anchor)));
+        owed.dedup_by_key(|(instrument, _)| *instrument);
+        owed
     }
 
     /// Record build identity, once, at startup.
@@ -477,14 +508,44 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
         instrument: InstrumentRef,
         depth_bound: u32,
     ) -> Result<Snapshot, SnapshotError> {
-        let now_unix = self.clock.unix_ns();
-        let Some(pipeline) = self.feeds.market_by_price.as_mut() else {
-            return Err(SnapshotError::NoDepthFeed);
-        };
         // The point in the live stream this book state is true as of, which is
         // what tells a subscriber which live messages to apply after it and
         // which to discard.
-        let anchor = pipeline.mktdata_sequence().unwrap_or(0);
+        let anchor = self
+            .feeds
+            .market_by_price
+            .as_ref()
+            .ok_or(SnapshotError::NoDepthFeed)?
+            .mktdata_sequence()
+            .unwrap_or(0);
+        self.snapshot_anchored_at(adapter, instrument, anchor, depth_bound)
+    }
+
+    /// The recovery snapshot an [`InstrumentReset`] obliged, at the anchor that
+    /// reset promised.
+    ///
+    /// **Not the live sequence.** A subscriber records the reset's anchor as
+    /// the minimum `Anchor Seq` it will accept for that instrument, so a
+    /// snapshot captured later and anchored where the stream has since reached
+    /// is one it discards — leaving the instrument waiting for something that
+    /// already went past. The anchor comes from
+    /// [`owed_snapshots`](Self::owed_snapshots), which carries it for exactly
+    /// this reason.
+    ///
+    /// # Errors
+    ///
+    /// As [`snapshot`](Self::snapshot).
+    pub fn snapshot_anchored_at(
+        &mut self,
+        adapter: &dyn Adapter,
+        instrument: InstrumentRef,
+        anchor: u64,
+        depth_bound: u32,
+    ) -> Result<Snapshot, SnapshotError> {
+        let now_unix = self.clock.unix_ns();
+        let Some(_) = self.feeds.market_by_price.as_ref() else {
+            return Err(SnapshotError::NoDepthFeed);
+        };
         let mut framer = self.depth.open_snapshot(
             self.refdata.instruments(),
             instrument,
@@ -773,6 +834,64 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
     fn upstream_message(&mut self, _message_type: &'static str) {
         let now_ns = dz_publisher_refdata::Clock::monotonic_ns(&self.clock);
         self.idle.upstream(now_ns);
+    }
+
+    /// The adapter no longer trusts its own book for one instrument.
+    ///
+    /// Three things happen, in this order, and the order is the contract: the
+    /// discard is announced on the wire anchored at the number its own datagram
+    /// takes, the instrument is recorded as owing a recovery snapshot, and
+    /// nothing else about the channel changes — every other instrument on it is
+    /// unaffected, which is the whole point of a per-instrument signal.
+    ///
+    /// The snapshot is **owed, not sent here.** A subscriber discards any
+    /// snapshot for the instrument with an older anchor, so it has to be
+    /// captured after this message and before the next delta for that
+    /// instrument — and capturing a book costs a walk of it, which does not
+    /// belong inside an adapter's callback. [`owed_snapshots`](Self::owed_snapshots)
+    /// is what the caller drains.
+    fn desynchronised(&mut self, instrument: InstrumentRef, reason: Desync) {
+        let now_mono = dz_publisher_refdata::Clock::monotonic_ns(&self.clock);
+        let now_unix = self.clock.unix_ns();
+
+        let Some(pipeline) = self.feeds.market_by_price.as_mut() else {
+            // No depth feed carries `0x14`, so there is nothing to announce and
+            // nothing to recover. Counted as unroutable, which is what every
+            // other event no enabled feed carries is counted as.
+            self.unroutable += 1;
+            return;
+        };
+        // The anchor is where the stream is *now*: the reset takes effect
+        // immediately, so it is the number the datagram carrying it will take,
+        // read off the send path because nothing else knows it.
+        let anchor = pipeline.mktdata_sequence().unwrap_or(0);
+
+        let lowered = self.depth.lower_instrument_reset(
+            self.refdata.instruments(),
+            instrument,
+            now_unix,
+            reason,
+            anchor,
+        );
+        match lowered {
+            Ok(reset) => {
+                let sent = timed(&self.metrics, EgressMessageType::InstrumentReset, || {
+                    self.feeds
+                        .market_by_price
+                        .as_mut()
+                        .expect("checked above")
+                        .send_instrument_reset(&reset, now_mono, now_unix)
+                });
+                if sent.is_ok() {
+                    // Recorded only once the announcement reached the wire. A
+                    // snapshot owed for a reset no subscriber saw would arrive
+                    // with an anchor nobody is waiting for.
+                    self.owed.push((instrument, reset.new_anchor_seq));
+                    self.published(now_mono, now_unix);
+                }
+            }
+            Err(error) => self.refusals.record(error),
+        }
     }
 
     fn event(&mut self, event: Event<'_>) {

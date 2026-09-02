@@ -1,11 +1,13 @@
 //! Market by price: a normalized level or clear, lowered onto `0x40` and
 //! `0x41`.
 
-use dz_adapter_core::{Aggressor, ClearScope, InstrumentRef, Presence, Scalar, Side, TradeFlags};
+use dz_adapter_core::{
+    Aggressor, ClearScope, Desync, InstrumentRef, Presence, Scalar, Side, TradeFlags,
+};
 use dz_edge_mbp::{
-    BookClear, LevelUpdate, ACTION_CHANGE, ACTION_DELETE, ACTION_NEW, ACTION_UNKNOWN, CLEAR_ASK,
-    CLEAR_BID, CLEAR_BOTH, SCOPE_ENTIRE_SIDE, SCOPE_FROM_PRICE, SIDE_ASK, SIDE_BID,
-    U16_UNAVAILABLE,
+    BookClear, InstrumentReset, LevelUpdate, ACTION_CHANGE, ACTION_DELETE, ACTION_NEW,
+    ACTION_UNKNOWN, CLEAR_ASK, CLEAR_BID, CLEAR_BOTH, RESET_UNSPECIFIED, RESET_UPSTREAM_GAP,
+    RESET_VENUE_RESYNC, SCOPE_ENTIRE_SIDE, SCOPE_FROM_PRICE, SIDE_ASK, SIDE_BID, U16_UNAVAILABLE,
 };
 
 use crate::error::LoweringError;
@@ -236,6 +238,59 @@ impl DepthLowering {
         )
     }
 
+    /// `EventSink::desynchronised` to `0x14 InstrumentReset`.
+    ///
+    /// **The reason is derived from what the adapter could say, plus what only
+    /// the runtime knows.** A venue can report that its upstream resynchronised
+    /// or that it saw a gap; it cannot report a publisher-side integrity
+    /// failure, because that is a statement about us. So the two venue
+    /// observations map straight through and `Unspecified` stays unspecified —
+    /// this layer does not upgrade a silence into a claim about which of the
+    /// five reasons it was.
+    ///
+    /// `sequence_number` is the number the datagram carrying this message will
+    /// take, and it becomes `New Anchor Seq`. That is not a diagnostic: the
+    /// reset takes effect immediately, so the anchor is where the stream is
+    /// *now*, and the specification's own conformance subscriber grades a
+    /// mismatch a violation. The caller passes it because the send path is the
+    /// only layer that knows it.
+    ///
+    /// # What this obliges the caller to do next
+    ///
+    /// Emit a snapshot for this instrument with `Anchor Seq` equal to
+    /// `sequence_number`, **before** resuming delta emission. A subscriber
+    /// discards any snapshot for the instrument with an older anchor, so a
+    /// reset whose promised snapshot never arrives leaves that instrument
+    /// waiting forever — worse than the divergence it announced. Nothing here
+    /// can enforce that; it is stated so that a caller cannot say it did not
+    /// know.
+    ///
+    /// The per-instrument sequence is **not** touched. It restarts on a
+    /// `Reset Count` change and at no other time, and an instrument reset is
+    /// not one: the channel is intact and every other instrument on it is
+    /// unaffected, which is the whole point of a per-instrument signal.
+    ///
+    /// # Errors
+    ///
+    /// [`LoweringError::UnknownInstrument`] for a handle the table does not
+    /// hold.
+    pub fn lower_instrument_reset(
+        &mut self,
+        instruments: &InstrumentTable,
+        instrument: InstrumentRef,
+        source_ts_ns: u64,
+        reason: Desync,
+        sequence_number: u64,
+    ) -> Result<InstrumentReset, LoweringError> {
+        let inst = *instruments.get(instrument)?;
+        Ok(InstrumentReset::anchored_at(
+            inst.instrument_id,
+            reset_reason(reason),
+            sequence_number,
+            source_ts_ns,
+        ))
+    }
+
     /// Mint the next snapshot id, for the framer.
     pub(crate) fn take_snapshot_id(&mut self) -> u32 {
         let id = self.next_snapshot_id;
@@ -274,5 +329,20 @@ const fn action_byte(qty_raw: u64, presence: Presence) -> u8 {
         Presence::Unknown => ACTION_UNKNOWN,
         Presence::New => ACTION_NEW,
         Presence::Change => ACTION_CHANGE,
+    }
+}
+
+/// The wire's reset reason for what a venue was able to say.
+///
+/// Exhaustive, so a fourth [`Desync`] fails to compile here rather than being
+/// silently reported as unspecified. The two publisher-side values of the wire
+/// table — an integrity failure and a venue-specific code — are absent because
+/// no adapter can reach them: they are statements about the publisher, and a
+/// runtime that makes one composes the message itself.
+const fn reset_reason(reason: Desync) -> u8 {
+    match reason {
+        Desync::Unspecified => RESET_UNSPECIFIED,
+        Desync::VenueResync => RESET_VENUE_RESYNC,
+        Desync::UpstreamGap => RESET_UPSTREAM_GAP,
     }
 }

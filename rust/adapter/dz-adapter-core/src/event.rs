@@ -307,3 +307,37 @@ mod tests {
         }
     }
 }
+
+/// Why an adapter no longer trusts its own book for one instrument.
+///
+/// **The venue's half of a reset reason, and only that half.** The wire's
+/// reset-reason table has five values and two of them are a publisher talking
+/// about itself: an integrity check that found its own book diverged, and a
+/// venue-specific value documented out of band. Neither is anything an adapter
+/// can state, so neither is here — the same asymmetry [`Presence`] has against
+/// the action table, and for the same reason.
+///
+/// What a venue *can* say is that its upstream resynchronised the instrument
+/// underneath it, or that it saw a gap in its own event stream. Those are
+/// observations about the upstream, which is the half a venue owns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Desync {
+    /// Something happened and the adapter cannot say what.
+    ///
+    /// Conformant, and the default: the wire defines this value for exactly
+    /// this case. An adapter that knows which of the two below it has should
+    /// say so, because an operator reads them differently — a venue resync is
+    /// the venue's doing and a gap is ours to explain.
+    #[default]
+    Unspecified,
+    /// The upstream venue reset or resynchronised this instrument.
+    VenueResync,
+    /// The adapter detected a gap in its upstream event stream.
+    ///
+    /// The one that costs the most to get wrong, and the reason this whole
+    /// method exists: a delta that was never applied leaves every later
+    /// absolute quantity at that price wrong for the rest of the era, not for
+    /// one update. A subscriber that missed one level update is not corrected
+    /// by the next.
+    UpstreamGap,
+}

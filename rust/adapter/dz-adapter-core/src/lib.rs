@@ -98,7 +98,7 @@ pub mod sink;
 
 pub use adapter::Adapter;
 pub use error::{AdapterError, ParseError};
-pub use event::{Aggressor, ClearScope, Event, Presence, Side, SideUpdate, TradeFlags};
+pub use event::{Aggressor, ClearScope, Desync, Event, Presence, Side, SideUpdate, TradeFlags};
 pub use instrument::{
     AssetClass, InstrumentRef, InstrumentSpec, MarketModel, PriceBound, SettleType,
 };
