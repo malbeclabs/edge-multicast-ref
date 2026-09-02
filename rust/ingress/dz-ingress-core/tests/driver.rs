@@ -27,8 +27,8 @@ use dz_adapter_core::{
     ListingSink, ParseError, Payload, Scalar, SideUpdate, UpstreamSink,
 };
 use dz_ingress_core::{
-    BackoffPolicy, BoxFuture, Clock, Driver, IngressError, IngressObserver, Input, Policy,
-    Received, UpstreamMessage,
+    BackoffPolicy, BoxFuture, Clock, ConnectFailureReason, Driver, IngressError, IngressObserver,
+    Input, Policy, Received, UpstreamMessage,
 };
 
 const CONNECTION: ConnectionId = ConnectionId::new("mktdata");
@@ -170,7 +170,10 @@ impl Connection {
 
     fn refused() -> Self {
         Self {
-            connect: Some(IngressError::connect("refused")),
+            connect: Some(IngressError::connect(
+                ConnectFailureReason::Refused,
+                "refused",
+            )),
             send: None,
             reads: VecDeque::new(),
         }
@@ -469,6 +472,7 @@ struct Recorded {
     parse_errors: Vec<&'static str>,
     states: Vec<(&'static str, bool)>,
     reconnects: Vec<DisconnectReason>,
+    connect_failures: Vec<ConnectFailureReason>,
     rate_limited: usize,
     adapter_errors: usize,
 }
@@ -507,6 +511,10 @@ impl IngressObserver for TestObserver {
 
     fn reconnect(&self, reason: DisconnectReason) {
         self.recorded().reconnects.push(reason);
+    }
+
+    fn connect_failure(&self, reason: ConnectFailureReason) {
+        self.recorded().connect_failures.push(reason);
     }
 
     fn rate_limited(&self) {
@@ -658,7 +666,8 @@ fn a_connect_that_never_succeeded_pairs_with_nothing_and_counts_no_reconnect() {
     // `dz_publisher_ingress_reconnects_total` has four label values and all
     // four describe a session that existed and stopped. Folding a refused
     // connect into one of them would make the counter mean two things; the
-    // series for this case is the connection-state gauge staying at 0.
+    // series for this case is the connection-state gauge staying at 0, and
+    // `connect_failures_total{reason}`, which is what says why.
     let outcome = run(
         policy(),
         RecordingAdapter::default(),
@@ -672,6 +681,13 @@ fn a_connect_that_never_succeeded_pairs_with_nothing_and_counts_no_reconnect() {
     assert!(
         !recorded.states.iter().any(|(_, connected)| *connected),
         "nothing may report itself connected"
+    );
+    // Once per attempt, with the reason the transport classified — the pair of
+    // numbers that separates a publisher which never came up from one that is
+    // flapping, which no single family could say.
+    assert_eq!(
+        recorded.connect_failures,
+        vec![ConnectFailureReason::Refused, ConnectFailureReason::Refused]
     );
 }
 

@@ -29,8 +29,8 @@ use dz_adapter_core::{
     ParseError, Payload, UpstreamSink,
 };
 use dz_ingress_core::{
-    BackoffPolicy, BoxFuture, Clock, Driver, IngressError, IngressObserver, Input, Policy,
-    Received, TokioClock, UpstreamMessage,
+    BackoffPolicy, BoxFuture, Clock, ConnectFailureReason, Driver, IngressError, IngressObserver,
+    Input, Policy, Received, TokioClock, UpstreamMessage,
 };
 use dz_ingress_websocket::WebSocketInput;
 use futures_util::{SinkExt, StreamExt};
@@ -444,6 +444,7 @@ impl IngressObserver for Discard {
     fn reconnect(&self, reason: DisconnectReason) {
         self.reconnects.lock().expect("the recorder").push(reason);
     }
+    fn connect_failure(&self, _reason: ConnectFailureReason) {}
     fn rate_limited(&self) {}
     fn adapter_error(&self, _error: AdapterError) {}
 }

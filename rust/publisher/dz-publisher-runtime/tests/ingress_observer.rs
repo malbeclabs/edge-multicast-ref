@@ -12,7 +12,7 @@ mod harness;
 use std::sync::Arc;
 
 use dz_adapter_core::{AdapterError, DisconnectReason, ParseError};
-use dz_ingress_core::IngressObserver;
+use dz_ingress_core::{ConnectFailureReason, IngressObserver};
 use dz_publisher_metrics::{PublisherMetrics, PublisherMetricsConfig};
 use dz_publisher_runtime::MetricsObserver;
 
@@ -167,6 +167,42 @@ fn bytes_duplicates_and_rate_limits_reach_their_own_families() {
         &[],
         " 1"
     ));
+}
+
+#[test]
+fn every_connect_failure_reason_reaches_the_series_it_is_the_label_of() {
+    // The family that answers the question the connection-state gauge raises.
+    // A gauge at 0 says the upstream is down; these seven say whether somebody
+    // has to rotate a credential, respect a limit, fix a hostname or read a
+    // venue changelog — four different people, and before this they were one
+    // string in a log line.
+    let metrics = metrics();
+    let observer = MetricsObserver::new(Arc::clone(&metrics));
+
+    for reason in ConnectFailureReason::ALL {
+        observer.connect_failure(reason);
+    }
+
+    let exposition = metrics.render();
+    for reason in [
+        "refused",
+        "unresolved",
+        "tls",
+        "timeout",
+        "unauthorized",
+        "rate_limit",
+        "rejected",
+    ] {
+        assert!(
+            sample(
+                &exposition,
+                "dz_publisher_ingress_connect_failures_total",
+                &[&format!("reason=\"{reason}\"")],
+                " 1"
+            ),
+            "`{reason}` did not move:\n{exposition}"
+        );
+    }
 }
 
 #[test]

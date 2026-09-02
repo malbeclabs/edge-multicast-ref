@@ -15,9 +15,9 @@
 use std::sync::Arc;
 
 use dz_adapter_core::{AdapterError, DisconnectReason, ParseError};
-use dz_ingress_core::IngressObserver;
+use dz_ingress_core::{ConnectFailureReason as IngressConnectFailureReason, IngressObserver};
 use dz_publisher_metrics::{
-    AdapterErrorReason, ParseErrorReason, PublisherMetrics, ReconnectReason,
+    AdapterErrorReason, ConnectFailureReason, ParseErrorReason, PublisherMetrics, ReconnectReason,
 };
 
 /// [`IngressObserver`] over the normative registry.
@@ -92,6 +92,22 @@ impl IngressObserver for MetricsObserver {
             DisconnectReason::AuthExpired => ReconnectReason::AuthExpired,
         };
         self.metrics.ingress().reconnect(reason);
+    }
+
+    fn connect_failure(&self, reason: IngressConnectFailureReason) {
+        // Two names for one taxonomy — the transport's and the registry's — and
+        // an exhaustive match so an eighth reason on either side is a build
+        // failure rather than a series nobody declared.
+        let reason = match reason {
+            IngressConnectFailureReason::Refused => ConnectFailureReason::Refused,
+            IngressConnectFailureReason::Unresolved => ConnectFailureReason::Unresolved,
+            IngressConnectFailureReason::Tls => ConnectFailureReason::Tls,
+            IngressConnectFailureReason::Timeout => ConnectFailureReason::Timeout,
+            IngressConnectFailureReason::Unauthorized => ConnectFailureReason::Unauthorized,
+            IngressConnectFailureReason::RateLimit => ConnectFailureReason::RateLimit,
+            IngressConnectFailureReason::Rejected => ConnectFailureReason::Rejected,
+        };
+        self.metrics.ingress().connect_failure(reason);
     }
 
     fn rate_limited(&self) {

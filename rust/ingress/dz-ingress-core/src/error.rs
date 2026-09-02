@@ -6,6 +6,72 @@ use dz_adapter_core::DisconnectReason;
 
 use crate::kind::Kind;
 
+/// Why a connection was never established.
+///
+/// **The transport's vocabulary, and it lives here rather than in
+/// `dz-adapter-core` for a reason.** That crate carries the taxonomies an
+/// *adapter* can state — a parse failure, a disconnect it was told about — and
+/// a connect failure is not one of them: an adapter owns no transport and
+/// cannot observe a name that would not resolve or a handshake rejected for
+/// credentials. Putting it there would have given the boundary a word no
+/// implementor of it can say.
+///
+/// The seven values are the ones an operator acts differently on, and the split
+/// among the last three is the one worth defending: a handshake rejected for
+/// bad credentials is a secret to rotate, one rejected for too many connections
+/// is a limit to respect, and one rejected for anything else is a venue change
+/// to read about. Leaving all three in a detail string would have made the
+/// three indistinguishable in the only place anybody looks.
+///
+/// Mirrors `dz_publisher_metrics::ConnectFailureReason`, which is two copies of
+/// one taxonomy — the cost of this crate not making a venue link a Prometheus
+/// client. They are held to each other by an exhaustive match in both
+/// directions in `tests/label_taxonomies.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConnectFailureReason {
+    /// The far side refused the connection outright.
+    Refused,
+    /// The endpoint's name would not resolve.
+    Unresolved,
+    /// The TLS negotiation failed: a certificate, a chain, a protocol version.
+    Tls,
+    /// The transport's own connect budget elapsed with nothing established.
+    Timeout,
+    /// The handshake was rejected for credentials.
+    Unauthorized,
+    /// The handshake was rejected for too many connections.
+    RateLimit,
+    /// The handshake was rejected for anything else.
+    Rejected,
+}
+
+impl ConnectFailureReason {
+    /// Every value, in the order the metrics crate declares them.
+    pub const ALL: [Self; 7] = [
+        Self::Refused,
+        Self::Unresolved,
+        Self::Tls,
+        Self::Timeout,
+        Self::Unauthorized,
+        Self::RateLimit,
+        Self::Rejected,
+    ];
+
+    /// The label value this reason is counted under.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Refused => "refused",
+            Self::Unresolved => "unresolved",
+            Self::Tls => "tls",
+            Self::Timeout => "timeout",
+            Self::Unauthorized => "unauthorized",
+            Self::RateLimit => "rate_limit",
+            Self::Rejected => "rejected",
+        }
+    }
+}
+
 /// What went wrong on the upstream connection.
 ///
 /// Three variants, because the driver takes exactly three different actions and
@@ -31,12 +97,16 @@ pub enum IngressError {
     /// metric label with four values, all of which describe a session that
     /// existed and then stopped; none of them describes one that never started.
     /// Rather than fold a connect refusal into `remote_close` and make the
-    /// reconnect counter mean two things, the driver counts nothing here and
-    /// leaves `dz_publisher_ingress_connection_state` at 0 — which is the
-    /// series that family's own documentation says exists for exactly this
-    /// case, the publisher whose upstream never came up at all.
+    /// reconnect counter mean two things, this carries a taxonomy of its own —
+    /// see [`ConnectFailureReason`] — which
+    /// `dz_publisher_ingress_connect_failures_total{reason}` counts by. The
+    /// connection-state gauge staying at 0 is still the signal that the
+    /// upstream never came up; what was missing was any way to say *why*.
     #[error("upstream connection could not be established: {detail}")]
-    Connect { detail: String },
+    Connect {
+        reason: ConnectFailureReason,
+        detail: String,
+    },
 
     /// An established connection ended, for one of the four reasons the
     /// reconnect metric counts by.
@@ -64,8 +134,9 @@ pub enum IngressError {
 
 impl IngressError {
     /// A connection that was never established.
-    pub fn connect(detail: impl Into<String>) -> Self {
+    pub fn connect(reason: ConnectFailureReason, detail: impl Into<String>) -> Self {
         Self::Connect {
+            reason,
             detail: detail.into(),
         }
     }

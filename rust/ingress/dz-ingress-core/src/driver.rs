@@ -239,7 +239,8 @@ enum Stop {
 ///   alert should call healthy.
 /// - **`reconnects_total` counts only an established, subscribed connection
 ///   ending.** A connect attempt that never succeeded has no reason in that
-///   label set — see [`IngressError::Connect`].
+///   label set — see [`IngressError::Connect`], which carries a taxonomy of
+///   its own that `connect_failures_total` counts by instead.
 /// - **A parse error ends the payload and nothing else.** It is counted, the
 ///   payload is dropped, the connection stays up, and it is never retried. The
 ///   boundary's rustdoc states that contract; this is where it is kept. Retrying
@@ -330,10 +331,23 @@ impl<'a> Driver<'a> {
 
         match self.input.connect(self.policy.connect_timeout).await {
             Ok(()) => {}
-            Err(error) if error.is_fatal() => return Cycle::Fatal(error),
+            Err(error) if error.is_fatal() => {
+                if let IngressError::Connect { reason, .. } = &error {
+                    self.observer.connect_failure(*reason);
+                }
+                return Cycle::Fatal(error);
+            }
             // Nothing was established, so nothing ended: no `on_disconnected`,
-            // no reconnect counted, and the state gauge is already 0.
-            Err(_) => return Cycle::Retry,
+            // no reconnect counted, and the state gauge is already 0. What is
+            // counted is the failure itself, by reason — a fatal one too, since
+            // the last thing a publisher does before exiting is the number
+            // somebody will want.
+            Err(error) => {
+                if let IngressError::Connect { reason, .. } = &error {
+                    self.observer.connect_failure(*reason);
+                }
+                return Cycle::Retry;
+            }
         }
 
         // A queue per connection, not one reused. What the adapter wants sent is

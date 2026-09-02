@@ -80,7 +80,7 @@ pub use clock::TokioClock;
 pub use clock::{BoxFuture, Clock};
 pub use config::{IngressConfig, Policy};
 pub use driver::{Driver, UpstreamQueue};
-pub use error::{ConfigError, IngressError};
+pub use error::{ConfigError, ConnectFailureReason, IngressError};
 pub use input::{Input, Received, StampSource, UpstreamMessage};
 pub use kind::Kind;
 pub use limit::RateLimiter;

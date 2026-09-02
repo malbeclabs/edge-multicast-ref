@@ -3,6 +3,8 @@
 
 use dz_adapter_core::{AdapterError, DisconnectReason, ParseError};
 
+use crate::ConnectFailureReason;
+
 /// The normative `dz_publisher_ingress_*` families, one method each.
 ///
 /// # Why a trait and not the metrics crate
@@ -83,6 +85,16 @@ pub trait IngressObserver {
     /// set has no value for that, and folding it into one of the four would
     /// make the counter mean two things.
     fn reconnect(&self, reason: DisconnectReason);
+
+    /// `dz_publisher_ingress_connect_failures_total{reason}`.
+    ///
+    /// A connection that was never established, labelled by why — the case
+    /// [`reconnect`](Self::reconnect) deliberately does not cover. The two
+    /// families answer different questions: a reconnect counter rising is a
+    /// flapping session, and this rising with the state gauge stuck at 0 is a
+    /// publisher that never came up, which is the outage that needs the reason
+    /// most and had nowhere to put it.
+    fn connect_failure(&self, reason: ConnectFailureReason);
 
     /// `dz_publisher_ingress_rate_limited_total`.
     ///

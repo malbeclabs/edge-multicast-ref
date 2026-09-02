@@ -1,4 +1,5 @@
-//! The boundary's three taxonomies against the label enums they are recorded as.
+//! The taxonomies of this crate's ingress half against the label enums they
+//! are recorded as.
 //!
 //! [`IngressObserver`](dz_ingress_core::IngressObserver) hands the runtime a
 //! [`DisconnectReason`] and a [`ParseError`], and
@@ -17,6 +18,14 @@
 //! same arity and still disagree about a spelling — and the label value is what
 //! reaches the dashboard.
 //!
+//! One of the four is this crate's own rather than the boundary's:
+//! [`ConnectFailureReason`](dz_ingress_core::ConnectFailureReason) is declared
+//! here because a connect failure is the transport's to observe and an adapter
+//! owns no transport — the boundary must not gain a word no implementor of it
+//! can say. It is mirrored the same way regardless, and in both directions,
+//! because the argument that a mapping nobody compiles is a mapping that
+//! drifts does not care which crate the original lives in.
+//!
 //! The timestamp mapping is here rather than in the boundary crate for the
 //! reason the boundary crate exists: `dz-adapter-core` has one dependency, and
 //! holding its own mirror to the original would mean naming the metrics crate —
@@ -24,7 +33,10 @@
 //! already carries that dev-dependency for the other two.
 
 use dz_adapter_core::{DisconnectReason, ParseError, VenueTimestampKind};
-use dz_publisher_metrics::{ParseErrorReason, ReconnectReason, TimestampKind};
+use dz_ingress_core::ConnectFailureReason;
+use dz_publisher_metrics::{
+    ConnectFailureReason as ConnectFailureLabel, ParseErrorReason, ReconnectReason, TimestampKind,
+};
 
 /// The mapping the runtime performs for
 /// `dz_publisher_ingress_reconnects_total{reason}`.
@@ -129,4 +141,66 @@ fn the_two_timestamp_taxonomies_are_the_same_size() {
     // the list above is the metrics crate's, and the exhaustive match in
     // `declarable` is what holds the two together.
     assert_eq!(VenueTimestampKind::ALL.len(), 4);
+}
+
+/// The mapping the runtime performs for
+/// `dz_publisher_ingress_connect_failures_total{reason}`.
+///
+/// Exhaustive on this crate's enum: an eighth reason the transport can classify
+/// fails to compile until somebody decides which label it is counted under.
+fn as_connect_failure_label(reason: ConnectFailureReason) -> ConnectFailureLabel {
+    match reason {
+        ConnectFailureReason::Refused => ConnectFailureLabel::Refused,
+        ConnectFailureReason::Unresolved => ConnectFailureLabel::Unresolved,
+        ConnectFailureReason::Tls => ConnectFailureLabel::Tls,
+        ConnectFailureReason::Timeout => ConnectFailureLabel::Timeout,
+        ConnectFailureReason::Unauthorized => ConnectFailureLabel::Unauthorized,
+        ConnectFailureReason::RateLimit => ConnectFailureLabel::RateLimit,
+        ConnectFailureReason::Rejected => ConnectFailureLabel::Rejected,
+    }
+}
+
+/// Exhaustive on the metrics crate's enum, in the other direction: an eighth
+/// label there fails to compile until the transport can classify it. A
+/// pre-created child series nothing can ever reach is a panel that stays empty
+/// for a reason nobody can find.
+fn classifiable(reason: ConnectFailureLabel) -> ConnectFailureReason {
+    match reason {
+        ConnectFailureLabel::Refused => ConnectFailureReason::Refused,
+        ConnectFailureLabel::Unresolved => ConnectFailureReason::Unresolved,
+        ConnectFailureLabel::Tls => ConnectFailureReason::Tls,
+        ConnectFailureLabel::Timeout => ConnectFailureReason::Timeout,
+        ConnectFailureLabel::Unauthorized => ConnectFailureReason::Unauthorized,
+        ConnectFailureLabel::RateLimit => ConnectFailureReason::RateLimit,
+        ConnectFailureLabel::Rejected => ConnectFailureReason::Rejected,
+    }
+}
+
+#[test]
+fn every_connect_failure_reason_the_transport_can_classify_is_a_label() {
+    for reason in ConnectFailureReason::ALL {
+        assert_eq!(
+            reason.as_str(),
+            as_connect_failure_label(reason).as_str(),
+            "the two spellings of {reason:?} have diverged"
+        );
+    }
+}
+
+#[test]
+fn every_connect_failure_label_can_be_classified_by_the_transport() {
+    // The metrics crate's own `ALL` is private to it, so the seven are listed
+    // here and `classifiable` is what keeps the list honest.
+    for reason in [
+        ConnectFailureLabel::Refused,
+        ConnectFailureLabel::Unresolved,
+        ConnectFailureLabel::Tls,
+        ConnectFailureLabel::Timeout,
+        ConnectFailureLabel::Unauthorized,
+        ConnectFailureLabel::RateLimit,
+        ConnectFailureLabel::Rejected,
+    ] {
+        assert_eq!(classifiable(reason).as_str(), reason.as_str());
+    }
+    assert_eq!(ConnectFailureReason::ALL.len(), 7);
 }

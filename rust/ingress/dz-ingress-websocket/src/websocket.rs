@@ -4,7 +4,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dz_adapter_core::{ConnectionId, DisconnectReason};
-use dz_ingress_core::{BoxFuture, IngressError, Input, Received, UpstreamMessage};
+use dz_ingress_core::{
+    BoxFuture, ConnectFailureReason, IngressError, Input, Received, UpstreamMessage,
+};
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
 use tokio::time::{timeout, Instant};
@@ -207,10 +209,10 @@ impl Input for WebSocketInput {
             );
             let (stream, _response) = match timeout(budget, attempt).await {
                 Err(_elapsed) => {
-                    return Err(IngressError::connect(format!(
-                        "no handshake with {} within {budget:?}",
-                        self.endpoint
-                    )))
+                    return Err(IngressError::connect(
+                        ConnectFailureReason::Timeout,
+                        format!("no handshake with {} within {budget:?}", self.endpoint),
+                    ))
                 }
                 Ok(Err(error)) => return Err(classify_handshake(&self.endpoint, error)),
                 Ok(Ok(established)) => established,
@@ -423,11 +425,52 @@ fn classify_handshake(endpoint: &str, error: WsError) -> IngressError {
         // A URL that does not parse, or a scheme this client does not speak.
         // Retrying cannot change either.
         WsError::Url(inner) => IngressError::fatal(format!("`{endpoint}` is not usable: {inner}")),
-        WsError::Http(response) => IngressError::connect(format!(
-            "{endpoint} refused the handshake with status {}",
-            response.status()
-        )),
-        other => IngressError::connect(format!("{endpoint}: {other}")),
+        // **The status is classified rather than left in the detail.** A
+        // handshake rejected for credentials is a secret to rotate, one
+        // rejected for too many connections is a limit to respect, and the two
+        // want different people woken up — a distinction that a string nobody
+        // groups by cannot make.
+        WsError::Http(response) => {
+            let status = response.status();
+            let reason = match status.as_u16() {
+                401 | 403 => ConnectFailureReason::Unauthorized,
+                429 => ConnectFailureReason::RateLimit,
+                _ => ConnectFailureReason::Rejected,
+            };
+            IngressError::connect(
+                reason,
+                format!("{endpoint} refused the handshake with status {status}"),
+            )
+        }
+        // Everything else the library reports at connect time: a refused
+        // socket, a name that would not resolve, a TLS negotiation that
+        // failed. `tokio-tungstenite` flattens all three into `Io` and `Tls`
+        // variants whose inner kinds are the only thing that separates them.
+        WsError::Io(inner) => {
+            let reason = match inner.kind() {
+                std::io::ErrorKind::ConnectionRefused => ConnectFailureReason::Refused,
+                std::io::ErrorKind::TimedOut => ConnectFailureReason::Timeout,
+                // A name that would not resolve arrives here on every platform
+                // this runs on, and there is no stable `ErrorKind` for it —
+                // `HostUnreachable` and friends are unstable, so the string is
+                // the only signal. Matched loosely and documented, because the
+                // alternative is counting every socket error as a refusal.
+                _ if inner.to_string().contains("resolve")
+                    || inner.to_string().contains("name") =>
+                {
+                    ConnectFailureReason::Unresolved
+                }
+                _ => ConnectFailureReason::Refused,
+            };
+            IngressError::connect(reason, format!("{endpoint}: {inner}"))
+        }
+        WsError::Tls(inner) => {
+            IngressError::connect(ConnectFailureReason::Tls, format!("{endpoint}: {inner}"))
+        }
+        other => IngressError::connect(
+            ConnectFailureReason::Refused,
+            format!("{endpoint}: {other}"),
+        ),
     }
 }
 
