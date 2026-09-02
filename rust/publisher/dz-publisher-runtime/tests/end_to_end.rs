@@ -20,7 +20,7 @@ use dz_adapter_core::EventSink;
 use dz_edge_refdata::InstrumentDefinition;
 use dz_edge_tob::{Quote, Trade};
 use dz_publisher_runtime::Exit;
-use harness::{feed, harness, FakeAdapter, SOURCE_ID};
+use harness::{depth_feed, feed, harness, FakeAdapter, SOURCE_ID};
 
 // The wire values, transcribed from the top-of-book specification's own tables.
 // `dz-edge-tob` exports each of these as a constant; the literals are written
@@ -67,7 +67,7 @@ fn a_fake_adapters_events_reach_a_fake_datagram_sink_as_datagrams() {
     let _ = h.publisher.tick();
 
     // ---- what reached the mktdata port ----
-    let mktdata = h.mktdata.messages();
+    let mktdata = h.mktdata().messages();
     let quotes: Vec<Quote> = mktdata
         .iter()
         .filter(|(type_id, _)| *type_id == 0x03)
@@ -139,7 +139,7 @@ fn a_fake_adapters_events_reach_a_fake_datagram_sink_as_datagrams() {
     assert_eq!(trade.trade_flags, 0);
 
     // ---- what reached the refdata port ----
-    let refdata = h.refdata.messages();
+    let refdata = h.refdata().messages();
     let definitions: Vec<InstrumentDefinition> = refdata
         .iter()
         .filter(|(type_id, _)| *type_id == 0x02)
@@ -164,21 +164,21 @@ fn a_fake_adapters_events_reach_a_fake_datagram_sink_as_datagrams() {
     // ---- and the datagrams themselves ----
     // Numbered densely from zero in the era the store handed out, per channel
     // instance, on each port role independently.
-    for (index, (sequence, era)) in h.mktdata.headers().iter().enumerate() {
+    for (index, (sequence, era)) in h.mktdata().headers().iter().enumerate() {
         assert_eq!(*sequence, index as u64);
         assert_eq!(*era, 2);
     }
-    for (index, (sequence, era)) in h.refdata.headers().iter().enumerate() {
+    for (index, (sequence, era)) in h.refdata().headers().iter().enumerate() {
         assert_eq!(*sequence, index as u64);
         assert_eq!(*era, 2);
     }
     // Under the mandated cap, which is the builder's and not a configured
     // value: 1,232 bytes, to leave room for GRE encapsulation.
     for datagram in h
-        .mktdata
+        .mktdata()
         .datagrams()
         .iter()
-        .chain(h.refdata.datagrams().iter())
+        .chain(h.refdata().datagrams().iter())
     {
         assert!(datagram.len() <= 1232, "{} bytes", datagram.len());
     }
@@ -243,7 +243,7 @@ fn a_refused_scaling_drops_one_message_and_leaves_the_publisher_running() {
     assert_eq!(h.publisher.refusals().too_precise, 1);
     assert_eq!(h.publisher.refusals().total(), 1);
     assert!(
-        !h.mktdata.type_ids().contains(&0x03),
+        !h.mktdata().type_ids().contains(&0x03),
         "a quote the exponent cannot state exactly reached the wire"
     );
 
@@ -251,7 +251,7 @@ fn a_refused_scaling_drops_one_message_and_leaves_the_publisher_running() {
     // instrument's wrong exponent must not darken a feed.
     h.publisher.event(harness::quote(instrument, 2));
     let quotes: Vec<Quote> = h
-        .mktdata
+        .mktdata()
         .messages()
         .iter()
         .filter(|(type_id, _)| *type_id == 0x03)
@@ -262,26 +262,27 @@ fn a_refused_scaling_drops_one_message_and_leaves_the_publisher_running() {
 }
 
 #[test]
-fn a_depth_event_is_counted_and_dropped_without_spending_a_sequence_number() {
-    // This build has no feed to carry a depth message, and the *order* of the
-    // two things it does about that is the point: counted and dropped **before**
-    // the lowering, so no `Per-Instrument Seq` is stamped. A number spent on a
-    // message that never reached the wire is a gap every subscriber reads as
-    // packet loss.
+fn an_event_no_enabled_feed_carries_is_dropped_without_spending_a_sequence_number() {
+    // This publisher emits top-of-book only, so a depth event has nowhere to
+    // go — and the *order* of the two things it does about that is the point:
+    // counted and dropped **before** the lowering, so no `Per-Instrument Seq`
+    // is stamped. A number spent on a message that never reached the wire is a
+    // gap every subscriber reads as packet loss.
     let mut h = harness(feed());
     let mut adapter = FakeAdapter::new(&["A-B"]);
     h.publisher.poll_listings(&mut adapter);
     let instrument = adapter.handles()[0];
 
     for step in 0..4 {
-        h.publisher.event(harness::level(instrument, step));
+        h.publisher.event(harness::bid_level(instrument, step));
     }
-    assert_eq!(h.publisher.unroutable(), 4);
+    h.publisher.event(harness::clear(instrument, 5));
+    assert_eq!(h.publisher.unroutable(), 5);
     assert_eq!(h.publisher.refusals().total(), 0, "not a lowering refusal");
-    assert!(h.mktdata.datagrams().is_empty());
+    assert!(h.mktdata().datagrams().is_empty());
 
     // The counter the depth lowering carries has not moved, which is the thing
-    // a later feed inherits.
+    // a depth feed would inherit.
     assert_eq!(
         h.publisher
             .depth_lowering_mut()
@@ -289,6 +290,22 @@ fn a_depth_event_is_counted_and_dropped_without_spending_a_sequence_number() {
             .last(instrument),
         0
     );
+}
+
+#[test]
+fn a_quote_has_nowhere_to_go_on_a_publisher_that_emits_only_depth() {
+    // The same rule from the other side. A top-of-book event on a depth-only
+    // publisher is not a defect in the adapter — a venue's adapter emits what
+    // its upstream says, and which feeds this process publishes is
+    // configuration — so it is counted and dropped rather than refused loudly.
+    let mut h = harness(depth_feed());
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+
+    h.publisher.event(harness::quote(instrument, 1));
+    assert_eq!(h.publisher.unroutable(), 1);
+    assert!(!h.mktdata().type_ids().contains(&0x03));
 }
 
 #[test]
@@ -312,7 +329,7 @@ fn an_event_naming_a_withdrawn_instrument_is_refused_rather_than_republished() {
 
     h.publisher.event(harness::quote(withdrawn, 9));
     assert_eq!(h.publisher.refusals().unknown_instrument, 1);
-    assert!(!h.mktdata.type_ids().contains(&0x03));
+    assert!(!h.mktdata().type_ids().contains(&0x03));
 }
 
 #[test]
@@ -323,5 +340,5 @@ fn a_signal_shuts_the_composed_publisher_down_cleanly() {
     h.publisher.event(harness::quote(adapter.handles()[0], 1));
     let teardown = h.publisher.shut_down(Exit::Signal);
     assert_eq!(teardown.steps().len(), 6);
-    assert_eq!(h.mktdata.type_ids().last(), Some(&0x06));
+    assert_eq!(h.mktdata().type_ids().last(), Some(&0x06));
 }

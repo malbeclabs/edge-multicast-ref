@@ -4,18 +4,41 @@
 //! injected [`Clock`]. That is what makes the wiring testable: a normalized
 //! event goes in through [`EventSink`], a datagram comes out of a
 //! [`DatagramSink`](dz_publisher_egress::DatagramSink), and there is no socket,
-//! no filesystem, no privilege and no sleep anywhere between. [`crate::run()`] is
-//! the layer that supplies the real implementations and the waiting; nothing it
-//! adds decides anything.
+//! no filesystem, no privilege and no sleep anywhere between. [`crate::run()`]
+//! is the layer that supplies the real implementations and the waiting; nothing
+//! it adds decides anything.
 //!
 //! # What this type owns, and what it only holds
 //!
-//! It owns the routing — which lowering an event goes through and which port
-//! role the result is pushed onto — the cadences, the guards, and the order of
-//! the teardown. It owns none of the things the crates it holds own: not the
-//! `Instrument ID`, not the exponents, not `Update Flags`, not `Action`, not
-//! `Per-Instrument Seq`, not `Sequence Number`, not `Reset Count`, not the
-//! datagram cap, and not one metric name.
+//! It owns the routing — which lowering an event goes through, which feed
+//! carries the result, and which port role it is pushed onto — the cadences,
+//! the guards, and the order of the teardown. It owns none of the things the
+//! crates it holds own: not the `Instrument ID`, not the exponents, not
+//! `Update Flags`, not `Action`, not `Per-Instrument Seq`, not `Sequence
+//! Number`, not `Reset Count`, not the datagram cap, and not one metric name.
+//!
+//! # The routing, and why `Trade` is lowered once
+//!
+//! | Event | Top-of-book feed | Market-by-price feed |
+//! |---|---|---|
+//! | `Quote` | `0x03` on mktdata | — |
+//! | `Trade` | `0x04` on mktdata | `0x04` on mktdata |
+//! | `Level` | — | `0x40` on mktdata |
+//! | `Clear` | — | `0x41` on mktdata |
+//! | a pulled snapshot | — | `0x20`/`0x42`/`0x22` on snapshot |
+//!
+//! `Trade` is the row that needs an argument. The wire's cross-specification
+//! policy requires `0x04` to be **byte-for-byte identical** across a venue's
+//! sibling feeds, and in one existing publisher that obligation is held by a
+//! doc comment across two separate encoder implementations, checked by hand.
+//! `dz-publisher-lowering` made it one function; this makes it one *value*. The
+//! trade is lowered once and the same `Trade` is handed to both send paths, so
+//! the two are not two things that agree — they are one thing, and there is no
+//! second call site to drift.
+//!
+//! An event no enabled feed carries — a `Quote` on a publisher that emits only
+//! depth, or a variant a later boundary release adds — is counted and dropped
+//! **before** it is lowered. See [`Publisher::unroutable`].
 //!
 //! # The instrument table is borrowed per call, and that is the whole reason
 //!
@@ -26,19 +49,22 @@
 //! admit an instrument. For [`DepthLowering`] it is worse than awkward: it
 //! carries `Per-Instrument Seq`, and rebuilding it to release a borrow would
 //! restart that sequence, which no subscriber can tell apart from a channel
-//! reset. So the registry owns the table, this type holds the lowerings for the
+//! reset. So the registry owns the table, this type holds both lowerings for the
 //! life of the era, and the table is passed at each call.
 
 use std::sync::Arc;
 
-use dz_adapter_core::{Adapter, Event, EventSink};
+use dz_adapter_core::{Adapter, Event, EventSink, InstrumentRef};
 use dz_edge_core::fixed_point::ScaleError;
-use dz_edge_refdata::InstrumentDefinition;
-use dz_publisher_lowering::{DepthLowering, Lowering, LoweringError, SourceId};
+use dz_edge_mbp::MarketByPrice;
+use dz_edge_refdata::{InstrumentDefinition, ManifestSummary};
+use dz_edge_tob::TopOfBook;
+use dz_publisher_lowering::{DepthLowering, Lowering, LoweringError, Snapshot, SourceId};
 use dz_publisher_metrics::{EgressMessageType, PublisherMetrics, RefdataLoadErrorReason};
 use dz_publisher_refdata::{Counts, Registry, StateStore};
 
 use crate::clock::Clock;
+use crate::config::EmittedFeed;
 use crate::guard::{ConsistencyGuard, Exit, IdleGuard, Inconsistency};
 use crate::pipeline::FeedPipeline;
 
@@ -52,6 +78,88 @@ use crate::pipeline::FeedPipeline;
 /// comparison — so a poll that changes nothing writes nothing and touches no
 /// disk.
 pub const LISTING_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The send paths this publisher operates, one per enabled `[[feed]]` block.
+///
+/// Two typed fields rather than a collection, because
+/// [`FeedPipeline`] is generic over the wire feed — `Magic` belongs to the feed
+/// — so the two are different types and a `Vec` of them would need dynamic
+/// dispatch on the datagram path to buy nothing. Every field is an `Option`
+/// because a publisher emits one feed or several, which is what `[[feed]]`
+/// being an array is for.
+///
+/// A publisher with neither is refused before this type is built; see
+/// [`crate::StartupError::NoEnabledFeed`].
+#[derive(Default)]
+pub struct Feeds {
+    pub top_of_book: Option<FeedPipeline<TopOfBook>>,
+    pub market_by_price: Option<FeedPipeline<MarketByPrice>>,
+}
+
+impl Feeds {
+    /// Every enabled feed's `Channel ID`.
+    #[must_use]
+    pub fn channel_ids(&self) -> Vec<u8> {
+        let mut ids: Vec<u8> = [
+            self.top_of_book.as_ref().map(FeedPipeline::channel_id),
+            self.market_by_price.as_ref().map(FeedPipeline::channel_id),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    /// A dropped fan-out member whose failure darkens this publisher, on any
+    /// feed and any port role.
+    #[must_use]
+    pub fn dark_transmitter(&self) -> Option<String> {
+        self.top_of_book
+            .as_ref()
+            .and_then(FeedPipeline::dark_transmitter)
+            .or_else(|| {
+                self.market_by_price
+                    .as_ref()
+                    .and_then(FeedPipeline::dark_transmitter)
+            })
+            .map(str::to_owned)
+    }
+}
+
+/// Why a pulled snapshot did not reach the wire.
+///
+/// Four cases, because the caller does different things with them. An adapter
+/// that is not ready is a slot to skip and come back to — one dormant
+/// instrument rather than a restart loop — and it is deliberately not counted
+/// as a lowering refusal, because an operator acts differently on *this
+/// instrument's exponent is wrong* and *this instrument's book is still warming
+/// up*. Collapsing the two would put the second in the bucket that sends
+/// someone to look at reference data.
+#[derive(Debug, thiserror::Error)]
+pub enum SnapshotError {
+    /// This publisher emits no feed with a snapshot port role.
+    ///
+    /// A caller's mistake rather than a runtime condition: a top-of-book
+    /// publisher has no book state to serve and no port to serve it on.
+    #[error("this publisher emits no feed that carries a snapshot port role")]
+    NoDepthFeed,
+
+    /// The adapter could not answer: a book that has not bootstrapped, or a
+    /// handle it does not hold.
+    #[error(transparent)]
+    Adapter(#[from] dz_adapter_core::AdapterError),
+
+    /// The framing refused it: an unknown handle, or the first level whose
+    /// price or quantity the instrument's exponents cannot state exactly.
+    #[error(transparent)]
+    Lowering(#[from] LoweringError),
+
+    /// The snapshot framed and did not send.
+    #[error(transparent)]
+    Egress(#[from] dz_publisher_egress::EgressError),
+}
 
 /// Lowering refusals, by the reason each is distinguishable under.
 ///
@@ -134,28 +242,6 @@ impl Refusals {
     }
 }
 
-/// Why a pulled snapshot did not frame.
-///
-/// Two cases and not one, because the caller does opposite things with them. An
-/// adapter that is not ready is a slot to skip and come back to — one dormant
-/// instrument rather than a restart loop — and it is deliberately not counted
-/// as a lowering refusal, because an operator acts differently on *this
-/// instrument's exponent is wrong* and *this instrument's book is still warming
-/// up*. Collapsing the two would put the second in the bucket that sends
-/// someone to look at reference data.
-#[derive(Debug, thiserror::Error)]
-pub enum SnapshotError {
-    /// The adapter could not answer: a book that has not bootstrapped, or a
-    /// handle it does not hold.
-    #[error(transparent)]
-    Adapter(#[from] dz_adapter_core::AdapterError),
-
-    /// The framing refused it: an unknown handle, or the first level whose
-    /// price or quantity the instrument's exponents cannot state exactly.
-    #[error(transparent)]
-    Lowering(#[from] LoweringError),
-}
-
 /// One step of the teardown, in the order it happens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TeardownStep {
@@ -163,10 +249,10 @@ pub enum TeardownStep {
     IngressStopped,
     /// `Valid` is 0 and nothing further is admitted.
     AdmissionsClosed,
-    /// The last `ManifestSummary`, carrying `Valid = 0`, is on the refdata
-    /// port.
+    /// The last `ManifestSummary`, carrying `Valid = 0`, is on every feed's
+    /// refdata port.
     FinalManifestSent,
-    /// `EndOfSession` is on the mktdata port.
+    /// `EndOfSession` is on every feed's mktdata port.
     EndOfSessionSent,
     /// Every port role's open datagram has been sent.
     PortsFlushed,
@@ -222,13 +308,10 @@ pub struct Publisher<S: StateStore, K: Clock + Clone> {
     clock: K,
     lowering: Lowering,
     /// Held for the life of the era and **never rebuilt**, because it carries
-    /// `Per-Instrument Seq`. Nothing in this build can put a depth message on
-    /// the wire — see [`crate::StartupError::UnsupportedFeedSpec`] — and it is
-    /// held anyway so that the one thing that must not happen when depth lands
-    /// cannot: rebuilding it mid-era restarts a sequence a subscriber reads as a
-    /// channel reset.
+    /// `Per-Instrument Seq`. Rebuilding it mid-era restarts a sequence a
+    /// subscriber reads as a channel reset.
     depth: DepthLowering,
-    feed: FeedPipeline,
+    feeds: Feeds,
     idle: IdleGuard,
     consistency: ConsistencyGuard,
     /// One buffer for the life of the process; `definition_tick` clears and
@@ -245,21 +328,30 @@ pub struct Publisher<S: StateStore, K: Clock + Clone> {
 }
 
 impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
-    /// Compose a publisher over an opened reference-data registry and a built
-    /// send path.
+    /// Compose a publisher over an opened reference-data registry and the built
+    /// send paths.
     ///
     /// Both are arguments and neither is opened here, which is the whole reason
     /// the composition is testable: the registry arrives having already claimed
     /// its state directory (or a memory store standing in for one), and the send
-    /// path arrives holding fan-outs whose members may be recording sinks rather
+    /// paths arrive holding fan-outs whose members may be recording sinks rather
     /// than sockets.
+    ///
+    /// **One registry serves every feed**, and that is right rather than a
+    /// simplification. `Instrument ID` identity is the one thing there can only
+    /// be one of, so two registries would be two ID spaces and a published ID
+    /// would resolve to two different definitions. `Manifest Seq` is a property
+    /// of the published set, which is the same set on every feed. And the
+    /// manifest's own redundant `Channel ID` field is stamped by the builder
+    /// from the datagram that frames it, so one composed manifest is truthful
+    /// on every feed's refdata port.
     #[must_use]
     pub fn new(
         metrics: Arc<PublisherMetrics>,
         refdata: Registry<S, K>,
         clock: K,
         source_id: SourceId,
-        feed: FeedPipeline,
+        feeds: Feeds,
         idle_guard: std::time::Duration,
     ) -> Self {
         Self {
@@ -268,7 +360,7 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
             clock,
             lowering: Lowering::new(source_id),
             depth: DepthLowering::new(source_id),
-            feed,
+            feeds,
             idle: IdleGuard::new(idle_guard),
             consistency: ConsistencyGuard::new(),
             definitions: Vec::new(),
@@ -290,11 +382,11 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
     /// Drain the adapter's listings if the poll is due.
     ///
     /// The adapter is an argument rather than a field, for the same reason the
-    /// instrument table is an argument to the lowering: [`dz_ingress_core::Driver`]
-    /// holds the adapter mutably for as long as it is driving, so a publisher
-    /// that also held one could never poll. Passing it in at the two call sites
-    /// that need it — this one and [`Self::snapshot`] — is what lets the driver
-    /// keep its borrow.
+    /// instrument table is an argument to the lowering:
+    /// [`dz_ingress_core::Driver`] holds the adapter mutably for as long as it
+    /// is driving, so a publisher that also held one could never poll. Passing
+    /// it in at the two call sites that need it — this one and
+    /// [`Self::snapshot`] — is what lets the driver keep its borrow.
     ///
     /// Returns whether the listings were drained.
     pub fn poll_listings(&mut self, adapter: &mut dyn Adapter) -> bool {
@@ -326,29 +418,25 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
     /// [`DefinitionPacer`](dz_publisher_refdata::DefinitionPacer) does too, so a
     /// runtime ticking every 10ms and one ticking every 250ms lap the definition
     /// set in the same time and neither can be made to burst by ticking slowly.
+    ///
+    /// The definition tick is drained **once** and packed onto every feed's
+    /// refdata port. Draining per feed would ask the pacer for the lap's debt
+    /// twice and emit twice as much of the set per tick, which is the burst the
+    /// pacer exists to prevent arriving through the caller.
     #[must_use]
     pub fn tick(&mut self) -> Option<Exit> {
         let now_mono = dz_publisher_refdata::Clock::monotonic_ns(&self.clock);
         let now_unix = self.clock.unix_ns();
 
-        if self.feed.heartbeat_due(now_mono) {
-            let _ = self.feed.send_heartbeat(now_mono, now_unix);
-        }
-
         self.refdata.definition_tick(&mut self.definitions);
-        for definition in &self.definitions {
-            let _ = self.feed.pack_definition(definition, now_unix);
-        }
+        let manifest = self.refdata.manifest();
 
-        if self.feed.manifest_due(now_mono) {
-            let manifest = self.refdata.manifest();
-            let _ = self.feed.send_manifest(&manifest, now_mono, now_unix);
+        if let Some(pipeline) = self.feeds.top_of_book.as_mut() {
+            tick_pipeline(pipeline, &self.definitions, &manifest, now_mono, now_unix);
         }
-
-        // After the packing, so a definition tick that did not fill a datagram
-        // still reaches the wire this tick rather than waiting for the one that
-        // does. The refdata port is where the pacing already bounds the volume.
-        let _ = self.feed.flush(now_mono, now_unix);
+        if let Some(pipeline) = self.feeds.market_by_price.as_mut() {
+            tick_pipeline(pipeline, &self.definitions, &manifest, now_mono, now_unix);
+        }
 
         self.forward_counts();
         self.check_consistency();
@@ -362,36 +450,41 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
             .or_else(|| self.idle.check(now_mono))
     }
 
-    /// Write one instrument's book to the snapshot port.
+    /// Pull one instrument's book from the adapter, frame it, and send it on the
+    /// snapshot port role.
     ///
-    /// **Not wired to a cadence, and the reason is a missing key rather than a
-    /// missing implementation.** The snapshot is pulled because the cadence, the
-    /// rotation across instruments and the framing are the runtime's while the
-    /// book is the adapter's — and the design's configuration names
-    /// `snapshot_port` and no snapshot interval, so there is nothing to pace
-    /// against. Inventing a key here would be the one thing this crate is not
-    /// allowed to do.
+    /// **Pulled rather than pushed**, and the pacing is the caller's. The
+    /// cadence, the rotation across instruments and the framing belong to the
+    /// runtime because they are what a subscriber's recovery depends on; the
+    /// book belongs to the adapter because it is the venue's microstructure. So
+    /// the runtime asks — and *when* it asks is deliberately not decided here,
+    /// because the design's configuration names `[[feed]] snapshot_port` and no
+    /// snapshot interval. Inventing a key is the one thing this crate must not
+    /// do, so this method is called by whoever holds a policy and
+    /// [`crate::run()`] does not call it. See the crate documentation.
     ///
-    /// It is unreachable for a second reason as well: the three snapshot message
-    /// types have no `EgressMessageType` to be counted under, exactly as the
-    /// depth messages do not. So this method takes the framer as far as the
-    /// lowering goes and hands the result back rather than sending it, which
-    /// leaves the hole one function wide and visible.
+    /// Returns the snapshot as it went out, so a caller can log the level count
+    /// and a test can assert the framing.
     ///
     /// # Errors
     ///
-    /// [`SnapshotError`], which keeps the adapter's own refusal apart from the
-    /// framing's. Nothing partial is returned either way: an incomplete
-    /// snapshot is worse than none, because a subscriber cannot tell a refused
-    /// level from a lost one.
+    /// [`SnapshotError`], which keeps four causes apart. Nothing partial is
+    /// framed: an incomplete snapshot is worse than none, because a subscriber
+    /// cannot tell a refused level from a lost one.
     pub fn snapshot(
         &mut self,
         adapter: &dyn Adapter,
-        instrument: dz_adapter_core::InstrumentRef,
+        instrument: InstrumentRef,
         depth_bound: u32,
-    ) -> Result<dz_publisher_lowering::Snapshot, SnapshotError> {
+    ) -> Result<Snapshot, SnapshotError> {
         let now_unix = self.clock.unix_ns();
-        let anchor = self.feed.mktdata_sequence().unwrap_or(0);
+        let Some(pipeline) = self.feeds.market_by_price.as_mut() else {
+            return Err(SnapshotError::NoDepthFeed);
+        };
+        // The point in the live stream this book state is true as of, which is
+        // what tells a subscriber which live messages to apply after it and
+        // which to discard.
+        let anchor = pipeline.mktdata_sequence().unwrap_or(0);
         let mut framer = self.depth.open_snapshot(
             self.refdata.instruments(),
             instrument,
@@ -402,7 +495,13 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
         // The adapter's refusal is carried through rather than folded into a
         // lowering refusal; see `SnapshotError`.
         adapter.snapshot(instrument, &mut framer)?;
-        Ok(framer.finish()?)
+        let snapshot = framer.finish()?;
+        self.feeds
+            .market_by_price
+            .as_mut()
+            .expect("checked above")
+            .send_snapshot(&snapshot, now_unix)?;
+        Ok(snapshot)
     }
 
     /// Shut down, in the order below, and record the exit.
@@ -425,11 +524,17 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
     ///    non-authoritative set while mktdata is still live, which is exactly
     ///    the truth.
     /// 4. **`EndOfSession` goes out on mktdata.** The terminal statement for the
-    ///    channel, and therefore last: anything after it contradicts it.
-    /// 5. **Both port roles flush.** A datagram left open holds a number that
+    ///    channel, and therefore last: anything after it contradicts it. On
+    ///    every feed, because every feed's mktdata channel is ending.
+    /// 5. **Every port role flushes.** A datagram left open holds a number that
     ///    has been assigned, and abandoning it is a gap for no reason.
     /// 6. **The exit is recorded**, so that `dz_publisher_exit_reason_total`
     ///    carries the reason before the last scrape.
+    ///
+    /// There is deliberately no *final snapshot* step. A snapshot describes a
+    /// book a subscriber is about to be told has ended, and sending one on the
+    /// way down would spend a snapshot series' numbers to describe state nobody
+    /// can use.
     ///
     /// Releasing the sockets and the state directory is not a step here. Both
     /// are released by dropping this value, which is what also happens when the
@@ -445,13 +550,28 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
         steps.push(TeardownStep::AdmissionsClosed);
 
         let manifest = self.refdata.manifest();
-        let _ = self.feed.send_manifest(&manifest, now_mono, now_unix);
+        if let Some(pipeline) = self.feeds.top_of_book.as_mut() {
+            let _ = pipeline.send_manifest(&manifest, now_mono, now_unix);
+        }
+        if let Some(pipeline) = self.feeds.market_by_price.as_mut() {
+            let _ = pipeline.send_manifest(&manifest, now_mono, now_unix);
+        }
         steps.push(TeardownStep::FinalManifestSent);
 
-        let _ = self.feed.send_end_of_session(now_mono, now_unix);
+        if let Some(pipeline) = self.feeds.top_of_book.as_mut() {
+            let _ = pipeline.send_end_of_session(now_mono, now_unix);
+        }
+        if let Some(pipeline) = self.feeds.market_by_price.as_mut() {
+            let _ = pipeline.send_end_of_session(now_mono, now_unix);
+        }
         steps.push(TeardownStep::EndOfSessionSent);
 
-        let _ = self.feed.flush(now_mono, now_unix);
+        if let Some(pipeline) = self.feeds.top_of_book.as_mut() {
+            let _ = pipeline.flush(now_unix);
+        }
+        if let Some(pipeline) = self.feeds.market_by_price.as_mut() {
+            let _ = pipeline.flush(now_unix);
+        }
         steps.push(TeardownStep::PortsFlushed);
 
         self.forward_counts();
@@ -467,14 +587,15 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
         self.refusals
     }
 
-    /// Events this build had no feed to carry.
+    /// Events no enabled feed carried.
     ///
-    /// Depth events, and any event variant a later boundary release adds that
-    /// this build does not know. **Refused before the lowering rather than
-    /// after**, which is the load-bearing part: lowering a depth event stamps
-    /// `Per-Instrument Seq`, and a number spent on a message that never reached
-    /// the wire is a gap every subscriber reads as packet loss. See
-    /// [`crate::StartupError::UnsupportedFeedSpec`] for why there is no feed.
+    /// A `Quote` on a publisher that emits only depth, a `Level` on one that
+    /// emits only top-of-book, or an event variant a later boundary release
+    /// adds that this build does not know. **Refused before the lowering rather
+    /// than after**, which is the load-bearing part for the depth path:
+    /// lowering a `Level` stamps `Per-Instrument Seq`, and a number spent on a
+    /// message that never reached the wire is a gap every subscriber reads as
+    /// packet loss.
     #[must_use]
     pub const fn unroutable(&self) -> u64 {
         self.unroutable
@@ -486,10 +607,10 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
         &self.refdata
     }
 
-    /// The send path, for a diagnostic and for a test.
+    /// The send paths, for a diagnostic and for a test.
     #[must_use]
-    pub const fn feed(&self) -> &FeedPipeline {
-        &self.feed
+    pub const fn feeds(&self) -> &Feeds {
+        &self.feeds
     }
 
     /// The metric registry every crate below this one records through.
@@ -546,18 +667,19 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
 
         let published = i64::try_from(self.refdata.published()).unwrap_or(i64::MAX);
         refdata.set_instruments_current(published);
-        refdata.set_manifest_seq(
-            self.feed.channel_id(),
-            u64::from(self.refdata.manifest_seq()),
-        );
-        refdata.set_manifest_valid(self.feed.channel_id(), self.refdata.is_valid());
+        // Per `Channel ID`, because the manifest is what a subscriber to that
+        // channel reconciles against — and every feed advertises the same
+        // published set, which is why one registry serves them all.
+        for channel_id in self.feeds.channel_ids() {
+            refdata.set_manifest_seq(channel_id, u64::from(self.refdata.manifest_seq()));
+            refdata.set_manifest_valid(channel_id, self.refdata.is_valid());
+        }
         self.metrics.book().set_instruments_published(published);
     }
 
     /// Read the two states the publisher cannot recover from in place.
     fn check_consistency(&mut self) {
-        if let Some(sink) = self.feed.dark_transmitter() {
-            let sink = sink.to_owned();
+        if let Some(sink) = self.feeds.dark_transmitter() {
             self.consistency.found(Inconsistency::EgressDark { sink });
         }
         if let Some(fault) = self.refdata.fault() {
@@ -582,6 +704,59 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
             .process()
             .set_idle_guard_last_update(unix_seconds(now_unix_ns));
     }
+}
+
+/// Time an encode and a send, and record it under the message type's own label.
+///
+/// A free function taking the registry rather than a method taking `&self`, so
+/// that the borrow it needs is of one field: the closure it wraps holds
+/// `&mut self.feeds`, and a method would borrow the whole of `self` alongside
+/// it.
+///
+/// Two clock reads per message, on the hot path, and they are worth it: this is
+/// the only normative latency family the runtime can honestly observe — the two
+/// that measure from a payload's arrival cannot be reached from `EventSink` at
+/// all — and a family nobody ever writes to is indistinguishable from a
+/// publisher that has stopped.
+fn timed<T>(
+    metrics: &PublisherMetrics,
+    message_type: EgressMessageType,
+    send: impl FnOnce() -> T,
+) -> T {
+    let started = std::time::Instant::now();
+    let outcome = send();
+    metrics
+        .latency()
+        .observe_encode_duration(message_type, started.elapsed().as_secs_f64());
+    outcome
+}
+
+/// Everything one feed's send path owes a tick.
+///
+/// A free function generic over the feed, because the two send paths are
+/// different types and this is the same behaviour for both. The definitions and
+/// the manifest arrive as arguments rather than being drained here, so that the
+/// pacer is asked once per tick however many feeds are enabled.
+fn tick_pipeline<F: EmittedFeed>(
+    pipeline: &mut FeedPipeline<F>,
+    definitions: &[InstrumentDefinition],
+    manifest: &ManifestSummary,
+    now_mono_ns: u64,
+    now_unix_ns: u64,
+) {
+    if pipeline.heartbeat_due(now_mono_ns) {
+        let _ = pipeline.send_heartbeat(now_mono_ns, now_unix_ns);
+    }
+    for definition in definitions {
+        let _ = pipeline.pack_definition(definition, now_unix_ns);
+    }
+    if pipeline.manifest_due(now_mono_ns) {
+        let _ = pipeline.send_manifest(manifest, now_mono_ns, now_unix_ns);
+    }
+    // After the packing, so a definition tick that did not fill a datagram
+    // still reaches the wire this tick rather than waiting for the one that
+    // does. The refdata port is where the pacing already bounds the volume.
+    let _ = pipeline.flush(now_unix_ns);
 }
 
 impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
@@ -612,6 +787,13 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                 bid,
                 ask,
             } => {
+                // Refused before the lowering when no feed carries it, which
+                // costs nothing here and is the same rule the depth arms below
+                // need for a stronger reason.
+                let Some(_) = self.feeds.top_of_book.as_ref() else {
+                    self.unroutable += 1;
+                    return;
+                };
                 let lowered = lowering.lower_quote(
                     self.refdata.instruments(),
                     instrument,
@@ -621,12 +803,13 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                 );
                 match lowered {
                     Ok(quote) => {
-                        let started = std::time::Instant::now();
-                        let sent = self.feed.send_quote(&quote, now_mono, now_unix);
-                        self.metrics.latency().observe_encode_duration(
-                            EgressMessageType::Quote,
-                            started.elapsed().as_secs_f64(),
-                        );
+                        let sent = timed(&self.metrics, EgressMessageType::Quote, || {
+                            self.feeds
+                                .top_of_book
+                                .as_mut()
+                                .expect("checked above")
+                                .send_quote(&quote, now_mono, now_unix)
+                        });
                         if sent.is_ok() {
                             self.published(now_mono, now_unix);
                         }
@@ -657,13 +840,66 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                     flags,
                 );
                 match lowered {
+                    // **One value, both feeds.** The wire requires `0x04` to be
+                    // byte-for-byte identical across a venue's sibling feeds,
+                    // and this is the mechanism: there is one lowered trade and
+                    // no second call site to drift. A trade also stamps no
+                    // `Per-Instrument Seq` — the message has no such field, and
+                    // it is not a book mutation.
                     Ok(trade) => {
-                        let started = std::time::Instant::now();
-                        let sent = self.feed.send_trade(&trade, now_mono, now_unix);
-                        self.metrics.latency().observe_encode_duration(
-                            EgressMessageType::Trade,
-                            started.elapsed().as_secs_f64(),
-                        );
+                        let mut reached = false;
+                        timed(&self.metrics, EgressMessageType::Trade, || {
+                            if let Some(pipeline) = self.feeds.top_of_book.as_mut() {
+                                reached |= pipeline.send_trade(&trade, now_mono, now_unix).is_ok();
+                            }
+                            if let Some(pipeline) = self.feeds.market_by_price.as_mut() {
+                                reached |= pipeline.send_trade(&trade, now_mono, now_unix).is_ok();
+                            }
+                        });
+                        if reached {
+                            self.published(now_mono, now_unix);
+                        }
+                    }
+                    Err(error) => self.refusals.record(error),
+                }
+            }
+
+            Event::Level {
+                instrument,
+                source_ts_ns,
+                side,
+                px,
+                qty,
+                order_count,
+                presence,
+            } => {
+                // Before the lowering, and here that is the load-bearing order:
+                // `lower_level` stamps `Per-Instrument Seq`, and a number spent
+                // on a message that no feed will carry is a gap every
+                // subscriber reads as packet loss.
+                let Some(_) = self.feeds.market_by_price.as_ref() else {
+                    self.unroutable += 1;
+                    return;
+                };
+                let lowered = self.depth.lower_level(
+                    self.refdata.instruments(),
+                    instrument,
+                    source_ts_ns,
+                    side,
+                    px,
+                    qty,
+                    order_count,
+                    presence,
+                );
+                match lowered {
+                    Ok(level) => {
+                        let sent = timed(&self.metrics, EgressMessageType::LevelUpdate, || {
+                            self.feeds
+                                .market_by_price
+                                .as_mut()
+                                .expect("checked above")
+                                .send_level(&level, now_mono, now_unix)
+                        });
                         if sent.is_ok() {
                             self.published(now_mono, now_unix);
                         }
@@ -672,11 +908,41 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                 }
             }
 
-            // Depth, and any variant a later boundary release adds. Counted and
-            // dropped **without being lowered**, because lowering one stamps
-            // `Per-Instrument Seq` and a number spent on a message that never
-            // reached the wire is a gap every subscriber reads as packet loss.
-            // See `Publisher::unroutable`.
+            Event::Clear {
+                instrument,
+                source_ts_ns,
+                scope,
+            } => {
+                let Some(_) = self.feeds.market_by_price.as_ref() else {
+                    self.unroutable += 1;
+                    return;
+                };
+                let lowered = self.depth.lower_clear(
+                    self.refdata.instruments(),
+                    instrument,
+                    source_ts_ns,
+                    scope,
+                );
+                match lowered {
+                    Ok(clear) => {
+                        let sent = timed(&self.metrics, EgressMessageType::BookClear, || {
+                            self.feeds
+                                .market_by_price
+                                .as_mut()
+                                .expect("checked above")
+                                .send_book_clear(&clear, now_mono, now_unix)
+                        });
+                        if sent.is_ok() {
+                            self.published(now_mono, now_unix);
+                        }
+                    }
+                    Err(error) => self.refusals.record(error),
+                }
+            }
+
+            // A variant a later boundary release adds — the market-by-order
+            // ones, when `dz-edge-mbo` lands. Counted and dropped without being
+            // lowered, for the same reason the depth arms check first.
             _ => self.unroutable += 1,
         }
     }

@@ -432,6 +432,36 @@ the audit's own failure, as a test.
 > copy, which the second copy's own doc named as the point at which it needs one
 > home.
 
+> **Depth followed, once the labels existed.** `EgressMessageType` gained its
+> five depth types in task 6, which removed the only thing keeping
+> `spec = "market-by-price"` a startup error. The runtime now lowers
+> `Event::Level` and `Event::Clear`, carries three port roles, and sends a
+> framed snapshot. 94 tests.
+>
+> **A publisher can emit both feeds from one process, and that is where the
+> `0x04` obligation stops being a doc comment.** The trade is lowered **once**
+> and the same value is handed to both send paths — which is stronger than task
+> 5's "both channels delegate to one function", because there is no second call
+> site at all. One registry serves both feeds, and the three things that makes
+> true were checked rather than assumed: `Instrument ID` identity is the one
+> thing there can only be one of, `Manifest Seq` describes the published set
+> rather than a channel, and the datagram builder stamps the `Channel ID` at
+> push, so one composed `ManifestSummary` is truthful on both refdata ports.
+>
+> **A codec gap it had to work around, and the workaround is not the fix.**
+> `DatagramBuilder<F: Feed>` is generic over the feed, so the magic is right,
+> but `push<M: AppMessage>` carries no bound tying the message to the feed —
+> nothing stops a `Quote` going into a market-by-price datagram, and `0x03` is
+> not in that feed's message table. The codec validates `PORT_ROLES` and stops
+> there. The runtime closed it for itself with a type-level `EmittedFeed: Feed`
+> carrying a `const SPEC`, so a pipeline cannot disagree with its own
+> specification; the codec is still permissive, and the proper fix is a feed
+> declaration on `AppMessage` that `push` can check. Same class as the `Action`
+> table: a byte the codec permits that a specification forbids.
+>
+> A snapshot has no cadence key to pace against, so `Publisher::snapshot` frames
+> one on demand and the pacing is explicitly the caller's. No key was invented.
+
 ### 8. The UDS adapter
 
 - [ ] A framed normalized-event encoding: length-delimited, one event per

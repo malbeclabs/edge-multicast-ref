@@ -11,6 +11,7 @@ mod harness;
 
 use std::time::Duration;
 
+use dz_edge_core::PortRole;
 use dz_publisher_runtime::{Document, FeedSpec, StartupError};
 use harness::{Doc, CHANNEL_ID, GROUP, MKTDATA_PORT, REFDATA_PORT, SOURCE_ID};
 
@@ -270,22 +271,150 @@ fn a_duration_without_a_unit_is_refused_rather_than_guessed_at() {
 }
 
 #[test]
-fn a_depth_feed_spec_names_what_this_build_can_emit() {
-    // Not a spelling mistake, and the message must not read as one. The
-    // lowering handles market-by-price today; what its message types lack is an
-    // `EgressMessageType` to be counted under, and the metric name set is
-    // closed by a governing playbook.
-    let mut doc = Doc::valid();
-    doc.feed = doc
-        .feed
-        .replace("spec = \"top-of-book\"", "spec = \"market-by-price\"");
-    let error = Document::parse(&doc.render())
-        .expect("the document parses")
+fn a_depth_feed_resolves_with_the_three_port_roles_it_operates() {
+    // The other half of `a_valid_document_resolves_end_to_end`. The depth
+    // specification is named by `dz_edge_mbp::MarketByPrice`'s own
+    // `Feed::NAME`, and what distinguishes it here is the third port role: a
+    // subscriber to a depth feed holds a book that only exists because it
+    // applied every message in order, so it needs somewhere to recover from.
+    let config = Document::parse(&Doc::valid().feed(Doc::depth_feed_block()).render())
+        .expect("valid")
         .resolve()
-        .expect_err("this build cannot emit market-by-price");
+        .expect("resolvable");
+
+    let feed = &config.feeds[0];
+    assert_eq!(feed.spec, FeedSpec::MarketByPrice);
+    assert_eq!(feed.spec.as_str(), "market-by-price");
+    assert_eq!(feed.snapshot_port, Some(harness::DEPTH_SNAPSHOT_PORT));
+    assert!(feed.spec.has_snapshot_port());
+    assert_eq!(
+        config.port_roles(),
+        [PortRole::Mktdata, PortRole::Refdata, PortRole::Snapshot]
+    );
+    assert_eq!(config.channel_ids(), [harness::DEPTH_CHANNEL_ID]);
+}
+
+#[test]
+fn a_depth_feed_with_no_snapshot_port_is_refused() {
+    // Refused rather than run without one. A subscriber that lost a datagram
+    // would have nowhere to recover from, and the publisher would look healthy
+    // the whole time.
+    let block = Doc::depth_feed_block()
+        .lines()
+        .filter(|line| !line.starts_with("snapshot_port"))
+        .fold(String::new(), |mut text, line| {
+            text.push_str(line);
+            text.push('\n');
+            text
+        });
+    let error = Document::parse(&Doc::valid().feed(block).render())
+        .expect("parses")
+        .resolve()
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            StartupError::SnapshotPortRequired {
+                spec: "market-by-price"
+            }
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_top_of_book_feed_with_a_snapshot_port_is_refused() {
+    // The other direction, and it is the audit's failure in miniature: a key
+    // nobody reads. An operator who wrote a port believes something is
+    // listening on it, and top-of-book has no snapshot port role at all.
+    let error = Document::parse(
+        &Doc::valid()
+            .feed(format!("{}snapshot_port = 30003\n", Doc::valid().feed))
+            .render(),
+    )
+    .expect("parses")
+    .resolve()
+    .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            StartupError::SnapshotPortNotCarried {
+                spec: "top-of-book",
+                port: 30003
+            }
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn both_feeds_in_one_document_resolve() {
+    // `[[feed]]` is an array because a publisher may emit several, which one
+    // existing publisher expresses as repeated blocks and another as four
+    // differently-named sections.
+    let doc = Doc::valid();
+    let both = format!("{}\n{}", doc.feed, Doc::depth_feed_block());
+    let config = Document::parse(&doc.feed(both).render())
+        .expect("valid")
+        .resolve()
+        .expect("two feeds is what the array is for");
+
+    assert_eq!(config.feeds.len(), 2);
+    assert_eq!(config.feeds[0].spec, FeedSpec::TopOfBook);
+    assert_eq!(config.feeds[1].spec, FeedSpec::MarketByPrice);
+    // The union, deduplicated: the metrics crate pre-creates one child series
+    // per role and per channel, so an omission leaves a panel blank and an
+    // extra asserts a channel that does not exist.
+    assert_eq!(
+        config.port_roles(),
+        [PortRole::Mktdata, PortRole::Refdata, PortRole::Snapshot]
+    );
+    assert_eq!(
+        config.channel_ids(),
+        [harness::CHANNEL_ID, harness::DEPTH_CHANNEL_ID]
+    );
+}
+
+#[test]
+fn two_feeds_naming_different_source_ids_are_refused() {
+    // A `Source ID` is the publisher's registered identity and is the same for
+    // every message a process sends - the lowering takes it once, for that
+    // reason. Obeying either of two would put an identity on one feed's wire
+    // that its own block did not ask for.
+    let doc = Doc::valid();
+    let other = Doc::depth_feed_block().replace(
+        &format!("source_id = {SOURCE_ID}"),
+        &format!("source_id = {}", SOURCE_ID + 1),
+    );
+    let both = format!("{}\n{other}", doc.feed);
+    let error = Document::parse(&doc.feed(both).render())
+        .expect("parses")
+        .resolve()
+        .unwrap_err();
+    assert!(
+        matches!(error, StartupError::SeveralSourceIds { .. }),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_feed_specification_this_build_has_no_codec_for_names_the_ones_it_has() {
+    // Market-by-order is the live example: `dz-edge-mbo` does not exist, so the
+    // boundary has no event variants for it and this crate has nothing to
+    // compose. Named rather than defaulted, and the message lists both
+    // specifications that do resolve.
+    let error = Document::parse(
+        &Doc::valid()
+            .edit_feed("spec = \"top-of-book\"", "spec = \"market-by-order\"")
+            .render(),
+    )
+    .expect("the document parses")
+    .resolve()
+    .expect_err("this build has no market-by-order codec");
     let message = error.to_string();
+    assert!(message.contains("market-by-order"), "{message}");
+    assert!(message.contains("top-of-book"), "{message}");
     assert!(message.contains("market-by-price"), "{message}");
-    assert!(message.contains(FeedSpec::SUPPORTED), "{message}");
     assert!(matches!(error, StartupError::UnsupportedFeedSpec { .. }));
 }
 

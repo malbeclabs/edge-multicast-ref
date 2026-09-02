@@ -28,13 +28,16 @@ use dz_adapter_core::{
     Adapter, AssetClass, EventSink, InstrumentRef, InstrumentSpec, ListingSink, MarketModel,
     ParseError, Payload, PriceBound, Scalar, SettleType,
 };
-use dz_edge_core::{Datagram, PortRole};
-use dz_edge_tob::MAGIC_TOB;
+use dz_edge_core::{Datagram, PortRole, ResetCount};
+use dz_edge_mbp::{MarketByPrice, MAGIC_MBP};
+use dz_edge_tob::{TopOfBook, MAGIC_TOB};
 use dz_publisher_egress::{DatagramSink, EgressEndpoint, FailureScope, SinkError, Tee};
 use dz_publisher_lowering::SourceId;
 use dz_publisher_metrics::{PublisherMetrics, PublisherMetricsConfig};
 use dz_publisher_refdata::{CycleSchedule, MemoryStore, Registry, RegistryConfig, SelectionPolicy};
-use dz_publisher_runtime::{Feed, FeedPipeline, FeedSpec, ManualClock, Publisher};
+use dz_publisher_runtime::{
+    EmittedFeed, Feed, FeedPipeline, FeedSpec, Feeds, ManualClock, Port, Ports, Publisher,
+};
 
 /// The documentation-range source address every endpoint here sends from.
 pub const SOURCE: Ipv4Addr = Ipv4Addr::new(203, 0, 113, 7);
@@ -43,19 +46,42 @@ pub const GROUP: Ipv4Addr = Ipv4Addr::new(233, 252, 0, 4);
 pub const MKTDATA_PORT: u16 = 30001;
 pub const REFDATA_PORT: u16 = 30002;
 pub const CHANNEL_ID: u8 = 3;
+/// The depth feed's own `Channel ID` and ports. Distinct from the top-of-book
+/// feed's on every axis, because a publisher emitting both has two channel
+/// instances and a test that shared a port between them would be asserting
+/// against a configuration `Document::resolve` refuses.
+pub const DEPTH_CHANNEL_ID: u8 = 4;
+pub const DEPTH_MKTDATA_PORT: u16 = 30011;
+pub const DEPTH_REFDATA_PORT: u16 = 30012;
+pub const DEPTH_SNAPSHOT_PORT: u16 = 30013;
+/// The era the top-of-book harness begins in: not the first, so a test that
+/// reads the header sees a value the store could only have got from a previous
+/// run.
+pub const TOB_ERA: u8 = 2;
+/// The depth harness's era, deliberately a different number. The era store is
+/// keyed per feed, so a newly enabled feed must not inherit one from a feed that
+/// has published for months — and two feeds in one process must not share one.
+pub const MBP_ERA: u8 = 5;
 /// In the assigned production range, which is what `SourceId` admits.
 pub const SOURCE_ID: u16 = 41;
 
 /// What a recording sink kept.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Recorder {
     datagrams: Rc<RefCell<Vec<Vec<u8>>>>,
+    /// The feed's own `Magic`, so that decoding here is the comparison a
+    /// subscriber makes: a datagram misrouted from a sibling feed is refusable
+    /// rather than parseable at the wrong layout.
+    magic: u16,
 }
 
 impl Recorder {
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(magic: u16) -> Self {
+        Self {
+            datagrams: Rc::new(RefCell::new(Vec::new())),
+            magic,
+        }
     }
 
     /// Every datagram this recorder was handed, in order.
@@ -79,9 +105,26 @@ impl Recorder {
         let mut out = Vec::new();
         for datagram in self.datagrams.borrow().iter() {
             let decoded =
-                Datagram::decode(datagram, MAGIC_TOB).expect("the runtime composed a datagram");
+                Datagram::decode(datagram, self.magic).expect("the runtime composed a datagram");
             for message in decoded.messages() {
                 out.push((message.type_id, message.bytes.to_vec()));
+            }
+        }
+        out
+    }
+
+    /// Every message with its header `Flags`, in order.
+    ///
+    /// The builder owns that field — a caller cannot set the snapshot bit on a
+    /// mktdata message by accident — so this is how a test checks that the bit
+    /// followed the port role rather than a call site.
+    #[must_use]
+    pub fn messages_with_flags(&self) -> Vec<(u8, u16, Vec<u8>)> {
+        let mut out = Vec::new();
+        for datagram in self.datagrams.borrow().iter() {
+            let decoded = Datagram::decode(datagram, self.magic).expect("composed");
+            for message in decoded.messages() {
+                out.push((message.type_id, message.flags, message.bytes.to_vec()));
             }
         }
         out
@@ -100,7 +143,7 @@ impl Recorder {
             .borrow()
             .iter()
             .map(|datagram| {
-                let decoded = Datagram::decode(datagram, MAGIC_TOB).expect("composed");
+                let decoded = Datagram::decode(datagram, self.magic).expect("composed");
                 (
                     decoded.header().sequence_number,
                     decoded.header().reset_count,
@@ -120,11 +163,11 @@ pub struct RecordingSink {
 
 impl RecordingSink {
     #[must_use]
-    pub fn new(name: &'static str, scope: FailureScope) -> Self {
+    pub fn new(name: &'static str, scope: FailureScope, magic: u16) -> Self {
         Self {
             name,
             scope,
-            recorder: Recorder::new(),
+            recorder: Recorder::new(magic),
             refusing: Rc::new(Cell::new(false)),
         }
     }
@@ -167,13 +210,71 @@ impl DatagramSink for RecordingSink {
 pub struct Harness {
     pub publisher: Publisher<MemoryStore, ManualClock>,
     pub clock: ManualClock,
-    pub mktdata: Recorder,
-    pub refdata: Recorder,
-    pub mktdata_refusal: Rc<Cell<bool>>,
     pub metrics: Arc<PublisherMetrics>,
+    /// The top-of-book feed's recorders, when this publisher emits it.
+    pub tob: Option<FeedRecorders>,
+    /// The market-by-price feed's recorders, when this publisher emits it.
+    pub mbp: Option<FeedRecorders>,
 }
 
-/// The `[[feed]]` a harness publishes, with every value stated.
+/// What one feed's port roles recorded, and the switch that breaks its live
+/// socket.
+pub struct FeedRecorders {
+    pub mktdata: Recorder,
+    pub refdata: Recorder,
+    /// Depth feeds only.
+    pub snapshot: Option<Recorder>,
+    pub mktdata_refusal: Rc<Cell<bool>>,
+}
+
+impl Harness {
+    /// The recorders of the one feed this publisher emits.
+    ///
+    /// # Panics
+    ///
+    /// When it emits both, because then "the feed" is ambiguous and the test
+    /// means one of `tob` or `mbp`.
+    #[must_use]
+    pub fn only(&self) -> &FeedRecorders {
+        match (self.tob.as_ref(), self.mbp.as_ref()) {
+            (Some(one), None) | (None, Some(one)) => one,
+            (Some(_), Some(_)) => {
+                panic!("this publisher emits both feeds; name `tob` or `mbp`")
+            }
+            (None, None) => panic!("this publisher emits no feed"),
+        }
+    }
+
+    #[must_use]
+    pub fn mktdata(&self) -> &Recorder {
+        &self.only().mktdata
+    }
+
+    #[must_use]
+    pub fn refdata(&self) -> &Recorder {
+        &self.only().refdata
+    }
+
+    /// The snapshot port role's recorder.
+    ///
+    /// # Panics
+    ///
+    /// When the one feed carries no snapshot port role.
+    #[must_use]
+    pub fn snapshot(&self) -> &Recorder {
+        self.only()
+            .snapshot
+            .as_ref()
+            .expect("this feed carries no snapshot port role")
+    }
+
+    #[must_use]
+    pub fn mktdata_refusal(&self) -> &Rc<Cell<bool>> {
+        &self.only().mktdata_refusal
+    }
+}
+
+/// The top-of-book `[[feed]]` a harness publishes, with every value stated.
 #[must_use]
 pub fn feed() -> Feed {
     Feed {
@@ -191,55 +292,148 @@ pub fn feed() -> Feed {
     }
 }
 
-/// A publisher with the stated feed.
+/// The market-by-price `[[feed]]`, which carries a snapshot port role.
 #[must_use]
-pub fn harness(feed: Feed) -> Harness {
-    harness_inner(feed, false)
+pub fn depth_feed() -> Feed {
+    Feed {
+        spec: FeedSpec::MarketByPrice,
+        channel_id: DEPTH_CHANNEL_ID,
+        source_id: SourceId::new(SOURCE_ID).expect("in the assigned range"),
+        group: GROUP,
+        mktdata_port: DEPTH_MKTDATA_PORT,
+        refdata_port: DEPTH_REFDATA_PORT,
+        // Required for a depth feed, and refused for one that carries no
+        // snapshot port role. See `StartupError::SnapshotPortRequired`.
+        snapshot_port: Some(DEPTH_SNAPSHOT_PORT),
+        heartbeat_interval: Duration::from_secs(1),
+        definition_cycle: Duration::from_secs(30),
+        manifest_cadence: Duration::from_secs(1),
+        idle_guard: Duration::from_secs(60),
+    }
 }
 
-/// The same, over a state directory whose writes fail.
+/// A publisher emitting the stated feed and nothing else.
+#[must_use]
+pub fn harness(feed: Feed) -> Harness {
+    harness_inner(&[feed], false)
+}
+
+/// A publisher emitting **both** feeds from one process.
+///
+/// Which is what `[[feed]]` being an array is for, and where the wire's
+/// cross-specification obligation on `0x04` becomes assertable: one execution,
+/// two feeds, and the same bytes on both.
+#[must_use]
+pub fn harness_both() -> Harness {
+    harness_inner(&[feed(), depth_feed()], false)
+}
+
+/// The same as [`harness`], over a state directory whose writes fail.
 ///
 /// Stated rather than arranged: a full or read-only directory is a behaviour a
 /// real filesystem produces only if a test can build a broken one, and building
 /// one costs privileges a suite should not need.
 #[must_use]
 pub fn harness_with_broken_writes(feed: Feed) -> Harness {
-    harness_inner(feed, true)
+    harness_inner(&[feed], true)
 }
 
-fn harness_inner(feed: Feed, break_writes: bool) -> Harness {
+/// Build one feed's three fan-outs over recorders.
+fn ports(feed: &Feed, metrics: &Arc<PublisherMetrics>, magic: u16) -> (Ports, FeedRecorders) {
+    let open = |name: &'static str, role: PortRole, port: u16| {
+        let sink = RecordingSink::new(name, FailureScope::Process, magic);
+        let recorder = sink.recorder();
+        let refusal = sink.refusal_switch();
+        let mut tee = Tee::new(role, Arc::clone(metrics));
+        tee.add(Box::new(sink));
+        (
+            Port {
+                endpoint: EgressEndpoint::new(role, SOURCE, port),
+                sink: tee,
+            },
+            recorder,
+            refusal,
+        )
+    };
+
+    let (mktdata, mktdata_recorder, mktdata_refusal) =
+        open("mktdata", PortRole::Mktdata, feed.mktdata_port);
+    let (refdata, refdata_recorder, _) = open("refdata", PortRole::Refdata, feed.refdata_port);
+    let snapshot = feed
+        .snapshot_port
+        .map(|port| open("snapshot", PortRole::Snapshot, port));
+    let snapshot_recorder = snapshot.as_ref().map(|(_, recorder, _)| recorder.clone());
+
+    (
+        Ports {
+            mktdata,
+            refdata,
+            snapshot: snapshot.map(|(port, _, _)| port),
+        },
+        FeedRecorders {
+            mktdata: mktdata_recorder,
+            refdata: refdata_recorder,
+            snapshot: snapshot_recorder,
+            mktdata_refusal,
+        },
+    )
+}
+
+/// Compose one feed's send path over recorders.
+fn pipeline<F: EmittedFeed>(
+    feed: &Feed,
+    metrics: &Arc<PublisherMetrics>,
+    era: u8,
+    magic: u16,
+) -> (FeedPipeline<F>, FeedRecorders) {
+    let (ports, recorders) = ports(feed, metrics, magic);
+    (
+        FeedPipeline::new(feed, Arc::clone(metrics), ResetCount(era), ports),
+        recorders,
+    )
+}
+
+fn harness_inner(configured: &[Feed], break_writes: bool) -> Harness {
     let clock = ManualClock::at_unix_ns(1_700_000_000_000_000_000);
+    let identity = configured.first().expect("at least one feed");
+
+    let mut port_roles: Vec<PortRole> = Vec::new();
+    for feed in configured {
+        for role in feed.spec.port_roles() {
+            if !port_roles.contains(role) {
+                port_roles.push(*role);
+            }
+        }
+    }
+    let channel_ids: Vec<u8> = configured.iter().map(|feed| feed.channel_id).collect();
+
     let metrics = Arc::new(PublisherMetrics::new(&PublisherMetricsConfig {
         venue: "a-venue",
-        source_id: feed.source_id.get(),
-        port_roles: feed.spec.port_roles(),
+        source_id: identity.source_id.get(),
+        port_roles: &port_roles,
         connections: &["upstream"],
-        channel_ids: &[feed.channel_id],
-        ingress_message_types: &["quote", "trade"],
+        channel_ids: &channel_ids,
+        ingress_message_types: &["quote", "trade", "level"],
     }));
 
-    let mktdata_sink = RecordingSink::new("mktdata", FailureScope::Process);
-    let mktdata = mktdata_sink.recorder();
-    let mktdata_refusal = mktdata_sink.refusal_switch();
-    let refdata_sink = RecordingSink::new("refdata", FailureScope::Process);
-    let refdata = refdata_sink.recorder();
-
-    let mut mktdata_tee = Tee::new(PortRole::Mktdata, Arc::clone(&metrics));
-    mktdata_tee.add(Box::new(mktdata_sink));
-    let mut refdata_tee = Tee::new(PortRole::Refdata, Arc::clone(&metrics));
-    refdata_tee.add(Box::new(refdata_sink));
-
-    let pipeline = FeedPipeline::new(
-        &feed,
-        Arc::clone(&metrics),
-        // Era 2: not the first, so a test that reads the header sees a value
-        // the store could only have got from a previous run.
-        dz_edge_core::ResetCount(2),
-        EgressEndpoint::new(PortRole::Mktdata, SOURCE, MKTDATA_PORT),
-        mktdata_tee,
-        EgressEndpoint::new(PortRole::Refdata, SOURCE, REFDATA_PORT),
-        refdata_tee,
-    );
+    let mut feeds = Feeds::default();
+    let mut tob = None;
+    let mut mbp = None;
+    for feed in configured {
+        match feed.spec {
+            FeedSpec::TopOfBook => {
+                let (built, recorders) = pipeline::<TopOfBook>(feed, &metrics, TOB_ERA, MAGIC_TOB);
+                feeds.top_of_book = Some(built);
+                tob = Some(recorders);
+            }
+            FeedSpec::MarketByPrice => {
+                let (built, recorders) =
+                    pipeline::<MarketByPrice>(feed, &metrics, MBP_ERA, MAGIC_MBP);
+                feeds.market_by_price = Some(built);
+                mbp = Some(recorders);
+            }
+        }
+    }
 
     let store = MemoryStore::new();
     if break_writes {
@@ -247,10 +441,10 @@ fn harness_inner(feed: Feed, break_writes: bool) -> Harness {
     }
     let registry = Registry::open(
         RegistryConfig {
-            source_id: feed.source_id,
-            channel_id: feed.channel_id,
+            source_id: identity.source_id,
+            channel_id: identity.channel_id,
             selection: SelectionPolicy::new(8, 16, 8).expect("a coherent policy"),
-            schedule: CycleSchedule::new(feed.definition_cycle, 1232, 1),
+            schedule: CycleSchedule::new(identity.definition_cycle, 1232, 1),
         },
         store,
         clock.clone(),
@@ -261,18 +455,17 @@ fn harness_inner(feed: Feed, break_writes: bool) -> Harness {
         Arc::clone(&metrics),
         registry,
         clock.clone(),
-        feed.source_id,
-        pipeline,
-        feed.idle_guard,
+        identity.source_id,
+        feeds,
+        identity.idle_guard,
     );
 
     Harness {
         publisher,
         clock,
-        mktdata,
-        refdata,
-        mktdata_refusal,
         metrics,
+        tob,
+        mbp,
     }
 }
 
@@ -477,6 +670,65 @@ impl Doc {
         Self::default()
     }
 
+    /// Replace one section wholesale, leaving the rest valid.
+    ///
+    /// A builder rather than a field assignment, so that a test reads as *a
+    /// valid document, with this one section changed*.
+    #[must_use]
+    pub fn feed(mut self, text: impl Into<String>) -> Self {
+        self.feed = text.into();
+        self
+    }
+
+    #[must_use]
+    pub fn egress(mut self, text: impl Into<String>) -> Self {
+        self.egress = text.into();
+        self
+    }
+
+    #[must_use]
+    pub fn adapter(mut self, text: impl Into<String>) -> Self {
+        self.adapter = text.into();
+        self
+    }
+
+    #[must_use]
+    pub fn ingress(mut self, text: impl Into<String>) -> Self {
+        self.ingress = text.into();
+        self
+    }
+
+    /// Rewrite one value inside the `[[feed]]` block.
+    #[must_use]
+    pub fn edit_feed(mut self, from: &str, to: &str) -> Self {
+        self.feed = self.feed.replace(from, to);
+        self
+    }
+
+    /// Rewrite one value inside the `[refdata]` block.
+    #[must_use]
+    pub fn edit_refdata(mut self, from: &str, to: &str) -> Self {
+        self.refdata = self.refdata.replace(from, to);
+        self
+    }
+
+    /// The market-by-price `[[feed]]` block, valid, with the snapshot port
+    /// role its specification requires.
+    #[must_use]
+    pub fn depth_feed_block() -> String {
+        format!(
+            "[[feed]]\n\
+             spec = \"market-by-price\"\n\
+             enabled = true\n\
+             channel_id = {DEPTH_CHANNEL_ID}\n\
+             source_id = {SOURCE_ID}\n\
+             multicast_group = \"{GROUP}\"\n\
+             mktdata_port = {DEPTH_MKTDATA_PORT}\n\
+             refdata_port = {DEPTH_REFDATA_PORT}\n\
+             snapshot_port = {DEPTH_SNAPSHOT_PORT}\n"
+        )
+    }
+
     #[must_use]
     pub fn render(&self) -> String {
         [
@@ -554,18 +806,71 @@ pub fn trade(instrument: InstrumentRef, source_ts_ns: u64) -> dz_adapter_core::E
     }
 }
 
-/// One depth event, which this build has no feed to carry.
+/// One resting price level, with the venue's own presence hint.
+///
+/// `qty` is the absolute aggregate resting quantity **after** the change and
+/// never a delta, so a quantity of zero removes the level — which is what makes
+/// the `Action` derivation the one thing it is.
 #[must_use]
-pub fn level(instrument: InstrumentRef, source_ts_ns: u64) -> dz_adapter_core::Event<'static> {
-    use dz_adapter_core::{Event, Presence, Side};
-    Event::Level {
+pub fn level(
+    instrument: InstrumentRef,
+    source_ts_ns: u64,
+    side: dz_adapter_core::Side,
+    px: &'static str,
+    qty: &'static str,
+    presence: dz_adapter_core::Presence,
+) -> dz_adapter_core::Event<'static> {
+    dz_adapter_core::Event::Level {
         instrument,
         source_ts_ns,
-        side: Side::Bid,
-        px: Scalar::text("100.25"),
-        qty: Scalar::text("2.500"),
+        side,
+        px: Scalar::text(px),
+        qty: Scalar::text(qty),
         order_count: None,
-        presence: Presence::New,
+        presence,
+    }
+}
+
+/// A bid level at the same price and quantity every other fixture here uses.
+#[must_use]
+pub fn bid_level(instrument: InstrumentRef, source_ts_ns: u64) -> dz_adapter_core::Event<'static> {
+    level(
+        instrument,
+        source_ts_ns,
+        dz_adapter_core::Side::Bid,
+        "100.25",
+        "2.500",
+        dz_adapter_core::Presence::New,
+    )
+}
+
+/// Removing a level: an absolute quantity of zero, and nothing else.
+#[must_use]
+pub fn removed_level(
+    instrument: InstrumentRef,
+    source_ts_ns: u64,
+    presence: dz_adapter_core::Presence,
+) -> dz_adapter_core::Event<'static> {
+    level(
+        instrument,
+        source_ts_ns,
+        dz_adapter_core::Side::Bid,
+        "100.25",
+        "0",
+        presence,
+    )
+}
+
+/// A bulk removal of one side's levels.
+///
+/// Not a resynchronisation signal: it says these levels are gone, not that the
+/// book a subscriber holds is untrustworthy.
+#[must_use]
+pub fn clear(instrument: InstrumentRef, source_ts_ns: u64) -> dz_adapter_core::Event<'static> {
+    dz_adapter_core::Event::Clear {
+        instrument,
+        source_ts_ns,
+        scope: dz_adapter_core::ClearScope::EntireSide(dz_adapter_core::Side::Bid),
     }
 }
 

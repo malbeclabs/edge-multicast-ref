@@ -114,7 +114,7 @@ fn a_dark_transmitter_fires_the_consistency_guard() {
         "nothing is wrong with this publisher yet"
     );
 
-    h.mktdata_refusal.set(true);
+    h.mktdata_refusal().set(true);
     // A tick sends a heartbeat, which is the send that discovers the socket.
     h.clock.advance(Duration::from_secs(2));
     let exit = h.publisher.tick().expect("the mktdata transmitter is gone");
@@ -138,7 +138,7 @@ fn the_consistency_guard_is_reported_ahead_of_the_idle_guard() {
     h.publisher.poll_listings(&mut adapter);
     let instrument = adapter.handles()[0];
 
-    h.mktdata_refusal.set(true);
+    h.mktdata_refusal().set(true);
     h.publisher.upstream_message("quote");
     h.publisher.event(harness::quote(instrument, 1));
     h.clock.advance(WINDOW * 2);

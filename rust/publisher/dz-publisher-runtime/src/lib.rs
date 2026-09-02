@@ -35,39 +35,66 @@
 //! makes a venue-specific key written at the top level a load error rather than
 //! a key nobody reads.
 //!
-//! # What is wired, and what is a hole
+//! # What is wired
 //!
-//! The top-of-book path is whole: a normalized event from a venue's adapter is
-//! lowered through [`dz_publisher_lowering`], composed into a datagram by
-//! [`dz_publisher_egress`], and reaches a
+//! Both feeds this workspace has a codec for, end to end. A normalized event
+//! from a venue's adapter is lowered through [`dz_publisher_lowering`],
+//! composed into a datagram by [`dz_publisher_egress`], and reaches a
 //! [`DatagramSink`](dz_publisher_egress::DatagramSink) numbered, in an era that
 //! survived the restart, on the port role its specification allows, under the
-//! cap. Heartbeats, the paced definition cycle, the manifest cadence, the two
-//! guards and an ordered shutdown that ends with `EndOfSession` are all here.
+//! mandated cap:
 //!
-//! Four things are deliberately not, and each is a missing piece elsewhere
-//! rather than an unfinished one here:
+//! | Event | `top-of-book` | `market-by-price` |
+//! |---|---|---|
+//! | `Quote` | `0x03` mktdata | — |
+//! | `Trade` | `0x04` mktdata | `0x04` mktdata |
+//! | `Level` | — | `0x40` mktdata |
+//! | `Clear` | — | `0x41` mktdata |
+//! | a pulled snapshot | — | `0x20`/`0x42`/`0x22` snapshot |
 //!
-//! - **The depth feeds cannot reach the wire.** `dz-publisher-lowering` lowers
-//!   `LevelUpdate`, `BookClear` and the three snapshot messages correctly
-//!   today. What none of them has is an
-//!   [`EgressMessageType`](dz_publisher_metrics::EgressMessageType) to be
-//!   counted under, and the metric name set is closed by a governing playbook —
-//!   so this crate can neither invent a label nor push a message it has no
-//!   label for. `[[feed]] spec = "market-by-price"` is therefore a startup
-//!   error naming what this build can emit, and a depth event is counted and
-//!   dropped *before* it is lowered, so that no `Per-Instrument Seq` is spent
-//!   on a message that never left. See [`Publisher::unroutable`].
-//! - **The snapshot has no cadence to be pulled on.** The design names
+//! Plus heartbeats, the paced definition cycle, the manifest cadence, the two
+//! guards, and an ordered shutdown that ends with `EndOfSession`.
+//!
+//! A publisher may emit **both** feeds from one process, which is what
+//! `[[feed]]` being an array is for — and it is where the wire's
+//! cross-specification policy for `0x04` stops being a doc comment. The trade
+//! is lowered **once** and the same value is handed to both send paths, so the
+//! two feeds do not carry two things that agree; they carry one thing.
+//!
+//! One registry serves every feed. `Instrument ID` identity is the one thing
+//! there can only be one of, `Manifest Seq` describes the published set rather
+//! than a channel, and the manifest's own redundant `Channel ID` is stamped by
+//! the builder from the datagram that frames it — so one composed manifest is
+//! truthful on every feed's refdata port. See [`Publisher::new`].
+//!
+//! # What is still a hole
+//!
+//! Four things, and each is a missing piece elsewhere rather than an unfinished
+//! one here:
+//!
+//! - **A snapshot has no cadence to be pulled on.** The design names
 //!   `[[feed]] snapshot_port` and no snapshot interval, and inventing a key is
-//!   the one thing this crate must not do. [`Publisher::snapshot`] frames one
-//!   on demand and hands it back rather than sending it.
-//! - **A lowering refusal has no series.** Five reasons stay distinguishable and
-//!   none of them fits the closed set. See [`Refusals`] for why every candidate
-//!   is worse than none, and for what a playbook addition would look like.
+//!   the one thing this crate must not do. So the framing and the sending are
+//!   whole — [`Publisher::snapshot`] pulls one instrument's book from the
+//!   adapter, frames it as a begin, its levels and an end, and puts it on the
+//!   snapshot port role — and *when* is the caller's. [`run()`] does not call
+//!   it, and a rotation over the published set is what the key would drive.
+//! - **A lowering refusal has no series.** Five reasons stay distinguishable
+//!   and none of them fits the closed set. See [`Refusals`] for why every
+//!   candidate is worse than none, and for what a playbook addition would look
+//!   like.
 //! - **`[adapter.tee]` is parsed, defaults off, and is plumbed nowhere.** The
 //!   framing it would write is the framing the offline comparison reads, and
 //!   that framing does not exist yet. See [`TeeConfig`].
+//! - **Two latency families cannot be observed.**
+//!   `dz_publisher_recv_to_send_latency_seconds` and
+//!   `dz_publisher_venue_to_recv_latency_seconds` both measure from a payload's
+//!   arrival, and `EventSink` — the whole of what the composed publisher is
+//!   handed — does not carry `Payload::recv_ts_ns`. The encode-duration family
+//!   is observed instead.
+//!
+//! Market-by-order is absent rather than a hole: `dz-edge-mbo` does not exist,
+//! and the boundary's own event variants for it are absent for the same reason.
 //!
 //! # Nothing here needs a socket to be tested
 //!
@@ -100,13 +127,15 @@ pub mod run;
 
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use config::{
-    AdapterConfig, Config, Document, EgressSection, Feed, FeedSection, FeedSpec, MetricsSection,
-    Refdata, RefdataSection, ReplayConfig, SelectionSection, TeeConfig,
+    AdapterConfig, Config, Document, EgressSection, EmittedFeed, Feed, FeedSection, FeedSpec,
+    MetricsSection, Refdata, RefdataSection, ReplayConfig, SelectionSection, TeeConfig,
 };
 pub use error::{AdapterInitError, StartupError};
 pub use guard::{ConsistencyGuard, Exit, IdleGuard, Inconsistency, Upstream};
 pub use observer::MetricsObserver;
-pub use pipeline::FeedPipeline;
-pub use publisher::{Publisher, Refusals, SnapshotError, Teardown, TeardownStep, LISTING_POLL};
+pub use pipeline::{FeedPipeline, Port, Ports};
+pub use publisher::{
+    Feeds, Publisher, Refusals, SnapshotError, Teardown, TeardownStep, LISTING_POLL,
+};
 pub use registry::{AdapterContext, AdapterRegistry, Venue};
 pub use run::run;

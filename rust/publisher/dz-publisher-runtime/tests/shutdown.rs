@@ -47,7 +47,7 @@ fn the_last_message_on_the_mktdata_port_is_end_of_session() {
     let _ = h.publisher.tick();
     h.publisher.shut_down(Exit::Signal);
 
-    let type_ids = h.mktdata.type_ids();
+    let type_ids = h.mktdata().type_ids();
     // Transcribed from the specifications' own message tables, not read off the
     // codec: `0x01` heartbeat, `0x03` quote, `0x06` end of session.
     assert!(type_ids.contains(&0x03), "the quote never reached the wire");
@@ -86,7 +86,7 @@ fn a_heartbeat_is_suppressed_while_market_data_is_flowing() {
         let _ = h.publisher.tick();
     }
 
-    let type_ids = h.mktdata.type_ids();
+    let type_ids = h.mktdata().type_ids();
     assert!(
         !type_ids.contains(&0x01),
         "a heartbeat was sent on a channel that was publishing: {type_ids:?}"
@@ -104,7 +104,7 @@ fn the_final_manifest_carries_valid_zero_and_is_the_last_thing_on_the_refdata_po
     let _ = h.publisher.tick();
 
     let before: Vec<ManifestSummary> = h
-        .refdata
+        .refdata()
         .messages()
         .into_iter()
         .filter(|(type_id, _)| *type_id == 0x07)
@@ -118,7 +118,7 @@ fn the_final_manifest_carries_valid_zero_and_is_the_last_thing_on_the_refdata_po
     h.publisher.shut_down(Exit::Signal);
 
     let manifests: Vec<ManifestSummary> = h
-        .refdata
+        .refdata()
         .messages()
         .into_iter()
         .filter(|(type_id, _)| *type_id == 0x07)
@@ -135,7 +135,7 @@ fn the_final_manifest_carries_valid_zero_and_is_the_last_thing_on_the_refdata_po
     assert_eq!(last.channel_id, harness::CHANNEL_ID);
 
     // And it is the last thing on that port role.
-    let refdata_ids = h.refdata.type_ids();
+    let refdata_ids = h.refdata().type_ids();
     assert_eq!(refdata_ids.last(), Some(&0x07));
     assert_eq!(ManifestSummary::TYPE_ID, 0x07);
 }
@@ -200,7 +200,7 @@ fn an_era_that_survived_a_restart_is_on_every_datagram() {
     let _ = h.publisher.tick();
     h.publisher.shut_down(Exit::Signal);
 
-    let headers = h.mktdata.headers();
+    let headers = h.mktdata().headers();
     assert!(!headers.is_empty());
     for (index, (sequence, era)) in headers.iter().enumerate() {
         assert_eq!(*era, 2, "the era changed mid-run");

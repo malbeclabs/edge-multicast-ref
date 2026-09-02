@@ -10,6 +10,7 @@ description = "The publisher a venue links: config composition, the adapter regi
 [dependencies]
 dz-adapter-core = { path = "../../adapter/dz-adapter-core" }
 dz-edge-core = { path = "../../codec/dz-edge-core" }
+dz-edge-mbp = { path = "../../codec/dz-edge-mbp" }
 dz-edge-refdata = { path = "../../codec/dz-edge-refdata" }
 dz-edge-tob = { path = "../../codec/dz-edge-tob" }
 dz-ingress-core = { path = "../../ingress/dz-ingress-core" }
@@ -56,8 +57,3 @@ tokio = { version = "1", default-features = false, features = [
 # `a_transport_this_binary_was_not_built_with_is_a_different_error`, which uses
 # a kind the feature does not cover.
 dz-ingress-core = { path = "../../ingress/dz-ingress-core", features = ["uds"] }
-
-# Decoding what the wiring actually put on the wire. The end-to-end test asserts
-# datagrams by decoding them with the codec rather than by inspecting the
-# runtime's own state, which is the only way the assertion is about the wire.
-dz-edge-mbp = { path = "../../codec/dz-edge-mbp" }

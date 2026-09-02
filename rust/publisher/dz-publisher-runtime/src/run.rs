@@ -39,6 +39,7 @@ use dz_adapter_core::{
     ListingSink, ParseError, Payload, SnapshotSink, UpstreamSink,
 };
 use dz_edge_core::{PortRole, MAX_DATAGRAM_SIZE};
+use dz_edge_mbp::MarketByPrice;
 use dz_edge_tob::TopOfBook;
 use dz_ingress_core::Driver;
 use dz_publisher_egress::{EraStore, FailureScope, KernelRoute, MulticastTransmitter, Tee};
@@ -46,12 +47,12 @@ use dz_publisher_metrics::{PublisherMetrics, PublisherMetricsConfig};
 use dz_publisher_refdata::{CycleSchedule, FileStore, Registry, RegistryConfig, StateStore};
 
 use crate::clock::{Clock, SystemClock};
-use crate::config::Config;
+use crate::config::{Config, Feed, FeedSpec};
 use crate::error::StartupError;
 use crate::guard::{Exit, Inconsistency};
 use crate::observer::MetricsObserver;
-use crate::pipeline::FeedPipeline;
-use crate::publisher::Publisher;
+use crate::pipeline::{FeedPipeline, Port, Ports};
+use crate::publisher::{Feeds, Publisher};
 use crate::registry::{AdapterContext, AdapterRegistry};
 
 /// How often the tick body runs.
@@ -140,16 +141,14 @@ fn config_path() -> Result<PathBuf, StartupError> {
 }
 
 fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, StartupError> {
-    // Exactly one, and not by luck: `Document::resolve` refuses a feed
-    // specification this build cannot emit and refuses two blocks naming one
-    // specification, and `top-of-book` is the only one it can emit. When the
-    // depth specifications land, this becomes a loop and the event routing in
-    // `Publisher` becomes a match on the feed a variant belongs to.
-    let feed = config
+    // Every enabled feed's identity is the same, which `Document::resolve`
+    // has already checked: a `Source ID` is the publisher's registered
+    // identity and the lowering takes it once.
+    let identity = config
         .feeds
         .first()
-        .cloned()
-        .ok_or(StartupError::NoEnabledFeed)?;
+        .ok_or(StartupError::NoEnabledFeed)?
+        .clone();
 
     // The adapter first, because its declarations are what make two metric
     // label sets knowable at startup: the connection names, so that the
@@ -167,8 +166,8 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
 
     let metrics = Arc::new(PublisherMetrics::new(&PublisherMetricsConfig {
         venue: &config.venue,
-        source_id: feed.source_id.get(),
-        port_roles: feed.spec.port_roles(),
+        source_id: identity.source_id.get(),
+        port_roles: &config.port_roles(),
         connections: &[connection.as_str()],
         channel_ids: &config.channel_ids(),
         ingress_message_types: &message_types,
@@ -176,70 +175,27 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
 
     let clock = SystemClock::new();
 
-    // The era before the first datagram, and persisted before it is returned. A
-    // publisher whose sequence series restarts at 0 without its era changing has
-    // told its subscribers nothing: they keep the stale book and read the
-    // sequence going backwards as reordering.
+    // The era store, opened once: one file per feed, keyed on the feed's own
+    // name, so a newly enabled feed advertises its first era rather than
+    // inheriting one from a feed that has published for months.
     //
     // It lives in `[refdata] state_dir` because that is the only durable
-    // directory the document names, and the file is keyed on the feed's own
-    // name — so a newly enabled feed advertises its first era rather than
-    // inheriting one from a feed that has published for months.
-    let era = EraStore::open(&config.refdata.state_dir)?.begin_era::<TopOfBook>()?;
+    // directory the document names.
+    let eras = EraStore::open(&config.refdata.state_dir)?;
 
-    let mktdata_destination = SocketAddrV4::new(feed.group, feed.mktdata_port);
-    let refdata_destination = SocketAddrV4::new(feed.group, feed.refdata_port);
-    let route = KernelRoute;
-
-    // Both port roles are `FailureScope::Process`, and the refdata one is the
-    // decision the design left open. A dead mktdata socket means this publisher
-    // is not publishing, which is a reason to end the process and let a
-    // supervisor restart it where the route works. A dead *refdata* socket
-    // leaves existing subscribers served and makes the feed unjoinable: every
-    // `Instrument ID` on the wire resolves to a definition that is no longer
-    // being retransmitted, and the reference-data cycle is what a subscriber's
-    // whole view of identity is built on. Degrading silently into a feed nobody
-    // new can join is worse than a restart, so it ends the process too.
-    let mktdata_transmitter = MulticastTransmitter::open(
-        "mktdata",
-        &config.egress,
-        mktdata_destination,
-        PortRole::Mktdata,
-        FailureScope::Process,
-        &route,
-    )?;
-    let refdata_transmitter = MulticastTransmitter::open(
-        "refdata",
-        &config.egress,
-        refdata_destination,
-        PortRole::Refdata,
-        FailureScope::Process,
-        &route,
-    )?;
-    let mktdata_endpoint = mktdata_transmitter.endpoint();
-    let refdata_endpoint = refdata_transmitter.endpoint();
-
-    let mut mktdata = Tee::new(PortRole::Mktdata, Arc::clone(&metrics));
-    mktdata.add(Box::new(mktdata_transmitter));
-    let mut refdata_tee = Tee::new(PortRole::Refdata, Arc::clone(&metrics));
-    refdata_tee.add(Box::new(refdata_transmitter));
-
-    // `[adapter.tee]` would add a second member to the mktdata fan-out here,
-    // and to this one rather than to a second transmitter: it darkens nothing
-    // when it fails and must never be able to end a send, which is exactly what
-    // `Tee` guarantees a member. It is not added because the framing it writes
-    // is the framing the offline comparison reads, and that framing does not
-    // exist yet - see `crate::config::TeeConfig`.
-
+    // One registry for every feed, and that is right rather than a
+    // simplification - see `Publisher::new`. It is opened before the sockets so
+    // that the single-writer guard refuses a second publisher on one state
+    // directory before that publisher has bound anything.
     let schedule = CycleSchedule::new(
-        feed.definition_cycle,
+        identity.definition_cycle,
         MAX_DATAGRAM_SIZE as u16,
         MAX_DEFINITION_DATAGRAMS_PER_TICK,
     );
     let refdata = Registry::open(
         RegistryConfig {
-            source_id: feed.source_id,
-            channel_id: feed.channel_id,
+            source_id: identity.source_id,
+            channel_id: identity.channel_id,
             selection: config.refdata.selection,
             schedule,
         },
@@ -247,23 +203,42 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
         clock.clone(),
     )?;
 
-    let pipeline = FeedPipeline::new(
-        &feed,
-        Arc::clone(&metrics),
-        era,
-        mktdata_endpoint,
-        mktdata,
-        refdata_endpoint,
-        refdata_tee,
-    );
+    let route = KernelRoute;
+    let mut feeds = Feeds::default();
+    for feed in &config.feeds {
+        // The match is total over a set that is not `#[non_exhaustive]`, so a
+        // feed specification added to `FeedSpec` breaks the build here - which
+        // is the point. A value a configuration can name that nothing composes
+        // is a value that resolves to nothing at startup.
+        match feed.spec {
+            FeedSpec::TopOfBook => {
+                let ports = open_ports(feed, &config, &metrics, &route)?;
+                feeds.top_of_book = Some(FeedPipeline::new(
+                    feed,
+                    Arc::clone(&metrics),
+                    eras.begin_era::<TopOfBook>()?,
+                    ports,
+                ));
+            }
+            FeedSpec::MarketByPrice => {
+                let ports = open_ports(feed, &config, &metrics, &route)?;
+                feeds.market_by_price = Some(FeedPipeline::new(
+                    feed,
+                    Arc::clone(&metrics),
+                    eras.begin_era::<MarketByPrice>()?,
+                    ports,
+                ));
+            }
+        }
+    }
 
     let publisher = RefCell::new(Publisher::new(
         Arc::clone(&metrics),
         refdata,
         clock.clone(),
-        feed.source_id,
-        pipeline,
-        feed.idle_guard,
+        identity.source_id,
+        feeds,
+        identity.idle_guard,
     ));
     publisher.borrow().record_build_info(
         env!("CARGO_PKG_VERSION"),
@@ -321,6 +296,64 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
     // the process is gone is not the first one that would have carried it.
     drop(server);
     Ok(teardown.exit().clone())
+}
+
+/// Open one feed's transmitters and wrap each in its own fan-out.
+///
+/// # Every port role is `FailureScope::Process`, and two of the three are the
+/// decision the design left open
+///
+/// A dead **mktdata** socket means this publisher is not publishing, which is a
+/// reason to end the process and let a supervisor restart it where the route
+/// works. That one the design states.
+///
+/// A dead **refdata** socket leaves existing subscribers served and makes the
+/// feed unjoinable: every `Instrument ID` on the wire resolves to a definition
+/// that is no longer being retransmitted, and the reference-data cycle is what a
+/// subscriber's whole view of identity is built on. Degrading silently into a
+/// feed nobody new can join is worse than a restart.
+///
+/// A dead **snapshot** socket is the same argument for a depth feed and slightly
+/// stronger: a subscriber that lost a datagram cannot rebuild its book without
+/// one, so a depth feed with no snapshot port is a feed whose subscribers
+/// diverge one gap at a time and never recover. That is exactly why
+/// `snapshot_port` is required for a depth feed rather than optional.
+fn open_ports(
+    feed: &Feed,
+    config: &Config,
+    metrics: &Arc<PublisherMetrics>,
+    route: &KernelRoute,
+) -> Result<Ports, StartupError> {
+    let open = |name: &'static str, port_role: PortRole, dst_port: u16| {
+        let destination = SocketAddrV4::new(feed.group, dst_port);
+        let transmitter = MulticastTransmitter::open(
+            name,
+            &config.egress,
+            destination,
+            port_role,
+            FailureScope::Process,
+            route,
+        )?;
+        let endpoint = transmitter.endpoint();
+        let mut sink = Tee::new(port_role, Arc::clone(metrics));
+        sink.add(Box::new(transmitter));
+        // `[adapter.tee]` would add a second member to this fan-out, and to
+        // this rather than to a second transmitter: it darkens nothing when it
+        // fails and must never be able to end a send, which is exactly what
+        // `Tee` guarantees a member. It is not added because the framing it
+        // writes is the framing the offline comparison reads, and that framing
+        // does not exist yet - see `crate::config::TeeConfig`.
+        Ok::<Port, StartupError>(Port { endpoint, sink })
+    };
+
+    Ok(Ports {
+        mktdata: open("mktdata", PortRole::Mktdata, feed.mktdata_port)?,
+        refdata: open("refdata", PortRole::Refdata, feed.refdata_port)?,
+        snapshot: match feed.snapshot_port {
+            Some(dst_port) => Some(open("snapshot", PortRole::Snapshot, dst_port)?),
+            None => None,
+        },
+    })
 }
 
 /// The numbers no series carries, on the way out.

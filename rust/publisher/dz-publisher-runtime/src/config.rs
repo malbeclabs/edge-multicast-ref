@@ -37,7 +37,9 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use dz_edge_core::PortRole;
+use dz_edge_core::{Feed as WireFeed, PortRole};
+use dz_edge_mbp::MarketByPrice;
+use dz_edge_tob::TopOfBook;
 use dz_ingress_core::{IngressConfig, Kind, Policy};
 use dz_publisher_egress::{EgressPolicy, Ipv4Prefix, DEFAULT_TTL};
 use dz_publisher_lowering::SourceId;
@@ -152,7 +154,15 @@ pub struct FeedSection {
     pub mktdata_port: u16,
     pub refdata_port: u16,
 
-    /// Depth feeds only. Absent for a feed with no snapshot port.
+    /// Depth feeds only, and **required** for one.
+    ///
+    /// Both directions are refused rather than shrugged at. A depth feed
+    /// without one publishes a book a subscriber that lost a datagram can never
+    /// resynchronise, which is the failure the port exists for; a top-of-book
+    /// feed with one names a port nothing will ever send on, and an operator
+    /// who wrote it believes something is listening there. See
+    /// [`StartupError::SnapshotPortRequired`] and
+    /// [`StartupError::SnapshotPortNotCarried`].
     #[serde(default)]
     pub snapshot_port: Option<u16>,
 
@@ -333,23 +343,38 @@ pub struct ReplayConfig {
 /// [`dz_ingress_core::Kind`] is: what makes a feed emittable is something being
 /// able to compose, count and transmit its messages, and a value a
 /// configuration can name that nothing composes is a value that resolves to
-/// nothing at startup.
+/// nothing at startup. Not `#[non_exhaustive]`, so a feed added here breaks
+/// every match over this type — including [`crate::run()`]'s, which is where the
+/// composing happens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FeedSpec {
     /// `dz-edge-tob`: `Quote` and `Trade`, on the mktdata and refdata port
     /// roles.
     TopOfBook,
+    /// `dz-edge-mbp`: `LevelUpdate` and `BookClear` on mktdata, the three
+    /// snapshot message types on the snapshot port role, and `Trade` — which
+    /// is byte-identical to top-of-book's, per the wire's cross-specification
+    /// policy for `0x04`.
+    MarketByPrice,
 }
 
 impl FeedSpec {
-    /// The specifications this build can emit, by the name the codec crate
-    /// gives them.
-    pub const SUPPORTED: &'static str = "top-of-book";
+    /// Every specification, in the order an error message names them.
+    pub const ALL: [Self; 2] = [Self::TopOfBook, Self::MarketByPrice];
 
+    /// The specifications this build can emit, for an error message.
+    ///
+    /// A literal so that it is a `&'static str` usable in a `thiserror` format
+    /// string; held to [`ALL`](Self::ALL) by
+    /// `tests/feed_specs.rs::the_supported_list_is_the_specification_set`.
+    pub const SUPPORTED: &'static str = "top-of-book, market-by-price";
+
+    /// The configuration token, which is the codec crate's own `Feed::NAME`.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::TopOfBook => "top-of-book",
+            Self::TopOfBook => <TopOfBook as WireFeed>::NAME,
+            Self::MarketByPrice => <MarketByPrice as WireFeed>::NAME,
         }
     }
 
@@ -357,33 +382,80 @@ impl FeedSpec {
     ///
     /// Handed to the metrics crate, which pre-creates one child series per role
     /// — so passing a role this publisher does not operate would assert a
-    /// channel that does not exist.
+    /// channel that does not exist, and omitting one it does operate would
+    /// leave a panel blank until the first datagram.
     #[must_use]
     pub const fn port_roles(self) -> &'static [PortRole] {
         match self {
             Self::TopOfBook => &[PortRole::Mktdata, PortRole::Refdata],
+            // The third role is the whole difference at this level: a
+            // subscriber to a depth feed holds a book that only exists because
+            // it applied every message in order, so it needs somewhere to
+            // recover from.
+            Self::MarketByPrice => &[PortRole::Mktdata, PortRole::Refdata, PortRole::Snapshot],
+        }
+    }
+
+    /// Whether this specification carries a snapshot port role.
+    #[must_use]
+    pub const fn has_snapshot_port(self) -> bool {
+        match self {
+            Self::TopOfBook => false,
+            Self::MarketByPrice => true,
         }
     }
 
     /// Resolve a `[[feed]] spec` token.
     ///
+    /// The tokens are the codec crates' own `Feed::NAME` constants rather than
+    /// literals here, so a configuration names a feed by the name the crate
+    /// that implements it gives it, and the two cannot drift.
+    ///
     /// # Errors
     ///
     /// [`StartupError::UnsupportedFeedSpec`], naming what this build can emit.
-    /// The depth specifications are the interesting refusal and they are not a
-    /// spelling mistake: `dz-publisher-lowering` lowers them correctly today,
-    /// and what they lack is an `EgressMessageType` to be counted under. The
-    /// metric name set is closed by a governing playbook, so this crate can
-    /// neither invent a label nor push a message it has none for.
+    /// There is no default: a feed is not a thing to guess at, and the audit's
+    /// misspelled section became the wrong transport precisely because
+    /// something defaulted.
     pub fn resolve(token: &str) -> Result<Self, StartupError> {
-        match token {
-            "top-of-book" => Ok(Self::TopOfBook),
-            other => Err(StartupError::UnsupportedFeedSpec {
-                spec: other.to_owned(),
+        Self::ALL
+            .into_iter()
+            .find(|spec| spec.as_str() == token)
+            .ok_or_else(|| StartupError::UnsupportedFeedSpec {
+                spec: token.to_owned(),
                 supported: Self::SUPPORTED.to_owned(),
-            }),
-        }
+            })
     }
+}
+
+/// A wire feed this crate can compose a send path for, as a type-level fact.
+///
+/// # Why this exists rather than a field
+///
+/// [`ChannelEgress`](dz_publisher_egress::ChannelEgress) is generic over the
+/// feed, because `Magic` belongs to the feed and is what rejects a datagram
+/// misrouted from a sibling. So a send path is
+/// `FeedPipeline<TopOfBook>` or `FeedPipeline<MarketByPrice>` and the feed is
+/// known at compile time — but the *routing* has to know which specification it
+/// is holding, because the codec will not stop a `Quote` being pushed into a
+/// market-by-price datagram: `DatagramBuilder::push` checks `PORT_ROLES` and
+/// nothing checks feed membership.
+///
+/// Carrying the specification as an associated constant rather than a runtime
+/// field is what makes the two unable to disagree. A `FeedPipeline` built over
+/// `MarketByPrice` cannot be told it is a top-of-book feed, because there is
+/// nothing to tell.
+pub trait EmittedFeed: WireFeed {
+    /// The `[[feed]] spec` this wire feed answers to.
+    const SPEC: FeedSpec;
+}
+
+impl EmittedFeed for TopOfBook {
+    const SPEC: FeedSpec = FeedSpec::TopOfBook;
+}
+
+impl EmittedFeed for MarketByPrice {
+    const SPEC: FeedSpec = FeedSpec::MarketByPrice;
 }
 
 /// One feed's configuration, checked.
@@ -472,6 +544,19 @@ impl Document {
         }
         if feeds.is_empty() {
             return Err(StartupError::NoEnabledFeed);
+        }
+        // One `Source ID` per process, because that is what a `Source ID` is:
+        // the lowering takes it once and every message a process sends carries
+        // it, so there is no per-message decision and no per-feed one either.
+        // Two feeds naming different ids is a configuration that cannot be
+        // obeyed, and picking one of them would put an identity on one feed's
+        // wire that its own block did not ask for.
+        let first = feeds[0].source_id;
+        if let Some(other) = feeds.iter().find(|feed| feed.source_id != first) {
+            return Err(StartupError::SeveralSourceIds {
+                one: first.get(),
+                another: other.source_id.get(),
+            });
         }
 
         let selection = SelectionPolicy::new(
@@ -595,6 +680,20 @@ impl FeedSection {
             return Err(StartupError::ZeroPort {
                 key: "snapshot_port",
             });
+        }
+        match (spec.has_snapshot_port(), self.snapshot_port) {
+            (true, None) => {
+                return Err(StartupError::SnapshotPortRequired {
+                    spec: spec.as_str(),
+                })
+            }
+            (false, Some(port)) => {
+                return Err(StartupError::SnapshotPortNotCarried {
+                    spec: spec.as_str(),
+                    port,
+                })
+            }
+            _ => {}
         }
         if self.mktdata_port == self.refdata_port {
             return Err(StartupError::PortsCollide {

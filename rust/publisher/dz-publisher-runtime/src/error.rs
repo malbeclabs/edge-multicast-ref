@@ -82,16 +82,47 @@ pub enum StartupError {
 
     /// A `[[feed]] spec` this build cannot emit.
     ///
-    /// A separate error from a spelling mistake, and the message says which it
-    /// is: the depth specs are named by the codec crates and lowered by
-    /// `dz-publisher-lowering`, and what they lack is an
-    /// `EgressMessageType` to be counted under — the metric name set is closed
-    /// by a governing playbook, so the runtime cannot invent one and cannot
-    /// push a message it has no label for. See the crate documentation.
+    /// The tokens are the codec crates' own `Feed::NAME` constants, so this is
+    /// a spelling mistake or a feed whose codec crate is not in this workspace
+    /// — `dz-edge-mbo` and `dz-edge-perp-stats` being the ones that are not.
+    /// The message names what this build can emit, because being told only
+    /// that a value was refused leaves an operator guessing.
     #[error(
         "`[[feed]] spec = \"{spec}\"` is not a feed this build can emit; it can emit: {supported}"
     )]
     UnsupportedFeedSpec { spec: String, supported: String },
+
+    /// A depth feed with no `snapshot_port`.
+    ///
+    /// Refused rather than run without one. A subscriber to a depth feed holds
+    /// a book that exists only because it applied every message in order, so
+    /// one that lost a datagram has nowhere to recover from — and the publisher
+    /// looks healthy the whole time.
+    #[error(
+        "`[[feed]] spec = \"{spec}\"` carries a snapshot port role and `snapshot_port` is not set"
+    )]
+    SnapshotPortRequired { spec: &'static str },
+
+    /// A feed with a `snapshot_port` its specification does not carry.
+    ///
+    /// Refused rather than ignored: an operator who wrote a port believes
+    /// something is listening on it, and a key nobody reads is the audit's own
+    /// failure one level down.
+    #[error(
+        "`[[feed]] spec = \"{spec}\"` carries no snapshot port role, so \
+         `snapshot_port = {port}` names a port nothing will send on"
+    )]
+    SnapshotPortNotCarried { spec: &'static str, port: u16 },
+
+    /// Two enabled feeds naming different `source_id`s.
+    ///
+    /// A `Source ID` is the publisher's registered identity and is the same for
+    /// every message a process sends — the lowering takes it once, for that
+    /// reason. Two feeds asking for different ones is a configuration that
+    /// cannot be obeyed, and obeying either would put an identity on one feed's
+    /// wire that its own block did not ask for.
+    #[error("two enabled `[[feed]]` blocks name different source ids, {one} and {another}")]
+    SeveralSourceIds { one: u16, another: u16 },
 
     /// Two `[[feed]]` blocks name the same specification.
     ///
