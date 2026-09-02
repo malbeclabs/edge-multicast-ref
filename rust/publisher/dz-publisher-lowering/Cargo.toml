@@ -1,0 +1,17 @@
+[package]
+name = "dz-publisher-lowering"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Normalized venue events to Edge wire messages: the one implementation every venue shares"
+
+# Separate from the runtime deliberately: the recorder links this to re-run a
+# venue's mapping over an archive, and must not thereby link an egress socket,
+# a signal handler or an async runtime.
+[dependencies]
+dz-adapter-core = { path = "../../adapter/dz-adapter-core" }
+dz-edge-core = { path = "../../codec/dz-edge-core" }
+dz-edge-tob = { path = "../../codec/dz-edge-tob" }
+thiserror = { workspace = true }

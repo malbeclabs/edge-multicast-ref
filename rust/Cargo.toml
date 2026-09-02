@@ -7,6 +7,7 @@ members = [
     "codec/dz-edge-refdata",
     "adapter/dz-adapter-core",
     "publisher/dz-publisher-metrics",
+    "publisher/dz-publisher-lowering",
     "recorder/dz-recorder-core",
     "recorder/dz-recorder-archive",
     "recorder/dz-recorder-replay",

@@ -66,7 +66,7 @@ once. That argument does not stop at the repository boundary.
 Where this design names a thing that seam already names, it takes that name. It
 diverges in exactly one place, and the divergence is the next two findings.
 
-### Finding: a venue that encodes writes a flags byte, and one is wrong
+### Finding: a venue that encodes writes a flags byte, and two of them read it differently
 
 That seam's venue methods return *wire messages* — the venue is handed
 `instrument_id`, `source_id` and its scale, and hands back an encoded `Quote`.
@@ -77,15 +77,34 @@ minting, so almost nothing is left. Almost: one of those encoders sets
 update_flags: QUOTE_UPDATE_BID | QUOTE_UPDATE_ASK
 ```
 
-unconditionally, on every quote, on a live feed. Every subscriber reading
-`Update Flags` is told both sides changed whenever either did, and no test can
-see it, because the encoder and the decoder agree. It is the `Action` bug
-described in the earlier design, in a different byte.
+unconditionally, on every quote, on a live feed.
+
+**That constant is not currently producing a wrong byte, and the reason it is
+not is the finding.** Its book's top accessor returns `None` unless both sides
+exist, and its caller turns that into a missing-field error, so a one-sided book
+never reaches the encoder. What makes the constant safe is therefore a property
+of a different function, two layers away, that nothing states and nothing tests.
+The next feed to reuse that encoder over a book that can be one-sided ships the
+wrong byte, and no round-trip test sees it because the encoder and the decoder
+agree.
+
+**And the wire convention itself is settled only by convention.** Both
+publishers derive the byte the same way, independently: the *updated* bit and
+the *gone* bit of a side are mutually exclusive, so the bit says the side is
+**present**, not that it moved. One states that as a normative table in its own
+encoder and pins the absent side's zeros byte for byte; the other reaches the
+same four values from whether each side of a truncated book is empty. The feed
+spec fixes the four bit positions and stops. Two agreeing implementations and a
+silent specification is exactly the state in which a third implementation
+invents a third convention.
 
 `Update Flags` is derivable and nothing else is derived from it: the publisher
 knows which sides its event carried. So the last step — normalized event to wire
 message — moves out of the venue too, and `SideUpdate` above is what makes the
-derivation the only way to reach the byte.
+derivation the only way to reach the byte. Since the byte carries presence,
+`SideUpdate` has two cases and not three: there is no way to say *unchanged*,
+and a quote that would restate the top unchanged is not an event — both
+publishers already suppress it, in the layer that holds the book.
 
 ### Finding: two scaling paths in one publisher, and the exact one is unused
 
@@ -99,10 +118,19 @@ fixed-point:
 
 The correct implementation was written, reasoned about at length, and is not the
 one running. `dz_edge_core::fixed_point::parse_signed` is a third
-implementation of the same function, in this repository, already exact. Scaling
-belongs behind the interface for the same reason the datagram cap belongs in the
-builder: not because a venue would choose wrongly, but because the choice keeps
-being available.
+implementation of the same function, in this repository, already exact.
+
+**What that costs on the wire, precisely.** The live path takes the rounding
+conversion's failure as `.unwrap_or(0)`, and the same publisher's quote sets a
+side's *updated* bit whenever it has a level for that side. So a value it cannot
+convert is published as a price of zero **with the side flagged as present** — a
+real-looking quote at nothing, in range, indistinguishable at a subscriber from
+a genuine bid at zero. This is the strongest single argument in this document
+for the boundary being where it is.
+
+Scaling belongs behind the interface for the same reason the datagram cap
+belongs in the builder: not because a venue would choose wrongly, but because
+the choice keeps being available.
 
 ### Finding: pre-scaled integers must stay expressible
 
@@ -242,12 +270,12 @@ pub enum Scalar<'a> {
 
 /// One side of a two-sided quote.
 ///
-/// The three cases are distinct and the venue knows which it has; the runtime
-/// derives `Update Flags` from the pair. An adapter never writes a flags byte.
+/// Two cases, because the wire has two states per side: the *updated* and
+/// *gone* bits are mutually exclusive, so the bit says a side is present. The
+/// runtime derives `Update Flags` from the pair; an adapter never writes one.
 pub enum SideUpdate<'a> {
-    Unchanged,
     Gone,
-    Updated { px: Scalar<'a>, qty: Scalar<'a>, source_count: Option<u16> },
+    Present { px: Scalar<'a>, qty: Scalar<'a>, source_count: Option<u16> },
 }
 
 #[non_exhaustive]

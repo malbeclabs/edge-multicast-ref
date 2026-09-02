@@ -201,6 +201,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dz-publisher-lowering"
+version = "0.1.0"
+dependencies = [
+ "dz-adapter-core",
+ "dz-edge-core",
+ "dz-edge-tob",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "dz-publisher-metrics"
 version = "0.1.0"
 dependencies = [

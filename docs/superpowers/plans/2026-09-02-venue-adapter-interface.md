@@ -10,8 +10,8 @@ the venue said?*
 **Spec:** `docs/superpowers/specs/2026-09-02-venue-adapter-interface-design.md`
 
 **Tech stack:** Rust 2021, workspace MSRV. `dz-adapter-core` depends on
-`dz-edge-core` and `thiserror` and nothing else. No async runtime below
-`dz-ingress-*`.
+`thiserror` and nothing else — stricter than this plan first asked for, see
+task 1's note. No async runtime below `dz-ingress-*`.
 
 ---
 
@@ -45,9 +45,9 @@ that runs in CI. No task in it requires a venue repository to change.
   test name, fixture, config example or crate name in this plan names a venue, a
   venue repository, a venue crate, an issue tracker, or gives a count of
   publishers.
-- **`dz-adapter-core` takes no new dependency.** `dz-edge-core` and `thiserror`.
-  A task that needs a third stops and asks. This is the crate every venue
-  inherits and it is the whole point of the crate being separate.
+- **`dz-adapter-core` takes no new dependency.** `thiserror`, and nothing
+  else. A task that needs a second stops and asks. This is the crate every
+  venue inherits and it is the whole point of the crate being separate.
 - **Nothing spec-decided is expressible through the interface.** No
   `Instrument ID`, `Source ID`, `Channel ID`, sequence number, scaled integer,
   flags byte, `Action`, or datagram in any parameter or return type an adapter
@@ -67,7 +67,7 @@ by reasoning, and each is a task below that would otherwise be written wrong.
 | Piece | Why it is not obvious |
 |---|---|
 | `Scalar` has two variants and no third | text-only forces a venue whose book already holds integers to round-trip through a string, which is a second scaling that can drift; a variant carrying an integer already at the *instrument's* exponent would hand scaling back to the venue |
-| `Update Flags` is derived, never passed | an existing encoder writes both bits unconditionally, on a live feed, and no round-trip test can see it |
+| `Update Flags` is derived, never passed | the bit says a side is *present*, not that it moved, and the two bits of a side are mutually exclusive — which both publishers derive independently and neither specification states. See task 3's note |
 | `Action` is derived from `qty` plus a hint | the shipped bug is a table numbered from `New`; deriving `Delete` from zero makes both illegal pairings unrepresentable while leaving New-vs-Change with the only layer that knows |
 | `on_payload` is sync and I/O-free | it is what makes Mode C a pure function; `async fn` in the trait would also pin every venue to one runtime version |
 | the snapshot is pulled, not pushed | the cadence is the runtime's and the book is the adapter's |
@@ -84,7 +84,8 @@ by reasoning, and each is a task below that would otherwise be written wrong.
 - [x] New crate `rust/adapter/dz-adapter-core`, added to workspace `members`.
 - [x] `InstrumentRef` — opaque, `Copy`, constructible only inside the workspace.
 - [x] `Scalar<'a>` — `Text(&'a str)` and `Fixed { mantissa: i64, exponent: i8 }`.
-- [x] `SideUpdate<'a>` — `Unchanged` / `Gone` / `Updated { px, qty, source_count }`.
+- [x] `SideUpdate<'a>` — `Gone` / `Present { px, qty, source_count }`; three
+      cases as first written, corrected to two in task 3.
 - [x] `Presence`, `Side`, `Aggressor`, `TradeFlags`, `ClearScope`.
 - [x] `ParseError` with exactly the four variants of `ParseErrorReason`, and a
       test that fails if the two enums ever differ in arity or token.
@@ -150,20 +151,71 @@ implemented without importing anything else.
 
 ### 3. `dz-publisher-lowering`: top-of-book
 
-- [ ] New crate `rust/publisher/dz-publisher-lowering`.
-- [ ] `InstrumentTable`: `InstrumentRef` → `(Instrument ID, price exponent, qty
+- [x] New crate `rust/publisher/dz-publisher-lowering`.
+- [x] `InstrumentTable`: `InstrumentRef` → `(Instrument ID, price exponent, qty
       exponent)`, populated by the refdata owner, read on the hot path.
-- [ ] `lower_quote`: `Event::Quote` → `dz_edge_tob::Quote`, deriving
+- [x] `lower_quote`: `Event::Quote` → `dz_edge_tob::Quote`, deriving
       `Update Flags` from the `SideUpdate` pair and scaling both sides through
       `dz_edge_core::fixed_point`.
-- [ ] `lower_trade`: `Event::Trade` → `dz_edge_tob::Trade`.
-- [ ] `Scalar::Fixed` rescaling: exact or refused, never rounded, sharing the
+- [x] `lower_trade`: `Event::Trade` → `dz_edge_tob::Trade`.
+- [x] `Scalar::Fixed` rescaling: exact or refused, never rounded, sharing the
       three `ScaleError` cases so each reaches its own metric reason.
 
 **Tests:** every `SideUpdate` pair against its expected flags byte, as a table —
 including the two an unconditional encoder gets wrong. `Scalar::Text` and
 `Scalar::Fixed` carrying the same value lower to identical bytes. A `Fixed`
 whose exponent cannot be rescaled exactly is refused rather than rounded.
+
+> **Task 3: landed**, and it moved the boundary first. 22 tests in the new
+> crate, 581 in the workspace, `clippy --all-targets --all-features -D
+> warnings`, `fmt --check` and `check-public-repo-rules.sh` clean, `cargo test
+> --all` green in both profiles.
+>
+> **`Update Flags` states presence, not change, and the byte was read off the
+> two publishers rather than reasoned about.** Both derive it the same way,
+> independently, on live feeds: a side's *updated* and *gone* bits are mutually
+> exclusive, so the bit says the side is present. One publisher states that
+> table in its own encoder as normative for its feed and pins the absent side's
+> zeros byte for byte; the other reaches the same four values from whether each
+> side of a truncated book is empty. The feed spec fixes the four bit positions
+> and settles nothing else.
+>
+> So `SideUpdate` lost `Unchanged` and became `Gone` or `Present`, which is a
+> correction to task 2. A venue cannot say *this side did not move* because the
+> wire cannot carry it, and a quote that would restate the top unchanged is
+> therefore not an event at all: suppressing it stays with the adapter, which is
+> the layer holding the book. Both publishers already do that, one counting the
+> suppressions as its expected bulk of traffic and one deduplicating on the
+> encoded top.
+>
+> **One of the two defects this design cites was miscounted.** The encoder that
+> writes both update bits unconditionally cannot reach the wire with an absent
+> side: its book's top accessor returns `None` unless both sides exist and the
+> caller turns that into a missing-field error, so under presence semantics the
+> constant is the correct byte for every quote that feed emits. The live hazard
+> on the quote path is the other publisher's, and it is worse — its market-data
+> scaling goes through `f64` and `.round()` and takes failure as
+> `.unwrap_or(0)`, so a value it cannot convert is published as a price of zero
+> with the side's *updated* bit set. An exact, string-only conversion sits in
+> the same repository, uncalled on that path. That is now the finding the
+> scaling argument rests on, and it is the stronger one. The `Action` defect
+> holds up unchanged: it landed, and it is fixed there by the same
+> transcribe-the-spec-tables technique as `tests/wire_vocabularies.rs`.
+>
+> **A withdrawn instrument leaves a hole.** `InstrumentTable` slots never shift
+> and are never reused. An `InstrumentRef` is a handle rather than a capability
+> — the runtime that mints one is in a different crate from the boundary that
+> carries it, so a forged or stale handle is reachable — and this is where
+> either is refused, once, countably, instead of resolving to whichever
+> `Instrument ID` moved into that slot.
+>
+> **The lowering refusal has no normative metric family yet.**
+> `LoweringError::reason()` keeps `unknown_instrument` and the three
+> `ScaleError` cases distinguishable, but the normative set in
+> `dz-publisher-metrics` has no series for a lowering refusal, and the set is
+> closed by a governing playbook. Which family these land on is a decision for
+> the runtime task, and it needs either a playbook addition or a deliberate
+> mapping onto an existing `reason`. Flagged rather than invented.
 
 ### 4. `dz-publisher-lowering`: depth
 
