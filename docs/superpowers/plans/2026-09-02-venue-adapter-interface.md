@@ -604,6 +604,42 @@ waiting on a feed only one of them publishes.
 
 ---
 
+## It ran
+
+Everything above is tested against fakes — sockets behind traits, injected
+clocks, recording sinks — which is what makes the suite run unprivileged with no
+network, and which means all of it was a hypothesis until a byte left a socket.
+
+`rust/publisher/dz-publisher-runtime/examples/loopback.sh` is that byte. It
+composes the real runtime over real transmitters on a multicast group, publishes
+a known set of events, and reads the other end with **this repository's Go
+subscriber** — which makes the check cross-language rather than our encoder
+agreeing with our decoder.
+
+The subscriber decoded a heartbeat, the manifest cadence, two instrument
+definitions, both quotes, the trade and the `EndOfSession`, and every value it
+read is the value the publisher sent: the golden vector's raw integers on the
+two-sided quote, `update_flags = 6` with zeroed bid on the one-sided one, and
+the venue's own exponents on the definition.
+
+**Two things only the real run could find.**
+
+Unpinned, the transmitter resolves its source off the route to the group — which
+is the discipline, and on a host whose route to that group leaves by the default
+interface, a subscriber joined on loopback hears nothing. The publisher reports
+a clean teardown, because nothing in the send path is wrong: the two ends chose
+different interfaces. That is what `[egress] pin` is for, and it is invisible to
+every test that holds a fake socket.
+
+And `check-public-repo-rules.sh` refused the first group the example used. A
+multicast address outside MCAST-TEST-NET in a public repository is exactly what
+that gate is for, and it caught it before the commit rather than after.
+
+**`[adapter.replay]` is a config key with no implementation.** It parses, and
+`run()` does not read it. So the example composes the publisher itself rather
+than going through `run()`, which is why `run()` is still the one path with no
+live exercise at all.
+
 ## Acceptance
 
 The plan is done when a venue repository can, against tagged crates and with no
