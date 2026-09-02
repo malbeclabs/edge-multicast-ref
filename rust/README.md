@@ -26,7 +26,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all --check
 ```
 
-CI runs all four on every pull request — unfiltered, because a required check that never reports blocks a pull request for ever. Three further jobs gate what the default build cannot reach: `afpacket` (needs `libpcap-dev`), `e2e` (needs a runner that can deliver multicast to itself) and `conformance` (builds edge-feed-spec's own rule set from a pinned revision and applies it to what this repository produces).
+CI runs all four on every pull request — unfiltered, because a required check that never reports blocks a pull request forever. Three further jobs gate what the default build cannot reach: `afpacket` (needs `libpcap-dev`), `e2e` (needs a runner that can deliver multicast to itself) and `conformance` (builds edge-feed-spec's own rule set from a pinned revision and applies it to what this repository produces).
 
 `Cargo.lock` is tracked. MSRV and the `prometheus` version are pinned at the workspace level.
 
