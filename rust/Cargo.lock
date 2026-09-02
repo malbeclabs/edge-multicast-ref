@@ -263,6 +263,7 @@ version = "0.1.0"
 dependencies = [
  "dz-adapter-core",
  "dz-edge-core",
+ "dz-edge-mbp",
  "dz-edge-refdata",
  "dz-edge-tob",
  "prometheus",
@@ -279,6 +280,21 @@ dependencies = [
  "dz-edge-refdata",
  "dz-publisher-lowering",
  "nix 0.30.1",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "dz-publisher-runtime"
+version = "0.1.0"
+dependencies = [
+ "dz-adapter-core",
+ "dz-edge-core",
+ "dz-ingress-core",
+ "dz-publisher-egress",
+ "dz-publisher-lowering",
+ "dz-publisher-metrics",
+ "dz-publisher-refdata",
+ "serde",
  "thiserror 1.0.69",
 ]
 
@@ -373,6 +389,21 @@ dependencies = [
  "dz-recorder-replay",
  "serde",
  "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "dz-recorder-relower"
+version = "0.1.0"
+dependencies = [
+ "dz-adapter-core",
+ "dz-edge-core",
+ "dz-edge-mbp",
+ "dz-edge-refdata",
+ "dz-edge-tob",
+ "dz-publisher-lowering",
+ "dz-recorder-core",
+ "dz-recorder-replay",
  "thiserror 1.0.69",
 ]
 

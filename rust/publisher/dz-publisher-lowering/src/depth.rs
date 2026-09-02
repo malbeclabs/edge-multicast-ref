@@ -1,7 +1,7 @@
 //! Market by price: a normalized level or clear, lowered onto `0x40` and
 //! `0x41`.
 
-use dz_adapter_core::{ClearScope, InstrumentRef, Presence, Scalar, Side};
+use dz_adapter_core::{Aggressor, ClearScope, InstrumentRef, Presence, Scalar, Side, TradeFlags};
 use dz_edge_mbp::{
     BookClear, LevelUpdate, ACTION_CHANGE, ACTION_DELETE, ACTION_NEW, ACTION_UNKNOWN, CLEAR_ASK,
     CLEAR_BID, CLEAR_BOTH, SCOPE_ENTIRE_SIDE, SCOPE_FROM_PRICE, SIDE_ASK, SIDE_BID,
@@ -189,6 +189,51 @@ impl DepthLowering {
     /// The sequence, read-only, for the framer's `Last Instrument Seq`.
     pub(crate) const fn sequence(&self) -> &PerInstrumentSeq {
         &self.seq
+    }
+
+    /// `Event::Trade` to `0x04 Trade`, on a depth channel.
+    ///
+    /// **The same function the top-of-book channel calls.** This feed carries
+    /// `0x04` as well — a trade tape beside the book, for consumers who want
+    /// one — and the wire's cross-specification policy requires the bytes to be
+    /// identical to the top-of-book feed's for the same execution. So this is a
+    /// call to [`crate::trade::lower`] and not a second encoder, which is the
+    /// whole distinction: in one existing publisher that obligation is a doc
+    /// comment holding two implementations to each other by hand.
+    ///
+    /// Note what it does **not** take: a `Per-Instrument Seq`. That series
+    /// belongs to the messages that mutate the book, and a trade does not.
+    /// Spending a number on one would put a gap in a series every subscriber
+    /// reads for loss.
+    ///
+    /// # Errors
+    ///
+    /// As [`lower_level`](Self::lower_level).
+    #[allow(clippy::too_many_arguments)]
+    pub fn lower_trade(
+        &self,
+        instruments: &InstrumentTable,
+        instrument: InstrumentRef,
+        source_ts_ns: u64,
+        px: Scalar<'_>,
+        qty: Scalar<'_>,
+        aggressor: Aggressor,
+        trade_id: Option<u64>,
+        cumulative_volume: Option<Scalar<'_>>,
+        flags: TradeFlags,
+    ) -> Result<dz_edge_tob::Trade, LoweringError> {
+        crate::trade::lower(
+            self.source_id,
+            instruments,
+            instrument,
+            source_ts_ns,
+            px,
+            qty,
+            aggressor,
+            trade_id,
+            cumulative_volume,
+            flags,
+        )
     }
 
     /// Mint the next snapshot id, for the framer.

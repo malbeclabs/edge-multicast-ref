@@ -2,9 +2,7 @@
 
 use dz_adapter_core::{Aggressor, InstrumentRef, Scalar, SideUpdate, TradeFlags};
 use dz_edge_tob::{
-    Quote, Trade, AGGRESSOR_BUY, AGGRESSOR_SELL, AGGRESSOR_UNKNOWN, QUOTE_ASK_GONE,
-    QUOTE_ASK_UPDATED, QUOTE_BID_GONE, QUOTE_BID_UPDATED, TRADE_FLAG_BLOCK, TRADE_FLAG_CROSS,
-    TRADE_FLAG_SWEEP,
+    Quote, Trade, QUOTE_ASK_GONE, QUOTE_ASK_UPDATED, QUOTE_BID_GONE, QUOTE_BID_UPDATED,
 };
 
 use crate::error::LoweringError;
@@ -94,26 +92,15 @@ impl Lowering {
 
     /// `Event::Trade` to `0x04 Trade`.
     ///
-    /// **One implementation, for every feed a venue publishes.** The wire's
-    /// cross-specification policy for `0x04` requires a venue's trade messages
-    /// to be identical whichever of its feeds carries them, and today that is a
-    /// doc comment holding two encoders to each other by hand in one publisher.
-    /// Here there is one function and nothing to hold.
-    ///
-    /// The three sentinels are the specification's own, and each is what the
-    /// venue not publishing something looks like on the wire: no trade
-    /// identifier is `0`, no running total is `0`, and an unstated aggressor is
-    /// the `Unknown` value rather than a guess. Neither existing publisher
-    /// exposes a running total on its trade events, and neither sets a
-    /// qualifier bit.
+    /// **One implementation, for every feed a venue publishes**, and this
+    /// method is a call to it rather than a copy of it — see [`crate::trade`]
+    /// for the obligation that makes the distinction matter, and
+    /// [`DepthLowering::lower_trade`](crate::DepthLowering::lower_trade) for
+    /// the other caller.
     ///
     /// # Errors
     ///
     /// As [`lower_quote`](Self::lower_quote).
-    // The parameters are exactly the fields of `Event::Trade`. Grouping them
-    // into a struct would be a second definition of that variant, in another
-    // crate, free to drift from it — which is the failure this whole boundary
-    // exists to prevent, traded for one lint.
     #[allow(clippy::too_many_arguments)]
     pub fn lower_trade(
         &self,
@@ -127,24 +114,18 @@ impl Lowering {
         cumulative_volume: Option<Scalar<'_>>,
         flags: TradeFlags,
     ) -> Result<Trade, LoweringError> {
-        let inst = instruments.get(instrument)?;
-
-        let cumulative_volume = match cumulative_volume {
-            Some(volume) => qty_for(inst, volume, "cumulative_volume")?,
-            None => 0,
-        };
-
-        Ok(Trade {
-            instrument_id: inst.instrument_id,
-            source_id: self.source_id.get(),
-            aggressor_side: aggressor_byte(aggressor),
-            trade_flags: trade_flags_byte(flags),
-            source_timestamp_ns: source_ts_ns,
-            trade_price: price_for(inst, px, "trade_price")?,
-            trade_qty: qty_for(inst, qty, "trade_qty")?,
-            trade_id: trade_id.unwrap_or(0),
+        crate::trade::lower(
+            self.source_id,
+            instruments,
+            instrument,
+            source_ts_ns,
+            px,
+            qty,
+            aggressor,
+            trade_id,
             cumulative_volume,
-        })
+            flags,
+        )
     }
 }
 
@@ -213,30 +194,4 @@ fn lower_side(
             flag: wire.updated,
         }),
     }
-}
-
-/// The aggressor byte. Exhaustive, so a fourth case fails to compile here.
-const fn aggressor_byte(aggressor: Aggressor) -> u8 {
-    match aggressor {
-        Aggressor::Unknown => AGGRESSOR_UNKNOWN,
-        Aggressor::Buy => AGGRESSOR_BUY,
-        Aggressor::Sell => AGGRESSOR_SELL,
-    }
-}
-
-/// The trade qualifier byte, composed from the three booleans the boundary
-/// carries. A bit nobody defined is unreachable because there is no fourth
-/// boolean.
-const fn trade_flags_byte(flags: TradeFlags) -> u8 {
-    let mut byte = 0;
-    if flags.block {
-        byte |= TRADE_FLAG_BLOCK;
-    }
-    if flags.sweep {
-        byte |= TRADE_FLAG_SWEEP;
-    }
-    if flags.cross {
-        byte |= TRADE_FLAG_CROSS;
-    }
-    byte
 }

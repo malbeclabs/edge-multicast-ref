@@ -1,0 +1,48 @@
+[package]
+name = "dz-publisher-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The publisher a venue links: config composition, the adapter registry, the guards, and the wiring"
+
+[dependencies]
+dz-adapter-core = { path = "../../adapter/dz-adapter-core" }
+dz-edge-core = { path = "../../codec/dz-edge-core" }
+dz-edge-refdata = { path = "../../codec/dz-edge-refdata" }
+dz-edge-tob = { path = "../../codec/dz-edge-tob" }
+dz-ingress-core = { path = "../../ingress/dz-ingress-core" }
+dz-publisher-egress = { path = "../dz-publisher-egress" }
+dz-publisher-lowering = { path = "../dz-publisher-lowering" }
+dz-publisher-metrics = { path = "../dz-publisher-metrics" }
+dz-publisher-refdata = { path = "../dz-publisher-refdata" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+# This crate owns the configuration *document*, which is the one place in the
+# family that needs a parser: every other crate owns the shape of its own
+# section and is handed the section already deserialized. See `config`.
+toml = { workspace = true }
+
+# The runtime a publisher runs, and the only crate in this family that may name
+# one. Everything below here takes its waiting through an injected `Clock`
+# precisely so that a venue is not pinned to this minor version and so that no
+# test has to sleep; this is the layer that finally has to pick.
+#
+# `rt` and not `rt-multi-thread`: the composed publisher is deliberately not
+# `Send` - a `DatagramSink` is a trait object with no `Send` bound, because a
+# socket does not need to move between threads - so the driver and the tick loop
+# run as two futures in one task on a current-thread runtime. See `run`.
+tokio = { version = "1", default-features = false, features = [
+    "rt",
+    "time",
+    "signal",
+    "macros",
+] }
+
+[dev-dependencies]
+# Decoding what the wiring actually put on the wire. The end-to-end test asserts
+# datagrams by decoding them with the codec rather than by inspecting the
+# runtime's own state, which is the only way the assertion is about the wire.
+dz-edge-mbp = { path = "../../codec/dz-edge-mbp" }

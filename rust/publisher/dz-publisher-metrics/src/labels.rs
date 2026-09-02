@@ -282,18 +282,28 @@ pub enum EgressMessageType {
     Trade,
     InstrumentDefinition,
     ManifestSummary,
+    LevelUpdate,
+    BookClear,
+    SnapshotBegin,
+    SnapshotLevel,
+    SnapshotEnd,
 }
 
 impl EgressMessageType {
     /// Every variant, in no particular order. Used to pre-create every
     /// child series of this closed-label family at construction.
-    pub(crate) const ALL: [Self; 6] = [
+    pub(crate) const ALL: [Self; 11] = [
         Self::Heartbeat,
         Self::EndOfSession,
         Self::Quote,
         Self::Trade,
         Self::InstrumentDefinition,
         Self::ManifestSummary,
+        Self::LevelUpdate,
+        Self::BookClear,
+        Self::SnapshotBegin,
+        Self::SnapshotLevel,
+        Self::SnapshotEnd,
     ];
 
     #[must_use]
@@ -305,6 +315,11 @@ impl EgressMessageType {
             Self::Trade => "trade",
             Self::InstrumentDefinition => "instrument_definition",
             Self::ManifestSummary => "manifest_summary",
+            Self::LevelUpdate => "level_update",
+            Self::BookClear => "book_clear",
+            Self::SnapshotBegin => "snapshot_begin",
+            Self::SnapshotLevel => "snapshot_level",
+            Self::SnapshotEnd => "snapshot_end",
         }
     }
 
@@ -321,10 +336,17 @@ impl EgressMessageType {
     /// a series that can ever be written to.
     pub(crate) const fn port_roles(self) -> &'static [PortRole] {
         match self {
-            Self::Heartbeat | Self::EndOfSession | Self::Quote | Self::Trade => {
-                &[PortRole::Mktdata]
-            }
+            Self::Heartbeat
+            | Self::EndOfSession
+            | Self::Quote
+            | Self::Trade
+            | Self::LevelUpdate
+            | Self::BookClear => &[PortRole::Mktdata],
             Self::InstrumentDefinition | Self::ManifestSummary => &[PortRole::Refdata],
+            // The snapshot port carries one book state cut across datagrams,
+            // and nothing else does. A snapshot message on the market-data
+            // port is a series that can never be written to.
+            Self::SnapshotBegin | Self::SnapshotLevel | Self::SnapshotEnd => &[PortRole::Snapshot],
         }
     }
 
@@ -356,6 +378,7 @@ mod tests {
     #[test]
     fn port_roles_match_the_codec() {
         use dz_edge_core::{AppMessage, EndOfSession, Heartbeat};
+        use dz_edge_mbp::{BookClear, LevelUpdate, SnapshotBegin, SnapshotEnd, SnapshotLevel};
         use dz_edge_refdata::{InstrumentDefinition, ManifestSummary};
         use dz_edge_tob::{Quote, Trade};
 
@@ -374,12 +397,17 @@ mod tests {
         check::<Trade>(EgressMessageType::Trade);
         check::<InstrumentDefinition>(EgressMessageType::InstrumentDefinition);
         check::<ManifestSummary>(EgressMessageType::ManifestSummary);
+        check::<LevelUpdate>(EgressMessageType::LevelUpdate);
+        check::<BookClear>(EgressMessageType::BookClear);
+        check::<SnapshotBegin>(EgressMessageType::SnapshotBegin);
+        check::<SnapshotLevel>(EgressMessageType::SnapshotLevel);
+        check::<SnapshotEnd>(EgressMessageType::SnapshotEnd);
 
         // Every variant is covered above. A message type added to the codec
         // with no entry here would be pre-created nowhere, silently.
         assert_eq!(
             EgressMessageType::ALL.len(),
-            6,
+            11,
             "a new message type needs a port-role entry and a line in this test"
         );
     }

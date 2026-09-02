@@ -57,6 +57,7 @@ pub mod seq;
 pub mod snapshot;
 pub mod source;
 pub mod tob;
+pub mod trade;
 
 pub use contract::ContractSize;
 pub use depth::DepthLowering;

@@ -321,23 +321,65 @@ and the last sequence the begin declared.
 
 ### 5. Lowering is one implementation, and `0x04` proves it
 
-- [ ] `Event::Trade` lowers through one function regardless of which feed the
+- [x] `Event::Trade` lowers through one function regardless of which feed the
       channel carries.
-- [ ] Test: the same `Event::Trade` lowered for a top-of-book channel and for a
+- [x] Test: the same `Event::Trade` lowered for a top-of-book channel and for a
       depth channel produces byte-identical `Trade` messages.
 
 This is today a doc comment on two encoders held to each other by hand. The
 test is the whole task.
 
+> **Task 5: landed**, and made structural rather than asserted. The body moved
+> to `src/trade.rs`, and both `Lowering::lower_trade` and
+> `DepthLowering::lower_trade` are calls to it with no body of their own — so
+> the two channels cannot drift, and `tests/trade_is_one_implementation.rs`
+> keeps it that way. The specification's own words are what make it worth the
+> file: *"Trade and Liquidation are byte-for-byte identical between the
+> top-of-book feed, the market-by-order feed, and this feed."*
+>
+> Three things beyond the checklist, each because agreement on bytes is only
+> half of one implementation: the two channels are asserted to **refuse** the
+> same trade for the same reason, to agree for a venue that quotes a contract
+> (the newest thing in the path and the likeliest place for two callers to
+> diverge), and a trade is asserted to spend **no** `Per-Instrument Seq` — that
+> series belongs to the messages that mutate the book, and spending a number on
+> a trade would put a gap in a series every subscriber reads for loss.
+
 ### 6. Golden vectors, both directions
 
-- [ ] For each lowered message type, a vector in `testdata/golden/`: the
+- [x] For each lowered message type, a vector in `testdata/golden/`: the
       normalized event, the instrument's exponents, and the expected bytes.
-- [ ] Asserted from `dz-publisher-lowering` (encode) and from the existing
+- [x] Asserted from `dz-publisher-lowering` (encode) and from the existing
       decoders (decode), so the vector binds the interface the way
       `testdata/golden/` already binds the codec across languages.
-- [ ] `EgressMessageType` entries in `dz-publisher-metrics` for anything new;
+- [x] `EgressMessageType` entries in `dz-publisher-metrics` for anything new;
       its unit test fails until they exist.
+
+> **Task 6: landed, and half of it needed no new vector.** `Quote` and `Trade`
+> are reachable from a normalized event at the exponents the existing vectors
+> imply, so the lowering reproduces `quote-v3.bin` and `trade-v3.bin` exactly.
+> That is a stronger statement than a vector of this crate's own would be: a
+> vector generated here would say the lowering agrees with itself, while
+> reproducing the vector another language already reproduces says it agrees
+> with the wire. Both `Scalar` shapes reach those bytes.
+>
+> The depth messages needed vectors of their own, and the reason is a finding
+> rather than an inconvenience. The codec's vectors set every field to a
+> distinct value so a transposed pair cannot pass — including three the
+> boundary cannot state at all: a level's `Level Index` is a rank in the
+> publisher's own book at emission rather than a property of the venue's event,
+> and `Update Reason` and `Clear Reason` have nowhere in a normalized event to
+> come from. No event can reproduce them, so reproducing them would have meant
+> inventing a way for a venue to author a field it does not know. The five new
+> vectors carry `-from-event-` in their names, `manifest.json` records the
+> event beside the bytes in a `lowered_from` block, and the generator is an
+> `#[ignore]`d test because regenerating one is a wire change.
+>
+> `EgressMessageType` gained the five depth types, and its cross-check against
+> the codec's own `PORT_ROLES` failed until they had port roles — which is
+> exactly what this task said it would do. The snapshot three are
+> snapshot-port-only: a snapshot message on the market-data port is a series
+> that can never be written to.
 
 ### 7. The registry and the config binding
 

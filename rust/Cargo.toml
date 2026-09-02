@@ -10,6 +10,7 @@ members = [
     "publisher/dz-publisher-lowering",
     "publisher/dz-publisher-egress",
     "publisher/dz-publisher-refdata",
+    "publisher/dz-publisher-runtime",
     "ingress/dz-ingress-core",
     "ingress/dz-ingress-websocket",
     "recorder/dz-recorder-core",
@@ -18,6 +19,7 @@ members = [
     "recorder/dz-recorder-capture",
     "recorder/dz-recorder-health",
     "recorder/dz-recorder-loss",
+    "recorder/dz-recorder-relower",
     "recorder/dz-recorder-e2e",
     "recorder/dz-recorder",
 ]
