@@ -252,13 +252,13 @@ whose exponent cannot be rescaled exactly is refused rather than rounded.
 
 ### 4. `dz-publisher-lowering`: depth
 
-- [ ] `lower_level`: `Event::Level` → `dz_edge_mbp::LevelUpdate`, deriving
+- [x] `lower_level`: `Event::Level` → `dz_edge_mbp::LevelUpdate`, deriving
       `Action` — `qty_raw == 0` is `ACTION_DELETE` unconditionally, non-zero
       takes `Presence`, `Unknown` is conformant.
-- [ ] `lower_clear`, `lower_snapshot_level`, `SnapshotBegin`/`SnapshotEnd`
-      framing of a pulled snapshot.
-- [ ] `PerInstrumentSeq`: the runtime's counter, keyed on the instrument,
-      reset with the channel, stamped here and nowhere else.
+- [x] `lower_clear`, the snapshot framing (`SnapshotBegin`, the levels,
+      `SnapshotEnd`) of a pulled snapshot.
+- [x] `PerInstrumentSeq`: the runtime's counter, keyed on the instrument,
+      reset with the era, stamped here and nowhere else.
 
 **Tests:** the two illegal pairings the specification names are unreachable —
 asserted by exhausting `Presence` against zero and non-zero quantity. A snapshot
@@ -276,6 +276,42 @@ and the last sequence the begin declared.
 > not yet check. Until it does, the derivation table in this task is the only
 > control there is, which is why it is written as a table over exhausted
 > `Presence` values rather than as a few examples.
+
+> **Task 4: landed.** 18 tests, 605 in the workspace, both profiles green,
+> clippy and fmt clean. Four things are worth stating because a later reading
+> would otherwise take them for slips.
+>
+> **`DepthLowering` is a second type rather than a method on `Lowering`.** The
+> per-instrument sequence is a counter, top-of-book has no such field, and
+> folding the two together would make the stateless path carry state for
+> nothing and stop it being `Copy`.
+>
+> **The sequence number is taken last, after every refusal.** A number spent on
+> a message that never reached the wire is a phantom gap every subscriber reads
+> as packet loss, and the refusal is reachable rather than theoretical — a
+> price the instrument's exponent cannot state exactly is refused rather than
+> rounded. Asserted directly.
+>
+> **`Order Count` absent is `0xFFFF`, and that is the opposite of the
+> top-of-book sentinel.** Two specifications answer the identical question with
+> opposite values: this feed treats `0` as a real count, while top-of-book's
+> `Source Count` says "unavailable" with `0`. The two are written out
+> separately rather than shared through a helper that would have to pick a
+> side, and a test pins both directions.
+>
+> **The snapshot framer records a refusal instead of returning it.**
+> `SnapshotSink::level` cannot fail — it is called from inside the adapter's
+> own loop over its book — so the first refusal is kept and surfaced by
+> `finish`, which is where the runtime can count it and skip the instrument.
+> Nothing partial is ever returned: an incomplete snapshot is worse than none,
+> because a subscriber cannot tell a level that was refused from a level that
+> was lost.
+>
+> `Level Index`, `Update Reason`, `Level Flags` and `Clear Reason` are all
+> informational and none is expressible at the boundary; each carries the value
+> the specification defines for absent. `Level Index` in particular is a
+> property of the publisher's own book *as it emits*, not of the venue's event,
+> so it is `0xFFFF` rather than guessed.
 
 ### 5. Lowering is one implementation, and `0x04` proves it
 

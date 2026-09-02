@@ -19,6 +19,12 @@
 //! - **`Update Flags`.** Derived from the pair of sides, where the *updated*
 //!   and *gone* bits of a side are mutually exclusive. See
 //!   [`Lowering::lower_quote`].
+//! - **`Action`.** Derived from the quantity and a hint: zero is a removal and
+//!   nothing else can be. See [`DepthLowering::lower_level`], and the shipped
+//!   defect it is aimed at.
+//! - **`Per-Instrument Seq`.** The runtime's counter, stamped here and nowhere
+//!   else, which is also the join key an offline re-lowering diffs on. See
+//!   [`PerInstrumentSeq`].
 //! - **Trade qualifiers and the aggressor byte**, from the boundary's booleans
 //!   and its three-case enum, so a bit nobody defined has no way to be set.
 //! - **The publisher's own `Source ID`**, checked once against the registry's
@@ -37,19 +43,25 @@
 //!
 //! # Scope
 //!
-//! Top-of-book (`0x03`, `0x04`) is here. Depth and its snapshot framing follow,
-//! and market-by-order follows its codec crate.
+//! Top-of-book (`0x03`, `0x04`) and market by price (`0x40`, `0x41`, and the
+//! three snapshot messages) are here. Market-by-order follows its codec crate.
 
 #![forbid(unsafe_code)]
 
+pub mod depth;
 pub mod error;
 pub mod instrument;
 pub mod scale;
+pub mod seq;
+pub mod snapshot;
 pub mod source;
 pub mod tob;
 
+pub use depth::DepthLowering;
 pub use error::LoweringError;
 pub use instrument::{Instrument, InstrumentTable};
 pub use scale::{price_at, qty_at};
+pub use seq::PerInstrumentSeq;
+pub use snapshot::{Snapshot, SnapshotFramer};
 pub use source::SourceId;
 pub use tob::Lowering;

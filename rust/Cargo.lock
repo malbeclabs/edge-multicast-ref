@@ -206,6 +206,7 @@ version = "0.1.0"
 dependencies = [
  "dz-adapter-core",
  "dz-edge-core",
+ "dz-edge-mbp",
  "dz-edge-tob",
  "thiserror 1.0.69",
 ]

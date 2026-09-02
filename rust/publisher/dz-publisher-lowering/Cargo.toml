@@ -13,5 +13,6 @@ description = "Normalized venue events to Edge wire messages: the one implementa
 [dependencies]
 dz-adapter-core = { path = "../../adapter/dz-adapter-core" }
 dz-edge-core = { path = "../../codec/dz-edge-core" }
+dz-edge-mbp = { path = "../../codec/dz-edge-mbp" }
 dz-edge-tob = { path = "../../codec/dz-edge-tob" }
 thiserror = { workspace = true }
