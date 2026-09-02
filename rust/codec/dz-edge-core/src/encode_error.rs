@@ -22,6 +22,18 @@ pub enum EncodeError {
         role: &'static str,
     },
 
+    /// The feed this datagram carries does not define this message.
+    ///
+    /// The magic would have been right — a builder is generic over its feed —
+    /// so the datagram would have looked like the feed it claimed to be, with a
+    /// message inside that the feed's specification does not list. A subscriber
+    /// reading it has no defined behaviour to fall back on.
+    ///
+    /// Recoverable, like the others: the send path counts it and drops the
+    /// message rather than aborting, because a publisher that panics goes dark.
+    #[error("the {feed} feed does not carry message type {type_id:#04x}")]
+    NotCarriedByFeed { feed: &'static str, type_id: u8 },
+
     /// The message's fields are individually representable and their
     /// combination is one its own specification forbids.
     ///

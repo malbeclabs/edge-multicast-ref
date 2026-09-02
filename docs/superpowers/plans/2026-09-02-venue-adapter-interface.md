@@ -448,16 +448,29 @@ the audit's own failure, as a test.
 > rather than a channel, and the datagram builder stamps the `Channel ID` at
 > push, so one composed `ManifestSummary` is truthful on both refdata ports.
 >
-> **A codec gap it had to work around, and the workaround is not the fix.**
-> `DatagramBuilder<F: Feed>` is generic over the feed, so the magic is right,
-> but `push<M: AppMessage>` carries no bound tying the message to the feed —
-> nothing stops a `Quote` going into a market-by-price datagram, and `0x03` is
-> not in that feed's message table. The codec validates `PORT_ROLES` and stops
-> there. The runtime closed it for itself with a type-level `EmittedFeed: Feed`
-> carrying a `const SPEC`, so a pipeline cannot disagree with its own
-> specification; the codec is still permissive, and the proper fix is a feed
-> declaration on `AppMessage` that `push` can check. Same class as the `Action`
-> table: a byte the codec permits that a specification forbids.
+> **A codec gap it had to work around — since closed at the codec.**
+> `DatagramBuilder<F: Feed>` is generic over the feed, so the magic was always
+> right, but `push<M: AppMessage>` carried no bound tying the message to the
+> feed: nothing stopped a `Quote` going into a market-by-price datagram, and
+> `0x03` is not in that feed's message table. The codec validated `PORT_ROLES`
+> and stopped there.
+>
+> `Feed` now declares `CARRIES` — the specification's own message table, as a
+> constant — and `push` refuses a Type ID the feed does not list, first of all,
+> before the port role and before capacity: a message a feed does not carry is
+> not made carriable by a correct role, a valid body or a bigger datagram.
+>
+> The market-by-price specification anticipated this exactly, and it is worth
+> quoting because it names the consequence: `0x03` is *"intentionally unused
+> here to prevent accidental cross-decoding if a frame is misrouted"*. Nothing
+> enforced that on the emitting side, so only a subscriber would have found
+> out — by decoding a message its own feed does not define. Same class as the
+> `Action` table, and caught the same way: by holding the code to a table
+> transcribed from the specification rather than to itself.
+>
+> The runtime's `EmittedFeed` stays. It catches the mismatch when a pipeline is
+> composed rather than at each push, which is earlier and names the pair that
+> disagreed.
 >
 > A snapshot has no cadence key to pace against, so `Publisher::snapshot` frames
 > one on demand and the pacing is explicitly the caller's. No key was invented.

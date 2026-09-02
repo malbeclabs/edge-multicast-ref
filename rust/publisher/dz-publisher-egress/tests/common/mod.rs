@@ -81,6 +81,14 @@ pub struct TestFeed;
 impl Feed for TestFeed {
     const MAGIC: u16 = 0x445A;
     const NAME: &'static str = "test-feed";
+    /// A test feed stands in for a specification it does not have, so its table
+    /// is every Type ID this file pushes rather than a transcription of
+    /// anything. A real feed's is the specification's own — see
+    /// [`dz_edge_core::Feed::CARRIES`].
+    const CARRIES: &'static [u8] = &[
+        0x01, 0x02, 0x03, 0x04, 0x06, 0x07, 0x08, 0x11, 0x12, 0x13, 0x14, 0x20, 0x22, 0x40, 0x41,
+        0x42, 0x7F,
+    ];
 }
 
 /// A second feed, for the per-feed era store.
@@ -88,6 +96,14 @@ pub struct OtherFeed;
 impl Feed for OtherFeed {
     const MAGIC: u16 = 0x1234;
     const NAME: &'static str = "other-feed";
+    /// A test feed stands in for a specification it does not have, so its table
+    /// is every Type ID this file pushes rather than a transcription of
+    /// anything. A real feed's is the specification's own — see
+    /// [`dz_edge_core::Feed::CARRIES`].
+    const CARRIES: &'static [u8] = &[
+        0x01, 0x02, 0x03, 0x04, 0x06, 0x07, 0x08, 0x11, 0x12, 0x13, 0x14, 0x20, 0x22, 0x40, 0x41,
+        0x42, 0x7F,
+    ];
 }
 
 /// A feed whose name is not one path component.
@@ -95,6 +111,14 @@ pub struct EscapingFeed;
 impl Feed for EscapingFeed {
     const MAGIC: u16 = 0x0000;
     const NAME: &'static str = "../escape";
+    /// A test feed stands in for a specification it does not have, so its table
+    /// is every Type ID this file pushes rather than a transcription of
+    /// anything. A real feed's is the specification's own — see
+    /// [`dz_edge_core::Feed::CARRIES`].
+    const CARRIES: &'static [u8] = &[
+        0x01, 0x02, 0x03, 0x04, 0x06, 0x07, 0x08, 0x11, 0x12, 0x13, 0x14, 0x20, 0x22, 0x40, 0x41,
+        0x42, 0x7F,
+    ];
 }
 
 // ------------------------------------------------------------------- messages

@@ -147,7 +147,16 @@ impl EgressError {
                     Some(EgressErrorReason::MtuExceeded)
                 }
                 EncodeError::WrongPortRole { .. } => Some(EgressErrorReason::WrongPortRole),
-                EncodeError::MalformedMessage { .. } => None,
+                // Two refusals with no normative reason between them, and
+                // neither is folded into a value that would then mean two
+                // things. A message a feed does not carry is the nearest thing
+                // to a wrong port role — both are the specification refusing a
+                // placement — but they are different mistakes and an operator
+                // acts differently: a wrong role is a send path wired to the
+                // wrong socket, and a message the feed does not carry is a
+                // publisher composing for a feed it is not emitting. The
+                // playbook is owed a value for each.
+                EncodeError::NotCarriedByFeed { .. } | EncodeError::MalformedMessage { .. } => None,
             },
             Self::NotRegistered { .. } => Some(EgressErrorReason::NotRegistered),
             Self::Sink { source } => Some(source.reason()),

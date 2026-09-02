@@ -14,5 +14,8 @@ description = "Normalized venue events to Edge wire messages: the one implementa
 dz-adapter-core = { path = "../../adapter/dz-adapter-core" }
 dz-edge-core = { path = "../../codec/dz-edge-core" }
 dz-edge-mbp = { path = "../../codec/dz-edge-mbp" }
+# For the feed-membership test only: every type this workspace encodes has to
+# be in its feed's table, and two of them live here.
+dz-edge-refdata = { path = "../../codec/dz-edge-refdata" }
 dz-edge-tob = { path = "../../codec/dz-edge-tob" }
 thiserror = { workspace = true }

@@ -265,6 +265,7 @@ dependencies = [
  "dz-adapter-core",
  "dz-edge-core",
  "dz-edge-mbp",
+ "dz-edge-refdata",
  "dz-edge-tob",
  "thiserror 1.0.69",
 ]

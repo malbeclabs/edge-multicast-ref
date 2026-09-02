@@ -117,4 +117,35 @@ pub struct MarketByPrice;
 impl dz_edge_core::Feed for MarketByPrice {
     const MAGIC: u16 = MAGIC_MBP;
     const NAME: &'static str = "market-by-price";
+
+    /// This feed's message table, transcribed from the specification.
+    ///
+    /// **`0x03` is absent deliberately, and the specification says why**: it is
+    /// `Quote` in the top-of-book feed and `Midpoint` in the midpoint feed, and
+    /// it is *"intentionally unused here to prevent accidental cross-decoding
+    /// if a datagram is misrouted"*. Until this table existed nothing enforced
+    /// that on the emitting side — a builder is generic over its feed, so the
+    /// magic was always right and a `Quote` went into a market-by-price
+    /// datagram unrefused.
+    ///
+    /// `0x05` is reserved and absent for the same reason.
+    ///
+    /// Four Type IDs are shared with the market-by-order feed at its own
+    /// numbers rather than renumbered into this feed's range, because they are
+    /// the same payload and reassignment is what the policy forbids.
+    const CARRIES: &'static [u8] = &[
+        0x01, // Heartbeat
+        0x02, // InstrumentDefinition
+        0x04, // Trade
+        0x06, // EndOfSession
+        0x07, // ManifestSummary
+        0x08, // Liquidation
+        0x13, // BatchBoundary
+        0x14, // InstrumentReset
+        0x20, // SnapshotBegin
+        0x22, // SnapshotEnd
+        0x40, // LevelUpdate
+        0x41, // BookClear
+        0x42, // SnapshotLevel
+    ];
 }
