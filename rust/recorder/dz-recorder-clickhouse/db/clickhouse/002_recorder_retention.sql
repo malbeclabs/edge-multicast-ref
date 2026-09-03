@@ -1,0 +1,40 @@
+-- The retention split, and the sizing it comes from.
+--
+-- THE MEASUREMENT, not an estimate: a busy recorder in a live deployment
+-- sustains roughly 80,000 datagrams a minute across its feeds, which is on the
+-- order of 100 million rows a day from one host. The derived grains are three to
+-- four orders of magnitude smaller — a gap row exists only where something was
+-- missing, and a coverage row is one per segment per channel instance — which is
+-- what makes keeping them indefinitely reasonable and keeping the base rows not.
+--
+-- So `datagram` expires and the other four do not.
+--
+-- WHAT HAPPENS WHEN THE TTL IS SHORTER THAN THE QUESTION. The derived rows
+-- survive it, and `segment_coverage` is what says whether the window was ever
+-- covered at all — which is the difference between "no loss" and "nothing kept".
+-- A gap query over a window whose base rows have expired still returns the gaps,
+-- because they were derived while the rows were there; what is gone is the
+-- ability to ask a question nobody thought of at load time. That is the trade,
+-- and it is why the derived tables are the ones with no TTL.
+--
+-- SET THIS TO THE OBJECT RETENTION OF THE DEPLOYMENT IT RUNS IN. The window
+-- below matches the objects themselves: nothing ships objects off a recorder
+-- host today, and objects are evicted under the staging budget in about a day
+-- and a half on a busy one, so two days is the honest figure for that
+-- arrangement and not a preference. A deployment that keeps objects for a month
+-- should say a month here — a `datagram` TTL longer than the object retention
+-- promises a re-derivation that has nothing left to derive from, and one shorter
+-- throws away rows while the evidence for them is still on disk.
+ALTER TABLE recorder.datagram
+    MODIFY TTL toDateTime(recv_ts) + INTERVAL 2 DAY;
+
+-- And stated rather than assumed for the other four, so that a later reader does
+-- not have to infer the absence of a TTL from the absence of a line.
+--
+--   recorder.era                 no TTL: an era boundary is the thing a gap in
+--                                any window is interpreted against.
+--   recorder.segment_coverage    no TTL: it is what distinguishes a window with
+--                                no loss from a window nothing kept.
+--   recorder.sequence_gap        no TTL: it is the finding.
+--   recorder.conformance_finding no TTL: a verdict's whole value is that it was
+--                                recorded when the rule ran.

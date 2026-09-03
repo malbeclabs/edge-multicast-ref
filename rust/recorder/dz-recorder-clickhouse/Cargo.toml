@@ -1,0 +1,45 @@
+[package]
+name = "dz-recorder-clickhouse"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The column-store row sink: JSONEachRow over HTTP, batched, with the batch as the retry unit"
+
+[dependencies]
+dz-recorder-rows = { path = "../dz-recorder-rows" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# One POST with a body, and nothing else. `default-features = false` is what
+# keeps a TLS stack out of this workspace's build: the loader runs on the
+# recorder host and talks to a column store over a private path, so plain HTTP
+# is the deployment and `https` is refused at configuration load rather than
+# silently downgraded. Turning the `tls` feature on is the whole change if that
+# path ever stops being private.
+ureq = { version = "3", default-features = false }
+
+[dev-dependencies]
+dz-recorder-replay = { path = "../dz-recorder-replay" }
+dz-recorder-archive = { path = "../dz-recorder-archive" }
+dz-recorder-core = { path = "../dz-recorder-core" }
+dz-edge-core = { path = "../../codec/dz-edge-core" }
+tempfile = { workspace = true }
+
+[features]
+# TLS, off by default. The loader runs on the recorder host and reaches the
+# column store over a private path, so the default build carries no TLS stack at
+# all — which keeps `rustls` and its provider out of this workspace's build for
+# every crate in it. An `https://` endpoint is refused at configuration load
+# rather than silently downgraded, so turning this on is the whole change if that
+# path ever stops being private, and forgetting to is a startup failure rather
+# than a password on the wire in the clear.
+tls = ["ureq/rustls"]
+# The suite that applies the checked-in DDL to a real server and asserts a
+# load, a re-load and the arithmetic. Off by default, because `cargo test`
+# must need nothing of the host: CI turns it on in a job that has provisioned
+# the container the demo already uses. When it is on the tests fail rather than
+# skip if the server is absent, because a gate that passes when it could not
+# run is not a gate.
+clickhouse-tests = []
