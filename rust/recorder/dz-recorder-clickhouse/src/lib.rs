@@ -23,11 +23,13 @@
 //!
 //! # Credentials come from the environment, and are never logged
 //!
-//! [`Credentials::from_env`] is the only way one enters this process. The
-//! configuration file carries the endpoint, the database and the user — the
-//! things an operator needs to read in a review — and no password key exists to
-//! be filled in by somebody who then commits it. Nothing in this crate's
-//! `Debug` or `Display` output can carry one: see [`Credentials`].
+//! [`Credentials::from_env`] is the only way one enters this process:
+//! [`PASSWORD_FILE_ENV`] — which is what a systemd credential is — or
+//! [`PASSWORD_ENV`] for a caller with nowhere to put a file. The configuration
+//! file carries the endpoint, the database and the user, the things an operator
+//! needs to read in a review, and no password key exists to be filled in by
+//! somebody who then commits it. Nothing in this crate's `Debug` or `Display`
+//! output can carry one: see [`Credentials`].
 #![forbid(unsafe_code)]
 
 pub mod config;
@@ -35,7 +37,7 @@ pub mod ddl;
 pub mod sink;
 pub mod transport;
 
-pub use config::{ClickHouseConfig, ConfigError, Credentials};
+pub use config::{ClickHouseConfig, ConfigError, Credentials, PASSWORD_ENV, PASSWORD_FILE_ENV};
 pub use ddl::{migrations, Migration};
-pub use sink::{send_order, ClickHouseSink, PASSWORD_ENV};
+pub use sink::{send_order, ClickHouseSink};
 pub use transport::{HttpTransport, Response, Transport, TransportError};

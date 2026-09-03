@@ -1,0 +1,37 @@
+[package]
+name = "dz-recorder-load"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The loader: walks a directory of completed objects and turns them into rows, idempotently"
+
+[dependencies]
+dz-recorder-rows = { path = "../dz-recorder-rows" }
+dz-recorder-clickhouse = { path = "../dz-recorder-clickhouse" }
+dz-recorder-archive = { path = "../dz-recorder-archive" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+prometheus = { workspace = true }
+tiny_http = { workspace = true }
+# The only way to stop a `--watch` without abandoning the pass it is in the
+# middle of. std has no safe signal API and this crate forbids unsafe, so the
+# handler is a dependency rather than a syscall — the same one and the same
+# feature the recorder already uses.
+ctrlc = { version = "3", features = ["termination"] }
+
+[dev-dependencies]
+dz-recorder-core = { path = "../dz-recorder-core" }
+dz-recorder-replay = { path = "../dz-recorder-replay" }
+dz-edge-core = { path = "../../codec/dz-edge-core" }
+tempfile = { workspace = true }
+
+[features]
+# Passed through, so that `cargo test -p dz-recorder-load --features
+# clickhouse-tests` reaches the suite that needs a server without the binary
+# needing to know what the feature is for.
+clickhouse-tests = ["dz-recorder-clickhouse/clickhouse-tests"]
+tls = ["dz-recorder-clickhouse/tls"]

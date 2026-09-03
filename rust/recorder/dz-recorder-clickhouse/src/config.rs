@@ -11,6 +11,22 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// The password, read as a value.
+///
+/// Second choice, and it exists because a container or a shell that has the
+/// secret in hand has nowhere else to put it. A value in the environment is
+/// readable through `/proc/<pid>/environ` by anything running as the same user
+/// and is inherited by every child, so [`PASSWORD_FILE_ENV`] is preferred when
+/// both are set.
+pub const PASSWORD_ENV: &str = "DZ_LOADER_CLICKHOUSE_PASSWORD";
+
+/// A path to read the password from, which is what a systemd credential is.
+///
+/// First choice. `LoadCredentialEncrypted=` hands a unit a file under
+/// `$CREDENTIALS_DIRECTORY` rather than a variable, and that file is readable by
+/// the service user alone and is not inherited by anything the process spawns.
+pub const PASSWORD_FILE_ENV: &str = "DZ_LOADER_CLICKHOUSE_PASSWORD_FILE";
+
 /// The default cap on rows in one request.
 ///
 /// A `JSONEachRow` insert is one HTTP request and one atomic block, so the batch
@@ -188,6 +204,28 @@ impl Credentials {
         }
     }
 
+    /// The user from the configuration, the password from the environment, and
+    /// from nowhere else.
+    ///
+    /// [`PASSWORD_FILE_ENV`] wins over [`PASSWORD_ENV`] when both are set,
+    /// because a file readable by the service user alone is a better place for a
+    /// secret than a variable every child process inherits. A file that cannot
+    /// be read is treated as no password rather than as a failure here: the
+    /// destination's own refusal is a clearer error than this one could be, and
+    /// it arrives with the server's own message.
+    #[must_use]
+    pub fn from_env(user: impl Into<String>) -> Self {
+        let from_file = std::env::var(PASSWORD_FILE_ENV)
+            .ok()
+            .filter(|p| !p.is_empty())
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            // Trailing newline stripped: a credential written by an editor or by
+            // `echo` has one, and a password with a newline in it authenticates
+            // nowhere while looking exactly right in a file listing.
+            .map(|text| text.trim_end_matches(['\n', '\r']).to_owned());
+        Self::new(user, from_file.or_else(|| std::env::var(PASSWORD_ENV).ok()))
+    }
+
     #[must_use]
     pub fn password(&self) -> Option<&str> {
         self.password.as_deref()
@@ -260,6 +298,85 @@ mod tests {
         assert!(rendered.contains("loader"), "{rendered}");
         assert!(rendered.contains("<set"), "{rendered}");
         assert_eq!(creds.password(), Some("hunter2"), "and it is still usable");
+    }
+
+    /// A file beats a variable, because a variable is inherited by every child
+    /// and readable through `/proc`.
+    ///
+    /// The variables are set and removed inside one test rather than across
+    /// several, because the environment is process-wide and `cargo test` runs
+    /// tests in threads: two tests setting the same variable would race.
+    #[test]
+    fn a_credential_file_is_preferred_over_a_variable_and_is_trimmed() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let path = dir.path().join("clickhouse-password");
+        // With the trailing newline an editor or `echo` leaves: a password with
+        // a newline in it authenticates nowhere while looking exactly right in a
+        // file listing.
+        std::fs::write(&path, "from-the-file\n").expect("the file is writable");
+
+        with_env(
+            &[
+                (PASSWORD_ENV, Some("from-the-variable")),
+                (PASSWORD_FILE_ENV, Some(&path.display().to_string())),
+            ],
+            || {
+                assert_eq!(
+                    Credentials::from_env("loader").password(),
+                    Some("from-the-file")
+                );
+            },
+        );
+
+        // The variable alone still works, for a container with nowhere to put a
+        // file.
+        with_env(
+            &[
+                (PASSWORD_ENV, Some("from-the-variable")),
+                (PASSWORD_FILE_ENV, None),
+            ],
+            || {
+                assert_eq!(
+                    Credentials::from_env("loader").password(),
+                    Some("from-the-variable")
+                );
+            },
+        );
+
+        // A file that is not there is no password, and not a failure: the
+        // destination's own refusal is a clearer error, and it arrives with the
+        // server's own message.
+        with_env(
+            &[
+                (PASSWORD_ENV, None),
+                (PASSWORD_FILE_ENV, Some("/nope/not/here")),
+            ],
+            || assert!(!Credentials::from_env("loader").is_authenticated()),
+        );
+    }
+
+    /// Sets and restores process-wide variables around one closure.
+    ///
+    /// `std::env::set_var` is safe on this toolchain and still process-wide, so
+    /// every environment assertion in this module runs inside one test.
+    fn with_env(vars: &[(&str, Option<&str>)], body: impl FnOnce()) {
+        let previous: Vec<(String, Option<String>)> = vars
+            .iter()
+            .map(|(k, _)| ((*k).to_owned(), std::env::var(k).ok()))
+            .collect();
+        for (key, value) in vars {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        body();
+        for (key, value) in previous {
+            match value {
+                Some(value) => std::env::set_var(&key, value),
+                None => std::env::remove_var(&key),
+            }
+        }
     }
 
     #[test]

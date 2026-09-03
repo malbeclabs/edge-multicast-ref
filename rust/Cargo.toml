@@ -23,6 +23,7 @@ members = [
     "recorder/dz-recorder-relower",
     "recorder/dz-recorder-rows",
     "recorder/dz-recorder-clickhouse",
+    "recorder/dz-recorder-load",
     "recorder/dz-recorder-e2e",
     "recorder/dz-recorder",
 ]

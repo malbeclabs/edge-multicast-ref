@@ -24,9 +24,6 @@ use serde::Serialize;
 use crate::config::{ClickHouseConfig, Credentials};
 use crate::transport::{HttpTransport, Transport, TransportError};
 
-/// The only place a password enters this process.
-pub const PASSWORD_ENV: &str = "DZ_LOADER_CLICKHOUSE_PASSWORD";
-
 /// How long to wait before attempt *n*, doubling.
 ///
 /// Short, and bounded by [`MAX_BACKOFF`]: this is a loader catching up against
@@ -60,7 +57,7 @@ impl ClickHouseSink<HttpTransport> {
     /// configuration file.
     #[must_use]
     pub fn over_http(config: ClickHouseConfig) -> Self {
-        let credentials = Credentials::new(config.user.clone(), std::env::var(PASSWORD_ENV).ok());
+        let credentials = Credentials::from_env(config.user.clone());
         let transport = HttpTransport::new(config.timeout);
         Self::with_transport(config, credentials, transport)
     }
