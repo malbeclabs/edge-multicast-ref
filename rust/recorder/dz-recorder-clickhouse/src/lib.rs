@@ -38,6 +38,6 @@ pub mod sink;
 pub mod transport;
 
 pub use config::{ClickHouseConfig, ConfigError, Credentials, PASSWORD_ENV, PASSWORD_FILE_ENV};
-pub use ddl::{migrations, Migration};
+pub use ddl::{migrations, schema, Migration};
 pub use sink::{send_order, ClickHouseSink};
 pub use transport::{HttpTransport, Response, Transport, TransportError};

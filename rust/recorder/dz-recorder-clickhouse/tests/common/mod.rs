@@ -134,15 +134,27 @@ impl Transport for FakeTransport {
 
 /// A configuration pointing at a documentation address, which nothing here
 /// contacts.
+/// A configuration that posts every batch as it arrives.
+///
+/// `insert_min_rows = 1`, so a test about what one request looks like is not
+/// also a test of the coalescing. The tests that *are* about coalescing set the
+/// bounds themselves.
 #[must_use]
 pub fn config() -> ClickHouseConfig {
     ClickHouseConfig {
         endpoint: "http://192.0.2.20:8123".to_owned(),
         database: "recorder".to_owned(),
         user: "loader".to_owned(),
+        insert_min_rows: 1,
         ..ClickHouseConfig::default()
     }
 }
+
+/// One instant, for the tests that are not about time.
+pub const NOW: u64 = 1_700_000_000_000_000_000;
+
+/// Nanoseconds in one second, for a test stating a delay.
+pub const SECOND_NS: u64 = 1_000_000_000;
 
 /// A real batch: the real writer, the real archive, the real derivation.
 #[must_use]

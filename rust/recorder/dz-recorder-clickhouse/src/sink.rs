@@ -1,24 +1,58 @@
 //! The sink: rows into `JSONEachRow` bodies, bounded batches, bounded retries.
 //!
+//! # Rows are coalesced across objects, and that is the whole design
+//!
+//! **Merge pressure is the constraint, not row volume.** An insert is one atomic
+//! block and becomes one part, so what a day of loading costs the destination is
+//! set by rows per part rather than rows per day — and merge work never appears
+//! in a query log, only as the gap between a provider's CPU graph and
+//! query-attributed CPU. A chatty inserter raises it silently.
+//!
+//! A sink that posted once per object would write one part per object per lane.
+//! On the busiest lane measured that is fine; on the quietest — 130 to 150
+//! datagrams a minute, about 700 rows in a time-rotated object — it is a 700-row
+//! part per object for ever, which is the pathological profile. So the sink holds
+//! rows until [`insert_min_rows`](crate::ClickHouseConfig::insert_min_rows),
+//! caps an insert at [`insert_max_rows`](crate::ClickHouseConfig::insert_max_rows),
+//! and gives up holding after
+//! [`insert_max_delay`](crate::ClickHouseConfig::insert_max_delay) so a quiet
+//! lane is late rather than absent.
+//!
+//! # Accepted is not landed
+//!
+//! Holding rows means `write_batch` returning `Ok` no longer means the rows are
+//! in the store, so it says which objects *landed* instead — see
+//! [`Accepted`](dz_recorder_rows::Accepted). The loader records an object in its
+//! ledger only when the insert carrying its rows has been acknowledged. An
+//! entry written on acceptance would mark an object loaded whose rows are still
+//! in memory, and a crash would then lose them with nothing recording that it
+//! did.
+//!
 //! # The batch is the retry unit, and the object is the unit of credit
 //!
-//! A [`RowBatch`] is split into one or more requests per grain, because a
-//! request is bounded by rows and by bytes and an object is not. Each request is
-//! retried on its own. But if *any* request in the batch fails after its
-//! attempts are spent, the whole `write_batch` fails and the loader must treat
-//! the object as unloaded — even though some rows landed.
+//! A failure fails **every object whose rows are in the buffer**, not only the
+//! one that was being written. That is wider than it was and still correct for
+//! the same reason: the tables are `ReplacingMergeTree` and the rows are a pure
+//! function of `(object key, sha256)`, so re-loading them all is a replace.
+//! Reporting partial success is how a gap becomes invisible — an object whose
+//! datagram rows landed and whose gap rows did not reads as a clean feed for
+//! ever.
 //!
-//! That looks wasteful and it is the only correct answer. The tables are
-//! `ReplacingMergeTree` and the rows are a pure function of `(object key,
-//! sha256)`, so loading the object again replaces what landed rather than
-//! duplicating it. The alternative — reporting what got through — leaves an
-//! object whose datagram rows are present and whose gap rows are not, and that
-//! object reads as a clean feed for ever. Partial credit is how a gap becomes
-//! invisible.
+//! # Nothing here may block the recorder
+//!
+//! The loader is a separate process that shares only a directory with the
+//! recorder. A column store that is down, slow or full must cost loading
+//! progress and nothing else, so every failure below is a counted refusal and
+//! never a wait without a bound.
+//!
+//! # Credentials come from the environment, and are never logged
+//!
+//! [`Credentials::from_env`](crate::Credentials::from_env) is the only way one
+//! enters this process.
 
 use std::time::Duration;
 
-use dz_recorder_rows::{Grain, RowBatch, RowSink, RowSinkError, Written};
+use dz_recorder_rows::{Accepted, Grain, ObjectId, RowBatch, RowSink, RowSinkError, Written};
 use serde::Serialize;
 
 use crate::config::{ClickHouseConfig, Credentials};
@@ -47,6 +81,80 @@ pub struct ClickHouseSink<T: Transport> {
     last_error: Option<String>,
     /// Waits between attempts, injected so the retry tests do not sleep.
     sleep: fn(Duration),
+    /// The rows taken and not yet posted, and who they belong to.
+    held: Held,
+    /// Bytes sent, cumulatively. Per request rather than per object, for the
+    /// reason `Accepted::bytes_posted` states.
+    bytes_posted: u64,
+}
+
+/// Rows accepted and not yet sent.
+///
+/// One buffer per grain, because one insert goes to one table. `objects` is
+/// every object with rows anywhere in those buffers: they land together and they
+/// fail together, which is what makes a retry a replace rather than a partial
+/// truth.
+#[derive(Debug, Default)]
+struct Held {
+    rows: RowBatch,
+    objects: Vec<ObjectId>,
+    /// When the oldest row in the buffer was accepted, which is what the age
+    /// bound is measured from. `None` when nothing is held.
+    oldest_ns: Option<u64>,
+    bytes: u64,
+}
+
+impl Held {
+    fn take(&mut self, batch: RowBatch, now_ns: u64) {
+        let id = ObjectId::of(&batch);
+        if !self.objects.contains(&id) {
+            self.objects.push(id);
+        }
+        self.oldest_ns.get_or_insert(now_ns);
+        // The object key and digest live on every row, so the batch's own pair
+        // is not carried forward: an insert spanning objects is ordinary, and
+        // the rows say which object each came from.
+        self.rows.datagram.extend(batch.datagram);
+        self.rows.era.extend(batch.era);
+        self.rows.segment_coverage.extend(batch.segment_coverage);
+        self.rows.sequence_gap.extend(batch.sequence_gap);
+        self.rows
+            .conformance_finding
+            .extend(batch.conformance_finding);
+    }
+
+    fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.objects.is_empty()
+    }
+
+    /// Whether what is held has to go now.
+    ///
+    /// Rows first, age second, and the order is only for legibility: either is
+    /// sufficient. The age is measured from the *oldest* held row rather than
+    /// from the last write, or a lane that trickles one object per interval
+    /// would reset the clock on every arrival and never post at all.
+    fn due(&self, now_ns: u64, min_rows: usize, max_delay: Duration) -> bool {
+        if self.is_empty() {
+            return false;
+        }
+        if self.len() >= min_rows {
+            return true;
+        }
+        let delay_ns = u64::try_from(max_delay.as_nanos()).unwrap_or(u64::MAX);
+        self.oldest_ns
+            .is_some_and(|oldest| now_ns.saturating_sub(oldest) >= delay_ns)
+    }
+
+    fn clear(&mut self) -> Vec<ObjectId> {
+        self.rows = RowBatch::default();
+        self.oldest_ns = None;
+        self.bytes = 0;
+        std::mem::take(&mut self.objects)
+    }
 }
 
 impl ClickHouseSink<HttpTransport> {
@@ -77,6 +185,8 @@ impl<T: Transport> ClickHouseSink<T> {
             batches_failed: 0,
             last_error: None,
             sleep: std::thread::sleep,
+            held: Held::default(),
+            bytes_posted: 0,
         }
     }
 
@@ -126,13 +236,32 @@ impl<T: Transport> ClickHouseSink<T> {
             .map(|r| r.body)
     }
 
+    /// Bytes sent, cumulatively.
+    #[must_use]
+    pub const fn bytes_posted(&self) -> u64 {
+        self.bytes_posted
+    }
+
+    /// Rows held, waiting to be posted.
+    #[must_use]
+    pub fn held_rows(&self) -> usize {
+        self.held.len()
+    }
+
+    /// Objects whose rows are held and therefore not yet loaded.
+    #[must_use]
+    pub fn held_objects(&self) -> usize {
+        self.held.objects.len()
+    }
+
     /// Splits one grain's rows into bodies no larger than the configured bounds.
     ///
-    /// Both bounds are enforced, and the byte bound is the one that binds: a row
-    /// count says nothing about a row's width, and the widest grain here carries
-    /// an object key and two digests. A single row over the byte bound is sent
-    /// on its own rather than refused — the bound exists to keep a request
-    /// reasonable, and refusing a row for being wide would silently drop the
+    /// Both bounds are enforced. `insert_max_rows` is the one that governs merge
+    /// pressure — an insert is one part — and `insert_max_bytes` is the one that
+    /// keeps a request reasonable whatever the row count says, because a row
+    /// count says nothing about a row's width. A single row over the byte bound
+    /// is sent on its own rather than refused: the bound exists to keep a
+    /// request sane, and refusing a row for being wide would silently drop the
     /// row most worth having.
     fn bodies<R: Serialize>(&self, grain: Grain, rows: &[R]) -> Result<Vec<Body>, RowSinkError> {
         let mut bodies = Vec::new();
@@ -142,7 +271,8 @@ impl<T: Transport> ClickHouseSink<T> {
                 serde_json::to_vec(row).map_err(|source| RowSinkError::Encode { grain, source })?;
             let would_be = current.bytes.len() as u64 + line.len() as u64 + 1;
             if current.rows > 0
-                && (current.rows >= self.config.max_rows || would_be > self.config.max_bytes)
+                && (current.rows >= self.config.insert_max_rows
+                    || would_be > self.config.insert_max_bytes)
             {
                 bodies.push(std::mem::take(&mut current));
             }
@@ -185,13 +315,16 @@ impl<T: Transport> ClickHouseSink<T> {
         &mut self,
         grain: Grain,
         rows: &[R],
-        object_key: &str,
+        objects: &[ObjectId],
     ) -> Result<u64, RowSinkError> {
         let mut bytes = 0u64;
         for body in self.bodies(grain, rows)? {
             self.send(grain, &body)
                 .map_err(|e| RowSinkError::Rejected {
-                    object_key: object_key.to_owned(),
+                    // The insert spans objects, so the refusal names them all:
+                    // every one of them stays unloaded, and an error naming one of
+                    // several would send an operator after the wrong file.
+                    object_key: describe(objects),
                     attempts: self.config.attempts,
                     last: e.to_string(),
                 })?;
@@ -199,32 +332,100 @@ impl<T: Transport> ClickHouseSink<T> {
         }
         Ok(bytes)
     }
+
+    /// Posts everything held, whatever it is, and says what landed.
+    ///
+    /// The base grain goes first and the derived grains after, and the order is
+    /// deliberate: an insert set whose gap rows are present and whose datagram
+    /// rows are not reads as a finding with no evidence behind it, which is the
+    /// more alarming of the two intermediate states and the one an operator
+    /// would chase.
+    fn post(&mut self) -> Result<(Vec<ObjectId>, u64), RowSinkError> {
+        if self.held.is_empty() {
+            return Ok((Vec::new(), 0));
+        }
+        // Taken out first, so a failure below leaves nothing held: those objects
+        // are unloaded and will be re-derived, and holding their rows as well
+        // would send them twice on the next successful post.
+        let rows = std::mem::take(&mut self.held.rows);
+        let objects = self.held.clear();
+
+        let mut bytes = 0u64;
+        bytes += self.write_grain(Grain::Datagram, &rows.datagram, &objects)?;
+        bytes += self.write_grain(Grain::Era, &rows.era, &objects)?;
+        bytes += self.write_grain(Grain::SegmentCoverage, &rows.segment_coverage, &objects)?;
+        bytes += self.write_grain(Grain::SequenceGap, &rows.sequence_gap, &objects)?;
+        bytes += self.write_grain(
+            Grain::ConformanceFinding,
+            &rows.conformance_finding,
+            &objects,
+        )?;
+        Ok((objects, bytes))
+    }
 }
 
 impl<T: Transport> RowSink for ClickHouseSink<T> {
-    fn write_batch(&mut self, rows: RowBatch) -> Result<Written, RowSinkError> {
-        let key = rows.object_key.clone();
-        let mut bytes = 0u64;
-        // Order matters only for what a half-landed object looks like while it
-        // is being retried, and the derived grains go last deliberately: an
-        // object whose gap rows are present and whose datagram rows are not
-        // reads as a finding with no evidence, which is the more alarming of the
-        // two intermediate states and the one an operator would chase.
-        bytes += self.write_grain(Grain::Datagram, &rows.datagram, &key)?;
-        bytes += self.write_grain(Grain::Era, &rows.era, &key)?;
-        bytes += self.write_grain(Grain::SegmentCoverage, &rows.segment_coverage, &key)?;
-        bytes += self.write_grain(Grain::SequenceGap, &rows.sequence_gap, &key)?;
-        bytes += self.write_grain(Grain::ConformanceFinding, &rows.conformance_finding, &key)?;
-        Ok(Written::of(&rows, bytes))
+    fn write_batch(&mut self, rows: RowBatch, now_ns: u64) -> Result<Accepted, RowSinkError> {
+        // Zero bytes on the row count: see `Accepted::bytes_posted` for why a
+        // byte count cannot be per object once an insert spans objects.
+        let accepted = Written::of(&rows, 0);
+        self.held.take(rows, now_ns);
+        let (landed, bytes_posted) = if self.held.due(
+            now_ns,
+            self.config.insert_min_rows,
+            self.config.insert_max_delay,
+        ) {
+            self.post()?
+        } else {
+            (Vec::new(), 0)
+        };
+        Ok(Accepted {
+            accepted,
+            landed,
+            bytes_posted,
+        })
     }
 
-    fn flush(&mut self) -> Result<(), RowSinkError> {
-        // Nothing is held: every batch is posted before `write_batch` returns,
-        // because a sink that buffered across objects would make "this object is
-        // loaded" a claim about memory rather than about the store — and the
-        // ledger entry written after it would then survive a crash the rows did
-        // not.
-        Ok(())
+    fn post_if_due(&mut self, now_ns: u64) -> Result<Vec<ObjectId>, RowSinkError> {
+        if self.held.due(
+            now_ns,
+            self.config.insert_min_rows,
+            self.config.insert_max_delay,
+        ) {
+            self.post().map(|(landed, bytes)| {
+                self.bytes_posted += bytes;
+                landed
+            })
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    fn flush(&mut self, _now_ns: u64) -> Result<Vec<ObjectId>, RowSinkError> {
+        self.post().map(|(landed, bytes)| {
+            self.bytes_posted += bytes;
+            landed
+        })
+    }
+}
+
+/// The objects an insert carried, for an error to name.
+///
+/// All of them, and never the first: they land together and fail together, so a
+/// refusal naming one of five would send an operator after the wrong file.
+fn describe(objects: &[ObjectId]) -> String {
+    match objects {
+        [] => "no object".to_owned(),
+        [one] => one.key.clone(),
+        many => format!(
+            "{} objects including {}",
+            many.len(),
+            many.iter()
+                .take(3)
+                .map(|o| o.key.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
 }
 

@@ -236,8 +236,11 @@ fn a_dry_run_writes_rows_contacts_nothing_and_records_nothing() {
         stderr(&output)
     );
     let report = stderr(&output);
-    assert!(report.contains("loaded 2 object(s)"), "{report}");
-    assert!(report.contains("0 unloaded"), "{report}");
+    assert!(report.contains("derived 2 object(s), loaded 2"), "{report}");
+    // A dry run's sink writes per object and lands per object, so nothing is
+    // ever held: the coalescing exists for parts in a column store, and a file
+    // has none.
+    assert!(report.contains("0 unloaded of which 0 held"), "{report}");
 
     let datagrams = std::fs::read_to_string(rows.join("datagram.jsonl"))
         .expect("the datagram rows were written");
@@ -257,7 +260,7 @@ fn a_dry_run_writes_rows_contacts_nothing_and_records_nothing() {
     let again = run(&args);
     assert!(again.status.success(), "{}", stderr(&again));
     assert!(
-        stderr(&again).contains("loaded 2 object(s)"),
+        stderr(&again).contains("derived 2 object(s), loaded 2"),
         "a dry run that recorded its work would answer this once"
     );
 }
@@ -298,8 +301,8 @@ fn a_damaged_object_fails_the_object_and_reports_it_in_the_exit_code() {
     let text = stderr(&output);
     assert!(text.contains("hashes to"), "{text}");
     assert!(
-        text.contains("loaded 1 object(s)"),
+        text.contains("derived 1 object(s), loaded 1"),
         "the other object still loaded: {text}"
     );
-    assert!(text.contains("1 unloaded"), "{text}");
+    assert!(text.contains("1 unloaded of which 0 held"), "{text}");
 }

@@ -63,7 +63,7 @@ use thiserror::Error;
 use cli::{Args, CliError, Invocation, Mode};
 use config::LoaderConfig;
 use ledger::Ledger;
-use loader::Loader;
+use loader::{now_unix_nanos, Loader};
 use metrics::LoaderMetrics;
 
 /// The command line could not be understood, which is a different failure from a
@@ -240,6 +240,9 @@ fn drive<S: RowSink>(
     };
     let mut first_failure: Option<String> = None;
     let mut failed = 0u64;
+    // Carried across passes because the sink is: a quiet lane's rows may be
+    // held for the whole `insert_max_delay`, which is several passes.
+    let mut pending: Vec<loader::Pending> = Vec::new();
 
     loop {
         let (pass, errors) = Loader {
@@ -250,6 +253,7 @@ fn drive<S: RowSink>(
             ledger,
             sink,
             metrics,
+            pending: &mut pending,
         }
         .run_once(&stopping);
 
@@ -261,8 +265,15 @@ fn drive<S: RowSink>(
             first_failure = errors.first().cloned();
         }
         eprintln!(
-            "dz-recorder-load: loaded {} object(s), skipped {}, failed {}; {} unloaded, oldest {}s behind",
-            pass.loaded, pass.skipped, pass.failed, pass.unloaded, pass.oldest_unloaded_age_seconds
+            "dz-recorder-load: derived {} object(s), loaded {}, skipped {}, failed {}; \
+             {} unloaded of which {} held by the sink, oldest {}s behind",
+            pass.derived,
+            pass.loaded,
+            pass.skipped,
+            pass.failed,
+            pass.unloaded,
+            pass.held,
+            pass.oldest_unloaded_age_seconds
         );
 
         if args.mode == Mode::Once || stopping() {
@@ -283,8 +294,42 @@ fn drive<S: RowSink>(
         }
     }
 
-    if let Err(e) = sink.flush() {
-        eprintln!("dz-recorder-load: flush: {e}");
+    // Everything held, due or not: a `--once` pass and a shutdown both end here,
+    // so no run leaves rows in memory that the ledger will never account for.
+    // The objects that land are recorded, because rows in the store with no
+    // ledger entry are an object the next run derives again for nothing.
+    match sink.flush(now_unix_nanos()) {
+        Ok(landed) => {
+            for id in &landed {
+                if let Some(index) = pending.iter().position(|p| &p.id == id) {
+                    let done = pending.remove(index);
+                    if let Err(e) = ledger.record(ledger::Entry {
+                        object_key: done.id.key.clone(),
+                        object_sha256: done.id.sha256.clone(),
+                        loaded_at_ns: now_unix_nanos(),
+                        trailer: done.trailer,
+                    }) {
+                        eprintln!("dz-recorder-load: ledger: {e}");
+                        failed += 1;
+                    } else {
+                        metrics.object_loaded(&done.written, done.bytes_read);
+                    }
+                }
+            }
+            if !landed.is_empty() {
+                eprintln!(
+                    "dz-recorder-load: flushed {} held object(s) on the way out",
+                    landed.len()
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!("dz-recorder-load: flush: {e}");
+            failed += 1;
+            if first_failure.is_none() {
+                first_failure = Some(e.to_string());
+            }
+        }
     }
     // A pass that could not load an object exits non-zero, so a timer's own
     // failure count is the same number an operator would get from the metrics.

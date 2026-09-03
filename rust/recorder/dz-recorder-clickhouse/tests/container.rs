@@ -15,9 +15,16 @@
 mod common;
 
 use common::batch;
-use dz_recorder_clickhouse::{migrations, ClickHouseConfig, ClickHouseSink};
+use dz_recorder_clickhouse::{migrations, schema, ClickHouseConfig, ClickHouseSink};
 use dz_recorder_replay::Fault;
 use dz_recorder_rows::{Grain, RowSink};
+
+/// One instant for every sink call in this file.
+///
+/// The sinks take the clock as a parameter, so a test states it rather than
+/// sleeping: what is under test here is what a sink writes, never when it
+/// decides to.
+const NOW: u64 = 1_700_000_000_000_000_000;
 
 const URL_ENV: &str = "DZ_LOADER_CLICKHOUSE_URL";
 const DEFAULT_URL: &str = "http://127.0.0.1:8123";
@@ -28,6 +35,9 @@ const RETENTION: &str = "002_recorder_retention.sql";
 struct Scratch {
     sink: ClickHouseSink<dz_recorder_clickhouse::HttpTransport>,
     database: String,
+    /// Kept so a test can build a second sink with different insert bounds
+    /// against the same scratch database.
+    config: ClickHouseConfig,
 }
 
 impl Scratch {
@@ -69,13 +79,24 @@ impl Scratch {
             .statement(&format!("CREATE DATABASE {database}"))
             .expect("the scratch database is creatable");
 
-        let sink = ClickHouseSink::over_http(ClickHouseConfig {
+        let config = ClickHouseConfig {
             endpoint,
             database: database.clone(),
+            // Every test but the two about parts wants a post per batch, so
+            // that what is asserted is the schema rather than the coalescing.
+            insert_min_rows: 1,
             ..ClickHouseConfig::default()
-        });
-        let scratch = Self { sink, database };
-        for migration in migrations() {
+        };
+        let sink = ClickHouseSink::over_http(config.clone());
+        let scratch = Self {
+            sink,
+            database,
+            config,
+        };
+        // The schema, and not the account: `004` takes a password parameter
+        // and grants privileges, and the container runs with access management
+        // off. Retention is applied by the one test that is about retention.
+        for migration in schema() {
             if migration.name == RETENTION {
                 continue;
             }
@@ -155,9 +176,12 @@ fn the_checked_in_ddl_accepts_what_the_loader_sends() {
     let rows = batch(500, Fault::SequenceGap);
     let expected: Vec<(Grain, usize)> = Grain::ALL.iter().map(|g| (*g, rows.rows(*g))).collect();
 
-    let written = scratch.sink.write_batch(rows).expect("the batch lands");
+    let written = scratch
+        .sink
+        .write_batch(rows, NOW)
+        .expect("the batch lands");
     for (grain, count) in expected {
-        assert_eq!(written.rows(grain), count as u64, "{grain}");
+        assert_eq!(written.accepted.rows(grain), count as u64, "{grain}");
         assert_eq!(scratch.count(grain.table()), count as u64, "{grain}");
     }
 }
@@ -176,8 +200,11 @@ fn loading_the_same_object_twice_replaces_rather_than_duplicates() {
     let datagrams = rows.rows(Grain::Datagram) as u64;
     let gaps = rows.rows(Grain::SequenceGap) as u64;
 
-    scratch.sink.write_batch(rows).expect("the first load");
-    scratch.sink.write_batch(once).expect("the second load");
+    scratch.sink.write_batch(rows, NOW).expect("the first load");
+    scratch
+        .sink
+        .write_batch(once, NOW)
+        .expect("the second load");
     scratch.merge("datagram");
     scratch.merge("sequence_gap");
 
@@ -195,7 +222,10 @@ fn loading_the_same_object_twice_replaces_rather_than_duplicates() {
 fn span_minus_count_is_the_loss_at_the_datagram_grain() {
     let mut scratch = Scratch::open("arithmetic");
     let clean = batch(500, Fault::None);
-    scratch.sink.write_batch(clean).expect("the clean load");
+    scratch
+        .sink
+        .write_batch(clean, NOW)
+        .expect("the clean load");
     assert_eq!(
         scratch.scalar(&format!(
             "SELECT max(sequence_number) - min(sequence_number) + 1 - count() \
@@ -209,7 +239,7 @@ fn span_minus_count_is_the_loss_at_the_datagram_grain() {
     let mut scratch = Scratch::open("arithmetic_gap");
     let with_gap = batch(500, Fault::SequenceGap);
     let missing: u64 = with_gap.sequence_gap.iter().map(|g| g.missing_count).sum();
-    scratch.sink.write_batch(with_gap).expect("the load");
+    scratch.sink.write_batch(with_gap, NOW).expect("the load");
     assert_eq!(
         scratch.scalar(&format!(
             "SELECT toString(max(sequence_number) - min(sequence_number) + 1 - count()) \
@@ -221,12 +251,87 @@ fn span_minus_count_is_the_loss_at_the_datagram_grain() {
     );
 }
 
+/// **Rows per part**, which is the number merge pressure is actually set by.
+///
+/// An insert is one atomic block and becomes one part, so a sink that posted per
+/// object would write one part per object per lane — and merge work never shows
+/// up in a query log, only as the gap between a provider's CPU graph and
+/// query-attributed CPU. This is the assertion that holds the coalescing to its
+/// purpose against a real server's own `system.parts`, rather than against what
+/// the sink believes it sent.
+#[test]
+fn coalescing_produces_parts_at_or_above_the_floor_and_never_single_digit_ones() {
+    let scratch = Scratch::open("parts");
+    // Four distinct objects — the count is what makes them distinct — held and
+    // posted together. 30+31+32+33 datagram rows is 126, over the floor.
+    let mut sink = ClickHouseSink::over_http(ClickHouseConfig {
+        insert_min_rows: 100,
+        ..scratch.config.clone()
+    });
+    let mut datagrams = 0u64;
+    for count in [30, 31, 32, 33] {
+        let rows = batch(count, Fault::None);
+        datagrams += rows.rows(Grain::Datagram) as u64;
+        sink.write_batch(rows, NOW).expect("accepted");
+    }
+    sink.flush(NOW).expect("posted");
+
+    // Every row landed.
+    assert_eq!(scratch.count("datagram"), datagrams);
+
+    // And in **one** part, not four: `active` only, because an inactive part is
+    // one a merge has already replaced.
+    let parts = scratch.scalar(&format!(
+        "SELECT count() FROM system.parts WHERE database = '{}' AND table = 'datagram' \
+         AND active",
+        scratch.database
+    ));
+    assert_eq!(parts, "1", "four objects, one insert, one part");
+
+    // The plan's other half: no configuration produces a part of single-digit
+    // rows. Asserted from the server's own accounting.
+    let smallest = scratch.scalar(&format!(
+        "SELECT min(rows) FROM system.parts WHERE database = '{}' AND active AND rows > 0",
+        scratch.database
+    ));
+    let smallest: u64 = smallest.parse().expect("min(rows) is a number");
+    assert!(
+        smallest >= 10,
+        "a part of {smallest} rows is the profile the coalescing exists to prevent"
+    );
+}
+
+/// And without the floor, the same four objects are four parts — which is what
+/// says the assertion above is measuring the coalescing and not the engine.
+#[test]
+fn posting_per_object_would_produce_one_part_per_object() {
+    let scratch = Scratch::open("parts_per_object");
+    let mut sink = ClickHouseSink::over_http(ClickHouseConfig {
+        insert_min_rows: 1,
+        ..scratch.config.clone()
+    });
+    for count in [30, 31, 32, 33] {
+        sink.write_batch(batch(count, Fault::None), NOW)
+            .expect("posted immediately");
+    }
+
+    let parts = scratch.scalar(&format!(
+        "SELECT count() FROM system.parts WHERE database = '{}' AND table = 'datagram' \
+         AND active",
+        scratch.database
+    ));
+    assert_eq!(
+        parts, "4",
+        "one part per object, which is the profile the floor exists to prevent"
+    );
+}
+
 /// The era rank is a view over the openings, and it is dense.
 #[test]
 fn the_era_rank_view_numbers_the_openings_densely() {
     let mut scratch = Scratch::open("era");
     let rows = batch(200, Fault::ResetCountAdvance);
-    scratch.sink.write_batch(rows).expect("the load");
+    scratch.sink.write_batch(rows, NOW).expect("the load");
 
     assert_eq!(
         scratch.scalar(&format!(
@@ -287,7 +392,7 @@ fn the_ttl_expires_the_base_rows_and_leaves_the_derived_ones() {
     let coverage = rows.rows(Grain::SegmentCoverage) as u64;
     let eras = rows.rows(Grain::Era) as u64;
     assert!(datagrams > 0 && gaps > 0 && coverage > 0 && eras > 0);
-    scratch.sink.write_batch(rows).expect("the load");
+    scratch.sink.write_batch(rows, NOW).expect("the load");
 
     // Before retention: everything is there. Without this the assertions below
     // would hold over a database nothing had ever been loaded into.

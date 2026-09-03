@@ -121,6 +121,7 @@ pub struct LoaderMetrics {
     passes_total: IntCounter,
     last_pass_timestamp_seconds: IntGauge,
     unloaded_objects: IntGauge,
+    held_objects: IntGauge,
     oldest_unloaded_age_seconds: IntGauge,
     ledger_entries: IntGauge,
 }
@@ -219,6 +220,17 @@ impl LoaderMetrics {
                  waiting.",
                 &labels,
             ),
+            held_objects: gauge(
+                &registry,
+                "dz_loader_held_objects",
+                "Objects the sink has taken and not yet posted, so their rows are in memory \
+                 rather than in the store. Compare against dz_loader_unloaded_objects: a \
+                 backlog that is all held is a sink coalescing as designed, and one that is \
+                 all underived is a loader behind. This is also why the unloaded count \
+                 includes these — rows in memory are not loaded, and counting them as loaded \
+                 would report a loader caught up while its last insert sat unsent.",
+                &labels,
+            ),
             oldest_unloaded_age_seconds: gauge(
                 &registry,
                 "dz_loader_oldest_unloaded_age_seconds",
@@ -288,11 +300,13 @@ impl LoaderMetrics {
     pub fn pass_finished(
         &self,
         unloaded: i64,
+        held: i64,
         oldest_unloaded_age_seconds: i64,
         ledger_entries: i64,
         now_unix_seconds: i64,
     ) {
         self.unloaded_objects.set(unloaded);
+        self.held_objects.set(held);
         self.oldest_unloaded_age_seconds
             .set(oldest_unloaded_age_seconds);
         self.ledger_entries.set(ledger_entries);
@@ -373,6 +387,7 @@ mod tests {
             "dz_loader_passes_total",
             "dz_loader_last_pass_timestamp_seconds",
             "dz_loader_unloaded_objects",
+            "dz_loader_held_objects",
             "dz_loader_oldest_unloaded_age_seconds",
             "dz_loader_ledger_entries",
         ] {
@@ -436,7 +451,7 @@ mod tests {
     #[test]
     fn a_pass_publishes_the_backlog_and_the_age_of_its_oldest() {
         let metrics = LoaderMetrics::new("s", "r");
-        metrics.pass_finished(7, 4_000, 12, 1_700_000_000);
+        metrics.pass_finished(7, 3, 4_000, 12, 1_700_000_000);
         let text = metrics.render();
         assert!(
             text.contains("dz_loader_unloaded_objects{recorder=\"r\",site=\"s\"} 7"),
@@ -447,6 +462,12 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("dz_loader_ledger_entries{recorder=\"r\",site=\"s\"} 12"));
+        // The held count, which is the part of the backlog that is a sink
+        // coalescing rather than a loader behind.
+        assert!(
+            text.contains("dz_loader_held_objects{recorder=\"r\",site=\"s\"} 3"),
+            "{text}"
+        );
         assert!(text.contains("dz_loader_passes_total{recorder=\"r\",site=\"s\"} 1"));
     }
 

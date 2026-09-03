@@ -5,7 +5,7 @@ mod common;
 
 use std::collections::BTreeSet;
 
-use common::{batch, config, no_wait, Answer, FakeTransport};
+use common::{batch, config, no_wait, Answer, FakeTransport, NOW, SECOND_NS};
 use dz_recorder_clickhouse::{send_order, ClickHouseSink, Credentials};
 use dz_recorder_replay::Fault;
 use dz_recorder_rows::{Grain, RowSink, RowSinkError};
@@ -28,7 +28,8 @@ fn a_request_is_json_each_row_with_the_statement_in_the_url() {
     let expected: Vec<(Grain, usize)> = Grain::ALL.iter().map(|g| (*g, rows.rows(*g))).collect();
 
     let mut sink = sink(FakeTransport::new());
-    let written = sink.write_batch(rows).expect("the batch lands");
+    let accepted = sink.write_batch(rows, NOW).expect("the batch lands");
+    let written = accepted.accepted;
 
     let sent = sink_sent(&sink);
     // One request per non-empty grain: the batch bounds are far above this
@@ -65,7 +66,19 @@ fn a_request_is_json_each_row_with_the_statement_in_the_url() {
 
     // The credentials travel in headers, and the user is the configured one.
     assert!(sent.iter().all(|s| s.user == "loader" && s.has_password));
-    assert!(written.bytes() > 0);
+    // Bytes are a property of the request and not of an object, so they come
+    // back on the accept rather than on the row count: see `Accepted`.
+    assert!(accepted.bytes_posted > 0);
+    assert_eq!(
+        written.bytes(),
+        0,
+        "a coalescing sink cannot attribute bytes per object"
+    );
+    assert_eq!(
+        accepted.landed.len(),
+        1,
+        "insert_min_rows is 1 here, so it posted"
+    );
 }
 
 /// A grain that produced no rows sends no request.
@@ -82,7 +95,7 @@ fn a_grain_with_no_rows_sends_no_request() {
     assert_eq!(rows.rows(Grain::SequenceGap), 0);
 
     let mut sink = sink(FakeTransport::new());
-    sink.write_batch(rows).expect("the batch lands");
+    sink.write_batch(rows, NOW).expect("the batch lands");
     let tables: BTreeSet<String> = sink_sent(&sink).iter().map(common::Sent::table).collect();
     assert!(!tables.contains("recorder.conformance_finding"));
     assert!(!tables.contains("recorder.sequence_gap"));
@@ -98,13 +111,14 @@ fn a_batch_is_split_by_row_count_and_by_bytes() {
     assert_eq!(total, 100);
 
     let mut tuned = config();
-    tuned.max_rows = 30;
+    tuned.insert_max_rows = 30;
     let mut sink = ClickHouseSink::with_transport(
         tuned,
         Credentials::new("loader", None),
         FakeTransport::new(),
     );
-    sink.write_batch(rows.clone()).expect("the batch lands");
+    sink.write_batch(rows.clone(), NOW)
+        .expect("the batch lands");
     let sent = sink_sent(&sink);
     let datagram: Vec<_> = sent
         .iter()
@@ -121,14 +135,14 @@ fn a_batch_is_split_by_row_count_and_by_bytes() {
     // The byte bound, on the same rows: a request is capped by whichever bound
     // is reached first.
     let mut by_bytes = config();
-    by_bytes.max_rows = usize::MAX;
-    by_bytes.max_bytes = 2_000;
+    by_bytes.insert_max_rows = usize::MAX;
+    by_bytes.insert_max_bytes = 2_000;
     let mut sink = ClickHouseSink::with_transport(
         by_bytes,
         Credentials::new("loader", None),
         FakeTransport::new(),
     );
-    sink.write_batch(rows).expect("the batch lands");
+    sink.write_batch(rows, NOW).expect("the batch lands");
     let sent = sink_sent(&sink);
     let datagram: Vec<_> = sent
         .iter()
@@ -156,13 +170,13 @@ fn a_batch_is_split_by_row_count_and_by_bytes() {
 fn a_single_row_over_the_byte_bound_is_still_sent() {
     let rows = batch(3, Fault::None);
     let mut tuned = config();
-    tuned.max_bytes = 1;
+    tuned.insert_max_bytes = 1;
     let mut sink = ClickHouseSink::with_transport(
         tuned,
         Credentials::new("loader", None),
         FakeTransport::new(),
     );
-    sink.write_batch(rows).expect("the batch lands");
+    sink.write_batch(rows, NOW).expect("the batch lands");
     let datagram: Vec<_> = sink_sent(&sink)
         .into_iter()
         .filter(|s| s.table() == "recorder.datagram")
@@ -179,7 +193,8 @@ fn an_unreachable_destination_is_retried_with_the_same_bytes() {
     let transport =
         FakeTransport::answering(vec![Answer::Unreachable, Answer::Unreachable, Answer::Ok]);
     let mut sink = sink(transport);
-    sink.write_batch(rows).expect("the third attempt landed it");
+    sink.write_batch(rows, NOW)
+        .expect("the third attempt landed it");
 
     let sent = sink_sent(&sink);
     let datagram: Vec<_> = sent
@@ -207,7 +222,7 @@ fn a_rejected_statement_is_not_retried_at_all() {
     let mut sink = sink(FakeTransport::answering(vec![Answer::Refused(400)]));
 
     let error = sink
-        .write_batch(rows)
+        .write_batch(rows, NOW)
         .expect_err("a request the server refuses is a failed load");
     let RowSinkError::Rejected {
         object_key: named,
@@ -250,7 +265,9 @@ fn a_server_failure_is_retried_until_the_attempts_are_spent() {
         )
         .waiting_with(no_wait);
 
-        let error = sink.write_batch(rows).expect_err("every attempt failed");
+        let error = sink
+            .write_batch(rows, NOW)
+            .expect_err("every attempt failed");
         let RowSinkError::Rejected { attempts, .. } = &error else {
             panic!("expected a rejection, got {error}");
         };
@@ -289,7 +306,7 @@ fn a_failure_on_a_later_grain_fails_the_whole_object() {
     .waiting_with(no_wait);
 
     let error = sink
-        .write_batch(rows)
+        .write_batch(rows, NOW)
         .expect_err("the gap rows did not land");
     assert!(matches!(error, RowSinkError::Rejected { .. }), "{error}");
     let tables: Vec<String> = sink_sent(&sink).iter().map(common::Sent::table).collect();
@@ -318,7 +335,7 @@ fn the_base_grain_is_sent_before_the_grains_derived_from_it() {
 
     let rows = batch(100, Fault::SequenceGap);
     let mut sink = sink(FakeTransport::new());
-    sink.write_batch(rows).expect("the batch lands");
+    sink.write_batch(rows, NOW).expect("the batch lands");
     let tables: Vec<String> = sink_sent(&sink).iter().map(common::Sent::table).collect();
     let datagram = tables
         .iter()
@@ -337,9 +354,9 @@ fn the_base_grain_is_sent_before_the_grains_derived_from_it() {
 fn flush_holds_nothing_because_write_batch_held_nothing() {
     let rows = batch(10, Fault::None);
     let mut sink = sink(FakeTransport::new());
-    sink.write_batch(rows).expect("the batch lands");
+    sink.write_batch(rows, NOW).expect("the batch lands");
     let before = sink_sent(&sink).len();
-    sink.flush().expect("flush");
+    sink.flush(NOW).expect("flush");
     assert_eq!(sink_sent(&sink).len(), before);
 }
 
@@ -354,7 +371,7 @@ fn an_unauthenticated_sink_sends_no_password_header() {
         Credentials::new("default", None),
         FakeTransport::new(),
     );
-    sink.write_batch(rows).expect("the batch lands");
+    sink.write_batch(rows, NOW).expect("the batch lands");
     assert!(sink_sent(&sink).iter().all(|s| !s.has_password));
 }
 
@@ -365,4 +382,283 @@ fn an_unauthenticated_sink_sends_no_password_header() {
 /// through a borrow rather than holding a second handle.
 fn sink_sent(sink: &ClickHouseSink<FakeTransport>) -> Vec<common::Sent> {
     sink.transport().sent()
+}
+
+// ---------------------------------------------------------------------------
+// Coalescing: what stops one part per object per lane
+// ---------------------------------------------------------------------------
+
+/// A quiet lane's objects are held and posted together, not one part each.
+///
+/// **This is the whole reason the sink holds anything.** An insert is one atomic
+/// block and becomes one part, so a sink that posted per object would write one
+/// part per object per lane — and the quietest lanes measured produce about 700
+/// rows in a time-rotated object. Merge pressure is set by rows per part, and it
+/// never appears in a query log, only as the gap between a provider's CPU graph
+/// and query-attributed CPU.
+#[test]
+fn rows_from_several_objects_coalesce_into_one_insert() {
+    let mut tuned = config();
+    // Four objects of 32, 33, 34 and 35 rows: a clean segment of *n* datagrams
+    // derives n + 2 rows, the era boundary and the coverage row being the two.
+    // 99 rows are held after three, and the fourth crosses.
+    tuned.insert_min_rows = 100;
+    let mut sink = ClickHouseSink::with_transport(
+        tuned,
+        Credentials::new("loader", None),
+        FakeTransport::new(),
+    );
+
+    // Distinct objects, and the counts are what makes them distinct: the
+    // synthetic publisher's receive stamps are fixed, so an object key varies
+    // only with how many datagrams the segment held. Four batches of the same
+    // size are four copies of one object, which the sink correctly treats as
+    // one — see the test below.
+    let mut ids = Vec::new();
+    for datagrams in [30, 31, 32] {
+        let rows = batch(datagrams, Fault::None);
+        ids.push(rows.object_key.clone());
+        let accepted = sink.write_batch(rows, NOW).expect("accepted");
+        assert!(
+            accepted.landed.is_empty(),
+            "under the floor, so nothing should have been sent yet"
+        );
+        assert_eq!(accepted.bytes_posted, 0);
+    }
+    assert_eq!(sink_sent(&sink).len(), 0, "no request yet");
+    assert_eq!(sink.held_rows(), 99);
+    assert_eq!(sink.held_objects(), 3);
+
+    // The fourth crosses the floor, and every held object lands at once.
+    let rows = batch(33, Fault::None);
+    ids.push(rows.object_key.clone());
+    let accepted = sink.write_batch(rows, NOW).expect("accepted");
+    assert_eq!(accepted.landed.len(), 4, "all four land together");
+    assert!(accepted.bytes_posted > 0);
+    assert_eq!(sink.held_objects(), 0, "and nothing is held afterwards");
+
+    // One request per non-empty grain, carrying every object's rows — not one
+    // request per object.
+    let sent = sink_sent(&sink);
+    let datagram: Vec<_> = sent
+        .iter()
+        .filter(|s| s.table() == "recorder.datagram")
+        .collect();
+    assert_eq!(datagram.len(), 1, "one insert, not four");
+    assert_eq!(datagram[0].rows().len(), 30 + 31 + 32 + 33);
+
+    // And every object is named in the rows, so `ReplacingMergeTree` can
+    // deduplicate a re-load of any one of them.
+    let keys: BTreeSet<String> = datagram[0]
+        .rows()
+        .iter()
+        .map(|r| r["object_key"].as_str().expect("a key").to_owned())
+        .collect();
+    assert_eq!(
+        keys.len(),
+        4,
+        "an insert spanning objects says which is which"
+    );
+    for id in &ids {
+        assert!(keys.contains(id), "{id} is missing from the insert");
+    }
+}
+
+/// The age bound: a lane too quiet to reach the floor is late, never absent.
+#[test]
+fn held_rows_are_posted_once_the_delay_is_up() {
+    let mut tuned = config();
+    tuned.insert_min_rows = 1_000_000;
+    tuned.insert_max_delay = std::time::Duration::from_secs(900);
+    let mut sink = ClickHouseSink::with_transport(
+        tuned,
+        Credentials::new("loader", None),
+        FakeTransport::new(),
+    );
+
+    let accepted = sink.write_batch(batch(20, Fault::None), NOW).expect("held");
+    assert!(accepted.landed.is_empty());
+
+    // Not due yet, and a pass that asks gets nothing.
+    assert!(sink
+        .post_if_due(NOW + 899 * SECOND_NS)
+        .expect("not due")
+        .is_empty());
+    assert_eq!(sink_sent(&sink).len(), 0);
+    assert_eq!(sink.held_objects(), 1);
+
+    // Due, on a pass that found no new object at all — which is the case the
+    // bound exists for.
+    let landed = sink.post_if_due(NOW + 900 * SECOND_NS).expect("due");
+    assert_eq!(landed.len(), 1);
+    assert_eq!(sink.held_objects(), 0);
+    assert!(!sink_sent(&sink).is_empty());
+}
+
+/// The age is measured from the oldest held row, not from the last write.
+///
+/// A lane that trickles one object per interval would otherwise reset the clock
+/// on every arrival and never post at all — which is the failure the bound
+/// exists to prevent, arriving by a longer route.
+#[test]
+fn the_delay_runs_from_the_oldest_held_row_and_is_not_reset_by_a_write() {
+    let mut tuned = config();
+    tuned.insert_min_rows = 1_000_000;
+    tuned.insert_max_delay = std::time::Duration::from_secs(100);
+    let mut sink = ClickHouseSink::with_transport(
+        tuned,
+        Credentials::new("loader", None),
+        FakeTransport::new(),
+    );
+
+    sink.write_batch(batch(5, Fault::None), NOW).expect("held");
+    // A second, *different* object arrives 90 seconds later, well short of the
+    // bound. Different because an object key varies with the datagram count.
+    let accepted = sink
+        .write_batch(batch(6, Fault::None), NOW + 90 * SECOND_NS)
+        .expect("held");
+    assert!(accepted.landed.is_empty(), "still under the floor");
+
+    // 100 seconds after the *first* row, not the second: due.
+    let landed = sink.post_if_due(NOW + 100 * SECOND_NS).expect("due");
+    assert_eq!(
+        landed.len(),
+        2,
+        "the clock runs from the oldest row, so both go"
+    );
+}
+
+/// A flush posts whatever is held, due or not.
+///
+/// This is the way out: a `--once` pass and a shutdown both end here, so no run
+/// leaves rows in memory that the ledger will never account for.
+#[test]
+fn a_flush_posts_what_is_held_however_far_from_due_it_is() {
+    let mut tuned = config();
+    tuned.insert_min_rows = 1_000_000;
+    tuned.insert_max_delay = std::time::Duration::from_secs(86_400);
+    let mut sink = ClickHouseSink::with_transport(
+        tuned,
+        Credentials::new("loader", None),
+        FakeTransport::new(),
+    );
+
+    sink.write_batch(batch(10, Fault::None), NOW).expect("held");
+    assert_eq!(sink.held_objects(), 1);
+    let landed = sink.flush(NOW).expect("a flush does not wait for due");
+    assert_eq!(landed.len(), 1);
+    assert_eq!(sink.held_objects(), 0);
+    assert!(sink.bytes_posted() > 0);
+
+    // And a flush with nothing held is not a request.
+    let before = sink_sent(&sink).len();
+    assert!(sink.flush(NOW).expect("nothing to do").is_empty());
+    assert_eq!(sink_sent(&sink).len(), before);
+}
+
+/// A failed post fails **every** held object, and holds none of them afterwards.
+///
+/// Wider than one object, and correct for the same reason a single object's
+/// failure was: the tables are `ReplacingMergeTree` and the rows are a pure
+/// function of `(object key, sha256)`, so re-loading all of them is a replace.
+/// Keeping the rows as well would send them twice on the next successful post.
+#[test]
+fn a_failed_post_fails_every_held_object_and_keeps_none() {
+    let mut tuned = config();
+    tuned.insert_min_rows = 100;
+    tuned.attempts = 1;
+    let mut sink = ClickHouseSink::with_transport(
+        tuned,
+        Credentials::new("loader", None),
+        FakeTransport::answering(vec![Answer::Refused(400)]),
+    )
+    .waiting_with(no_wait);
+
+    for datagrams in [30, 31, 32] {
+        sink.write_batch(batch(datagrams, Fault::None), NOW)
+            .expect("held, so no failure yet");
+    }
+    let error = sink
+        .write_batch(batch(33, Fault::None), NOW)
+        .expect_err("the fourth crosses the floor and the post is refused");
+
+    let RowSinkError::Rejected { object_key, .. } = &error else {
+        panic!("expected a rejection, got {error}");
+    };
+    // The refusal names them all: an insert spanning four objects that failed
+    // leaves four objects unloaded, and naming one would send an operator after
+    // the wrong file.
+    assert!(
+        object_key.contains("4 objects including"),
+        "the refusal has to say how many: {object_key}"
+    );
+    assert_eq!(
+        sink.held_objects(),
+        0,
+        "nothing is held after a failure, or the next post sends these twice"
+    );
+    assert_eq!(sink.batches_failed(), 1);
+}
+
+/// The default floor and cap are the measured numbers, not round ones.
+#[test]
+fn the_insert_bounds_default_to_the_measured_write_pattern() {
+    let default = dz_recorder_clickhouse::ClickHouseConfig::default();
+    assert_eq!(
+        default.insert_max_rows, 1_000_000,
+        "an object's rows land in one or two parts"
+    );
+    assert_eq!(
+        default.insert_min_rows, 50_000,
+        "the floor that stops one part per object per lane"
+    );
+    assert_eq!(
+        default.insert_max_delay,
+        std::time::Duration::from_secs(15 * 60),
+        "so a quiet lane is late rather than absent"
+    );
+    // And a floor above the cap is refused, because every insert would then
+    // wait for the delay.
+    let mut broken = default.clone();
+    broken.endpoint = "http://192.0.2.20:8123".to_owned();
+    broken.database = "recorder".to_owned();
+    broken.insert_min_rows = broken.insert_max_rows + 1;
+    assert!(broken.check().is_err());
+}
+
+/// One object handed over twice while held is one object, not two.
+///
+/// Which is what `(object key, sha256)` being the identity means, and it matters
+/// here rather than only in the store: the sink hands back the objects that
+/// landed, and naming the same one twice would have the loader write two ledger
+/// entries for it and count it loaded twice.
+///
+/// It is also the shape a retry takes. A pass that failed after accepting an
+/// object re-derives it, and the second acceptance must not make the insert
+/// claim two objects' worth of progress.
+#[test]
+fn the_same_object_accepted_twice_while_held_is_one_object() {
+    let mut tuned = config();
+    tuned.insert_min_rows = 1_000_000;
+    let mut sink = ClickHouseSink::with_transport(
+        tuned,
+        Credentials::new("loader", None),
+        FakeTransport::new(),
+    );
+
+    let first = batch(20, Fault::None);
+    let again = batch(20, Fault::None);
+    assert_eq!(
+        (first.object_key.clone(), first.object_sha256.clone()),
+        (again.object_key.clone(), again.object_sha256.clone()),
+        "the fixture has to produce the same object twice for this to test anything"
+    );
+
+    sink.write_batch(first, NOW).expect("held");
+    sink.write_batch(again, NOW).expect("held");
+    assert_eq!(sink.held_objects(), 1, "one object, handed over twice");
+    assert_eq!(sink.held_rows(), 44, "and both copies of its rows");
+
+    let landed = sink.flush(NOW).expect("posted");
+    assert_eq!(landed.len(), 1, "named once, so recorded once");
 }

@@ -27,6 +27,12 @@ use dz_recorder_replay::OwnedDatagram;
 use dz_recorder_rows::{
     derive_object, DropScope, FileSink, Grain, PortRoleLabel, RowSink, SegmentTrailer, Verdict,
 };
+/// One instant for every sink call in this file.
+///
+/// The sinks take the clock as a parameter, so a test states it rather than
+/// sleeping: what is under test here is what a sink writes, never when it
+/// decides to.
+const NOW: u64 = 1_700_000_000_000_000_000;
 
 const MKTDATA_CHANNEL: u8 = 7;
 const REFDATA_CHANNEL: u8 = 9;
@@ -400,8 +406,11 @@ fn the_rows_land_in_a_sink_as_one_json_object_per_line() {
         .collect();
 
     let mut sink = FileSink::create(dir.path()).expect("the directory is writable");
-    let written = sink.write_batch(derived.rows).expect("the batch lands");
-    sink.flush().expect("flush");
+    let written = sink
+        .write_batch(derived.rows, NOW)
+        .expect("the batch lands")
+        .accepted;
+    sink.flush(NOW).expect("flush");
 
     for (grain, count) in expected {
         assert_eq!(written.rows(grain), count as u64, "{grain}");

@@ -33,8 +33,36 @@
 -- should say a month here — a `datagram` TTL longer than the object retention
 -- promises a re-derivation that has nothing left to derive from, and one shorter
 -- throws away rows while the evidence for them is still on disk.
+-- THE PART COUNT THE TTL IMPLIES, not only the row count.
+--
+-- A row count does not predict what retention costs. A short TTL on the largest
+-- table can be a continuous delete-and-merge treadmill, and two separate
+-- retention incidents on the destination cluster came from TTL *behaviour*
+-- rather than from volume. So the number is written down here, and it follows
+-- from the write pattern rather than from the row count:
+--
+--   partitions are days, and the loader's `insert_max_rows` is a million rows,
+--   so ~100 million rows a day is on the order of 100 parts per daily partition
+--   before merges, settling to a handful after. A two-day window is therefore
+--   two or three live partitions and a few hundred parts at the peak.
+--
+-- **That is the cheap shape, and it is cheap because the TTL is a whole number
+-- of days and the partition key is a day.** An expired partition leaves as a
+-- part *drop* rather than as a row-level mutation, which is the difference
+-- between a bounded cost and a treadmill. A TTL of, say, `36 HOUR` against a
+-- daily partition would expire rows in the middle of a live partition and turn
+-- every merge into a rewrite. Keep the window a multiple of the partition.
 ALTER TABLE recorder.datagram
     MODIFY TTL toDateTime(recv_ts) + INTERVAL 2 DAY;
+
+-- AND IT LIVES HERE, NEVER APPLIED BY HAND.
+--
+-- One of those two incidents was a hand-applied TTL change that a nightly
+-- schema auto-sync silently reverted, for six days, which no row count would
+-- have shown: the rows kept expiring on the old window and the operator kept
+-- reading the new one. A TTL that is not in a file the deploy applies is a TTL
+-- that is true until the next sync. Change it here, review it here, apply it
+-- from here.
 
 -- And stated rather than assumed for the other four, so that a later reader does
 -- not have to infer the absence of a TTL from the absence of a line.

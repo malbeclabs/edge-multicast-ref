@@ -78,6 +78,26 @@
 --    indistinguishable from an object nobody loaded. The rank ranks
 --    `continuation = 0` rows, so every query sees what the design intended.
 
+-- DEDUPLICATION IS MERGE-TIME, NOT INSERT-TIME, AND A CONSUMER HAS TO KNOW
+--
+-- Every table here is a `ReplacingMergeTree`, and that is what makes a re-run
+-- after an analyser fix a replace rather than a duplication. It is **not** what
+-- makes the duplicate invisible the moment the second load finishes: the engine
+-- collapses rows on the sort key when it merges parts, and until a merge runs
+-- both rows are there and both are returned.
+--
+-- Which is correct for idempotence and surprising for everything downstream. A
+-- data-quality check that counts rows reads a re-load as a doubling, and that
+-- has already produced one false "row count doubled" finding on the destination
+-- cluster that had to be retracted. An exact count needs `FINAL`, or an
+-- explicit `GROUP BY` over the sort key, or `OPTIMIZE ... FINAL` first:
+--
+--   SELECT count() FROM recorder.datagram FINAL WHERE ...   -- exact, slower
+--   SELECT count() FROM recorder.datagram WHERE ...         -- fast, an upper bound
+--
+-- So an approximate count is an upper bound and never an equality, and a panel
+-- that compares two of them across a reload is comparing two upper bounds.
+
 CREATE DATABASE IF NOT EXISTS recorder;
 
 -- 1. The base fact. Everything else is derivable from this, which is why it is

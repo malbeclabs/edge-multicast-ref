@@ -78,16 +78,46 @@ failure mode is a startup failure, which is the good kind — but it is a startu
 failure, so the build and deploy pipeline has to enable the feature *before* the
 unit is enabled, and `--check` is where it is caught.
 
-**Give the service account a read-bytes ceiling and a workload thread share.**
-The configuration takes an endpoint, a database and a user, and the password
-comes from a systemd credential — but nothing here provisions the account, and
-nothing here bounds what it can spend. A loader is a write-path workload and
-should be cheap; what makes an unbounded account dangerous is not this process
-misbehaving but the queries somebody later points at the rows it wrote. A
-workload added without limits is discovered weeks later by someone reading a
-graph, and by then it is a table too big to fix cheaply. The two settings cost
-nothing at provisioning time and remove this account from that category
-permanently.
+**Apply `004_recorder_loader_user.sql`, with the password as a parameter.** The
+account is checked in beside the schema and bounded at creation: `INSERT` on the
+five tables, `SELECT` on `segment_coverage` and `era` only — the two the
+adjacency check reads — no DDL at all, a settings profile with a read-bytes
+ceiling and a single thread, and a quota. It is applied by an administrator and
+not by the loader, because a loader that could grant itself privileges is the
+thing the file exists to prevent, and the password is a query parameter so that
+no credential lives in this repository.
+
+That leaves one thing the file cannot do, and it is the workload thread share: set it where the cluster supports one. A loader is a
+write-path workload and should be cheap; what makes an unbounded account
+dangerous is not this process misbehaving but the queries somebody later points
+at the rows it wrote. A workload added without limits is discovered weeks later
+by someone reading a graph, and by then it is a table too big to fix cheaply.
+
+## What the sink sends, and why it holds
+
+**One insert is one part, so merge pressure is set by rows per part rather than
+rows per day** — and merge work never appears in a query log, only as the gap
+between a provider's CPU graph and query-attributed CPU. A sink that posted once
+per object would write one part per object per lane, and the quietest lanes
+measured produce about 700 rows in a time-rotated object.
+
+So the sink holds rows across objects:
+
+| Key | Default | |
+|---|---|---|
+| `insert_max_rows` | 1,000,000 | an object's rows land in one or two parts |
+| `insert_min_rows` | 50,000 | the floor that stops one part per object per lane |
+| `insert_max_delay` | 900s | the bound on holding, so a quiet lane is late rather than absent |
+
+**Which means accepted is not loaded.** `dz_loader_held_objects` is the part of
+the backlog that is the sink coalescing as designed; `dz_loader_unloaded_objects`
+includes it, deliberately, because rows in memory are not in the store. A ledger
+entry is written when the insert carrying an object's rows is acknowledged and
+never when the sink takes them — an entry written on acceptance would mark an
+object loaded whose rows a crash then loses, with nothing recording that it did.
+
+A `--once` pass and a shutdown both flush, so no run leaves rows in memory the
+ledger will never account for.
 
 The one query shape worth knowing before it is pointed at a dashboard is
 `recorder.era_ranked`: `era_index` is a dense rank, and a dense rank is defined
