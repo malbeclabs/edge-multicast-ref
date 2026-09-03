@@ -164,13 +164,26 @@ impl<S: RowSink> Loader<'_, S> {
                 pass.skipped += 1;
                 continue;
             }
-            seen.push((
-                ObjectId {
-                    key: manifest.object_key.clone(),
-                    sha256: manifest.sha256.clone(),
-                },
-                manifest.end_ns,
-            ));
+            let id = ObjectId {
+                key: manifest.object_key.clone(),
+                sha256: manifest.sha256.clone(),
+            };
+            seen.push((id.clone(), manifest.end_ns));
+
+            // Derived already, and with the sink: an object waiting for the
+            // insert that carries its rows has no ledger entry by design, so
+            // the check above does not see it and the walk would derive it
+            // again on every pass until the insert went — thirty times over at
+            // the deployed poll interval. The re-derivation is not free and it
+            // is not harmless: the second copy is derived against a *pending*
+            // trailer of its own object rather than its predecessor's, so it
+            // writes as unverified the era boundaries the first copy settled,
+            // and the second copy is the one that lands.
+            if self.pending.iter().any(|p| p.id == id) {
+                self.metrics.object_skipped(SkipReason::Held);
+                pass.skipped += 1;
+                continue;
+            }
 
             // Checked before the object rather than after it: a signal that
             // arrived mid-pass finishes the object it is in and stops, so a
@@ -921,6 +934,10 @@ mod deferred_ledger_tests {
         /// When set, the next post fails and holds nothing — the shape a
         /// refused insert takes.
         refuse: bool,
+        /// Every batch handed over, in order: the object it came from and the
+        /// `anchor_certain` of its era rows. `held` cannot show a re-derivation
+        /// — the object is already in it — and this can.
+        taken: Vec<(String, Vec<u8>)>,
     }
 
     impl HoldingSink {
@@ -941,6 +958,10 @@ mod deferred_ledger_tests {
     impl RowSink for HoldingSink {
         fn write_batch(&mut self, rows: RowBatch, _now_ns: u64) -> Result<Accepted, RowSinkError> {
             let id = ObjectId::of(&rows);
+            self.taken.push((
+                rows.object_key.clone(),
+                rows.era.iter().map(|e| e.anchor_certain).collect(),
+            ));
             if !self.held.contains(&id) {
                 self.held.push(id);
             }
@@ -1114,6 +1135,72 @@ mod deferred_ledger_tests {
         .run_once(&|| false);
         assert_eq!(second.derived, 2, "both are derived again");
         assert_eq!(second.skipped, 0, "neither was recorded as loaded");
+    }
+
+    /// **An object the sink is holding is not derived again.**
+    ///
+    /// It has no ledger entry by design — the entry is written when the rows
+    /// land — so the walk's own skip cannot see it, and without this the
+    /// deployed configuration re-derives every held object about thirty times
+    /// (a 30s poll against a 900s `insert_max_delay`). The cost is not the
+    /// work. The second copy consults a pending trailer that now includes the
+    /// object's *own* segment, so the adjacency check fails and it writes as
+    /// unverified the era boundaries the first copy settled — and the copy the
+    /// insert carries is the last one written.
+    #[test]
+    fn an_object_the_sink_is_holding_is_not_derived_again_next_pass() {
+        let archive = archive(3, 20);
+        let metrics = LoaderMetrics::new(SITE, RECORDER);
+        let mut ledger = Ledger::open(&archive.ledger).expect("a new ledger");
+        let mut sink = HoldingSink::default();
+        let mut pending = Vec::new();
+
+        let mut pass = |ledger: &mut Ledger, sink: &mut HoldingSink, pending: &mut Vec<Pending>| {
+            Loader {
+                objects_dir: &archive.completed,
+                site: SITE,
+                recorder: RECORDER,
+                max_objects: 0,
+                ledger,
+                sink,
+                metrics: &metrics,
+                pending,
+            }
+            .run_once(&|| false)
+            .0
+        };
+
+        let first = pass(&mut ledger, &mut sink, &mut pending);
+        assert_eq!(first.derived, 3);
+        let second = pass(&mut ledger, &mut sink, &mut pending);
+        let third = pass(&mut ledger, &mut sink, &mut pending);
+
+        assert_eq!(second.derived, 0, "all three are already with the sink");
+        assert_eq!(third.derived, 0);
+        assert_eq!(second.skipped, 3);
+        assert!(metrics.render().contains("reason=\"held\",recorder"));
+        assert_eq!(
+            sink.taken.len(),
+            3,
+            "one batch per object over three passes, not three: {:?}",
+            sink.taken
+        );
+        assert_eq!(
+            pending.len(),
+            3,
+            "and the held list is the same three, not nine"
+        );
+        // The boundaries the first pass settled are still settled, because
+        // nothing derived them a second time.
+        let certain: Vec<u8> = sink
+            .taken
+            .iter()
+            .map(|(_, eras)| *eras.first().expect("one boundary per object"))
+            .collect();
+        assert_eq!(certain, vec![0, 1, 1], "only the first is unsettled");
+        // Still nothing loaded: what changed is the deriving, not the ledger.
+        assert_eq!(ledger.entries(), 0);
+        assert_eq!(third.unloaded, 3);
     }
 
     /// In-order certainty survives the coalescing.

@@ -91,10 +91,21 @@ pub enum SkipReason {
     /// recorder writes the manifest first, so this is what a pass that ran
     /// during a publication sees, and it resolves itself on the next one.
     Unpaired,
+    /// Its rows are already with the sink, waiting for the insert that carries
+    /// them. It has no ledger entry by design — the entry is written when the
+    /// rows land — so this is what stops the pass from deriving it again, and
+    /// under a poll interval far shorter than `insert_max_delay` that is most
+    /// of the passes an object is alive for.
+    Held,
 }
 
 impl SkipReason {
-    pub const ALL: [Self; 3] = [Self::AlreadyLoaded, Self::ForeignHost, Self::Unpaired];
+    pub const ALL: [Self; 4] = [
+        Self::AlreadyLoaded,
+        Self::ForeignHost,
+        Self::Unpaired,
+        Self::Held,
+    ];
 
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -102,6 +113,7 @@ impl SkipReason {
             Self::AlreadyLoaded => "already_loaded",
             Self::ForeignHost => "foreign_host",
             Self::Unpaired => "unpaired",
+            Self::Held => "held",
         }
     }
 }
