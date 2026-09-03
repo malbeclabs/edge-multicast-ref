@@ -1,0 +1,20 @@
+[package]
+name = "dz-adapter-uds"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "A normalized-event record encoding, and the built-in adapter that reads it"
+
+[dependencies]
+dz-adapter-core = { path = "../dz-adapter-core" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# The round-trip test's only real property is that the encoding is lossless
+# *with respect to the lowering*, which needs the lowering to say.
+dz-edge-core = { path = "../../codec/dz-edge-core" }
+dz-edge-mbp = { path = "../../codec/dz-edge-mbp" }
+dz-edge-tob = { path = "../../codec/dz-edge-tob" }
+dz-publisher-lowering = { path = "../../publisher/dz-publisher-lowering" }

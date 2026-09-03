@@ -245,6 +245,17 @@ impl<F: Feed> DatagramBuilder<F> {
     /// On `Err` the builder is unchanged, so a caller may finish the current
     /// datagram and retry the same message on a fresh one.
     pub fn push<M: AppMessage>(&mut self, msg: &M) -> Result<(), EncodeError> {
+        // First of all, because it is the broadest refusal: a message this feed
+        // does not define is not made carriable by a correct port role, a
+        // valid body or a bigger datagram. The magic would have been right,
+        // which is exactly what makes it worth checking here — nothing further
+        // down the send path can tell.
+        if !F::carries(M::TYPE_ID) {
+            return Err(EncodeError::NotCarriedByFeed {
+                feed: F::NAME,
+                type_id: M::TYPE_ID,
+            });
+        }
         // Before the port role and before the capacity check: a message that
         // may not be sent at all is not made sendable by a bigger datagram.
         msg.validate()?;

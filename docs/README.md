@@ -2,6 +2,8 @@
 
 Design documents and implementation plans, kept as a record. Each was written against the code as it stood at its date and is not updated afterwards — for current behaviour, read the component's README. On wire format, [edge-feed-spec](https://github.com/malbeclabs/edge-feed-spec) wins over anything here.
 
+How-to material does not live here, for the reason above: a guide has to stay true. [BRINGING-UP-A-FEED.md](../BRINGING-UP-A-FEED.md) is the one for standing a feed up end to end.
+
 `superpowers/specs/` and `superpowers/plans/` are the current convention: a spec argues a design and is reviewed before code, a plan turns it into ordered tasks, and they pair by name and date. The dated files at this level predate that split.
 
 Older documents also predate [GLOSSARY.md](https://github.com/malbeclabs/edge-feed-spec/blob/main/GLOSSARY.md) and say `frame` for `datagram` and `bot` for `book-builder`. They are left as written.
@@ -12,6 +14,7 @@ Older documents also predate [GLOSSARY.md](https://github.com/malbeclabs/edge-fe
 |---|---|
 | [Shared publisher crates](superpowers/specs/2026-08-26-edge-publisher-crates-design.md) | The design behind [`rust/codec`](../rust/codec/) and [`rust/publisher`](../rust/publisher/) |
 | [Codec crates: Top-of-Book path](superpowers/plans/2026-08-26-codec-crates-top-of-book.md) | Plan for the first three codec crates |
+| [The venue adapter interface](superpowers/specs/2026-09-02-venue-adapter-interface-design.md) · [plan](superpowers/plans/2026-09-02-venue-adapter-interface.md) | The trait a venue repository implements to turn its own source into our messages, and how the recorder re-lowers it to compare against multicast |
 
 ## Feeds
 

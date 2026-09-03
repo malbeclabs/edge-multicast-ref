@@ -1,0 +1,13 @@
+[package]
+name = "dz-publisher-egress"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Multicast egress: the transmitter, the per-channel sequencer, and the datagram sink"
+
+[dependencies]
+dz-edge-core = { path = "../../codec/dz-edge-core" }
+dz-publisher-metrics = { path = "../dz-publisher-metrics" }
+thiserror = { workspace = true }

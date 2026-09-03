@@ -30,6 +30,7 @@ pub use socket::{
 
 #[cfg(feature = "afpacket")]
 pub use afpacket::{
-    bpf_filter_for, AfPacketSource, AfPacketSourceConfig, AfPacketStats, FeedFilter, FrameSkip,
-    ParsedFrame, Precision, RingAccounting, RingDelta,
+    bpf_filter_for, datalink_refusal, AfPacketSource, AfPacketSourceConfig, AfPacketStats,
+    FeedFilter, FrameSkip, Linktype, ParsedFrame, Precision, RingAccounting, RingDelta,
+    PARSED_DATALINK,
 };

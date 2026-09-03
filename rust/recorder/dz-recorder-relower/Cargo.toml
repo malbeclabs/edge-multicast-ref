@@ -1,0 +1,33 @@
+[package]
+name = "dz-recorder-relower"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Offline re-lowering: did the publisher publish what the venue said?"
+
+# `dz-publisher-runtime` is deliberately absent, and that absence is the reason
+# `dz-publisher-lowering` is a crate of its own: this comparison re-runs the
+# publisher's own lowering without linking its egress socket, its signal
+# handling or an async runtime.
+#
+# `dz-recorder-core` is here for `Source` and `RecordedDatagram`. The multicast
+# archive reaches every other offline tier through that one trait, and a second
+# way in would be a second archive format to keep honest.
+[dependencies]
+dz-adapter-core = { path = "../../adapter/dz-adapter-core" }
+dz-edge-core = { path = "../../codec/dz-edge-core" }
+dz-edge-mbp = { path = "../../codec/dz-edge-mbp" }
+dz-edge-refdata = { path = "../../codec/dz-edge-refdata" }
+dz-edge-tob = { path = "../../codec/dz-edge-tob" }
+dz-publisher-lowering = { path = "../../publisher/dz-publisher-lowering" }
+dz-recorder-core = { path = "../dz-recorder-core" }
+thiserror = { workspace = true }
+
+# The tests build their own upstream and their own multicast archive, in memory:
+# no filesystem, no privileges, no network. `dz-recorder-replay` supplies the
+# datagram shape both sides of the recorder already speak, and the synthetic
+# publisher whose traffic this comparison must decline to decode.
+[dev-dependencies]
+dz-recorder-replay = { path = "../dz-recorder-replay" }

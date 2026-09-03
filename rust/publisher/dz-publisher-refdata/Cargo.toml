@@ -1,0 +1,21 @@
+[package]
+name = "dz-publisher-refdata"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Reference data: instrument identity, the selection policy, and the definition cycle"
+
+[dependencies]
+dz-adapter-core = { path = "../../adapter/dz-adapter-core" }
+dz-edge-core = { path = "../../codec/dz-edge-core" }
+dz-edge-refdata = { path = "../../codec/dz-edge-refdata" }
+dz-publisher-lowering = { path = "../dz-publisher-lowering" }
+# For `flock`, and for nothing else. The single-writer guard has to be released
+# by the kernel when the process holding it dies, or a crash-looping publisher
+# locks itself out of its own state directory permanently; see `file_store.rs`.
+# `fs` is the feature that carries `Flock`; nothing else here is enabled, so
+# this adds one crate to the graph and no C dependency.
+nix = { version = "0.30", default-features = false, features = ["fs"] }
+thiserror = { workspace = true }

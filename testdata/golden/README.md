@@ -65,3 +65,33 @@ represented here for that reason.
 **Changing a vector is a wire change.** Justify it against `edge-feed-spec` and
 record the spec revision in `manifest.json`. Never edit a vector to make a
 failing test pass.
+
+## Vectors produced by the venue adapter boundary
+
+A file whose name carries `-from-event-` starts one layer earlier than the
+rest. The others are a hand-written wire struct in, canonical bytes out — they
+bind the *codec*. These are a **normalized event** as a venue states it, plus
+the instrument's exponents, in — and they bind the *interface*: the shared
+lowering that turns what a venue knows into what the wire carries.
+
+`manifest.json` records the event beside the bytes, in a `lowered_from` block,
+so another language can reproduce them the way it reproduces the codec's.
+
+They exist separately from the codec's own vectors rather than replacing them,
+and the reason is worth stating: those vectors set every field to a distinct
+value so a transposed pair cannot pass, and three of those fields cannot be
+stated at the boundary at all — a level's `Level Index` is a rank in the
+publisher's own book at emission rather than a property of the venue's event,
+and `Update Reason` and `Clear Reason` have nowhere in a normalized event to
+come from. No event can reproduce them, so an attempt to make one would mean
+inventing a way for a venue to author a field it does not know.
+
+`Quote` and `Trade` need no such vector: the lowering reproduces
+`quote-v3.bin` and `trade-v3.bin` exactly, which is a stronger statement than a
+vector of its own would be. A vector this repository generated would say the
+lowering agrees with itself; reproducing the vector another language already
+reproduces says it agrees with the wire.
+
+Regenerating any of these is a wire change. The generator is an `#[ignore]`d
+test for that reason — it has to be a deliberate act, justified against the
+specification, never a fixup for a test that started failing.

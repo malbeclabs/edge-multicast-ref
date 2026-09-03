@@ -1,0 +1,60 @@
+[package]
+name = "dz-ingress-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The transport half of the venue boundary: the Input trait, reconnection and backoff"
+
+# Every venue that takes a transport from this family inherits these, so the
+# list is held to the same standard as the boundary crate's own.
+#
+# `serde` and no `toml`: this crate owns the shape of `[ingress]` - which is the
+# rule that stops six keys being spelled three ways each - but the runtime owns
+# the document, so nothing here needs a parser.
+#
+# What is deliberately absent: an async runtime (waiting goes through the
+# injected `Clock`, so a venue is not pinned to our tokio minor version and the
+# backoff is testable without sleeping) and a metrics client (the normative
+# ingress families are recorded through `IngressObserver`, which the runtime
+# implements over its registry).
+[dependencies]
+dz-adapter-core = { path = "../../adapter/dz-adapter-core" }
+thiserror = { workspace = true }
+serde = { workspace = true }
+
+# Optional, and the only thing here that names a runtime: `TokioClock`, the
+# production `Clock`. A transport crate in this family turns it on, because a
+# transport already has the runtime. Off by default, so the default build of
+# this crate has no runtime in its tree.
+tokio = { version = "1", features = ["time"], optional = true }
+
+[dev-dependencies]
+# Dev-dependencies are not inherited by a venue, which is what makes these two
+# affordable.
+#
+# `dz-publisher-metrics` is here so that the mapping from the boundary's
+# `DisconnectReason` onto the `ReconnectReason` label can be a compiled,
+# exhaustive match rather than a comment claiming the two agree. `toml` is here
+# so that the `[ingress]` tests parse the same text an operator writes.
+dz-publisher-metrics = { path = "../../publisher/dz-publisher-metrics" }
+toml = { workspace = true }
+
+[features]
+default = []
+
+# The production clock. See `clock::TokioClock`.
+tokio = ["dep:tokio"]
+
+# One marker per transport in the family, turned on by the crate that
+# implements it: `dz-ingress-websocket` depends on this crate with
+# `features = ["websocket"]`. That is what makes `Kind::is_linked` answerable
+# from a crate which - being the one every transport depends on - can depend on
+# none of them. See `kind`.
+websocket = []
+fix = []
+multicast = []
+rest = []
+filetail = []
+uds = []
