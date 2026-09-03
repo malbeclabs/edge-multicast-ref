@@ -25,8 +25,9 @@
 --
 -- So the rank is **not** on the path anything queries by default:
 --
---   * `era_settled`     the ReplacingMergeTree collapse, as an aggregate rather
---                       than `FINAL`. Prunable by `anchor_ts`.
+--   * `era_opening`     the boundaries that open an era, collapsed by `FINAL`
+--                       over a table that is partitioned by day, so a predicate
+--                       on `anchor_ts` prunes before the collapse is paid for.
 --   * `datagram_in_era` a datagram resolved to its era **by the anchor**, with
 --                       no rank and no window. This is what a panel joins.
 --   * `era_ranked`      the rank. An all-history query by construction, for a
@@ -40,43 +41,44 @@
 -- is both cheaper and more stable than one that groups by the rank.
 
 
--- 1. The settled row, without `FINAL`.
+-- 1. The openings that actually open an era, collapsed.
 --
--- `FINAL` forces merge-on-read on every query and is not prunable; this is the
--- same collapse written as an aggregate over the sort key, which is exactly what
--- `ReplacingMergeTree(anchor_certain)` does on merge — `max` on the version and
--- `argMax` on everything else, so a settled row wins over an unsettled one
--- whichever order the two loads happened in.
+-- `FINAL` applies the `ReplacingMergeTree(anchor_certain)` collapse at read
+-- time, so a boundary that has since been settled reads at its settled value
+-- rather than waiting for a merge to run. That is not optional here: the whole
+-- point of the version column is that late evidence upgrades a verdict, and a
+-- query that read the unsettled row would report `anchor_certain = 0` for a
+-- boundary the archive has since resolved.
 --
--- The GROUP BY is the table's sort key and nothing else. That is what makes this
--- equivalent to the engine's own collapse rather than an aggregate that happens
--- to look like it, and it is why `feed` is an `argMax` and not a grouping key.
-CREATE OR REPLACE VIEW recorder.era_settled AS
-SELECT
-    site,
-    recorder,
-    source_addr,
-    channel_id,
-    dst_port,
-    anchor_ts,
-    argMax(feed, anchor_certain)          AS feed,
-    argMax(anchor_seq, anchor_certain)    AS anchor_seq,
-    argMax(reset_count, anchor_certain)   AS reset_count,
-    argMax(segment_seq, anchor_certain)   AS segment_seq,
-    max(anchor_certain)                   AS anchor_certain,
-    argMax(continuation, anchor_certain)  AS continuation,
-    argMax(object_key, anchor_certain)    AS object_key,
-    argMax(object_sha256, anchor_certain) AS object_sha256
-FROM recorder.era
-GROUP BY site, recorder, source_addr, channel_id, dst_port, anchor_ts;
+-- **`FINAL` is affordable because the table underneath it is partitioned.** It
+-- forces merge-on-read over the parts a query reads, and `era` is partitioned by
+-- day — so a predicate on `anchor_ts` prunes the partitions first and `FINAL`
+-- pays for what is left. Unpartitioned, as this table was, that cost grew with
+-- the age of the deployment and no caller could bound it.
+--
+-- The collapse was briefly written by hand as `max` on the version and `argMax`
+-- on the rest, to avoid `FINAL` altogether. It is recorded here that this is a
+-- worse trade and not a missing optimisation: a hand-written collapse has to
+-- match the engine's semantics exactly and keep matching them as columns are
+-- added, and the aggregate a column store already implements is not obviously
+-- cheaper than the aggregate written beside it. `FINAL` is correct by
+-- construction; the partition is what made it bounded.
+--
+-- `continuation = 0` is the filter: a boundary the evidence settled as a
+-- continuation of the preceding segment's era opens no era, so it is recorded
+-- and never resolved to or ranked.
+CREATE OR REPLACE VIEW recorder.era_opening AS
+SELECT *
+FROM recorder.era FINAL
+WHERE continuation = 0;
 
 
 -- 2. A datagram resolved to its era, by range join on the anchor.
 --
 -- The join the base table pays nothing for, and the one a panel should use. No
--- window function and no `FINAL`, so a predicate on `recv_ts` prunes the
--- datagram side and a predicate on `anchor_ts` prunes the era side — both are
--- partitioned by day.
+-- window function, so a predicate on `recv_ts` prunes the datagram side and a
+-- predicate on `anchor_ts` prunes the era side — both are partitioned by day,
+-- and the collapse above is paid for only on what survives the prune.
 --
 -- It carries the era's identity and not its index: `era_anchor_ts` is what
 -- `sequence_gap` already carries, `reset_count` is the wire fact, and
@@ -89,9 +91,6 @@ GROUP BY site, recorder, source_addr, channel_id, dst_port, anchor_ts;
 -- LEFT, because a datagram whose era row has not been loaded yet is still a
 -- datagram, and a join that dropped it would understate the traffic.
 --
--- `continuation = 0` is the filter: a boundary the evidence settled as a
--- continuation of the preceding segment's era opens no era, so it is recorded
--- and never resolved to.
 CREATE OR REPLACE VIEW recorder.datagram_in_era AS
 SELECT
     d.*,
@@ -100,9 +99,7 @@ SELECT
     e.reset_count    AS era_reset_count,
     e.anchor_certain AS anchor_certain
 FROM recorder.datagram AS d
-ASOF LEFT JOIN (
-    SELECT * FROM recorder.era_settled WHERE continuation = 0
-) AS e
+ASOF LEFT JOIN recorder.era_opening AS e
     ON  d.site        = e.site
     AND d.recorder    = e.recorder
     AND d.source_addr = e.source_addr
@@ -152,5 +149,4 @@ SELECT
         PARTITION BY site, recorder, source_addr, channel_id, dst_port
         ORDER BY anchor_ts
     ) AS era_index
-FROM recorder.era_settled
-WHERE continuation = 0;
+FROM recorder.era_opening;

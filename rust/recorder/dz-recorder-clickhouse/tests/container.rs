@@ -258,11 +258,11 @@ fn the_era_rank_view_numbers_the_openings_densely() {
         )),
         scratch.count("datagram").to_string()
     );
-    // The settled view is the engine's own collapse: one row per opening, as
-    // `FINAL` would have given.
+    // The collapsed view: one row per boundary that opens an era, with the
+    // continuations recorded and filtered out.
     assert_eq!(
         scratch.scalar(&format!(
-            "SELECT count() FROM {}.era_settled",
+            "SELECT count() FROM {}.era_opening",
             scratch.database
         )),
         "2"

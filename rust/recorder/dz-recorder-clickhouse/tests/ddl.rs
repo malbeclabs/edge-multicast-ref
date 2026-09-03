@@ -307,46 +307,54 @@ fn the_era_index_is_a_rank_over_the_openings_and_not_a_column() {
     );
 }
 
-/// The collapse is an aggregate over the sort key, not `FINAL`.
+/// The collapse is `FINAL`, over a table that is partitioned.
 ///
-/// `FINAL` forces merge-on-read on every query and is not prunable. The
-/// aggregate is what `ReplacingMergeTree(anchor_certain)` does on merge — `max`
-/// on the version, `argMax` on everything else — and it prunes by `anchor_ts`.
+/// `FINAL` is what applies `ReplacingMergeTree(anchor_certain)` at read time, so
+/// a boundary the archive has since settled reads at its settled value rather
+/// than waiting for a merge. It forces merge-on-read, which is why the partition
+/// on `era` is what makes it affordable: a predicate on `anchor_ts` prunes
+/// first, and `FINAL` pays for what is left.
 ///
-/// The GROUP BY has to be the table's sort key and nothing else, or this is an
-/// aggregate that merely looks like the engine's collapse.
+/// It was briefly a hand-written `max`/`argMax` collapse instead. That is
+/// recorded in the file as the worse trade it is: a hand-written collapse has to
+/// match the engine's semantics exactly and keep matching them as columns are
+/// added.
 #[test]
-fn the_settled_era_is_the_engines_own_collapse_without_final() {
-    let view = migration("003_recorder_era_rank.sql");
-    let sql = view.sql;
+fn the_era_opening_is_collapsed_by_final_over_a_partitioned_table() {
+    let sql = migration("003_recorder_era_rank.sql").sql;
     assert!(
-        sql.contains("GROUP BY site, recorder, source_addr, channel_id, dst_port, anchor_ts"),
-        "the collapse has to group by the sort key exactly"
+        sql.contains("FROM recorder.era FINAL"),
+        "the collapse is the engine's own"
     );
     assert!(
-        sql.contains("max(anchor_certain)") && sql.contains("argMax(feed, anchor_certain)"),
-        "the version column decides, as it does on merge"
-    );
-    // Every column of `era` is carried through, or the view is a narrower table
-    // wearing the same name.
-    let columns = columns(rows_sql(), "era");
-    for column in &columns {
-        assert!(
-            sql.contains(column.as_str()),
-            "`{column}` is in `era` and not in `era_settled`"
-        );
-    }
-    assert!(
-        !sql.contains("FROM recorder.era FINAL"),
-        "`FINAL` is what the collapse above replaced"
+        sql.contains("WHERE continuation = 0"),
+        "a boundary settled as a continuation opens no era"
     );
     assert!(
-        !sql.contains(" FINAL"),
-        "no view here reads through `FINAL`: {sql}"
+        sql.contains("affordable because the table underneath it is partitioned"),
+        "why `FINAL` is acceptable has to be stated beside it"
+    );
+    // Exactly one view reads the base table, so the collapse and the filter are
+    // written once and the other two views build on it.
+    assert_eq!(
+        sql.matches("recorder.era FINAL").count(),
+        1,
+        "the collapse is written once"
+    );
+    // Once as a join and once as a scan, which is the two views a caller uses.
+    assert_eq!(
+        sql.matches("recorder.era_opening AS e").count(),
+        1,
+        "the range join builds on it"
+    );
+    assert_eq!(
+        sql.matches("FROM recorder.era_opening").count(),
+        1,
+        "and so does the rank"
     );
 }
 
-/// The join a panel runs carries the era's identity and no rank.
+/// The join a panel runs carries the era's identity and no rank./// The join a panel runs carries the era's identity and no rank.
 ///
 /// The anchor is a receive stamp on a row that already exists; the index is a
 /// position in a sequence that renumbers when an earlier era arrives late. So
@@ -378,8 +386,9 @@ fn resolving_a_datagram_to_its_era_needs_no_window_and_no_final() {
         "nor the window that produces it"
     );
     assert!(
-        datagram_in_era.contains("continuation = 0"),
-        "a boundary that opened no era is never resolved to"
+        datagram_in_era.contains("recorder.era_opening"),
+        "the collapse and the `continuation = 0` filter are written once, in \
+         the view this builds on"
     );
 }
 
