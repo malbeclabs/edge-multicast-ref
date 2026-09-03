@@ -34,11 +34,16 @@ use crate::ConnectFailureReason;
 ///   driver cannot tell. It is declared because the runtime's implementation
 ///   should be a complete mapping of the group, and because this is the place
 ///   the missing channel will be noticed.
-/// - [`adapter_error`](Self::adapter_error) has a caller and no family. An
-///   adapter that cannot compose its own subscription is a real, retried
-///   failure with nowhere in the closed set to be counted: it is not a parse
-///   error, and the four reconnect reasons all describe a session that ended
-///   rather than one that never got going.
+/// - [`adapter_error`](Self::adapter_error) is counted, and not by the closed
+///   set. An adapter that cannot compose its own subscription is a real,
+///   retried failure that none of the normative families can hold: it is not a
+///   parse error, and the four reconnect reasons all describe a session that
+///   ended rather than one that never got going. So it has a family of its own,
+///   `dz_publisher_ingress_adapter_errors_total{reason}`, which this repository
+///   *proposes* rather than transcribes — the distinction that matters to
+///   anybody comparing a publisher's exposition against the playbook's list.
+///   It had no family at all when this trait was written, and the sentence
+///   saying so outlived that by one change.
 pub trait IngressObserver {
     /// `dz_publisher_ingress_messages_total{message_type,connection}`.
     ///
@@ -102,6 +107,8 @@ pub trait IngressObserver {
     /// which is expected behaviour — see [`RateLimiter`](crate::RateLimiter).
     fn rate_limited(&self);
 
-    /// An adapter method failed. See the trait note: no family covers this.
+    /// `dz_publisher_ingress_adapter_errors_total{reason}`, which is a family
+    /// this repository proposes rather than one the playbook lists. See the
+    /// trait note for why none of the normative ones can hold it.
     fn adapter_error(&self, error: AdapterError);
 }
