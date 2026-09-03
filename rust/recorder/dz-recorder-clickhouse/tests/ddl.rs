@@ -727,3 +727,49 @@ fn the_loader_account_is_bounded_and_kept_out_of_the_schema() {
     );
     assert_eq!(schema().len(), migrations().len() - 1);
 }
+
+/// The account file can be applied in the order it is written.
+///
+/// Every edge here is a name the server resolves as it stores an entity, not a
+/// preference: `SETTINGS PROFILE 'dz_loader'` is resolved when the user is
+/// stored, and the quota and the grants name a user that has to exist by then.
+/// Written the other way round the first statement fails and nothing is
+/// created — and a re-run after a partial fix finds the user already there
+/// behind `IF NOT EXISTS` and leaves it without its ceilings for ever, which is
+/// the one outcome the file exists to prevent. Nothing in this repository
+/// applies `004` — it needs a password and access-management rights — so the
+/// order is asserted here or nowhere.
+#[test]
+fn the_account_file_creates_the_profile_before_the_user_that_names_it() {
+    // The SQL of each statement, without the prose above it: a comment block is
+    // kept inside the statement it precedes, and the prose in this file names
+    // the very statements under test here.
+    let statements: Vec<String> = migration("004_recorder_loader_user.sql")
+        .statements()
+        .iter()
+        .map(|s| {
+            s.lines()
+                .filter(|l| !l.trim_start().starts_with("--"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .collect();
+    let first = |needle: &str| {
+        statements
+            .iter()
+            .position(|s| s.contains(needle))
+            .unwrap_or_else(|| panic!("no statement contains {needle}: {statements:#?}"))
+    };
+
+    let profile = first("CREATE SETTINGS PROFILE");
+    let user = first("CREATE USER");
+    let quota = first("CREATE QUOTA");
+    let grant = first("GRANT ");
+
+    assert!(
+        profile < user,
+        "the profile is resolved when the user is stored, not on the first query"
+    );
+    assert!(user < quota, "the quota names the user in its TO clause");
+    assert!(user < grant, "a grant names a user that has to exist");
+}

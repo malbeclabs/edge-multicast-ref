@@ -38,10 +38,19 @@
 -- No DDL at all. A loader that could create or alter a table is a loader that
 -- can apply a schema change nobody reviewed, and the schema here is checked in
 -- precisely so that it is reviewed.
-
-CREATE USER IF NOT EXISTS dz_loader
-    IDENTIFIED WITH sha256_password BY {password:String}
-    SETTINGS PROFILE 'dz_loader';
+--
+--
+-- THE ORDER OF THE STATEMENTS IS LOAD-BEARING
+--
+-- Profile, then user, then quota, then grants — and every one of those edges is
+-- a name resolved at apply time rather than a preference. ClickHouse resolves
+-- `SETTINGS PROFILE` when it stores the user entity, so a profile created after
+-- the user is a profile the user was never given; `CREATE QUOTA ... TO
+-- dz_loader` and every `GRANT` name a user that has to exist by then. Written
+-- the other way round the first statement fails and nothing is created — and a
+-- re-run after a partial fix would find the user already there behind `IF NOT
+-- EXISTS` and leave it without its ceilings for ever, which is the one outcome
+-- this whole file exists to prevent.
 
 -- The ceiling. `max_read_bytes` is the one that matters: it is what turns a
 -- query somebody adds later from an incident into an error, and it is set well
@@ -65,6 +74,12 @@ CREATE SETTINGS PROFILE IF NOT EXISTS dz_loader SETTINGS
     -- would silently drop a *legitimate* re-load of an unchanged object, which
     -- is exactly the operation a re-run after an analyser fix performs.
     insert_deduplicate = 0 READONLY;
+
+-- The account, after the profile it names: the profile is resolved here, not on
+-- the first query.
+CREATE USER IF NOT EXISTS dz_loader
+    IDENTIFIED WITH sha256_password BY {password:String}
+    SETTINGS PROFILE 'dz_loader';
 
 -- A quota as well as a profile, because a profile bounds one query and a quota
 -- bounds a day of them. Generous, and its purpose is to exist: an account with
