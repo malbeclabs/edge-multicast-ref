@@ -66,6 +66,37 @@ store's password comes from a systemd credential
 (`DZ_LOADER_CLICKHOUSE_PASSWORD_FILE`) or, second best, from
 `DZ_LOADER_CLICKHOUSE_PASSWORD`.
 
+## Two things to do at provisioning, neither of them in this crate
+
+**Build with `--features tls` if the destination is `https://`.** TLS is off by
+default, so the default build carries no TLS stack at all — which keeps `rustls`
+and its provider out of every crate in this workspace. An `https://` endpoint is
+then refused at configuration load rather than silently downgraded, because a
+loader that quietly spoke plain HTTP to an endpoint an operator wrote as `https`
+would put the password on the wire in the clear having been told not to. The
+failure mode is a startup failure, which is the good kind — but it is a startup
+failure, so the build and deploy pipeline has to enable the feature *before* the
+unit is enabled, and `--check` is where it is caught.
+
+**Give the service account a read-bytes ceiling and a workload thread share.**
+The configuration takes an endpoint, a database and a user, and the password
+comes from a systemd credential — but nothing here provisions the account, and
+nothing here bounds what it can spend. A loader is a write-path workload and
+should be cheap; what makes an unbounded account dangerous is not this process
+misbehaving but the queries somebody later points at the rows it wrote. A
+workload added without limits is discovered weeks later by someone reading a
+graph, and by then it is a table too big to fix cheaply. The two settings cost
+nothing at provisioning time and remove this account from that category
+permanently.
+
+The one query shape worth knowing before it is pointed at a dashboard is
+`recorder.era_ranked`: `era_index` is a dense rank, and a dense rank is defined
+over all history, so no predicate on time can be pushed through it. `era` is
+kept indefinitely and carries one row per channel instance per segment. A
+time-ranged panel joins `recorder.datagram_in_era` or `recorder.sequence_gap`
+instead — both key on the era's anchor, and both prune. `003_recorder_era_rank.sql`
+states which is which and why.
+
 ## Idempotence is a property, not a procedure
 
 Loading the same object twice produces the same rows, because the derivation is

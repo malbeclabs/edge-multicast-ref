@@ -132,6 +132,13 @@ fn the_sort_keys_are_the_ones_the_rows_were_shaped_for() {
         "the coverage sort key changed"
     );
 
+    // Partitioned like every other table here, and it was the one exception:
+    // unpartitioned it is a table whose merges grow with the age of the
+    // deployment and whose TTL would be a full rewrite rather than a decision.
+    assert!(
+        sql.contains("PARTITION BY toYYYYMMDD(anchor_ts)"),
+        "the era table is not partitioned"
+    );
     // `era_anchor_ts` and not `era_index`: the index a loader computes is local
     // to the object it loaded.
     assert!(
@@ -139,6 +146,74 @@ fn the_sort_keys_are_the_ones_the_rows_were_shaped_for() {
             "ORDER BY (source_addr, channel_id, dst_port, era_anchor_ts, missing_from, site)"
         ),
         "the gap sort key changed"
+    );
+}
+
+/// Every table is partitioned by a day, and none is an exception.
+///
+/// `era` was, and the exception was not a decision — it was the one table whose
+/// growth nobody had put a number on. An unpartitioned table that is kept
+/// indefinitely is one whose merges grow with the age of the deployment and
+/// whose TTL, if one is ever wanted, is a full rewrite rather than a decision
+/// somebody can take.
+#[test]
+fn every_table_is_partitioned_by_a_day() {
+    let sql = rows_sql();
+    let expected = [
+        (Grain::Datagram, "toYYYYMMDD(recv_ts)"),
+        (Grain::Era, "toYYYYMMDD(anchor_ts)"),
+        (Grain::SegmentCoverage, "toYYYYMMDD(start_ts)"),
+        (Grain::SequenceGap, "toYYYYMMDD(before_ts)"),
+        (Grain::ConformanceFinding, "toYYYYMMDD(window_start)"),
+    ];
+    for (grain, partition) in expected {
+        assert!(
+            sql.contains(&format!("PARTITION BY {partition}")),
+            "{grain} is not partitioned by {partition}"
+        );
+    }
+    // One `PARTITION BY` per table, so a table added later without one fails
+    // here rather than being noticed on a graph months afterwards.
+    assert_eq!(
+        sql.matches("PARTITION BY ").count(),
+        Grain::COUNT,
+        "a table has no PARTITION BY, or one has two"
+    );
+}
+
+/// `era`'s row rate is stated, with the arithmetic, because the rank over it is
+/// unbounded and the crossover is invisible without the number.
+///
+/// It is not what "one row per reset" suggests: a loader writes one row per
+/// channel instance per *object*, so this is `segment_coverage`'s cardinality
+/// rather than a reset's.
+#[test]
+fn the_era_tables_row_rate_is_stated_with_its_arithmetic() {
+    let sql = rows_sql();
+    let era = sql
+        .split("CREATE TABLE IF NOT EXISTS recorder.era (")
+        .next()
+        .expect("the table has a header")
+        .rsplit("-- 2.")
+        .next()
+        .expect("the header is numbered");
+
+    assert!(
+        era.contains("THE ROW RATE"),
+        "the rate is not stated: {era}"
+    );
+    assert!(
+        era.contains("1,440 segments a day"),
+        "the ceiling the rotation interval sets has to be in the arithmetic"
+    );
+    assert!(
+        era.contains("same cardinality as segment_coverage"),
+        "the comparison that makes the number legible"
+    );
+    assert!(
+        era.contains("kept indefinitely"),
+        "and that this is the table whose size is a function of the \
+         deployment's age"
     );
 }
 
@@ -202,8 +277,14 @@ fn the_retention_split_expires_the_base_rows_and_keeps_the_derived_ones() {
     );
 }
 
-/// The rank lives in a view over the era openings, filtered to the boundaries
-/// that actually open one.
+/// The rank is a view over the openings, and it is not on the path a panel
+/// queries.
+///
+/// A dense rank is defined over all history, so a predicate on time cannot be
+/// pushed through the window function: a query for one hour ranks every era ever
+/// recorded for the instances it selects, and `era` is kept indefinitely. So the
+/// rank exists, is documented as the all-history query it is, and the two views
+/// a panel actually joins carry the era's *identity* — the anchor — instead.
 #[test]
 fn the_era_index_is_a_rank_over_the_openings_and_not_a_column() {
     let view = migration("003_recorder_era_rank.sql");
@@ -217,14 +298,89 @@ fn the_era_index_is_a_rank_over_the_openings_and_not_a_column() {
         view.sql.contains("WHERE continuation = 0"),
         "a boundary settled as a continuation is recorded and not ranked"
     );
+    // The cost is stated in the file, because the crossover is invisible
+    // without it and the failure mode is a table too big to fix cheaply by the
+    // time somebody reads a graph.
     assert!(
-        view.sql.contains("FROM recorder.era FINAL"),
-        "without FINAL a settled boundary reads at its unsettled value until a \
-         merge happens to run"
+        view.sql.contains("all-history query by construction"),
+        "the rank's cost has to be stated where somebody about to use it reads"
     );
-    // And the range join the base table pays nothing for, written once.
-    assert!(view.sql.contains("ASOF LEFT JOIN"));
-    assert!(view.sql.contains("e.anchor_ts  <= d.recv_ts"));
+}
+
+/// The collapse is an aggregate over the sort key, not `FINAL`.
+///
+/// `FINAL` forces merge-on-read on every query and is not prunable. The
+/// aggregate is what `ReplacingMergeTree(anchor_certain)` does on merge — `max`
+/// on the version, `argMax` on everything else — and it prunes by `anchor_ts`.
+///
+/// The GROUP BY has to be the table's sort key and nothing else, or this is an
+/// aggregate that merely looks like the engine's collapse.
+#[test]
+fn the_settled_era_is_the_engines_own_collapse_without_final() {
+    let view = migration("003_recorder_era_rank.sql");
+    let sql = view.sql;
+    assert!(
+        sql.contains("GROUP BY site, recorder, source_addr, channel_id, dst_port, anchor_ts"),
+        "the collapse has to group by the sort key exactly"
+    );
+    assert!(
+        sql.contains("max(anchor_certain)") && sql.contains("argMax(feed, anchor_certain)"),
+        "the version column decides, as it does on merge"
+    );
+    // Every column of `era` is carried through, or the view is a narrower table
+    // wearing the same name.
+    let columns = columns(rows_sql(), "era");
+    for column in &columns {
+        assert!(
+            sql.contains(column.as_str()),
+            "`{column}` is in `era` and not in `era_settled`"
+        );
+    }
+    assert!(
+        !sql.contains("FROM recorder.era FINAL"),
+        "`FINAL` is what the collapse above replaced"
+    );
+    assert!(
+        !sql.contains(" FINAL"),
+        "no view here reads through `FINAL`: {sql}"
+    );
+}
+
+/// The join a panel runs carries the era's identity and no rank.
+///
+/// The anchor is a receive stamp on a row that already exists; the index is a
+/// position in a sequence that renumbers when an earlier era arrives late. So
+/// the cheap view keys on the anchor, and both sides of the join prune.
+#[test]
+fn resolving_a_datagram_to_its_era_needs_no_window_and_no_final() {
+    let view = migration("003_recorder_era_rank.sql");
+    let datagram_in_era = view
+        .sql
+        .split("CREATE OR REPLACE VIEW recorder.datagram_in_era AS")
+        .nth(1)
+        .expect("the view is declared")
+        .split("CREATE OR REPLACE VIEW")
+        .next()
+        .expect("the view ends");
+
+    assert!(datagram_in_era.contains("ASOF LEFT JOIN"));
+    assert!(datagram_in_era.contains("e.anchor_ts  <= d.recv_ts"));
+    assert!(
+        datagram_in_era.contains("era_anchor_ts") && datagram_in_era.contains("anchor_certain"),
+        "the era's identity, and what says whether a finding may be escalated"
+    );
+    assert!(
+        !datagram_in_era.contains("era_index"),
+        "the rank is an all-history computation and must not be on this path"
+    );
+    assert!(
+        !datagram_in_era.contains("dense_rank"),
+        "nor the window that produces it"
+    );
+    assert!(
+        datagram_in_era.contains("continuation = 0"),
+        "a boundary that opened no era is never resolved to"
+    );
 }
 
 /// Every file splits into statements a server takes one at a time, and no

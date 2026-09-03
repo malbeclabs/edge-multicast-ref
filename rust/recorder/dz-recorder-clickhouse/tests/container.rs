@@ -237,11 +237,32 @@ fn the_era_rank_view_numbers_the_openings_densely() {
         "[1,2]",
         "two openings, numbered from one"
     );
-    // And a datagram resolves to an era by range join, with the base table
-    // storing no rank at all.
+    // And a datagram resolves to an era by range join on the anchor, with no
+    // rank on that path and no `FINAL`: the rank is an all-history computation
+    // and a panel must not be behind one.
     assert_eq!(
         scratch.scalar(&format!(
-            "SELECT countDistinct(era_index) FROM {}.datagram_in_era",
+            "SELECT countDistinct(era_anchor_ts) FROM {}.datagram_in_era",
+            scratch.database
+        )),
+        "2",
+        "each datagram resolved to one of the two openings"
+    );
+    // Every datagram resolved to something: a LEFT join that dropped rows would
+    // understate the traffic, and one that resolved them all to the *first* era
+    // would hide the reset.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT count() FROM {}.datagram_in_era WHERE era_anchor_ts > 0",
+            scratch.database
+        )),
+        scratch.count("datagram").to_string()
+    );
+    // The settled view is the engine's own collapse: one row per opening, as
+    // `FINAL` would have given.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT count() FROM {}.era_settled",
             scratch.database
         )),
         "2"

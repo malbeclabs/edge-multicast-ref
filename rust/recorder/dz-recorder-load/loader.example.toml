@@ -41,7 +41,13 @@ max_objects_per_pass = 60
 
 [clickhouse]
 # No path and no query: those are the loader's. `https` is refused unless the
-# binary was built with the `tls` feature, rather than silently downgraded.
+# binary was built with the `tls` feature, rather than silently downgraded — so
+# an https destination needs `--features tls` in the build pipeline before the
+# unit is enabled, and `--check` is where a build without it is caught.
+#
+# The account this points at wants a read-bytes ceiling and a workload thread
+# share set where it is provisioned. Nothing here bounds what it can spend, and
+# an unbounded account is discovered weeks later by somebody reading a graph.
 endpoint = "http://192.0.2.20:8123"
 database = "recorder"
 user = "loader"

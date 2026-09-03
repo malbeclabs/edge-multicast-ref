@@ -3,7 +3,7 @@
 -- THE MEASUREMENT, not an estimate: a busy recorder in a live deployment
 -- sustains roughly 80,000 datagrams a minute across its feeds, which is on the
 -- order of 100 million rows a day from one host. The derived grains are three to
--- four orders of magnitude smaller — a gap row exists only where something was
+-- four orders of magnitude smaller — with one exception stated below — a gap row exists only where something was
 -- missing, and a coverage row is one per segment per channel instance — which is
 -- what makes keeping them indefinitely reasonable and keeping the base rows not.
 --
@@ -40,7 +40,15 @@ ALTER TABLE recorder.datagram
 -- not have to infer the absence of a TTL from the absence of a line.
 --
 --   recorder.era                 no TTL: an era boundary is the thing a gap in
---                                any window is interpreted against.
+--                                any window is interpreted against. **The one
+--                                derived table whose rate is not three or four
+--                                orders below the base rows**: it carries one
+--                                row per channel instance per segment, so it is
+--                                segment_coverage's cardinality rather than a
+--                                reset's — see 001 for the arithmetic. It is
+--                                partitioned by day for exactly that reason, so
+--                                that a TTL here stays a decision somebody can
+--                                take rather than a table rewrite.
 --   recorder.segment_coverage    no TTL: it is what distinguishes a window with
 --                                no loss from a window nothing kept.
 --   recorder.sequence_gap        no TTL: it is the finding.

@@ -136,14 +136,38 @@ ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(recv_ts)
 ORDER BY (source_addr, channel_id, dst_port, sequence_number, site, recv_ts);
 
--- 2. Where each era opened. One row per reset rather than one per datagram, so
---    the monotonic index is a rank over a small table and never a number
---    anybody has to trust because it was written down once.
+-- 2. Where each era opened, so the monotonic index is a rank over the openings
+--    and never a number anybody has to trust because it was written down once.
 --
 --    ReplacingMergeTree(anchor_certain) makes late evidence an upgrade and never
 --    a regression: a settled row always wins over an unsettled one, whichever
 --    order the two loads happened in. Evidence arriving late upgrades a verdict;
 --    its absence never blocks one.
+--
+--    THE ROW RATE, because it is not what "one row per reset" suggests and the
+--    rank over this table is unbounded by construction.
+--
+--    A reset is the rare term. The dominant one is the **boundary**: a loader
+--    writes one row per channel instance per *object*, because an object's first
+--    era for an instance is the one whose continuity the predecessor decides,
+--    and it is recorded whether it opened an era or continued one — a row that
+--    cannot be deleted cannot be corrected by omission. So:
+--
+--        era rows a day  =  segments a day  x  channel instances  +  resets
+--
+--    Rotation fires on size or age, whichever comes first, and the age bound is
+--    60 seconds by default — so 1,440 segments a day per recorder is the ceiling
+--    whatever the traffic rate. At ten channel instances that is roughly 14,000
+--    rows a day and 5 million a year; at fifty it is 72,000 a day and 26 million
+--    a year. **This is the same cardinality as segment_coverage** — one row per
+--    segment per channel instance — and it is partitioned the same way for that
+--    reason.
+--
+--    Two consequences a reader has to have before querying it. This table is
+--    kept indefinitely, so it is the one table here whose size is a function of
+--    how long the deployment has existed. And `era_index` is a dense rank over
+--    all of it: see 003, which states which query prunes and which does not, and
+--    why the anchor and not the rank is an era's stable identity.
 CREATE TABLE IF NOT EXISTS recorder.era (
     site           LowCardinality(String),
     recorder       LowCardinality(String),
@@ -166,6 +190,13 @@ CREATE TABLE IF NOT EXISTS recorder.era (
     object_sha256  String
 )
 ENGINE = ReplacingMergeTree(anchor_certain)
+-- Partitioned, like every other table here. It was the one exception, and the
+-- exception was not a decision: at the rate above this reaches millions of rows
+-- within a year or two and is kept for ever, so unpartitioned it is a table
+-- whose merges grow with the age of the deployment and whose TTL, if one is ever
+-- wanted, is a full rewrite rather than a decision. `anchor_ts` and not
+-- `segment_seq`, because `segment_seq` restarts at 0 on every recorder run.
+PARTITION BY toYYYYMMDD(anchor_ts)
 ORDER BY (site, recorder, source_addr, channel_id, dst_port, anchor_ts);
 
 -- 3. The manifest, as a table: loaded without opening a single object.
