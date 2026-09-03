@@ -244,7 +244,12 @@ impl<S: RowSink> Loader<'_, S> {
             if stop() {
                 loading = false;
             }
-            if self.max_objects != 0 && pass.loaded >= self.max_objects as u64 {
+            // Against what the pass *derived*, which is the work it did. Loading
+            // is not that number any more: a sink that coalesces lands nothing
+            // until an insert goes, so a bound on `loaded` stays at 0 through a
+            // whole catch-up and bounds nothing — which is the unbounded pass
+            // the key exists to prevent.
+            if self.max_objects != 0 && pass.derived >= self.max_objects as u64 {
                 loading = false;
             }
             if !loading {
@@ -1387,6 +1392,43 @@ mod deferred_ledger_tests {
             )),
             "{text}"
         );
+    }
+
+    /// The pass bound bounds a pass under a sink that coalesces.
+    ///
+    /// It used to be tested against what the pass *loaded*, and loading stays
+    /// at 0 until an insert goes — so a catch-up pass against the deployed sink
+    /// derived every object in the directory, which is the unbounded pass the
+    /// key exists to prevent. The `FileSink` the other bound test uses lands
+    /// every object as it takes it, so it cannot tell the two numbers apart.
+    #[test]
+    fn the_pass_bound_counts_what_was_derived_because_nothing_has_landed_yet() {
+        let archive = archive(4, 20);
+        let metrics = LoaderMetrics::new(SITE, RECORDER);
+        let mut ledger = Ledger::open(&archive.ledger).expect("a new ledger");
+        let mut sink = HoldingSink::default();
+        let mut pending = Vec::new();
+
+        let (pass, errors) = Loader {
+            objects_dir: &archive.completed,
+            site: SITE,
+            recorder: RECORDER,
+            max_objects: 2,
+            ledger: &mut ledger,
+            sink: &mut sink,
+            metrics: &metrics,
+            pending: &mut pending,
+        }
+        .run_once(&|| false);
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(pass.derived, 2, "the bound is a bound");
+        assert_eq!(pass.loaded, 0, "and nothing landed, which is the point");
+        assert_eq!(pending.len(), 2);
+        // The scan carried on past the bound, so the lag it publishes is the
+        // whole backlog and not the prefix it got through.
+        assert_eq!(pass.unloaded, 4);
+        assert!(pass.oldest_unloaded_age_seconds > 0);
     }
 
     /// In-order certainty survives the coalescing.

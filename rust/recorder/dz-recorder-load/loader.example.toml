@@ -34,9 +34,11 @@ ledger = "/var/lib/dz-recorder-load/ledger.jsonl"
 # window, which is what the lag alert watches.
 poll_interval = 30
 
-# Objects one pass will load. A bound, so the metrics are published between
+# Objects one pass will derive. A bound, so the metrics are published between
 # passes rather than after an unbounded catch-up: a loader eight hours behind
-# must still say so every poll interval. 0 is no bound.
+# must still say so every poll interval. Derived rather than loaded, because the
+# sink coalesces and a pass can derive sixty objects and land none of them.
+# 0 is no bound.
 max_objects_per_pass = 60
 
 [clickhouse]
