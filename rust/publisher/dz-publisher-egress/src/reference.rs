@@ -122,12 +122,18 @@ impl ReferenceStream {
                 ),
             ));
         }
-        // `symlink_metadata`, so a symlink to a socket is judged by what the
-        // link points at only if it resolves — a dangling link is `NotFound`
-        // here and is the ordinary "the recorder has not started" case, while a
-        // link to a regular file is a misconfiguration `metadata` would report
-        // and this would not. So the resolved type is what is checked, and a
-        // dangling link falls through to the absent case below.
+        // `metadata` and deliberately not `symlink_metadata`: the *resolved*
+        // type is what a `sendto` will meet, so that is what is judged. A
+        // symlink to a socket resolves to a socket and opens; a symlink to a
+        // regular file resolves to the misconfiguration and is refused; and a
+        // dangling link is `NotFound`, which falls through to the absent case
+        // below — the ordinary "the recorder has not started" one this module
+        // exists for.
+        //
+        // `symlink_metadata` would break that last case: it reports the link
+        // itself, so a dangling link is a symlink rather than nothing, a symlink
+        // is not a socket, and a publisher starting before its recorder would
+        // fail at startup.
         match std::fs::metadata(destination) {
             Ok(found) if !found.file_type().is_socket() => {
                 return Err(io::Error::new(

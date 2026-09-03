@@ -208,7 +208,15 @@ pub struct SourceSection {
 /// would have been accepted rather than a role nothing implements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum SourceRole {
-    /// The source this publisher publishes from. Exactly one per feed.
+    /// The source this publisher publishes from.
+    ///
+    /// **Exactly one enabled `primary`, publisher-wide** — not one per feed.
+    /// Every source's payloads reach one adapter, the adapter emits events, and
+    /// no event carries the source it came from, so nothing here can confine one
+    /// source's data to one feed; a per-feed rule would describe routing the
+    /// runtime does not do. See [`resolve_sources`] for the check and
+    /// [`StartupError::SourcePrimaries`](crate::StartupError::SourcePrimaries)
+    /// for what a document that breaks it is told.
     #[default]
     Primary,
     /// Connected, driven and counted, and carried for the race comparison

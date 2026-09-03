@@ -18,6 +18,19 @@ pub struct Payload<'a> {
     /// reaches the wire through the event.
     pub recv_ts_ns: u64,
     /// Which connection delivered it.
+    ///
+    /// **The only thing that distinguishes one source's data from another's.** A
+    /// publisher with several `[[source]]` blocks hands every source's payloads
+    /// to one adapter, and the events that adapter emits carry no connection at
+    /// all — so this field is where a multi-source adapter decides what reaches
+    /// the wire, and after
+    /// [`Adapter::on_payload`](crate::Adapter::on_payload) returns there is
+    /// nothing left that could. An adapter that ignores it and emits from every
+    /// connection puts two upstreams' events on one channel instance under one
+    /// `Sequence Number` series, which a subscriber reads as its own losses.
+    ///
+    /// It is also the key per-connection state has to be stored under; see
+    /// [`Adapter::on_disconnected`](crate::Adapter::on_disconnected).
     pub connection: ConnectionId,
 }
 

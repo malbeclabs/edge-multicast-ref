@@ -175,6 +175,33 @@ pub trait Adapter: Send {
     /// `Ok(())` with no event. Only a payload the adapter cannot read is an
     /// error.
     ///
+    /// # `payload.connection` decides what reaches the wire, and nothing else
+    /// can
+    ///
+    /// **This method is the only seam at which one source's data can be held
+    /// back.** A publisher with several `[[source]]` blocks hands every
+    /// source's payloads to this one object; what an adapter emits here is
+    /// lowered onto the feed and sent. No event carries the source it came from,
+    /// so nothing downstream — not the runtime, not the `role` in the document —
+    /// can tell one source's events from another's afterwards.
+    ///
+    /// The consequence for an adapter that gains a second source: **emit from
+    /// the connection you mean to publish, and decide deliberately what a
+    /// comparison connection's payloads do here.** An adapter that parses and
+    /// emits from every connection puts two upstreams' events on one channel
+    /// instance under one `Sequence Number` series, which a subscriber's gap
+    /// detection reads as its own losses and cannot attribute. That is the whole
+    /// failure the document's `role` key exists to describe and cannot prevent.
+    ///
+    /// This is deliberately *not* a runtime gate. Merging two views of one book
+    /// — which price is current, when to fail over — follows the venue's
+    /// microstructure, and a gate here would break exactly the case these
+    /// interfaces exist to support: one shipped publisher reconciles two
+    /// validator streams inside its adapter with a reorder window and a grace
+    /// fallback, and every event it emits is the product of both connections.
+    /// So the choice is the adapter's, and it has to be a choice rather than a
+    /// default.
+    ///
     /// # Errors
     ///
     /// [`ParseError`], whose variant is the reason the failure is counted

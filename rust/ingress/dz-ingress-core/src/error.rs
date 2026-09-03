@@ -124,10 +124,26 @@ pub enum IngressError {
     ///
     /// For a configuration the transport can only discover at connect time — an
     /// endpoint that is not a valid one, a credential path that does not exist,
-    /// a scheme this transport does not speak. The runtime's own restart policy
-    /// then applies, which is the right layer: a process that exits loudly at
+    /// a scheme this transport does not speak. A process that exits loudly at
     /// startup is diagnosable, and a driver that hides the same fault behind a
     /// backoff is not.
+    ///
+    /// # What happens next depends on whose connection it was
+    ///
+    /// **A primary source's:** the process ends, and the supervisor's restart
+    /// policy applies. That is the right layer, and it is also what retries the
+    /// fault — several of the causes above are only fatal *for this attempt*,
+    /// and a credential path that does not exist yet is the plain example: under
+    /// late secret injection the same configuration succeeds on the next start.
+    ///
+    /// **A non-primary source's:** the driver is dropped, the publisher carries
+    /// on, and that connection's `connection_state` stays at 0. Nothing retries
+    /// it — **a restart is what retries it**, and until one happens the source
+    /// is down for the life of the process. That is the deliberate trade: a
+    /// source that by design must not reach the wire must not be able to take
+    /// the wire down with it, and the cost is that a fault which used to clear
+    /// on a restart the process took itself now needs one somebody takes. The
+    /// gauge at 0 is the signal.
     #[error("upstream connection is not usable as configured: {detail}")]
     Fatal { detail: String },
 }

@@ -436,7 +436,10 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
                 // alerted on, and what a log adds is the reason.
                 eprintln!(
                     "`{connection}` gave up and is not the primary, so this publisher carries \
-                     on without it; its connection_state stays at 0: {error}"
+                     on without it. Nothing retries it: its connection_state stays at 0 until \
+                     this process is restarted, which is what retries it — and several causes \
+                     of a fatal error are only fatal for one attempt, a credential path that \
+                     does not exist yet most of all. {error}"
                 );
             })
         });
@@ -993,6 +996,10 @@ impl Adapter for SharedAdapter {
 /// cannot happen — `check_sources` holds the two sets equal before this — and if
 /// it ever did, primary is the answer that does not silently keep a publisher
 /// running past a fault.
+///
+/// The cost of answering `false` is stated on
+/// [`poll_first_primary_to_give_up`]: that source is then down until somebody
+/// restarts the process, because nothing else retries a fatal error.
 fn fatal_ends_the_process(sources: &[Source], connection: ConnectionId) -> bool {
     sources.is_empty()
         || sources
@@ -1008,6 +1015,15 @@ fn fatal_ends_the_process(sources: &[Source], connection: ConnectionId) -> bool 
 /// error, so such a run is permanently done and polling it again would panic;
 /// leaving it out of the set is also what leaves its `connection_state` at 0,
 /// which is the alert for a connection that never came up.
+///
+/// **Nothing retries it, and a restart is what does.** Several of the causes of
+/// a fatal error are only fatal for one attempt — a credential path that does
+/// not exist yet is the plain one, under late secret injection — and before this
+/// the process exited and both sources came back. The trade is deliberate: a
+/// source that by design must not reach the wire must not be able to take the
+/// wire down with it, and the cost is that a fault which used to clear on a
+/// restart the process took itself now needs one somebody takes. The report says
+/// so, because "carries on without it" on its own reads like a wait.
 ///
 /// Every run still in the set is polled on every pass, including after a
 /// non-primary has ended in the same pass — so each has registered its waker

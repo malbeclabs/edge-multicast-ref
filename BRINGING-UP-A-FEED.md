@@ -299,6 +299,15 @@ unsupported scheme. A mistyped URL on a comparison source is now that source's
 driver dropped and named, with its `connection_state` left at 0 — the alert for
 exactly this case — and the primary carrying on.
 
+**Nothing retries that source, and a restart is what does.** Some of those
+causes are only fatal for one attempt — a credential path that does not exist
+*yet*, under late secret injection, is the plain one — and before this the
+process exited and both sources came back together. So the trade has a cost,
+and it is this: a fault that used to clear on a restart the process took itself
+now needs one somebody takes, and the gauge sitting at 0 is the only thing that
+says so. Watch `dz_publisher_ingress_connection_state == 0` per `connection`,
+not just the process being up.
+
 **An adapter serving two sources must key its per-connection state by
 `conn`.** One adapter object receives every source's `on_connected` and
 `on_disconnected`, so an adapter that keeps one upstream sequence cursor, one
@@ -421,7 +430,8 @@ infrastructure repositories, and each of those owns its own review.
 - [ ] `poll_listings` produces the instruments, and can be told about ones that open later
 - [ ] `on_connected` composes the subscription, and is idempotent across reconnects
 - [ ] the binary registers the adapter under a `kind` token, and links the transports it allows
-- [ ] for a venue with several upstreams: one `[[source]]` per connection, exactly one `primary` per feed, and one `Input` built per `cx.sources()` entry
+- [ ] for a venue with several upstreams: one `[[source]]` per connection, exactly one `primary` **publisher-wide** (not per feed), and one `Input` built per `cx.sources()` entry
+- [ ] for a venue with several upstreams: per-connection state in the adapter keyed by `conn`, and `on_payload` emitting from the connection it means to publish — the runtime cannot hold a `comparison` source's events back
 - [ ] an offline replay run publishes, and this repository's Go parser reads the values back
 - [ ] config reviewed for `pin`, `source_id`, `channel_id`, group and ports
 - [ ] for a depth feed: `snapshot_cycle` set, and the adapter's `DepthBound` checked against what its book actually holds
