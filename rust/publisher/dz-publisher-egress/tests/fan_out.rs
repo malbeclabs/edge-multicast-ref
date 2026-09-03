@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use dz_edge_core::{PortRole, ResetCount};
 use dz_publisher_egress::{
-    ChannelEgress, DatagramSink, EgressEndpoint, EgressError, FailureScope, SinkError, Tee,
+    ChannelEgress, DatagramSink, EgressEndpoint, EgressError, FailureScope, ReferenceStream,
+    SinkError, Tee,
 };
 use dz_publisher_metrics::{EgressErrorReason, EgressMessageType};
 
@@ -240,5 +241,57 @@ fn a_fan_out_collapse_reaches_the_composer_as_a_countable_error() {
             &[("port_role", "mktdata"), ("reason", "not_registered")],
         ),
         1,
+    );
+}
+
+#[test]
+fn a_reference_stream_whose_consumer_has_not_started_keeps_its_place_in_the_fan_out() {
+    // **The startup order this stream is built for.** A recorder that is not
+    // running yet answers every `sendto` with `ENOENT`, and one that restarted
+    // leaving its socket file behind answers `ECONNREFUSED`. Both used to be
+    // counted as non-transient, so the member was dropped on the publisher's
+    // first datagram and nothing ever restored it: the reference stream was over
+    // for the life of the process, silently, in exactly the case the module
+    // documentation says costs only the datagrams that were missed.
+    let metrics = metrics(&[PortRole::Mktdata], &[7]);
+    let wire = FakeSink::new("wire");
+    let absent = std::env::temp_dir().join(format!(
+        "dz-fanout-absent-{}-{:?}.sock",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_file(&absent);
+
+    let mut tee = Tee::new(PortRole::Mktdata, Arc::clone(&metrics));
+    tee.add(wire.boxed());
+    tee.add(Box::new(
+        ReferenceStream::open("reference-stream", &absent).expect("an unbound socket"),
+    ));
+
+    for _ in 0..3 {
+        tee.send(b"datagram")
+            .expect("a member's failure is absorbed");
+    }
+
+    assert_eq!(
+        tee.live(),
+        2,
+        "the recorder has not gone away; it is not up"
+    );
+    assert_eq!(tee.dropped().count(), 0);
+    assert_eq!(
+        tee.absorbed_failures(),
+        3,
+        "offered on every datagram, because the next one may arrive",
+    );
+    assert_eq!(wire.accepted().len(), 3, "the wire is untouched by it");
+    assert_eq!(
+        sample(
+            &metrics,
+            "dz_publisher_egress_errors_total",
+            &[("port_role", "mktdata"), ("reason", "socket_error")],
+        ),
+        3,
+        "counted every time, under the label a failed send to a socket has",
     );
 }

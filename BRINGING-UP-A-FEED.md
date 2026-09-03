@@ -86,6 +86,7 @@ One type implementing `dz_adapter_core::Adapter`:
 | `on_connected` | the subscription it wants sent, after every connect — reconnects included, which is what makes a silently lost subscription come back |
 | `on_payload` | one upstream payload, mapped onto normalized events |
 | `on_disconnected` | the session ended, and why |
+| `snapshot` | the book it holds for one instrument, and how deep that book goes — depth feeds only |
 
 Two rules that are easy to get wrong and expensive to get wrong:
 
@@ -96,6 +97,13 @@ Two rules that are easy to get wrong and expensive to get wrong:
   has no encoding for.
 - **A quantity of zero is a removal and nothing else.** The `Action` is derived
   from the quantity plus a presence hint; a venue does not choose it.
+- **`Depth Bound` of zero claims the complete book.** A depth adapter's
+  `snapshot` returns a `DepthBound`, and `Complete` is a positive claim a
+  subscriber is entitled to sum into available liquidity. An adapter that writes
+  the top N of its book returns `DepthBound::levels(n)`; one that writes all of
+  it returns `Complete`, and an empty book is legitimately complete. There is no
+  default, because the value a default would pick is the strongest claim on the
+  feed.
 
 Keep the adapter's own book state machine and reuse the venue's existing decoder
 if it has one. An adapter that folds the book a second way is validating itself.
@@ -109,13 +117,17 @@ which adapters a binary contains:
 fn main() -> std::process::ExitCode {
     dz_publisher_runtime::run(
         AdapterRegistry::new()
-            .with("a-venue-tob", |cx| Ok(Venue {
-                adapter: Box::new(VenueAdapter::new(cx)?),
-                input: venue_input(cx)?,
-            })),
+            .with("a-venue-tob", |cx| Ok(Venue::single(
+                Box::new(VenueAdapter::new(cx)?),
+                venue_input(cx)?,
+            ))),
     )
 }
 ```
+
+A venue with several upstreams for one feed builds one `Input` per
+`cx.sources()` entry and returns them together — see
+[Several sources for one feed](#several-sources-for-one-feed).
 
 `run()` owns configuration loading, the guards, the signals, the metrics, the
 egress, the reference data and the teardown. There is no default adapter and no
@@ -163,6 +175,7 @@ multicast_group = "233.252.0.10"
 mktdata_port = 41000
 refdata_port = 41001
 # snapshot_port = 41002     # depth feeds only
+# snapshot_cycle = "5s"     # depth feeds only: one full rotation of the book
 heartbeat_interval = "1s"
 definition_cycle = "30s"
 manifest_cadence = "5s"
@@ -196,10 +209,116 @@ kind = "a-venue-tob"
 - **`source_id` and `channel_id` are identity on the wire.** Two publishers
   sharing a `Source ID` on one group are indistinguishable to a subscriber's gap
   detection.
+- **`definition_cycle` and `idle_guard` are one answer per publisher**, even
+  though they are written per feed. One reference-data registry serves every
+  feed, because `Instrument ID` identity can only be one thing, and the idle
+  guard measures one publisher's silence. Two enabled feeds stating different
+  values is a startup error naming both, rather than the first block's answer
+  quietly winning.
+- **A depth feed with no `snapshot_cycle` cannot be joined mid-session.** It
+  still emits the recovery snapshots a reset obliges, but a subscriber that
+  arrives after the deltas started has nothing to build a book from — a level
+  update states the resting quantity at a price, so nothing later corrects a
+  missing start. The publisher says so at startup; both shipped publishers run
+  a periodic snapshot, both at five seconds.
 - **Addresses in examples are documentation ranges** (RFC 5737 and
   MCAST-TEST-NET). `scripts/check-public-repo-rules.sh` enforces that for code
   in this repository, and it is the same habit worth keeping in a config
   template: an address in an example is copied into production sooner or later.
+
+### Several sources for one feed
+
+A venue often carries the same book twice by different paths — a websocket and a
+FIX session, a local socket and a remote stream, two validators of one chain.
+They are **not the same stream**: conflation differs, per-connection sequencing
+differs, and each arrives at its own moment. So which one publishes is a
+decision, and `[[source]]` is where it is stated:
+
+```toml
+[[source]]
+name = "ws"                 # the `connection` metric label, from the file
+ingress = "websocket"
+role = "primary"            # this one publishes
+
+[source.upstream]
+# the venue's own keys, for this source
+
+[[source]]
+name = "fix"
+ingress = "fix"
+role = "comparison"         # connected, driven, counted — for the race
+
+[source.upstream]
+```
+
+- **Exactly one `primary`, publisher-wide, and it is a startup error
+  otherwise.** Two primaries are two publishers' worth of events on the channel
+  instances they reach: the `Sequence Number` series is per channel instance, so
+  a subscriber's gap detection reads the two interleaved as its own losses and
+  cannot tell which. None is a publisher whose data has no path to the wire at
+  all, heartbeating channels it never fills.
+
+  Publisher-wide and *not* per feed, and that is not a simplification. A per-feed
+  rule would be a statement about routing this runtime does not do: every
+  source's payloads reach one adapter, the adapter emits events, and no event
+  carries the source it came from — so nothing here can confine one source's data
+  to one feed. There is no `carries` key for the same reason. A key that reads as
+  a partition while nothing partitions is worse than no key: it made two
+  primaries with disjoint declarations resolve cleanly while both upstreams'
+  events landed on one channel instance.
+- **The transport is named once.** Either `[ingress] kind` for a publisher with
+  one source, or `[[source]] ingress` per source. Both is refused: a key read
+  only when another is absent is a key an operator cannot reason about. A
+  document that names it per source need not write `[ingress]` at all.
+- **The name in the file is the metric label.** `dz_publisher_ingress_*` carries
+  `connection`, pre-created at 0 for every declared source, so a second upstream
+  that never came up is a series sitting at zero rather than no series at all. A
+  name with leading or trailing whitespace is refused rather than trimmed —
+  `"ws"` and `"ws "` would be two series a dashboard cannot tell apart.
+- **Absent `[[source]]` is one source**, named by the transport the venue builds.
+  Every document written before the array existed still means exactly that,
+  including that its fatal errors end the process.
+
+**The runtime does not merge two sources — the venue does.** Every source reaches
+one adapter, and each payload carries the connection that delivered it, so the
+adapter decides which of two prices is current and when to fail over. That is
+the same rule as the book state machine, for the same reason: it follows the
+venue's microstructure, and one shipped publisher already reconciles two
+validator streams this way with a reorder window and a grace fallback.
+
+Two consequences an operator has to know before configuring a second source.
+
+**`role` is not a gate on what reaches the wire.** The runtime cannot keep a
+`comparison` source off it, because the adapter emits events and no event
+carries the source it came from. What it buys is the label, the startup check
+above, what an analysis tier reads to know which side of a race is which — and
+one runtime behaviour: **only a `primary`'s fatal error ends the process.** A
+driver returns only on a fatal error, and those are the per-source configuration
+faults found at connect: an invalid endpoint, a missing credential path, an
+unsupported scheme. A mistyped URL on a comparison source is now that source's
+driver dropped and named, with its `connection_state` left at 0 — the alert for
+exactly this case — and the primary carrying on.
+
+**Nothing retries that source, and a restart is what does.** Some of those
+causes are only fatal for one attempt — a credential path that does not exist
+*yet*, under late secret injection, is the plain one — and before this the
+process exited and both sources came back together. So the trade has a cost,
+and it is this: a fault that used to clear on a restart the process took itself
+now needs one somebody takes, and the gauge sitting at 0 is the only thing that
+says so. Watch `dz_publisher_ingress_connection_state == 0` per `connection`,
+not just the process being up.
+
+**An adapter serving two sources must key its per-connection state by
+`conn`.** One adapter object receives every source's `on_connected` and
+`on_disconnected`, so an adapter that keeps one upstream sequence cursor, one
+authentication token, or one "have I subscribed yet" flag is correct with one
+source and silently wrong with two: a comparison connection flaps, the
+primary's cursor is cleared, and the primary's next payload is read as a
+discontinuity — which an adapter that answers discontinuities with a reset turns
+into an `InstrumentReset` and a recovery snapshot on the live wire, from a
+connection that publishes nothing. Migration is one config block and one line in
+the venue's `main` with the adapter untouched, which is exactly why this is
+worth reading first.
 
 ## The recorder
 
@@ -311,8 +430,11 @@ infrastructure repositories, and each of those owns its own review.
 - [ ] `poll_listings` produces the instruments, and can be told about ones that open later
 - [ ] `on_connected` composes the subscription, and is idempotent across reconnects
 - [ ] the binary registers the adapter under a `kind` token, and links the transports it allows
+- [ ] for a venue with several upstreams: one `[[source]]` per connection, exactly one `primary` **publisher-wide** (not per feed), and one `Input` built per `cx.sources()` entry
+- [ ] for a venue with several upstreams: per-connection state in the adapter keyed by `conn`, and `on_payload` emitting from the connection it means to publish — the runtime cannot hold a `comparison` source's events back
 - [ ] an offline replay run publishes, and this repository's Go parser reads the values back
 - [ ] config reviewed for `pin`, `source_id`, `channel_id`, group and ports
+- [ ] for a depth feed: `snapshot_cycle` set, and the adapter's `DepthBound` checked against what its book actually holds
 - [ ] a recorder is configured for the feed before the publisher is pointed at production
 - [ ] metrics scraped, and the connection-state alert exists
 

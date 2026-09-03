@@ -11,7 +11,7 @@
 mod harness;
 
 use dz_ingress_core::Kind;
-use dz_publisher_runtime::{AdapterContext, AdapterRegistry, Document, StartupError};
+use dz_publisher_runtime::{AdapterContext, AdapterRegistry, Document, FeedSpec, StartupError};
 use harness::Doc;
 
 /// A registry entry that refuses if it is reached.
@@ -28,7 +28,18 @@ fn register(registry: AdapterRegistry, name: &'static str) -> AdapterRegistry {
 }
 
 fn context<'a>(adapter: &'a dz_publisher_runtime::AdapterConfig) -> AdapterContext<'a> {
-    AdapterContext::new(adapter, Kind::Uds, "a-venue")
+    // No `[[source]]` block: the publisher with one upstream, named by the
+    // transport the venue builds. `sources` is where the multi-source documents
+    // in `tests/sources.rs` differ.
+    // `top-of-book`, which is the feed every case here is about: the built-in
+    // record adapter refuses a depth feed, and that refusal has its own test.
+    AdapterContext::new(
+        adapter,
+        Some(Kind::Uds),
+        "a-venue",
+        &[],
+        &[FeedSpec::TopOfBook],
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -100,8 +111,14 @@ fn an_empty_registry_says_so_rather_than_printing_an_empty_list() {
         .expect_err("nothing is registered");
     let message = error.to_string();
     assert!(
-        message.contains("registered no adapter"),
+        message.contains("none registered by this binary"),
         "an empty registry must say so: {message}"
+    );
+    // And it must still name what a `kind` *could* resolve to, or the message
+    // reads as "nothing works here" when one name does.
+    assert!(
+        message.contains("built in: uds"),
+        "the built-in is part of what this binary answers to: {message}"
     );
 }
 
@@ -233,7 +250,14 @@ fn the_registry_names_its_entries_in_a_stable_order() {
         "mu",
     );
     assert_eq!(registry.kinds(), ["alpha", "mu", "zeta"]);
-    assert_eq!(registry.registered_list(), "alpha, mu, zeta");
+    // The built-ins are named separately rather than mixed in, because *what is
+    // in this binary* has two sources and an operator reading the message needs
+    // to know which one a name came from. `kinds()` and `len()` stay the
+    // venue's own entries.
+    assert_eq!(
+        registry.registered_list(),
+        "alpha, mu, zeta (built in: uds)"
+    );
     assert_eq!(registry.len(), 3);
     assert!(!registry.is_empty());
 }
@@ -247,4 +271,189 @@ fn a_kind_registered_twice_panics_rather_than_shadowing_one_adapter_with_another
     // exact class of failure this registry exists to make impossible. The panic
     // happens before a socket exists and before a single datagram.
     let _ = register(register(AdapterRegistry::new(), "one-source"), "one-source");
+}
+
+// ---------------------------------------------------------------------------
+// The built-in: the one adapter this crate contains itself.
+// ---------------------------------------------------------------------------
+
+/// A `[adapter]` section naming the built-in record adapter, with the listing
+/// set a record source and a publisher have to agree on out of band.
+fn uds_adapter_section(listings: &str) -> String {
+    format!("[adapter]\nkind = \"uds\"\n\n[adapter.upstream]\n{listings}")
+}
+
+fn one_listing() -> String {
+    "[[adapter.upstream.listing]]\n\
+     symbol = \"A-B\"\n\
+     asset_class = \"crypto_spot\"\n\
+     price_exponent = -2\n\
+     qty_exponent = -3\n\
+     market_model = \"clob\"\n\
+     tick_size = \"0.01\"\n\
+     lot_size = \"0.001\"\n\
+     settle_type = \"cash\"\n\
+     price_bound = \"non_negative\"\n"
+        .to_owned()
+}
+
+#[test]
+fn the_builtin_record_adapter_resolves_with_no_venue_registered() {
+    // The one case where there is no venue code to register: an integration
+    // that is not Rust cannot implement `Adapter`, so it writes records and the
+    // built-in reads them. An empty registry is the whole point of this test -
+    // nothing here registered anything, and `kind = "uds"` still resolves.
+    let mut doc = Doc::valid();
+    doc.adapter = uds_adapter_section(&one_listing());
+    let document = Document::parse(&doc.render()).expect("valid");
+
+    AdapterRegistry::new()
+        .open(&context(&document.adapter))
+        .expect("the built-in resolves without a venue");
+}
+
+#[test]
+fn a_venue_registering_the_same_name_is_the_one_that_runs() {
+    // A built-in is a registered kind, not a precedence rule over the venue: a
+    // venue that has its own reason to spell an adapter `uds` knows its own
+    // upstream, and this crate does not get to overrule it.
+    let mut doc = Doc::valid();
+    doc.adapter = uds_adapter_section(&one_listing());
+    let document = Document::parse(&doc.render()).expect("valid");
+
+    let error = register(AdapterRegistry::new(), "uds")
+        .open(&context(&document.adapter))
+        .expect_err("the venue's own entry is reached");
+    assert!(
+        error.to_string().contains("reached the constructor"),
+        "the venue's constructor must be the one called: {error}"
+    );
+}
+
+#[test]
+fn the_builtin_refuses_a_listing_set_of_nothing() {
+    // Refused at startup rather than at the first poll. An adapter offering
+    // nothing publishes nothing, and a record source writing for symbols the
+    // publisher never admitted is a feed that looks alive and carries no
+    // instrument.
+    let mut doc = Doc::valid();
+    doc.adapter = uds_adapter_section("");
+    let document = Document::parse(&doc.render()).expect("valid");
+
+    let error = AdapterRegistry::new()
+        .open(&context(&document.adapter))
+        .expect_err("no listing was stated");
+    let message = error.to_string();
+    assert!(message.contains("uds"), "the kind is named: {message}");
+}
+
+#[test]
+fn the_builtin_refuses_a_depth_feed_rather_than_publish_deltas_it_cannot_snapshot() {
+    // **The record encoding decodes `Level` and `Clear`, so this built-in is
+    // depth-capable on the delta path** - and that is what made the gap
+    // dangerous. `UdsAdapter` holds no book by design, so it answers no
+    // snapshot and inherits a default that refuses. Nothing refused the
+    // combination, so `kind = "uds"` beside a `market-by-price` feed resolved
+    // and published: deltas flowed, every counter moved, and no recovery
+    // snapshot after a reset and no periodic snapshot ever went out. A
+    // `LevelUpdate` states the resting quantity at a price, so a subscriber
+    // joining mid-session is not corrected by the next message - it is wrong at
+    // every price it has never seen an update for, indefinitely. That is the
+    // mid-session-join failure `snapshot_cycle` closes, reopened one `kind`
+    // along.
+    let mut doc = Doc::valid();
+    doc.adapter = uds_adapter_section(&one_listing());
+    let document = Document::parse(&doc.render()).expect("valid");
+
+    let error = AdapterRegistry::new()
+        .open(&AdapterContext::new(
+            &document.adapter,
+            Some(Kind::Uds),
+            "a-venue",
+            &[],
+            &[FeedSpec::MarketByPrice],
+        ))
+        .expect_err("this adapter cannot serve a depth feed");
+    let message = error.to_string();
+    assert!(
+        message.contains("market-by-price"),
+        "the feed is named: {message}"
+    );
+    assert!(
+        message.contains("snapshot"),
+        "and what cannot be answered: {message}"
+    );
+}
+
+#[test]
+fn the_builtin_serves_the_feed_whose_messages_are_self_contained() {
+    // The control, and the boundary of the refusal above: a top-of-book feed is
+    // never asked for a snapshot - it carries no snapshot port role at all - so
+    // an adapter that holds no book serves it completely.
+    let mut doc = Doc::valid();
+    doc.adapter = uds_adapter_section(&one_listing());
+    let document = Document::parse(&doc.render()).expect("valid");
+
+    AdapterRegistry::new()
+        .open(&AdapterContext::new(
+            &document.adapter,
+            Some(Kind::Uds),
+            "a-venue",
+            &[],
+            &[FeedSpec::TopOfBook],
+        ))
+        .expect("a feed with no snapshot port role needs no book");
+}
+
+#[test]
+fn the_builtin_transport_refuses_and_says_which_path_does_work() {
+    // The honest state of this path: the record *adapter* exists and the record
+    // *transport* does not, so a live run cannot be composed and an offline one
+    // can. A transport that connected to nothing and stayed up would look
+    // exactly like a healthy feed on a quiet venue, which is the failure this
+    // whole family of crates is built to make impossible.
+    let mut doc = Doc::valid();
+    doc.adapter = uds_adapter_section(&one_listing());
+    let document = Document::parse(&doc.render()).expect("valid");
+    let mut venue = AdapterRegistry::new()
+        .open(&context(&document.adapter))
+        .expect("resolves");
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("a current-thread runtime");
+    let error = runtime
+        .block_on(venue.sources[0].connect(std::time::Duration::from_millis(1)))
+        .expect_err("there is no transport to connect");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("adapter.replay"),
+        "the refusal has to name the path that works: {message}"
+    );
+    assert!(
+        message.contains("dz-ingress-uds"),
+        "and the crate that is missing: {message}"
+    );
+    // `Fatal` rather than `Connect`: a transport that does not exist is not
+    // worth retrying under a backoff forever, so the driver stops instead of
+    // looping.
+    assert!(matches!(error, dz_ingress_core::IngressError::Fatal { .. }));
+}
+
+#[test]
+fn an_unknown_kind_names_the_built_ins_as_well_as_the_venues_own() {
+    // *What is in this binary* has two sources now, and an operator reading the
+    // message cannot act on it without being told both.
+    let mut doc = Doc::valid();
+    doc.adapter = "[adapter]\nkind = \"mistyped\"\n".to_owned();
+    let document = Document::parse(&doc.render()).expect("valid");
+
+    let error = register(AdapterRegistry::new(), "a-venue-tob")
+        .open(&context(&document.adapter))
+        .expect_err("`mistyped` is neither");
+    let message = error.to_string();
+    assert!(message.contains("a-venue-tob"), "{message}");
+    assert!(message.contains("built in: uds"), "{message}");
 }

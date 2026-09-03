@@ -1,5 +1,6 @@
 //! The trait itself.
 
+use crate::depth::DepthBound;
 use crate::error::{AdapterError, ParseError};
 use crate::instrument::InstrumentRef;
 use crate::payload::{ConnectionId, DisconnectReason, Payload};
@@ -107,6 +108,22 @@ pub trait Adapter: Send {
     /// subscribes to nothing and receives nothing; the runtime's idle guard is
     /// what catches that, rather than this signature.
     ///
+    /// # Per-connection state must be keyed by `conn`
+    ///
+    /// **One adapter serves every source a publisher opens.** A publisher with
+    /// several `[[source]]` blocks drives one connection per source and hands
+    /// every payload to *this* object, which tells them apart by
+    /// [`Payload::connection`](crate::Payload::connection) — and by the `conn`
+    /// argument here and on [`on_disconnected`](Self::on_disconnected).
+    ///
+    /// So state that belongs to a connection has to be stored per `conn` and
+    /// not per adapter. An adapter that keeps one upstream sequence cursor, or
+    /// one authentication token, or one "have I subscribed yet" flag, is
+    /// correct with one source and wrong the moment a second is configured —
+    /// and the way it is wrong is silent: a comparison connection flaps, this
+    /// method resets the state the *primary* was using, and the next primary
+    /// payload is read against a cursor that belongs to nothing.
+    ///
     /// # Errors
     ///
     /// [`AdapterError`] when the adapter cannot compose what it needs to send.
@@ -126,6 +143,22 @@ pub trait Adapter: Send {
     /// was tracking against the upstream's own numbering, a book it can no
     /// longer trust to be current. Defaulted for the same reason as
     /// [`on_connected`](Self::on_connected).
+    ///
+    /// # Invalidate `conn`'s state, and nothing else's
+    ///
+    /// One adapter serves every source, so this is called once per *connection*
+    /// ending and not once per adapter. Clearing state unconditionally is
+    /// correct only for a publisher with one source; with two it is the bug
+    /// this paragraph exists to prevent, and it reaches the wire.
+    ///
+    /// Concretely: a comparison connection flaps, an adapter that clears "the"
+    /// upstream sequence cursor here clears the primary's, and the primary's
+    /// next payload is read as a discontinuity. An adapter that answers that
+    /// with an `InstrumentReset` puts one, and a recovery snapshot, on the live
+    /// wire — from a connection that publishes nothing. Migration to a second
+    /// source is one configuration block and one line in the venue's `main`,
+    /// with the adapter untouched, so this is a paragraph an adapter author has
+    /// to have read *before* that day rather than after it.
     fn on_disconnected(&mut self, conn: ConnectionId, reason: DisconnectReason) {
         let _ = (conn, reason);
     }
@@ -142,6 +175,33 @@ pub trait Adapter: Send {
     /// `Ok(())` with no event. Only a payload the adapter cannot read is an
     /// error.
     ///
+    /// # `payload.connection` decides what reaches the wire, and nothing else
+    /// can
+    ///
+    /// **This method is the only seam at which one source's data can be held
+    /// back.** A publisher with several `[[source]]` blocks hands every
+    /// source's payloads to this one object; what an adapter emits here is
+    /// lowered onto the feed and sent. No event carries the source it came from,
+    /// so nothing downstream — not the runtime, not the `role` in the document —
+    /// can tell one source's events from another's afterwards.
+    ///
+    /// The consequence for an adapter that gains a second source: **emit from
+    /// the connection you mean to publish, and decide deliberately what a
+    /// comparison connection's payloads do here.** An adapter that parses and
+    /// emits from every connection puts two upstreams' events on one channel
+    /// instance under one `Sequence Number` series, which a subscriber's gap
+    /// detection reads as its own losses and cannot attribute. That is the whole
+    /// failure the document's `role` key exists to describe and cannot prevent.
+    ///
+    /// This is deliberately *not* a runtime gate. Merging two views of one book
+    /// — which price is current, when to fail over — follows the venue's
+    /// microstructure, and a gate here would break exactly the case these
+    /// interfaces exist to support: one shipped publisher reconciles two
+    /// validator streams inside its adapter with a reorder window and a grace
+    /// fallback, and every event it emits is the product of both connections.
+    /// So the choice is the adapter's, and it has to be a choice rather than a
+    /// default.
+    ///
     /// # Errors
     ///
     /// [`ParseError`], whose variant is the reason the failure is counted
@@ -153,7 +213,8 @@ pub trait Adapter: Send {
         out: &mut dyn EventSink,
     ) -> Result<(), ParseError>;
 
-    /// Write the book this adapter currently holds for one instrument.
+    /// Write the book this adapter currently holds for one instrument, and say
+    /// how deep that book goes.
     ///
     /// **Pulled rather than pushed.** The snapshot cadence, the rotation across
     /// instruments and the framing belong to the runtime, because they are what
@@ -161,8 +222,22 @@ pub trait Adapter: Send {
     /// because it is the venue's microstructure. Neither can drive the other,
     /// so the runtime asks.
     ///
-    /// Defaulted to writing nothing, which is correct for a top-of-book adapter:
-    /// that feed has no snapshot port and nothing to write.
+    /// # The `Depth Bound` is returned, and that is the whole reason it is
+    ///
+    /// [`DepthBound`] is the answer to *is this the complete book, or the top N
+    /// of it?*, and it is the one field of a snapshot that only the layer
+    /// holding the book can fill in. It is returned rather than passed in
+    /// because a return value cannot be forgotten: an adapter cannot write a
+    /// level without stating the depth those levels were drawn from, and the
+    /// runtime cannot supply a default for it — the wire's `0` means *complete*,
+    /// so the default a runtime would reach for is the strongest claim on the
+    /// feed. See [`DepthBound`] for what that claim costs when it is wrong.
+    ///
+    /// A bounded book writes its levels outward from the top of each side and
+    /// returns [`DepthBound::Levels`]; a book with everything in it returns
+    /// [`DepthBound::Complete`], and does so with no levels at all when the
+    /// venue has no resting interest — an empty book is a book, and refusing to
+    /// snapshot one would hold a quiet instrument out of the rotation.
     ///
     /// # Errors
     ///
@@ -172,12 +247,24 @@ pub trait Adapter: Send {
     /// [`AdapterError::UnknownInstrument`] when the handle is not one this
     /// adapter holds, which is a disagreement between two admitted sets and
     /// never something to retry.
+    ///
+    /// # Defaulted, and what the default now says
+    ///
+    /// The default refuses with [`AdapterError::Internal`], because there is no
+    /// honest depth to report for a book that was never written. A top-of-book
+    /// adapter is never asked — the runtime pulls snapshots only for a depth
+    /// feed, which has the port for them — so the default costs it nothing. A
+    /// *depth* adapter that leaves this defaulted is a defect, and this reports
+    /// it as one; the alternative it replaced was a snapshot of no levels
+    /// claiming to be a complete book.
     fn snapshot(
         &self,
         instrument: InstrumentRef,
         out: &mut dyn SnapshotSink,
-    ) -> Result<(), AdapterError> {
+    ) -> Result<DepthBound, AdapterError> {
         let _ = (instrument, out);
-        Ok(())
+        Err(AdapterError::Internal {
+            detail: "this adapter holds no book: `snapshot` is not implemented",
+        })
     }
 }

@@ -99,6 +99,24 @@ fn withdrawing_twice_and_withdrawing_nothing_are_both_the_state_asked_for() {
     instruments.withdraw(InstrumentRef::from_admission(9_999));
 
     assert!(instruments.is_empty());
+    // The published-set count is a maintained cache, because a rotation reads
+    // it every tick and a walk of the slots there would make a tick documented
+    // as O(1) in the set O(n) in it. So it may only move for a slot that was
+    // actually held: the two no-op withdrawals above are exactly the cases that
+    // would take it below zero, or - having wrapped - report a published set of
+    // 18 quintillion instruments.
+    assert_eq!(instruments.len(), 0);
+
+    let re_admitted = instruments.admit(instrument(42));
+    assert_eq!(
+        instruments.len(),
+        1,
+        "and the count still tracks the slots after them"
+    );
+    assert_eq!(
+        instruments.get(re_admitted).expect("held").instrument_id,
+        42
+    );
 }
 
 /// An assigned production id, which is what a publisher runs under. Zero would

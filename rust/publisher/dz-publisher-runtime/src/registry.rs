@@ -28,10 +28,10 @@
 //! #     -> Result<Box<dyn dz_ingress_core::Input>, std::io::Error> { unimplemented!() }
 //! fn main() -> std::process::ExitCode {
 //!     dz_publisher_runtime::run(AdapterRegistry::new().with("a-venue", |cx| {
-//!         Ok(Venue {
-//!             adapter: Box::new(VenueAdapter::new(cx)?),
-//!             input: venue_input(cx)?,
-//!         })
+//!         Ok(Venue::single(
+//!             Box::new(VenueAdapter::new(cx)?),
+//!             venue_input(cx)?,
+//!         ))
 //!     }))
 //! }
 //! ```
@@ -58,7 +58,7 @@ use dz_adapter_core::Adapter;
 use dz_ingress_core::{Input, Kind};
 use serde::de::DeserializeOwned;
 
-use crate::config::{AdapterConfig, ReplayConfig};
+use crate::config::{AdapterConfig, FeedSpec, ReplayConfig, Source};
 use crate::error::{AdapterInitError, StartupError};
 
 /// What a venue's constructor hands back: the mapping, and the transport it
@@ -85,9 +85,35 @@ use crate::error::{AdapterInitError, StartupError};
 /// this and is stated rather than hidden.
 pub struct Venue {
     /// The venue's mapping from its upstream's payloads onto normalized events.
+    ///
+    /// **One, however many sources there are.** A venue that reads the same
+    /// book over a websocket and over a FIX session hands back one adapter that
+    /// tells them apart by
+    /// [`Payload::connection`](dz_adapter_core::Payload::connection), because
+    /// merging two views of one book follows the venue's microstructure and is
+    /// the same decision as the book state machine itself. The runtime drives
+    /// the connections; it does not reconcile them.
     pub adapter: Box<dyn Adapter>,
-    /// The transport those payloads arrive on. See the type's own note.
-    pub input: Box<dyn Input>,
+    /// The transports those payloads arrive on, one per enabled `[[source]]`.
+    ///
+    /// See the type's own note, and [`Venue::single`] for the publisher with
+    /// one upstream.
+    pub sources: Vec<Box<dyn Input>>,
+}
+
+impl Venue {
+    /// A venue with one upstream.
+    ///
+    /// The shape every publisher had before a feed could have several sources,
+    /// and still the ordinary one. A document with no `[[source]]` block is
+    /// exactly this.
+    #[must_use]
+    pub fn single(adapter: Box<dyn Adapter>, input: Box<dyn Input>) -> Self {
+        Self {
+            adapter,
+            sources: vec![input],
+        }
+    }
 }
 
 /// Neither half is `Debug` and neither can be: `Adapter` and `Input` are
@@ -107,18 +133,26 @@ impl std::fmt::Debug for Venue {
 /// a venue's hands, and a context carrying them would hand them back.
 pub struct AdapterContext<'a> {
     kind: &'a str,
-    ingress_kind: Kind,
+    ingress_kind: Option<Kind>,
     venue: &'a str,
     upstream: &'a toml::Table,
     credentials: &'a toml::Table,
     replay: &'a ReplayConfig,
+    sources: &'a [Source],
+    feeds: &'a [FeedSpec],
 }
 
 impl<'a> AdapterContext<'a> {
     /// The context for one `[adapter]` section and one resolved `[ingress]
     /// kind`.
     #[must_use]
-    pub fn new(adapter: &'a AdapterConfig, ingress_kind: Kind, venue: &'a str) -> Self {
+    pub fn new(
+        adapter: &'a AdapterConfig,
+        ingress_kind: Option<Kind>,
+        venue: &'a str,
+        sources: &'a [Source],
+        feeds: &'a [FeedSpec],
+    ) -> Self {
         Self {
             kind: &adapter.kind,
             ingress_kind,
@@ -126,6 +160,8 @@ impl<'a> AdapterContext<'a> {
             upstream: &adapter.upstream,
             credentials: &adapter.credentials,
             replay: &adapter.replay,
+            sources,
+            feeds,
         }
     }
 
@@ -139,10 +175,54 @@ impl<'a> AdapterContext<'a> {
         self.kind
     }
 
-    /// The transport `[ingress] kind` resolved to. See [`Venue`].
+    /// The transport the document-level `[ingress] kind` resolved to.
+    ///
+    /// `None` when the document names a transport per `[[source]]` instead, in
+    /// which case [`sources`](Self::sources) carries one [`Kind`] each and
+    /// there is no single answer to give. The two are mutually exclusive at
+    /// load: naming a transport in both places is refused.
     #[must_use]
-    pub const fn ingress_kind(&self) -> Kind {
+    pub const fn ingress_kind(&self) -> Option<Kind> {
         self.ingress_kind
+    }
+
+    /// Every enabled `[[source]]`, resolved.
+    ///
+    /// What a venue builds one [`Input`] from each of: the name to carry as its
+    /// [`ConnectionId`](dz_adapter_core::ConnectionId), the transport to open,
+    /// and its own `upstream` and `credentials` tables. Empty when the document
+    /// declares no sources, which is the publisher with one upstream — see
+    /// [`Venue::single`].
+    ///
+    /// **The `ConnectionId` is handed over rather than invented.** It is the
+    /// `connection` metric label, it is declared to the registry at startup so
+    /// the `== 0` alert exists before anything connects, and it comes from the
+    /// document so that the file an operator reads and the label a dashboard
+    /// groups by are one string. A venue that named its own would be a second
+    /// place for that string to live.
+    #[must_use]
+    pub const fn sources(&self) -> &'a [Source] {
+        self.sources
+    }
+
+    /// Every enabled `[[feed]] spec` this publisher emits.
+    ///
+    /// **Which normalized-event surface will be asked for, and nothing about
+    /// the wire.** No `Channel ID`, `Source ID`, group, port or era comes with
+    /// it — those are the values this boundary exists to keep out of a venue's
+    /// hands. A feed specification is the opposite kind of fact: it is what the
+    /// runtime will ask this adapter *for*, and an adapter is the only thing
+    /// that knows whether it can answer.
+    ///
+    /// It is here for the refusal that needs it. A depth feed obliges
+    /// [`Adapter::snapshot`](dz_adapter_core::Adapter::snapshot) — a subscriber
+    /// that lost a datagram has nowhere else to recover from, and one joining
+    /// mid-session has nowhere to start — so an adapter that holds no book must
+    /// be able to refuse that combination at startup rather than publish deltas
+    /// no subscriber can apply. See [`crate::builtin`].
+    #[must_use]
+    pub const fn feeds(&self) -> &'a [FeedSpec] {
+        self.feeds
     }
 
     /// The `venue` label, for an adapter that wants its own log lines to carry
@@ -276,10 +356,14 @@ impl AdapterRegistry {
     #[must_use]
     pub fn registered_list(&self) -> String {
         let kinds = self.kinds();
+        let built_in = format!("built in: {}", crate::builtin::BUILTIN_KINDS.join(", "));
         if kinds.is_empty() {
-            "none - this binary registered no adapter".to_owned()
+            // Still worth saying rather than printing only the built-in: a
+            // build that linked no venue adapter is a different problem from a
+            // misspelled name, and it wants a different action.
+            format!("none registered by this binary ({built_in})")
         } else {
-            kinds.join(", ")
+            format!("{} ({built_in})", kinds.join(", "))
         }
     }
 
@@ -292,14 +376,27 @@ impl AdapterRegistry {
     /// [`StartupError::AdapterInit`] carrying whatever the venue's constructor
     /// refused with.
     pub fn open(&self, cx: &AdapterContext<'_>) -> Result<Venue, StartupError> {
-        let (name, constructor) = self
-            .entries
-            .iter()
-            .find(|(name, _)| *name == cx.kind())
-            .ok_or_else(|| StartupError::UnknownAdapterKind {
-                token: cx.kind().to_owned(),
-                registered: self.registered_list(),
-            })?;
-        constructor(cx).map_err(|source| StartupError::AdapterInit { kind: name, source })
+        if let Some((name, constructor)) = self.entries.iter().find(|(name, _)| *name == cx.kind())
+        {
+            return constructor(cx)
+                .map_err(|source| StartupError::AdapterInit { kind: name, source });
+        }
+        // **After the venue's own entries, and never instead of one.** A venue
+        // that registers a name this crate also builds in gets its own — it is
+        // the one that knows its upstream — and the built-in is what answers a
+        // name nothing else does. See `crate::builtin` for why there is one at
+        // all.
+        if let Some(built_in) = crate::builtin::open(cx) {
+            let kind = crate::builtin::BUILTIN_KINDS
+                .iter()
+                .find(|name| **name == cx.kind())
+                .copied()
+                .unwrap_or("built-in");
+            return built_in.map_err(|source| StartupError::AdapterInit { kind, source });
+        }
+        Err(StartupError::UnknownAdapterKind {
+            token: cx.kind().to_owned(),
+            registered: self.registered_list(),
+        })
     }
 }

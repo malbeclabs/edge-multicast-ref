@@ -43,6 +43,8 @@ impl Adapter for Quiet {
 
 Nothing else is imported, because there is nothing else to import. A real adapter parses its upstream in `on_payload`, offers its instruments in `poll_listings`, writes its subscriptions in `on_connected`, and — if its feed has a snapshot port — writes its book in `snapshot`.
 
+`snapshot` returns a `DepthBound`, and that is the one place a venue states something about the wire: whether the levels it just wrote are the **complete** book or the top N of it. It is returned rather than passed in because a return value cannot be forgotten, and because the value a runtime would have to default it to is the wire's `0` — which is a positive claim of completeness. A shipped depth publisher reaches that same `0` legitimately, but only through an argument about its own upstream and a check against a full-depth REST book; the number is cheap and the evidence behind it is not, and the evidence lives here.
+
 ## Three properties, and what each one buys
 
 **`dz-adapter-core` depends on `thiserror` and nothing else.** A venue inheriting our async runtime's minor version, or our Prometheus client's, is a version conflict we caused. `tests/dependencies.rs` fails the moment a second entry appears. The transport half of the boundary is async and carries a dependency tree of its own, so it lives in [`ingress/`](../ingress/) and a venue that does not need it does not link it.

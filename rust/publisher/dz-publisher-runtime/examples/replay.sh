@@ -64,8 +64,32 @@ kind = "uds"
 enabled = true
 path = "$work/payloads"
 
-[adapter.upstream]
-symbols = ["$SYMBOL"]
+# The reference stream. The path is a prefix: one socket per feed *and* port
+# role, so a recorder can attribute a copy without decoding it - a Unix datagram
+# carries neither the destination port nor the group the diff is keyed on. This
+# run binds this feed's mktdata one and counts what arrives, which is the only
+# place that wiring is exercised end to end. No backticks in this heredoc: its
+# delimiter is unquoted so that the paths interpolate, which makes a backtick a
+# command substitution.
+[adapter.tee]
+enabled = true
+path = "$work/tee"
+
+# The built-in record adapter's instrument set. Stated in full rather than as a
+# bare symbol: every field here is one a subscriber reads out of the published
+# instrument definition, and a guessed exponent misdescribes every price on the
+# feed. There is no discovery in the record encoding, so the source process and
+# the publisher agree on this set out of band.
+[[adapter.upstream.listing]]
+symbol = "$SYMBOL"
+asset_class = "crypto_spot"
+price_exponent = -4
+qty_exponent = -2
+market_model = "clob"
+tick_size = "0.0001"
+lot_size = "0.01"
+settle_type = "cash"
+price_bound = "non_negative"
 TOML
 
 echo "building the subscriber"
@@ -76,6 +100,32 @@ echo "starting the subscriber on $GROUP via $IFACE"
     -group "$GROUP" -marketdata-port "$MKTDATA_PORT" -refdata-port "$REFDATA_PORT" \
     -output "$work/out.json" -format json -interface "$IFACE" >"$work/subscriber.log" 2>&1 &
 sleep 2
+
+echo "binding the reference stream on $work/tee.top-of-book.mktdata"
+# Bound before the publisher starts: the tee sends unconnected, so a datagram
+# with nobody bound is dropped and counted rather than queued.
+python3 - "$work/tee.top-of-book.mktdata" "$work/tee.count" <<'TEE' &
+import os, socket, sys
+
+path, out = sys.argv[1], sys.argv[2]
+if os.path.exists(path):
+    os.unlink(path)
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+sock.bind(path)
+sock.settimeout(20)
+datagrams = []
+try:
+    while True:
+        datagrams.append(sock.recv(2048))
+except socket.timeout:
+    pass
+with open(out, "w") as f:
+    f.write(f"{len(datagrams)}\n")
+    f.write(f"{datagrams[0][:2].hex() if datagrams else ''}\n")
+    f.write(f"{max((len(d) for d in datagrams), default=0)}\n")
+TEE
+tee_listener=$!
+sleep 1
 
 echo "running run()"
 (cd "$repo/rust" && cargo run -q -p dz-publisher-runtime --example replay_publisher -- \
@@ -122,3 +172,26 @@ assert t["aggressor_side"] == "buy", t["aggressor_side"]
 print()
 print("  run() published what the records said, and a Go subscriber read it back")
 PY
+
+echo
+echo "what the reference stream received:"
+wait "$tee_listener" 2>/dev/null || true
+python3 - "$work/tee.count" <<'TEE'
+import sys
+
+count, magic, longest = open(sys.argv[1]).read().splitlines()
+count, longest = int(count), int(longest)
+print(f"  {count} datagrams, longest {longest} bytes, first magic 0x{magic}")
+
+# The tee is a copy of what left the mktdata socket, so the datagrams are the
+# feed's own - magic and all - with no framing added. `5a44` is `DZ` little
+# endian, the top-of-book magic.
+assert count > 0, "nothing reached the reference stream"
+assert magic == "5a44", f"the copy is not a top-of-book datagram: 0x{magic}"
+# And the mandated cap holds on the copy too, which is the check that would
+# catch a tee that concatenated or framed.
+assert longest <= 1232, longest
+
+print()
+print("  every datagram the publisher sent arrived on the reference stream unaltered")
+TEE

@@ -29,9 +29,16 @@ use crate::limit::RateLimiter;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IngressConfig {
-    /// Which transport. Required, and there is no default — see
-    /// [`Kind::resolve`].
-    pub kind: String,
+    /// Which transport, for a publisher with one source.
+    ///
+    /// **Optional, and still with no default.** A publisher may name its
+    /// transport here or once per `[[source]]` block, and naming it in both
+    /// places is refused rather than resolved in favour of one — a key that is
+    /// read only when another is absent is a key an operator cannot reason
+    /// about. Naming it in neither is refused too, and the error says both
+    /// ways of stating it. See [`Self::resolve`] and [`Self::policy`].
+    #[serde(default)]
+    pub kind: Option<String>,
 
     /// How long a connect attempt may take before it counts as failed.
     #[serde(default = "default_connect_timeout", deserialize_with = "de_duration")]
@@ -73,6 +80,31 @@ pub struct IngressConfig {
     pub idle_timeout: Option<Duration>,
 }
 
+/// Every key's own default, so the whole section may be absent.
+///
+/// A publisher that names its transport once per `[[source]]` has nothing to
+/// state in `[ingress]` at all, and without this the document fails at parse
+/// with `missing field \`ingress\`` reported at line 1, column 1 — which points
+/// an operator at the whole file rather than at the section they did not write.
+///
+/// **This cannot hide a missing transport.** `kind` defaults to `None` here as
+/// it does in the deserializer, so a document that names a transport in neither
+/// place still reaches [`ConfigError::NoKind`], which is the error that names
+/// both ways of stating it. Each field below calls the same function the serde
+/// attribute above it does, so there is one value per key and not two.
+impl Default for IngressConfig {
+    fn default() -> Self {
+        Self {
+            kind: None,
+            connect_timeout: default_connect_timeout(),
+            reconnect_backoff_initial: default_backoff_initial(),
+            reconnect_backoff_max: default_backoff_max(),
+            rate_limit_per_second: 0,
+            idle_timeout: None,
+        }
+    }
+}
+
 /// Everything the driver needs to run, validated.
 ///
 /// Separate from [`IngressConfig`] because the driver takes what has been
@@ -105,6 +137,25 @@ impl IngressConfig {
     /// [`ConfigError`], naming both the value that was refused and the values
     /// that would have been accepted.
     pub fn resolve(&self) -> Result<(Kind, Policy), ConfigError> {
+        let policy = self.policy()?;
+        let kind = Kind::resolve(self.kind.as_deref().ok_or(ConfigError::NoKind)?)?;
+        Ok((kind, policy))
+    }
+
+    /// The policy alone, for a document whose transports are named per source.
+    ///
+    /// Split out rather than duplicated: every check below applies whichever
+    /// way the transport is named, and a second copy of them is a second place
+    /// for a rule to be forgotten. [`resolve`](Self::resolve) is this plus the
+    /// document-level `kind`, and the two are deliberately not offered as one
+    /// function that sometimes returns a transport — a caller that has sources
+    /// must not be handed a `Kind` it has no use for.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError`], naming both the value that was refused and what would
+    /// have been accepted.
+    pub fn policy(&self) -> Result<Policy, ConfigError> {
         // The durations first, and the transport second. Both are reported one
         // at a time, so the order decides which an operator sees: a backoff
         // pair that is the wrong way round is wrong whichever transport runs,
@@ -134,16 +185,12 @@ impl IngressConfig {
         }
         let backoff =
             BackoffPolicy::new(self.reconnect_backoff_initial, self.reconnect_backoff_max)?;
-        let kind = Kind::resolve(&self.kind)?;
-        Ok((
-            kind,
-            Policy {
-                connect_timeout: self.connect_timeout,
-                backoff,
-                rate_limit_per_second: self.rate_limit_per_second,
-                idle_timeout: self.idle_timeout,
-            },
-        ))
+        Ok(Policy {
+            connect_timeout: self.connect_timeout,
+            backoff,
+            rate_limit_per_second: self.rate_limit_per_second,
+            idle_timeout: self.idle_timeout,
+        })
     }
 }
 

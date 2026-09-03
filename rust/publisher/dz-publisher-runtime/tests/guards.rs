@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use dz_adapter_core::EventSink;
 use dz_publisher_metrics::ExitReason;
-use dz_publisher_runtime::{Exit, Inconsistency};
+use dz_publisher_runtime::{Exit, FeedSpec, Inconsistency};
 use harness::{feed, harness, FakeAdapter};
 
 /// The window every test here uses, so the arithmetic is readable.
@@ -205,4 +205,55 @@ fn every_exit_this_crate_decides_maps_onto_a_reason_the_metrics_crate_defines() 
         ExitReason::ConsistencyGuard
     );
     assert_eq!(Exit::Signal.reason(), ExitReason::Signal);
+}
+
+#[test]
+fn a_dropped_reference_stream_is_named_and_darkens_nothing() {
+    // **The other half of the scope distinction, and the half that was
+    // unobservable.** A `Channel`-scope member that fails non-transiently is
+    // counted, dropped and absorbed — the send returns `Ok`, because propagating
+    // it would put a decision about `Sequence Number` in the hands of one
+    // auxiliary consumer's socket. So the fan-out goes quiet with nothing in the
+    // send path saying so, and `Tee::dropped` had no caller at all: an archive
+    // stopped being written and the publisher reported itself healthy.
+    let mut h = guarded();
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    // The first tick sends a heartbeat and the first manifest, so both fan-outs
+    // are known to be working before anything is broken.
+    assert!(h.publisher.tick().is_none());
+    assert!(h.publisher.dropped_sinks().is_empty());
+
+    h.only().reference_refusal.set(true);
+    h.only().refdata_reference_refusal.set(true);
+    h.clock.advance(Duration::from_secs(2));
+
+    assert!(
+        h.publisher.tick().is_none(),
+        "a reference stream must never be able to end the process",
+    );
+    assert_eq!(
+        h.publisher.feeds().dark_transmitter(),
+        None,
+        "nothing that darkens this publisher has failed",
+    );
+
+    let dropped = h.publisher.dropped_sinks();
+    let named: Vec<(&str, &str, usize)> = dropped
+        .iter()
+        .map(|d| (d.name, d.port_role.as_str(), d.live))
+        .collect();
+    assert_eq!(
+        named,
+        [
+            ("mktdata-reference", "mktdata", 1),
+            ("refdata-reference", "refdata", 1),
+        ],
+        "both dropped members are named, with the transmitter still live beside \
+         each: {dropped:?}",
+    );
+    assert!(dropped.iter().all(|d| d.spec == FeedSpec::TopOfBook));
+    // The transmitters are untouched: what a dropped auxiliary member costs is
+    // the copy and nothing else.
+    assert!(h.mktdata().len() > 1);
 }

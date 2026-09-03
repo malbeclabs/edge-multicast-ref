@@ -217,14 +217,24 @@ pub struct Harness {
     pub mbp: Option<FeedRecorders>,
 }
 
-/// What one feed's port roles recorded, and the switch that breaks its live
-/// socket.
+/// What one feed's port roles recorded, and the switches that break them.
 pub struct FeedRecorders {
     pub mktdata: Recorder,
     pub refdata: Recorder,
     /// Depth feeds only.
     pub snapshot: Option<Recorder>,
     pub mktdata_refusal: Rc<Cell<bool>>,
+    /// What the mktdata role's **reference stream** recorded: the second member
+    /// of that fan-out, at `FailureScope::Channel`, as `[adapter.tee]` adds it.
+    pub reference: Recorder,
+    /// Breaks that reference stream non-transiently, which is what a socket
+    /// whose path has become unwritable does. A `Channel`-scope member, so the
+    /// publisher must survive it and name it rather than exiting.
+    pub reference_refusal: Rc<Cell<bool>>,
+    /// The same, on the refdata role.
+    pub refdata_reference_refusal: Rc<Cell<bool>>,
+    /// The same, on the snapshot role. Depth feeds only.
+    pub snapshot_reference_refusal: Option<Rc<Cell<bool>>>,
 }
 
 impl Harness {
@@ -285,6 +295,8 @@ pub fn feed() -> Feed {
         mktdata_port: MKTDATA_PORT,
         refdata_port: REFDATA_PORT,
         snapshot_port: None,
+        // No snapshot port role, so no rotation to configure.
+        snapshot_cycle: None,
         heartbeat_interval: Duration::from_secs(1),
         definition_cycle: Duration::from_secs(30),
         manifest_cadence: Duration::from_secs(1),
@@ -305,10 +317,27 @@ pub fn depth_feed() -> Feed {
         // Required for a depth feed, and refused for one that carries no
         // snapshot port role. See `StartupError::SnapshotPortRequired`.
         snapshot_port: Some(DEPTH_SNAPSHOT_PORT),
+        // No rotation unless a test asks for one: every existing assertion
+        // about this feed is about what one pulled snapshot looks like, and a
+        // cycle running underneath them would put datagrams on the snapshot
+        // port that no test sent. `depth_feed_with_rotation` is the opt-in.
+        snapshot_cycle: None,
         heartbeat_interval: Duration::from_secs(1),
         definition_cycle: Duration::from_secs(30),
         manifest_cadence: Duration::from_secs(1),
         idle_guard: Duration::from_secs(60),
+    }
+}
+
+/// The market-by-price `[[feed]]` with a snapshot rotation configured.
+///
+/// `cycle` is one full pass over the published set; the per-instrument tick is
+/// derived from it and the instrument count.
+#[must_use]
+pub fn depth_feed_with_rotation(cycle: Duration) -> Feed {
+    Feed {
+        snapshot_cycle: Some(cycle),
+        ..depth_feed()
     }
 }
 
@@ -339,30 +368,55 @@ pub fn harness_with_broken_writes(feed: Feed) -> Harness {
 }
 
 /// Build one feed's three fan-outs over recorders.
+///
+/// **Two members per fan-out, which is the shape a publisher with
+/// `[adapter.tee]` runs**: the transmitter, at `FailureScope::Process`, and the
+/// reference stream, at `FailureScope::Channel`. The second one costs nothing
+/// when it is healthy and it is what makes the two scopes distinguishable in a
+/// test: one of them ends the process and the other must never be able to.
 fn ports(feed: &Feed, metrics: &Arc<PublisherMetrics>, magic: u16) -> (Ports, FeedRecorders) {
-    let open = |name: &'static str, role: PortRole, port: u16| {
+    let open = |name: &'static str, reference_name: &'static str, role: PortRole, port: u16| {
         let sink = RecordingSink::new(name, FailureScope::Process, magic);
         let recorder = sink.recorder();
         let refusal = sink.refusal_switch();
+        let reference = RecordingSink::new(reference_name, FailureScope::Channel, magic);
+        let reference_recorder = reference.recorder();
+        let reference_refusal = reference.refusal_switch();
         let mut tee = Tee::new(role, Arc::clone(metrics));
         tee.add(Box::new(sink));
+        tee.add(Box::new(reference));
         (
             Port {
                 endpoint: EgressEndpoint::new(role, SOURCE, port),
                 sink: tee,
             },
-            recorder,
-            refusal,
+            (recorder, refusal),
+            (reference_recorder, reference_refusal),
         )
     };
 
-    let (mktdata, mktdata_recorder, mktdata_refusal) =
-        open("mktdata", PortRole::Mktdata, feed.mktdata_port);
-    let (refdata, refdata_recorder, _) = open("refdata", PortRole::Refdata, feed.refdata_port);
+    let (mktdata, (mktdata_recorder, mktdata_refusal), (reference_recorder, reference_refusal)) =
+        open(
+            "mktdata",
+            "mktdata-reference",
+            PortRole::Mktdata,
+            feed.mktdata_port,
+        );
+    let (refdata, (refdata_recorder, _), (_, refdata_reference_refusal)) = open(
+        "refdata",
+        "refdata-reference",
+        PortRole::Refdata,
+        feed.refdata_port,
+    );
     let snapshot = feed
         .snapshot_port
-        .map(|port| open("snapshot", PortRole::Snapshot, port));
-    let snapshot_recorder = snapshot.as_ref().map(|(_, recorder, _)| recorder.clone());
+        .map(|port| open("snapshot", "snapshot-reference", PortRole::Snapshot, port));
+    let snapshot_recorder = snapshot
+        .as_ref()
+        .map(|(_, (recorder, _), _)| recorder.clone());
+    let snapshot_reference_refusal = snapshot
+        .as_ref()
+        .map(|(_, _, (_, refusal))| Rc::clone(refusal));
 
     (
         Ports {
@@ -375,6 +429,10 @@ fn ports(feed: &Feed, metrics: &Arc<PublisherMetrics>, magic: u16) -> (Ports, Fe
             refdata: refdata_recorder,
             snapshot: snapshot_recorder,
             mktdata_refusal,
+            reference: reference_recorder,
+            reference_refusal,
+            refdata_reference_refusal,
+            snapshot_reference_refusal,
         },
     )
 }
@@ -510,6 +568,10 @@ pub struct FakeAdapter {
     /// entry per resting level, outward from the top of each side, in the
     /// venue's own decimal text.
     book: Vec<(dz_adapter_core::Side, String, String)>,
+    /// What this adapter says about its own depth when it is asked for a
+    /// snapshot. `Complete` by default because the fake writes its whole book;
+    /// `with_depth_bound` states a bound instead.
+    depth: dz_adapter_core::DepthBound,
 }
 
 impl FakeAdapter {
@@ -521,6 +583,7 @@ impl FakeAdapter {
             declined: 0,
             withdrawing: Vec::new(),
             book: Vec::new(),
+            depth: dz_adapter_core::DepthBound::Complete,
         }
     }
 
@@ -531,6 +594,18 @@ impl FakeAdapter {
             .iter()
             .map(|(side, px, qty)| (*side, (*px).to_owned(), (*qty).to_owned()))
             .collect();
+        self
+    }
+
+    /// Report a bounded book rather than a complete one.
+    ///
+    /// The two are different statements on the wire and only the adapter can
+    /// make either, which is what returning the bound from
+    /// `Adapter::snapshot` is for.
+    #[must_use]
+    pub fn with_depth_bound(mut self, levels: u32) -> Self {
+        self.depth =
+            dz_adapter_core::DepthBound::levels(levels).expect("a bound of zero is `Complete`");
         self
     }
 
@@ -584,7 +659,7 @@ impl Adapter for FakeAdapter {
         &self,
         _instrument: InstrumentRef,
         out: &mut dyn dz_adapter_core::SnapshotSink,
-    ) -> Result<(), dz_adapter_core::AdapterError> {
+    ) -> Result<dz_adapter_core::DepthBound, dz_adapter_core::AdapterError> {
         if self.book.is_empty() {
             // The runtime skips this instrument's slot and comes back, which is
             // the difference between one dormant instrument and a restart loop.
@@ -595,7 +670,7 @@ impl Adapter for FakeAdapter {
         for (side, px, qty) in &self.book {
             out.level(*side, Scalar::text(px), Scalar::text(qty), None);
         }
-        Ok(())
+        Ok(self.depth)
     }
 }
 
@@ -896,4 +971,111 @@ pub fn too_precise_quote(
         },
         ask: SideUpdate::Gone,
     }
+}
+
+/// An [`Input`](dz_ingress_core::Input) that refuses everything, named.
+///
+/// For the checks about *which* sources a venue built: nothing in those tests
+/// connects, and a transport that tried would be a test of a transport.
+#[must_use]
+pub fn refusing_input(connection: dz_adapter_core::ConnectionId) -> RefusingInput {
+    RefusingInput(connection)
+}
+
+pub struct RefusingInput(dz_adapter_core::ConnectionId);
+
+impl dz_ingress_core::Input for RefusingInput {
+    fn connection(&self) -> dz_adapter_core::ConnectionId {
+        self.0
+    }
+
+    fn connect(
+        &mut self,
+        _timeout: Duration,
+    ) -> dz_ingress_core::BoxFuture<'_, Result<(), dz_ingress_core::IngressError>> {
+        Box::pin(async {
+            Err(dz_ingress_core::IngressError::Fatal {
+                detail: "this input exists to be named, not to connect".to_owned(),
+            })
+        })
+    }
+
+    fn send<'a>(
+        &'a mut self,
+        _message: dz_ingress_core::UpstreamMessage<'a>,
+    ) -> dz_ingress_core::BoxFuture<'a, Result<(), dz_ingress_core::IngressError>> {
+        Box::pin(async {
+            Err(dz_ingress_core::IngressError::Fatal {
+                detail: "nothing to send on".to_owned(),
+            })
+        })
+    }
+
+    fn recv<'a>(
+        &'a mut self,
+        _budget: Option<Duration>,
+    ) -> dz_ingress_core::BoxFuture<
+        'a,
+        Result<dz_ingress_core::Received<'a>, dz_ingress_core::IngressError>,
+    > {
+        Box::pin(async {
+            Err(dz_ingress_core::IngressError::Fatal {
+                detail: "nothing to receive from".to_owned(),
+            })
+        })
+    }
+
+    fn shutdown(&mut self) -> dz_ingress_core::BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+}
+
+/// An adapter that records which connection each payload arrived on.
+///
+/// The whole of what the runtime promises a multi-source venue: every source
+/// reaches one adapter, and the adapter can tell them apart.
+/// What one payload was attributed to: the connection's name and its bytes.
+pub type Attributed = (&'static str, Vec<u8>);
+
+/// The record, shared with the test that reads it.
+///
+/// `Arc<Mutex<_>>` and not `Rc<RefCell<_>>`: [`Adapter`] is `Send`, because the
+/// runtime drives it from a thread that is not the one that built it.
+pub type Attributions = Arc<std::sync::Mutex<Vec<Attributed>>>;
+
+#[derive(Default)]
+pub struct ConnectionRecorder {
+    pub seen: Attributions,
+}
+
+impl dz_adapter_core::Adapter for ConnectionRecorder {
+    fn message_types(&self) -> &[&'static str] {
+        &["payload"]
+    }
+
+    fn poll_listings(&mut self, _out: &mut dyn dz_adapter_core::ListingSink) {}
+
+    fn on_payload(
+        &mut self,
+        payload: &dz_adapter_core::Payload<'_>,
+        out: &mut dyn dz_adapter_core::EventSink,
+    ) -> Result<(), dz_adapter_core::ParseError> {
+        out.upstream_message("payload");
+        self.seen
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .push((payload.connection.as_str(), payload.bytes.to_vec()));
+        Ok(())
+    }
+}
+
+/// An [`EventSink`] that keeps nothing.
+///
+/// For the source tests, where what is under test is which connection a payload
+/// arrived on rather than what it lowered to.
+pub struct NoEvents;
+
+impl dz_adapter_core::EventSink for NoEvents {
+    fn upstream_message(&mut self, _message_type: &'static str) {}
+    fn event(&mut self, _event: dz_adapter_core::Event<'_>) {}
 }
