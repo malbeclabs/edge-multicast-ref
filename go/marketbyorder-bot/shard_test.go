@@ -201,7 +201,7 @@ func TestShard_RunProcessesRecordsThenResetAcks(t *testing.T) {
 	s.inbox <- shardMsg{kind: msgRecord, rec: &rec}
 
 	acks := make(chan int, 1)
-	s.inbox <- shardMsg{kind: msgReset, ack: acks}
+	s.inbox <- shardMsg{kind: msgReset, ch: 0, ack: acks}
 	select {
 	case got := <-acks:
 		if got != 0 {

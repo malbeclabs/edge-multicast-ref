@@ -86,11 +86,33 @@ func NewShard(idx, n int, eventsW *EventsWriter, sw *SnapshotWriter, metrics *Me
 	}
 }
 
-func (s *Shard) reset() {
-	s.instruments = map[instKey]*Instrument{}
-	s.refdata = map[instKey]InstrumentDef{}
-	s.deltaBuf = map[instKey][]BufferedDelta{}
-	s.snapCtx = map[snapKey]SnapshotContext{}
+// resetChannel discards every instrument owned by one channel.
+//
+// Scoped to a channel, not the whole shard, because a group can carry two
+// redundant publishers interleaved on the same ports under different
+// channel_ids. Reset Count is per publisher, so a reset on one says nothing
+// about the other, and wiping both would throw away books that never reset.
+func (s *Shard) resetChannel(ch uint8) {
+	for k := range s.instruments {
+		if k.ch == ch {
+			delete(s.instruments, k)
+		}
+	}
+	for k := range s.refdata {
+		if k.ch == ch {
+			delete(s.refdata, k)
+		}
+	}
+	for k := range s.deltaBuf {
+		if k.ch == ch {
+			delete(s.deltaBuf, k)
+		}
+	}
+	for k := range s.snapCtx {
+		if k.ch == ch {
+			delete(s.snapCtx, k)
+		}
+	}
 }
 
 // apply mutates book state for one record and returns the resulting events.
@@ -482,7 +504,7 @@ func (s *Shard) Run(ctx context.Context) {
 				s.handle(*msg.rec)
 			case msgReset:
 				s.mu.Lock()
-				s.reset()
+				s.resetChannel(msg.ch)
 				s.mu.Unlock()
 				if s.sw != nil {
 					s.sw.Reset(ctx) // ctx-aware: never wedges on shutdown
@@ -503,10 +525,14 @@ func (s *Shard) Run(ctx context.Context) {
 	}
 }
 
-// shardMsg is the inbox protocol; populated in Task 5.
+// shardMsg is the inbox protocol. A record mutates book state; a reset wipes one
+// channel's share of it and acks; a fence only acks, which is enough to order a
+// channel-scoped write after every preceding instrument write because the inbox
+// is FIFO.
 type shardMsg struct {
 	rec  *Record
 	kind shardMsgKind
+	ch   uint8 // channel to wipe, for msgReset
 	ack  chan int
 }
 
