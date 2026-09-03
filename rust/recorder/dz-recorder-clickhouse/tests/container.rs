@@ -276,8 +276,37 @@ fn coalescing_produces_parts_at_or_above_the_floor_and_never_single_digit_ones()
     }
     sink.flush(NOW).expect("posted");
 
-    // Every row landed.
-    assert_eq!(scratch.count("datagram"), datagrams);
+    // Every row landed — counted **without** `FINAL`, and that is the point of
+    // this fixture rather than a shortcut past it.
+    //
+    // The synthetic publisher starts every stream at sequence 0 with the same
+    // receive stamps, so four objects of 30, 31, 32 and 33 datagrams are
+    // prefixes of one another: the row for `(instance, sequence, site,
+    // recv_ts)` is identical in all four, and `object_key` is not in the sort
+    // key. `FINAL` therefore collapses them to 33 — correctly, and it is the one
+    // case `001`'s own header calls out as indistinguishable from a re-load: a
+    // duplicate whose receive stamp matches to the nanosecond. A real recorder
+    // cannot produce it, because that would be one datagram written into two
+    // segments.
+    //
+    // What this test is about is **parts**, so the raw count is the right
+    // measure, and asserting both makes the difference legible.
+    let raw: u64 = scratch
+        .scalar(&format!(
+            "SELECT count() FROM {}.datagram",
+            scratch.database
+        ))
+        .parse()
+        .expect("count() is a number");
+    assert_eq!(
+        raw, datagrams,
+        "every row this test inserted is in the table"
+    );
+    assert_eq!(
+        scratch.count("datagram"),
+        33,
+        "and `FINAL` collapses the overlap, which is the sort key doing its job"
+    );
 
     // And in **one** part, not four: `active` only, because an inactive part is
     // one a merge has already replaced.
