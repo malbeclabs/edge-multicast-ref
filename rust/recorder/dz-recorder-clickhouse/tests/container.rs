@@ -311,19 +311,43 @@ fn coalescing_produces_parts_at_or_above_the_floor_and_never_single_digit_ones()
     ));
     assert_eq!(parts, "1", "three objects, one insert, one part");
 
-    // The plan's other half: no configuration produces a part of single-digit
-    // rows. Asserted from the server's own accounting.
+    // The plan's other half — no part of single-digit rows — scoped to
+    // `datagram`, which is the grain the whole argument is about.
+    //
+    // Not database-wide, and the reason is not convenience: `era` and
+    // `segment_coverage` carry on the order of one row per channel instance per
+    // object, so in a three-object fixture they have three rows in total and
+    // their part is three rows however the sink is configured. There is no
+    // batching policy that makes a table with three rows in it hold a part of
+    // fifty. What coalescing buys those grains is a part *per insert* instead of
+    // one per object, which is the assertion below.
     let smallest: u64 = scratch
         .scalar(&format!(
-            "SELECT min(rows) FROM system.parts WHERE database = '{}' AND active AND rows > 0",
+            "SELECT min(rows) FROM system.parts WHERE database = '{}' \
+             AND table = 'datagram' AND active AND rows > 0",
             scratch.database
         ))
         .parse()
         .expect("min(rows) is a number");
     assert!(
         smallest >= 10,
-        "a part of {smallest} rows is the profile the coalescing exists to prevent"
+        "a datagram part of {smallest} rows is the profile the coalescing exists to prevent"
     );
+
+    // And every grain that got rows got **one** part, not one per object. That
+    // is what the coalescing buys the small grains, where a row floor cannot.
+    for grain in [Grain::Datagram, Grain::Era, Grain::SegmentCoverage] {
+        assert_eq!(
+            scratch.scalar(&format!(
+                "SELECT count() FROM system.parts WHERE database = '{}' AND table = '{}' \
+                 AND active",
+                scratch.database,
+                grain.table()
+            )),
+            "1",
+            "{grain} should be one part for three objects"
+        );
+    }
 }
 
 /// **An insert block is collapsed on the sort key before the part is written**,
