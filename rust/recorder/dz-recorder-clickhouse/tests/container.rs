@@ -272,7 +272,11 @@ fn coalescing_produces_parts_at_or_above_the_floor_and_never_single_digit_ones()
         ..scratch.config.clone()
     });
     let mut datagrams = 0u64;
-    // 32, 33 and 34 rows: 32 and 65 are held, and 99 crosses the floor.
+    // 32, 33 and 34 rows: 32 and 65 are held, and 99 crosses the floor — so the
+    // third `write_batch` is what posts and the flush afterwards has nothing
+    // left. Landings are counted wherever they happen, because which call
+    // crosses the floor is arithmetic and not the property under test.
+    let mut landed = Vec::new();
     for (count, role) in [
         (30, PortRole::Mktdata),
         (31, PortRole::Refdata),
@@ -280,10 +284,11 @@ fn coalescing_produces_parts_at_or_above_the_floor_and_never_single_digit_ones()
     ] {
         let rows = batch_on_role(count, role);
         datagrams += rows.rows(Grain::Datagram) as u64;
-        sink.write_batch(rows, NOW).expect("accepted");
+        landed.extend(sink.write_batch(rows, NOW).expect("accepted").landed);
     }
-    let landed = sink.flush(NOW).expect("posted");
-    assert_eq!(landed.len(), 3, "three objects in one insert");
+    landed.extend(sink.flush(NOW).expect("posted"));
+    assert_eq!(landed.len(), 3, "three objects, and all three landed");
+    assert_eq!(sink.held_objects(), 0, "with nothing left held");
 
     // Every row landed, and `FINAL` changes nothing because the keys are
     // disjoint.
