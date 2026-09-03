@@ -80,8 +80,9 @@ unit is enabled, and `--check` is where it is caught.
 
 **Apply `004_recorder_loader_user.sql`, with the password as a parameter.** The
 account is checked in beside the schema and bounded at creation: `INSERT` on the
-five tables, `SELECT` on `segment_coverage` and `era` only — the two the
-adjacency check reads — no DDL at all, a settings profile with a read-bytes
+five tables and nothing else — the adjacency check reads the preceding trailer
+from the loader's own ledger, not from the destination, so the account needs no
+`SELECT` on anything — no DDL at all, a settings profile with a read-bytes
 ceiling and a single thread, and a quota. It is applied by an administrator and
 not by the loader, because a loader that could grant itself privileges is the
 thing the file exists to prevent, and the password is a query parameter so that

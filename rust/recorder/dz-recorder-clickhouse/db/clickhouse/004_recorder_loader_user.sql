@@ -28,12 +28,13 @@
 --
 -- INSERT on the five tables, because that is the whole job.
 --
--- SELECT on `segment_coverage` and `era` **only**. Those two are what the
--- adjacency check reads — the preceding segment's coverage and the boundary rows
--- a later load settles — and nothing else in the loader reads anything. In
--- particular no SELECT on `datagram`: it is the largest table by three orders of
--- magnitude, and an account that cannot scan it cannot accidentally become the
--- most expensive query on the cluster.
+-- **No SELECT on anything.** The adjacency check reads the preceding segment's
+-- trailer from the loader's own on-disk ledger and from the objects it is still
+-- holding, never from the destination, and the only non-INSERT statement the
+-- loader ever issues is `--check`'s `SELECT 1` — which reads no table and needs
+-- no grant. An account that cannot read `datagram` cannot accidentally become
+-- the most expensive query on the cluster; an account that cannot read anything
+-- cannot become one at all.
 --
 -- No DDL at all. A loader that could create or alter a table is a loader that
 -- can apply a schema change nobody reviewed, and the schema here is checked in
@@ -94,7 +95,3 @@ GRANT INSERT ON recorder.era TO dz_loader;
 GRANT INSERT ON recorder.segment_coverage TO dz_loader;
 GRANT INSERT ON recorder.sequence_gap TO dz_loader;
 GRANT INSERT ON recorder.conformance_finding TO dz_loader;
-
--- The two the adjacency check reads, and no others.
-GRANT SELECT ON recorder.segment_coverage TO dz_loader;
-GRANT SELECT ON recorder.era TO dz_loader;

@@ -695,18 +695,21 @@ fn the_loader_account_is_bounded_and_kept_out_of_the_schema() {
         "a profile bounds a query, a quota bounds a day"
     );
 
-    // INSERT on all five, SELECT on exactly the two the adjacency check reads.
+    // INSERT on all five, and nothing else.
     for grain in Grain::ALL {
         assert!(
             user.contains(&format!("GRANT INSERT ON recorder.{}", grain.table())),
             "{grain} cannot be written"
         );
     }
-    assert!(user.contains("GRANT SELECT ON recorder.segment_coverage"));
-    assert!(user.contains("GRANT SELECT ON recorder.era TO"));
+    // And SELECT on nothing at all: the adjacency check reads the preceding
+    // trailer from the loader's own ledger and from what it is still holding,
+    // never from the destination, and `--check`'s `SELECT 1` reads no table.
+    // An unused grant in the file whose argument is least privilege is the one
+    // a later reader takes as permission to write the query it describes.
     assert!(
-        !user.contains("GRANT SELECT ON recorder.datagram"),
-        "the largest table by three orders of magnitude, and nothing reads it"
+        !user.contains("GRANT SELECT"),
+        "a read privilege for a read nothing performs: {user}"
     );
     assert!(
         !user.contains("GRANT ALTER") && !user.contains("GRANT CREATE"),
