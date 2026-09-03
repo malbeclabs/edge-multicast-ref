@@ -165,9 +165,10 @@ pub use config::{
 pub use error::{AdapterInitError, StartupError};
 pub use guard::{ConsistencyGuard, Exit, IdleGuard, Inconsistency, Upstream};
 pub use observer::MetricsObserver;
-pub use pipeline::{FeedPipeline, Port, Ports};
+pub use pipeline::{DroppedSink, FeedPipeline, Port, Ports};
 pub use publisher::{
-    Feeds, Publisher, Refusals, SnapshotError, Teardown, TeardownStep, LISTING_POLL,
+    Feeds, Publisher, Refusals, SnapshotError, SnapshotRefusals, Teardown, TeardownStep,
+    LISTING_POLL,
 };
 pub use registry::{AdapterContext, AdapterRegistry, Venue};
 pub use replay::ReplayInput;

@@ -11,7 +11,7 @@
 mod harness;
 
 use dz_ingress_core::Kind;
-use dz_publisher_runtime::{AdapterContext, AdapterRegistry, Document, StartupError};
+use dz_publisher_runtime::{AdapterContext, AdapterRegistry, Document, FeedSpec, StartupError};
 use harness::Doc;
 
 /// A registry entry that refuses if it is reached.
@@ -31,7 +31,15 @@ fn context<'a>(adapter: &'a dz_publisher_runtime::AdapterConfig) -> AdapterConte
     // No `[[source]]` block: the publisher with one upstream, named by the
     // transport the venue builds. `sources` is where the multi-source documents
     // in `tests/sources.rs` differ.
-    AdapterContext::new(adapter, Some(Kind::Uds), "a-venue", &[])
+    // `top-of-book`, which is the feed every case here is about: the built-in
+    // record adapter refuses a depth feed, and that refusal has its own test.
+    AdapterContext::new(
+        adapter,
+        Some(Kind::Uds),
+        "a-venue",
+        &[],
+        &[FeedSpec::TopOfBook],
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -337,6 +345,64 @@ fn the_builtin_refuses_a_listing_set_of_nothing() {
         .expect_err("no listing was stated");
     let message = error.to_string();
     assert!(message.contains("uds"), "the kind is named: {message}");
+}
+
+#[test]
+fn the_builtin_refuses_a_depth_feed_rather_than_publish_deltas_it_cannot_snapshot() {
+    // **The record encoding decodes `Level` and `Clear`, so this built-in is
+    // depth-capable on the delta path** - and that is what made the gap
+    // dangerous. `UdsAdapter` holds no book by design, so it answers no
+    // snapshot and inherits a default that refuses. Nothing refused the
+    // combination, so `kind = "uds"` beside a `market-by-price` feed resolved
+    // and published: deltas flowed, every counter moved, and no recovery
+    // snapshot after a reset and no periodic snapshot ever went out. A
+    // `LevelUpdate` states the resting quantity at a price, so a subscriber
+    // joining mid-session is not corrected by the next message - it is wrong at
+    // every price it has never seen an update for, indefinitely. That is the
+    // mid-session-join failure `snapshot_cycle` closes, reopened one `kind`
+    // along.
+    let mut doc = Doc::valid();
+    doc.adapter = uds_adapter_section(&one_listing());
+    let document = Document::parse(&doc.render()).expect("valid");
+
+    let error = AdapterRegistry::new()
+        .open(&AdapterContext::new(
+            &document.adapter,
+            Some(Kind::Uds),
+            "a-venue",
+            &[],
+            &[FeedSpec::MarketByPrice],
+        ))
+        .expect_err("this adapter cannot serve a depth feed");
+    let message = error.to_string();
+    assert!(
+        message.contains("market-by-price"),
+        "the feed is named: {message}"
+    );
+    assert!(
+        message.contains("snapshot"),
+        "and what cannot be answered: {message}"
+    );
+}
+
+#[test]
+fn the_builtin_serves_the_feed_whose_messages_are_self_contained() {
+    // The control, and the boundary of the refusal above: a top-of-book feed is
+    // never asked for a snapshot - it carries no snapshot port role at all - so
+    // an adapter that holds no book serves it completely.
+    let mut doc = Doc::valid();
+    doc.adapter = uds_adapter_section(&one_listing());
+    let document = Document::parse(&doc.render()).expect("valid");
+
+    AdapterRegistry::new()
+        .open(&AdapterContext::new(
+            &document.adapter,
+            Some(Kind::Uds),
+            "a-venue",
+            &[],
+            &[FeedSpec::TopOfBook],
+        ))
+        .expect("a feed with no snapshot port role needs no book");
 }
 
 #[test]

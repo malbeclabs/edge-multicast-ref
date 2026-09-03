@@ -75,6 +75,42 @@ pub struct Port {
     pub sink: Tee,
 }
 
+/// A fan-out member that is no longer being offered datagrams.
+///
+/// Named rather than counted, because the two members of a port role's fan-out
+/// are not interchangeable: the transmitter going away means this publisher is
+/// dark, and the reference stream going away means an archive has stopped being
+/// written while every subscriber is served exactly as before. An operator acts
+/// differently on each, and a count of live members says which is which only if
+/// you already know what was configured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DroppedSink<'a> {
+    /// The feed whose fan-out it was in.
+    pub spec: FeedSpec,
+    /// The port role, which is the `port_role` label its failures were counted
+    /// under.
+    pub port_role: PortRole,
+    /// [`DatagramSink::name`](dz_publisher_egress::DatagramSink::name).
+    pub name: &'a str,
+    /// How many members of that fan-out are still live. Zero is a port role
+    /// with nowhere to send, which the next send reports as
+    /// [`SinkError::NotRegistered`](dz_publisher_egress::SinkError::NotRegistered).
+    pub live: usize,
+}
+
+impl std::fmt::Display for DroppedSink<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "`{}` on the {} port role of `{}` ({} live member(s) left)",
+            self.name,
+            self.port_role.as_str(),
+            self.spec.as_str(),
+            self.live
+        )
+    }
+}
+
 /// The port roles one feed operates.
 pub struct Ports {
     pub mktdata: Port,
@@ -495,15 +531,41 @@ impl<F: EmittedFeed> FeedPipeline<F> {
             })
     }
 
-    /// The live member count of one port role's fan-out, for the log line a
-    /// dropped member deserves. `None` for a role this feed does not operate.
+    /// Every fan-out member of this feed that is no longer being fed.
+    ///
+    /// **This is where the silence becomes visible.** A member that fails
+    /// non-transiently is counted and dropped, and the send's outcome is `Ok` —
+    /// which is the only correct answer, because above the sink boundary sits
+    /// the code that advances `Sequence Number` (see
+    /// [`Tee`]). The cost of that is that a reference stream can stop being fed
+    /// with nothing in the send path saying so, and the answer is that the
+    /// runtime reads this between ticks and names what it finds.
+    ///
+    /// `live` travels with each entry because it is what an operator needs
+    /// next: a dropped member beside two live ones is an auxiliary consumer
+    /// gone, and a dropped member beside none is a port role with nowhere left
+    /// to send.
     #[must_use]
-    pub fn live_sinks(&self, port_role: PortRole) -> Option<usize> {
-        match port_role {
-            PortRole::Mktdata => Some(self.mktdata.sink().live()),
-            PortRole::Refdata => Some(self.refdata.sink().live()),
-            PortRole::Snapshot => self.snapshot.as_ref().map(|e| e.sink().live()),
+    pub fn dropped_sinks(&self) -> Vec<DroppedSink<'_>> {
+        let mut dropped = Vec::new();
+        let roles = [
+            (PortRole::Mktdata, Some(&self.mktdata)),
+            (PortRole::Refdata, Some(&self.refdata)),
+            (PortRole::Snapshot, self.snapshot.as_ref()),
+        ];
+        for (port_role, egress) in roles {
+            let Some(egress) = egress else { continue };
+            let live = egress.sink().live();
+            for name in egress.sink().dropped() {
+                dropped.push(DroppedSink {
+                    spec: F::SPEC,
+                    port_role,
+                    name,
+                    live,
+                });
+            }
         }
+        dropped
     }
 
     /// The `Sequence Number` this feed's mktdata series will stamp next.

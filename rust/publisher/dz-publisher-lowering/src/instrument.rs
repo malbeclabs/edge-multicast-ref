@@ -54,13 +54,26 @@ pub struct Instrument {
 #[derive(Debug, Clone, Default)]
 pub struct InstrumentTable {
     slots: Vec<Option<Instrument>>,
+    /// How many slots are held, maintained by `admit` and `withdraw`.
+    ///
+    /// **Cached because [`len`](Self::len) is on a tick path.** The snapshot
+    /// rotation derives its per-instrument interval from the published set on
+    /// every tick, and that tick's cost being O(1) in the size of the set is the
+    /// invariant a large set is sized against — counting the held slots each
+    /// time would have made it O(n) and quietly turned the pacing arithmetic
+    /// into the most expensive thing in the loop. One `usize`, updated at the
+    /// two places that can change it.
+    held: usize,
 }
 
 impl InstrumentTable {
     /// An empty table.
     #[must_use]
     pub const fn new() -> Self {
-        Self { slots: Vec::new() }
+        Self {
+            slots: Vec::new(),
+            held: 0,
+        }
     }
 
     /// Admit an instrument and mint the handle the adapter will carry for it.
@@ -70,6 +83,7 @@ impl InstrumentTable {
     pub fn admit(&mut self, instrument: Instrument) -> InstrumentRef {
         let index = self.slots.len();
         self.slots.push(Some(instrument));
+        self.held += 1;
         // A `u32` handle bounds the table at 2^32 instruments. Reaching it
         // would take more admissions than a publisher process can hold
         // definitions for, so the cast is a documented ceiling rather than a
@@ -84,8 +98,14 @@ impl InstrumentTable {
     /// Idempotent, and silent for a handle the table never held: withdrawing
     /// something that is already gone is the state the caller asked for.
     pub fn withdraw(&mut self, instrument: InstrumentRef) {
+        // `take` rather than an assignment, because the count may only move for
+        // a slot that was actually held: withdrawing twice, or withdrawing a
+        // handle this table never minted, is a state the caller asked for and
+        // not an instrument leaving the published set.
         if let Some(slot) = self.slots.get_mut(instrument.index() as usize) {
-            *slot = None;
+            if slot.take().is_some() {
+                self.held -= 1;
+            }
         }
     }
 
@@ -136,15 +156,21 @@ impl InstrumentTable {
     ///
     /// Withdrawn slots are not counted, so this is the published set and not
     /// the number of handles ever minted.
+    ///
+    /// O(1), and it has to be: the snapshot rotation reads it on every tick to
+    /// derive the per-instrument interval, and a walk of the slots there would
+    /// make the pacing arithmetic the most expensive thing in a tick that is
+    /// documented as O(1) in the published set. Maintained by
+    /// [`admit`](Self::admit) and [`withdraw`](Self::withdraw); see `held`.
     #[must_use]
-    pub fn len(&self) -> usize {
-        self.slots.iter().flatten().count()
+    pub const fn len(&self) -> usize {
+        self.held
     }
 
     /// Whether the table holds nothing.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
+    pub const fn is_empty(&self) -> bool {
+        self.held == 0
     }
 
     /// How many handles have ever been minted, withdrawn ones included.
@@ -164,7 +190,9 @@ impl InstrumentTable {
     /// For a caller walking the table by index — a snapshot rotation — where
     /// resolving the instrument itself is not what is wanted and
     /// [`get`](Self::get)'s refusal would have to be discarded. Costs one bounds
-    /// check, so a rotation's tick stays O(1) in the size of the published set.
+    /// check, which is one of the two halves of a rotation tick being O(1) in
+    /// the size of the published set; the other is [`len`](Self::len), which is
+    /// a cached count for exactly the same reason.
     #[must_use]
     pub fn holds(&self, instrument: InstrumentRef) -> bool {
         self.slots

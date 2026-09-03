@@ -28,6 +28,8 @@ A fleet dashboard only works if every publisher emits the same names, so publish
 
 One name resolves without a venue registering it: `uds`, the built-in record adapter, for an integration that is not Rust and therefore cannot implement the trait. It is a registered kind and not a fallback — it is consulted after the venue's own entries, a venue registering the same name wins, and a `kind` naming neither is still the startup error. Its transport does not exist yet, so its `Input` refuses at connect and names `[adapter.replay]`, which is the path that works.
 
+It serves a top-of-book feed and **refuses a depth one at startup**. The record encoding carries `Level` and `Clear`, so it is depth-capable on the delta path — but it holds no book by design, the source process having already applied the microstructure, so it can answer no snapshot. Run against a `market-by-price` feed it would publish deltas with no recovery snapshot after a reset and no periodic snapshot at all, which is the mid-session-join failure `snapshot_cycle` closes reopened one `kind` along. A depth feed needs an adapter that holds the book.
+
 ## Depth: the two things a snapshot needs
 
 | Decision | Owner | Why there |

@@ -217,14 +217,24 @@ pub struct Harness {
     pub mbp: Option<FeedRecorders>,
 }
 
-/// What one feed's port roles recorded, and the switch that breaks its live
-/// socket.
+/// What one feed's port roles recorded, and the switches that break them.
 pub struct FeedRecorders {
     pub mktdata: Recorder,
     pub refdata: Recorder,
     /// Depth feeds only.
     pub snapshot: Option<Recorder>,
     pub mktdata_refusal: Rc<Cell<bool>>,
+    /// What the mktdata role's **reference stream** recorded: the second member
+    /// of that fan-out, at `FailureScope::Channel`, as `[adapter.tee]` adds it.
+    pub reference: Recorder,
+    /// Breaks that reference stream non-transiently, which is what a socket
+    /// whose path has become unwritable does. A `Channel`-scope member, so the
+    /// publisher must survive it and name it rather than exiting.
+    pub reference_refusal: Rc<Cell<bool>>,
+    /// The same, on the refdata role.
+    pub refdata_reference_refusal: Rc<Cell<bool>>,
+    /// The same, on the snapshot role. Depth feeds only.
+    pub snapshot_reference_refusal: Option<Rc<Cell<bool>>>,
 }
 
 impl Harness {
@@ -358,30 +368,55 @@ pub fn harness_with_broken_writes(feed: Feed) -> Harness {
 }
 
 /// Build one feed's three fan-outs over recorders.
+///
+/// **Two members per fan-out, which is the shape a publisher with
+/// `[adapter.tee]` runs**: the transmitter, at `FailureScope::Process`, and the
+/// reference stream, at `FailureScope::Channel`. The second one costs nothing
+/// when it is healthy and it is what makes the two scopes distinguishable in a
+/// test: one of them ends the process and the other must never be able to.
 fn ports(feed: &Feed, metrics: &Arc<PublisherMetrics>, magic: u16) -> (Ports, FeedRecorders) {
-    let open = |name: &'static str, role: PortRole, port: u16| {
+    let open = |name: &'static str, reference_name: &'static str, role: PortRole, port: u16| {
         let sink = RecordingSink::new(name, FailureScope::Process, magic);
         let recorder = sink.recorder();
         let refusal = sink.refusal_switch();
+        let reference = RecordingSink::new(reference_name, FailureScope::Channel, magic);
+        let reference_recorder = reference.recorder();
+        let reference_refusal = reference.refusal_switch();
         let mut tee = Tee::new(role, Arc::clone(metrics));
         tee.add(Box::new(sink));
+        tee.add(Box::new(reference));
         (
             Port {
                 endpoint: EgressEndpoint::new(role, SOURCE, port),
                 sink: tee,
             },
-            recorder,
-            refusal,
+            (recorder, refusal),
+            (reference_recorder, reference_refusal),
         )
     };
 
-    let (mktdata, mktdata_recorder, mktdata_refusal) =
-        open("mktdata", PortRole::Mktdata, feed.mktdata_port);
-    let (refdata, refdata_recorder, _) = open("refdata", PortRole::Refdata, feed.refdata_port);
+    let (mktdata, (mktdata_recorder, mktdata_refusal), (reference_recorder, reference_refusal)) =
+        open(
+            "mktdata",
+            "mktdata-reference",
+            PortRole::Mktdata,
+            feed.mktdata_port,
+        );
+    let (refdata, (refdata_recorder, _), (_, refdata_reference_refusal)) = open(
+        "refdata",
+        "refdata-reference",
+        PortRole::Refdata,
+        feed.refdata_port,
+    );
     let snapshot = feed
         .snapshot_port
-        .map(|port| open("snapshot", PortRole::Snapshot, port));
-    let snapshot_recorder = snapshot.as_ref().map(|(_, recorder, _)| recorder.clone());
+        .map(|port| open("snapshot", "snapshot-reference", PortRole::Snapshot, port));
+    let snapshot_recorder = snapshot
+        .as_ref()
+        .map(|(_, (recorder, _), _)| recorder.clone());
+    let snapshot_reference_refusal = snapshot
+        .as_ref()
+        .map(|(_, _, (_, refusal))| Rc::clone(refusal));
 
     (
         Ports {
@@ -394,6 +429,10 @@ fn ports(feed: &Feed, metrics: &Arc<PublisherMetrics>, magic: u16) -> (Ports, Fe
             refdata: refdata_recorder,
             snapshot: snapshot_recorder,
             mktdata_refusal,
+            reference: reference_recorder,
+            reference_refusal,
+            refdata_reference_refusal,
+            snapshot_reference_refusal,
         },
     )
 }

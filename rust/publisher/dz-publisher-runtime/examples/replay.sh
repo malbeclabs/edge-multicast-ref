@@ -64,11 +64,13 @@ kind = "uds"
 enabled = true
 path = "$work/payloads"
 
-# The reference stream. The path is a prefix: one socket per port role, so a
-# recorder can attribute a copy without decoding it. This run binds the mktdata
-# one and counts what arrives, which is the only place that wiring is exercised
-# end to end. No backticks in this heredoc: its delimiter is unquoted so that
-# the paths interpolate, which makes a backtick a command substitution.
+# The reference stream. The path is a prefix: one socket per feed *and* port
+# role, so a recorder can attribute a copy without decoding it - a Unix datagram
+# carries neither the destination port nor the group the diff is keyed on. This
+# run binds this feed's mktdata one and counts what arrives, which is the only
+# place that wiring is exercised end to end. No backticks in this heredoc: its
+# delimiter is unquoted so that the paths interpolate, which makes a backtick a
+# command substitution.
 [adapter.tee]
 enabled = true
 path = "$work/tee"
@@ -99,10 +101,10 @@ echo "starting the subscriber on $GROUP via $IFACE"
     -output "$work/out.json" -format json -interface "$IFACE" >"$work/subscriber.log" 2>&1 &
 sleep 2
 
-echo "binding the reference stream on $work/tee.mktdata"
+echo "binding the reference stream on $work/tee.top-of-book.mktdata"
 # Bound before the publisher starts: the tee sends unconnected, so a datagram
 # with nobody bound is dropped and counted rather than queued.
-python3 - "$work/tee.mktdata" "$work/tee.count" <<'TEE' &
+python3 - "$work/tee.top-of-book.mktdata" "$work/tee.count" <<'TEE' &
 import os, socket, sys
 
 path, out = sys.argv[1], sys.argv[2]

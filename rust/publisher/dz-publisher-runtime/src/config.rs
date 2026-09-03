@@ -267,6 +267,11 @@ const fn default_ttl() -> u8 {
 /// is the opposite of `[adapter] kind` — that one has no default because a
 /// wrong guess is invisible, and these have one because a missing value would
 /// otherwise leave a publisher with no heartbeat at all.
+///
+/// Two of the four are `Option` here even so, and it is not a change of that
+/// rule: they still default, once, in [`Document::resolve`] rather than per
+/// block. See [`definition_cycle`](Self::definition_cycle) for the failure that
+/// distinction fixes.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FeedSection {
@@ -335,8 +340,22 @@ pub struct FeedSection {
     /// definition**, not a lap target. `dz-publisher-refdata` paces one lap
     /// across 80% of it, which is what stops the burst the reference-data
     /// specification forbids.
-    #[serde(default = "default_definition_cycle", deserialize_with = "de_duration")]
-    pub definition_cycle: Duration,
+    ///
+    /// # Why this one is an `Option` and the two beside it are not
+    ///
+    /// It is per-feed in the document and **single in the publisher**: it paces
+    /// one reference-data registry, and there is one because `Instrument ID`
+    /// identity can only be one thing. Two enabled blocks stating different
+    /// values is therefore a document that cannot be obeyed and is refused —
+    /// see [`StartupError::FeedsDisagree`] — and that refusal is only about the
+    /// operator's own keys if a stated value is distinguishable from an absent
+    /// one. Serde-defaulted, a document stating this on its depth feed and
+    /// omitting it on its top-of-book feed was refused for a conflict between
+    /// the value they typed and a default they never did.
+    ///
+    /// So absent is absent, and the default is applied once after the check.
+    #[serde(default, deserialize_with = "de_optional_duration")]
+    pub definition_cycle: Option<Duration>,
 
     #[serde(default = "default_manifest_cadence", deserialize_with = "de_duration")]
     pub manifest_cadence: Duration,
@@ -346,8 +365,13 @@ pub struct FeedSection {
     /// point, what it refuses to measure — `[ingress] idle_timeout` is the
     /// other one, and the two are deliberately spelled differently so that
     /// neither can be read as the other.
-    #[serde(default = "default_idle_guard", deserialize_with = "de_duration")]
-    pub idle_guard: Duration,
+    ///
+    /// An `Option` for the reason
+    /// [`definition_cycle`](Self::definition_cycle) is one: there is a single
+    /// guard, because the silence it measures is the publisher's, so two stated
+    /// values are refused — and an omission is not one of the two.
+    #[serde(default, deserialize_with = "de_optional_duration")]
+    pub idle_guard: Option<Duration>,
 }
 
 const fn default_true() -> bool {
@@ -470,16 +494,23 @@ pub struct AdapterConfig {
 /// what reaches subscribers, which is the section an operator reads as *this can
 /// take the feed down*.
 ///
-/// # One socket per port role, and no framing at all
+/// # One socket per feed *and* port role, and no framing at all
 ///
-/// `path` is a **prefix**: the role's own token is appended, so a `path` of
-/// `/run/a-publisher/tee` is written to as `tee.mktdata`, `tee.refdata` and
-/// `tee.snapshot`. The diff this stream exists for is keyed on the destination
-/// port among other things, and a Unix datagram carries no UDP header — so one
-/// socket for three roles would hand a recorder datagrams it could not
-/// attribute without decoding them, and decoding is the one thing a record path
-/// does not do. The shape mirrors the recorder's own configuration, which
-/// already names a port per role.
+/// `path` is a **prefix**: the feed's own `spec` token and the role's are
+/// appended, so a `path` of `/run/a-publisher/tee` on a publisher emitting both
+/// feeds is written to as `tee.top-of-book.mktdata`, `tee.top-of-book.refdata`,
+/// `tee.market-by-price.mktdata`, `tee.market-by-price.refdata` and
+/// `tee.market-by-price.snapshot`.
+///
+/// Both halves of that name are load-bearing, for one reason: **a Unix datagram
+/// carries neither a destination port nor a group**, and the diff this stream
+/// exists for is keyed on both. A recorder handed two roles on one socket, or
+/// two feeds' copies of one role on one socket, cannot attribute a datagram
+/// without decoding it — and decoding is the one thing a record path does not
+/// do. `[[feed]]` is an array, so a publisher emitting two feeds is the ordinary
+/// case rather than the exception; a name keyed on the role alone is right only
+/// for the publisher that happens to emit one feed. The shape mirrors the
+/// recorder's own configuration, which keys its ports per feed.
 ///
 /// The socket is `SOCK_DGRAM`, so one datagram in is one datagram out and there
 /// is no framing to invent, agree on or get wrong. See
@@ -495,6 +526,38 @@ pub struct TeeConfig {
     /// The Unix socket the publisher fans encoded datagrams out to.
     #[serde(default)]
     pub path: Option<PathBuf>,
+}
+
+impl TeeConfig {
+    /// The socket one feed's one port role is copied to.
+    ///
+    /// `<path>.<feed spec>.<port role>`, in the tokens the document itself
+    /// states — the `spec` an operator wrote in the `[[feed]]` block and the
+    /// role's own name — so the file, the socket and the recorder's
+    /// configuration all spell the same two things the same way.
+    ///
+    /// # Errors
+    ///
+    /// [`StartupError::TeeWithoutPath`] when the section is on and names no
+    /// path. Checked again here as well as at load, because a prefix is not
+    /// something to default: a tee that quietly wrote to a relative path would
+    /// have an operator believing copies were being archived.
+    pub fn destination(
+        &self,
+        spec: FeedSpec,
+        port_role: PortRole,
+    ) -> Result<PathBuf, StartupError> {
+        let prefix = self.path.as_deref().ok_or(StartupError::TeeWithoutPath)?;
+        // Built on the `OsString` rather than with `join` or `set_extension`:
+        // the suffix is appended to the last component, and `join` would make it
+        // a child directory instead.
+        let mut destination = prefix.as_os_str().to_owned();
+        destination.push(".");
+        destination.push(spec.as_str());
+        destination.push(".");
+        destination.push(port_role.as_str());
+        Ok(PathBuf::from(destination))
+    }
 }
 
 /// `[adapter.replay]`: a fixture directory for an offline run.
@@ -642,8 +705,13 @@ pub struct Feed {
     /// only. See [`FeedSection::snapshot_cycle`].
     pub snapshot_cycle: Option<Duration>,
     pub heartbeat_interval: Duration,
+    /// The publisher-wide value, which every feed carries identically: it paces
+    /// one reference-data registry. Either the one an enabled `[[feed]]` block
+    /// stated, or the default — see [`one_stated`].
     pub definition_cycle: Duration,
     pub manifest_cadence: Duration,
+    /// The publisher-wide value, as [`definition_cycle`](Self::definition_cycle)
+    /// is: there is one guard, and the silence it measures is the publisher's.
     pub idle_guard: Duration,
 }
 
@@ -762,13 +830,46 @@ impl Document {
         // failure an operator sees and a wrong `Channel ID` is worth hearing
         // about before a misspelled adapter: the second is a typo in one line
         // and the first is a conversation with subscribers.
+        // **Two keys are per-feed in the document and not per-feed in the
+        // publisher, so a document that states two answers is refused rather
+        // than silently given the first feed's.**
+        //
+        // `definition_cycle` paces one registry, and one registry is deliberate:
+        // `Instrument ID` identity is the one thing there can only be one of,
+        // so every feed publishes the same set from the same table and a second
+        // cadence over it would emit the same definition at two rates. See
+        // `Publisher::new`.
+        //
+        // `idle_guard` is one guard because the silence it measures is the
+        // publisher's — upstream delivering and nothing reaching any wire. The
+        // shipped publisher that once had one guard per feed now has exactly one
+        // venue-wide guard, with a fallback to its first feed's key; the
+        // fallback is the part that is a trap, and this is where it is refused
+        // instead.
+        //
+        // **Only two stated values are a disagreement**, which is why both keys
+        // are `Option` in the section and defaulted once here: a document
+        // stating `idle_guard` on its depth feed and omitting it on its
+        // top-of-book feed states one answer, and refusing it for a conflict
+        // with a default the operator never typed is a refusal to start over a
+        // key the file does not contain.
+        let enabled: Vec<FeedSection> =
+            self.feeds.into_iter().filter(|feed| feed.enabled).collect();
+        let definition_cycle = one_stated(
+            "[[feed]] definition_cycle",
+            enabled.iter().map(|feed| feed.definition_cycle),
+            default_definition_cycle(),
+        )?;
+        let idle_guard = one_stated(
+            "[[feed]] idle_guard",
+            enabled.iter().map(|feed| feed.idle_guard),
+            default_idle_guard(),
+        )?;
+
         let mut feeds = Vec::new();
         let mut seen: BTreeMap<&'static str, ()> = BTreeMap::new();
-        for section in self.feeds {
-            if !section.enabled {
-                continue;
-            }
-            let feed = section.resolve()?;
+        for section in enabled {
+            let feed = section.resolve(definition_cycle, idle_guard)?;
             if seen.insert(feed.spec.as_str(), ()).is_some() {
                 return Err(StartupError::DuplicateFeedSpec {
                     spec: feed.spec.as_str().to_owned(),
@@ -791,49 +892,6 @@ impl Document {
                 one: first.get(),
                 another: other.source_id.get(),
             });
-        }
-
-        // **Two keys are per-feed in the document and not per-feed in the
-        // publisher, so a document that states two answers is refused rather
-        // than silently given the first feed's.**
-        //
-        // `definition_cycle` paces one registry, and one registry is deliberate:
-        // `Instrument ID` identity is the one thing there can only be one of,
-        // so every feed publishes the same set from the same table and a second
-        // cadence over it would emit the same definition at two rates. See
-        // `Publisher::new`.
-        //
-        // `idle_guard` is one guard because the silence it measures is the
-        // publisher's — upstream delivering and nothing reaching any wire. The
-        // shipped publisher that once had one guard per feed now has exactly one
-        // venue-wide guard, with a fallback to its first feed's key; the
-        // fallback is the part that is a trap, and this is where it is refused
-        // instead.
-        for (key, value, of_other) in [
-            (
-                "[[feed]] definition_cycle",
-                feeds[0].definition_cycle,
-                feeds
-                    .iter()
-                    .find(|feed| feed.definition_cycle != feeds[0].definition_cycle)
-                    .map(|feed| feed.definition_cycle),
-            ),
-            (
-                "[[feed]] idle_guard",
-                feeds[0].idle_guard,
-                feeds
-                    .iter()
-                    .find(|feed| feed.idle_guard != feeds[0].idle_guard)
-                    .map(|feed| feed.idle_guard),
-            ),
-        ] {
-            if let Some(another) = of_other {
-                return Err(StartupError::FeedsDisagree {
-                    key,
-                    one: value,
-                    another,
-                });
-            }
         }
 
         let selection = SelectionPolicy::new(
@@ -920,6 +978,16 @@ impl Config {
         ids
     }
 
+    /// Every enabled feed's specification, in the document's own order.
+    ///
+    /// Handed to a venue's constructor through
+    /// [`AdapterContext::feeds`](crate::AdapterContext::feeds), which is where
+    /// the reason it exists is written down.
+    #[must_use]
+    pub fn feed_specs(&self) -> Vec<FeedSpec> {
+        self.feeds.iter().map(|feed| feed.spec).collect()
+    }
+
     /// Exactly the port roles this publisher operates, across every enabled
     /// feed.
     #[must_use]
@@ -959,8 +1027,69 @@ impl EgressSection {
     }
 }
 
+/// The one value an enabled `[[feed]]` block set states for a key the publisher
+/// holds once, or the default if none of them states one.
+///
+/// # Absent is absent, and that is the whole point of the function
+///
+/// Both callers' keys used to be serde-defaulted, so every block carried a
+/// value whether or not it stated one — and the disagreement check then read a
+/// document that set `idle_guard = "300s"` on its depth feed and omitted it on
+/// its top-of-book feed as a conflict between 300s and a 60s default the
+/// operator never typed. A publisher that started yesterday would refuse to
+/// start today, naming two values, one of which is not in the file.
+///
+/// So the sections carry `Option`, only two stated values are a disagreement,
+/// and the default is applied once — here, after the check, so that a single
+/// stated value governs every feed rather than only the block it appears in.
+///
+/// The zero check is here too, for the same reason it is a refusal at all: zero
+/// is what an unset key reads as in a document that spells its durations as
+/// bare numbers, and a cadence of zero is not a slower cadence.
+///
+/// # Errors
+///
+/// [`StartupError::ZeroDuration`] for a stated zero, and
+/// [`StartupError::FeedsDisagree`] naming both values when two blocks state
+/// different ones.
+fn one_stated(
+    key: &'static str,
+    stated: impl Iterator<Item = Option<Duration>>,
+    default: Duration,
+) -> Result<Duration, StartupError> {
+    let mut settled: Option<Duration> = None;
+    for value in stated.flatten() {
+        if value.is_zero() {
+            return Err(StartupError::ZeroDuration { key });
+        }
+        match settled {
+            None => settled = Some(value),
+            // Named in the document's own order, so the two values in the
+            // message are the first and the one that disagreed with it.
+            Some(one) if one != value => {
+                return Err(StartupError::FeedsDisagree {
+                    key,
+                    one,
+                    another: value,
+                })
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(settled.unwrap_or(default))
+}
+
 impl FeedSection {
-    fn resolve(self) -> Result<Feed, StartupError> {
+    /// Check one block, with the two publisher-wide cadences already settled.
+    ///
+    /// They are arguments rather than fields of the block because they are not
+    /// per-feed values: see [`one_stated`]. Every resolved [`Feed`] carries the
+    /// same pair by construction.
+    fn resolve(
+        self,
+        definition_cycle: Duration,
+        idle_guard: Duration,
+    ) -> Result<Feed, StartupError> {
         let spec = FeedSpec::resolve(&self.spec)?;
         let source_id = SourceId::new(self.source_id).ok_or(StartupError::BadSourceId {
             source_id: self.source_id,
@@ -1033,11 +1162,11 @@ impl FeedSection {
             });
         }
 
+        // `definition_cycle` and `idle_guard` are not here: they are checked
+        // once, across every enabled block, by `one_stated`.
         for (key, value) in [
             ("[[feed]] heartbeat_interval", self.heartbeat_interval),
-            ("[[feed]] definition_cycle", self.definition_cycle),
             ("[[feed]] manifest_cadence", self.manifest_cadence),
-            ("[[feed]] idle_guard", self.idle_guard),
         ]
         .into_iter()
         .chain(
@@ -1059,9 +1188,9 @@ impl FeedSection {
             snapshot_port: self.snapshot_port,
             snapshot_cycle: self.snapshot_cycle,
             heartbeat_interval: self.heartbeat_interval,
-            definition_cycle: self.definition_cycle,
+            definition_cycle,
             manifest_cadence: self.manifest_cadence,
-            idle_guard: self.idle_guard,
+            idle_guard,
         })
     }
 }

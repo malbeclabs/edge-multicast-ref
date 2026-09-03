@@ -453,3 +453,63 @@ fn a_top_of_book_publisher_has_no_rotation_to_drive() {
     h.clock.advance(Duration::from_secs(60));
     assert!(h.publisher.periodic_snapshot(&adapter).is_none());
 }
+
+#[test]
+fn a_refused_snapshot_is_counted_whether_it_was_expected_or_not() {
+    // **The one failure on this path that is invisible in every other number.**
+    // The datagram counters keep moving, the sequence series stays dense, the
+    // heartbeat is on time, and the aggregate snapshot rate looks normal because
+    // the instruments that *are* ready are still being served — while one book
+    // never bootstraps and no subscriber can build it. It reached a log line and
+    // nothing else, printed on every 10ms tick, and `NotReady` was discarded
+    // outright: *never ready* and *not ready yet* are the same line, and only a
+    // count separates them.
+    let mut h = harness(depth_feed_with_rotation(Duration::from_secs(1)));
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    assert_eq!(h.publisher.snapshot_refusals().total(), 0);
+
+    // The first call schedules; each one after it finds a book with no levels.
+    h.clock.advance(Duration::from_secs(1));
+    assert!(h.publisher.periodic_snapshot(&adapter).is_none());
+    for _ in 0..3 {
+        h.clock.advance(Duration::from_secs(1));
+        assert!(matches!(
+            h.publisher.periodic_snapshot(&adapter),
+            Some(Err(SnapshotError::Adapter(AdapterError::NotReady { .. })))
+        ));
+    }
+
+    let counts = h.publisher.snapshot_refusals();
+    assert_eq!(
+        counts.not_ready, 3,
+        "every refusal is counted, not only the ones that get a line"
+    );
+    assert_eq!(
+        counts.refused, 0,
+        "a book that has not bootstrapped is the expected refusal and is kept apart from the rest"
+    );
+    assert_eq!(counts.total(), 3);
+}
+
+#[test]
+fn a_recovery_snapshot_the_framing_refuses_is_counted_as_a_refusal() {
+    // The other bucket, and through the other entry point: the count is taken
+    // where both paths meet, so a caller cannot forget it. A level whose price
+    // the instrument's exponent cannot state exactly refuses the whole snapshot
+    // - an incomplete one is worse than none - and that is a refusal somebody
+    // has to act on rather than a book that is still warming up.
+    let mut h = depth();
+    let mut adapter = FakeAdapter::new(&["A-B"]).with_book(&[(Side::Bid, "100.2567", "2.500")]);
+    h.publisher.poll_listings(&mut adapter);
+
+    let handle = adapter.handles()[0];
+    let refused = h
+        .publisher
+        .snapshot_anchored_at(&adapter, handle, 7)
+        .expect_err("four decimal places, and the exponent states two");
+    assert!(matches!(refused, SnapshotError::Lowering(_)), "{refused}");
+
+    let counts = h.publisher.snapshot_refusals();
+    assert_eq!((counts.refused, counts.not_ready), (1, 0));
+}

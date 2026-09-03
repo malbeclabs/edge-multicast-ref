@@ -22,6 +22,18 @@
 //! misspelling. What a built-in changes is only that this binary knows one name
 //! without being told it.
 //!
+//! # It serves a top-of-book feed and refuses a depth one
+//!
+//! The record encoding carries `Level` and `Clear`, so this adapter is
+//! depth-capable on the *delta* path — and that is what makes the gap worth a
+//! named refusal. [`UdsAdapter`] holds no book, deliberately: the source process
+//! already applied the microstructure, and a second opinion about it here would
+//! be a second book to be wrong. So it answers no snapshot, and a depth feed
+//! obliges one — after a reset, and on a cadence for the subscriber that joins
+//! mid-session. `kind = "uds"` beside a `market-by-price` feed is therefore
+//! refused at startup rather than run: see `DepthFeedUnsupported`, which is the
+//! whole argument.
+//!
 //! # What is honestly missing, and what it does about it
 //!
 //! The transport half does not exist: `Kind::Uds` is a token in
@@ -198,6 +210,13 @@ token_enum! {
 }
 
 fn uds(cx: &AdapterContext<'_>) -> Result<Venue, AdapterInitError> {
+    // **Refused before anything else, because it is the one thing this adapter
+    // cannot do.** See `DepthFeedUnsupported`.
+    if let Some(spec) = cx.feeds().iter().find(|spec| spec.has_snapshot_port()) {
+        return Err(Box::new(DepthFeedUnsupported {
+            spec: spec.as_str(),
+        }));
+    }
     let upstream: Upstream = cx
         .upstream()
         .map_err(|source| -> AdapterInitError { Box::new(source) })?;
@@ -231,6 +250,41 @@ fn uds(cx: &AdapterContext<'_>) -> Result<Venue, AdapterInitError> {
         adapter: Box::new(UdsAdapter::new(listings)),
         sources,
     })
+}
+
+/// `kind = "uds"` alongside a feed that carries a snapshot port role.
+///
+/// # Why this is a startup error and not a runtime one
+///
+/// The record encoding carries `Level` and `Clear`, so this built-in is
+/// *depth-capable* on the delta path — and that is exactly what makes the gap
+/// dangerous. [`UdsAdapter`] holds no book, by design: the process on the other
+/// side already applied the microstructure, and a second opinion about it here
+/// would be a second book to be wrong. So it implements no `snapshot`, and
+/// [`Adapter::snapshot`](dz_adapter_core::Adapter::snapshot)'s default refuses.
+///
+/// Without this refusal the configuration resolves and the feed publishes:
+/// deltas flow, the datagram counters move, the sequence series stays dense —
+/// and **no recovery snapshot after a reset and no periodic snapshot ever go
+/// out**. A `LevelUpdate` states the resting quantity at a price, so a
+/// subscriber with no starting state is not corrected by the next message. It is
+/// wrong at every price it has never seen an update for, indefinitely, and a
+/// subscriber that lost one datagram has nowhere to recover from. That is the
+/// mid-session-join failure `[[feed]] snapshot_cycle` exists to close, reopened
+/// one `kind` along.
+///
+/// The way to publish a depth feed is a venue adapter that holds the book. What
+/// this built-in serves is a feed whose every message is self-contained.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "the built-in record adapter holds no book, so it cannot answer a snapshot, and \
+     `[[feed]] spec = \"{spec}\"` carries a snapshot port role: the feed would publish deltas \
+     with no recovery snapshot after a reset and no periodic snapshot at all, which no \
+     subscriber joining mid-session can build a book from. A depth feed needs an adapter that \
+     holds the book"
+)]
+struct DepthFeedUnsupported {
+    spec: &'static str,
 }
 
 /// `[adapter.upstream]` named no instrument.

@@ -58,7 +58,7 @@ use dz_adapter_core::Adapter;
 use dz_ingress_core::{Input, Kind};
 use serde::de::DeserializeOwned;
 
-use crate::config::{AdapterConfig, ReplayConfig, Source};
+use crate::config::{AdapterConfig, FeedSpec, ReplayConfig, Source};
 use crate::error::{AdapterInitError, StartupError};
 
 /// What a venue's constructor hands back: the mapping, and the transport it
@@ -139,6 +139,7 @@ pub struct AdapterContext<'a> {
     credentials: &'a toml::Table,
     replay: &'a ReplayConfig,
     sources: &'a [Source],
+    feeds: &'a [FeedSpec],
 }
 
 impl<'a> AdapterContext<'a> {
@@ -150,6 +151,7 @@ impl<'a> AdapterContext<'a> {
         ingress_kind: Option<Kind>,
         venue: &'a str,
         sources: &'a [Source],
+        feeds: &'a [FeedSpec],
     ) -> Self {
         Self {
             kind: &adapter.kind,
@@ -159,6 +161,7 @@ impl<'a> AdapterContext<'a> {
             credentials: &adapter.credentials,
             replay: &adapter.replay,
             sources,
+            feeds,
         }
     }
 
@@ -200,6 +203,26 @@ impl<'a> AdapterContext<'a> {
     #[must_use]
     pub const fn sources(&self) -> &'a [Source] {
         self.sources
+    }
+
+    /// Every enabled `[[feed]] spec` this publisher emits.
+    ///
+    /// **Which normalized-event surface will be asked for, and nothing about
+    /// the wire.** No `Channel ID`, `Source ID`, group, port or era comes with
+    /// it — those are the values this boundary exists to keep out of a venue's
+    /// hands. A feed specification is the opposite kind of fact: it is what the
+    /// runtime will ask this adapter *for*, and an adapter is the only thing
+    /// that knows whether it can answer.
+    ///
+    /// It is here for the refusal that needs it. A depth feed obliges
+    /// [`Adapter::snapshot`](dz_adapter_core::Adapter::snapshot) — a subscriber
+    /// that lost a datagram has nowhere else to recover from, and one joining
+    /// mid-session has nowhere to start — so an adapter that holds no book must
+    /// be able to refuse that combination at startup rather than publish deltas
+    /// no subscriber can apply. See [`crate::builtin`].
+    #[must_use]
+    pub const fn feeds(&self) -> &'a [FeedSpec] {
+        self.feeds
     }
 
     /// The `venue` label, for an adapter that wants its own log lines to carry

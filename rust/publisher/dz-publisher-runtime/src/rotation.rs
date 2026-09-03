@@ -19,6 +19,14 @@
 //! O(1) in the size of the published set, and it means a stall degrades into a
 //! slower lap rather than a spike.
 //!
+//! **O(1) is a claim about two calls, and both had to be made true for it.**
+//! [`InstrumentTable::holds`] is a bounds check, and
+//! [`InstrumentTable::len`] — which [`SnapshotRotation::due`] reads on every
+//! tick to derive the per-instrument interval — is a cached count rather than a
+//! walk of the slots. It was the walk, which made the pacing arithmetic the
+//! most expensive thing in a tick that says here it is constant, and this is the
+//! invariant a maintainer would size a large published set against.
+//!
 //! **What that does not survive**, stated because it is the ceiling and not a
 //! detail: a set so large that `cycle / instruments` falls below the runtime's
 //! own tick laps more slowly than configured, and a single instrument whose book

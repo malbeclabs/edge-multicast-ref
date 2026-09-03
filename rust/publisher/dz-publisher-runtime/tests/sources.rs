@@ -399,12 +399,18 @@ fn registry_building(builds: &'static [&'static str]) -> AdapterRegistry {
     })
 }
 
-fn context<'a>(config: &'a dz_publisher_runtime::Config) -> AdapterContext<'a> {
+fn context(config: &dz_publisher_runtime::Config) -> AdapterContext<'_> {
+    // Leaked because the context borrows every section it carries and the feed
+    // specifications are derived rather than stored. One allocation per case in
+    // a test binary, which is what a `&'static` costs here.
+    let feeds: &'static [dz_publisher_runtime::FeedSpec] =
+        Box::leak(config.feed_specs().into_boxed_slice());
     AdapterContext::new(
         &config.adapter,
         config.ingress_kind,
         &config.venue,
         &config.sources,
+        feeds,
     )
 }
 

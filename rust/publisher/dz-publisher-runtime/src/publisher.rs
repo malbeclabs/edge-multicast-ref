@@ -55,7 +55,7 @@
 use std::sync::Arc;
 
 use dz_adapter_core::{
-    Adapter, DepthBound, Desync, Event, EventSink, InstrumentRef, VenueTimestampKind,
+    Adapter, AdapterError, DepthBound, Desync, Event, EventSink, InstrumentRef, VenueTimestampKind,
 };
 use dz_edge_core::fixed_point::ScaleError;
 use dz_edge_mbp::MarketByPrice;
@@ -71,7 +71,7 @@ use dz_publisher_refdata::{Counts, Registry, StateStore};
 use crate::clock::Clock;
 use crate::config::EmittedFeed;
 use crate::guard::{ConsistencyGuard, Exit, IdleGuard, Inconsistency};
-use crate::pipeline::FeedPipeline;
+use crate::pipeline::{DroppedSink, FeedPipeline};
 use crate::rotation::SnapshotRotation;
 
 /// How often the runtime drains the adapter's listings.
@@ -132,6 +132,24 @@ impl Feeds {
             })
             .map(str::to_owned)
     }
+
+    /// Every fan-out member, on any feed and any port role, that is no longer
+    /// being fed. See [`FeedPipeline::dropped_sinks`].
+    #[must_use]
+    pub fn dropped_sinks(&self) -> Vec<DroppedSink<'_>> {
+        let mut dropped = self
+            .top_of_book
+            .as_ref()
+            .map(FeedPipeline::dropped_sinks)
+            .unwrap_or_default();
+        dropped.extend(
+            self.market_by_price
+                .as_ref()
+                .map(FeedPipeline::dropped_sinks)
+                .unwrap_or_default(),
+        );
+        dropped
+    }
 }
 
 /// Why a pulled snapshot did not reach the wire.
@@ -165,6 +183,69 @@ pub enum SnapshotError {
     /// The snapshot framed and did not send.
     #[error(transparent)]
     Egress(#[from] dz_publisher_egress::EgressError),
+}
+
+/// Snapshots that were asked for and did not go out.
+///
+/// # Why these are counted at all
+///
+/// A refused snapshot is the one failure on this path that is invisible in
+/// every other number. The datagram counters keep moving, the sequence series
+/// stays dense, the heartbeat is on time, and the aggregate snapshot rate looks
+/// normal because the *other* instruments are being served — while one
+/// instrument's book never bootstraps and no subscriber can build it. The
+/// refusal reached a log line and nothing else, and a log line 100 times a
+/// second is not a record: it is what makes an operator turn the log off.
+///
+/// # Two counts, because the caller does two different things
+///
+/// [`AdapterError::NotReady`] is expected: the rotation has already stepped
+/// past the instrument, it comes back on the next lap, and one dormant
+/// instrument is not a feed whose snapshots stop. It is counted rather than
+/// discarded precisely because *never ready* and *not ready yet* are the same
+/// line — the difference is only visible as a number that stops growing or does
+/// not.
+///
+/// Everything else is a refusal somebody has to act on: an exponent that cannot
+/// state a level exactly, a handle the adapter does not hold, a socket that
+/// refused the framed snapshot.
+///
+/// There is no metric family for either. The normative `dz_publisher_*` set is
+/// closed by a governing playbook and has no home for a *snapshot that was not
+/// taken* — `egress_errors_total` is about a datagram that failed to leave, and
+/// a snapshot refused before framing never became one. Same answer as
+/// [`Refusals`], for the same reason, and the exit report prints both.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SnapshotRefusals {
+    /// The adapter's book had not bootstrapped, or its session had not
+    /// authenticated: [`AdapterError::NotReady`].
+    pub not_ready: u64,
+    /// Every other refusal, on the framing, the adapter or the socket.
+    pub refused: u64,
+}
+
+impl SnapshotRefusals {
+    /// Count one refusal.
+    ///
+    /// An exhaustive match rather than a fallback arm, so that a cause added to
+    /// [`SnapshotError`] has to be classified here instead of landing in
+    /// whichever bucket a `_` named.
+    fn record(&mut self, error: &SnapshotError) {
+        match error {
+            SnapshotError::Adapter(AdapterError::NotReady { .. }) => self.not_ready += 1,
+            SnapshotError::Adapter(
+                AdapterError::UnknownInstrument | AdapterError::Internal { .. },
+            )
+            | SnapshotError::NoDepthFeed
+            | SnapshotError::Lowering(_)
+            | SnapshotError::Egress(_) => self.refused += 1,
+        }
+    }
+
+    #[must_use]
+    pub const fn total(&self) -> u64 {
+        self.not_ready + self.refused
+    }
 }
 
 /// Lowering refusals, by the reason each is distinguishable under.
@@ -353,6 +434,8 @@ pub struct Publisher<S: StateStore, K: Clock + Clone> {
     /// forwards the delta.
     forwarded: Counts,
     refusals: Refusals,
+    /// Snapshots asked for and not sent. See [`SnapshotRefusals`].
+    snapshot_refusals: SnapshotRefusals,
     unroutable: u64,
     /// Instruments announced as discarded, each with the anchor its
     /// `InstrumentReset` promised. See [`Self::owed_snapshots`].
@@ -420,6 +503,7 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
             definitions: Vec::new(),
             forwarded: Counts::default(),
             refusals: Refusals::default(),
+            snapshot_refusals: SnapshotRefusals::default(),
             unroutable: 0,
             owed: Vec::new(),
             payload_recv_ts_ns: None,
@@ -584,13 +668,14 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
         // The point in the live stream this book state is true as of, which is
         // what tells a subscriber which live messages to apply after it and
         // which to discard.
-        let anchor = self
-            .feeds
-            .market_by_price
-            .as_ref()
-            .ok_or(SnapshotError::NoDepthFeed)?
-            .mktdata_sequence()
-            .unwrap_or(0);
+        let anchor = match self.feeds.market_by_price.as_ref() {
+            Some(pipeline) => pipeline.mktdata_sequence().unwrap_or(0),
+            None => {
+                let error = SnapshotError::NoDepthFeed;
+                self.snapshot_refusals.record(&error);
+                return Err(error);
+            }
+        };
         self.snapshot_anchored_at(adapter, instrument, anchor)
     }
 
@@ -609,6 +694,25 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
     ///
     /// As [`snapshot`](Self::snapshot).
     pub fn snapshot_anchored_at(
+        &mut self,
+        adapter: &dyn Adapter,
+        instrument: InstrumentRef,
+        anchor: u64,
+    ) -> Result<Snapshot, SnapshotError> {
+        // **Counted here rather than by the caller**, because both entry points
+        // reach this one and a count a caller has to remember to take is a count
+        // that is missing from whichever path was added last. See
+        // [`SnapshotRefusals`].
+        let outcome = self.capture_and_send(adapter, instrument, anchor);
+        if let Err(error) = &outcome {
+            self.snapshot_refusals.record(error);
+        }
+        outcome
+    }
+
+    /// The capture, the framing and the send, with the counting left to
+    /// [`snapshot_anchored_at`](Self::snapshot_anchored_at).
+    fn capture_and_send(
         &mut self,
         adapter: &dyn Adapter,
         instrument: InstrumentRef,
@@ -767,6 +871,12 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
         self.refusals
     }
 
+    /// Snapshots asked for and not sent. See [`SnapshotRefusals`].
+    #[must_use]
+    pub const fn snapshot_refusals(&self) -> SnapshotRefusals {
+        self.snapshot_refusals
+    }
+
     /// Events no enabled feed carried.
     ///
     /// A `Quote` on a publisher that emits only depth, a `Level` on one that
@@ -779,6 +889,22 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
     #[must_use]
     pub const fn unroutable(&self) -> u64 {
         self.unroutable
+    }
+
+    /// Every fan-out member that is no longer being fed, on any feed and any
+    /// port role.
+    ///
+    /// **Read between ticks, because a send cannot report it.** A member whose
+    /// failure is not transient is counted and dropped and the send still
+    /// succeeds — the only correct outcome, since propagating it would put a
+    /// decision about `Sequence Number` in the hands of one auxiliary
+    /// consumer's broken socket. The cost is that the fan-out goes quiet
+    /// silently, and this is the reading that ends the silence: the runtime
+    /// names each entry the first time it sees it, and the exit report names
+    /// them all. See [`FeedPipeline::dropped_sinks`](crate::FeedPipeline::dropped_sinks).
+    #[must_use]
+    pub fn dropped_sinks(&self) -> Vec<DroppedSink<'_>> {
+        self.feeds.dropped_sinks()
     }
 
     /// The reference-data owner, for a diagnostic and for a test.

@@ -158,11 +158,17 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
     // `connection_state == 0` alert can fire on a publisher whose upstream never
     // came up at all, and the upstream message types, so that no panel is blank
     // because a message has not arrived yet.
+    // The feeds go with it, because whether this adapter can serve them is a
+    // question only the adapter can answer: a depth feed obliges
+    // `Adapter::snapshot`, and an adapter that holds no book has to be able to
+    // refuse that at startup rather than publish deltas no subscriber can apply.
+    let feed_specs = config.feed_specs();
     let cx = AdapterContext::new(
         &config.adapter,
         config.ingress_kind,
         &config.venue,
         &config.sources,
+        &feed_specs,
     );
     let venue = registry.open(&cx)?;
     check_sources(&config, &venue)?;
@@ -544,26 +550,25 @@ fn open_ports(
         // fails and must never be able to end a send, which is exactly what
         // `Tee` guarantees a member and what `FailureScope::Channel` declares.
         //
-        // **One socket per port role**, at `path` suffixed with the role's own
-        // token. The diff this stream exists for is keyed on the destination
-        // port among other things, and a Unix datagram carries no UDP header —
-        // so three roles sharing one socket would hand a recorder datagrams it
-        // could not attribute without decoding them, and decoding is the one
-        // thing a record path does not do. The shape mirrors the recorder's own
-        // configuration, which already names a port per role.
+        // **One socket per feed and port role**, at `path` suffixed with the
+        // feed's own `spec` token and the role's. A Unix datagram carries
+        // neither a destination port nor a group, and the diff this stream
+        // exists for is keyed on both — so a recorder handed two roles on one
+        // socket, or two feeds' copies of one role on one socket, could not
+        // attribute a datagram without decoding it, and decoding is the one
+        // thing a record path does not do.
+        //
+        // **The feed is in the name because this function runs once per feed.**
+        // `[[feed]]` is an array and a publisher emitting both feeds is the
+        // ordinary case; a name keyed on the role alone is correct only for the
+        // publisher that happens to emit one. The shape mirrors the recorder's
+        // own configuration, which keys its ports per feed. See
+        // `TeeConfig::destination`.
         if config.adapter.tee.enabled {
-            let prefix = config
-                .adapter
-                .tee
-                .path
-                .as_deref()
-                .ok_or(StartupError::TeeWithoutPath)?;
-            let mut destination = prefix.as_os_str().to_owned();
-            destination.push(".");
-            destination.push(port_role.as_str());
-            let destination = PathBuf::from(destination);
+            let destination = config.adapter.tee.destination(feed.spec, port_role)?;
             eprintln!(
-                "teeing {} datagrams to {}",
+                "teeing {} {} datagrams to {}",
+                feed.spec.as_str(),
                 port_role.as_str(),
                 destination.display()
             );
@@ -589,9 +594,10 @@ fn open_ports(
 
 /// The numbers no series carries, on the way out.
 ///
-/// Three of them, each named where it is documented: lowering refusals by
-/// reason, events this build had no feed to carry, and adapter failures the
-/// closed family set has nowhere for. A log line is not a substitute for a
+/// Five of them, each named where it is documented: lowering refusals by
+/// reason, snapshots asked for and not sent, events this build had no feed to
+/// carry, adapter failures the closed family set has nowhere for, and fan-out
+/// members that are no longer being fed. A log line is not a substitute for a
 /// series and is not offered as one; it is what a closed metric set leaves.
 fn report<S: StateStore, K: Clock + Clone>(
     publisher: &Publisher<S, K>,
@@ -611,6 +617,24 @@ fn report<S: StateStore, K: Clock + Clone>(
             detail.join(" ")
         );
     }
+    // Both counts, whenever either moved. A depth feed whose books never
+    // bootstrap is the case this exists for, and it is invisible everywhere
+    // else: the datagram counters keep moving, the sequence series stays dense,
+    // and the aggregate snapshot rate looks normal because the instruments that
+    // *are* ready are still being served.
+    let snapshots = publisher.snapshot_refusals();
+    if snapshots.total() > 0 {
+        eprintln!(
+            "dz-publisher-runtime: {} snapshots were not sent ({} refused, {} on a book that was \
+             not ready)",
+            snapshots.total(),
+            snapshots.refused,
+            snapshots.not_ready
+        );
+    }
+    for dropped in publisher.dropped_sinks() {
+        eprintln!("dz-publisher-runtime: was no longer sending to {dropped}");
+    }
     if publisher.unroutable() > 0 {
         eprintln!(
             "dz-publisher-runtime: {} events had no feed to carry them",
@@ -625,12 +649,45 @@ fn report<S: StateStore, K: Clock + Clone>(
     }
 }
 
+/// Whether a repetition of the same failure is worth another line.
+///
+/// **The first one, then one per decade: 1, 10, 100, 1,000.** The tick body runs
+/// every 10ms, so a permanent refusal printed on each of them is up to a hundred
+/// lines a second — which does not inform an operator, it teaches them to turn
+/// the log off, and it buries every other line in the process. A decade
+/// schedule states the first occurrence promptly, keeps saying so while the
+/// order of magnitude is still changing, and costs four lines an hour where the
+/// unfiltered version costs three hundred thousand.
+///
+/// The count itself is not sampled — see
+/// [`SnapshotRefusals`](crate::SnapshotRefusals) — so what a line drops is a
+/// repetition and never the evidence.
+const fn worth_a_line(count: u64) -> bool {
+    match count {
+        0 => false,
+        1 => true,
+        // `is_power_of_ten` does not exist; a divisor walk on a `u64` this
+        // small is a handful of divisions on a path that only runs when
+        // something has already gone wrong.
+        mut n => {
+            while n % 10 == 0 {
+                n /= 10;
+            }
+            n == 1
+        }
+    }
+}
+
 /// Poll listings and tick until a guard fires.
 async fn tick_loop<S: StateStore, K: Clock + Clone>(
     publisher: &RefCell<Publisher<S, K>>,
     adapter: &Arc<Mutex<Box<dyn Adapter>>>,
     clock: &K,
 ) -> Exit {
+    // A fan-out member is named the first time it is seen to be gone and never
+    // again: the drop is permanent by construction, so a line per tick would be
+    // a line per tick forever. The exit report names the whole set again.
+    let mut named_dropped: Vec<String> = Vec::new();
     loop {
         clock.sleep(TICK).await;
         // One synchronous critical section, and nothing awaited inside it. See
@@ -653,10 +710,16 @@ async fn tick_loop<S: StateStore, K: Clock + Clone>(
                 // consistency check will announce it again with a fresh anchor.
                 // Retrying here would hold a tick open on a book that is not
                 // ready.
+                //
+                // Every refusal is counted before it is printed, and printed on
+                // the decade schedule `worth_a_line` states — including
+                // `NotReady`, which is filtered here as it is below because a
+                // book that has not bootstrapped is the expected refusal and the
+                // count is where it is recorded.
                 for (instrument, anchor) in publisher.owed_snapshots() {
                     if let Err(error) = publisher.snapshot_anchored_at(&**held, instrument, anchor)
                     {
-                        eprintln!("dz-publisher-runtime: a recovery snapshot was refused: {error}");
+                        report_snapshot_refusal("a recovery", &error, &publisher);
                     }
                 }
                 // The periodic rotation, which is what a subscriber joining
@@ -667,14 +730,19 @@ async fn tick_loop<S: StateStore, K: Clock + Clone>(
                 // past the instrument, so a book that has not bootstrapped
                 // costs one slot of one lap rather than the rotation.
                 if let Some(Err(error)) = publisher.periodic_snapshot(&**held) {
-                    match error {
-                        // Expected, transient, and not a failure: the contract
-                        // of `NotReady` is that the caller comes back.
-                        SnapshotError::Adapter(AdapterError::NotReady { .. }) => {}
-                        error => eprintln!(
-                            "dz-publisher-runtime: a periodic snapshot was refused: {error}"
-                        ),
-                    }
+                    report_snapshot_refusal("a periodic", &error, &publisher);
+                }
+            }
+            // A fan-out member that has been dropped is silent by design — the
+            // send that lost it returned `Ok`, because the alternative is one
+            // auxiliary consumer's socket deciding what happens to a
+            // `Sequence Number`. Read between ticks and named once, which is
+            // where that silence ends.
+            for dropped in publisher.dropped_sinks() {
+                let name = dropped.to_string();
+                if !named_dropped.contains(&name) {
+                    eprintln!("dz-publisher-runtime: no longer sending to {name}");
+                    named_dropped.push(name);
                 }
             }
             publisher.tick()
@@ -682,6 +750,38 @@ async fn tick_loop<S: StateStore, K: Clock + Clone>(
         if let Some(exit) = exit {
             return exit;
         }
+    }
+}
+
+/// Print a snapshot refusal, on the schedule [`worth_a_line`] states.
+///
+/// The count comes from the publisher rather than from a local, so that the
+/// number in the line is the same number the exit report prints and there is
+/// one place a refusal is tallied.
+fn report_snapshot_refusal<S: StateStore, K: Clock + Clone>(
+    which: &str,
+    error: &SnapshotError,
+    publisher: &Publisher<S, K>,
+) {
+    let counts = publisher.snapshot_refusals();
+    // `NotReady` is the expected refusal — the rotation has stepped past the
+    // instrument and comes back on the next lap — so it is worded as a book
+    // that is not ready rather than as a failure. It is no longer discarded:
+    // *never ready* and *not ready yet* read identically in one line, and the
+    // count is what separates them.
+    if matches!(error, SnapshotError::Adapter(AdapterError::NotReady { .. })) {
+        if worth_a_line(counts.not_ready) {
+            eprintln!(
+                "dz-publisher-runtime: {which} snapshot found a book that is not ready \
+                 ({} so far): {error}",
+                counts.not_ready
+            );
+        }
+    } else if worth_a_line(counts.refused) {
+        eprintln!(
+            "dz-publisher-runtime: {which} snapshot was refused ({} so far): {error}",
+            counts.refused
+        );
     }
 }
 
@@ -841,5 +941,28 @@ impl Adapter for SharedAdapter {
         out: &mut dyn SnapshotSink,
     ) -> Result<DepthBound, AdapterError> {
         self.held().snapshot(instrument, out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_repeated_refusal_is_printed_on_a_decade_schedule() {
+        // The tick body runs every 10ms, so a permanent refusal printed on
+        // every one of them is a hundred lines a second, counted nowhere and
+        // burying everything else. The first is prompt, and after that only the
+        // order of magnitude is news.
+        let printed: Vec<u64> = (0..=1_000).filter(|n| worth_a_line(*n)).collect();
+        assert_eq!(printed, [1, 10, 100, 1_000]);
+    }
+
+    #[test]
+    fn nothing_is_printed_for_a_refusal_that_has_not_happened() {
+        // The count is taken before the line, so zero means the caller asked
+        // about the wrong bucket - and a line about a failure that did not
+        // happen is worse than no line.
+        assert!(!worth_a_line(0));
     }
 }
