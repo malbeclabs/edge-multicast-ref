@@ -58,6 +58,7 @@ in this plan decodes a payload.
 - **The record path is not touched.** No new key in `RecorderConfig`, and in particular no endpoint, credential or database key: the configuration crate documents the absence of exactly those keys as an invariant, because the recorder does not upload. The loader has its own configuration file, its own service user and its own metrics port.
 - **Nothing in the loader may block the recorder.** They share only a directory, which the loader opens read-only, and a load ledger the loader owns. A column store that is down, slow or full must cost loading progress and nothing else.
 - **The expensive table carries only what its own object states.** Derived numbers live in the derived tables. A column in `datagram` that depends on another object is a column a backfill silently invalidates.
+- **The derived tables are written by the loader, never by a refreshable materialized view.** A refresh executes wholly on one replica under a Keeper lock, is never distributed, and replica placement is skewed rather than randomised, so a cohort of refreshes concentrates on one replica — measured at roughly 1.7x its peers' load on the destination cluster, and the reason that service sat at its maximum size for six days. The upstream fix is open and unmerged, and does not help a view without `RANDOMIZE FOR` anyway. Writing rows from a loader sidesteps all of it.
 - **Idempotence is a property, not a procedure.** Loading the same object twice produces the same rows, and `ReplacingMergeTree` keyed on `(object_key, object_sha256)` is what makes a re-run after an analyser fix a replace rather than a duplication.
 - **Lints:** `#![forbid(unsafe_code)]` and the workspace clippy set.
 
@@ -115,6 +116,36 @@ blocks one.
 
 ---
 
+## The write pattern, decided here rather than during task 3
+
+Row volume is not the constraint: on the order of 100 million rows a day from one
+host is under one percent of the busiest table on the destination cluster.
+**Merge pressure is the constraint, and it is set by rows per part, not rows per
+day** — and merge work is invisible in the query log, showing up only as the
+difference between the provider's CPU graph and query-attributed CPU, so a chatty
+inserter raises it silently.
+
+So the batch is a number in the sink configuration, not a sentiment:
+
+| Key | Default | Why |
+|---|---|---|
+| `insert_max_rows` | 1,000,000 | An object's rows land in one or two parts. The busiest lane measured on a live recorder is 224,000 datagrams a minute, which is about 1.1 million rows in a time-rotated object. |
+| `insert_min_rows` | 50,000 | Rows from several objects coalesce into one insert rather than each becoming a part. The quietest lanes measured run 130-150 datagrams a minute — about 700 rows an object — and one part per object per lane is the pathological profile the cluster already has two examples of. |
+| `insert_max_delay` | `15m` | The bound on coalescing, so a quiet lane is late rather than absent. At the rates above the worst case is roughly 2,000 rows a part. |
+
+Never per datagram, and never per row. One insert per grain: a batch spanning
+grains is refused, while a batch spanning objects is ordinary, because
+`ReplacingMergeTree` dedups on `(object_key, object_sha256)` and the load ledger
+marks an object loaded only once every grain carrying its rows has landed.
+
+Steady state per host is then on the order of a couple of thousand inserts a day
+across every grain and lane, with rows per part between about 2,000 on the
+quietest lane and about a million on the busiest — better on both axes than the
+best-behaved high-volume table on the destination cluster, which sustains 166,000
+inserts a day at 78,700 rows a part.
+
+---
+
 ## Tasks
 
 ### 1. `dz-recorder-rows`: the row types, pure
@@ -141,12 +172,14 @@ blocks one.
 ### 3. `dz-recorder-clickhouse`: the sink
 
 - [ ] New crate `recorder/dz-recorder-clickhouse` implementing `RowSink` over HTTP with `JSONEachRow`.
-- [ ] Batching by row count and by bytes, with the batch as the retry unit; retries bounded, with the last error readable.
+- [ ] Batching by `insert_max_rows` / `insert_min_rows` / `insert_max_delay` from the table above, with the batch as the retry unit; retries bounded, with the last error readable.
+- [ ] **A bounded database user, checked in beside the DDL and created with it.** `INSERT` on the five tables, `SELECT` on `segment_coverage` and `era` only — the adjacency check needs those two and nothing else reads — plus a settings profile with an explicit read-bytes ceiling and thread cap, a quota, and a workload thread share where the cluster supports one. A writer that arrives with a ceiling already set costs far less than one given a ceiling after an incident: every workload added to the destination cluster in the last month was discovered weeks later from a graph, one of them at a quarter of total cluster CPU.
+- [ ] **Document that `ReplacingMergeTree` dedup is merge-time, not insert-time**, in the DDL comment and in the crate docs. A re-run after an analyser fix leaves duplicate rows *visible* until a merge runs, which is correct for idempotence and surprising for consumers: a data-quality check that counts rows reads a reload as a doubling, and an exact count needs `FINAL` or an explicit dedup in the query. This has already produced one false "row count doubled" finding on the destination cluster that had to be retracted.
 - [ ] Credentials from the environment only, never from the configuration file, and never logged. The configuration carries the endpoint, database and user.
 - [ ] A failed batch is retained and counted, and the loader treats the object as unloaded: partial credit is how a gap becomes invisible.
 - [ ] The checked-in DDL: `db/clickhouse/*.sql`, one file per migration, numbered as the existing schema files are, with the decisions above applied.
 
-**Verification:** `cargo test -p dz-recorder-clickhouse` covers batching, retry and the JSON body against literals with no server. A feature-gated `--features clickhouse-tests` suite runs the DDL against the container the demo already provisions and asserts a load, a re-load and the arithmetic.
+**Verification:** `cargo test -p dz-recorder-clickhouse` covers batching, retry and the JSON body against literals with no server. A feature-gated `--features clickhouse-tests` suite runs the DDL against the container the demo already provisions and asserts a load, a re-load and the arithmetic — and asserts **rows per part** from `system.parts`: loading a set of objects whose rows exceed `insert_min_rows` produces parts at or above it, and no configuration produces a part of single-digit rows. The re-load assertion covers both readings: duplicate rows are visible before a merge, and `FINAL` returns the single row.
 
 ### 4. `dz-recorder-load`: the binary
 
@@ -163,6 +196,8 @@ blocks one.
 - [ ] TTL on `datagram` matched to the retention of the objects themselves; none on `sequence_gap`, `segment_coverage`, `conformance_finding`, `era`.
 - [ ] The sizing stated in the DDL comment from a measurement, not an estimate: a busy recorder in a live deployment sustains roughly 80,000 datagrams a minute across its feeds, which is on the order of 100 million rows a day from one host. The derived grains are three to four orders of magnitude smaller, which is what makes keeping them indefinitely reasonable and keeping the base rows not.
 - [ ] A documented answer to what happens when the TTL is shorter than the question: the derived rows survive, and `segment_coverage` says whether the window was ever covered — which is the difference between "no loss" and "nothing kept".
+- [ ] **State the steady-state part count the TTL implies, not only the row count.** A short TTL on the largest table is a continuous delete-and-merge treadmill that a row count does not predict: partitions are days, and the expected parts per partition follow from the write pattern above. Write the number down, then check it — two separate retention incidents on the destination cluster came from TTL behaviour rather than volume.
+- [ ] **The TTL lives in the checked-in DDL and is never applied by hand.** One of those incidents was a hand-applied change that auto-sync silently reverted nightly for six days, which no row count would have shown.
 
 **Verification:** the TTL is asserted in the feature-gated suite by inserting a row dated past the window and observing it leave after a merge; the derived tables' rows survive the same merge.
 
