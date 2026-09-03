@@ -112,6 +112,47 @@ pub struct Pending {
     pub bytes_read: u64,
 }
 
+/// Why one object's load failed, and what became of the rows the sink was
+/// holding when it did.
+///
+/// The second half is the part a caller cannot infer from the first: a digest
+/// mismatch and a refused insert are both an [`ErrorKind::Io`] away from each
+/// other in the worst case, and the answers are opposite. A failure at the sink
+/// takes every object it was holding with it — [`post`] empties the buffer
+/// before it sends, so a refusal leaves nothing held — and a failure anywhere
+/// else leaves those objects exactly where they were, waiting for an insert
+/// that is still going to land.
+///
+/// [`post`]: dz_recorder_rows::RowSink::write_batch
+struct Failed {
+    kind: ErrorKind,
+    message: String,
+    sink_lost_its_rows: bool,
+}
+
+impl Failed {
+    /// A failure before the sink was touched, or after it had done its work:
+    /// what it holds is untouched, and forgetting it would leave the insert
+    /// that carries it to land with no ledger entry behind it.
+    const fn with_rows_intact(kind: ErrorKind, message: String) -> Self {
+        Self {
+            kind,
+            message,
+            sink_lost_its_rows: false,
+        }
+    }
+
+    /// The sink could not send the batch, and everything it was holding went
+    /// with it.
+    const fn with_rows_lost(kind: ErrorKind, message: String) -> Self {
+        Self {
+            kind,
+            message,
+            sink_lost_its_rows: true,
+        }
+    }
+}
+
 impl<S: RowSink> Loader<'_, S> {
     /// Walks the directory once.
     ///
@@ -219,12 +260,16 @@ impl<S: RowSink> Loader<'_, S> {
                     pass.written.add(rows);
                 }
                 Err(failure) => {
-                    let (kind, message) = failure;
-                    // Every object the sink was holding failed with this one,
-                    // so none of them is loaded and all of them are re-derived
-                    // next pass.
-                    self.pending.clear();
-                    self.fail(kind, message, &mut pass, &mut errors);
+                    if failure.sink_lost_its_rows {
+                        // Every object the sink was holding failed with this
+                        // one, so none of them is loaded and all of them are
+                        // re-derived next pass. Only then: a derivation that
+                        // failed never reached the sink, and forgetting the
+                        // objects it is still holding would leave their insert
+                        // to land with no ledger entry written for any of them.
+                        self.pending.clear();
+                    }
+                    self.fail(failure.kind, failure.message, &mut pass, &mut errors);
                 }
             }
         }
@@ -295,7 +340,7 @@ impl<S: RowSink> Loader<'_, S> {
         candidate: &Candidate,
         manifest: &SegmentManifest,
         now_ns: u64,
-    ) -> Result<(u64, Written), (ErrorKind, String)> {
+    ) -> Result<(u64, Written), Failed> {
         let bytes_read = std::fs::metadata(&candidate.object)
             .map(|m| m.len())
             .unwrap_or(manifest.byte_count);
@@ -305,13 +350,15 @@ impl<S: RowSink> Loader<'_, S> {
         // and consulting only the ledger would write an uncertain boundary for
         // every object after the first.
         let trailer = self.trailer();
+        // Before the sink is touched, which is what makes this failure one the
+        // held rows survive.
         let derived = derive_object(&candidate.object, manifest, trailer.as_ref())
-            .map_err(|e| (kind_of(&e), e.to_string()))?;
+            .map_err(|e| Failed::with_rows_intact(kind_of(&e), e.to_string()))?;
 
         let accepted = self
             .sink
             .write_batch(derived.rows, now_ns)
-            .map_err(|e| (kind_of_sink(&e), e.to_string()))?;
+            .map_err(|e| Failed::with_rows_lost(kind_of_sink(&e), e.to_string()))?;
         let rows = accepted.accepted;
 
         self.pending.push(Pending {
@@ -323,7 +370,11 @@ impl<S: RowSink> Loader<'_, S> {
             written: rows,
             bytes_read,
         });
-        let landed = self.record_landed(&accepted.landed)?;
+        // A ledger that will not write is not a sink that lost the rows: they
+        // are in the store, and the objects still held are still held.
+        let landed = self
+            .record_landed(&accepted.landed)
+            .map_err(|(kind, message)| Failed::with_rows_intact(kind, message))?;
         Ok((landed, rows))
     }
 
@@ -899,7 +950,7 @@ mod pass_tests {
         );
     }
 
-    fn sorted_objects(archive: &Archive) -> Vec<PathBuf> {
+    pub(super) fn sorted_objects(archive: &Archive) -> Vec<PathBuf> {
         let mut objects: Vec<PathBuf> = std::fs::read_dir(&archive.completed)
             .expect("the completed directory exists")
             .filter_map(Result::ok)
@@ -934,6 +985,9 @@ mod deferred_ledger_tests {
         /// When set, the next post fails and holds nothing — the shape a
         /// refused insert takes.
         refuse: bool,
+        /// When set, the end-of-pass `post_if_due` posts, which is the shape a
+        /// pass takes when the age bound comes due in it.
+        due: bool,
         /// Every batch handed over, in order: the object it came from and the
         /// `anchor_certain` of its era rows. `held` cannot show a re-derivation
         /// — the object is already in it — and this can.
@@ -972,9 +1026,14 @@ mod deferred_ledger_tests {
             })
         }
 
-        /// Never due on its own: a test says when.
+        /// Due only when a test says so, and never on a clock: what is under
+        /// test is the loader's discipline, not a sink's timing.
         fn post_if_due(&mut self, _now_ns: u64) -> Result<Vec<ObjectId>, RowSinkError> {
-            Ok(Vec::new())
+            if self.due {
+                self.post()
+            } else {
+                Ok(Vec::new())
+            }
         }
 
         fn flush(&mut self, _now_ns: u64) -> Result<Vec<ObjectId>, RowSinkError> {
@@ -1201,6 +1260,68 @@ mod deferred_ledger_tests {
         // Still nothing loaded: what changed is the deriving, not the ledger.
         assert_eq!(ledger.entries(), 0);
         assert_eq!(third.unloaded, 3);
+    }
+
+    /// **A damaged object does not make the loader forget what the sink holds.**
+    ///
+    /// The derivation fails before the sink is touched, so the objects it is
+    /// holding are still going to land — and if the loader has dropped their
+    /// trailers by then, the insert lands with no ledger entry written for any
+    /// of them: the rows are in the store, nothing records it, and they are
+    /// re-inserted every pass until the objects are evicted while their lag
+    /// never falls.
+    #[test]
+    fn a_derive_failure_does_not_drop_the_objects_the_sink_is_holding() {
+        let archive = archive(3, 20);
+        // The middle object, appended to: it still replays whole, and it is no
+        // longer the object its manifest describes.
+        let objects = sorted_objects(&archive);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&objects[1])
+            .expect("the object is writable");
+        std::io::Write::write_all(&mut file, b"not the described bytes").expect("append");
+        drop(file);
+
+        let metrics = LoaderMetrics::new(SITE, RECORDER);
+        let mut ledger = Ledger::open(&archive.ledger).expect("a new ledger");
+        // Due, so the insert goes at the end of this same pass: the age bound
+        // coming due in a pass that also hit a damaged object is the whole
+        // shape under test.
+        let mut sink = HoldingSink {
+            due: true,
+            ..HoldingSink::default()
+        };
+        let mut pending = Vec::new();
+
+        let (pass, errors) = Loader {
+            objects_dir: &archive.completed,
+            site: SITE,
+            recorder: RECORDER,
+            max_objects: 0,
+            ledger: &mut ledger,
+            sink: &mut sink,
+            metrics: &metrics,
+            pending: &mut pending,
+        }
+        .run_once(&|| false);
+
+        assert_eq!(pass.failed, 1, "the damaged object, and only it");
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("hashes to"), "{}", errors[0]);
+        assert_eq!(pass.derived, 2, "the other two reached the sink");
+        assert_eq!(
+            pass.loaded, 2,
+            "and the insert that carried them was recorded"
+        );
+        assert_eq!(
+            ledger.entries(),
+            2,
+            "rows in the store with no ledger entry are an object the next pass \
+             derives again for nothing"
+        );
+        assert!(pending.is_empty(), "nothing is still waiting on an insert");
+        assert_eq!(pass.unloaded, 1, "the damaged object, still unloaded");
     }
 
     /// In-order certainty survives the coalescing.
