@@ -28,7 +28,10 @@ fn register(registry: AdapterRegistry, name: &'static str) -> AdapterRegistry {
 }
 
 fn context<'a>(adapter: &'a dz_publisher_runtime::AdapterConfig) -> AdapterContext<'a> {
-    AdapterContext::new(adapter, Kind::Uds, "a-venue")
+    // No `[[source]]` block: the publisher with one upstream, named by the
+    // transport the venue builds. `sources` is where the multi-source documents
+    // in `tests/sources.rs` differ.
+    AdapterContext::new(adapter, Some(Kind::Uds), "a-venue", &[])
 }
 
 // ---------------------------------------------------------------------------
@@ -355,7 +358,7 @@ fn the_builtin_transport_refuses_and_says_which_path_does_work() {
         .build()
         .expect("a current-thread runtime");
     let error = runtime
-        .block_on(venue.input.connect(std::time::Duration::from_millis(1)))
+        .block_on(venue.sources[0].connect(std::time::Duration::from_millis(1)))
         .expect_err("there is no transport to connect");
 
     let message = error.to_string();

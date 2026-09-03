@@ -188,6 +188,31 @@ impl IngressError {
 /// transport` and stops there invites the same guess a second time.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
+    /// No transport was named at all.
+    ///
+    /// Its own error rather than an unknown kind of `""`, because the two are
+    /// different mistakes: one is a value to correct, this is a decision nobody
+    /// made. There is a default for neither — a transport is the one thing
+    /// about an upstream that cannot be guessed — so the message names both
+    /// places it can be stated and leaves the choice where it belongs.
+    #[error(
+        "no transport is named: state `[ingress] kind` for a publisher with one source, or          `[[source]] ingress` once per source; the built-in set is {}",
+        Kind::TOKEN_LIST
+    )]
+    NoKind,
+
+    /// A transport named in two places at once.
+    ///
+    /// Refused rather than resolved in favour of one. A key that is read only
+    /// when another is absent is a key an operator cannot reason about from the
+    /// file in front of them, and the audit's own failure was a value somebody
+    /// believed was in force while another one was.
+    #[error(
+        "the transport is named twice: `[ingress] kind = \"{document}\"` and `[[source]] \
+         ingress` on {sources} source(s); name it in one place"
+    )]
+    KindNamedTwice { document: String, sources: usize },
+
     /// `kind` is not one of the transports in this family.
     #[error(
         "`[ingress] kind = \"{token}\"` names no transport in this family; the built-in set is {}",

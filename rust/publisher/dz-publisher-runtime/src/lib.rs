@@ -89,6 +89,20 @@
 //!   handed — does not carry `Payload::recv_ts_ns`. The encode-duration family
 //!   is observed instead.
 //!
+//! # A feed can have several sources
+//!
+//! `[[source]]` states one block per upstream — its name, its transport, and
+//! whether it is the one that publishes. The runtime opens every enabled
+//! source, drives each with its own [`Driver`](dz_ingress_core::Driver), and
+//! hands every payload to **one** adapter, which tells them apart by
+//! [`Payload::connection`](dz_adapter_core::Payload::connection).
+//!
+//! It does not merge them, and that is deliberate: which of two views of one
+//! book is current, and when to fail over, follows the venue's microstructure —
+//! the same argument that leaves the book state machine with the venue. See
+//! [`SourceSection`] for the rule that makes the array checkable, and for what
+//! [`SourceRole`] can and cannot enforce.
+//!
 //! Two entries that were on this list have closed, and both were closed by
 //! evidence from the shipped publishers rather than by a decision here.
 //!
@@ -145,7 +159,8 @@ pub use builtin::BUILTIN_KINDS;
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use config::{
     AdapterConfig, Config, Document, EgressSection, EmittedFeed, Feed, FeedSection, FeedSpec,
-    MetricsSection, Refdata, RefdataSection, ReplayConfig, SelectionSection, TeeConfig,
+    MetricsSection, Refdata, RefdataSection, ReplayConfig, SelectionSection, Source, SourceRole,
+    SourceSection, TeeConfig,
 };
 pub use error::{AdapterInitError, StartupError};
 pub use guard::{ConsistencyGuard, Exit, IdleGuard, Inconsistency, Upstream};
@@ -157,4 +172,4 @@ pub use publisher::{
 pub use registry::{AdapterContext, AdapterRegistry, Venue};
 pub use replay::ReplayInput;
 pub use rotation::SnapshotRotation;
-pub use run::run;
+pub use run::{check_sources, run};

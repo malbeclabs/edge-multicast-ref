@@ -214,9 +214,22 @@ fn uds(cx: &AdapterContext<'_>) -> Result<Venue, AdapterInitError> {
     if listings.is_empty() {
         return Err(Box::new(EmptyListings));
     }
+    // One source per declared `[[source]]`, or the one implicit connection a
+    // document without them has. Every one of them refuses at connect, and each
+    // is named as the document named it — a refusal counted under a label that
+    // is not the operator's own name for the connection is a refusal they
+    // cannot find.
+    let sources: Vec<Box<dyn Input>> = if cx.sources().is_empty() {
+        vec![Box::new(NoTransport(ConnectionId::new(CONNECTION)))]
+    } else {
+        cx.sources()
+            .iter()
+            .map(|source| Box::new(NoTransport(source.connection)) as Box<dyn Input>)
+            .collect()
+    };
     Ok(Venue {
         adapter: Box::new(UdsAdapter::new(listings)),
-        input: Box::new(NoTransport(ConnectionId::new(CONNECTION))),
+        sources,
     })
 }
 

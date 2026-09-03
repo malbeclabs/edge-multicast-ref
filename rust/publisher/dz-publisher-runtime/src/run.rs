@@ -42,7 +42,7 @@ use dz_adapter_core::{
 use dz_edge_core::{PortRole, MAX_DATAGRAM_SIZE};
 use dz_edge_mbp::MarketByPrice;
 use dz_edge_tob::TopOfBook;
-use dz_ingress_core::{Driver, Input};
+use dz_ingress_core::{Driver, IngressError, Input};
 use dz_publisher_egress::{
     EraStore, FailureScope, KernelRoute, MulticastTransmitter, ReferenceStream, Tee,
 };
@@ -50,7 +50,7 @@ use dz_publisher_metrics::{PublisherMetrics, PublisherMetricsConfig};
 use dz_publisher_refdata::{CycleSchedule, FileStore, Registry, RegistryConfig, StateStore};
 
 use crate::clock::{Clock, SystemClock};
-use crate::config::{Config, Feed, FeedSpec};
+use crate::config::{Config, Feed, FeedSpec, SourceRole};
 use crate::error::StartupError;
 use crate::guard::{Exit, Inconsistency};
 use crate::observer::MetricsObserver;
@@ -158,8 +158,14 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
     // `connection_state == 0` alert can fire on a publisher whose upstream never
     // came up at all, and the upstream message types, so that no panel is blank
     // because a message has not arrived yet.
-    let cx = AdapterContext::new(&config.adapter, config.ingress_kind, &config.venue);
+    let cx = AdapterContext::new(
+        &config.adapter,
+        config.ingress_kind,
+        &config.venue,
+        &config.sources,
+    );
     let venue = registry.open(&cx)?;
+    check_sources(&config, &venue)?;
     // **`[adapter.replay]` substitutes for the transport, not for the
     // adapter.** An offline run exercises this whole function — the config, the
     // registry, the venue's own adapter, the lowering, the sockets — with
@@ -167,35 +173,50 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
     // the difference, which is the property that makes the exercise worth
     // anything; the transport the venue built is dropped unused, and a line
     // says so rather than leaving an operator to wonder why nothing connected.
-    let mut input: Box<dyn Input> = match &config.adapter.replay {
+    //
+    // **One replaying input replaces every source**, named after the primary. A
+    // fixture directory is one recording, so replaying it once per source would
+    // publish every payload as many times as there are sources — and a race
+    // between two copies of one recording is not a race. Replaying the primary
+    // is the run the offline comparison is defined against.
+    let mut inputs: Vec<Box<dyn Input>> = match &config.adapter.replay {
         replay if replay.enabled => {
             let path = replay
                 .path
                 .as_deref()
                 .ok_or(StartupError::ReplayWithoutPath)?;
-            let replaying = crate::ReplayInput::open(venue.input.connection(), path)
+            let connection = primary_connection(&config, &venue);
+            let replaying = crate::ReplayInput::open(connection, path)
                 .map_err(|source| StartupError::Replay { source })?;
             eprintln!(
-                "replaying {} payloads from {}: {}",
+                "replaying {} payloads as `{connection}` from {}: {}",
                 replaying.remaining(),
                 path.display(),
                 replaying.names().join(", ")
             );
-            Box::new(replaying)
+            vec![Box::new(replaying)]
         }
-        _ => venue.input,
+        _ => venue.sources,
     };
     let adapter = Arc::new(Mutex::new(venue.adapter));
-    let (message_types, connection) = {
+    let message_types = {
         let held = adapter.lock().unwrap_or_else(|held| held.into_inner());
-        (held.message_types().to_vec(), input.connection())
+        held.message_types().to_vec()
     };
+    // Every source's name, so that `ingress_connection_state` is pre-created at
+    // 0 for each of them: a publisher whose second upstream never came up is
+    // the case the alert exists for, and a series that appeared on first
+    // success would not carry it.
+    let connections: Vec<&'static str> = inputs
+        .iter()
+        .map(|input| input.connection().as_str())
+        .collect();
 
     let metrics = Arc::new(PublisherMetrics::new(&PublisherMetricsConfig {
         venue: &config.venue,
         source_id: identity.source_id.get(),
         port_roles: &config.port_roles(),
-        connections: &[connection.as_str()],
+        connections: &connections,
         channel_ids: &config.channel_ids(),
         ingress_message_types: &message_types,
     }));
@@ -328,25 +349,73 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
     }
 
     let exit = runtime.block_on(async {
-        let mut shared_adapter = SharedAdapter::new(Arc::clone(&adapter), message_types.clone());
-        let mut driver = Driver::new(
-            &mut *input,
-            &mut shared_adapter,
-            &clock,
-            &observer,
-            config.ingress,
-        );
-        let mut sink = SharedSink(&publisher);
+        // One driver per source, which is the shape `Driver` was written for:
+        // the connection, the backoff and the rate limit are per upstream, and
+        // a second source being rate limited must not pace the first. The
+        // clock, the observer and the adapter are shared, and the adapter
+        // through the same lock a single-source publisher already used —
+        // uncontended, because every driver and the tick are futures in one
+        // task on a current-thread runtime and none of them locks across an
+        // await.
+        let mut shared_adapters: Vec<SharedAdapter> = inputs
+            .iter()
+            .map(|_| SharedAdapter::new(Arc::clone(&adapter), message_types.clone()))
+            .collect();
+        let mut sinks: Vec<SharedSink<'_, _, _>> =
+            inputs.iter().map(|_| SharedSink(&publisher)).collect();
+        let mut drivers: Vec<(&'static str, Driver<'_>)> = inputs
+            .iter_mut()
+            .zip(shared_adapters.iter_mut())
+            .map(|(input, shared)| {
+                let name = input.connection().as_str();
+                (
+                    name,
+                    Driver::new(&mut **input, shared, &clock, &observer, config.ingress),
+                )
+            })
+            .collect();
+        // Not `dz_ingress_core::BoxFuture`, which is `Send`: none of these are.
+        // They reach the publisher through the `RefCell` this whole module is
+        // built around, which is sound precisely because everything stays in
+        // one task on a current-thread runtime.
+        type Run<'a> =
+            std::pin::Pin<Box<dyn std::future::Future<Output = (&'static str, IngressError)> + 'a>>;
+        let mut runs: Vec<Run<'_>> = drivers
+            .iter_mut()
+            .zip(sinks.iter_mut())
+            .map(|((name, driver), sink)| {
+                let name = *name;
+                Box::pin(async move { (name, driver.run(sink).await) }) as Run<'_>
+            })
+            .collect();
+
+        // The first driver to give up ends the process, and it is named. There
+        // is no `select!` over a count decided at runtime, and no task per
+        // source either: the composed publisher is deliberately not `Send`, so
+        // polling them in turn from one future is what keeps every borrow in
+        // this task. Each returns `Pending` having registered its own waker, so
+        // this parks rather than spins.
+        let first_to_give_up = std::future::poll_fn(|cx| {
+            for run in &mut runs {
+                if let std::task::Poll::Ready(ended) = run.as_mut().poll(cx) {
+                    return std::task::Poll::Ready(ended);
+                }
+            }
+            std::task::Poll::Pending
+        });
+
         tokio::select! {
-            error = driver.run(&mut sink) => Exit::ConsistencyGuard(
-                Inconsistency::UpstreamUnusable { detail: error.to_string() },
+            (connection, error) = first_to_give_up => Exit::ConsistencyGuard(
+                Inconsistency::UpstreamUnusable {
+                    detail: format!("`{connection}`: {error}"),
+                },
             ),
             exit = tick_loop(&publisher, &adapter, &clock) => exit,
             () = signalled() => Exit::Signal,
         }
     });
 
-    // The driver is dropped, so nothing more arrives from upstream: the first
+    // The drivers are dropped, so nothing more arrives from upstream: the first
     // step of the teardown is already true when `shut_down` records it.
     let teardown = publisher.borrow_mut().shut_down(exit);
     report(&publisher.borrow(), &observer);
@@ -354,6 +423,81 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
     // the process is gone is not the first one that would have carried it.
     drop(server);
     Ok(teardown.exit().clone())
+}
+
+/// Hold the venue's transports to the document's sources.
+///
+/// # Why this is checked rather than trusted
+///
+/// The document says which sources exist and the venue's own `main` builds them,
+/// so the two can disagree — and every way they can disagree is silent. A venue
+/// that skipped a source publishes from fewer upstreams than the file says, with
+/// no series for the one that is missing, which reads exactly like an upstream
+/// that is down. A venue that built a name nobody configured moves traffic under
+/// a `connection` label the registry never declared, so it is counted under no
+/// series at all.
+///
+/// So the names have to match as a set, and a mismatch names both sides. This is
+/// the same check `[adapter] kind` gets, for the same reason: *what is in this
+/// binary* is the question an operator cannot answer from the file.
+///
+/// # Errors
+///
+/// [`StartupError::NoVenueSource`], [`StartupError::SourcesUndeclared`] and
+/// [`StartupError::SourcesDisagree`], which are the three ways the two sides can
+/// fail to line up.
+pub fn check_sources(config: &Config, venue: &crate::Venue) -> Result<(), StartupError> {
+    if venue.sources.is_empty() {
+        return Err(StartupError::NoVenueSource);
+    }
+    if config.sources.is_empty() {
+        // No `[[source]]` block: one implicit source, named by the transport the
+        // venue built, which is what every document said before the array
+        // existed. Several transports without a document that declares them is
+        // still a mismatch — nothing would say what the second one is.
+        if venue.sources.len() > 1 {
+            return Err(StartupError::SourcesUndeclared {
+                built: venue.sources.len(),
+            });
+        }
+        return Ok(());
+    }
+
+    let mut declared: Vec<&str> = config
+        .sources
+        .iter()
+        .map(|source| source.connection.as_str())
+        .collect();
+    let mut built: Vec<&str> = venue
+        .sources
+        .iter()
+        .map(|input| input.connection().as_str())
+        .collect();
+    // Compared as sets: the document's order is a reading order and the venue's
+    // is a construction order, and neither is a promise to the other.
+    declared.sort_unstable();
+    built.sort_unstable();
+    if declared != built {
+        return Err(StartupError::SourcesDisagree {
+            declared: declared.join(", "),
+            built: built.join(", "),
+        });
+    }
+    Ok(())
+}
+
+/// The connection a replay run publishes under.
+///
+/// The primary's, when the document declares one, because that is the source the
+/// offline comparison is defined against; otherwise the one transport the venue
+/// built, which is what a single-source publisher has always used.
+fn primary_connection(config: &Config, venue: &crate::Venue) -> ConnectionId {
+    config
+        .sources
+        .iter()
+        .find(|source| source.role == SourceRole::Primary)
+        .map(|source| source.connection)
+        .unwrap_or_else(|| venue.sources[0].connection())
 }
 
 /// Open one feed's transmitters and wrap each in its own fan-out.

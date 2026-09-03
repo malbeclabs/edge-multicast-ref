@@ -933,3 +933,110 @@ pub fn too_precise_quote(
         ask: SideUpdate::Gone,
     }
 }
+
+/// An [`Input`](dz_ingress_core::Input) that refuses everything, named.
+///
+/// For the checks about *which* sources a venue built: nothing in those tests
+/// connects, and a transport that tried would be a test of a transport.
+#[must_use]
+pub fn refusing_input(connection: dz_adapter_core::ConnectionId) -> RefusingInput {
+    RefusingInput(connection)
+}
+
+pub struct RefusingInput(dz_adapter_core::ConnectionId);
+
+impl dz_ingress_core::Input for RefusingInput {
+    fn connection(&self) -> dz_adapter_core::ConnectionId {
+        self.0
+    }
+
+    fn connect(
+        &mut self,
+        _timeout: Duration,
+    ) -> dz_ingress_core::BoxFuture<'_, Result<(), dz_ingress_core::IngressError>> {
+        Box::pin(async {
+            Err(dz_ingress_core::IngressError::Fatal {
+                detail: "this input exists to be named, not to connect".to_owned(),
+            })
+        })
+    }
+
+    fn send<'a>(
+        &'a mut self,
+        _message: dz_ingress_core::UpstreamMessage<'a>,
+    ) -> dz_ingress_core::BoxFuture<'a, Result<(), dz_ingress_core::IngressError>> {
+        Box::pin(async {
+            Err(dz_ingress_core::IngressError::Fatal {
+                detail: "nothing to send on".to_owned(),
+            })
+        })
+    }
+
+    fn recv<'a>(
+        &'a mut self,
+        _budget: Option<Duration>,
+    ) -> dz_ingress_core::BoxFuture<
+        'a,
+        Result<dz_ingress_core::Received<'a>, dz_ingress_core::IngressError>,
+    > {
+        Box::pin(async {
+            Err(dz_ingress_core::IngressError::Fatal {
+                detail: "nothing to receive from".to_owned(),
+            })
+        })
+    }
+
+    fn shutdown(&mut self) -> dz_ingress_core::BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+}
+
+/// An adapter that records which connection each payload arrived on.
+///
+/// The whole of what the runtime promises a multi-source venue: every source
+/// reaches one adapter, and the adapter can tell them apart.
+/// What one payload was attributed to: the connection's name and its bytes.
+pub type Attributed = (&'static str, Vec<u8>);
+
+/// The record, shared with the test that reads it.
+///
+/// `Arc<Mutex<_>>` and not `Rc<RefCell<_>>`: [`Adapter`] is `Send`, because the
+/// runtime drives it from a thread that is not the one that built it.
+pub type Attributions = Arc<std::sync::Mutex<Vec<Attributed>>>;
+
+#[derive(Default)]
+pub struct ConnectionRecorder {
+    pub seen: Attributions,
+}
+
+impl dz_adapter_core::Adapter for ConnectionRecorder {
+    fn message_types(&self) -> &[&'static str] {
+        &["payload"]
+    }
+
+    fn poll_listings(&mut self, _out: &mut dyn dz_adapter_core::ListingSink) {}
+
+    fn on_payload(
+        &mut self,
+        payload: &dz_adapter_core::Payload<'_>,
+        out: &mut dyn dz_adapter_core::EventSink,
+    ) -> Result<(), dz_adapter_core::ParseError> {
+        out.upstream_message("payload");
+        self.seen
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .push((payload.connection.as_str(), payload.bytes.to_vec()));
+        Ok(())
+    }
+}
+
+/// An [`EventSink`] that keeps nothing.
+///
+/// For the source tests, where what is under test is which connection a payload
+/// arrived on rather than what it lowered to.
+pub struct NoEvents;
+
+impl dz_adapter_core::EventSink for NoEvents {
+    fn upstream_message(&mut self, _message_type: &'static str) {}
+    fn event(&mut self, _event: dz_adapter_core::Event<'_>) {}
+}

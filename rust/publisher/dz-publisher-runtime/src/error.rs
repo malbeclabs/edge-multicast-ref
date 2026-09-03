@@ -146,6 +146,90 @@ pub enum StartupError {
         another: std::time::Duration,
     },
 
+    /// The venue's constructor handed back no transport at all.
+    ///
+    /// A publisher with nothing to read from would come up, publish nothing,
+    /// and look like a quiet venue.
+    #[error("the adapter's constructor returned no source: this publisher would read nothing")]
+    NoVenueSource,
+
+    /// The venue built several transports and the document declares none.
+    ///
+    /// Refused rather than run: with no `[[source]]` block there is nothing
+    /// that says what the second connection is, which feed it carries or
+    /// whether it is meant to publish — and its name would be the venue's
+    /// rather than the operator's.
+    #[error(
+        "the adapter's constructor returned {built} sources and the document declares none; \
+         state one `[[source]]` block per connection"
+    )]
+    SourcesUndeclared { built: usize },
+
+    /// The document's sources and the venue's transports are not the same set.
+    ///
+    /// Every way they can disagree is silent. A transport the document did not
+    /// declare moves traffic under a `connection` label the metric registry
+    /// never pre-created, so it is counted under nothing; a declared source the
+    /// venue did not build is a series sitting at zero, which reads exactly
+    /// like an upstream that is down.
+    #[error(
+        "the `[[source]]` blocks and the adapter's transports are different sets: declared \
+         {declared}; built {built}"
+    )]
+    SourcesDisagree { declared: String, built: String },
+
+    /// A `[[source]]` block with an empty `name`.
+    ///
+    /// The name is the `connection` metric label, so an empty one is a series
+    /// nobody can group by and a log line nobody can read.
+    #[error("a `[[source]]` block has an empty `name`")]
+    UnnamedSource,
+
+    /// Two `[[source]]` blocks sharing a name.
+    ///
+    /// Checked across every block and not only the enabled ones: two blocks
+    /// with one name are two descriptions of a single connection, and which of
+    /// them is in force would depend on which happened to be enabled today.
+    #[error("two `[[source]]` blocks are named `{name}`")]
+    DuplicateSourceName { name: String },
+
+    /// `[[source]] role` is a token the closed set does not carry.
+    #[error("`[[source]] role = \"{token}\"` is not a role; the roles are {supported}")]
+    UnknownSourceRole {
+        token: String,
+        supported: &'static str,
+    },
+
+    /// A source declaring it carries a feed this publisher does not emit.
+    ///
+    /// A key nobody reads, refused for the reason every other one is: an
+    /// operator who wrote it believes that feed is being served from that
+    /// source.
+    #[error("`[[source]]` `{name}` carries `{spec}`, which no enabled `[[feed]]` block emits")]
+    SourceCarriesUnknownFeed { name: String, spec: &'static str },
+
+    /// Every `[[source]]` block is disabled.
+    #[error("every `[[source]]` block is disabled: this publisher would connect to nothing")]
+    NoEnabledSource,
+
+    /// A feed with no primary source, or with more than one.
+    ///
+    /// **The rule the whole array exists to make checkable.** Two primaries
+    /// carrying one feed are two publishers' worth of events on one channel
+    /// instance — the `Sequence Number` series is per channel instance, so a
+    /// subscriber's gap detection reads the two interleaved as its own losses
+    /// and cannot tell which. None is a feed whose block is enabled and whose
+    /// data has no path to the wire, which is a publisher heartbeating a channel
+    /// it never fills.
+    #[error(
+        "`[[feed]] spec = \"{spec}\"` needs exactly one enabled `[[source]]` with \
+         `role = \"primary\"` carrying it; it has {primaries}"
+    )]
+    FeedPrimaries {
+        spec: &'static str,
+        primaries: String,
+    },
+
     /// Two enabled feeds naming different `source_id`s.
     ///
     /// A `Source ID` is the publisher's registered identity and is the same for

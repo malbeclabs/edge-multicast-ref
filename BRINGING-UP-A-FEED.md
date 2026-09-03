@@ -117,13 +117,17 @@ which adapters a binary contains:
 fn main() -> std::process::ExitCode {
     dz_publisher_runtime::run(
         AdapterRegistry::new()
-            .with("a-venue-tob", |cx| Ok(Venue {
-                adapter: Box::new(VenueAdapter::new(cx)?),
-                input: venue_input(cx)?,
-            })),
+            .with("a-venue-tob", |cx| Ok(Venue::single(
+                Box::new(VenueAdapter::new(cx)?),
+                venue_input(cx)?,
+            ))),
     )
 }
 ```
+
+A venue with several upstreams for one feed builds one `Input` per
+`cx.sources()` entry and returns them together — see
+[Several sources for one feed](#several-sources-for-one-feed).
 
 `run()` owns configuration loading, the guards, the signals, the metrics, the
 egress, the reference data and the teardown. There is no default adapter and no
@@ -221,6 +225,60 @@ kind = "a-venue-tob"
   MCAST-TEST-NET). `scripts/check-public-repo-rules.sh` enforces that for code
   in this repository, and it is the same habit worth keeping in a config
   template: an address in an example is copied into production sooner or later.
+
+### Several sources for one feed
+
+A venue often carries the same book twice by different paths — a websocket and a
+FIX session, a local socket and a remote stream, two validators of one chain.
+They are **not the same stream**: conflation differs, per-connection sequencing
+differs, and each arrives at its own moment. So which one publishes is a
+decision, and `[[source]]` is where it is stated:
+
+```toml
+[[source]]
+name = "ws"                 # the `connection` metric label, from the file
+ingress = "websocket"
+role = "primary"            # this one publishes
+carries = ["top-of-book"]   # empty means every enabled feed
+
+[source.upstream]
+# the venue's own keys, for this source
+
+[[source]]
+name = "fix"
+ingress = "fix"
+role = "comparison"         # connected, driven, counted — for the race
+carries = ["top-of-book"]
+
+[source.upstream]
+```
+
+- **Exactly one `primary` per feed, and it is a startup error otherwise.** Two
+  primaries carrying one feed are two publishers' worth of events on one channel
+  instance: the `Sequence Number` series is per channel instance, so a
+  subscriber's gap detection reads the two interleaved as its own losses and
+  cannot tell which. None is a feed whose block is enabled and whose data has no
+  path to the wire.
+- **The transport is named once.** Either `[ingress] kind` for a publisher with
+  one source, or `[[source]] ingress` per source. Both is refused: a key read
+  only when another is absent is a key an operator cannot reason about.
+- **The name in the file is the metric label.** `dz_publisher_ingress_*` carries
+  `connection`, pre-created at 0 for every declared source, so a second upstream
+  that never came up is a series sitting at zero rather than no series at all.
+- **Absent `[[source]]` is one source**, named by the transport the venue builds.
+  Every document written before the array existed still means exactly that.
+
+**The runtime does not merge two sources — the venue does.** Every source reaches
+one adapter, and each payload carries the connection that delivered it, so the
+adapter decides which of two prices is current and when to fail over. That is
+the same rule as the book state machine, for the same reason: it follows the
+venue's microstructure, and one shipped publisher already reconciles two
+validator streams this way with a reorder window and a grace fallback. The
+consequence is worth knowing: **`role` is a declaration, not a gate.** The
+runtime cannot keep a `comparison` source off the wire, because the adapter emits
+events and no event carries the source it came from. What the role buys is the
+label, the startup check, and what an analysis tier reads to know which side of a
+race is which.
 
 ## The recorder
 
@@ -332,6 +390,7 @@ infrastructure repositories, and each of those owns its own review.
 - [ ] `poll_listings` produces the instruments, and can be told about ones that open later
 - [ ] `on_connected` composes the subscription, and is idempotent across reconnects
 - [ ] the binary registers the adapter under a `kind` token, and links the transports it allows
+- [ ] for a venue with several upstreams: one `[[source]]` per connection, exactly one `primary` per feed, and one `Input` built per `cx.sources()` entry
 - [ ] an offline replay run publishes, and this repository's Go parser reads the values back
 - [ ] config reviewed for `pin`, `source_id`, `channel_id`, group and ports
 - [ ] for a depth feed: `snapshot_cycle` set, and the adapter's `DepthBound` checked against what its book actually holds
