@@ -10,6 +10,13 @@ struct TestFeed;
 impl Feed for TestFeed {
     const MAGIC: u16 = 0x445A;
     const NAME: &'static str = "test";
+    /// A test feed stands in for a specification it does not have, so its table
+    /// is every Type ID this file pushes rather than a transcription of
+    /// anything. A real feed's is the specification's own — see
+    /// [`dz_edge_core::Feed::CARRIES`].
+    const CARRIES: &'static [u8] = &[
+        0x01, 0x02, 0x03, 0x04, 0x06, 0x07, 0x08, 0x13, 0x14, 0x20, 0x22, 0x40, 0x41, 0x42, 0x7F,
+    ];
 }
 
 // A feed distinct from `TestFeed`, so `finish` stamping `F::MAGIC` can be
@@ -18,6 +25,13 @@ struct OtherFeed;
 impl Feed for OtherFeed {
     const MAGIC: u16 = 0x1234;
     const NAME: &'static str = "other";
+    /// A test feed stands in for a specification it does not have, so its table
+    /// is every Type ID this file pushes rather than a transcription of
+    /// anything. A real feed's is the specification's own — see
+    /// [`dz_edge_core::Feed::CARRIES`].
+    const CARRIES: &'static [u8] = &[
+        0x01, 0x02, 0x03, 0x04, 0x06, 0x07, 0x08, 0x13, 0x14, 0x20, 0x22, 0x40, 0x41, 0x42, 0x7F,
+    ];
 }
 
 struct Sixteen;

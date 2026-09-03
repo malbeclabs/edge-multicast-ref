@@ -324,3 +324,56 @@ fn no_depth_message_stamps_a_channel_id_over_its_own_body() {
         assert_eq!(buf, before);
     }
 }
+
+/// `0x14 InstrumentReset`, offset by offset from the specification's table.
+///
+/// Transcribed by hand: `4` Instrument ID, `8` Reason, `9` three reserved
+/// bytes, `12` New Anchor Seq, `20` Timestamp, 28 bytes in all. A layout read
+/// off the encoder it checks agrees with it by construction.
+#[test]
+fn instrument_reset_wire_layout() {
+    use dz_edge_mbp::InstrumentReset;
+
+    let reset = InstrumentReset::anchored_at(
+        0x0A0B_0C0D,
+        dz_edge_mbp::RESET_UPSTREAM_GAP,
+        0x1122_3344_5566_7788,
+        0x0102_0304_0506_0708,
+    );
+    let mut b = [0u8; InstrumentReset::SIZE];
+    reset.encode_into(&mut b);
+
+    assert_eq!(b.len(), 28, "the specification's length");
+    assert_eq!(b[0], 0x14, "offset 0: Type");
+    assert_eq!(b[1], 28, "offset 1: Length");
+    assert_eq!(&b[2..4], &[0, 0], "offset 2: message flags, cleared here");
+    assert_eq!(
+        &b[4..8],
+        &0x0A0B_0C0Du32.to_le_bytes(),
+        "offset 4: Instrument ID"
+    );
+    assert_eq!(b[8], 3, "offset 8: Reason, the upstream-gap value");
+    assert_eq!(&b[9..12], &[0, 0, 0], "offset 9: three reserved bytes");
+    assert_eq!(
+        &b[12..20],
+        &0x1122_3344_5566_7788u64.to_le_bytes(),
+        "offset 12: New Anchor Seq"
+    );
+    assert_eq!(
+        &b[20..28],
+        &0x0102_0304_0506_0708u64.to_le_bytes(),
+        "offset 20: Timestamp"
+    );
+
+    assert_eq!(InstrumentReset::decode(&b).expect("decodes"), reset);
+}
+
+/// The reset-reason table, transcribed.
+#[test]
+fn reset_reason_values_match_the_specification() {
+    assert_eq!(dz_edge_mbp::RESET_UNSPECIFIED, 0);
+    assert_eq!(dz_edge_mbp::RESET_PUBLISHER_INCONSISTENCY, 1);
+    assert_eq!(dz_edge_mbp::RESET_VENUE_RESYNC, 2);
+    assert_eq!(dz_edge_mbp::RESET_UPSTREAM_GAP, 3);
+    assert_eq!(dz_edge_mbp::RESET_OTHER, 255);
+}

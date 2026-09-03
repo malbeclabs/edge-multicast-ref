@@ -1,0 +1,56 @@
+[package]
+name = "dz-ingress-websocket"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "A WebSocket Input for dz-ingress-core"
+
+[dependencies]
+dz-adapter-core = { path = "../../adapter/dz-adapter-core" }
+
+# `websocket` is the marker that makes `[ingress] kind = "websocket"` resolve:
+# it is on exactly when this crate is in the link, which is what lets the core
+# answer "is that transport built into this binary?" without depending on the
+# transports. `tokio` brings the production `Clock`, which this crate can afford
+# because it already has the runtime.
+dz-ingress-core = { path = "../dz-ingress-core", features = ["websocket", "tokio"] }
+
+# No `thiserror`: every failure this crate can have is one the core already
+# names - a connect that did not, a connection that ended with a reason the
+# reconnect metric counts by, or a fault retrying cannot fix - and a second
+# error type here would be one a driver would have to translate.
+
+# The runtime. `net` for the socket, `time` for the read timeout and the ping
+# cadence, `io-util` because the websocket stream is built on it. No `rt`: this
+# crate spawns nothing and starts no runtime, so whichever one the binary runs
+# is the one it uses.
+tokio = { version = "1", default-features = false, features = ["net", "time", "io-util"] }
+
+# The websocket implementation. See the crate docs for why this one.
+# `default-features = false` and then only what is used, so that neither
+# `native-tls` nor `aws-lc-rs` can arrive by way of a default.
+tokio-tungstenite = { version = "0.29", default-features = false, features = [
+    "connect",
+    "handshake",
+    "stream",
+    "rustls-tls-webpki-roots",
+] }
+
+# `Stream::next` and `Sink::send` on the websocket stream, and nothing else.
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+
+# TLS. `ring` rather than the default `aws-lc-rs` because the latter builds C
+# and assembly through cmake at build time, and a venue building this crate
+# should not need a C toolchain to reach a venue over TLS. The version is the
+# one tokio-tungstenite resolves, so there is one copy of rustls and one copy of
+# the trust-anchor types in the graph - two would not typecheck together.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "0.26"
+
+[dev-dependencies]
+# `macros` and `rt` for the loopback tests, which run their own current-thread
+# runtime. Not in `[dependencies]`: a library that starts a runtime takes a
+# decision that belongs to the binary.
+tokio = { version = "1", features = ["macros", "rt", "net", "time", "io-util"] }

@@ -1,12 +1,19 @@
 //! Every metric family in the normative set must render under its exact
 //! name. This is the test that stops a rename: change any name below in the
 //! implementation without updating this list, and this test fails.
+//!
+//! `PROPOSED_NAMES` is the same check for the families this crate proposes and
+//! the governing playbook does not yet carry. They are a separate list rather
+//! than appended to the normative one so that the two cannot be confused: what
+//! is normative is a fixed set somebody else owns, and a proposal that quietly
+//! joined that list would be indistinguishable from one that had been accepted.
 
 use dz_edge_core::PortRole;
 use dz_publisher_metrics::{
-    EgressErrorReason, EgressMessageType, EventKind, ExitReason, InconsistencyKind,
-    ParseErrorReason, PublisherMetrics, PublisherMetricsConfig, ReconnectReason, RecoveryOutcome,
-    RefdataLoadErrorReason, TimestampKind,
+    AdapterErrorReason, ConnectFailureReason, EgressErrorReason, EgressMessageType, EventKind,
+    ExitReason, InconsistencyKind, LoweringRefusalReason, ParseErrorReason, PublisherMetrics,
+    PublisherMetricsConfig, ReconnectReason, RecoveryOutcome, RefdataLoadErrorReason,
+    TimestampKind,
 };
 
 const NORMATIVE_NAMES: &[&str] = &[
@@ -48,6 +55,14 @@ const NORMATIVE_NAMES: &[&str] = &[
     "dz_publisher_exit_reason_total",
 ];
 
+/// Families this crate proposes as additions to the normative set. Each is
+/// named as a proposal in its own documentation and in its `HELP` text.
+const PROPOSED_NAMES: &[&str] = &[
+    "dz_publisher_ingress_connect_failures_total",
+    "dz_publisher_ingress_adapter_errors_total",
+    "dz_publisher_lowering_refusals_total",
+];
+
 fn touch_every_family(m: &PublisherMetrics) {
     m.ingress().message("trade", "primary");
     m.ingress().bytes(1);
@@ -56,6 +71,11 @@ fn touch_every_family(m: &PublisherMetrics) {
     m.ingress().set_connection_state("primary", true);
     m.ingress().reconnect(ReconnectReason::Timeout);
     m.ingress().rate_limited();
+    m.ingress().connect_failure(ConnectFailureReason::Refused);
+    m.ingress().adapter_error(AdapterErrorReason::NotReady);
+
+    m.lowering()
+        .refusal(LoweringRefusalReason::UnknownInstrument);
 
     m.book().update();
     m.book().inconsistency(InconsistencyKind::SequenceGap);
@@ -115,6 +135,67 @@ fn every_normative_family_renders_under_its_exact_name() {
         assert!(
             rendered.contains(&format!("# TYPE {name} ")),
             "missing normative metric family {name} in:\n{rendered}"
+        );
+    }
+}
+
+#[test]
+fn every_proposed_family_renders_under_its_exact_name() {
+    let metrics = PublisherMetrics::new(&PublisherMetricsConfig {
+        venue: "test-venue",
+        source_id: 7,
+        port_roles: &[PortRole::Mktdata],
+        connections: &[],
+        channel_ids: &[],
+        ingress_message_types: &[],
+    });
+    touch_every_family(&metrics);
+    let rendered = metrics.render();
+
+    for name in PROPOSED_NAMES {
+        assert!(
+            rendered.contains(&format!("# TYPE {name} ")),
+            "missing proposed metric family {name} in:\n{rendered}"
+        );
+    }
+}
+
+#[test]
+fn every_proposed_family_says_in_its_help_that_it_is_a_proposal() {
+    // A family the playbook does not carry, rendered with no sign of that, is
+    // one somebody reads off a scrape and writes into a dashboard as though it
+    // were part of the shared contract.
+    let metrics = PublisherMetrics::new(&PublisherMetricsConfig {
+        venue: "test-venue",
+        source_id: 7,
+        port_roles: &[PortRole::Mktdata],
+        connections: &[],
+        channel_ids: &[],
+        ingress_message_types: &[],
+    });
+    let rendered = metrics.render();
+
+    for name in PROPOSED_NAMES {
+        let help = rendered
+            .lines()
+            .find(|line| line.starts_with(&format!("# HELP {name} ")))
+            .unwrap_or_else(|| panic!("no HELP line for {name} in:\n{rendered}"));
+        assert!(
+            help.contains("A proposed addition to the normative set"),
+            "the HELP of {name} must name it as a proposal: {help}"
+        );
+    }
+}
+
+#[test]
+fn a_proposed_family_is_not_in_the_normative_list() {
+    // The two lists are disjoint by construction, and stay that way only if
+    // something says so: a proposal moved into `NORMATIVE_NAMES` without the
+    // playbook having accepted it is the mistake this guards.
+    for name in PROPOSED_NAMES {
+        assert!(
+            !NORMATIVE_NAMES.contains(name),
+            "{name} is a proposal and must not be listed as normative"
         );
     }
 }

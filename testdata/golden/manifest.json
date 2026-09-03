@@ -203,6 +203,160 @@
       },
       "flags_on_wire": 1,
       "note": "Flags bit 0 is set because this message travels the snapshot port. The builder stamps it at push, after the body is encoded, so a vector taken from the encoder alone would carry 0 and every subscriber would count it as a snapshot-flag mismatch."
+    },
+    {
+      "file": "level-update-from-event-v3.bin",
+      "message": "LevelUpdate",
+      "type_id": "0x40",
+      "size": 48,
+      "schema_version": 3,
+      "lowered_from": {
+        "event": "Level",
+        "instrument": {
+          "instrument_id": 1,
+          "price_exponent": -4,
+          "qty_exponent": -2,
+          "quoted_per_contract": null
+        },
+        "source_id": 2,
+        "source_ts_ns": 1700000000000000003,
+        "side": "ask",
+        "px": "1000.05",
+        "qty": "72.50",
+        "order_count": 5,
+        "presence": "new"
+      },
+      "fields": {
+        "instrument_id": 1,
+        "source_id": 2,
+        "side": 1,
+        "action": 1,
+        "per_instrument_seq": 1,
+        "price_raw": 10000500,
+        "qty_raw": 7250,
+        "timestamp_ns": 1700000000000000003,
+        "order_count": 5,
+        "level_index": 65535,
+        "update_reason": 0,
+        "level_flags": 0
+      },
+      "flags_on_wire": 0
+    },
+    {
+      "file": "book-clear-from-event-v3.bin",
+      "message": "BookClear",
+      "type_id": "0x41",
+      "size": 36,
+      "schema_version": 3,
+      "lowered_from": {
+        "event": "Clear",
+        "instrument": {
+          "instrument_id": 1,
+          "price_exponent": -4,
+          "qty_exponent": -2,
+          "quoted_per_contract": null
+        },
+        "source_id": 2,
+        "source_ts_ns": 1700000000000000004,
+        "scope": "from_price",
+        "side": "ask",
+        "px": "1000.05",
+        "preceded_by": "one Level event for this instrument, so the shared per-instrument series is at 1"
+      },
+      "fields": {
+        "instrument_id": 1,
+        "source_id": 2,
+        "clear_side": 1,
+        "scope": 1,
+        "per_instrument_seq": 2,
+        "from_price_raw": 10000500,
+        "timestamp_ns": 1700000000000000004,
+        "clear_reason": 0
+      },
+      "flags_on_wire": 0
+    },
+    {
+      "file": "snapshot-begin-from-event-v3.bin",
+      "message": "SnapshotBegin",
+      "type_id": "0x20",
+      "size": 40,
+      "schema_version": 3,
+      "lowered_from": {
+        "framing": "pulled from an adapter that wrote two levels",
+        "instrument": {
+          "instrument_id": 1,
+          "price_exponent": -4,
+          "qty_exponent": -2,
+          "quoted_per_contract": null
+        },
+        "anchor_seq": 918273645,
+        "timestamp_ns": 1700000000000000005,
+        "depth_bound": 50,
+        "note": "no delta was lowered for this instrument in this era, so Last Instrument Seq is 0"
+      },
+      "fields": {
+        "instrument_id": 1,
+        "anchor_seq": 918273645,
+        "total_levels": 2,
+        "snapshot_id": 1,
+        "last_instrument_seq": 0,
+        "timestamp_ns": 1700000000000000005,
+        "depth_bound": 50
+      },
+      "flags_on_wire": 0
+    },
+    {
+      "file": "snapshot-level-from-event-v3.bin",
+      "message": "SnapshotLevel",
+      "type_id": "0x42",
+      "size": 32,
+      "schema_version": 3,
+      "lowered_from": {
+        "framing": "the first level the adapter wrote, outward from the top of the bid",
+        "instrument": {
+          "instrument_id": 1,
+          "price_exponent": -4,
+          "qty_exponent": -2,
+          "quoted_per_contract": null
+        },
+        "side": "bid",
+        "px": "999.95",
+        "qty": "125.00",
+        "order_count": 3
+      },
+      "fields": {
+        "snapshot_id": 1,
+        "price_raw": 9999500,
+        "qty_raw": 12500,
+        "order_count": 3,
+        "side": 0,
+        "level_flags": 0
+      },
+      "flags_on_wire": 0
+    },
+    {
+      "file": "snapshot-end-from-event-v3.bin",
+      "message": "SnapshotEnd",
+      "type_id": "0x22",
+      "size": 20,
+      "schema_version": 3,
+      "lowered_from": {
+        "framing": "the same snapshot as snapshot-begin-from-event-v3.bin",
+        "instrument": {
+          "instrument_id": 1,
+          "price_exponent": -4,
+          "qty_exponent": -2,
+          "quoted_per_contract": null
+        },
+        "anchor_seq": 918273645
+      },
+      "fields": {
+        "instrument_id": 1,
+        "anchor_seq": 918273645,
+        "snapshot_id": 1
+      },
+      "flags_on_wire": 0
     }
-  ]
+  ],
+  "lowered_vectors_note": "Vectors whose file name carries `-from-event-` are produced by the venue adapter boundary rather than by a hand-written wire struct: the `lowered_from` block is the normalized event a venue states plus the instrument's exponents, and the bytes are what the shared lowering produces from them. They exist separately from the codec's own vectors because those set every field to a distinct value, including three the boundary cannot state - a level's Level Index, an Update Reason and a Clear Reason - so no normalized event can reproduce them."
 }

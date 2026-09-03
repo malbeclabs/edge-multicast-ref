@@ -2,8 +2,9 @@
 //! wire token from `as_str()`.
 
 use dz_publisher_metrics::{
-    EgressErrorReason, EventKind, ExitReason, InconsistencyKind, ParseErrorReason, ReconnectReason,
-    RecoveryOutcome, RefdataLoadErrorReason, TimestampKind,
+    AdapterErrorReason, ConnectFailureReason, EgressErrorReason, EventKind, ExitReason,
+    InconsistencyKind, LoweringRefusalReason, ParseErrorReason, ReconnectReason, RecoveryOutcome,
+    RefdataLoadErrorReason, TimestampKind,
 };
 
 #[test]
@@ -20,6 +21,42 @@ fn reconnect_reason_tokens() {
     assert_eq!(ReconnectReason::RemoteClose.as_str(), "remote_close");
     assert_eq!(ReconnectReason::RateLimit.as_str(), "rate_limit");
     assert_eq!(ReconnectReason::AuthExpired.as_str(), "auth_expired");
+}
+
+#[test]
+fn connect_failure_reason_tokens() {
+    assert_eq!(ConnectFailureReason::Refused.as_str(), "refused");
+    assert_eq!(ConnectFailureReason::Unresolved.as_str(), "unresolved");
+    assert_eq!(ConnectFailureReason::Tls.as_str(), "tls");
+    assert_eq!(ConnectFailureReason::Timeout.as_str(), "timeout");
+    assert_eq!(ConnectFailureReason::Unauthorized.as_str(), "unauthorized");
+    assert_eq!(ConnectFailureReason::RateLimit.as_str(), "rate_limit");
+    assert_eq!(ConnectFailureReason::Rejected.as_str(), "rejected");
+}
+
+#[test]
+fn adapter_error_reason_tokens() {
+    assert_eq!(AdapterErrorReason::NotReady.as_str(), "not_ready");
+    assert_eq!(
+        AdapterErrorReason::UnknownInstrument.as_str(),
+        "unknown_instrument"
+    );
+    assert_eq!(AdapterErrorReason::Internal.as_str(), "internal");
+}
+
+#[test]
+fn lowering_refusal_reason_tokens() {
+    assert_eq!(
+        LoweringRefusalReason::UnknownInstrument.as_str(),
+        "unknown_instrument"
+    );
+    assert_eq!(
+        LoweringRefusalReason::InexactContract.as_str(),
+        "inexact_contract"
+    );
+    assert_eq!(LoweringRefusalReason::TooPrecise.as_str(), "too_precise");
+    assert_eq!(LoweringRefusalReason::Malformed.as_str(), "malformed");
+    assert_eq!(LoweringRefusalReason::Overflow.as_str(), "overflow");
 }
 
 #[test]
@@ -57,6 +94,15 @@ fn egress_error_reason_tokens() {
     assert_eq!(EgressErrorReason::SocketError.as_str(), "socket_error");
     assert_eq!(EgressErrorReason::NotRegistered.as_str(), "not_registered");
     assert_eq!(EgressErrorReason::WrongPortRole.as_str(), "wrong_port_role");
+    // The two proposed additions.
+    assert_eq!(
+        EgressErrorReason::NotCarriedByFeed.as_str(),
+        "not_carried_by_feed"
+    );
+    assert_eq!(
+        EgressErrorReason::MalformedMessage.as_str(),
+        "malformed_message"
+    );
 }
 
 #[test]
