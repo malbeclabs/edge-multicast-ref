@@ -80,6 +80,31 @@ pub struct IngressConfig {
     pub idle_timeout: Option<Duration>,
 }
 
+/// Every key's own default, so the whole section may be absent.
+///
+/// A publisher that names its transport once per `[[source]]` has nothing to
+/// state in `[ingress]` at all, and without this the document fails at parse
+/// with `missing field \`ingress\`` reported at line 1, column 1 — which points
+/// an operator at the whole file rather than at the section they did not write.
+///
+/// **This cannot hide a missing transport.** `kind` defaults to `None` here as
+/// it does in the deserializer, so a document that names a transport in neither
+/// place still reaches [`ConfigError::NoKind`], which is the error that names
+/// both ways of stating it. Each field below calls the same function the serde
+/// attribute above it does, so there is one value per key and not two.
+impl Default for IngressConfig {
+    fn default() -> Self {
+        Self {
+            kind: None,
+            connect_timeout: default_connect_timeout(),
+            reconnect_backoff_initial: default_backoff_initial(),
+            reconnect_backoff_max: default_backoff_max(),
+            rate_limit_per_second: 0,
+            idle_timeout: None,
+        }
+    }
+}
+
 /// Everything the driver needs to run, validated.
 ///
 /// Separate from [`IngressConfig`] because the driver takes what has been

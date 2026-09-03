@@ -48,7 +48,9 @@
 //! reference stream ends for the life of the process in exactly the case this
 //! module says costs only the datagrams that were missed.
 
+use std::fs::FileType;
 use std::io;
+use std::os::unix::fs::FileTypeExt as _;
 use std::os::unix::net::UnixDatagram;
 use std::path::{Path, PathBuf};
 
@@ -85,13 +87,30 @@ impl ReferenceStream {
     /// destination too long to be addressed at all, which is a configuration
     /// mistake and not a state that can improve.
     ///
+    /// A destination that exists and is **not** a socket is refused here, and
+    /// that is not tidiness. `sendto` to a regular file or a directory returns
+    /// `ECONNREFUSED`, the same errno a recorder that restarted and left its
+    /// socket file behind returns — so a misconfigured path would be classified
+    /// transient and retried on every datagram for the life of the process. The
+    /// member is never dropped, so it never reaches `dropped_sinks` and no "no
+    /// longer sending to" line is printed: the only signal would be a
+    /// `socket_error` rate indistinguishable from a recorder that has not
+    /// started. The errno is genuinely ambiguous and transient is the right
+    /// default for it; what fixes this is refusing the one case that is
+    /// decidable, at the one moment it is worth deciding.
+    ///
+    /// A path that appears *after* this check, or is replaced, is not covered —
+    /// nothing here holds the directory. That is the case the errno stays
+    /// ambiguous for, and it is the case that can improve on its own.
+    ///
     /// # Errors
     ///
     /// [`io::Error`] when an unbound datagram socket cannot be created or made
     /// non-blocking, and [`io::ErrorKind::InvalidInput`] for a destination
-    /// longer than [`MAX_DESTINATION_LEN`].
+    /// longer than [`MAX_DESTINATION_LEN`] or one that exists and is not a
+    /// socket.
     pub fn open(name: &'static str, destination: &Path) -> Result<Self, io::Error> {
-        // Before the socket, because it is the one failure here that is about
+        // Before the socket, because these are the failures here that are about
         // what was configured rather than about the host.
         let len = destination.as_os_str().len();
         if len > MAX_DESTINATION_LEN {
@@ -102,6 +121,30 @@ impl ReferenceStream {
                      at most {MAX_DESTINATION_LEN} bytes"
                 ),
             ));
+        }
+        // `symlink_metadata`, so a symlink to a socket is judged by what the
+        // link points at only if it resolves — a dangling link is `NotFound`
+        // here and is the ordinary "the recorder has not started" case, while a
+        // link to a regular file is a misconfiguration `metadata` would report
+        // and this would not. So the resolved type is what is checked, and a
+        // dangling link falls through to the absent case below.
+        match std::fs::metadata(destination) {
+            Ok(found) if !found.file_type().is_socket() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "the destination {} exists and is {}, not a socket: sending to it \
+                         returns the same errno as a recorder that has not started, so it \
+                         would be retried on every datagram for ever",
+                        destination.display(),
+                        describe(&found.file_type())
+                    ),
+                ));
+            }
+            // A socket is what this is for, and *absent* is the ordinary case:
+            // nothing is connected or resolved here, so a publisher starting
+            // before its recorder is not a startup failure.
+            Ok(_) | Err(_) => {}
         }
         let socket = UnixDatagram::unbound()?;
         // The reason this sink can promise not to block the send path. Without
@@ -119,6 +162,24 @@ impl ReferenceStream {
     #[must_use]
     pub fn destination(&self) -> &Path {
         &self.destination
+    }
+}
+
+/// What is at the destination, for the refusal above to name.
+///
+/// Named rather than debug-printed: an operator reading "is a directory" knows
+/// what they did, and a `FileType { .. }` does not tell them.
+fn describe(kind: &FileType) -> &'static str {
+    if kind.is_dir() {
+        "a directory"
+    } else if kind.is_file() {
+        "a regular file"
+    } else if kind.is_fifo() {
+        "a named pipe"
+    } else if kind.is_char_device() || kind.is_block_device() {
+        "a device"
+    } else {
+        "not a socket"
     }
 }
 
@@ -299,6 +360,68 @@ mod tests {
         let path = std::path::PathBuf::from(format!("/{}", "x".repeat(MAX_DESTINATION_LEN - 1)));
         assert_eq!(path.as_os_str().len(), MAX_DESTINATION_LEN);
         ReferenceStream::open("tee", &path).expect("exactly at the limit");
+    }
+
+    /// A misconfigured path is a startup error, not a retry for ever.
+    ///
+    /// `sendto` to a regular file returns `ECONNREFUSED` — the same errno a
+    /// recorder that restarted and left its socket file behind returns — so
+    /// without this the path is classified transient, retried on every
+    /// datagram, never dropped, never named in a "no longer sending to" line,
+    /// and visible only as a `socket_error` rate indistinguishable from a
+    /// recorder that has not started.
+    #[test]
+    fn a_destination_that_exists_and_is_not_a_socket_is_refused_at_open() {
+        let dir = std::env::temp_dir().join(format!("dz-not-a-socket-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temporary directory");
+        let file = dir.join("regular-file");
+        std::fs::write(&file, b"not a socket").expect("the file is writable");
+
+        let error =
+            ReferenceStream::open("tee", &file).expect_err("a regular file is not a socket");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            error.to_string().contains("a regular file"),
+            "the refusal says what is there: {error}"
+        );
+        assert!(
+            error.to_string().contains(&file.display().to_string()),
+            "and names the path: {error}"
+        );
+
+        // A directory too, which is what a `path` prefix left without its
+        // suffix produces.
+        let error = ReferenceStream::open("tee", &dir).expect_err("a directory is not a socket");
+        assert!(error.to_string().contains("a directory"), "{error}");
+
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    /// And a destination that is simply not there still opens, because that is
+    /// the startup order this module exists for.
+    #[test]
+    fn a_destination_that_does_not_exist_yet_still_opens() {
+        let path = std::env::temp_dir()
+            .join(format!("dz-absent-{}", std::process::id()))
+            .join("not-created-yet.sock");
+        assert!(!path.exists());
+        ReferenceStream::open("tee", &path).expect("a publisher may start before its recorder");
+    }
+
+    /// A socket that is already bound opens, which is the other ordinary case:
+    /// the recorder started first.
+    #[test]
+    fn a_destination_that_is_a_socket_opens() {
+        let dir = std::env::temp_dir().join(format!("dz-is-a-socket-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temporary directory");
+        let path = dir.join("bound.sock");
+        let _consumer = UnixDatagram::bind(&path).expect("the consumer binds");
+
+        ReferenceStream::open("tee", &path).expect("a bound socket is the destination");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]

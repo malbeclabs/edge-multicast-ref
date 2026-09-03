@@ -108,6 +108,22 @@ pub trait Adapter: Send {
     /// subscribes to nothing and receives nothing; the runtime's idle guard is
     /// what catches that, rather than this signature.
     ///
+    /// # Per-connection state must be keyed by `conn`
+    ///
+    /// **One adapter serves every source a publisher opens.** A publisher with
+    /// several `[[source]]` blocks drives one connection per source and hands
+    /// every payload to *this* object, which tells them apart by
+    /// [`Payload::connection`](crate::Payload::connection) — and by the `conn`
+    /// argument here and on [`on_disconnected`](Self::on_disconnected).
+    ///
+    /// So state that belongs to a connection has to be stored per `conn` and
+    /// not per adapter. An adapter that keeps one upstream sequence cursor, or
+    /// one authentication token, or one "have I subscribed yet" flag, is
+    /// correct with one source and wrong the moment a second is configured —
+    /// and the way it is wrong is silent: a comparison connection flaps, this
+    /// method resets the state the *primary* was using, and the next primary
+    /// payload is read against a cursor that belongs to nothing.
+    ///
     /// # Errors
     ///
     /// [`AdapterError`] when the adapter cannot compose what it needs to send.
@@ -127,6 +143,22 @@ pub trait Adapter: Send {
     /// was tracking against the upstream's own numbering, a book it can no
     /// longer trust to be current. Defaulted for the same reason as
     /// [`on_connected`](Self::on_connected).
+    ///
+    /// # Invalidate `conn`'s state, and nothing else's
+    ///
+    /// One adapter serves every source, so this is called once per *connection*
+    /// ending and not once per adapter. Clearing state unconditionally is
+    /// correct only for a publisher with one source; with two it is the bug
+    /// this paragraph exists to prevent, and it reaches the wire.
+    ///
+    /// Concretely: a comparison connection flaps, an adapter that clears "the"
+    /// upstream sequence cursor here clears the primary's, and the primary's
+    /// next payload is read as a discontinuity. An adapter that answers that
+    /// with an `InstrumentReset` puts one, and a recovery snapshot, on the live
+    /// wire — from a connection that publishes nothing. Migration to a second
+    /// source is one configuration block and one line in the venue's `main`,
+    /// with the adapter untouched, so this is a paragraph an adapter author has
+    /// to have read *before* that day rather than after it.
     fn on_disconnected(&mut self, conn: ConnectionId, reason: DisconnectReason) {
         let _ = (conn, reason);
     }

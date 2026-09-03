@@ -50,7 +50,7 @@ use dz_publisher_metrics::{PublisherMetrics, PublisherMetricsConfig};
 use dz_publisher_refdata::{CycleSchedule, FileStore, Registry, RegistryConfig, StateStore};
 
 use crate::clock::{Clock, SystemClock};
-use crate::config::{Config, Feed, FeedSpec, SourceRole};
+use crate::config::{Config, Feed, FeedSpec, Source, SourceRole};
 use crate::error::StartupError;
 use crate::guard::{Exit, Inconsistency};
 use crate::observer::MetricsObserver;
@@ -369,13 +369,30 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
             .collect();
         let mut sinks: Vec<SharedSink<'_, _, _>> =
             inputs.iter().map(|_| SharedSink(&publisher)).collect();
-        let mut drivers: Vec<(&'static str, Driver<'_>)> = inputs
+        // Whether a fatal error from this connection ends the process.
+        //
+        // Only a primary's does, and that is the whole of what `role` decides
+        // at runtime. `Driver::run` returns only on `IngressError::Fatal`,
+        // whose documented causes are the per-source configuration faults found
+        // at connect: an invalid endpoint, a missing credential path, an
+        // unsupported scheme. Without this a mistyped URL on a source that by
+        // design must not reach the wire takes the healthy primary down — and
+        // keeps it down across restarts, because the fault is in the file.
+        //
+        // A document with no `[[source]]` array has one implicit source and no
+        // role to read, so every input is primary and the behaviour is exactly
+        // what a single-source publisher has always had. An input the document
+        // does not name cannot happen — `check_sources` holds the two sets
+        // equal before this — and if it ever did, primary is the answer that
+        // does not silently keep a publisher running past a fault.
+        let mut drivers: Vec<(&'static str, bool, Driver<'_>)> = inputs
             .iter_mut()
             .zip(shared_adapters.iter_mut())
             .map(|(input, shared)| {
-                let name = input.connection().as_str();
+                let connection = input.connection();
                 (
-                    name,
+                    connection.as_str(),
+                    fatal_ends_the_process(&config.sources, connection),
                     Driver::new(&mut **input, shared, &clock, &observer, config.ingress),
                 )
             })
@@ -386,28 +403,42 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
         // one task on a current-thread runtime.
         type Run<'a> =
             std::pin::Pin<Box<dyn std::future::Future<Output = (&'static str, IngressError)> + 'a>>;
-        let mut runs: Vec<Run<'_>> = drivers
+        let mut runs: Vec<(bool, Run<'_>)> = drivers
             .iter_mut()
             .zip(sinks.iter_mut())
-            .map(|((name, driver), sink)| {
+            .map(|((name, primary, driver), sink)| {
                 let name = *name;
-                Box::pin(async move { (name, driver.run(sink).await) }) as Run<'_>
+                (
+                    *primary,
+                    Box::pin(async move { (name, driver.run(sink).await) }) as Run<'_>,
+                )
             })
             .collect();
 
-        // The first driver to give up ends the process, and it is named. There
-        // is no `select!` over a count decided at runtime, and no task per
-        // source either: the composed publisher is deliberately not `Send`, so
-        // polling them in turn from one future is what keeps every borrow in
-        // this task. Each returns `Pending` having registered its own waker, so
-        // this parks rather than spins.
+        // The first **primary** driver to give up ends the process, and it is
+        // named. There is no `select!` over a count decided at runtime, and no
+        // task per source either: the composed publisher is deliberately not
+        // `Send`, so polling them in turn from one future is what keeps every
+        // borrow in this task. Each returns `Pending` having registered its own
+        // waker, so this parks rather than spins.
+        //
+        // A driver that is not the primary's is **dropped from the set and
+        // named**, and the publisher carries on. `Driver::run` returns only on
+        // a fatal error, so such a driver is permanently done and polling it
+        // again would panic; leaving it out is also what leaves its
+        // `connection_state` at 0, which is the alert for a connection that
+        // never came up. The primary is what the wire depends on, and it is the
+        // only thing whose failure the wire should feel.
         let first_to_give_up = std::future::poll_fn(|cx| {
-            for run in &mut runs {
-                if let std::task::Poll::Ready(ended) = run.as_mut().poll(cx) {
-                    return std::task::Poll::Ready(ended);
-                }
-            }
-            std::task::Poll::Pending
+            poll_first_primary_to_give_up(&mut runs, cx, |connection, error| {
+                // Named here rather than counted into a new family: the series
+                // that says this happened already exists and is already
+                // alerted on, and what a log adds is the reason.
+                eprintln!(
+                    "`{connection}` gave up and is not the primary, so this publisher carries \
+                     on without it; its connection_state stays at 0: {error}"
+                );
+            })
         });
 
         tokio::select! {
@@ -944,6 +975,73 @@ impl Adapter for SharedAdapter {
     }
 }
 
+/// Whether a fatal error from `connection` ends the process.
+///
+/// **Only a primary's does, and that is the whole of what `role` decides at
+/// runtime.** `Driver::run` returns only on
+/// [`IngressError::Fatal`](dz_ingress_core::IngressError::Fatal), whose
+/// documented causes are the per-source configuration faults found at connect:
+/// an invalid endpoint, a missing credential path, an unsupported scheme.
+/// Without this a mistyped URL on a source that by design must not reach the
+/// wire takes the healthy primary down — and keeps it down across restarts,
+/// because the fault is in the file and a supervisor restarting the process
+/// reads the same file.
+///
+/// A document with no `[[source]]` array has one implicit source and no role to
+/// read, so every input is primary and the behaviour is exactly what a
+/// single-source publisher has always had. An input the document does not name
+/// cannot happen — `check_sources` holds the two sets equal before this — and if
+/// it ever did, primary is the answer that does not silently keep a publisher
+/// running past a fault.
+fn fatal_ends_the_process(sources: &[Source], connection: ConnectionId) -> bool {
+    sources.is_empty()
+        || sources
+            .iter()
+            .find(|source| source.connection == connection)
+            .is_none_or(Source::is_primary)
+}
+
+/// Poll every run, and return only when a **primary** has given up.
+///
+/// A run that is not a primary's is reported through `report`, dropped from the
+/// set, and the publisher carries on. `Driver::run` returns only on a fatal
+/// error, so such a run is permanently done and polling it again would panic;
+/// leaving it out of the set is also what leaves its `connection_state` at 0,
+/// which is the alert for a connection that never came up.
+///
+/// Every run still in the set is polled on every pass, including after a
+/// non-primary has ended in the same pass — so each has registered its waker
+/// and this parks rather than spins. Returning as soon as one non-primary ended
+/// would leave the runs after it in the vector unpolled and their wakers
+/// unregistered, which is a publisher that stops noticing its own upstreams.
+fn poll_first_primary_to_give_up<F, E>(
+    runs: &mut Vec<(bool, F)>,
+    cx: &mut std::task::Context<'_>,
+    mut report: impl FnMut(&'static str, &E),
+) -> std::task::Poll<(&'static str, E)>
+where
+    F: std::future::Future<Output = (&'static str, E)> + Unpin,
+{
+    let mut done: Vec<usize> = Vec::new();
+    for (index, (primary, run)) in runs.iter_mut().enumerate() {
+        let std::task::Poll::Ready((connection, error)) = std::pin::Pin::new(run).poll(cx) else {
+            continue;
+        };
+        if *primary {
+            return std::task::Poll::Ready((connection, error));
+        }
+        report(connection, &error);
+        done.push(index);
+    }
+    // Back to front, so the earlier indices stay valid.
+    for index in done.into_iter().rev() {
+        // Dropped, and deliberately: the future has already returned `Ready`,
+        // so there is nothing left in it to await.
+        drop(runs.remove(index));
+    }
+    std::task::Poll::Pending
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -964,5 +1062,125 @@ mod tests {
         // about the wrong bucket - and a line about a failure that did not
         // happen is worse than no line.
         assert!(!worth_a_line(0));
+    }
+
+    // -----------------------------------------------------------------------
+    // Only a primary's fatal error ends the process
+    // -----------------------------------------------------------------------
+
+    fn declared(name: &'static str, role: SourceRole) -> Source {
+        Source {
+            connection: ConnectionId::new(name),
+            kind: dz_ingress_core::Kind::Uds,
+            role,
+            upstream: toml::Table::new(),
+            credentials: toml::Table::new(),
+        }
+    }
+
+    /// A source that by design must not reach the wire must not be able to take
+    /// the wire down.
+    ///
+    /// `Driver::run` returns only on `IngressError::Fatal`, and its documented
+    /// causes are the per-source configuration faults found at connect. So
+    /// before this a mistyped URL on a comparison source ended the process —
+    /// and kept ending it across restarts, because the fault is in the file a
+    /// supervisor hands back.
+    #[test]
+    fn only_a_primarys_fatal_error_ends_the_process() {
+        let sources = [
+            declared("ws", SourceRole::Primary),
+            declared("fix", SourceRole::Comparison),
+        ];
+        assert!(fatal_ends_the_process(&sources, ConnectionId::new("ws")));
+        assert!(!fatal_ends_the_process(&sources, ConnectionId::new("fix")));
+    }
+
+    /// A document with no `[[source]]` array keeps exactly the behaviour a
+    /// single-source publisher has always had.
+    #[test]
+    fn with_no_sources_declared_every_fatal_error_still_ends_the_process() {
+        assert!(fatal_ends_the_process(&[], ConnectionId::new("whatever")));
+    }
+
+    /// An input the document does not name cannot happen — `check_sources`
+    /// holds the two sets equal first — and if it ever did, the answer must not
+    /// be the one that keeps a publisher running past a fault.
+    #[test]
+    fn an_undeclared_connection_is_treated_as_a_primary() {
+        let sources = [declared("ws", SourceRole::Primary)];
+        assert!(fatal_ends_the_process(
+            &sources,
+            ConnectionId::new("nobody")
+        ));
+    }
+
+    /// The mechanism: a non-primary is reported, dropped, and the publisher
+    /// carries on.
+    #[test]
+    fn a_non_primary_that_gives_up_is_reported_and_dropped_from_the_set() {
+        type Run =
+            std::pin::Pin<Box<dyn std::future::Future<Output = (&'static str, &'static str)>>>;
+        let ready = |name: &'static str| -> Run { Box::pin(std::future::ready((name, "fatal"))) };
+        let pending = || -> Run { Box::pin(std::future::pending()) };
+
+        // Two comparison sources have given up and the primary has not. Both
+        // are reported in the same pass, which is what says the loop carries on
+        // past the first rather than returning: a run left unpolled is a waker
+        // unregistered, and a publisher that stops noticing its own upstreams.
+        let mut runs: Vec<(bool, Run)> = vec![
+            (false, ready("fix")),
+            (true, pending()),
+            (false, ready("rest")),
+        ];
+        let mut reported: Vec<&'static str> = Vec::new();
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(waker);
+
+        let polled = poll_first_primary_to_give_up(&mut runs, &mut cx, |connection, _| {
+            reported.push(connection);
+        });
+        assert!(polled.is_pending(), "the primary has not given up");
+        assert_eq!(reported, vec!["fix", "rest"]);
+        // Dropped from the set, because a future that returned `Ready` panics
+        // if it is polled again — and because leaving it out is what leaves its
+        // connection_state at 0.
+        assert_eq!(runs.len(), 1);
+        assert!(runs[0].0, "the one left is the primary's");
+
+        // A second pass over the same set does not re-report, and does not
+        // panic on a completed future.
+        reported.clear();
+        assert!(
+            poll_first_primary_to_give_up(&mut runs, &mut cx, |connection, _| {
+                reported.push(connection);
+            })
+            .is_pending()
+        );
+        assert!(reported.is_empty());
+    }
+
+    /// And the primary's own failure is returned, named, on the pass it happens.
+    #[test]
+    fn a_primary_that_gives_up_ends_the_poll_and_is_named() {
+        type Run =
+            std::pin::Pin<Box<dyn std::future::Future<Output = (&'static str, &'static str)>>>;
+        let mut runs: Vec<(bool, Run)> = vec![
+            (false, Box::pin(std::future::pending())),
+            (true, Box::pin(std::future::ready(("ws", "endpoint")))),
+        ];
+        let waker = std::task::Waker::noop();
+        let mut cx = std::task::Context::from_waker(waker);
+
+        let polled = poll_first_primary_to_give_up(&mut runs, &mut cx, |_, _| {
+            panic!("a primary is not reported and carried on from");
+        });
+        match polled {
+            std::task::Poll::Ready((connection, error)) => {
+                assert_eq!(connection, "ws");
+                assert_eq!(error, "endpoint");
+            }
+            std::task::Poll::Pending => panic!("the primary gave up"),
+        }
     }
 }

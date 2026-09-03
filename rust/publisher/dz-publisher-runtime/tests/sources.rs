@@ -17,13 +17,10 @@ use dz_publisher_runtime::{
 use harness::Doc;
 
 /// A `[[source]]` block, with only the keys a test varies stated.
-fn source(name: &str, ingress: &str, role: &str, carries: &str) -> String {
+fn source(name: &str, ingress: &str, role: &str) -> String {
     let mut block = format!("[[source]]\nname = \"{name}\"\ningress = \"{ingress}\"\n");
     if !role.is_empty() {
         block.push_str(&format!("role = \"{role}\"\n"));
-    }
-    if !carries.is_empty() {
-        block.push_str(&format!("carries = [{carries}]\n"));
     }
     block
 }
@@ -62,8 +59,8 @@ fn a_document_with_no_sources_is_the_publisher_with_one_upstream() {
 fn two_sources_resolve_with_their_transports_names_and_roles() {
     let doc = with_sources(&format!(
         "{}\n{}",
-        source("ws", "uds", "primary", ""),
-        source("fix", "uds", "comparison", "")
+        source("ws", "uds", "primary"),
+        source("fix", "uds", "comparison")
     ));
     let config = Document::parse(&doc.render())
         .expect("valid")
@@ -87,7 +84,7 @@ fn the_transport_named_in_both_places_is_refused() {
     let doc = Doc::valid().adapter(format!(
         "{}\n{}",
         Doc::valid().adapter,
-        source("ws", "uds", "primary", "")
+        source("ws", "uds", "primary")
     ));
     let error = Document::parse(&doc.render())
         .expect("parses")
@@ -122,8 +119,8 @@ fn a_feed_with_two_primaries_is_refused() {
     // which. This is the one rule that has to be a startup error.
     let doc = with_sources(&format!(
         "{}\n{}",
-        source("ws", "uds", "primary", ""),
-        source("fix", "uds", "primary", "")
+        source("ws", "uds", "primary"),
+        source("fix", "uds", "primary")
     ));
     let error = Document::parse(&doc.render())
         .expect("parses")
@@ -131,8 +128,7 @@ fn a_feed_with_two_primaries_is_refused() {
         .unwrap_err();
 
     match error {
-        StartupError::FeedPrimaries { spec, primaries } => {
-            assert_eq!(spec, "top-of-book");
+        StartupError::SourcePrimaries { primaries } => {
             // Both are named: the operator has to know which two blocks are in
             // conflict.
             assert!(primaries.contains("ws"), "{primaries}");
@@ -146,26 +142,32 @@ fn a_feed_with_two_primaries_is_refused() {
 fn a_feed_with_no_primary_is_refused() {
     // A feed whose block is enabled and whose data has no path to the wire is a
     // publisher heartbeating a channel it never fills.
-    let doc = with_sources(&source("fix", "uds", "comparison", ""));
+    let doc = with_sources(&source("fix", "uds", "comparison"));
     let error = Document::parse(&doc.render())
         .expect("parses")
         .resolve()
         .unwrap_err();
 
     match error {
-        StartupError::FeedPrimaries { spec, primaries } => {
-            assert_eq!(spec, "top-of-book");
-            assert_eq!(primaries, "none");
-        }
+        StartupError::SourcePrimaries { primaries } => assert_eq!(primaries, "none"),
         other => panic!("expected a primaries error, got {other}"),
     }
 }
 
+/// The rule is publisher-wide, and two primaries are refused however many feeds
+/// the publisher emits.
+///
+/// It was per feed, grouped by a `carries` key that said which feeds a source's
+/// data reached. That key could not be honoured: every source's payloads reach
+/// one adapter, the adapter emits events, and no event carries the source it
+/// came from — so nothing in the runtime can confine a source to a subset of
+/// feeds. Two primaries with disjoint declarations therefore resolved cleanly
+/// while both upstreams' events landed on one channel instance under one
+/// `Sequence Number` series, which a subscriber reads as its own gap-detection
+/// losses. A rule that describes routing the runtime does not do is worse than
+/// no rule, so the key is gone and the rule is the one that holds.
 #[test]
-fn the_primary_is_per_feed_and_not_per_publisher() {
-    // Two feeds, each with its own primary, is not a conflict: `carries` is what
-    // says which sources are alternatives for the same data, and these two are
-    // not alternatives at all.
+fn two_primaries_are_refused_on_a_publisher_with_two_feeds() {
     let doc = Doc::valid()
         .feed(format!(
             "{}\n{}",
@@ -176,35 +178,65 @@ fn the_primary_is_per_feed_and_not_per_publisher() {
         .adapter(format!(
             "{}\n{}\n{}",
             Doc::valid().adapter,
-            source("ws", "uds", "primary", "\"top-of-book\""),
-            source("fix", "uds", "primary", "\"market-by-price\"")
+            source("ws", "uds", "primary"),
+            source("fix", "uds", "primary")
+        ));
+    let error = Document::parse(&doc.render())
+        .expect("parses")
+        .resolve()
+        .expect_err("two primaries are two publishers' worth of events");
+
+    match error {
+        StartupError::SourcePrimaries { primaries } => {
+            assert!(
+                primaries.contains("ws") && primaries.contains("fix"),
+                "{primaries}"
+            );
+        }
+        other => panic!("expected a primaries error, got {other}"),
+    }
+}
+
+/// One primary and one comparison is the shape the array exists for, and it
+/// resolves on a publisher with two feeds as it does on one.
+#[test]
+fn one_primary_beside_a_comparison_resolves_however_many_feeds_there_are() {
+    let doc = Doc::valid()
+        .feed(format!(
+            "{}\n{}",
+            Doc::valid().feed,
+            Doc::depth_feed_block()
+        ))
+        .ingress(ingress_policy_only())
+        .adapter(format!(
+            "{}\n{}\n{}",
+            Doc::valid().adapter,
+            source("ws", "uds", "primary"),
+            source("fix", "uds", "comparison")
         ));
     let config = Document::parse(&doc.render())
         .expect("valid")
         .resolve()
-        .expect("each feed has exactly one primary");
+        .expect("one primary is the rule");
 
     assert_eq!(config.sources.len(), 2);
-    let ws = &config.sources[0];
-    assert!(ws.carries(dz_publisher_runtime::FeedSpec::TopOfBook));
-    assert!(!ws.carries(dz_publisher_runtime::FeedSpec::MarketByPrice));
+    assert!(config.sources[0].is_primary());
+    assert!(!config.sources[1].is_primary());
 }
 
+/// `carries` is not a key any more, so a document stating it is refused by
+/// `deny_unknown_fields` rather than accepted and ignored.
+///
+/// A key that used to mean something and now means nothing is the one an
+/// operator is most likely to still have in a file, and reading it as a
+/// partition nothing performs is what the removal is for.
 #[test]
-fn a_source_with_no_carries_carries_every_feed() {
-    // The single-source case, and the reason `carries` is defaultable: a
-    // publisher whose one upstream feeds both its feeds should not have to
-    // enumerate them.
-    let doc = with_sources(&source("ws", "uds", "primary", ""));
-    let config = Document::parse(&doc.render())
-        .expect("valid")
-        .resolve()
-        .expect("resolvable");
-
-    let ws = &config.sources[0];
-    assert!(ws.carries.is_empty());
-    assert!(ws.carries(dz_publisher_runtime::FeedSpec::TopOfBook));
-    assert!(ws.carries(dz_publisher_runtime::FeedSpec::MarketByPrice));
+fn the_carries_key_is_refused_rather_than_ignored() {
+    let mut block = source("ws", "uds", "primary");
+    block.push_str("carries = [\"top-of-book\"]\n");
+    let doc = with_sources(&block);
+    let error = Document::parse(&doc.render()).expect_err("`carries` is not a key");
+    assert!(error.to_string().contains("carries"), "{error}");
 }
 
 #[test]
@@ -212,7 +244,7 @@ fn primary_is_the_default_role() {
     // A publisher with one source states a transport and nothing else, and the
     // role it gets is the one that publishes. The alternative default -
     // `comparison` - would be a publisher that came up and published nothing.
-    let doc = with_sources(&source("ws", "uds", "", ""));
+    let doc = with_sources(&source("ws", "uds", ""));
     let config = Document::parse(&doc.render())
         .expect("valid")
         .resolve()
@@ -227,7 +259,7 @@ fn primary_is_the_default_role() {
 
 #[test]
 fn a_role_outside_the_closed_set_is_refused_naming_the_set() {
-    let doc = with_sources(&source("ws", "uds", "secondary", ""));
+    let doc = with_sources(&source("ws", "uds", "secondary"));
     let error = Document::parse(&doc.render())
         .expect("parses")
         .resolve()
@@ -248,8 +280,8 @@ fn two_sources_sharing_a_name_are_refused() {
     // which of them is in force would depend on which happened to be enabled.
     let doc = with_sources(&format!(
         "{}\n{}",
-        source("ws", "uds", "primary", ""),
-        source("ws", "uds", "comparison", "")
+        source("ws", "uds", "primary"),
+        source("ws", "uds", "comparison")
     ));
     let error = Document::parse(&doc.render())
         .expect("parses")
@@ -266,8 +298,8 @@ fn two_sources_sharing_a_name_are_refused() {
 fn a_duplicate_name_is_refused_even_when_one_block_is_disabled() {
     let doc = with_sources(&format!(
         "{}enabled = false\n{}",
-        source("ws", "uds", "primary", ""),
-        source("ws", "uds", "primary", "")
+        source("ws", "uds", "primary"),
+        source("ws", "uds", "primary")
     ));
     let error = Document::parse(&doc.render())
         .expect("parses")
@@ -280,23 +312,106 @@ fn a_duplicate_name_is_refused_even_when_one_block_is_disabled() {
     );
 }
 
+/// A document that names its transport per source need not write `[ingress]`
+/// at all.
+///
+/// Required, this failed at parse with `missing field `ingress`` reported at
+/// line 1, column 1 — an error pointing an operator at the whole file rather
+/// than at the section they did not write. Every key in the section has a
+/// default and `kind` is optional, so nothing in it must be stated.
 #[test]
-fn a_source_carrying_a_feed_this_publisher_does_not_emit_is_refused() {
-    // A key nobody reads, refused for the reason every other one is: an
-    // operator who wrote it believes that feed is being served from there.
-    let doc = with_sources(&source("ws", "uds", "primary", "\"market-by-price\""));
+fn a_document_with_sources_and_no_ingress_section_resolves() {
+    let doc = Doc::valid().ingress(String::new()).adapter(format!(
+        "{}\n{}",
+        Doc::valid().adapter,
+        source("ws", "uds", "primary")
+    ));
+    let config = Document::parse(&doc.render())
+        .expect("the section is defaultable")
+        .resolve()
+        .expect("resolvable");
+
+    assert_eq!(config.sources.len(), 1);
+    assert_eq!(config.sources[0].kind, Kind::Uds);
+    // And the defaults are the section's own, not zeros.
+    assert!(config.ingress.connect_timeout > std::time::Duration::ZERO);
+}
+
+/// And a document that names a transport in neither place still fails — with
+/// the error that names both ways of stating it, rather than with a missing
+/// section.
+#[test]
+fn a_document_with_no_transport_anywhere_still_names_both_places() {
+    let doc = Doc::valid().ingress(String::new());
+    let error = Document::parse(&doc.render())
+        .expect("the section is defaultable")
+        .resolve()
+        .expect_err("no transport is named anywhere");
+
+    let message = error.to_string();
+    assert!(message.contains("[ingress] kind"), "{message}");
+    assert!(message.contains("[[source]] ingress"), "{message}");
+}
+
+/// A name that differs from its trim is refused, not trimmed.
+///
+/// The name is used three times: the emptiness check reads the trimmed string,
+/// and the duplicate check and the leak that produces the `connection` metric
+/// label read what was written. So `"ws"` and `"ws "` resolved as two distinct
+/// sources with two label values a dashboard cannot tell apart, and an error
+/// listing them rendered them as `ws, ws `. Trimming silently would fix the
+/// label and leave the file saying something else; refusing names the typo where
+/// it was made.
+#[test]
+fn a_source_name_with_surrounding_whitespace_is_refused() {
+    let doc = with_sources(&source("ws ", "uds", "primary"));
     let error = Document::parse(&doc.render())
         .expect("parses")
         .resolve()
-        .unwrap_err();
+        .expect_err("a name that is not its own trim");
 
     match error {
-        StartupError::SourceCarriesUnknownFeed { name, spec } => {
-            assert_eq!(name, "ws");
-            assert_eq!(spec, "market-by-price");
+        StartupError::SourceNameNotTrimmed { name, trimmed } => {
+            assert_eq!(name, "ws ");
+            assert_eq!(trimmed, "ws");
+            // Both spellings are in the message, because the point is that they
+            // look the same and are not.
+            let message = StartupError::SourceNameNotTrimmed { name, trimmed }.to_string();
+            assert!(message.contains("connection"), "{message}");
         }
-        other => panic!("expected an unknown carried feed, got {other}"),
+        other => panic!("expected a whitespace refusal, got {other}"),
     }
+
+    // And a name that is all whitespace is still the empty case, which has its
+    // own error: an operator who wrote `name = " "` wrote no name.
+    let doc = with_sources(&source("   ", "uds", "primary"));
+    let error = Document::parse(&doc.render())
+        .expect("parses")
+        .resolve()
+        .expect_err("whitespace is not a name");
+    assert!(matches!(error, StartupError::UnnamedSource), "{error}");
+}
+
+/// Two names that differ only by whitespace are no longer two sources.
+///
+/// This is the failure the refusal above prevents, asserted from the other
+/// side: without it these resolve as two connections and the metric registry
+/// pre-creates two series a dashboard renders identically.
+#[test]
+fn two_names_differing_only_by_whitespace_are_not_two_sources() {
+    let doc = with_sources(&format!(
+        "{}\n{}",
+        source("ws", "uds", "primary"),
+        source("ws ", "uds", "comparison")
+    ));
+    let error = Document::parse(&doc.render())
+        .expect("parses")
+        .resolve()
+        .expect_err("`ws` and `ws ` are not two connections");
+    assert!(
+        matches!(error, StartupError::SourceNameNotTrimmed { .. }),
+        "{error}"
+    );
 }
 
 #[test]
@@ -307,8 +422,8 @@ fn a_disabled_source_is_not_opened_and_not_declared() {
     // somebody took on purpose.
     let doc = with_sources(&format!(
         "{}\n{}enabled = false\n",
-        source("ws", "uds", "primary", ""),
-        source("fix", "uds", "comparison", "")
+        source("ws", "uds", "primary"),
+        source("fix", "uds", "comparison")
     ));
     let config = Document::parse(&doc.render())
         .expect("valid")
@@ -323,7 +438,7 @@ fn a_disabled_source_is_not_opened_and_not_declared() {
 fn every_source_disabled_is_refused() {
     let doc = with_sources(&format!(
         "{}enabled = false\n",
-        source("ws", "uds", "primary", "")
+        source("ws", "uds", "primary")
     ));
     let error = Document::parse(&doc.render())
         .expect("parses")
@@ -347,7 +462,7 @@ fn a_transport_this_binary_was_not_built_with_is_refused_per_source() {
     // and fail in CI. No crate implements `fix` at all, so it is unlinked in
     // every build — and it is the transport a shipped venue is actually waiting
     // for.
-    let doc = with_sources(&source("ws", "fix", "primary", ""));
+    let doc = with_sources(&source("ws", "fix", "primary"));
     let error = Document::parse(&doc.render())
         .expect("parses")
         .resolve()
@@ -365,7 +480,7 @@ fn a_credential_that_is_not_a_path_is_refused_per_source_too() {
     // somebody pasted in.
     let doc = with_sources(&format!(
         "{}\n[source.credentials]\nkey = \"\"\"\n-----BEGIN PRIVATE KEY-----\nx\n\"\"\"\n",
-        source("ws", "uds", "primary", "")
+        source("ws", "uds", "primary")
     ));
     let error = Document::parse(&doc.render())
         .expect("parses")
@@ -418,8 +533,8 @@ fn context(config: &dz_publisher_runtime::Config) -> AdapterContext<'_> {
 fn a_venue_that_builds_the_declared_sources_composes() {
     let doc = with_sources(&format!(
         "{}\n{}",
-        source("ws", "uds", "primary", ""),
-        source("fix", "uds", "comparison", "")
+        source("ws", "uds", "primary"),
+        source("fix", "uds", "comparison")
     ));
     let config = Document::parse(&doc.render())
         .expect("valid")
@@ -441,8 +556,8 @@ fn a_venue_that_skips_a_declared_source_is_refused_naming_both_sets() {
     // reads exactly like an upstream that is down.
     let doc = with_sources(&format!(
         "{}\n{}",
-        source("ws", "uds", "primary", ""),
-        source("fix", "uds", "comparison", "")
+        source("ws", "uds", "primary"),
+        source("fix", "uds", "comparison")
     ));
     let config = Document::parse(&doc.render())
         .expect("valid")
@@ -466,7 +581,7 @@ fn a_venue_that_skips_a_declared_source_is_refused_naming_both_sets() {
 fn a_venue_that_builds_a_source_nobody_declared_is_refused() {
     // Its traffic would move under a `connection` label the metric registry
     // never pre-created, so it would be counted under no series at all.
-    let doc = with_sources(&source("ws", "uds", "primary", ""));
+    let doc = with_sources(&source("ws", "uds", "primary"));
     let config = Document::parse(&doc.render())
         .expect("valid")
         .resolve()

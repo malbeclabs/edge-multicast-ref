@@ -239,7 +239,6 @@ decision, and `[[source]]` is where it is stated:
 name = "ws"                 # the `connection` metric label, from the file
 ingress = "websocket"
 role = "primary"            # this one publishes
-carries = ["top-of-book"]   # empty means every enabled feed
 
 [source.upstream]
 # the venue's own keys, for this source
@@ -248,37 +247,69 @@ carries = ["top-of-book"]   # empty means every enabled feed
 name = "fix"
 ingress = "fix"
 role = "comparison"         # connected, driven, counted — for the race
-carries = ["top-of-book"]
 
 [source.upstream]
 ```
 
-- **Exactly one `primary` per feed, and it is a startup error otherwise.** Two
-  primaries carrying one feed are two publishers' worth of events on one channel
-  instance: the `Sequence Number` series is per channel instance, so a
-  subscriber's gap detection reads the two interleaved as its own losses and
-  cannot tell which. None is a feed whose block is enabled and whose data has no
-  path to the wire.
+- **Exactly one `primary`, publisher-wide, and it is a startup error
+  otherwise.** Two primaries are two publishers' worth of events on the channel
+  instances they reach: the `Sequence Number` series is per channel instance, so
+  a subscriber's gap detection reads the two interleaved as its own losses and
+  cannot tell which. None is a publisher whose data has no path to the wire at
+  all, heartbeating channels it never fills.
+
+  Publisher-wide and *not* per feed, and that is not a simplification. A per-feed
+  rule would be a statement about routing this runtime does not do: every
+  source's payloads reach one adapter, the adapter emits events, and no event
+  carries the source it came from — so nothing here can confine one source's data
+  to one feed. There is no `carries` key for the same reason. A key that reads as
+  a partition while nothing partitions is worse than no key: it made two
+  primaries with disjoint declarations resolve cleanly while both upstreams'
+  events landed on one channel instance.
 - **The transport is named once.** Either `[ingress] kind` for a publisher with
   one source, or `[[source]] ingress` per source. Both is refused: a key read
-  only when another is absent is a key an operator cannot reason about.
+  only when another is absent is a key an operator cannot reason about. A
+  document that names it per source need not write `[ingress]` at all.
 - **The name in the file is the metric label.** `dz_publisher_ingress_*` carries
   `connection`, pre-created at 0 for every declared source, so a second upstream
-  that never came up is a series sitting at zero rather than no series at all.
+  that never came up is a series sitting at zero rather than no series at all. A
+  name with leading or trailing whitespace is refused rather than trimmed —
+  `"ws"` and `"ws "` would be two series a dashboard cannot tell apart.
 - **Absent `[[source]]` is one source**, named by the transport the venue builds.
-  Every document written before the array existed still means exactly that.
+  Every document written before the array existed still means exactly that,
+  including that its fatal errors end the process.
 
 **The runtime does not merge two sources — the venue does.** Every source reaches
 one adapter, and each payload carries the connection that delivered it, so the
 adapter decides which of two prices is current and when to fail over. That is
 the same rule as the book state machine, for the same reason: it follows the
 venue's microstructure, and one shipped publisher already reconciles two
-validator streams this way with a reorder window and a grace fallback. The
-consequence is worth knowing: **`role` is a declaration, not a gate.** The
-runtime cannot keep a `comparison` source off the wire, because the adapter emits
-events and no event carries the source it came from. What the role buys is the
-label, the startup check, and what an analysis tier reads to know which side of a
-race is which.
+validator streams this way with a reorder window and a grace fallback.
+
+Two consequences an operator has to know before configuring a second source.
+
+**`role` is not a gate on what reaches the wire.** The runtime cannot keep a
+`comparison` source off it, because the adapter emits events and no event
+carries the source it came from. What it buys is the label, the startup check
+above, what an analysis tier reads to know which side of a race is which — and
+one runtime behaviour: **only a `primary`'s fatal error ends the process.** A
+driver returns only on a fatal error, and those are the per-source configuration
+faults found at connect: an invalid endpoint, a missing credential path, an
+unsupported scheme. A mistyped URL on a comparison source is now that source's
+driver dropped and named, with its `connection_state` left at 0 — the alert for
+exactly this case — and the primary carrying on.
+
+**An adapter serving two sources must key its per-connection state by
+`conn`.** One adapter object receives every source's `on_connected` and
+`on_disconnected`, so an adapter that keeps one upstream sequence cursor, one
+authentication token, or one "have I subscribed yet" flag is correct with one
+source and silently wrong with two: a comparison connection flaps, the
+primary's cursor is cleared, and the primary's next payload is read as a
+discontinuity — which an adapter that answers discontinuities with a reset turns
+into an `InstrumentReset` and a recovery snapshot on the live wire, from a
+connection that publishes nothing. Migration is one config block and one line in
+the venue's `main` with the adapter untouched, which is exactly why this is
+worth reading first.
 
 ## The recorder
 

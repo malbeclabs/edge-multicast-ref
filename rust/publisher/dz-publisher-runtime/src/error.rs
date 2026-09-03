@@ -185,6 +185,24 @@ pub enum StartupError {
     #[error("a `[[source]]` block has an empty `name`")]
     UnnamedSource,
 
+    /// A `name` with leading or trailing whitespace.
+    ///
+    /// Refused rather than trimmed, because the name is used three times and
+    /// trimming it in one of them is worse than either. The emptiness check
+    /// above reads the trimmed string; the duplicate check and the leak that
+    /// produces the `connection` label read what was written. So `"ws"` and
+    /// `"ws "` resolve as two distinct sources carrying two label values a
+    /// dashboard cannot tell apart, and an error listing them renders them as
+    /// `ws, ws `. Trimming silently would fix the label and leave an operator
+    /// reading a file that does not say what the label says; refusing names the
+    /// typo where it was made.
+    #[error(
+        "`[[source]] name = \"{name}\"` has leading or trailing whitespace: the name is the \
+         `connection` metric label, and `\"{trimmed}\"` and `\"{name}\"` would be two series a \
+         dashboard cannot tell apart"
+    )]
+    SourceNameNotTrimmed { name: String, trimmed: String },
+
     /// Two `[[source]]` blocks sharing a name.
     ///
     /// Checked across every block and not only the enabled ones: two blocks
@@ -200,35 +218,32 @@ pub enum StartupError {
         supported: &'static str,
     },
 
-    /// A source declaring it carries a feed this publisher does not emit.
-    ///
-    /// A key nobody reads, refused for the reason every other one is: an
-    /// operator who wrote it believes that feed is being served from that
-    /// source.
-    #[error("`[[source]]` `{name}` carries `{spec}`, which no enabled `[[feed]]` block emits")]
-    SourceCarriesUnknownFeed { name: String, spec: &'static str },
-
     /// Every `[[source]]` block is disabled.
     #[error("every `[[source]]` block is disabled: this publisher would connect to nothing")]
     NoEnabledSource,
 
-    /// A feed with no primary source, or with more than one.
+    /// No enabled `primary` source, or more than one.
     ///
-    /// **The rule the whole array exists to make checkable.** Two primaries
-    /// carrying one feed are two publishers' worth of events on one channel
-    /// instance — the `Sequence Number` series is per channel instance, so a
-    /// subscriber's gap detection reads the two interleaved as its own losses
-    /// and cannot tell which. None is a feed whose block is enabled and whose
-    /// data has no path to the wire, which is a publisher heartbeating a channel
-    /// it never fills.
+    /// **The rule the whole array exists to make checkable, and it is
+    /// publisher-wide rather than per feed** — because that is the rule the
+    /// runtime actually upholds. Every source's payloads reach one adapter, the
+    /// adapter emits events, and no event carries the source it came from, so
+    /// the runtime cannot route one source's data to one feed and another's to
+    /// another. A per-feed rule would have accepted two primaries with disjoint
+    /// declarations and let both upstreams' events land on one channel instance
+    /// under one `Sequence Number` series, which a subscriber reads as its own
+    /// gap-detection losses and cannot attribute.
+    ///
+    /// Two primaries are therefore two publishers' worth of events wherever
+    /// they land. None is a publisher whose data has no path to the wire at all,
+    /// heartbeating channels it never fills.
     #[error(
-        "`[[feed]] spec = \"{spec}\"` needs exactly one enabled `[[source]]` with \
-         `role = \"primary\"` carrying it; it has {primaries}"
+        "exactly one enabled `[[source]]` must have `role = \"primary\"`; there {} {primaries}. \
+         Every source's payloads reach one adapter and no event carries the source it came \
+         from, so this is a publisher-wide rule and not a per-feed one",
+        if primaries.contains(',') { "are" } else { "is" }
     )]
-    FeedPrimaries {
-        spec: &'static str,
-        primaries: String,
-    },
+    SourcePrimaries { primaries: String },
 
     /// Two enabled feeds naming different `source_id`s.
     ///

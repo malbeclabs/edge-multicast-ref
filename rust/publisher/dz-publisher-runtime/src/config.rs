@@ -83,6 +83,16 @@ pub struct Document {
     /// Owned by `dz-ingress-core`. This crate holds the document; that crate
     /// holds the shape of this section, so nothing there needs a parser and
     /// nothing here needs to know what a backoff is.
+    ///
+    /// **Defaultable, because every key in it has a default and `kind` is
+    /// optional.** A publisher that names its transport once per `[[source]]`
+    /// has nothing to state here, and required this failed at parse with
+    /// `missing field `ingress`` at line 1, column 1 — an error pointing at the
+    /// whole file rather than at the section nobody wrote. A document that
+    /// names a transport in *neither* place still reaches
+    /// [`ConfigError::NoKind`], which names both ways of stating it, so the
+    /// default cannot make a publisher with no transport start.
+    #[serde(default)]
     pub ingress: IngressConfig,
 
     /// One per upstream connection this publisher opens.
@@ -121,11 +131,37 @@ pub struct Document {
 /// It does not merge them. Merging two views of one book is the venue's, for the
 /// same reason the book state machine is: which of two prices is current, and
 /// when to fail over, follows the venue's microstructure and nothing here can
-/// know it. The consequence is worth stating plainly — **the runtime cannot
-/// enforce that a `comparison` source stays off the wire**, because the adapter
-/// emits events and no event carries the source it came from. [`SourceRole`] is
-/// therefore a declaration, a metric label and what an analysis tier reads; it
-/// is not a gate.
+/// know it.
+///
+/// # What `role` is, and the one thing it decides
+///
+/// **The runtime cannot enforce that a `comparison` source stays off the wire.**
+/// The adapter emits events and no event carries the source it came from, so
+/// there is no seam at which one source's data could be held back from a feed.
+/// So `role` is a declaration and a metric label, and it is *not* a gate on
+/// what reaches the wire. Nothing here pretends otherwise, and the one rule that
+/// depends on it — exactly one enabled `primary` — is publisher-wide for exactly
+/// that reason: a per-feed rule would describe routing the runtime does not do.
+///
+/// What it does decide, and the reason it is not decoration:
+/// **only a `primary`'s fatal error ends the process.** `Driver::run` returns
+/// only on [`IngressError::Fatal`](dz_ingress_core::IngressError::Fatal), whose
+/// documented causes are the per-source configuration faults found at connect —
+/// an invalid endpoint, a missing credential path, an unsupported scheme. A
+/// mistyped URL on a source that by design must not reach the wire took the
+/// healthy primary down and kept it down across restarts. Now that source's
+/// driver is dropped and named, its `connection_state` stays at 0 — which is
+/// the alert for exactly this case — and the primary carries on.
+///
+/// # There is no `carries`
+///
+/// There was, and it declared which feeds a source's data reached. It could not
+/// be honoured: every payload reaches one adapter and every event it emits
+/// reaches every feed the event belongs to, so a source cannot be confined to a
+/// subset of feeds by anything in this crate. A key that reads as a partition
+/// while nothing partitions is worse than no key — it made two primaries with
+/// disjoint declarations resolve cleanly while both upstreams' events landed on
+/// one channel instance under one `Sequence Number` series.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceSection {
@@ -151,15 +187,6 @@ pub struct SourceSection {
     /// fires for a decision somebody took on purpose.
     #[serde(default = "default_true")]
     pub enabled: bool,
-
-    /// Which feeds this source's data reaches, by `[[feed]] spec`.
-    ///
-    /// The grouping that makes [`SourceRole`] checkable: *exactly one primary
-    /// per feed* is a rule about alternatives for the same data, and this is
-    /// what says which sources are alternatives. Empty means every enabled
-    /// feed, which is the ordinary single-source case.
-    #[serde(default)]
-    pub carries: Vec<String>,
 
     /// What this publisher does with it. See [`SourceRole`].
     #[serde(default)]
@@ -745,10 +772,9 @@ pub struct Source {
     pub connection: ConnectionId,
     /// Which transport carries it.
     pub kind: Kind,
-    /// What this publisher does with it.
+    /// What this publisher does with it. Consumed at runtime: only a
+    /// `primary`'s fatal error ends the process. See [`SourceSection`].
     pub role: SourceRole,
-    /// The feeds this source's data reaches; empty means every enabled feed.
-    pub carries: Vec<FeedSpec>,
     /// The venue's own endpoint keys.
     pub upstream: toml::Table,
     /// The venue's own credential paths.
@@ -761,16 +787,18 @@ impl std::fmt::Debug for Source {
             .field("connection", &self.connection.as_str())
             .field("kind", &self.kind)
             .field("role", &self.role.as_str())
-            .field("carries", &self.carries)
             .finish_non_exhaustive()
     }
 }
 
 impl Source {
-    /// Whether this source's data reaches `spec`.
+    /// Whether a fatal error from this source ends the process.
+    ///
+    /// Only a primary's does. Everything else is dropped, named and left with
+    /// its `connection_state` at 0.
     #[must_use]
-    pub fn carries(&self, spec: FeedSpec) -> bool {
-        self.carries.is_empty() || self.carries.contains(&spec)
+    pub const fn is_primary(&self) -> bool {
+        matches!(self.role, SourceRole::Primary)
     }
 }
 
@@ -919,7 +947,7 @@ impl Document {
             (None, self.ingress.policy()?)
         };
 
-        let sources = resolve_sources(self.sources, &feeds)?;
+        let sources = resolve_sources(self.sources)?;
 
         check_credentials(&self.adapter.credentials)?;
         for source in &sources {
@@ -1200,25 +1228,39 @@ impl FeedSection {
 ///
 /// # The one rule that has to be a startup error
 ///
-/// **Exactly one enabled `primary` per enabled feed.** Two primaries carrying
-/// one feed are two publishers' worth of events on one channel instance: the
+/// **Exactly one enabled `primary`, publisher-wide.** Two primaries are two
+/// publishers' worth of events on the channel instances they reach: the
 /// `Sequence Number` series is per channel instance, so a subscriber's gap
 /// detection reads the two interleaved as its own losses and cannot tell which.
-/// None is a feed whose block is enabled and whose data has no path to the wire,
-/// which is a publisher heartbeating a channel it never fills.
+/// None is a publisher whose data has no path to the wire, heartbeating channels
+/// it never fills.
+///
+/// **Publisher-wide, and not per feed.** A per-feed rule would be a statement
+/// about routing this runtime does not do: every source's payloads reach one
+/// adapter, the adapter emits events, and no event carries the source it came
+/// from — so nothing here can confine one source's data to one feed. The rule
+/// as written is the one the runtime upholds, and it is checkable from the
+/// document alone.
 ///
 /// A `comparison` source is refused nothing else: several are fine, and one
-/// arriving on a feed that has a primary is the whole point of the role.
-fn resolve_sources(
-    sections: Vec<SourceSection>,
-    feeds: &[Feed],
-) -> Result<Vec<Source>, StartupError> {
+/// arriving beside the primary is the whole point of the role.
+fn resolve_sources(sections: Vec<SourceSection>) -> Result<Vec<Source>, StartupError> {
     let mut sources: Vec<Source> = Vec::new();
     let mut seen: BTreeMap<String, ()> = BTreeMap::new();
 
     for section in sections {
-        if section.name.trim().is_empty() {
+        // Trimmed once, and then held against what was written: the name is the
+        // `connection` metric label, and a name that differs from its trim
+        // would be one string in the file and another in a dashboard.
+        let name = section.name.trim();
+        if name.is_empty() {
             return Err(StartupError::UnnamedSource);
+        }
+        if name != section.name {
+            return Err(StartupError::SourceNameNotTrimmed {
+                trimmed: name.to_owned(),
+                name: section.name,
+            });
         }
         // Checked across every block rather than only the enabled ones: two
         // blocks sharing a name are two descriptions of one connection, and
@@ -1236,20 +1278,6 @@ fn resolve_sources(
             Some(token) => SourceRole::resolve(token)?,
             None => SourceRole::default(),
         };
-        let mut carries = Vec::new();
-        for spec in &section.carries {
-            let spec = FeedSpec::resolve(spec)?;
-            // A source carrying a feed this publisher does not emit is a key
-            // nobody reads, and an operator who wrote it believes that feed is
-            // being served from it.
-            if !feeds.iter().any(|feed| feed.spec == spec) {
-                return Err(StartupError::SourceCarriesUnknownFeed {
-                    name: section.name.clone(),
-                    spec: spec.as_str(),
-                });
-            }
-            carries.push(spec);
-        }
 
         sources.push(Source {
             // Leaked once, here, before the metric registry exists. See
@@ -1257,7 +1285,6 @@ fn resolve_sources(
             connection: ConnectionId::new(Box::leak(section.name.into_boxed_str())),
             kind,
             role,
-            carries,
             upstream: section.upstream,
             credentials: section.credentials,
         });
@@ -1272,22 +1299,19 @@ fn resolve_sources(
         return Ok(sources);
     }
 
-    for feed in feeds {
-        let primaries: Vec<&str> = sources
-            .iter()
-            .filter(|source| source.role == SourceRole::Primary && source.carries(feed.spec))
-            .map(|source| source.connection.as_str())
-            .collect();
-        if primaries.len() != 1 {
-            return Err(StartupError::FeedPrimaries {
-                spec: feed.spec.as_str(),
-                primaries: if primaries.is_empty() {
-                    "none".to_owned()
-                } else {
-                    primaries.join(", ")
-                },
-            });
-        }
+    let primaries: Vec<&str> = sources
+        .iter()
+        .filter(|source| source.is_primary())
+        .map(|source| source.connection.as_str())
+        .collect();
+    if primaries.len() != 1 {
+        return Err(StartupError::SourcePrimaries {
+            primaries: if primaries.is_empty() {
+                "none".to_owned()
+            } else {
+                primaries.join(", ")
+            },
+        });
     }
 
     Ok(sources)

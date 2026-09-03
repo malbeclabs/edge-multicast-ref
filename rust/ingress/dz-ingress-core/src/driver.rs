@@ -221,10 +221,22 @@ enum Stop {
 /// **Every `on_connected` is followed by exactly one `on_disconnected`**, for
 /// the same [`ConnectionId`], including when `on_connected` itself failed and
 /// including on the way out through a fatal error. An adapter can therefore
-/// reset its per-connection state in `on_disconnected` unconditionally, rather
-/// than defensively at the top of `on_connected` as well — and an adapter
-/// tracking the upstream's own sequence numbering has to reset it somewhere, or
-/// the first payload of the new connection is read as a gap.
+/// reset **that connection's** state in `on_disconnected` rather than
+/// defensively at the top of `on_connected` as well — and an adapter tracking
+/// the upstream's own sequence numbering has to reset it somewhere, or the first
+/// payload of the new connection is read as a gap.
+///
+/// **That reset is keyed by `conn`, and not unconditional.** One driver runs per
+/// source and every one of them hands its events to *one* adapter object, so
+/// this method is called once per connection ending and not once per adapter.
+/// An adapter that clears "the" cursor here is correct with one source and wrong
+/// with two, silently: a comparison connection flaps, the primary's cursor is
+/// cleared, and the primary's next payload is read as a discontinuity — which an
+/// adapter that answers discontinuities with a reset turns into an
+/// `InstrumentReset` and a recovery snapshot on the live wire, from a connection
+/// that publishes nothing. See
+/// [`Adapter::on_disconnected`](dz_adapter_core::Adapter::on_disconnected),
+/// which states the obligation.
 ///
 /// **`on_connected` runs on every successful connect, reconnects included.**
 /// This is the whole reason that method exists. A venue's subscriptions live on
