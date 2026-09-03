@@ -17,6 +17,14 @@
 -- ability to ask a question nobody thought of at load time. That is the trade,
 -- and it is why the derived tables are the ones with no TTL.
 --
+-- A SUITE THAT LOADS HISTORICAL FIXTURES MUST NOT APPLY THIS FILE. A row-level
+-- TTL is applied as the part is written, so a fixture dated outside the window
+-- is inserted and dropped in one step — every count comes back zero and every
+-- insert is answered 200, which is indistinguishable from a schema that never
+-- accepted the rows. The feature-gated suite therefore applies 001 and 003, and
+-- applies this file only in the test that is about retention, after the rows it
+-- expects to lose have been counted.
+--
 -- SET THIS TO THE OBJECT RETENTION OF THE DEPLOYMENT IT RUNS IN. The window
 -- below matches the objects themselves: nothing ships objects off a recorder
 -- host today, and objects are evicted under the staging budget in about a day

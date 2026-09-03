@@ -111,6 +111,13 @@ impl Transport for HttpTransport {
             // A redirect would re-send the body to somewhere the configuration
             // did not name, and the credentials with it.
             .max_redirects(0)
+            // A status outside 2xx comes back as a *response* and not as an
+            // error, so the body can be read off it. This client's default is
+            // the other way round, and that default discards exactly the thing
+            // worth keeping: a column store's own message names the column it
+            // could not parse, and a bounded retry that throws it away leaves an
+            // operator with a status code and no cause.
+            .http_status_as_error(false)
             .build()
             .into();
 
@@ -141,11 +148,10 @@ impl Transport for HttpTransport {
                     })
                 }
             }
-            // A status outside 2xx reaches here rather than through Ok in this
-            // client's default configuration, so the body has to be recovered on
-            // this arm too: a column store's own message names the column it
-            // could not parse, and discarding it leaves an operator with a
-            // status code and no cause.
+            // Only reachable if the configuration above is ever changed back:
+            // kept so that a status arriving as an error is still reported as a
+            // refusal rather than as an unreachable destination, which retries
+            // differently.
             Err(ureq::Error::StatusCode(status)) => Err(TransportError::Refused {
                 url: url.to_owned(),
                 status,
