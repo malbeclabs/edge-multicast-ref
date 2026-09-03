@@ -186,7 +186,7 @@ fn the_venues_own_integers_reach_the_canonical_bytes_too() {
 // event beside the bytes, so another language can reproduce them the way it
 // reproduces the codec's.
 
-use dz_adapter_core::{ClearScope, InstrumentRef, Presence, Side, SnapshotSink};
+use dz_adapter_core::{ClearScope, DepthBound, InstrumentRef, Presence, Side, SnapshotSink};
 use dz_edge_mbp::{BookClear, LevelUpdate, SnapshotBegin, SnapshotEnd, SnapshotLevel};
 use dz_publisher_lowering::DepthLowering;
 
@@ -194,6 +194,10 @@ use dz_publisher_lowering::DepthLowering;
 /// than the venue's and so are stated here as the runtime would.
 const ANCHOR_SEQ: u64 = 918_273_645;
 const SNAPSHOT_TS: u64 = 1_700_000_000_000_000_005;
+/// The depth these vectors declare. A bound and not `Complete`, deliberately:
+/// the golden bytes should carry a non-zero `Depth Bound` so a decoder that
+/// dropped the field would fail here rather than agree with a zero it never
+/// read.
 const DEPTH_BOUND: u32 = 50;
 
 /// The one level update these vectors carry, from the event a venue states.
@@ -239,7 +243,6 @@ fn lowered_snapshot(
             InstrumentRef::from_admission(0),
             ANCHOR_SEQ,
             SNAPSHOT_TS,
-            DEPTH_BOUND,
         )
         .expect("held");
     framer.level(
@@ -254,7 +257,9 @@ fn lowered_snapshot(
         Scalar::text("72.50"),
         None,
     );
-    let snapshot = framer.finish().expect("both levels are exact");
+    let snapshot = framer
+        .finish(DepthBound::levels(DEPTH_BOUND).expect("the bound is not zero"))
+        .expect("both levels are exact");
     (snapshot.begin, snapshot.levels, snapshot.end)
 }
 

@@ -75,29 +75,36 @@
 //! than families the governing playbook already carries, which the metrics
 //! crate keeps in a list of its own and says in each help text.
 //!
-//! Four things, and each is a missing piece elsewhere rather than an unfinished
+//! Two things, and each is a missing piece elsewhere rather than an unfinished
 //! one here:
 //!
-//! - **A snapshot has no cadence to be pulled on.** The design names
-//!   `[[feed]] snapshot_port` and no snapshot interval, and inventing a key is
-//!   the one thing this crate must not do. So the framing and the sending are
-//!   whole — [`Publisher::snapshot`] pulls one instrument's book from the
-//!   adapter, frames it as a begin, its levels and an end, and puts it on the
-//!   snapshot port role — and *when* is the caller's. [`run()`] does not call
-//!   it, and a rotation over the published set is what the key would drive.
 //! - **A lowering refusal has no series.** Five reasons stay distinguishable
 //!   and none of them fits the closed set. See [`Refusals`] for why every
 //!   candidate is worse than none, and for what a playbook addition would look
 //!   like.
-//! - **`[adapter.tee]` is parsed, defaults off, and is plumbed nowhere.** The
-//!   framing it would write is the framing the offline comparison reads, and
-//!   that framing does not exist yet. See [`TeeConfig`].
 //! - **Two latency families cannot be observed.**
 //!   `dz_publisher_recv_to_send_latency_seconds` and
 //!   `dz_publisher_venue_to_recv_latency_seconds` both measure from a payload's
 //!   arrival, and `EventSink` — the whole of what the composed publisher is
 //!   handed — does not carry `Payload::recv_ts_ns`. The encode-duration family
 //!   is observed instead.
+//!
+//! Two entries that were on this list have closed, and both were closed by
+//! evidence from the shipped publishers rather than by a decision here.
+//!
+//! - **A snapshot now has a cadence**, `[[feed]] snapshot_cycle`: one full pass
+//!   over the published set, one instrument per derived tick. It was left out
+//!   because the design names no key for it and inventing keys is how a
+//!   configuration grows values nobody can set right — but both shipped
+//!   publishers carry a periodic snapshot, both at five seconds, one of them
+//!   under this name and with these semantics. Absent still means recovery
+//!   snapshots and nothing else, which is what this runtime did before. See
+//!   [`rotation`] and [`Publisher::periodic_snapshot`].
+//! - **`[adapter.tee]` is plumbed**, as a second [`DatagramSink`](dz_publisher_egress::DatagramSink)
+//!   per port role writing byte-identical copies to a Unix datagram socket.
+//!   What it was waiting on was a framing, and the answer was that it needs
+//!   none: `SOCK_DGRAM` preserves message boundaries, so one datagram in is one
+//!   datagram out. See [`ReferenceStream`](dz_publisher_egress::ReferenceStream).
 //!
 //! Market-by-order is absent rather than a hole: `dz-edge-mbo` does not exist,
 //! and the boundary's own event variants for it are absent for the same reason.
@@ -120,6 +127,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod builtin;
 pub mod clock;
 pub mod config;
 mod duration;
@@ -130,8 +138,10 @@ pub mod pipeline;
 pub mod publisher;
 pub mod registry;
 pub mod replay;
+pub mod rotation;
 pub mod run;
 
+pub use builtin::BUILTIN_KINDS;
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use config::{
     AdapterConfig, Config, Document, EgressSection, EmittedFeed, Feed, FeedSection, FeedSpec,
@@ -146,4 +156,5 @@ pub use publisher::{
 };
 pub use registry::{AdapterContext, AdapterRegistry, Venue};
 pub use replay::ReplayInput;
+pub use rotation::SnapshotRotation;
 pub use run::run;

@@ -6,18 +6,23 @@
 //! drive the other, so the runtime asks — and this is the asking, the framing
 //! and the sending.
 //!
-//! **The cadence is still the caller's**, and that is a missing key rather than
-//! a missing implementation: the design names `[[feed]] snapshot_port` and no
-//! snapshot interval, and inventing one is the one thing this crate must not do.
-//! So [`Publisher::snapshot`] is called by whoever holds a policy, and
-//! `run` does not call it.
+//! **The cadence is `[[feed]] snapshot_cycle`**, and a feed that states one is
+//! rotated over by the runtime: one instrument per derived tick, one full pass
+//! per cycle. A feed that states none emits recovery snapshots and no others,
+//! which is what this runtime did before the key existed — and which leaves a
+//! subscriber that joins mid-session with nothing to bootstrap from.
+//!
+//! `Publisher::snapshot` is still callable directly, for a caller that holds a
+//! policy of its own.
 
 mod harness;
 
-use dz_adapter_core::{EventSink, Side};
+use std::time::Duration;
+
+use dz_adapter_core::{AdapterError, EventSink, Side};
 use dz_edge_mbp::{SnapshotBegin, SnapshotEnd, SnapshotLevel};
 use dz_publisher_runtime::SnapshotError;
-use harness::{depth_feed, feed, harness, FakeAdapter, SOURCE_ID};
+use harness::{depth_feed, depth_feed_with_rotation, feed, harness, FakeAdapter, SOURCE_ID};
 
 /// Message header flag bit 0: set on the snapshot port, cleared elsewhere.
 /// Transcribed from the specification rather than read off the codec.
@@ -35,17 +40,21 @@ fn depth() -> harness::Harness {
 #[test]
 fn a_pulled_snapshot_reaches_the_snapshot_port_as_a_begin_the_levels_and_an_end() {
     let mut h = depth();
-    let mut adapter = FakeAdapter::new(&["A-B"]).with_book(&[
-        (Side::Bid, "100.25", "2.500"),
-        (Side::Bid, "100.24", "5.000"),
-        (Side::Ask, "100.75", "1.250"),
-    ]);
+    let mut adapter = FakeAdapter::new(&["A-B"])
+        // Ten levels per side is what this venue's book holds, so the snapshot
+        // is bounded and says so. See the `depth_bound` assertion below.
+        .with_depth_bound(10)
+        .with_book(&[
+            (Side::Bid, "100.25", "2.500"),
+            (Side::Bid, "100.24", "5.000"),
+            (Side::Ask, "100.75", "1.250"),
+        ]);
     h.publisher.poll_listings(&mut adapter);
     let instrument = adapter.handles()[0];
 
     let framed = h
         .publisher
-        .snapshot(&adapter, instrument, 10)
+        .snapshot(&adapter, instrument)
         .expect("the adapter holds a book for this instrument");
 
     // ---- the framing, as it went out ----
@@ -80,6 +89,10 @@ fn a_pulled_snapshot_reaches_the_snapshot_port_as_a_begin_the_levels_and_an_end(
     // than been told a number the publisher invented.
     assert_eq!(begin.total_levels, 3);
     assert_eq!(begin.instrument_id, 1);
+    // **The bound is the adapter's**, and 10 is what this one declared. There
+    // is no parameter on `Publisher::snapshot` that could have supplied it, so
+    // this value can only have come from the layer holding the book. A zero
+    // here would be a claim that the snapshot carries the complete book.
     assert_eq!(begin.depth_bound, 10);
     // No depth delta has been sent for this instrument in this era, and that is
     // what a subscriber initialises its own tracker to after applying the
@@ -158,10 +171,7 @@ fn the_snapshot_anchor_is_the_live_sequence_the_book_state_is_true_as_of() {
     for step in 0..3 {
         h.publisher.event(harness::bid_level(instrument, step));
     }
-    let framed = h
-        .publisher
-        .snapshot(&adapter, instrument, 10)
-        .expect("framed");
+    let framed = h.publisher.snapshot(&adapter, instrument).expect("framed");
 
     assert_eq!(h.mktdata().len(), 3);
     assert_eq!(
@@ -185,10 +195,7 @@ fn opening_a_snapshot_does_not_reset_the_per_instrument_sequence() {
 
     h.publisher.event(harness::bid_level(instrument, 1));
     h.publisher.event(harness::bid_level(instrument, 2));
-    let framed = h
-        .publisher
-        .snapshot(&adapter, instrument, 10)
-        .expect("framed");
+    let framed = h.publisher.snapshot(&adapter, instrument).expect("framed");
     assert_eq!(framed.begin.last_instrument_seq, 2);
 
     h.publisher.event(harness::bid_level(instrument, 3));
@@ -218,7 +225,7 @@ fn a_snapshot_of_a_book_that_has_not_bootstrapped_is_not_a_lowering_refusal() {
 
     let error = h
         .publisher
-        .snapshot(&adapter, instrument, 10)
+        .snapshot(&adapter, instrument)
         .expect_err("the adapter holds no book");
     assert!(
         matches!(
@@ -245,7 +252,7 @@ fn a_publisher_that_emits_no_depth_feed_has_no_snapshot_to_serve() {
 
     let error = h
         .publisher
-        .snapshot(&adapter, instrument, 10)
+        .snapshot(&adapter, instrument)
         .expect_err("this publisher carries no snapshot port role");
     assert!(matches!(error, SnapshotError::NoDepthFeed), "{error}");
 }
@@ -267,7 +274,7 @@ fn a_snapshot_level_the_exponent_cannot_state_exactly_refuses_the_whole_snapshot
 
     let error = h
         .publisher
-        .snapshot(&adapter, instrument, 10)
+        .snapshot(&adapter, instrument)
         .expect_err("one level cannot be stated exactly");
     assert!(matches!(error, SnapshotError::Lowering(_)), "{error}");
     assert!(
@@ -278,4 +285,171 @@ fn a_snapshot_level_the_exponent_cannot_state_exactly_refuses_the_whole_snapshot
     // untouched.
     assert_eq!(h.publisher.refdata().published(), 1);
     let _ = SOURCE_ID;
+}
+
+// ---------------------------------------------------------------------------
+// The periodic rotation: `[[feed]] snapshot_cycle`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_feed_with_no_cycle_sends_no_periodic_snapshot() {
+    // The behaviour this runtime had before the key existed, kept as what the
+    // key's absence means: recovery snapshots and nothing else. Asserted so
+    // that adding the rotation cannot have quietly turned it on for every
+    // existing configuration.
+    let mut h = harness(depth_feed());
+    let mut adapter = FakeAdapter::new(&["A-B"]).with_book(&[(Side::Bid, "100.25", "2.500")]);
+    h.publisher.poll_listings(&mut adapter);
+
+    for _ in 0..100 {
+        h.clock.advance(Duration::from_secs(1));
+        assert!(
+            h.publisher.periodic_snapshot(&adapter).is_none(),
+            "a feed with no `snapshot_cycle` has no rotation to drive"
+        );
+    }
+    assert_eq!(h.snapshot().len(), 0);
+    assert_eq!(h.publisher.snapshot_cycle(), None);
+}
+
+#[test]
+fn a_cycle_puts_each_instrument_on_the_snapshot_port_once_a_pass() {
+    // The point of the key: a subscriber that joined after the deltas started
+    // has something to build a book from. Three instruments, a three-second
+    // cycle, so the derived tick is one second and one pass covers the set.
+    let mut h = harness(depth_feed_with_rotation(Duration::from_secs(3)));
+    let mut adapter =
+        FakeAdapter::new(&["A-B", "C-D", "E-F"]).with_book(&[(Side::Bid, "100.25", "2.500")]);
+    h.publisher.poll_listings(&mut adapter);
+    assert_eq!(h.publisher.snapshot_cycle(), Some(Duration::from_secs(3)));
+
+    let mut instruments = Vec::new();
+    for _ in 0..4 {
+        h.clock.advance(Duration::from_secs(1));
+        if let Some(framed) = h.publisher.periodic_snapshot(&adapter) {
+            instruments.push(
+                framed
+                    .expect("the adapter holds a book")
+                    .begin
+                    .instrument_id,
+            );
+        }
+    }
+
+    // The first tick schedules rather than snapshots, so four ticks are three
+    // snapshots - and they are three *different* instruments rather than the
+    // same one three times.
+    assert_eq!(instruments, [1, 2, 3]);
+    // One group of three messages per instrument on the snapshot port role, and
+    // nothing on it that the rotation did not send.
+    assert_eq!(
+        h.snapshot().type_ids(),
+        [0x20, 0x42, 0x22, 0x20, 0x42, 0x22, 0x20, 0x42, 0x22]
+    );
+}
+
+#[test]
+fn a_periodic_snapshot_carries_the_depth_the_adapter_declared() {
+    // The bound on the wire is the venue's answer on the rotation's path too,
+    // and there is no parameter anywhere on that path that could supply one.
+    let mut h = harness(depth_feed_with_rotation(Duration::from_secs(1)));
+    let mut adapter = FakeAdapter::new(&["A-B"])
+        .with_depth_bound(25)
+        .with_book(&[(Side::Bid, "100.25", "2.500")]);
+    h.publisher.poll_listings(&mut adapter);
+
+    h.clock.advance(Duration::from_secs(1));
+    assert!(
+        h.publisher.periodic_snapshot(&adapter).is_none(),
+        "scheduled"
+    );
+    h.clock.advance(Duration::from_secs(1));
+    let framed = h
+        .publisher
+        .periodic_snapshot(&adapter)
+        .expect("one instrument fell due")
+        .expect("the adapter holds a book");
+
+    assert_eq!(framed.begin.depth_bound, 25);
+}
+
+#[test]
+fn a_book_that_has_not_bootstrapped_is_skipped_and_the_rotation_moves_on() {
+    // `NotReady` is the one refusal that is expected, and the rotation has
+    // already stepped past the instrument when it is reported: the alternative
+    // is a rotation parked on one dormant instrument, which is a feed whose
+    // snapshots stop for every other instrument too.
+    let mut h = harness(depth_feed_with_rotation(Duration::from_secs(2)));
+    // The first has no book; the second does.
+    let mut adapter = FakeAdapter::new(&["A-B", "C-D"]);
+    h.publisher.poll_listings(&mut adapter);
+
+    h.clock.advance(Duration::from_secs(1));
+    assert!(
+        h.publisher.periodic_snapshot(&adapter).is_none(),
+        "scheduled"
+    );
+    h.clock.advance(Duration::from_secs(1));
+    let refused = h
+        .publisher
+        .periodic_snapshot(&adapter)
+        .expect("one instrument fell due");
+    assert!(matches!(
+        refused,
+        Err(SnapshotError::Adapter(AdapterError::NotReady { .. }))
+    ));
+
+    // The next tick is the *next* instrument, not a retry of the first.
+    let mut with_book =
+        FakeAdapter::new(&["A-B", "C-D"]).with_book(&[(Side::Bid, "100.25", "2.500")]);
+    h.publisher.poll_listings(&mut with_book);
+    h.clock.advance(Duration::from_secs(1));
+    let framed = h
+        .publisher
+        .periodic_snapshot(&with_book)
+        .expect("the second instrument fell due")
+        .expect("this one has a book");
+    assert_eq!(
+        framed.begin.instrument_id, 2,
+        "a refusal must not hold the rotation on the instrument that refused"
+    );
+}
+
+#[test]
+fn a_periodic_snapshot_is_anchored_where_the_live_stream_has_reached() {
+    // Unlike a recovery snapshot, which is anchored where its own reset
+    // promised, a periodic one describes the book as of now - so its anchor is
+    // the live series' position and a subscriber applies everything after it.
+    let mut h = harness(depth_feed_with_rotation(Duration::from_secs(1)));
+    let mut adapter = FakeAdapter::new(&["A-B"]).with_book(&[(Side::Bid, "100.25", "2.500")]);
+    h.publisher.poll_listings(&mut adapter);
+    for step in 0..4 {
+        h.publisher
+            .event(harness::bid_level(adapter.handles()[0], step));
+    }
+
+    h.clock.advance(Duration::from_secs(1));
+    assert!(
+        h.publisher.periodic_snapshot(&adapter).is_none(),
+        "scheduled"
+    );
+    h.clock.advance(Duration::from_secs(1));
+    let framed = h
+        .publisher
+        .periodic_snapshot(&adapter)
+        .expect("due")
+        .expect("framed");
+
+    assert_eq!(framed.begin.anchor_seq, h.mktdata().len() as u64);
+}
+
+#[test]
+fn a_top_of_book_publisher_has_no_rotation_to_drive() {
+    // There is no snapshot port role on that feed, so there is nothing to pace
+    // and no key that could have configured one.
+    let mut h = harness(feed());
+    let adapter = FakeAdapter::new(&["A-B"]);
+    assert_eq!(h.publisher.snapshot_cycle(), None);
+    h.clock.advance(Duration::from_secs(60));
+    assert!(h.publisher.periodic_snapshot(&adapter).is_none());
 }

@@ -49,6 +49,7 @@
 
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::time::Duration;
 
 use dz_edge_core::{AppMessage, EndOfSession, Heartbeat, PortRole, ResetCount, MAX_DATAGRAM_SIZE};
 use dz_edge_mbp::{BookClear, InstrumentReset, LevelUpdate};
@@ -96,6 +97,10 @@ pub struct FeedPipeline<F: EmittedFeed> {
     snapshot: Option<ChannelEgress<F, Tee>>,
     heartbeat_interval_ns: u64,
     manifest_cadence_ns: u64,
+    /// One full pass of the snapshot rotation, when this feed configures one.
+    /// Held here rather than passed to the publisher because it is a key of the
+    /// feed block, and only a feed with a snapshot port role can have it.
+    snapshot_cycle: Option<Duration>,
     /// Monotonic. When a mktdata datagram last left, so that a heartbeat is
     /// *"sent when there is no other traffic"* rather than sent on a timer
     /// alongside traffic.
@@ -159,10 +164,20 @@ impl<F: EmittedFeed> FeedPipeline<F> {
             snapshot,
             heartbeat_interval_ns: nanos(feed.heartbeat_interval),
             manifest_cadence_ns: nanos(feed.manifest_cadence),
+            snapshot_cycle: feed.snapshot_cycle,
             last_mktdata_ns: None,
             next_manifest_ns: None,
             feed: PhantomData,
         }
+    }
+
+    /// One full pass of this feed's snapshot rotation, if it configures one.
+    ///
+    /// `None` is a feed that emits recovery snapshots and no others, which is
+    /// what `[[feed]] snapshot_cycle` being absent means.
+    #[must_use]
+    pub const fn snapshot_cycle(&self) -> Option<Duration> {
+        self.snapshot_cycle
     }
 
     /// The specification this send path composes, which is `F`'s and not a

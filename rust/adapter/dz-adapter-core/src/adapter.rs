@@ -1,5 +1,6 @@
 //! The trait itself.
 
+use crate::depth::DepthBound;
 use crate::error::{AdapterError, ParseError};
 use crate::instrument::InstrumentRef;
 use crate::payload::{ConnectionId, DisconnectReason, Payload};
@@ -153,7 +154,8 @@ pub trait Adapter: Send {
         out: &mut dyn EventSink,
     ) -> Result<(), ParseError>;
 
-    /// Write the book this adapter currently holds for one instrument.
+    /// Write the book this adapter currently holds for one instrument, and say
+    /// how deep that book goes.
     ///
     /// **Pulled rather than pushed.** The snapshot cadence, the rotation across
     /// instruments and the framing belong to the runtime, because they are what
@@ -161,8 +163,22 @@ pub trait Adapter: Send {
     /// because it is the venue's microstructure. Neither can drive the other,
     /// so the runtime asks.
     ///
-    /// Defaulted to writing nothing, which is correct for a top-of-book adapter:
-    /// that feed has no snapshot port and nothing to write.
+    /// # The `Depth Bound` is returned, and that is the whole reason it is
+    ///
+    /// [`DepthBound`] is the answer to *is this the complete book, or the top N
+    /// of it?*, and it is the one field of a snapshot that only the layer
+    /// holding the book can fill in. It is returned rather than passed in
+    /// because a return value cannot be forgotten: an adapter cannot write a
+    /// level without stating the depth those levels were drawn from, and the
+    /// runtime cannot supply a default for it — the wire's `0` means *complete*,
+    /// so the default a runtime would reach for is the strongest claim on the
+    /// feed. See [`DepthBound`] for what that claim costs when it is wrong.
+    ///
+    /// A bounded book writes its levels outward from the top of each side and
+    /// returns [`DepthBound::Levels`]; a book with everything in it returns
+    /// [`DepthBound::Complete`], and does so with no levels at all when the
+    /// venue has no resting interest — an empty book is a book, and refusing to
+    /// snapshot one would hold a quiet instrument out of the rotation.
     ///
     /// # Errors
     ///
@@ -172,12 +188,24 @@ pub trait Adapter: Send {
     /// [`AdapterError::UnknownInstrument`] when the handle is not one this
     /// adapter holds, which is a disagreement between two admitted sets and
     /// never something to retry.
+    ///
+    /// # Defaulted, and what the default now says
+    ///
+    /// The default refuses with [`AdapterError::Internal`], because there is no
+    /// honest depth to report for a book that was never written. A top-of-book
+    /// adapter is never asked — the runtime pulls snapshots only for a depth
+    /// feed, which has the port for them — so the default costs it nothing. A
+    /// *depth* adapter that leaves this defaulted is a defect, and this reports
+    /// it as one; the alternative it replaced was a snapshot of no levels
+    /// claiming to be a complete book.
     fn snapshot(
         &self,
         instrument: InstrumentRef,
         out: &mut dyn SnapshotSink,
-    ) -> Result<(), AdapterError> {
+    ) -> Result<DepthBound, AdapterError> {
         let _ = (instrument, out);
-        Ok(())
+        Err(AdapterError::Internal {
+            detail: "this adapter holds no book: `snapshot` is not implemented",
+        })
     }
 }

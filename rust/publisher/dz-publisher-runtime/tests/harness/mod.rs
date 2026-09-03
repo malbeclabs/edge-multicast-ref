@@ -285,6 +285,8 @@ pub fn feed() -> Feed {
         mktdata_port: MKTDATA_PORT,
         refdata_port: REFDATA_PORT,
         snapshot_port: None,
+        // No snapshot port role, so no rotation to configure.
+        snapshot_cycle: None,
         heartbeat_interval: Duration::from_secs(1),
         definition_cycle: Duration::from_secs(30),
         manifest_cadence: Duration::from_secs(1),
@@ -305,10 +307,27 @@ pub fn depth_feed() -> Feed {
         // Required for a depth feed, and refused for one that carries no
         // snapshot port role. See `StartupError::SnapshotPortRequired`.
         snapshot_port: Some(DEPTH_SNAPSHOT_PORT),
+        // No rotation unless a test asks for one: every existing assertion
+        // about this feed is about what one pulled snapshot looks like, and a
+        // cycle running underneath them would put datagrams on the snapshot
+        // port that no test sent. `depth_feed_with_rotation` is the opt-in.
+        snapshot_cycle: None,
         heartbeat_interval: Duration::from_secs(1),
         definition_cycle: Duration::from_secs(30),
         manifest_cadence: Duration::from_secs(1),
         idle_guard: Duration::from_secs(60),
+    }
+}
+
+/// The market-by-price `[[feed]]` with a snapshot rotation configured.
+///
+/// `cycle` is one full pass over the published set; the per-instrument tick is
+/// derived from it and the instrument count.
+#[must_use]
+pub fn depth_feed_with_rotation(cycle: Duration) -> Feed {
+    Feed {
+        snapshot_cycle: Some(cycle),
+        ..depth_feed()
     }
 }
 
@@ -510,6 +529,10 @@ pub struct FakeAdapter {
     /// entry per resting level, outward from the top of each side, in the
     /// venue's own decimal text.
     book: Vec<(dz_adapter_core::Side, String, String)>,
+    /// What this adapter says about its own depth when it is asked for a
+    /// snapshot. `Complete` by default because the fake writes its whole book;
+    /// `with_depth_bound` states a bound instead.
+    depth: dz_adapter_core::DepthBound,
 }
 
 impl FakeAdapter {
@@ -521,6 +544,7 @@ impl FakeAdapter {
             declined: 0,
             withdrawing: Vec::new(),
             book: Vec::new(),
+            depth: dz_adapter_core::DepthBound::Complete,
         }
     }
 
@@ -531,6 +555,18 @@ impl FakeAdapter {
             .iter()
             .map(|(side, px, qty)| (*side, (*px).to_owned(), (*qty).to_owned()))
             .collect();
+        self
+    }
+
+    /// Report a bounded book rather than a complete one.
+    ///
+    /// The two are different statements on the wire and only the adapter can
+    /// make either, which is what returning the bound from
+    /// `Adapter::snapshot` is for.
+    #[must_use]
+    pub fn with_depth_bound(mut self, levels: u32) -> Self {
+        self.depth =
+            dz_adapter_core::DepthBound::levels(levels).expect("a bound of zero is `Complete`");
         self
     }
 
@@ -584,7 +620,7 @@ impl Adapter for FakeAdapter {
         &self,
         _instrument: InstrumentRef,
         out: &mut dyn dz_adapter_core::SnapshotSink,
-    ) -> Result<(), dz_adapter_core::AdapterError> {
+    ) -> Result<dz_adapter_core::DepthBound, dz_adapter_core::AdapterError> {
         if self.book.is_empty() {
             // The runtime skips this instrument's slot and comes back, which is
             // the difference between one dormant instrument and a restart loop.
@@ -595,7 +631,7 @@ impl Adapter for FakeAdapter {
         for (side, px, qty) in &self.book {
             out.level(*side, Scalar::text(px), Scalar::text(qty), None);
         }
-        Ok(())
+        Ok(self.depth)
     }
 }
 

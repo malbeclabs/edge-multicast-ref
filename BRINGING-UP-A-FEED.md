@@ -86,6 +86,7 @@ One type implementing `dz_adapter_core::Adapter`:
 | `on_connected` | the subscription it wants sent, after every connect — reconnects included, which is what makes a silently lost subscription come back |
 | `on_payload` | one upstream payload, mapped onto normalized events |
 | `on_disconnected` | the session ended, and why |
+| `snapshot` | the book it holds for one instrument, and how deep that book goes — depth feeds only |
 
 Two rules that are easy to get wrong and expensive to get wrong:
 
@@ -96,6 +97,13 @@ Two rules that are easy to get wrong and expensive to get wrong:
   has no encoding for.
 - **A quantity of zero is a removal and nothing else.** The `Action` is derived
   from the quantity plus a presence hint; a venue does not choose it.
+- **`Depth Bound` of zero claims the complete book.** A depth adapter's
+  `snapshot` returns a `DepthBound`, and `Complete` is a positive claim a
+  subscriber is entitled to sum into available liquidity. An adapter that writes
+  the top N of its book returns `DepthBound::levels(n)`; one that writes all of
+  it returns `Complete`, and an empty book is legitimately complete. There is no
+  default, because the value a default would pick is the strongest claim on the
+  feed.
 
 Keep the adapter's own book state machine and reuse the venue's existing decoder
 if it has one. An adapter that folds the book a second way is validating itself.
@@ -163,6 +171,7 @@ multicast_group = "233.252.0.10"
 mktdata_port = 41000
 refdata_port = 41001
 # snapshot_port = 41002     # depth feeds only
+# snapshot_cycle = "5s"     # depth feeds only: one full rotation of the book
 heartbeat_interval = "1s"
 definition_cycle = "30s"
 manifest_cadence = "5s"
@@ -196,6 +205,18 @@ kind = "a-venue-tob"
 - **`source_id` and `channel_id` are identity on the wire.** Two publishers
   sharing a `Source ID` on one group are indistinguishable to a subscriber's gap
   detection.
+- **`definition_cycle` and `idle_guard` are one answer per publisher**, even
+  though they are written per feed. One reference-data registry serves every
+  feed, because `Instrument ID` identity can only be one thing, and the idle
+  guard measures one publisher's silence. Two enabled feeds stating different
+  values is a startup error naming both, rather than the first block's answer
+  quietly winning.
+- **A depth feed with no `snapshot_cycle` cannot be joined mid-session.** It
+  still emits the recovery snapshots a reset obliges, but a subscriber that
+  arrives after the deltas started has nothing to build a book from — a level
+  update states the resting quantity at a price, so nothing later corrects a
+  missing start. The publisher says so at startup; both shipped publishers run
+  a periodic snapshot, both at five seconds.
 - **Addresses in examples are documentation ranges** (RFC 5737 and
   MCAST-TEST-NET). `scripts/check-public-repo-rules.sh` enforces that for code
   in this repository, and it is the same habit worth keeping in a config
@@ -313,6 +334,7 @@ infrastructure repositories, and each of those owns its own review.
 - [ ] the binary registers the adapter under a `kind` token, and links the transports it allows
 - [ ] an offline replay run publishes, and this repository's Go parser reads the values back
 - [ ] config reviewed for `pin`, `source_id`, `channel_id`, group and ports
+- [ ] for a depth feed: `snapshot_cycle` set, and the adapter's `DepthBound` checked against what its book actually holds
 - [ ] a recorder is configured for the feed before the publisher is pointed at production
 - [ ] metrics scraped, and the connection-state alert exists
 

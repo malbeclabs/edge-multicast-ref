@@ -114,6 +114,38 @@ pub enum StartupError {
     )]
     SnapshotPortNotCarried { spec: &'static str, port: u16 },
 
+    /// A feed with a `snapshot_cycle` and no snapshot port role.
+    ///
+    /// The same rule as [`Self::SnapshotPortNotCarried`], one key along: a
+    /// cadence for a port role the feed does not carry is a key nobody reads,
+    /// and an operator who wrote it believes snapshots are going out.
+    #[error(
+        "`[[feed]] spec = \"{spec}\"` carries no snapshot port role, so \
+         `snapshot_cycle` would pace snapshots nothing sends"
+    )]
+    SnapshotCycleWithoutPort { spec: &'static str },
+
+    /// Two enabled feeds stating different values for a key the publisher holds
+    /// once.
+    ///
+    /// **Refused rather than resolved to the first feed's**, which is what this
+    /// runtime silently did. Both keys are per-feed in the document because they
+    /// are properties of a feed, and both are single in the publisher because of
+    /// what they drive: `definition_cycle` paces one reference-data registry,
+    /// which is one because `Instrument ID` identity can only be one thing, and
+    /// `idle_guard` measures one publisher's silence. Taking the first block's
+    /// answer means an operator who set the second is obeyed on paper and
+    /// ignored in fact.
+    #[error(
+        "two enabled `[[feed]]` blocks state different `{key}`, {one:?} and \
+         {another:?}, and this publisher holds one"
+    )]
+    FeedsDisagree {
+        key: &'static str,
+        one: std::time::Duration,
+        another: std::time::Duration,
+    },
+
     /// Two enabled feeds naming different `source_id`s.
     ///
     /// A `Source ID` is the publisher's registered identity and is the same for
@@ -257,6 +289,26 @@ pub enum StartupError {
     /// No configuration file was named.
     #[error("no configuration file: {usage}")]
     NoConfigPath { usage: &'static str },
+
+    /// `[adapter.tee] enabled = true` with no `path`.
+    ///
+    /// The same shape as [`Self::ReplayWithoutPath`]: a section switched on and
+    /// left incomplete is an operator who believes copies are being archived.
+    #[error("[adapter.tee] is enabled but names no path")]
+    TeeWithoutPath,
+
+    /// The reference stream's own socket would not open.
+    ///
+    /// Not the consumer's socket: nothing is connected there, so a recorder
+    /// that has not started yet is the ordinary case and not a startup failure.
+    /// This is a host on which an unbound datagram socket cannot be created at
+    /// all.
+    #[error("the reference stream for {path} would not open: {source}")]
+    Tee {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 
     /// `[adapter.replay] enabled = true` with no `path`.
     ///

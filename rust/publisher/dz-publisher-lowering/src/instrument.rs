@@ -146,4 +146,29 @@ impl InstrumentTable {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// How many handles have ever been minted, withdrawn ones included.
+    ///
+    /// The bound a cursor walking this table counts to, which is why it is not
+    /// [`len`](Self::len): a handle is the index of its slot for the lifetime of
+    /// the table, so a withdrawal leaves a hole rather than shifting the ones
+    /// after it. A rotation that counted to `len` would stop short of the last
+    /// instrument as soon as anything was delisted.
+    #[must_use]
+    pub const fn slots(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// Whether this handle resolves to an instrument.
+    ///
+    /// For a caller walking the table by index — a snapshot rotation — where
+    /// resolving the instrument itself is not what is wanted and
+    /// [`get`](Self::get)'s refusal would have to be discarded. Costs one bounds
+    /// check, so a rotation's tick stays O(1) in the size of the published set.
+    #[must_use]
+    pub fn holds(&self, instrument: InstrumentRef) -> bool {
+        self.slots
+            .get(instrument.index() as usize)
+            .is_some_and(Option::is_some)
+    }
 }

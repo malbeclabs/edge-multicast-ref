@@ -54,7 +54,9 @@
 
 use std::sync::Arc;
 
-use dz_adapter_core::{Adapter, Desync, Event, EventSink, InstrumentRef, VenueTimestampKind};
+use dz_adapter_core::{
+    Adapter, DepthBound, Desync, Event, EventSink, InstrumentRef, VenueTimestampKind,
+};
 use dz_edge_core::fixed_point::ScaleError;
 use dz_edge_mbp::MarketByPrice;
 use dz_edge_refdata::{InstrumentDefinition, ManifestSummary};
@@ -70,6 +72,7 @@ use crate::clock::Clock;
 use crate::config::EmittedFeed;
 use crate::guard::{ConsistencyGuard, Exit, IdleGuard, Inconsistency};
 use crate::pipeline::FeedPipeline;
+use crate::rotation::SnapshotRotation;
 
 /// How often the runtime drains the adapter's listings.
 ///
@@ -367,6 +370,9 @@ pub struct Publisher<S: StateStore, K: Clock + Clone> {
     venue_timestamp_kind: Option<TimestampKind>,
     /// Monotonic. When the adapter's listings were last drained.
     last_poll_ns: Option<u64>,
+    /// The periodic snapshot rotation, when the depth feed configures a cycle.
+    /// `None` is a publisher that emits recovery snapshots and no others.
+    snapshots: Option<SnapshotRotation>,
     seeded: bool,
 }
 
@@ -397,6 +403,11 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
         feeds: Feeds,
         idle_guard: std::time::Duration,
     ) -> Self {
+        let snapshots = feeds
+            .market_by_price
+            .as_ref()
+            .and_then(FeedPipeline::snapshot_cycle)
+            .map(SnapshotRotation::new);
         Self {
             metrics,
             refdata,
@@ -414,6 +425,7 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
             payload_recv_ts_ns: None,
             venue_timestamp_kind: None,
             last_poll_ns: None,
+            snapshots,
             seeded: false,
         }
     }
@@ -540,15 +552,21 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
     /// Pull one instrument's book from the adapter, frame it, and send it on the
     /// snapshot port role.
     ///
-    /// **Pulled rather than pushed**, and the pacing is the caller's. The
-    /// cadence, the rotation across instruments and the framing belong to the
-    /// runtime because they are what a subscriber's recovery depends on; the
-    /// book belongs to the adapter because it is the venue's microstructure. So
-    /// the runtime asks — and *when* it asks is deliberately not decided here,
-    /// because the design's configuration names `[[feed]] snapshot_port` and no
-    /// snapshot interval. Inventing a key is the one thing this crate must not
-    /// do, so this method is called by whoever holds a policy and
-    /// [`crate::run()`] does not call it. See the crate documentation.
+    /// **Pulled rather than pushed.** The cadence, the rotation across
+    /// instruments and the framing belong to the runtime because they are what a
+    /// subscriber's recovery depends on; the book belongs to the adapter because
+    /// it is the venue's microstructure. So the runtime asks.
+    ///
+    /// **The `Depth Bound` is not a parameter**, and that is the point: it is
+    /// whatever [`Adapter::snapshot`] returned. A bound this method accepted
+    /// would be one its callers had to supply, and the value a caller with no
+    /// book reaches for is `0` — which on the wire is a positive claim that the
+    /// snapshot carries the complete book. See
+    /// [`DepthBound`].
+    ///
+    /// The pacing is still the caller's, but there is now a rotation to call:
+    /// [`periodic_snapshot`](Self::periodic_snapshot) drives `[[feed]]
+    /// snapshot_cycle`.
     ///
     /// Returns the snapshot as it went out, so a caller can log the level count
     /// and a test can assert the framing.
@@ -562,7 +580,6 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
         &mut self,
         adapter: &dyn Adapter,
         instrument: InstrumentRef,
-        depth_bound: u32,
     ) -> Result<Snapshot, SnapshotError> {
         // The point in the live stream this book state is true as of, which is
         // what tells a subscriber which live messages to apply after it and
@@ -574,7 +591,7 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
             .ok_or(SnapshotError::NoDepthFeed)?
             .mktdata_sequence()
             .unwrap_or(0);
-        self.snapshot_anchored_at(adapter, instrument, anchor, depth_bound)
+        self.snapshot_anchored_at(adapter, instrument, anchor)
     }
 
     /// The recovery snapshot an [`InstrumentReset`] obliged, at the anchor that
@@ -596,29 +613,75 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
         adapter: &dyn Adapter,
         instrument: InstrumentRef,
         anchor: u64,
-        depth_bound: u32,
     ) -> Result<Snapshot, SnapshotError> {
         let now_unix = self.clock.unix_ns();
         let Some(_) = self.feeds.market_by_price.as_ref() else {
             return Err(SnapshotError::NoDepthFeed);
         };
-        let mut framer = self.depth.open_snapshot(
-            self.refdata.instruments(),
-            instrument,
-            anchor,
-            now_unix,
-            depth_bound,
-        )?;
+        let mut framer =
+            self.depth
+                .open_snapshot(self.refdata.instruments(), instrument, anchor, now_unix)?;
         // The adapter's refusal is carried through rather than folded into a
-        // lowering refusal; see `SnapshotError`.
-        adapter.snapshot(instrument, &mut framer)?;
-        let snapshot = framer.finish()?;
+        // lowering refusal; see `SnapshotError`. What it returns instead of a
+        // refusal is the depth the levels it just wrote were drawn from, which
+        // is the one field of the framing that is the venue's.
+        let depth_bound: DepthBound = adapter.snapshot(instrument, &mut framer)?;
+        let snapshot = framer.finish(depth_bound)?;
         self.feeds
             .market_by_price
             .as_mut()
             .expect("checked above")
             .send_snapshot(&snapshot, now_unix)?;
         Ok(snapshot)
+    }
+
+    /// The next periodic snapshot the rotation owes, taken if one is due.
+    ///
+    /// `None` covers three states that are all *nothing to do now*: this
+    /// publisher configured no `[[feed]] snapshot_cycle`, the derived tick has
+    /// not elapsed, or the published set is empty. `Some` carries the outcome of
+    /// the one instrument that fell due — including its refusal, because a
+    /// caller that discarded it would turn a book that never bootstraps into
+    /// silence nobody reads.
+    ///
+    /// # Why this exists at all
+    ///
+    /// A recovery snapshot answers a reset the publisher itself announced. It
+    /// does nothing for the subscriber that joins mid-session, and that
+    /// subscriber cannot build a book without one: a `LevelUpdate` states the
+    /// resting quantity at a price, so a subscriber with no starting state is
+    /// not corrected by the next message — it is wrong at every price it has
+    /// never seen an update for, indefinitely. Both shipped publishers carry a
+    /// periodic snapshot for exactly this reason and both set it to five
+    /// seconds; a runtime with a snapshot port and no cadence is the outlier.
+    ///
+    /// # `NotReady` is not a failure here
+    ///
+    /// An adapter whose book has not bootstrapped refuses, the rotation has
+    /// already stepped past it, and it comes back on the next lap. That is the
+    /// documented contract of [`AdapterError::NotReady`](dz_adapter_core::AdapterError::NotReady)
+    /// and the difference between one dormant instrument and a feed whose
+    /// snapshots stop; a caller should log it at most quietly.
+    pub fn periodic_snapshot(
+        &mut self,
+        adapter: &dyn Adapter,
+    ) -> Option<Result<Snapshot, SnapshotError>> {
+        let now_mono = dz_publisher_refdata::Clock::monotonic_ns(&self.clock);
+        let due = self
+            .snapshots
+            .as_mut()?
+            .due(now_mono, self.refdata.instruments())?;
+        Some(self.snapshot(adapter, due))
+    }
+
+    /// One full pass of the snapshot rotation, if this publisher runs one.
+    ///
+    /// For a log line at startup: a depth feed with no cadence is a feed no
+    /// joining subscriber can bootstrap from, and that is worth stating rather
+    /// than leaving to be inferred from silence.
+    #[must_use]
+    pub fn snapshot_cycle(&self) -> Option<std::time::Duration> {
+        self.snapshots.as_ref().map(SnapshotRotation::cycle)
     }
 
     /// Shut down, in the order below, and record the exit.

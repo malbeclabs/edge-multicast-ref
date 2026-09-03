@@ -276,10 +276,14 @@ impl AdapterRegistry {
     #[must_use]
     pub fn registered_list(&self) -> String {
         let kinds = self.kinds();
+        let built_in = format!("built in: {}", crate::builtin::BUILTIN_KINDS.join(", "));
         if kinds.is_empty() {
-            "none - this binary registered no adapter".to_owned()
+            // Still worth saying rather than printing only the built-in: a
+            // build that linked no venue adapter is a different problem from a
+            // misspelled name, and it wants a different action.
+            format!("none registered by this binary ({built_in})")
         } else {
-            kinds.join(", ")
+            format!("{} ({built_in})", kinds.join(", "))
         }
     }
 
@@ -292,14 +296,27 @@ impl AdapterRegistry {
     /// [`StartupError::AdapterInit`] carrying whatever the venue's constructor
     /// refused with.
     pub fn open(&self, cx: &AdapterContext<'_>) -> Result<Venue, StartupError> {
-        let (name, constructor) = self
-            .entries
-            .iter()
-            .find(|(name, _)| *name == cx.kind())
-            .ok_or_else(|| StartupError::UnknownAdapterKind {
-                token: cx.kind().to_owned(),
-                registered: self.registered_list(),
-            })?;
-        constructor(cx).map_err(|source| StartupError::AdapterInit { kind: name, source })
+        if let Some((name, constructor)) = self.entries.iter().find(|(name, _)| *name == cx.kind())
+        {
+            return constructor(cx)
+                .map_err(|source| StartupError::AdapterInit { kind: name, source });
+        }
+        // **After the venue's own entries, and never instead of one.** A venue
+        // that registers a name this crate also builds in gets its own — it is
+        // the one that knows its upstream — and the built-in is what answers a
+        // name nothing else does. See `crate::builtin` for why there is one at
+        // all.
+        if let Some(built_in) = crate::builtin::open(cx) {
+            let kind = crate::builtin::BUILTIN_KINDS
+                .iter()
+                .find(|name| **name == cx.kind())
+                .copied()
+                .unwrap_or("built-in");
+            return built_in.map_err(|source| StartupError::AdapterInit { kind, source });
+        }
+        Err(StartupError::UnknownAdapterKind {
+            token: cx.kind().to_owned(),
+            registered: self.registered_list(),
+        })
     }
 }

@@ -35,14 +35,17 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use dz_adapter_core::{
-    Adapter, AdapterError, ConnectionId, Desync, DisconnectReason, Event, EventSink, InstrumentRef,
-    ListingSink, ParseError, Payload, SnapshotSink, UpstreamSink, VenueTimestampKind,
+    Adapter, AdapterError, ConnectionId, DepthBound, Desync, DisconnectReason, Event, EventSink,
+    InstrumentRef, ListingSink, ParseError, Payload, SnapshotSink, UpstreamSink,
+    VenueTimestampKind,
 };
 use dz_edge_core::{PortRole, MAX_DATAGRAM_SIZE};
 use dz_edge_mbp::MarketByPrice;
 use dz_edge_tob::TopOfBook;
 use dz_ingress_core::{Driver, Input};
-use dz_publisher_egress::{EraStore, FailureScope, KernelRoute, MulticastTransmitter, Tee};
+use dz_publisher_egress::{
+    EraStore, FailureScope, KernelRoute, MulticastTransmitter, ReferenceStream, Tee,
+};
 use dz_publisher_metrics::{PublisherMetrics, PublisherMetricsConfig};
 use dz_publisher_refdata::{CycleSchedule, FileStore, Registry, RegistryConfig, StateStore};
 
@@ -52,7 +55,7 @@ use crate::error::StartupError;
 use crate::guard::{Exit, Inconsistency};
 use crate::observer::MetricsObserver;
 use crate::pipeline::{FeedPipeline, Port, Ports};
-use crate::publisher::{Feeds, Publisher};
+use crate::publisher::{Feeds, Publisher, SnapshotError};
 use crate::registry::{AdapterContext, AdapterRegistry};
 
 /// How often the tick body runs.
@@ -273,6 +276,20 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
         option_env!("DZ_PUBLISHER_TOOLCHAIN").unwrap_or("unknown"),
     );
 
+    // A depth feed with no cadence emits recovery snapshots and no others,
+    // which is a feed a subscriber cannot join mid-session. It is a legitimate
+    // configuration and it is not a default anybody should get by accident, so
+    // it is stated at startup rather than left to be inferred from silence.
+    match publisher.borrow().snapshot_cycle() {
+        Some(cycle) => eprintln!("snapshot rotation: one pass over the published set every {cycle:?}"),
+        None if config.feeds.iter().any(|feed| feed.snapshot_port.is_some()) => eprintln!(
+            "dz-publisher-runtime: a feed carries a snapshot port and no `[[feed]] snapshot_cycle`: \
+             only recovery snapshots will be sent, so a subscriber that joins mid-session cannot \
+             bootstrap its book"
+        ),
+        None => {}
+    }
+
     let server = if config.metrics.enabled {
         Some(
             dz_publisher_metrics::serve(Arc::clone(&metrics), config.metrics.listen_addr).map_err(
@@ -378,12 +395,41 @@ fn open_ports(
         let endpoint = transmitter.endpoint();
         let mut sink = Tee::new(port_role, Arc::clone(metrics));
         sink.add(Box::new(transmitter));
-        // `[adapter.tee]` would add a second member to this fan-out, and to
-        // this rather than to a second transmitter: it darkens nothing when it
+        // `[adapter.tee]` adds a second member to this fan-out, and to this
+        // rather than as a second transmitter: it darkens nothing when it
         // fails and must never be able to end a send, which is exactly what
-        // `Tee` guarantees a member. It is not added because the framing it
-        // writes is the framing the offline comparison reads, and that framing
-        // does not exist yet - see `crate::config::TeeConfig`.
+        // `Tee` guarantees a member and what `FailureScope::Channel` declares.
+        //
+        // **One socket per port role**, at `path` suffixed with the role's own
+        // token. The diff this stream exists for is keyed on the destination
+        // port among other things, and a Unix datagram carries no UDP header —
+        // so three roles sharing one socket would hand a recorder datagrams it
+        // could not attribute without decoding them, and decoding is the one
+        // thing a record path does not do. The shape mirrors the recorder's own
+        // configuration, which already names a port per role.
+        if config.adapter.tee.enabled {
+            let prefix = config
+                .adapter
+                .tee
+                .path
+                .as_deref()
+                .ok_or(StartupError::TeeWithoutPath)?;
+            let mut destination = prefix.as_os_str().to_owned();
+            destination.push(".");
+            destination.push(port_role.as_str());
+            let destination = PathBuf::from(destination);
+            eprintln!(
+                "teeing {} datagrams to {}",
+                port_role.as_str(),
+                destination.display()
+            );
+            sink.add(Box::new(
+                ReferenceStream::open(name, &destination).map_err(|source| StartupError::Tee {
+                    path: destination.clone(),
+                    source,
+                })?,
+            ));
+        }
         Ok::<Port, StartupError>(Port { endpoint, sink })
     };
 
@@ -464,10 +510,26 @@ async fn tick_loop<S: StateStore, K: Clock + Clone>(
                 // Retrying here would hold a tick open on a book that is not
                 // ready.
                 for (instrument, anchor) in publisher.owed_snapshots() {
-                    if let Err(error) =
-                        publisher.snapshot_anchored_at(&**held, instrument, anchor, 0)
+                    if let Err(error) = publisher.snapshot_anchored_at(&**held, instrument, anchor)
                     {
                         eprintln!("dz-publisher-runtime: a recovery snapshot was refused: {error}");
+                    }
+                }
+                // The periodic rotation, which is what a subscriber joining
+                // mid-session bootstraps from. One instrument per tick, so this
+                // is O(1) in the published set; see `crate::rotation`.
+                //
+                // A refusal is reported and the rotation has already stepped
+                // past the instrument, so a book that has not bootstrapped
+                // costs one slot of one lap rather than the rotation.
+                if let Some(Err(error)) = publisher.periodic_snapshot(&**held) {
+                    match error {
+                        // Expected, transient, and not a failure: the contract
+                        // of `NotReady` is that the caller comes back.
+                        SnapshotError::Adapter(AdapterError::NotReady { .. }) => {}
+                        error => eprintln!(
+                            "dz-publisher-runtime: a periodic snapshot was refused: {error}"
+                        ),
                     }
                 }
             }
@@ -626,11 +688,14 @@ impl Adapter for SharedAdapter {
         self.held().on_payload(payload, out)
     }
 
+    /// Forwarded rather than defaulted, and the default is why: it refuses. A
+    /// wrapper that inherited it would report every venue's book as
+    /// unimplemented.
     fn snapshot(
         &self,
         instrument: InstrumentRef,
         out: &mut dyn SnapshotSink,
-    ) -> Result<(), AdapterError> {
+    ) -> Result<DepthBound, AdapterError> {
         self.held().snapshot(instrument, out)
     }
 }

@@ -46,7 +46,7 @@ use dz_publisher_lowering::SourceId;
 use dz_publisher_refdata::SelectionPolicy;
 use serde::Deserialize;
 
-use crate::duration::de_duration;
+use crate::duration::{de_duration, de_optional_duration};
 use crate::error::StartupError;
 
 /// The whole document.
@@ -165,6 +165,29 @@ pub struct FeedSection {
     /// [`StartupError::SnapshotPortNotCarried`].
     #[serde(default)]
     pub snapshot_port: Option<u16>,
+
+    /// One full pass of the snapshot rotation. Depth feeds only, and optional.
+    ///
+    /// # Why the key exists, and why it is a cycle
+    ///
+    /// A recovery snapshot answers a reset the publisher announced; it does
+    /// nothing for the subscriber that joins mid-session, and that subscriber
+    /// cannot build a book without one. Both shipped publishers carry a periodic
+    /// snapshot for that reason and both set it to five seconds — one of them
+    /// under this exact name and this exact meaning, a full round-robin pass
+    /// with one instrument per tick.
+    ///
+    /// A *cycle* and not an interval, for the reason `definition_cycle` is one:
+    /// an interval per instrument has the whole published set falling due
+    /// together, and a snapshot is several datagrams per instrument. See
+    /// [`SnapshotRotation`](crate::rotation::SnapshotRotation).
+    ///
+    /// Absent means recovery snapshots and nothing else, which is what this
+    /// runtime did before the key existed. It is refused on a feed with no
+    /// snapshot port role rather than ignored: see
+    /// [`StartupError::SnapshotCycleWithoutPort`].
+    #[serde(default, deserialize_with = "de_optional_duration")]
+    pub snapshot_cycle: Option<Duration>,
 
     #[serde(default = "default_heartbeat", deserialize_with = "de_duration")]
     pub heartbeat_interval: Duration,
@@ -308,12 +331,20 @@ pub struct AdapterConfig {
 /// what reaches subscribers, which is the section an operator reads as *this can
 /// take the feed down*.
 ///
-/// **Parsed, defaulted off, and plumbed nowhere.** The framing the tee writes is
-/// the same framing the offline comparison needs, and that framing does not
-/// exist yet — so the alternative to leaving this unplumbed is inventing a wire
-/// format here that a later crate would have to match. What the section already
-/// buys is that an operator who enables it gets a load error naming the
-/// unplumbed state, rather than a silently ignored key.
+/// # One socket per port role, and no framing at all
+///
+/// `path` is a **prefix**: the role's own token is appended, so a `path` of
+/// `/run/a-publisher/tee` is written to as `tee.mktdata`, `tee.refdata` and
+/// `tee.snapshot`. The diff this stream exists for is keyed on the destination
+/// port among other things, and a Unix datagram carries no UDP header — so one
+/// socket for three roles would hand a recorder datagrams it could not
+/// attribute without decoding them, and decoding is the one thing a record path
+/// does not do. The shape mirrors the recorder's own configuration, which
+/// already names a port per role.
+///
+/// The socket is `SOCK_DGRAM`, so one datagram in is one datagram out and there
+/// is no framing to invent, agree on or get wrong. See
+/// [`ReferenceStream`](dz_publisher_egress::ReferenceStream).
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TeeConfig {
@@ -468,6 +499,9 @@ pub struct Feed {
     pub mktdata_port: u16,
     pub refdata_port: u16,
     pub snapshot_port: Option<u16>,
+    /// One full pass of the snapshot rotation; `None` for recovery snapshots
+    /// only. See [`FeedSection::snapshot_cycle`].
+    pub snapshot_cycle: Option<Duration>,
     pub heartbeat_interval: Duration,
     pub definition_cycle: Duration,
     pub manifest_cadence: Duration,
@@ -559,6 +593,49 @@ impl Document {
             });
         }
 
+        // **Two keys are per-feed in the document and not per-feed in the
+        // publisher, so a document that states two answers is refused rather
+        // than silently given the first feed's.**
+        //
+        // `definition_cycle` paces one registry, and one registry is deliberate:
+        // `Instrument ID` identity is the one thing there can only be one of,
+        // so every feed publishes the same set from the same table and a second
+        // cadence over it would emit the same definition at two rates. See
+        // `Publisher::new`.
+        //
+        // `idle_guard` is one guard because the silence it measures is the
+        // publisher's — upstream delivering and nothing reaching any wire. The
+        // shipped publisher that once had one guard per feed now has exactly one
+        // venue-wide guard, with a fallback to its first feed's key; the
+        // fallback is the part that is a trap, and this is where it is refused
+        // instead.
+        for (key, value, of_other) in [
+            (
+                "[[feed]] definition_cycle",
+                feeds[0].definition_cycle,
+                feeds
+                    .iter()
+                    .find(|feed| feed.definition_cycle != feeds[0].definition_cycle)
+                    .map(|feed| feed.definition_cycle),
+            ),
+            (
+                "[[feed]] idle_guard",
+                feeds[0].idle_guard,
+                feeds
+                    .iter()
+                    .find(|feed| feed.idle_guard != feeds[0].idle_guard)
+                    .map(|feed| feed.idle_guard),
+            ),
+        ] {
+            if let Some(another) = of_other {
+                return Err(StartupError::FeedsDisagree {
+                    key,
+                    one: value,
+                    another,
+                });
+            }
+        }
+
         let selection = SelectionPolicy::new(
             self.refdata.selection.bootstrap_top_n,
             self.refdata.selection.max_published,
@@ -568,6 +645,14 @@ impl Document {
         let (ingress_kind, ingress) = self.ingress.resolve()?;
 
         check_credentials(&self.adapter.credentials)?;
+
+        // Checked at load rather than where the socket is opened: a section
+        // switched on and left incomplete is an operator who believes copies
+        // are being archived, and there is no reason to open a multicast socket
+        // before saying so.
+        if self.adapter.tee.enabled && self.adapter.tee.path.is_none() {
+            return Err(StartupError::TeeWithoutPath);
+        }
 
         Ok(Config {
             venue: self.venue,
@@ -717,12 +802,25 @@ impl FeedSection {
             }
         }
 
+        // A cadence for a port role this feed does not carry is a key nobody
+        // reads, which is the failure the whole document is checked against.
+        if self.snapshot_cycle.is_some() && self.snapshot_port.is_none() {
+            return Err(StartupError::SnapshotCycleWithoutPort {
+                spec: spec.as_str(),
+            });
+        }
+
         for (key, value) in [
             ("[[feed]] heartbeat_interval", self.heartbeat_interval),
             ("[[feed]] definition_cycle", self.definition_cycle),
             ("[[feed]] manifest_cadence", self.manifest_cadence),
             ("[[feed]] idle_guard", self.idle_guard),
-        ] {
+        ]
+        .into_iter()
+        .chain(
+            self.snapshot_cycle
+                .map(|cycle| ("[[feed]] snapshot_cycle", cycle)),
+        ) {
             if value.is_zero() {
                 return Err(StartupError::ZeroDuration { key });
             }
@@ -736,6 +834,7 @@ impl FeedSection {
             mktdata_port: self.mktdata_port,
             refdata_port: self.refdata_port,
             snapshot_port: self.snapshot_port,
+            snapshot_cycle: self.snapshot_cycle,
             heartbeat_interval: self.heartbeat_interval,
             definition_cycle: self.definition_cycle,
             manifest_cadence: self.manifest_cadence,
