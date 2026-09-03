@@ -301,27 +301,21 @@ fn drive<S: RowSink>(
     match sink.flush(now_unix_nanos()) {
         Ok(landed) => {
             metrics.bytes_posted(landed.bytes_posted);
-            for id in &landed.objects {
-                if let Some(index) = pending.iter().position(|p| &p.id == id) {
-                    let done = pending.remove(index);
-                    if let Err(e) = ledger.record(ledger::Entry {
-                        object_key: done.id.key.clone(),
-                        object_sha256: done.id.sha256.clone(),
-                        loaded_at_ns: now_unix_nanos(),
-                        trailer: done.trailer,
-                    }) {
-                        eprintln!("dz-recorder-load: ledger: {e}");
-                        failed += 1;
-                    } else {
-                        metrics.object_loaded(&done.written, done.bytes_read);
+            // The same recording a pass does, and not a second copy of it: an
+            // object recorded differently on the way out is an object the next
+            // run disagrees with itself about.
+            match loader::record_landed(&landed.objects, &mut pending, ledger, metrics) {
+                Ok(recorded) if recorded > 0 => {
+                    eprintln!("dz-recorder-load: flushed {recorded} held object(s) on the way out")
+                }
+                Ok(_) => {}
+                Err((_, message)) => {
+                    eprintln!("dz-recorder-load: ledger: {message}");
+                    failed += 1;
+                    if first_failure.is_none() {
+                        first_failure = Some(message);
                     }
                 }
-            }
-            if !landed.objects.is_empty() {
-                eprintln!(
-                    "dz-recorder-load: flushed {} held object(s) on the way out",
-                    landed.objects.len()
-                );
             }
         }
         Err(e) => {

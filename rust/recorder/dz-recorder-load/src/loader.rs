@@ -417,28 +417,7 @@ impl<S: RowSink> Loader<'_, S> {
     /// load: the rows are in the store and the loader has forgotten it did that,
     /// so the re-load that follows is a replace.
     fn record_landed(&mut self, landed: &[ObjectId]) -> Result<u64, (ErrorKind, String)> {
-        let mut recorded = 0u64;
-        for id in landed {
-            let Some(index) = self.pending.iter().position(|p| &p.id == id) else {
-                // The sink named an object this loader is not holding. It cannot
-                // happen — a sink only ever lands what it was given — and if it
-                // did, recording an entry for an object with no trailer would
-                // put a boundary check on evidence nobody derived.
-                continue;
-            };
-            let done = self.pending.remove(index);
-            self.ledger
-                .record(Entry {
-                    object_key: done.id.key.clone(),
-                    object_sha256: done.id.sha256.clone(),
-                    loaded_at_ns: now_unix_nanos(),
-                    trailer: done.trailer,
-                })
-                .map_err(|e: LedgerError| (ErrorKind::Ledger, e.to_string()))?;
-            self.metrics.object_loaded(&done.written, done.bytes_read);
-            recorded += 1;
-        }
-        Ok(recorded)
+        record_landed(landed, self.pending, self.ledger, self.metrics)
     }
 
     fn fail(&self, kind: ErrorKind, message: String, pass: &mut Pass, errors: &mut Vec<String>) {
@@ -506,6 +485,51 @@ impl<S: RowSink> Loader<'_, S> {
         out.sort_by_key(|c| (c.start_ns, c.object.clone()));
         out
     }
+}
+
+/// Writes a ledger entry for every object whose rows have landed, and stops
+/// holding them.
+///
+/// A free function because the way out needs it too: a `--once` pass and a
+/// shutdown both end in a flush, and the objects that flush lands have to be
+/// recorded by the same code that records them mid-pass. Two copies of this
+/// had already drifted — one bailing on a ledger failure and one logging and
+/// carrying on, one counting a landing the loader was not holding and one
+/// dropping it silently — and neither copy was the one the tests exercised.
+///
+/// # Errors
+///
+/// The ledger could not be written. The rows are in the store and the loader
+/// has forgotten it did that, so the re-load that follows is a replace — which
+/// is safe, and still a failure worth reporting.
+pub(crate) fn record_landed(
+    landed: &[ObjectId],
+    pending: &mut Vec<Pending>,
+    ledger: &mut Ledger,
+    metrics: &LoaderMetrics,
+) -> Result<u64, (ErrorKind, String)> {
+    let mut recorded = 0u64;
+    for id in landed {
+        let Some(index) = pending.iter().position(|p| &p.id == id) else {
+            // The sink named an object this loader is not holding. It cannot
+            // happen — a sink only ever lands what it was given — and if it
+            // did, recording an entry for an object with no trailer would put a
+            // boundary check on evidence nobody derived.
+            continue;
+        };
+        let done = pending.remove(index);
+        ledger
+            .record(Entry {
+                object_key: done.id.key.clone(),
+                object_sha256: done.id.sha256.clone(),
+                loaded_at_ns: now_unix_nanos(),
+                trailer: done.trailer,
+            })
+            .map_err(|e: LedgerError| (ErrorKind::Ledger, e.to_string()))?;
+        metrics.object_loaded(&done.written, done.bytes_read);
+        recorded += 1;
+    }
+    Ok(recorded)
 }
 
 fn read_manifest(path: &Path) -> Result<SegmentManifest, String> {
@@ -1132,21 +1156,12 @@ mod deferred_ledger_tests {
         // everything.
         let landed = sink.flush(0).expect("posted");
         assert_eq!(landed.objects.len(), 3);
-        for id in &landed.objects {
-            let done = pending
-                .iter()
-                .position(|p| &p.id == id)
-                .expect("the loader was holding it");
-            let done = pending.remove(done);
-            ledger
-                .record(Entry {
-                    object_key: done.id.key,
-                    object_sha256: done.id.sha256,
-                    loaded_at_ns: 0,
-                    trailer: done.trailer,
-                })
-                .expect("recordable");
-        }
+        // Through the recording the binary's own way out calls, rather than a
+        // hand-rolled copy of it: a test that reimplements the code under test
+        // passes over exactly the drift it exists to catch.
+        let recorded = record_landed(&landed.objects, &mut pending, &mut ledger, &metrics)
+            .expect("the ledger is writable");
+        assert_eq!(recorded, 3);
         assert_eq!(ledger.entries(), 3);
         assert!(pending.is_empty());
 
