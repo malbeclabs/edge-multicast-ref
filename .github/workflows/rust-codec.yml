@@ -123,6 +123,62 @@ jobs:
         working-directory: rust
         run: cargo test -p dz-recorder --features socket-e2e
 
+  # The analysis tier's column-store suite: the checked-in DDL applied to a real
+  # server, then a load, a re-load, the arithmetic and the TTL.
+  #
+  # A separate job because it needs a server, and the job above must stay the
+  # gate that needs nothing of the host — the same split `afpacket` already
+  # makes, for the same reason. The image is the one the demo provisions, pinned
+  # to the same tag: a schema proved against a different major version is a
+  # schema nobody proved.
+  #
+  # The suite fails rather than skips when the server is absent, so this is a
+  # gate and not a hope. Everything it does happens in a scratch database it
+  # creates and drops.
+  clickhouse:
+    runs-on: ubuntu-latest
+    services:
+      clickhouse:
+        image: clickhouse/clickhouse-server:24.8
+        ports:
+          - 8123:8123
+        env:
+          # Dev-mode: no auth, single node. The suite reaches it over the
+          # runner's own loopback and nothing else can.
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 0
+          CLICKHOUSE_SKIP_USER_SETUP: 1
+        options: >-
+          --health-cmd "wget -qO- http://localhost:8123/ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      # Before the tests, because a health check that passed while the server
+      # was still loading its own databases produces a first failure nobody can
+      # interpret.
+      - name: Is the server answering?
+        run: |
+          for _ in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8123/ping; then exit 0; fi
+            sleep 2
+          done
+          echo "the column store never answered on 8123" >&2
+          exit 1
+      - name: Clippy (clickhouse-tests)
+        working-directory: rust
+        run: cargo clippy -p dz-recorder-clickhouse --features clickhouse-tests --all-targets -- -D warnings
+      - name: Test (the DDL against a real server)
+        working-directory: rust
+        env:
+          DZ_LOADER_CLICKHOUSE_URL: http://127.0.0.1:8123
+        # Serially: each test creates and drops a database of its own, and
+        # `OPTIMIZE ... FINAL` is a server-wide operation worth not overlapping.
+        run: cargo test -p dz-recorder-clickhouse --features clickhouse-tests -- --test-threads=1
+
   # The specification's own rule set, over what this repository's publisher
   # writes and its recorder keeps. Everything else here compares the chain
   # against itself, which cannot catch both halves agreeing on something the

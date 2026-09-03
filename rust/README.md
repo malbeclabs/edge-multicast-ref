@@ -18,7 +18,7 @@ The receivers are binaries with their own dependency trees; see [kernel-receiver
 | [`adapter/`](adapter/) | The boundary a venue implements ([README](adapter/README.md)) |
 | [`ingress/`](ingress/) | The transports that drive it ([README](ingress/README.md)) |
 | [`publisher/`](publisher/) | Everything else a publisher needs ([README](publisher/README.md)) |
-| [`recorder/`](recorder/) | Nine crates, from the capture to the analysis tier ([README](recorder/README.md)) |
+| [`recorder/`](recorder/) | Twelve crates, from the capture to the rows a dashboard reads ([README](recorder/README.md)) |
 
 ```sh
 cd rust

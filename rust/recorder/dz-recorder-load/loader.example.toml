@@ -1,0 +1,78 @@
+# The loader's configuration. Every key it has, with the reason for the ones
+# that are not obvious.
+#
+# THERE IS NO PASSWORD KEY. The column store's password comes from
+# DZ_LOADER_CLICKHOUSE_PASSWORD and from nowhere else, because a key that exists
+# is a key somebody fills in and a configuration file is a thing people commit.
+# The unit beside this file loads it as a systemd credential.
+#
+# Nothing here reaches the record path. `RecorderConfig` documents the absence of
+# an endpoint, a credential and a database key as an invariant — the recorder
+# does not upload, and `completed_dir` is the whole interface to whatever reads
+# from it. This is the file on the other side of that directory.
+
+[loader]
+# The same words the health tier's metric labels and the row columns use for the
+# same things. A dashboard where the live panel and the historical panel
+# disagree about what a recorder is teaches nobody anything.
+site = "site-a"
+recorder = "recorder-1"
+
+# The recorder's own `[archive] completed_dir`, opened read-only. The loader runs
+# on the recorder host: nothing ships objects off one today, and objects are
+# evicted under the staging budget in about a day and a half on a busy host — so
+# the rows travel and the bytes stay local.
+objects_dir = "/var/lib/dz-recorder/completed"
+
+# What has been loaded, keyed on (object key, sha256). On the loader's own
+# writable path and never inside `objects_dir`: a file the recorder's staging
+# budget cannot classify is a file eviction cannot reach.
+ledger = "/var/lib/dz-recorder-load/ledger.jsonl"
+
+# How long `--watch` waits between passes. Shorter than the rotation interval, or
+# the loader is always a segment behind for no reason; nowhere near the eviction
+# window, which is what the lag alert watches.
+poll_interval = 30
+
+# Objects one pass will load. A bound, so the metrics are published between
+# passes rather than after an unbounded catch-up: a loader eight hours behind
+# must still say so every poll interval. 0 is no bound.
+max_objects_per_pass = 60
+
+[clickhouse]
+# No path and no query: those are the loader's. `https` is refused unless the
+# binary was built with the `tls` feature, rather than silently downgraded — so
+# an https destination needs `--features tls` in the build pipeline before the
+# unit is enabled, and `--check` is where a build without it is caught.
+#
+# The account this points at wants a read-bytes ceiling and a workload thread
+# share set where it is provisioned. Nothing here bounds what it can spend, and
+# an unbounded account is discovered weeks later by somebody reading a graph.
+endpoint = "http://192.0.2.20:8123"
+database = "recorder"
+user = "loader"
+
+# One request is one atomic block, so these two decide how much work a retry
+# repeats. The byte bound is the one that binds: a row count says nothing about
+# a row's width.
+max_rows = 50000
+max_bytes = 16777216
+
+# Attempts per batch, including the first. Bounded, because the answer to a
+# destination that will not take a batch is to leave the object unloaded and come
+# back to it — an unbounded retry inside one object is a loader that stops making
+# progress on every other object while looking busy.
+attempts = 4
+timeout = 30
+
+[metrics]
+# Not the recorder's 9100: two processes cannot share one port. Bind it to a
+# non-public interface — it describes a live data path, and exposing it publicly
+# leaks the feeds, the sites and the timing of an archive.
+#
+# dz_loader_oldest_unloaded_age_seconds is THE alert. Objects are evicted under
+# the recorder's staging budget, so a loader slower than the write rate loses
+# history permanently and silently. Alert on that against the eviction window,
+# not on the backlog count: two hundred young objects is a busy loader, and one
+# object older than the window is history already gone.
+listen_addr = "127.0.0.1:9101"

@@ -1,0 +1,56 @@
+-- The retention split, and the sizing it comes from.
+--
+-- THE MEASUREMENT, not an estimate: a busy recorder in a live deployment
+-- sustains roughly 80,000 datagrams a minute across its feeds, which is on the
+-- order of 100 million rows a day from one host. The derived grains are three to
+-- four orders of magnitude smaller — with one exception stated below — a gap row exists only where something was
+-- missing, and a coverage row is one per segment per channel instance — which is
+-- what makes keeping them indefinitely reasonable and keeping the base rows not.
+--
+-- So `datagram` expires and the other four do not.
+--
+-- WHAT HAPPENS WHEN THE TTL IS SHORTER THAN THE QUESTION. The derived rows
+-- survive it, and `segment_coverage` is what says whether the window was ever
+-- covered at all — which is the difference between "no loss" and "nothing kept".
+-- A gap query over a window whose base rows have expired still returns the gaps,
+-- because they were derived while the rows were there; what is gone is the
+-- ability to ask a question nobody thought of at load time. That is the trade,
+-- and it is why the derived tables are the ones with no TTL.
+--
+-- A SUITE THAT LOADS HISTORICAL FIXTURES MUST NOT APPLY THIS FILE. A row-level
+-- TTL is applied as the part is written, so a fixture dated outside the window
+-- is inserted and dropped in one step — every count comes back zero and every
+-- insert is answered 200, which is indistinguishable from a schema that never
+-- accepted the rows. The feature-gated suite therefore applies 001 and 003, and
+-- applies this file only in the test that is about retention, after the rows it
+-- expects to lose have been counted.
+--
+-- SET THIS TO THE OBJECT RETENTION OF THE DEPLOYMENT IT RUNS IN. The window
+-- below matches the objects themselves: nothing ships objects off a recorder
+-- host today, and objects are evicted under the staging budget in about a day
+-- and a half on a busy one, so two days is the honest figure for that
+-- arrangement and not a preference. A deployment that keeps objects for a month
+-- should say a month here — a `datagram` TTL longer than the object retention
+-- promises a re-derivation that has nothing left to derive from, and one shorter
+-- throws away rows while the evidence for them is still on disk.
+ALTER TABLE recorder.datagram
+    MODIFY TTL toDateTime(recv_ts) + INTERVAL 2 DAY;
+
+-- And stated rather than assumed for the other four, so that a later reader does
+-- not have to infer the absence of a TTL from the absence of a line.
+--
+--   recorder.era                 no TTL: an era boundary is the thing a gap in
+--                                any window is interpreted against. **The one
+--                                derived table whose rate is not three or four
+--                                orders below the base rows**: it carries one
+--                                row per channel instance per segment, so it is
+--                                segment_coverage's cardinality rather than a
+--                                reset's — see 001 for the arithmetic. It is
+--                                partitioned by day for exactly that reason, so
+--                                that a TTL here stays a decision somebody can
+--                                take rather than a table rewrite.
+--   recorder.segment_coverage    no TTL: it is what distinguishes a window with
+--                                no loss from a window nothing kept.
+--   recorder.sequence_gap        no TTL: it is the finding.
+--   recorder.conformance_finding no TTL: a verdict's whole value is that it was
+--                                recorded when the rule ran.
