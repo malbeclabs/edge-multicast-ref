@@ -614,3 +614,170 @@ fn the_port_role_on_a_row_is_the_one_the_archive_recorded() {
         );
     }
 }
+
+/// The admission on a gap row is the one covering *that run*, not the instance's
+/// total over the window.
+///
+/// **The consuming report sums this column over a window.** The instance's
+/// residue is the right number for one row per instance and the wrong one for
+/// one row per gap: carried on every gap row of an instance it would be counted
+/// once per gap, so an instance with two starvations would report twice its own
+/// loss and the publisher would be exonerated for a gap nobody covered.
+///
+/// The attribution is the archive's own reading of `drop_delta`: what the handle
+/// lost *before* the datagram it rides on, so the datagram closing a run is the
+/// one whose delta explains it.
+#[test]
+fn each_gap_row_carries_the_admission_that_covers_its_own_run() {
+    // Two starvations of different sizes, and one run the publisher itself left
+    // between them — so an instance-level residue would be visibly wrong on all
+    // three rows.
+    let publisher = SyntheticPublisher::clean(600).starved(&[
+        StarvationWindow {
+            first: 100,
+            count: 5,
+        },
+        StarvationWindow {
+            first: 400,
+            count: 20,
+        },
+    ]);
+    let recorded = record(&publisher);
+    let rows = recorded.rows().rows;
+
+    assert_eq!(rows.sequence_gap.len(), 2, "{:?}", rows.sequence_gap);
+    let mut by_size: Vec<&SequenceGap> = rows.sequence_gap.iter().collect();
+    by_size.sort_by_key(|g| g.missing_count);
+
+    assert_eq!(by_size[0].missing_count, 5);
+    assert_eq!(
+        by_size[0].admitted_recorder, 5,
+        "the delta on the datagram that closed this run, and not 25"
+    );
+    assert_eq!(by_size[0].unexplained_count, Some(0));
+    assert_eq!(by_size[0].verdict, Verdict::Recorder);
+
+    assert_eq!(by_size[1].missing_count, 20);
+    assert_eq!(by_size[1].admitted_recorder, 20);
+    assert_eq!(by_size[1].unexplained_count, Some(0));
+    assert_eq!(by_size[1].verdict, Verdict::Recorder);
+
+    // Summing the column over the window is the operation the consuming report
+    // performs, and it has to come to what the recorder actually admitted.
+    assert_eq!(
+        rows.sequence_gap
+            .iter()
+            .map(|g| g.admitted_recorder)
+            .sum::<u64>(),
+        25
+    );
+    assert_eq!(
+        rows.sequence_gap
+            .iter()
+            .map(|g| g.unexplained_count.expect("the scope permits it"))
+            .sum::<u64>(),
+        0,
+        "every missing datagram here is ours"
+    );
+}
+
+/// A gap the recorder only partly covers is neither `recorder` nor a publisher
+/// finding, and the residue is what says so.
+///
+/// A single verdict per gap cannot express "five missing with three admitted",
+/// which is why the row carries `unexplained_count` and the verdict is decided
+/// on that residue rather than on the missing count.
+#[test]
+fn a_gap_the_recorder_only_partly_covers_reports_the_residue() {
+    // The publisher skips seven at the halfway point and the recorder is starved
+    // across the same boundary, so the two merge into one run wider than what we
+    // admit.
+    let publisher =
+        SyntheticPublisher::with_fault(200, Fault::SequenceGap).starved(&[StarvationWindow {
+            first: 100,
+            count: 3,
+        }]);
+    let recorded = record(&publisher);
+    let rows = recorded.rows().rows;
+
+    let partly: Vec<&SequenceGap> = rows
+        .sequence_gap
+        .iter()
+        .filter(|g| g.admitted_recorder > 0 && g.admitted_recorder < g.missing_count)
+        .collect();
+    assert_eq!(
+        partly.len(),
+        1,
+        "the fixture has to produce a run that is partly ours: {:?}",
+        rows.sequence_gap
+    );
+    let gap = partly[0];
+    assert_eq!(gap.admitted_recorder, 3, "what we admit");
+    assert_eq!(gap.missing_count, 10, "the publisher's seven and our three");
+    assert_eq!(
+        gap.unexplained_count,
+        Some(7),
+        "the residue is the missing count less what we admit"
+    );
+    assert_ne!(
+        gap.verdict,
+        Verdict::Recorder,
+        "a gap we only partly cover is not ours"
+    );
+}
+
+/// At `port-role` scope with more than one instance the admission cannot be
+/// attributed, and the row refuses the subtraction rather than guessing.
+///
+/// The accumulator is the *socket*, and a socket carries every instance on its
+/// group and port: its delta rides on whichever datagram next gets through, from
+/// any of them. Subtracting one instance's share exonerates whichever arrived
+/// next and charges the other for loss the recorder caused — which manufactures
+/// exactly the publisher finding this design exists to prevent.
+///
+/// The verdict here is `path`, and legitimately so: the second instance on this
+/// channel and port delivered the numbers the first is missing, which is what
+/// the design means by redundancy earning its cost. That answer comes from
+/// positive evidence — the datagrams are in the archive — rather than from a
+/// residue, so the scope does not block it. What the scope blocks is any claim
+/// about whose loss it was.
+#[test]
+fn a_role_carrying_two_instances_reports_the_number_and_refuses_the_subtraction() {
+    // Two publishers on one channel and port, and a starvation on the role.
+    let publisher =
+        SyntheticPublisher::with_fault(400, Fault::NewSourceAddress).starved(&[StarvationWindow {
+            first: 300,
+            count: 6,
+        }]);
+    let recorded = record(&publisher);
+    let rows = recorded.rows().rows;
+
+    let instances: BTreeSet<_> = rows.datagram.iter().map(|d| d.source_addr).collect();
+    assert_eq!(instances.len(), 2, "the fixture needs two instances");
+    assert!(
+        !rows.sequence_gap.is_empty(),
+        "the starvation left a gap somewhere"
+    );
+    for gap in &rows.sequence_gap {
+        assert_eq!(
+            gap.unexplained_count, None,
+            "no per-instance subtraction is valid here: {gap:?}"
+        );
+        assert_ne!(
+            gap.verdict,
+            Verdict::Recorder,
+            "the archive cannot say the loss was ours at this scope: {gap:?}"
+        );
+        assert_eq!(gap.admitted_scope, DropScope::PortRole);
+        assert!(
+            gap.on_redundant_path.is_some(),
+            "the channel and port carried a second source, so the question was asked"
+        );
+    }
+    // And the redundancy is visible where it earned its cost.
+    assert!(
+        rows.sequence_gap.iter().any(|g| g.verdict == Verdict::Path),
+        "a value absent from one instance and present in the other is path loss: {:?}",
+        rows.sequence_gap
+    );
+}

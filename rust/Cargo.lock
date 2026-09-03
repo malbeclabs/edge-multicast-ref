@@ -404,6 +404,7 @@ dependencies = [
  "dz-recorder-capture",
  "dz-recorder-core",
  "dz-recorder-replay",
+ "dz-recorder-rows",
  "serde_json",
  "tempfile",
 ]

@@ -278,6 +278,11 @@ pub fn derive<S: Source + ?Sized>(
     let mut loss = LossDeriver::new(input.drop_scope);
     let mut datagram = Vec::new();
     let mut last_reset: BTreeMap<ChannelInstance, u8> = BTreeMap::new();
+    // Per `(instance, sequence number)`, the admitted loss the datagram at that
+    // number carried. `drop_delta` is what the handle lost *before* the datagram
+    // it rides on, so this is what makes an admission attributable to the run it
+    // closes rather than to the instance as a whole — see `admitted_for_run`.
+    let mut admitted_before: BTreeMap<(ChannelInstance, u64), u32> = BTreeMap::new();
     let mut short_datagrams = 0u64;
 
     while let Some(dg) = source.next().map_err(|source| DeriveError::Source {
@@ -298,6 +303,13 @@ pub fn derive<S: Source + ?Sized>(
         if last_reset.contains_key(&key) || last_reset.len() < limits.max_instances {
             last_reset.insert(key, header.reset_count);
         }
+        if dg.drop_delta != 0 {
+            // First arrival wins, as the deriver's own delivered ranges do: a
+            // duplicate is not a second admission of the same loss.
+            admitted_before
+                .entry((key, header.sequence_number))
+                .or_insert(dg.drop_delta);
+        }
         datagram.push(datagram_row(manifest, scope, &dg, &header));
     }
 
@@ -315,7 +327,12 @@ pub fn derive<S: Source + ?Sized>(
                 boundary(coverage, key, input),
             ));
         }
-        let unexplained = report.unexplained(&key);
+        // Whether a per-instance subtraction is valid at all, which is the
+        // scope question and not the quantity one.
+        let subtraction_is_valid = !matches!(
+            report.unexplained(&key),
+            None | Some(Unexplained::Unverifiable)
+        );
         let interface_drops = interface_drop_delta(manifest, input.preceding);
         for run in &loss.runs {
             let anchor = loss
@@ -331,7 +348,8 @@ pub fn derive<S: Source + ?Sized>(
                 GapEvidence {
                     era_anchor_ts: anchor.map_or(Nanos(run.before_ts_ns), |(ts, _)| ts),
                     anchor_certain: anchor.map_or(0, |(_, certain)| certain),
-                    unexplained,
+                    admitted: admitted_for_run(&admitted_before, key, run),
+                    subtraction_is_valid,
                     interface_drops,
                     on_redundant_path: on_redundant_path(&report, loss, run),
                 },
@@ -565,9 +583,43 @@ fn coverage_row(
 struct GapEvidence {
     era_anchor_ts: Nanos,
     anchor_certain: u8,
-    unexplained: Option<Unexplained>,
+    /// The recorder's own admitted loss covering *this run*, not the instance's
+    /// total over the window.
+    admitted: u64,
+    /// Whether a per-instance subtraction is valid at the archive's declared
+    /// scope. When it is not there is no residue to report, whatever the number
+    /// above says.
+    subtraction_is_valid: bool,
     interface_drops: Option<u64>,
     on_redundant_path: Option<u8>,
+}
+
+/// The recorder's own admitted loss covering one run.
+///
+/// **Per run, and not per instance, because the consuming report sums this
+/// column over a window.** `LossReport::unexplained` is the instance's residue
+/// over the whole window, which is the right number for one row per instance and
+/// the wrong one for one row per gap: carried on every gap row of an instance it
+/// would be counted once per gap, so an instance with four gaps would report four
+/// times its own loss.
+///
+/// The attribution is the archive's own. `drop_delta` is what the capture handle
+/// lost *before* the datagram it rides on, so the datagram at `missing_to + 1`
+/// is the one whose delta explains this run — that is the same reading the
+/// recorder's own `epb_dropcount` has, and it is why the debt is carried forward
+/// onto the next datagram that gets through rather than recorded where it
+/// happened.
+///
+/// Whether that number may be *subtracted* is a separate question, decided by
+/// the scope. See [`GapEvidence::subtraction_is_valid`].
+fn admitted_for_run(
+    admitted_before: &BTreeMap<(ChannelInstance, u64), u32>,
+    key: ChannelInstance,
+    run: &dz_recorder_loss::SequenceRun,
+) -> u64 {
+    admitted_before
+        .get(&(key, run.missing_to.saturating_add(1)))
+        .map_or(0, |delta| u64::from(*delta))
 }
 
 fn gap_row(
@@ -577,13 +629,13 @@ fn gap_row(
     run: &dz_recorder_loss::SequenceRun,
     evidence: GapEvidence,
 ) -> SequenceGap {
-    let unexplained_count = match evidence.unexplained {
-        Some(Unexplained::Count(n)) => Some(n),
-        // No per-instance subtraction is meaningful at this scope, so there is
-        // no residue to report. Zero would exonerate the publisher and the
-        // missing count would accuse it; the archive can support neither.
-        Some(Unexplained::Unverifiable) | None => None,
-    };
+    // No per-instance subtraction is meaningful at every scope, and where it is
+    // not there is no residue to report: zero would exonerate the publisher and
+    // the missing count would accuse it, and the archive can support neither.
+    let unexplained_count = evidence.subtraction_is_valid.then(|| {
+        run.missing_count()
+            .saturating_sub(evidence.admitted.min(run.missing_count()))
+    });
     SequenceGap {
         site: manifest.site.clone(),
         recorder: manifest.recorder.clone(),
@@ -609,7 +661,7 @@ fn gap_row(
         // cross-site read this loader does not perform.
         sent_from_ts: None,
         sent_to_ts: None,
-        admitted_recorder: loss.admitted,
+        admitted_recorder: evidence.admitted,
         admitted_scope: drop_scope,
         unexplained_count,
         interface_drops: evidence.interface_drops,

@@ -20,6 +20,10 @@ Plan: [`2026-08-30-edge-recorder-record-path.md`](../../docs/superpowers/plans/2
 | `dz-recorder-capture` | Live capture as a `Source`: membership, kernel receive timestamps, drop accounting, rejoin, source admission |
 | `dz-recorder-archive` | The pcapng writer: rotation, compression, hashing, the manifest, and the staging watermark |
 | `dz-recorder-replay` | An archive read back as a `Source`, plus the synthetic publisher the tests are built on |
+| `dz-recorder-loss` | Which sequence values nobody delivered, per channel instance and per era, and whose they are |
+| `dz-recorder-rows` | The rows an archive derives into, and the derivation: pure, sink-agnostic, and exercised with no server |
+| `dz-recorder-clickhouse` | The column store as one `RowSink`, plus the checked-in DDL |
+| `dz-recorder-load` | The loader binary ([README](dz-recorder-load/README.md)) |
 
 Take what you need. A publisher wanting a byte-exact record of its own egress
 takes `-archive` alone; a test harness takes `-replay` alone; a host that only
@@ -162,13 +166,54 @@ cargo test -p dz-recorder-capture --features afpacket-live-tests --no-run
 sudo ./target/debug/deps/afpacket_mode-<hash> live:: --test-threads=1
 ```
 
+## The rows, and where the loader runs
+
+The analysis tier turns an archive into rows a dashboard can ask —
+`datagram`, `era`, `segment_coverage`, `sequence_gap` and
+`conformance_finding` — without the record path learning what a column store
+is. The derivation reads a `Source`, so it is exercised in CI against the
+synthetic publisher with no socket, no privileges and no server, and the column
+store is one implementation of a `RowSink` behind a trait.
+
+**The loader runs on the recorder host**, against that host's own completed
+directory, opened read-only. Nothing ships objects off a recorder host today,
+and objects are evicted under the staging budget: the rows are tens of bytes
+against a datagram's twelve hundred, so the small thing travels and the bytes
+stay local. That is also what makes the cross-site join available *before* a
+shipper exists, because the join is over rows and not over objects — not having
+a shipper costs retention, and not the join.
+
+**The gate on that arrangement is
+`dz_loader_oldest_unloaded_age_seconds` against the eviction window.** A loader
+slower than the write rate loses history permanently and silently, and no re-run
+recovers an object that is gone. Alert on the age and not on the backlog count:
+two hundred young objects is a busy loader, and one object older than the window
+is history already gone. See
+[`dz-recorder-load/README.md`](dz-recorder-load/README.md).
+
+```bash
+cargo test -p dz-recorder-rows            # the derivation, no server
+cargo test -p dz-recorder-clickhouse      # batching, retry and the DDL, no server
+cargo test -p dz-recorder-e2e --test archive_to_rows
+```
+
 ## Not here yet
 
-The header-only health tier and its `dz_recorder_*` metrics, the `dz-recorder`
-binary that wires capture, archive and health together, the object layout and
-the manifest index table are plan 2. The analysis tier — replay into the
-conformance rule set, the per-datagram and per-message row loaders, and the
-cross-site join on `(channel instance, sequence number)` — is plan 3.
+The conformance runner over replay, and the decoded per-message rows.
+`conformance_finding` exists as the table a runner fills, and nothing writes a
+row into it — an empty table is the honest statement that nothing judged the
+object, where a `pass` row would be a pass over a rule that never ran.
+
+The cross-site pass that turns `unverifiable` into `publisher`. That verdict
+needs a datagram absent from *every* site with no recorder overflow anywhere,
+and one vantage cannot say it: a gap row lands with `seen_elsewhere` as `NULL`
+and `unverifiable` as the verdict until the join has run.
+
+Any repoint of an existing dashboard. Rows have to be proven equivalent to what
+a panel already shows before anything is switched over.
+
+Any shipper. The loader is deliberately arranged so that not having one costs
+retention and not the join.
 
 One check is deliberately deferred: the archive is an interface between two
 languages, and the golden-vector check that a pcapng segment written here reads
