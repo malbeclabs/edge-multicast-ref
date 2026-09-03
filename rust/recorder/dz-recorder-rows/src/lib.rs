@@ -56,4 +56,4 @@ pub use rows::{
     ConformanceFinding, Datagram, DropScope, Era, FindingVerdict, Grain, Nanos, PortRoleLabel,
     RecvTsKindLabel, RoleJoinRow, RowBatch, SegmentCoverage, SequenceGap, Verdict,
 };
-pub use sink::{Accepted, ObjectId, RowSink, RowSinkError, Written};
+pub use sink::{Accepted, Landed, ObjectId, RowSink, RowSinkError, Written};

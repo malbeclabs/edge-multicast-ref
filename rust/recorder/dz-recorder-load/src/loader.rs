@@ -279,10 +279,13 @@ impl<S: RowSink> Loader<'_, S> {
         // something else arrived, which is the opposite of what the age bound is
         // for.
         match self.sink.post_if_due(now_ns) {
-            Ok(landed) => match self.record_landed(&landed) {
-                Ok(recorded) => pass.loaded += recorded,
-                Err((kind, message)) => self.fail(kind, message, &mut pass, &mut errors),
-            },
+            Ok(landed) => {
+                self.metrics.bytes_posted(landed.bytes_posted);
+                match self.record_landed(&landed.objects) {
+                    Ok(recorded) => pass.loaded += recorded,
+                    Err((kind, message)) => self.fail(kind, message, &mut pass, &mut errors),
+                }
+            }
             Err(e) => {
                 let kind = kind_of_sink(&e);
                 self.pending.clear();
@@ -359,6 +362,10 @@ impl<S: RowSink> Loader<'_, S> {
             .sink
             .write_batch(derived.rows, now_ns)
             .map_err(|e| Failed::with_rows_lost(kind_of_sink(&e), e.to_string()))?;
+        // What this call actually sent, which is `0` unless the batch it took
+        // made the buffer due. Counted here rather than against the object,
+        // because a request that carried four objects has one length.
+        self.metrics.bytes_posted(accepted.bytes_posted);
         let rows = accepted.accepted;
 
         self.pending.push(Pending {
@@ -967,7 +974,11 @@ mod pass_tests {
 
 #[cfg(test)]
 mod deferred_ledger_tests {
-    use dz_recorder_rows::{Accepted, RowBatch, RowSinkError, Written};
+    use dz_recorder_rows::{Accepted, Landed, RowBatch, RowSinkError, Written};
+
+    /// What this sink pretends one object's rows cost on the wire, so a test
+    /// can name the total a request should have counted.
+    const BYTES_PER_OBJECT: u64 = 1_000;
 
     use super::pass_tests::*;
     use super::*;
@@ -995,7 +1006,7 @@ mod deferred_ledger_tests {
     }
 
     impl HoldingSink {
-        fn post(&mut self) -> Result<Vec<ObjectId>, RowSinkError> {
+        fn post(&mut self) -> Result<Landed, RowSinkError> {
             if self.refuse {
                 let held = std::mem::take(&mut self.held);
                 return Err(RowSinkError::Rejected {
@@ -1005,7 +1016,11 @@ mod deferred_ledger_tests {
                 });
             }
             self.posts += 1;
-            Ok(std::mem::take(&mut self.held))
+            let objects = std::mem::take(&mut self.held);
+            Ok(Landed {
+                bytes_posted: objects.len() as u64 * BYTES_PER_OBJECT,
+                objects,
+            })
         }
     }
 
@@ -1028,15 +1043,15 @@ mod deferred_ledger_tests {
 
         /// Due only when a test says so, and never on a clock: what is under
         /// test is the loader's discipline, not a sink's timing.
-        fn post_if_due(&mut self, _now_ns: u64) -> Result<Vec<ObjectId>, RowSinkError> {
+        fn post_if_due(&mut self, _now_ns: u64) -> Result<Landed, RowSinkError> {
             if self.due {
                 self.post()
             } else {
-                Ok(Vec::new())
+                Ok(Landed::default())
             }
         }
 
-        fn flush(&mut self, _now_ns: u64) -> Result<Vec<ObjectId>, RowSinkError> {
+        fn flush(&mut self, _now_ns: u64) -> Result<Landed, RowSinkError> {
             self.post()
         }
     }
@@ -1111,8 +1126,8 @@ mod deferred_ledger_tests {
         // the age bound exists for: a pass that derives nothing and lands
         // everything.
         let landed = sink.flush(0).expect("posted");
-        assert_eq!(landed.len(), 3);
-        for id in &landed {
+        assert_eq!(landed.objects.len(), 3);
+        for id in &landed.objects {
             let done = pending
                 .iter()
                 .position(|p| &p.id == id)
@@ -1214,7 +1229,7 @@ mod deferred_ledger_tests {
         let mut sink = HoldingSink::default();
         let mut pending = Vec::new();
 
-        let mut pass = |ledger: &mut Ledger, sink: &mut HoldingSink, pending: &mut Vec<Pending>| {
+        let pass = |ledger: &mut Ledger, sink: &mut HoldingSink, pending: &mut Vec<Pending>| {
             Loader {
                 objects_dir: &archive.completed,
                 site: SITE,
@@ -1322,6 +1337,56 @@ mod deferred_ledger_tests {
         );
         assert!(pending.is_empty(), "nothing is still waiting on an insert");
         assert_eq!(pass.unloaded, 1, "the damaged object, still unloaded");
+    }
+
+    /// **`dz_loader_bytes_written_total` moves.**
+    ///
+    /// It is fed from the bytes a *request* sent, because a sink that coalesces
+    /// reports none per object — the rows of four objects in one body have one
+    /// length between them. A counter fed from the per-object number therefore
+    /// stayed at 0 for ever, while its own help text and `bytes_read_total`'s
+    /// both tell an operator to compare the two.
+    #[test]
+    fn the_bytes_counter_follows_the_request_that_carried_the_rows() {
+        let archive = archive(3, 20);
+        let metrics = LoaderMetrics::new(SITE, RECORDER);
+        let mut ledger = Ledger::open(&archive.ledger).expect("a new ledger");
+        let mut sink = HoldingSink {
+            due: true,
+            ..HoldingSink::default()
+        };
+        let mut pending = Vec::new();
+
+        let (pass, errors) = Loader {
+            objects_dir: &archive.completed,
+            site: SITE,
+            recorder: RECORDER,
+            max_objects: 0,
+            ledger: &mut ledger,
+            sink: &mut sink,
+            metrics: &metrics,
+            pending: &mut pending,
+        }
+        .run_once(&|| false);
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(pass.loaded, 3, "one request carried all three");
+        let text = metrics.render();
+        assert!(
+            text.contains(&format!(
+                "dz_loader_bytes_written_total{{recorder=\"{RECORDER}\",site=\"{SITE}\"}} {}",
+                3 * BYTES_PER_OBJECT
+            )),
+            "the request's bytes were dropped on the way to the counter:\n{text}"
+        );
+        // And the number it is meant to be read against is there too, because
+        // the ratio is the reason the rows travel and the objects stay local.
+        assert!(
+            !text.contains(&format!(
+                "dz_loader_bytes_read_total{{recorder=\"{RECORDER}\",site=\"{SITE}\"}} 0"
+            )),
+            "{text}"
+        );
     }
 
     /// In-order certainty survives the coalescing.

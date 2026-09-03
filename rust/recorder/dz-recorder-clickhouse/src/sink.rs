@@ -52,7 +52,9 @@
 
 use std::time::Duration;
 
-use dz_recorder_rows::{Accepted, Grain, ObjectId, RowBatch, RowSink, RowSinkError, Written};
+use dz_recorder_rows::{
+    Accepted, Grain, Landed, ObjectId, RowBatch, RowSink, RowSinkError, Written,
+};
 use serde::Serialize;
 
 use crate::config::{ClickHouseConfig, Credentials};
@@ -362,6 +364,19 @@ impl<T: Transport> ClickHouseSink<T> {
         )?;
         Ok((objects, bytes))
     }
+
+    /// [`post`](Self::post), with the bytes it sent added to the running total.
+    ///
+    /// Every path out of this sink goes through here, so the accumulator cannot
+    /// be missing the one that carries most of the traffic — which is what it
+    /// was: `write_batch` posts whenever the batch it took made the buffer due,
+    /// and that is the dominant path under any configuration where an object is
+    /// bigger than `insert_min_rows`.
+    fn posted(&mut self) -> Result<(Vec<ObjectId>, u64), RowSinkError> {
+        let (objects, bytes) = self.post()?;
+        self.bytes_posted += bytes;
+        Ok((objects, bytes))
+    }
 }
 
 impl<T: Transport> RowSink for ClickHouseSink<T> {
@@ -375,7 +390,7 @@ impl<T: Transport> RowSink for ClickHouseSink<T> {
             self.config.insert_min_rows,
             self.config.insert_max_delay,
         ) {
-            self.post()?
+            self.posted()?
         } else {
             (Vec::new(), 0)
         };
@@ -386,25 +401,25 @@ impl<T: Transport> RowSink for ClickHouseSink<T> {
         })
     }
 
-    fn post_if_due(&mut self, now_ns: u64) -> Result<Vec<ObjectId>, RowSinkError> {
+    fn post_if_due(&mut self, now_ns: u64) -> Result<Landed, RowSinkError> {
         if self.held.due(
             now_ns,
             self.config.insert_min_rows,
             self.config.insert_max_delay,
         ) {
-            self.post().map(|(landed, bytes)| {
-                self.bytes_posted += bytes;
-                landed
+            self.posted().map(|(objects, bytes_posted)| Landed {
+                objects,
+                bytes_posted,
             })
         } else {
-            Ok(Vec::new())
+            Ok(Landed::default())
         }
     }
 
-    fn flush(&mut self, _now_ns: u64) -> Result<Vec<ObjectId>, RowSinkError> {
-        self.post().map(|(landed, bytes)| {
-            self.bytes_posted += bytes;
-            landed
+    fn flush(&mut self, _now_ns: u64) -> Result<Landed, RowSinkError> {
+        self.posted().map(|(objects, bytes_posted)| Landed {
+            objects,
+            bytes_posted,
         })
     }
 }

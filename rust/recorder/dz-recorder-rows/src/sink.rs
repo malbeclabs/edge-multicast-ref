@@ -114,6 +114,25 @@ impl ObjectId {
     }
 }
 
+/// What a post put in the store.
+///
+/// The two together, because a caller needs both and they are answers to the
+/// same event: which objects are now durable, and what that request cost. A
+/// method that returned only the objects left the byte count on the floor —
+/// and `dz_loader_bytes_written_total` flat at 0 while its own help text told
+/// an operator to compare it against the bytes read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Landed {
+    /// The objects whose rows are now durable. Empty when nothing was due.
+    pub objects: Vec<ObjectId>,
+    /// Bytes this call sent, and `0` when it sent nothing.
+    ///
+    /// A property of the *request* and not of an object: the rows of four
+    /// objects in one body have one length between them, and dividing it up
+    /// would be inventing a number. See [`Accepted::bytes_posted`].
+    pub bytes_posted: u64,
+}
+
 /// What a sink did with one batch.
 ///
 /// **Accepted is not landed, and the difference is the whole reason this type
@@ -178,7 +197,7 @@ pub trait RowSink {
     /// # Errors
     ///
     /// [`RowSinkError`], and the held objects stay unloaded.
-    fn post_if_due(&mut self, now_ns: u64) -> Result<Vec<ObjectId>, RowSinkError>;
+    fn post_if_due(&mut self, now_ns: u64) -> Result<Landed, RowSinkError>;
 
     /// Posts everything held, due or not, and says what landed.
     ///
@@ -188,5 +207,5 @@ pub trait RowSink {
     /// # Errors
     ///
     /// [`RowSinkError`], and the held objects stay unloaded.
-    fn flush(&mut self, now_ns: u64) -> Result<Vec<ObjectId>, RowSinkError>;
+    fn flush(&mut self, now_ns: u64) -> Result<Landed, RowSinkError>;
 }

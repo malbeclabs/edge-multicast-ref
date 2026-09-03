@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::rows::{Grain, RowBatch};
-use crate::sink::{Accepted, ObjectId, RowSink, RowSinkError, Written};
+use crate::sink::{Accepted, Landed, ObjectId, RowSink, RowSinkError, Written};
 
 /// One file per grain under one directory, named `<grain>.jsonl`.
 #[derive(Debug)]
@@ -114,8 +114,8 @@ impl RowSink for FileSink {
     }
 
     /// Nothing is ever due, because nothing is ever held.
-    fn post_if_due(&mut self, _now_ns: u64) -> Result<Vec<ObjectId>, RowSinkError> {
-        Ok(Vec::new())
+    fn post_if_due(&mut self, _now_ns: u64) -> Result<Landed, RowSinkError> {
+        Ok(Landed::default())
     }
 
     /// Flushes the buffered writers and lands nothing new.
@@ -123,11 +123,11 @@ impl RowSink for FileSink {
     /// The rows were written by [`write_batch`](Self::write_batch); what is
     /// buffered here is a `BufWriter`, not a batch, and it belongs to the file
     /// rather than to an object.
-    fn flush(&mut self, _now_ns: u64) -> Result<Vec<ObjectId>, RowSinkError> {
+    fn flush(&mut self, _now_ns: u64) -> Result<Landed, RowSinkError> {
         for writer in self.files.iter_mut().flatten() {
             writer.flush()?;
         }
-        Ok(Vec::new())
+        Ok(Landed::default())
     }
 }
 

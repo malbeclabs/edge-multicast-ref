@@ -81,6 +81,50 @@ fn a_request_is_json_each_row_with_the_statement_in_the_url() {
     );
 }
 
+/// Every path out of the sink counts the bytes it sent, including the one that
+/// carries most of them.
+///
+/// `write_batch` posts whenever the batch it took made the buffer due, and that
+/// is the dominant path under any configuration where an object is bigger than
+/// `insert_min_rows` — the accumulator missed exactly that one, so a sink that
+/// had sent megabytes reported none of them, and the loader counter fed from
+/// the same idea sat at 0 while its help text told an operator to compare it
+/// against the bytes read.
+#[test]
+fn the_bytes_a_request_sent_are_counted_whichever_call_sent_it() {
+    // `config()` posts per batch, so this is the write_batch path.
+    let mut sink = sink(FakeTransport::new());
+    assert_eq!(sink.bytes_posted(), 0, "nothing sent yet");
+
+    let accepted = sink.write_batch(batch(100, Fault::None), NOW).expect("in");
+    assert!(!accepted.landed.is_empty(), "this configuration posts");
+    assert_eq!(
+        sink.bytes_posted(),
+        accepted.bytes_posted,
+        "the request went out and the accumulator did not see it"
+    );
+    let after_write = sink.bytes_posted();
+    assert!(after_write > 0);
+    // And it is the body that was actually sent, not an estimate of it.
+    let sent: u64 = sink_sent(&sink).iter().map(|s| s.body.len() as u64).sum();
+    assert_eq!(after_write, sent);
+
+    // The held path adds to the same total rather than to one of its own.
+    let mut held = config();
+    held.insert_min_rows = 1_000_000;
+    let mut sink = ClickHouseSink::with_transport(
+        held,
+        Credentials::new("loader", None),
+        FakeTransport::new(),
+    );
+    let accepted = sink.write_batch(batch(20, Fault::None), NOW).expect("held");
+    assert_eq!(accepted.bytes_posted, 0, "it held, so it sent nothing");
+    assert_eq!(sink.bytes_posted(), 0);
+    let landed = sink.flush(NOW).expect("posted");
+    assert!(landed.bytes_posted > 0, "the flush sent the body");
+    assert_eq!(sink.bytes_posted(), landed.bytes_posted);
+}
+
 /// A grain that produced no rows sends no request.
 ///
 /// An `INSERT ... FORMAT JSONEachRow` with an empty body is a request the server
@@ -483,6 +527,7 @@ fn held_rows_are_posted_once_the_delay_is_up() {
     assert!(sink
         .post_if_due(NOW + 899 * SECOND_NS)
         .expect("not due")
+        .objects
         .is_empty());
     assert_eq!(sink_sent(&sink).len(), 0);
     assert_eq!(sink.held_objects(), 1);
@@ -490,7 +535,7 @@ fn held_rows_are_posted_once_the_delay_is_up() {
     // Due, on a pass that found no new object at all — which is the case the
     // bound exists for.
     let landed = sink.post_if_due(NOW + 900 * SECOND_NS).expect("due");
-    assert_eq!(landed.len(), 1);
+    assert_eq!(landed.objects.len(), 1);
     assert_eq!(sink.held_objects(), 0);
     assert!(!sink_sent(&sink).is_empty());
 }
@@ -522,7 +567,7 @@ fn the_delay_runs_from_the_oldest_held_row_and_is_not_reset_by_a_write() {
     // 100 seconds after the *first* row, not the second: due.
     let landed = sink.post_if_due(NOW + 100 * SECOND_NS).expect("due");
     assert_eq!(
-        landed.len(),
+        landed.objects.len(),
         2,
         "the clock runs from the oldest row, so both go"
     );
@@ -546,13 +591,13 @@ fn a_flush_posts_what_is_held_however_far_from_due_it_is() {
     sink.write_batch(batch(10, Fault::None), NOW).expect("held");
     assert_eq!(sink.held_objects(), 1);
     let landed = sink.flush(NOW).expect("a flush does not wait for due");
-    assert_eq!(landed.len(), 1);
+    assert_eq!(landed.objects.len(), 1);
     assert_eq!(sink.held_objects(), 0);
     assert!(sink.bytes_posted() > 0);
 
     // And a flush with nothing held is not a request.
     let before = sink_sent(&sink).len();
-    assert!(sink.flush(NOW).expect("nothing to do").is_empty());
+    assert!(sink.flush(NOW).expect("nothing to do").objects.is_empty());
     assert_eq!(sink_sent(&sink).len(), before);
 }
 
@@ -660,5 +705,5 @@ fn the_same_object_accepted_twice_while_held_is_one_object() {
     assert_eq!(sink.held_rows(), 44, "and both copies of its rows");
 
     let landed = sink.flush(NOW).expect("posted");
-    assert_eq!(landed.len(), 1, "named once, so recorded once");
+    assert_eq!(landed.objects.len(), 1, "named once, so recorded once");
 }

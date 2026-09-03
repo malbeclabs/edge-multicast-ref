@@ -192,7 +192,9 @@ impl LoaderMetrics {
             bytes_written_total: counter(
                 &registry,
                 "dz_loader_bytes_written_total",
-                "Row bytes handed to the destination.",
+                "Row bytes put on the wire, summed per request. Per request and not per \
+                 object: an insert spans objects, so the rows of several of them have one \
+                 length between them and dividing it up would be inventing a number.",
                 &labels,
             ),
             errors_total: counter_vec(
@@ -285,12 +287,23 @@ impl LoaderMetrics {
     pub fn object_loaded(&self, written: &dz_recorder_rows::Written, bytes_read: u64) {
         self.objects_loaded_total.inc();
         self.bytes_read_total.inc_by(bytes_read);
-        self.bytes_written_total.inc_by(written.bytes());
         for grain in Grain::ALL {
             self.rows_written_total
                 .with_label_values(&[grain.table()])
                 .inc_by(written.rows(grain));
         }
+    }
+
+    /// Bytes one request put on the wire.
+    ///
+    /// Counted per request and never per object, which is why it is not part of
+    /// [`object_loaded`](Self::object_loaded): once an insert spans objects the
+    /// rows of four of them have one length between them, and dividing it up
+    /// would be inventing a number. A sink that coalesces reports `0` bytes on
+    /// the per-object count for exactly that reason, so a counter fed from
+    /// there stayed at 0 for ever.
+    pub fn bytes_posted(&self, bytes: u64) {
+        self.bytes_written_total.inc_by(bytes);
     }
 
     pub fn object_skipped(&self, reason: SkipReason) {

@@ -286,7 +286,7 @@ fn coalescing_produces_parts_at_or_above_the_floor_and_never_single_digit_ones()
         datagrams += rows.rows(Grain::Datagram) as u64;
         landed.extend(sink.write_batch(rows, NOW).expect("accepted").landed);
     }
-    landed.extend(sink.flush(NOW).expect("posted"));
+    landed.extend(sink.flush(NOW).expect("posted").objects);
     assert_eq!(landed.len(), 3, "three objects, and all three landed");
     assert_eq!(sink.held_objects(), 0, "with nothing left held");
 

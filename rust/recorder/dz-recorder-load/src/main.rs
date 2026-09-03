@@ -300,7 +300,8 @@ fn drive<S: RowSink>(
     // ledger entry are an object the next run derives again for nothing.
     match sink.flush(now_unix_nanos()) {
         Ok(landed) => {
-            for id in &landed {
+            metrics.bytes_posted(landed.bytes_posted);
+            for id in &landed.objects {
                 if let Some(index) = pending.iter().position(|p| &p.id == id) {
                     let done = pending.remove(index);
                     if let Err(e) = ledger.record(ledger::Entry {
@@ -316,10 +317,10 @@ fn drive<S: RowSink>(
                     }
                 }
             }
-            if !landed.is_empty() {
+            if !landed.objects.is_empty() {
                 eprintln!(
                     "dz-recorder-load: flushed {} held object(s) on the way out",
-                    landed.len()
+                    landed.objects.len()
                 );
             }
         }
