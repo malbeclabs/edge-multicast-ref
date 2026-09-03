@@ -30,6 +30,16 @@
 //! nothing else, or the network has no reason to deliver the traffic to this
 //! host at all.
 //!
+//! All of that reads a 14-byte Ethernet header off the front of the frame, so a
+//! handle on any other datalink is refused at open rather than drained. A
+//! device with no link layer of its own — a tunnel, above all — is opened by
+//! libpcap on bare IP or in cooked mode, and the parse would then read two
+//! bytes of something else as an EtherType: no frame is ever IPv4, every frame
+//! is skipped, and the recorder logs each feed as recording and archives
+//! nothing while the feed is live. That is the same shape of failure as a
+//! handle stamping at microsecond precision — a value the handle reported that
+//! the writer cannot honour — and it gets the same answer.
+//!
 //! Everything above goes through `libpcap` rather than reaching past it to a
 //! raw `AF_PACKET` socket. That seam keeps every `unsafe` block inside the FFI
 //! crate, and it is what makes an accelerated capture framework a link-time
@@ -59,7 +69,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-pub use pcap::{Precision, Stat};
+pub use pcap::{Linktype, Precision, Stat};
 
 /// The groups and ports one capture handle is allowed to see.
 ///
@@ -223,6 +233,11 @@ pub enum FrameSkip {
 /// `frame.len()` when the capture length cut it short. It is what separates a
 /// datagram over the mandated cap — archived as what was captured, declaring
 /// the length that was sent — from headers claiming more than ever arrived.
+///
+/// Every offset here is counted from a 14-byte Ethernet header. That the frame
+/// has one is not an assumption this function makes but a fact
+/// [`datalink_refusal`] establishes at open, because a datalink it cannot read
+/// makes every frame a skip and every skip silent.
 pub fn classify_frame(frame: &[u8], on_wire_len: usize) -> Result<ParsedFrame<'_>, FrameSkip> {
     let ethernet = frame
         .get(..ETHERNET_HEADER_LEN)
@@ -283,6 +298,77 @@ pub fn classify_frame(frame: &[u8], on_wire_len: usize) -> Result<ParsedFrame<'_
             [UDP_HEADER_LEN..UDP_HEADER_LEN + (udp.len() - UDP_HEADER_LEN).min(wire_payload_len)],
         wire_payload_len: u32::try_from(wire_payload_len).unwrap_or(u32::MAX),
     })
+}
+
+/// The one datalink [`classify_frame`] can read, and the one the archive
+/// declares in every interface description block it writes.
+pub const PARSED_DATALINK: Linktype = Linktype::ETHERNET;
+
+/// Why a handle's datalink cannot be recorded, or `None` when it can.
+///
+/// Verified at open, the way the timestamp precision is, and for the same
+/// reason: both are values the handle reports rather than values it was given,
+/// and a recorder that cannot honour one of them must not be able to report
+/// itself healthy. The symptom without this refusal is a recorder that starts
+/// cleanly, logs every feed as recording, and holds every `dz_recorder_*`
+/// series at zero against a live feed.
+///
+/// A device with no link layer is what reaches this in practice, and it arrives
+/// two ways. libpcap declines some tunnel arptypes outright — a `gre` device is
+/// one, and the activation warning it answers with reaches this crate as an
+/// open failure before the datalink is ever read. The rest it opens: an `ipip`
+/// tunnel and a `tun` device both come up on `DLT_RAW`, bare IP with no link
+/// layer at all and no warning of any kind, and a cooked-mode device comes up
+/// on `LINUX_SLL`. Those are the handles this refuses.
+///
+/// A refusal rather than a fallback to socket mode. The configuration asked for
+/// what the network delivered to the interface; a mode swapped in underneath
+/// the operator archives what one socket survived, and `/metrics` would still
+/// name the mode they asked for.
+///
+/// # Why the message names the device before it names the mode
+///
+/// `interface` is per `[[feed]]` and `capture.mode` is one `[capture]` table
+/// for the whole recorder, so "switch to socket mode" is not a fix for one
+/// feed's device: on a recorder with more than one feed it downgrades every
+/// Ethernet feed to synthesised headers, and `resolve_interface` then refuses
+/// every `feed.interface` that names a device with
+/// `StartupError::InterfaceIsNotAnAddress` — a remedy that does not start.
+/// So the per-feed remedy comes first, the mode second, and the mode carries
+/// both of the things an operator has to know before taking it.
+#[must_use]
+pub fn datalink_refusal(device: &str, link: Linktype) -> Option<String> {
+    if link == PARSED_DATALINK {
+        return None;
+    }
+    Some(format!(
+        "capture device {device} is on datalink {}, and AF_PACKET mode reads EN10MB \
+         (Ethernet) only: every frame would fail the parse, nothing would be archived, and \
+         the recorder would report itself healthy against a live feed. A device with no link \
+         layer of its own — a tunnel — is opened on bare IP or in cooked mode, and neither \
+         carries the Ethernet header this mode captures and the archive keeps. Either point \
+         this feed at a device that has an Ethernet link layer, or run this recorder in \
+         socket mode, which records on any device and declares its synthesised headers as \
+         synthesised. Socket mode is `capture.mode` = \"socket\" and it is recorder-wide: \
+         it applies to every feed in this configuration, and in that mode every \
+         `feed.interface` has to be the interface's address rather than its device name.",
+        describe_datalink(link),
+    ))
+}
+
+/// `LINUX_SLL (Linux cooked v1)` where libpcap knows the name, the bare number
+/// where it does not: an operator reading this against the `link-type` line
+/// `tcpdump` printed for the same device needs the name `tcpdump` printed.
+///
+/// The number is a `DLT_` value, which is what the handle reports and is not
+/// always the `LINKTYPE_` value of the same name, so libpcap has no name for
+/// every value this type can hold and the fallback is not decoration.
+fn describe_datalink(link: Linktype) -> String {
+    match (link.get_name(), link.get_description()) {
+        (Ok(name), Ok(description)) => format!("{name} ({description})"),
+        (Ok(name), Err(_)) => name,
+        _ => format!("DLT {}", link.0),
+    }
 }
 
 /// libpcap reports a realtime `timeval` whose fraction is nanoseconds when
@@ -1042,6 +1128,16 @@ impl AfPacketSource {
         // Before anything is read, so no unfiltered traffic is ever buffered.
         cap.filter(&filter, true)
             .map_err(|e| io_error(format!("filter `{filter}`: {e}")))?;
+
+        // Before the precision probe, because it costs no file and refuses the
+        // handle for the same kind of reason.
+        // Not kept on the source afterwards. An accessor for it could only
+        // ever return `PARSED_DATALINK` — this line is what guarantees that —
+        // so it would be public surface no caller can learn anything from, and
+        // a test asserting it would pass with this check deleted.
+        if let Some(reason) = datalink_refusal(device, cap.get_datalink()) {
+            return Err(io_error(reason));
+        }
 
         let probe_dir = config
             .precision_probe_dir

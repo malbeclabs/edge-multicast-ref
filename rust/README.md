@@ -4,7 +4,8 @@ Two unrelated bodies of Rust, not part of the same build.
 
 | Path | | In the workspace? |
 |---|---|---|
-| [`codec/`](codec/), [`adapter/`](adapter/), [`ingress/`](ingress/), [`publisher/`](publisher/), [`recorder/`](recorder/) | Libraries a venue publisher and the recorder are built from | Yes |
+| [`codec/`](codec/), [`adapter/`](adapter/), [`ingress/`](ingress/), [`publisher/`](publisher/) | Libraries a venue publisher is built from | Yes |
+| [`recorder/`](recorder/) | The recorder: keeps the bytes a host received, with its own losses inside the archive | Yes |
 | `kernel-receiver/`, `xdp-receiver/` | Standalone shred receivers | No — `exclude`d |
 
 The receivers are binaries with their own dependency trees; see [kernel-receiver](kernel-receiver/) and [xdp-receiver](xdp-receiver/). They are `exclude`d rather than merely absent from `members` so `cargo metadata` here does not try to resolve them.
@@ -17,7 +18,7 @@ The receivers are binaries with their own dependency trees; see [kernel-receiver
 | [`adapter/`](adapter/) | The boundary a venue implements ([README](adapter/README.md)) |
 | [`ingress/`](ingress/) | The transports that drive it ([README](ingress/README.md)) |
 | [`publisher/`](publisher/) | Everything else a publisher needs ([README](publisher/README.md)) |
-| [`recorder/`](recorder/) | Capture, archive and the analysis tier ([README](recorder/README.md)) |
+| [`recorder/`](recorder/) | Nine crates, from the capture to the analysis tier ([README](recorder/README.md)) |
 
 ```sh
 cd rust
@@ -27,7 +28,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --all --check
 ```
 
-CI runs all four on every pull request, plus `scripts/check-public-repo-rules.sh`. There is no path filter, so a change anywhere runs the whole workspace — which is what keeps a codec change from breaking a publisher silently.
+CI runs all four on every pull request, plus `scripts/check-public-repo-rules.sh` — unfiltered, because a required check that never reports blocks a pull request forever, and because a change anywhere then runs the whole workspace, which is what keeps a codec change from breaking a publisher silently. Three further jobs gate what the default build cannot reach: `afpacket` (needs `libpcap-dev`), `e2e` (needs a runner that can deliver multicast to itself) and `conformance` (builds edge-feed-spec's own rule set from a pinned revision and applies it to what this repository produces).
 
 `Cargo.lock` is tracked. MSRV and the `prometheus` version are pinned at the workspace level.
 

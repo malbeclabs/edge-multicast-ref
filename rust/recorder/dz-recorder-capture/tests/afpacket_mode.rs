@@ -13,8 +13,9 @@
 
 use dz_edge_core::PortRole;
 use dz_recorder_capture::afpacket::{
-    bpf_filter_for, classify_frame, precision_from_savefile_magic, stamp_ns, AfPacketSource,
-    AfPacketSourceConfig, FeedFilter, FrameSkip, PortMap, Precision, RingAccounting, Stat,
+    bpf_filter_for, classify_frame, datalink_refusal, precision_from_savefile_magic, stamp_ns,
+    AfPacketSource, AfPacketSourceConfig, FeedFilter, FrameSkip, Linktype, PortMap, Precision,
+    RingAccounting, Stat, PARSED_DATALINK,
 };
 use dz_recorder_capture::{PendingLoss, PortBinding};
 use std::net::Ipv4Addr;
@@ -166,6 +167,109 @@ fn a_capture_with_no_port_roles_is_refused_rather_than_compiled() {
     // configuration costs nothing; discovering it from an archive costs a disk.
     let config = AfPacketSourceConfig::new("tun0", Ipv4Addr::new(192, 0, 2, 7), Vec::new());
     assert!(AfPacketSource::open(&config).is_err());
+}
+
+#[test]
+fn the_datalink_the_parse_reads_is_the_one_the_archive_declares() {
+    // Every offset in the parse is counted from a 14-byte Ethernet header, and
+    // every interface description block the archive writes says LINKTYPE_ETHERNET.
+    assert_eq!(PARSED_DATALINK, Linktype::ETHERNET);
+    assert_eq!(datalink_refusal("placeholder0", Linktype::ETHERNET), None);
+}
+
+#[test]
+fn a_datalink_the_parse_cannot_read_is_refused_rather_than_drained() {
+    // The failure this refusal exists for: a feed arriving over a tunnel, which
+    // has no link layer of its own, so libpcap opens it on bare IP or in cooked
+    // mode. Both are reachable in practice and neither warns — an `ipip` tunnel
+    // and a `tun` device come up on DLT_RAW. Without the refusal the recorder
+    // starts cleanly, logs every feed as recording, skips every frame, and
+    // holds every metric at zero against a live feed.
+    // The expected text is written out rather than computed, because computing
+    // it with the same rule the code uses cannot tell the two branches apart —
+    // and it is the branch that matters here. `DLT_RAW` is **12**, which is
+    // what a `tun` or `ipip` handle reports and what libpcap names `RAW (Raw
+    // IP)`; `Linktype::RAW` is **101**, the `LINKTYPE_` value of that name,
+    // which libpcap names under no `DLT_` at all and which therefore takes the
+    // bare-number branch. Both are listed: the first is the message an operator
+    // on a tunnel actually reads, the second is the fallback for a value
+    // libpcap cannot name, and before this only the second was covered.
+    const DLT_RAW: Linktype = Linktype(12);
+    for (link, expected) in [
+        (Linktype::LINUX_SLL, "LINUX_SLL (Linux cooked v1)"),
+        (Linktype::LINUX_SLL2, "LINUX_SLL2 (Linux cooked v2)"),
+        (DLT_RAW, "RAW (Raw IP)"),
+        (Linktype::RAW, "DLT 101"),
+        (Linktype::NULL, "NULL (BSD loopback)"),
+    ] {
+        let reason = datalink_refusal("dz0", link).expect("a datalink the parse cannot read");
+        assert!(reason.contains("dz0"), "{reason}");
+        assert!(
+            reason.contains(expected),
+            "the operator matches this against tcpdump's own link-type line, \
+             which prints `{expected}`: {reason}"
+        );
+        // And the remedy is one an operator can take on this feed alone. The
+        // device comes first because `capture.mode` is recorder-wide: a message
+        // that led with it would be telling somebody to downgrade every other
+        // feed, and to break the startup of each one whose `interface` names a
+        // device.
+        let device_first = reason
+            .find("point this feed at a device")
+            .unwrap_or_else(|| panic!("the per-feed remedy is missing: {reason}"));
+        let mode_second = reason
+            .find("`capture.mode`")
+            .unwrap_or_else(|| panic!("the mode is missing: {reason}"));
+        assert!(
+            device_first < mode_second,
+            "the recorder-wide remedy may not be the first one offered: {reason}"
+        );
+        assert!(
+            reason.contains("recorder-wide"),
+            "an operator taking the mode has to be told it applies to every feed: {reason}"
+        );
+    }
+}
+
+#[test]
+fn a_bare_ip_frame_is_read_as_a_link_header_and_skipped() {
+    // DLT_RAW, which is what an `ipip` tunnel and a `tun` device open on: the
+    // frame starts at the IPv4 header, so the two bytes the parse reads as an
+    // EtherType are the first half of the source address. 192.0.2.1 makes them
+    // 0xc000, the frame is skipped, and nothing says so outside this crate.
+    let mut raw_ip = vec![
+        0x45, 0x00, 0x00, 0x34, 0x00, 0x00, 0x00, 0x00, 0x1f, 0x11, 0x00, 0x00, 192, 0, 2, 1, 233,
+        252, 0, 10,
+    ];
+    raw_ip.extend_from_slice(&[0x9c, 0x68, 0x9c, 0x40, 0x00, 0x20, 0x00, 0x00]);
+    raw_ip.extend_from_slice(&[7u8; 24]);
+    let len = raw_ip.len();
+    assert_eq!(classify_frame(&raw_ip, len), Err(FrameSkip::NotIpv4));
+}
+
+#[test]
+fn a_cooked_mode_frame_is_what_the_refusal_at_open_prevents() {
+    // A cooked v1 header is 16 bytes with the protocol at offset 14, so the two
+    // bytes the parse reads as an EtherType are part of a link-layer address and
+    // are never 0x0800. Every frame off such a handle fails here, and a skip
+    // counted inside the capture crate reaches neither /metrics nor a log: the
+    // recorder is indistinguishable from one watching a dark feed.
+    let mut cooked = vec![
+        0x00, 0x00, // packet type: sent to us
+        0x00, 0x01, // ARPHRD_ETHER
+        0x00, 0x06, // address length
+        0x02, 0x00, 0x00, 0x00, 0x00, 0x01, // address
+        0x00, 0x00, // address padding
+        0x08, 0x00, // protocol: IPv4, at offset 14 rather than 12
+    ];
+    cooked.extend_from_slice(&[
+        0x45, 0x00, 0x00, 0x34, 0x00, 0x00, 0x00, 0x00, 0x1f, 0x11, 0x00, 0x00, 192, 0, 2, 1, 233,
+        252, 0, 10,
+    ]);
+    cooked.extend_from_slice(&[0x9c, 0x68, 0x9c, 0x40, 0x00, 0x20, 0x00, 0x00]);
+    cooked.extend_from_slice(&[7u8; 24]);
+    let len = cooked.len();
+    assert_eq!(classify_frame(&cooked, len), Err(FrameSkip::NotIpv4));
 }
 
 #[test]
@@ -523,6 +627,11 @@ mod live {
         );
         assert_eq!(source.precision(), Precision::Nano);
         assert!(source.filter().starts_with("udp and dst host "));
+        // Nothing here asserts the datalink. `lo` reports EN10MB, so an
+        // assertion that the handle is on Ethernet would hold with the refusal
+        // in `open` deleted — it is `datalink_refusal`'s own test that pins the
+        // refusal, on the values a real tunnel reports and a loopback device
+        // never will.
     }
 
     #[test]
