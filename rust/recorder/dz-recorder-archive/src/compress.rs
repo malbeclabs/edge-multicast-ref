@@ -5,7 +5,7 @@
 //! a zstd over a whole segment, which is the failure the whole design is shaped
 //! to avoid.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -88,41 +88,96 @@ impl Faults {
     }
 }
 
-/// A set of segment paths the compressor can answer for.
-///
-/// Two of these exist, and the difference between them is the whole of the
-/// budget's relationship with the compressor. **In flight** is the one segment
-/// being read right now: evicting it destroys an object that was about to land,
-/// so the budget leaves it alone. **Queued** is everything submitted behind it:
-/// counted and evictable like any other history, because the job queue is
-/// unbounded and a publication that stalls would otherwise grow staging without
-/// bound while the budget reported it under.
-///
-/// Everything else still under a working name is an orphan — one the compressor
-/// has finished with, or one a dead run left — and only the compressor knows
-/// which is which, so it says so here rather than leaving it to be guessed from
-/// a file name.
-#[derive(Debug, Default)]
-pub(crate) struct InFlight {
-    paths: Mutex<HashSet<PathBuf>>,
+/// Which half of the handover a segment the compressor holds is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Phase {
+    /// Handed over and not started on. The budget counts it — an unbounded
+    /// queue nothing counts is an unbounded disk — and evicts it only after
+    /// everything else.
+    Queued,
+    /// Being read by the compressor right now. The one file eviction must never
+    /// take: its source is the compressor's input, and taking it destroys an
+    /// object that was about to land.
+    InFlight,
 }
 
-impl InFlight {
-    pub(crate) fn enter(&self, path: PathBuf) {
-        self.lock().insert(path);
+/// Every segment the compressor holds, and which phase each one is in, **under
+/// one lock**.
+///
+/// # Why one map and not two sets
+///
+/// This was two `HashSet`s behind two mutexes, `queued` and `in_flight`, and
+/// the compressor moved a path from one to the other by entering the second
+/// before leaving the first — so that the path was never in neither set. That
+/// is true of the *writer* and it was not true of the *reader*: the watermark's
+/// scan asked the two sets at two different moments, and a transition landing
+/// between those two reads showed it a path that was in neither — not queued,
+/// so not protected as the newest queued entry, and not in flight, so not
+/// skipped. Its own name then made it evictable, and a sweep whose budget was
+/// over deleted the file the compressor was at that moment reading. The
+/// publication failed with `ENOENT`, the object never landed, and the window it
+/// held was gone.
+///
+/// One map behind one lock makes that state unrepresentable rather than
+/// unlikely: a reader takes a single atomic look and gets `Queued`, `InFlight`
+/// or nothing, which are the only three states that ever hold.
+///
+/// Nothing is the answer that matters as much as the other two: a segment still
+/// under a working name that this does not hold is an orphan — one the
+/// compressor has finished with, or one a dead run left — and only the
+/// compressor knows which is which, so it says so here rather than leaving it
+/// to be guessed from a file name.
+#[derive(Debug, Default)]
+pub(crate) struct Custody {
+    paths: Mutex<HashMap<PathBuf, Phase>>,
+}
+
+impl Custody {
+    /// Handed to the compressor and not started on.
+    pub(crate) fn queue(&self, path: PathBuf) {
+        self.lock().insert(path, Phase::Queued);
     }
 
-    fn leave(&self, path: &Path) {
+    /// The compressor has started reading it. One lock acquisition, which is
+    /// the whole point: there is no moment at which this path is in neither
+    /// phase.
+    pub(crate) fn start(&self, path: &Path) {
+        self.lock().insert(path.to_path_buf(), Phase::InFlight);
+    }
+
+    /// The compressor is done with it, however it ended.
+    pub(crate) fn finish(&self, path: &Path) {
         self.lock().remove(path);
     }
 
-    pub(crate) fn holds(&self, path: &Path) -> bool {
-        self.lock().contains(path)
+    /// The phase this path is in, or `None` if the compressor does not hold it.
+    pub(crate) fn phase(&self, path: &Path) -> Option<Phase> {
+        self.lock().get(path).copied()
+    }
+
+    /// Deletes `path` unless the compressor is reading it, holding the lock
+    /// across the unlink so that it cannot start reading it in between.
+    ///
+    /// `None` when the file was left alone because it is in flight. Otherwise
+    /// the result of the unlink.
+    ///
+    /// The phase a sweep decided on came from a scan that has since had to walk
+    /// two directories, stat everything in them and sort the result — plenty of
+    /// time for the compressor to pick a queued segment up. Re-reading the
+    /// phase here would only narrow that window; taking the lock closes it,
+    /// because [`start`](Self::start) needs the same lock and a `remove_file`
+    /// is a syscall, not a wait.
+    pub(crate) fn remove_unless_in_flight(&self, path: &Path) -> Option<std::io::Result<()>> {
+        let guard = self.lock();
+        if guard.get(path) == Some(&Phase::InFlight) {
+            return None;
+        }
+        Some(fs::remove_file(path))
     }
 
     /// A poisoned lock still holds the truth about what is in flight, and
     /// panicking here would take a recorder down over an accounting question.
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashSet<PathBuf>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, Phase>> {
         self.paths.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
@@ -164,8 +219,7 @@ pub(crate) struct Compressor {
     jobs: Option<Sender<Job>>,
     completed: Receiver<Result<Published, SinkError>>,
     faults: Arc<Faults>,
-    in_flight: Arc<InFlight>,
-    queued: Arc<InFlight>,
+    custody: Arc<Custody>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -175,10 +229,8 @@ impl Compressor {
         let (done_tx, done_rx) = channel();
         let faults = Arc::new(Faults::default());
         let thread_faults = Arc::clone(&faults);
-        let in_flight = Arc::new(InFlight::default());
-        let thread_in_flight = Arc::clone(&in_flight);
-        let queued = Arc::new(InFlight::default());
-        let thread_queued = Arc::clone(&queued);
+        let custody = Arc::new(Custody::default());
+        let thread_custody = Arc::clone(&custody);
         let thread = std::thread::Builder::new()
             .name("dz-recorder-compress".to_owned())
             .spawn(move || {
@@ -192,19 +244,16 @@ impl Compressor {
                     // staging without bound while bytes_on_disk reported it
                     // comfortably under.
                     //
-                    // In this order, so the path is never in neither set: a
-                    // moment as both is an accounting the budget can read
-                    // safely, and a moment as neither is a file it would treat
-                    // as an orphan.
-                    thread_in_flight.enter(source.clone());
-                    thread_queued.leave(&source);
+                    // One call, so the transition is atomic to a reader as well
+                    // as to this thread. See `Custody`.
+                    thread_custody.start(&source);
                     // A publication that failed must not end the thread: the
                     // next segment still has to land.
                     let done = publish(&job, &thread_faults);
                     // Before the result is handed over, so that a caller which
                     // sees the completion sees a budget that already accounts
                     // for whatever the publication left behind.
-                    thread_in_flight.leave(&source);
+                    thread_custody.finish(&source);
                     if done_tx.send(done).is_err() {
                         break;
                     }
@@ -215,8 +264,7 @@ impl Compressor {
             jobs: Some(jobs_tx),
             completed: done_rx,
             faults,
-            in_flight,
-            queued,
+            custody,
             thread: Some(thread),
         }
     }
@@ -227,23 +275,18 @@ impl Compressor {
         Arc::clone(&self.faults)
     }
 
-    /// What the compressor is holding, so the budget leaves those segments alone
-    /// and counts every other one.
-    pub(crate) fn in_flight(&self) -> Arc<InFlight> {
-        Arc::clone(&self.in_flight)
-    }
-
-    /// What has been submitted and not yet picked up, so the budget counts it,
-    /// can reach it, and takes it only after everything else.
-    pub(crate) fn queued(&self) -> Arc<InFlight> {
-        Arc::clone(&self.queued)
+    /// What the compressor holds and in which phase, so the budget skips the
+    /// one segment being read, counts the queue behind it, and takes a queued
+    /// one only after every other kind of history.
+    pub(crate) fn custody(&self) -> Arc<Custody> {
+        Arc::clone(&self.custody)
     }
 
     /// A submitted segment is queued, not in flight: counted by the budget and
     /// evictable by it, but only after every other kind of history.
     pub(crate) fn submit(&self, job: Job) -> Result<(), SinkError> {
         let source = job.source.clone();
-        self.queued.enter(source.clone());
+        self.custody.queue(source.clone());
         match self
             .jobs
             .as_ref()
@@ -254,7 +297,7 @@ impl Compressor {
             Err(_) => {
                 // Nothing will publish it, so it is history the budget accounts
                 // for from here on — as an orphan rather than as a queue entry.
-                self.queued.leave(&source);
+                self.custody.finish(&source);
                 Err(SinkError::Compress(
                     "the compressor thread is gone".to_owned(),
                 ))
@@ -507,5 +550,84 @@ impl Write for HashingWriter {
 
     fn flush(&mut self) -> io::Result<()> {
         self.inner.flush()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn a_segment_being_handed_over_is_never_observed_in_neither_phase() {
+        // The invariant the budget reads and the one this type exists for. It
+        // held for the writer before — the compressor entered the in-flight set
+        // before leaving the queued one — and it did not hold for the *reader*,
+        // which asked the two sets at two different moments and saw a
+        // transition land between the two answers. A segment in neither phase
+        // is neither protected as the queue's newest entry nor skipped as one
+        // being read, and its own name then makes it evictable: the sweep
+        // deleted the file the compressor was at that moment compressing, the
+        // publication failed on a source that was gone, and the window it held
+        // never became an object.
+        //
+        // One thread transitions in a loop while another watches. This cannot
+        // fail against one map behind one lock — that is the point of writing
+        // it that way — so what the test is for is the next person who reaches
+        // for two collections again: it is the statement of the invariant they
+        // would have to keep, and the two-set version could not keep it at all,
+        // because there is no way to read two mutexes as of one instant.
+        let custody = Arc::new(Custody::default());
+        let path = PathBuf::from("/staging/segment-7.pcapng");
+        let stop = Arc::new(AtomicBool::new(false));
+        // Held before the watcher starts looking: what is under test is the
+        // handover, not the moment before the first submission.
+        custody.queue(path.clone());
+
+        let handing_over = {
+            let custody = Arc::clone(&custody);
+            let path = path.clone();
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                // Queued to in flight and back, which is the transition a
+                // rotation and a pickup perform between them.
+                while !stop.load(Ordering::Relaxed) {
+                    custody.start(&path);
+                    custody.queue(path.clone());
+                }
+            })
+        };
+
+        for _ in 0..200_000 {
+            assert!(
+                custody.phase(&path).is_some(),
+                "a segment the compressor holds was seen in neither phase"
+            );
+        }
+        stop.store(true, Ordering::Relaxed);
+        handing_over.join().expect("the handover thread");
+    }
+
+    #[test]
+    fn a_file_in_flight_is_not_removed_and_says_so() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let path = dir.path().join("segment-1.pcapng");
+        fs::write(&path, b"a segment").expect("the segment");
+
+        let custody = Custody::default();
+        custody.queue(path.clone());
+        assert!(
+            custody.remove_unless_in_flight(&path).is_some(),
+            "a queued segment is the budget's to take"
+        );
+        assert!(!path.exists());
+
+        fs::write(&path, b"a segment").expect("the segment again");
+        custody.start(&path);
+        assert!(
+            custody.remove_unless_in_flight(&path).is_none(),
+            "a segment being published is the one file eviction must not take"
+        );
+        assert!(path.exists(), "and it is still there to be published");
     }
 }

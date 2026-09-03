@@ -88,8 +88,7 @@ impl ArchiveWriter {
         // So that the one segment eviction must not take is the one the
         // compressor says it is holding, rather than every file that shares its
         // name shape.
-        watermark.track_in_flight(compressor.in_flight());
-        watermark.track_queued(compressor.queued());
+        watermark.track_custody(compressor.custody());
         // So a budget that cannot be met reaches last_error rather than being
         // known only to the sweep that discovered it.
         watermark.track_faults(Arc::clone(&faults));
