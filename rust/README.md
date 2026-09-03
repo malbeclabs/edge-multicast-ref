@@ -30,7 +30,7 @@ cargo fmt --all --check
 
 CI runs all four on every pull request, plus `scripts/check-public-repo-rules.sh` — unfiltered, because a required check that never reports blocks a pull request forever, and because a change anywhere then runs the whole workspace, which is what keeps a codec change from breaking a publisher silently. Three further jobs gate what the default build cannot reach: `afpacket` (needs `libpcap-dev`), `e2e` (needs a runner that can deliver multicast to itself) and `conformance` (builds edge-feed-spec's own rule set from a pinned revision and applies it to what this repository produces).
 
-`Cargo.lock` is tracked. MSRV and the `prometheus` version are pinned at the workspace level.
+`Cargo.lock` is tracked. MSRV and the `prometheus` version are pinned at the workspace level, and one `version` in `[workspace.package]` covers every crate — a consumer pins one tag for all of them, for the reason [RELEASING.md](../RELEASING.md) gives.
 
 ## Conventions
 
