@@ -14,7 +14,8 @@
 
 mod common;
 
-use common::batch;
+use common::{batch, batch_on_role};
+use dz_edge_core::PortRole;
 use dz_recorder_clickhouse::{migrations, schema, ClickHouseConfig, ClickHouseSink};
 use dz_recorder_replay::Fault;
 use dz_recorder_rows::{Grain, RowSink};
@@ -259,38 +260,98 @@ fn span_minus_count_is_the_loss_at_the_datagram_grain() {
 /// query-attributed CPU. This is the assertion that holds the coalescing to its
 /// purpose against a real server's own `system.parts`, rather than against what
 /// the sink believes it sent.
+///
+/// The three objects are on the three **port roles**, so their rows have
+/// disjoint sort keys and nothing collapses: what is measured here is parts, and
+/// the collapse has a test of its own below.
 #[test]
 fn coalescing_produces_parts_at_or_above_the_floor_and_never_single_digit_ones() {
     let scratch = Scratch::open("parts");
-    // Four distinct objects — the count is what makes them distinct — held and
-    // posted together. 30+31+32+33 datagram rows is 126, over the floor.
     let mut sink = ClickHouseSink::over_http(ClickHouseConfig {
-        insert_min_rows: 100,
+        insert_min_rows: 90,
         ..scratch.config.clone()
     });
     let mut datagrams = 0u64;
-    for count in [30, 31, 32, 33] {
-        let rows = batch(count, Fault::None);
+    // 32, 33 and 34 rows: 32 and 65 are held, and 99 crosses the floor.
+    for (count, role) in [
+        (30, PortRole::Mktdata),
+        (31, PortRole::Refdata),
+        (32, PortRole::Snapshot),
+    ] {
+        let rows = batch_on_role(count, role);
         datagrams += rows.rows(Grain::Datagram) as u64;
         sink.write_batch(rows, NOW).expect("accepted");
     }
+    let landed = sink.flush(NOW).expect("posted");
+    assert_eq!(landed.len(), 3, "three objects in one insert");
+
+    // Every row landed, and `FINAL` changes nothing because the keys are
+    // disjoint.
+    let raw: u64 = scratch
+        .scalar(&format!(
+            "SELECT count() FROM {}.datagram",
+            scratch.database
+        ))
+        .parse()
+        .expect("count() is a number");
+    assert_eq!(raw, datagrams);
+    assert_eq!(scratch.count("datagram"), datagrams);
+
+    // And in **one** part, not three: `active` only, because an inactive part is
+    // one a merge has already replaced.
+    let parts = scratch.scalar(&format!(
+        "SELECT count() FROM system.parts WHERE database = '{}' AND table = 'datagram' \
+         AND active",
+        scratch.database
+    ));
+    assert_eq!(parts, "1", "three objects, one insert, one part");
+
+    // The plan's other half: no configuration produces a part of single-digit
+    // rows. Asserted from the server's own accounting.
+    let smallest: u64 = scratch
+        .scalar(&format!(
+            "SELECT min(rows) FROM system.parts WHERE database = '{}' AND active AND rows > 0",
+            scratch.database
+        ))
+        .parse()
+        .expect("min(rows) is a number");
+    assert!(
+        smallest >= 10,
+        "a part of {smallest} rows is the profile the coalescing exists to prevent"
+    );
+}
+
+/// **An insert block is collapsed on the sort key before the part is written**,
+/// and a consumer counting rows has to know it.
+///
+/// `optimize_on_insert` is on by default, so the engine applies the
+/// `ReplacingMergeTree` collapse to the block being inserted rather than only
+/// when parts merge. "Deduplication is merge-time" is therefore true *across*
+/// inserts and false *within* one — and coalescing objects into one insert is
+/// what moves rows from the first case into the second.
+///
+/// The fixture makes that visible: the synthetic publisher starts every stream
+/// at sequence 0 with the same receive stamps, so objects of 30, 31, 32 and 33
+/// datagrams on one instance are prefixes of one another. 126 rows go in and 33
+/// come out, because `object_key` is not in the sort key. A real recorder cannot
+/// produce this — it would be one datagram written into two segments — and this
+/// test exists because the arithmetic surprised the author of the DDL comment.
+#[test]
+fn an_insert_block_is_collapsed_on_the_sort_key_before_the_part_is_written() {
+    let scratch = Scratch::open("insert_collapse");
+    let mut sink = ClickHouseSink::over_http(ClickHouseConfig {
+        insert_min_rows: 1_000_000,
+        ..scratch.config.clone()
+    });
+    let mut sent = 0u64;
+    for count in [30, 31, 32, 33] {
+        let rows = batch(count, Fault::None);
+        sent += rows.rows(Grain::Datagram) as u64;
+        sink.write_batch(rows, NOW).expect("held");
+    }
+    assert_eq!(sent, 126, "what the sink put in the body");
     sink.flush(NOW).expect("posted");
 
-    // Every row landed — counted **without** `FINAL`, and that is the point of
-    // this fixture rather than a shortcut past it.
-    //
-    // The synthetic publisher starts every stream at sequence 0 with the same
-    // receive stamps, so four objects of 30, 31, 32 and 33 datagrams are
-    // prefixes of one another: the row for `(instance, sequence, site,
-    // recv_ts)` is identical in all four, and `object_key` is not in the sort
-    // key. `FINAL` therefore collapses them to 33 — correctly, and it is the one
-    // case `001`'s own header calls out as indistinguishable from a re-load: a
-    // duplicate whose receive stamp matches to the nanosecond. A real recorder
-    // cannot produce it, because that would be one datagram written into two
-    // segments.
-    //
-    // What this test is about is **parts**, so the raw count is the right
-    // measure, and asserting both makes the difference legible.
     let raw: u64 = scratch
         .scalar(&format!(
             "SELECT count() FROM {}.datagram",
@@ -299,38 +360,23 @@ fn coalescing_produces_parts_at_or_above_the_floor_and_never_single_digit_ones()
         .parse()
         .expect("count() is a number");
     assert_eq!(
-        raw, datagrams,
-        "every row this test inserted is in the table"
+        raw, 33,
+        "the block was collapsed on the sort key at insert time, not at merge time"
     );
+    // `FINAL` adds nothing, because the collapse already happened.
+    assert_eq!(scratch.count("datagram"), 33);
+    // One part, and its own row count agrees.
     assert_eq!(
-        scratch.count("datagram"),
-        33,
-        "and `FINAL` collapses the overlap, which is the sort key doing its job"
-    );
-
-    // And in **one** part, not four: `active` only, because an inactive part is
-    // one a merge has already replaced.
-    let parts = scratch.scalar(&format!(
-        "SELECT count() FROM system.parts WHERE database = '{}' AND table = 'datagram' \
-         AND active",
-        scratch.database
-    ));
-    assert_eq!(parts, "1", "four objects, one insert, one part");
-
-    // The plan's other half: no configuration produces a part of single-digit
-    // rows. Asserted from the server's own accounting.
-    let smallest = scratch.scalar(&format!(
-        "SELECT min(rows) FROM system.parts WHERE database = '{}' AND active AND rows > 0",
-        scratch.database
-    ));
-    let smallest: u64 = smallest.parse().expect("min(rows) is a number");
-    assert!(
-        smallest >= 10,
-        "a part of {smallest} rows is the profile the coalescing exists to prevent"
+        scratch.scalar(&format!(
+            "SELECT sum(rows) FROM system.parts WHERE database = '{}' AND table = 'datagram' \
+             AND active",
+            scratch.database
+        )),
+        "33"
     );
 }
 
-/// And without the floor, the same four objects are four parts — which is what
+/// And without the floor, the same three objects are three parts — which is what
 /// says the assertion above is measuring the coalescing and not the engine.
 #[test]
 fn posting_per_object_would_produce_one_part_per_object() {
@@ -339,8 +385,12 @@ fn posting_per_object_would_produce_one_part_per_object() {
         insert_min_rows: 1,
         ..scratch.config.clone()
     });
-    for count in [30, 31, 32, 33] {
-        sink.write_batch(batch(count, Fault::None), NOW)
+    for (count, role) in [
+        (30, PortRole::Mktdata),
+        (31, PortRole::Refdata),
+        (32, PortRole::Snapshot),
+    ] {
+        sink.write_batch(batch_on_role(count, role), NOW)
             .expect("posted immediately");
     }
 
@@ -350,7 +400,7 @@ fn posting_per_object_would_produce_one_part_per_object() {
         scratch.database
     ));
     assert_eq!(
-        parts, "4",
+        parts, "3",
         "one part per object, which is the profile the floor exists to prevent"
     );
 }

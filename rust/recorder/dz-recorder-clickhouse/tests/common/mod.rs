@@ -156,9 +156,28 @@ pub const NOW: u64 = 1_700_000_000_000_000_000;
 /// Nanoseconds in one second, for a test stating a delay.
 pub const SECOND_NS: u64 = 1_000_000_000;
 
+/// A real batch on one port role, so two of them have disjoint sort keys.
+///
+/// The destination port is part of the channel instance and part of every
+/// table's sort key, so the same stream on two roles is two instances. That is
+/// what lets a test insert several objects without the engine collapsing their
+/// rows into one another — see `an_insert_block_is_collapsed_on_the_sort_key...`
+/// for the case where they do overlap, and why.
+#[must_use]
+pub fn batch_on_role(datagrams: usize, role: PortRole) -> RowBatch {
+    build(SyntheticPublisher::clean(datagrams).on_role(role), role)
+}
+
 /// A real batch: the real writer, the real archive, the real derivation.
 #[must_use]
 pub fn batch(datagrams: usize, fault: Fault) -> RowBatch {
+    build(
+        SyntheticPublisher::with_fault(datagrams, fault),
+        PortRole::Mktdata,
+    )
+}
+
+fn build(publisher: SyntheticPublisher, role: PortRole) -> RowBatch {
     let dir = tempfile::tempdir().expect("a temporary directory");
     let cfg = ArchiveWriterConfig {
         staging_dir: dir.path().join("staging"),
@@ -176,16 +195,12 @@ pub fn batch(datagrams: usize, fault: Fault) -> RowBatch {
             config_hash: "a".repeat(64),
         },
         feed: "top-of-book".to_owned(),
-        roles_joined: vec![RoleJoin::on(
-            PortRole::Mktdata,
-            GROUP,
-            port_for(PortRole::Mktdata),
-        )],
+        roles_joined: vec![RoleJoin::on(role, GROUP, port_for(role))],
         link_headers: LinkHeaders::Synthesised,
         capture_drop_scope: CaptureDropScope::PortRole,
     };
     let mut writer = ArchiveWriter::new(cfg, 0).expect("the archive opens");
-    SyntheticPublisher::with_fault(datagrams, fault)
+    publisher
         .publish_into(&mut writer)
         .expect("the write path never fails the caller");
     writer

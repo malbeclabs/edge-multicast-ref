@@ -78,25 +78,43 @@
 --    indistinguishable from an object nobody loaded. The rank ranks
 --    `continuation = 0` rows, so every query sees what the design intended.
 
--- DEDUPLICATION IS MERGE-TIME, NOT INSERT-TIME, AND A CONSUMER HAS TO KNOW
+-- DEDUPLICATION IS MERGE-TIME ACROSS INSERTS AND INSERT-TIME WITHIN ONE, AND A
+-- CONSUMER HAS TO KNOW WHICH
 --
 -- Every table here is a `ReplacingMergeTree`, and that is what makes a re-run
--- after an analyser fix a replace rather than a duplication. It is **not** what
--- makes the duplicate invisible the moment the second load finishes: the engine
--- collapses rows on the sort key when it merges parts, and until a merge runs
--- both rows are there and both are returned.
+-- after an analyser fix a replace rather than a duplication. *When* the
+-- duplicate stops being visible has two answers, and only one of them is the
+-- one usually quoted.
 --
--- Which is correct for idempotence and surprising for everything downstream. A
--- data-quality check that counts rows reads a re-load as a doubling, and that
--- has already produced one false "row count doubled" finding on the destination
--- cluster that had to be retracted. An exact count needs `FINAL`, or an
--- explicit `GROUP BY` over the sort key, or `OPTIMIZE ... FINAL` first:
+-- **Within one insert: immediately.** `optimize_on_insert` is on by default, so
+-- the engine applies the collapse to the block being written rather than only
+-- when parts merge. Two rows sharing a sort key in one insert become one row in
+-- the part, before it lands.
+--
+-- **Across inserts: only on merge.** Two rows sharing a sort key in two
+-- different inserts are in two parts, and both are there and both are returned
+-- until a merge runs.
+--
+-- The second is correct for idempotence and surprising for everything
+-- downstream. A data-quality check that counts rows reads a re-load as a
+-- doubling, and that has already produced one false "row count doubled" finding
+-- on the destination cluster that had to be retracted. An exact count needs
+-- `FINAL`, or an explicit `GROUP BY` over the sort key, or `OPTIMIZE ... FINAL`
+-- first:
 --
 --   SELECT count() FROM recorder.datagram FINAL WHERE ...   -- exact, slower
 --   SELECT count() FROM recorder.datagram WHERE ...         -- fast, an upper bound
 --
 -- So an approximate count is an upper bound and never an equality, and a panel
 -- that compares two of them across a reload is comparing two upper bounds.
+--
+-- The loader coalesces rows from several objects into one insert, which moves
+-- rows between those two cases: two objects that shared a sort key row used to
+-- land in separate parts and now collapse on the way in. Nothing a recorder
+-- writes can share one — that would be a single datagram written into two
+-- segments, since `recv_ts` is in the key to the nanosecond — but the fixtures
+-- can, and `an_insert_block_is_collapsed_on_the_sort_key_before_the_part_is_written`
+-- is the test that pins the behaviour rather than leaving it to be rediscovered.
 
 CREATE DATABASE IF NOT EXISTS recorder;
 

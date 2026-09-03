@@ -631,9 +631,15 @@ mod fixtures {
 #[test]
 fn the_schema_says_deduplication_is_merge_time() {
     let sql = rows_sql();
+    // Both halves, because only one of them is the one usually quoted and the
+    // other is the one that surprised this file's own author.
     assert!(
-        sql.contains("MERGE-TIME, NOT INSERT-TIME"),
+        sql.contains("MERGE-TIME ACROSS INSERTS AND INSERT-TIME WITHIN ONE"),
         "the timing has to be stated where somebody counting rows will read it"
+    );
+    assert!(
+        sql.contains("optimize_on_insert"),
+        "the setting that makes the within-one-insert case what it is"
     );
     assert!(
         sql.contains("FINAL"),
