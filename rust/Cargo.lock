@@ -440,6 +440,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "dz-recorder-rows"
+version = "0.1.0"
+dependencies = [
+ "dz-edge-core",
+ "dz-recorder-archive",
+ "dz-recorder-core",
+ "dz-recorder-loss",
+ "dz-recorder-replay",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

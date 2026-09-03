@@ -702,3 +702,45 @@ fn an_era_that_opens_normally_refuses_a_value_no_outage_puts_in_it() {
         "1..=6, and nothing the forged value opened"
     );
 }
+
+/// An era's anchor is where it *opened*, and a datagram arriving afterwards
+/// below that value does not move it.
+///
+/// The distinction is load-bearing for the offline tier: an era is identified by
+/// a rank over the openings, and a range join from a per-datagram row resolves
+/// the era by the anchor's receive stamp. Deriving either from the delivered
+/// span would make an era's identity depend on a datagram that arrived later —
+/// so a reordering, or backward motion the archive holds anyway, would renumber
+/// history and move a boundary that had already been recorded.
+#[test]
+fn an_eras_anchor_is_where_it_opened_and_not_its_lowest_delivered_value() {
+    let mut stream = Stream::new();
+    // The era opens at 100, and 98 arrives late — inside the reordering window,
+    // so it is a late delivery into this era rather than a new space.
+    stream.send(PUBLISHER_A, 100, 0);
+    stream.send(PUBLISHER_A, 101, 0);
+    stream.send(PUBLISHER_A, 98, 0);
+
+    let report = derive(CaptureDropScope::PortRole, &stream.sent);
+    let loss = report
+        .instance(&instance(PUBLISHER_A, PortRole::Mktdata))
+        .expect("the instance sent three datagrams");
+
+    assert_eq!(loss.eras.len(), 1, "one era: {:?}", loss.eras);
+    let era = &loss.eras[0];
+    assert_eq!(era.anchor_seq, 100, "the opening value");
+    assert_eq!(
+        era.anchor_ts_ns,
+        stream.ts_of(0),
+        "the opening datagram's own stamp"
+    );
+    assert_eq!(era.first_seq, 98, "the span did widen downwards");
+    assert!(
+        era.anchor_seq > era.first_seq,
+        "the anchor and the span are the same value here, so this test asserts nothing"
+    );
+    assert!(
+        era.anchor_ts_ns < stream.ts_of(2),
+        "the anchor took the late arrival's stamp"
+    );
+}
