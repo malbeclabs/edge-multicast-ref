@@ -5,7 +5,7 @@ name: dz-recorder release
 # **Dispatch only, and the version is not an input the build honours.** The
 # recorder reads its version from `CARGO_PKG_VERSION` — see `identity.rs`, which
 # refuses to discover provenance at run time — so there is no way to release a
-# version the source does not already carry. The input is therefore a claim this
+# version the source code does not already carry. The input is therefore a claim this
 # workflow *checks* against the workspace version rather than a value it injects,
 # and a release of vX.Y.Z requires the bump to be on main first. That is one
 # stage rather than the sibling's two (malbeclabs/kalshi `feed-capture release`),
@@ -35,7 +35,15 @@ permissions:
 jobs:
   release:
     name: release
-    runs-on: ubuntu-latest
+    # **Pinned, and to the fleet's distro rather than to whatever is newest.** The
+    # binary links the runner's glibc dynamically, so the asset's glibc floor is
+    # whatever built it — and `ubuntu-latest` moves between Ubuntu majors on
+    # GitHub's schedule, which would raise that floor with no change here and no
+    # warning until a recorder failed to start on a name still promising
+    # `linux_amd64`. The recorder hosts are Ubuntu 24.04 (Noble): see the
+    # `ec2_ami` comments in malbeclabs/infra `terraform/plans/multicast-recorder`.
+    # Move this when the fleet moves, deliberately and in that order.
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     defaults:
@@ -46,7 +54,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Validate the version against the source and the remote
+      - name: Validate the version against the source code and the remote
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
@@ -62,7 +70,7 @@ jobs:
             echo "HEAD is not at origin/main; re-run this from an up-to-date main." >&2
             exit 1
           fi
-          # The binary reports CARGO_PKG_VERSION, so a tag the source does not
+          # The binary reports CARGO_PKG_VERSION, so a tag the source code does not
           # carry would publish an asset whose --version contradicts its name.
           EXPECTED="${VERSION#v}"
           GOT=$(awk -F\" '/^\[workspace.package\]/{s=1} s && /^version[[:space:]]*=/{print $2; exit}' Cargo.toml)
@@ -78,8 +86,12 @@ jobs:
           EXISTING=$(git ls-remote --tags origin "refs/tags/dz-recorder/${VERSION}" | awk '{print $1}')
           if [[ -n "${EXISTING}" ]]; then
             # An annotated tag's ref names the tag object, so compare what it
-            # dereferences to rather than the ref itself.
-            EXISTING=$(git ls-remote --tags origin "refs/tags/dz-recorder/${VERSION}^{}" | awk '{print $1}')
+            # dereferences to rather than the ref itself. A LIGHTWEIGHT tag
+            # advertises no `^{}` ref at all and its own ref is already the
+            # commit, so fall back to it — without this, one dies here on an
+            # empty string, reporting a tag "at , which is not this HEAD".
+            PEELED=$(git ls-remote --tags origin "refs/tags/dz-recorder/${VERSION}^{}" | awk '{print $1}')
+            EXISTING="${PEELED:-${EXISTING}}"
             if [[ "${EXISTING}" != "$(git rev-parse HEAD)" ]]; then
               echo "tag dz-recorder/${VERSION} exists on origin at ${EXISTING}, which is not this HEAD" >&2
               exit 1
@@ -117,11 +129,15 @@ jobs:
       - name: Install libpcap
         run: sudo apt-get update && sudo apt-get install -y libpcap-dev
 
+      # `--locked` on all three, and not only on the build: cargo would otherwise
+      # refresh a stale lockfile here and the build's own `--locked` would then
+      # find it already current, publishing a binary from dependency versions the
+      # committed Cargo.lock never named.
       - name: Clippy
-        run: cargo clippy -p dz-recorder --features afpacket --all-targets -- -D warnings
+        run: cargo clippy --locked -p dz-recorder --features afpacket --all-targets -- -D warnings
 
       - name: Test
-        run: cargo test -p dz-recorder --features afpacket
+        run: cargo test --locked -p dz-recorder --features afpacket
 
       - name: Build
         env:
@@ -138,7 +154,7 @@ jobs:
           echo "${OUT}"
           # `dz-recorder <version> (<commit>)`, and both halves are asserted: an
           # `unknown` commit here is a binary whose archives cannot be attributed
-          # to the source that wrote them.
+          # to the source code that wrote them.
           [[ "$(printf '%s' "${OUT}" | awk '{print $2}')" == "${VERSION#v}" ]] || {
             echo "binary reports a version that is not ${VERSION}" >&2; exit 1; }
           printf '%s' "${OUT}" | grep -qF "(${COMMIT})" || {
