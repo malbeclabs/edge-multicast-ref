@@ -324,6 +324,7 @@ pub struct HealthMetrics {
     era_ordinal: IntGaugeVec,
     last_datagram_timestamp_seconds: GaugeVec,
     heartbeat_last_timestamp_seconds: GaugeVec,
+    archive_oldest_segment_timestamp_seconds: GaugeVec,
 }
 
 /// The children for one feed, resolved once so nothing on the drain thread
@@ -341,6 +342,7 @@ pub(crate) struct FeedChildren {
     pub(crate) unexpected_source_datagrams: IntCounter,
     pub(crate) foreign_group_datagrams: IntCounter,
     pub(crate) unexpected_role: IntCounter,
+    pub(crate) archive_oldest_segment_timestamp: Gauge,
 }
 
 /// The children for one `(feed, role)`, resolved once for the same reason.
@@ -839,6 +841,21 @@ impl HealthMetrics {
                 &labels,
                 &["feed", "port_role", "channel", "source"],
             ),
+            archive_oldest_segment_timestamp_seconds: gauge_vec(
+                &registry,
+                "dz_recorder_archive_oldest_segment_timestamp_seconds",
+                "Unix receive-window start of the OLDEST object still on the disk, per feed. \
+                 How much history this host can still answer from, which is the question \
+                 dz_recorder_segments_evicted_total cannot answer: a budget that is full \
+                 evicts on every sweep for ever, so that counter rises at steady state by \
+                 design and an alert on it fires permanently. Alert on `time() - this` \
+                 instead, against the window a loss investigation needs — and guard it on \
+                 the recorder having archived something, the same way \
+                 dz_recorder_last_datagram_timestamp_seconds asks: this renders 0 for a feed \
+                 with nothing retained, and `time() - 0` is an age of decades.",
+                &labels,
+                &["feed"],
+            ),
             heartbeat_last_timestamp_seconds: gauge_vec(
                 &registry,
                 "dz_recorder_heartbeat_last_timestamp_seconds",
@@ -874,6 +891,8 @@ impl HealthMetrics {
         let name = feed.feed;
 
         self.interface_drops_total.with_label_values(&[name]);
+        self.archive_oldest_segment_timestamp_seconds
+            .with_label_values(&[name]);
         self.instances_tracked.with_label_values(&[name]);
         self.instances_opened_total.with_label_values(&[name]);
         self.instances_evicted_total.with_label_values(&[name]);
@@ -1001,6 +1020,9 @@ impl HealthMetrics {
                 .with_label_values(&[feed]),
             foreign_group_datagrams: self
                 .foreign_group_datagrams_total
+                .with_label_values(&[feed]),
+            archive_oldest_segment_timestamp: self
+                .archive_oldest_segment_timestamp_seconds
                 .with_label_values(&[feed]),
             unexpected_role: self
                 .datagrams_unexpected_role_total

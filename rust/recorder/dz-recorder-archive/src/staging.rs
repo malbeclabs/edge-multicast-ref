@@ -270,6 +270,22 @@ impl StagingWatermark {
         self.objects().first().map(|o| o.segment_seq)
     }
 
+    /// Where the retained history starts: the receive window of the oldest
+    /// object still on the disk, or `None` when none is.
+    ///
+    /// **This is the retention question, and eviction counts cannot answer
+    /// it.** A budget that is full evicts on every sweep for ever, so the
+    /// eviction counter rises at steady state by design and says nothing about
+    /// how much history is left — which is what somebody chasing a loss report
+    /// from last night actually needs to know. From `start_ns` rather than a
+    /// file's mtime, because the mtime is a property of the copy while this is
+    /// a property of the traffic, and it is the same clock the object key and
+    /// the manifest are stamped with.
+    #[must_use]
+    pub fn oldest_segment_start_ns(&self) -> Option<u64> {
+        self.objects().first().map(|o| o.start_ns)
+    }
+
     #[must_use]
     pub fn segments_evicted_total(&self) -> u64 {
         self.segments_evicted_total
@@ -702,6 +718,48 @@ mod tests {
             w.bytes_on_disk(),
             2000,
             "a queue of three counts two: the newest is the bounded transient"
+        );
+    }
+
+    #[test]
+    fn the_retention_floor_is_the_oldest_windows_start_and_moves_as_history_goes() {
+        // **The question the eviction counter cannot answer.** A full budget
+        // evicts on every sweep for ever, so that counter rises at steady state
+        // by design; what somebody chasing last night's loss report needs is how
+        // far back the archive still reaches, and this is that number.
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let staging = dir.path().join("staging");
+        let completed = dir.path().join("completed");
+        fs::create_dir_all(&staging).expect("staging");
+        fs::create_dir_all(&completed).expect("completed");
+
+        // Written newest-first, so a `last()` where `first()` belongs, or a
+        // reliance on directory order, reads the wrong end.
+        for (start, end, seq) in [
+            (3_000u64, 3_500u64, 2u64),
+            (1_000, 1_500, 0),
+            (2_000, 2_500, 1),
+        ] {
+            let path = completed.join(format!("{start}-{end}-{seq}{ZSTD_SUFFIX}"));
+            fs::write(&path, vec![0u8; 600]).expect("an object");
+            fs::write(completed.join(manifest_name(start, end, seq)), b"{}").expect("a manifest");
+        }
+
+        // 602 bytes an object, manifest included, so a 1500-byte budget has room
+        // for two and eviction takes exactly one.
+        let mut w = StagingWatermark::new(staging, completed, 1_500);
+        assert_eq!(
+            w.oldest_segment_start_ns(),
+            Some(1_000),
+            "the floor is the oldest window, whatever order the directory lists"
+        );
+
+        w.enforce().expect("eviction");
+        assert_eq!(w.objects_evicted_total(), 1, "exactly the oldest");
+        assert_eq!(
+            w.oldest_segment_start_ns(),
+            Some(2_000),
+            "the floor is a level and has to follow the history that was dropped"
         );
     }
 

@@ -235,6 +235,13 @@ impl ArchiveWriter {
         self.watermark.segments_evicted_total()
     }
 
+    /// Where this feed's retained history starts. See
+    /// [`StagingWatermark::oldest_segment_start_ns`].
+    #[must_use]
+    pub fn oldest_segment_start_ns(&self) -> Option<u64> {
+        self.watermark.oldest_segment_start_ns()
+    }
+
     /// Published objects evicted, a subset of
     /// [`segments_evicted_total`](Self::segments_evicted_total).
     #[must_use]
