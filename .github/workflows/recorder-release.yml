@@ -70,10 +70,25 @@ jobs:
             echo "workspace version is '${GOT}', expected '${EXPECTED}' — bump it on main first." >&2
             exit 1
           fi
-          if git ls-remote --exit-code --tags origin "refs/tags/dz-recorder/${VERSION}" >/dev/null 2>&1; then
-            echo "tag dz-recorder/${VERSION} already exists on origin" >&2
-            exit 1
+          # An existing tag is only a conflict when it names a different commit.
+          # A tag that already points at this HEAD is what a re-run after a
+          # partial failure finds — the push landed and the release did not —
+          # and refusing it would make the only way forward deleting a tag
+          # somebody may already have pinned.
+          EXISTING=$(git ls-remote --tags origin "refs/tags/dz-recorder/${VERSION}" | awk '{print $1}')
+          if [[ -n "${EXISTING}" ]]; then
+            # An annotated tag's ref names the tag object, so compare what it
+            # dereferences to rather than the ref itself.
+            EXISTING=$(git ls-remote --tags origin "refs/tags/dz-recorder/${VERSION}^{}" | awk '{print $1}')
+            if [[ "${EXISTING}" != "$(git rev-parse HEAD)" ]]; then
+              echo "tag dz-recorder/${VERSION} exists on origin at ${EXISTING}, which is not this HEAD" >&2
+              exit 1
+            fi
+            echo "tag dz-recorder/${VERSION} already points at this commit; re-using it"
           fi
+          # A release is a different matter: its assets are published, and
+          # replacing them silently is how a pinned artefact changes underneath
+          # a fleet that already downloaded it.
           if gh release view "dz-recorder/${VERSION}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             echo "release dz-recorder/${VERSION} already exists" >&2
             exit 1
@@ -153,6 +168,13 @@ jobs:
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
+          # Idempotent for the same reason the check above is: a re-run after the
+          # push landed must not fail on its own tag. Validation has already
+          # established that any tag with this name is on this commit.
+          if git ls-remote --exit-code --tags origin "refs/tags/dz-recorder/${VERSION}" >/dev/null 2>&1; then
+            echo "tag dz-recorder/${VERSION} is already on origin at this commit"
+            exit 0
+          fi
           git -c user.name="github-actions[bot]" \
               -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
               tag -a "dz-recorder/${VERSION}" -m "dz-recorder ${VERSION}" "${SHA}"
