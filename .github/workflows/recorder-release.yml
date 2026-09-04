@@ -1,0 +1,177 @@
+name: dz-recorder release
+
+# Publishes a `dz-recorder` binary the fleet can pin against.
+#
+# **Dispatch only, and the version is not an input the build honours.** The
+# recorder reads its version from `CARGO_PKG_VERSION` — see `identity.rs`, which
+# refuses to discover provenance at run time — so there is no way to release a
+# version the source does not already carry. The input is therefore a claim this
+# workflow *checks* against the workspace version rather than a value it injects,
+# and a release of vX.Y.Z requires the bump to be on main first. That is one
+# stage rather than the sibling's two (malbeclabs/kalshi `feed-capture release`),
+# because there is nothing a prepare stage could inject here.
+#
+# The commit is stamped at compile time from DZ_RECORDER_BUILD_COMMIT. A build
+# that is not told says `unknown`, and that string ends up in the Section Header
+# block of every archive this binary writes — so an untagged commit is a build
+# whose archives cannot be attributed, which is why it is set here and asserted
+# below rather than left to a default.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, matching the workspace version (e.g. v0.1.0)."
+        required: true
+        type: string
+
+concurrency:
+  group: dz-recorder-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate the version against the source and the remote
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if ! [[ "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "version '${VERSION}' does not match vMAJOR.MINOR.PATCH[-PRERELEASE]" >&2
+            exit 1
+          fi
+          # Releases run from main, so what is tagged is what the fleet can read.
+          REMOTE_MAIN=$(git ls-remote origin refs/heads/main | awk '{print $1}')
+          if [[ "$(git rev-parse HEAD)" != "${REMOTE_MAIN}" ]]; then
+            echo "HEAD is not at origin/main; re-run this from an up-to-date main." >&2
+            exit 1
+          fi
+          # The binary reports CARGO_PKG_VERSION, so a tag the source does not
+          # carry would publish an asset whose --version contradicts its name.
+          EXPECTED="${VERSION#v}"
+          GOT=$(awk -F\" '/^\[workspace.package\]/{s=1} s && /^version[[:space:]]*=/{print $2; exit}' Cargo.toml)
+          if [[ "${GOT}" != "${EXPECTED}" ]]; then
+            echo "workspace version is '${GOT}', expected '${EXPECTED}' — bump it on main first." >&2
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/dz-recorder/${VERSION}" >/dev/null 2>&1; then
+            echo "tag dz-recorder/${VERSION} already exists on origin" >&2
+            exit 1
+          fi
+          if gh release view "dz-recorder/${VERSION}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "release dz-recorder/${VERSION} already exists" >&2
+            exit 1
+          fi
+
+      - name: Resolve the commit this build is stamped with
+        id: resolve
+        run: |
+          set -euo pipefail
+          {
+            echo "sha=$(git rev-parse HEAD)"
+            echo "short_sha=$(git rev-parse --short=8 HEAD)"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+
+      # afpacket needs it at build time, and the released binary carries the
+      # feature: a host on a plain interface uses it, and one on a DoubleZero
+      # tunnel refuses it at open rather than recording nothing.
+      - name: Install libpcap
+        run: sudo apt-get update && sudo apt-get install -y libpcap-dev
+
+      - name: Clippy
+        run: cargo clippy -p dz-recorder --features afpacket --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test -p dz-recorder --features afpacket
+
+      - name: Build
+        env:
+          DZ_RECORDER_BUILD_COMMIT: ${{ steps.resolve.outputs.short_sha }}
+        run: cargo build --locked --release --features afpacket --bin dz-recorder
+
+      - name: Check what the binary says about itself
+        env:
+          VERSION: ${{ inputs.version }}
+          COMMIT: ${{ steps.resolve.outputs.short_sha }}
+        run: |
+          set -euo pipefail
+          OUT=$(./target/release/dz-recorder --version)
+          echo "${OUT}"
+          # `dz-recorder <version> (<commit>)`, and both halves are asserted: an
+          # `unknown` commit here is a binary whose archives cannot be attributed
+          # to the source that wrote them.
+          [[ "$(printf '%s' "${OUT}" | awk '{print $2}')" == "${VERSION#v}" ]] || {
+            echo "binary reports a version that is not ${VERSION}" >&2; exit 1; }
+          printf '%s' "${OUT}" | grep -qF "(${COMMIT})" || {
+            echo "binary was not stamped with ${COMMIT}" >&2; exit 1; }
+
+      - name: Package
+        id: package
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          DIST="$RUNNER_TEMP/dz-recorder-release"
+          STAGE_NAME="dz-recorder_${VERSION#v}_linux_amd64"
+          mkdir -p "$DIST/$STAGE_NAME"
+          cp target/release/dz-recorder "$DIST/$STAGE_NAME/"
+          cp recorder/README.md "$DIST/$STAGE_NAME/"
+          tar -C "$DIST" -czf "$DIST/${STAGE_NAME}.tar.gz" "$STAGE_NAME"
+          (cd "$DIST" && sha256sum "${STAGE_NAME}.tar.gz" > "${STAGE_NAME}.tar.gz.sha256")
+          {
+            echo "dist=$DIST"
+            echo "stage_name=$STAGE_NAME"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Tag
+        env:
+          SHA: ${{ steps.resolve.outputs.sha }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              tag -a "dz-recorder/${VERSION}" -m "dz-recorder ${VERSION}" "${SHA}"
+          git push origin "refs/tags/dz-recorder/${VERSION}"
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          DIST: ${{ steps.package.outputs.dist }}
+          STAGE_NAME: ${{ steps.package.outputs.stage_name }}
+        run: |
+          set -euo pipefail
+          PRERELEASE_ARGS=()
+          [[ "${VERSION}" == *-* ]] && PRERELEASE_ARGS+=(--prerelease)
+          gh release create "dz-recorder/${VERSION}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "dz-recorder ${VERSION}" \
+            --generate-notes \
+            "${PRERELEASE_ARGS[@]}" \
+            "$DIST/${STAGE_NAME}.tar.gz" \
+            "$DIST/${STAGE_NAME}.tar.gz.sha256"
