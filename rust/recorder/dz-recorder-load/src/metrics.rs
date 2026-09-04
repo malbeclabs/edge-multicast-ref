@@ -91,10 +91,21 @@ pub enum SkipReason {
     /// recorder writes the manifest first, so this is what a pass that ran
     /// during a publication sees, and it resolves itself on the next one.
     Unpaired,
+    /// Its rows are already with the sink, waiting for the insert that carries
+    /// them. It has no ledger entry by design — the entry is written when the
+    /// rows land — so this is what stops the pass from deriving it again, and
+    /// under a poll interval far shorter than `insert_max_delay` that is most
+    /// of the passes an object is alive for.
+    Held,
 }
 
 impl SkipReason {
-    pub const ALL: [Self; 3] = [Self::AlreadyLoaded, Self::ForeignHost, Self::Unpaired];
+    pub const ALL: [Self; 4] = [
+        Self::AlreadyLoaded,
+        Self::ForeignHost,
+        Self::Unpaired,
+        Self::Held,
+    ];
 
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -102,6 +113,7 @@ impl SkipReason {
             Self::AlreadyLoaded => "already_loaded",
             Self::ForeignHost => "foreign_host",
             Self::Unpaired => "unpaired",
+            Self::Held => "held",
         }
     }
 }
@@ -121,6 +133,7 @@ pub struct LoaderMetrics {
     passes_total: IntCounter,
     last_pass_timestamp_seconds: IntGauge,
     unloaded_objects: IntGauge,
+    held_objects: IntGauge,
     oldest_unloaded_age_seconds: IntGauge,
     ledger_entries: IntGauge,
 }
@@ -179,7 +192,9 @@ impl LoaderMetrics {
             bytes_written_total: counter(
                 &registry,
                 "dz_loader_bytes_written_total",
-                "Row bytes handed to the destination.",
+                "Row bytes put on the wire, summed per request. Per request and not per \
+                 object: an insert spans objects, so the rows of several of them have one \
+                 length between them and dividing it up would be inventing a number.",
                 &labels,
             ),
             errors_total: counter_vec(
@@ -217,6 +232,17 @@ impl LoaderMetrics {
                 "dz_loader_unloaded_objects",
                 "Objects in the directory with no ledger entry. Half of lag: how much is \
                  waiting.",
+                &labels,
+            ),
+            held_objects: gauge(
+                &registry,
+                "dz_loader_held_objects",
+                "Objects the sink has taken and not yet posted, so their rows are in memory \
+                 rather than in the store. Compare against dz_loader_unloaded_objects: a \
+                 backlog that is all held is a sink coalescing as designed, and one that is \
+                 all underived is a loader behind. This is also why the unloaded count \
+                 includes these — rows in memory are not loaded, and counting them as loaded \
+                 would report a loader caught up while its last insert sat unsent.",
                 &labels,
             ),
             oldest_unloaded_age_seconds: gauge(
@@ -261,12 +287,23 @@ impl LoaderMetrics {
     pub fn object_loaded(&self, written: &dz_recorder_rows::Written, bytes_read: u64) {
         self.objects_loaded_total.inc();
         self.bytes_read_total.inc_by(bytes_read);
-        self.bytes_written_total.inc_by(written.bytes());
         for grain in Grain::ALL {
             self.rows_written_total
                 .with_label_values(&[grain.table()])
                 .inc_by(written.rows(grain));
         }
+    }
+
+    /// Bytes one request put on the wire.
+    ///
+    /// Counted per request and never per object, which is why it is not part of
+    /// [`object_loaded`](Self::object_loaded): once an insert spans objects the
+    /// rows of four of them have one length between them, and dividing it up
+    /// would be inventing a number. A sink that coalesces reports `0` bytes on
+    /// the per-object count for exactly that reason, so a counter fed from
+    /// there stayed at 0 for ever.
+    pub fn bytes_posted(&self, bytes: u64) {
+        self.bytes_written_total.inc_by(bytes);
     }
 
     pub fn object_skipped(&self, reason: SkipReason) {
@@ -288,11 +325,13 @@ impl LoaderMetrics {
     pub fn pass_finished(
         &self,
         unloaded: i64,
+        held: i64,
         oldest_unloaded_age_seconds: i64,
         ledger_entries: i64,
         now_unix_seconds: i64,
     ) {
         self.unloaded_objects.set(unloaded);
+        self.held_objects.set(held);
         self.oldest_unloaded_age_seconds
             .set(oldest_unloaded_age_seconds);
         self.ledger_entries.set(ledger_entries);
@@ -373,6 +412,7 @@ mod tests {
             "dz_loader_passes_total",
             "dz_loader_last_pass_timestamp_seconds",
             "dz_loader_unloaded_objects",
+            "dz_loader_held_objects",
             "dz_loader_oldest_unloaded_age_seconds",
             "dz_loader_ledger_entries",
         ] {
@@ -436,7 +476,7 @@ mod tests {
     #[test]
     fn a_pass_publishes_the_backlog_and_the_age_of_its_oldest() {
         let metrics = LoaderMetrics::new("s", "r");
-        metrics.pass_finished(7, 4_000, 12, 1_700_000_000);
+        metrics.pass_finished(7, 3, 4_000, 12, 1_700_000_000);
         let text = metrics.render();
         assert!(
             text.contains("dz_loader_unloaded_objects{recorder=\"r\",site=\"s\"} 7"),
@@ -447,6 +487,12 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("dz_loader_ledger_entries{recorder=\"r\",site=\"s\"} 12"));
+        // The held count, which is the part of the backlog that is a sink
+        // coalescing rather than a loader behind.
+        assert!(
+            text.contains("dz_loader_held_objects{recorder=\"r\",site=\"s\"} 3"),
+            "{text}"
+        );
         assert!(text.contains("dz_loader_passes_total{recorder=\"r\",site=\"s\"} 1"));
     }
 

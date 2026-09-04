@@ -27,20 +27,48 @@ pub const PASSWORD_ENV: &str = "DZ_LOADER_CLICKHOUSE_PASSWORD";
 /// the service user alone and is not inherited by anything the process spawns.
 pub const PASSWORD_FILE_ENV: &str = "DZ_LOADER_CLICKHOUSE_PASSWORD_FILE";
 
-/// The default cap on rows in one request.
+/// The cap on rows in one insert.
 ///
-/// A `JSONEachRow` insert is one HTTP request and one atomic block, so the batch
-/// size decides how much work a retry repeats and how much memory the server
-/// holds. Fifty thousand rows of the widest grain here is a few tens of
-/// megabytes of JSON, which a single request handles comfortably and a retry can
-/// afford to redo.
-pub const DEFAULT_MAX_ROWS: usize = 50_000;
+/// **Row volume is not the constraint; merge pressure is, and it is set by rows
+/// per part rather than rows per day.** An insert is one atomic block and
+/// becomes one part, so this is what decides how much merge work a day of
+/// loading creates — and merge work does not appear in a query log at all, only
+/// as the gap between a provider's CPU graph and query-attributed CPU. A chatty
+/// inserter raises it silently.
+///
+/// A million rows lands an object's rows in one or two parts. The busiest lane
+/// measured on a live recorder is 224,000 datagrams a minute, which is about 1.1
+/// million rows in a time-rotated object.
+pub const DEFAULT_INSERT_MAX_ROWS: usize = 1_000_000;
 
-/// The default cap on bytes in one request, which is the bound that actually
-/// binds: a row count says nothing about a row's width.
-pub const DEFAULT_MAX_BYTES: u64 = 16 * 1024 * 1024;
+/// The number of rows below which the sink keeps holding.
+///
+/// **The bound that stops one part per object per lane**, which is the
+/// pathological profile — and the reason a row *maximum* alone is not enough. The
+/// quietest lanes measured run 130 to 150 datagrams a minute, about 700 rows in
+/// a time-rotated object, so a sink that posted per object would write a
+/// 700-row part per object per lane for ever. Rows from several objects coalesce
+/// into one insert instead.
+pub const DEFAULT_INSERT_MIN_ROWS: usize = 50_000;
 
-/// The default number of attempts one batch is given.
+/// How long the sink may hold rows short of [`DEFAULT_INSERT_MIN_ROWS`].
+///
+/// The bound on coalescing, so a quiet lane is **late rather than absent**. At
+/// the rates above the worst case is roughly 2,000 rows a part, which is far
+/// better than one part per object and is the price of not letting a quiet lane
+/// go unqueryable indefinitely.
+pub const DEFAULT_INSERT_MAX_DELAY: Duration = Duration::from_secs(15 * 60);
+
+/// The cap on bytes in one insert.
+///
+/// Not in the design's table, and kept because a row count says nothing about a
+/// row's width: the widest grain here carries an object key and two digests, and
+/// a million of those is not the same request as a million gap rows. This is the
+/// bound that keeps one request from being unreasonable whatever the row count
+/// says; the row bounds above are what govern merge pressure.
+pub const DEFAULT_INSERT_MAX_BYTES: u64 = 256 * 1024 * 1024;
+
+/// The default number of attempts one batch is given./// The default number of attempts one batch is given.
 ///
 /// Bounded, because the loader's answer to a destination that will not take a
 /// batch is to leave the object unloaded and come back to it — and an unbounded
@@ -62,8 +90,16 @@ pub enum ConfigError {
     NotAnHttpUrl(String),
     #[error("[clickhouse] database is required, and `default` is not a database to load into")]
     NoDatabase,
-    #[error("[clickhouse] max_rows and max_bytes must both be above zero: a batch of nothing never lands")]
+    #[error(
+        "[clickhouse] insert_max_rows and insert_max_bytes must both be above zero: a batch of \
+         nothing never lands"
+    )]
     EmptyBatch,
+    #[error(
+        "[clickhouse] insert_min_rows ({min}) cannot exceed insert_max_rows ({max}): the floor \
+         the sink holds to has to be reachable, or every insert waits for the delay"
+    )]
+    FloorAboveCap { min: usize, max: usize },
     #[error("[clickhouse] attempts must be at least 1: a batch nobody tries never lands")]
     NoAttempts,
 }
@@ -78,8 +114,17 @@ pub struct ClickHouseConfig {
     pub endpoint: String,
     pub database: String,
     pub user: String,
-    pub max_rows: usize,
-    pub max_bytes: u64,
+    /// The cap on rows in one insert. See [`DEFAULT_INSERT_MAX_ROWS`].
+    pub insert_max_rows: usize,
+    /// The floor below which the sink keeps holding. See
+    /// [`DEFAULT_INSERT_MIN_ROWS`].
+    pub insert_min_rows: usize,
+    /// How long it may hold short of that floor. See
+    /// [`DEFAULT_INSERT_MAX_DELAY`].
+    #[serde(with = "duration_secs")]
+    pub insert_max_delay: Duration,
+    /// The cap on bytes in one insert. See [`DEFAULT_INSERT_MAX_BYTES`].
+    pub insert_max_bytes: u64,
     /// Attempts per batch, including the first.
     pub attempts: u32,
     #[serde(with = "duration_secs")]
@@ -92,8 +137,10 @@ impl Default for ClickHouseConfig {
             endpoint: String::new(),
             database: String::new(),
             user: "default".to_owned(),
-            max_rows: DEFAULT_MAX_ROWS,
-            max_bytes: DEFAULT_MAX_BYTES,
+            insert_max_rows: DEFAULT_INSERT_MAX_ROWS,
+            insert_min_rows: DEFAULT_INSERT_MIN_ROWS,
+            insert_max_delay: DEFAULT_INSERT_MAX_DELAY,
+            insert_max_bytes: DEFAULT_INSERT_MAX_BYTES,
             attempts: DEFAULT_ATTEMPTS,
             timeout: Duration::from_secs(30),
         }
@@ -124,8 +171,14 @@ impl ClickHouseConfig {
         if self.database.trim().is_empty() {
             return Err(ConfigError::NoDatabase);
         }
-        if self.max_rows == 0 || self.max_bytes == 0 {
+        if self.insert_max_rows == 0 || self.insert_max_bytes == 0 {
             return Err(ConfigError::EmptyBatch);
+        }
+        if self.insert_min_rows > self.insert_max_rows {
+            return Err(ConfigError::FloorAboveCap {
+                min: self.insert_min_rows,
+                max: self.insert_max_rows,
+            });
         }
         if self.attempts == 0 {
             return Err(ConfigError::NoAttempts);
@@ -436,10 +489,10 @@ mod tests {
     #[test]
     fn a_batch_of_nothing_and_a_retry_of_nothing_are_refused() {
         let mut config = valid();
-        config.max_rows = 0;
+        config.insert_max_rows = 0;
         assert_eq!(config.check(), Err(ConfigError::EmptyBatch));
         config = valid();
-        config.max_bytes = 0;
+        config.insert_max_bytes = 0;
         assert_eq!(config.check(), Err(ConfigError::EmptyBatch));
         config = valid();
         config.attempts = 0;

@@ -12,7 +12,7 @@
 
 use std::collections::BTreeSet;
 
-use dz_recorder_clickhouse::{migrations, Migration};
+use dz_recorder_clickhouse::{migrations, schema, Migration};
 use dz_recorder_rows::Grain;
 
 /// The columns one `CREATE TABLE recorder.<table>` block declares, in order.
@@ -619,4 +619,160 @@ mod fixtures {
             last_seq: 0,
         }
     }
+}
+
+/// Deduplication is merge-time, and the schema says so where a consumer reads.
+///
+/// `ReplacingMergeTree` collapses rows when it merges parts, so until a merge
+/// runs a re-load's duplicates are *visible*. That is correct for idempotence
+/// and surprising for everything downstream: a data-quality check that counts
+/// rows reads a re-load as a doubling, which has already produced one false
+/// finding that had to be retracted.
+#[test]
+fn the_schema_says_deduplication_is_merge_time() {
+    let sql = rows_sql();
+    // Both halves, because only one of them is the one usually quoted and the
+    // other is the one that surprised this file's own author.
+    assert!(
+        sql.contains("MERGE-TIME ACROSS INSERTS AND INSERT-TIME WITHIN ONE"),
+        "the timing has to be stated where somebody counting rows will read it"
+    );
+    assert!(
+        sql.contains("optimize_on_insert"),
+        "the setting that makes the within-one-insert case what it is"
+    );
+    assert!(
+        sql.contains("FINAL"),
+        "and the query that is exact has to be shown beside the one that is fast"
+    );
+    assert!(
+        sql.contains("upper bound"),
+        "because that is what an approximate count is, and never an equality"
+    );
+}
+
+/// The retention file states the part count, not only the row count, and says
+/// the TTL is never applied by hand.
+///
+/// Both come from incidents: a row count does not predict what a TTL costs, and
+/// a hand-applied TTL was silently reverted by a nightly sync for six days.
+#[test]
+fn the_retention_file_states_its_part_count_and_where_it_lives() {
+    let sql = migration("002_recorder_retention.sql").sql;
+    assert!(
+        sql.contains("THE PART COUNT THE TTL IMPLIES"),
+        "a row count does not predict what retention costs"
+    );
+    assert!(
+        sql.contains("parts per daily partition"),
+        "the number has to be there, not just the warning"
+    );
+    assert!(
+        sql.contains("part *drop* rather than as a row-level mutation"),
+        "why a whole-day window against a daily partition is the cheap shape"
+    );
+    assert!(
+        sql.contains("NEVER APPLIED BY HAND"),
+        "the other incident, and the reason this file exists"
+    );
+}
+
+/// The loader's account is checked in, bounded, and not applied by anything that
+/// writes rows.
+#[test]
+fn the_loader_account_is_bounded_and_kept_out_of_the_schema() {
+    let user = migration("004_recorder_loader_user.sql").sql;
+
+    // The ceiling that matters, and the one that keeps a later query from
+    // becoming the most expensive on the cluster.
+    assert!(
+        user.contains("max_bytes_to_read"),
+        "no read ceiling: {user}"
+    );
+    assert!(user.contains("max_threads = 1"), "no thread cap");
+    assert!(
+        user.contains("CREATE QUOTA"),
+        "a profile bounds a query, a quota bounds a day"
+    );
+
+    // INSERT on all five, and nothing else.
+    for grain in Grain::ALL {
+        assert!(
+            user.contains(&format!("GRANT INSERT ON recorder.{}", grain.table())),
+            "{grain} cannot be written"
+        );
+    }
+    // And SELECT on nothing at all: the adjacency check reads the preceding
+    // trailer from the loader's own ledger and from what it is still holding,
+    // never from the destination, and `--check`'s `SELECT 1` reads no table.
+    // An unused grant in the file whose argument is least privilege is the one
+    // a later reader takes as permission to write the query it describes.
+    assert!(
+        !user.contains("GRANT SELECT"),
+        "a read privilege for a read nothing performs: {user}"
+    );
+    assert!(
+        !user.contains("GRANT ALTER") && !user.contains("GRANT CREATE"),
+        "a loader that could alter a table could apply a schema nobody reviewed"
+    );
+
+    // The password is a parameter, never a literal in a file this repository
+    // holds.
+    assert!(user.contains("{password:String}"), "{user}");
+    for leak in ["IDENTIFIED BY '", "sha256_hash BY '"] {
+        assert!(!user.contains(leak), "a literal credential: {user}");
+    }
+
+    // And it is not in what a test or a schema deploy applies.
+    assert!(
+        !schema().iter().any(|m| m.name.contains("loader_user")),
+        "the account is applied by an administrator, not by the row writer"
+    );
+    assert_eq!(schema().len(), migrations().len() - 1);
+}
+
+/// The account file can be applied in the order it is written.
+///
+/// Every edge here is a name the server resolves as it stores an entity, not a
+/// preference: `SETTINGS PROFILE 'dz_loader'` is resolved when the user is
+/// stored, and the quota and the grants name a user that has to exist by then.
+/// Written the other way round the first statement fails and nothing is
+/// created — and a re-run after a partial fix finds the user already there
+/// behind `IF NOT EXISTS` and leaves it without its ceilings for ever, which is
+/// the one outcome the file exists to prevent. Nothing in this repository
+/// applies `004` — it needs a password and access-management rights — so the
+/// order is asserted here or nowhere.
+#[test]
+fn the_account_file_creates_the_profile_before_the_user_that_names_it() {
+    // The SQL of each statement, without the prose above it: a comment block is
+    // kept inside the statement it precedes, and the prose in this file names
+    // the very statements under test here.
+    let statements: Vec<String> = migration("004_recorder_loader_user.sql")
+        .statements()
+        .iter()
+        .map(|s| {
+            s.lines()
+                .filter(|l| !l.trim_start().starts_with("--"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .collect();
+    let first = |needle: &str| {
+        statements
+            .iter()
+            .position(|s| s.contains(needle))
+            .unwrap_or_else(|| panic!("no statement contains {needle}: {statements:#?}"))
+    };
+
+    let profile = first("CREATE SETTINGS PROFILE");
+    let user = first("CREATE USER");
+    let quota = first("CREATE QUOTA");
+    let grant = first("GRANT ");
+
+    assert!(
+        profile < user,
+        "the profile is resolved when the user is stored, not on the first query"
+    );
+    assert!(user < quota, "the quota names the user in its TO clause");
+    assert!(user < grant, "a grant names a user that has to exist");
 }

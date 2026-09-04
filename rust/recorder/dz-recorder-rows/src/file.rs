@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::rows::{Grain, RowBatch};
-use crate::sink::{RowSink, RowSinkError, Written};
+use crate::sink::{Accepted, Landed, ObjectId, RowSink, RowSinkError, Written};
 
 /// One file per grain under one directory, named `<grain>.jsonl`.
 #[derive(Debug)]
@@ -88,21 +88,46 @@ impl FileSink {
 }
 
 impl RowSink for FileSink {
-    fn write_batch(&mut self, rows: RowBatch) -> Result<Written, RowSinkError> {
+    /// Writes immediately, and lands immediately.
+    ///
+    /// **This sink deliberately does not coalesce.** The column store's sink
+    /// holds rows across objects because merge pressure there is set by rows per
+    /// part, and one part per object per lane is the pathological profile. A file
+    /// has no parts and no merges, so holding would buy nothing and cost the two
+    /// things this sink exists for: a golden test would have to flush before it
+    /// could read, and a `--dry-run` would report objects as pending that it had
+    /// already written.
+    fn write_batch(&mut self, rows: RowBatch, _now_ns: u64) -> Result<Accepted, RowSinkError> {
         let mut bytes = 0u64;
         bytes += self.write_rows(Grain::Datagram, &rows.datagram)?;
         bytes += self.write_rows(Grain::Era, &rows.era)?;
         bytes += self.write_rows(Grain::SegmentCoverage, &rows.segment_coverage)?;
         bytes += self.write_rows(Grain::SequenceGap, &rows.sequence_gap)?;
         bytes += self.write_rows(Grain::ConformanceFinding, &rows.conformance_finding)?;
-        Ok(Written::of(&rows, bytes))
+        Ok(Accepted {
+            accepted: Written::of(&rows, bytes),
+            landed: vec![ObjectId::of(&rows)],
+            // A file sink writes per object and sends nothing later, so its
+            // request bytes and its per-object bytes are the same number.
+            bytes_posted: bytes,
+        })
     }
 
-    fn flush(&mut self) -> Result<(), RowSinkError> {
+    /// Nothing is ever due, because nothing is ever held.
+    fn post_if_due(&mut self, _now_ns: u64) -> Result<Landed, RowSinkError> {
+        Ok(Landed::default())
+    }
+
+    /// Flushes the buffered writers and lands nothing new.
+    ///
+    /// The rows were written by [`write_batch`](Self::write_batch); what is
+    /// buffered here is a `BufWriter`, not a batch, and it belongs to the file
+    /// rather than to an object.
+    fn flush(&mut self, _now_ns: u64) -> Result<Landed, RowSinkError> {
         for writer in self.files.iter_mut().flatten() {
             writer.flush()?;
         }
-        Ok(())
+        Ok(Landed::default())
     }
 }
 
@@ -111,6 +136,6 @@ impl Drop for FileSink {
     /// a loader that reported rows written over a lost buffer is the same lie a
     /// partial write would be.
     fn drop(&mut self) {
-        let _ = self.flush();
+        let _ = self.flush(0);
     }
 }

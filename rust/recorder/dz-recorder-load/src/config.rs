@@ -73,9 +73,13 @@ pub struct Loader {
     /// How long `--watch` waits between passes.
     #[serde(with = "duration_secs")]
     pub poll_interval: Duration,
-    /// Objects one pass will load, so that a pass has a bound and the metrics
+    /// Objects one pass will derive, so that a pass has a bound and the metrics
     /// are published between passes rather than after an unbounded catch-up.
     /// Zero is no bound.
+    ///
+    /// Derived and not loaded, because they are different numbers under a sink
+    /// that coalesces: a pass may derive sixty objects and load none, and a
+    /// bound on the loading would not have bounded that pass at all.
     pub max_objects_per_pass: usize,
 }
 

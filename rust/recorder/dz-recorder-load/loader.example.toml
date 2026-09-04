@@ -34,9 +34,11 @@ ledger = "/var/lib/dz-recorder-load/ledger.jsonl"
 # window, which is what the lag alert watches.
 poll_interval = 30
 
-# Objects one pass will load. A bound, so the metrics are published between
+# Objects one pass will derive. A bound, so the metrics are published between
 # passes rather than after an unbounded catch-up: a loader eight hours behind
-# must still say so every poll interval. 0 is no bound.
+# must still say so every poll interval. Derived rather than loaded, because the
+# sink coalesces and a pass can derive sixty objects and land none of them.
+# 0 is no bound.
 max_objects_per_pass = 60
 
 [clickhouse]
@@ -52,11 +54,25 @@ endpoint = "http://192.0.2.20:8123"
 database = "recorder"
 user = "loader"
 
-# One request is one atomic block, so these two decide how much work a retry
-# repeats. The byte bound is the one that binds: a row count says nothing about
-# a row's width.
-max_rows = 50000
-max_bytes = 16777216
+# One insert is one atomic block and becomes one part, so these three decide
+# what a day of loading costs the destination — and merge work never appears in
+# a query log, only as the gap between a provider's CPU graph and
+# query-attributed CPU. A chatty inserter raises it silently.
+#
+# insert_max_rows lands an object's rows in one or two parts. The busiest lane
+# measured on a live recorder is 224,000 datagrams a minute, about 1.1 million
+# rows in a time-rotated object.
+insert_max_rows = 1000000
+# The floor that stops one part per object per lane, which is the pathological
+# profile. The quietest lanes measured run 130-150 datagrams a minute, about 700
+# rows an object: rows from several objects coalesce into one insert instead.
+insert_min_rows = 50000
+# The bound on that coalescing, so a quiet lane is late rather than absent. At
+# the rates above the worst case is roughly 2,000 rows a part.
+insert_max_delay = 900
+# Not a merge-pressure bound: a row count says nothing about a row's width, and
+# this keeps one request reasonable whatever the row count says.
+insert_max_bytes = 268435456
 
 # Attempts per batch, including the first. Bounded, because the answer to a
 # destination that will not take a batch is to leave the object unloaded and come

@@ -132,6 +132,7 @@ So the batch is a number in the sink configuration, not a sentiment:
 | `insert_max_rows` | 1,000,000 | An object's rows land in one or two parts. The busiest lane measured on a live recorder is 224,000 datagrams a minute, which is about 1.1 million rows in a time-rotated object. |
 | `insert_min_rows` | 50,000 | Rows from several objects coalesce into one insert rather than each becoming a part. The quietest lanes measured run 130-150 datagrams a minute — about 700 rows an object — and one part per object per lane is the pathological profile the cluster already has two examples of. |
 | `insert_max_delay` | `15m` | The bound on coalescing, so a quiet lane is late rather than absent. At the rates above the worst case is roughly 2,000 rows a part. |
+| `insert_max_bytes` | `256MiB` | Not a merge-pressure bound and not in the reasoning above: a row count says nothing about a row's width, and the widest grain carries an object key and two digests. This is what keeps one request reasonable whatever the row count says. |
 
 Never per datagram, and never per row. One insert per grain: a batch spanning
 grains is refused, while a batch spanning objects is ordinary, because
@@ -150,62 +151,62 @@ inserts a day at 78,700 rows a part.
 
 ### 1. `dz-recorder-rows`: the row types, pure
 
-- [ ] New crate `recorder/dz-recorder-rows`, added to the workspace members.
-- [ ] `Datagram`, `Era`, `SegmentCoverage`, `SequenceGap`, `ConformanceFinding` as plain structs with `serde` derives, field names exactly the column names.
-- [ ] A `RowSink` trait: `write_batch(&mut self, rows: RowBatch) -> Result<Written, SinkError>`, plus `flush`. One method per grain is refused — a batch spanning grains is one unit of idempotence.
-- [ ] `FileSink`: newline-delimited JSON per grain into a directory. This is the CI sink and the `--dry-run` sink.
-- [ ] Unit tests: every struct round-trips through JSON with the column names the DDL uses, asserted against a literal, so a rename cannot pass.
+- [x] New crate `recorder/dz-recorder-rows`, added to the workspace members.
+- [x] `Datagram`, `Era`, `SegmentCoverage`, `SequenceGap`, `ConformanceFinding` as plain structs with `serde` derives, field names exactly the column names.
+- [x] A `RowSink` trait, with one method per grain refused — a batch spanning grains is one unit of idempotence. **As built the signature is `write_batch(&mut self, rows: RowBatch, now_ns: u64) -> Result<Accepted, RowSinkError>`, plus `post_if_due` and `flush`, and the reason is the write pattern below:** once a sink coalesces across objects, `Ok` no longer means the rows are in the store, so it returns which objects *landed* and the loader records those. The clock is a parameter for the same reason the archive writer's `rotate_at` takes one — an age bound that read a clock inside could not be tested without sleeping.
+- [x] `FileSink`: newline-delimited JSON per grain into a directory. This is the CI sink and the `--dry-run` sink.
+- [x] Unit tests: every struct round-trips through JSON with the column names the DDL uses, asserted against a literal, so a rename cannot pass.
 
 **Verification:** `cargo test -p dz-recorder-rows` with no server and no network.
 
 ### 2. Derivation from an archive, over `Source`
 
-- [ ] `derive(source, manifest) -> RowBatch`: one `Datagram` row per archived datagram, reading the 24-byte header only. No message walk.
-- [ ] `SegmentCoverage` from the manifest, including `reset_counts_seen` and the per-instance first/last sequence, so a coverage question opens no object.
-- [ ] Manifest sha256 verified before any row is derived; a mismatch is a refusal naming the object, never a partial load.
-- [ ] `Era` rows from reset transitions plus the adjacency check against the previous segment's coverage, setting `anchor_certain`.
-- [ ] `SequenceGap` rows from `dz-recorder-loss`, which already decides which sequence values nobody delivered — this task wires it, it does not reimplement it.
-- [ ] Verdicts assigned per the spec, with `seen_elsewhere` left absent rather than guessed when the cross-site window is incomplete.
+- [x] `derive(source, manifest) -> RowBatch`: one `Datagram` row per archived datagram, reading the 24-byte header only. No message walk.
+- [x] `SegmentCoverage` from the manifest, including `reset_counts_seen` and the per-instance first/last sequence, so a coverage question opens no object.
+- [x] Manifest sha256 verified before any row is derived; a mismatch is a refusal naming the object, never a partial load.
+- [x] `Era` rows from reset transitions plus the adjacency check against the previous segment's coverage, setting `anchor_certain`.
+- [x] `SequenceGap` rows from `dz-recorder-loss`, which already decides which sequence values nobody delivered — this task wires it, it does not reimplement it.
+- [x] Verdicts assigned per the spec, with `seen_elsewhere` left absent rather than guessed when the cross-site window is incomplete.
 
 **Verification:** golden tests over the synthetic publisher in `dz-recorder-replay`. The existing `faults` fixtures — a gap, backward motion, a reset, a new source, a duplicate, a reordered pair, an oversized declared length, an unknown schema version, a silent channel — each get an asserted row set. Add one fixture that is a clean segment carrying heartbeat-shaped datagrams and assert `span − count == 0` for it.
 
 ### 3. `dz-recorder-clickhouse`: the sink
 
-- [ ] New crate `recorder/dz-recorder-clickhouse` implementing `RowSink` over HTTP with `JSONEachRow`.
-- [ ] Batching by `insert_max_rows` / `insert_min_rows` / `insert_max_delay` from the table above, with the batch as the retry unit; retries bounded, with the last error readable.
-- [ ] **A bounded database user, checked in beside the DDL and created with it.** `INSERT` on the five tables, `SELECT` on `segment_coverage` and `era` only — the adjacency check needs those two and nothing else reads — plus a settings profile with an explicit read-bytes ceiling and thread cap, a quota, and a workload thread share where the cluster supports one. A writer that arrives with a ceiling already set costs far less than one given a ceiling after an incident: every workload added to the destination cluster in the last month was discovered weeks later from a graph, one of them at a quarter of total cluster CPU.
-- [ ] **Document that `ReplacingMergeTree` dedup is merge-time, not insert-time**, in the DDL comment and in the crate docs. A re-run after an analyser fix leaves duplicate rows *visible* until a merge runs, which is correct for idempotence and surprising for consumers: a data-quality check that counts rows reads a reload as a doubling, and an exact count needs `FINAL` or an explicit dedup in the query. This has already produced one false "row count doubled" finding on the destination cluster that had to be retracted.
-- [ ] Credentials from the environment only, never from the configuration file, and never logged. The configuration carries the endpoint, database and user.
-- [ ] A failed batch is retained and counted, and the loader treats the object as unloaded: partial credit is how a gap becomes invisible.
-- [ ] The checked-in DDL: `db/clickhouse/*.sql`, one file per migration, numbered as the existing schema files are, with the decisions above applied.
+- [x] New crate `recorder/dz-recorder-clickhouse` implementing `RowSink` over HTTP with `JSONEachRow`.
+- [x] Batching by `insert_max_rows` / `insert_min_rows` / `insert_max_delay` from the table above, with the batch as the retry unit; retries bounded, with the last error readable.
+- [x] **A bounded database user, checked in beside the DDL and created with it.** `INSERT` on the five tables, `SELECT` on `segment_coverage` and `era` only — the adjacency check needs those two and nothing else reads — plus a settings profile with an explicit read-bytes ceiling and thread cap, a quota, and a workload thread share where the cluster supports one. A writer that arrives with a ceiling already set costs far less than one given a ceiling after an incident: every workload added to the destination cluster in the last month was discovered weeks later from a graph, one of them at a quarter of total cluster CPU.
+- [x] **Document that `ReplacingMergeTree` dedup is merge-time, not insert-time**, in the DDL comment and in the crate docs. A re-run after an analyser fix leaves duplicate rows *visible* until a merge runs, which is correct for idempotence and surprising for consumers: a data-quality check that counts rows reads a reload as a doubling, and an exact count needs `FINAL` or an explicit dedup in the query. This has already produced one false "row count doubled" finding on the destination cluster that had to be retracted.
+- [x] Credentials from the environment only, never from the configuration file, and never logged. The configuration carries the endpoint, database and user.
+- [x] A failed batch is retained and counted, and the loader treats the object as unloaded: partial credit is how a gap becomes invisible.
+- [x] The checked-in DDL: `db/clickhouse/*.sql`, one file per migration, numbered as the existing schema files are, with the decisions above applied.
 
 **Verification:** `cargo test -p dz-recorder-clickhouse` covers batching, retry and the JSON body against literals with no server. A feature-gated `--features clickhouse-tests` suite runs the DDL against the container the demo already provisions and asserts a load, a re-load and the arithmetic — and asserts **rows per part** from `system.parts`: loading a set of objects whose rows exceed `insert_min_rows` produces parts at or above it, and no configuration produces a part of single-digit rows. The re-load assertion covers both readings: duplicate rows are visible before a merge, and `FINAL` returns the single row.
 
 ### 4. `dz-recorder-load`: the binary
 
-- [ ] `--config`, `--check`, `--once`, `--watch`, `--dry-run`, `--version`, parsed by hand as the recorder's is.
-- [ ] Walks a completed-objects directory, oldest first, and keeps a load ledger keyed on `(object_key, object_sha256)` so a restart resumes rather than re-loads.
-- [ ] `--check` validates configuration and reachability and loads nothing.
-- [ ] `dz_loader_*` metrics: objects loaded, rows written per grain, batches failed, bytes read, the last error, and **lag** as both the age of the oldest unloaded object and the count of unloaded objects.
-- [ ] Runs as its own user with the objects directory read-only; a systemd unit and its `ExecStartPre=--check`, mirroring the recorder's.
+- [x] `--config`, `--check`, `--once`, `--watch`, `--dry-run`, `--version`, parsed by hand as the recorder's is.
+- [x] Walks a completed-objects directory, oldest first, and keeps a load ledger keyed on `(object_key, object_sha256)` so a restart resumes rather than re-loads.
+- [x] `--check` validates configuration and reachability and loads nothing.
+- [x] `dz_loader_*` metrics: objects loaded, rows written per grain, batches failed, bytes read, the last error, and **lag** as both the age of the oldest unloaded object and the count of unloaded objects.
+- [x] Runs as its own user with the objects directory read-only; a systemd unit and its `ExecStartPre=--check`, mirroring the recorder's.
 
 **Verification:** an end-to-end test in `dz-recorder-e2e` — encode with the real encoder, record with the real writer, load with the real loader into `FileSink`, and assert the rows against the datagrams that were encoded. Then the same against the container, feature-gated.
 
 ### 5. Retention and the sizing it implies
 
-- [ ] TTL on `datagram` matched to the retention of the objects themselves; none on `sequence_gap`, `segment_coverage`, `conformance_finding`, `era`.
-- [ ] The sizing stated in the DDL comment from a measurement, not an estimate: a busy recorder in a live deployment sustains roughly 80,000 datagrams a minute across its feeds, which is on the order of 100 million rows a day from one host. The derived grains are three to four orders of magnitude smaller, which is what makes keeping them indefinitely reasonable and keeping the base rows not.
-- [ ] A documented answer to what happens when the TTL is shorter than the question: the derived rows survive, and `segment_coverage` says whether the window was ever covered — which is the difference between "no loss" and "nothing kept".
-- [ ] **State the steady-state part count the TTL implies, not only the row count.** A short TTL on the largest table is a continuous delete-and-merge treadmill that a row count does not predict: partitions are days, and the expected parts per partition follow from the write pattern above. Write the number down, then check it — two separate retention incidents on the destination cluster came from TTL behaviour rather than volume.
-- [ ] **The TTL lives in the checked-in DDL and is never applied by hand.** One of those incidents was a hand-applied change that auto-sync silently reverted nightly for six days, which no row count would have shown.
+- [x] TTL on `datagram` matched to the retention of the objects themselves; none on `sequence_gap`, `segment_coverage`, `conformance_finding`, `era`.
+- [x] The sizing stated in the DDL comment from a measurement, not an estimate: a busy recorder in a live deployment sustains roughly 80,000 datagrams a minute across its feeds, which is on the order of 100 million rows a day from one host. The derived grains are three to four orders of magnitude smaller, which is what makes keeping them indefinitely reasonable and keeping the base rows not.
+- [x] A documented answer to what happens when the TTL is shorter than the question: the derived rows survive, and `segment_coverage` says whether the window was ever covered — which is the difference between "no loss" and "nothing kept".
+- [x] **State the steady-state part count the TTL implies, not only the row count.** A short TTL on the largest table is a continuous delete-and-merge treadmill that a row count does not predict: partitions are days, and the expected parts per partition follow from the write pattern above. Write the number down, then check it — two separate retention incidents on the destination cluster came from TTL behaviour rather than volume.
+- [x] **The TTL lives in the checked-in DDL and is never applied by hand.** One of those incidents was a hand-applied change that auto-sync silently reverted nightly for six days, which no row count would have shown.
 
 **Verification:** the TTL is asserted in the feature-gated suite by inserting a row dated past the window and observing it leave after a merge; the derived tables' rows survive the same merge.
 
 ### 6. Where it runs, and the prerequisite that is missing
 
-- [ ] Document that the loader runs **on the recorder host**, reading that host's own completed directory. Nothing ships objects off a recorder host today, and objects are evicted under the staging budget in about a day and a half on a busy one: the rows are tens of bytes against a datagram's twelve hundred, so the small thing travels and the bytes stay local.
-- [ ] State the consequence plainly: this is what makes the cross-site join available *before* a shipper exists, because the join is over rows and not over objects.
-- [ ] The lag alert from task 4 is the gate on that arrangement — a loader that falls behind eviction loses history that no re-run can recover.
+- [x] Document that the loader runs **on the recorder host**, reading that host's own completed directory. Nothing ships objects off a recorder host today, and objects are evicted under the staging budget in about a day and a half on a busy one: the rows are tens of bytes against a datagram's twelve hundred, so the small thing travels and the bytes stay local.
+- [x] State the consequence plainly: this is what makes the cross-site join available *before* a shipper exists, because the join is over rows and not over objects.
+- [x] The lag alert from task 4 is the gate on that arrangement — a loader that falls behind eviction loses history that no re-run can recover.
 
 **Verification:** documentation only, reviewed with this plan.
 

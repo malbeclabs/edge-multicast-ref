@@ -12,6 +12,13 @@ use dz_recorder_replay::synthetic::SyntheticPublisher;
 use dz_recorder_replay::Fault;
 use dz_recorder_rows::{FileSink, Grain, RowSink};
 
+/// One instant for every sink call in this file.
+///
+/// The sinks take the clock as a parameter, so a test states it rather than
+/// sleeping: what is under test here is what a sink writes, never when it
+/// decides to.
+const NOW: u64 = 1_700_000_000_000_000_000;
+
 #[test]
 fn every_grain_lands_in_its_own_file_named_for_its_table() {
     let dir = tempfile::tempdir().expect("a temporary directory");
@@ -20,8 +27,11 @@ fn every_grain_lands_in_its_own_file_named_for_its_table() {
     let expected: Vec<(Grain, usize)> = Grain::ALL.iter().map(|g| (*g, batch.rows(*g))).collect();
 
     let mut sink = FileSink::create(dir.path()).expect("the directory is writable");
-    let written = sink.write_batch(batch).expect("the batch lands");
-    sink.flush().expect("flush");
+    let written = sink
+        .write_batch(batch, NOW)
+        .expect("the batch lands")
+        .accepted;
+    sink.flush(NOW).expect("flush");
 
     for (grain, rows) in expected {
         assert_eq!(written.rows(grain), rows as u64, "{grain}");
@@ -59,9 +69,11 @@ fn a_second_load_of_the_same_object_appends_rather_than_replacing() {
     let recorded = record(&SyntheticPublisher::clean(20));
 
     let mut sink = FileSink::create(dir.path()).expect("the directory is writable");
-    sink.write_batch(recorded.rows().rows).expect("first load");
-    sink.write_batch(recorded.rows().rows).expect("second load");
-    sink.flush().expect("flush");
+    sink.write_batch(recorded.rows().rows, NOW)
+        .expect("first load");
+    sink.write_batch(recorded.rows().rows, NOW)
+        .expect("second load");
+    sink.flush(NOW).expect("flush");
 
     let text = std::fs::read_to_string(FileSink::path_in(dir.path(), Grain::Datagram))
         .expect("the file is readable");
@@ -76,7 +88,8 @@ fn a_dropped_sink_still_flushed_what_it_was_holding() {
     let recorded = record(&SyntheticPublisher::clean(20));
     {
         let mut sink = FileSink::create(dir.path()).expect("the directory is writable");
-        sink.write_batch(recorded.rows().rows).expect("the batch");
+        sink.write_batch(recorded.rows().rows, NOW)
+            .expect("the batch");
     }
     let text = std::fs::read_to_string(FileSink::path_in(dir.path(), Grain::Datagram))
         .expect("the file is readable");
