@@ -50,7 +50,12 @@ jobs:
       run:
         working-directory: rust
     steps:
-      - uses: actions/checkout@v4
+      # Third-party actions are pinned to commit SHAs, not to tags or branches.
+      # This is the only job in the repository with `contents: write`, so an
+      # action that moves under a mutable ref moves inside the step that
+      # publishes a fleet binary. A tag can be repointed and `@stable` is a
+      # branch — the weakest of the three this job used to ride.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
@@ -115,11 +120,16 @@ jobs:
             echo "short_sha=$(git rev-parse --short=8 HEAD)"
           } >> "$GITHUB_OUTPUT"
 
-      - uses: dtolnay/rust-toolchain@stable
+      # `toolchain` is stated rather than left to the default. The `@stable` form
+      # worked because that action's stable BRANCH defaults the input to stable;
+      # pinned to a SHA that default is no longer visible in the ref, and a SHA
+      # from any other branch of it makes the input required with no default.
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
+          toolchain: stable
           components: clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           workspaces: rust -> target
 
