@@ -33,7 +33,7 @@ use dz_recorder_rows::{
     derive_object, DeriveError, ObjectId, RowSink, RowSinkError, SegmentTrailer, Written,
 };
 
-use crate::ledger::{Entry, Ledger, LedgerError};
+use crate::ledger::{Entry, Ledger};
 use crate::metrics::{ErrorKind, LoaderMetrics, SkipReason};
 
 /// The suffix the recorder writes beside every object.
@@ -257,12 +257,15 @@ impl<S: RowSink> Loader<'_, S> {
             }
 
             match self.load(candidate, &manifest, now_ns) {
-                Ok((landed, rows)) => {
+                Ok((recorded, rows)) => {
                     pass.derived += 1;
-                    pass.loaded += landed;
+                    pass.loaded += recorded.recorded;
                     // Rows accepted, which is what this pass derived and handed
                     // over. Whether they are in the store yet is `loaded`.
                     pass.written.add(rows);
+                    for message in recorded.failures {
+                        self.fail(ErrorKind::Ledger, message, &mut pass, &mut errors);
+                    }
                 }
                 Err(failure) => {
                     if failure.sink_lost_its_rows {
@@ -286,9 +289,10 @@ impl<S: RowSink> Loader<'_, S> {
         match self.sink.post_if_due(now_ns) {
             Ok(landed) => {
                 self.metrics.bytes_posted(landed.bytes_posted);
-                match self.record_landed(&landed.objects) {
-                    Ok(recorded) => pass.loaded += recorded,
-                    Err((kind, message)) => self.fail(kind, message, &mut pass, &mut errors),
+                let recorded = self.record_landed(&landed.objects);
+                pass.loaded += recorded.recorded;
+                for message in recorded.failures {
+                    self.fail(ErrorKind::Ledger, message, &mut pass, &mut errors);
                 }
             }
             Err(e) => {
@@ -348,7 +352,7 @@ impl<S: RowSink> Loader<'_, S> {
         candidate: &Candidate,
         manifest: &SegmentManifest,
         now_ns: u64,
-    ) -> Result<(u64, Written), Failed> {
+    ) -> Result<(Recorded, Written), Failed> {
         let bytes_read = std::fs::metadata(&candidate.object)
             .map(|m| m.len())
             .unwrap_or(manifest.byte_count);
@@ -382,12 +386,10 @@ impl<S: RowSink> Loader<'_, S> {
             written: rows,
             bytes_read,
         });
-        // A ledger that will not write is not a sink that lost the rows: they
-        // are in the store, and the objects still held are still held.
-        let landed = self
-            .record_landed(&accepted.landed)
-            .map_err(|(kind, message)| Failed::with_rows_intact(kind, message))?;
-        Ok((landed, rows))
+        // A ledger that will not write is not a failure of *this* object, and
+        // never a lost sink: the rows are in the store, and what is still held
+        // is still held. It comes back on the recording, one message per entry.
+        Ok((self.record_landed(&accepted.landed), rows))
     }
 
     /// The trailer the next object's adjacency check should consult.
@@ -416,7 +418,7 @@ impl<S: RowSink> Loader<'_, S> {
     /// The ledger could not be written, which the caller treats as a failed
     /// load: the rows are in the store and the loader has forgotten it did that,
     /// so the re-load that follows is a replace.
-    fn record_landed(&mut self, landed: &[ObjectId]) -> Result<u64, (ErrorKind, String)> {
+    fn record_landed(&mut self, landed: &[ObjectId]) -> Recorded {
         record_landed(landed, self.pending, self.ledger, self.metrics)
     }
 
@@ -487,6 +489,18 @@ impl<S: RowSink> Loader<'_, S> {
     }
 }
 
+/// What one recording did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Recorded {
+    /// Objects whose entry is now in the ledger.
+    pub recorded: u64,
+    /// One message per object whose entry could not be written. Their rows are
+    /// in the store with nothing recording it, so the next pass derives and
+    /// re-inserts them — a replace, because the tables are `ReplacingMergeTree`
+    /// and the rows are a pure function of `(object key, sha256)`.
+    pub failures: Vec<String>,
+}
+
 /// Writes a ledger entry for every object whose rows have landed, and stops
 /// holding them.
 ///
@@ -497,18 +511,28 @@ impl<S: RowSink> Loader<'_, S> {
 /// carrying on, one counting a landing the loader was not holding and one
 /// dropping it silently — and neither copy was the one the tests exercised.
 ///
-/// # Errors
+/// # Every landing is recorded independently, and none of them is a `?`
 ///
-/// The ledger could not be written. The rows are in the store and the loader
-/// has forgotten it did that, so the re-load that follows is a replace — which
-/// is safe, and still a failure worth reporting.
+/// **The insert is over.** These objects' rows are in the store and the sink
+/// has forgotten them, so the only question left is which of them the ledger
+/// gets to hear about — and a return on the first failure answers it for one
+/// object and abandons the rest still holding a `pending` entry for rows
+/// nobody holds any more. The walk skips what is pending, so those objects are
+/// skipped on every later pass: a single transient append failure freezes their
+/// lag until the process is restarted, with the ledger writable again and the
+/// sink holding nothing.
+///
+/// So each entry is attempted, each failure is counted, and every landing
+/// leaves `pending` whatever the ledger did. An object whose entry did not get
+/// written has no entry, which is exactly what makes the next pass derive it
+/// again.
 pub(crate) fn record_landed(
     landed: &[ObjectId],
     pending: &mut Vec<Pending>,
     ledger: &mut Ledger,
     metrics: &LoaderMetrics,
-) -> Result<u64, (ErrorKind, String)> {
-    let mut recorded = 0u64;
+) -> Recorded {
+    let mut out = Recorded::default();
     for id in landed {
         let Some(index) = pending.iter().position(|p| &p.id == id) else {
             // The sink named an object this loader is not holding. It cannot
@@ -517,19 +541,24 @@ pub(crate) fn record_landed(
             // boundary check on evidence nobody derived.
             continue;
         };
+        // Out of `pending` before the ledger is touched, and whatever it says:
+        // the rows have gone, and an object left pending over rows the sink no
+        // longer holds is one the walk will skip for ever.
         let done = pending.remove(index);
-        ledger
-            .record(Entry {
-                object_key: done.id.key.clone(),
-                object_sha256: done.id.sha256.clone(),
-                loaded_at_ns: now_unix_nanos(),
-                trailer: done.trailer,
-            })
-            .map_err(|e: LedgerError| (ErrorKind::Ledger, e.to_string()))?;
-        metrics.object_loaded(&done.written, done.bytes_read);
-        recorded += 1;
+        match ledger.record(Entry {
+            object_key: done.id.key.clone(),
+            object_sha256: done.id.sha256.clone(),
+            loaded_at_ns: now_unix_nanos(),
+            trailer: done.trailer,
+        }) {
+            Ok(()) => {
+                metrics.object_loaded(&done.written, done.bytes_read);
+                out.recorded += 1;
+            }
+            Err(e) => out.failures.push(e.to_string()),
+        }
     }
-    Ok(recorded)
+    out
 }
 
 fn read_manifest(path: &Path) -> Result<SegmentManifest, String> {
@@ -1159,9 +1188,9 @@ mod deferred_ledger_tests {
         // Through the recording the binary's own way out calls, rather than a
         // hand-rolled copy of it: a test that reimplements the code under test
         // passes over exactly the drift it exists to catch.
-        let recorded = record_landed(&landed.objects, &mut pending, &mut ledger, &metrics)
-            .expect("the ledger is writable");
-        assert_eq!(recorded, 3);
+        let recorded = record_landed(&landed.objects, &mut pending, &mut ledger, &metrics);
+        assert_eq!(recorded.recorded, 3);
+        assert!(recorded.failures.is_empty(), "{:?}", recorded.failures);
         assert_eq!(ledger.entries(), 3);
         assert!(pending.is_empty());
 
@@ -1444,6 +1473,77 @@ mod deferred_ledger_tests {
         // whole backlog and not the prefix it got through.
         assert_eq!(pass.unloaded, 4);
         assert!(pass.oldest_unloaded_age_seconds > 0);
+    }
+
+    /// **A ledger failure part-way through an insert's landings strands
+    /// nothing.**
+    ///
+    /// The insert is over by the time these entries are written: the rows are
+    /// in the store and the sink has forgotten them. A recording that returned
+    /// on the first failure left every object behind it holding a `pending`
+    /// entry for rows nobody holds any more — and since the walk skips what is
+    /// pending, those objects were skipped on every later pass, their lag
+    /// frozen, with the ledger writable again and the sink empty. Only a
+    /// restart cleared it.
+    ///
+    /// A transient fault is enough, so the fault here is transient: the ledger
+    /// path is a directory for one pass and a writable file after it.
+    #[test]
+    fn a_ledger_failure_mid_landing_leaves_every_object_recoverable() {
+        let archive = archive(3, 20);
+        let metrics = LoaderMetrics::new(SITE, RECORDER);
+        let mut ledger = Ledger::open(&archive.ledger).expect("a new ledger");
+        // Due, so the insert lands inside the pass and the entries are written
+        // while the walk is still the thing running.
+        let mut sink = HoldingSink {
+            due: true,
+            ..HoldingSink::default()
+        };
+        let mut pending = Vec::new();
+        let pass = |ledger: &mut Ledger, sink: &mut HoldingSink, pending: &mut Vec<Pending>| {
+            Loader {
+                objects_dir: &archive.completed,
+                site: SITE,
+                recorder: RECORDER,
+                max_objects: 0,
+                ledger,
+                sink,
+                metrics: &metrics,
+                pending,
+            }
+            .run_once(&|| false)
+        };
+
+        // Every append fails: a directory is not a file to append to.
+        std::fs::create_dir(&archive.ledger).expect("the parent is writable");
+        let (first, errors) = pass(&mut ledger, &mut sink, &mut pending);
+        assert_eq!(first.derived, 3);
+        assert_eq!(first.loaded, 0, "not one entry was written");
+        assert_eq!(
+            first.failed, 3,
+            "and each one is counted, not just the first"
+        );
+        assert!(errors.iter().any(|e| e.contains("ledger")), "{errors:?}");
+        assert!(
+            pending.is_empty(),
+            "the sink has sent and forgotten these rows, so nothing may still \
+             be waiting on them: {pending:?}"
+        );
+        assert_eq!(ledger.entries(), 0);
+
+        // The fault clears.
+        std::fs::remove_dir(&archive.ledger).expect("the directory is removable");
+
+        let (second, errors) = pass(&mut ledger, &mut sink, &mut pending);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(
+            second.derived, 3,
+            "all three are derived again, which is a replace"
+        );
+        assert_eq!(second.skipped, 0, "and none of them is stranded as held");
+        assert_eq!(second.loaded, 3);
+        assert_eq!(ledger.entries(), 3);
+        assert_eq!(second.unloaded, 0, "the lag falls to nothing");
     }
 
     /// In-order certainty survives the coalescing.

@@ -304,17 +304,18 @@ fn drive<S: RowSink>(
             // The same recording a pass does, and not a second copy of it: an
             // object recorded differently on the way out is an object the next
             // run disagrees with itself about.
-            match loader::record_landed(&landed.objects, &mut pending, ledger, metrics) {
-                Ok(recorded) if recorded > 0 => {
-                    eprintln!("dz-recorder-load: flushed {recorded} held object(s) on the way out")
-                }
-                Ok(_) => {}
-                Err((_, message)) => {
-                    eprintln!("dz-recorder-load: ledger: {message}");
-                    failed += 1;
-                    if first_failure.is_none() {
-                        first_failure = Some(message);
-                    }
+            let recorded = loader::record_landed(&landed.objects, &mut pending, ledger, metrics);
+            if recorded.recorded > 0 {
+                eprintln!(
+                    "dz-recorder-load: flushed {} held object(s) on the way out",
+                    recorded.recorded
+                );
+            }
+            for message in recorded.failures {
+                eprintln!("dz-recorder-load: ledger: {message}");
+                failed += 1;
+                if first_failure.is_none() {
+                    first_failure = Some(message);
                 }
             }
         }
