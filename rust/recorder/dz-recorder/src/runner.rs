@@ -433,6 +433,7 @@ impl FeedRecorder {
         // double the reads of every sweep for an answer it just computed.
         self.observer.record_archive_oldest_segment(
             self.writer.retained_floor_ns().map(|ns| ns / 1_000_000_000),
+            self.writer.retained_objects(),
         );
 
         // Loss upstream of the capture point. Fed to the health tier, which

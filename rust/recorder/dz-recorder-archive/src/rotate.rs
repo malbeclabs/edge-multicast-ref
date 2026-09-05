@@ -243,6 +243,14 @@ impl ArchiveWriter {
         self.watermark.retained_floor_ns()
     }
 
+    /// Published objects this feed still holds, as of the last
+    /// [`sweep_staging`](Self::sweep_staging). See
+    /// [`StagingWatermark::retained_objects`].
+    #[must_use]
+    pub const fn retained_objects(&self) -> usize {
+        self.watermark.retained_objects()
+    }
+
     /// Published objects evicted, a subset of
     /// [`segments_evicted_total`](Self::segments_evicted_total).
     #[must_use]

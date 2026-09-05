@@ -75,6 +75,7 @@ pub const NORMATIVE_NAMES: &[&str] = &[
     "dz_recorder_datagrams_unexpected_role_total",
     "dz_recorder_segments_evicted_total",
     "dz_recorder_archive_oldest_segment_timestamp_seconds",
+    "dz_recorder_archive_segments_retained",
     "dz_recorder_sequence_gaps_total",
     "dz_recorder_missing_datagrams_on_arrival_total",
     "dz_recorder_duplicate_datagrams_total",

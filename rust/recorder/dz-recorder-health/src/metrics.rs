@@ -325,6 +325,7 @@ pub struct HealthMetrics {
     last_datagram_timestamp_seconds: GaugeVec,
     heartbeat_last_timestamp_seconds: GaugeVec,
     archive_oldest_segment_timestamp_seconds: GaugeVec,
+    archive_segments_retained: IntGaugeVec,
 }
 
 /// The children for one feed, resolved once so nothing on the drain thread
@@ -343,6 +344,7 @@ pub(crate) struct FeedChildren {
     pub(crate) foreign_group_datagrams: IntCounter,
     pub(crate) unexpected_role: IntCounter,
     pub(crate) archive_oldest_segment_timestamp: Gauge,
+    pub(crate) archive_segments_retained: IntGauge,
 }
 
 /// The children for one `(feed, role)`, resolved once for the same reason.
@@ -852,7 +854,22 @@ impl HealthMetrics {
                  instead, against the window a loss investigation needs — and guard it on \
                  the recorder having archived something, the same way \
                  dz_recorder_last_datagram_timestamp_seconds asks: this renders 0 for a feed \
-                 with nothing retained, and `time() - 0` is an age of decades.",
+                 with nothing retained — which under that rule reads as a window decades \
+                 long and silences it in exactly the state it exists to catch. Pair every \
+                 rule on this with dz_recorder_archive_segments_retained == 0, which is the \
+                 term that says nothing is held.",
+                &labels,
+                &["feed"],
+            ),
+            archive_segments_retained: int_gauge_vec(
+                &registry,
+                "dz_recorder_archive_segments_retained",
+                "Completed objects still on the disk, per feed. The companion \
+                 dz_recorder_archive_oldest_segment_timestamp_seconds needs to be \
+                 alertable: a timestamp cannot distinguish an archive that reaches back \
+                 years from one holding nothing at all, because both publish a number and \
+                 the empty case publishes 0. Zero here is that case, and it is the state a \
+                 retention rule most needs to fire on.",
                 &labels,
                 &["feed"],
             ),
@@ -893,6 +910,7 @@ impl HealthMetrics {
         self.interface_drops_total.with_label_values(&[name]);
         self.archive_oldest_segment_timestamp_seconds
             .with_label_values(&[name]);
+        self.archive_segments_retained.with_label_values(&[name]);
         self.instances_tracked.with_label_values(&[name]);
         self.instances_opened_total.with_label_values(&[name]);
         self.instances_evicted_total.with_label_values(&[name]);
@@ -1024,6 +1042,7 @@ impl HealthMetrics {
             archive_oldest_segment_timestamp: self
                 .archive_oldest_segment_timestamp_seconds
                 .with_label_values(&[feed]),
+            archive_segments_retained: self.archive_segments_retained.with_label_values(&[feed]),
             unexpected_role: self
                 .datagrams_unexpected_role_total
                 .with_label_values(&[feed]),

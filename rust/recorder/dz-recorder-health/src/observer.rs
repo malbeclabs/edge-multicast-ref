@@ -280,17 +280,25 @@ impl HealthObserver {
             .inc_by(deltas.foreign_group_datagrams);
     }
 
-    /// Publishes where this feed's retained history starts, in Unix seconds.
+    /// Publishes where this feed's retained history starts, in Unix seconds, and
+    /// how many objects it is the front of.
     ///
     /// Set on every sweep, including a sweep that evicted nothing: this is a
     /// level and not an event, and a gauge only written when something was
     /// deleted would sit at the last eviction's value while the archive filled
     /// up behind it. `None` — nothing retained — leaves it at 0, which the
     /// help text tells an alert to guard against rather than read as 1970.
-    pub fn record_archive_oldest_segment(&self, start_unix_seconds: Option<u64>) {
+    pub fn record_archive_oldest_segment(&self, start_unix_seconds: Option<u64>, retained: usize) {
         self.feed_children
             .archive_oldest_segment_timestamp
             .set(start_unix_seconds.map_or(0.0, |s| s as f64));
+        // Published together, and never one without the other. The timestamp
+        // alone cannot say "nothing retained": it publishes 0 for that, and a
+        // retention rule of the shape `now - floor < target` reads 0 as a window
+        // decades long and stays silent. This count is the term that fires.
+        self.feed_children
+            .archive_segments_retained
+            .set(retained as i64);
     }
 
     /// Records one completed archive segment deleted to stay inside the staging

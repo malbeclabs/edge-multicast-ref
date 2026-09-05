@@ -148,6 +148,9 @@ pub struct StagingWatermark {
     /// the retention gauge — runs immediately after it. A second scan for the
     /// same answer doubles the directory reads of every sweep.
     retained_floor_ns: Option<u64>,
+    /// How many published objects that floor is the front of, as of the same
+    /// pass. **The floor alone cannot say "nothing".**
+    retained_objects: usize,
     /// Which `segment-{seq}.pcapng` is the one being written right now.
     ///
     /// Only that one file is genuinely transient. Every other name of that shape
@@ -192,6 +195,7 @@ impl StagingWatermark {
             completed_dir,
             staging_max,
             retained_floor_ns: None,
+            retained_objects: 0,
             open_segment_seq: 0,
             custody: None,
             faults: None,
@@ -300,6 +304,19 @@ impl StagingWatermark {
         self.retained_floor_ns
     }
 
+    /// Published objects still on the disk as of the last
+    /// [`enforce`](Self::enforce).
+    ///
+    /// The companion the floor needs to be alertable. Retention is watched as
+    /// `now - floor < target`, and a feed retaining nothing publishes a floor of
+    /// `0` — which reads as a window decades long and silences that rule in
+    /// exactly the state it exists to catch. This is the term that says
+    /// "nothing", and no other exposed series does.
+    #[must_use]
+    pub const fn retained_objects(&self) -> usize {
+        self.retained_objects
+    }
+
     #[must_use]
     pub fn segments_evicted_total(&self) -> u64 {
         self.segments_evicted_total
@@ -331,8 +348,9 @@ impl StagingWatermark {
     pub fn enforce(&mut self) -> Result<(), SinkError> {
         let (objects, residue) = self.scan();
         // Before the early return below, so a pass that evicts nothing still
-        // publishes a floor.
+        // publishes a floor and a count.
         self.retained_floor_ns = objects.first().map(|o| o.start_ns);
+        self.retained_objects = objects.len();
         let unreclaimable: u64 = residue
             .iter()
             .filter(|r| !r.evictable)
@@ -380,12 +398,23 @@ impl StagingWatermark {
             }
             let (reclaimed, error) = self.account_removal(object.bytes, true, outcome);
             total = total.saturating_sub(reclaimed);
+            // Only a removal that happened. A file that could not be deleted is
+            // still on the disk and still the oldest history there is, so
+            // counting the attempt would advance the floor past it — and with a
+            // read-only completed_dir every attempt fails, the count reaches the
+            // whole list, and the gauge reports no retained history over an
+            // intact archive. `NotFound` counts: account_removal reports it as
+            // reclaimed because the file is gone either way.
+            let removed = error.is_none();
             failure = failure.or(error);
-            objects_evicted += 1;
+            if removed {
+                objects_evicted += 1;
+            }
         }
         // The list is oldest first and eviction takes from the front, so what is
         // left starts at the first object it did not reach.
         self.retained_floor_ns = objects.get(objects_evicted).map(|o| o.start_ns);
+        self.retained_objects = objects.len() - objects_evicted;
         // Orphans first and queued segments last, for the reason objects come
         // before either: a queued segment is the only copy of the window it
         // holds and an object nothing else can now produce, so it is the last
@@ -789,6 +818,82 @@ mod tests {
             Some(2_000),
             "the floor is a level and has to follow the history that was dropped"
         );
+        assert_eq!(wide.retained_objects(), 3);
+        assert_eq!(tight.retained_objects(), 2, "the count follows the floor");
+    }
+
+    /// **A feed retaining nothing has to say so with something other than the
+    /// floor.**
+    ///
+    /// The floor publishes `0` when there is nothing, and retention is watched
+    /// as `now - floor < target` — under which `0` reads as a window decades long
+    /// and the rule stays silent in exactly the state it exists to catch. The
+    /// count is the term that fires.
+    #[test]
+    fn an_archive_holding_nothing_reports_a_count_of_zero() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let staging = dir.path().join("staging");
+        let completed = dir.path().join("completed");
+        fs::create_dir_all(&staging).expect("staging");
+        fs::create_dir_all(&completed).expect("completed");
+
+        let mut w = StagingWatermark::new(staging, completed, 10_000);
+        w.enforce().expect("a pass over an empty archive");
+        assert_eq!(w.retained_objects(), 0, "nothing is held");
+        assert_eq!(
+            w.retained_floor_ns(),
+            None,
+            "and the floor has nothing to report, which the gauge renders as 0"
+        );
+    }
+
+    /// **A removal that failed must not advance the floor past a file still on
+    /// the disk.**
+    ///
+    /// With `completed_dir` read-only every removal fails. Counting the attempt
+    /// rather than the removal walks the floor off the end of the list and
+    /// reports an empty archive over an intact one — the same false "no history"
+    /// the count above exists to make honest.
+    #[test]
+    fn a_removal_that_failed_leaves_the_floor_where_it_was() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let staging = dir.path().join("staging");
+        let completed = dir.path().join("completed");
+        fs::create_dir_all(&staging).expect("staging");
+        fs::create_dir_all(&completed).expect("completed");
+        for (start, end, seq) in [(1_000u64, 1_500u64, 0u64), (2_000, 2_500, 1)] {
+            fs::write(
+                completed.join(format!("{start}-{end}-{seq}{ZSTD_SUFFIX}")),
+                vec![0u8; 600],
+            )
+            .expect("an object");
+            fs::write(completed.join(manifest_name(start, end, seq)), b"{}").expect("a manifest");
+        }
+        // Read-only, so unlink inside it fails with EACCES rather than removing.
+        let mut perms = fs::metadata(&completed)
+            .expect("the directory")
+            .permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o555);
+        fs::set_permissions(&completed, perms).expect("the directory is ours");
+
+        let mut w = StagingWatermark::new(staging, completed.clone(), 100);
+        let outcome = w.enforce();
+
+        // Restore before asserting, so a failure here does not leave a
+        // directory the temp-dir teardown cannot remove.
+        let mut perms = fs::metadata(&completed)
+            .expect("the directory")
+            .permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        fs::set_permissions(&completed, perms).expect("the directory is ours");
+
+        assert!(outcome.is_err(), "the sweep could not delete anything");
+        assert_eq!(
+            w.retained_floor_ns(),
+            Some(1_000),
+            "the floor moved past a file eviction could not take"
+        );
+        assert_eq!(w.retained_objects(), 2, "both are still on the disk");
     }
 
     #[test]
