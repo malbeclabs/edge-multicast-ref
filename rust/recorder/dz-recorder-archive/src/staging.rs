@@ -141,6 +141,13 @@ pub struct StagingWatermark {
     staging_dir: PathBuf,
     completed_dir: PathBuf,
     staging_max: u64,
+    /// Where the retained history started as of the last [`enforce`](Self::enforce).
+    ///
+    /// Kept rather than recomputed because `enforce` already scans both
+    /// directories, and the caller that wants this — the sweep that publishes
+    /// the retention gauge — runs immediately after it. A second scan for the
+    /// same answer doubles the directory reads of every sweep.
+    retained_floor_ns: Option<u64>,
     /// Which `segment-{seq}.pcapng` is the one being written right now.
     ///
     /// Only that one file is genuinely transient. Every other name of that shape
@@ -184,6 +191,7 @@ impl StagingWatermark {
             staging_dir,
             completed_dir,
             staging_max,
+            retained_floor_ns: None,
             open_segment_seq: 0,
             custody: None,
             faults: None,
@@ -270,8 +278,9 @@ impl StagingWatermark {
         self.objects().first().map(|o| o.segment_seq)
     }
 
-    /// Where the retained history starts: the receive window of the oldest
-    /// object still on the disk, or `None` when none is.
+    /// Where the retained history starts, as of the last
+    /// [`enforce`](Self::enforce): the receive window of the oldest object then
+    /// still on the disk, or `None` when there was none.
     ///
     /// **This is the retention question, and eviction counts cannot answer
     /// it.** A budget that is full evicts on every sweep for ever, so the
@@ -281,9 +290,14 @@ impl StagingWatermark {
     /// file's mtime, because the mtime is a property of the copy while this is
     /// a property of the traffic, and it is the same clock the object key and
     /// the manifest are stamped with.
+    ///
+    /// From the sweep's own scan and not a fresh one: `enforce` reads both
+    /// directories already, so recomputing this would double the directory
+    /// reads of every sweep for an answer that pass had in hand. `None` before
+    /// the first `enforce`.
     #[must_use]
-    pub fn oldest_segment_start_ns(&self) -> Option<u64> {
-        self.objects().first().map(|o| o.start_ns)
+    pub const fn retained_floor_ns(&self) -> Option<u64> {
+        self.retained_floor_ns
     }
 
     #[must_use]
@@ -316,6 +330,9 @@ impl StagingWatermark {
     /// copy of the window it holds, so it is the last history worth giving up.
     pub fn enforce(&mut self) -> Result<(), SinkError> {
         let (objects, residue) = self.scan();
+        // Before the early return below, so a pass that evicts nothing still
+        // publishes a floor.
+        self.retained_floor_ns = objects.first().map(|o| o.start_ns);
         let unreclaimable: u64 = residue
             .iter()
             .filter(|r| !r.evictable)
@@ -349,7 +366,8 @@ impl StagingWatermark {
         // One undeletable file must not stop the buffer from being bounded, so
         // the sweep runs to the end and reports afterwards.
         let mut failure = None;
-        for object in objects {
+        let mut objects_evicted = 0usize;
+        for object in &objects {
             if total <= self.staging_max {
                 break;
             }
@@ -363,7 +381,11 @@ impl StagingWatermark {
             let (reclaimed, error) = self.account_removal(object.bytes, true, outcome);
             total = total.saturating_sub(reclaimed);
             failure = failure.or(error);
+            objects_evicted += 1;
         }
+        // The list is oldest first and eviction takes from the front, so what is
+        // left starts at the first object it did not reach.
+        self.retained_floor_ns = objects.get(objects_evicted).map(|o| o.start_ns);
         // Orphans first and queued segments last, for the reason objects come
         // before either: a queued segment is the only copy of the window it
         // holds and an object nothing else can now produce, so it is the last
@@ -745,19 +767,25 @@ mod tests {
             fs::write(completed.join(manifest_name(start, end, seq)), b"{}").expect("a manifest");
         }
 
-        // 602 bytes an object, manifest included, so a 1500-byte budget has room
-        // for two and eviction takes exactly one.
-        let mut w = StagingWatermark::new(staging, completed, 1_500);
+        // A budget nothing exceeds: the pass evicts nothing and still has to
+        // publish a floor, which is also where reading the wrong end shows up.
+        let mut wide = StagingWatermark::new(staging.clone(), completed.clone(), 10_000);
+        assert_eq!(wide.retained_floor_ns(), None, "nothing scanned yet");
+        wide.enforce().expect("a pass that evicts nothing");
+        assert_eq!(wide.objects_evicted_total(), 0);
         assert_eq!(
-            w.oldest_segment_start_ns(),
+            wide.retained_floor_ns(),
             Some(1_000),
             "the floor is the oldest window, whatever order the directory lists"
         );
 
-        w.enforce().expect("eviction");
-        assert_eq!(w.objects_evicted_total(), 1, "exactly the oldest");
+        // 602 bytes an object, manifest included, so a 1500-byte budget has room
+        // for two and eviction takes exactly one.
+        let mut tight = StagingWatermark::new(staging, completed, 1_500);
+        tight.enforce().expect("eviction");
+        assert_eq!(tight.objects_evicted_total(), 1, "exactly the oldest");
         assert_eq!(
-            w.oldest_segment_start_ns(),
+            tight.retained_floor_ns(),
             Some(2_000),
             "the floor is a level and has to follow the history that was dropped"
         );

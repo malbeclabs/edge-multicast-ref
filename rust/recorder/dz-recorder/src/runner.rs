@@ -427,10 +427,12 @@ impl FeedRecorder {
         // steady state by design; this is the level somebody chasing last
         // night's loss report actually needs. Published on every sweep, evicted
         // or not, because it moves when a segment is *written* too.
+        //
+        // Read from the sweep above rather than measured here: that pass has
+        // already scanned both directories, and asking the disk again would
+        // double the reads of every sweep for an answer it just computed.
         self.observer.record_archive_oldest_segment(
-            self.writer
-                .oldest_segment_start_ns()
-                .map(|ns| ns / 1_000_000_000),
+            self.writer.retained_floor_ns().map(|ns| ns / 1_000_000_000),
         );
 
         // Loss upstream of the capture point. Fed to the health tier, which
