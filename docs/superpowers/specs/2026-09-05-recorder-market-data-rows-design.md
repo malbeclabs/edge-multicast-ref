@@ -79,14 +79,30 @@ deriver needs, and it is already written, already tested, and already strict
 about the three ways a walk goes wrong: foreign `Magic`, undecodable datagram,
 unknown message type.
 
-**Reference data comes off the wire, not from a registry.** `ArchivedRefdata`
-consumes `InstrumentDefinition` and `ManifestSummary` out of the same archive and
-resolves `Instrument ID` to symbol, price exponent, quantity exponent, `Source
-ID` and contract value. This is what makes offline derivation *correct* rather
-than merely possible: the exponents that decode a price are the ones that were on
-the wire in that era, not the ones a registry holds today. A live capture that
-reads a registry at startup is running today's mapping over yesterday's bytes and
-has no way to notice.
+**Reference data comes off the wire, not from a registry.**
+`InstrumentDefinition` and `ManifestSummary` are in the same archive, so the
+exponents that decode a price are the ones that were on the wire — not the ones a
+registry holds today. A live capture that reads a registry at startup runs
+today's mapping over yesterday's bytes and has no way to notice. That property is
+the reason to derive offline at all.
+
+**`ArchivedRefdata` is not the accumulator this needs, and how it differs is
+instructive.** It keys `by_symbol`, and on a restatement it **keeps the first
+definition** and raises `ScaleRestated`. That is deliberate and the reasoning is
+sound for what it was built for: a re-lowering holds *two* archives whose clocks
+belong to a subscriber and to a publisher, with no key that orders one against
+the other, so there is no defensible instant at which to switch exponents.
+Keeping the first is the honest half of an unanswerable question.
+
+**A row deriver is not in that position.** It holds one archive, in which every
+message carries a sequence number and every era carries an anchor, so it *can*
+place a restatement exactly: at the sequence number of the definition that made
+it. The accumulator this needs is therefore a different one — keyed
+`(channel_id, instrument_id)` rather than by symbol, and **scoped to an era**,
+restating forward from the definition that changed it rather than pinning the
+first. Reusing `ArchivedRefdata` unchanged would apply a pre-restatement exponent
+to post-restatement prices, and would key the whole join on the one field this
+document argues is not a key.
 
 **The row machinery exists.** `dz-recorder-rows` defines the row model,
 `dz-recorder-clickhouse` owns the checked-in migrations and the insert sink, and
@@ -101,8 +117,9 @@ decoder, no venue client, no credential, and no change to the record path.
 
 ## The rows
 
-Three tables, in `recorder`, beside the four that exist. Every one carries the
-identity block the transport rows carry — `site`, `recorder`, `env`, `feed`,
+Three tables, in `recorder`, beside the five that exist — `datagram`, `era`,
+`segment_coverage`, `sequence_gap` and `conformance_finding`. Every one carries
+the identity block those rows carry — `site`, `recorder`, `env`, `feed`,
 `port_role`, `source_addr`, `channel_id`, `dst_port` — so that a market data
 question and a loss question can be asked in one join. That is the whole reason
 for putting them in the same database rather than in a second one.
@@ -172,7 +189,8 @@ CREATE TABLE IF NOT EXISTS recorder.event (
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(recv_ts)
-ORDER BY (channel_id, instrument_id, era_anchor_ts, sequence_number, message_index, site);
+ORDER BY (channel_id, instrument_id, era_anchor_ts, sequence_number, message_index,
+          source_addr, dst_port, site, recv_ts);
 ```
 
 **One table with nullable per-type columns, not one table per message type.** The
@@ -187,25 +205,68 @@ not read by a query filtered to another.
 never has to infer it from the deriver.** Anything not listed for a type is
 `NULL` in that type's rows.
 
-| Message | Shared | Type-specific |
+| Message | Carries on the wire | Mapping |
 |---|---|---|
-| `Quote` | `instrument_id`, `source_id`, `upstream_ts` ← `source_timestamp_ns` | `bid_px_raw`, `bid_qty_raw`, `bid_source_count`, `ask_px_raw`, `ask_qty_raw`, `ask_source_count`, `flags_raw` ← `update_flags` |
-| `Trade` | `instrument_id`, `source_id`, `upstream_ts` ← `source_timestamp_ns` | `price_raw` ← `trade_price`, `qty_raw` ← `trade_qty`, `side_raw` ← `aggressor_side`, `flags_raw` ← `trade_flags`, `trade_id`, `cumulative_volume` |
-| `LevelUpdate` | `instrument_id`, `source_id`, `per_instrument_seq`, `upstream_ts` ← `timestamp_ns` | `side_raw` ← `side`, `action_raw` ← `action`, `price_raw`, `qty_raw`, `order_count`, `level_index` |
-| `BookClear` | `instrument_id`, `source_id`, `per_instrument_seq`, `upstream_ts` ← `timestamp_ns` | `side_raw` ← `clear_side`, `action_raw` ← `scope`, `reason_raw` ← `clear_reason`, `price_raw` ← `from_price_raw` |
-| `InstrumentReset` | `instrument_id`, `source_id`, `upstream_ts` | `reason_raw` ← the reset reason |
-| `SnapshotBegin` | `instrument_id`, `upstream_ts` ← `timestamp_ns` | `snapshot_id`, `anchor_seq`, `total_levels`, `depth_bound`, `per_instrument_seq` ← `last_instrument_seq` |
-| `SnapshotLevel` | `upstream_ts` | `snapshot_id`, `side_raw`, `price_raw`, `qty_raw`, `order_count`, `level_index` |
-| `SnapshotEnd` | `instrument_id` | `snapshot_id`, `anchor_seq` |
+| `Quote` | `instrument_id`, `source_id`, `source_timestamp_ns` | `bid_px_raw`, `bid_qty_raw`, `bid_source_count`, `ask_px_raw`, `ask_qty_raw`, `ask_source_count`, `flags_raw` ← `update_flags`, `upstream_ts` ← `source_timestamp_ns` |
+| `Trade` | `instrument_id`, `source_id`, `source_timestamp_ns` | `price_raw` ← `trade_price`, `qty_raw` ← `trade_qty`, `side_raw` ← `aggressor_side`, `flags_raw` ← `trade_flags`, `trade_id`, `cumulative_volume`, `upstream_ts` ← `source_timestamp_ns` |
+| `LevelUpdate` | `instrument_id`, `source_id`, `per_instrument_seq`, `timestamp_ns` | `side_raw` ← `side`, `action_raw` ← `action`, `reason_raw` ← `update_reason`, `flags_raw` ← `level_flags`, `price_raw`, `qty_raw`, `order_count`†, `level_index`†, `upstream_ts` ← `timestamp_ns` |
+| `BookClear` | `instrument_id`, `source_id`, `per_instrument_seq`, `timestamp_ns` | `side_raw` ← `clear_side`, `action_raw` ← `scope`, `reason_raw` ← `clear_reason`, `price_raw` ← `from_price_raw`, `upstream_ts` ← `timestamp_ns` |
+| `InstrumentReset` | `instrument_id`, `timestamp_ns` — **no `Source ID`** | `reason_raw` ← `reason`, `anchor_seq` ← **`new_anchor_seq`**, `upstream_ts` ← `timestamp_ns`, `source_id` ‡ |
+| `SnapshotBegin` | `instrument_id`, `timestamp_ns` — **no `Source ID`** | `snapshot_id`, `anchor_seq`, `total_levels`, `depth_bound`, `per_instrument_seq` ← `last_instrument_seq`, `upstream_ts` ← `timestamp_ns`, `source_id` ‡ |
+| `SnapshotLevel` | **`snapshot_id` only** — no instrument, no timestamp, no level index | `side_raw` ← `side`, `flags_raw` ← `level_flags`, `price_raw`, `qty_raw`, `order_count`†; `instrument_id`, `upstream_ts` and `level_index` ⁂ |
+| `SnapshotEnd` | `instrument_id`, `anchor_seq`, `snapshot_id` | `snapshot_id`, `anchor_seq` |
+
+**† The wire's absent-value sentinel is `NULL`, not a number.** `order_count` and
+`level_index` carry `U16_UNAVAILABLE` (`0xFFFF`) when the venue exposes neither,
+and the specification is explicit that it is not a count and not a rank. Written
+through as `65535` it becomes an instrument with sixty-five thousand orders at a
+level, which is not a subtle wrongness but it is a silent one. The deriver
+translates the sentinel to `NULL` on both columns.
+
+**‡ Where a message omits `Source ID`, it is resolved from era-qualified
+reference data** for that `(channel_id, instrument_id)`, never invented and never
+carried over from an adjacent message of another type. The same rule supplies
+`price_exp` and `qty_exp`, which no market data message carries at all.
+
+**⁂ A `SnapshotLevel` inherits its instrument and its time from the
+`SnapshotBegin` that `snapshot_id` ties it to**, which is precisely why
+`snapshot_id` is on the level at all — the codec says so, and a level whose
+`snapshot_id` matches no open begin in the window is a row the deriver refuses
+rather than guesses at. `level_index` is the level's ordinal within the snapshot,
+assigned by the deriver from arrival order within the cycle, and is marked as
+derived rather than read so that nobody later compares it against a wire field
+that does not exist.
 
 Note what this table already tells you: **the deriver decodes more message types
-than `WireCapture` does.** `MessageBody` has four variants because a re-lowering
-compares only the messages a venue event produces. A book needs the three
-snapshot messages and `InstrumentReset` as well, and none of them is in that
-enum. That is the largest single piece of new decode work here, and it is small.
+than `WireCapture` does, and needs more of each datagram than it keeps.**
+`MessageBody` has four variants because a re-lowering compares only the messages
+a venue event produces; a book needs the three snapshot messages and
+`InstrumentReset` as well, and none of them is in that enum.
 
-**Ordered by `(channel_id, instrument_id, era_anchor_ts, sequence_number)`, never
-by symbol.** See *Symbol is not a key*.
+And `WireProvenance` is narrower than this schema. It keeps `channel_id`,
+`sequence_number`, `reset_count`, the two timestamps, the port role and the two
+indices — it does **not** keep the source address, the destination port or the
+receive-timestamp kind, all three of which `RecordedDatagram` carries and the
+walk discards. Every one is in the identity block above, so provenance must be
+widened before a single `event` row can be written. That is the least
+interesting item on the work list and the one most likely to be discovered late.
+
+**Ordered by instrument first, and by the channel instance as well.** Two things
+are being served and they pull opposite ways. `ReplacingMergeTree` deduplicates on
+the whole sort key, so the key must carry everything that distinguishes two
+genuine rows: without `source_addr` and `dst_port`, two paths publishing one
+`Channel ID` collapse into one row; without `recv_ts`, a duplicated datagram —
+same sequence number, same message index, different arrival — deletes the
+original rather than sitting beside it. `datagram` carries all three for exactly
+this reason and this table must too.
+
+They sit *after* `instrument_id` rather than before it, which is the one place
+this key departs from `datagram`'s. Every question asked of `datagram` is per
+channel instance; the dominant question here is per instrument over a window, and
+a leading instance prefix makes that a full scan. The instance columns are here
+for identity and for deduplication, not as the leading filter.
+
+**Never ordered by symbol.** See *Symbol is not a key*.
 
 **Prices and quantities stay raw, with their exponents beside them.** Converting
 to a decimal at load time bakes in a scale a later era can change and loses the
@@ -219,8 +280,12 @@ price_exp)`; a reader who wants to know what was sent still has it.
 CREATE TABLE IF NOT EXISTS recorder.instrument (
     site           LowCardinality(String),
     recorder       LowCardinality(String),
+    env            LowCardinality(String),
     feed           LowCardinality(String),
+    port_role      LowCardinality(String),
+    source_addr    IPv4,
     channel_id     UInt8,
+    dst_port       UInt16,
     source_id      UInt16,
     instrument_id  UInt32,
     era_anchor_ts  DateTime64(9),
@@ -237,15 +302,25 @@ CREATE TABLE IF NOT EXISTS recorder.instrument (
 )
 ENGINE = ReplacingMergeTree(last_seen_ts)
 PARTITION BY toYYYYMMDD(era_anchor_ts)
-ORDER BY (channel_id, instrument_id, era_anchor_ts, site, recorder);
+ORDER BY (channel_id, instrument_id, era_anchor_ts, source_addr, dst_port, site, recorder);
 ```
 
-`ArchivedRefdata`, as a table. It exists for three reasons, each of which is a
-defect in its absence: the mapping is **per era**, so any join to it must be
-era-qualified; `declared_count` against the count of distinct `instrument_id`
-values actually observed is the only statement of published-set coverage the
-archive can make; and without it the `symbol` column on `event` would be a lie
-across an era boundary.
+The era-scoped accumulator, as a table. It exists for three reasons, each of
+which is a defect in its absence: the mapping is **per era**, so any join to it
+must be era-qualified; `declared_count` against the count of distinct
+`instrument_id` values actually observed is the only statement of published-set
+coverage the archive can make; and without it the `symbol` column on `event`
+would be a lie across an era boundary.
+
+**It carries the full identity block, including the channel instance**, for a
+reason that is easy to skip: an `era_anchor_ts` is only meaningful *for one
+channel instance*, because a `Reset Count` is that instance's. Two paths
+publishing one `Channel ID` open their eras independently, so a table keyed
+without `source_addr` and `dst_port` merges two eras that are not the same era
+and produces a join that silently picks one path's exponents for the other
+path's prices. `port_role` is on it because reference data arrives on the
+`refdata` role and a reader joining from a `mktdata` event must be able to see
+that the roles differ rather than discover it.
 
 ### 3. `book_top` — one row per change in top of book
 
@@ -267,6 +342,7 @@ CREATE TABLE IF NOT EXISTS recorder.book_top (
     instrument_id     UInt32,
     symbol            LowCardinality(String),
     sequence_number   UInt64,
+    message_index     UInt8,
     reset_count       UInt8,
     era_anchor_ts     DateTime64(9),
     bid_px_raw        Nullable(Int64),
@@ -285,12 +361,28 @@ CREATE TABLE IF NOT EXISTS recorder.book_top (
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(recv_ts)
-ORDER BY (channel_id, instrument_id, era_anchor_ts, recv_ts, observation);
+ORDER BY (channel_id, instrument_id, era_anchor_ts, recv_ts, sequence_number,
+          message_index, observation);
 ```
 
-One row per *change*. A message that leaves the top of book identical to what it
-already was produces no row: a feed whose depth updates rarely move the top would
-otherwise pay per-event volume for a per-change question.
+One row per *change*, where a change is a change in **either** the visible top
+**or** the certainty of it. A message that moves neither produces no row: a feed
+whose depth updates rarely reach the top would otherwise pay per-event volume for
+a per-change question.
+
+**Certainty is part of the state, not an annotation on it.** Emitting rows only
+when prices or quantities move loses exactly the transition that matters most: a
+gap or an `InstrumentReset` arrives, no later message happens to move the top,
+and every `ASOF` lookup from then on keeps returning the last row — which says
+`book_certain = 1` and is now false. So a transition of `book_certain` emits a
+row on its own, carrying the same top as the row before it and a different
+verdict on whether that top can be believed.
+
+**`message_index` is in the row and in the sort key** because a publisher may
+pack several top-changing messages for one instrument into one datagram. They
+share `recv_ts`, `sequence_number` and `observation`, so without the index
+`ReplacingMergeTree` collapses a run of genuine changes into whichever one merged
+last.
 
 ### There is no fourth table
 
@@ -365,26 +457,49 @@ Three things are deliberately absent, and each has been a real mistake:
   key space and the race silently reports nothing.
 
 **The key is not unique, and must not be.** A book returning to a previous state
-produces the same `state_key` again — correct, and the reason a pairing is
-`ASOF`-shaped: for each occurrence at one observation point, the nearest
-occurrence of the same key at the other within a bounded window, each used once.
-A join on the key alone produces a cross product on any instrument that
-oscillates between two states, which is most of them.
+produces the same `state_key` again, which is correct. It also means a join on
+the key alone produces a cross product on any instrument that oscillates between
+two states, which is most of them.
+
+**`ASOF JOIN` does not fix that, and it is worth being precise about why**, since
+reaching for it is the obvious move. `ASOF` selects the nearest right-hand row
+*independently for each left-hand row*: it has no notion of consuming a match, so
+when a state repeats quickly, several occurrences at one observation point all
+pair with the same occurrence at the other. The lead times that come out are not
+wrong in a way anyone notices — they are plausible, biased, and derived from
+counting one arrival several times.
+
+**Number the occurrences instead.** Within one `(observation, channel_id,
+instrument_id, era, state_key)`, assign each row its ordinal by `recv_ts`; pair
+ordinal *n* at one observation point with ordinal *n* at the other. That is
+one-to-one by construction, it needs no window function beyond `row_number`, and
+it fails visibly rather than quietly: an occurrence with no counterpart at the
+same ordinal is an unpaired row, which is a fact worth seeing — it usually means
+one observation point missed a state the other saw. A bounded `|Δt|` then
+discards pairs whose ordinals happen to align across an outage.
 
 ---
 
 ## The book, and the honest part
 
 `Quote` carries both sides and needs no state. `LevelUpdate` is a delta and needs
-a book. So `book_top` needs a book state machine, and a book needs a starting
-point.
+a book. So `book_top` has two derivations, not one, and only the second needs an
+anchor at all.
 
-**There is exactly one anchor: a complete snapshot cycle.** `SnapshotBegin`
-states `anchor_seq` — the channel sequence number the book state is true as of —
-along with `total_levels` and a `snapshot_id`; the `SnapshotLevel` messages
-follow; `SnapshotEnd` repeats both so that a reader who lost either end knows it.
-A cycle with fewer levels than `total_levels`, or with no `SnapshotEnd`, is
-incomplete and must not be applied.
+**A `Quote` is self-anchoring.** It states a complete two-sided top, so it
+establishes a certain top by itself, with no prior state and no snapshot — and
+after a gap it *restores* certainty the moment the next one arrives, because
+nothing about a missed `Quote` makes the next one less true. A quote-only feed
+therefore produces `book_top` rows from its first message, and a rule requiring a
+snapshot cycle would have produced none at all for it. Snapshot anchoring belongs
+to stateful depth reconstruction and nowhere else.
+
+**For a book built from deltas there is exactly one anchor: a complete snapshot
+cycle.** `SnapshotBegin` states `anchor_seq` — the channel sequence number the
+book state is true as of — along with `total_levels` and a `snapshot_id`; the
+`SnapshotLevel` messages follow; `SnapshotEnd` repeats both so that a reader who
+lost either end knows it. A cycle with fewer levels than `total_levels`, or with
+no `SnapshotEnd`, is incomplete and must not be applied.
 
 Two messages that look like anchors and are not:
 
@@ -394,12 +509,26 @@ Two messages that look like anchors and are not:
   starting point.
 - **`InstrumentReset` is the opposite of an anchor.** It is the message a
   publisher owes when it has lost confidence in its own book for one instrument.
-  It *destroys* certainty rather than establishing it: after it, the book is
-  unknown until the next complete snapshot cycle, and `uncertain_reason` records
-  it as `instrument_reset`.
+  It *destroys* certainty rather than establishing it: after it the book is
+  unknown, and `uncertain_reason` records it as `instrument_reset`.
 
-Before the first anchor in a window, the book is unknown and `book_top` emits
-nothing, with `no_anchor` as the reason on the first row it can emit.
+  It also carries the terms of its own recovery, which is why `new_anchor_seq` is
+  mapped rather than dropped: the cycle that re-establishes the book is one whose
+  `anchor_seq` is at or after it. A deriver that ignores that field will accept a
+  snapshot already in flight when the reset was published — a book state the
+  publisher had already disowned — and will rebuild from it with
+  `book_certain = 1`. That is the worst outcome available here, because it is
+  confidently wrong rather than honestly unknown.
+
+**Before the first anchor, a delta-built book emits one row and then nothing.**
+The obvious rule — emit nothing until anchored — is the wrong contract, because
+absence is indistinguishable from a feed that was silent, and an `ASOF` lookup
+into a pre-anchor window returns whatever preceded it, which may be another era.
+So the first `LevelUpdate` for an instrument in an unanchored window emits a
+single row with `book_certain = 0` and `uncertain_reason = 'no_anchor'`, no
+prices, and nothing further is emitted until a cycle completes. A consumer can
+then distinguish "not yet knowable" from "no data" by looking, which is the whole
+job of the column.
 
 **A live book cannot say that it does not know.** A capture that missed datagrams
 applies the deltas that did arrive and keeps quoting a top of book that has
@@ -467,8 +596,24 @@ already drawn rather than an achievement of this document.
 - **No product line is named in the schema.** `feed` and `observation` are
   declared strings, opaque to every query above.
 
-**A new feed becomes rows by being recorded.** The list of things someone must
-write for the second feed, and for the third, is empty.
+**A new feed in the price-level message set becomes rows by being recorded.** For
+that feed the list of things someone must write is empty: no adapter code, no
+schema change, no migration, no configuration beyond the declaration that already
+makes it recordable.
+
+**That boundary is the message set, and it is worth stating rather than
+overselling.** `event` has a closed set of columns covering eight message types,
+and `WireCapture` classifies anything else as an unknown type. A feed carrying
+order-level messages — an add, a cancel, an execution — is not
+configuration-only: it needs enum variants, a mapping, columns and a migration,
+which is the same work this document does for price levels and is why *No
+order-level reconstruction* is a non-goal below rather than a footnote.
+
+The extension mechanism is therefore ordinary and is named here so nobody expects
+a different one: **a new message set is a new migration and a widened mapping
+table**, done once for the family rather than once per venue. What is generic is
+that the second and third feed *of a given set* cost nothing — not that every
+conceivable feed does.
 
 ---
 
@@ -509,14 +654,26 @@ incident:
   and `SnapshotEnd`, which `WireCapture` counts as skipped today. The codec
   already decodes them — this is a widening of the walk's output, not new
   parsing.
-- **A book with an unknown state.** Anchored only on a complete snapshot cycle,
-  fed by `LevelUpdate` and `BookClear`, and driven to `book_certain = 0` by a gap
-  in the channel instance's sequence space or by an `InstrumentReset`.
+- **A wider `WireProvenance`.** The source address, the destination port and the
+  receive-timestamp kind are on `RecordedDatagram` and are dropped by the walk,
+  and all three are in the identity block. Nothing can be written until they
+  survive it.
+- **An era-scoped reference-data accumulator**, keyed `(channel_id,
+  instrument_id)`, restating exponents forward from the definition that changed
+  them. `ArchivedRefdata` keys by symbol and pins the first statement, which is
+  right for a re-lowering and wrong here — see *Why this is a derivation*.
+- **A book with an unknown state.** Two derivations: `Quote` self-anchoring, and
+  a delta book anchored only on a complete snapshot cycle, fed by `LevelUpdate`
+  and `BookClear`, and driven to `book_certain = 0` by a gap in the channel
+  instance's sequence space or by an `InstrumentReset`. A certainty transition
+  emits its own row.
 - **`state_key`, and a test that it is stable.** Specifically: unchanged across a
   schema version bump, across a change in batching, and across two observation
   points that decode the same state — the three ways a race key fails.
+- **The occurrence-ordinal pairing**, as a view, with the unpaired rows visible
+  rather than dropped.
 - **Migration `005`**, with the three tables and their TTLs, applied the way the
-  existing four are: checked in, embedded, and applied by the deploy rather than
+  existing five are: checked in, embedded, and applied by the deploy rather than
   by a process at startup.
 - **A per-feed derivation switch** in the loader's configuration, and a lag
   metric for the derivation distinct from the lag of the datagram load.
