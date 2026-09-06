@@ -1886,6 +1886,12 @@ mod market_data_tests {
 
     /// A completed directory with one object of `feed` in it.
     fn archive(feed: &str) -> Archive {
+        archive_with(feed, Compression::Zstd { level: 1 })
+    }
+
+    /// The same, at a stated compression, for the one test that has to damage
+    /// the object it produced.
+    fn archive_with(feed: &str, compression: Compression) -> Archive {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let completed = dir.path().join("completed");
         let cfg = ArchiveWriterConfig {
@@ -1894,7 +1900,7 @@ mod market_data_tests {
             rotate_bytes: 1 << 30,
             rotate_interval: Duration::from_secs(3600),
             staging_max: 1 << 40,
-            compression: Compression::Zstd { level: 1 },
+            compression,
             identity: RecorderIdentity {
                 site: SITE.to_owned(),
                 recorder: RECORDER.to_owned(),
@@ -2191,6 +2197,82 @@ mod market_data_tests {
         assert!(metrics
             .render()
             .contains("dz_loader_market_data_unloaded_objects"));
+    }
+
+    /// The object, its manifest, and the path of each.
+    fn published(archive: &Archive) -> (PathBuf, SegmentManifest) {
+        let entries: Vec<PathBuf> = std::fs::read_dir(&archive.completed)
+            .expect("the completed directory exists")
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .collect();
+        let manifest_path = entries
+            .iter()
+            .find(|p| p.to_string_lossy().ends_with(MANIFEST_SUFFIX))
+            .expect("every object lands with a manifest beside it");
+        let manifest: SegmentManifest =
+            serde_json::from_str(&std::fs::read_to_string(manifest_path).expect("readable"))
+                .expect("the manifest deserialises");
+        let object = entries
+            .iter()
+            .find(|p| !p.to_string_lossy().ends_with(MANIFEST_SUFFIX))
+            .expect("and the object beside it")
+            .clone();
+        (object, manifest)
+    }
+
+    /// Bytes that are not an archive derive nothing, and say so.
+    #[test]
+    fn something_that_is_not_an_archive_is_refused_rather_than_walked() {
+        let archive = archive(MarketByPrice::NAME);
+        let (object, manifest) = published(&archive);
+        std::fs::write(&object, b"not a capture").expect("the object is writable");
+
+        let error = crate::market_data::derive_market_data(&object, &manifest, &derives(false)[0])
+            .expect_err("bytes that are not an archive are refused");
+        assert!(
+            matches!(error, crate::market_data::MarketDataError::Open { .. }),
+            "{error}"
+        );
+    }
+
+    /// A walk that stops short of the end of the archive derives nothing.
+    ///
+    /// The first walk already refuses a torn object, so nothing reaches this
+    /// through a pass — which is exactly why the refusal is asserted here rather
+    /// than assumed. A check that holds only because another function ran first
+    /// is a check one refactor away from not holding, and what it prevents is an
+    /// `event` table that stops mid-window while `datagram` does not.
+    ///
+    /// Either refusal will do, and which one it is is the reader's business
+    /// rather than this one's: a replay yields every datagram before a tear and
+    /// then returns the error, so a tear arrives here as a failed walk, and the
+    /// end-of-archive check is what catches the object that ends early without
+    /// failing at all — a foreign capture, a merged file. `derive_object` keeps
+    /// the same pair for the same reason.
+    #[test]
+    fn a_walk_that_ends_short_of_the_archive_derives_nothing() {
+        let archive = archive_with(MarketByPrice::NAME, Compression::None);
+        let (object, manifest) = published(&archive);
+        // The section header survives, so the archive opens; the last block does
+        // not, so the walk ends somewhere other than the end of the file.
+        let bytes = std::fs::read(&object).expect("the object is readable");
+        std::fs::write(&object, &bytes[..bytes.len() * 2 / 3]).expect("the object is writable");
+
+        let error = crate::market_data::derive_market_data(&object, &manifest, &derives(false)[0])
+            .expect_err("a torn object derives nothing");
+        assert!(
+            matches!(
+                error,
+                crate::market_data::MarketDataError::Incomplete { .. }
+                    | crate::market_data::MarketDataError::Walk { .. }
+            ),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains(&manifest.object_key),
+            "the refusal names the object: {error}"
+        );
     }
 
     /// Nothing resolved is not the same as nothing published.
