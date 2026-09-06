@@ -388,6 +388,8 @@ dependencies = [
  "dz-edge-core",
  "dz-recorder-core",
  "dz-recorder-replay",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 1.0.69",
 ]

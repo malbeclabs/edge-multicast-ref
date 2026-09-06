@@ -8,12 +8,17 @@
 //! runner that knew the names of rules would refuse the next one added, which is
 //! exactly the rule that was added to catch the thing nobody had thought of.
 //!
-//! [`pcap`] converts a replayed archive into the classic pcap the tool reads,
-//! and it is the *only* such conversion in this repository. `dz-recorder-e2e`'s
-//! conformance gate ran its own copy until this crate existed, and a bridge with
-//! two implementations is a bridge where the gate and the runner can disagree
-//! about what the tool was shown — with the gate being the one nobody would
-//! think to re-check.
+//! Two halves, and they are separable on purpose.
+//!
+//! - [`pcap`] converts a replayed archive into the classic pcap the tool reads.
+//!   It is the *only* such conversion in this repository. `dz-recorder-e2e`'s
+//!   conformance gate ran its own copy until this crate existed, and a bridge
+//!   with two implementations is a bridge where the gate and the runner can
+//!   disagree about what the tool was shown — with the gate being the one nobody
+//!   would think to re-check.
+//! - [`tool`] is the boundary against the rule set: a trait, one implementation
+//!   that runs the binary, and the version resolution that has to happen before
+//!   any verdict may be stamped.
 //!
 //! # What this crate does not do
 //!
@@ -21,10 +26,17 @@
 //! role is `na`, whether a violation over a hole this object's own loss
 //! derivation found becomes `unverifiable`, and what a `pass` row has to satisfy
 //! before it is honest — all of that is judgement over the object, and it sits
-//! above this seam rather than in it. What is here is only what has to be
-//! exactly right before any judgement is worth making: what the tool was shown.
+//! above this seam rather than in it. What is here is only the two things that
+//! have to be exactly right before any judgement is worth making: what the tool
+//! was shown, and which rule set answered.
 #![forbid(unsafe_code)]
 
 pub mod pcap;
+pub mod report;
+pub mod tool;
 
 pub use pcap::{write_group_pcaps, write_pcap, BridgeError, GroupPcap};
+pub use report::{EvidenceRange, Outcome, ReportError, ReportInstance, RuleOutcome, RuleSetReport};
+pub use tool::{
+    ConformanceTool, Invocation, PinnedRuleSet, PortRoles, RuleSet, ToolError, ToolRun,
+};
