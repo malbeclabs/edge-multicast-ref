@@ -99,7 +99,7 @@ One vantage point cannot tell those apart, which is why a `sequence_gap` row lan
 | `dz-recorder-relower` | An archive read back as decoded messages, and re-run against a venue's own mapping: *did the publisher publish what the venue said?* |
 | `dz-recorder-health` | Whether a recorder is recording, as the process itself can tell |
 | `dz-recorder-rows` | The rows an archive derives into, and the derivation: pure, sink-agnostic, and exercised with no server |
-| `dz-recorder-events` | Market data rows: reference data scoped to an era, and the fold that joins the messages to it |
+| `dz-recorder-events` | Market data rows: reference data scoped to an era, the fold that joins the messages to it, and the book that says when its top cannot be believed |
 | `dz-recorder-clickhouse` | The column store as one `RowSink`, plus the checked-in DDL |
 | `dz-recorder-load` | The loader binary ([README](dz-recorder-load/README.md)) |
 | `dz-recorder-e2e` | The tests that use the real encoder, the real writer and the real reader end to end |
@@ -318,37 +318,65 @@ channel instance — source address, `Channel ID`, destination port — because 
 sequence number is meaningless without it and two redundant publishers serving
 one channel are told apart by nothing else.
 
+## Market data as rows
+
+The transport rows say how many datagrams were missing and whose they were.
+None of them can say what the top of book was for an instrument at an instant,
+because `datagram` records how large a message was and never what it said —
+a deliberate property of the record path that had been allowed to become a
+property of the rows. `dz-recorder-events` derives the answer from objects that
+are already written, so that a feed becomes rows by being recorded rather than by
+someone writing a capture for it. Designed in
+[`2026-09-05-recorder-market-data-rows-design.md`](../../docs/superpowers/specs/2026-09-05-recorder-market-data-rows-design.md)
+and planned in
+[`2026-09-06-recorder-market-data-rows.md`](../../docs/superpowers/plans/2026-09-06-recorder-market-data-rows.md).
+
+Three tables, declared by `005`. `instrument` is the archived reference data kept
+as a history rather than a set, so a restatement of an exponent has a position and
+the prices either side of it decode at different scales. `event` is one row per
+decoded message, joined to the definition in force when it arrived. `book_top` is
+one row per change in top of book — and per change in whether that top can be
+believed.
+
+**`book_certain` is the point of the book.** A live book that missed datagrams
+applies the deltas that arrived and keeps quoting a top that has diverged from the
+publisher's, and it cannot notice, because noticing needs the datagram it did not
+receive. A derived book can: the gap is observable in the archive, so certainty
+falls on a gap or an `InstrumentReset` and is restored only by each derivation's
+own rule — a `Quote` is self-anchoring, a delta book anchors only on a complete
+snapshot cycle. A certainty transition emits its own row, so a gap that moves no
+price is still visible as one.
+
+Two observation points recognise the same book state by `state_key`, a hash over
+a stated tuple that excludes every timestamp — a timestamp is what the race
+measures, so it cannot also be what identifies the state. `006` numbers the
+occurrences of a repeating state and pairs them ordinal to ordinal, because a
+state repeats and an `ASOF` join does not care: without the ordinal, several
+occurrences at one point all pair with one at the other and the lead times that
+come out are not measurements of anything. An occurrence with no counterpart stays
+visible rather than being dropped.
+
+**Derivation is per feed and off by the absence of a section**, not by a flag
+whose default could be flipped, and it has its own backlog and lag gauges: the
+datagram tier loads every object, so a shared series would page about book rows
+for objects that hold none. Before a feed is turned on, `dz-recorder-events`'
+sizing measurement states its messages-per-datagram multiplier over a window that
+held a burst and a snapshot cycle — and says so plainly when the window held
+neither, rather than reporting a true number about the wrong window.
+
+```bash
+cargo test -p dz-recorder-events          # the fold, the book, the key
+cargo test -p dz-recorder-e2e --test archive_to_market_data
+cargo run -p dz-recorder-events --example sizing -- \
+  --feed market-by-price <object>.pcapng.zst   # the multiplier, before turning one on
+```
+
 ## Not here yet
 
 The conformance runner over replay. `conformance_finding` exists as the table a
 runner fills, and nothing writes a row into it — an empty table is the honest
 statement that nothing judged the object, where a `pass` row would be a pass over
 a rule that never ran.
-
-**The market data derivation, though its tables now exist.** Designed in
-[`2026-09-05-recorder-market-data-rows-design.md`](../../docs/superpowers/specs/2026-09-05-recorder-market-data-rows-design.md)
-and planned in
-[`2026-09-06-recorder-market-data-rows.md`](../../docs/superpowers/plans/2026-09-06-recorder-market-data-rows.md).
-Four of the nine tasks are in: provenance carries the channel instance, the walk
-surfaces the four state messages, `dz-recorder-events` holds era-scoped reference
-data, and `005` declares `event`, `instrument` and `book_top` with the row types
-that fill them.
-
-Five of the nine tasks are in, and `event` and `instrument` are now written:
-`dz-recorder-events`' fold walks an object, merges the walk's three outputs into
-archive order, joins each message to the reference data in force at its arrival,
-and refuses what it cannot attribute rather than filling it in.
-
-Six of the nine tasks are in, and all three tables are now written. The book has
-two derivations — a `Quote` is self-anchoring, a delta book anchors only on a
-complete snapshot cycle — and `book_certain` falls to 0 on a sequence gap or an
-`InstrumentReset` and is restored only by each derivation's own rule. A certainty
-transition emits its own row, so a gap that moves no price is still visible as
-one.
-
-Still out: the occurrence-ordinal pairing view (task 7), the loader wiring and the
-per-feed switch (task 8), and the messages-per-datagram measurement that has to
-exist before a feed's derivation is enabled (task 9).
 
 The cross-site pass that turns `unverifiable` into `publisher`. That verdict
 needs a datagram absent from *every* site with no recorder overflow anywhere,
