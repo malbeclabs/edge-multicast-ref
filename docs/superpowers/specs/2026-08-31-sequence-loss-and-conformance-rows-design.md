@@ -586,8 +586,42 @@ received it, so the same datagram recorded at two sites joins on that key in
 - publisher-attributable loss, isolated: absent from *every* site, with no
   recorder overflow anywhere
 
-The `seen_elsewhere` column on `sequence_gap` is this join, precomputed for the
-panels that cannot afford it live.
+The `seen_elsewhere` column on `sequence_gap` is this join, and it is a join a
+panel reads rather than one a panel writes.
+
+**It is three-valued, and the third value is the reason the column exists.** `1`
+present at another vantage, `0` absent at every vantage that could speak, and
+*absent* — nobody else could speak yet. A site that has not loaded, a site that
+overflowed in the window, and a site that was up and not reporting all produce
+the third, and any of them read as a `0` is a `publisher` finding drawn from an
+archive that did not look. So a loader over one object writes the third and only
+the third, and the verdict beside it is `unverifiable`.
+
+**The join is recomputed and not stored, and lateness decides that rather than
+cost.** A verdict written while an object is loading is written against whatever
+else had arrived by then, and the other site's object may arrive tomorrow; a
+verdict written back afterwards is a second row on a sort key whose table carries
+no version column, so a re-run of the original object would restore the
+un-upgraded row and silently withdraw a settled finding. Storing the answer
+therefore waits on giving `sequence_gap` the version column `era` already has — a
+decision of its own, and a table recreation.
+
+**What it may read is bounded by what expires.** `datagram` is the one table with
+a TTL, so a join that read *absence* off it would find every sequence number
+absent everywhere two days on and promote every stale gap in the archive on a
+timer. Absence is instead read from `segment_coverage` and the sites' own gap
+rows, which have no TTL and between them are exhaustive: within a covered range a
+site held a sequence number if and only if it covered it and recorded no gap over
+it. `datagram` is read for one thing — the publisher's send stamps, which only a
+site that received the datagram can supply — and those go absent when the base
+rows do, which costs a verdict nothing.
+
+**Recorder overflow is what makes an absence inadmissible**, and both carriers of
+it are already in the rows: `segment_coverage.capture_drop_total` as a *delta*
+over the preceding segment, unknown rather than zero where that segment is
+missing; and the other site's own `unexplained_count`, which is absent exactly
+when `drop_scope` made a per-instance subtraction invalid. A site that cannot say
+what it lost cannot say what a publisher lost.
 
 ---
 
@@ -630,9 +664,13 @@ Stated plainly, because the analysis tier is plan 3 and none of it is built:
   walk — so it is the cheap half.
 - **`drop_scope` reaching the rows.** The archive now declares it per segment;
   the loader must carry it, or every subtraction above is silently wrong.
-- **The gap deriver**, which is where the five verdicts are decided, and the
+- ~~**The gap deriver**, which is where the five verdicts are decided, and the
   only component here that needs the cross-site join to be complete before it
-  can say `publisher` rather than `unverifiable`.
+  can say `publisher` rather than `unverifiable`.~~ Settled, and in two places
+  rather than one: the four exculpatory verdicts are decided in the recorder,
+  from evidence one object holds, and `publisher` is decided by the cross-site
+  views — see **Cross-site, which needs no new table** for why the second is a
+  query and not a column a loader fills in.
 - **The conformance runner over replay**, writing verdicts with their rule set
   version instead of discarding them.
 - **A retention split.** `datagram` is the expensive table and the one every

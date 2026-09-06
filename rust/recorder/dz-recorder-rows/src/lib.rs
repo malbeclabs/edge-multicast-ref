@@ -31,9 +31,13 @@
 //! `publisher` is a verdict this crate never writes. It requires a datagram
 //! absent from *every* site with no recorder overflow anywhere, which is a join
 //! across sites that one object cannot answer; a row is written with
-//! [`Verdict::Unverifiable`] and `seen_elsewhere` absent, and a later pass over
-//! the rows upgrades it. Evidence arriving late upgrades a verdict; its absence
-//! never blocks one.
+//! [`Verdict::Unverifiable`] and `seen_elsewhere` absent, and the cross-site
+//! views of `007` are where that absence becomes a `0` or a `1`. Evidence
+//! arriving late upgrades a verdict; its absence never blocks one.
+//!
+//! That the join is a view and not a step here is the same decision restated:
+//! a verdict decided while an object is loading is decided against whatever
+//! else had arrived by then, and the other site's object may arrive tomorrow.
 //!
 //! Nothing here decodes a payload. The 24-byte datagram header is read through
 //! [`DatagramHeader::peek`](dz_edge_core::DatagramHeader::peek), which judges
