@@ -22,7 +22,7 @@ use dz_edge_mbp::{
 use dz_edge_refdata::{InstrumentDefinition, ManifestSummary};
 use dz_edge_tob::{Quote, Trade};
 use dz_publisher_lowering::SourceId;
-use dz_recorder_core::{RecordedDatagram, RecvTsKind, Source};
+use dz_recorder_core::{ChannelInstance, RecordedDatagram, RecvTsKind, Source};
 
 use crate::error::RelowerError;
 use crate::finding::Caveat;
@@ -265,6 +265,20 @@ pub struct WireCapture {
     refdata: ArchivedRefdata,
     skipped: Skipped,
     datagrams: u64,
+    /// Datagrams of this feed, per channel instance.
+    ///
+    /// The messages carry the instance in their provenance, so a consumer could
+    /// almost count this itself — and would get it wrong, because a datagram
+    /// carrying nothing but a `Heartbeat` yields no message and would go
+    /// uncounted. That datagram is real: the transport tier reads its header
+    /// and writes a row for it, and a channel that is mostly heartbeats is
+    /// exactly the channel a per-datagram ratio is asked about.
+    ///
+    /// Counted from the peeked header, so a body this build cannot decode is
+    /// still counted against the instance it names. The transport tier is a
+    /// replay plus a header read, and this denominator is what that tier
+    /// actually sees.
+    datagrams_by_instance: BTreeMap<ChannelInstance, u64>,
     /// Every `Source ID` seen on a joined message, so a capture holding two
     /// publishers can be refused rather than averaged over.
     observed_source_ids: BTreeSet<u16>,
@@ -318,17 +332,25 @@ impl WireCapture {
         // Peeked before the full decode so that a datagram from another feed is
         // counted as foreign rather than as undecodable: the two mean entirely
         // different things about an archive, and one of them is not a problem.
-        match DatagramHeader::peek(datagram.payload) {
+        let peeked = match DatagramHeader::peek(datagram.payload) {
             Ok(header) if header.magic != expected_magic => {
                 self.skipped.foreign_magic += 1;
                 return;
             }
-            Ok(_) => {}
+            Ok(header) => header,
             Err(_) => {
                 self.skipped.undecodable += 1;
                 return;
             }
-        }
+        };
+        *self
+            .datagrams_by_instance
+            .entry(ChannelInstance::new(
+                *datagram.src.ip(),
+                peeked.channel_id,
+                datagram.dst.port(),
+            ))
+            .or_default() += 1;
 
         let decoded = match Datagram::decode(datagram.payload, expected_magic) {
             Ok(decoded) => decoded,
@@ -512,6 +534,17 @@ impl WireCapture {
     #[must_use]
     pub const fn datagrams(&self) -> u64 {
         self.datagrams
+    }
+
+    /// How many of them carried this feed's `Magic`, per channel instance.
+    ///
+    /// The total above counts everything the sources yielded, including the
+    /// datagrams of other feeds; this counts only the ones whose header this
+    /// walk read, filed under the instance that header named. The difference is
+    /// the whole point of it for a consumer sizing one feed.
+    #[must_use]
+    pub const fn datagrams_by_instance(&self) -> &BTreeMap<ChannelInstance, u64> {
+        &self.datagrams_by_instance
     }
 
     /// The publisher's identity, as the archive states it.
