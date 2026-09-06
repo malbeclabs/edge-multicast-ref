@@ -545,8 +545,18 @@ pub struct Event {
     pub dst_port: u16,
 
     pub sequence_number: u64,
+    /// The wire value, as sent. A fact and never a key: it is a `u8` and it
+    /// wraps, so two eras 256 resets apart share a value.
     pub reset_count: u8,
-    pub era_anchor_ts: Nanos,
+    /// Monotonic per recorder run, and what places this row in the archive.
+    ///
+    /// The era is **not** a column here, for the reason `datagram` has none: an
+    /// era's anchor is only observable as *the first datagram of that era in
+    /// this object*, so a stored anchor differs between two objects of one era
+    /// and would split that era across sort-key prefixes. `reset_count` is the
+    /// wire fact, `segment_seq` places the row, and the era is resolved by range
+    /// join to `era` — where the openings, and their certainty, already are.
+    pub segment_seq: u64,
     /// Position of the message inside its datagram.
     ///
     /// In the sort key, because a publisher may pack several messages for one
@@ -634,7 +644,13 @@ pub struct Instrument {
     pub dst_port: u16,
     pub source_id: u16,
     pub instrument_id: u32,
-    pub era_anchor_ts: Nanos,
+    /// The sequence number this statement came into force at.
+    ///
+    /// A stable era-scoped identity where an anchor timestamp is not: it is the
+    /// position of the definition that made the statement, identical in every
+    /// object that carries it, so two loads of one era replace each other
+    /// instead of accumulating.
+    pub from_sequence: u64,
     pub reset_count: u8,
     pub symbol: String,
     pub price_exp: i8,
@@ -683,7 +699,7 @@ pub struct BookTop {
     pub sequence_number: u64,
     pub message_index: u8,
     pub reset_count: u8,
-    pub era_anchor_ts: Nanos,
+    pub segment_seq: u64,
     pub bid_px_raw: Option<i64>,
     pub bid_qty_raw: Option<u64>,
     pub bid_source_count: Option<u16>,

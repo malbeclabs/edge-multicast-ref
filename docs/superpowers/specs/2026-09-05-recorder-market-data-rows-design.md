@@ -148,7 +148,7 @@ CREATE TABLE IF NOT EXISTS recorder.event (
 
     sequence_number    UInt64,
     reset_count        UInt8,
-    era_anchor_ts      DateTime64(9),
+    segment_seq        UInt64,
     message_index      UInt8,
 
     source_id          UInt16,
@@ -190,7 +190,7 @@ CREATE TABLE IF NOT EXISTS recorder.event (
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(recv_ts)
-ORDER BY (channel_id, instrument_id, era_anchor_ts, sequence_number, message_index,
+ORDER BY (channel_id, instrument_id, sequence_number, message_index,
           source_addr, dst_port, site, recv_ts);
 ```
 
@@ -278,6 +278,17 @@ channel instance; the dominant question here is per instrument over a window, an
 a leading instance prefix makes that a full scan. The instance columns are here
 for identity and for deduplication, not as the leading filter.
 
+**And no era column, which corrects an earlier draft of this document.** An
+era's anchor is only observable as *the first datagram of that era in this
+object*, so a stored anchor differs between two objects carrying one era and
+splits that era across sort-key prefixes — and on `instrument`, whose engine
+replaces on the key, it would accumulate a row per object where one per era was
+meant. `datagram` already carries `reset_count` and `segment_seq` and resolves
+the era by range join to `era`, where the openings and their `anchor_certain`
+already live; these tables follow it. `instrument` keys on `from_sequence`
+instead — the position of the definition that made the statement, identical in
+every object that carries it.
+
 **Never ordered by symbol.** See *Symbol is not a key*.
 
 **Prices and quantities stay raw, with their exponents beside them.** Converting
@@ -300,7 +311,7 @@ CREATE TABLE IF NOT EXISTS recorder.instrument (
     dst_port       UInt16,
     source_id      UInt16,
     instrument_id  UInt32,
-    era_anchor_ts  DateTime64(9),
+    from_sequence  UInt64,
     reset_count    UInt8,
     symbol         String,
     price_exp      Int8,
@@ -313,8 +324,8 @@ CREATE TABLE IF NOT EXISTS recorder.instrument (
     object_key     String
 )
 ENGINE = ReplacingMergeTree(last_seen_ts)
-PARTITION BY toYYYYMMDD(era_anchor_ts)
-ORDER BY (channel_id, instrument_id, era_anchor_ts, source_addr, dst_port, site, recorder);
+PARTITION BY toYYYYMMDD(first_seen_ts)
+ORDER BY (channel_id, instrument_id, from_sequence, source_addr, dst_port, site, recorder);
 ```
 
 The era-scoped accumulator, as a table. It exists for three reasons, each of
@@ -325,12 +336,12 @@ coverage the archive can make; and without it the `symbol` column on `event`
 would be a lie across an era boundary.
 
 **It carries the full identity block, including the channel instance**, for a
-reason that is easy to skip: an `era_anchor_ts` is only meaningful *for one
-channel instance*, because a `Reset Count` is that instance's. Two paths
-publishing one `Channel ID` open their eras independently, so a table keyed
-without `source_addr` and `dst_port` merges two eras that are not the same era
-and produces a join that silently picks one path's exponents for the other
-path's prices. `port_role` is on it because reference data arrives on the
+reason that is easy to skip: an era is only meaningful *for one channel
+instance*, because a `Reset Count` is that instance's. Two paths publishing one
+`Channel ID` open their eras independently, so a table keyed without
+`source_addr` and `dst_port` merges two eras that are not the same era and
+produces a join that silently picks one path's exponents for the other path's
+prices. `port_role` is on it because reference data arrives on the
 `refdata` role and a reader joining from a `mktdata` event must be able to see
 that the roles differ rather than discover it.
 
@@ -356,7 +367,7 @@ CREATE TABLE IF NOT EXISTS recorder.book_top (
     sequence_number   UInt64,
     message_index     UInt8,
     reset_count       UInt8,
-    era_anchor_ts     DateTime64(9),
+    segment_seq       UInt64,
     bid_px_raw        Nullable(Int64),
     bid_qty_raw       Nullable(UInt64),
     bid_source_count  Nullable(UInt16),
@@ -373,7 +384,7 @@ CREATE TABLE IF NOT EXISTS recorder.book_top (
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(recv_ts)
-ORDER BY (channel_id, instrument_id, era_anchor_ts, recv_ts, sequence_number,
+ORDER BY (channel_id, instrument_id, recv_ts, sequence_number,
           message_index, observation);
 ```
 

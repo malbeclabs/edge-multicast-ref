@@ -51,8 +51,17 @@ CREATE TABLE IF NOT EXISTS recorder.event (
     dst_port           UInt16,
 
     sequence_number    UInt64,
+    -- The wire value, as sent. A fact and never a key: it is a UInt8 and it
+    -- wraps, so two eras 256 resets apart share a value.
     reset_count        UInt8,
-    era_anchor_ts      DateTime64(9),
+    -- Monotonic per recorder run, and what places this row in the archive.
+    --
+    -- THE ERA IS NOT A COLUMN HERE, for the reason `datagram` has none: an era's
+    -- anchor is only observable as the first datagram of that era *in this
+    -- object*, so a stored anchor differs between two objects of one era and
+    -- splits that era across sort-key prefixes. The era is resolved by range
+    -- join to `era`, where the openings and their certainty already are.
+    segment_seq        UInt64,
     -- In the sort key because a publisher may pack several messages for one
     -- instrument into one datagram: they share a sequence number and an arrival,
     -- and without this a run of genuine events collapses to whichever merged last.
@@ -114,7 +123,7 @@ CREATE TABLE IF NOT EXISTS recorder.event (
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(recv_ts)
-ORDER BY (channel_id, instrument_id, era_anchor_ts, sequence_number, message_index,
+ORDER BY (channel_id, instrument_id, sequence_number, message_index,
           source_addr, dst_port, site, recv_ts);
 
 -- The era-scoped reference data, kept.
@@ -137,7 +146,11 @@ CREATE TABLE IF NOT EXISTS recorder.instrument (
     dst_port       UInt16,
     source_id      UInt16,
     instrument_id  UInt32,
-    era_anchor_ts  DateTime64(9),
+    -- The sequence number this statement came into force at: a stable era-scoped
+    -- identity where an anchor timestamp is not. It is the position of the
+    -- definition that made the statement, identical in every object that carries
+    -- it, so two loads of one era replace each other instead of accumulating.
+    from_sequence  UInt64,
     reset_count    UInt8,
     symbol         String,
     price_exp      Int8,
@@ -154,8 +167,8 @@ CREATE TABLE IF NOT EXISTS recorder.instrument (
     object_key     String
 )
 ENGINE = ReplacingMergeTree(last_seen_ts)
-PARTITION BY toYYYYMMDD(era_anchor_ts)
-ORDER BY (channel_id, instrument_id, era_anchor_ts, source_addr, dst_port, site, recorder);
+PARTITION BY toYYYYMMDD(first_seen_ts)
+ORDER BY (channel_id, instrument_id, from_sequence, source_addr, dst_port, site, recorder);
 
 -- One row per change in an instrument's top of book, where a change is a change
 -- in EITHER the visible top OR the certainty of it.
@@ -187,7 +200,7 @@ CREATE TABLE IF NOT EXISTS recorder.book_top (
     sequence_number   UInt64,
     message_index     UInt8,
     reset_count       UInt8,
-    era_anchor_ts     DateTime64(9),
+    segment_seq       UInt64,
     bid_px_raw        Nullable(Int64),
     bid_qty_raw       Nullable(UInt64),
     bid_source_count  Nullable(UInt16),
@@ -210,7 +223,7 @@ CREATE TABLE IF NOT EXISTS recorder.book_top (
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(recv_ts)
-ORDER BY (channel_id, instrument_id, era_anchor_ts, recv_ts, sequence_number,
+ORDER BY (channel_id, instrument_id, recv_ts, sequence_number,
           message_index, observation);
 
 -- THE RETENTION SPLIT, ONE TABLE FURTHER DOWN THAN `002` PUT IT.

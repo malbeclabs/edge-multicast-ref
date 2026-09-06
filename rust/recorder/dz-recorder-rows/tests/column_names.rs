@@ -554,7 +554,7 @@ fn event_fixture() -> Event {
         dst_port: 31_000,
         sequence_number: 42,
         reset_count: 0,
-        era_anchor_ts: Nanos(1_700_000_000_000_000_000),
+        segment_seq: 3,
         message_index: 2,
         source_id: 1_000,
         instrument_id: 11,

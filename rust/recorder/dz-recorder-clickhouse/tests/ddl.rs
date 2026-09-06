@@ -178,6 +178,13 @@ fn the_market_data_sort_keys_carry_what_distinguishes_two_rows() {
         event.starts_with("channel_id, instrument_id"),
         "event key does not lead with the instrument: {event}"
     );
+    // And no era column, for the reason `datagram` has none: an era's anchor is
+    // only observable as the first datagram of that era *in this object*, so a
+    // stored one splits an era across prefixes. The era is a range join.
+    assert!(
+        !event.contains("era_anchor_ts"),
+        "event stores a per-object era anchor: {event}"
+    );
 
     let book_top = sort_key(sql, "book_top");
     assert!(book_top.contains("message_index"), "book_top: {book_top}");
@@ -188,6 +195,10 @@ fn the_market_data_sort_keys_carry_what_distinguishes_two_rows() {
     let instrument = sort_key(sql, "instrument");
     assert!(instrument.contains("source_addr"), "{instrument}");
     assert!(instrument.contains("dst_port"), "{instrument}");
+    // Keyed on where the statement came into force, which is identical in every
+    // object that carries it, so two loads of one era replace rather than
+    // accumulate.
+    assert!(instrument.contains("from_sequence"), "{instrument}");
 }
 
 /// The retention split, one table further down than `002` put it.
@@ -329,7 +340,7 @@ fn every_table_is_partitioned_by_a_day() {
         (
             market_data_sql(),
             Grain::Instrument,
-            "toYYYYMMDD(era_anchor_ts)",
+            "toYYYYMMDD(first_seen_ts)",
         ),
         (market_data_sql(), Grain::BookTop, "toYYYYMMDD(recv_ts)"),
     ];
@@ -679,7 +690,7 @@ mod fixtures {
             dst_port: 0,
             sequence_number: 0,
             reset_count: 0,
-            era_anchor_ts: Nanos(0),
+            segment_seq: 0,
             message_index: 0,
             source_id: 0,
             instrument_id: 0,
@@ -727,7 +738,7 @@ mod fixtures {
             dst_port: 0,
             source_id: 0,
             instrument_id: 0,
-            era_anchor_ts: Nanos(0),
+            from_sequence: 0,
             reset_count: 0,
             symbol: String::new(),
             price_exp: 0,
@@ -759,7 +770,7 @@ mod fixtures {
             sequence_number: 0,
             message_index: 0,
             reset_count: 0,
-            era_anchor_ts: Nanos(0),
+            segment_seq: 0,
             bid_px_raw: None,
             bid_qty_raw: None,
             bid_source_count: None,
