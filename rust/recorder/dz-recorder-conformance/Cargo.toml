@@ -1,0 +1,21 @@
+[package]
+name = "dz-recorder-conformance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The seam between a replayed archive and the specification's own rule set"
+
+# No codec crate, deliberately. The runner never decodes a payload: it hands
+# bytes to a rule set that does its own decoding, and a dependency on
+# `dz-edge-mbp` here would be the first step towards a rule written in this
+# repository.
+[dependencies]
+dz-recorder-replay = { path = "../dz-recorder-replay" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+dz-edge-core = { path = "../../codec/dz-edge-core" }
+dz-recorder-core = { path = "../dz-recorder-core" }
+tempfile = { workspace = true }

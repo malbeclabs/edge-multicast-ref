@@ -10,9 +10,13 @@
 //! knows 88 rules this repository has never encoded.
 //!
 //! It reads classic `pcap` and the archive is `pcapng`, so replay's output is
-//! written into one here. That conversion is the only thing this test adds to
-//! the chain, and it adds nothing to the payloads: the datagram bytes handed to
-//! the writer are exactly the bytes replay produced.
+//! written into one — **by `dz-recorder-conformance`, and no longer here.**
+//! That crate is the analysis tier's bridge, and this gate reaches the tool
+//! through it deliberately: a bridge with two implementations is a bridge where
+//! the gate and the runner can disagree about what the tool was shown, and the
+//! gate is the one nobody would think to re-check. What the conversion adds to
+//! the chain is still nothing: the datagram bytes handed to the writer are
+//! exactly the bytes replay produced.
 //!
 //! Behind the `conformance` feature, and it does not skip. If the feature is on
 //! and the tool is absent the test fails, because a conformance gate that
@@ -21,13 +25,12 @@
 //! A submodule of `common` rather than a suite of its own: it holds no tests,
 //! and every suite that validates a chain reaches it through the same helpers.
 
-use std::net::SocketAddrV4;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 use super::{port_of, replay, Recorded, GROUP};
 use dz_edge_core::PortRole;
-use dz_recorder_replay::OwnedDatagram;
+use dz_recorder_conformance::write_group_pcaps;
 
 /// Where the tool is. Set by whatever runs the suite, because it is built from
 /// a sibling repository this one does not vendor.
@@ -49,61 +52,6 @@ fn tool() -> PathBuf {
         path.display()
     );
     path
-}
-
-/// The 42 bytes of Ethernet, IPv4 and UDP the datagram travelled behind.
-///
-/// Synthesised rather than captured, exactly as socket mode's archive does it,
-/// and for the same reason: what is being validated is the payload, and these
-/// bytes only have to be well-formed enough for the tool to find it.
-fn link_headers(src: SocketAddrV4, dst: SocketAddrV4, payload_len: usize) -> Vec<u8> {
-    let payload_len = u16::try_from(payload_len).expect("a datagram is small");
-    let mut out = Vec::with_capacity(42);
-    out.extend_from_slice(&[0u8; 12]); // destination and source MAC
-    out.extend_from_slice(&0x0800u16.to_be_bytes()); // IPv4
-    out.push(0x45); // version 4, 5 words of header
-    out.push(0);
-    out.extend_from_slice(&(20 + 8 + payload_len).to_be_bytes());
-    out.extend_from_slice(&[0, 0, 0, 0]);
-    out.push(4); // TTL
-    out.push(17); // UDP
-    out.extend_from_slice(&[0, 0]); // header checksum, unchecked by the tool
-    out.extend_from_slice(&src.ip().octets());
-    out.extend_from_slice(&dst.ip().octets());
-    out.extend_from_slice(&src.port().to_be_bytes());
-    out.extend_from_slice(&dst.port().to_be_bytes());
-    out.extend_from_slice(&(8 + payload_len).to_be_bytes());
-    out.extend_from_slice(&[0, 0]); // UDP checksum, zero means unchecked
-    out
-}
-
-/// Classic pcap, little-endian, microsecond resolution — what `pcapgo.Reader`
-/// expects. Written by hand because it is twenty-four bytes of file header and
-/// sixteen per record, and pulling a dependency in to produce that would be
-/// more code than this.
-fn write_pcap(path: &Path, datagrams: &[OwnedDatagram]) {
-    let mut out = Vec::new();
-    out.extend_from_slice(&0xa1b2_c3d4u32.to_le_bytes()); // magic, microseconds
-    out.extend_from_slice(&2u16.to_le_bytes());
-    out.extend_from_slice(&4u16.to_le_bytes());
-    out.extend_from_slice(&0i32.to_le_bytes()); // no timezone offset
-    out.extend_from_slice(&0u32.to_le_bytes()); // no timestamp accuracy claim
-    out.extend_from_slice(&65_535u32.to_le_bytes()); // snaplen
-    out.extend_from_slice(&1u32.to_le_bytes()); // LINKTYPE_ETHERNET
-
-    for dg in datagrams {
-        let mut frame = link_headers(dg.src, dg.dst, dg.payload.len());
-        frame.extend_from_slice(&dg.payload);
-        let secs = u32::try_from(dg.recv_ts_ns / 1_000_000_000).expect("a recent timestamp");
-        let micros = u32::try_from(dg.recv_ts_ns % 1_000_000_000 / 1_000).expect("under a second");
-        let len = u32::try_from(frame.len()).expect("a frame is small");
-        out.extend_from_slice(&secs.to_le_bytes());
-        out.extend_from_slice(&micros.to_le_bytes());
-        out.extend_from_slice(&len.to_le_bytes()); // captured
-        out.extend_from_slice(&len.to_le_bytes()); // on the wire
-        out.extend_from_slice(&frame);
-    }
-    std::fs::write(path, &out).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
 }
 
 /// What one conformance run concluded.
@@ -132,16 +80,25 @@ impl Verdict {
 /// Replays the archive, writes it as a pcap and runs the tool over it.
 pub fn conformance_of(archive: &Recorded, feed: &str) -> Verdict {
     let dir = tempfile::tempdir().expect("a temporary directory");
-    let pcap = dir.path().join("replayed.pcap");
-    write_pcap(&pcap, &replay(&archive.object));
+    let pcaps =
+        write_group_pcaps(dir.path(), &replay(&archive.object)).expect("the bridge writes a pcap");
+
+    // One group throughout this crate, so one invocation. The bridge writes one
+    // file per group because the tool takes one `-group`, and a second file
+    // here would mean a second group nobody in this suite joined.
+    assert_eq!(
+        pcaps.iter().map(|p| p.group).collect::<Vec<_>>(),
+        vec![GROUP],
+        "these fixtures publish to one group, and the tool judges one at a time"
+    );
 
     let out = Command::new(tool())
         .arg("-feed")
         .arg(feed)
         .arg("-pcap")
-        .arg(&pcap)
+        .arg(&pcaps[0].path)
         .arg("-group")
-        .arg(GROUP.to_string())
+        .arg(pcaps[0].group.to_string())
         .arg("-mktdata-port")
         .arg(port_of(PortRole::Mktdata).to_string())
         .arg("-refdata-port")

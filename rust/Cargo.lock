@@ -382,6 +382,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "dz-recorder-conformance"
+version = "0.1.1"
+dependencies = [
+ "dz-edge-core",
+ "dz-recorder-core",
+ "dz-recorder-replay",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "dz-recorder-core"
 version = "0.1.1"
 dependencies = [
@@ -402,6 +413,7 @@ dependencies = [
  "dz-edge-tob",
  "dz-recorder-archive",
  "dz-recorder-capture",
+ "dz-recorder-conformance",
  "dz-recorder-core",
  "dz-recorder-replay",
  "dz-recorder-rows",
