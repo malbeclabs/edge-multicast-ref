@@ -204,9 +204,16 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: edge-feed-spec/tools/conformance/go.mod
+      # Stamped, because an unstamped build answers `dev+none` from `--version`
+      # and from its own report — a value where a commit belongs. A verdict that
+      # cannot name the rule set that reached it is a verdict about a file.
       - name: Build dz-conformance
         working-directory: edge-feed-spec/tools/conformance
-        run: go build -o "$RUNNER_TEMP/dz-conformance" .
+        run: |
+          go build \
+            -ldflags "-X main.version=${SPEC_REF} -X main.commit=${SPEC_REF}" \
+            -o "$RUNNER_TEMP/dz-conformance" .
+          "$RUNNER_TEMP/dz-conformance" --version
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
