@@ -13,13 +13,14 @@
 //! looked at.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::net::SocketAddrV4;
 
 use dz_edge_core::{Datagram, DatagramHeader, PortRole, TYPE_END_OF_SESSION, TYPE_HEARTBEAT};
 use dz_edge_mbp::{BookClear, LevelUpdate};
 use dz_edge_refdata::{InstrumentDefinition, ManifestSummary};
 use dz_edge_tob::{Quote, Trade};
 use dz_publisher_lowering::SourceId;
-use dz_recorder_core::{RecordedDatagram, Source};
+use dz_recorder_core::{RecordedDatagram, RecvTsKind, Source};
 
 use crate::error::RelowerError;
 use crate::finding::Caveat;
@@ -65,12 +66,22 @@ impl MessageBody {
 
 /// Where a message was on the wire.
 ///
-/// **Provenance, never compared.** Every field here is one a batching or pacing
-/// difference moves, which is exactly why the healthy case is not a finding: put
-/// any of these in the comparison and a publisher that packed two messages
-/// differently would be reported as defective. What they are for is finding the
+/// **Provenance, never compared.** Nothing here enters a comparison: put the
+/// timing fields in one and a publisher that packed two messages differently
+/// would be reported as defective, and put the addressing fields in one and a
+/// feed served by a second path would be. What they are for is finding the
 /// datagram again — an operator handed a finding opens the archive at this
-/// sequence number.
+/// sequence number — and, for a consumer that derives rows rather than findings,
+/// saying which channel instance a message belongs to.
+///
+/// The two halves are there for those two different reasons and it is worth
+/// keeping them apart in one's head. [`datagram_index`](Self::datagram_index),
+/// [`message_index`](Self::message_index) and the timestamps are **timing**: a
+/// batching or pacing decision moves every one of them. [`src`](Self::src),
+/// [`dst`](Self::dst), [`channel_id`](Self::channel_id) and
+/// [`role`](Self::role) are **identity**: no publisher decision moves them, and
+/// together they are the channel instance a sequence number is only meaningful
+/// under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WireProvenance {
     /// Position of the datagram in the archive, counting from 0 over everything
@@ -83,7 +94,24 @@ pub struct WireProvenance {
     pub reset_count: u8,
     pub send_timestamp_ns: u64,
     pub recv_ts_ns: u64,
+    /// How [`recv_ts_ns`](Self::recv_ts_ns) was taken. A latency derived from an
+    /// application fallback stamp measures this process, not the path, so a
+    /// consumer that reports one has to be able to say which it had.
+    pub recv_ts_kind: RecvTsKind,
     pub role: PortRole,
+    /// The publisher's address and port, as the datagram was received.
+    ///
+    /// Half of the channel instance. Two redundant publishers serving one
+    /// `Channel ID` are told apart by nothing else, and a sequence number read
+    /// without it reads one publisher's advance as the other's backward motion.
+    pub src: SocketAddrV4,
+    /// The group and port the datagram was addressed to.
+    ///
+    /// The other half. The port is the one the channel instance is keyed on; the
+    /// group is not part of that key but is what a subscriber joined, so a
+    /// consumer reporting on a feed's delivery needs it and cannot recover it
+    /// from anywhere else in this type.
+    pub dst: SocketAddrV4,
 }
 
 impl core::fmt::Display for WireProvenance {
@@ -243,7 +271,10 @@ impl WireCapture {
                 reset_count: header.reset_count,
                 send_timestamp_ns: header.send_timestamp_ns,
                 recv_ts_ns: datagram.recv_ts_ns,
+                recv_ts_kind: datagram.recv_ts_kind,
                 role: datagram.role,
+                src: datagram.src,
+                dst: datagram.dst,
             };
             self.absorb_message(
                 message.type_id,
