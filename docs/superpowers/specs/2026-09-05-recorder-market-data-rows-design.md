@@ -210,7 +210,7 @@ never has to infer it from the deriver.** Anything not listed for a type is
 |---|---|---|
 | `Quote` | `instrument_id`, `source_id`, `source_timestamp_ns` | `bid_px_raw`, `bid_qty_raw`, `bid_source_count`, `ask_px_raw`, `ask_qty_raw`, `ask_source_count`, `flags_raw` ← `update_flags`, `upstream_ts` ← `source_timestamp_ns` |
 | `Trade` | `instrument_id`, `source_id`, `source_timestamp_ns` | `price_raw` ← `trade_price`, `qty_raw` ← `trade_qty`, `side_raw` ← `aggressor_side`, `flags_raw` ← `trade_flags`, `trade_id`, `cumulative_volume`, `upstream_ts` ← `source_timestamp_ns` |
-| `LevelUpdate` | `instrument_id`, `source_id`, `per_instrument_seq`, `timestamp_ns` | `side_raw` ← `side`, `action_raw` ← `action`, `reason_raw` ← `update_reason`, `flags_raw` ← `level_flags`, `price_raw`, `qty_raw`, `order_count`†, `level_index`†, `upstream_ts` ← `timestamp_ns` |
+| `LevelUpdate` | `instrument_id`, `source_id`, `per_instrument_seq`, `timestamp_ns` ‡‡ | `side_raw` ← `side`, `action_raw` ← `action`, `reason_raw` ← `update_reason`, `flags_raw` ← `level_flags`, `price_raw`, `qty_raw`, `order_count`†, `level_index`†, `upstream_ts` ← `timestamp_ns` |
 | `BookClear` | `instrument_id`, `source_id`, `per_instrument_seq`, `timestamp_ns` | `side_raw` ← `clear_side`, `action_raw` ← `scope`, `reason_raw` ← `clear_reason`, `price_raw` ← `from_price_raw`, `upstream_ts` ← `timestamp_ns` |
 | `InstrumentReset` | `instrument_id`, `timestamp_ns` — **no `Source ID`** | `reason_raw` ← `reason`, `anchor_seq` ← **`new_anchor_seq`**, `upstream_ts` ← `timestamp_ns`, `source_id` ‡ |
 | `SnapshotBegin` | `instrument_id`, `timestamp_ns` — **no `Source ID`** | `snapshot_id`, `anchor_seq`, `total_levels`, `depth_bound`, `per_instrument_seq` ← `last_instrument_seq`, `upstream_ts` ← `timestamp_ns`, `source_id` ‡ |
@@ -228,6 +228,32 @@ translates the sentinel to `NULL` on both columns.
 reference data** for that `(channel_id, instrument_id)`, never invented and never
 carried over from an adjacent message of another type. The same rule supplies
 `price_exp` and `qty_exp`, which no market data message carries at all.
+
+**‡‡ Reference data is resolved across port roles, which is what decides how it
+is keyed.** A definition arrives on `refdata` and a price on `mktdata`, and those
+are two channel instances — the destination port is part of the key — each
+advancing its own sequence space and its own `Reset Count`. A definition at
+refdata sequence 40 and a price at mktdata sequence 40 are not ordered by those
+numbers at all; comparing them compares two rulers. So:
+
+- **The accumulator is keyed on the channel — `(source address, Channel ID)` —
+  not on the channel instance.** `GLOSSARY.md` has an instrument as unique within
+  a channel, and putting the port in the key would file the definitions somewhere
+  the prices could never find them. The source address stays, because two
+  redundant publishers each publish their own definitions and one path's
+  exponents must never decode the other path's prices.
+- **A statement is in force from the instant it was received**, not from a
+  sequence number. One archive is written in arrival order by one host, so
+  `recv_ts` totally orders everything in it across every port role — which is
+  exactly the join a cross-role lookup needs. The sequence number is kept beside
+  it as the statement's stable identity, which is what `instrument.from_sequence`
+  holds.
+
+This is the one place in this design where time is the right ruler, and it does
+not contradict *The equivalence key*: that key excludes time because a timestamp
+is the quantity a race measures. Here the question is which statement one host
+had already received, which is a question about that host's own clock and about
+nothing else.
 
 **⁑ `levels_seen` is counted by the deriver, not read from the wire**, and it
 exists because persisting every `SnapshotLevel` is optional. A cycle is

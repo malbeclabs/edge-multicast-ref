@@ -9,6 +9,8 @@
 //! against. See
 //! `docs/superpowers/specs/2026-09-05-recorder-market-data-rows-design.md`.
 
+pub mod derive;
 pub mod instruments;
 
-pub use instruments::{At, InstrumentTable, Observed, Statement};
+pub use derive::{derive_events, DerivedEvents, EventInput, Refused};
+pub use instruments::{At, Channel, InstrumentTable, Observed, Statement};

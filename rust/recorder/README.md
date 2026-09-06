@@ -99,7 +99,7 @@ One vantage point cannot tell those apart, which is why a `sequence_gap` row lan
 | `dz-recorder-relower` | An archive read back as decoded messages, and re-run against a venue's own mapping: *did the publisher publish what the venue said?* |
 | `dz-recorder-health` | Whether a recorder is recording, as the process itself can tell |
 | `dz-recorder-rows` | The rows an archive derives into, and the derivation: pure, sink-agnostic, and exercised with no server |
-| `dz-recorder-events` | Market data rows: reference data scoped to an era, and the messages joined to it |
+| `dz-recorder-events` | Market data rows: reference data scoped to an era, and the fold that joins the messages to it |
 | `dz-recorder-clickhouse` | The column store as one `RowSink`, plus the checked-in DDL |
 | `dz-recorder-load` | The loader binary ([README](dz-recorder-load/README.md)) |
 | `dz-recorder-e2e` | The tests that use the real encoder, the real writer and the real reader end to end |
@@ -306,8 +306,14 @@ whole contract:
   them: a complete cycle is the only anchor a delta book has, and a reset is the
   only statement that what precedes it is not to be trusted.
 
-`Skipped` still counts the second group, because that report is about what the
-comparison did not compare and that has not changed. Provenance carries the
+There is a third, `reference_messages()`, carrying `InstrumentDefinition` and
+`ManifestSummary` **with their positions**. `ArchivedRefdata` consumes the same
+two and keeps a set rather than a history, which is right for a comparison that
+holds two archives with no key ordering them; a consumer holding one archive can
+place a restatement exactly, and needs the position in order to.
+
+`Skipped` still counts the second and third groups, because that report is about
+what the comparison did not compare and that has not changed. Provenance carries the
 channel instance — source address, `Channel ID`, destination port — because a
 sequence number is meaningless without it and two redundant publishers serving
 one channel are told apart by nothing else.
@@ -328,11 +334,15 @@ surfaces the four state messages, `dz-recorder-events` holds era-scoped referenc
 data, and `005` declares `event`, `instrument` and `book_top` with the row types
 that fill them.
 
-**Nothing writes a row into any of the three.** The fold that would — joining each
-message to the reference data — and the book behind `book_top` are tasks 5 and 6,
-and an empty table here means the same thing it means for `conformance_finding`:
-that nothing derived the object, where an invented row would be a book state
-nothing observed.
+Five of the nine tasks are in, and `event` and `instrument` are now written:
+`dz-recorder-events`' fold walks an object, merges the walk's three outputs into
+archive order, joins each message to the reference data in force at its arrival,
+and refuses what it cannot attribute rather than filling it in.
+
+**`book_top` is still empty**, and will be until task 6. It needs state that spans
+objects — a book — and an empty table here means what it means for
+`conformance_finding`: that nothing derived it, where an invented row would be a
+book state nothing observed.
 
 The cross-site pass that turns `unverifiable` into `publisher`. That verdict
 needs a datagram absent from *every* site with no recorder overflow anywhere,

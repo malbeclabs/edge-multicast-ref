@@ -8,7 +8,7 @@ use std::net::Ipv4Addr;
 
 use dz_edge_refdata::{InstrumentDefinition, ManifestSummary, LEG_LEN, SYMBOL_LEN};
 use dz_recorder_core::ChannelInstance;
-use dz_recorder_events::{At, InstrumentTable, Observed};
+use dz_recorder_events::{At, Channel, InstrumentTable, Observed};
 
 const CHANNEL: u8 = 1;
 const PORT: u16 = 31_000;
@@ -17,6 +17,26 @@ const AAA: u32 = 11;
 
 fn instance() -> ChannelInstance {
     ChannelInstance::new(Ipv4Addr::new(198, 51, 100, 1), CHANNEL, PORT)
+}
+
+/// The same publisher's `refdata` port: a different channel instance, the same
+/// channel. Definitions arrive here and prices arrive on `instance()`, which is
+/// why the table is keyed on the channel and resolved by arrival time.
+fn refdata_instance() -> ChannelInstance {
+    ChannelInstance::new(Ipv4Addr::new(198, 51, 100, 1), CHANNEL, PORT + 1)
+}
+
+fn channel() -> Channel {
+    Channel::of(instance())
+}
+
+fn other_channel() -> Channel {
+    Channel::of(other_path())
+}
+
+/// The receive stamp `at(n)` produces, so a test can ask "in force then?".
+const fn ts(sequence_number: u64) -> u64 {
+    1_700_000_000_000_000_000 + sequence_number
 }
 
 /// A second path serving the same channel — a different instance, and nothing
@@ -79,16 +99,22 @@ fn a_restatement_applies_from_its_own_sequence_number() {
     // side of the restatement decode at different scales — which is what
     // actually happened on the wire.
     assert_eq!(
-        table.resolve(instance(), AAA, 499).unwrap().price_exponent,
+        table
+            .resolve(channel(), AAA, ts(499))
+            .unwrap()
+            .price_exponent,
         -2
     );
     assert_eq!(
-        table.resolve(instance(), AAA, 500).unwrap().price_exponent,
+        table
+            .resolve(channel(), AAA, ts(500))
+            .unwrap()
+            .price_exponent,
         -4
     );
     assert_eq!(
         table
-            .resolve(instance(), AAA, 100_000)
+            .resolve(channel(), AAA, ts(100_000))
             .unwrap()
             .price_exponent,
         -4
@@ -102,7 +128,7 @@ fn a_price_before_the_first_definition_resolves_to_nothing() {
 
     // The exponent that decodes it was not on the wire yet. Inventing one
     // produces a number rather than an answer.
-    assert!(table.resolve(instance(), AAA, 99).is_none());
+    assert!(table.resolve(channel(), AAA, ts(99)).is_none());
 }
 
 #[test]
@@ -134,7 +160,7 @@ fn a_statement_positioned_behind_the_one_in_force_is_refused() {
     // order every lookup depends on.
     assert_eq!(
         table
-            .resolve(instance(), AAA, 100_000)
+            .resolve(channel(), AAA, ts(100_000))
             .unwrap()
             .price_exponent,
         -2
@@ -152,14 +178,17 @@ fn an_era_ends_a_table_rather_than_extending_it() {
         table.observe_definition(&definition(AAA, "AAA", -4), at(10, 1)),
         Observed::First
     );
-    assert_eq!(table.era(instance()), Some(1));
+    assert_eq!(table.era(channel()), Some(1));
     assert_eq!(
-        table.resolve(instance(), AAA, 20).unwrap().price_exponent,
+        table
+            .resolve(channel(), AAA, ts(20))
+            .unwrap()
+            .price_exponent,
         -4
     );
     // And the old era's statement is gone rather than shadowing the new one at a
     // sequence number the new era has not reached.
-    assert_eq!(table.defined_count(instance()), 1);
+    assert_eq!(table.defined_count(channel()), 1);
 }
 
 #[test]
@@ -170,9 +199,9 @@ fn a_symbol_reused_across_eras_is_two_instruments() {
     // by symbol merges these two; keyed by `Instrument ID` it cannot.
     table.observe_definition(&definition(99, "AAA", -2), at(100, 1));
 
-    assert!(table.resolve(instance(), AAA, 100).is_none());
+    assert!(table.resolve(channel(), AAA, ts(100)).is_none());
     assert_eq!(
-        table.resolve(instance(), 99, 100).unwrap().instrument_id,
+        table.resolve(channel(), 99, ts(100)).unwrap().instrument_id,
         99
     );
 }
@@ -194,12 +223,15 @@ fn two_paths_serving_one_channel_keep_separate_tables() {
     // Each instance advances its own sequence space and opens its own eras, so
     // one path's restatement is not the other's.
     assert_eq!(
-        table.resolve(instance(), AAA, 100).unwrap().price_exponent,
+        table
+            .resolve(channel(), AAA, ts(100))
+            .unwrap()
+            .price_exponent,
         -2
     );
     assert_eq!(
         table
-            .resolve(other_path(), AAA, 100)
+            .resolve(other_channel(), AAA, ts(100))
             .unwrap()
             .price_exponent,
         -6
@@ -219,7 +251,7 @@ fn a_manifest_that_is_not_valid_yet_declares_nothing() {
     table.observe_manifest(&summary, at(100, 0));
 
     // Absent, not zero. A zero would read as a feed publishing nothing.
-    assert_eq!(table.declared_count(instance()), None);
+    assert_eq!(table.declared_count(channel()), None);
 
     table.observe_manifest(
         &ManifestSummary {
@@ -228,7 +260,7 @@ fn a_manifest_that_is_not_valid_yet_declares_nothing() {
         },
         at(200, 0),
     );
-    assert_eq!(table.declared_count(instance()), Some(40));
+    assert_eq!(table.declared_count(channel()), Some(40));
 }
 
 #[test]
@@ -249,6 +281,49 @@ fn the_declared_count_is_what_coverage_is_measured_against() {
 
     // Two of the three the publisher said it had. That subtraction is the only
     // statement of published-set coverage an archive can make.
-    assert_eq!(table.declared_count(instance()), Some(3));
-    assert_eq!(table.defined_count(instance()), 2);
+    assert_eq!(table.declared_count(channel()), Some(3));
+    assert_eq!(table.defined_count(channel()), 2);
+}
+
+/// Definitions arrive on one port role and prices on another, and the table has
+/// to serve both.
+///
+/// This is the case that made the sequence-number key untenable: `refdata` and
+/// `mktdata` are two channel instances with two sequence spaces, so a statement
+/// at refdata sequence 40 orders against a price at mktdata sequence 40 not at
+/// all. One archive is written in arrival order by one host, so the receive
+/// clock is what both can be read against.
+#[test]
+fn a_definition_on_refdata_resolves_for_a_price_on_mktdata() {
+    let mut table = InstrumentTable::new();
+    table.observe_definition(
+        &definition(AAA, "AAA", -2),
+        At {
+            instance: refdata_instance(),
+            // A sequence number from the refdata space, deliberately far from
+            // anything mktdata would carry.
+            sequence_number: 40,
+            reset_count: 0,
+            recv_ts_ns: ts(1_000),
+        },
+    );
+
+    // A price that arrived later, on the other port role, at a sequence number
+    // that means nothing in the refdata space.
+    assert_eq!(
+        table
+            .resolve(channel(), AAA, ts(2_000))
+            .unwrap()
+            .price_exponent,
+        -2
+    );
+    // And one that arrived before the definition still resolves to nothing.
+    assert!(table.resolve(channel(), AAA, ts(500)).is_none());
+}
+
+/// The port is not in the key, but the address is.
+#[test]
+fn the_channel_is_the_key_and_the_port_is_not() {
+    assert_eq!(channel(), Channel::of(refdata_instance()));
+    assert_ne!(channel(), other_channel());
 }

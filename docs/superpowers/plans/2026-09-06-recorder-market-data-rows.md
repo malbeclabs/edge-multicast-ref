@@ -79,7 +79,9 @@ Add a second output to `WireCapture` — a `Vec<StateMessage>` beside `messages`
 
 ### 3. `dz-recorder-events`: the era-scoped reference data
 
-A new crate. `InstrumentTable` keyed `(channel_id, instrument_id)` within an era, taking definitions with provenance, restating exponents forward from the sequence number of the definition that changed them, and resetting at an era boundary. Resolves `source_id`, `price_exp` and `qty_exp` for the messages that do not carry them.
+A new crate. `InstrumentTable` keyed on the **channel** — `(source address, Channel ID)` — within an era, taking definitions with provenance, restating exponents forward, and resetting at an era boundary. Resolves `source_id`, `price_exp` and `qty_exp` for the messages that do not carry them.
+
+**Corrected while task 5 was being written**, and the correction is in the spec: the key is the channel and not the channel instance, and a statement is positioned by *arrival time* rather than by sequence number. Definitions arrive on `refdata` and prices on `mktdata` — two instances, two sequence spaces — so a sequence-number position orders them against a ruler they do not share, and a key holding the port files the definitions where the prices can never find them.
 
 **Verification:** unit tests with no archive. A restatement mid-window applies the old exponents before its sequence number and the new ones after — the case `ArchivedRefdata` deliberately cannot answer and this one must. A symbol reused across eras resolves to two instruments, not one.
 

@@ -413,8 +413,14 @@ dependencies = [
 name = "dz-recorder-events"
 version = "0.1.0"
 dependencies = [
+ "dz-edge-core",
+ "dz-edge-mbp",
  "dz-edge-refdata",
+ "dz-edge-tob",
  "dz-recorder-core",
+ "dz-recorder-relower",
+ "dz-recorder-replay",
+ "dz-recorder-rows",
 ]
 
 [[package]]

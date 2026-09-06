@@ -108,6 +108,31 @@ pub struct StateMessage {
     pub provenance: WireProvenance,
 }
 
+/// A reference-data message, and where it was.
+///
+/// [`ArchivedRefdata`](crate::refdata::ArchivedRefdata) consumes these and keeps
+/// what it needs for a comparison, which is a set rather than a history: it keys
+/// by symbol and pins the first statement, because its two archives carry no key
+/// that orders one against the other and so no instant at which to switch
+/// exponents is defensible.
+///
+/// A consumer holding **one** archive is not in that position — every definition
+/// here arrives at a sequence number — so it can place a restatement exactly, and
+/// needs the position in order to. That is the whole reason these are surfaced
+/// rather than only accumulated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReferenceMessage {
+    pub body: ReferenceBody,
+    pub provenance: WireProvenance,
+}
+
+/// The two messages that describe instruments rather than markets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferenceBody {
+    Definition(InstrumentDefinition),
+    Manifest(ManifestSummary),
+}
+
 /// Where a message was on the wire.
 ///
 /// **Provenance, never compared.** Nothing here enters a comparison: put the
@@ -236,6 +261,7 @@ pub struct Skipped {
 pub struct WireCapture {
     messages: Vec<WireMessage>,
     state: Vec<StateMessage>,
+    reference: Vec<ReferenceMessage>,
     refdata: ArchivedRefdata,
     skipped: Skipped,
     datagrams: u64,
@@ -374,14 +400,26 @@ impl WireCapture {
                 // is the one message whose layout changed between generations,
                 // and an archive can hold either.
                 match InstrumentDefinition::decode(bytes, schema_version) {
-                    Ok(definition) => self.refdata.observe_definition(&definition),
+                    Ok(definition) => {
+                        self.refdata.observe_definition(&definition);
+                        self.reference.push(ReferenceMessage {
+                            body: ReferenceBody::Definition(definition),
+                            provenance,
+                        });
+                    }
                     Err(_) => self.skipped.undecodable += 1,
                 }
             }
             ManifestSummary::TYPE_ID => {
                 self.skipped.reference_data += 1;
                 match ManifestSummary::decode(bytes) {
-                    Ok(summary) => self.refdata.observe_manifest(&summary),
+                    Ok(summary) => {
+                        self.refdata.observe_manifest(&summary);
+                        self.reference.push(ReferenceMessage {
+                            body: ReferenceBody::Manifest(summary),
+                            provenance,
+                        });
+                    }
                     Err(_) => self.skipped.undecodable += 1,
                 }
             }
@@ -431,6 +469,13 @@ impl WireCapture {
     /// what was actually read.
     fn push_state(&mut self, body: StateBody, provenance: WireProvenance) {
         self.state.push(StateMessage { body, provenance });
+    }
+
+    /// The reference-data messages, in the order the archive holds them, each
+    /// with the position it was carried at.
+    #[must_use]
+    pub fn reference_messages(&self) -> &[ReferenceMessage] {
+        &self.reference
     }
 
     /// The state messages, in the order the archive holds them.

@@ -25,15 +25,41 @@
 //! exact position and the prices before it and after it decode at different
 //! scales — which is what actually happened.
 //!
+//! # A statement is positioned in time, not in a sequence space
+//!
+//! This is the one place where a sequence number is the wrong ruler, and the
+//! reason is structural rather than a preference. **Reference data arrives on the
+//! `refdata` port role and market data on `mktdata`**, and those are two channel
+//! instances — `(source address, Channel ID, destination port)` — each advancing
+//! its own sequence space and its own `Reset Count`. A definition at refdata
+//! sequence 40 and a price at mktdata sequence 40 are not ordered by those
+//! numbers at all; comparing them compares two rulers.
+//!
+//! What *is* comparable is the recorder's own receive clock. One archive is
+//! written in arrival order by one host, so `recv_ts` totally orders everything
+//! in it across every port role — which is exactly the join a cross-role lookup
+//! needs. A statement is therefore in force from the instant it was received, and
+//! [`Statement::from_sequence`] is kept beside it as the statement's stable
+//! identity rather than as its position.
+//!
+//! # Keyed on the channel, not on the channel instance
+//!
+//! `GLOSSARY.md` has an instrument as unique *within a channel*, so the key is
+//! `(source address, Channel ID)`. The destination port is deliberately not in
+//! it: the port is what makes refdata and mktdata different instances, and
+//! including it would file the definitions somewhere the prices could never find
+//! them. The source address stays, because two redundant publishers serving one
+//! channel each publish their own definitions, and one path's exponents must
+//! never decode the other path's prices.
+//!
 //! # An era is where a table ends
 //!
-//! Statements are placed by sequence number, and a `Reset Count` restarts the
-//! sequence space. Carrying statements across that boundary would order them
-//! against numbers from a different space, so a new era clears the instruments
-//! of the channel instance that opened it. Nothing is merged across an era, in
-//! either direction.
+//! A `Reset Count` on the port role that carried the definitions restarts their
+//! space, so a new era clears that channel's instruments. Nothing is merged
+//! across an era, in either direction.
 
 use std::collections::BTreeMap;
+use std::net::Ipv4Addr;
 
 use dz_edge_refdata::{InstrumentDefinition, ManifestSummary, SYMBOL_LEN};
 use dz_recorder_core::ChannelInstance;
@@ -44,12 +70,36 @@ use dz_recorder_core::ChannelInstance;
 /// is the whole difference between this accumulator and the one it is not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct At {
-    /// The channel instance the datagram arrived on. A `Reset Count` belongs to
-    /// one of these, so an era does too.
+    /// The channel instance the datagram arrived on.
+    ///
+    /// Its address and `Channel ID` are the key; its destination port is not —
+    /// see this module's note on why a port would hide the definitions from the
+    /// prices.
     pub instance: ChannelInstance,
+    /// The statement's position in its own port role's sequence space: its
+    /// identity, not its ordering, because two roles do not share a space.
     pub sequence_number: u64,
     pub reset_count: u8,
+    /// The recorder's own receive clock, which orders one archive across every
+    /// port role in it.
     pub recv_ts_ns: u64,
+}
+
+/// The key reference data is held under: a channel, not a channel instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Channel {
+    pub source_addr: Ipv4Addr,
+    pub channel_id: u8,
+}
+
+impl Channel {
+    #[must_use]
+    pub const fn of(instance: ChannelInstance) -> Self {
+        Self {
+            source_addr: instance.source,
+            channel_id: instance.channel_id,
+        }
+    }
 }
 
 /// One instrument, as one definition stated it, in force from a sequence number.
@@ -63,11 +113,18 @@ pub struct Statement {
     pub qty_exponent: i8,
     pub contract_value: u64,
     pub manifest_seq: u16,
-    /// The sequence number of the datagram that carried this definition.
+    /// The sequence number of the datagram that carried this definition, in its
+    /// own port role's space.
     ///
-    /// It is in force from here until the next statement, which is what lets a
-    /// price before a restatement and a price after it decode differently.
+    /// The statement's stable identity — identical in every object that carries
+    /// it — and not its position.
     pub from_sequence: u64,
+    /// The instant it came into force.
+    ///
+    /// It holds from here until the next statement, which is what lets a price
+    /// received before a restatement and one received after it decode at
+    /// different scales.
+    pub from_recv_ts_ns: u64,
     pub first_seen_ts_ns: u64,
 }
 
@@ -103,18 +160,18 @@ pub enum Observed {
     Restated,
     /// A statement identical to the one in force. The cycle came round again.
     Repeated,
-    /// A statement positioned at or before the one already in force.
+    /// A statement received at or before the one already in force.
     ///
-    /// Not inserted. An archive is read in order, so this is a fact about the
-    /// reader rather than about the feed, and quietly accepting it would put the
-    /// table's statements out of the order every lookup depends on.
+    /// Not inserted. An archive is read in arrival order, so this is a fact about
+    /// the reader rather than about the feed, and accepting it quietly would put
+    /// the table's statements out of the order every lookup depends on.
     OutOfOrder,
 }
 
 /// Reference data for every channel instance an archive holds.
 #[derive(Debug, Clone, Default)]
 pub struct InstrumentTable {
-    instances: BTreeMap<ChannelInstance, EraTable>,
+    channels: BTreeMap<Channel, EraTable>,
 }
 
 /// One channel instance's instruments, within one era.
@@ -155,6 +212,7 @@ impl InstrumentTable {
             contract_value: definition.contract_value,
             manifest_seq: definition.manifest_seq,
             from_sequence: at.sequence_number,
+            from_recv_ts_ns: at.recv_ts_ns,
             first_seen_ts_ns: at.recv_ts_ns,
         };
 
@@ -169,7 +227,7 @@ impl InstrumentTable {
         if in_force.says_the_same_as(&statement) {
             return Observed::Repeated;
         }
-        if statement.from_sequence <= in_force.from_sequence {
+        if statement.from_recv_ts_ns <= in_force.from_recv_ts_ns {
             return Observed::OutOfOrder;
         }
         history.push(statement);
@@ -188,53 +246,53 @@ impl InstrumentTable {
         }
     }
 
-    /// The statement in force for an instrument at a sequence number.
+    /// The statement in force for an instrument at an instant.
     ///
-    /// The last statement positioned at or before `at_sequence`. A price carried
+    /// The last statement received at or before `at_recv_ts_ns`. A price received
     /// before the first definition of its instrument resolves to `None` — the
     /// exponent that decodes it was not on the wire yet, and inventing one would
     /// produce a number rather than an answer.
     #[must_use]
     pub fn resolve(
         &self,
-        instance: ChannelInstance,
+        channel: Channel,
         instrument_id: u32,
-        at_sequence: u64,
+        at_recv_ts_ns: u64,
     ) -> Option<&Statement> {
-        self.instances
-            .get(&instance)?
+        self.channels
+            .get(&channel)?
             .instruments
             .get(&instrument_id)?
             .iter()
             .rev()
-            .find(|statement| statement.from_sequence <= at_sequence)
+            .find(|statement| statement.from_recv_ts_ns <= at_recv_ts_ns)
     }
 
     /// What the published set declared, if a valid summary said so.
     #[must_use]
-    pub fn declared_count(&self, instance: ChannelInstance) -> Option<u32> {
-        self.instances.get(&instance)?.declared_count
+    pub fn declared_count(&self, channel: Channel) -> Option<u32> {
+        self.channels.get(&channel)?.declared_count
     }
 
     /// The era this instance's statements belong to.
     #[must_use]
-    pub fn era(&self, instance: ChannelInstance) -> Option<u8> {
-        self.instances.get(&instance).map(|table| table.reset_count)
+    pub fn era(&self, channel: Channel) -> Option<u8> {
+        self.channels.get(&channel).map(|table| table.reset_count)
     }
 
-    /// How many instruments this instance has defined in the current era.
+    /// How many instruments this channel has defined in the current era.
     #[must_use]
-    pub fn defined_count(&self, instance: ChannelInstance) -> usize {
-        self.instances
-            .get(&instance)
+    pub fn defined_count(&self, channel: Channel) -> usize {
+        self.channels
+            .get(&channel)
             .map_or(0, |table| table.instruments.len())
     }
 
-    /// The instance's table, cleared first if this position opens a new era.
+    /// The channel's table, cleared first if this position opens a new era.
     fn era_table(&mut self, at: At) -> &mut EraTable {
         let table = self
-            .instances
-            .entry(at.instance)
+            .channels
+            .entry(Channel::of(at.instance))
             .or_insert_with(|| EraTable::new(at.reset_count));
         if table.reset_count != at.reset_count {
             *table = EraTable::new(at.reset_count);
