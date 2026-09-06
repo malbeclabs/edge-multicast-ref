@@ -16,7 +16,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddrV4;
 
 use dz_edge_core::{Datagram, DatagramHeader, PortRole, TYPE_END_OF_SESSION, TYPE_HEARTBEAT};
-use dz_edge_mbp::{BookClear, LevelUpdate};
+use dz_edge_mbp::{
+    BookClear, InstrumentReset, LevelUpdate, SnapshotBegin, SnapshotEnd, SnapshotLevel,
+};
 use dz_edge_refdata::{InstrumentDefinition, ManifestSummary};
 use dz_edge_tob::{Quote, Trade};
 use dz_publisher_lowering::SourceId;
@@ -62,6 +64,48 @@ impl MessageBody {
             Self::Clear(clear) => JoinKey::of_clear(clear),
         }
     }
+}
+
+/// A message that moves book state without being a venue event.
+///
+/// **Deliberately not a `MessageBody` variant.** That enum is what a re-lowering
+/// *compares*, and every one of these is excluded from a comparison for a reason
+/// that has not changed: a reset and a snapshot are the publisher's own
+/// statements about its book, produced by the runtime rather than lowered from
+/// an upstream payload, so a re-lowering has nothing to produce them from and
+/// their absence from it means nothing. Widening `MessageBody` would turn four
+/// stated exclusions into an implicit one.
+///
+/// They are surfaced because a consumer that *builds* a book rather than
+/// comparing one needs exactly these four and can get them nowhere else: a
+/// snapshot cycle is the only anchor a delta book has, and a reset is the only
+/// statement that the book before it is not to be trusted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateBody {
+    Reset(InstrumentReset),
+    SnapshotBegin(SnapshotBegin),
+    SnapshotLevel(SnapshotLevel),
+    SnapshotEnd(SnapshotEnd),
+}
+
+impl StateBody {
+    /// The message type, as the codec names it.
+    #[must_use]
+    pub const fn message_type(&self) -> &'static str {
+        match self {
+            Self::Reset(_) => "InstrumentReset",
+            Self::SnapshotBegin(_) => "SnapshotBegin",
+            Self::SnapshotLevel(_) => "SnapshotLevel",
+            Self::SnapshotEnd(_) => "SnapshotEnd",
+        }
+    }
+}
+
+/// One state message the archive holds, and where it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StateMessage {
+    pub body: StateBody,
+    pub provenance: WireProvenance,
 }
 
 /// Where a message was on the wire.
@@ -165,7 +209,19 @@ pub struct Skipped {
     /// asked. Re-lowering a snapshot offline would compare a book state the
     /// re-lowering took at one instant against one the publisher took at
     /// another, which is Mode B's problem and not soluble here.
+    ///
+    /// Skipped by the *comparison*, which is what this counter reports, and
+    /// still surfaced on [`state_messages`](WireCapture::state_messages) for a
+    /// consumer that anchors a book with them.
     pub snapshot: u64,
+    /// `InstrumentReset`.
+    ///
+    /// Counted here rather than as an unknown type, which is where it went
+    /// before and was wrong: the codec has a decoder for it, so it was never a
+    /// message this build could not read. It is skipped for the same reason the
+    /// snapshot is — the publisher's statement about its own book, lowered from
+    /// no upstream payload — and is surfaced for the same reason.
+    pub reset: u64,
     /// Message types this build has no decoder for. The specification requires a
     /// decoder to skip them using the length field and continue, which is what
     /// happens.
@@ -179,6 +235,7 @@ pub struct Skipped {
 #[derive(Debug, Clone, Default)]
 pub struct WireCapture {
     messages: Vec<WireMessage>,
+    state: Vec<StateMessage>,
     refdata: ArchivedRefdata,
     skipped: Skipped,
     datagrams: u64,
@@ -329,9 +386,34 @@ impl WireCapture {
                 }
             }
             TYPE_HEARTBEAT | TYPE_END_OF_SESSION => self.skipped.control += 1,
-            dz_edge_mbp::SnapshotBegin::TYPE_ID
-            | dz_edge_mbp::SnapshotLevel::TYPE_ID
-            | dz_edge_mbp::SnapshotEnd::TYPE_ID => self.skipped.snapshot += 1,
+            SnapshotBegin::TYPE_ID => {
+                self.skipped.snapshot += 1;
+                match SnapshotBegin::decode(bytes) {
+                    Ok(begin) => self.push_state(StateBody::SnapshotBegin(begin), provenance),
+                    Err(_) => self.skipped.undecodable += 1,
+                }
+            }
+            SnapshotLevel::TYPE_ID => {
+                self.skipped.snapshot += 1;
+                match SnapshotLevel::decode(bytes) {
+                    Ok(level) => self.push_state(StateBody::SnapshotLevel(level), provenance),
+                    Err(_) => self.skipped.undecodable += 1,
+                }
+            }
+            SnapshotEnd::TYPE_ID => {
+                self.skipped.snapshot += 1;
+                match SnapshotEnd::decode(bytes) {
+                    Ok(end) => self.push_state(StateBody::SnapshotEnd(end), provenance),
+                    Err(_) => self.skipped.undecodable += 1,
+                }
+            }
+            InstrumentReset::TYPE_ID => {
+                self.skipped.reset += 1;
+                match InstrumentReset::decode(bytes) {
+                    Ok(reset) => self.push_state(StateBody::Reset(reset), provenance),
+                    Err(_) => self.skipped.undecodable += 1,
+                }
+            }
             _ => self.skipped.unknown_type += 1,
         }
     }
@@ -339,6 +421,27 @@ impl WireCapture {
     fn push(&mut self, body: MessageBody, source_id: u16, provenance: WireProvenance) {
         self.observed_source_ids.insert(source_id);
         self.messages.push(WireMessage { body, provenance });
+    }
+
+    /// A state message never touches `observed_source_ids`.
+    ///
+    /// None of the four carries a `Source ID` on the wire, so a capture that
+    /// counted them would be counting a value it invented. That set is what
+    /// refuses an archive holding two publishers, and a refusal has to rest on
+    /// what was actually read.
+    fn push_state(&mut self, body: StateBody, provenance: WireProvenance) {
+        self.state.push(StateMessage { body, provenance });
+    }
+
+    /// The state messages, in the order the archive holds them.
+    ///
+    /// Order is the whole contract here: a snapshot cycle is a `SnapshotBegin`,
+    /// its levels and a `SnapshotEnd`, and a consumer reads it as a run. Nothing
+    /// groups them, because grouping would have to decide what an incomplete
+    /// cycle is and that is the consumer's judgement, not the walk's.
+    #[must_use]
+    pub fn state_messages(&self) -> &[StateMessage] {
+        &self.state
     }
 
     /// The messages, in the order the archive holds them.

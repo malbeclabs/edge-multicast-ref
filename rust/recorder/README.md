@@ -21,9 +21,12 @@ Plan: [`2026-08-30-edge-recorder-record-path.md`](../../docs/superpowers/plans/2
 | `dz-recorder-archive` | The pcapng writer: rotation, compression, hashing, the manifest, and the staging watermark |
 | `dz-recorder-replay` | An archive read back as a `Source`, plus the synthetic publisher the tests are built on |
 | `dz-recorder-loss` | Which sequence values nobody delivered, per channel instance and per era, and whose they are |
+| `dz-recorder-relower` | An archive read back as decoded messages, and re-run against a venue's own mapping: *did the publisher publish what the venue said?* |
+| `dz-recorder-health` | Whether a recorder is recording, as the process itself can tell |
 | `dz-recorder-rows` | The rows an archive derives into, and the derivation: pure, sink-agnostic, and exercised with no server |
 | `dz-recorder-clickhouse` | The column store as one `RowSink`, plus the checked-in DDL |
 | `dz-recorder-load` | The loader binary ([README](dz-recorder-load/README.md)) |
+| `dz-recorder-e2e` | The tests that use the real encoder, the real writer and the real reader end to end |
 
 Take what you need. A publisher wanting a byte-exact record of its own egress
 takes `-archive` alone; a test harness takes `-replay` alone; a host that only
@@ -197,12 +200,46 @@ cargo test -p dz-recorder-clickhouse      # batching, retry and the DDL, no serv
 cargo test -p dz-recorder-e2e --test archive_to_rows
 ```
 
+## Decoding an archive, which is not the record path decoding one
+
+`dz-recorder-relower` is where an archive becomes messages again. Nothing in the
+record path decodes, and that stays true: this reads objects that are already
+written, in a process that can be turned off, run late, or run twice.
+
+`WireCapture` has two outputs and the distinction between them is the crate's
+whole contract:
+
+- **`messages()`** is what a comparison compares — `Quote`, `Trade`,
+  `LevelUpdate`, `BookClear`. Four types, because those are the ones a venue
+  event produces and therefore the ones a re-lowering can produce a counterpart
+  for.
+- **`state_messages()`** is what a *book* needs — `InstrumentReset` and the
+  snapshot triple. Each is the publisher's own statement about its own book,
+  lowered from no upstream payload, so a re-lowering has nothing to compare them
+  against and excludes every one. A consumer building a book cannot do without
+  them: a complete cycle is the only anchor a delta book has, and a reset is the
+  only statement that what precedes it is not to be trusted.
+
+`Skipped` still counts the second group, because that report is about what the
+comparison did not compare and that has not changed. Provenance carries the
+channel instance — source address, `Channel ID`, destination port — because a
+sequence number is meaningless without it and two redundant publishers serving
+one channel are told apart by nothing else.
+
 ## Not here yet
 
-The conformance runner over replay, and the decoded per-message rows.
-`conformance_finding` exists as the table a runner fills, and nothing writes a
-row into it — an empty table is the honest statement that nothing judged the
-object, where a `pass` row would be a pass over a rule that never ran.
+The conformance runner over replay. `conformance_finding` exists as the table a
+runner fills, and nothing writes a row into it — an empty table is the honest
+statement that nothing judged the object, where a `pass` row would be a pass over
+a rule that never ran.
+
+The decoded per-message rows — `event`, `instrument` and `book_top`. Designed in
+[`2026-09-05-recorder-market-data-rows-design.md`](../../docs/superpowers/specs/2026-09-05-recorder-market-data-rows-design.md)
+and planned in
+[`2026-09-06-recorder-market-data-rows.md`](../../docs/superpowers/plans/2026-09-06-recorder-market-data-rows.md);
+the first two tasks — provenance carrying the channel instance, and the walk
+surfacing the four state messages — are in. The book, the era-scoped reference
+data and the tables are not.
 
 The cross-site pass that turns `unverifiable` into `publisher`. That verdict
 needs a datagram absent from *every* site with no recorder overflow anywhere,

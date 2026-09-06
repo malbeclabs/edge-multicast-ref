@@ -29,7 +29,9 @@ use dz_adapter_core::{
 use dz_edge_core::{
     ChannelSequence, DatagramBuilder, Feed, Heartbeat, PortRole, ResetCount, MAX_DATAGRAM_SIZE,
 };
-use dz_edge_mbp::{BookClear, LevelUpdate, SnapshotEnd};
+use dz_edge_mbp::{
+    BookClear, InstrumentReset, LevelUpdate, SnapshotBegin, SnapshotEnd, SnapshotLevel,
+};
 use dz_edge_refdata::{InstrumentDefinition, ManifestSummary, LEG_LEN, SYMBOL_LEN};
 use dz_edge_tob::{Quote, Trade};
 use dz_recorder_core::{RecordedDatagram, RecvTsKind, Source, SourceError};
@@ -68,6 +70,10 @@ pub enum Msg {
     /// The snapshot port role's own, for the case where a snapshot must be
     /// skipped rather than joined.
     SnapshotEnd(SnapshotEnd),
+    SnapshotBegin(SnapshotBegin),
+    SnapshotLevel(SnapshotLevel),
+    /// The publisher disowning its own book for one instrument.
+    Reset(InstrumentReset),
 }
 
 impl Msg {
@@ -81,6 +87,9 @@ impl Msg {
             Self::Manifest(message) => builder.push(&message),
             Self::Heartbeat(message) => builder.push(&message),
             Self::SnapshotEnd(message) => builder.push(&message),
+            Self::SnapshotBegin(message) => builder.push(&message),
+            Self::SnapshotLevel(message) => builder.push(&message),
+            Self::Reset(message) => builder.push(&message),
         };
         pushed.expect("the fixture builds datagrams the codec accepts");
     }

@@ -92,4 +92,6 @@ pub use finding::{Caveat, Finding, Outcome};
 pub use join::{JoinKey, TopOfBookTie};
 pub use refdata::{ArchivedInstrument, ArchivedRefdata, MissingDefinition};
 pub use relower::{relower, LoweredMessage, ParseFailure, ReLowered, ReLoweredProvenance, Refusal};
-pub use wire::{MessageBody, Skipped, WireCapture, WireMessage, WireProvenance};
+pub use wire::{
+    MessageBody, Skipped, StateBody, StateMessage, WireCapture, WireMessage, WireProvenance,
+};
