@@ -410,6 +410,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dz-recorder-events"
+version = "0.1.0"
+dependencies = [
+ "dz-edge-refdata",
+ "dz-recorder-core",
+]
+
+[[package]]
 name = "dz-recorder-health"
 version = "0.1.0"
 dependencies = [

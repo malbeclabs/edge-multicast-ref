@@ -1,0 +1,12 @@
+[package]
+name = "dz-recorder-events"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Market data rows derived from an archive: reference data scoped to an era, and the messages joined to it"
+
+[dependencies]
+dz-recorder-core = { path = "../dz-recorder-core" }
+dz-edge-refdata = { path = "../../codec/dz-edge-refdata" }

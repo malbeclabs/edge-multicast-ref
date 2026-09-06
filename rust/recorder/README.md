@@ -24,6 +24,7 @@ Plan: [`2026-08-30-edge-recorder-record-path.md`](../../docs/superpowers/plans/2
 | `dz-recorder-relower` | An archive read back as decoded messages, and re-run against a venue's own mapping: *did the publisher publish what the venue said?* |
 | `dz-recorder-health` | Whether a recorder is recording, as the process itself can tell |
 | `dz-recorder-rows` | The rows an archive derives into, and the derivation: pure, sink-agnostic, and exercised with no server |
+| `dz-recorder-events` | Market data rows: reference data scoped to an era, and the messages joined to it |
 | `dz-recorder-clickhouse` | The column store as one `RowSink`, plus the checked-in DDL |
 | `dz-recorder-load` | The loader binary ([README](dz-recorder-load/README.md)) |
 | `dz-recorder-e2e` | The tests that use the real encoder, the real writer and the real reader end to end |
@@ -237,9 +238,9 @@ The decoded per-message rows — `event`, `instrument` and `book_top`. Designed 
 [`2026-09-05-recorder-market-data-rows-design.md`](../../docs/superpowers/specs/2026-09-05-recorder-market-data-rows-design.md)
 and planned in
 [`2026-09-06-recorder-market-data-rows.md`](../../docs/superpowers/plans/2026-09-06-recorder-market-data-rows.md);
-the first two tasks — provenance carrying the channel instance, and the walk
-surfacing the four state messages — are in. The book, the era-scoped reference
-data and the tables are not.
+the first three tasks are in — provenance carrying the channel instance, the walk
+surfacing the four state messages, and `dz-recorder-events`' era-scoped reference
+data. The book, the derivation itself and the tables are not.
 
 The cross-site pass that turns `unverifiable` into `publisher`. That verdict
 needs a datagram absent from *every* site with no recorder overflow anywhere,
