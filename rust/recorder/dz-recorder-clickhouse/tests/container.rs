@@ -17,7 +17,8 @@ mod common;
 use common::{
     batch, batch_on_role, cross_site_fixture, midday_ns, now_ns, race_fixture,
     ABSENT_BUT_A_SITE_OVERFLOWED, ABSENT_EVERYWHERE, A_SITE_IS_UP_AND_SILENT, MISSING_FROM,
-    MISSING_TO, NOBODY_ELSE_HAS_LOADED, PRESENT_AT_ANOTHER_SITE, REPEATED,
+    MISSING_TO, NOBODY_ELSE_HAS_LOADED, ONLY_A_CO_LOCATED_RECORDER, PRESENT_AT_ANOTHER_SITE,
+    REPEATED,
 };
 use dz_edge_core::PortRole;
 use dz_recorder_clickhouse::{migrations, schema, ClickHouseConfig, ClickHouseSink};
@@ -154,14 +155,16 @@ impl Scratch {
             .to_owned()
     }
 
-    /// One gap row of *our* site, read back through the cross-site view.
+    /// One gap row of *our* vantage, read back through the cross-site view.
     ///
     /// The case is the `Channel ID`, so a failing assertion names the case
-    /// rather than a row number.
+    /// rather than a row number. The recorder is in the predicate as well as
+    /// the site, because two recorders at one site are two vantages and one of
+    /// the cases below puts a second one beside us.
     fn cross_site(&self, case: u8, columns: &str) -> String {
         self.scalar(&format!(
             "SELECT {columns} FROM {}.sequence_gap_cross_site \
-             WHERE site = 'one' AND channel_id = {case}",
+             WHERE site = 'one' AND recorder = 'recorder-one' AND channel_id = {case}",
             self.database
         ))
     }
@@ -768,7 +771,8 @@ fn absent_from_every_site_with_no_overflow_anywhere_is_the_publisher() {
     assert_eq!(
         scratch.scalar(&format!(
             "SELECT concat(verdict, ' ', ifNull(toString(seen_elsewhere), 'unknown')) \
-             FROM {}.sequence_gap FINAL WHERE site = 'one' AND channel_id = {ABSENT_EVERYWHERE}",
+             FROM {}.sequence_gap FINAL WHERE site = 'one' AND recorder = 'recorder-one' \
+             AND channel_id = {ABSENT_EVERYWHERE}",
             scratch.database
         )),
         "unverifiable unknown",
@@ -884,6 +888,41 @@ fn one_vantage_alone_leaves_the_answer_unknown() {
     );
 }
 
+/// A recorder in our own rack is not a second opinion about a publisher.
+///
+/// Presence and absence are not symmetric here, and this is the case that says
+/// so. A box beside ours holding the datagram would be conclusive that the
+/// publisher sent it, so presence counts from any vantage at all. That same box
+/// *missing* it shares our switch, our uplink and our load — one bad optic
+/// upstream of both takes both — so it is no evidence about a publisher, and it
+/// neither contributes an absence nor blocks one. The answer stays unknown
+/// because nobody else could speak, which is what is true.
+#[test]
+fn a_recorder_at_our_own_site_neither_contributes_an_absence_nor_blocks_one() {
+    let mut scratch = Scratch::open("cross_site_colocated");
+    let base = midday_ns();
+    load_cross_site(&mut scratch, base);
+
+    assert_eq!(
+        scratch.cross_site(
+            ONLY_A_CO_LOCATED_RECORDER,
+            "concat(ifNull(toString(seen_elsewhere), 'unknown'), ' ', verdict)"
+        ),
+        "unknown unverifiable",
+        "a rack's shared uplink must not be able to accuse the feed"
+    );
+    assert_eq!(
+        scratch.cross_site(
+            ONLY_A_CO_LOCATED_RECORDER,
+            "concat(toString(seqs_absent), '/', toString(seqs_expanded), ' ', \
+             toString(absent_sites), ' ', toString(blocked_vantages), ' ', \
+             toString(silent_vantages))"
+        ),
+        "0/3 0 0 0",
+        "it spoke, and none of what it said counted either way"
+    );
+}
+
 /// Loading a site twice is one absence and not two.
 ///
 /// A re-run after an analyser fix is a replace, and between the second load and
@@ -905,7 +944,7 @@ fn loading_a_site_twice_is_one_absence_and_not_two() {
     assert_eq!(
         scratch.scalar(&format!(
             "SELECT count() FROM {}.sequence_gap_cross_site WHERE site = 'one' \
-             AND channel_id = {ABSENT_EVERYWHERE}",
+             AND recorder = 'recorder-one' AND channel_id = {ABSENT_EVERYWHERE}",
             scratch.database
         )),
         "1",
