@@ -1,6 +1,24 @@
 [package]
 name = "dz-recorder-load"
-version.workspace = true
+# The loader's own version, and deliberately not `version.workspace = true`.
+#
+# This number is what an operator pins a downloaded binary against, so it has to
+# mean "the loader changed". Borrowed from the workspace it would move whenever
+# the recorder — or a codec crate, or the publisher — was bumped, and a version
+# that advances for a change to another binary is a version nobody can reason
+# about: an operator comparing two pins cannot tell whether the loader they are
+# running differs from the loader they were running.
+#
+# The alternative failure, two numbers a human keeps equal by hand, is not
+# bought here either: nothing requires this to equal the workspace version, so
+# there is no step to forget. What the two binaries must agree about is the
+# archive format, and that is stated in the object — the Section Header block
+# and the manifest beside it — where a loader can check it, rather than in a
+# number on the outside of a tarball that nothing enforces.
+#
+# `.github/workflows/loader-release.yml` reads this key and refuses to publish a
+# tag that disagrees with it.
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
