@@ -18,6 +18,11 @@
 //! the chain is still nothing: the datagram bytes handed to the writer are
 //! exactly the bytes replay produced.
 //!
+//! What stays here is the assertion. This gate reads the tool's raw exit code
+//! and its raw standard error, uninterpreted, because a gate that shared the
+//! runner's reading of an exit code could not catch the runner reading it
+//! wrongly.
+//!
 //! Behind the `conformance` feature, and it does not skip. If the feature is on
 //! and the tool is absent the test fails, because a conformance gate that
 //! quietly passes when it cannot run is worse than no gate: it reports a clean
@@ -26,11 +31,10 @@
 //! and every suite that validates a chain reaches it through the same helpers.
 
 use std::path::PathBuf;
-use std::process::Command;
 
-use super::{port_of, replay, Recorded, GROUP};
-use dz_edge_core::PortRole;
-use dz_recorder_conformance::write_group_pcaps;
+use super::{port_of, replay, Recorded, ALL_ROLES, GROUP};
+use dz_recorder_conformance::pcap::write_group_pcaps;
+use dz_recorder_conformance::tool::{ConformanceTool, Invocation, PortRoles};
 
 /// Where the tool is. Set by whatever runs the suite, because it is built from
 /// a sibling repository this one does not vendor.
@@ -92,24 +96,25 @@ pub fn conformance_of(archive: &Recorded, feed: &str) -> Verdict {
         "these fixtures publish to one group, and the tool judges one at a time"
     );
 
-    let out = Command::new(tool())
-        .arg("-feed")
-        .arg(feed)
-        .arg("-pcap")
-        .arg(&pcaps[0].path)
-        .arg("-group")
-        .arg(pcaps[0].group.to_string())
-        .arg("-mktdata-port")
-        .arg(port_of(PortRole::Mktdata).to_string())
-        .arg("-refdata-port")
-        .arg(port_of(PortRole::Refdata).to_string())
-        .arg("-snapshot-port")
-        .arg(port_of(PortRole::Snapshot).to_string())
-        .output()
+    let mut ports = PortRoles::none();
+    for role in ALL_ROLES {
+        ports = ports.with(*role, port_of(*role));
+    }
+
+    let run = ConformanceTool::new(tool(), dir.path())
+        .run(
+            &Invocation {
+                pcap: &pcaps[0].path,
+                group: pcaps[0].group,
+                feed,
+                ports,
+            },
+            None,
+        )
         .expect("the conformance tool runs");
 
     Verdict {
-        code: out.status.code().expect("the tool was not signalled"),
-        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        code: run.code.expect("the tool was not signalled"),
+        stderr: run.stderr,
     }
 }

@@ -1,0 +1,23 @@
+{
+  "report_format": 1,
+  "feed": "mbp",
+  "rules": [
+    {
+      "rule_id": "HEARTBEAT.CADENCE",
+      "outcome": "unverifiable",
+      "instance": { "source": "192.0.2.1", "channel_id": 3, "dst_port": 40000 }
+    },
+    {
+      "rule_id": "REFDATA.MANIFEST_CADENCE",
+      "outcome": "na"
+    },
+    {
+      "rule_id": "MBP.BOOK.CROSSED",
+      "outcome": "suspected",
+      "instance": { "source": "192.0.2.2", "channel_id": 3, "dst_port": 40000 },
+      "evidence": { "reset_count": 2, "first_seq": 900, "last_seq": 905 },
+      "detail": "one oracle cycle, awaiting confirmation",
+      "cycles_confirmed": 1
+    }
+  ]
+}
