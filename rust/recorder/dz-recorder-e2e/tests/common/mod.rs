@@ -103,6 +103,21 @@ pub fn archive_config(
     completed: &Path,
     roles_joined: Vec<RoleJoin>,
 ) -> ArchiveWriterConfig {
+    archive_config_for(staging, completed, roles_joined, TopOfBook::NAME)
+}
+
+/// The same, for a suite whose stream is not this crate's default feed.
+///
+/// The manifest's `feed` is the name the analysis tier switches derivation on
+/// by, so a depth stream published under the top-of-book feed's name would be
+/// asserting the switch against a label nothing in a deployment would ever
+/// carry.
+pub fn archive_config_for(
+    staging: &Path,
+    completed: &Path,
+    roles_joined: Vec<RoleJoin>,
+    feed: &str,
+) -> ArchiveWriterConfig {
     ArchiveWriterConfig {
         staging_dir: staging.to_path_buf(),
         completed_dir: completed.to_path_buf(),
@@ -113,7 +128,7 @@ pub fn archive_config(
         staging_max: 1 << 40,
         compression: Compression::Zstd { level: 1 },
         identity: identity(),
-        feed: TopOfBook::NAME.to_owned(),
+        feed: feed.to_owned(),
         roles_joined,
         // Socket mode's provenance and its drop scope, because socket mode is
         // the mode a publisher's own egress reaches through a socket: it really
@@ -172,12 +187,22 @@ impl Recorded {
 /// The datagrams go in through [`Sink::write`], which is the same call a drain
 /// thread makes, so nothing here is a shortcut past the write path.
 pub fn record(sent: &[OwnedDatagram], roles_joined: &[PortRole]) -> Recorded {
-    record_with(roles_joined, |writer| {
-        for dg in sent {
-            Sink::write(writer, &dg.as_recorded()).expect("the write path never fails the caller");
-        }
-        sent.len() as u64
-    })
+    record_feed(sent, roles_joined, TopOfBook::NAME)
+}
+
+/// The same, under a stated feed name.
+pub fn record_feed(sent: &[OwnedDatagram], roles_joined: &[PortRole], feed: &str) -> Recorded {
+    record_joined_as(
+        roles_joined.iter().copied().map(join).collect(),
+        feed,
+        |writer| {
+            for dg in sent {
+                Sink::write(writer, &dg.as_recorded())
+                    .expect("the write path never fails the caller");
+            }
+            sent.len() as u64
+        },
+    )
 }
 
 /// The same, for a caller whose datagrams arrive rather than exist: the socket
@@ -202,10 +227,18 @@ pub fn record_joined<F>(roles_joined: Vec<RoleJoin>, fill: F) -> Recorded
 where
     F: FnOnce(&mut ArchiveWriter) -> u64,
 {
+    record_joined_as(roles_joined, TopOfBook::NAME, fill)
+}
+
+/// The same again, under a stated feed name.
+pub fn record_joined_as<F>(roles_joined: Vec<RoleJoin>, feed: &str, fill: F) -> Recorded
+where
+    F: FnOnce(&mut ArchiveWriter) -> u64,
+{
     let dir = tempfile::tempdir().expect("a temporary directory");
     let staging = dir.path().join("staging");
     let completed = dir.path().join("completed");
-    let cfg = archive_config(&staging, &completed, roles_joined);
+    let cfg = archive_config_for(&staging, &completed, roles_joined, feed);
 
     let mut writer = ArchiveWriter::new(cfg, 0).expect("the archive opens");
     let offered = fill(&mut writer);
