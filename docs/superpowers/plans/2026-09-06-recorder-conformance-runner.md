@@ -54,14 +54,19 @@ Each of these changes the shape of more than one task.
 ### 1. The report format is the seam, and everything above it is built against fixtures
 
 The spec names two things `edge-feed-spec` must supply and this repository must
-not invent: a declared per-rule report, and a way to ask the tool which rule set
-it is. Today the interface is an exit code plus rule identifiers appearing in
-standard error, which `dz-recorder-e2e` matches by substring — enough for a gate,
-not enough for a table whose grain is one row per rule.
+not invent: a per-rule outcome that is **placed and ranged**, and a build that
+stamps the commit it was built from. Both are smaller than they read, because
+both interfaces already exist — the tool writes a declared `-json-report` whose
+rule entries carry `rule_id`, `severity` and counts, and `--version` prints
+`version+commit`. What is missing is a channel instance and an evidence range on
+each entry, and a build that sets those two fields rather than leaving them
+`dev+none`.
 
-**Parsing that text is refused**, for the reason the spec gives: a format nobody
-declared changes with a log line, and a `rule_id` recovered by a regular
-expression becomes an empty string on the day somebody improves the wording.
+The gate's interface — an exit code plus violations on standard error, which
+`dz-recorder-e2e` matches by substring — stays what it is, and **parsing that
+text is refused**: a format nobody declared changes with a log line, and a
+`rule_id` recovered by a regular expression becomes an empty string on the day
+somebody improves the wording.
 
 So the plan puts a trait at that boundary in task 2 and builds tasks 3 through 7
 against recorded fixtures of the report the spec specifies. Those tasks need no
@@ -326,7 +331,8 @@ made against.
 
 ## What is not in this plan
 
-- **The two upstream asks.** A declared per-rule report and a way to ask the tool
+- **The two upstream asks.** A placed and ranged per-rule outcome, and a build
+  that stamps its commit — see decision 1 for what already exists of each
   its version are changes to `edge-feed-spec`, proposed there. This plan is
   arranged so that everything except task 8 lands without them.
 - **Any conformance rule.** Not written, not encoded, not enumerated, not
