@@ -73,6 +73,11 @@ fn pairing_sql() -> &'static str {
     sql_of("006_recorder_book_top_pairing.sql")
 }
 
+/// The cross-site views, which are `007`.
+fn cross_site_sql() -> &'static str {
+    sql_of("007_recorder_cross_site.sql")
+}
+
 /// One `CREATE OR REPLACE VIEW recorder.<name>` statement, up to the next one.
 fn view_body(sql: &'static str, name: &str) -> &'static str {
     let needle = format!("CREATE OR REPLACE VIEW recorder.{name} AS");
@@ -789,6 +794,28 @@ fn every_migration_splits_into_whole_statements() {
         );
     }
 
+    // The seven views of the cross-site join, and nothing split across two.
+    let cross_site = migration("007_recorder_cross_site.sql").statements();
+    assert_eq!(cross_site.len(), 7, "seven views");
+    for view in [
+        "segment_overflow",
+        "gap_missing_seq",
+        "instance_vantage_day",
+        "gap_vantage_seq",
+        "gap_cross_site_evidence",
+        "gap_sent_elsewhere",
+        "sequence_gap_cross_site",
+    ] {
+        assert_eq!(
+            cross_site
+                .iter()
+                .filter(|s| s.contains(&format!("CREATE OR REPLACE VIEW recorder.{view} AS")))
+                .count(),
+            1,
+            "{view}"
+        );
+    }
+
     // The five tables and the database, and nothing split across two of them.
     let statements = migration("001_recorder_rows.sql").statements();
     assert_eq!(statements.len(), 6, "one database and five tables");
@@ -827,6 +854,139 @@ fn the_schema_names_no_venue_and_no_address_outside_the_documentation_ranges() {
             migration.name
         );
     }
+}
+
+/// The escalation reads a `NULL` as unknown and never as a `no`.
+///
+/// `seen_elsewhere` is three-valued and the whole column exists for the third
+/// value: `1` present elsewhere, `0` absent at every vantage that could speak,
+/// `NULL` nobody else could speak yet. A condition written `!= 1` promotes on
+/// every one of those nulls — a site that has not loaded, a site that
+/// overflowed, a site that went quiet — and each of those is a `publisher`
+/// finding drawn from an archive that did not look.
+#[test]
+fn the_cross_site_escalation_tests_absence_and_never_the_absence_of_presence() {
+    let view = view_body(cross_site_sql(), "sequence_gap_cross_site");
+    assert!(
+        view.contains("ifNull(seen_elsewhere = 0, 0)"),
+        "the promotion is on a known absence: {view}"
+    );
+    assert!(
+        !view.contains("seen_elsewhere != 1") && !view.contains("seen_elsewhere <> 1"),
+        "and never on the absence of a presence: {view}"
+    );
+    // And only ever upwards from `unverifiable`. The other three verdicts are
+    // exculpatory and decided from evidence one object holds; nothing found at
+    // another site makes a gap our own ring admitted anything other than ours.
+    assert!(
+        view.contains("if(g.verdict = 'unverifiable'"),
+        "the escalation runs from one verdict only: {view}"
+    );
+    assert_eq!(
+        view.matches("'publisher'").count(),
+        1,
+        "and writes the accusation in exactly one place"
+    );
+    assert!(
+        cross_site_sql().contains("promotes on ignorance"),
+        "why `!= 1` is wrong has to be written where the condition is"
+    );
+}
+
+/// Absence is decided on rows that have no TTL, and the base rows are read for
+/// one thing only.
+///
+/// The obvious join expands the missing sequence numbers and looks for them in
+/// `datagram` at the other sites. That answers *present* correctly and *absent*
+/// catastrophically: `datagram` is the one table `002` expires, so two days on
+/// every sequence number looks absent everywhere and every stale gap in the
+/// archive is promoted to `publisher` on a timer.
+#[test]
+fn the_cross_site_absence_is_read_from_the_rows_that_outlive_the_datagrams() {
+    let sql = cross_site_sql();
+    assert_eq!(
+        sql.matches("recorder.datagram").count(),
+        1,
+        "the base rows are read once, and it is not for the verdict"
+    );
+    assert!(
+        view_body(sql, "gap_sent_elsewhere").contains("recorder.datagram"),
+        "the one read is the send stamps, which only a site that received the \
+         datagram can supply"
+    );
+    for view in ["gap_vantage_seq", "gap_cross_site_evidence"] {
+        assert!(
+            !view_body(sql, view).contains("recorder.datagram"),
+            "{view} decides admissibility and must not read an expiring table"
+        );
+    }
+    assert!(
+        view_body(sql, "gap_vantage_seq").contains("recorder.segment_overflow")
+            && view_body(sql, "gap_vantage_seq").contains("recorder.gap_missing_seq"),
+        "it reads the coverage rows and the other sites' own gap rows, which \
+         within a covered range are exhaustive"
+    );
+}
+
+/// Overflow is read as a delta, and a missing predecessor is unknown rather
+/// than clean.
+///
+/// `capture_drop_total` is cumulative and never resets, so a host that dropped a
+/// burst an hour ago carries it for ever: a rule reading the total would find no
+/// site admissible on any host that ever overflowed, and one reading a
+/// defaulted predecessor as zero would admit exactly the absence a missing
+/// segment conceals.
+#[test]
+fn the_cross_site_overflow_test_is_a_delta_with_no_predecessor_left_unknown() {
+    let view = view_body(cross_site_sql(), "segment_overflow");
+    assert!(
+        view.contains("p.present = 1 AND p.segment_seq + 1 = c.segment_seq"),
+        "adjacency is checked and never assumed: {view}"
+    );
+    assert!(
+        view.contains("NULL) AS capture_drop_delta"),
+        "and a delta with no predecessor is null rather than zero: {view}"
+    );
+    assert!(
+        view.contains("if(isNull(capture_drop_delta), NULL, toUInt8(capture_drop_delta = 0))"),
+        "so unknown and clean stay two answers: {view}"
+    );
+    assert!(
+        cross_site_sql().contains("where an unaccounted burst hides"),
+        "why a hole is not a zero has to be stated where the null is written"
+    );
+}
+
+/// The evidence is counted in distinct vantages and distinct sequence numbers,
+/// never in rows.
+///
+/// A re-run after an analyser fix is a replace, and between the second load and
+/// the merge every row is in the tables twice. Counted as rows, one site's
+/// single absence is two — and since the verdict turns on how many sites agreed,
+/// that is the one arithmetic error here that promotes a finding on evidence
+/// nobody has. It is the same reason `006` counts `uniqExact(observation)`.
+#[test]
+fn the_cross_site_evidence_counts_distinct_vantages_and_never_rows() {
+    let view = view_body(cross_site_sql(), "gap_cross_site_evidence");
+    assert!(
+        view.contains("uniqExactIf(other_site, absence_admissible = 1)      AS absent_sites"),
+        "the sites that agreed are distinct sites: {view}"
+    );
+    assert!(
+        !view.contains("count()") && !view.contains("countIf(") && !view.contains("sum("),
+        "and nothing here counts rows: {view}"
+    );
+    assert!(
+        view_body(cross_site_sql(), "gap_missing_seq").contains("recorder.sequence_gap FINAL"),
+        "the collapse is applied once, beneath the expansion"
+    );
+    assert_eq!(
+        cross_site_sql()
+            .matches("recorder.sequence_gap FINAL")
+            .count(),
+        1,
+        "and written once, so nothing above pays for it twice"
+    );
 }
 
 fn migration(name: &str) -> Migration {

@@ -30,7 +30,10 @@
 //! - [`SequenceGap::seen_elsewhere`], [`SequenceGap::on_redundant_path`] — a
 //!   cross-site or cross-instance observation. Absent means the window that
 //!   would answer it was not complete, which is why the verdict beside it is
-//!   `unverifiable` rather than `publisher`.
+//!   `unverifiable` rather than `publisher`. Absent is *not* a no: a site that
+//!   has not loaded, a site that overflowed and a site that went quiet all read
+//!   as absent, and each of them read as a `0` would be a publisher finding
+//!   drawn from an archive that did not look.
 //! - [`SequenceGap::sent_from_ts`], [`SequenceGap::sent_to_ts`] — when the
 //!   missing datagrams were actually sent, which only a site that received them
 //!   can say. A site has no clock reading for a datagram it never received.
@@ -414,7 +417,13 @@ pub struct SequenceGap {
     /// The *delta* over the window, upstream of the capture point. Absent when
     /// the preceding segment was not available to subtract from.
     pub interface_drops: Option<u64>,
-    /// Present at another site. Absent until the cross-site join has run.
+    /// Present at another site, and three-valued.
+    ///
+    /// `Some(1)` present elsewhere, `Some(0)` absent at every vantage that
+    /// could speak, `None` nobody else could speak yet. A loader over one
+    /// object writes `None` and nothing else: the other two are the cross-site
+    /// join's to say, and a `None` a reader takes for a `0` is the failure this
+    /// column exists to prevent.
     pub seen_elsewhere: Option<u8>,
     /// Present in another instance on this channel and port. Absent when this
     /// channel and port carried no second source in this object, because then
