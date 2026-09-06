@@ -50,6 +50,7 @@ mod endpoint;
 mod identity;
 mod ledger;
 mod loader;
+mod market_data;
 mod metrics;
 
 use std::process::ExitCode;
@@ -253,6 +254,7 @@ fn drive<S: RowSink>(
             ledger,
             sink,
             metrics,
+            market_data: &config.market_data,
             pending: &mut pending,
         }
         .run_once(&stopping);
@@ -275,6 +277,15 @@ fn drive<S: RowSink>(
             pass.held,
             pass.oldest_unloaded_age_seconds
         );
+        // Only where a feed derives. A line reading "0 unloaded" on every host
+        // that turned nothing on is a line an operator learns to skip, and the
+        // one host that did turn something on is the host whose line matters.
+        if !config.market_data.is_empty() {
+            eprintln!(
+                "dz-recorder-load: market data: {} unloaded, oldest {}s behind",
+                pass.market_data_unloaded, pass.market_data_oldest_unloaded_age_seconds
+            );
+        }
 
         if args.mode == Mode::Once || stopping() {
             break;

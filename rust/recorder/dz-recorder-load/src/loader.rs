@@ -33,7 +33,9 @@ use dz_recorder_rows::{
     derive_object, DeriveError, ObjectId, RowSink, RowSinkError, SegmentTrailer, Written,
 };
 
+use crate::config::MarketDataFeed;
 use crate::ledger::{Entry, Ledger};
+use crate::market_data::{derivation_for, derive_market_data, extend_batch, refusals};
 use crate::metrics::{ErrorKind, LoaderMetrics, SkipReason};
 
 /// The suffix the recorder writes beside every object.
@@ -73,6 +75,16 @@ pub struct Pass {
     pub held: u64,
     /// How old the oldest unloaded object is, from its own receive window.
     pub oldest_unloaded_age_seconds: i64,
+    /// The same two numbers over the objects of feeds whose market data
+    /// derivation is on — a subset, and never the same number.
+    ///
+    /// Separate because the two tiers are behind on two different sets: every
+    /// object feeds the transport tables, and derivation is per feed and off by
+    /// default. On a host where no feed derives these stay at zero however far
+    /// behind the load is, which is the honest statement that no market data is
+    /// at risk.
+    pub market_data_unloaded: u64,
+    pub market_data_oldest_unloaded_age_seconds: i64,
     pub written: Written,
 }
 
@@ -85,6 +97,12 @@ pub struct Loader<'a, S: RowSink> {
     pub ledger: &'a mut Ledger,
     pub sink: &'a mut S,
     pub metrics: &'a LoaderMetrics,
+    /// The feeds whose objects also become market data rows.
+    ///
+    /// Empty is the default and empty is off: an object whose manifest names no
+    /// feed in here is derived into the transport tables exactly as before, and
+    /// `event`, `instrument` and `book_top` stay empty for it.
+    pub market_data: &'a [MarketDataFeed],
     /// Objects derived and accepted by the sink, waiting for the insert that
     /// carries their rows to be acknowledged.
     ///
@@ -173,7 +191,11 @@ impl<S: RowSink> Loader<'_, S> {
         // ledger *after* the pass rather than pruned during it, because an
         // object can land at any point: the sink coalesces, so the insert that
         // makes object one durable may be the one object four triggered.
-        let mut seen: Vec<(ObjectId, u64)> = Vec::new();
+        // The flag is whether this object's feed derives market data, read from
+        // the manifest that named the feed. Kept per object rather than looked
+        // up again afterwards, because the answer is a property of the object
+        // and the configuration is a slice somebody may one day reload.
+        let mut seen: Vec<(ObjectId, u64, bool)> = Vec::new();
         // Turns off at a stop signal or at the pass bound, while the scan below
         // carries on: see the comment in the loop.
         let mut loading = true;
@@ -209,7 +231,11 @@ impl<S: RowSink> Loader<'_, S> {
                 key: manifest.object_key.clone(),
                 sha256: manifest.sha256.clone(),
             };
-            seen.push((id.clone(), manifest.end_ns));
+            seen.push((
+                id.clone(),
+                manifest.end_ns,
+                derivation_for(self.market_data, &manifest.feed).is_some(),
+            ));
 
             // Derived already, and with the sink: an object waiting for the
             // insert that carries its rows has no ledger entry by design, so
@@ -312,16 +338,23 @@ impl<S: RowSink> Loader<'_, S> {
         // deliberately — rows in memory are not loaded, and a lag metric that
         // counted them as loaded would report a loader caught up while its last
         // insert sat unsent.
-        let unloaded: Vec<u64> = seen
+        let now_seconds = now_unix_seconds();
+        let unloaded: Vec<(u64, bool)> = seen
             .iter()
-            .filter(|(id, _)| !self.ledger.is_loaded(&id.key, &id.sha256))
-            .map(|(_, end_ns)| *end_ns)
+            .filter(|(id, _, _)| !self.ledger.is_loaded(&id.key, &id.sha256))
+            .map(|(_, end_ns, derives)| (*end_ns, *derives))
             .collect();
         pass.unloaded = unloaded.len() as u64;
-        pass.oldest_unloaded_age_seconds = unloaded
-            .iter()
-            .min()
-            .map_or(0, |end_ns| age_seconds(*end_ns, now_unix_seconds()));
+        pass.oldest_unloaded_age_seconds =
+            oldest_age(unloaded.iter().map(|(end, _)| *end), now_seconds);
+        // The derivation's own lag, over the objects it was turned on for.
+        // A separate number and not a filter a reader applies afterwards: on a
+        // host where no feed derives this is 0 while the load's is whatever it
+        // is, and that difference is the whole point of publishing two.
+        let derived_unloaded = unloaded.iter().filter(|(_, derives)| *derives);
+        pass.market_data_unloaded = derived_unloaded.clone().count() as u64;
+        pass.market_data_oldest_unloaded_age_seconds =
+            oldest_age(derived_unloaded.map(|(end, _)| *end), now_seconds);
 
         if let Err(e) = self.ledger.compact(&present) {
             // Not a failed load: the ledger is still correct, only longer than
@@ -334,7 +367,11 @@ impl<S: RowSink> Loader<'_, S> {
             pass.held as i64,
             pass.oldest_unloaded_age_seconds,
             self.ledger.entries() as i64,
-            now_unix_seconds(),
+            now_seconds,
+        );
+        self.metrics.market_data_pass_finished(
+            pass.market_data_unloaded as i64,
+            pass.market_data_oldest_unloaded_age_seconds,
         );
         (pass, errors)
     }
@@ -364,8 +401,24 @@ impl<S: RowSink> Loader<'_, S> {
         let trailer = self.trailer();
         // Before the sink is touched, which is what makes this failure one the
         // held rows survive.
-        let derived = derive_object(&candidate.object, manifest, trailer.as_ref())
+        let mut derived = derive_object(&candidate.object, manifest, trailer.as_ref())
             .map_err(|e| Failed::with_rows_intact(kind_of(&e), e.to_string()))?;
+
+        // And only then, and only for a feed somebody named. The digest has been
+        // verified and the archive has been walked to its end by the call above,
+        // so what this second walk adds is the codec and nothing else.
+        //
+        // A failure here fails the whole object, batch included. Keeping the
+        // datagram rows and dropping the market data would land an object whose
+        // `event` table is empty — which is what a feed nobody published on looks
+        // like, and it would look like that for ever, because the ledger entry
+        // would say the object is loaded.
+        if let Some(feed) = derivation_for(self.market_data, &manifest.feed) {
+            let events = derive_market_data(&candidate.object, manifest, feed)
+                .map_err(|e| Failed::with_rows_intact(ErrorKind::Replay, e.to_string()))?;
+            self.metrics.market_data_refused(&refusals(&events));
+            extend_batch(&mut derived.rows, events);
+        }
 
         let accepted = self
             .sink
@@ -603,6 +656,16 @@ fn age_seconds(end_ns: u64, now_unix_seconds: i64) -> i64 {
     (now_unix_seconds - end).max(0)
 }
 
+/// The age of the oldest window in a set, and `0` for an empty one.
+///
+/// Zero for empty is what makes "nothing is waiting" and "the oldest thing
+/// waiting ended a moment ago" the same reading, which is the reading a lag
+/// alert wants: both are a loader that is not behind.
+fn oldest_age(ends: impl Iterator<Item = u64>, now_unix_seconds: i64) -> i64 {
+    ends.min()
+        .map_or(0, |end_ns| age_seconds(end_ns, now_unix_seconds))
+}
+
 fn now_unix_seconds() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -724,6 +787,7 @@ mod pass_tests {
             ledger,
             sink: &mut sink,
             metrics,
+            market_data: &[],
             pending: &mut Vec::new(),
         }
         .run_once(&stop);
@@ -839,6 +903,7 @@ mod pass_tests {
             ledger: &mut ledger,
             sink: &mut sink,
             metrics: &metrics,
+            market_data: &[],
             pending: &mut Vec::new(),
         }
         .run_once(&stop);
@@ -921,6 +986,7 @@ mod pass_tests {
             ledger: &mut ledger,
             sink: &mut sink,
             metrics: &metrics,
+            market_data: &[],
             pending: &mut Vec::new(),
         }
         .run_once(&stop);
@@ -949,6 +1015,7 @@ mod pass_tests {
             ledger: &mut ledger,
             sink: &mut sink,
             metrics: &metrics,
+            market_data: &[],
             pending: &mut Vec::new(),
         }
         .run_once(&stop);
@@ -976,6 +1043,7 @@ mod pass_tests {
             ledger: &mut ledger,
             sink: &mut sink,
             metrics: &metrics,
+            market_data: &[],
             pending: &mut Vec::new(),
         }
         .run_once(&stop);
@@ -1001,6 +1069,7 @@ mod pass_tests {
             ledger: &mut ledger,
             sink: &mut sink,
             metrics: &metrics,
+            market_data: &[],
             pending: &mut Vec::new(),
         };
         let mut errors = Vec::new();
@@ -1136,6 +1205,7 @@ mod deferred_ledger_tests {
             ledger: &mut ledger,
             sink: &mut sink,
             metrics: &metrics,
+            market_data: &[],
             pending: &mut pending,
         }
         .run_once(&|| false);
@@ -1171,6 +1241,7 @@ mod deferred_ledger_tests {
                 ledger,
                 sink,
                 metrics: &metrics,
+                market_data: &[],
                 pending,
             }
             .run_once(&|| false)
@@ -1231,6 +1302,7 @@ mod deferred_ledger_tests {
             ledger: &mut ledger,
             sink: &mut sink,
             metrics: &metrics,
+            market_data: &[],
             pending: &mut pending,
         }
         .run_once(&|| false);
@@ -1253,6 +1325,7 @@ mod deferred_ledger_tests {
             ledger: &mut ledger,
             sink: &mut sink,
             metrics: &metrics,
+            market_data: &[],
             pending: &mut pending,
         }
         .run_once(&|| false);
@@ -1287,6 +1360,7 @@ mod deferred_ledger_tests {
                 ledger,
                 sink,
                 metrics: &metrics,
+                market_data: &[],
                 pending,
             }
             .run_once(&|| false)
@@ -1366,6 +1440,7 @@ mod deferred_ledger_tests {
             ledger: &mut ledger,
             sink: &mut sink,
             metrics: &metrics,
+            market_data: &[],
             pending: &mut pending,
         }
         .run_once(&|| false);
@@ -1414,6 +1489,7 @@ mod deferred_ledger_tests {
             ledger: &mut ledger,
             sink: &mut sink,
             metrics: &metrics,
+            market_data: &[],
             pending: &mut pending,
         }
         .run_once(&|| false);
@@ -1461,6 +1537,7 @@ mod deferred_ledger_tests {
             ledger: &mut ledger,
             sink: &mut sink,
             metrics: &metrics,
+            market_data: &[],
             pending: &mut pending,
         }
         .run_once(&|| false);
@@ -1509,6 +1586,7 @@ mod deferred_ledger_tests {
                 ledger,
                 sink,
                 metrics: &metrics,
+                market_data: &[],
                 pending,
             }
             .run_once(&|| false)
@@ -1572,6 +1650,7 @@ mod deferred_ledger_tests {
             ledger: &mut ledger,
             sink: &mut sink,
             metrics: &metrics,
+            market_data: &[],
             pending: &mut pending,
         }
         .run_once(&|| false);
@@ -1592,5 +1671,552 @@ mod deferred_ledger_tests {
             })
             .collect();
         assert_eq!(certain, vec![0, 1, 1], "only the first is unsettled");
+    }
+}
+
+/// The switch, over an archive the real encoder wrote.
+///
+/// **The assertion that matters here is the one about the datagram rows.** This
+/// tier is being added to a loader already in production shape, so the claim
+/// being tested is not that derivation works — the events crate's own suite says
+/// that — but that a loader with no `[[market_data]]` section writes byte for
+/// byte what it wrote before.
+#[cfg(test)]
+mod market_data_tests {
+    use std::net::SocketAddrV4;
+    use std::time::Duration;
+
+    use dz_edge_core::{
+        ChannelSequence, DatagramBuilder, Feed, PortRole, ResetCount, MAX_DATAGRAM_SIZE,
+    };
+    use dz_edge_mbp::{
+        LevelUpdate, MarketByPrice, SnapshotBegin, SnapshotEnd, SnapshotLevel, ACTION_NEW,
+        SIDE_ASK, SIDE_BID,
+    };
+    use dz_edge_refdata::{InstrumentDefinition, ASSET_CLASS_CRYPTO_SPOT, SYMBOL_LEN};
+    use dz_recorder_archive::rotate::{ArchiveWriter, ArchiveWriterConfig};
+    use dz_recorder_archive::writer::{LinkHeaders, RoleJoin};
+    use dz_recorder_archive::Compression;
+    use dz_recorder_core::{CaptureDropScope, RecorderIdentity, RecvTsKind, Sink};
+    use dz_recorder_replay::synthetic::{port_for, GROUP, PRIMARY_SOURCE};
+    use dz_recorder_replay::OwnedDatagram;
+    use dz_recorder_rows::{FileSink, Grain};
+    use tempfile::TempDir;
+
+    use crate::config::MarketDataFeed;
+
+    use super::*;
+
+    const SITE: &str = "site-1";
+    const RECORDER: &str = "recorder-1";
+    /// One `Channel ID` across all three port roles.
+    ///
+    /// Reference data is keyed on `(source address, Channel ID)` and never on
+    /// the channel instance, because definitions arrive on `refdata` and prices
+    /// on `mktdata`: a fixture that gave the roles different channels would file
+    /// the definitions where the prices could never find them, and every event
+    /// row would be refused for an unresolved instrument.
+    const CHANNEL: u8 = 3;
+    const INSTRUMENT: u32 = 4_242;
+    const SOURCE_ID: u16 = 2;
+    const SNAPSHOT_ID: u32 = 77;
+    /// Levels the cycle promises and carries. Two, so the count is not one.
+    const TOTAL_LEVELS: u32 = 2;
+    const FIRST_RECV_TS_NS: u64 = 1_700_000_000_123_456_789;
+
+    struct Archive {
+        _dir: TempDir,
+        completed: PathBuf,
+        rows: PathBuf,
+        ledger: PathBuf,
+    }
+
+    fn symbol() -> [u8; SYMBOL_LEN] {
+        let mut out = [b' '; SYMBOL_LEN];
+        out[..8].copy_from_slice(b"BTC-USDT");
+        out
+    }
+
+    fn definition() -> InstrumentDefinition {
+        InstrumentDefinition {
+            instrument_id: INSTRUMENT,
+            source_id: SOURCE_ID,
+            symbol: symbol(),
+            leg1: *b"BTC     ",
+            leg2: *b"USDT    ",
+            asset_class: ASSET_CLASS_CRYPTO_SPOT,
+            price_exponent: -2,
+            qty_exponent: -8,
+            market_model: 1,
+            tick_size: 1,
+            lot_size: 1,
+            contract_value: 1,
+            expiry_ns: 0,
+            settle_type: 1,
+            price_bound: 1,
+            manifest_seq: 1,
+        }
+    }
+
+    fn level(seq: u32, price_raw: i64, qty_raw: u64, side: u8) -> LevelUpdate {
+        LevelUpdate {
+            instrument_id: INSTRUMENT,
+            source_id: SOURCE_ID,
+            side,
+            action: ACTION_NEW,
+            per_instrument_seq: seq,
+            price_raw,
+            qty_raw,
+            timestamp_ns: 1_700_000_000_000_000_000 + u64::from(seq),
+            order_count: 3,
+            level_index: 0,
+            update_reason: 0,
+            level_flags: 0,
+        }
+    }
+
+    /// One datagram of this feed, framed by the real builder.
+    fn datagram(
+        sequence: ChannelSequence,
+        role: PortRole,
+        recv_ts_ns: u64,
+        push: impl FnOnce(&mut DatagramBuilder<MarketByPrice>),
+    ) -> OwnedDatagram {
+        let mut builder = DatagramBuilder::<MarketByPrice>::new(
+            sequence,
+            role,
+            u16::try_from(MAX_DATAGRAM_SIZE).expect("the mandated cap fits a u16"),
+        );
+        push(&mut builder);
+        let payload = builder
+            .finish(recv_ts_ns - 1_000)
+            .expect("a datagram with at least one message is emittable");
+        let wire_payload_len = u32::try_from(payload.len()).expect("a datagram is small");
+        OwnedDatagram {
+            payload,
+            src: SocketAddrV4::new(PRIMARY_SOURCE, 50_000),
+            dst: SocketAddrV4::new(GROUP, port_for(role)),
+            role,
+            recv_ts_ns,
+            recv_ts_kind: RecvTsKind::KernelSoftware,
+            drop_delta: 0,
+            ttl: Some(4),
+            link_headers: None,
+            wire_payload_len,
+        }
+    }
+
+    /// A depth feed's three roles, in arrival order.
+    ///
+    /// The definition arrives first because a statement is in force from the
+    /// instant it was received: a fixture that priced before it defined would be
+    /// asserting the fold's refusal rather than its output.
+    fn depth_stream() -> Vec<OwnedDatagram> {
+        let mut out = Vec::new();
+        let mut recv_ts = FIRST_RECV_TS_NS;
+        let mut stamp = || {
+            recv_ts += 7_654_321;
+            recv_ts
+        };
+
+        let refdata = ChannelSequence::new(CHANNEL, ResetCount::NEVER_RESET);
+        out.push(datagram(refdata, PortRole::Refdata, stamp(), |b| {
+            b.push(&definition())
+                .expect("refdata carries an instrument definition");
+        }));
+
+        let mut mktdata = ChannelSequence::new(CHANNEL, ResetCount::NEVER_RESET);
+        for (seq, price, qty, side) in [
+            (1u32, 9_999_500i64, 12_500u64, SIDE_BID),
+            (2, 10_000_500, 7_250, SIDE_ASK),
+            (3, 9_999_600, 11_000, SIDE_BID),
+        ] {
+            out.push(datagram(mktdata, PortRole::Mktdata, stamp(), |b| {
+                b.push(&level(seq, price, qty, side))
+                    .expect("mktdata carries a level update");
+            }));
+            mktdata.advance();
+        }
+
+        // One complete cycle: a begin, its levels, an end. Split across two
+        // datagrams, which is the ordinary case for a real book.
+        let mut snapshot = ChannelSequence::new(CHANNEL, ResetCount::NEVER_RESET);
+        out.push(datagram(snapshot, PortRole::Snapshot, stamp(), |b| {
+            b.push(&SnapshotBegin {
+                instrument_id: INSTRUMENT,
+                anchor_seq: 3,
+                total_levels: TOTAL_LEVELS,
+                snapshot_id: SNAPSHOT_ID,
+                last_instrument_seq: 3,
+                timestamp_ns: 1_700_000_000_000_000_300,
+                depth_bound: 50,
+            })
+            .expect("snapshot carries a begin");
+            b.push(&SnapshotLevel {
+                snapshot_id: SNAPSHOT_ID,
+                price_raw: 9_999_600,
+                qty_raw: 11_000,
+                order_count: 1,
+                side: SIDE_BID,
+                level_flags: 0,
+            })
+            .expect("and a level");
+        }));
+        snapshot.advance();
+        out.push(datagram(snapshot, PortRole::Snapshot, stamp(), |b| {
+            b.push(&SnapshotLevel {
+                snapshot_id: SNAPSHOT_ID,
+                price_raw: 10_000_500,
+                qty_raw: 7_250,
+                order_count: 1,
+                side: SIDE_ASK,
+                level_flags: 0,
+            })
+            .expect("the second level");
+            b.push(&SnapshotEnd {
+                instrument_id: INSTRUMENT,
+                anchor_seq: 3,
+                snapshot_id: SNAPSHOT_ID,
+            })
+            .expect("and the end that closes it");
+        }));
+
+        out
+    }
+
+    /// A completed directory with one object of `feed` in it.
+    fn archive(feed: &str) -> Archive {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let completed = dir.path().join("completed");
+        let cfg = ArchiveWriterConfig {
+            staging_dir: dir.path().join("staging"),
+            completed_dir: completed.clone(),
+            rotate_bytes: 1 << 30,
+            rotate_interval: Duration::from_secs(3600),
+            staging_max: 1 << 40,
+            compression: Compression::Zstd { level: 1 },
+            identity: RecorderIdentity {
+                site: SITE.to_owned(),
+                recorder: RECORDER.to_owned(),
+                env: "test".to_owned(),
+                build_version: "0.1.0".to_owned(),
+                build_commit: "0000000".to_owned(),
+                config_hash: "a".repeat(64),
+            },
+            feed: feed.to_owned(),
+            roles_joined: [PortRole::Mktdata, PortRole::Refdata, PortRole::Snapshot]
+                .into_iter()
+                .map(|role| RoleJoin::on(role, GROUP, port_for(role)))
+                .collect(),
+            link_headers: LinkHeaders::Synthesised,
+            capture_drop_scope: CaptureDropScope::PortRole,
+        };
+        let mut writer = ArchiveWriter::new(cfg, 0).expect("the archive opens");
+        for dg in depth_stream() {
+            Sink::write(&mut writer, &dg.as_recorded()).expect("the write path never fails");
+        }
+        assert_eq!(writer.datagrams_dropped_total(), 0);
+        writer
+            .rotate_at(FIRST_RECV_TS_NS + 1_000_000_000)
+            .expect("rotation")
+            .expect("a segment that held datagrams produces an object");
+        writer
+            .wait_completed()
+            .expect("the compressor publishes exactly one object")
+            .expect("publication");
+        Archive {
+            completed,
+            rows: dir.path().join("rows"),
+            ledger: dir.path().join("ledger.jsonl"),
+            _dir: dir,
+        }
+    }
+
+    fn derives(persist_snapshot_levels: bool) -> Vec<MarketDataFeed> {
+        vec![MarketDataFeed {
+            feed: MarketByPrice::NAME.to_owned(),
+            magic: MarketByPrice::MAGIC,
+            persist_snapshot_levels,
+        }]
+    }
+
+    /// One pass over `archive`, with `market_data` in force.
+    fn pass(archive: &Archive, market_data: &[MarketDataFeed], metrics: &LoaderMetrics) -> Pass {
+        let mut ledger = Ledger::open(&archive.ledger).expect("a new ledger");
+        let mut sink = FileSink::create(&archive.rows).expect("the directory is writable");
+        let stop = || false;
+        let (pass, errors) = Loader {
+            objects_dir: &archive.completed,
+            site: SITE,
+            recorder: RECORDER,
+            max_objects: 0,
+            ledger: &mut ledger,
+            sink: &mut sink,
+            metrics,
+            market_data,
+            pending: &mut Vec::new(),
+        }
+        .run_once(&stop);
+        sink.flush(now_unix_nanos()).expect("flush");
+        assert!(errors.is_empty(), "{errors:?}");
+        pass
+    }
+
+    fn rows(archive: &Archive, grain: Grain) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(FileSink::path_in(&archive.rows, grain))
+            .map(|text| {
+                text.lines()
+                    .filter(|l| !l.is_empty())
+                    .map(|l| serde_json::from_str(l).expect("one JSON object per line"))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn message_types(archive: &Archive) -> Vec<String> {
+        rows(archive, Grain::Event)
+            .iter()
+            .map(|row| row["message_type"].as_str().unwrap_or_default().to_owned())
+            .collect()
+    }
+
+    /// **The switch off writes no market data row and changes no datagram row.**
+    ///
+    /// The second half is the one that matters. Everything about this tier is
+    /// additive to a loader that is already in production shape, so what has to
+    /// be true is that a host which turned nothing on gets the file it got
+    /// before — not similar rows, the same bytes.
+    #[test]
+    fn the_switch_off_writes_no_market_data_and_leaves_the_datagram_rows_alone() {
+        let off = archive(MarketByPrice::NAME);
+        let on = archive(MarketByPrice::NAME);
+        let metrics = LoaderMetrics::new(SITE, RECORDER);
+
+        let without = pass(&off, &[], &metrics);
+        let with = pass(&on, &derives(false), &metrics);
+
+        for grain in [Grain::Event, Grain::Instrument, Grain::BookTop] {
+            assert!(
+                rows(&off, grain).is_empty(),
+                "{grain} rows were written for a feed nobody named"
+            );
+            assert!(
+                !rows(&on, grain).is_empty(),
+                "{grain} rows are what the switch turns on"
+            );
+        }
+
+        // And the transport tier is untouched: same rows, same order, same
+        // values, in all four of its tables.
+        for grain in [
+            Grain::Datagram,
+            Grain::Era,
+            Grain::SegmentCoverage,
+            Grain::SequenceGap,
+        ] {
+            assert_eq!(
+                rows(&off, grain),
+                rows(&on, grain),
+                "{grain} differs with the switch on"
+            );
+        }
+        assert_eq!(without.loaded, 1);
+        assert_eq!(with.loaded, 1);
+        assert_eq!(
+            without.written.rows(Grain::Datagram),
+            with.written.rows(Grain::Datagram)
+        );
+        assert_eq!(without.written.rows(Grain::Event), 0);
+        assert!(with.written.rows(Grain::Event) > 0);
+    }
+
+    /// A feed the configuration does not name derives nothing, even when
+    /// another one does.
+    ///
+    /// The switch is per feed, so a host carrying two feeds into one completed
+    /// directory turns derivation on for one of them and not for the other —
+    /// which is the whole reason it is not a global flag.
+    #[test]
+    fn a_feed_the_configuration_does_not_name_derives_nothing() {
+        let other = archive("top-of-book");
+        let metrics = LoaderMetrics::new(SITE, RECORDER);
+        let pass = pass(&other, &derives(false), &metrics);
+
+        assert_eq!(pass.loaded, 1, "it still loads");
+        assert!(!rows(&other, Grain::Datagram).is_empty());
+        assert!(
+            rows(&other, Grain::Event).is_empty(),
+            "the entry names market-by-price and this object says top-of-book"
+        );
+    }
+
+    /// The level switch decides rows and never state.
+    ///
+    /// A cycle is always visible as a row, because begin and end are always
+    /// written and the end carries `levels_seen` against the begin's
+    /// `total_levels`. Persisting the levels is what makes each one its own row,
+    /// and the book anchors either way — which is what makes the count on the
+    /// end row trustworthy in the case where the levels are not there to count.
+    #[test]
+    fn levels_feed_the_book_always_and_become_rows_only_when_asked() {
+        let consumed = archive(MarketByPrice::NAME);
+        let persisted = archive(MarketByPrice::NAME);
+        let metrics = LoaderMetrics::new(SITE, RECORDER);
+        pass(&consumed, &derives(false), &metrics);
+        pass(&persisted, &derives(true), &metrics);
+
+        assert_eq!(
+            message_types(&consumed)
+                .iter()
+                .filter(|t| *t == "SnapshotLevel")
+                .count(),
+            0,
+            "levels are consumed, not persisted: {:?}",
+            message_types(&consumed)
+        );
+        assert_eq!(
+            message_types(&persisted)
+                .iter()
+                .filter(|t| *t == "SnapshotLevel")
+                .count(),
+            TOTAL_LEVELS as usize
+        );
+
+        // The cycle is a row either way, and the end says how many levels were
+        // actually seen — which is what makes "was the snapshot complete"
+        // answerable from the rows that are there.
+        for archive in [&consumed, &persisted] {
+            let events = rows(archive, Grain::Event);
+            let begin = events
+                .iter()
+                .find(|row| row["message_type"] == "SnapshotBegin")
+                .expect("a begin row");
+            let end = events
+                .iter()
+                .find(|row| row["message_type"] == "SnapshotEnd")
+                .expect("an end row");
+            assert_eq!(begin["total_levels"], TOTAL_LEVELS);
+            assert_eq!(end["levels_seen"], TOTAL_LEVELS);
+        }
+
+        // And the book anchored, which is the thing consuming every level is
+        // for: a level skipped before the book saw it leaves a cycle that never
+        // completes and nothing that ever anchors.
+        let anchored = rows(&consumed, Grain::BookTop);
+        assert!(
+            anchored.iter().any(|row| row["from_anchor"] == 1),
+            "no top came from applying the snapshot: {anchored:?}"
+        );
+        assert_eq!(
+            rows(&consumed, Grain::BookTop).len(),
+            rows(&persisted, Grain::BookTop).len(),
+            "the switch is about rows, not about state"
+        );
+    }
+
+    /// The rows carry the recorder that observed the bytes, not the loader.
+    #[test]
+    fn every_market_data_row_is_signed_by_the_manifests_recorder() {
+        let archive = archive(MarketByPrice::NAME);
+        let metrics = LoaderMetrics::new(SITE, RECORDER);
+        pass(&archive, &derives(false), &metrics);
+
+        for row in rows(&archive, Grain::Event) {
+            assert_eq!(row["site"], SITE);
+            assert_eq!(row["recorder"], RECORDER);
+            assert_eq!(row["feed"], MarketByPrice::NAME);
+            assert_eq!(row["instrument_id"], INSTRUMENT);
+            assert_eq!(row["source_id"], SOURCE_ID);
+        }
+        for row in rows(&archive, Grain::BookTop) {
+            // `site` names a recorder, and this is what names an observation of
+            // one book among several.
+            assert_eq!(row["observation"], format!("{SITE}/{RECORDER}"));
+        }
+    }
+
+    /// Two lags, and the derivation's counts only the objects it is on for.
+    ///
+    /// With nothing named, the load has an object waiting and the derivation has
+    /// none — because that object was never going to produce a row about an
+    /// instrument, and a page about it would be a page about nothing.
+    #[test]
+    fn the_derivations_backlog_is_only_the_objects_it_derives() {
+        let archive = archive(MarketByPrice::NAME);
+        let metrics = LoaderMetrics::new(SITE, RECORDER);
+
+        // A pass that loads nothing, so both backlogs are non-trivial: the
+        // ledger is thrown away and the sink never posts.
+        let mut ledger = Ledger::open(&archive.ledger).expect("a new ledger");
+        let mut sink = FileSink::create(&archive.rows).expect("the directory is writable");
+        let stopped = || true;
+        let (off, _) = Loader {
+            objects_dir: &archive.completed,
+            site: SITE,
+            recorder: RECORDER,
+            max_objects: 0,
+            ledger: &mut ledger,
+            sink: &mut sink,
+            metrics: &metrics,
+            market_data: &[],
+            pending: &mut Vec::new(),
+        }
+        .run_once(&stopped);
+        assert_eq!(off.unloaded, 1, "the load is behind");
+        assert_eq!(
+            off.market_data_unloaded, 0,
+            "and no market data is at risk, because no feed derives"
+        );
+        assert_eq!(off.market_data_oldest_unloaded_age_seconds, 0);
+
+        let mut ledger = Ledger::open(&archive.ledger).expect("a new ledger");
+        let (on, _) = Loader {
+            objects_dir: &archive.completed,
+            site: SITE,
+            recorder: RECORDER,
+            max_objects: 0,
+            ledger: &mut ledger,
+            sink: &mut sink,
+            metrics: &metrics,
+            market_data: &derives(false),
+            pending: &mut Vec::new(),
+        }
+        .run_once(&stopped);
+        assert_eq!(on.unloaded, 1);
+        assert_eq!(on.market_data_unloaded, 1, "now it is");
+        assert!(
+            on.market_data_oldest_unloaded_age_seconds > 0,
+            "an object recorded in 2023 is not zero seconds behind"
+        );
+        assert!(metrics
+            .render()
+            .contains("dz_loader_market_data_unloaded_objects"));
+    }
+
+    /// Nothing resolved is not the same as nothing published.
+    ///
+    /// A `Magic` that matches no datagram in the object is the shape a typo
+    /// takes, and it writes an empty `event` table — which reads exactly like a
+    /// feed nobody published on. The refusal counters are what tell the two
+    /// apart, and here the walk skips every datagram as foreign so even those
+    /// stay at zero: the row counts are the only evidence, and they are counted
+    /// per grain already.
+    #[test]
+    fn a_magic_that_matches_nothing_derives_nothing_rather_than_guessing() {
+        let archive = archive(MarketByPrice::NAME);
+        let metrics = LoaderMetrics::new(SITE, RECORDER);
+        let wrong = vec![MarketDataFeed {
+            feed: MarketByPrice::NAME.to_owned(),
+            magic: 0x445A,
+            persist_snapshot_levels: false,
+        }];
+        let pass = pass(&archive, &wrong, &metrics);
+
+        assert_eq!(pass.loaded, 1, "the object still loads");
+        assert!(!rows(&archive, Grain::Datagram).is_empty());
+        assert!(
+            rows(&archive, Grain::Event).is_empty(),
+            "a datagram at the wrong Magic is refused, never parsed at the wrong layout"
+        );
     }
 }
