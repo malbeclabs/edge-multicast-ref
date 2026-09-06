@@ -17,8 +17,8 @@ mod common;
 use common::{
     batch, batch_on_role, cross_site_fixture, midday_ns, now_ns, race_fixture,
     ABSENT_BUT_A_SITE_OVERFLOWED, ABSENT_EVERYWHERE, A_SITE_IS_UP_AND_SILENT, MISSING_FROM,
-    MISSING_TO, NOBODY_ELSE_HAS_LOADED, ONLY_A_CO_LOCATED_RECORDER, PRESENT_AT_ANOTHER_SITE,
-    REPEATED,
+    MISSING_TO, NOBODY_ELSE_HAS_LOADED, ONLY_A_CO_LOCATED_RECORDER, OUR_OWN_SCOPE_CANNOT_SUBTRACT,
+    PRESENT_AT_ANOTHER_SITE, REPEATED,
 };
 use dz_edge_core::PortRole;
 use dz_recorder_clickhouse::{migrations, schema, ClickHouseConfig, ClickHouseSink};
@@ -920,6 +920,45 @@ fn a_recorder_at_our_own_site_neither_contributes_an_absence_nor_blocks_one() {
         ),
         "0/3 0 0 0",
         "it spoke, and none of what it said counted either way"
+    );
+}
+
+/// Known absent everywhere, and still not a finding, because we cannot say what
+/// we lost ourselves.
+///
+/// The escalation is a conjunction and not a rename of `seen_elsewhere`, and
+/// this is the case that separates the two: the other site covered the range,
+/// missed the same three and overflowed nothing, so the answer is *known* — and
+/// our own archive declared capture-handle scope with a ring that admitted
+/// something over the window, where the count belongs to the handle and to no
+/// port role in particular. Our residue is therefore not a number at all, the
+/// three could be ours, and the specification's own table says never
+/// `publisher` at that scope whatever anybody else saw.
+#[test]
+fn a_scope_that_cannot_subtract_stops_a_verdict_the_other_sites_would_have_given() {
+    let mut scratch = Scratch::open("cross_site_our_scope");
+    let base = midday_ns();
+    load_cross_site(&mut scratch, base);
+
+    assert_eq!(
+        scratch.cross_site(
+            OUR_OWN_SCOPE_CANNOT_SUBTRACT,
+            "concat(ifNull(toString(seen_elsewhere), 'unknown'), ' ', verdict, ' ', \
+             ifNull(toString(unexplained_count), 'unknown'))"
+        ),
+        "0 unverifiable unknown",
+        "the cross-site answer is known and the verdict is still not a finding"
+    );
+    // And the evidence is exactly the publisher case's, which is what says the
+    // difference is our own row and nothing about the other sites.
+    assert_eq!(
+        scratch.cross_site(
+            OUR_OWN_SCOPE_CANNOT_SUBTRACT,
+            "concat(toString(seqs_absent), '/', toString(seqs_expanded), ' ', \
+             toString(absent_sites), ' ', toString(blocked_vantages), ' ', \
+             toString(silent_vantages))"
+        ),
+        "3/3 1 0 0"
     );
 }
 

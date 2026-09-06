@@ -134,6 +134,13 @@
 -- only a different `site` may contribute an absence. Two vantages of one
 -- instance are two observations, and the recorder is never folded.
 --
+-- It does not *block* one either, and that half is as deliberate. A vantage that
+-- missed the datagram and cannot rule out its own overflow blocks the verdict —
+-- it is a site that would otherwise have been evidence — but a recorder in our
+-- own rack was never going to be evidence, so counting it there would leave
+-- every deployment running two recorders at a site on `unverifiable` for ever,
+-- on the word of a box that agrees with us by construction.
+--
 --
 -- WHAT THIS STILL CANNOT SEE, WRITTEN DOWN RATHER THAN DISCOVERED
 --

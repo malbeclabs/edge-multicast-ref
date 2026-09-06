@@ -379,6 +379,7 @@ pub const ABSENT_BUT_A_SITE_OVERFLOWED: u8 = 3;
 pub const A_SITE_IS_UP_AND_SILENT: u8 = 4;
 pub const NOBODY_ELSE_HAS_LOADED: u8 = 5;
 pub const ONLY_A_CO_LOCATED_RECORDER: u8 = 6;
+pub const OUR_OWN_SCOPE_CANNOT_SUBTRACT: u8 = 7;
 
 /// The sequence numbers our site is missing, in every case.
 pub const MISSING_FROM: u64 = 103;
@@ -519,7 +520,16 @@ pub fn gap(
         sent_from_ts: None,
         sent_to_ts: None,
         admitted_recorder: 0,
-        admitted_scope: DropScope::PortRole,
+        // The scope follows the residue rather than being a third parameter,
+        // because the two are one fact: a null residue is what the loader
+        // writes when the archive declared capture-handle scope and the handle
+        // admitted something, since a ring counts frames dropped before
+        // demultiplexing and the number then belongs to no port role at all.
+        admitted_scope: if unexplained.is_some() {
+            DropScope::PortRole
+        } else {
+            DropScope::CaptureHandle
+        },
         unexplained_count: unexplained,
         interface_drops: Some(0),
         seen_elsewhere: None,
@@ -585,6 +595,11 @@ pub fn datagram(site: &str, channel: u8, sequence_number: u64, recv_ts: u64) -> 
 /// * `ONLY_A_CO_LOCATED_RECORDER` — a second recorder at our own site covered
 ///   the range and missed the same three, admissibly in every respect but the
 ///   one that matters. It is not another site.
+/// * `OUR_OWN_SCOPE_CANNOT_SUBTRACT` — `two` is absent and admissible, so the
+///   answer is *known*; but our own ring overflowed at capture-handle scope, so
+///   we cannot say how much of our own gap is ours. Known absent elsewhere and
+///   still not a finding, which is the case that says the escalation is a
+///   conjunction and not a rename of `seen_elsewhere`.
 #[must_use]
 pub fn cross_site_fixture(base: u64) -> Vec<RowBatch> {
     let ours = base - 30 * SECOND_NS;
@@ -596,6 +611,7 @@ pub fn cross_site_fixture(base: u64) -> Vec<RowBatch> {
         A_SITE_IS_UP_AND_SILENT,
         NOBODY_ELSE_HAS_LOADED,
         ONLY_A_CO_LOCATED_RECORDER,
+        OUR_OWN_SCOPE_CANNOT_SUBTRACT,
     ];
     let mut batches = Vec::new();
     let mut object = |site: &str, segment: Segment, batch: RowBatch| {
@@ -621,17 +637,36 @@ pub fn cross_site_fixture(base: u64) -> Vec<RowBatch> {
             ..RowBatch::default()
         },
     );
+    // Our own window segment admitted five drops in the one case that is about
+    // our own ring, and nothing in the others. The cross-site views never read
+    // our own overflow — it is our *residue* they read — but a fixture whose
+    // manifest contradicted its own gap row would describe a recorder that
+    // cannot exist.
+    let our_overflowing_window = Segment::window(base, 5);
     object(
         "one",
         window,
         RowBatch {
             segment_coverage: every_case
                 .iter()
-                .map(|case| coverage("one", *case, window))
+                .map(|case| {
+                    if *case == OUR_OWN_SCOPE_CANNOT_SUBTRACT {
+                        coverage("one", *case, our_overflowing_window)
+                    } else {
+                        coverage("one", *case, window)
+                    }
+                })
                 .collect(),
             sequence_gap: every_case
                 .iter()
-                .map(|case| gap("one", *case, base, ours, Some(3)))
+                .map(|case| {
+                    let residue = if *case == OUR_OWN_SCOPE_CANNOT_SUBTRACT {
+                        None
+                    } else {
+                        Some(3)
+                    };
+                    gap("one", *case, base, ours, residue)
+                })
                 .collect(),
             ..RowBatch::default()
         },
@@ -654,6 +689,7 @@ pub fn cross_site_fixture(base: u64) -> Vec<RowBatch> {
                 ABSENT_EVERYWHERE,
                 ABSENT_BUT_A_SITE_OVERFLOWED,
                 A_SITE_IS_UP_AND_SILENT,
+                OUR_OWN_SCOPE_CANNOT_SUBTRACT,
             ]
             .iter()
             .map(|case| coverage("two", *case, their_preceding))
@@ -673,10 +709,12 @@ pub fn cross_site_fixture(base: u64) -> Vec<RowBatch> {
                     ABSENT_BUT_A_SITE_OVERFLOWED,
                     their_overflowing_window,
                 ),
+                coverage("two", OUR_OWN_SCOPE_CANNOT_SUBTRACT, their_window),
             ],
             sequence_gap: vec![
                 gap("two", ABSENT_EVERYWHERE, base, theirs, Some(3)),
                 gap("two", ABSENT_BUT_A_SITE_OVERFLOWED, base, theirs, Some(3)),
+                gap("two", OUR_OWN_SCOPE_CANNOT_SUBTRACT, base, theirs, Some(3)),
             ],
             // The datagrams `two` received and we did not, a millisecond apart,
             // which is what makes the first case not a publisher gap.
