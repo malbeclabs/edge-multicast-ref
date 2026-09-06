@@ -557,23 +557,36 @@ noted here so that it is taken deliberately rather than discovered.
 **Two of these are asks on the specification's repository, and they are the
 reason this document cannot end with an implementation note.**
 
-- **A per-rule outcome from the rule set.** Today the interface is an exit code —
-  0 clean, 1 violation, 2 could not run — plus violations named on standard error,
-  where `dz-recorder-e2e` finds `MBP.DELTA.ABSOLUTE_APPLY` and
-  `MBP.SNAP.GROUP_STRUCTURE` by substring. That is enough for a gate and not
-  enough for a table whose grain is one row per rule. **Parsing that text is
-  refused**, and not on grounds of taste: a format nobody declared changes with a
-  log line, and a `rule_id` recovered by a regular expression becomes an empty
-  string silently, on exactly the day somebody improves the wording. What is
-  needed is a declared machine-readable report, one entry per rule evaluated,
-  each naming the rule, the outcome, the channel instance it applies to, and the
-  sequence range its evidence lies in. The instance and the range are not
-  decoration: the first is what places the row, and the second is what the
-  absence downgrade tests against the object's own holes.
-- **A way to ask the tool which rule set it is.** The version has to come from the
-  binary that produced the verdicts, because a version taken from configuration is
-  a claim rather than a fact, and this table's entire value is that its provenance
-  is a fact.
+- **A per-rule outcome placed and ranged.** The tool already writes a declared
+  report — `-json-report` emits `{version, commit, strict, read_error, rules}`,
+  and each rule entry carries `rule_id`, `severity` and a map of `counts`. So the
+  ask is a **widening of a file that exists**, not a new interface, and it is
+  smaller than it first appeared. What the counts cannot supply is where a
+  finding goes and what it is about: an entry needs **the channel instance it
+  applies to** — source address, `Channel ID` and destination port — and **the
+  sequence range its evidence lies in**. The first is what places the row, since
+  a sequence number means nothing under a coarser key and one capture can hold
+  several instances. The second is what the absence downgrade tests against the
+  object's own holes; without it every absence rule is unusable here, because a
+  finding we cannot range is a finding we cannot decline to stand behind.
+
+  What is **not** asked for is a parse of standard error. The exit code and the
+  named violations there are enough for a gate — `dz-recorder-e2e` matches
+  `MBP.DELTA.ABSOLUTE_APPLY` and `MBP.SNAP.GROUP_STRUCTURE` by substring — and
+  they are not enough for a table whose grain is one row per rule. Parsing them
+  is refused on the grounds this document gives elsewhere: a format nobody
+  declared changes with a log line, and a `rule_id` recovered by a regular
+  expression becomes an empty string silently.
+- **A build that stamps the commit it was built from.** The version query also
+  exists: `--version` prints `version+commit`, one line, and the report carries
+  the same two fields. Both are set at build time through
+  `-ldflags -X main.version -X main.commit`, and a build that omits them answers
+  `dev+none` — which resolves to a value rather than to a commit, and a value is
+  what this table must not store. So what is needed upstream is not a query but
+  that the build producing the consumed binary stamps its pin, and this
+  repository's own CI job must do the same for the binary it builds from a
+  checkout. A verdict stamped `dev+none` says its provenance is unknown while
+  looking exactly like a verdict whose provenance is known.
 
 The rest is work in this repository:
 
