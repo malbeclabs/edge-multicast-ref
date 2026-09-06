@@ -159,7 +159,14 @@ fn a_change_in_batching_does_not_move_the_key() {
     singly.extend(pack::<TopOfBook>(&quotes(), PortRole::Mktdata, 100));
 
     let mut batched = pack::<TopOfBook>(&defs(), PortRole::Refdata, 1);
-    batched.extend(pack_batched::<TopOfBook>(&quotes(), PortRole::Mktdata, 100));
+    let burst = quotes();
+    let burst_len = burst.len();
+    batched.extend(pack_batched::<TopOfBook>(
+        &burst,
+        PortRole::Mktdata,
+        100,
+        burst_len,
+    ));
 
     assert_eq!(
         batched.len(),

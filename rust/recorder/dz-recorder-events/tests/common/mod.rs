@@ -9,7 +9,7 @@
 use std::net::{Ipv4Addr, SocketAddrV4};
 
 use dz_edge_core::{
-    ChannelSequence, DatagramBuilder, Feed, PortRole, ResetCount, MAX_DATAGRAM_SIZE,
+    ChannelSequence, DatagramBuilder, Feed, Heartbeat, PortRole, ResetCount, MAX_DATAGRAM_SIZE,
 };
 use dz_edge_mbp::{
     BookClear, InstrumentReset, LevelUpdate, SnapshotBegin, SnapshotEnd, SnapshotLevel,
@@ -57,6 +57,10 @@ pub enum Msg {
     SnapshotBegin(SnapshotBegin),
     SnapshotLevel(SnapshotLevel),
     SnapshotEnd(SnapshotEnd),
+    /// Carried for what it is *not*: a heartbeat is a datagram the transport
+    /// tier writes a row for and this tier writes nothing for, so a fixture
+    /// that leaves it out states a ratio no real feed has.
+    Heartbeat(Heartbeat),
 }
 
 impl Msg {
@@ -72,6 +76,7 @@ impl Msg {
             Self::SnapshotBegin(m) => builder.push(&m),
             Self::SnapshotLevel(m) => builder.push(&m),
             Self::SnapshotEnd(m) => builder.push(&m),
+            Self::Heartbeat(m) => builder.push(&m),
         };
         pushed.expect("the fixture builds datagrams the codec accepts");
     }
@@ -116,7 +121,7 @@ pub fn pack_from<F: Feed>(
     out
 }
 
-/// Pack every message into **one** datagram, from a stated sequence number.
+/// Pack messages `per_datagram` at a time, from a stated sequence number.
 ///
 /// Batching is the publisher's decision and nobody else's: it moves the
 /// sequence number a message arrives under, its `message_index`, and the
@@ -124,26 +129,37 @@ pub fn pack_from<F: Feed>(
 /// statement about the market, so a fixture that says the same things two ways
 /// is what holds anything derived from the state to being a function of the
 /// state.
+///
+/// It is also the burst, which [`pack`] cannot express: a publisher under load
+/// puts an update run into one datagram, and that is the case a
+/// messages-per-datagram ratio is taken to find out about. A fixture that only
+/// ever packed one message per datagram would measure a ratio of one and prove
+/// nothing about the packing.
 #[must_use]
 pub fn pack_batched<F: Feed>(
     messages: &[Msg],
     role: PortRole,
     first_sequence: u64,
+    per_datagram: usize,
 ) -> Vec<OwnedDatagram> {
-    let sequence = ChannelSequence::resume(CHANNEL_ID, ResetCount(0), first_sequence);
-    let mut builder = DatagramBuilder::<F>::new(
-        sequence,
-        role,
-        u16::try_from(MAX_DATAGRAM_SIZE).expect("the mandated cap fits a u16"),
-    );
-    for message in messages {
-        message.push(&mut builder);
+    assert!(per_datagram > 0, "a datagram carries at least one message");
+    let mut sequence = ChannelSequence::resume(CHANNEL_ID, ResetCount(0), first_sequence);
+    let mut out = Vec::new();
+    for (batch_index, batch) in messages.chunks(per_datagram).enumerate() {
+        let mut builder = DatagramBuilder::<F>::new(
+            sequence,
+            role,
+            u16::try_from(MAX_DATAGRAM_SIZE).expect("the mandated cap fits a u16"),
+        );
+        for message in batch {
+            message.push(&mut builder);
+        }
+        let send_ts = 1_700_000_000_000_000_000 + (first_sequence + batch_index as u64) * 1_000_037;
+        let payload = builder.finish(send_ts).expect("the batch fits a datagram");
+        out.push(recorded(payload, role, PRIMARY_SOURCE, send_ts));
+        sequence.advance();
     }
-    let send_ts = 1_700_000_000_000_000_000 + first_sequence * 1_000_037;
-    let payload = builder
-        .finish(send_ts)
-        .expect("the fixture packs at least one message");
-    vec![recorded(payload, role, PRIMARY_SOURCE, send_ts)]
+    out
 }
 
 /// One datagram as a recorder wrote it down.

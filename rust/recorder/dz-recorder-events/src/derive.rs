@@ -310,7 +310,12 @@ impl Decoded<'_> {
     }
 }
 
-fn instance_of(provenance: &WireProvenance) -> ChannelInstance {
+/// The channel instance a message arrived on.
+///
+/// `pub(crate)` because the sizing measurement keys on the same thing this fold
+/// does: two readings of one archive that disagreed about which instance a
+/// datagram belonged to would be two answers about one feed.
+pub(crate) fn instance_of(provenance: &WireProvenance) -> ChannelInstance {
     ChannelInstance::new(
         *provenance.src.ip(),
         provenance.channel_id,
