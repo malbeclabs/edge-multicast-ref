@@ -110,22 +110,57 @@ pub fn pack_from<F: Feed>(
         // by arrival time.
         let send_ts = 1_700_000_000_000_000_000 + (first_sequence + index as u64) * 1_000_037;
         let payload = builder.finish(send_ts).expect("one message is a datagram");
-        let payload_len = payload.len();
-        out.push(OwnedDatagram {
-            payload,
-            src: SocketAddrV4::new(source, SOURCE_PORT),
-            dst: SocketAddrV4::new(GROUP, port_for(role)),
-            role,
-            recv_ts_ns: send_ts + 42_000,
-            recv_ts_kind: RecvTsKind::KernelSoftware,
-            drop_delta: 0,
-            ttl: Some(8),
-            link_headers: None,
-            wire_payload_len: u32::try_from(payload_len).expect("under the cap"),
-        });
+        out.push(recorded(payload, role, source, send_ts));
         sequence.advance();
     }
     out
+}
+
+/// Pack every message into **one** datagram, from a stated sequence number.
+///
+/// Batching is the publisher's decision and nobody else's: it moves the
+/// sequence number a message arrives under, its `message_index`, and the
+/// arrival stamp it shares with everything packed beside it. None of that is a
+/// statement about the market, so a fixture that says the same things two ways
+/// is what holds anything derived from the state to being a function of the
+/// state.
+#[must_use]
+pub fn pack_batched<F: Feed>(
+    messages: &[Msg],
+    role: PortRole,
+    first_sequence: u64,
+) -> Vec<OwnedDatagram> {
+    let sequence = ChannelSequence::resume(CHANNEL_ID, ResetCount(0), first_sequence);
+    let mut builder = DatagramBuilder::<F>::new(
+        sequence,
+        role,
+        u16::try_from(MAX_DATAGRAM_SIZE).expect("the mandated cap fits a u16"),
+    );
+    for message in messages {
+        message.push(&mut builder);
+    }
+    let send_ts = 1_700_000_000_000_000_000 + first_sequence * 1_000_037;
+    let payload = builder
+        .finish(send_ts)
+        .expect("the fixture packs at least one message");
+    vec![recorded(payload, role, PRIMARY_SOURCE, send_ts)]
+}
+
+/// One datagram as a recorder wrote it down.
+fn recorded(payload: Vec<u8>, role: PortRole, source: Ipv4Addr, send_ts: u64) -> OwnedDatagram {
+    let payload_len = payload.len();
+    OwnedDatagram {
+        payload,
+        src: SocketAddrV4::new(source, SOURCE_PORT),
+        dst: SocketAddrV4::new(GROUP, port_for(role)),
+        role,
+        recv_ts_ns: send_ts + 42_000,
+        recv_ts_kind: RecvTsKind::KernelSoftware,
+        drop_delta: 0,
+        ttl: Some(8),
+        link_headers: None,
+        wire_payload_len: u32::try_from(payload_len).expect("under the cap"),
+    }
 }
 
 /// An archive of datagrams, read back as a [`Source`].

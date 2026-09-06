@@ -277,6 +277,12 @@ pub fn top(observation: &str, site: &str, base: u64, offset_ms: u64, state_key: 
 
 /// The era each observation point opened, so the ordinal has one to number
 /// within.
+///
+/// The two points open theirs at two instants, which is not decoration: an era's
+/// stored identity is its anchor and an anchor is a *receive* stamp, so two
+/// recorders of one feed have two of them and two transports share none at all.
+/// A fixture that gave both points one anchor would let a pairing grouped on the
+/// era pass, and that pairing finds nothing in the field.
 pub fn opening(site: &str, base: u64) -> Era {
     Era {
         site: site.to_owned(),
@@ -323,7 +329,10 @@ pub fn race_fixture(base: u64) -> RowBatch {
     RowBatch {
         object_key: "object".to_owned(),
         object_sha256: "sha".to_owned(),
-        era: vec![opening("one", base), opening("two", base)],
+        era: vec![
+            opening("one", base - 5_000_000),
+            opening("two", base - 3_000_000),
+        ],
         book_top,
         ..RowBatch::default()
     }

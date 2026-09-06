@@ -68,6 +68,22 @@ fn market_data_sql() -> &'static str {
     sql_of("005_recorder_market_data.sql")
 }
 
+/// The pairing views, which are `006`.
+fn pairing_sql() -> &'static str {
+    sql_of("006_recorder_book_top_pairing.sql")
+}
+
+/// One `CREATE OR REPLACE VIEW recorder.<name>` statement, up to the next one.
+fn view_body(sql: &'static str, name: &str) -> &'static str {
+    let needle = format!("CREATE OR REPLACE VIEW recorder.{name} AS");
+    let start = sql
+        .find(&needle)
+        .unwrap_or_else(|| panic!("the schema declares no view `{name}`"));
+    let body = &sql[start..];
+    body.find("\nCREATE OR REPLACE VIEW")
+        .map_or(body, |end| &body[..end])
+}
+
 fn sql_of(name: &str) -> &'static str {
     migrations()
         .into_iter()
@@ -575,6 +591,160 @@ fn resolving_a_datagram_to_its_era_needs_no_window_and_no_final() {
     );
 }
 
+/// The pairing numbers the occurrences, and never joins on the key alone.
+///
+/// `state_key` is not unique and must not be — a book returning to a previous
+/// state produces the same key again — so a join on the key is a cross product
+/// on any instrument that oscillates, and `ASOF` is the obvious repair and the
+/// wrong one: it selects the nearest right-hand row independently for each
+/// left-hand row, with no notion of consuming a match, so several occurrences at
+/// one observation point all pair with the same occurrence at the other. The
+/// lead times that come out are plausible, biased, and counted from one arrival
+/// several times, which is why the reasoning is required to be in the file and
+/// not only in a review.
+#[test]
+fn the_race_numbers_the_occurrences_rather_than_pairing_by_proximity() {
+    let sql = pairing_sql();
+    assert!(
+        sql.contains("row_number() OVER ("),
+        "the ordinal is a window function over the rows and nothing else"
+    );
+    assert!(
+        sql.contains("PARTITION BY b.observation, b.channel_id, b.instrument_id,")
+            && sql.contains("e.anchor_ts, b.state_key"),
+        "the ordinal is per observation point, per instrument, per era, per state"
+    );
+    assert!(
+        sql.contains("ORDER BY b.recv_ts"),
+        "and it is ordered by the arrival, which is what a race compares"
+    );
+
+    let race = view_body(sql, "book_top_race");
+    assert!(
+        !race.contains("ASOF") && !race.contains("JOIN"),
+        "the pairing is an aggregate over the ordinal, not a join: {race}"
+    );
+    assert!(
+        sql.contains("no notion of consuming a match"),
+        "why `ASOF` is wrong here belongs beside the thing that does not use it"
+    );
+}
+
+/// A snapshot-derived row is excluded *before* the numbering.
+///
+/// A snapshot anchors a book and never times one: the runtime pulls it on its
+/// own cadence and the archive records when it was published rather than when it
+/// was asked for, so its arrival stamp measures the publisher's scheduler. The
+/// filter is in the same statement as the window, where `WHERE` runs first and
+/// an anchor row consumes no ordinal. Filtered afterwards it would leave every
+/// later occurrence at that observation point numbered one too high — which does
+/// not read as a mistake downstream, it reads as a lead time.
+#[test]
+fn an_anchor_row_takes_no_ordinal_because_it_is_filtered_before_the_window() {
+    let occurrence = view_body(pairing_sql(), "book_top_occurrence");
+    assert!(
+        occurrence.contains("row_number() OVER (")
+            && occurrence.contains("WHERE b.from_anchor = 0"),
+        "the exclusion and the numbering are one statement: {occurrence}"
+    );
+    assert!(
+        !view_body(pairing_sql(), "book_top_race").contains("from_anchor"),
+        "so nothing below has to remember to repeat it"
+    );
+    assert!(
+        pairing_sql().contains("measures the publisher's scheduler"),
+        "why a snapshot is not an observation has to be stated where it is excluded"
+    );
+}
+
+/// The era is in the numbering and not in the pairing, and that asymmetry is the
+/// point.
+///
+/// An `Instrument ID` is unique within an era, so one point's own ordinals must
+/// not run across a boundary. But an era's stored identity is its anchor, and an
+/// anchor is a *receive* stamp — one observation point's observation of that
+/// era. Two recorders of one feed open their eras at two instants and two
+/// transports share no sequence space at all, so a pairing grouped on any era
+/// column pairs nothing across observation points and reports a total outage as
+/// a clean feed.
+#[test]
+fn the_pairing_groups_on_the_state_and_the_ordinal_and_on_no_era() {
+    let sql = pairing_sql();
+    assert!(
+        sql.contains("GROUP BY channel_id, instrument_id, state_key, occurrence"),
+        "the pairing key is the state and its ordinal"
+    );
+    let race = view_body(sql, "book_top_race");
+    assert!(
+        !race.contains("GROUP BY channel_id, instrument_id, state_key, occurrence, era")
+            && !race.contains("era_anchor_ts,\n"),
+        "an era column in the grouping would pair nothing at all: {race}"
+    );
+    assert!(
+        sql.contains("uniqExact(observation)"),
+        "and distinct observation points are counted, not rows, because an \
+         ordinal restarts at each era"
+    );
+}
+
+/// An occurrence with no counterpart is a row, and its lead time is null.
+///
+/// The fact worth seeing: it usually means one observation point missed a state
+/// the other saw. A join would have dropped it, and a zero lead would have
+/// entered every average over the column as evidence that the two paths tied.
+#[test]
+fn an_unpaired_occurrence_is_visible_and_carries_no_lead_time() {
+    let race = view_body(pairing_sql(), "book_top_race");
+    assert!(
+        race.contains("if(uniqExact(observation) > 1,"),
+        "the lead exists only where there were two points to measure between"
+    );
+    assert!(
+        race.contains("NULL)") && race.contains("AS lead_ms"),
+        "and is null rather than zero otherwise: {race}"
+    );
+    assert!(
+        race.contains("groupUniqArray(observation)"),
+        "the row names the points that saw the state, so an unpaired one is \
+         readable rather than merely present"
+    );
+    assert!(
+        pairing_sql().contains("bound is a property of the two paths"),
+        "the |Δt| bound is the caller's, and why has to be written down"
+    );
+}
+
+/// The replacing collapse is applied once, below everything that numbers.
+///
+/// A re-run after a fix is a replace, so between the second load and the merge
+/// one arrival is in the table twice. Numbered without the collapse the
+/// duplicate becomes a second occurrence, and it does not merely inflate a
+/// count: the surplus occurrences pair with each other and the last one at each
+/// point pairs with nothing, so a re-load reports states both points saw as
+/// states one of them missed.
+#[test]
+fn the_collapse_is_applied_once_beneath_the_numbering() {
+    let sql = pairing_sql();
+    assert_eq!(
+        sql.matches("recorder.book_top FINAL").count(),
+        1,
+        "the collapse is written once"
+    );
+    assert!(
+        view_body(sql, "book_top_occurrence").contains("FROM recorder.book_top_settled AS b"),
+        "and the numbering reads the collapsed view rather than the table"
+    );
+    assert!(
+        !view_body(sql, "book_top_race").contains("FINAL"),
+        "nothing above it pays for the collapse a second time"
+    );
+    assert!(
+        sql.contains("manufacture evidence of loss"),
+        "what a duplicate would do here is worse than a double count, and the \
+         file has to say so"
+    );
+}
+
 /// Every file splits into statements a server takes one at a time, and no
 /// statement is a fragment of prose.
 #[test]
@@ -603,6 +773,20 @@ fn every_migration_splits_into_whole_statements() {
                 migration.name
             );
         }
+    }
+
+    // The three views of the pairing, and nothing split across two of them.
+    let pairing = migration("006_recorder_book_top_pairing.sql").statements();
+    assert_eq!(pairing.len(), 3, "three views");
+    for view in ["book_top_settled", "book_top_occurrence", "book_top_race"] {
+        assert_eq!(
+            pairing
+                .iter()
+                .filter(|s| s.contains(&format!("CREATE OR REPLACE VIEW recorder.{view} AS")))
+                .count(),
+            1,
+            "{view}"
+        );
     }
 
     // The five tables and the database, and nothing split across two of them.
