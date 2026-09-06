@@ -64,8 +64,18 @@ Without them the refusal at startup is correct and confusing.
 | `dz-recorder-core`, `-capture`, `-archive`, `-replay`, `-loss`, `-health` | a recorder built out of libraries |
 | `dz-recorder-relower` | offline re-lowering, for the analysis tier |
 
-`dz-recorder-e2e` is a test harness and `dz-recorder` is a binary. Neither is a
-dependency anybody outside this repository wants.
+`dz-recorder-e2e` is a test harness, and `dz-recorder` and `dz-recorder-load` are
+binaries. None of them is a dependency anybody outside this repository wants.
+
+**The one-version rule is about the crates a consumer's graph resolves, and a
+binary is not one of them.** Nothing resolves two copies of a binary, so the trap
+above does not reach one, and nothing here requires a binary's number to move
+when the libraries move. There is a reason not to move it: a binary's version is
+a pin for whoever deploys it, and the question that pin answers is *did this
+binary change*, which a number travelling with an unrelated release cannot
+answer. So a binary released on its own stream states its own `version` in its
+own manifest, and its tag names which binary it is rather than sharing the `v*`
+tags a consumer pins.
 
 ## What a version promises
 
@@ -83,7 +93,9 @@ for everybody else, and those are called out.
 
 1. Land what the release contains, on `main`, green.
 2. Bump `version` in `[workspace.package]` in [`rust/Cargo.toml`](rust/Cargo.toml).
-   One version for every crate: see the two-copies trap above.
+   One version for every crate a consumer resolves: see the two-copies trap
+   above. A binary that carries its own version is bumped in its own manifest,
+   on its own release stream, and does not wait for this one.
 3. `cargo test --all`, `cargo test --all --release`,
    `cargo clippy --all-targets --all-features -- -D warnings`,
    `cargo fmt --all --check`, `./scripts/check-public-repo-rules.sh`. CI runs all
