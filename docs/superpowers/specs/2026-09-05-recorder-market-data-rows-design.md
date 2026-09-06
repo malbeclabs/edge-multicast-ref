@@ -181,6 +181,7 @@ CREATE TABLE IF NOT EXISTS recorder.event (
     snapshot_id        Nullable(UInt32),
     anchor_seq         Nullable(UInt64),
     total_levels       Nullable(UInt32),
+    levels_seen        Nullable(UInt32),
     depth_bound        Nullable(UInt32),
 
     object_key         String,
@@ -214,7 +215,7 @@ never has to infer it from the deriver.** Anything not listed for a type is
 | `InstrumentReset` | `instrument_id`, `timestamp_ns` — **no `Source ID`** | `reason_raw` ← `reason`, `anchor_seq` ← **`new_anchor_seq`**, `upstream_ts` ← `timestamp_ns`, `source_id` ‡ |
 | `SnapshotBegin` | `instrument_id`, `timestamp_ns` — **no `Source ID`** | `snapshot_id`, `anchor_seq`, `total_levels`, `depth_bound`, `per_instrument_seq` ← `last_instrument_seq`, `upstream_ts` ← `timestamp_ns`, `source_id` ‡ |
 | `SnapshotLevel` | **`snapshot_id` only** — no instrument, no timestamp, no level index | `side_raw` ← `side`, `flags_raw` ← `level_flags`, `price_raw`, `qty_raw`, `order_count`†; `instrument_id`, `upstream_ts` and `level_index` ⁂ |
-| `SnapshotEnd` | `instrument_id`, `anchor_seq`, `snapshot_id` | `snapshot_id`, `anchor_seq` |
+| `SnapshotEnd` | `instrument_id`, `anchor_seq`, `snapshot_id` | `snapshot_id`, `anchor_seq`, `levels_seen` ⁑ |
 
 **† The wire's absent-value sentinel is `NULL`, not a number.** `order_count` and
 `level_index` carry `U16_UNAVAILABLE` (`0xFFFF`) when the venue exposes neither,
@@ -227,6 +228,17 @@ translates the sentinel to `NULL` on both columns.
 reference data** for that `(channel_id, instrument_id)`, never invented and never
 carried over from an adjacent message of another type. The same rule supplies
 `price_exp` and `qty_exp`, which no market data message carries at all.
+
+**⁑ `levels_seen` is counted by the deriver, not read from the wire**, and it
+exists because persisting every `SnapshotLevel` is optional. A cycle is
+`total_levels` messages per instrument per cycle, on the runtime's cadence rather
+than the market's, so it is the largest row count in the system attached to the
+port role with the least analytical value per row. **The book consumes every
+level; `event` persists them behind a per-feed switch that is off by default**,
+while `SnapshotBegin` and `SnapshotEnd` are always written. `total_levels` on the
+begin row against `levels_seen` on the end row then answers *was the snapshot
+complete* from rows alone — which is the question persisting the levels would
+otherwise have been the only way to ask.
 
 **⁂ A `SnapshotLevel` inherits its instrument and its time from the
 `SnapshotBegin` that `snapshot_id` ties it to**, which is precisely why

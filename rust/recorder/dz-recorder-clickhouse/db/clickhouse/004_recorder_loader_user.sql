@@ -95,3 +95,10 @@ GRANT INSERT ON recorder.era TO dz_loader;
 GRANT INSERT ON recorder.segment_coverage TO dz_loader;
 GRANT INSERT ON recorder.sequence_gap TO dz_loader;
 GRANT INSERT ON recorder.conformance_finding TO dz_loader;
+-- The market data tables of `005`. Granted here rather than in `005` itself for
+-- the reason this whole file is separate: a grant needs access-management rights
+-- and a password in hand, and a loader that could grant itself privileges is the
+-- thing this arrangement exists to prevent.
+GRANT INSERT ON recorder.event TO dz_loader;
+GRANT INSERT ON recorder.instrument TO dz_loader;
+GRANT INSERT ON recorder.book_top TO dz_loader;

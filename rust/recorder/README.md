@@ -12,6 +12,81 @@ recorder hosts can be built on it without any of them re-deciding what to keep.
 Design: [`2026-08-28-edge-recorder-crates-design.md`](../../docs/superpowers/specs/2026-08-28-edge-recorder-crates-design.md).
 Plan: [`2026-08-30-edge-recorder-record-path.md`](../../docs/superpowers/plans/2026-08-30-edge-recorder-record-path.md).
 
+## What runs, on one host
+
+Two processes, and the directory between them is the whole interface. Nothing
+else connects them: no socket, no queue, no shared memory.
+
+```
+  the wire                    RECORD PATH  (dz-recorder)                        the disk
+┌────────────┐   UDP    ┌───────────────┐         ┌───────────────┐      ┌────────────────────┐
+│ publishers │─────────▶│ -capture      │────────▶│ -archive      │─────▶│ staging/  →        │
+│ (2 paths,  │ multicast│ joins, stamps,│ datagram│ rotates, zstd,│ .zst │ completed/         │
+│  n feeds)  │          │ counts drops  │         │ hashes, mani- │ +json│  <feed>/<seg>.zst  │
+└────────────┘          │               │         │ fests, evicts │      │  <feed>/<seg>.json │
+                        └───────────────┘         └───────────────┘      └─────────┬──────────┘
+                         decodes NOTHING                                           │ read-only
+                         ─────────────────                                         │
+                         A datagram a decoder                                      ▼
+                         would reject is a          ANALYSIS PATH  (dz-recorder-load)
+                         datagram the archive     ┌──────────────────────────────────────────┐
+                         never holds — and the    │ -replay   reads objects back as a Source │
+                         evidence needed to       │ -loss     which sequence values are gone │
+                         diagnose that bug is     │ -relower  bytes → messages + state msgs  │
+                         what the bug destroyed.  │ -events   era-scoped reference data      │
+                                                  │ -rows     the row model, sink-agnostic   │
+                                                  └────────────────────┬─────────────────────┘
+                                                                       │ JSONEachRow
+                                                                       ▼
+                                                            ┌────────────────────┐
+                                                            │ -clickhouse (sink) │
+                                                            └────────────────────┘
+```
+
+**The separation is the design, not an implementation detail.** The record path
+must never block, so it never decodes, never joins and never waits on a server.
+The analysis path can be turned off, run late, or run twice over the same object,
+because it only reads objects that are already written and its writes are
+idempotent on `(object key, sha256)`.
+
+## What is analysed, and where the sites meet
+
+Each host loads its own objects. Nothing ships an object anywhere — the rows are
+tens of bytes against a datagram's twelve hundred, so the small thing travels and
+the bytes stay local. That is also what makes a cross-site question answerable
+**before** a shipper exists: the join is over rows.
+
+```
+   site A                        site B                        site C
+┌────────────┐               ┌────────────┐               ┌────────────┐
+│ recorder   │               │ recorder   │               │ recorder   │
+│  objects ──┼──┐            │  objects ──┼──┐            │  objects ──┼──┐
+│  (local,   │  │ loader     │  (local,   │  │ loader     │  (local,   │  │ loader
+│   evicted) │  │            │   evicted) │  │            │   evicted) │  │
+└────────────┘  │            └────────────┘  │            └────────────┘  │
+                └──────────────────┬─────────┴───────────────────┬────────┘
+                                   ▼                             ▼
+                        ┌──────────────────────────────────────────────┐
+                        │                 column store                 │
+                        ├──────────────────────────────────────────────┤
+                        │ TRANSPORT   datagram · era · segment_coverage│
+                        │            sequence_gap · conformance_finding│
+                        │ MARKET DATA event · instrument · book_top    │
+                        └──────────────────────────────────────────────┘
+                                   │
+                                   ├─ was a datagram lost, and whose was it?
+                                   │    absent at ONE site  → that site's path
+                                   │    absent at EVERY site → before they diverge
+                                   ├─ what was the book, and can it be believed?
+                                   │    book_certain = 0 says the honest answer
+                                   └─ who saw this state first?
+                                        one state_key at two `observation` values
+```
+
+**A gap at one site is a path; a gap at every site is upstream of all of them.**
+One vantage point cannot tell those apart, which is why a `sequence_gap` row lands
+`unverifiable` until the join has run — and why the second recorder exists at all.
+
 ## The crates
 
 | Crate | What it is for |
@@ -172,10 +247,20 @@ sudo ./target/debug/deps/afpacket_mode-<hash> live:: --test-threads=1
 
 ## The rows, and where the loader runs
 
-The analysis tier turns an archive into rows a dashboard can ask —
-`datagram`, `era`, `segment_coverage`, `sequence_gap` and
-`conformance_finding` — without the record path learning what a column store
-is. The derivation reads a `Source`, so it is exercised in CI against the
+The analysis tier turns an archive into rows a dashboard can ask, without the
+record path learning what a column store is. Two families, in one database and
+joined on one identity block:
+
+| | Tables | Grain | Migration |
+|---|---|---|---|
+| **Transport** | `datagram`, `era`, `segment_coverage`, `sequence_gap`, `conformance_finding` | the channel instance — what arrived, and what did not | `001` |
+| **Market data** | `event`, `instrument`, `book_top` | the instrument — what the messages said | `005` |
+
+The split is a key, not a category. A sequence number is meaningful only under
+`(source address, Channel ID, destination port)` and a price is meaningful only
+under an instrument within an era, and one sort key cannot be both — which is
+why these are tables beside each other rather than columns added to the first
+five. The derivation reads a `Source`, so it is exercised in CI against the
 synthetic publisher with no socket, no privileges and no server, and the column
 store is one implementation of a `RowSink` behind a trait.
 
@@ -234,13 +319,20 @@ runner fills, and nothing writes a row into it — an empty table is the honest
 statement that nothing judged the object, where a `pass` row would be a pass over
 a rule that never ran.
 
-The decoded per-message rows — `event`, `instrument` and `book_top`. Designed in
+**The market data derivation, though its tables now exist.** Designed in
 [`2026-09-05-recorder-market-data-rows-design.md`](../../docs/superpowers/specs/2026-09-05-recorder-market-data-rows-design.md)
 and planned in
-[`2026-09-06-recorder-market-data-rows.md`](../../docs/superpowers/plans/2026-09-06-recorder-market-data-rows.md);
-the first three tasks are in — provenance carrying the channel instance, the walk
-surfacing the four state messages, and `dz-recorder-events`' era-scoped reference
-data. The book, the derivation itself and the tables are not.
+[`2026-09-06-recorder-market-data-rows.md`](../../docs/superpowers/plans/2026-09-06-recorder-market-data-rows.md).
+Four of the nine tasks are in: provenance carries the channel instance, the walk
+surfaces the four state messages, `dz-recorder-events` holds era-scoped reference
+data, and `005` declares `event`, `instrument` and `book_top` with the row types
+that fill them.
+
+**Nothing writes a row into any of the three.** The fold that would — joining each
+message to the reference data — and the book behind `book_top` are tasks 5 and 6,
+and an empty table here means the same thing it means for `conformance_finding`:
+that nothing derived the object, where an invented row would be a book state
+nothing observed.
 
 The cross-site pass that turns `unverifiable` into `publisher`. That verdict
 needs a datagram absent from *every* site with no recorder overflow anywhere,

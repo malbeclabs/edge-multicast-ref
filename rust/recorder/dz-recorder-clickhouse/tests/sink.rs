@@ -373,7 +373,10 @@ fn the_base_grain_is_sent_before_the_grains_derived_from_it() {
             Grain::Era,
             Grain::SegmentCoverage,
             Grain::SequenceGap,
-            Grain::ConformanceFinding
+            Grain::ConformanceFinding,
+            Grain::Instrument,
+            Grain::Event,
+            Grain::BookTop
         ]
     );
 

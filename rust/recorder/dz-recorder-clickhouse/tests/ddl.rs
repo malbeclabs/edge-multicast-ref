@@ -15,6 +15,19 @@ use std::collections::BTreeSet;
 use dz_recorder_clickhouse::{migrations, schema, Migration};
 use dz_recorder_rows::Grain;
 
+/// The grains `001` declares: the envelope of a datagram, and what is derived
+/// from it.
+const TRANSPORT_GRAINS: [Grain; 5] = [
+    Grain::Datagram,
+    Grain::Era,
+    Grain::SegmentCoverage,
+    Grain::SequenceGap,
+    Grain::ConformanceFinding,
+];
+
+/// The grains `005` declares: what the messages said.
+const MARKET_DATA_GRAINS: [Grain; 3] = [Grain::Event, Grain::Instrument, Grain::BookTop];
+
 /// The columns one `CREATE TABLE recorder.<table>` block declares, in order.
 fn columns(sql: &str, table: &str) -> Vec<String> {
     let needle = format!("CREATE TABLE IF NOT EXISTS recorder.{table} (");
@@ -47,33 +60,66 @@ fn columns(sql: &str, table: &str) -> Vec<String> {
 }
 
 fn rows_sql() -> &'static str {
+    sql_of("001_recorder_rows.sql")
+}
+
+/// The market data tables, which are `005` rather than `001`.
+fn market_data_sql() -> &'static str {
+    sql_of("005_recorder_market_data.sql")
+}
+
+fn sql_of(name: &str) -> &'static str {
     migrations()
         .into_iter()
-        .find(|m| m.name == "001_recorder_rows.sql")
-        .expect("the tables are in 001")
+        .find(|m| m.name == name)
+        .unwrap_or_else(|| panic!("{name} is a migration"))
         .sql
 }
 
 /// A field with no column, or a column with no field, fails here.
 #[test]
 fn every_column_has_a_field_and_every_field_has_a_column() {
-    let sql = rows_sql();
-    for (grain, fields) in [
-        (Grain::Datagram, field_names(&fixtures::datagram())),
-        (Grain::Era, field_names(&fixtures::era())),
+    for (sql, grain, fields) in [
         (
+            rows_sql(),
+            Grain::Datagram,
+            field_names(&fixtures::datagram()),
+        ),
+        (rows_sql(), Grain::Era, field_names(&fixtures::era())),
+        (
+            rows_sql(),
             Grain::SegmentCoverage,
             field_names(&fixtures::segment_coverage()),
         ),
-        (Grain::SequenceGap, field_names(&fixtures::sequence_gap())),
         (
+            rows_sql(),
+            Grain::SequenceGap,
+            field_names(&fixtures::sequence_gap()),
+        ),
+        (
+            rows_sql(),
             Grain::ConformanceFinding,
             field_names(&fixtures::conformance_finding()),
+        ),
+        (
+            market_data_sql(),
+            Grain::Event,
+            field_names(&fixtures::event()),
+        ),
+        (
+            market_data_sql(),
+            Grain::Instrument,
+            field_names(&fixtures::instrument()),
+        ),
+        (
+            market_data_sql(),
+            Grain::BookTop,
+            field_names(&fixtures::book_top()),
         ),
     ] {
         let declared: BTreeSet<String> = columns(sql, grain.table()).into_iter().collect();
         let mut expected = fields;
-        if grain == Grain::Datagram {
+        if grain == Grain::Datagram || grain == Grain::Event {
             // The one column the loader never sends: the engine computes it, and
             // inserting into a MATERIALIZED column is an error.
             expected.insert("send_recv_ms".to_owned());
@@ -82,6 +128,117 @@ fn every_column_has_a_field_and_every_field_has_a_column() {
             declared, expected,
             "{grain}: the schema and the row type disagree about columns"
         );
+    }
+}
+
+/// The `ORDER BY (...)` of one table, as one line.
+///
+/// The key may wrap, so this joins until the closing parenthesis rather than
+/// reading a line: a key that fits on one line and a key that does not are the
+/// same key, and a test that could only read the first would quietly stop
+/// checking the moment one grew.
+fn sort_key(sql: &str, table: &str) -> String {
+    let after = sql
+        .split_once(&format!("CREATE TABLE IF NOT EXISTS recorder.{table} ("))
+        .unwrap_or_else(|| panic!("{table} is declared"))
+        .1;
+    let key = after
+        .split_once("ORDER BY (")
+        .unwrap_or_else(|| panic!("{table} has an ORDER BY"))
+        .1;
+    let key = key
+        .split_once(");")
+        .unwrap_or_else(|| panic!("{table}'s ORDER BY is closed"))
+        .0;
+    key.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The market data keys carry everything that distinguishes two genuine rows.
+///
+/// `ReplacingMergeTree` deduplicates on the whole sort key, so a key missing an
+/// identity column does not merely sort badly — it deletes rows. Each assertion
+/// here is a row that would have been lost.
+#[test]
+fn the_market_data_sort_keys_carry_what_distinguishes_two_rows() {
+    let sql = market_data_sql();
+    let event = sort_key(sql, "event");
+
+    // Two paths publishing one Channel ID. Without these, one collapses into the
+    // other and the feed reads as though a publisher went backwards.
+    assert!(event.contains("source_addr"), "event key: {event}");
+    assert!(event.contains("dst_port"), "event key: {event}");
+    // A duplicated datagram: same sequence number, same message index, different
+    // arrival. Without this it deletes the original rather than sitting beside it.
+    assert!(event.contains("recv_ts"), "event key: {event}");
+    // Several messages for one instrument packed into one datagram.
+    assert!(event.contains("message_index"), "event key: {event}");
+    // And the instrument leads, because the dominant question is per instrument
+    // over a window — the one place these keys depart from `datagram`'s.
+    assert!(
+        event.starts_with("channel_id, instrument_id"),
+        "event key does not lead with the instrument: {event}"
+    );
+
+    let book_top = sort_key(sql, "book_top");
+    assert!(book_top.contains("message_index"), "book_top: {book_top}");
+    assert!(book_top.contains("observation"), "book_top: {book_top}");
+
+    // An era belongs to one channel instance, so an instrument table keyed
+    // without the address and the port merges two eras that are not the same era.
+    let instrument = sort_key(sql, "instrument");
+    assert!(instrument.contains("source_addr"), "{instrument}");
+    assert!(instrument.contains("dst_port"), "{instrument}");
+}
+
+/// The retention split, one table further down than `002` put it.
+#[test]
+fn the_market_data_retention_expires_the_events_and_keeps_the_book() {
+    let sql = market_data_sql();
+    assert!(
+        sql.contains("ALTER TABLE recorder.event")
+            && sql.contains("MODIFY TTL toDateTime(recv_ts) + INTERVAL 2 DAY"),
+        "the expensive base table has no TTL"
+    );
+    assert!(
+        sql.contains("ALTER TABLE recorder.book_top")
+            && sql.contains("MODIFY TTL toDateTime(recv_ts) + INTERVAL 30 DAY"),
+        "the derived table's longer window is not stated"
+    );
+    // `instrument` is what makes every other row's symbol and exponents mean
+    // anything after the fact. Expiring it leaves prices that no longer decode.
+    assert!(
+        !sql.contains("ALTER TABLE recorder.instrument"),
+        "reference data must not expire"
+    );
+    // Whole days, so a TTL is a partition drop rather than a treadmill of part
+    // rewrites — the reason `002` gives for the same shape.
+    for window in ["INTERVAL 2 DAY", "INTERVAL 30 DAY"] {
+        assert!(
+            sql.contains(window),
+            "{window} is not a whole number of days"
+        );
+    }
+}
+
+/// The columns that can be unknown are nullable, on the market data tables too.
+#[test]
+fn the_market_data_columns_that_can_be_unknown_are_nullable() {
+    let sql = market_data_sql();
+    for column in [
+        // The sentinel translation's destination. A count the venue does not
+        // expose is absent, not sixty-five thousand.
+        "order_count        Nullable(UInt16)",
+        "level_index        Nullable(UInt16)",
+        // A message that carries no venue time.
+        "upstream_ts        Nullable(DateTime64(9))",
+        // The reset's recovery anchor, and the snapshot's.
+        "anchor_seq         Nullable(UInt64)",
+        // Absent rather than zero: a zero reads as a feed publishing nothing.
+        "declared_count Nullable(UInt32)",
+        // Certain rows have no sequence number to point at.
+        "uncertain_since   Nullable(UInt64)",
+    ] {
+        assert!(sql.contains(column), "not nullable: {column}");
     }
 }
 
@@ -158,15 +315,25 @@ fn the_sort_keys_are_the_ones_the_rows_were_shaped_for() {
 /// somebody can take.
 #[test]
 fn every_table_is_partitioned_by_a_day() {
-    let sql = rows_sql();
     let expected = [
-        (Grain::Datagram, "toYYYYMMDD(recv_ts)"),
-        (Grain::Era, "toYYYYMMDD(anchor_ts)"),
-        (Grain::SegmentCoverage, "toYYYYMMDD(start_ts)"),
-        (Grain::SequenceGap, "toYYYYMMDD(before_ts)"),
-        (Grain::ConformanceFinding, "toYYYYMMDD(window_start)"),
+        (rows_sql(), Grain::Datagram, "toYYYYMMDD(recv_ts)"),
+        (rows_sql(), Grain::Era, "toYYYYMMDD(anchor_ts)"),
+        (rows_sql(), Grain::SegmentCoverage, "toYYYYMMDD(start_ts)"),
+        (rows_sql(), Grain::SequenceGap, "toYYYYMMDD(before_ts)"),
+        (
+            rows_sql(),
+            Grain::ConformanceFinding,
+            "toYYYYMMDD(window_start)",
+        ),
+        (market_data_sql(), Grain::Event, "toYYYYMMDD(recv_ts)"),
+        (
+            market_data_sql(),
+            Grain::Instrument,
+            "toYYYYMMDD(era_anchor_ts)",
+        ),
+        (market_data_sql(), Grain::BookTop, "toYYYYMMDD(recv_ts)"),
     ];
-    for (grain, partition) in expected {
+    for (sql, grain, partition) in expected {
         assert!(
             sql.contains(&format!("PARTITION BY {partition}")),
             "{grain} is not partitioned by {partition}"
@@ -175,9 +342,14 @@ fn every_table_is_partitioned_by_a_day() {
     // One `PARTITION BY` per table, so a table added later without one fails
     // here rather than being noticed on a graph months afterwards.
     assert_eq!(
-        sql.matches("PARTITION BY ").count(),
-        Grain::COUNT,
-        "a table has no PARTITION BY, or one has two"
+        rows_sql().matches("PARTITION BY ").count(),
+        TRANSPORT_GRAINS.len(),
+        "a table in 001 has no PARTITION BY, or one has two"
+    );
+    assert_eq!(
+        market_data_sql().matches("PARTITION BY ").count(),
+        MARKET_DATA_GRAINS.len(),
+        "a table in 005 has no PARTITION BY, or one has two"
     );
 }
 
@@ -425,7 +597,7 @@ fn every_migration_splits_into_whole_statements() {
     // The five tables and the database, and nothing split across two of them.
     let statements = migration("001_recorder_rows.sql").statements();
     assert_eq!(statements.len(), 6, "one database and five tables");
-    for grain in Grain::ALL {
+    for grain in TRANSPORT_GRAINS {
         assert_eq!(
             statements
                 .iter()
@@ -484,11 +656,125 @@ mod fixtures {
     use std::net::Ipv4Addr;
 
     use dz_recorder_rows::{
-        ConformanceFinding, Datagram, DropScope, Era, FindingVerdict, Nanos, PortRoleLabel,
-        RecvTsKindLabel, SegmentCoverage, SequenceGap, Verdict,
+        BookTop, ConformanceFinding, Datagram, DropScope, Era, Event, FindingVerdict, Instrument,
+        MessageTypeLabel, Nanos, PortRoleLabel, RecvTsKindLabel, SegmentCoverage, SequenceGap,
+        UncertainReason, Verdict,
     };
 
     const ADDR: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 10);
+
+    pub fn event() -> Event {
+        Event {
+            recv_ts: Nanos(0),
+            send_ts: Nanos(0),
+            upstream_ts: None,
+            recv_ts_kind: RecvTsKindLabel::KernelSoftware,
+            site: String::new(),
+            recorder: String::new(),
+            env: String::new(),
+            feed: String::new(),
+            port_role: PortRoleLabel::Mktdata,
+            source_addr: ADDR,
+            channel_id: 0,
+            dst_port: 0,
+            sequence_number: 0,
+            reset_count: 0,
+            era_anchor_ts: Nanos(0),
+            message_index: 0,
+            source_id: 0,
+            instrument_id: 0,
+            symbol: String::new(),
+            price_exp: 0,
+            qty_exp: 0,
+            per_instrument_seq: None,
+            message_type: MessageTypeLabel::Quote,
+            side_raw: None,
+            action_raw: None,
+            reason_raw: None,
+            flags_raw: None,
+            price_raw: None,
+            qty_raw: None,
+            order_count: None,
+            level_index: None,
+            bid_px_raw: None,
+            bid_qty_raw: None,
+            bid_source_count: None,
+            ask_px_raw: None,
+            ask_qty_raw: None,
+            ask_source_count: None,
+            trade_id: None,
+            cumulative_volume: None,
+            snapshot_id: None,
+            anchor_seq: None,
+            total_levels: None,
+            levels_seen: None,
+            depth_bound: None,
+            object_key: String::new(),
+            object_sha256: String::new(),
+            datagram_index: 0,
+        }
+    }
+
+    pub fn instrument() -> Instrument {
+        Instrument {
+            site: String::new(),
+            recorder: String::new(),
+            env: String::new(),
+            feed: String::new(),
+            port_role: PortRoleLabel::Refdata,
+            source_addr: ADDR,
+            channel_id: 0,
+            dst_port: 0,
+            source_id: 0,
+            instrument_id: 0,
+            era_anchor_ts: Nanos(0),
+            reset_count: 0,
+            symbol: String::new(),
+            price_exp: 0,
+            qty_exp: 0,
+            contract_value: 0,
+            first_seen_ts: Nanos(0),
+            last_seen_ts: Nanos(0),
+            manifest_seq: None,
+            declared_count: None,
+            object_key: String::new(),
+        }
+    }
+
+    pub fn book_top() -> BookTop {
+        BookTop {
+            recv_ts: Nanos(0),
+            send_ts: Nanos(0),
+            site: String::new(),
+            recorder: String::new(),
+            env: String::new(),
+            feed: String::new(),
+            observation: String::new(),
+            source_addr: ADDR,
+            channel_id: 0,
+            dst_port: 0,
+            source_id: 0,
+            instrument_id: 0,
+            symbol: String::new(),
+            sequence_number: 0,
+            message_index: 0,
+            reset_count: 0,
+            era_anchor_ts: Nanos(0),
+            bid_px_raw: None,
+            bid_qty_raw: None,
+            bid_source_count: None,
+            ask_px_raw: None,
+            ask_qty_raw: None,
+            ask_source_count: None,
+            price_exp: 0,
+            qty_exp: 0,
+            state_key: 0,
+            book_certain: 1,
+            uncertain_since: None,
+            uncertain_reason: UncertainReason::None,
+            object_key: String::new(),
+        }
+    }
 
     pub fn datagram() -> Datagram {
         Datagram {

@@ -460,5 +460,12 @@ pub const fn send_order() -> [Grain; Grain::COUNT] {
         Grain::SegmentCoverage,
         Grain::SequenceGap,
         Grain::ConformanceFinding,
+        // The market data grains follow the transport ones for the same reason
+        // the gap rows follow the datagram rows: `book_top` is derived from
+        // `event`, and `event` joins to `instrument`. A book state present with
+        // no event behind it reads as a finding with no evidence.
+        Grain::Instrument,
+        Grain::Event,
+        Grain::BookTop,
     ]
 }

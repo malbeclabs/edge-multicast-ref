@@ -41,7 +41,7 @@ impl FileSink {
         std::fs::create_dir_all(&dir)?;
         Ok(Self {
             dir,
-            files: [None, None, None, None, None],
+            files: [const { None }; Grain::COUNT],
         })
     }
 
