@@ -332,8 +332,8 @@ made against.
 ## What is not in this plan
 
 - **The two upstream asks.** A placed and ranged per-rule outcome, and a build
-  that stamps its commit — see decision 1 for what already exists of each
-  its version are changes to `edge-feed-spec`, proposed there. This plan is
+  that stamps the commit it was built from. Both are changes to `edge-feed-spec`,
+  proposed there, and decision 1 says what already exists of each. This plan is
   arranged so that everything except task 8 lands without them.
 - **Any conformance rule.** Not written, not encoded, not enumerated, not
   allow-listed. The rule set is the specification's, and this repository's only
