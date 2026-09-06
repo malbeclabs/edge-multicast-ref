@@ -711,6 +711,14 @@ pub struct BookTop {
     /// The equivalence key: a hash over the instrument and both sides, and over
     /// nothing else. No timestamp, no sequence number, no bytes.
     pub state_key: u64,
+    /// 1 when this top came from applying a snapshot rather than from a
+    /// message the market produced.
+    ///
+    /// Such a row is a starting state and never an observation in a race: the
+    /// runtime pulls a snapshot on its own cadence and the archive records when
+    /// it was *published*, not when it was asked for, so its timestamp measures
+    /// the publisher's scheduler. The pairing excludes these.
+    pub from_anchor: u8,
     /// 0 once the book is unknowable.
     pub book_certain: u8,
     pub uncertain_since: Option<u64>,

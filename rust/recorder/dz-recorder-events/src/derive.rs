@@ -32,9 +32,11 @@ use dz_recorder_relower::{
     MessageBody, ReferenceBody, RelowerError, StateBody, WireCapture, WireProvenance,
 };
 use dz_recorder_rows::{
-    absent_if_sentinel, Event, Instrument, MessageTypeLabel, Nanos, PortRoleLabel, RecvTsKindLabel,
+    absent_if_sentinel, BookTop, Event, Instrument, MessageTypeLabel, Nanos, PortRoleLabel,
+    RecvTsKindLabel,
 };
 
+use crate::book::{state_key, Book, BookRefused, Change};
 use crate::instruments::{At, Channel, InstrumentTable, Observed, Statement};
 
 /// What a derivation needs that the archive does not carry.
@@ -50,6 +52,13 @@ pub struct EventInput<'a> {
     /// misrouted from another feed in the family being parsed at the wrong
     /// layout.
     pub magic: u16,
+    /// Where this view of the book came from, as `site` names a recorder.
+    ///
+    /// Two recorders of one multicast feed are two observations; a multicast
+    /// feed and some other transport carrying the same instruments are two
+    /// observations. Nothing downstream knows which is which, and nothing
+    /// should — a race is one `state_key` seen at more than one of these.
+    pub observation: &'a str,
     /// Whether `SnapshotLevel` messages become rows.
     ///
     /// Off by default at every layer above this one. A cycle is `total_levels`
@@ -82,7 +91,9 @@ pub struct Refused {
 pub struct DerivedEvents {
     pub event: Vec<Event>,
     pub instrument: Vec<Instrument>,
+    pub book_top: Vec<BookTop>,
     pub refused: Refused,
+    pub book_refused: BookRefused,
 }
 
 /// One snapshot cycle, while it is open.
@@ -128,6 +139,8 @@ pub fn derive_events<S: Source + ?Sized>(
     let mut table = InstrumentTable::new();
     let mut seen: BTreeMap<(ChannelInstance, u32, u64), Seen> = BTreeMap::new();
     let mut cycles: BTreeMap<(ChannelInstance, u32), OpenCycle> = BTreeMap::new();
+    let mut book = Book::new();
+    let mut at_datagram: Option<u64> = None;
     let mut out = DerivedEvents::default();
 
     for decoded in ordered {
@@ -143,6 +156,21 @@ pub fn derive_events<S: Source + ?Sized>(
             reset_count: provenance.reset_count,
             recv_ts_ns: provenance.recv_ts_ns,
         };
+
+        // Once per datagram, not once per message: a gap belongs to the channel
+        // instance's sequence space, and every message inside one datagram
+        // carries that datagram's sequence number.
+        if at_datagram != Some(provenance.datagram_index) {
+            at_datagram = Some(provenance.datagram_index);
+            for (instrument_id, change) in
+                book.observe_sequence(instance, provenance.role, provenance.sequence_number)
+            {
+                if let Some(statement) = table.resolve(channel, instrument_id, at.recv_ts_ns) {
+                    out.book_top
+                        .push(book_row(input, &provenance, statement, &change));
+                }
+            }
+        }
 
         match decoded {
             Decoded::Reference(message) => match message.body {
@@ -172,8 +200,20 @@ pub fn derive_events<S: Source + ?Sized>(
                     out.refused.unresolved_instrument += 1;
                     continue;
                 };
+                let statement = statement.clone();
                 out.event
-                    .push(market_row(input, &provenance, statement, &message.body));
+                    .push(market_row(input, &provenance, &statement, &message.body));
+                let change = match &message.body {
+                    MessageBody::Quote(quote) => book.quote(channel, quote),
+                    MessageBody::Level(level) => book.level(channel, level),
+                    MessageBody::Clear(clear) => book.clear(channel, clear),
+                    // A trade moves no book. It is an event, not a state.
+                    MessageBody::Trade(_) => None,
+                };
+                if let Some(change) = change {
+                    out.book_top
+                        .push(book_row(input, &provenance, &statement, &change));
+                }
             }
             Decoded::State(message) => {
                 let Some(instrument_id) =
@@ -185,23 +225,44 @@ pub fn derive_events<S: Source + ?Sized>(
                     out.refused.unresolved_instrument += 1;
                     continue;
                 };
-                if matches!(message.body, StateBody::SnapshotLevel(_))
-                    && !input.persist_snapshot_levels
+                let statement = statement.clone();
+                // **The book consumes every level; only persistence is
+                // optional.** Skipping the level before the book sees it leaves
+                // a cycle that never completes, so nothing ever anchors — which
+                // is the one thing consuming them is for.
+                if !matches!(message.body, StateBody::SnapshotLevel(_))
+                    || input.persist_snapshot_levels
                 {
-                    continue;
+                    out.event.push(state_row(
+                        input,
+                        &provenance,
+                        &statement,
+                        &message.body,
+                        instrument_id,
+                        &cycles,
+                    ));
                 }
-                out.event.push(state_row(
-                    input,
-                    &provenance,
-                    statement,
-                    &message.body,
-                    instrument_id,
-                    &cycles,
-                ));
+                let change = match &message.body {
+                    StateBody::Reset(reset) => book.reset(channel, reset),
+                    StateBody::SnapshotBegin(begin) => {
+                        book.snapshot_begin(channel, begin);
+                        None
+                    }
+                    StateBody::SnapshotLevel(level) => {
+                        book.snapshot_level(channel, level);
+                        None
+                    }
+                    StateBody::SnapshotEnd(end) => book.snapshot_end(channel, end),
+                };
+                if let Some(change) = change {
+                    out.book_top
+                        .push(book_row(input, &provenance, &statement, &change));
+                }
             }
         }
     }
 
+    out.book_refused = book.refused;
     out.instrument = seen
         .into_iter()
         .map(|((instance, _, _), entry)| Instrument {
@@ -470,5 +531,47 @@ const fn role_label(role: PortRole) -> PortRoleLabel {
         PortRole::Mktdata => PortRoleLabel::Mktdata,
         PortRole::Refdata => PortRoleLabel::Refdata,
         PortRole::Snapshot => PortRoleLabel::Snapshot,
+    }
+}
+
+/// One change in a top of book, as a row.
+fn book_row(
+    input: &EventInput<'_>,
+    provenance: &WireProvenance,
+    statement: &Statement,
+    change: &Change,
+) -> BookTop {
+    BookTop {
+        recv_ts: Nanos(provenance.recv_ts_ns),
+        send_ts: Nanos(provenance.send_timestamp_ns),
+        site: input.identity.site.clone(),
+        recorder: input.identity.recorder.clone(),
+        env: input.identity.env.clone(),
+        feed: input.feed.to_owned(),
+        observation: input.observation.to_owned(),
+        source_addr: *provenance.src.ip(),
+        channel_id: provenance.channel_id,
+        dst_port: provenance.dst.port(),
+        source_id: statement.source_id,
+        instrument_id: statement.instrument_id,
+        symbol: statement.symbol.clone(),
+        sequence_number: provenance.sequence_number,
+        message_index: provenance.message_index,
+        reset_count: provenance.reset_count,
+        segment_seq: input.segment_seq,
+        bid_px_raw: change.top.bid.price_raw,
+        bid_qty_raw: change.top.bid.qty_raw,
+        bid_source_count: change.top.bid.source_count,
+        ask_px_raw: change.top.ask.price_raw,
+        ask_qty_raw: change.top.ask.qty_raw,
+        ask_source_count: change.top.ask.source_count,
+        price_exp: statement.price_exponent,
+        qty_exp: statement.qty_exponent,
+        state_key: state_key(provenance.channel_id, statement.instrument_id, &change.top),
+        from_anchor: u8::from(change.from_anchor),
+        book_certain: u8::from(change.certainty.certain),
+        uncertain_since: change.certainty.since,
+        uncertain_reason: change.certainty.reason,
+        object_key: input.object_key.to_owned(),
     }
 }

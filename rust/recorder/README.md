@@ -339,10 +339,16 @@ Five of the nine tasks are in, and `event` and `instrument` are now written:
 archive order, joins each message to the reference data in force at its arrival,
 and refuses what it cannot attribute rather than filling it in.
 
-**`book_top` is still empty**, and will be until task 6. It needs state that spans
-objects — a book — and an empty table here means what it means for
-`conformance_finding`: that nothing derived it, where an invented row would be a
-book state nothing observed.
+Six of the nine tasks are in, and all three tables are now written. The book has
+two derivations — a `Quote` is self-anchoring, a delta book anchors only on a
+complete snapshot cycle — and `book_certain` falls to 0 on a sequence gap or an
+`InstrumentReset` and is restored only by each derivation's own rule. A certainty
+transition emits its own row, so a gap that moves no price is still visible as
+one.
+
+Still out: the occurrence-ordinal pairing view (task 7), the loader wiring and the
+per-feed switch (task 8), and the messages-per-datagram measurement that has to
+exist before a feed's derivation is enabled (task 9).
 
 The cross-site pass that turns `unverifiable` into `publisher`. That verdict
 needs a datagram absent from *every* site with no recorder overflow anywhere,

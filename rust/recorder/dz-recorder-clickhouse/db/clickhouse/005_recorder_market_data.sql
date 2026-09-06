@@ -216,6 +216,12 @@ CREATE TABLE IF NOT EXISTS recorder.book_top (
     -- payload is a function of the schema version and the batching, so a
     -- publisher upgrade repartitions the key space and the race reports nothing.
     state_key         UInt64,
+    -- 1 when this top came from applying a snapshot rather than from a message
+    -- the market produced. A starting state and never an observation in a race:
+    -- the runtime pulls a snapshot on its own cadence and the archive records
+    -- when it was published, not when it was asked for, so its timestamp
+    -- measures the publisher's scheduler. The pairing excludes these.
+    from_anchor       UInt8,
     book_certain      UInt8,
     uncertain_since   Nullable(UInt64),
     uncertain_reason  LowCardinality(String),   -- none | gap | instrument_reset | no_anchor

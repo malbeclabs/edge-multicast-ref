@@ -33,6 +33,7 @@ fn input<'a>(identity: &'a dz_recorder_core::RecorderIdentity, magic: u16) -> Ev
         segment_seq: 3,
         magic,
         persist_snapshot_levels: true,
+        observation: "observation",
     }
 }
 

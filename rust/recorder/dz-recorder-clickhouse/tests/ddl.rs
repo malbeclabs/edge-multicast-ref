@@ -780,6 +780,7 @@ mod fixtures {
             price_exp: 0,
             qty_exp: 0,
             state_key: 0,
+            from_anchor: 0,
             book_certain: 1,
             uncertain_since: None,
             uncertain_reason: UncertainReason::None,

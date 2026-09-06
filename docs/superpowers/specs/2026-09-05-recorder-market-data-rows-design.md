@@ -403,6 +403,7 @@ CREATE TABLE IF NOT EXISTS recorder.book_top (
     price_exp         Int8,
     qty_exp           Int8,
     state_key         UInt64,                   -- the equivalence key
+    from_anchor       UInt8,                    -- 1 if derived by applying a snapshot
     book_certain      UInt8,                    -- 0 once the book is unknowable
     uncertain_since   Nullable(UInt64),         -- the sequence number that made it so
     uncertain_reason  LowCardinality(String),   -- gap | instrument_reset | no_anchor
@@ -593,9 +594,25 @@ might be wrong" from an unfalsifiable worry into a `WHERE` clause.
 
 **A snapshot anchors a book and never times one.** The runtime pulls it on its
 own cadence from the adapter's book, and the archive records when it was
-published rather than when it was asked for. So a snapshot is a starting state
-and is never an observation in a race — `book_top` rows derived from applying a
-snapshot carry the anchor's sequence number and are excluded from pairing.
+published rather than when it was asked for, so its timestamp measures the
+publisher's scheduler. A snapshot is a starting state and is never an observation
+in a race, and `from_anchor` on the row is how the pairing knows to exclude it —
+a property of the row rather than something a reader has to reconstruct by
+joining back to the message that produced it.
+
+**A book spans port roles, so it is keyed on the channel and not the channel
+instance.** The anchor arrives on the `snapshot` role and the deltas that follow
+it on `mktdata`, and those are two channel instances because the destination port
+is part of that key. A book keyed on the instance anchors one book and updates a
+different one, and neither is ever both certain and current. This is the same
+structural fact that decides how reference data is keyed, and it has the same
+answer.
+
+**Gap detection stays per channel instance**, because a sequence space does — a
+hole is a hole in one port role's numbering. Only a hole on `mktdata` touches
+certainty: a missed definition is the reference data's problem, and a missed
+snapshot message is already caught by the cycle's own level count against
+`total_levels`.
 
 **`Per-Instrument Seq` is the depth join key and it is deterministic**, stamped by
 the runtime from a counter keyed on the instrument and reset with the era. It is
