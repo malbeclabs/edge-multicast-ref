@@ -108,7 +108,27 @@ Two rules that are easy to get wrong and expensive to get wrong:
 Keep the adapter's own book state machine and reuse the venue's existing decoder
 if it has one. An adapter that folds the book a second way is validating itself.
 
-### 2. Write the binary
+### 2. Depend on these crates
+
+A tag in this repository is the release; there is nothing on crates.io. See
+[RELEASING.md](RELEASING.md) for the whole of it, including how to cut the next
+one, but the two lines that matter here:
+
+```toml
+[workspace.dependencies]
+dz-adapter-core = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.1.0" }
+dz-publisher-runtime = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.1.0" }
+dz-ingress-core = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.1.0", features = ["websocket"] }
+```
+
+**Every crate from the same tag, pinned in one place.** Two tags in one graph
+means two copies of `dz-edge-core`, and then `Scalar` from one is not `Scalar`
+from the other — a type mismatch between two types with the same name, which is
+among the least legible errors cargo produces. The transport marker features are
+not optional decoration either: `[ingress] kind` refuses a transport the binary
+does not link.
+
+### 3. Write the binary
 
 It is a registry and nothing else — the one thing the runtime cannot know is
 which adapters a binary contains:
@@ -143,7 +163,7 @@ transport whose crate is not linked is refused at startup, so the binary depends
 on `dz-ingress-core` with the marker feature for the transports it means to
 allow.
 
-### 3. Prove it offline before you point it at anything
+### 4. Prove it offline before you point it at anything
 
 `[adapter.replay]` substitutes recorded upstream bytes for the transport. The
 adapter cannot tell the difference, which is the property that makes the
@@ -155,7 +175,7 @@ and read the other end with this repository's own Go parser — asserting
 *values*, not datagram counts. Every end-to-end exercise here does exactly
 that, and each one has found bugs that no unit test did.
 
-### 4. Configuration
+### 5. Configuration
 
 One document, checked at startup, with unknown keys refused — so a misspelled
 section is a startup failure rather than a default nobody noticed.
