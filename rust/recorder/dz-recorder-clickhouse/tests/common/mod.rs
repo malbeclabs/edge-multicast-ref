@@ -378,6 +378,7 @@ pub const ABSENT_EVERYWHERE: u8 = 2;
 pub const ABSENT_BUT_A_SITE_OVERFLOWED: u8 = 3;
 pub const A_SITE_IS_UP_AND_SILENT: u8 = 4;
 pub const NOBODY_ELSE_HAS_LOADED: u8 = 5;
+pub const ONLY_A_CO_LOCATED_RECORDER: u8 = 6;
 
 /// The sequence numbers our site is missing, in every case.
 pub const MISSING_FROM: u64 = 103;
@@ -430,8 +431,18 @@ impl Segment {
     }
 }
 
-fn identity(site: &str) -> (String, String) {
-    (site.to_owned(), format!("recorder-{site}"))
+/// A vantage, written `site` for the site's own recorder and `site/recorder`
+/// for a second one beside it.
+///
+/// Two recorders at one site are two vantages and the site is never folded away
+/// — and the difference between the two is exactly what
+/// `ONLY_A_CO_LOCATED_RECORDER` is about, because a box in our own rack shares
+/// our switch, our uplink and our load.
+fn identity(vantage: &str) -> (String, String) {
+    vantage.split_once('/').map_or_else(
+        || (vantage.to_owned(), format!("recorder-{vantage}")),
+        |(site, recorder)| (site.to_owned(), recorder.to_owned()),
+    )
 }
 
 /// One coverage row, as a site's own manifest produced it.
@@ -571,6 +582,9 @@ pub fn datagram(site: &str, channel: u8, sequence_number: u64, recv_ts: u64) -> 
 ///   coverage of this instance earlier the same day and none over the window. A
 ///   site that is not reporting is not a site that reported nothing.
 /// * `NOBODY_ELSE_HAS_LOADED` — our rows, and nobody else's.
+/// * `ONLY_A_CO_LOCATED_RECORDER` — a second recorder at our own site covered
+///   the range and missed the same three, admissibly in every respect but the
+///   one that matters. It is not another site.
 #[must_use]
 pub fn cross_site_fixture(base: u64) -> Vec<RowBatch> {
     let ours = base - 30 * SECOND_NS;
@@ -581,6 +595,7 @@ pub fn cross_site_fixture(base: u64) -> Vec<RowBatch> {
         ABSENT_BUT_A_SITE_OVERFLOWED,
         A_SITE_IS_UP_AND_SILENT,
         NOBODY_ELSE_HAS_LOADED,
+        ONLY_A_CO_LOCATED_RECORDER,
     ];
     let mut batches = Vec::new();
     let mut object = |site: &str, segment: Segment, batch: RowBatch| {
@@ -695,6 +710,43 @@ pub fn cross_site_fixture(base: u64) -> Vec<RowBatch> {
         RowBatch {
             segment_coverage: vec![coverage("three", A_SITE_IS_UP_AND_SILENT, their_window)],
             sequence_gap: vec![gap("three", A_SITE_IS_UP_AND_SILENT, base, theirs, Some(3))],
+            ..RowBatch::default()
+        },
+    );
+
+    // A second recorder in our own rack, which missed the same three. What it
+    // held would have been conclusive; what it missed is not a second opinion
+    // about a publisher, and treating it as one would let a rack's shared
+    // uplink accuse the feed.
+    let beside_us = "one/recorder-one-b";
+    object(
+        beside_us,
+        their_preceding,
+        RowBatch {
+            segment_coverage: vec![coverage(
+                beside_us,
+                ONLY_A_CO_LOCATED_RECORDER,
+                their_preceding,
+            )],
+            ..RowBatch::default()
+        },
+    );
+    object(
+        beside_us,
+        their_window,
+        RowBatch {
+            segment_coverage: vec![coverage(
+                beside_us,
+                ONLY_A_CO_LOCATED_RECORDER,
+                their_window,
+            )],
+            sequence_gap: vec![gap(
+                beside_us,
+                ONLY_A_CO_LOCATED_RECORDER,
+                base,
+                theirs,
+                Some(3),
+            )],
             ..RowBatch::default()
         },
     );

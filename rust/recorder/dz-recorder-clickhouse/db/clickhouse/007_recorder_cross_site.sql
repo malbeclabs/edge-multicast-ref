@@ -336,6 +336,11 @@ SELECT
     o.recorder        AS other_recorder,
     o.overflow_free   AS other_overflow_free,
     t.present         AS missed,
+    -- A vantage at another site. A second recorder in our own rack shares our
+    -- switch, our uplink and our load, so what it *missed* is not independent
+    -- evidence — while what it *held* is conclusive, which is why this gates
+    -- only the absence columns and never `held`.
+    toUInt8(o.site != m.site) AS independent,
     -- Held: covered by that vantage and absent from its own gap rows. Within a
     -- covered range those are the only two possibilities, which is what lets
     -- this be answered without reading a base row that may have expired.
@@ -345,7 +350,7 @@ SELECT
     -- whose own residue accounts for the whole of its own gap; and whose era
     -- boundary is settled. Anything else is an absence nobody may use.
     toUInt8(ifNull(t.present = 1
-                   AND o.site != m.site
+                   AND independent = 1
                    AND o.overflow_free = 1
                    AND t.unexplained_count = t.missing_count
                    AND t.anchor_certain = 1, 0)) AS absence_admissible
@@ -404,11 +409,20 @@ SELECT
     uniqExactIf(sequence_number, held = 1)               AS seqs_held,
     uniqExactIf(sequence_number, absence_admissible = 1) AS seqs_absent,
     uniqExactIf(other_site, absence_admissible = 1)      AS absent_sites,
-    -- A vantage that also missed it and cannot rule out its own overflow. Its
-    -- gap may be its own ring, and an absence that may be somebody's own ring
-    -- is no evidence about a publisher at all.
+    -- A vantage at another site that also missed it and whose absence cannot be
+    -- used: its own ring overflowed, its scope invalidates the subtraction, or
+    -- its era boundary is unsettled. Its gap may be its own, and an absence that
+    -- may be somebody's own ring is no evidence about a publisher — but it is a
+    -- site that would otherwise have been evidence, so it blocks rather than
+    -- abstains.
+    --
+    -- `independent = 1`, so a recorder in our own rack neither counts nor
+    -- blocks. Its absence is not a second opinion about a publisher, and a
+    -- deployment running two recorders at a site would otherwise never reach a
+    -- verdict at all.
     uniqExactIf((toString(other_site), toString(other_recorder)),
-                missed = 1 AND absence_admissible = 0)   AS blocked_vantages,
+                missed = 1 AND independent = 1
+                AND absence_admissible = 0)              AS blocked_vantages,
     groupUniqArrayIf((toString(other_site), toString(other_recorder)),
                      held = 1)                           AS held_by,
     groupUniqArray((toString(other_site), toString(other_recorder))) AS spoke
