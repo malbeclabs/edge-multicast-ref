@@ -99,11 +99,24 @@ impl RowSink for FileSink {
     /// already written.
     fn write_batch(&mut self, rows: RowBatch, _now_ns: u64) -> Result<Accepted, RowSinkError> {
         let mut bytes = 0u64;
-        bytes += self.write_rows(Grain::Datagram, &rows.datagram)?;
-        bytes += self.write_rows(Grain::Era, &rows.era)?;
-        bytes += self.write_rows(Grain::SegmentCoverage, &rows.segment_coverage)?;
-        bytes += self.write_rows(Grain::SequenceGap, &rows.sequence_gap)?;
-        bytes += self.write_rows(Grain::ConformanceFinding, &rows.conformance_finding)?;
+        // Over `Grain::ALL` and matched exhaustively, so a grain added to the
+        // enum cannot be forgotten here. It was: the market data grains were
+        // added to `Grain` and to `RowBatch` and not to this list, and because
+        // `Written::of` counts the batch rather than what was written, the sink
+        // reported rows that no file held — which is a `--dry-run` answering
+        // *what would the rows say* with a table it silently dropped.
+        for grain in Grain::ALL {
+            bytes += match grain {
+                Grain::Datagram => self.write_rows(grain, &rows.datagram)?,
+                Grain::Era => self.write_rows(grain, &rows.era)?,
+                Grain::SegmentCoverage => self.write_rows(grain, &rows.segment_coverage)?,
+                Grain::SequenceGap => self.write_rows(grain, &rows.sequence_gap)?,
+                Grain::ConformanceFinding => self.write_rows(grain, &rows.conformance_finding)?,
+                Grain::Event => self.write_rows(grain, &rows.event)?,
+                Grain::Instrument => self.write_rows(grain, &rows.instrument)?,
+                Grain::BookTop => self.write_rows(grain, &rows.book_top)?,
+            };
+        }
         Ok(Accepted {
             accepted: Written::of(&rows, bytes),
             landed: vec![ObjectId::of(&rows)],
