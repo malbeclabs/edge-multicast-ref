@@ -520,7 +520,7 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
     ///
     /// **The anchor travels with the debt, and that is not an optimisation.**
     /// The specification obliges a snapshot with `Anchor Seq` *equal to* the
-    /// value the reset named — not equal to wherever the stream has reached by
+    /// value the reset named — not equal to wherever the feed has reached by
     /// the time the book is captured. Those differ by at least one, because the
     /// reset's own datagram advanced the sequence, and a snapshot anchored a
     /// number later is one a subscriber discards: it records the reset's anchor
@@ -666,7 +666,7 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
         adapter: &dyn Adapter,
         instrument: InstrumentRef,
     ) -> Result<Snapshot, SnapshotError> {
-        // The point in the live stream this book state is true as of, which is
+        // The point in the live feed this book state is true as of, which is
         // what tells a subscriber which live messages to apply after it and
         // which to discard.
         let anchor = match self.feeds.market_by_price.as_ref() {
@@ -685,7 +685,7 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
     ///
     /// **Not the live sequence.** A subscriber records the reset's anchor as
     /// the minimum `Anchor Seq` it will accept for that instrument, so a
-    /// snapshot captured later and anchored where the stream has since reached
+    /// snapshot captured later and anchored where the feed has since reached
     /// is one it discards — leaving the instrument waiting for something that
     /// already went past. The anchor comes from
     /// [`owed_snapshots`](Self::owed_snapshots), which carries it for exactly
@@ -1174,7 +1174,7 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
             self.unroutable += 1;
             return;
         };
-        // The anchor is where the stream is *now*: the reset takes effect
+        // The anchor is where the feed is *now*: the reset takes effect
         // immediately, so it is the number the datagram carrying it will take,
         // read off the send path because nothing else knows it.
         let anchor = pipeline.mktdata_sequence().unwrap_or(0);

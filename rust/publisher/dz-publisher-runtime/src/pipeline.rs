@@ -572,7 +572,7 @@ impl<F: EmittedFeed> FeedPipeline<F> {
 
     /// The `Sequence Number` this feed's mktdata series will stamp next.
     ///
-    /// This is a snapshot's `Anchor Seq`: the point in the live stream the book
+    /// This is a snapshot's `Anchor Seq`: the point in the live feed the book
     /// state is true as of, which is what tells a subscriber which live
     /// messages to apply after it and which to discard.
     #[must_use]

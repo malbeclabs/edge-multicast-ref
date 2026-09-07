@@ -40,7 +40,7 @@ pub const RESET_OTHER: u8 = 255;
 ///
 /// And it must equal the `Sequence Number` of the very datagram carrying this
 /// message: the reset takes effect immediately, so the anchor is where the
-/// stream is *now*. The specification's own conformance subscriber grades that
+/// feed is *now*. The specification's own conformance subscriber grades that
 /// a violation, which is why [`Self::anchored_at`] exists rather than a bare
 /// struct literal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

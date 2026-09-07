@@ -359,7 +359,7 @@ fn coalescing_produces_parts_at_or_above_the_floor_and_never_single_digit_ones()
 /// inserts and false *within* one — and coalescing objects into one insert is
 /// what moves rows from the first case into the second.
 ///
-/// The fixture makes that visible: the synthetic publisher starts every stream
+/// The fixture makes that visible: the synthetic publisher starts every feed
 /// at sequence 0 with the same receive stamps, so objects of 30, 31, 32 and 33
 /// datagrams on one instance are prefixes of one another. 126 rows go in and 33
 /// come out, because `object_key` is not in the sort key. A real recorder cannot

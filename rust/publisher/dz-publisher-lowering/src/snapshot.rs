@@ -13,7 +13,7 @@ use crate::scale::{price_for, qty_for};
 /// Three message types rather than one, because a snapshot is one book state
 /// cut across datagrams and a subscriber has to be able to tell whether it
 /// received all of it. The begin declares how many levels are coming and which
-/// point in the live stream the result is true as of; the end repeats the
+/// point in the live feed the result is true as of; the end repeats the
 /// identifiers so a subscriber that lost either one knows it did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {

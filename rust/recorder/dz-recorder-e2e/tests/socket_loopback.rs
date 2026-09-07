@@ -62,7 +62,7 @@ const ARRIVAL_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a recorder is watched for datagrams that must never arrive.
 ///
 /// Unlike [`ARRIVAL_TIMEOUT`] this one is always spent: the test asks each
-/// recorder for both streams and the correct answer is that half of them never
+/// recorder for both feeds and the correct answer is that half of them never
 /// come. Short enough to keep the suite quick, long enough that a datagram
 /// looping back on this host has had many times the time it needs.
 const MIXING_TIMEOUT: Duration = Duration::from_millis(750);
@@ -243,7 +243,7 @@ fn assert_arrived(outgoing: &[Outgoing], captured: &[OwnedDatagram], source: &So
     assert_eq!(captured.len(), outgoing.len());
 }
 
-/// The correct half of the stream: an advancing sequence, an era that begins
+/// The correct half of the feed: an advancing sequence, an era that begins
 /// again, more than one message per datagram, and two port roles.
 fn correct(outgoing: &mut Vec<Outgoing>) {
     let mut mktdata = fresh(MKTDATA_CHANNEL);
@@ -655,7 +655,7 @@ fn two_groups_on_one_port_each_record_their_own_and_nothing_of_the_other() {
         theirs_seq.advance();
     }
 
-    // Each recorder is asked for *both* streams. A recorder that filters
+    // Each recorder is asked for *both* feeds. A recorder that filters
     // correctly returns its own four and waits out the timeout for the rest,
     // which is the only shape of this test that can fail when the filtering
     // stops working: asking for four would be satisfied by the wrong four.
