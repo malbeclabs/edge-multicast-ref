@@ -448,7 +448,7 @@ clarifications this design adds:
 [adapter]
 kind = "..."         # must name a registered adapter; error lists the registry
 
-[adapter.tee]        # optional; the reference stream of the comparison below
+[adapter.tee]        # optional; the reference copy of the comparison below
 enabled = false
 path    = "..."      # Unix socket the publisher fans encoded datagrams out to
 ```
@@ -472,7 +472,7 @@ The adapter interface supplies that reference three ways, of increasing strength
 and cost. None of the three is new machinery: each is one of the four in-process
 test harnesses above, pointed at an archive instead of a test.
 
-### Mode A — the egress tee
+### Mode A — the egress fan-out
 
 `dz-publisher-egress` already boundaries on `DatagramSink`. Fan out: one sink is
 the multicast transmitter, the second writes the identical encoded datagrams to
@@ -483,12 +483,12 @@ for datagram, keyed on `(source, Channel ID, destination port, Sequence
 Number)` — the channel instance the recorder already keys on. Network loss,
 reordering, MTU drops and one-way latency become measured rather than inferred.
 
-Two rules, both non-negotiable, and both the reason this is a *tee* and not a
-second transmitter: the tee never blocks the send path, and a tee failure is
-counted and dropped, never propagated. A reference stream that can stall the
-feed it measures is worse than no reference stream.
+Two rules, both non-negotiable, and both the reason this is a *fan-out* and not
+a second transmitter: it never blocks the send path, and a failure in it is
+counted and dropped, never propagated. A reference copy that can stall the feed
+it measures is worse than no reference copy.
 
-What it does not catch: anything upstream of the tee. The tee sees what the
+What it does not catch: anything upstream of the fan-out. It sees what the
 publisher decided to send, so a mapping bug is faithfully reproduced on both
 sides.
 

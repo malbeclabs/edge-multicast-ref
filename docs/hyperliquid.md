@@ -59,10 +59,10 @@ testnet and mainnet-beta. Note the code; you will use it in Steps 3 and 4.
 
 ### Channel details (mainnet-beta)
 
-Several publisher streams share the `tiredsolid` group. They use the same multicast
-address but **distinct ports**, so you select a specific stream by the ports you bind.
-All mainnet-beta streams use `source_id=1` for Top-of-Book and Market-by-Order datagrams.
-Market-by-Order datagrams use `channel_id=1`.
+Several publishers share the `tiredsolid` group. They use the same multicast
+address but **distinct ports**, so you select a specific publisher by the ports
+you bind. All mainnet-beta publishers use `source_id=1` for Top-of-Book and
+Market-by-Order datagrams. Market-by-Order datagrams use `channel_id=1`.
 
 | Property | Value |
 |----------|-------|
@@ -70,7 +70,7 @@ Market-by-Order datagrams use `channel_id=1`.
 | Source ID | `1` |
 | Market-by-Order channel ID | `1` |
 
-Available mainnet-beta port sets. Each set is one publisher stream carrying both
+Available mainnet-beta port sets. Each set is one publisher carrying both
 Top-of-Book (TOB) and Market-by-Order (MBO) on the ports shown:
 
 | Port set | TOB mktdata | TOB refdata | MBO mktdata | MBO refdata | MBO snapshot |
@@ -86,7 +86,7 @@ Top-of-Book (TOB) and Market-by-Order (MBO) on the ports shown:
 | I | `9201` | `9202` | `10201` | `10202` | `10203` |
 | J | `9401` | `9402` | `10401` | `10402` | `10403` |
 
-To receive a stream specifically, bind to its ports above on `233.84.178.15`.
+To receive one publisher specifically, bind to its ports above on `233.84.178.15`.
 Top-of-Book & Trades follows the
 [top-of-book spec](https://github.com/malbeclabs/edge-feed-spec/blob/main/top-of-book/spec.md).
 Market-by-Order follows the
@@ -95,8 +95,8 @@ Market-by-Order follows the
 #### Order-intent feed
 
 The order-intent feed publishes pre-consensus order flow on a **separate group**,
-`tiredsolid-intent` → `233.84.178.19`. Datagrams carry `source_id=1`. Select a stream by
-binding its ports on `233.84.178.19`:
+`tiredsolid-intent` → `233.84.178.19`. Datagrams carry `source_id=1`. Select a
+publisher by binding its ports on `233.84.178.19`:
 
 | Property | Value |
 |----------|-------|
@@ -193,7 +193,7 @@ mind:
 
 - Each datagram is at most **1,232 bytes**, which leaves room for the GRE headers
   used in last-mile delivery.
-- Select a stream by binding to its ports on `233.84.178.15` (see
+- Select a publisher by binding to its ports on `233.84.178.15` (see
   [Channel details](#channel-details-mainnet-beta)). Datagrams carry **`source_id=1`**;
   Market-by-Order datagrams carry **`channel_id=1`**.
 

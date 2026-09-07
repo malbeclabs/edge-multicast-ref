@@ -92,9 +92,9 @@ The `sink.go`, `sink_socket.go`, and `sink_json.go` files are copies of the TOB 
 | Flag | Required | Default | Description |
 |---|---|---|---|
 | `--group` | yes | — | Multicast group IP (e.g., `239.10.10.20`) |
-| `--refdata-port` | yes | — | UDP port for refdata channel |
-| `--mktdata-port` | yes | — | UDP port for mktdata channel |
-| `--snapshot-port` | yes | — | UDP port for snapshot channel |
+| `--refdata-port` | yes | — | UDP port for the `refdata` port role |
+| `--mktdata-port` | yes | — | UDP port for the `mktdata` port role |
+| `--snapshot-port` | yes | — | UDP port for the `snapshot` port role |
 | `--interface` | no | system default | Network interface for IGMP join (e.g., `doublezero1`) |
 | `--output` | yes | — | `unix:///path/to/sock` or `file:///path/to/log` |
 | `--format` | no | `json` | `json` (only one supported in v1; CSV does not handle the variable-width fields) |

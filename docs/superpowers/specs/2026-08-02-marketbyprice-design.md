@@ -3,8 +3,8 @@
 Spec: [market-by-price/spec.md](https://github.com/malbeclabs/edge-feed-spec/blob/main/market-by-price/spec.md)
 (Schema Version 1, magic `0x4442`)
 
-Related prior work: `2026-04-23-marketbyorder-design.md` (the sibling feed this
-mirrors), `2026-06-06-marketbyorder-bot-snapshot-resilience-design.md` (the
+Related prior work: `2026-04-23-marketbyorder-design.md` (the market-by-order
+feed this mirrors), `2026-06-06-marketbyorder-bot-snapshot-resilience-design.md` (the
 shadow-commit snapshot model this adopts and the field evidence behind it).
 
 ## Problem
@@ -79,7 +79,8 @@ Package `main`, files mirroring `go/marketbyorder-parser`:
 ### Wire layout
 
 Magic `0x4442`, Schema Version 1, 24-byte datagram header and 4-byte application
-message header identical to the sibling feeds. Maximum datagram 1,232 bytes.
+message header identical to the other feeds in the family. Maximum datagram
+1,232 bytes.
 
 Thirteen message types. Body sizes below are the message size minus the 4-byte
 header, since that is what the parse functions receive:

@@ -33,7 +33,7 @@ not.
 | Plan | Lands | Delivers |
 |---|---|---|
 | **1 — the interface** (this one) | `dz-adapter-core`, `dz-publisher-lowering`, the registry and config binding, `dz-recorder-relower` | a venue can write an adapter and prove its mapping in CI; an archive can be re-lowered and diffed |
-| **2 — the runtime and the tee** | `dz-ingress-core`/`-websocket`, the `DatagramSink` fan-out, `dz-publisher-runtime` wiring, the reference recorder | a venue can *run*, and Modes A and B become live |
+| **2 — the runtime and the fan-out** | `dz-ingress-core`/`-websocket`, the `DatagramSink` fan-out, `dz-publisher-runtime` wiring, the reference recorder | a venue can *run*, and Modes A and B become live |
 
 Plan 1 is sized so that every task is a merge into this repository with a test
 that runs in CI. No task in it requires a venue repository to change.
@@ -585,7 +585,7 @@ keeps the tool usable.
 > `dz-ingress-*` did **not** stay planned — the websocket transport landed, so
 > the publisher's planned table now names what actually remains: the other
 > transports, market-by-order behind its missing codec crate, and the egress
-> tee, which was waiting on a framing that task 8 has now written.
+> fan-out, which was waiting on a framing that task 8 has now written.
 >
 > One correction rather than an addition: `rust/README.md` claimed CI ran on
 > changes under a list of paths. There is no path filter — CI runs on every pull

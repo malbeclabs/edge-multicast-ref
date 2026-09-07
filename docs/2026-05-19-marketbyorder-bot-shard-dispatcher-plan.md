@@ -2049,16 +2049,16 @@ git commit -m "marketbyorder-bot: add in-process throughput soak + parity accept
 
 ---
 
-## Task 12: Race sweep + documentation + finish
+## Task 12: Race run + documentation + finish
 
 **Files:**
 - Modify: `go/marketbyorder-bot/README.md`
 - Modify: `/Users/fach/.claude/CLAUDE.md` is OFF LIMITS — do NOT touch. Only repo docs.
 
-- [ ] **Step 1: Full race sweep**
+- [ ] **Step 1: Full race run**
 
 Run: `cd go/marketbyorder-bot && go test ./... -race`
-Expected: PASS — `ok marketbyorder-bot`, no `DATA RACE` reports. If a race appears, it is a real bug in shard/coordinator ownership — fix before continuing (do not mark this task complete with a failing race sweep).
+Expected: PASS — `ok marketbyorder-bot`, no `DATA RACE` reports. If a race appears, it is a real bug in shard/coordinator ownership — fix before continuing (do not mark this task complete with a failing race run).
 
 - [ ] **Step 2: Full CI-style check for the package**
 
@@ -2103,7 +2103,7 @@ git commit -m "marketbyorder-bot: document sharded dispatch and --shards flag"
 
 - [ ] **Step 5: Finish the development branch**
 
-Use the superpowers:finishing-a-development-branch skill to decide merge/PR. The work is complete when: all tests pass (`go test ./...`), race sweep is clean (`go test ./... -race`), `gofmt -l .` is empty, `go vet ./...` is clean, and the README + design doc are committed. Reference GitHub issue #12 in the PR/merge description.
+Use the superpowers:finishing-a-development-branch skill to decide merge/PR. The work is complete when: all tests pass (`go test ./...`), the race run is clean (`go test ./... -race`), `gofmt -l .` is empty, `go vet ./...` is clean, and the README + design doc are committed. Reference GitHub issue #12 in the PR/merge description.
 
 ---
 

@@ -383,7 +383,7 @@ re-lower the venue's own recorded events offline and join them to the recorded
 multicast on `(Instrument ID, Per-Instrument Seq)` — a diff rather than a guess.
 Two limits worth knowing before relying on it: a factor the publisher applied
 that the wire does not carry cannot be recovered offline, and the join needs the
-recorded reference stream as well as the market data.
+recorded reference data as well as the market data.
 
 ## The infrastructure repositories
 

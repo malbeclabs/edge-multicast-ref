@@ -250,7 +250,7 @@ those it actually implements:
 does not populate them. Registering a metric with no writer is the defect the PR 3
 review already caught once. A per-shard flush only ever sees the instruments that
 are currently dirty, so neither gauge can be computed correctly from it without a
-separate full sweep, which nothing needs yet.
+separate full scan of every instrument, which nothing needs yet.
 
 This does not leave PR 5 short. The parent spec's dashboard panel for instruments
 with a non-zero or unknown depth bound is served from `level_snapshots.depth_bound`
