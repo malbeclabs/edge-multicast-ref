@@ -124,7 +124,7 @@ CREATE TABLE IF NOT EXISTS recorder.event (
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(recv_ts)
 ORDER BY (channel_id, instrument_id, sequence_number, message_index,
-          source_addr, dst_port, site, recv_ts);
+          source_addr, dst_port, site, recorder, env, feed, recv_ts);
 
 -- The era-scoped reference data, kept.
 --
@@ -168,7 +168,8 @@ CREATE TABLE IF NOT EXISTS recorder.instrument (
 )
 ENGINE = ReplacingMergeTree(last_seen_ts)
 PARTITION BY toYYYYMMDD(first_seen_ts)
-ORDER BY (channel_id, instrument_id, from_sequence, source_addr, dst_port, site, recorder);
+ORDER BY (channel_id, instrument_id, from_sequence, source_addr, dst_port,
+          site, recorder, env, feed);
 
 -- One row per change in an instrument's top of book, where a change is a change
 -- in EITHER the visible top OR the certainty of it.
@@ -230,7 +231,7 @@ CREATE TABLE IF NOT EXISTS recorder.book_top (
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(recv_ts)
 ORDER BY (channel_id, instrument_id, recv_ts, sequence_number,
-          message_index, observation);
+          message_index, observation, env, feed);
 
 -- THE RETENTION SPLIT, ONE TABLE FURTHER DOWN THAN `002` PUT IT.
 --

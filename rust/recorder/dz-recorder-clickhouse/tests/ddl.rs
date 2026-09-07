@@ -215,6 +215,47 @@ fn the_market_data_sort_keys_carry_what_distinguishes_two_rows() {
     // object that carries it, so two loads of one era replace rather than
     // accumulate.
     assert!(instrument.contains("from_sequence"), "{instrument}");
+
+    // The rest of the identity block, on all three. Two recorders at one site
+    // see the same datagrams and agree on channel, instrument, sequence number
+    // and index; `recv_ts` differing is two clocks not colliding rather than a
+    // key, and `book_top` folds site and recorder into `observation`. `env` is
+    // the same argument across a boundary nothing else in the row crosses, and
+    // `feed` is what stops two feeds sharing a Channel ID and an Instrument ID
+    // from merging on the strength of that coincidence.
+    for (name, key) in [
+        ("event", &event),
+        ("book_top", &book_top),
+        ("instrument", &instrument),
+    ] {
+        for column in ["env", "feed"] {
+            assert!(
+                key.contains(column),
+                "{name} key omits {column}, so two of them merge: {key}"
+            );
+        }
+    }
+    assert!(event.contains("recorder"), "event key: {event}");
+    assert!(instrument.contains("recorder"), "{instrument}");
+    assert!(
+        book_top.contains("observation"),
+        "book_top names its vantage through `observation`: {book_top}"
+    );
+
+    // And `port_role` is in none of them, deliberately: it is recoverable from
+    // `dst_port`, which is in every key that has a channel instance in it, so
+    // keying on the name beside the number widens every key to restate a fact.
+    // `book_top` has no such column at all, because a book spans port roles.
+    for (name, key) in [
+        ("event", &event),
+        ("book_top", &book_top),
+        ("instrument", &instrument),
+    ] {
+        assert!(
+            !key.contains("port_role"),
+            "{name} key restates the port as a name as well as a number: {key}"
+        );
+    }
 }
 
 /// The retention split, one table further down than `002` put it.
