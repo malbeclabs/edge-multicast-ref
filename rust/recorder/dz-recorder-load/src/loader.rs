@@ -1811,7 +1811,7 @@ mod market_data_tests {
     /// The definition arrives first because a statement is in force from the
     /// instant it was received: a fixture that priced before it defined would be
     /// asserting the fold's refusal rather than its output.
-    fn depth_stream() -> Vec<OwnedDatagram> {
+    fn depth_feed() -> Vec<OwnedDatagram> {
         let mut out = Vec::new();
         let mut recv_ts = FIRST_RECV_TS_NS;
         let mut stamp = || {
@@ -1918,7 +1918,7 @@ mod market_data_tests {
             capture_drop_scope: CaptureDropScope::PortRole,
         };
         let mut writer = ArchiveWriter::new(cfg, 0).expect("the archive opens");
-        for dg in depth_stream() {
+        for dg in depth_feed() {
             Sink::write(&mut writer, &dg.as_recorded()).expect("the write path never fails");
         }
         assert_eq!(writer.datagrams_dropped_total(), 0);

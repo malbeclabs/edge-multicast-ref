@@ -23,7 +23,7 @@ mod depth;
 
 use common::record_feed;
 use depth::{
-    depth_stream, derive, ANCHOR_ASK_PRICE, ANCHOR_BID_PRICE, DEPTH_ROLES, INSTRUMENT, LEVELS,
+    depth_feed, derive, ANCHOR_ASK_PRICE, ANCHOR_BID_PRICE, DEPTH_ROLES, INSTRUMENT, LEVELS,
     SOURCE_ID, SYMBOL,
 };
 use dz_edge_core::Feed;
@@ -133,7 +133,7 @@ impl Drop for Scratch {
 #[test]
 fn the_checked_in_ddl_holds_what_the_deriver_produces() {
     let mut scratch = Scratch::open("market_data");
-    let sent = depth_stream();
+    let sent = depth_feed();
     let recorded = record_feed(&sent, DEPTH_ROLES, MarketByPrice::NAME);
     let derived = derive(&recorded, MAGIC_MBP, true);
 
@@ -229,7 +229,7 @@ fn the_checked_in_ddl_holds_what_the_deriver_produces() {
 #[test]
 fn loading_one_object_twice_replaces_its_market_data_rather_than_doubling_it() {
     let mut scratch = Scratch::open("market_data_reload");
-    let sent = depth_stream();
+    let sent = depth_feed();
     let recorded = record_feed(&sent, DEPTH_ROLES, MarketByPrice::NAME);
     let derived = derive(&recorded, MAGIC_MBP, true);
     let expected = [

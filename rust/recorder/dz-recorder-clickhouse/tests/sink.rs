@@ -362,14 +362,14 @@ fn a_failure_on_a_later_grain_fails_the_whole_object() {
 
 /// A grain the send order names is a grain the sink actually posts.
 ///
-/// The market data lanes were named in [`send_order`] and carried nowhere: the
+/// The market data grains were named in [`send_order`] and carried nowhere: the
 /// rows were counted as accepted, the object was credited as loaded, and the
 /// rows were dropped on the floor. That is the one outcome this crate is built
 /// to make impossible — a failure has to cost the object, and a success has to
 /// mean the rows are in the table — and it produced neither an error nor a
 /// counter, because from the sink's own point of view nothing had gone wrong.
 ///
-/// So the assertion is not that the order is right but that every lane exists:
+/// So the assertion is not that the order is right but that every grain exists:
 /// a batch carrying rows for a grain produces a request for that grain's table,
 /// with the rows it carried in it.
 #[test]
@@ -393,7 +393,7 @@ fn a_batch_carrying_market_data_posts_it_rather_than_counting_it() {
         "every accepted row is in the request, or the object is credited for \
          rows nobody stored"
     );
-    // The transport grain beside it, so this is about the lane and not about a
+    // The transport grain beside it, so this is about the grain and not about a
     // sink that posts nothing at all.
     let era = sent
         .iter()

@@ -342,8 +342,8 @@ pub fn now_ns() -> u64 {
     u64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .expect("a clock after the epoch")
+            .expect("a clock after the Unix epoch")
             .as_nanos(),
     )
-    .expect("nanoseconds since the epoch fit a u64")
+    .expect("nanoseconds since the Unix epoch fit a u64")
 }

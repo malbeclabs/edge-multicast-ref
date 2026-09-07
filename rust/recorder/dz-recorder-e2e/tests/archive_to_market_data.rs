@@ -1,7 +1,7 @@
 //! The whole chain again, and this time to the rows about instruments.
 //!
-//! `archive_to_rows` carries a stream from the encoder to the four transport
-//! tables. This one carries a depth stream from the encoder to `event`,
+//! `archive_to_rows` carries a feed from the encoder to the four transport
+//! tables. This one carries a depth feed from the encoder to `event`,
 //! `instrument` and `book_top`: the real `DatagramBuilder` frames it, the real
 //! `ArchiveWriter` publishes it, the real deriver reads it back, and the
 //! `FileSink` the loader's `--dry-run` uses writes the rows.
@@ -23,7 +23,7 @@ mod depth;
 
 use common::record_feed;
 use depth::{
-    depth_stream, derive, ANCHOR_ASK_PRICE, ANCHOR_ASK_QTY, ANCHOR_BID_PRICE, ANCHOR_BID_QTY,
+    depth_feed, derive, ANCHOR_ASK_PRICE, ANCHOR_ASK_QTY, ANCHOR_BID_PRICE, ANCHOR_BID_QTY,
     ANCHOR_SEQ, BETTER_ASK_PRICE, BETTER_ASK_QTY, BETTER_BID_PRICE, BETTER_BID_QTY,
     CUMULATIVE_VOLUME, DEPTH_ROLES, INSTRUMENT, LEVELS, PRICE_EXPONENT, QTY_EXPONENT, SNAPSHOT_ID,
     SOURCE_ID, SYMBOL, TRADE_ID,
@@ -56,7 +56,7 @@ fn message_count(datagram: &OwnedDatagram) -> usize {
 /// Every message that carries an event became one row that recovers it.
 #[test]
 fn every_encoded_message_becomes_a_row_that_recovers_it() {
-    let sent = depth_stream();
+    let sent = depth_feed();
     let recorded = record_feed(&sent, DEPTH_ROLES, MarketByPrice::NAME);
     let derived = derive(&recorded, MAGIC_MBP, false);
 
@@ -165,7 +165,7 @@ fn every_encoded_message_becomes_a_row_that_recovers_it() {
 /// counted.
 #[test]
 fn a_cycle_is_visible_from_its_begin_and_end_with_the_levels_unpersisted() {
-    let sent = depth_stream();
+    let sent = depth_feed();
     let recorded = record_feed(&sent, DEPTH_ROLES, MarketByPrice::NAME);
 
     let consumed = derive(&recorded, MAGIC_MBP, false);
@@ -237,7 +237,7 @@ fn levels(derived: &DerivedEvents) -> usize {
 /// The book states are the prices that were encoded, and the anchor is marked.
 #[test]
 fn the_book_tops_are_the_prices_that_were_encoded() {
-    let sent = depth_stream();
+    let sent = depth_feed();
     let recorded = record_feed(&sent, DEPTH_ROLES, MarketByPrice::NAME);
     let derived = derive(&recorded, MAGIC_MBP, false);
 
@@ -299,7 +299,7 @@ fn the_book_tops_are_the_prices_that_were_encoded() {
 /// insert ever held.
 #[test]
 fn the_rows_survive_the_sink_the_loader_writes_them_through() {
-    let sent = depth_stream();
+    let sent = depth_feed();
     let recorded = record_feed(&sent, DEPTH_ROLES, MarketByPrice::NAME);
     let derived = derive(&recorded, MAGIC_MBP, true);
     let expected: Vec<(Grain, usize)> = vec![
@@ -349,7 +349,7 @@ fn the_rows_survive_the_sink_the_loader_writes_them_through() {
 /// and every one of them would look like a price.
 #[test]
 fn the_wrong_magic_derives_nothing_rather_than_the_wrong_prices() {
-    let sent = depth_stream();
+    let sent = depth_feed();
     let recorded = record_feed(&sent, DEPTH_ROLES, MarketByPrice::NAME);
     assert_ne!(MAGIC_TOB, MarketByPrice::MAGIC, "two feeds, two delimiters");
     let derived = derive(&recorded, MAGIC_TOB, false);

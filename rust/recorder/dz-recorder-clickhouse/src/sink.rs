@@ -117,7 +117,7 @@ impl Held {
         // is not carried forward: an insert spanning objects is ordinary, and
         // the rows say which object each came from.
         //
-        // **Every grain, and the destructuring is what says so.** A lane left
+        // **Every grain, and the destructuring is what says so.** A grain left
         // out here is not a compile error and not a refusal: the rows are
         // counted as accepted, the object is credited, and they are dropped —
         // the one outcome this crate exists to make impossible. Naming the
@@ -375,7 +375,7 @@ impl<T: Transport> ClickHouseSink<T> {
         // The order is a property somebody reasoned about once, and a second
         // copy of it is a second thing to keep in step — and a grain missing
         // from *this* copy is not a wrong order but a silent drop. The match is
-        // exhaustive, so a new grain cannot be added without a lane.
+        // exhaustive, so a new grain cannot be added without a write.
         let mut bytes = 0u64;
         for grain in send_order() {
             bytes += match grain {

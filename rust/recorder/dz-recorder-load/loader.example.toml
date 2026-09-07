@@ -60,10 +60,10 @@ max_objects_per_pass = 60
 # feed = "market-by-price"
 #
 # The feed's Magic. Required, with no default and no registry to look it up in:
-# it is the only thing that stops a datagram misrouted from a sibling feed being
-# parsed at the wrong layout, and a value that matches nothing derives an empty
-# table that reads exactly like a feed nobody published on. `--check` says back
-# which value was read.
+# it is the only thing that stops a datagram misrouted from another feed in the
+# family being parsed at the wrong layout, and a value that matches nothing
+# derives an empty table that reads exactly like a feed nobody published on.
+# `--check` says back which value was read.
 # magic = 0x4442
 #
 # Whether every SnapshotLevel becomes an `event` row. Off, and the book consumes

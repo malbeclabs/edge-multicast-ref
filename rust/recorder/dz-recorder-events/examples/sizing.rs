@@ -61,9 +61,9 @@ fn main() -> ExitCode {
     }
 
     // Both are required and neither has a default. The `Magic` is the only thing
-    // that stops a datagram misrouted from a sibling feed being parsed at the
-    // wrong layout, and only the caller knows which feed it believes it is
-    // holding; a default window of "whatever was lying around" would produce a
+    // that stops a datagram misrouted from another feed in the family being
+    // parsed at the wrong layout, and only the caller knows which feed it
+    // believes it is holding; a default window of "whatever was lying around" would produce a
     // number with nothing to say what it is about.
     let Some(magic) = magic else {
         eprintln!("{USAGE}");

@@ -106,10 +106,10 @@ pub fn archive_config(
     archive_config_for(staging, completed, roles_joined, TopOfBook::NAME)
 }
 
-/// The same, for a suite whose stream is not this crate's default feed.
+/// The same, for a suite whose traffic is not this crate's default feed.
 ///
 /// The manifest's `feed` is the name the analysis tier switches derivation on
-/// by, so a depth stream published under the top-of-book feed's name would be
+/// by, so a depth feed published under the top-of-book feed's name would be
 /// asserting the switch against a label nothing in a deployment would ever
 /// carry.
 pub fn archive_config_for(

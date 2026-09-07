@@ -145,9 +145,9 @@ fn datagram(
         .expect("a datagram with at least one message is emittable")
 }
 
-/// The stream: reference data, then a complete cycle, then the deltas.
+/// The feed: reference data, then a complete cycle, then the deltas.
 #[must_use]
-pub fn depth_stream() -> Vec<OwnedDatagram> {
+pub fn depth_feed() -> Vec<OwnedDatagram> {
     let mut wire = Wire::new();
 
     // Reference data first, because a statement is in force from the instant it
