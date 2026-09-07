@@ -230,7 +230,7 @@ func (s *Shard) applyDeltaToReady(k instKey, inst *Instrument, rec Record) []Cha
 	expected := inst.LastAppliedInstrumentSeq + 1
 
 	if piSeq < expected {
-		// Duplicate or late. Discarded without demoting: a duplicated frame during
+		// Duplicate or late. Discarded without demoting: a duplicated datagram during
 		// bootstrap must not cost a re-bootstrap.
 		//
 		// Counted, though, because this path is also the only symptom of a wedged

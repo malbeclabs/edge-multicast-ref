@@ -8,9 +8,9 @@ import (
 	"time"
 )
 
-// buildFrameHeader constructs a 24-byte frame header for tests.
-func buildFrameHeader(magic uint16, schema, channel uint8, seq uint64, ts time.Time, msgCount, resetCount uint8, frameLen uint16) []byte {
-	buf := make([]byte, frameHeaderSize)
+// buildDatagramHeader constructs a 24-byte datagram header for tests.
+func buildDatagramHeader(magic uint16, schema, channel uint8, seq uint64, ts time.Time, msgCount, resetCount uint8, datagramLen uint16) []byte {
+	buf := make([]byte, datagramHeaderSize)
 	binary.LittleEndian.PutUint16(buf[0:2], magic)
 	buf[2] = schema
 	buf[3] = channel
@@ -18,14 +18,14 @@ func buildFrameHeader(magic uint16, schema, channel uint8, seq uint64, ts time.T
 	binary.LittleEndian.PutUint64(buf[12:20], uint64(ts.UnixNano()))
 	buf[20] = msgCount
 	buf[21] = resetCount
-	binary.LittleEndian.PutUint16(buf[22:24], frameLen)
+	binary.LittleEndian.PutUint16(buf[22:24], datagramLen)
 	return buf
 }
 
-func TestParseFrameHeader_Valid(t *testing.T) {
+func TestParseDatagramHeader_Valid(t *testing.T) {
 	ts := time.Unix(1700000000, 123456789)
-	buf := buildFrameHeader(mboMagic, mboSchemaVersionV1, 7, 42, ts, 3, 1, frameHeaderSize)
-	h, err := ParseFrameHeader(buf)
+	buf := buildDatagramHeader(mboMagic, mboSchemaVersionV1, 7, 42, ts, 3, 1, datagramHeaderSize)
+	h, err := ParseDatagramHeader(buf)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -41,40 +41,40 @@ func TestParseFrameHeader_Valid(t *testing.T) {
 	if !h.SendTimestamp.Equal(ts) {
 		t.Errorf("ts: got %v want %v", h.SendTimestamp, ts)
 	}
-	if h.MessageCount != 3 || h.ResetCount != 1 || h.FrameLength != frameHeaderSize {
+	if h.MessageCount != 3 || h.ResetCount != 1 || h.FrameLength != datagramHeaderSize {
 		t.Errorf("fields: %+v", h)
 	}
 }
 
-func TestParseFrameHeader_BadMagic(t *testing.T) {
-	buf := buildFrameHeader(0xDEAD, mboSchemaVersionV1, 0, 0, time.Now(), 0, 0, frameHeaderSize)
-	_, err := ParseFrameHeader(buf)
+func TestParseDatagramHeader_BadMagic(t *testing.T) {
+	buf := buildDatagramHeader(0xDEAD, mboSchemaVersionV1, 0, 0, time.Now(), 0, 0, datagramHeaderSize)
+	_, err := ParseDatagramHeader(buf)
 	if !errors.Is(err, errBadMagic) {
 		t.Fatalf("expected errBadMagic, got %v", err)
 	}
 }
 
-func TestParseFrameHeader_WrongVersion(t *testing.T) {
-	buf := buildFrameHeader(mboMagic, 99, 0, 0, time.Now(), 0, 0, frameHeaderSize)
-	_, err := ParseFrameHeader(buf)
+func TestParseDatagramHeader_WrongVersion(t *testing.T) {
+	buf := buildDatagramHeader(mboMagic, 99, 0, 0, time.Now(), 0, 0, datagramHeaderSize)
+	_, err := ParseDatagramHeader(buf)
 	if !errors.Is(err, errSchemaVersion) {
 		t.Fatalf("expected errSchemaVersion, got %v", err)
 	}
 }
 
-func TestParseFrameHeader_LengthMismatch(t *testing.T) {
-	buf := buildFrameHeader(mboMagic, mboSchemaVersionV1, 0, 0, time.Now(), 0, 0, 999)
-	_, err := ParseFrameHeader(buf)
+func TestParseDatagramHeader_LengthMismatch(t *testing.T) {
+	buf := buildDatagramHeader(mboMagic, mboSchemaVersionV1, 0, 0, time.Now(), 0, 0, 999)
+	_, err := ParseDatagramHeader(buf)
 	if !errors.Is(err, errFrameLength) {
 		t.Fatalf("expected errFrameLength, got %v", err)
 	}
 }
 
-func TestParseFrameHeader_TooShort(t *testing.T) {
+func TestParseDatagramHeader_TooShort(t *testing.T) {
 	buf := make([]byte, 10)
-	_, err := ParseFrameHeader(buf)
-	if !errors.Is(err, errFrameTooShort) {
-		t.Fatalf("expected errFrameTooShort, got %v", err)
+	_, err := ParseDatagramHeader(buf)
+	if !errors.Is(err, errDatagramTooShort) {
+		t.Fatalf("expected errDatagramTooShort, got %v", err)
 	}
 }
 
@@ -355,11 +355,11 @@ func TestParseSnapshotEnd(t *testing.T) {
 	}
 }
 
-// buildSingleMessageFrame wraps an application message body in a complete frame.
-func buildSingleMessageFrame(t *testing.T, msgType uint8, msgLength uint8, msgBody []byte) []byte {
+// buildSingleMessageDatagram wraps an application message body in a complete datagram.
+func buildSingleMessageDatagram(t *testing.T, msgType uint8, msgLength uint8, msgBody []byte) []byte {
 	t.Helper()
-	frameLen := frameHeaderSize + messageHeaderSize + len(msgBody)
-	buf := buildFrameHeader(mboMagic, mboSchemaVersionV1, 1, 100, time.Unix(1700000020, 0), 1, 0, uint16(frameLen))
+	datagramLen := datagramHeaderSize + messageHeaderSize + len(msgBody)
+	buf := buildDatagramHeader(mboMagic, mboSchemaVersionV1, 1, 100, time.Unix(1700000020, 0), 1, 0, uint16(datagramLen))
 	mh := make([]byte, messageHeaderSize)
 	mh[0] = msgType
 	mh[1] = msgLength
@@ -381,10 +381,10 @@ func TestMarketByOrderParser_OrderAdd(t *testing.T) {
 	binary.LittleEndian.PutUint64(body[28:36], uint64(int64(82446)))
 	binary.LittleEndian.PutUint64(body[36:44], 3031)
 
-	frame := buildSingleMessageFrame(t, msgTypeOrderAdd, messageHeaderSize+48, body)
+	datagram := buildSingleMessageDatagram(t, msgTypeOrderAdd, messageHeaderSize+48, body)
 
 	p := &marketByOrderParser{}
-	recs, err := p.ParseFrame("mktdata", frame)
+	recs, err := p.ParseDatagram("mktdata", datagram)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,10 +402,10 @@ func TestMarketByOrderParser_OrderAdd(t *testing.T) {
 
 func TestMarketByOrderParser_UnknownTypeSkipped(t *testing.T) {
 	body := make([]byte, 8)
-	frame := buildSingleMessageFrame(t, 0xFE, messageHeaderSize+8, body)
+	datagram := buildSingleMessageDatagram(t, 0xFE, messageHeaderSize+8, body)
 
 	p := &marketByOrderParser{}
-	recs, err := p.ParseFrame("mktdata", frame)
+	recs, err := p.ParseDatagram("mktdata", datagram)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -414,10 +414,10 @@ func TestMarketByOrderParser_UnknownTypeSkipped(t *testing.T) {
 	}
 }
 
-// buildOrderAddFrameWithTS constructs a complete MBO frame containing a single
-// order_add message. Returns the frame bytes, the enter timestamp in nanoseconds,
-// and the frame send timestamp in nanoseconds (enterNS != sendNS by design).
-func buildOrderAddFrameWithTS(t *testing.T) (frame []byte, enterNS, sendNS uint64) {
+// buildOrderAddDatagramWithTS constructs a complete MBO datagram containing a single
+// order_add message. Returns the datagram bytes, the enter timestamp in nanoseconds,
+// and the datagram send timestamp in nanoseconds (enterNS != sendNS by design).
+func buildOrderAddDatagramWithTS(t *testing.T) (datagram []byte, enterNS, sendNS uint64) {
 	t.Helper()
 	sendTS := time.Unix(1700000020, 111111111)
 	enterTS := time.Unix(1700000010, 222222222)
@@ -436,40 +436,40 @@ func buildOrderAddFrameWithTS(t *testing.T) (frame []byte, enterNS, sendNS uint6
 	binary.LittleEndian.PutUint64(body[36:44], 10)                   // QtyRaw
 
 	msgLen := uint8(messageHeaderSize + 48)
-	frameLen := frameHeaderSize + int(msgLen)
-	hdr := buildFrameHeader(mboMagic, mboSchemaVersionV1, 1, 200, sendTS, 1, 0, uint16(frameLen))
+	datagramLen := datagramHeaderSize + int(msgLen)
+	hdr := buildDatagramHeader(mboMagic, mboSchemaVersionV1, 1, 200, sendTS, 1, 0, uint16(datagramLen))
 	mh := make([]byte, messageHeaderSize)
 	mh[0] = msgTypeOrderAdd
 	mh[1] = msgLen
 	binary.LittleEndian.PutUint16(mh[2:4], 0)
-	frame = append(hdr, mh...)
-	frame = append(frame, body...)
-	return frame, enterNS, sendNS
+	datagram = append(hdr, mh...)
+	datagram = append(datagram, body...)
+	return datagram, enterNS, sendNS
 }
 
-// TestParseFrame_BatchBoundaryHasNoSourceTS guards against treating a
+// TestParseDatagram_BatchBoundaryHasNoSourceTS guards against treating a
 // batch_boundary's BatchTime as a block/venue timestamp. BatchTime is a batch
 // counter, not wall-clock, so the record must carry SourceTSNS == 0 (which the
 // bot maps to a NULL source_ts and excludes from source latency).
-func TestParseFrame_BatchBoundaryHasNoSourceTS(t *testing.T) {
+func TestParseDatagram_BatchBoundaryHasNoSourceTS(t *testing.T) {
 	sendTS := time.Unix(1700000020, 111111111)
 	body := make([]byte, 12)
 	binary.LittleEndian.PutUint32(body[0:4], 7000)        // BatchID
 	binary.LittleEndian.PutUint64(body[4:12], 1025401179) // BatchTime (counter, not epoch ns)
 
 	msgLen := uint8(messageHeaderSize + 12)
-	frameLen := frameHeaderSize + int(msgLen)
-	hdr := buildFrameHeader(mboMagic, mboSchemaVersionV1, 1, 200, sendTS, 1, 0, uint16(frameLen))
+	datagramLen := datagramHeaderSize + int(msgLen)
+	hdr := buildDatagramHeader(mboMagic, mboSchemaVersionV1, 1, 200, sendTS, 1, 0, uint16(datagramLen))
 	mh := make([]byte, messageHeaderSize)
 	mh[0] = msgTypeBatchBoundary
 	mh[1] = msgLen
-	frame := append(hdr, mh...)
-	frame = append(frame, body...)
+	datagram := append(hdr, mh...)
+	datagram = append(datagram, body...)
 
 	p := &marketByOrderParser{}
-	recs, err := p.ParseFrame("mktdata", frame)
+	recs, err := p.ParseDatagram("mktdata", datagram)
 	if err != nil {
-		t.Fatalf("ParseFrame: %v", err)
+		t.Fatalf("ParseDatagram: %v", err)
 	}
 	if len(recs) != 1 || recs[0].Type != "batch_boundary" {
 		t.Fatalf("got %d records, want 1 batch_boundary", len(recs))
@@ -482,12 +482,12 @@ func TestParseFrame_BatchBoundaryHasNoSourceTS(t *testing.T) {
 	}
 }
 
-func TestParseFrame_OrderAddEmitsSourceAndSendTS(t *testing.T) {
-	frame, enterNS, sendNS := buildOrderAddFrameWithTS(t)
+func TestParseDatagram_OrderAddEmitsSourceAndSendTS(t *testing.T) {
+	datagram, enterNS, sendNS := buildOrderAddDatagramWithTS(t)
 	p := &marketByOrderParser{}
-	recs, err := p.ParseFrame("mktdata", frame)
+	recs, err := p.ParseDatagram("mktdata", datagram)
 	if err != nil {
-		t.Fatalf("ParseFrame: %v", err)
+		t.Fatalf("ParseDatagram: %v", err)
 	}
 	if len(recs) != 1 {
 		t.Fatalf("got %d records, want 1", len(recs))
@@ -497,20 +497,20 @@ func TestParseFrame_OrderAddEmitsSourceAndSendTS(t *testing.T) {
 		t.Errorf("SourceTSNS = %d, want %d (enter_ts)", r.SourceTSNS, enterNS)
 	}
 	if r.SendTSNS != sendNS {
-		t.Errorf("SendTSNS = %d, want %d (frame send)", r.SendTSNS, sendNS)
+		t.Errorf("SendTSNS = %d, want %d (datagram send)", r.SendTSNS, sendNS)
 	}
 }
 
-func TestMarketByOrderParser_TruncatedFrame(t *testing.T) {
+func TestMarketByOrderParser_TruncatedDatagram(t *testing.T) {
 	body := make([]byte, 48)
-	frame := buildSingleMessageFrame(t, msgTypeOrderAdd, messageHeaderSize+48, body)
-	// Truncate the frame to 30 bytes — header says 76, only 30 present.
-	truncated := frame[:30]
+	datagram := buildSingleMessageDatagram(t, msgTypeOrderAdd, messageHeaderSize+48, body)
+	// Truncate the datagram to 30 bytes — header says 76, only 30 present.
+	truncated := datagram[:30]
 
 	p := &marketByOrderParser{}
-	_, err := p.ParseFrame("mktdata", truncated)
+	_, err := p.ParseDatagram("mktdata", truncated)
 	if err == nil {
-		t.Fatal("expected error on truncated frame")
+		t.Fatal("expected error on truncated datagram")
 	}
 }
 
@@ -648,7 +648,7 @@ func TestParseInstrumentDefinition_V3SymbolFillsField(t *testing.T) {
 	}
 }
 
-// The declared version and the body length must agree. A v3 frame carrying a v1
+// The declared version and the body length must agree. A v3 datagram carrying a v1
 // body would otherwise read Source ID and Symbol across 66 bytes of adjacent
 // fields and produce plausible garbage instead of an error.
 func TestParseInstrumentDefinition_LengthMustMatchVersion(t *testing.T) {
@@ -671,79 +671,79 @@ func TestParseInstrumentDefinition_UnsupportedVersion(t *testing.T) {
 	}
 }
 
-// The frame header accepts both implemented versions and nothing else.
-func TestParseFrameHeader_AcceptsV1AndV3(t *testing.T) {
+// The datagram header accepts both implemented versions and nothing else.
+func TestParseDatagramHeader_AcceptsV1AndV3(t *testing.T) {
 	ts := time.Unix(1700000000, 0)
 	for _, v := range []uint8{1, 3} {
-		buf := buildFrameHeader(mboMagic, v, 0, 1, ts, 1, 0, frameHeaderSize)
-		if _, err := ParseFrameHeader(buf); err != nil {
+		buf := buildDatagramHeader(mboMagic, v, 0, 1, ts, 1, 0, datagramHeaderSize)
+		if _, err := ParseDatagramHeader(buf); err != nil {
 			t.Errorf("schema version %d must be accepted: %v", v, err)
 		}
 	}
 	for _, v := range []uint8{0, 2, 4, 255} {
-		buf := buildFrameHeader(mboMagic, v, 0, 1, ts, 1, 0, frameHeaderSize)
-		if _, err := ParseFrameHeader(buf); err == nil {
+		buf := buildDatagramHeader(mboMagic, v, 0, 1, ts, 1, 0, datagramHeaderSize)
+		if _, err := ParseDatagramHeader(buf); err == nil {
 			t.Errorf("schema version %d must be rejected", v)
 		}
 	}
 }
 
 // A publisher cutting over from v1 to v3 mid-stream must be followed without a
-// restart. This is why the version is read per frame rather than latched from
-// the first frame.
-func TestParseFrame_FollowsVersionSwitchMidStream(t *testing.T) {
+// restart. This is why the version is read per datagram rather than latched from
+// the first datagram.
+func TestParseDatagram_FollowsVersionSwitchMidStream(t *testing.T) {
 	p := &marketByOrderParser{}
 	ts := time.Unix(1700000000, 0)
 
 	build := func(version uint8, body []byte) []byte {
 		msgLen := uint8(messageHeaderSize + len(body))
-		frameLen := frameHeaderSize + int(msgLen)
-		hdr := buildFrameHeader(mboMagic, version, 0, 1, ts, 1, 0, uint16(frameLen))
+		datagramLen := datagramHeaderSize + int(msgLen)
+		hdr := buildDatagramHeader(mboMagic, version, 0, 1, ts, 1, 0, uint16(datagramLen))
 		mh := make([]byte, messageHeaderSize)
 		mh[0] = msgTypeInstrumentDefinition
 		mh[1] = msgLen
-		frame := append(hdr, mh...)
-		return append(frame, body...)
+		datagram := append(hdr, mh...)
+		return append(datagram, body...)
 	}
 
-	v1Frame := build(1, buildInstDefV1("SHORT"))
-	v3Frame := build(3, buildInstDefV3("KXNFLGAME-26SEP13NYJTEN-NYJ"))
+	v1Datagram := build(1, buildInstDefV1("SHORT"))
+	v3Datagram := build(3, buildInstDefV3("KXNFLGAME-26SEP13NYJTEN-NYJ"))
 
 	for i, tc := range []struct {
-		frame []byte
-		want  string
+		datagram []byte
+		want     string
 	}{
-		{v1Frame, "SHORT"},
-		{v3Frame, "KXNFLGAME-26SEP13NYJTEN-NYJ"},
-		{v1Frame, "SHORT"}, // and back again
+		{v1Datagram, "SHORT"},
+		{v3Datagram, "KXNFLGAME-26SEP13NYJTEN-NYJ"},
+		{v1Datagram, "SHORT"}, // and back again
 	} {
-		recs, err := p.ParseFrame("refdata", tc.frame)
+		recs, err := p.ParseDatagram("refdata", tc.datagram)
 		if err != nil {
-			t.Fatalf("frame %d: %v", i, err)
+			t.Fatalf("datagram %d: %v", i, err)
 		}
 		if len(recs) != 1 {
-			t.Fatalf("frame %d: expected 1 record, got %d", i, len(recs))
+			t.Fatalf("datagram %d: expected 1 record, got %d", i, len(recs))
 		}
 		if got := recs[0].Fields["symbol"]; got != tc.want {
-			t.Errorf("frame %d symbol: got %v want %q", i, got, tc.want)
+			t.Errorf("datagram %d symbol: got %v want %q", i, got, tc.want)
 		}
 	}
 }
 
 // Source ID must reach the record's Fields map, where the bot reads it.
-func TestParseFrame_InstrumentDefinitionCarriesSourceID(t *testing.T) {
+func TestParseDatagram_InstrumentDefinitionCarriesSourceID(t *testing.T) {
 	p := &marketByOrderParser{}
 	ts := time.Unix(1700000000, 0)
 	body := buildInstDefV3("BTC-USDT")
 	msgLen := uint8(messageHeaderSize + len(body))
-	frameLen := frameHeaderSize + int(msgLen)
-	hdr := buildFrameHeader(mboMagic, 3, 0, 1, ts, 1, 0, uint16(frameLen))
+	datagramLen := datagramHeaderSize + int(msgLen)
+	hdr := buildDatagramHeader(mboMagic, 3, 0, 1, ts, 1, 0, uint16(datagramLen))
 	mh := make([]byte, messageHeaderSize)
 	mh[0] = msgTypeInstrumentDefinition
 	mh[1] = msgLen
-	frame := append(append(hdr, mh...), body...)
+	datagram := append(append(hdr, mh...), body...)
 
-	recs, err := p.ParseFrame("refdata", frame)
+	recs, err := p.ParseDatagram("refdata", datagram)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -219,7 +219,7 @@ func TestDecodeInstrumentDef_UnsupportedVersion(t *testing.T) {
 	}
 }
 
-// The frame header (via TopOfBookParser.Parse -> validateHeader) accepts
+// The datagram header (via TopOfBookParser.Parse -> validateHeader) accepts
 // schema versions 1 and 3 as a set, and rejects everything else including 2.
 // A version ceiling would wrongly admit 2.
 func TestValidateHeader_AcceptsV1AndV3(t *testing.T) {
@@ -227,14 +227,14 @@ func TestValidateHeader_AcceptsV1AndV3(t *testing.T) {
 	ts := uint64(1700000000000000000)
 
 	for _, v := range []uint8{1, 3} {
-		frame := buildFrameWithVersion(v, 1, 100, ts, buildHeartbeat(1, ts))
-		if _, err := p.Parse(frame, PacketMeta{}); err != nil {
+		datagram := buildDatagramWithVersion(v, 1, 100, ts, buildHeartbeat(1, ts))
+		if _, err := p.Parse(datagram, PacketMeta{}); err != nil {
 			t.Errorf("schema version %d must be accepted: %v", v, err)
 		}
 	}
 	for _, v := range []uint8{0, 2, 4, 255} {
-		frame := buildFrameWithVersion(v, 1, 100, ts, buildHeartbeat(1, ts))
-		if _, err := p.Parse(frame, PacketMeta{}); err == nil {
+		datagram := buildDatagramWithVersion(v, 1, 100, ts, buildHeartbeat(1, ts))
+		if _, err := p.Parse(datagram, PacketMeta{}); err == nil {
 			t.Errorf("schema version %d must be rejected", v)
 		}
 	}
@@ -244,9 +244,9 @@ func TestValidateHeader_AcceptsV1AndV3(t *testing.T) {
 func TestParse_InstrumentDefinitionCarriesSourceID(t *testing.T) {
 	p := NewTopOfBookParser()
 	ts := uint64(1700000000000000000)
-	frame := buildFrameWithVersion(3, 1, 100, ts, buildInstrumentDefMsgV3(4242, "BTC-USDT", "BTC", "USDT"))
+	datagram := buildDatagramWithVersion(3, 1, 100, ts, buildInstrumentDefMsgV3(4242, "BTC-USDT", "BTC", "USDT"))
 
-	recs, err := p.Parse(frame, PacketMeta{})
+	recs, err := p.Parse(datagram, PacketMeta{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,8 +259,8 @@ func TestParse_InstrumentDefinitionCarriesSourceID(t *testing.T) {
 }
 
 // A publisher cutting over from v1 to v3 (and back) mid-stream must be
-// followed without a restart. This is why the version is read per frame
-// rather than latched from the first frame.
+// followed without a restart. This is why the version is read per datagram
+// rather than latched from the first datagram.
 func TestParse_FollowsVersionSwitchMidStream(t *testing.T) {
 	p := NewTopOfBookParser()
 	ts := uint64(1700000000000000000)
@@ -268,41 +268,41 @@ func TestParse_FollowsVersionSwitchMidStream(t *testing.T) {
 	v1Msg := buildInstrumentDefMsgV1(42, "SHORT", "BTC", "USDT")
 	v3Msg := buildInstrumentDefMsgV3(42, "KXNFLGAME-26SEP13NYJTEN-NYJ", "BTC", "USDT")
 
-	v1Frame := buildFrameWithVersion(1, 1, 100, ts, v1Msg)
-	v3Frame := buildFrameWithVersion(3, 1, 101, ts, v3Msg)
+	v1Datagram := buildDatagramWithVersion(1, 1, 100, ts, v1Msg)
+	v3Datagram := buildDatagramWithVersion(3, 1, 101, ts, v3Msg)
 
 	for i, tc := range []struct {
-		frame []byte
-		want  string
+		datagram []byte
+		want     string
 	}{
-		{v1Frame, "SHORT"},
-		{v3Frame, "KXNFLGAME-26SEP13NYJTEN-NYJ"},
-		{v1Frame, "SHORT"}, // and back again, still no restart
+		{v1Datagram, "SHORT"},
+		{v3Datagram, "KXNFLGAME-26SEP13NYJTEN-NYJ"},
+		{v1Datagram, "SHORT"}, // and back again, still no restart
 	} {
-		records, err := p.Parse(tc.frame, PacketMeta{})
+		records, err := p.Parse(tc.datagram, PacketMeta{})
 		if err != nil {
-			t.Fatalf("frame %d: %v", i, err)
+			t.Fatalf("datagram %d: %v", i, err)
 		}
 		if len(records) != 1 {
-			t.Fatalf("frame %d: expected 1 record, got %d", i, len(records))
+			t.Fatalf("datagram %d: expected 1 record, got %d", i, len(records))
 		}
 		if records[0].Symbol != tc.want {
-			t.Errorf("frame %d symbol: got %q want %q", i, records[0].Symbol, tc.want)
+			t.Errorf("datagram %d symbol: got %q want %q", i, records[0].Symbol, tc.want)
 		}
 	}
 }
 
-// buildFrameWithVersion is buildFrame/buildFrameWithReset but with an
+// buildDatagramWithVersion is buildDatagram/buildDatagramWithReset but with an
 // explicit schema version, needed to exercise version-specific behavior.
-func buildFrameWithVersion(schemaVersion, channelID uint8, seq uint64, sendTS uint64, msgs ...[]byte) []byte {
+func buildDatagramWithVersion(schemaVersion, channelID uint8, seq uint64, sendTS uint64, msgs ...[]byte) []byte {
 	headerSize := 24
 	bodySize := 0
 	for _, m := range msgs {
 		bodySize += len(m)
 	}
-	frameLen := headerSize + bodySize
+	datagramLen := headerSize + bodySize
 
-	buf := make([]byte, frameLen)
+	buf := make([]byte, datagramLen)
 	buf[0] = 0x5A
 	buf[1] = 0x44
 	buf[2] = schemaVersion
@@ -311,7 +311,7 @@ func buildFrameWithVersion(schemaVersion, channelID uint8, seq uint64, sendTS ui
 	binary.LittleEndian.PutUint64(buf[12:], sendTS)
 	buf[20] = uint8(len(msgs))
 	buf[21] = 0
-	binary.LittleEndian.PutUint16(buf[22:], uint16(frameLen))
+	binary.LittleEndian.PutUint16(buf[22:], uint16(datagramLen))
 
 	off := headerSize
 	for _, m := range msgs {

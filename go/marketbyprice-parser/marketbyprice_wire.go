@@ -7,7 +7,7 @@
 //
 // Length checks are exact equality, not >=. The spec's forward-compatibility
 // rule that a decoder ignores trailing bytes only applies across a Schema
-// Version bump, and ParseFrameHeader rejects unimplemented versions (anything
+// Version bump, and ParseDatagramHeader rejects unimplemented versions (anything
 // other than v1 or v3) before any body is parsed. Within a given version, an
 // unexpected body length is malformed.
 
@@ -24,12 +24,12 @@ const (
 	mbpMagic           uint16 = 0x4442
 	mbpSchemaVersionV1 uint8  = 1 // v1: InstrumentDefinition, 76-byte body (80-byte message)
 	mbpSchemaVersionV3 uint8  = 3 // v3: InstrumentDefinition, 126-byte body (130-byte message)
-	frameHeaderSize           = 24
+	datagramHeaderSize        = 24
 	messageHeaderSize         = 4
 )
 
 // Message type IDs. Types 0x03 and 0x05 are reserved and intentionally unused
-// (Quote in top-of-book, and a reserved slot) so a misrouted sibling frame
+// (Quote in top-of-book, and a reserved slot) so a misrouted sibling datagram
 // cannot cross-decode. 0x13, 0x14, 0x22, and the 0x02/0x04 bodies are
 // byte-for-byte identical to the market-by-order feed.
 const (
@@ -50,26 +50,26 @@ const (
 
 // Wire decoding errors.
 var (
-	errBadMagic        = errors.New("bad magic")
-	errSchemaVersion   = errors.New("unsupported schema version")
-	errFrameTooShort   = errors.New("frame too short for header")
-	errFrameLength     = errors.New("frame length mismatch")
-	errMessageTooShort = errors.New("message too short for header")
-	errMessageLength   = errors.New("message length out of range")
-	errMessageCount    = errors.New("message count out of range")
-	errTruncated       = errors.New("truncated message body")
-	errMalformedBody   = errors.New("malformed message body")
-	errUnknownType     = errors.New("unknown message type")
+	errBadMagic         = errors.New("bad magic")
+	errSchemaVersion    = errors.New("unsupported schema version")
+	errDatagramTooShort = errors.New("datagram too short for header")
+	errFrameLength      = errors.New("frame length mismatch")
+	errMessageTooShort  = errors.New("message too short for header")
+	errMessageLength    = errors.New("message length out of range")
+	errMessageCount     = errors.New("message count out of range")
+	errTruncated        = errors.New("truncated message body")
+	errMalformedBody    = errors.New("malformed message body")
+	errUnknownType      = errors.New("unknown message type")
 )
 
-// FrameHeader is the 24-byte frame header common to all three ports.
-type FrameHeader struct {
+// DatagramHeader is the 24-byte datagram header common to all three ports.
+type DatagramHeader struct {
 	Magic         uint16
 	SchemaVersion uint8
 	ChannelID     uint8
 	Sequence      uint64
 	SendTimestamp time.Time
-	MessageCount  uint8 // 1-255; ParseFrameHeader rejects 0
+	MessageCount  uint8 // 1-255; ParseDatagramHeader rejects 0
 	ResetCount    uint8
 	FrameLength   uint16
 }
@@ -87,12 +87,12 @@ type MessageHeader struct {
 // with the arrival port is a publisher defect worth counting.
 const flagSnapshot uint16 = 0x0001
 
-// ParseFrameHeader decodes the 24-byte frame header from buf.
-func ParseFrameHeader(buf []byte) (FrameHeader, error) {
-	if len(buf) < frameHeaderSize {
-		return FrameHeader{}, errFrameTooShort
+// ParseDatagramHeader decodes the 24-byte datagram header from buf.
+func ParseDatagramHeader(buf []byte) (DatagramHeader, error) {
+	if len(buf) < datagramHeaderSize {
+		return DatagramHeader{}, errDatagramTooShort
 	}
-	h := FrameHeader{
+	h := DatagramHeader{
 		Magic:         binary.LittleEndian.Uint16(buf[0:2]),
 		SchemaVersion: buf[2],
 		ChannelID:     buf[3],
@@ -112,14 +112,14 @@ func ParseFrameHeader(buf []byte) (FrameHeader, error) {
 	if int(h.FrameLength) != len(buf) {
 		return h, errFrameLength
 	}
-	// The spec gives Message Count a range of 1-255: a frame carries at least one
+	// The spec gives Message Count a range of 1-255: a datagram carries at least one
 	// application message. Checked here rather than left to the walk, because a
-	// zero count makes the loop body unreachable, so the frame would otherwise be
+	// zero count makes the loop body unreachable, so the datagram would otherwise be
 	// accepted as valid-but-empty and the violation would never be counted. This
-	// is the last surviving silently-tolerated empty frame now that leftover body
-	// bytes fail the frame.
+	// is the last surviving silently-tolerated empty datagram now that leftover body
+	// bytes fail the datagram.
 	if h.MessageCount == 0 {
-		return h, fmt.Errorf("%w: message count 0, frame carries no messages", errMessageCount)
+		return h, fmt.Errorf("%w: message count 0, datagram carries no messages", errMessageCount)
 	}
 	return h, nil
 }
@@ -241,7 +241,7 @@ const (
 )
 
 // ParseInstrumentDefinition decodes an InstrumentDefinition body using the
-// layout for the frame's schema version.
+// layout for the datagram's schema version.
 //
 // The body length cross-checks the declared version. They can only disagree if a
 // publisher bumped the header without the payload or the reverse, and the
@@ -390,7 +390,7 @@ const u16Unavailable uint16 = 0xFFFF
 
 // LiquidationBody is the 44-byte body of a Liquidation message. Byte-identical
 // to the top-of-book feed's 0x08, though no other parser in this repo decodes it.
-// Annotates a forced Trade, keyed on Trade ID, in the same frame as that Trade.
+// Annotates a forced Trade, keyed on Trade ID, in the same datagram as that Trade.
 type LiquidationBody struct {
 	InstrumentID   uint32
 	SourceID       uint16
@@ -423,7 +423,7 @@ func ParseLiquidation(buf []byte) (LiquidationBody, error) {
 // Bytes 0-31 are byte-for-byte the market-by-order feed's 32-byte body, with
 // Total Orders reading as Total Levels. Depth Bound is appended at offset 32.
 // That prefix-superset rule exists so a market-by-order decoder can read a
-// market-by-price frame; it does not license this decoder to accept a 32-byte
+// market-by-price datagram; it does not license this decoder to accept a 32-byte
 // body, so the length check is exact.
 type SnapshotBeginBody struct {
 	InstrumentID      uint32

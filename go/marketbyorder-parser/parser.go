@@ -22,13 +22,13 @@ type Record struct {
 	Fields         map[string]any `json:"fields,omitempty"`
 }
 
-// Parser decodes a wire frame received on a given port and returns zero or
-// more Records. A return of (nil, nil) means the frame was valid but produced
-// no records (e.g., padding-only). A non-nil error indicates the frame should
+// Parser decodes a wire datagram received on a given port and returns zero or
+// more Records. A return of (nil, nil) means the datagram was valid but produced
+// no records (e.g., padding-only). A non-nil error indicates the datagram should
 // be dropped and an error counter incremented.
 type Parser interface {
 	Name() string
-	ParseFrame(port string, frame []byte) ([]Record, error)
+	ParseDatagram(port string, datagram []byte) ([]Record, error)
 }
 
 var parserRegistry = map[string]func() Parser{}

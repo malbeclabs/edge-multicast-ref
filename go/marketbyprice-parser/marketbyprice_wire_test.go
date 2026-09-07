@@ -8,9 +8,9 @@ import (
 	"time"
 )
 
-// buildFrameHeader constructs a 24-byte frame header for tests.
-func buildFrameHeader(magic uint16, schema, channel uint8, seq uint64, ts time.Time, msgCount, resetCount uint8, frameLen uint16) []byte {
-	buf := make([]byte, frameHeaderSize)
+// buildDatagramHeader constructs a 24-byte datagram header for tests.
+func buildDatagramHeader(magic uint16, schema, channel uint8, seq uint64, ts time.Time, msgCount, resetCount uint8, datagramLen uint16) []byte {
+	buf := make([]byte, datagramHeaderSize)
 	binary.LittleEndian.PutUint16(buf[0:2], magic)
 	buf[2] = schema
 	buf[3] = channel
@@ -18,13 +18,13 @@ func buildFrameHeader(magic uint16, schema, channel uint8, seq uint64, ts time.T
 	binary.LittleEndian.PutUint64(buf[12:20], uint64(ts.UnixNano()))
 	buf[20] = msgCount
 	buf[21] = resetCount
-	binary.LittleEndian.PutUint16(buf[22:24], frameLen)
+	binary.LittleEndian.PutUint16(buf[22:24], datagramLen)
 	return buf
 }
 
 func TestMagicIsMarketByPrice(t *testing.T) {
 	// 0x4442 is this feed's magic. It must differ from the sibling feeds so a
-	// misrouted frame is rejected rather than cross-decoded.
+	// misrouted datagram is rejected rather than cross-decoded.
 	if mbpMagic != 0x4442 {
 		t.Fatalf("magic: got %#x want 0x4442", mbpMagic)
 	}
@@ -35,10 +35,10 @@ func TestMagicIsMarketByPrice(t *testing.T) {
 	}
 }
 
-func TestParseFrameHeader_Valid(t *testing.T) {
+func TestParseDatagramHeader_Valid(t *testing.T) {
 	ts := time.Unix(1700000000, 123456789)
-	buf := buildFrameHeader(mbpMagic, mbpSchemaVersionV1, 7, 42, ts, 3, 1, frameHeaderSize)
-	h, err := ParseFrameHeader(buf)
+	buf := buildDatagramHeader(mbpMagic, mbpSchemaVersionV1, 7, 42, ts, 3, 1, datagramHeaderSize)
+	h, err := ParseDatagramHeader(buf)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -54,36 +54,36 @@ func TestParseFrameHeader_Valid(t *testing.T) {
 	if !h.SendTimestamp.Equal(ts) {
 		t.Errorf("ts: got %v want %v", h.SendTimestamp, ts)
 	}
-	if h.MessageCount != 3 || h.ResetCount != 1 || h.FrameLength != frameHeaderSize {
+	if h.MessageCount != 3 || h.ResetCount != 1 || h.FrameLength != datagramHeaderSize {
 		t.Errorf("fields: %+v", h)
 	}
 }
 
-func TestParseFrameHeader_BadMagic(t *testing.T) {
-	// A market-by-order frame must not decode here.
-	buf := buildFrameHeader(0x4444, mbpSchemaVersionV1, 0, 0, time.Now(), 0, 0, frameHeaderSize)
-	if _, err := ParseFrameHeader(buf); !errors.Is(err, errBadMagic) {
+func TestParseDatagramHeader_BadMagic(t *testing.T) {
+	// A market-by-order datagram must not decode here.
+	buf := buildDatagramHeader(0x4444, mbpSchemaVersionV1, 0, 0, time.Now(), 0, 0, datagramHeaderSize)
+	if _, err := ParseDatagramHeader(buf); !errors.Is(err, errBadMagic) {
 		t.Fatalf("expected errBadMagic, got %v", err)
 	}
 }
 
-func TestParseFrameHeader_WrongVersion(t *testing.T) {
-	buf := buildFrameHeader(mbpMagic, 99, 0, 0, time.Now(), 0, 0, frameHeaderSize)
-	if _, err := ParseFrameHeader(buf); !errors.Is(err, errSchemaVersion) {
+func TestParseDatagramHeader_WrongVersion(t *testing.T) {
+	buf := buildDatagramHeader(mbpMagic, 99, 0, 0, time.Now(), 0, 0, datagramHeaderSize)
+	if _, err := ParseDatagramHeader(buf); !errors.Is(err, errSchemaVersion) {
 		t.Fatalf("expected errSchemaVersion, got %v", err)
 	}
 }
 
-func TestParseFrameHeader_LengthMismatch(t *testing.T) {
-	buf := buildFrameHeader(mbpMagic, mbpSchemaVersionV1, 0, 0, time.Now(), 0, 0, 999)
-	if _, err := ParseFrameHeader(buf); !errors.Is(err, errFrameLength) {
+func TestParseDatagramHeader_LengthMismatch(t *testing.T) {
+	buf := buildDatagramHeader(mbpMagic, mbpSchemaVersionV1, 0, 0, time.Now(), 0, 0, 999)
+	if _, err := ParseDatagramHeader(buf); !errors.Is(err, errFrameLength) {
 		t.Fatalf("expected errFrameLength, got %v", err)
 	}
 }
 
-func TestParseFrameHeader_TooShort(t *testing.T) {
-	if _, err := ParseFrameHeader(make([]byte, 10)); !errors.Is(err, errFrameTooShort) {
-		t.Fatalf("expected errFrameTooShort, got %v", err)
+func TestParseDatagramHeader_TooShort(t *testing.T) {
+	if _, err := ParseDatagramHeader(make([]byte, 10)); !errors.Is(err, errDatagramTooShort) {
+		t.Fatalf("expected errDatagramTooShort, got %v", err)
 	}
 }
 
@@ -363,7 +363,7 @@ func TestParseSnapshotBegin(t *testing.T) {
 
 // The 36-byte body is the market-by-order 32-byte layout plus Depth Bound.
 // A 32-byte body is a market-by-order message and must be rejected here: the
-// prefix-superset rule lets an MBO decoder read an MBP frame, not the reverse.
+// prefix-superset rule lets an MBO decoder read an MBP datagram, not the reverse.
 func TestParseSnapshotBegin_RejectsShortSiblingLayout(t *testing.T) {
 	if _, err := ParseSnapshotBegin(make([]byte, 32)); !errors.Is(err, errTruncated) {
 		t.Fatalf("expected errTruncated for 32-byte body, got %v", err)
@@ -679,7 +679,7 @@ func TestParseInstrumentDefinition_V3SymbolFillsField(t *testing.T) {
 	}
 }
 
-// The declared version and the body length must agree. A v3 frame carrying a v1
+// The declared version and the body length must agree. A v3 datagram carrying a v1
 // body would otherwise read Source ID and Symbol across 66 bytes of adjacent
 // fields and produce plausible garbage instead of an error.
 func TestParseInstrumentDefinition_LengthMustMatchVersion(t *testing.T) {
@@ -702,57 +702,57 @@ func TestParseInstrumentDefinition_UnsupportedVersion(t *testing.T) {
 	}
 }
 
-// The frame header accepts both implemented versions and nothing else.
-func TestParseFrameHeader_AcceptsV1AndV3(t *testing.T) {
+// The datagram header accepts both implemented versions and nothing else.
+func TestParseDatagramHeader_AcceptsV1AndV3(t *testing.T) {
 	ts := time.Unix(1700000000, 0)
 	for _, v := range []uint8{1, 3} {
-		buf := buildFrameHeader(mbpMagic, v, 0, 1, ts, 1, 0, frameHeaderSize)
-		if _, err := ParseFrameHeader(buf); err != nil {
+		buf := buildDatagramHeader(mbpMagic, v, 0, 1, ts, 1, 0, datagramHeaderSize)
+		if _, err := ParseDatagramHeader(buf); err != nil {
 			t.Errorf("schema version %d must be accepted: %v", v, err)
 		}
 	}
 	for _, v := range []uint8{0, 2, 4, 255} {
-		buf := buildFrameHeader(mbpMagic, v, 0, 1, ts, 1, 0, frameHeaderSize)
-		if _, err := ParseFrameHeader(buf); err == nil {
+		buf := buildDatagramHeader(mbpMagic, v, 0, 1, ts, 1, 0, datagramHeaderSize)
+		if _, err := ParseDatagramHeader(buf); err == nil {
 			t.Errorf("schema version %d must be rejected", v)
 		}
 	}
 }
 
 // A publisher cutting over from v1 to v3 mid-stream must be followed without a
-// restart. This is why the version is read per frame rather than latched from
-// the first frame.
-func TestParseFrame_FollowsVersionSwitchMidStream(t *testing.T) {
+// restart. This is why the version is read per datagram rather than latched from
+// the first datagram.
+func TestParseDatagram_FollowsVersionSwitchMidStream(t *testing.T) {
 	p := &marketByPriceParser{}
 	ts := time.Unix(1700000000, 0)
 
 	build := func(version uint8, body []byte) []byte {
 		msg := buildMsg(msgTypeInstrumentDefinition, 0, body)
-		total := frameHeaderSize + len(msg)
-		frame := buildFrameHeader(mbpMagic, version, 0, 1, ts, 1, 0, uint16(total))
-		return append(frame, msg...)
+		total := datagramHeaderSize + len(msg)
+		datagram := buildDatagramHeader(mbpMagic, version, 0, 1, ts, 1, 0, uint16(total))
+		return append(datagram, msg...)
 	}
 
-	v1Frame := build(1, buildInstDefV1("SHORT"))
-	v3Frame := build(3, buildInstDefV3("KXNFLGAME-26SEP13NYJTEN-NYJ"))
+	v1Datagram := build(1, buildInstDefV1("SHORT"))
+	v3Datagram := build(3, buildInstDefV3("KXNFLGAME-26SEP13NYJTEN-NYJ"))
 
 	for i, tc := range []struct {
-		frame []byte
-		want  string
+		datagram []byte
+		want     string
 	}{
-		{v1Frame, "SHORT"},
-		{v3Frame, "KXNFLGAME-26SEP13NYJTEN-NYJ"},
-		{v1Frame, "SHORT"}, // and back again
+		{v1Datagram, "SHORT"},
+		{v3Datagram, "KXNFLGAME-26SEP13NYJTEN-NYJ"},
+		{v1Datagram, "SHORT"}, // and back again
 	} {
-		recs, _, err := p.ParseFrame("refdata", tc.frame)
+		recs, _, err := p.ParseDatagram("refdata", tc.datagram)
 		if err != nil {
-			t.Fatalf("frame %d: %v", i, err)
+			t.Fatalf("datagram %d: %v", i, err)
 		}
 		if len(recs) != 1 {
-			t.Fatalf("frame %d: expected 1 record, got %d", i, len(recs))
+			t.Fatalf("datagram %d: expected 1 record, got %d", i, len(recs))
 		}
 		if got := recs[0].Fields["symbol"]; got != tc.want {
-			t.Errorf("frame %d symbol: got %v want %q", i, got, tc.want)
+			t.Errorf("datagram %d symbol: got %v want %q", i, got, tc.want)
 		}
 	}
 }

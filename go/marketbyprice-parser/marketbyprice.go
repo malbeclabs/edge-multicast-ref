@@ -12,7 +12,7 @@ func init() {
 }
 
 // Defects counts publisher-side protocol violations the spec asks a subscriber
-// to surface, for one frame. Observability only; they never change decoding.
+// to surface, for one datagram. Observability only; they never change decoding.
 type Defects struct {
 	SnapshotFlagMismatch int
 	MalformedBookClear   int
@@ -32,31 +32,31 @@ type Defects struct {
 
 // marketByPriceParser is stateless. It deliberately holds no counters: the
 // Runner shares one instance across all three port goroutines, so any mutable
-// field here would be a data race. Defect counts are returned per frame instead.
+// field here would be a data race. Defect counts are returned per datagram instead.
 type marketByPriceParser struct{}
 
 func (p *marketByPriceParser) Name() string { return "marketbyprice" }
 
-// ParseFrame decodes one frame and returns one Record per application message,
-// plus the defects observed in this frame.
+// ParseDatagram decodes one datagram and returns one Record per application message,
+// plus the defects observed in this datagram.
 //
 // A malformed individual message is dropped and counted; it does not fail the
-// frame, because its neighbors are independently valid. A malformed frame
+// datagram, because its neighbors are independently valid. A malformed datagram
 // structure (bad header, or a Message Length that cannot be trusted to advance
-// the walk) fails the frame.
-func (p *marketByPriceParser) ParseFrame(port string, frame []byte) ([]Record, Defects, error) {
+// the walk) fails the datagram.
+func (p *marketByPriceParser) ParseDatagram(port string, datagram []byte) ([]Record, Defects, error) {
 	var defects Defects
 
-	hdr, err := ParseFrameHeader(frame)
+	hdr, err := ParseDatagramHeader(datagram)
 	if err != nil {
 		return nil, defects, fmt.Errorf("header: %w", err)
 	}
 
-	body := frame[frameHeaderSize:]
+	body := datagram[datagramHeaderSize:]
 	records := make([]Record, 0, hdr.MessageCount)
 
-	// Hoisted: the arrival port is fixed for the whole frame, so this compare
-	// runs once per frame rather than once per application message.
+	// Hoisted: the arrival port is fixed for the whole datagram, so this compare
+	// runs once per datagram rather than once per application message.
 	wantSnapshot := port == "snapshot"
 
 	for i := uint8(0); i < hdr.MessageCount; i++ {
@@ -99,7 +99,7 @@ func (p *marketByPriceParser) ParseFrame(port string, frame []byte) ([]Record, D
 				continue
 			}
 			// A body the spec declares malformed is dropped and counted, not
-			// escalated to a frame failure — its neighbors are independently valid.
+			// escalated to a datagram failure — its neighbors are independently valid.
 			if errors.Is(decErr, errMalformedBody) {
 				if mh.Type == msgTypeBookClear {
 					defects.MalformedBookClear++
@@ -115,7 +115,7 @@ func (p *marketByPriceParser) ParseFrame(port string, frame []byte) ([]Record, D
 
 	// Message Count messages must account for exactly the bytes Frame Length
 	// declares. Leftovers mean the Message Lengths are collectively inconsistent
-	// with Frame Length, which the spec makes a malformed frame: stop parsing it
+	// with Frame Length, which the spec makes a malformed datagram: stop parsing it
 	// and count it. Without this an under-stated Message Count, or trailing
 	// garbage behind a correct Frame Length, passes clean and loses messages.
 	if len(body) != 0 {
@@ -126,9 +126,9 @@ func (p *marketByPriceParser) ParseFrame(port string, frame []byte) ([]Record, D
 }
 
 // decodeMessage maps one application message body to a Record. It returns
-// errUnknownType for a Type ID this decoder does not implement, so ParseFrame
+// errUnknownType for a Type ID this decoder does not implement, so ParseDatagram
 // can count the skip; every other error is the wire layer's.
-func (p *marketByPriceParser) decodeMessage(port string, hdr FrameHeader, mh MessageHeader, body []byte) (Record, error) {
+func (p *marketByPriceParser) decodeMessage(port string, hdr DatagramHeader, mh MessageHeader, body []byte) (Record, error) {
 	base := Record{
 		Timestamp:      hdr.SendTimestamp,
 		SendTSNS:       tsNS(hdr.SendTimestamp),
@@ -273,7 +273,7 @@ func (p *marketByPriceParser) decodeMessage(port string, hdr FrameHeader, mh Mes
 	case msgTypeBookClear:
 		b, err := ParseBookClear(body)
 		if err != nil {
-			// ParseFrame counts the malformed case and drops the message.
+			// ParseDatagram counts the malformed case and drops the message.
 			return Record{}, err
 		}
 		base.Type = "book_clear"

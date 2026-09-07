@@ -53,7 +53,7 @@ func TestSeqTracker(t *testing.T) {
 			wantMissing: 1,
 		},
 		{
-			name:        "first frame sets baseline",
+			name:        "first datagram sets baseline",
 			obs:         []obs{{a, 1, 100}},
 			wantGaps:    0,
 			wantMissing: 0,

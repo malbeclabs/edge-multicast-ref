@@ -13,14 +13,14 @@ type marketByOrderParser struct{}
 
 func (p *marketByOrderParser) Name() string { return "marketbyorder" }
 
-// ParseFrame decodes one MBO frame and returns one Record per application message.
-func (p *marketByOrderParser) ParseFrame(port string, frame []byte) ([]Record, error) {
-	hdr, err := ParseFrameHeader(frame)
+// ParseDatagram decodes one MBO datagram and returns one Record per application message.
+func (p *marketByOrderParser) ParseDatagram(port string, datagram []byte) ([]Record, error) {
+	hdr, err := ParseDatagramHeader(datagram)
 	if err != nil {
 		return nil, fmt.Errorf("header: %w", err)
 	}
 
-	body := frame[frameHeaderSize:]
+	body := datagram[datagramHeaderSize:]
 	records := make([]Record, 0, hdr.MessageCount)
 
 	for i := uint8(0); i < hdr.MessageCount; i++ {
@@ -50,7 +50,7 @@ func (p *marketByOrderParser) ParseFrame(port string, frame []byte) ([]Record, e
 	return records, nil
 }
 
-func (p *marketByOrderParser) decodeMessage(port string, hdr FrameHeader, mh MessageHeader, body []byte) (Record, bool, error) {
+func (p *marketByOrderParser) decodeMessage(port string, hdr DatagramHeader, mh MessageHeader, body []byte) (Record, bool, error) {
 	base := Record{
 		Timestamp:      hdr.SendTimestamp,
 		SendTSNS:       tsNS(hdr.SendTimestamp),

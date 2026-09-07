@@ -20,15 +20,15 @@ const (
 	summaryInterval = 30 * time.Second
 )
 
-const frameHeaderSeqOffset = 4
-const frameHeaderChannelOffset = 3
-const frameHeaderMinLen = 12 // need at least bytes 0..11 to read the seq field
+const datagramHeaderSeqOffset = 4
+const datagramHeaderChannelOffset = 3
+const datagramHeaderMinLen = 12 // need at least bytes 0..11 to read the seq field
 
 // pubKey identifies one publisher's sequence space.
 //
 // A group and port carries two redundant publishers interleaved packet by
-// packet, distinguished by source address and by Channel ID in the frame
-// header, and each numbers its frames independently. Keyed by port alone, the
+// packet, distinguished by source address and by Channel ID in the datagram
+// header, and each numbers its datagrams independently. Keyed by port alone, the
 // tracker read the alternation between them as continuous loss.
 //
 // netip.Addr rather than a string: comparable, usable directly as a map key,
@@ -38,7 +38,7 @@ type pubKey struct {
 	ch  uint8
 }
 
-// seqTracker tracks the frame header sequence number per publisher to detect
+// seqTracker tracks the datagram header sequence number per publisher to detect
 // real UDP datagram loss (gaps in the header seq).
 type seqTracker struct {
 	last map[pubKey]uint64
@@ -46,16 +46,16 @@ type seqTracker struct {
 
 // observe records seq for one publisher and returns (gaps, missing) where gaps
 // is 1 if a discontinuity was detected and missing is the number of missing
-// frames. Reorders/dups (seq <= last) are ignored and return (0, 0).
+// datagrams. Reorders/dups (seq <= last) are ignored and return (0, 0).
 //
 // A key not seen before establishes its baseline silently and returns (0, 0);
 // that is what keeps a newly-appearing publisher from producing a phantom gap
 // the size of the sequence. It does not make a publisher that restarts in
 // place under the same key safe: its sequence resets to a low value, last
-// stays pinned high, and every later frame takes the seq >= last false
+// stays pinned high, and every later datagram takes the seq >= last false
 // branch, so loss for that publisher is never reported again for the life of
 // the process. That in-place-restart case is a known limitation; Reset Count
-// in the frame header is the intended future signal for it.
+// in the datagram header is the intended future signal for it.
 func (s *seqTracker) observe(src netip.Addr, ch uint8, seq uint64) (gaps, missing uint64) {
 	if s.last == nil {
 		s.last = make(map[pubKey]uint64)
@@ -96,9 +96,9 @@ type RunnerConfig struct {
 }
 
 type Runner struct {
-	cfg              RunnerConfig
-	recordsWritten   atomic.Uint64
-	firstFrameLogged atomic.Bool
+	cfg                 RunnerConfig
+	recordsWritten      atomic.Uint64
+	firstDatagramLogged atomic.Bool
 }
 
 func NewRunner(cfg RunnerConfig) *Runner {
@@ -199,15 +199,15 @@ func (r *Runner) listenPort(ctx context.Context, port int, label string) error {
 			continue
 		}
 
-		// Refdata is a low-rate periodic-retransmit stream; frame-seq gaps there
+		// Refdata is a low-rate periodic-retransmit stream; datagram-seq gaps there
 		// are not a meaningful loss signal, so it's excluded.
-		if n >= frameHeaderMinLen && label != "refdata" {
-			ch := buf[frameHeaderChannelOffset]
-			seq := binary.LittleEndian.Uint64(buf[frameHeaderSeqOffset : frameHeaderSeqOffset+8])
+		if n >= datagramHeaderMinLen && label != "refdata" {
+			ch := buf[datagramHeaderChannelOffset]
+			seq := binary.LittleEndian.Uint64(buf[datagramHeaderSeqOffset : datagramHeaderSeqOffset+8])
 			if gaps, missing := tracker.observe(src, ch, seq); gaps > 0 && r.cfg.Metrics != nil {
 				srcLabel, chLabel := src.String(), strconv.Itoa(int(ch))
-				r.cfg.Metrics.frameSeqGaps.WithLabelValues(label, srcLabel, chLabel).Add(float64(gaps))
-				r.cfg.Metrics.framesMissing.WithLabelValues(label, srcLabel, chLabel).Add(float64(missing))
+				r.cfg.Metrics.datagramSeqGaps.WithLabelValues(label, srcLabel, chLabel).Add(float64(gaps))
+				r.cfg.Metrics.datagramsMissing.WithLabelValues(label, srcLabel, chLabel).Add(float64(missing))
 			}
 		}
 
@@ -232,15 +232,15 @@ func (r *Runner) listenPort(ctx context.Context, port int, label string) error {
 			continue
 		}
 
-		// Schema Version is byte 2 of the frame header, already validated by
+		// Schema Version is byte 2 of the datagram header, already validated by
 		// Parse. Read here rather than threaded through the parser, because the
 		// three parsers return different shapes and this is observability.
 		if r.cfg.Metrics != nil {
-			r.cfg.Metrics.framesTotal.WithLabelValues(label, strconv.Itoa(int(buf[2]))).Inc()
+			r.cfg.Metrics.datagramsTotal.WithLabelValues(label, strconv.Itoa(int(buf[2]))).Inc()
 		}
 
 		if len(records) > 0 {
-			if r.firstFrameLogged.CompareAndSwap(false, true) {
+			if r.firstDatagramLogged.CompareAndSwap(false, true) {
 				slog.Info("parser producing records",
 					"port", label,
 					"first_batch_size", len(records))

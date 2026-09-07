@@ -8,18 +8,18 @@ import (
 	"time"
 )
 
-// buildFrame assembles a full frame from pre-encoded message byte slices.
-func buildFrame(t *testing.T, channel uint8, seq uint64, ts time.Time, resetCount uint8, msgs ...[]byte) []byte {
+// buildDatagram assembles a full datagram from pre-encoded message byte slices.
+func buildDatagram(t *testing.T, channel uint8, seq uint64, ts time.Time, resetCount uint8, msgs ...[]byte) []byte {
 	t.Helper()
-	total := frameHeaderSize
+	total := datagramHeaderSize
 	for _, m := range msgs {
 		total += len(m)
 	}
-	frame := buildFrameHeader(mbpMagic, mbpSchemaVersionV1, channel, seq, ts, uint8(len(msgs)), resetCount, uint16(total))
+	datagram := buildDatagramHeader(mbpMagic, mbpSchemaVersionV1, channel, seq, ts, uint8(len(msgs)), resetCount, uint16(total))
 	for _, m := range msgs {
-		frame = append(frame, m...)
+		datagram = append(datagram, m...)
 	}
-	return frame
+	return datagram
 }
 
 // buildMsg prefixes a 4-byte application message header onto a body.
@@ -48,14 +48,14 @@ func levelUpdateBody(instID uint32, side uint8, piSeq uint32, price int64, qty u
 	return b
 }
 
-func TestParseFrame_MultipleMessages(t *testing.T) {
+func TestParseDatagram_MultipleMessages(t *testing.T) {
 	p := &marketByPriceParser{}
 	ts := time.Unix(1700000200, 0)
-	frame := buildFrame(t, 3, 500, ts, 2,
+	datagram := buildDatagram(t, 3, 500, ts, 2,
 		buildMsg(msgTypeLevelUpdate, 0, levelUpdateBody(11, 0, 100, 1000, 50, 2, 0, 1, 1)),
 		buildMsg(msgTypeLevelUpdate, 0, levelUpdateBody(11, 1, 101, 1010, 75, 3, 0, 2, 3)),
 	)
-	recs, _, err := p.ParseFrame("mktdata", frame)
+	recs, _, err := p.ParseDatagram("mktdata", datagram)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -85,12 +85,12 @@ func TestParseFrame_MultipleMessages(t *testing.T) {
 }
 
 // 0xFFFF means absent. The key must be omitted rather than carrying 65535.
-func TestParseFrame_SentinelsOmitted(t *testing.T) {
+func TestParseDatagram_SentinelsOmitted(t *testing.T) {
 	p := &marketByPriceParser{}
-	frame := buildFrame(t, 0, 1, time.Unix(1700000201, 0), 0,
+	datagram := buildDatagram(t, 0, 1, time.Unix(1700000201, 0), 0,
 		buildMsg(msgTypeLevelUpdate, 0, levelUpdateBody(11, 0, 1, 1000, 50, u16Unavailable, u16Unavailable, 2, 2)),
 	)
-	recs, _, err := p.ParseFrame("mktdata", frame)
+	recs, _, err := p.ParseDatagram("mktdata", datagram)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,12 +103,12 @@ func TestParseFrame_SentinelsOmitted(t *testing.T) {
 }
 
 // Order Count 0 is a real value on a LevelUpdate, not a sentinel.
-func TestParseFrame_ZeroOrderCountPresent(t *testing.T) {
+func TestParseDatagram_ZeroOrderCountPresent(t *testing.T) {
 	p := &marketByPriceParser{}
-	frame := buildFrame(t, 0, 1, time.Unix(1700000202, 0), 0,
+	datagram := buildDatagram(t, 0, 1, time.Unix(1700000202, 0), 0,
 		buildMsg(msgTypeLevelUpdate, 0, levelUpdateBody(11, 0, 1, 1000, 50, 0, 0, 2, 2)),
 	)
-	recs, _, err := p.ParseFrame("mktdata", frame)
+	recs, _, err := p.ParseDatagram("mktdata", datagram)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,15 +121,15 @@ func TestParseFrame_ZeroOrderCountPresent(t *testing.T) {
 	}
 }
 
-// Unknown types are skipped by Message Length, and the rest of the frame decodes.
-func TestParseFrame_UnknownTypeSkipped(t *testing.T) {
+// Unknown types are skipped by Message Length, and the rest of the datagram decodes.
+func TestParseDatagram_UnknownTypeSkipped(t *testing.T) {
 	p := &marketByPriceParser{}
 	reserved := buildMsg(0x55, 0, make([]byte, 20)) // reserved positional-index range
-	frame := buildFrame(t, 0, 1, time.Unix(1700000203, 0), 0,
+	datagram := buildDatagram(t, 0, 1, time.Unix(1700000203, 0), 0,
 		reserved,
 		buildMsg(msgTypeLevelUpdate, 0, levelUpdateBody(11, 0, 1, 1000, 50, 1, 0, 1, 1)),
 	)
-	recs, _, err := p.ParseFrame("mktdata", frame)
+	recs, _, err := p.ParseDatagram("mktdata", datagram)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -140,13 +140,13 @@ func TestParseFrame_UnknownTypeSkipped(t *testing.T) {
 
 // A Message Length below the 4-byte floor must error, not advance by zero and
 // spin forever on one malformed datagram.
-func TestParseFrame_MessageLengthBelowHeaderFloorRejected(t *testing.T) {
+func TestParseDatagram_MessageLengthBelowHeaderFloorRejected(t *testing.T) {
 	for _, length := range []uint8{0, 1, 2, 3} {
 		t.Run(fmt.Sprintf("length=%d", length), func(t *testing.T) {
 			p := &marketByPriceParser{}
-			frame := buildFrameHeader(mbpMagic, mbpSchemaVersionV1, 0, 1, time.Unix(1700000204, 0), 1, 0, frameHeaderSize+4)
-			frame = append(frame, 0x40, length, 0x00, 0x00) // Type 0x40, Length below the 4-byte header floor
-			_, _, err := p.ParseFrame("mktdata", frame)
+			datagram := buildDatagramHeader(mbpMagic, mbpSchemaVersionV1, 0, 1, time.Unix(1700000204, 0), 1, 0, datagramHeaderSize+4)
+			datagram = append(datagram, 0x40, length, 0x00, 0x00) // Type 0x40, Length below the 4-byte header floor
+			_, _, err := p.ParseDatagram("mktdata", datagram)
 			if !errors.Is(err, errMessageLength) {
 				t.Fatalf("expected errMessageLength for message length %d, got %v", length, err)
 			}
@@ -154,37 +154,37 @@ func TestParseFrame_MessageLengthBelowHeaderFloorRejected(t *testing.T) {
 	}
 }
 
-func TestParseFrame_MessageLengthOverrunsFrame(t *testing.T) {
+func TestParseDatagram_MessageLengthOverrunsDatagram(t *testing.T) {
 	p := &marketByPriceParser{}
-	frame := buildFrameHeader(mbpMagic, mbpSchemaVersionV1, 0, 1, time.Unix(1700000205, 0), 1, 0, frameHeaderSize+4)
-	frame = append(frame, 0x40, 200, 0x00, 0x00) // claims 200 bytes, only 4 present
-	if _, _, err := p.ParseFrame("mktdata", frame); err == nil {
-		t.Fatal("expected error for length overrunning the frame")
+	datagram := buildDatagramHeader(mbpMagic, mbpSchemaVersionV1, 0, 1, time.Unix(1700000205, 0), 1, 0, datagramHeaderSize+4)
+	datagram = append(datagram, 0x40, 200, 0x00, 0x00) // claims 200 bytes, only 4 present
+	if _, _, err := p.ParseDatagram("mktdata", datagram); err == nil {
+		t.Fatal("expected error for length overrunning the datagram")
 	}
 }
 
-func TestParseFrame_BadMagicRejected(t *testing.T) {
+func TestParseDatagram_BadMagicRejected(t *testing.T) {
 	p := &marketByPriceParser{}
-	frame := buildFrameHeader(0x4444, mbpSchemaVersionV1, 0, 1, time.Unix(1700000206, 0), 0, 0, frameHeaderSize)
-	if _, _, err := p.ParseFrame("mktdata", frame); err == nil {
+	datagram := buildDatagramHeader(0x4444, mbpSchemaVersionV1, 0, 1, time.Unix(1700000206, 0), 0, 0, datagramHeaderSize)
+	if _, _, err := p.ParseDatagram("mktdata", datagram); err == nil {
 		t.Fatal("expected error for market-by-order magic")
 	}
 }
 
 // A malformed BookClear is dropped from the record stream and counted, without
-// failing the whole frame — its neighbors still decode.
-func TestParseFrame_MalformedBookClearDropsMessageNotFrame(t *testing.T) {
+// failing the whole datagram — its neighbors still decode.
+func TestParseDatagram_MalformedBookClearDropsMessageNotDatagram(t *testing.T) {
 	p := &marketByPriceParser{}
 	bad := make([]byte, 32)
 	bad[6] = 2 // Clear Side: both
 	bad[7] = 1 // Scope: from price — malformed combination
-	frame := buildFrame(t, 0, 1, time.Unix(1700000207, 0), 0,
+	datagram := buildDatagram(t, 0, 1, time.Unix(1700000207, 0), 0,
 		buildMsg(msgTypeBookClear, 0, bad),
 		buildMsg(msgTypeLevelUpdate, 0, levelUpdateBody(11, 0, 1, 1000, 50, 1, 0, 1, 1)),
 	)
-	recs, defects, err := p.ParseFrame("mktdata", frame)
+	recs, defects, err := p.ParseDatagram("mktdata", datagram)
 	if err != nil {
-		t.Fatalf("malformed body must not fail the frame: %v", err)
+		t.Fatalf("malformed body must not fail the datagram: %v", err)
 	}
 	if len(recs) != 1 || recs[0].Type != "level_update" {
 		t.Fatalf("records: %+v", recs)
@@ -196,13 +196,13 @@ func TestParseFrame_MalformedBookClearDropsMessageNotFrame(t *testing.T) {
 
 // Flags bit 0 must be set on the snapshot port and clear elsewhere. Disagreement
 // is a publisher defect that is counted, never used for routing.
-func TestParseFrame_SnapshotFlagMismatchCounted(t *testing.T) {
+func TestParseDatagram_SnapshotFlagMismatchCounted(t *testing.T) {
 	p := &marketByPriceParser{}
 	// Snapshot flag set on mktdata: wrong.
-	frame := buildFrame(t, 0, 1, time.Unix(1700000208, 0), 0,
+	datagram := buildDatagram(t, 0, 1, time.Unix(1700000208, 0), 0,
 		buildMsg(msgTypeLevelUpdate, flagSnapshot, levelUpdateBody(11, 0, 1, 1000, 50, 1, 0, 1, 1)),
 	)
-	recs, defects, err := p.ParseFrame("mktdata", frame)
+	recs, defects, err := p.ParseDatagram("mktdata", datagram)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,39 +216,39 @@ func TestParseFrame_SnapshotFlagMismatchCounted(t *testing.T) {
 	// Snapshot flag clear on the snapshot port: also wrong.
 	sb := make([]byte, 36)
 	binary.LittleEndian.PutUint32(sb[0:4], 11)
-	frame2 := buildFrame(t, 0, 1, time.Unix(1700000209, 0), 0,
+	datagram2 := buildDatagram(t, 0, 1, time.Unix(1700000209, 0), 0,
 		buildMsg(msgTypeSnapshotBegin, 0, sb),
 	)
-	_, defects2, err := p.ParseFrame("snapshot", frame2)
+	_, defects2, err := p.ParseDatagram("snapshot", datagram2)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if defects2.SnapshotFlagMismatch != 1 {
-		t.Errorf("mismatch count: got %d want 1 (counts are per frame, not cumulative)", defects2.SnapshotFlagMismatch)
+		t.Errorf("mismatch count: got %d want 1 (counts are per datagram, not cumulative)", defects2.SnapshotFlagMismatch)
 	}
 }
 
 // Correctly-flagged messages produce no defects, on either port.
-func TestParseFrame_CorrectFlagsNoDefects(t *testing.T) {
+func TestParseDatagram_CorrectFlagsNoDefects(t *testing.T) {
 	p := &marketByPriceParser{}
-	frame := buildFrame(t, 0, 1, time.Unix(1700000213, 0), 0,
+	datagram := buildDatagram(t, 0, 1, time.Unix(1700000213, 0), 0,
 		buildMsg(msgTypeLevelUpdate, 0, levelUpdateBody(11, 0, 1, 1000, 50, 1, 0, 1, 1)),
 	)
-	if _, d, err := p.ParseFrame("mktdata", frame); err != nil || d.SnapshotFlagMismatch != 0 {
-		t.Errorf("mktdata clean frame: defects=%+v err=%v", d, err)
+	if _, d, err := p.ParseDatagram("mktdata", datagram); err != nil || d.SnapshotFlagMismatch != 0 {
+		t.Errorf("mktdata clean datagram: defects=%+v err=%v", d, err)
 	}
 
 	sb := make([]byte, 36)
 	binary.LittleEndian.PutUint32(sb[0:4], 11)
-	frame2 := buildFrame(t, 0, 1, time.Unix(1700000214, 0), 0,
+	datagram2 := buildDatagram(t, 0, 1, time.Unix(1700000214, 0), 0,
 		buildMsg(msgTypeSnapshotBegin, flagSnapshot, sb),
 	)
-	if _, d, err := p.ParseFrame("snapshot", frame2); err != nil || d.SnapshotFlagMismatch != 0 {
-		t.Errorf("snapshot clean frame: defects=%+v err=%v", d, err)
+	if _, d, err := p.ParseDatagram("snapshot", datagram2); err != nil || d.SnapshotFlagMismatch != 0 {
+		t.Errorf("snapshot clean datagram: defects=%+v err=%v", d, err)
 	}
 }
 
-func TestParseFrame_SnapshotGroupDecodes(t *testing.T) {
+func TestParseDatagram_SnapshotGroupDecodes(t *testing.T) {
 	p := &marketByPriceParser{}
 	sb := make([]byte, 36)
 	binary.LittleEndian.PutUint32(sb[0:4], 42)
@@ -270,12 +270,12 @@ func TestParseFrame_SnapshotGroupDecodes(t *testing.T) {
 	binary.LittleEndian.PutUint64(se[4:12], 7000)
 	binary.LittleEndian.PutUint32(se[12:16], 5)
 
-	frame := buildFrame(t, 0, 10, time.Unix(1700000210, 0), 0,
+	datagram := buildDatagram(t, 0, 10, time.Unix(1700000210, 0), 0,
 		buildMsg(msgTypeSnapshotBegin, flagSnapshot, sb),
 		buildMsg(msgTypeSnapshotLevel, flagSnapshot, sl),
 		buildMsg(msgTypeSnapshotEnd, flagSnapshot, se),
 	)
-	recs, _, err := p.ParseFrame("snapshot", frame)
+	recs, _, err := p.ParseDatagram("snapshot", datagram)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +300,7 @@ func TestParseFrame_SnapshotGroupDecodes(t *testing.T) {
 	}
 }
 
-func TestParseFrame_TradeAndLiquidation(t *testing.T) {
+func TestParseDatagram_TradeAndLiquidation(t *testing.T) {
 	p := &marketByPriceParser{}
 	tb := make([]byte, 48)
 	binary.LittleEndian.PutUint32(tb[0:4], 9)
@@ -313,11 +313,11 @@ func TestParseFrame_TradeAndLiquidation(t *testing.T) {
 	lb[7] = 1 // Method: backstop
 	binary.LittleEndian.PutUint64(lb[8:16], 4242)
 
-	frame := buildFrame(t, 0, 20, time.Unix(1700000212, 0), 0,
+	datagram := buildDatagram(t, 0, 20, time.Unix(1700000212, 0), 0,
 		buildMsg(msgTypeTrade, 0, tb),
 		buildMsg(msgTypeLiquidation, 0, lb),
 	)
-	recs, _, err := p.ParseFrame("mktdata", frame)
+	recs, _, err := p.ParseDatagram("mktdata", datagram)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +327,7 @@ func TestParseFrame_TradeAndLiquidation(t *testing.T) {
 	if recs[0].Fields["aggressor_side"] != "sell" {
 		t.Errorf("aggressor: %v", recs[0].Fields["aggressor_side"])
 	}
-	// The liquidation pairs with its trade by Trade ID, in the same frame.
+	// The liquidation pairs with its trade by Trade ID, in the same datagram.
 	if recs[0].Fields["trade_id"].(uint64) != recs[1].Fields["trade_id"].(uint64) {
 		t.Error("trade id must match between trade and liquidation")
 	}

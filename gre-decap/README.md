@@ -1,6 +1,6 @@
 # gre-decap
 
-XDP program that strips GRE encapsulation from DoubleZero multicast packets inline on the physical NIC. After decapsulation, the kernel sees plain multicast UDP frames — no tunnel interface or application changes needed.
+XDP program that strips GRE encapsulation from DoubleZero multicast packets inline on the physical NIC. After decapsulation, the kernel sees plain multicast UDP datagrams — no tunnel interface or application changes needed.
 
 ## How It Works
 

@@ -105,7 +105,7 @@ func recPtr(rec Record) *Record {
 // --- barrier / fence / channel-health ---
 
 // runResetBarrier executes the in-band FIFO reset barrier, then routes the
-// held triggering record as the first new-era frame.
+// held triggering record as the first new-era datagram.
 //
 // Barrier sends and ack-waits are ctx-aware: if ctx is cancelled mid-barrier
 // (the bot is shutting down), we abandon the barrier and return without
@@ -141,7 +141,7 @@ func (c *Coordinator) runResetBarrier(held Record) {
 	c.manifest = ManifestState{}
 	c.resetCount[ch] = held.ResetCount
 
-	// Route the held record as the first new-era frame, via the full classifier.
+	// Route the held record as the first new-era datagram, via the full classifier.
 	// resetCount[ch] now equals held.ResetCount, so this re-entry into Dispatch
 	// falls through to normal classification.
 	c.Dispatch(held)
