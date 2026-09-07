@@ -132,8 +132,10 @@ pub struct RuleOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuleSetReport {
     pub report_format: u32,
-    /// The feed the rule set was run for, so a report read back from disk can
-    /// be held against the invocation that asked for it.
+    /// The feed the rule set was run for. It exists to be checked rather than
+    /// read: [`crate::tool::RuleSet::judge`] holds it against the feed the
+    /// invocation named and refuses the pair when they differ, because a report
+    /// about another feed parses exactly as well as the right one.
     pub feed: String,
     /// One entry per rule evaluated, in the order the rule set stated them.
     pub rules: Vec<RuleOutcome>,
