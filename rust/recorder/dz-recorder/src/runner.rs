@@ -517,7 +517,7 @@ impl FeedRecorder {
                 source,
             }),
             // A fatal reported by a drain thread can be laundered into `Ended`
-            // when the channel disconnects before it is re-read, so this is the
+            // when its queue disconnects before it is re-read, so this is the
             // same failure wearing a quieter face.
             None if ended_unasked => Err(RunError::CaptureEnded { feed: summary.feed }),
             None => Ok(summary),
