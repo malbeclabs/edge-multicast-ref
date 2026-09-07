@@ -616,6 +616,21 @@ it. `datagram` is read for one thing — the publisher's send stamps, which only
 site that received the datagram can supply — and those go absent when the base
 rows do, which costs a verdict nothing.
 
+**The sequence space repeats, so every match on it is bounded in time.** A
+`Reset Count` restarts the numbering, so `(channel instance, sequence number)` is
+a key one instance revisits era after era — which is why `sequence_gap` keys on
+`era_anchor_ts` and not on `missing_from` alone. Both halves of the join have to
+say so, and not just the coverage half: a coverage row speaks only where its
+window overlaps the bracket the missing datagram was sent in, and that site's own
+gap rows are read only over that same window. Otherwise a gap it recorded at this
+sequence number in an earlier era answers for the datagram missing now, as an
+absence with its own stale residue behind it — a manufactured `publisher`
+finding, from the site that in fact held the datagram. The window is the
+*admitting segment's*, on the admitting site's own clock, and never our bracket:
+two sites' brackets for one datagram are readings of two clocks at two ends of a
+path, so demanding that they overlap would reject the ordinary case where both
+sites really did miss it — which reads as *held*, and exonerates.
+
 **Recorder overflow is what makes an absence inadmissible**, and both carriers of
 it are already in the rows: `segment_coverage.capture_drop_total` as a *delta*
 over the preceding segment, unknown rather than zero where that segment is

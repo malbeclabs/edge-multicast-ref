@@ -928,6 +928,49 @@ fn the_cross_site_absence_is_read_from_the_rows_that_outlive_the_datagrams() {
     );
 }
 
+/// Both sides of the vantage join are bounded in time, because the sequence
+/// space repeats.
+///
+/// A `Reset Count` restarts the numbering, so `(instance, sequence number)` is a
+/// key one instance revisits era after era — which is why `era_anchor_ts` is in
+/// `sequence_gap`'s sort key at all. Bounding only the coverage row leaves the
+/// other half open: a gap that vantage recorded at this number in an earlier era
+/// answers for the datagram missing now, as *missed* and, with its own stale
+/// residue, as an admissible absence. That is the accusing direction, on
+/// evidence about a different datagram.
+#[test]
+fn the_cross_site_vantage_join_bounds_the_gap_rows_as_well_as_the_coverage_rows() {
+    let view = view_body(cross_site_sql(), "gap_vantage_seq");
+    assert!(
+        view.contains("AND o.start_ts <= m.after_ts")
+            && view.contains("AND o.end_ts   >= m.before_ts"),
+        "a coverage row speaks only over the bracket the datagram was sent in: {view}"
+    );
+    // Against the admitting segment's window and never our own bracket: two
+    // sites' brackets are readings of two clocks at two ends of a path, and
+    // requiring theirs to overlap ours rejects the ordinary case where both
+    // really did miss the datagram — which reads as *held*, and exonerates.
+    assert!(
+        view.contains("arrayFilter(x -> x.1 <= o.end_ts AND x.2 >= o.start_ts"),
+        "and its gap rows are narrowed to that same window, on that same host's \
+         clock: {view}"
+    );
+    // In the match and not after it: a vantage whose only gap at this number is
+    // an old one held the datagram now, and a filter applied to the result would
+    // drop its row and turn a site that spoke into a site that was silent.
+    assert!(
+        view.contains(
+            "GROUP BY site, recorder, source_addr, channel_id, dst_port, sequence_number"
+        ),
+        "folded to one row per vantage and number, so the window narrows the \
+         evidence rather than the rows: {view}"
+    );
+    assert!(
+        cross_site_sql().contains("THE SEQUENCE SPACE REPEATS"),
+        "and why both halves need it is written where the join is"
+    );
+}
+
 /// Overflow is read as a delta, and a missing predecessor is unknown rather
 /// than clean.
 ///
