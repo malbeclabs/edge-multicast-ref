@@ -59,15 +59,15 @@ user = "loader"
 # a query log, only as the gap between a provider's CPU graph and
 # query-attributed CPU. A chatty inserter raises it silently.
 #
-# insert_max_rows lands an object's rows in one or two parts. The busiest lane
+# insert_max_rows lands an object's rows in one or two parts. The busiest feed
 # measured on a live recorder is 224,000 datagrams a minute, about 1.1 million
 # rows in a time-rotated object.
 insert_max_rows = 1000000
-# The floor that stops one part per object per lane, which is the pathological
-# profile. The quietest lanes measured run 130-150 datagrams a minute, about 700
+# The floor that stops one part per object per feed, which is the pathological
+# profile. The quietest feeds measured run 130-150 datagrams a minute, about 700
 # rows an object: rows from several objects coalesce into one insert instead.
 insert_min_rows = 50000
-# The bound on that coalescing, so a quiet lane is late rather than absent. At
+# The bound on that coalescing, so a quiet feed is late rather than absent. At
 # the rates above the worst case is roughly 2,000 rows a part.
 insert_max_delay = 900
 # Not a merge-pressure bound: a row count says nothing about a row's width, and

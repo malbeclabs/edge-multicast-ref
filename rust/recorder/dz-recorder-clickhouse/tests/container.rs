@@ -255,7 +255,7 @@ fn span_minus_count_is_the_loss_at_the_datagram_grain() {
 /// **Rows per part**, which is the number merge pressure is actually set by.
 ///
 /// An insert is one atomic block and becomes one part, so a sink that posted per
-/// object would write one part per object per lane — and merge work never shows
+/// object would write one part per object per feed — and merge work never shows
 /// up in a query log, only as the gap between a provider's CPU graph and
 /// query-attributed CPU. This is the assertion that holds the coalescing to its
 /// purpose against a real server's own `system.parts`, rather than against what

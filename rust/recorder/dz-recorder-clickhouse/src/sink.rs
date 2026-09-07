@@ -8,15 +8,15 @@
 //! in a query log, only as the gap between a provider's CPU graph and
 //! query-attributed CPU. A chatty inserter raises it silently.
 //!
-//! A sink that posted once per object would write one part per object per lane.
-//! On the busiest lane measured that is fine; on the quietest — 130 to 150
+//! A sink that posted once per object would write one part per object per feed.
+//! On the busiest feed measured that is fine; on the quietest — 130 to 150
 //! datagrams a minute, about 700 rows in a time-rotated object — it is a 700-row
 //! part per object for ever, which is the pathological profile. So the sink holds
 //! rows until [`insert_min_rows`](crate::ClickHouseConfig::insert_min_rows),
 //! caps an insert at [`insert_max_rows`](crate::ClickHouseConfig::insert_max_rows),
 //! and gives up holding after
 //! [`insert_max_delay`](crate::ClickHouseConfig::insert_max_delay) so a quiet
-//! lane is late rather than absent.
+//! feed is late rather than absent.
 //!
 //! # Accepted is not landed
 //!
@@ -137,7 +137,7 @@ impl Held {
     ///
     /// Rows first, age second, and the order is only for legibility: either is
     /// sufficient. The age is measured from the *oldest* held row rather than
-    /// from the last write, or a lane that trickles one object per interval
+    /// from the last write, or a feed that trickles one object per interval
     /// would reset the clock on every arrival and never post at all.
     fn due(&self, now_ns: u64, min_rows: usize, max_delay: Duration) -> bool {
         if self.is_empty() {
