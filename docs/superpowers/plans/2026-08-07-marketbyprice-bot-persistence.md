@@ -2208,7 +2208,7 @@ func (w *SnapshotWriter) flushDue() {
 			w.metrics.SnapshotLagMs.Observe(float64(now.Sub(e.dirtiedAt).Milliseconds()))
 		}
 
-		// Re-arm the coalesce window if the instrument was dirtied again while we
+		// Reset the coalesce window if the instrument was dirtied again while we
 		// were writing it.
 		w.mu.Lock()
 		if again, ok := w.dirty[e.key]; ok {

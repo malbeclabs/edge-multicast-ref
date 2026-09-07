@@ -4509,7 +4509,7 @@ func (w *SnapshotWriter) flushDue() {
 		}
 		snap := ComputeLevels(inst, w.depth)
 		w.write(snap, inst, e.dirtiedAt, now)
-		// re-arm: next write earliest in coalesceInterval
+		// reset the window: next write earliest in coalesceInterval
 		w.mu.Lock()
 		// (entry was deleted; if a new MarkDirty arrived during write, it'll be there)
 		w.mu.Unlock()
