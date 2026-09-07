@@ -385,7 +385,7 @@ consuming crates by tag.
 
 ---
 
-## Composition: how configuration picks the source
+## Composition: how configuration picks the adapter
 
 Configuration selects the adapter, but Rust has no runtime library loading, so
 *how* it selects matters and the design already half-states it. The publisher
@@ -429,7 +429,7 @@ adapter without rebuilding the publisher, which nobody has asked for. **Rejected
 unless a third party must ship a closed-source adapter**, and then as an
 addition rather than the default.
 
-**3. Out-of-process source — adopted as a second transport, not the default.**
+**3. Out-of-process adapter — adopted as a second transport, not the default.**
 `[adapter] kind = "uds"` selects a built-in adapter that reads a framed
 normalized-event stream from a Unix socket. The "library implementing the
 source" is then another process, in any language. This is worth having for two
@@ -479,7 +479,7 @@ the multicast transmitter, the second writes the identical encoded datagrams to
 a local Unix socket a recorder on the publisher host archives.
 
 Every subscriber-site archive then diffs against a reference archive, datagram
-for datagram, keyed on `(source, Channel ID, destination port, Sequence
+for datagram, keyed on `(source IP address, Channel ID, destination port, Sequence
 Number)` — the channel instance the recorder already keys on. Network loss,
 reordering, MTU drops and one-way latency become measured rather than inferred.
 

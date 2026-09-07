@@ -480,7 +480,7 @@ the audit's own failure, as a test.
 - [x] A length-delimited normalized-event **record** encoding, one event per
       record, versioned in a header byte.
 - [x] `UdsAdapter`, a built-in `Adapter` reading that encoding, so a non-Rust
-      integration can be the source.
+      integration can be the adapter.
 - [x] The same encoding, written: a `RecordWriter` plan 2 uses for
       `[adapter.tee]`.
 
@@ -637,12 +637,12 @@ the venue's own exponents on the definition.
 
 **Two things only the real run could find.**
 
-Unpinned, the transmitter resolves its source off the route to the group — which
-is the discipline, and on a host whose route to that group leaves by the default
-interface, a subscriber joined on loopback hears nothing. The publisher reports
-a clean teardown, because nothing in the send path is wrong: the two ends chose
-different interfaces. That is what `[egress] pin` is for, and it is invisible to
-every test that holds a fake socket.
+Unpinned, the transmitter resolves its source address off the route to the
+group — which is the discipline, and on a host whose route to that group leaves
+by the default interface, a subscriber joined on loopback hears nothing. The
+publisher reports a clean teardown, because nothing in the send path is wrong:
+the two ends chose different interfaces. That is what `[egress] pin` is for, and
+it is invisible to every test that holds a fake socket.
 
 And `check-public-repo-rules.sh` refused the first group the example used. A
 multicast address outside MCAST-TEST-NET in a public repository is exactly what

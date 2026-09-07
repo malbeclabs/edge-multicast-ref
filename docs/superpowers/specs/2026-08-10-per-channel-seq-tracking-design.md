@@ -52,11 +52,11 @@ break, and the spec should be honest about that. Measured over a 25-second
 capture of both groups:
 
 - 67 distinct `(source_ip, channel_id)` pairs against 64 distinct `channel_id`
-  values, so some channel id is genuinely reused across sources.
+  values, so some channel id is genuinely reused across source IP addresses.
 - The only case of one `(group, port, channel_id)` arriving from more than one
-  source was on a port no parser binds. On the three ports the parsers do bind,
-  the publishers follow an `N` / `N+100` channel-id convention, so `channel_id`
-  alone currently separates them.
+  source IP address was on a port no parser binds. On the three ports the
+  parsers do bind, the publishers follow an `N` / `N+100` channel-id convention,
+  so `channel_id` alone currently separates them.
 
 `source_ip` earns its place because that convention is a convention, not a
 guarantee, and because the failure it prevents is the silent kind this whole
@@ -155,7 +155,7 @@ normal Prometheus behaviour and needs no handling.
   joined to one multicast group. No eviction required.
 - A publisher first seen mid-stream initialises silently, instead of emitting
   one enormous phantom gap. This is an improvement on current behaviour, and it
-  is what makes a rehomed source safe.
+  is what makes a rehomed source IP address safe.
 - Reorders and duplicates (`seq <= last`) stay ignored, now per publisher.
 - Datagrams shorter than 12 bytes are skipped as today; byte 3 is only read inside
   that guard.
@@ -191,9 +191,10 @@ Extend `seqtracker_test.go` in each parser with a table covering:
   publisher
 - the first datagram seen from a publisher is silent
 - reorders and duplicates are handled per publisher, without disturbing the other
-- **two sources sharing one `channel_id` stay separate** — the case `source_ip`
-  exists to cover, and the one not reachable through a channel-only key
-- the same source on two channel ids stays separate
+- **two source IP addresses sharing one `channel_id` stay separate** — the case
+  `source_ip` exists to cover, and the one not reachable through a channel-only
+  key
+- the same source IP address on two channel ids stays separate
 
 For `marketbyorder-bot`, mirror the two tests from PR #38: interleaved
 channels with distinct steady Reset Counts run no barrier, and a real Reset Count
