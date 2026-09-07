@@ -259,10 +259,10 @@ ASOF LEFT JOIN (
 -- THE EXPANSION IS BOUNDED, AND WHAT IS CUT OFF SAYS SO. `range` over a gap of
 -- billions is a query that fails rather than answers, and a view that throws
 -- takes down every panel reading it. A gap wider than a million sequence values
--- inside one era is a stream restart or a misread era boundary rather than
--- loss, so it is expanded to the bound and marked incomplete — and an
--- incomplete expansion can never reach `publisher`, because part of the range
--- was never checked anywhere.
+-- inside one era is a restart of the sequence series, or a misread era
+-- boundary, rather than loss: it is expanded to the bound and marked
+-- incomplete — and an incomplete expansion can never reach `publisher`,
+-- because part of the range was never checked anywhere.
 CREATE OR REPLACE VIEW recorder.gap_missing_seq AS
 SELECT
     site,
@@ -520,7 +520,7 @@ SELECT
     m.missing_from  AS missing_from,
     uniqExact(m.sequence_number) AS seqs_held_in_base_rows,
     -- Nullable, so that a gap no other site held reads as a stamp nobody
-    -- measured rather than as the epoch: an unmatched LEFT JOIN fills a
+    -- measured rather than as the Unix epoch: an unmatched LEFT JOIN fills a
     -- plain DateTime64 with 1970 and a Nullable one with NULL.
     toNullable(min(d.send_ts)) AS sent_from_ts,
     toNullable(max(d.send_ts)) AS sent_to_ts,

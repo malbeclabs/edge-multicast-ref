@@ -1129,7 +1129,7 @@ fn the_cross_site_answer_outlives_the_base_rows_it_was_drawn_from() {
         ),
         "unknown",
         "and the one thing only a base row could say goes unknown rather than \
-         to the epoch"
+         to the Unix epoch"
     );
     assert_eq!(
         scratch.cross_site(ABSENT_EVERYWHERE, "verdict"),
