@@ -377,6 +377,12 @@ pub fn derive<S: Source + ?Sized>(
             // this object — where a `pass` row would be a pass over a rule that
             // never ran.
             conformance_finding: Vec::new(),
+            // The market data tables, likewise written by a derivation that is
+            // not this one: this fold has no book and no reference data, and a
+            // row it invented here would be a book state nothing observed.
+            event: Vec::new(),
+            instrument: Vec::new(),
+            book_top: Vec::new(),
         },
         trailer: SegmentTrailer {
             segment_seq: manifest.segment_seq,

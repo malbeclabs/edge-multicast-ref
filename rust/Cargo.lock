@@ -402,11 +402,27 @@ dependencies = [
  "dz-edge-tob",
  "dz-recorder-archive",
  "dz-recorder-capture",
+ "dz-recorder-clickhouse",
  "dz-recorder-core",
+ "dz-recorder-events",
  "dz-recorder-replay",
  "dz-recorder-rows",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "dz-recorder-events"
+version = "0.1.1"
+dependencies = [
+ "dz-edge-core",
+ "dz-edge-mbp",
+ "dz-edge-refdata",
+ "dz-edge-tob",
+ "dz-recorder-core",
+ "dz-recorder-relower",
+ "dz-recorder-replay",
+ "dz-recorder-rows",
 ]
 
 [[package]]
@@ -425,9 +441,13 @@ version = "0.1.1"
 dependencies = [
  "ctrlc",
  "dz-edge-core",
+ "dz-edge-mbp",
+ "dz-edge-refdata",
  "dz-recorder-archive",
  "dz-recorder-clickhouse",
  "dz-recorder-core",
+ "dz-recorder-events",
+ "dz-recorder-relower",
  "dz-recorder-replay",
  "dz-recorder-rows",
  "prometheus",

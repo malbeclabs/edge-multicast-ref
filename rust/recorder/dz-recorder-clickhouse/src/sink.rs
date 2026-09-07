@@ -116,13 +116,32 @@ impl Held {
         // The object key and digest live on every row, so the batch's own pair
         // is not carried forward: an insert spanning objects is ordinary, and
         // the rows say which object each came from.
-        self.rows.datagram.extend(batch.datagram);
-        self.rows.era.extend(batch.era);
-        self.rows.segment_coverage.extend(batch.segment_coverage);
-        self.rows.sequence_gap.extend(batch.sequence_gap);
-        self.rows
-            .conformance_finding
-            .extend(batch.conformance_finding);
+        //
+        // **Every grain, and the destructuring is what says so.** A lane left
+        // out here is not a compile error and not a refusal: the rows are
+        // counted as accepted, the object is credited, and they are dropped —
+        // the one outcome this crate exists to make impossible. Naming the
+        // fields rather than reaching for them makes a new grain fail to build.
+        let RowBatch {
+            object_key: _,
+            object_sha256: _,
+            datagram,
+            era,
+            segment_coverage,
+            sequence_gap,
+            conformance_finding,
+            event,
+            instrument,
+            book_top,
+        } = batch;
+        self.rows.datagram.extend(datagram);
+        self.rows.era.extend(era);
+        self.rows.segment_coverage.extend(segment_coverage);
+        self.rows.sequence_gap.extend(sequence_gap);
+        self.rows.conformance_finding.extend(conformance_finding);
+        self.rows.event.extend(event);
+        self.rows.instrument.extend(instrument);
+        self.rows.book_top.extend(book_top);
     }
 
     fn len(&self) -> usize {
@@ -352,16 +371,28 @@ impl<T: Transport> ClickHouseSink<T> {
         let rows = std::mem::take(&mut self.held.rows);
         let objects = self.held.clear();
 
+        // Driven by [`send_order`] rather than by a list written out again here.
+        // The order is a property somebody reasoned about once, and a second
+        // copy of it is a second thing to keep in step — and a grain missing
+        // from *this* copy is not a wrong order but a silent drop. The match is
+        // exhaustive, so a new grain cannot be added without a lane.
         let mut bytes = 0u64;
-        bytes += self.write_grain(Grain::Datagram, &rows.datagram, &objects)?;
-        bytes += self.write_grain(Grain::Era, &rows.era, &objects)?;
-        bytes += self.write_grain(Grain::SegmentCoverage, &rows.segment_coverage, &objects)?;
-        bytes += self.write_grain(Grain::SequenceGap, &rows.sequence_gap, &objects)?;
-        bytes += self.write_grain(
-            Grain::ConformanceFinding,
-            &rows.conformance_finding,
-            &objects,
-        )?;
+        for grain in send_order() {
+            bytes += match grain {
+                Grain::Datagram => self.write_grain(grain, &rows.datagram, &objects)?,
+                Grain::Era => self.write_grain(grain, &rows.era, &objects)?,
+                Grain::SegmentCoverage => {
+                    self.write_grain(grain, &rows.segment_coverage, &objects)?
+                }
+                Grain::SequenceGap => self.write_grain(grain, &rows.sequence_gap, &objects)?,
+                Grain::ConformanceFinding => {
+                    self.write_grain(grain, &rows.conformance_finding, &objects)?
+                }
+                Grain::Instrument => self.write_grain(grain, &rows.instrument, &objects)?,
+                Grain::Event => self.write_grain(grain, &rows.event, &objects)?,
+                Grain::BookTop => self.write_grain(grain, &rows.book_top, &objects)?,
+            };
+        }
         Ok((objects, bytes))
     }
 
@@ -460,5 +491,12 @@ pub const fn send_order() -> [Grain; Grain::COUNT] {
         Grain::SegmentCoverage,
         Grain::SequenceGap,
         Grain::ConformanceFinding,
+        // The market data grains follow the transport ones for the same reason
+        // the gap rows follow the datagram rows: `book_top` is derived from
+        // `event`, and `event` joins to `instrument`. A book state present with
+        // no event behind it reads as a finding with no evidence.
+        Grain::Instrument,
+        Grain::Event,
+        Grain::BookTop,
     ]
 }

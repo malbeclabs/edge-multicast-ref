@@ -9,6 +9,14 @@ description = "The loader: walks a directory of completed objects and turns them
 
 [dependencies]
 dz-recorder-rows = { path = "../dz-recorder-rows" }
+# The market data derivation, reached only for the feeds a configuration names.
+# Off by default, so a default build carries the codec and never runs it.
+dz-recorder-events = { path = "../dz-recorder-events" }
+dz-recorder-relower = { path = "../dz-recorder-relower" }
+dz-recorder-core = { path = "../dz-recorder-core" }
+# `derive_object` verifies the digest and hands back no source, so an enabled
+# feed opens the object a second time and walks it with the codec.
+dz-recorder-replay = { path = "../dz-recorder-replay" }
 dz-recorder-clickhouse = { path = "../dz-recorder-clickhouse" }
 dz-recorder-archive = { path = "../dz-recorder-archive" }
 serde = { workspace = true }
@@ -24,9 +32,11 @@ tiny_http = { workspace = true }
 ctrlc = { version = "3", features = ["termination"] }
 
 [dev-dependencies]
-dz-recorder-core = { path = "../dz-recorder-core" }
-dz-recorder-replay = { path = "../dz-recorder-replay" }
 dz-edge-core = { path = "../../codec/dz-edge-core" }
+# The real encoder, so that what the switch is asserted over is a stream a
+# publisher could have sent rather than bytes a test agreed with itself about.
+dz-edge-mbp = { path = "../../codec/dz-edge-mbp" }
+dz-edge-refdata = { path = "../../codec/dz-edge-refdata" }
 tempfile = { workspace = true }
 
 [features]

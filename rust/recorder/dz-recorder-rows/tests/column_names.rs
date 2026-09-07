@@ -16,8 +16,9 @@
 use std::net::Ipv4Addr;
 
 use dz_recorder_rows::{
-    ConformanceFinding, Datagram, DropScope, Era, FindingVerdict, Grain, Nanos, PortRoleLabel,
-    RecvTsKindLabel, RoleJoinRow, SegmentCoverage, SequenceGap, Verdict,
+    absent_if_sentinel, ConformanceFinding, Datagram, DropScope, Era, Event, FindingVerdict, Grain,
+    MessageTypeLabel, Nanos, PortRoleLabel, RecvTsKindLabel, RoleJoinRow, SegmentCoverage,
+    SequenceGap, Verdict,
 };
 use serde_json::{json, Value};
 
@@ -415,7 +416,10 @@ fn a_grain_names_its_table_once() {
             "era",
             "segment_coverage",
             "sequence_gap",
-            "conformance_finding"
+            "conformance_finding",
+            "event",
+            "instrument",
+            "book_top"
         ]
     );
     for grain in Grain::ALL {
@@ -494,5 +498,94 @@ fn gap() -> SequenceGap {
         on_redundant_path: None,
         verdict: Verdict::Unverifiable,
         object_key: KEY.to_owned(),
+    }
+}
+
+/// The depth feed's absent-value sentinel becomes `NULL`, and zero does not.
+///
+/// Two specifications answer one question in opposite ways: depth says
+/// *unavailable* with `0xFFFF`, top of book says it with zero. So the
+/// translation belongs to the depth fields alone, and a zero order count — a
+/// real reading, a level with no orders behind it — has to survive.
+#[test]
+fn the_absent_value_sentinel_is_null_and_a_zero_is_not() {
+    assert_eq!(absent_if_sentinel(0xFFFF), None);
+    assert_eq!(absent_if_sentinel(0), Some(0));
+    assert_eq!(absent_if_sentinel(1), Some(1));
+    assert_eq!(absent_if_sentinel(0xFFFE), Some(0xFFFE));
+}
+
+/// A market data row reads back as itself, sentinel and all.
+#[test]
+fn a_market_data_row_reads_back_as_itself() {
+    let event = Event {
+        order_count: absent_if_sentinel(0xFFFF),
+        level_index: absent_if_sentinel(3),
+        ..event_fixture()
+    };
+    let round: Event = serde_json::from_value(as_json(&event)).expect("an event row reads back");
+    assert_eq!(round, event);
+    assert_eq!(round.order_count, None);
+    assert_eq!(round.level_index, Some(3));
+
+    let json = as_json(&event);
+    // A null in the JSON, not a missing key: a column store reading
+    // `JSONEachRow` fills an absent key with a default, and the default of a
+    // count is zero.
+    assert!(json
+        .get("order_count")
+        .expect("the key is present")
+        .is_null());
+}
+
+fn event_fixture() -> Event {
+    Event {
+        recv_ts: Nanos(1_700_000_000_000_000_000),
+        send_ts: Nanos(1_699_999_999_000_000_000),
+        upstream_ts: Some(Nanos(1_699_999_998_000_000_000)),
+        recv_ts_kind: RecvTsKindLabel::KernelSoftware,
+        site: "site".to_owned(),
+        recorder: "recorder".to_owned(),
+        env: "env".to_owned(),
+        feed: "feed".to_owned(),
+        port_role: PortRoleLabel::Mktdata,
+        source_addr: std::net::Ipv4Addr::new(192, 0, 2, 10),
+        channel_id: 1,
+        dst_port: 31_000,
+        sequence_number: 42,
+        reset_count: 0,
+        segment_seq: 3,
+        message_index: 2,
+        source_id: 1_000,
+        instrument_id: 11,
+        symbol: "AAA".to_owned(),
+        price_exp: -2,
+        qty_exp: 0,
+        per_instrument_seq: Some(7),
+        message_type: MessageTypeLabel::LevelUpdate,
+        side_raw: Some(0),
+        action_raw: Some(1),
+        reason_raw: Some(0),
+        flags_raw: Some(0),
+        price_raw: Some(9_950),
+        qty_raw: Some(12),
+        order_count: None,
+        level_index: None,
+        bid_px_raw: None,
+        bid_qty_raw: None,
+        bid_source_count: None,
+        ask_px_raw: None,
+        ask_qty_raw: None,
+        ask_source_count: None,
+        trade_id: None,
+        cumulative_volume: None,
+        snapshot_id: None,
+        anchor_seq: None,
+        total_levels: None,
+        levels_seen: None,
+        depth_bound: None,
+        object_key: "object".to_owned(),
+        object_sha256: "sha".to_owned(),
+        datagram_index: 5,
     }
 }

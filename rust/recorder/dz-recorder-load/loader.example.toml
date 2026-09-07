@@ -41,6 +41,38 @@ poll_interval = 30
 # 0 is no bound.
 max_objects_per_pass = 60
 
+# MARKET DATA DERIVATION IS OFF, AND IT IS OFF BY THE ABSENCE OF THIS SECTION.
+#
+# A feed with no entry here is loaded exactly as everything is loaded today:
+# datagram, era, segment_coverage and sequence_gap, and nothing about
+# instruments. Naming a feed turns on a second walk of every one of its objects
+# with the codec, and fills event, instrument and book_top.
+#
+# Per feed and not a global switch, because the cost is per feed and it is not
+# small: an object's messages outnumber its datagrams, and a snapshot cycle is
+# `total_levels` messages per instrument on the publisher's cadence. Measure it
+# for the feed before turning it on — the sizing number is messages walked over
+# datagrams walked, over a window that includes a burst and a snapshot cycle.
+#
+# [[market_data]]
+# The manifest's `feed`, matched exactly: the feed specification's name, never a
+# venue's. This is what the recorder writes into every manifest it publishes.
+# feed = "market-by-price"
+#
+# The feed's Magic. Required, with no default and no registry to look it up in:
+# it is the only thing that stops a datagram misrouted from a sibling feed being
+# parsed at the wrong layout, and a value that matches nothing derives an empty
+# table that reads exactly like a feed nobody published on. `--check` says back
+# which value was read.
+# magic = 0x4442
+#
+# Whether every SnapshotLevel becomes an `event` row. Off, and the book consumes
+# them either way — the switch is about rows, not about state. SnapshotBegin and
+# SnapshotEnd are always written, so a cycle is always visible, and
+# `total_levels` on the begin against `levels_seen` on the end answers "was the
+# snapshot complete" without the levels being there to count.
+# persist_snapshot_levels = false
+
 [clickhouse]
 # No path and no query: those are the loader's. `https` is refused unless the
 # binary was built with the `tls` feature, rather than silently downgraded — so

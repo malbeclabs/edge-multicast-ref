@@ -158,7 +158,7 @@ CREATE TABLE IF NOT EXISTS recorder.event (
 
     sequence_number    UInt64,
     reset_count        UInt8,
-    era_anchor_ts      DateTime64(9),
+    segment_seq        UInt64,
     message_index      UInt8,
 
     source_id          UInt16,
@@ -191,6 +191,7 @@ CREATE TABLE IF NOT EXISTS recorder.event (
     snapshot_id        Nullable(UInt32),
     anchor_seq         Nullable(UInt64),
     total_levels       Nullable(UInt32),
+    levels_seen        Nullable(UInt32),
     depth_bound        Nullable(UInt32),
 
     object_key         String,
@@ -199,7 +200,7 @@ CREATE TABLE IF NOT EXISTS recorder.event (
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(recv_ts)
-ORDER BY (channel_id, instrument_id, era_anchor_ts, sequence_number, message_index,
+ORDER BY (channel_id, instrument_id, sequence_number, message_index,
           source_addr, dst_port, site, recorder, env, feed, recv_ts);
 ```
 
@@ -237,12 +238,12 @@ never has to infer it from the deriver.** Anything not listed for a type is
 |---|---|---|
 | `Quote` | `instrument_id`, `source_id`, `source_timestamp_ns` | `bid_px_raw`, `bid_qty_raw`, `bid_source_count`, `ask_px_raw`, `ask_qty_raw`, `ask_source_count`, `flags_raw` ← `update_flags`, `upstream_ts` ← `source_timestamp_ns` |
 | `Trade` | `instrument_id`, `source_id`, `source_timestamp_ns` | `price_raw` ← `trade_price`, `qty_raw` ← `trade_qty`, `side_raw` ← `aggressor_side`, `flags_raw` ← `trade_flags`, `trade_id`, `cumulative_volume`, `upstream_ts` ← `source_timestamp_ns` |
-| `LevelUpdate` | `instrument_id`, `source_id`, `per_instrument_seq`, `timestamp_ns` | `side_raw` ← `side`, `action_raw` ← `action`, `reason_raw` ← `update_reason`, `flags_raw` ← `level_flags`, `price_raw`, `qty_raw`, `order_count`†, `level_index`†, `upstream_ts` ← `timestamp_ns` |
+| `LevelUpdate` | `instrument_id`, `source_id`, `per_instrument_seq`, `timestamp_ns` ‡‡ | `side_raw` ← `side`, `action_raw` ← `action`, `reason_raw` ← `update_reason`, `flags_raw` ← `level_flags`, `price_raw`, `qty_raw`, `order_count`†, `level_index`†, `upstream_ts` ← `timestamp_ns` |
 | `BookClear` | `instrument_id`, `source_id`, `per_instrument_seq`, `timestamp_ns` | `side_raw` ← `clear_side`, `action_raw` ← `scope`, `reason_raw` ← `clear_reason`, `price_raw` ← `from_price_raw`, `upstream_ts` ← `timestamp_ns` |
 | `InstrumentReset` | `instrument_id`, `timestamp_ns` — **no `Source ID`** | `reason_raw` ← `reason`, `anchor_seq` ← **`new_anchor_seq`**, `upstream_ts` ← `timestamp_ns`, `source_id` ‡ |
 | `SnapshotBegin` | `instrument_id`, `timestamp_ns` — **no `Source ID`** | `snapshot_id`, `anchor_seq`, `total_levels`, `depth_bound`, `per_instrument_seq` ← `last_instrument_seq`, `upstream_ts` ← `timestamp_ns`, `source_id` ‡ |
 | `SnapshotLevel` | **`snapshot_id` only** — no instrument, no timestamp, no level index | `side_raw` ← `side`, `flags_raw` ← `level_flags`, `price_raw`, `qty_raw`, `order_count`†; `instrument_id`, `upstream_ts` and `level_index` ⁂ |
-| `SnapshotEnd` | `instrument_id`, `anchor_seq`, `snapshot_id` | `snapshot_id`, `anchor_seq` |
+| `SnapshotEnd` | `instrument_id`, `anchor_seq`, `snapshot_id` | `snapshot_id`, `anchor_seq`, `levels_seen` ⁑ |
 
 **† The wire's absent-value sentinel is `NULL`, not a number.** `order_count` and
 `level_index` carry `U16_UNAVAILABLE` (`0xFFFF`) when the venue exposes neither,
@@ -255,6 +256,43 @@ translates the sentinel to `NULL` on both columns.
 reference data** for that `(channel_id, instrument_id)`, never invented and never
 carried over from an adjacent message of another type. The same rule supplies
 `price_exp` and `qty_exp`, which no market data message carries at all.
+
+**‡‡ Reference data is resolved across port roles, which is what decides how it
+is keyed.** A definition arrives on `refdata` and a price on `mktdata`, and those
+are two channel instances — the destination port is part of the key — each
+advancing its own sequence space and its own `Reset Count`. A definition at
+refdata sequence 40 and a price at mktdata sequence 40 are not ordered by those
+numbers at all; comparing them compares two rulers. So:
+
+- **The accumulator is keyed on the channel — `(source address, Channel ID)` —
+  not on the channel instance.** `GLOSSARY.md` has an instrument as unique within
+  a channel, and putting the port in the key would file the definitions somewhere
+  the prices could never find them. The source address stays, because two
+  redundant publishers each publish their own definitions and one path's
+  exponents must never decode the other path's prices.
+- **A statement is in force from the instant it was received**, not from a
+  sequence number. One archive is written in arrival order by one host, so
+  `recv_ts` totally orders everything in it across every port role — which is
+  exactly the join a cross-role lookup needs. The sequence number is kept beside
+  it as the statement's stable identity, which is what `instrument.from_sequence`
+  holds.
+
+This is the one place in this design where time is the right ruler, and it does
+not contradict *The equivalence key*: that key excludes time because a timestamp
+is the quantity a race measures. Here the question is which statement one host
+had already received, which is a question about that host's own clock and about
+nothing else.
+
+**⁑ `levels_seen` is counted by the deriver, not read from the wire**, and it
+exists because persisting every `SnapshotLevel` is optional. A cycle is
+`total_levels` messages per instrument per cycle, on the runtime's cadence rather
+than the market's, so it is the largest row count in the system attached to the
+port role with the least analytical value per row. **The book consumes every
+level; `event` persists them behind a per-feed switch that is off by default**,
+while `SnapshotBegin` and `SnapshotEnd` are always written. `total_levels` on the
+begin row against `levels_seen` on the end row then answers *was the snapshot
+complete* from rows alone — which is the question persisting the levels would
+otherwise have been the only way to ask.
 
 **⁂ A `SnapshotLevel` inherits its instrument and its time from the
 `SnapshotBegin` that `snapshot_id` ties it to**, which is precisely why
@@ -294,6 +332,17 @@ channel instance; the dominant question here is per instrument over a window, an
 a leading instance prefix makes that a full scan. The instance columns are here
 for identity and for deduplication, not as the leading filter.
 
+**And no era column, which corrects an earlier draft of this document.** An
+era's anchor is only observable as *the first datagram of that era in this
+object*, so a stored anchor differs between two objects carrying one era and
+splits that era across sort-key prefixes — and on `instrument`, whose engine
+replaces on the key, it would accumulate a row per object where one per era was
+meant. `datagram` already carries `reset_count` and `segment_seq` and resolves
+the era by range join to `era`, where the openings and their `anchor_certain`
+already live; these tables follow it. `instrument` keys on `from_sequence`
+instead — the position of the definition that made the statement, identical in
+every object that carries it.
+
 **Never ordered by symbol.** See *Symbol is not a key*.
 
 **Prices and quantities stay raw, with their exponents beside them.** Converting
@@ -316,7 +365,7 @@ CREATE TABLE IF NOT EXISTS recorder.instrument (
     dst_port       UInt16,
     source_id      UInt16,
     instrument_id  UInt32,
-    era_anchor_ts  DateTime64(9),
+    from_sequence  UInt64,
     reset_count    UInt8,
     symbol         String,
     price_exp      Int8,
@@ -329,8 +378,8 @@ CREATE TABLE IF NOT EXISTS recorder.instrument (
     object_key     String
 )
 ENGINE = ReplacingMergeTree(last_seen_ts)
-PARTITION BY toYYYYMMDD(era_anchor_ts)
-ORDER BY (channel_id, instrument_id, era_anchor_ts, source_addr, dst_port,
+PARTITION BY toYYYYMMDD(first_seen_ts)
+ORDER BY (channel_id, instrument_id, from_sequence, source_addr, dst_port,
           site, recorder, env, feed);
 ```
 
@@ -342,12 +391,12 @@ coverage the archive can make; and without it the `symbol` column on `event`
 would be a lie across an era boundary.
 
 **It carries the full identity block, including the channel instance**, for a
-reason that is easy to skip: an `era_anchor_ts` is only meaningful *for one
-channel instance*, because a `Reset Count` is that instance's. Two paths
-publishing one `Channel ID` open their eras independently, so a table keyed
-without `source_addr` and `dst_port` merges two eras that are not the same era
-and produces a join that silently picks one path's exponents for the other
-path's prices. `port_role` is on it because reference data arrives on the
+reason that is easy to skip: an era is only meaningful *for one channel
+instance*, because a `Reset Count` is that instance's. Two paths publishing one
+`Channel ID` open their eras independently, so a table keyed without
+`source_addr` and `dst_port` merges two eras that are not the same era and
+produces a join that silently picks one path's exponents for the other path's
+prices. `port_role` is on it because reference data arrives on the
 `refdata` role and a reader joining from a `mktdata` event must be able to see
 that the roles differ rather than discover it.
 
@@ -373,7 +422,7 @@ CREATE TABLE IF NOT EXISTS recorder.book_top (
     sequence_number   UInt64,
     message_index     UInt8,
     reset_count       UInt8,
-    era_anchor_ts     DateTime64(9),
+    segment_seq       UInt64,
     bid_px_raw        Nullable(Int64),
     bid_qty_raw       Nullable(UInt64),
     bid_source_count  Nullable(UInt16),
@@ -383,6 +432,7 @@ CREATE TABLE IF NOT EXISTS recorder.book_top (
     price_exp         Int8,
     qty_exp           Int8,
     state_key         UInt64,                   -- the equivalence key
+    from_anchor       UInt8,                    -- 1 if derived by applying a snapshot
     book_certain      UInt8,                    -- 0 once the book is unknowable
     uncertain_since   Nullable(UInt64),         -- the sequence number that made it so
     uncertain_reason  LowCardinality(String),   -- gap | instrument_reset | no_anchor
@@ -390,7 +440,7 @@ CREATE TABLE IF NOT EXISTS recorder.book_top (
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(recv_ts)
-ORDER BY (channel_id, instrument_id, era_anchor_ts, recv_ts, sequence_number,
+ORDER BY (channel_id, instrument_id, recv_ts, sequence_number,
           message_index, observation, env, feed);
 ```
 
@@ -573,9 +623,25 @@ might be wrong" from an unfalsifiable worry into a `WHERE` clause.
 
 **A snapshot anchors a book and never times one.** The runtime pulls it on its
 own cadence from the adapter's book, and the archive records when it was
-published rather than when it was asked for. So a snapshot is a starting state
-and is never an observation in a race — `book_top` rows derived from applying a
-snapshot carry the anchor's sequence number and are excluded from pairing.
+published rather than when it was asked for, so its timestamp measures the
+publisher's scheduler. A snapshot is a starting state and is never an observation
+in a race, and `from_anchor` on the row is how the pairing knows to exclude it —
+a property of the row rather than something a reader has to reconstruct by
+joining back to the message that produced it.
+
+**A book spans port roles, so it is keyed on the channel and not the channel
+instance.** The anchor arrives on the `snapshot` role and the deltas that follow
+it on `mktdata`, and those are two channel instances because the destination port
+is part of that key. A book keyed on the instance anchors one book and updates a
+different one, and neither is ever both certain and current. This is the same
+structural fact that decides how reference data is keyed, and it has the same
+answer.
+
+**Gap detection stays per channel instance**, because a sequence space does — a
+hole is a hole in one port role's numbering. Only a hole on `mktdata` touches
+certainty: a missed definition is the reference data's problem, and a missed
+snapshot message is already caught by the cycle's own level count against
+`total_levels`.
 
 **`Per-Instrument Seq` is the depth join key and it is deterministic**, stamped by
 the runtime from a counter keyed on the instrument and reset with the era. It is

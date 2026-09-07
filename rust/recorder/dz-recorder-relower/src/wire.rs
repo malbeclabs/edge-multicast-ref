@@ -13,13 +13,16 @@
 //! looked at.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::net::SocketAddrV4;
 
 use dz_edge_core::{Datagram, DatagramHeader, PortRole, TYPE_END_OF_SESSION, TYPE_HEARTBEAT};
-use dz_edge_mbp::{BookClear, LevelUpdate};
+use dz_edge_mbp::{
+    BookClear, InstrumentReset, LevelUpdate, SnapshotBegin, SnapshotEnd, SnapshotLevel,
+};
 use dz_edge_refdata::{InstrumentDefinition, ManifestSummary};
 use dz_edge_tob::{Quote, Trade};
 use dz_publisher_lowering::SourceId;
-use dz_recorder_core::{RecordedDatagram, Source};
+use dz_recorder_core::{ChannelInstance, RecordedDatagram, RecvTsKind, Source};
 
 use crate::error::RelowerError;
 use crate::finding::Caveat;
@@ -63,14 +66,91 @@ impl MessageBody {
     }
 }
 
+/// A message that moves book state without being a venue event.
+///
+/// **Deliberately not a `MessageBody` variant.** That enum is what a re-lowering
+/// *compares*, and every one of these is excluded from a comparison for a reason
+/// that has not changed: a reset and a snapshot are the publisher's own
+/// statements about its book, produced by the runtime rather than lowered from
+/// an upstream payload, so a re-lowering has nothing to produce them from and
+/// their absence from it means nothing. Widening `MessageBody` would turn four
+/// stated exclusions into an implicit one.
+///
+/// They are surfaced because a consumer that *builds* a book rather than
+/// comparing one needs exactly these four and can get them nowhere else: a
+/// snapshot cycle is the only anchor a delta book has, and a reset is the only
+/// statement that the book before it is not to be trusted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateBody {
+    Reset(InstrumentReset),
+    SnapshotBegin(SnapshotBegin),
+    SnapshotLevel(SnapshotLevel),
+    SnapshotEnd(SnapshotEnd),
+}
+
+impl StateBody {
+    /// The message type, as the codec names it.
+    #[must_use]
+    pub const fn message_type(&self) -> &'static str {
+        match self {
+            Self::Reset(_) => "InstrumentReset",
+            Self::SnapshotBegin(_) => "SnapshotBegin",
+            Self::SnapshotLevel(_) => "SnapshotLevel",
+            Self::SnapshotEnd(_) => "SnapshotEnd",
+        }
+    }
+}
+
+/// One state message the archive holds, and where it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StateMessage {
+    pub body: StateBody,
+    pub provenance: WireProvenance,
+}
+
+/// A reference-data message, and where it was.
+///
+/// [`ArchivedRefdata`](crate::refdata::ArchivedRefdata) consumes these and keeps
+/// what it needs for a comparison, which is a set rather than a history: it keys
+/// by symbol and pins the first statement, because its two archives carry no key
+/// that orders one against the other and so no instant at which to switch
+/// exponents is defensible.
+///
+/// A consumer holding **one** archive is not in that position — every definition
+/// here arrives at a sequence number — so it can place a restatement exactly, and
+/// needs the position in order to. That is the whole reason these are surfaced
+/// rather than only accumulated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReferenceMessage {
+    pub body: ReferenceBody,
+    pub provenance: WireProvenance,
+}
+
+/// The two messages that describe instruments rather than markets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferenceBody {
+    Definition(InstrumentDefinition),
+    Manifest(ManifestSummary),
+}
+
 /// Where a message was on the wire.
 ///
-/// **Provenance, never compared.** Every field here is one a batching or pacing
-/// difference moves, which is exactly why the healthy case is not a finding: put
-/// any of these in the comparison and a publisher that packed two messages
-/// differently would be reported as defective. What they are for is finding the
+/// **Provenance, never compared.** Nothing here enters a comparison: put the
+/// timing fields in one and a publisher that packed two messages differently
+/// would be reported as defective, and put the addressing fields in one and a
+/// feed served by a second path would be. What they are for is finding the
 /// datagram again — an operator handed a finding opens the archive at this
-/// sequence number.
+/// sequence number — and, for a consumer that derives rows rather than findings,
+/// saying which channel instance a message belongs to.
+///
+/// The two halves are there for those two different reasons and it is worth
+/// keeping them apart in one's head. [`datagram_index`](Self::datagram_index),
+/// [`message_index`](Self::message_index) and the timestamps are **timing**: a
+/// batching or pacing decision moves every one of them. [`src`](Self::src),
+/// [`dst`](Self::dst), [`channel_id`](Self::channel_id) and
+/// [`role`](Self::role) are **identity**: no publisher decision moves them, and
+/// together they are the channel instance a sequence number is only meaningful
+/// under.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WireProvenance {
     /// Position of the datagram in the archive, counting from 0 over everything
@@ -83,7 +163,24 @@ pub struct WireProvenance {
     pub reset_count: u8,
     pub send_timestamp_ns: u64,
     pub recv_ts_ns: u64,
+    /// How [`recv_ts_ns`](Self::recv_ts_ns) was taken. A latency derived from an
+    /// application fallback stamp measures this process, not the path, so a
+    /// consumer that reports one has to be able to say which it had.
+    pub recv_ts_kind: RecvTsKind,
     pub role: PortRole,
+    /// The publisher's address and port, as the datagram was received.
+    ///
+    /// Half of the channel instance. Two redundant publishers serving one
+    /// `Channel ID` are told apart by nothing else, and a sequence number read
+    /// without it reads one publisher's advance as the other's backward motion.
+    pub src: SocketAddrV4,
+    /// The group and port the datagram was addressed to.
+    ///
+    /// The other half. The port is the one the channel instance is keyed on; the
+    /// group is not part of that key but is what a subscriber joined, so a
+    /// consumer reporting on a feed's delivery needs it and cannot recover it
+    /// from anywhere else in this type.
+    pub dst: SocketAddrV4,
 }
 
 impl core::fmt::Display for WireProvenance {
@@ -137,7 +234,19 @@ pub struct Skipped {
     /// asked. Re-lowering a snapshot offline would compare a book state the
     /// re-lowering took at one instant against one the publisher took at
     /// another, which is Mode B's problem and not soluble here.
+    ///
+    /// Skipped by the *comparison*, which is what this counter reports, and
+    /// still surfaced on [`state_messages`](WireCapture::state_messages) for a
+    /// consumer that anchors a book with them.
     pub snapshot: u64,
+    /// `InstrumentReset`.
+    ///
+    /// Counted here rather than as an unknown type, which is where it went
+    /// before and was wrong: the codec has a decoder for it, so it was never a
+    /// message this build could not read. It is skipped for the same reason the
+    /// snapshot is — the publisher's statement about its own book, lowered from
+    /// no upstream payload — and is surfaced for the same reason.
+    pub reset: u64,
     /// Message types this build has no decoder for. The specification requires a
     /// decoder to skip them using the length field and continue, which is what
     /// happens.
@@ -151,9 +260,25 @@ pub struct Skipped {
 #[derive(Debug, Clone, Default)]
 pub struct WireCapture {
     messages: Vec<WireMessage>,
+    state: Vec<StateMessage>,
+    reference: Vec<ReferenceMessage>,
     refdata: ArchivedRefdata,
     skipped: Skipped,
     datagrams: u64,
+    /// Datagrams of this feed, per channel instance.
+    ///
+    /// The messages carry the instance in their provenance, so a consumer could
+    /// almost count this itself — and would get it wrong, because a datagram
+    /// carrying nothing but a `Heartbeat` yields no message and would go
+    /// uncounted. That datagram is real: the transport tier reads its header
+    /// and writes a row for it, and a channel that is mostly heartbeats is
+    /// exactly the channel a per-datagram ratio is asked about.
+    ///
+    /// Counted from the peeked header, so a body this build cannot decode is
+    /// still counted against the instance it names. The transport tier is a
+    /// replay plus a header read, and this denominator is what that tier
+    /// actually sees.
+    datagrams_by_instance: BTreeMap<ChannelInstance, u64>,
     /// Every `Source ID` seen on a joined message, so a capture holding two
     /// publishers can be refused rather than averaged over.
     observed_source_ids: BTreeSet<u16>,
@@ -207,17 +332,25 @@ impl WireCapture {
         // Peeked before the full decode so that a datagram from another feed is
         // counted as foreign rather than as undecodable: the two mean entirely
         // different things about an archive, and one of them is not a problem.
-        match DatagramHeader::peek(datagram.payload) {
+        let peeked = match DatagramHeader::peek(datagram.payload) {
             Ok(header) if header.magic != expected_magic => {
                 self.skipped.foreign_magic += 1;
                 return;
             }
-            Ok(_) => {}
+            Ok(header) => header,
             Err(_) => {
                 self.skipped.undecodable += 1;
                 return;
             }
-        }
+        };
+        *self
+            .datagrams_by_instance
+            .entry(ChannelInstance::new(
+                *datagram.src.ip(),
+                peeked.channel_id,
+                datagram.dst.port(),
+            ))
+            .or_default() += 1;
 
         let decoded = match Datagram::decode(datagram.payload, expected_magic) {
             Ok(decoded) => decoded,
@@ -243,7 +376,10 @@ impl WireCapture {
                 reset_count: header.reset_count,
                 send_timestamp_ns: header.send_timestamp_ns,
                 recv_ts_ns: datagram.recv_ts_ns,
+                recv_ts_kind: datagram.recv_ts_kind,
                 role: datagram.role,
+                src: datagram.src,
+                dst: datagram.dst,
             };
             self.absorb_message(
                 message.type_id,
@@ -286,21 +422,58 @@ impl WireCapture {
                 // is the one message whose layout changed between generations,
                 // and an archive can hold either.
                 match InstrumentDefinition::decode(bytes, schema_version) {
-                    Ok(definition) => self.refdata.observe_definition(&definition),
+                    Ok(definition) => {
+                        self.refdata.observe_definition(&definition);
+                        self.reference.push(ReferenceMessage {
+                            body: ReferenceBody::Definition(definition),
+                            provenance,
+                        });
+                    }
                     Err(_) => self.skipped.undecodable += 1,
                 }
             }
             ManifestSummary::TYPE_ID => {
                 self.skipped.reference_data += 1;
                 match ManifestSummary::decode(bytes) {
-                    Ok(summary) => self.refdata.observe_manifest(&summary),
+                    Ok(summary) => {
+                        self.refdata.observe_manifest(&summary);
+                        self.reference.push(ReferenceMessage {
+                            body: ReferenceBody::Manifest(summary),
+                            provenance,
+                        });
+                    }
                     Err(_) => self.skipped.undecodable += 1,
                 }
             }
             TYPE_HEARTBEAT | TYPE_END_OF_SESSION => self.skipped.control += 1,
-            dz_edge_mbp::SnapshotBegin::TYPE_ID
-            | dz_edge_mbp::SnapshotLevel::TYPE_ID
-            | dz_edge_mbp::SnapshotEnd::TYPE_ID => self.skipped.snapshot += 1,
+            SnapshotBegin::TYPE_ID => {
+                self.skipped.snapshot += 1;
+                match SnapshotBegin::decode(bytes) {
+                    Ok(begin) => self.push_state(StateBody::SnapshotBegin(begin), provenance),
+                    Err(_) => self.skipped.undecodable += 1,
+                }
+            }
+            SnapshotLevel::TYPE_ID => {
+                self.skipped.snapshot += 1;
+                match SnapshotLevel::decode(bytes) {
+                    Ok(level) => self.push_state(StateBody::SnapshotLevel(level), provenance),
+                    Err(_) => self.skipped.undecodable += 1,
+                }
+            }
+            SnapshotEnd::TYPE_ID => {
+                self.skipped.snapshot += 1;
+                match SnapshotEnd::decode(bytes) {
+                    Ok(end) => self.push_state(StateBody::SnapshotEnd(end), provenance),
+                    Err(_) => self.skipped.undecodable += 1,
+                }
+            }
+            InstrumentReset::TYPE_ID => {
+                self.skipped.reset += 1;
+                match InstrumentReset::decode(bytes) {
+                    Ok(reset) => self.push_state(StateBody::Reset(reset), provenance),
+                    Err(_) => self.skipped.undecodable += 1,
+                }
+            }
             _ => self.skipped.unknown_type += 1,
         }
     }
@@ -308,6 +481,34 @@ impl WireCapture {
     fn push(&mut self, body: MessageBody, source_id: u16, provenance: WireProvenance) {
         self.observed_source_ids.insert(source_id);
         self.messages.push(WireMessage { body, provenance });
+    }
+
+    /// A state message never touches `observed_source_ids`.
+    ///
+    /// None of the four carries a `Source ID` on the wire, so a capture that
+    /// counted them would be counting a value it invented. That set is what
+    /// refuses an archive holding two publishers, and a refusal has to rest on
+    /// what was actually read.
+    fn push_state(&mut self, body: StateBody, provenance: WireProvenance) {
+        self.state.push(StateMessage { body, provenance });
+    }
+
+    /// The reference-data messages, in the order the archive holds them, each
+    /// with the position it was carried at.
+    #[must_use]
+    pub fn reference_messages(&self) -> &[ReferenceMessage] {
+        &self.reference
+    }
+
+    /// The state messages, in the order the archive holds them.
+    ///
+    /// Order is the whole contract here: a snapshot cycle is a `SnapshotBegin`,
+    /// its levels and a `SnapshotEnd`, and a consumer reads it as a run. Nothing
+    /// groups them, because grouping would have to decide what an incomplete
+    /// cycle is and that is the consumer's judgement, not the walk's.
+    #[must_use]
+    pub fn state_messages(&self) -> &[StateMessage] {
+        &self.state
     }
 
     /// The messages, in the order the archive holds them.
@@ -333,6 +534,17 @@ impl WireCapture {
     #[must_use]
     pub const fn datagrams(&self) -> u64 {
         self.datagrams
+    }
+
+    /// How many of them carried this feed's `Magic`, per channel instance.
+    ///
+    /// The total above counts everything the sources yielded, including the
+    /// datagrams of other feeds; this counts only the ones whose header this
+    /// walk read, filed under the instance that header named. The difference is
+    /// the whole point of it for a consumer sizing one feed.
+    #[must_use]
+    pub const fn datagrams_by_instance(&self) -> &BTreeMap<ChannelInstance, u64> {
+        &self.datagrams_by_instance
     }
 
     /// The publisher's identity, as the archive states it.

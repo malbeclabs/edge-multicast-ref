@@ -15,6 +15,19 @@ use std::collections::BTreeSet;
 use dz_recorder_clickhouse::{migrations, schema, Migration};
 use dz_recorder_rows::Grain;
 
+/// The grains `001` declares: the envelope of a datagram, and what is derived
+/// from it.
+const TRANSPORT_GRAINS: [Grain; 5] = [
+    Grain::Datagram,
+    Grain::Era,
+    Grain::SegmentCoverage,
+    Grain::SequenceGap,
+    Grain::ConformanceFinding,
+];
+
+/// The grains `005` declares: what the messages said.
+const MARKET_DATA_GRAINS: [Grain; 3] = [Grain::Event, Grain::Instrument, Grain::BookTop];
+
 /// The columns one `CREATE TABLE recorder.<table>` block declares, in order.
 fn columns(sql: &str, table: &str) -> Vec<String> {
     let needle = format!("CREATE TABLE IF NOT EXISTS recorder.{table} (");
@@ -47,33 +60,82 @@ fn columns(sql: &str, table: &str) -> Vec<String> {
 }
 
 fn rows_sql() -> &'static str {
+    sql_of("001_recorder_rows.sql")
+}
+
+/// The market data tables, which are `005` rather than `001`.
+fn market_data_sql() -> &'static str {
+    sql_of("005_recorder_market_data.sql")
+}
+
+/// The pairing views, which are `006`.
+fn pairing_sql() -> &'static str {
+    sql_of("006_recorder_book_top_pairing.sql")
+}
+
+/// One `CREATE OR REPLACE VIEW recorder.<name>` statement, up to the next one.
+fn view_body(sql: &'static str, name: &str) -> &'static str {
+    let needle = format!("CREATE OR REPLACE VIEW recorder.{name} AS");
+    let start = sql
+        .find(&needle)
+        .unwrap_or_else(|| panic!("the schema declares no view `{name}`"));
+    let body = &sql[start..];
+    body.find("\nCREATE OR REPLACE VIEW")
+        .map_or(body, |end| &body[..end])
+}
+
+fn sql_of(name: &str) -> &'static str {
     migrations()
         .into_iter()
-        .find(|m| m.name == "001_recorder_rows.sql")
-        .expect("the tables are in 001")
+        .find(|m| m.name == name)
+        .unwrap_or_else(|| panic!("{name} is a migration"))
         .sql
 }
 
 /// A field with no column, or a column with no field, fails here.
 #[test]
 fn every_column_has_a_field_and_every_field_has_a_column() {
-    let sql = rows_sql();
-    for (grain, fields) in [
-        (Grain::Datagram, field_names(&fixtures::datagram())),
-        (Grain::Era, field_names(&fixtures::era())),
+    for (sql, grain, fields) in [
         (
+            rows_sql(),
+            Grain::Datagram,
+            field_names(&fixtures::datagram()),
+        ),
+        (rows_sql(), Grain::Era, field_names(&fixtures::era())),
+        (
+            rows_sql(),
             Grain::SegmentCoverage,
             field_names(&fixtures::segment_coverage()),
         ),
-        (Grain::SequenceGap, field_names(&fixtures::sequence_gap())),
         (
+            rows_sql(),
+            Grain::SequenceGap,
+            field_names(&fixtures::sequence_gap()),
+        ),
+        (
+            rows_sql(),
             Grain::ConformanceFinding,
             field_names(&fixtures::conformance_finding()),
+        ),
+        (
+            market_data_sql(),
+            Grain::Event,
+            field_names(&fixtures::event()),
+        ),
+        (
+            market_data_sql(),
+            Grain::Instrument,
+            field_names(&fixtures::instrument()),
+        ),
+        (
+            market_data_sql(),
+            Grain::BookTop,
+            field_names(&fixtures::book_top()),
         ),
     ] {
         let declared: BTreeSet<String> = columns(sql, grain.table()).into_iter().collect();
         let mut expected = fields;
-        if grain == Grain::Datagram {
+        if grain == Grain::Datagram || grain == Grain::Event {
             // The one column the loader never sends: the engine computes it, and
             // inserting into a MATERIALIZED column is an error.
             expected.insert("send_recv_ms".to_owned());
@@ -82,6 +144,169 @@ fn every_column_has_a_field_and_every_field_has_a_column() {
             declared, expected,
             "{grain}: the schema and the row type disagree about columns"
         );
+    }
+}
+
+/// The `ORDER BY (...)` of one table, as one line.
+///
+/// The key may wrap, so this joins until the closing parenthesis rather than
+/// reading a line: a key that fits on one line and a key that does not are the
+/// same key, and a test that could only read the first would quietly stop
+/// checking the moment one grew.
+fn sort_key(sql: &str, table: &str) -> String {
+    let after = sql
+        .split_once(&format!("CREATE TABLE IF NOT EXISTS recorder.{table} ("))
+        .unwrap_or_else(|| panic!("{table} is declared"))
+        .1;
+    let key = after
+        .split_once("ORDER BY (")
+        .unwrap_or_else(|| panic!("{table} has an ORDER BY"))
+        .1;
+    let key = key
+        .split_once(");")
+        .unwrap_or_else(|| panic!("{table}'s ORDER BY is closed"))
+        .0;
+    key.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The market data keys carry everything that distinguishes two genuine rows.
+///
+/// `ReplacingMergeTree` deduplicates on the whole sort key, so a key missing an
+/// identity column does not merely sort badly — it deletes rows. Each assertion
+/// here is a row that would have been lost.
+#[test]
+fn the_market_data_sort_keys_carry_what_distinguishes_two_rows() {
+    let sql = market_data_sql();
+    let event = sort_key(sql, "event");
+
+    // Two paths publishing one Channel ID. Without these, one collapses into the
+    // other and the feed reads as though a publisher went backwards.
+    assert!(event.contains("source_addr"), "event key: {event}");
+    assert!(event.contains("dst_port"), "event key: {event}");
+    // A duplicated datagram: same sequence number, same message index, different
+    // arrival. Without this it deletes the original rather than sitting beside it.
+    assert!(event.contains("recv_ts"), "event key: {event}");
+    // Several messages for one instrument packed into one datagram.
+    assert!(event.contains("message_index"), "event key: {event}");
+    // And the instrument leads, because the dominant question is per instrument
+    // over a window — the one place these keys depart from `datagram`'s.
+    assert!(
+        event.starts_with("channel_id, instrument_id"),
+        "event key does not lead with the instrument: {event}"
+    );
+    // And no era column, for the reason `datagram` has none: an era's anchor is
+    // only observable as the first datagram of that era *in this object*, so a
+    // stored one splits an era across prefixes. The era is a range join.
+    assert!(
+        !event.contains("era_anchor_ts"),
+        "event stores a per-object era anchor: {event}"
+    );
+
+    let book_top = sort_key(sql, "book_top");
+    assert!(book_top.contains("message_index"), "book_top: {book_top}");
+    assert!(book_top.contains("observation"), "book_top: {book_top}");
+
+    // An era belongs to one channel instance, so an instrument table keyed
+    // without the address and the port merges two eras that are not the same era.
+    let instrument = sort_key(sql, "instrument");
+    assert!(instrument.contains("source_addr"), "{instrument}");
+    assert!(instrument.contains("dst_port"), "{instrument}");
+    // Keyed on where the statement came into force, which is identical in every
+    // object that carries it, so two loads of one era replace rather than
+    // accumulate.
+    assert!(instrument.contains("from_sequence"), "{instrument}");
+
+    // The rest of the identity block, on all three. Two recorders at one site
+    // see the same datagrams and agree on channel, instrument, sequence number
+    // and index; `recv_ts` differing is two clocks not colliding rather than a
+    // key, and `book_top` folds site and recorder into `observation`. `env` is
+    // the same argument across a boundary nothing else in the row crosses, and
+    // `feed` is what stops two feeds sharing a Channel ID and an Instrument ID
+    // from merging on the strength of that coincidence.
+    for (name, key) in [
+        ("event", &event),
+        ("book_top", &book_top),
+        ("instrument", &instrument),
+    ] {
+        for column in ["env", "feed"] {
+            assert!(
+                key.contains(column),
+                "{name} key omits {column}, so two of them merge: {key}"
+            );
+        }
+    }
+    assert!(event.contains("recorder"), "event key: {event}");
+    assert!(instrument.contains("recorder"), "{instrument}");
+    assert!(
+        book_top.contains("observation"),
+        "book_top names its vantage through `observation`: {book_top}"
+    );
+
+    // And `port_role` is in none of them, deliberately: it is recoverable from
+    // `dst_port`, which is in every key that has a channel instance in it, so
+    // keying on the name beside the number widens every key to restate a fact.
+    // `book_top` has no such column at all, because a book spans port roles.
+    for (name, key) in [
+        ("event", &event),
+        ("book_top", &book_top),
+        ("instrument", &instrument),
+    ] {
+        assert!(
+            !key.contains("port_role"),
+            "{name} key restates the port as a name as well as a number: {key}"
+        );
+    }
+}
+
+/// The retention split, one table further down than `002` put it.
+#[test]
+fn the_market_data_retention_expires_the_events_and_keeps_the_book() {
+    let sql = market_data_sql();
+    assert!(
+        sql.contains("ALTER TABLE recorder.event")
+            && sql.contains("MODIFY TTL toDateTime(recv_ts) + INTERVAL 2 DAY"),
+        "the expensive base table has no TTL"
+    );
+    assert!(
+        sql.contains("ALTER TABLE recorder.book_top")
+            && sql.contains("MODIFY TTL toDateTime(recv_ts) + INTERVAL 30 DAY"),
+        "the derived table's longer window is not stated"
+    );
+    // `instrument` is what makes every other row's symbol and exponents mean
+    // anything after the fact. Expiring it leaves prices that no longer decode.
+    assert!(
+        !sql.contains("ALTER TABLE recorder.instrument"),
+        "reference data must not expire"
+    );
+    // Whole days, so a TTL is a partition drop rather than a treadmill of part
+    // rewrites — the reason `002` gives for the same shape.
+    for window in ["INTERVAL 2 DAY", "INTERVAL 30 DAY"] {
+        assert!(
+            sql.contains(window),
+            "{window} is not a whole number of days"
+        );
+    }
+}
+
+/// The columns that can be unknown are nullable, on the market data tables too.
+#[test]
+fn the_market_data_columns_that_can_be_unknown_are_nullable() {
+    let sql = market_data_sql();
+    for column in [
+        // The sentinel translation's destination. A count the venue does not
+        // expose is absent, not sixty-five thousand.
+        "order_count        Nullable(UInt16)",
+        "level_index        Nullable(UInt16)",
+        // A message that carries no venue time.
+        "upstream_ts        Nullable(DateTime64(9))",
+        // The reset's recovery anchor, and the snapshot's.
+        "anchor_seq         Nullable(UInt64)",
+        // Absent rather than zero: a zero reads as a feed publishing nothing.
+        "declared_count Nullable(UInt32)",
+        // Certain rows have no sequence number to point at.
+        "uncertain_since   Nullable(UInt64)",
+    ] {
+        assert!(sql.contains(column), "not nullable: {column}");
     }
 }
 
@@ -158,15 +383,25 @@ fn the_sort_keys_are_the_ones_the_rows_were_shaped_for() {
 /// somebody can take.
 #[test]
 fn every_table_is_partitioned_by_a_day() {
-    let sql = rows_sql();
     let expected = [
-        (Grain::Datagram, "toYYYYMMDD(recv_ts)"),
-        (Grain::Era, "toYYYYMMDD(anchor_ts)"),
-        (Grain::SegmentCoverage, "toYYYYMMDD(start_ts)"),
-        (Grain::SequenceGap, "toYYYYMMDD(before_ts)"),
-        (Grain::ConformanceFinding, "toYYYYMMDD(window_start)"),
+        (rows_sql(), Grain::Datagram, "toYYYYMMDD(recv_ts)"),
+        (rows_sql(), Grain::Era, "toYYYYMMDD(anchor_ts)"),
+        (rows_sql(), Grain::SegmentCoverage, "toYYYYMMDD(start_ts)"),
+        (rows_sql(), Grain::SequenceGap, "toYYYYMMDD(before_ts)"),
+        (
+            rows_sql(),
+            Grain::ConformanceFinding,
+            "toYYYYMMDD(window_start)",
+        ),
+        (market_data_sql(), Grain::Event, "toYYYYMMDD(recv_ts)"),
+        (
+            market_data_sql(),
+            Grain::Instrument,
+            "toYYYYMMDD(first_seen_ts)",
+        ),
+        (market_data_sql(), Grain::BookTop, "toYYYYMMDD(recv_ts)"),
     ];
-    for (grain, partition) in expected {
+    for (sql, grain, partition) in expected {
         assert!(
             sql.contains(&format!("PARTITION BY {partition}")),
             "{grain} is not partitioned by {partition}"
@@ -175,9 +410,14 @@ fn every_table_is_partitioned_by_a_day() {
     // One `PARTITION BY` per table, so a table added later without one fails
     // here rather than being noticed on a graph months afterwards.
     assert_eq!(
-        sql.matches("PARTITION BY ").count(),
-        Grain::COUNT,
-        "a table has no PARTITION BY, or one has two"
+        rows_sql().matches("PARTITION BY ").count(),
+        TRANSPORT_GRAINS.len(),
+        "a table in 001 has no PARTITION BY, or one has two"
+    );
+    assert_eq!(
+        market_data_sql().matches("PARTITION BY ").count(),
+        MARKET_DATA_GRAINS.len(),
+        "a table in 005 has no PARTITION BY, or one has two"
     );
 }
 
@@ -392,6 +632,160 @@ fn resolving_a_datagram_to_its_era_needs_no_window_and_no_final() {
     );
 }
 
+/// The pairing numbers the occurrences, and never joins on the key alone.
+///
+/// `state_key` is not unique and must not be — a book returning to a previous
+/// state produces the same key again — so a join on the key is a cross product
+/// on any instrument that oscillates, and `ASOF` is the obvious repair and the
+/// wrong one: it selects the nearest right-hand row independently for each
+/// left-hand row, with no notion of consuming a match, so several occurrences at
+/// one observation point all pair with the same occurrence at the other. The
+/// lead times that come out are plausible, biased, and counted from one arrival
+/// several times, which is why the reasoning is required to be in the file and
+/// not only in a review.
+#[test]
+fn the_race_numbers_the_occurrences_rather_than_pairing_by_proximity() {
+    let sql = pairing_sql();
+    assert!(
+        sql.contains("row_number() OVER ("),
+        "the ordinal is a window function over the rows and nothing else"
+    );
+    assert!(
+        sql.contains("PARTITION BY b.observation, b.channel_id, b.instrument_id,")
+            && sql.contains("e.anchor_ts, b.state_key"),
+        "the ordinal is per observation point, per instrument, per era, per state"
+    );
+    assert!(
+        sql.contains("ORDER BY b.recv_ts"),
+        "and it is ordered by the arrival, which is what a race compares"
+    );
+
+    let race = view_body(sql, "book_top_race");
+    assert!(
+        !race.contains("ASOF") && !race.contains("JOIN"),
+        "the pairing is an aggregate over the ordinal, not a join: {race}"
+    );
+    assert!(
+        sql.contains("no notion of consuming a match"),
+        "why `ASOF` is wrong here belongs beside the thing that does not use it"
+    );
+}
+
+/// A snapshot-derived row is excluded *before* the numbering.
+///
+/// A snapshot anchors a book and never times one: the runtime pulls it on its
+/// own cadence and the archive records when it was published rather than when it
+/// was asked for, so its arrival stamp measures the publisher's scheduler. The
+/// filter is in the same statement as the window, where `WHERE` runs first and
+/// an anchor row consumes no ordinal. Filtered afterwards it would leave every
+/// later occurrence at that observation point numbered one too high — which does
+/// not read as a mistake downstream, it reads as a lead time.
+#[test]
+fn an_anchor_row_takes_no_ordinal_because_it_is_filtered_before_the_window() {
+    let occurrence = view_body(pairing_sql(), "book_top_occurrence");
+    assert!(
+        occurrence.contains("row_number() OVER (")
+            && occurrence.contains("WHERE b.from_anchor = 0"),
+        "the exclusion and the numbering are one statement: {occurrence}"
+    );
+    assert!(
+        !view_body(pairing_sql(), "book_top_race").contains("from_anchor"),
+        "so nothing below has to remember to repeat it"
+    );
+    assert!(
+        pairing_sql().contains("measures the publisher's scheduler"),
+        "why a snapshot is not an observation has to be stated where it is excluded"
+    );
+}
+
+/// The era is in the numbering and not in the pairing, and that asymmetry is the
+/// point.
+///
+/// An `Instrument ID` is unique within an era, so one point's own ordinals must
+/// not run across a boundary. But an era's stored identity is its anchor, and an
+/// anchor is a *receive* stamp — one observation point's observation of that
+/// era. Two recorders of one feed open their eras at two instants and two
+/// transports share no sequence space at all, so a pairing grouped on any era
+/// column pairs nothing across observation points and reports a total outage as
+/// a clean feed.
+#[test]
+fn the_pairing_groups_on_the_state_and_the_ordinal_and_on_no_era() {
+    let sql = pairing_sql();
+    assert!(
+        sql.contains("GROUP BY channel_id, instrument_id, state_key, occurrence"),
+        "the pairing key is the state and its ordinal"
+    );
+    let race = view_body(sql, "book_top_race");
+    assert!(
+        !race.contains("GROUP BY channel_id, instrument_id, state_key, occurrence, era")
+            && !race.contains("era_anchor_ts,\n"),
+        "an era column in the grouping would pair nothing at all: {race}"
+    );
+    assert!(
+        sql.contains("uniqExact(observation)"),
+        "and distinct observation points are counted, not rows, because an \
+         ordinal restarts at each era"
+    );
+}
+
+/// An occurrence with no counterpart is a row, and its lead time is null.
+///
+/// The fact worth seeing: it usually means one observation point missed a state
+/// the other saw. A join would have dropped it, and a zero lead would have
+/// entered every average over the column as evidence that the two paths tied.
+#[test]
+fn an_unpaired_occurrence_is_visible_and_carries_no_lead_time() {
+    let race = view_body(pairing_sql(), "book_top_race");
+    assert!(
+        race.contains("if(uniqExact(observation) > 1,"),
+        "the lead exists only where there were two points to measure between"
+    );
+    assert!(
+        race.contains("NULL)") && race.contains("AS lead_ms"),
+        "and is null rather than zero otherwise: {race}"
+    );
+    assert!(
+        race.contains("groupUniqArray(observation)"),
+        "the row names the points that saw the state, so an unpaired one is \
+         readable rather than merely present"
+    );
+    assert!(
+        pairing_sql().contains("bound is a property of the two paths"),
+        "the |Δt| bound is the caller's, and why has to be written down"
+    );
+}
+
+/// The replacing collapse is applied once, below everything that numbers.
+///
+/// A re-run after a fix is a replace, so between the second load and the merge
+/// one arrival is in the table twice. Numbered without the collapse the
+/// duplicate becomes a second occurrence, and it does not merely inflate a
+/// count: the surplus occurrences pair with each other and the last one at each
+/// point pairs with nothing, so a re-load reports states both points saw as
+/// states one of them missed.
+#[test]
+fn the_collapse_is_applied_once_beneath_the_numbering() {
+    let sql = pairing_sql();
+    assert_eq!(
+        sql.matches("recorder.book_top FINAL").count(),
+        1,
+        "the collapse is written once"
+    );
+    assert!(
+        view_body(sql, "book_top_occurrence").contains("FROM recorder.book_top_settled AS b"),
+        "and the numbering reads the collapsed view rather than the table"
+    );
+    assert!(
+        !view_body(sql, "book_top_race").contains("FINAL"),
+        "nothing above it pays for the collapse a second time"
+    );
+    assert!(
+        sql.contains("manufacture evidence of loss"),
+        "what a duplicate would do here is worse than a double count, and the \
+         file has to say so"
+    );
+}
+
 /// Every file splits into statements a server takes one at a time, and no
 /// statement is a fragment of prose.
 #[test]
@@ -422,10 +816,24 @@ fn every_migration_splits_into_whole_statements() {
         }
     }
 
+    // The three views of the pairing, and nothing split across two of them.
+    let pairing = migration("006_recorder_book_top_pairing.sql").statements();
+    assert_eq!(pairing.len(), 3, "three views");
+    for view in ["book_top_settled", "book_top_occurrence", "book_top_race"] {
+        assert_eq!(
+            pairing
+                .iter()
+                .filter(|s| s.contains(&format!("CREATE OR REPLACE VIEW recorder.{view} AS")))
+                .count(),
+            1,
+            "{view}"
+        );
+    }
+
     // The five tables and the database, and nothing split across two of them.
     let statements = migration("001_recorder_rows.sql").statements();
     assert_eq!(statements.len(), 6, "one database and five tables");
-    for grain in Grain::ALL {
+    for grain in TRANSPORT_GRAINS {
         assert_eq!(
             statements
                 .iter()
@@ -484,11 +892,126 @@ mod fixtures {
     use std::net::Ipv4Addr;
 
     use dz_recorder_rows::{
-        ConformanceFinding, Datagram, DropScope, Era, FindingVerdict, Nanos, PortRoleLabel,
-        RecvTsKindLabel, SegmentCoverage, SequenceGap, Verdict,
+        BookTop, ConformanceFinding, Datagram, DropScope, Era, Event, FindingVerdict, Instrument,
+        MessageTypeLabel, Nanos, PortRoleLabel, RecvTsKindLabel, SegmentCoverage, SequenceGap,
+        UncertainReason, Verdict,
     };
 
     const ADDR: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 10);
+
+    pub fn event() -> Event {
+        Event {
+            recv_ts: Nanos(0),
+            send_ts: Nanos(0),
+            upstream_ts: None,
+            recv_ts_kind: RecvTsKindLabel::KernelSoftware,
+            site: String::new(),
+            recorder: String::new(),
+            env: String::new(),
+            feed: String::new(),
+            port_role: PortRoleLabel::Mktdata,
+            source_addr: ADDR,
+            channel_id: 0,
+            dst_port: 0,
+            sequence_number: 0,
+            reset_count: 0,
+            segment_seq: 0,
+            message_index: 0,
+            source_id: 0,
+            instrument_id: 0,
+            symbol: String::new(),
+            price_exp: 0,
+            qty_exp: 0,
+            per_instrument_seq: None,
+            message_type: MessageTypeLabel::Quote,
+            side_raw: None,
+            action_raw: None,
+            reason_raw: None,
+            flags_raw: None,
+            price_raw: None,
+            qty_raw: None,
+            order_count: None,
+            level_index: None,
+            bid_px_raw: None,
+            bid_qty_raw: None,
+            bid_source_count: None,
+            ask_px_raw: None,
+            ask_qty_raw: None,
+            ask_source_count: None,
+            trade_id: None,
+            cumulative_volume: None,
+            snapshot_id: None,
+            anchor_seq: None,
+            total_levels: None,
+            levels_seen: None,
+            depth_bound: None,
+            object_key: String::new(),
+            object_sha256: String::new(),
+            datagram_index: 0,
+        }
+    }
+
+    pub fn instrument() -> Instrument {
+        Instrument {
+            site: String::new(),
+            recorder: String::new(),
+            env: String::new(),
+            feed: String::new(),
+            port_role: PortRoleLabel::Refdata,
+            source_addr: ADDR,
+            channel_id: 0,
+            dst_port: 0,
+            source_id: 0,
+            instrument_id: 0,
+            from_sequence: 0,
+            reset_count: 0,
+            symbol: String::new(),
+            price_exp: 0,
+            qty_exp: 0,
+            contract_value: 0,
+            first_seen_ts: Nanos(0),
+            last_seen_ts: Nanos(0),
+            manifest_seq: None,
+            declared_count: None,
+            object_key: String::new(),
+        }
+    }
+
+    pub fn book_top() -> BookTop {
+        BookTop {
+            recv_ts: Nanos(0),
+            send_ts: Nanos(0),
+            site: String::new(),
+            recorder: String::new(),
+            env: String::new(),
+            feed: String::new(),
+            observation: String::new(),
+            source_addr: ADDR,
+            channel_id: 0,
+            dst_port: 0,
+            source_id: 0,
+            instrument_id: 0,
+            symbol: String::new(),
+            sequence_number: 0,
+            message_index: 0,
+            reset_count: 0,
+            segment_seq: 0,
+            bid_px_raw: None,
+            bid_qty_raw: None,
+            bid_source_count: None,
+            ask_px_raw: None,
+            ask_qty_raw: None,
+            ask_source_count: None,
+            price_exp: 0,
+            qty_exp: 0,
+            state_key: 0,
+            from_anchor: 0,
+            book_certain: 1,
+            uncertain_since: None,
+            uncertain_reason: UncertainReason::None,
+            object_key: String::new(),
+        }
+    }
 
     pub fn datagram() -> Datagram {
         Datagram {

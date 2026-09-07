@@ -5,7 +5,7 @@ mod common;
 
 use std::collections::BTreeSet;
 
-use common::{batch, config, no_wait, Answer, FakeTransport, NOW, SECOND_NS};
+use common::{batch, config, no_wait, race_fixture, Answer, FakeTransport, NOW, SECOND_NS};
 use dz_recorder_clickhouse::{send_order, ClickHouseSink, Credentials};
 use dz_recorder_replay::Fault;
 use dz_recorder_rows::{Grain, RowSink, RowSinkError};
@@ -360,6 +360,48 @@ fn a_failure_on_a_later_grain_fails_the_whole_object() {
     );
 }
 
+/// A grain the send order names is a grain the sink actually posts.
+///
+/// The market data lanes were named in [`send_order`] and carried nowhere: the
+/// rows were counted as accepted, the object was credited as loaded, and the
+/// rows were dropped on the floor. That is the one outcome this crate is built
+/// to make impossible — a failure has to cost the object, and a success has to
+/// mean the rows are in the table — and it produced neither an error nor a
+/// counter, because from the sink's own point of view nothing had gone wrong.
+///
+/// So the assertion is not that the order is right but that every lane exists:
+/// a batch carrying rows for a grain produces a request for that grain's table,
+/// with the rows it carried in it.
+#[test]
+fn a_batch_carrying_market_data_posts_it_rather_than_counting_it() {
+    let rows = race_fixture(NOW);
+    let tops = rows.rows(Grain::BookTop);
+    let eras = rows.rows(Grain::Era);
+    assert!(tops > 0 && eras > 0, "the fixture states both");
+
+    let mut sink = sink(FakeTransport::new());
+    sink.write_batch(rows, NOW).expect("the batch lands");
+
+    let sent = sink_sent(&sink);
+    let book_top = sent
+        .iter()
+        .find(|s| s.table() == "recorder.book_top")
+        .expect("the book_top rows were accepted, so they were sent");
+    assert_eq!(
+        book_top.rows().len(),
+        tops,
+        "every accepted row is in the request, or the object is credited for \
+         rows nobody stored"
+    );
+    // The transport grain beside it, so this is about the lane and not about a
+    // sink that posts nothing at all.
+    let era = sent
+        .iter()
+        .find(|s| s.table() == "recorder.era")
+        .expect("an era request");
+    assert_eq!(era.rows().len(), eras);
+}
+
 /// The base rows go first, so the alarming intermediate state cannot happen.
 ///
 /// An object whose gap rows are present and whose datagram rows are not reads as
@@ -373,7 +415,10 @@ fn the_base_grain_is_sent_before_the_grains_derived_from_it() {
             Grain::Era,
             Grain::SegmentCoverage,
             Grain::SequenceGap,
-            Grain::ConformanceFinding
+            Grain::ConformanceFinding,
+            Grain::Instrument,
+            Grain::Event,
+            Grain::BookTop
         ]
     );
 

@@ -12,6 +12,81 @@ recorder hosts can be built on it without any of them re-deciding what to keep.
 Design: [`2026-08-28-edge-recorder-crates-design.md`](../../docs/superpowers/specs/2026-08-28-edge-recorder-crates-design.md).
 Plan: [`2026-08-30-edge-recorder-record-path.md`](../../docs/superpowers/plans/2026-08-30-edge-recorder-record-path.md).
 
+## What runs, on one host
+
+Two processes, and the directory between them is the whole interface. Nothing
+else connects them: no socket, no queue, no shared memory.
+
+```
+  the wire                    RECORD PATH  (dz-recorder)                        the disk
+┌────────────┐   UDP    ┌───────────────┐         ┌───────────────┐      ┌────────────────────┐
+│ publishers │─────────▶│ -capture      │────────▶│ -archive      │─────▶│ staging/  →        │
+│ (2 paths,  │ multicast│ joins, stamps,│ datagram│ rotates, zstd,│ .zst │ completed/         │
+│  n feeds)  │          │ counts drops  │         │ hashes, mani- │ +json│  <feed>/<seg>.zst  │
+└────────────┘          │               │         │ fests, evicts │      │  <feed>/<seg>.json │
+                        └───────────────┘         └───────────────┘      └─────────┬──────────┘
+                         decodes NOTHING                                           │ read-only
+                         ─────────────────                                         │
+                         A datagram a decoder                                      ▼
+                         would reject is a          ANALYSIS PATH  (dz-recorder-load)
+                         datagram the archive     ┌──────────────────────────────────────────┐
+                         never holds — and the    │ -replay   reads objects back as a Source │
+                         evidence needed to       │ -loss     which sequence values are gone │
+                         diagnose that bug is     │ -relower  bytes → messages + state msgs  │
+                         what the bug destroyed.  │ -events   era-scoped reference data      │
+                                                  │ -rows     the row model, sink-agnostic   │
+                                                  └────────────────────┬─────────────────────┘
+                                                                       │ JSONEachRow
+                                                                       ▼
+                                                            ┌────────────────────┐
+                                                            │ -clickhouse (sink) │
+                                                            └────────────────────┘
+```
+
+**The separation is the design, not an implementation detail.** The record path
+must never block, so it never decodes, never joins and never waits on a server.
+The analysis path can be turned off, run late, or run twice over the same object,
+because it only reads objects that are already written and its writes are
+idempotent on `(object key, sha256)`.
+
+## What is analysed, and where the sites meet
+
+Each host loads its own objects. Nothing ships an object anywhere — the rows are
+tens of bytes against a datagram's twelve hundred, so the small thing travels and
+the bytes stay local. That is also what makes a cross-site question answerable
+**before** a shipper exists: the join is over rows.
+
+```
+   site A                        site B                        site C
+┌────────────┐               ┌────────────┐               ┌────────────┐
+│ recorder   │               │ recorder   │               │ recorder   │
+│  objects ──┼──┐            │  objects ──┼──┐            │  objects ──┼──┐
+│  (local,   │  │ loader     │  (local,   │  │ loader     │  (local,   │  │ loader
+│   evicted) │  │            │   evicted) │  │            │   evicted) │  │
+└────────────┘  │            └────────────┘  │            └────────────┘  │
+                └──────────────────┬─────────┴───────────────────┬────────┘
+                                   ▼                             ▼
+                        ┌──────────────────────────────────────────────┐
+                        │                 column store                 │
+                        ├──────────────────────────────────────────────┤
+                        │ TRANSPORT   datagram · era · segment_coverage│
+                        │            sequence_gap · conformance_finding│
+                        │ MARKET DATA event · instrument · book_top    │
+                        └──────────────────────────────────────────────┘
+                                   │
+                                   ├─ was a datagram lost, and whose was it?
+                                   │    absent at ONE site  → that site's path
+                                   │    absent at EVERY site → before they diverge
+                                   ├─ what was the book, and can it be believed?
+                                   │    book_certain = 0 says the honest answer
+                                   └─ who saw this state first?
+                                        one state_key at two `observation` values
+```
+
+**A gap at one site is a path; a gap at every site is upstream of all of them.**
+One vantage point cannot tell those apart, which is why a `sequence_gap` row lands
+`unverifiable` until the join has run — and why the second recorder exists at all.
+
 ## The crates
 
 | Crate | What it is for |
@@ -21,9 +96,13 @@ Plan: [`2026-08-30-edge-recorder-record-path.md`](../../docs/superpowers/plans/2
 | `dz-recorder-archive` | The pcapng writer: rotation, compression, hashing, the manifest, and the staging watermark |
 | `dz-recorder-replay` | An archive read back as a `Source`, plus the synthetic publisher the tests are built on |
 | `dz-recorder-loss` | Which sequence values nobody delivered, per channel instance and per era, and whose they are |
+| `dz-recorder-relower` | An archive read back as decoded messages, and re-run against a venue's own mapping: *did the publisher publish what the venue said?* |
+| `dz-recorder-health` | Whether a recorder is recording, as the process itself can tell |
 | `dz-recorder-rows` | The rows an archive derives into, and the derivation: pure, sink-agnostic, and exercised with no server |
+| `dz-recorder-events` | Market data rows: reference data scoped to an era, the fold that joins the messages to it, and the book that says when its top cannot be believed |
 | `dz-recorder-clickhouse` | The column store as one `RowSink`, plus the checked-in DDL |
 | `dz-recorder-load` | The loader binary ([README](dz-recorder-load/README.md)) |
+| `dz-recorder-e2e` | The tests that use the real encoder, the real writer and the real reader end to end |
 
 Take what you need. A publisher wanting a byte-exact record of its own egress
 takes `-archive` alone; a test harness takes `-replay` alone; a host that only
@@ -168,10 +247,20 @@ sudo ./target/debug/deps/afpacket_mode-<hash> live:: --test-threads=1
 
 ## The rows, and where the loader runs
 
-The analysis tier turns an archive into rows a dashboard can ask —
-`datagram`, `era`, `segment_coverage`, `sequence_gap` and
-`conformance_finding` — without the record path learning what a column store
-is. The derivation reads a `Source`, so it is exercised in CI against the
+The analysis tier turns an archive into rows a dashboard can ask, without the
+record path learning what a column store is. Two families, in one database and
+joined on one identity block:
+
+| | Tables | Grain | Migration |
+|---|---|---|---|
+| **Transport** | `datagram`, `era`, `segment_coverage`, `sequence_gap`, `conformance_finding` | the channel instance — what arrived, and what did not | `001` |
+| **Market data** | `event`, `instrument`, `book_top` | the instrument — what the messages said | `005` |
+
+The split is a key, not a category. A sequence number is meaningful only under
+`(source address, Channel ID, destination port)` and a price is meaningful only
+under an instrument within an era, and one sort key cannot be both — which is
+why these are tables beside each other rather than columns added to the first
+five. The derivation reads a `Source`, so it is exercised in CI against the
 synthetic publisher with no socket, no privileges and no server, and the column
 store is one implementation of a `RowSink` behind a trait.
 
@@ -197,12 +286,97 @@ cargo test -p dz-recorder-clickhouse      # batching, retry and the DDL, no serv
 cargo test -p dz-recorder-e2e --test archive_to_rows
 ```
 
+## Decoding an archive, which is not the record path decoding one
+
+`dz-recorder-relower` is where an archive becomes messages again. Nothing in the
+record path decodes, and that stays true: this reads objects that are already
+written, in a process that can be turned off, run late, or run twice.
+
+`WireCapture` has two outputs and the distinction between them is the crate's
+whole contract:
+
+- **`messages()`** is what a comparison compares — `Quote`, `Trade`,
+  `LevelUpdate`, `BookClear`. Four types, because those are the ones a venue
+  event produces and therefore the ones a re-lowering can produce a counterpart
+  for.
+- **`state_messages()`** is what a *book* needs — `InstrumentReset` and the
+  snapshot triple. Each is the publisher's own statement about its own book,
+  lowered from no upstream payload, so a re-lowering has nothing to compare them
+  against and excludes every one. A consumer building a book cannot do without
+  them: a complete cycle is the only anchor a delta book has, and a reset is the
+  only statement that what precedes it is not to be trusted.
+
+There is a third, `reference_messages()`, carrying `InstrumentDefinition` and
+`ManifestSummary` **with their positions**. `ArchivedRefdata` consumes the same
+two and keeps a set rather than a history, which is right for a comparison that
+holds two archives with no key ordering them; a consumer holding one archive can
+place a restatement exactly, and needs the position in order to.
+
+`Skipped` still counts the second and third groups, because that report is about
+what the comparison did not compare and that has not changed. Provenance carries the
+channel instance — source address, `Channel ID`, destination port — because a
+sequence number is meaningless without it and two redundant publishers serving
+one channel are told apart by nothing else.
+
+## Market data as rows
+
+The transport rows say how many datagrams were missing and whose they were.
+None of them can say what the top of book was for an instrument at an instant,
+because `datagram` records how large a message was and never what it said —
+a deliberate property of the record path that had been allowed to become a
+property of the rows. `dz-recorder-events` derives the answer from objects that
+are already written, so that a feed becomes rows by being recorded rather than by
+someone writing a capture for it. Designed in
+[`2026-09-05-recorder-market-data-rows-design.md`](../../docs/superpowers/specs/2026-09-05-recorder-market-data-rows-design.md)
+and planned in
+[`2026-09-06-recorder-market-data-rows.md`](../../docs/superpowers/plans/2026-09-06-recorder-market-data-rows.md).
+
+Three tables, declared by `005`. `instrument` is the archived reference data kept
+as a history rather than a set, so a restatement of an exponent has a position and
+the prices either side of it decode at different scales. `event` is one row per
+decoded message, joined to the definition in force when it arrived. `book_top` is
+one row per change in top of book — and per change in whether that top can be
+believed.
+
+**`book_certain` is the point of the book.** A live book that missed datagrams
+applies the deltas that arrived and keeps quoting a top that has diverged from the
+publisher's, and it cannot notice, because noticing needs the datagram it did not
+receive. A derived book can: the gap is observable in the archive, so certainty
+falls on a gap or an `InstrumentReset` and is restored only by each derivation's
+own rule — a `Quote` is self-anchoring, a delta book anchors only on a complete
+snapshot cycle. A certainty transition emits its own row, so a gap that moves no
+price is still visible as one.
+
+Two observation points recognise the same book state by `state_key`, a hash over
+a stated tuple that excludes every timestamp — a timestamp is what the race
+measures, so it cannot also be what identifies the state. `006` numbers the
+occurrences of a repeating state and pairs them ordinal to ordinal, because a
+state repeats and an `ASOF` join does not care: without the ordinal, several
+occurrences at one point all pair with one at the other and the lead times that
+come out are not measurements of anything. An occurrence with no counterpart stays
+visible rather than being dropped.
+
+**Derivation is per feed and off by the absence of a section**, not by a flag
+whose default could be flipped, and it has its own backlog and lag gauges: the
+datagram tier loads every object, so a shared series would page about book rows
+for objects that hold none. Before a feed is turned on, `dz-recorder-events`'
+sizing measurement states its messages-per-datagram multiplier over a window that
+held a burst and a snapshot cycle — and says so plainly when the window held
+neither, rather than reporting a true number about the wrong window.
+
+```bash
+cargo test -p dz-recorder-events          # the fold, the book, the key
+cargo test -p dz-recorder-e2e --test archive_to_market_data
+cargo run -p dz-recorder-events --example sizing -- \
+  --feed market-by-price <object>.pcapng.zst   # the multiplier, before turning one on
+```
+
 ## Not here yet
 
-The conformance runner over replay, and the decoded per-message rows.
-`conformance_finding` exists as the table a runner fills, and nothing writes a
-row into it — an empty table is the honest statement that nothing judged the
-object, where a `pass` row would be a pass over a rule that never ran.
+The conformance runner over replay. `conformance_finding` exists as the table a
+runner fills, and nothing writes a row into it — an empty table is the honest
+statement that nothing judged the object, where a `pass` row would be a pass over
+a rule that never ran.
 
 The cross-site pass that turns `unverifiable` into `publisher`. That verdict
 needs a datagram absent from *every* site with no recorder overflow anywhere,

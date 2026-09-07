@@ -18,7 +18,7 @@ use dz_recorder_clickhouse::{ClickHouseConfig, Credentials, Response, Transport,
 use dz_recorder_core::{CaptureDropScope, RecorderIdentity};
 use dz_recorder_replay::synthetic::{port_for, SyntheticPublisher, GROUP};
 use dz_recorder_replay::Fault;
-use dz_recorder_rows::{derive_object, RowBatch};
+use dz_recorder_rows::{derive_object, BookTop, Era, Nanos, RowBatch, UncertainReason};
 
 /// One request, as the sink issued it.
 #[derive(Debug, Clone)]
@@ -219,3 +219,131 @@ fn build(publisher: SyntheticPublisher, role: PortRole) -> RowBatch {
 
 /// A wait that does not wait, so the retry tests are instant.
 pub fn no_wait(_: Duration) {}
+
+/// The equivalence key the fixtures below pair on.
+///
+/// A literal, and deliberately so: what is under test here is the pairing, and
+/// the pairing knows nothing about how a key was computed — only that two rows
+/// carrying one value are two views of one book state. How the value is arrived
+/// at, and the three ways that can fail, are `dz-recorder-events`' own tests.
+pub const REPEATED: u64 = 7_777_777_777_777_777_777;
+pub const ANOTHER: u64 = 1_234_567_890;
+
+/// One top of book, as an observation point wrote it down.
+///
+/// The stamps are relative to *now* rather than to [`NOW`], which is the one
+/// place in this file the clock is not a constant. `005` gives `book_top` a
+/// thirty-day TTL and a row-level TTL is applied as the part is written, so a
+/// fixture stamped years in the past — as every other fixture here deliberately
+/// is — would be deleted in the same step that inserted it, with the insert
+/// answered `200` and every count below coming back zero. A race is about the
+/// difference between two arrivals, so the instant they are measured from is
+/// free.
+pub fn top(observation: &str, site: &str, base: u64, offset_ms: u64, state_key: u64) -> BookTop {
+    BookTop {
+        recv_ts: Nanos(base + offset_ms * 1_000_000),
+        send_ts: Nanos(base + offset_ms * 1_000_000 - 1_000_000),
+        site: site.to_owned(),
+        recorder: format!("recorder-{site}"),
+        env: "test".to_owned(),
+        feed: "feed".to_owned(),
+        observation: observation.to_owned(),
+        source_addr: std::net::Ipv4Addr::new(192, 0, 2, 10),
+        channel_id: 1,
+        dst_port: 40_000,
+        source_id: 1_000,
+        instrument_id: 11,
+        symbol: "AAA".to_owned(),
+        sequence_number: 1_000 + offset_ms,
+        message_index: 0,
+        reset_count: 0,
+        segment_seq: 3,
+        bid_px_raw: Some(9_950),
+        bid_qty_raw: Some(12),
+        bid_source_count: Some(2),
+        ask_px_raw: Some(10_050),
+        ask_qty_raw: Some(7),
+        ask_source_count: Some(3),
+        price_exp: -2,
+        qty_exp: 0,
+        state_key,
+        from_anchor: 0,
+        book_certain: 1,
+        uncertain_since: None,
+        uncertain_reason: UncertainReason::None,
+        object_key: "object".to_owned(),
+    }
+}
+
+/// The era each observation point opened, so the ordinal has one to number
+/// within.
+///
+/// The two points open theirs at two instants, which is not decoration: an era's
+/// stored identity is its anchor and an anchor is a *receive* stamp, so two
+/// recorders of one feed have two of them and two transports share none at all.
+/// A fixture that gave both points one anchor would let a pairing grouped on the
+/// era pass, and that pairing finds nothing in the field.
+pub fn opening(site: &str, base: u64) -> Era {
+    Era {
+        site: site.to_owned(),
+        recorder: format!("recorder-{site}"),
+        feed: "feed".to_owned(),
+        source_addr: std::net::Ipv4Addr::new(192, 0, 2, 10),
+        channel_id: 1,
+        dst_port: 40_000,
+        anchor_ts: Nanos(base),
+        anchor_seq: 1,
+        reset_count: 0,
+        segment_seq: 3,
+        anchor_certain: 1,
+        continuation: 0,
+        object_key: "object".to_owned(),
+        object_sha256: "sha".to_owned(),
+    }
+}
+
+/// A state seen three times at each of two observation points, a fourth time at
+/// only one of them, and a snapshot-derived row that is no observation at all.
+pub fn race_fixture(base: u64) -> RowBatch {
+    let mut book_top = Vec::new();
+    for offset in [10, 30, 50] {
+        book_top.push(top("a", "one", base, offset, REPEATED));
+        // Two milliseconds behind, every time. The lead is what a race
+        // measures, and a fixture where it is constant makes a wrong pairing
+        // arithmetically visible rather than merely different.
+        book_top.push(top("b", "two", base, offset + 2, REPEATED));
+    }
+    // The occurrence only one observation point saw.
+    book_top.push(top("a", "one", base, 70, REPEATED));
+    // A snapshot-derived top, earlier than anything else at `b`. If it took an
+    // ordinal it would take the *first* one, shifting every later occurrence at
+    // `b` by one — and the unpaired row above would then pair with it and
+    // disappear.
+    let mut anchored = top("b", "two", base, 5, REPEATED);
+    anchored.from_anchor = 1;
+    book_top.push(anchored);
+    // A different state, once at each point, so the fixture is not one key.
+    book_top.push(top("a", "one", base, 90, ANOTHER));
+    book_top.push(top("b", "two", base, 93, ANOTHER));
+
+    RowBatch {
+        object_key: "object".to_owned(),
+        object_sha256: "sha".to_owned(),
+        era: vec![
+            opening("one", base - 5_000_000),
+            opening("two", base - 3_000_000),
+        ],
+        book_top,
+        ..RowBatch::default()
+    }
+}
+
+pub fn now_ns() -> u64 {
+    u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("a clock after the epoch")
+            .as_nanos(),
+    )
+    .expect("nanoseconds since the epoch fit a u64")
+}

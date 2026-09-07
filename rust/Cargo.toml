@@ -21,6 +21,7 @@ members = [
     "recorder/dz-recorder-health",
     "recorder/dz-recorder-loss",
     "recorder/dz-recorder-relower",
+    "recorder/dz-recorder-events",
     "recorder/dz-recorder-rows",
     "recorder/dz-recorder-clickhouse",
     "recorder/dz-recorder-load",

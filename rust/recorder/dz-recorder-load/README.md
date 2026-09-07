@@ -128,6 +128,55 @@ time-ranged panel joins `recorder.datagram_in_era` or `recorder.sequence_gap`
 instead — both key on the era's anchor, and both prune. `003_recorder_era_rank.sql`
 states which is which and why.
 
+## Market data is derived per feed, and off
+
+The four transport tables are written for every object. `event`, `instrument`
+and `book_top` are written only for the feeds a `[[market_data]]` entry names,
+and there are no entries by default — so a host that upgrades this binary and
+changes no configuration writes exactly what it wrote before.
+
+```toml
+[[market_data]]
+feed = "market-by-price"   # the manifest's feed, matched exactly
+magic = 0x4442             # required, and no registry to look it up in
+persist_snapshot_levels = false
+```
+
+**Per feed rather than one switch, because the cost is per feed and it is not
+small.** An object's messages outnumber its datagrams by whatever the packing
+was, and a snapshot cycle is `total_levels` messages per instrument on the
+publisher's cadence rather than on the market's. A switch whose blast radius is
+every feed on the host is a switch nobody turns on.
+
+**`persist_snapshot_levels` decides rows and never state.** The book consumes
+every level either way — skipping one before the book has seen it leaves a cycle
+that never completes, so nothing ever anchors, which is the one thing consuming
+them is for. `SnapshotBegin` and `SnapshotEnd` are always written, so a cycle is
+always a row, and `total_levels` on the begin against `levels_seen` on the end
+answers *was the snapshot complete* with the levels absent.
+
+### And it has a lag of its own
+
+| | |
+|---|---|
+| `dz_loader_market_data_unloaded_objects` | how much of it is waiting |
+| `dz_loader_market_data_oldest_unloaded_age_seconds` | how close the oldest of it is to being evicted |
+
+Not `dz_loader_oldest_unloaded_age_seconds`, and the difference is not
+cosmetic: that gauge counts **every** object, including the objects of feeds
+that derive nothing. Alerting on it for market data pages about objects that
+hold no book rows — and, in the direction that costs history, lets a feed that
+*is* deriving hide inside a backlog of feeds that are not. On a host where
+nothing derives, these two read 0 whatever the load's read, which is the honest
+statement that no market data is at risk here.
+
+`dz_loader_market_data_refused_total{reason}` is the other one worth a panel.
+Every refusal is a row that is not in a table, and a derivation that resolves
+nothing writes an empty `event` table — indistinguishable from a feed nobody
+published on. `unresolved_instrument` climbing from zero is reference data that
+never arrived, which is the shape a wrong `Magic` and an unjoined `refdata` port
+both take.
+
 ## Idempotence is a property, not a procedure
 
 Loading the same object twice produces the same rows, because the derivation is
