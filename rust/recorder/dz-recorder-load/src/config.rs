@@ -58,6 +58,12 @@ pub enum ConfigError {
          parser saw last, and the switch an operator believes is off may be the other one"
     )]
     DuplicateDerivedFeed(String),
+    #[error(
+        "[[market_data]] feed `{0}` is padded with whitespace: the name is matched against the \
+         manifest's exactly, so a padded one matches no feed and derives nothing, and the \
+         failure looks like a switch that is off rather than a name that is wrong"
+    )]
+    PaddedDerivedFeed(String),
 }
 
 /// One loader host's whole configuration.
@@ -232,6 +238,13 @@ impl LoaderConfig {
         for (index, derived) in self.market_data.iter().enumerate() {
             if derived.feed.trim().is_empty() {
                 return Err(ConfigError::NoDerivedFeed);
+            }
+            // Refused rather than trimmed. Trimming would make the configuration
+            // and the thing it configures disagree about what the operator
+            // wrote, and it would make `"a"` and `"a "` one entry for the
+            // duplicate check while `--check` still echoed two.
+            if derived.feed.trim() != derived.feed {
+                return Err(ConfigError::PaddedDerivedFeed(derived.feed.clone()));
             }
             if derived.magic == 0 {
                 return Err(ConfigError::NoMagic(derived.feed.clone()));
@@ -503,6 +516,21 @@ persist_snapshot_levels = true
             config.check(),
             Err(ConfigError::DuplicateDerivedFeed(_))
         ));
+    }
+
+    /// A padded name matches no feed, and the failure it produces is the one
+    /// this whole section is arranged to prevent: an empty table that reads as a
+    /// feed nobody published on.
+    #[test]
+    fn a_feed_name_may_not_be_padded_with_whitespace() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let text = VALID.replace("OBJECTS", &dir.path().display().to_string())
+            + "\n[[market_data]]\nfeed = \"market-by-price \"\nmagic = 0x4442\n";
+        let config = LoaderConfig::parse(&text).expect("the fixture parses");
+        assert!(
+            matches!(config.check(), Err(ConfigError::PaddedDerivedFeed(ref feed)) if feed == "market-by-price "),
+            "a padded feed name is accepted and derives nothing"
+        );
     }
 
     /// The same refusal the rest of the file makes, in the section that is
