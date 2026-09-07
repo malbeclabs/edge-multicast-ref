@@ -485,6 +485,44 @@ fn an_exit_within_the_contract_with_no_report_is_an_error() {
 }
 
 #[test]
+fn a_report_for_another_feed_is_refused_and_names_both() {
+    // The report states the feed it is about, and it is checked rather than
+    // trusted. A report for another feed parses exactly as well as the right
+    // one, so nothing below this seam could tell: the rows would be filed under
+    // the feed the manifest states while describing traffic from somewhere
+    // else. That is the version disagreement in a second column, and it gets
+    // the same answer — refuse, name both, write nothing.
+    let fake = FakeTool::new(&FakeSpec {
+        exit: 0,
+        report: Report::Clean,
+        ..FakeSpec::default()
+    });
+    let pcap = fake.pcap();
+
+    // The fixture reports on `mbp`; this invocation asks about `mbo`.
+    let err = fake
+        .tool
+        .judge(&Invocation {
+            pcap: &pcap,
+            group: GROUP,
+            feed: "mbo",
+            ports: ports(),
+        })
+        .expect_err("a report about another feed is not this feed's report");
+
+    let message = err.to_string();
+    assert!(matches!(err, ToolError::FeedDisagrees { .. }), "{message}");
+    assert!(
+        message.contains("mbo"),
+        "the one the invocation asked for: {message}"
+    );
+    assert!(
+        message.contains("mbp"),
+        "and the one the report answered about: {message}"
+    );
+}
+
+#[test]
 fn an_exit_outside_the_contract_is_refused_rather_than_rounded() {
     // A code this runner does not understand is not one it may read as the
     // nearest one it does. The tool's contract may grow a fourth code, and the

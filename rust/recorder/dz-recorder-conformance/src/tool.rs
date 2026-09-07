@@ -36,6 +36,16 @@
 //! asks the tool which rule set it is before anything is judged, and a tool that
 //! cannot say — or that says something other than the configured value — is a
 //! refusal that names both.
+//!
+//! # A report is held against the invocation that asked for it
+//!
+//! The report states the feed it is about, and [`RuleSet::judge`] checks it
+//! against the feed it asked for rather than believing it. This is the version
+//! disagreement again in a second column: a report about another feed parses as
+//! well as the right one, so the mismatch would survive every check below this
+//! seam and arrive as rows filed under a feed whose traffic they do not
+//! describe. Both refusals name both values, because *which of the two is
+//! wrong* is a question only an operator can answer.
 
 use std::io;
 use std::net::Ipv4Addr;
@@ -160,6 +170,19 @@ pub enum ToolError {
     VersionDisagrees {
         tool: String,
         configured: String,
+        reported: String,
+    },
+    /// The report names a feed other than the one the tool was invoked for.
+    /// The same shape as [`ToolError::VersionDisagrees`] and for the same
+    /// reason: a finding filed under the wrong name is a finding about
+    /// something nobody asked about.
+    #[error(
+        "{tool} was run for feed {asked} and its report is for feed {reported}; a finding \
+         attributed to either would be a finding about a feed nobody asked about"
+    )]
+    FeedDisagrees {
+        tool: String,
+        asked: String,
         reported: String,
     },
 }
@@ -310,11 +333,26 @@ impl RuleSet for ConformanceTool {
             code,
             path: report_path.clone(),
         })?;
-        RuleSetReport::from_json(&bytes).map_err(|source| ToolError::Unreportable {
-            tool: self.describe(),
-            code,
-            source,
-        })
+        let report =
+            RuleSetReport::from_json(&bytes).map_err(|source| ToolError::Unreportable {
+                tool: self.describe(),
+                code,
+                source,
+            })?;
+
+        // The report names the feed it is about, and it is checked rather than
+        // trusted. A report that answers about another feed parses exactly as
+        // well as the right one, so nothing downstream could tell: every row
+        // derived from it would be filed under the feed the manifest states
+        // while describing traffic from somewhere else.
+        if report.feed != invocation.feed {
+            return Err(ToolError::FeedDisagrees {
+                tool: self.describe(),
+                asked: invocation.feed.to_owned(),
+                reported: report.feed,
+            });
+        }
+        Ok(report)
     }
 
     fn rule_set_version(&self) -> Result<String, ToolError> {
