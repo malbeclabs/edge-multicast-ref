@@ -6,7 +6,7 @@ import (
 )
 
 // Record is the JSON-serialised envelope emitted by the parser for every
-// wire message. Bot consumes these one per line on the parser socket.
+// wire message. The book-builder consumes these one per line on the parser socket.
 type Record struct {
 	Type           string         `json:"type"`
 	Timestamp      time.Time      `json:"ts"`

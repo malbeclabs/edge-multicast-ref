@@ -71,7 +71,7 @@ func TestBot_ReadsRecordsFromSocket(t *testing.T) {
 			}
 			conn.Write([]byte(encodeRecord(rec)))
 		}
-		// Wait briefly for the bot to consume them, then close.
+		// Wait briefly for the book-builder to consume them, then close.
 		time.Sleep(200 * time.Millisecond)
 	}()
 

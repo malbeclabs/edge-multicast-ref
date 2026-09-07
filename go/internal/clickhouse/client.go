@@ -114,7 +114,7 @@ func (c *Client) Run(ctx context.Context) {
 // table is unknown or its buffer is full.
 //
 // It never blocks. Blocking here would back-pressure through the caller into the
-// socket read loop, so a slow or dead ClickHouse would stop the bot reading its
+// socket read loop, so a slow or dead ClickHouse would stop the book-builder reading its
 // feed — persistence must never do that.
 func (c *Client) Enqueue(table string, row map[string]any) bool {
 	if c == nil {

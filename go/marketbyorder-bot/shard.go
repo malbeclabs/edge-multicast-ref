@@ -43,7 +43,7 @@ type ManifestState struct {
 	InstrumentCount uint32
 }
 
-// ChannelEvent is the small subset of bot-side state changes a shard reports
+// ChannelEvent is the small subset of book-builder-side state changes a shard reports
 // outward (used by writers to enqueue persistence and by metrics to track resets).
 type ChannelEvent struct {
 	Kind         string // "applied_delta" | "applied_snapshot" | "instrument_reset" | "channel_reset" | "per_instrument_gap"

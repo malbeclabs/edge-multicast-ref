@@ -240,7 +240,7 @@ func TestClient_FlushesOnShutdown(t *testing.T) {
 }
 
 // An empty URL disables persistence: New returns a nil Client whose methods are
-// safe no-ops, so the bot runs exactly as it does without ClickHouse.
+// safe no-ops, so the book-builder runs exactly as it does without ClickHouse.
 func TestClient_EmptyURLDisables(t *testing.T) {
 	c, err := New("", "testdb", nil, nil)
 	if err != nil {

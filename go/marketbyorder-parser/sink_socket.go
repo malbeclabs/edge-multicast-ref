@@ -27,7 +27,7 @@ type SocketSink struct {
 }
 
 // outQueueLen bounds per-client buffered batches. Sized to absorb
-// burst variance when the bot's single-goroutine dispatch falls behind;
+// burst variance when the book-builder's single-goroutine dispatch falls behind;
 // dropping here is preferred over dropping at the kernel UDP socket.
 const outQueueLen = 16384
 

@@ -50,7 +50,7 @@ func TestEventsWriter_InstrumentDefinitionCarriesSourceID(t *testing.T) {
 			InstrumentID: 4242,
 			Fields: map[string]any{
 				"symbol": "BTC-USDT",
-				// float64, not uint16: records reach the bot as decoded JSON.
+				// float64, not uint16: records reach the book-builder as decoded JSON.
 				"source_id": float64(77),
 			},
 		},

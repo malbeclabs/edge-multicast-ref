@@ -26,8 +26,9 @@ type DisconnectAware interface {
 	OnDisconnect()
 }
 
-// Bot reads JSONL Records from a parser Unix socket and dispatches them.
-// Reconnects with exponential backoff on disconnect.
+// Bot is the market-by-price book-builder: it reads JSONL Records from a
+// parser Unix socket and dispatches them. Reconnects with exponential backoff
+// on disconnect.
 type Bot struct {
 	socketPath string
 	dispatcher Dispatcher

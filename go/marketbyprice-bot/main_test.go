@@ -15,7 +15,7 @@ import (
 
 // A typed nil pointer stored in an interface is NOT == nil. Handing the client
 // value straight to the writers therefore made every `ch == nil` check dead —
-// including under the default --clickhouse-url="", where the bot built and
+// including under the default --clickhouse-url="", where the book-builder built and
 // discarded a row map per record and per level, and counted snapshot writes that
 // never happened.
 func TestEnqueuerFor_NilClientYieldsNilInterface(t *testing.T) {

@@ -170,7 +170,7 @@ func fieldKeys(rec Record) []string {
 // TestParseDatagram_AllTypesDecodeToRecords walks every implemented Type ID through
 // ParseDatagram and asserts the record Type plus the Fields entries most likely to
 // be wrong: enum stringers, and the keys whose names are the decoder's contract
-// with the bot. Each case uses its spec-assigned port and the matching snapshot
+// with the book-builder. Each case uses its spec-assigned port and the matching snapshot
 // flag, so a non-zero SnapshotFlagMismatch would also fail here.
 func TestParseDatagram_AllTypesDecodeToRecords(t *testing.T) {
 	cases := []struct {

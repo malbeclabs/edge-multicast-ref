@@ -450,7 +450,7 @@ func buildOrderAddDatagramWithTS(t *testing.T) (datagram []byte, enterNS, sendNS
 // TestParseDatagram_BatchBoundaryHasNoSourceTS guards against treating a
 // batch_boundary's BatchTime as a block/venue timestamp. BatchTime is a batch
 // counter, not wall-clock, so the record must carry SourceTSNS == 0 (which the
-// bot maps to a NULL source_ts and excludes from source latency).
+// book-builder maps to a NULL source_ts and excludes from source latency).
 func TestParseDatagram_BatchBoundaryHasNoSourceTS(t *testing.T) {
 	sendTS := time.Unix(1700000020, 111111111)
 	body := make([]byte, 12)
@@ -730,7 +730,7 @@ func TestParseDatagram_FollowsVersionSwitchMidStream(t *testing.T) {
 	}
 }
 
-// Source ID must reach the record's Fields map, where the bot reads it.
+// Source ID must reach the record's Fields map, where the book-builder reads it.
 func TestParseDatagram_InstrumentDefinitionCarriesSourceID(t *testing.T) {
 	p := &marketByOrderParser{}
 	ts := time.Unix(1700000000, 0)

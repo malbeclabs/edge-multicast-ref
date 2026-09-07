@@ -240,7 +240,7 @@ func TestValidateHeader_AcceptsV1AndV3(t *testing.T) {
 	}
 }
 
-// Source ID must reach the record's Fields map, where the bot reads it.
+// Source ID must reach the record's Fields map, where the book-builder reads it.
 func TestParse_InstrumentDefinitionCarriesSourceID(t *testing.T) {
 	p := NewTopOfBookParser()
 	ts := uint64(1700000000000000000)

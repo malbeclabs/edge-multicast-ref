@@ -236,7 +236,7 @@ func (r *Runner) receive(ctx context.Context, port string, conn *net.UDPConn, er
 
 // observeLatencies records send→recv and (when present) source→recv latency.
 // Negatives are clamped to 0 for the histogram; raw signed values still reach
-// ClickHouse via the bot.
+// ClickHouse via the book-builder.
 func observeLatencies(m *Metrics, port string, recvTime time.Time, rec Record) {
 	if rec.SendTSNS != 0 {
 		lat := recvTime.Sub(time.Unix(0, int64(rec.SendTSNS))).Seconds()

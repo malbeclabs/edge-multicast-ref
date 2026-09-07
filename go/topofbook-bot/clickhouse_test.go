@@ -284,7 +284,7 @@ func TestBuildInstrumentRow_CarriesSourceID(t *testing.T) {
 	rec := &Record{
 		InstrumentID: 4242,
 		Symbol:       "BTC-USDT",
-		// float64, not uint16: records reach this bot as decoded JSON.
+		// float64, not uint16: records reach this book-builder as decoded JSON.
 		Fields: map[string]any{"source_id": float64(77)},
 	}
 	row := buildInstrumentRow(rec, now)

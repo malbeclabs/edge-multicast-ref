@@ -6,7 +6,7 @@ import (
 	"github.com/malbeclabs/edge-multicast-ref/go/internal/clickhouse"
 )
 
-// metricsObserver adapts the shared client's Observer onto this bot's metrics.
+// metricsObserver adapts the shared client's Observer onto this book-builder's metrics.
 //
 // The shared package deliberately owns no Prometheus dependency, so each
 // consumer keeps its own metric names and namespace. This is the seam.
@@ -35,7 +35,7 @@ func (o *metricsObserver) BufferedRows(table string, n int) {
 // newClickhouseClient configures one batcher per table the writers target.
 //
 // A table missing from this list is silently rejected by Enqueue, so every table
-// in 03_schema_mbp.sql that the bot writes must appear here. instruments and
+// in 03_schema_mbp.sql that the book-builder writes must appear here. instruments and
 // channel_health get small, slow batchers: they are low-rate and worth landing
 // promptly rather than sitting in a buffer waiting for a large batch to fill.
 func newClickhouseClient(url, db string, batchSize int, batchInterval time.Duration, bufferSize int, m *Metrics) (*clickhouse.Client, error) {

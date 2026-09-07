@@ -219,7 +219,7 @@ func (w *SnapshotWriter) flushDue() {
 		// Counted only when rows were actually enqueued. With persistence disabled
 		// write is a no-op, and incrementing here regardless made
 		// snapshot_writes_total report writes that never happened — a metric with
-		// no writer behind it, which is exactly what this bot refuses to register.
+		// no writer behind it, which is exactly what this book-builder refuses to register.
 		if n := w.write(e.key, snap, lastSeq, lastSendTS, bookStale, now); n > 0 && w.metrics != nil {
 			w.metrics.SnapshotWritesTotal.Inc()
 			w.metrics.SnapshotLagMs.Observe(float64(now.Sub(e.dirtiedAt).Milliseconds()))

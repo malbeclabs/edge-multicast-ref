@@ -36,7 +36,7 @@ type openGroup struct {
 // path. Shards own all instrument-scoped state.
 //
 // Dispatch is NOT safe for concurrent callers: it mutates its maps without
-// locks, on the assumption that the only caller is the synchronous bot read loop.
+// locks, on the assumption that the only caller is the synchronous book-builder read loop.
 type Coordinator struct {
 	ctx     context.Context // escapes barrier/fence ack waits on shutdown
 	shards  []*Shard
@@ -80,7 +80,7 @@ func (c *Coordinator) shardFor(instrumentID uint32) int {
 	return int(instrumentID) % c.n
 }
 
-// Dispatch implements Dispatcher. Called synchronously from the bot read loop.
+// Dispatch implements Dispatcher. Called synchronously from the book-builder read loop.
 func (c *Coordinator) Dispatch(rec Record) {
 	if prev, seen := c.resetCount[rec.ChannelID]; seen && rec.ResetCount != prev {
 		c.runResetBarrier(rec)
@@ -117,7 +117,7 @@ func (c *Coordinator) Dispatch(rec Record) {
 		// instrument 0 and the level is silently dropped.
 		//
 		// Stamping here, where the identity is known from SnapshotBegin, is what
-		// lets the shard stay uniform. The alternative the sibling bot uses —
+		// lets the shard stay uniform. The alternative the market-by-order book-builder uses —
 		// scanning every instrument for one whose open snapshot matches the
 		// snapshot_id — picks arbitrarily when two instruments share an id, which
 		// is issue #30.
