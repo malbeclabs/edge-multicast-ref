@@ -184,8 +184,8 @@ motivates directly:
   guards nothing: a timeout-based test passes whether or not the check exists.
 
 As with the sibling parsers, per-port datagram-sequence gap tracking excludes
-`refdata`, which is a low-rate periodic-retransmit stream where gaps are not a
-loss signal.
+`refdata`, which is retransmitted periodically at a low rate, so gaps there are
+not a loss signal.
 
 ---
 

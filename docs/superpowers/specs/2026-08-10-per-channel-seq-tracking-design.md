@@ -122,7 +122,7 @@ That is two build-tagged files per parser, six in total. The signature becomes
 change that touches anything outside the receive loop and the tracker.
 
 **refdata stays excluded.** Per-channel keying fixes the "shared seq space" half
-of the existing exclusion, but refdata is a periodic-retransmit stream, so
+of the existing exclusion, but refdata is retransmitted periodically, so
 sequence gaps there remain meaningless by design.
 
 ## Metric surface

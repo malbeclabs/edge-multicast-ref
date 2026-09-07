@@ -183,7 +183,7 @@ All prices and quantities are emitted as **raw signed/unsigned integers** in the
 - `ingress_packets_total{port}`, `ingress_bytes_total{port}`
 - `parse_errors_total{port,reason}` — reasons: `bad_magic`, `schema_version`, `frame_length`, `truncated`, `other`
 - `records_total{type}`
-- `wire_latency_seconds{port}` — histogram of `now() - frame.send_ts` at parse time (includes clock skew)
+- `wire_latency_seconds{port}` — histogram of `now() - datagram.send_ts` at parse time (includes clock skew)
 - `socket_clients`
 - `socket_client_drops_total{reason}` — `slow_writer`, `disconnected`
 - `socket_records_sent_total`
