@@ -176,9 +176,9 @@ func (w *SnapshotWriter) flushDue() {
 		}
 		w.mu.Lock()
 		if e2, ok := w.dirty[e.instrumentID]; ok {
-			rearm := now.Add(w.coalesceInterval)
-			if e2.nextAllowedAt.Before(rearm) {
-				e2.nextAllowedAt = rearm
+			nextAllowed := now.Add(w.coalesceInterval)
+			if e2.nextAllowedAt.Before(nextAllowed) {
+				e2.nextAllowedAt = nextAllowed
 			}
 		}
 		w.mu.Unlock()
