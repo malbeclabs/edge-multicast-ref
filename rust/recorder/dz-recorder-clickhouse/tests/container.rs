@@ -14,7 +14,12 @@
 
 mod common;
 
-use common::{batch, batch_on_role, now_ns, race_fixture, REPEATED};
+use common::{
+    batch, batch_on_role, cross_site_fixture, midday_ns, now_ns, race_fixture,
+    ABSENT_BUT_A_SITE_OVERFLOWED, ABSENT_EVERYWHERE, A_SITE_IS_UP_AND_SILENT,
+    A_SITE_REUSED_THE_SEQUENCE, MISSING_FROM, MISSING_TO, NOBODY_ELSE_HAS_LOADED,
+    ONLY_A_CO_LOCATED_RECORDER, OUR_OWN_SCOPE_CANNOT_SUBTRACT, PRESENT_AT_ANOTHER_SITE, REPEATED,
+};
 use dz_edge_core::PortRole;
 use dz_recorder_clickhouse::{migrations, schema, ClickHouseConfig, ClickHouseSink};
 use dz_recorder_replay::Fault;
@@ -148,6 +153,20 @@ impl Scratch {
             .unwrap_or_else(|e| panic!("{sql}\n{e}"))
             .trim()
             .to_owned()
+    }
+
+    /// One gap row of *our* vantage, read back through the cross-site view.
+    ///
+    /// The case is the `Channel ID`, so a failing assertion names the case
+    /// rather than a row number. The recorder is in the predicate as well as
+    /// the site, because two recorders at one site are two vantages and one of
+    /// the cases below puts a second one beside us.
+    fn cross_site(&self, case: u8, columns: &str) -> String {
+        self.scalar(&format!(
+            "SELECT {columns} FROM {}.sequence_gap_cross_site \
+             WHERE site = 'one' AND recorder = 'recorder-one' AND channel_id = {case}",
+            self.database
+        ))
     }
 
     fn count(&self, table: &str) -> u64 {
@@ -654,5 +673,467 @@ fn a_re_load_before_the_merge_does_not_invent_occurrences() {
         )),
         "[2,2,2,1]",
         "the collapse is applied at read time, so a re-load changes nothing"
+    );
+}
+
+/// The whole cross-site fixture, loaded object by object as five loaders would
+/// have written it.
+fn load_cross_site(scratch: &mut Scratch, base: u64) {
+    for batch in cross_site_fixture(base) {
+        scratch
+            .sink
+            .write_batch(batch, NOW)
+            .expect("every object lands");
+    }
+}
+
+/// A datagram one site has and another does not was not a publisher gap.
+///
+/// The first thing the join is for, and the cheapest to get wrong in the other
+/// direction: a site with a gap and no way to look anywhere else reports the
+/// strongest finding this tier makes on the weakest evidence it has. Here the
+/// other site covered the range and recorded no gap over it, so it held the
+/// three datagrams — and `seen_elsewhere` is `1` however loud our own gap is.
+#[test]
+fn a_datagram_another_site_holds_is_not_a_publisher_gap() {
+    let mut scratch = Scratch::open("cross_site_present");
+    let base = midday_ns();
+    load_cross_site(&mut scratch, base);
+
+    assert_eq!(
+        scratch.cross_site(
+            PRESENT_AT_ANOTHER_SITE,
+            "concat(ifNull(toString(seen_elsewhere), 'unknown'), ' ', verdict)"
+        ),
+        "1 unverifiable",
+        "present at another site, and therefore never the publisher's"
+    );
+    assert_eq!(
+        scratch.cross_site(PRESENT_AT_ANOTHER_SITE, "toString(seqs_seen_elsewhere)"),
+        (MISSING_TO - MISSING_FROM + 1).to_string(),
+        "all three of them, attributed per datagram rather than per range"
+    );
+    assert_eq!(
+        scratch.cross_site(
+            PRESENT_AT_ANOTHER_SITE,
+            "arrayStringConcat(arrayMap(x -> x.1, seen_at), ',')"
+        ),
+        "two",
+        "and the row names the site that has them"
+    );
+    // The send stamps come from the site that received the datagrams, because
+    // we have no clock reading for a datagram we never received. They bracket
+    // the three arrivals the fixture stated, a millisecond apart.
+    assert_eq!(
+        scratch.cross_site(
+            PRESENT_AT_ANOTHER_SITE,
+            "toString(toUnixTimestamp64Nano(sent_to_ts) - toUnixTimestamp64Nano(sent_from_ts))"
+        ),
+        "2000000",
+        "the publisher's own stamps, recovered from a site that has them"
+    );
+}
+
+/// Absent from every site, with no recorder overflow anywhere: the finding.
+///
+/// Every exculpatory answer has been tested and failed — our own drops admit
+/// nothing, the interface delta is zero, no redundant instance carried it — and
+/// the one remaining explanation is now supported rather than assumed. This is
+/// the only verdict in the tier that accuses anybody, and the only place it is
+/// ever written.
+#[test]
+fn absent_from_every_site_with_no_overflow_anywhere_is_the_publisher() {
+    let mut scratch = Scratch::open("cross_site_publisher");
+    let base = midday_ns();
+    load_cross_site(&mut scratch, base);
+
+    assert_eq!(
+        scratch.cross_site(
+            ABSENT_EVERYWHERE,
+            "concat(ifNull(toString(seen_elsewhere), 'unknown'), ' ', verdict)"
+        ),
+        "0 publisher",
+        "known absent, and therefore escalated"
+    );
+    assert_eq!(
+        scratch.cross_site(
+            ABSENT_EVERYWHERE,
+            "concat(toString(seqs_absent), '/', toString(seqs_expanded), ' ', \
+             toString(absent_sites), ' ', toString(blocked_vantages), ' ', \
+             toString(silent_vantages))"
+        ),
+        "3/3 1 0 0",
+        "every missing sequence number accounted for, by one other site, with \
+         nothing blocked and nobody silent"
+    );
+    // And the loader's own row is untouched: `publisher` is the view's answer
+    // and never something a single vantage wrote down.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT concat(verdict, ' ', ifNull(toString(seen_elsewhere), 'unknown')) \
+             FROM {}.sequence_gap FINAL WHERE site = 'one' AND recorder = 'recorder-one' \
+             AND channel_id = {ABSENT_EVERYWHERE}",
+            scratch.database
+        )),
+        "unverifiable unknown",
+        "the stored row still says what one site could see, which is nothing"
+    );
+}
+
+/// A site that overflowed in the window cannot contribute an absence.
+///
+/// The case a careless implementation gets wrong, because it looks exactly like
+/// the one above: the datagram is missing at both sites and nothing else
+/// differs. What differs is that the other site's window segment admitted two
+/// drops its predecessor had not, so its three missing datagrams may be its own
+/// ring rather than the publisher's silence — and an absence that may be
+/// somebody's own ring is no evidence about a publisher at all.
+///
+/// The counter is read as a delta and never as a total, which is the other half
+/// of the same trap: both segments carry a non-zero cumulative count, and a rule
+/// reading the total would find no site admissible on any host that ever
+/// overflowed.
+#[test]
+fn a_site_that_overflowed_in_the_window_cannot_contribute_an_absence() {
+    let mut scratch = Scratch::open("cross_site_overflow");
+    let base = midday_ns();
+    load_cross_site(&mut scratch, base);
+
+    assert_eq!(
+        scratch.cross_site(
+            ABSENT_BUT_A_SITE_OVERFLOWED,
+            "concat(ifNull(toString(seen_elsewhere), 'unknown'), ' ', verdict)"
+        ),
+        "unknown unverifiable",
+        "an absence that may be that site's own ring promotes nothing"
+    );
+    assert_eq!(
+        scratch.cross_site(
+            ABSENT_BUT_A_SITE_OVERFLOWED,
+            "concat(toString(seqs_absent), ' ', toString(absent_sites), ' ', \
+             toString(blocked_vantages))"
+        ),
+        "0 0 1",
+        "it missed the same three and none of them counts"
+    );
+    // The delta is what decides it, and the delta exists only where the
+    // preceding segment does. A hole in `segment_seq` is precisely where an
+    // unaccounted burst hides, so it reads unknown rather than clean.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT groupArray(ifNull(toString(overflow_free), 'unknown')) FROM \
+             (SELECT overflow_free FROM {}.segment_overflow WHERE site = 'two' \
+              AND channel_id = {ABSENT_BUT_A_SITE_OVERFLOWED} ORDER BY segment_seq)",
+            scratch.database
+        )),
+        "['unknown','0']",
+        "no predecessor is unknown, and a delta of two is not clean"
+    );
+}
+
+/// A site that is up and not reporting is not a site that reported nothing.
+///
+/// The two look identical from a query that only counts absences: one other
+/// site covered the range, missed the same three admissibly, and nothing was
+/// blocked — every condition the case above needed. What stops it is a third
+/// site with coverage of this instance earlier the same day and none over this
+/// window. It was there and it is not speaking here, so "absent from every
+/// site" is a claim the archive cannot make.
+#[test]
+fn a_site_that_is_up_and_silent_over_the_window_blocks_the_verdict() {
+    let mut scratch = Scratch::open("cross_site_silent");
+    let base = midday_ns();
+    load_cross_site(&mut scratch, base);
+
+    assert_eq!(
+        scratch.cross_site(
+            A_SITE_IS_UP_AND_SILENT,
+            "concat(ifNull(toString(seen_elsewhere), 'unknown'), ' ', verdict)"
+        ),
+        "unknown unverifiable",
+        "a window a site is not reporting in is not a window it reported \
+         nothing in"
+    );
+    assert_eq!(
+        scratch.cross_site(
+            A_SITE_IS_UP_AND_SILENT,
+            "concat(toString(seqs_absent), '/', toString(seqs_expanded), ' ', \
+             toString(absent_sites), ' ', toString(blocked_vantages), ' ', \
+             toString(silent_vantages))"
+        ),
+        "3/3 1 0 1",
+        "everything the publisher case needed, and one site that went quiet"
+    );
+}
+
+/// One vantage alone never says `publisher`, and its answer is `NULL`.
+///
+/// Not `0`. A zero here is the claim that the archive looked everywhere and
+/// found nothing, and this is the state where it has not looked anywhere at
+/// all — which is the distinction the whole column exists to keep.
+#[test]
+fn one_vantage_alone_leaves_the_answer_unknown() {
+    let mut scratch = Scratch::open("cross_site_alone");
+    let base = midday_ns();
+    load_cross_site(&mut scratch, base);
+
+    assert_eq!(
+        scratch.cross_site(
+            NOBODY_ELSE_HAS_LOADED,
+            "concat(ifNull(toString(seen_elsewhere), 'unknown'), ' ', verdict, ' ', \
+             toString(seqs_expanded))"
+        ),
+        "unknown unverifiable 0",
+        "nobody else could speak, so nothing is known and nothing is promoted"
+    );
+}
+
+/// A recorder in our own rack is not a second opinion about a publisher.
+///
+/// Presence and absence are not symmetric here, and this is the case that says
+/// so. A box beside ours holding the datagram would be conclusive that the
+/// publisher sent it, so presence counts from any vantage at all. That same box
+/// *missing* it shares our switch, our uplink and our load — one bad optic
+/// upstream of both takes both — so it is no evidence about a publisher, and it
+/// neither contributes an absence nor blocks one. The answer stays unknown
+/// because nobody else could speak, which is what is true.
+#[test]
+fn a_recorder_at_our_own_site_neither_contributes_an_absence_nor_blocks_one() {
+    let mut scratch = Scratch::open("cross_site_colocated");
+    let base = midday_ns();
+    load_cross_site(&mut scratch, base);
+
+    assert_eq!(
+        scratch.cross_site(
+            ONLY_A_CO_LOCATED_RECORDER,
+            "concat(ifNull(toString(seen_elsewhere), 'unknown'), ' ', verdict)"
+        ),
+        "unknown unverifiable",
+        "a rack's shared uplink must not be able to accuse the feed"
+    );
+    assert_eq!(
+        scratch.cross_site(
+            ONLY_A_CO_LOCATED_RECORDER,
+            "concat(toString(seqs_absent), '/', toString(seqs_expanded), ' ', \
+             toString(absent_sites), ' ', toString(blocked_vantages), ' ', \
+             toString(silent_vantages))"
+        ),
+        "0/3 0 0 0",
+        "it spoke, and none of what it said counted either way"
+    );
+}
+
+/// Known absent everywhere, and still not a finding, because we cannot say what
+/// we lost ourselves.
+///
+/// The escalation is a conjunction and not a rename of `seen_elsewhere`, and
+/// this is the case that separates the two: the other site covered the range,
+/// missed the same three and overflowed nothing, so the answer is *known* — and
+/// our own archive declared capture-handle scope with a ring that admitted
+/// something over the window, where the count belongs to the handle and to no
+/// port role in particular. Our residue is therefore not a number at all, the
+/// three could be ours, and the specification's own table says never
+/// `publisher` at that scope whatever anybody else saw.
+#[test]
+fn a_scope_that_cannot_subtract_stops_a_verdict_the_other_sites_would_have_given() {
+    let mut scratch = Scratch::open("cross_site_our_scope");
+    let base = midday_ns();
+    load_cross_site(&mut scratch, base);
+
+    assert_eq!(
+        scratch.cross_site(
+            OUR_OWN_SCOPE_CANNOT_SUBTRACT,
+            "concat(ifNull(toString(seen_elsewhere), 'unknown'), ' ', verdict, ' ', \
+             ifNull(toString(unexplained_count), 'unknown'))"
+        ),
+        "0 unverifiable unknown",
+        "the cross-site answer is known and the verdict is still not a finding"
+    );
+    // And the evidence is exactly the publisher case's, which is what says the
+    // difference is our own row and nothing about the other sites.
+    assert_eq!(
+        scratch.cross_site(
+            OUR_OWN_SCOPE_CANNOT_SUBTRACT,
+            "concat(toString(seqs_absent), '/', toString(seqs_expanded), ' ', \
+             toString(absent_sites), ' ', toString(blocked_vantages), ' ', \
+             toString(silent_vantages))"
+        ),
+        "3/3 1 0 0"
+    );
+}
+
+/// A gap another site recorded in an earlier era does not answer for this one.
+///
+/// `(instance, sequence number)` is not unique over time. A `Reset Count`
+/// restarts the numbering, so an instance that has been up all day carries 103
+/// to 105 once per era, and `sequence_gap` says as much: `era_anchor_ts` is in
+/// its sort key precisely because the rest of the key is not unique across eras.
+///
+/// Here `two` covered our window and recorded no gap over it — it held all
+/// three — and three hours earlier, in an era of its own, it recorded a gap over
+/// the same three numbers, admissible in every respect. Matched on the instance
+/// and the number alone, that old gap answers for this datagram: `two` reads as
+/// having missed it, its stale `unexplained_count` and settled anchor make the
+/// absence admissible, and the site that actually held the three datagrams is
+/// counted as the site that agrees they were never sent. Nothing else is needed
+/// for `publisher`, so the strongest finding in the tier is written against a
+/// publisher on evidence about a datagram it sent hours earlier.
+///
+/// The guard is a window, and it is the *admitting segment's* window rather than
+/// our own bracket: our bracket and theirs are receive stamps from two hosts on
+/// two clocks at two ends of a path, and requiring those to overlap would reject
+/// the ordinary case where both sites really did miss the same datagram — which
+/// reads as *held* and exonerates a publisher instead. `two`'s segment and
+/// `two`'s gap rows share one clock, and that segment is already pinned to our
+/// bracket by the test that admitted it.
+#[test]
+fn a_gap_another_site_recorded_in_an_earlier_era_does_not_answer_for_this_one() {
+    let mut scratch = Scratch::open("cross_site_era_reuse");
+    let base = midday_ns();
+    load_cross_site(&mut scratch, base);
+
+    assert_eq!(
+        scratch.cross_site(
+            A_SITE_REUSED_THE_SEQUENCE,
+            "concat(ifNull(toString(seen_elsewhere), 'unknown'), ' ', verdict)"
+        ),
+        "1 unverifiable",
+        "the other site held these three, and its gap an era ago says nothing \
+         about them"
+    );
+    assert_eq!(
+        scratch.cross_site(
+            A_SITE_REUSED_THE_SEQUENCE,
+            "concat(toString(seqs_seen_elsewhere), ' ', toString(seqs_absent), ' ', \
+             toString(absent_sites), ' ', toString(blocked_vantages), ' ', \
+             toString(silent_vantages))"
+        ),
+        "3 0 0 0 0",
+        "all three held, nothing absent, and nothing blocked or silent either"
+    );
+    // Held, and not merely dropped from the join: a window applied after the
+    // match would take the old gap row and the vantage with it, turning the site
+    // that held the datagrams into a site that never spoke.
+    assert_eq!(
+        scratch.cross_site(
+            A_SITE_REUSED_THE_SEQUENCE,
+            "arrayStringConcat(arrayMap(x -> x.1, seen_at), ',')"
+        ),
+        "two",
+        "and the row names it, from coverage rows and gap rows alone"
+    );
+    // The old era's own row is still there and still says what it saw, which is
+    // what makes the case above about the join and not about the fixture.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT count() FROM {}.sequence_gap FINAL WHERE site = 'two' \
+             AND channel_id = {A_SITE_REUSED_THE_SEQUENCE}",
+            scratch.database
+        )),
+        "1",
+        "the earlier era's gap is in the archive; it is simply not evidence here"
+    );
+}
+
+/// Loading a site twice is one absence and not two.
+///
+/// A re-run after an analyser fix is a replace, and between the second load and
+/// the merge that follows it every row is in the tables twice. Counted as rows
+/// rather than as distinct vantages, one site's single absence would be two —
+/// and "absent from every site" is a claim about how many sites agreed, so a
+/// double count is the one arithmetic error here that can promote a verdict on
+/// evidence nobody has.
+///
+/// Deliberately no `OPTIMIZE`: the window between a re-load and the merge is
+/// exactly the window this is about.
+#[test]
+fn loading_a_site_twice_is_one_absence_and_not_two() {
+    let mut scratch = Scratch::open("cross_site_reload");
+    let base = midday_ns();
+    load_cross_site(&mut scratch, base);
+    load_cross_site(&mut scratch, base);
+
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT count() FROM {}.sequence_gap_cross_site WHERE site = 'one' \
+             AND recorder = 'recorder-one' AND channel_id = {ABSENT_EVERYWHERE}",
+            scratch.database
+        )),
+        "1",
+        "one gap, one row, whatever the loader did twice"
+    );
+    assert_eq!(
+        scratch.cross_site(
+            ABSENT_EVERYWHERE,
+            "concat(ifNull(toString(seen_elsewhere), 'unknown'), ' ', verdict, ' ', \
+             toString(seqs_absent), ' ', toString(absent_sites))"
+        ),
+        "0 publisher 3 1",
+        "one site absent, not two, and three sequence numbers, not six"
+    );
+    // The two cases that must stay unknown stay unknown, because a double count
+    // could also manufacture the *other* half of the conjunction.
+    for case in [ABSENT_BUT_A_SITE_OVERFLOWED, A_SITE_IS_UP_AND_SILENT] {
+        assert_eq!(
+            scratch.cross_site(case, "ifNull(toString(seen_elsewhere), 'unknown')"),
+            "unknown",
+            "case {case}"
+        );
+    }
+}
+
+/// The verdict survives the base rows it was drawn from, and does not invert
+/// when they go.
+///
+/// `datagram` is the one table with a TTL, and the obvious cross-site join —
+/// expand the missing sequence numbers and look for them at the other sites —
+/// reads *absent* off it. Two days on, every site's rows are gone, every
+/// sequence number looks absent everywhere, and a verdict drawn from that
+/// promotes every stale gap in the archive to `publisher` on a timer. So
+/// presence is read from `segment_coverage` and the other sites' own gap rows,
+/// which have no TTL: within a covered range a site held a sequence number if
+/// and only if it covered it and recorded no gap over it.
+///
+/// `TRUNCATE` rather than a TTL, because what is under test is a table with no
+/// base rows in it and not the clause that eventually empties one — and the
+/// fixture is stamped today on purpose, so the two-day window would not take it.
+#[test]
+fn the_cross_site_answer_outlives_the_base_rows_it_was_drawn_from() {
+    let mut scratch = Scratch::open("cross_site_expiry");
+    let base = midday_ns();
+    load_cross_site(&mut scratch, base);
+    assert_eq!(
+        scratch.cross_site(
+            PRESENT_AT_ANOTHER_SITE,
+            "ifNull(toString(seen_elsewhere), 'unknown')"
+        ),
+        "1",
+        "or nothing below is about what happens when the rows go"
+    );
+
+    scratch.scalar(&format!("TRUNCATE TABLE {}.datagram", scratch.database));
+    assert_eq!(scratch.count("datagram"), 0);
+
+    assert_eq!(
+        scratch.cross_site(
+            PRESENT_AT_ANOTHER_SITE,
+            "concat(ifNull(toString(seen_elsewhere), 'unknown'), ' ', verdict)"
+        ),
+        "1 unverifiable",
+        "the site that held it still says so, from rows that outlive the datagrams"
+    );
+    assert_eq!(
+        scratch.cross_site(
+            PRESENT_AT_ANOTHER_SITE,
+            "ifNull(toString(sent_from_ts), 'unknown')"
+        ),
+        "unknown",
+        "and the one thing only a base row could say goes unknown rather than \
+         to the epoch"
+    );
+    assert_eq!(
+        scratch.cross_site(ABSENT_EVERYWHERE, "verdict"),
+        "publisher",
+        "while the finding is unchanged, because it never rested on them"
     );
 }

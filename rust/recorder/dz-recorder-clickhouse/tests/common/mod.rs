@@ -18,7 +18,10 @@ use dz_recorder_clickhouse::{ClickHouseConfig, Credentials, Response, Transport,
 use dz_recorder_core::{CaptureDropScope, RecorderIdentity};
 use dz_recorder_replay::synthetic::{port_for, SyntheticPublisher, GROUP};
 use dz_recorder_replay::Fault;
-use dz_recorder_rows::{derive_object, BookTop, Era, Nanos, RowBatch, UncertainReason};
+use dz_recorder_rows::{
+    derive_object, BookTop, Datagram, DropScope, Era, Nanos, PortRoleLabel, RecvTsKindLabel,
+    RoleJoinRow, RowBatch, SegmentCoverage, SequenceGap, UncertainReason, Verdict,
+};
 
 /// One request, as the sink issued it.
 #[derive(Debug, Clone)]
@@ -346,4 +349,566 @@ pub fn now_ns() -> u64 {
             .as_nanos(),
     )
     .expect("nanoseconds since the epoch fit a u64")
+}
+
+/// Midday today, in nanoseconds.
+///
+/// Two properties the cross-site fixtures need and neither [`NOW`] nor
+/// [`now_ns`] has. It is *recent*, so a row-level TTL cannot delete a fixture in
+/// the same step that inserts it — the trap `002` documents and the reason
+/// `Scratch` does not apply that file. And it is nowhere near a day boundary,
+/// which matters because the cross-site verdict's census of which sites were
+/// reporting is keyed on `toYYYYMMDD(before_ts)`, `sequence_gap`'s own partition
+/// key. A fixture anchored to *now* would put its rows either side of midnight
+/// for one minute in every 1,440, and a suite that fails once a day is worse
+/// than no suite at all.
+#[must_use]
+pub fn midday_ns() -> u64 {
+    const DAY: u64 = 86_400 * SECOND_NS;
+    (now_ns() / DAY) * DAY + 12 * 3_600 * SECOND_NS
+}
+
+/// The cross-site case, carried in the `Channel ID`.
+///
+/// One channel instance per case, so the cases cannot contaminate one another
+/// through a shared sort key and a failing assertion names its case rather than
+/// a row number.
+pub const PRESENT_AT_ANOTHER_SITE: u8 = 1;
+pub const ABSENT_EVERYWHERE: u8 = 2;
+pub const ABSENT_BUT_A_SITE_OVERFLOWED: u8 = 3;
+pub const A_SITE_IS_UP_AND_SILENT: u8 = 4;
+pub const NOBODY_ELSE_HAS_LOADED: u8 = 5;
+pub const ONLY_A_CO_LOCATED_RECORDER: u8 = 6;
+pub const OUR_OWN_SCOPE_CANNOT_SUBTRACT: u8 = 7;
+pub const A_SITE_REUSED_THE_SEQUENCE: u8 = 8;
+
+/// How far back the earlier era of `A_SITE_REUSED_THE_SEQUENCE` sits.
+///
+/// The same day, so the census of which sites were reporting — keyed on
+/// `toYYYYMMDD(before_ts)` — is the same census; and hours away from the gap,
+/// so no segment of that era can overlap the bracket the gap is in.
+pub const AN_ERA_AGO: u64 = 3 * 3_600 * SECOND_NS;
+
+/// The sequence numbers our site is missing, in every case.
+pub const MISSING_FROM: u64 = 103;
+pub const MISSING_TO: u64 = 105;
+
+const SOURCE: std::net::Ipv4Addr = std::net::Ipv4Addr::new(192, 0, 2, 10);
+
+/// One segment of one site, as its manifest states it.
+///
+/// The pair of them is what makes a cumulative counter readable: a segment and
+/// the one before it, so `capture_drop_total` becomes a delta. A recorder that
+/// dropped a burst an hour ago carries that burst in its total for ever, and a
+/// rule reading the total would find no site admissible on any host that had
+/// ever overflowed.
+#[derive(Debug, Clone, Copy)]
+pub struct Segment {
+    pub segment_seq: u64,
+    pub start_ts: u64,
+    pub end_ts: u64,
+    pub first_seq: u64,
+    pub last_seq: u64,
+    pub capture_drop_total: u64,
+}
+
+impl Segment {
+    /// The segment the gap is in: sequence 100 to 110, either side of `base`.
+    #[must_use]
+    pub fn window(base: u64, capture_drop_total: u64) -> Self {
+        Self {
+            segment_seq: 5,
+            start_ts: base - 60 * SECOND_NS,
+            end_ts: base + 60 * SECOND_NS,
+            first_seq: 100,
+            last_seq: 110,
+            capture_drop_total,
+        }
+    }
+
+    /// The one before it, which is what turns the counter into a delta.
+    #[must_use]
+    pub fn preceding(base: u64, capture_drop_total: u64) -> Self {
+        Self {
+            segment_seq: 4,
+            start_ts: base - 120 * SECOND_NS,
+            end_ts: base - 60 * SECOND_NS,
+            first_seq: 50,
+            last_seq: 99,
+            capture_drop_total,
+        }
+    }
+
+    /// The same segment, an era earlier.
+    ///
+    /// The sequence numbers are the same ones, because that is what a `Reset
+    /// Count` does: it restarts the numbering, and an instance that has been up
+    /// all day carries 103 to 105 once per era. What is not the same is the
+    /// clock — and `segment_seq` counts a recorder's own rotations, which a
+    /// publisher's reset does not restart, so the earlier pair is the pair that
+    /// ran before this one.
+    #[must_use]
+    pub fn an_era_earlier(self) -> Self {
+        Self {
+            segment_seq: self.segment_seq - 2,
+            start_ts: self.start_ts - AN_ERA_AGO,
+            end_ts: self.end_ts - AN_ERA_AGO,
+            ..self
+        }
+    }
+}
+
+/// A vantage, written `site` for the site's own recorder and `site/recorder`
+/// for a second one beside it.
+///
+/// Two recorders at one site are two vantages and the site is never folded away
+/// — and the difference between the two is exactly what
+/// `ONLY_A_CO_LOCATED_RECORDER` is about, because a box in our own rack shares
+/// our switch, our uplink and our load.
+fn identity(vantage: &str) -> (String, String) {
+    vantage.split_once('/').map_or_else(
+        || (vantage.to_owned(), format!("recorder-{vantage}")),
+        |(site, recorder)| (site.to_owned(), recorder.to_owned()),
+    )
+}
+
+/// One coverage row, as a site's own manifest produced it.
+#[must_use]
+pub fn coverage(site: &str, channel: u8, segment: Segment) -> SegmentCoverage {
+    let (site, recorder) = identity(site);
+    SegmentCoverage {
+        site,
+        recorder,
+        env: "test".to_owned(),
+        feed: "feed".to_owned(),
+        source_addr: SOURCE,
+        channel_id: channel,
+        dst_port: port_for(PortRole::Mktdata),
+        segment_seq: segment.segment_seq,
+        start_ts: Nanos(segment.start_ts),
+        end_ts: Nanos(segment.end_ts),
+        first_seq: segment.first_seq,
+        last_seq: segment.last_seq,
+        datagram_count: segment.last_seq - segment.first_seq + 1,
+        reset_counts_seen: vec![0],
+        capture_drop_total: segment.capture_drop_total,
+        interface_drop_total: 0,
+        drop_scope: DropScope::PortRole,
+        roles_joined: vec![RoleJoinRow(
+            "mktdata".to_owned(),
+            GROUP,
+            port_for(PortRole::Mktdata),
+        )],
+        object_key: format!("{}", segment.segment_seq),
+        object_sha256: "sha".to_owned(),
+        build_version: "0.1.0".to_owned(),
+        build_commit: "0000000".to_owned(),
+        config_hash: "a".repeat(64),
+    }
+}
+
+/// How wide a gap's bracket is: the arrival either side of three missing
+/// datagrams on a channel that carries a few hundred a second.
+///
+/// Narrow, and narrower than [`ANOTHER_SITE_IS_ANOTHER_CLOCK`], because that is
+/// what a bracket is on any instance worth recording — and the two together are
+/// what make the fixture state the thing a bracket cannot do. Both sites bracket
+/// the *same* pair of arrivals, so their brackets are the same width and differ
+/// only by the offset between the two hosts.
+pub const BRACKET_NS: u64 = 20 * 1_000_000;
+
+/// The offset between two sites' readings of one publisher: their clocks, and
+/// the path between them.
+///
+/// Wider than the bracket, which is the ordinary case and not an extreme one. It
+/// is why the guard on another vantage's gap rows is that vantage's own segment
+/// window and never our bracket: their gap over the same three datagrams does
+/// not overlap ours, and a rule that demanded it would read *held* — exonerating
+/// a publisher on evidence nobody has.
+pub const ANOTHER_SITE_IS_ANOTHER_CLOCK: u64 = 45 * 1_000_000;
+
+/// One gap row, exactly as a site's own loader would have written it: the
+/// verdict `unverifiable`, `seen_elsewhere` absent, and no send stamps.
+///
+/// `unexplained` is the residue, and it carries the whole of the admissibility
+/// question a gap row answers on its own: `None` is the loader saying that no
+/// per-instance subtraction was valid at its declared scope, which is a site
+/// that cannot say what it lost and therefore cannot say what a publisher lost.
+#[must_use]
+pub fn gap(
+    site: &str,
+    channel: u8,
+    base: u64,
+    era_anchor: u64,
+    unexplained: Option<u64>,
+) -> SequenceGap {
+    let (site, recorder) = identity(site);
+    SequenceGap {
+        site,
+        recorder,
+        env: "test".to_owned(),
+        feed: "feed".to_owned(),
+        port_role: PortRoleLabel::Mktdata,
+        group_addr: GROUP,
+        source_addr: SOURCE,
+        channel_id: channel,
+        dst_port: port_for(PortRole::Mktdata),
+        reset_count: 0,
+        era_index: 1,
+        era_anchor_ts: Nanos(era_anchor),
+        anchor_certain: 1,
+        missing_from: MISSING_FROM,
+        missing_to: MISSING_TO,
+        missing_count: MISSING_TO - MISSING_FROM + 1,
+        reference_seqs: 11,
+        before_ts: Nanos(base),
+        after_ts: Nanos(base + BRACKET_NS),
+        sent_from_ts: None,
+        sent_to_ts: None,
+        admitted_recorder: 0,
+        // The scope follows the residue rather than being a third parameter,
+        // because the two are one fact: a null residue is what the loader
+        // writes when the archive declared capture-handle scope and the handle
+        // admitted something, since a ring counts frames dropped before
+        // demultiplexing and the number then belongs to no port role at all.
+        admitted_scope: if unexplained.is_some() {
+            DropScope::PortRole
+        } else {
+            DropScope::CaptureHandle
+        },
+        unexplained_count: unexplained,
+        interface_drops: Some(0),
+        seen_elsewhere: None,
+        on_redundant_path: None,
+        verdict: Verdict::Unverifiable,
+        object_key: "5".to_owned(),
+    }
+}
+
+/// One datagram row, at a site that received what we did not.
+#[must_use]
+pub fn datagram(site: &str, channel: u8, sequence_number: u64, recv_ts: u64) -> Datagram {
+    let (site, recorder) = identity(site);
+    Datagram {
+        recv_ts: Nanos(recv_ts),
+        send_ts: Nanos(recv_ts - 500_000),
+        recv_ts_kind: RecvTsKindLabel::KernelSoftware,
+        source_addr: SOURCE,
+        channel_id: channel,
+        dst_port: port_for(PortRole::Mktdata),
+        feed: "feed".to_owned(),
+        port_role: PortRoleLabel::Mktdata,
+        group_addr: GROUP,
+        sequence_number,
+        reset_count: 0,
+        segment_seq: 5,
+        payload_len: 100,
+        wire_payload_len: 100,
+        drop_delta: 0,
+        site,
+        recorder,
+        env: "test".to_owned(),
+        drop_scope: DropScope::PortRole,
+        object_key: "5".to_owned(),
+        object_sha256: "sha".to_owned(),
+    }
+}
+
+/// The five cross-site cases, as the objects several loaders would have written.
+///
+/// One batch per (site, segment), because that is what an object is: the
+/// idempotence test re-writes these same batches, and a fixture folding a site's
+/// two segments into one object could not tell a re-load of one from a re-load
+/// of both.
+///
+/// Our site is `one`, and it has the same gap — sequence 103 to 105 — in every
+/// case. What differs is what the other sites wrote:
+///
+/// * `PRESENT_AT_ANOTHER_SITE` — `two` covered the range and recorded no gap
+///   over it, so it held the datagrams. Not a publisher gap.
+/// * `ABSENT_EVERYWHERE` — `two` covered the range, missed the same three, and
+///   its two segments carry the same cumulative total, so it overflowed
+///   nothing. The finding.
+/// * `ABSENT_BUT_A_SITE_OVERFLOWED` — the same, except that `two`'s window
+///   segment admitted two drops its predecessor had not. Its absence may be its
+///   own ring, and an absence that may be somebody's own ring is no evidence
+///   about a publisher.
+/// * `A_SITE_IS_UP_AND_SILENT` — `three` covered the range and missed it
+///   admissibly, which is everything the finding above needed; and `two` has
+///   coverage of this instance earlier the same day and none over the window. A
+///   site that is not reporting is not a site that reported nothing.
+/// * `NOBODY_ELSE_HAS_LOADED` — our rows, and nobody else's.
+/// * `ONLY_A_CO_LOCATED_RECORDER` — a second recorder at our own site covered
+///   the range and missed the same three, admissibly in every respect but the
+///   one that matters. It is not another site.
+/// * `OUR_OWN_SCOPE_CANNOT_SUBTRACT` — `two` is absent and admissible, so the
+///   answer is *known*; but our own ring overflowed at capture-handle scope, so
+///   we cannot say how much of our own gap is ours. Known absent elsewhere and
+///   still not a finding, which is the case that says the escalation is a
+///   conjunction and not a rename of `seen_elsewhere`.
+/// * `A_SITE_REUSED_THE_SEQUENCE` — `two` covered the range over the window and
+///   recorded no gap over it, so it held the three datagrams; and three hours
+///   earlier, in an era of its own, it recorded a gap over the same three
+///   sequence numbers. A `Reset Count` restarts the numbering, so
+///   `(instance, sequence number)` is a key one instance revisits, and the
+///   earlier gap is evidence about a different datagram. It must not answer for
+///   this one — which it would, as *missed* and as an admissible absence, and
+///   the site that actually held the datagrams would accuse the publisher.
+///
+/// The two eras are told apart here by their anchors and their windows, which
+/// is what `sequence_gap` keys on and what the views read; the wire `Reset
+/// Count` is carried on the rows and read by none of them.
+#[must_use]
+pub fn cross_site_fixture(base: u64) -> Vec<RowBatch> {
+    let ours = base - 30 * SECOND_NS;
+    let theirs = base - 25 * SECOND_NS;
+    // Another site's reading of the same three missing datagrams, taken on its
+    // own clock at the other end of a path. It does not overlap ours, and the
+    // cases below are what say that a verdict must not need it to.
+    let their_bracket = base + ANOTHER_SITE_IS_ANOTHER_CLOCK;
+    let every_case = [
+        PRESENT_AT_ANOTHER_SITE,
+        ABSENT_EVERYWHERE,
+        ABSENT_BUT_A_SITE_OVERFLOWED,
+        A_SITE_IS_UP_AND_SILENT,
+        NOBODY_ELSE_HAS_LOADED,
+        ONLY_A_CO_LOCATED_RECORDER,
+        OUR_OWN_SCOPE_CANNOT_SUBTRACT,
+        A_SITE_REUSED_THE_SEQUENCE,
+    ];
+    let mut batches = Vec::new();
+    let mut object = |site: &str, segment: Segment, batch: RowBatch| {
+        batches.push(RowBatch {
+            object_key: format!("{site}/{}", segment.segment_seq),
+            object_sha256: format!("sha-{site}-{}", segment.segment_seq),
+            ..batch
+        });
+    };
+
+    // Ours: the same gap in every case, and a predecessor segment so that our
+    // own counter is a delta too.
+    let preceding = Segment::preceding(base, 0);
+    let window = Segment::window(base, 0);
+    object(
+        "one",
+        preceding,
+        RowBatch {
+            segment_coverage: every_case
+                .iter()
+                .map(|case| coverage("one", *case, preceding))
+                .collect(),
+            ..RowBatch::default()
+        },
+    );
+    // Our own window segment admitted five drops in the one case that is about
+    // our own ring, and nothing in the others. The cross-site views never read
+    // our own overflow — it is our *residue* they read — but a fixture whose
+    // manifest contradicted its own gap row would describe a recorder that
+    // cannot exist.
+    let our_overflowing_window = Segment::window(base, 5);
+    object(
+        "one",
+        window,
+        RowBatch {
+            segment_coverage: every_case
+                .iter()
+                .map(|case| {
+                    if *case == OUR_OWN_SCOPE_CANNOT_SUBTRACT {
+                        coverage("one", *case, our_overflowing_window)
+                    } else {
+                        coverage("one", *case, window)
+                    }
+                })
+                .collect(),
+            sequence_gap: every_case
+                .iter()
+                .map(|case| {
+                    let residue = if *case == OUR_OWN_SCOPE_CANNOT_SUBTRACT {
+                        None
+                    } else {
+                        Some(3)
+                    };
+                    gap("one", *case, base, ours, residue)
+                })
+                .collect(),
+            ..RowBatch::default()
+        },
+    );
+
+    // `two`, in the four cases it appears in. Seven admitted drops carried
+    // forward from before any of this: a total that is not zero and a delta that
+    // is, which is the distinction the admissibility test has to make.
+    let their_preceding = Segment::preceding(base, 7);
+    let their_window = Segment::window(base, 7);
+    // Two drops the predecessor had not admitted, in the one case that is about
+    // overflow.
+    let their_overflowing_window = Segment::window(base, 9);
+    object(
+        "two",
+        their_preceding,
+        RowBatch {
+            segment_coverage: [
+                PRESENT_AT_ANOTHER_SITE,
+                ABSENT_EVERYWHERE,
+                ABSENT_BUT_A_SITE_OVERFLOWED,
+                A_SITE_IS_UP_AND_SILENT,
+                OUR_OWN_SCOPE_CANNOT_SUBTRACT,
+                A_SITE_REUSED_THE_SEQUENCE,
+            ]
+            .iter()
+            .map(|case| coverage("two", *case, their_preceding))
+            .collect(),
+            ..RowBatch::default()
+        },
+    );
+    object(
+        "two",
+        their_window,
+        RowBatch {
+            segment_coverage: vec![
+                coverage("two", PRESENT_AT_ANOTHER_SITE, their_window),
+                coverage("two", ABSENT_EVERYWHERE, their_window),
+                coverage(
+                    "two",
+                    ABSENT_BUT_A_SITE_OVERFLOWED,
+                    their_overflowing_window,
+                ),
+                coverage("two", OUR_OWN_SCOPE_CANNOT_SUBTRACT, their_window),
+                // Covered, and with no gap row beside it: `two` held the three
+                // datagrams over this window. Its gap at these same three
+                // sequence numbers belongs to the era below.
+                coverage("two", A_SITE_REUSED_THE_SEQUENCE, their_window),
+            ],
+            sequence_gap: vec![
+                gap("two", ABSENT_EVERYWHERE, their_bracket, theirs, Some(3)),
+                gap(
+                    "two",
+                    ABSENT_BUT_A_SITE_OVERFLOWED,
+                    their_bracket,
+                    theirs,
+                    Some(3),
+                ),
+                gap(
+                    "two",
+                    OUR_OWN_SCOPE_CANNOT_SUBTRACT,
+                    their_bracket,
+                    theirs,
+                    Some(3),
+                ),
+            ],
+            // The datagrams `two` received and we did not, a millisecond apart,
+            // which is what makes the first case not a publisher gap.
+            datagram: (MISSING_FROM..=MISSING_TO)
+                .map(|seq| {
+                    datagram(
+                        "two",
+                        PRESENT_AT_ANOTHER_SITE,
+                        seq,
+                        base + (seq - MISSING_FROM + 1) * 1_000_000,
+                    )
+                })
+                .collect(),
+            ..RowBatch::default()
+        },
+    );
+
+    // `two` again, three hours earlier and an era back: the same instance, the
+    // same three sequence numbers, and a gap over them that is admissible in
+    // every respect. It is evidence about a datagram sent in a different era,
+    // and the only thing that says so is the clock — the sequence numbers are
+    // identical by construction, because that is what a `Reset Count` does.
+    let earlier_preceding = their_preceding.an_era_earlier();
+    let earlier_window = their_window.an_era_earlier();
+    object(
+        "two",
+        earlier_preceding,
+        RowBatch {
+            segment_coverage: vec![coverage(
+                "two",
+                A_SITE_REUSED_THE_SEQUENCE,
+                earlier_preceding,
+            )],
+            ..RowBatch::default()
+        },
+    );
+    object(
+        "two",
+        earlier_window,
+        RowBatch {
+            segment_coverage: vec![coverage("two", A_SITE_REUSED_THE_SEQUENCE, earlier_window)],
+            sequence_gap: vec![gap(
+                "two",
+                A_SITE_REUSED_THE_SEQUENCE,
+                their_bracket - AN_ERA_AGO,
+                theirs - AN_ERA_AGO,
+                Some(3),
+            )],
+            ..RowBatch::default()
+        },
+    );
+
+    // `three`, which speaks admissibly in the case `two` is silent in — so that
+    // the silence is the only thing standing between that case and a finding.
+    object(
+        "three",
+        their_preceding,
+        RowBatch {
+            segment_coverage: vec![coverage("three", A_SITE_IS_UP_AND_SILENT, their_preceding)],
+            ..RowBatch::default()
+        },
+    );
+    object(
+        "three",
+        their_window,
+        RowBatch {
+            segment_coverage: vec![coverage("three", A_SITE_IS_UP_AND_SILENT, their_window)],
+            sequence_gap: vec![gap(
+                "three",
+                A_SITE_IS_UP_AND_SILENT,
+                their_bracket,
+                theirs,
+                Some(3),
+            )],
+            ..RowBatch::default()
+        },
+    );
+
+    // A second recorder in our own rack, which missed the same three. What it
+    // held would have been conclusive; what it missed is not a second opinion
+    // about a publisher, and treating it as one would let a rack's shared
+    // uplink accuse the feed.
+    let beside_us = "one/recorder-one-b";
+    object(
+        beside_us,
+        their_preceding,
+        RowBatch {
+            segment_coverage: vec![coverage(
+                beside_us,
+                ONLY_A_CO_LOCATED_RECORDER,
+                their_preceding,
+            )],
+            ..RowBatch::default()
+        },
+    );
+    object(
+        beside_us,
+        their_window,
+        RowBatch {
+            segment_coverage: vec![coverage(
+                beside_us,
+                ONLY_A_CO_LOCATED_RECORDER,
+                their_window,
+            )],
+            sequence_gap: vec![gap(
+                beside_us,
+                ONLY_A_CO_LOCATED_RECORDER,
+                base,
+                theirs,
+                Some(3),
+            )],
+            ..RowBatch::default()
+        },
+    );
+
+    batches
 }
