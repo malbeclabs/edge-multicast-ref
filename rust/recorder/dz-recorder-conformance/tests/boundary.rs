@@ -485,6 +485,67 @@ fn an_exit_within_the_contract_with_no_report_is_an_error() {
 }
 
 #[test]
+fn a_missing_report_and_an_unreadable_one_do_not_claim_the_same_thing() {
+    // Two different failures with two different fixes: a tool that wrote
+    // nothing is a tool that died before it could, and a tool that wrote
+    // something unreadable is one whose report format has moved. An operator
+    // reading either at three in the morning has to be sent to the right one,
+    // so the two messages may not read alike.
+    let missing = FakeTool::new(&FakeSpec {
+        exit: 0,
+        report: Report::None,
+        ..FakeSpec::default()
+    });
+    let missing_pcap = missing.pcap();
+    let missing = missing
+        .tool
+        .judge(&Invocation {
+            pcap: &missing_pcap,
+            group: GROUP,
+            feed: "mbp",
+            ports: ports(),
+        })
+        .expect_err("nothing was written")
+        .to_string();
+
+    let unreadable = FakeTool::new(&FakeSpec {
+        exit: 0,
+        report: Report::Garbage,
+        ..FakeSpec::default()
+    });
+    let unreadable_pcap = unreadable.pcap();
+    let unreadable = unreadable
+        .tool
+        .judge(&Invocation {
+            pcap: &unreadable_pcap,
+            group: GROUP,
+            feed: "mbp",
+            ports: ports(),
+        })
+        .expect_err("what was written is not a report")
+        .to_string();
+
+    assert_ne!(missing, unreadable);
+    assert!(
+        missing.contains("wrote no report"),
+        "the file is not there, and that is what it says: {missing}"
+    );
+    assert!(
+        !unreadable.contains("wrote no report"),
+        "the file is there and unreadable, so this must not send an operator looking for a \
+         tool that died before writing: {unreadable}"
+    );
+    assert!(
+        unreadable.contains("cannot read"),
+        "it says what actually happened instead: {unreadable}"
+    );
+    assert!(
+        missing.contains("report.json") && unreadable.contains("report.json"),
+        "and both name the path, because there is one either way: {missing} / {unreadable}"
+    );
+}
+
+#[test]
 fn a_report_for_another_feed_is_refused_and_names_both() {
     // The report states the feed it is about, and it is checked rather than
     // trusted. A report for another feed parses exactly as well as the right
