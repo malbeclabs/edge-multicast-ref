@@ -26,6 +26,11 @@ dz-recorder-replay = { path = "../dz-recorder-replay" }
 # what the derivation expects.
 dz-recorder-rows = { path = "../dz-recorder-rows" }
 dz-recorder-capture = { path = "../dz-recorder-capture" }
+# The analysis tier's bridge to the specification's rule set. A plain
+# dev-dependency and not an optional one, because the `conformance` feature
+# gates the module that uses it rather than the crate itself: a second copy of
+# the replay-to-pcap conversion here is exactly what promoting it removed.
+dz-recorder-conformance = { path = "../dz-recorder-conformance" }
 tempfile = { workspace = true }
 # `SegmentManifest` is `Deserialize`, so the per-instance coverage rows are
 # asserted as the typed values the index table holds rather than found by a text
