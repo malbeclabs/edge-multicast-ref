@@ -146,12 +146,17 @@ pub enum ToolError {
         code: String,
         stderr: String,
     },
-    /// The tool exited within its contract and then said nothing this runner
-    /// can read. Never an empty set of passes.
-    #[error("{tool} exited {code} and wrote no report this runner can read: {source}")]
+    /// The tool exited within its contract and wrote a file this runner cannot
+    /// believe — malformed, or a format it does not read. Never an empty set of
+    /// passes, and never the same sentence as [`ToolError::ReportMissing`]:
+    /// a report that is absent and a report that is present and unreadable send
+    /// an operator to two different places, and a message that covered both
+    /// would send them to neither.
+    #[error("{tool} exited {code} and wrote a report at {path} this runner cannot read: {source}")]
     Unreportable {
         tool: String,
         code: i32,
+        path: PathBuf,
         #[source]
         source: ReportError,
     },
@@ -337,6 +342,7 @@ impl RuleSet for ConformanceTool {
             RuleSetReport::from_json(&bytes).map_err(|source| ToolError::Unreportable {
                 tool: self.describe(),
                 code,
+                path: report_path.clone(),
                 source,
             })?;
 
