@@ -3,7 +3,7 @@
 **Status:** draft, pending review
 **Date:** 2026-09-06
 **Applies to:** the recorder's analysis tier, and the column store a dashboard reads
-**Authority:** [`edge-feed-spec`](https://github.com/malbeclabs/edge-feed-spec) and its [`GLOSSARY.md`](https://github.com/malbeclabs/edge-feed-spec/blob/main/GLOSSARY.md), which owns the rule set this runs and every rule in it; `2026-08-31-sequence-loss-and-conformance-rows-design.md`, whose `conformance_finding` table this fills; `2026-08-28-edge-recorder-crates-design.md`, whose analysis tier names this as the missing half of step 7; `2026-09-05-recorder-market-data-rows-design.md` (on a branch in review at the time of writing), whose *No conformance rules over decoded messages* non-goal this document is the other side of
+**Authority:** [`edge-feed-spec`](https://github.com/malbeclabs/edge-feed-spec) and its [`GLOSSARY.md`](https://github.com/malbeclabs/edge-feed-spec/blob/main/GLOSSARY.md), which owns the rule set this runs and every rule in it; `2026-08-31-sequence-loss-and-conformance-rows-design.md`, whose `conformance_finding` table this fills; `2026-08-28-edge-recorder-crates-design.md`, whose analysis tier names this as the missing half of step 7; `2026-09-05-recorder-market-data-rows-design.md` (on a branch in review at the time of writing), whose *No conformance rules over decoded messages* non-goal this document answers from the other side.
 
 ---
 
@@ -16,8 +16,8 @@ publishers or of recorder sites. It states only what is to be built.
 `GLOSSARY.md` governs the vocabulary: `datagram` never `frame`, **`era` never
 `epoch`** for the sequence space a `Reset Count` opens, `channel` only for the
 `Channel ID` shard, `port role` for `mktdata`/`refdata`/`snapshot`, `feed` never
-`lane` or `stream`, and **`source` never bare** — every use below is `source
-address`, `Source ID`, or `upstream`.
+`lane` or `stream`, and **`source` never bare** — every use below is
+`source address`, `Source ID`, or `upstream`.
 
 One further distinction is load-bearing here rather than decorative, because two
 tables in this schema have a column called `verdict` and they do not share a
@@ -321,8 +321,9 @@ from the first and last messages a rule evaluated would silently shrink whenever
 a rule stopped early, and two rules over one segment would then disagree about
 what segment they were talking about.
 
-The sort key is `(rule_id, source_addr, channel_id, dst_port, window_start, site,
-recorder, rule_set_version)`. `object_key` is deliberately not in it and does not
+The sort key is
+`(rule_id, source_addr, channel_id, dst_port, window_start, site, recorder, rule_set_version)`.
+`object_key` is deliberately not in it and does not
 need to be: `window_start` is one recorder's own segment start, and two segments
 from one recorder do not begin in the same nanosecond. The residual case — a
 recorder restarting and a new run's first segment opening within the same
@@ -426,8 +427,9 @@ loaded nor unloaded in that ledger's vocabulary, and asking it produces the wron
 answer in the expensive direction: the version bump lands, the runner asks *have I
 loaded this object*, hears yes, and never re-judges anything.
 
-**So the runner keeps its own ledger, keyed `(object key, sha256, rule set
-version)`, in its own file.** Widening the load ledger's `Entry` was considered
+**So the runner keeps its own ledger, keyed
+`(object key, sha256, rule set version)`, in its own file.** Widening the load
+ledger's `Entry` was considered
 and rejected: it would push a rule-set version into a record whose other consumer
 — the era adjacency check, which carries a `SegmentTrailer` there — has nothing to
 do with rule sets, and it would make the boolean that guards datagram rows depend
