@@ -322,12 +322,53 @@ GROUP BY source_addr, channel_id, dst_port, day;
 -- exhaustive, so `missed = 0` means *held* and needs no `datagram` row to prove
 -- it.
 --
--- The time overlap is a guard against the sequence space repeating. A `Reset
--- Count` wraps and an instance long-lived enough reuses a sequence number in a
--- later era, so a coverage row is admitted only when its window overlaps the
--- bracket the missing datagram was sent in. Overlap and not containment:
--- segments rotate on their own clocks at each site, so a gap of ours routinely
--- spans two of theirs.
+-- THE SEQUENCE SPACE REPEATS, AND BOTH HALVES OF THIS HAVE TO SURVIVE IT. A
+-- `Reset Count` restarts the numbering, so one instance genuinely carries the
+-- same sequence number in era after era, and `sequence_gap` says so: its sort
+-- key is `(instance, era_anchor_ts, missing_from, site)`, and the anchor is in
+-- there precisely because the rest of the key is not unique across eras.
+--
+--   * **Admission** is guarded by the window: a coverage row speaks only when
+--     it overlaps the bracket the missing datagram was sent in. Overlap and not
+--     containment: segments rotate on their own clocks at each site, so a gap
+--     of ours routinely spans two of theirs.
+--   * **What the admitted vantage says** is guarded the same way, and it is a
+--     separate guard rather than the same one. The gap rows below are matched
+--     on `(vantage, instance, sequence number)`, which is a key an instance
+--     revisits every era — so without a window a gap that vantage recorded at
+--     this sequence number *last week* answers for the datagram missing now.
+--     It answers `missed`, which is `held = 0`, and it carries its own
+--     `unexplained_count` and `anchor_certain` into `absence_admissible`: an
+--     unrelated old gap that happened to be clean is a manufactured absence at
+--     another site, and a manufactured absence is what escalates a gap to
+--     `publisher`. That is the accusing direction, on evidence about a
+--     different datagram.
+--
+-- THE WINDOW IS THE ADMITTING SEGMENT'S, AND NOT OUR OWN BRACKET, and the
+-- difference is the whole reason this is not one line. Our bracket and theirs
+-- are receive stamps taken by two hosts on two clocks at two ends of a path,
+-- and on a busy instance a bracket is a handful of microseconds wide while the
+-- skew and the path delta between two sites are milliseconds. Requiring their
+-- gap's bracket to overlap ours would therefore reject the ordinary case where
+-- both sites really did miss the same datagram — and rejecting it reads as
+-- *held*, which exonerates a publisher on evidence nobody has. `o` is that
+-- vantage's own segment, stamped by the same clock as its own gap rows, so the
+-- comparison below is between two readings of one clock; and `o` is already
+-- pinned to our bracket by the admission test, which leaves their gap confined
+-- to a window overlapping ours to within one segment rotation.
+--
+-- What that does not separate is two eras inside a single segment — a restart
+-- and a wrap within one rotation — and that is stated here rather than left to
+-- be discovered. The guard is exactly as sharp as the segment that admitted the
+-- vantage.
+--
+-- The gap rows are folded to one row per `(vantage, instance, sequence number)`
+-- with their brackets in an array, rather than joined one row per era. A join
+-- would multiply this view's rows by the number of eras that ever reused the
+-- number, and the window test has to remove a non-overlapping era *from the
+-- match* and not from the result: a vantage whose only gap at this number is an
+-- old one held the datagram now, and a filter applied after the join would drop
+-- its row altogether and turn a site that spoke into a site that was silent.
 CREATE OR REPLACE VIEW recorder.gap_vantage_seq AS
 SELECT
     m.site            AS site,
@@ -342,25 +383,35 @@ SELECT
     o.site            AS other_site,
     o.recorder        AS other_recorder,
     o.overflow_free   AS other_overflow_free,
-    t.present         AS missed,
+    -- That vantage's gaps at this sequence number, narrowed to the ones its own
+    -- segment was recording when it recorded them. Same host, same clock, so
+    -- this comparison needs no allowance for skew and is given none.
+    arrayFilter(x -> x.1 <= o.end_ts AND x.2 >= o.start_ts,
+                t.occurrences) AS in_window,
+    toUInt8(length(in_window) > 0) AS missed,
     -- A vantage at another site. A second recorder in our own rack shares our
     -- switch, our uplink and our load, so what it *missed* is not independent
     -- evidence — while what it *held* is conclusive, which is why this gates
     -- only the absence columns and never `held`.
     toUInt8(o.site != m.site) AS independent,
-    -- Held: covered by that vantage and absent from its own gap rows. Within a
-    -- covered range those are the only two possibilities, which is what lets
-    -- this be answered without reading a base row that may have expired.
-    toUInt8(t.present = 0) AS held,
+    -- Held: covered by that vantage and absent from its own gap rows over this
+    -- window. Within a covered range those are the only two possibilities,
+    -- which is what lets this be answered without reading a base row that may
+    -- have expired.
+    toUInt8(length(in_window) = 0) AS held,
     -- An absence is evidence only from another **site**, whose switch, uplink
     -- and load are not ours; whose segment admitted nothing over the window;
     -- whose own residue accounts for the whole of its own gap; and whose era
     -- boundary is settled. Anything else is an absence nobody may use.
-    toUInt8(ifNull(t.present = 1
+    --
+    -- `arrayAll` and not `arrayExists`, for the case the paragraph above admits
+    -- it cannot separate: where one segment does hold two eras, every gap in it
+    -- has to be usable before the absence is, because one of them is the answer
+    -- and this view cannot say which.
+    toUInt8(ifNull(missed = 1
                    AND independent = 1
                    AND o.overflow_free = 1
-                   AND t.unexplained_count = t.missing_count
-                   AND t.anchor_certain = 1, 0)) AS absence_admissible
+                   AND arrayAll(x -> x.3 = 1, in_window), 0)) AS absence_admissible
 FROM recorder.gap_missing_seq AS m
 INNER JOIN recorder.segment_overflow AS o
     ON  o.source_addr = m.source_addr
@@ -374,11 +425,16 @@ LEFT JOIN (
         channel_id,
         dst_port,
         sequence_number,
-        unexplained_count,
-        missing_count,
-        anchor_certain,
-        toUInt8(1) AS present
+        -- The bracket the gap was recorded in, and whether it may be used at
+        -- all: its residue is the whole of its own gap, and its era boundary is
+        -- settled. Carried per occurrence, because it is the occurrence inside
+        -- the window that answers and not the vantage's history at this number.
+        groupArray((before_ts,
+                    after_ts,
+                    toUInt8(ifNull(unexplained_count = missing_count, 0)
+                            AND anchor_certain = 1))) AS occurrences
     FROM recorder.gap_missing_seq
+    GROUP BY site, recorder, source_addr, channel_id, dst_port, sequence_number
 ) AS t
     ON  t.site            = o.site
     AND t.recorder        = o.recorder

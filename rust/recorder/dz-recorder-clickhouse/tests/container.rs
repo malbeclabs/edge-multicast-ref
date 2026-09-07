@@ -16,9 +16,9 @@ mod common;
 
 use common::{
     batch, batch_on_role, cross_site_fixture, midday_ns, now_ns, race_fixture,
-    ABSENT_BUT_A_SITE_OVERFLOWED, ABSENT_EVERYWHERE, A_SITE_IS_UP_AND_SILENT, MISSING_FROM,
-    MISSING_TO, NOBODY_ELSE_HAS_LOADED, ONLY_A_CO_LOCATED_RECORDER, OUR_OWN_SCOPE_CANNOT_SUBTRACT,
-    PRESENT_AT_ANOTHER_SITE, REPEATED,
+    ABSENT_BUT_A_SITE_OVERFLOWED, ABSENT_EVERYWHERE, A_SITE_IS_UP_AND_SILENT,
+    A_SITE_REUSED_THE_SEQUENCE, MISSING_FROM, MISSING_TO, NOBODY_ELSE_HAS_LOADED,
+    ONLY_A_CO_LOCATED_RECORDER, OUR_OWN_SCOPE_CANNOT_SUBTRACT, PRESENT_AT_ANOTHER_SITE, REPEATED,
 };
 use dz_edge_core::PortRole;
 use dz_recorder_clickhouse::{migrations, schema, ClickHouseConfig, ClickHouseSink};
@@ -959,6 +959,79 @@ fn a_scope_that_cannot_subtract_stops_a_verdict_the_other_sites_would_have_given
              toString(silent_vantages))"
         ),
         "3/3 1 0 0"
+    );
+}
+
+/// A gap another site recorded in an earlier era does not answer for this one.
+///
+/// `(instance, sequence number)` is not unique over time. A `Reset Count`
+/// restarts the numbering, so an instance that has been up all day carries 103
+/// to 105 once per era, and `sequence_gap` says as much: `era_anchor_ts` is in
+/// its sort key precisely because the rest of the key is not unique across eras.
+///
+/// Here `two` covered our window and recorded no gap over it — it held all
+/// three — and three hours earlier, in an era of its own, it recorded a gap over
+/// the same three numbers, admissible in every respect. Matched on the instance
+/// and the number alone, that old gap answers for this datagram: `two` reads as
+/// having missed it, its stale `unexplained_count` and settled anchor make the
+/// absence admissible, and the site that actually held the three datagrams is
+/// counted as the site that agrees they were never sent. Nothing else is needed
+/// for `publisher`, so the strongest finding in the tier is written against a
+/// publisher on evidence about a datagram it sent hours earlier.
+///
+/// The guard is a window, and it is the *admitting segment's* window rather than
+/// our own bracket: our bracket and theirs are receive stamps from two hosts on
+/// two clocks at two ends of a path, and requiring those to overlap would reject
+/// the ordinary case where both sites really did miss the same datagram — which
+/// reads as *held* and exonerates a publisher instead. `two`'s segment and
+/// `two`'s gap rows share one clock, and that segment is already pinned to our
+/// bracket by the test that admitted it.
+#[test]
+fn a_gap_another_site_recorded_in_an_earlier_era_does_not_answer_for_this_one() {
+    let mut scratch = Scratch::open("cross_site_era_reuse");
+    let base = midday_ns();
+    load_cross_site(&mut scratch, base);
+
+    assert_eq!(
+        scratch.cross_site(
+            A_SITE_REUSED_THE_SEQUENCE,
+            "concat(ifNull(toString(seen_elsewhere), 'unknown'), ' ', verdict)"
+        ),
+        "1 unverifiable",
+        "the other site held these three, and its gap an era ago says nothing \
+         about them"
+    );
+    assert_eq!(
+        scratch.cross_site(
+            A_SITE_REUSED_THE_SEQUENCE,
+            "concat(toString(seqs_seen_elsewhere), ' ', toString(seqs_absent), ' ', \
+             toString(absent_sites), ' ', toString(blocked_vantages), ' ', \
+             toString(silent_vantages))"
+        ),
+        "3 0 0 0 0",
+        "all three held, nothing absent, and nothing blocked or silent either"
+    );
+    // Held, and not merely dropped from the join: a window applied after the
+    // match would take the old gap row and the vantage with it, turning the site
+    // that held the datagrams into a site that never spoke.
+    assert_eq!(
+        scratch.cross_site(
+            A_SITE_REUSED_THE_SEQUENCE,
+            "arrayStringConcat(arrayMap(x -> x.1, seen_at), ',')"
+        ),
+        "two",
+        "and the row names it, from coverage rows and gap rows alone"
+    );
+    // The old era's own row is still there and still says what it saw, which is
+    // what makes the case above about the join and not about the fixture.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT count() FROM {}.sequence_gap FINAL WHERE site = 'two' \
+             AND channel_id = {A_SITE_REUSED_THE_SEQUENCE}",
+            scratch.database
+        )),
+        "1",
+        "the earlier era's gap is in the archive; it is simply not evidence here"
     );
 }
 
