@@ -601,7 +601,7 @@ fn open_ports(
         if config.adapter.tee.enabled {
             let destination = config.adapter.tee.destination(feed.spec, port_role)?;
             eprintln!(
-                "teeing {} {} datagrams to {}",
+                "fanning out {} {} datagrams to {}",
                 feed.spec.as_str(),
                 port_role.as_str(),
                 destination.display()

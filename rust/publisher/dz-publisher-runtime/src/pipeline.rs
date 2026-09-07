@@ -71,7 +71,8 @@ pub struct Port {
     /// From the transmitter, so the composer inherits the socket's identity
     /// rather than being told it a second time.
     pub endpoint: EgressEndpoint,
-    /// The fan-out. One member is the transmitter; a second would be the tee.
+    /// The fan-out. One member is the transmitter; a second would be the
+    /// `[adapter.tee]` copy.
     pub sink: Tee,
 }
 

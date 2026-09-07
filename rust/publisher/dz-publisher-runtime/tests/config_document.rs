@@ -24,7 +24,7 @@ fn the_adapter_tee_defaults_off_when_the_section_is_absent() {
     let document = Document::parse(&Doc::valid().render()).expect("valid");
     assert!(
         !document.adapter.tee.enabled,
-        "a tee nobody asked for must not be on"
+        "a fan-out nobody asked for must not be on"
     );
     assert_eq!(document.adapter.tee.path, None);
 }
@@ -58,27 +58,28 @@ fn the_adapter_tee_parses_when_it_is_present() {
 #[test]
 fn the_adapter_tee_refuses_a_key_it_does_not_know() {
     // `[adapter.tee]` is under `[adapter]`, and task 7 asks for
-    // `deny_unknown_fields` on `[adapter]` *and every section under it*. A tee
-    // with a misspelled `path` would otherwise be an enabled tee with no
-    // destination.
+    // `deny_unknown_fields` on `[adapter]` *and every section under it*. A
+    // section with a misspelled `path` would otherwise be an enabled fan-out
+    // with no destination.
     let mut doc = Doc::valid();
     doc.adapter =
         "[adapter]\nkind = \"a-venue\"\n\n[adapter.tee]\nenabled = true\nsocket = \"/x\"\n"
             .to_owned();
-    let error = Document::parse(&doc.render()).expect_err("`socket` is not a key of the tee");
+    let error =
+        Document::parse(&doc.render()).expect_err("`socket` is not a key of `[adapter.tee]`");
     assert!(error.to_string().contains("socket"));
 }
 
 #[test]
 fn the_tee_is_configured_under_adapter_and_not_under_egress() {
-    // The placement is the design's and it is not cosmetic: the tee darkens
+    // The placement is the design's and it is not cosmetic: the fan-out darkens
     // nothing when it fails and must never be able to end a send, so it does
     // not belong beside the keys an operator reads as *this can take the feed
     // down*. Written as a test because the wrong placement would parse
     // perfectly well.
     let mut doc = Doc::valid();
     doc.egress = "[egress]\nttl = 1\n\n[egress.tee]\nenabled = true\n".to_owned();
-    let error = Document::parse(&doc.render()).expect_err("the tee is not an egress key");
+    let error = Document::parse(&doc.render()).expect_err("`tee` is not an egress key");
     assert!(error.to_string().contains("tee"));
 }
 
@@ -1041,8 +1042,9 @@ fn a_tee_socket_is_named_by_the_feed_as_well_as_the_port_role() {
 #[test]
 fn a_tee_that_is_on_with_no_path_names_no_socket() {
     // The same refusal the load already produced, checked again where the
-    // socket is named: a prefix is not something to default, and a tee quietly
-    // writing to a relative path is an operator believing copies are archived.
+    // socket is named: a prefix is not something to default, and a fan-out
+    // quietly writing to a relative path is an operator believing copies are
+    // archived.
     let tee = TeeConfig {
         enabled: true,
         path: None,

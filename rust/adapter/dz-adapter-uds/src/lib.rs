@@ -15,13 +15,14 @@
 //! written rather than read.
 //!
 //! It is **not** what `[adapter.tee]` carries, and the distinction matters
-//! because the two answer different questions. The tee carries byte-identical
-//! copies of composed *wire* datagrams, so what it feeds a recorder can be
-//! diffed against a subscriber-site archive datagram for datagram — that stream
-//! exists today. This encoding is a publisher's *normalized events*, upstream of
-//! the lowering, which is what makes a mapping defect visible at all: a tee'd
-//! datagram reproduces the defect faithfully on both sides. Neither replaces the
-//! other, and the offline re-lowering is the reason this half exists.
+//! because the two answer different questions. That fan-out carries
+//! byte-identical copies of composed *wire* datagrams, so what it feeds a
+//! recorder can be diffed against a subscriber-site archive datagram for
+//! datagram — that stream exists today. This encoding is a publisher's
+//! *normalized events*, upstream of the lowering, which is what makes a mapping
+//! defect visible at all: a fanned-out datagram reproduces the defect
+//! faithfully on both sides. Neither replaces the other, and the offline
+//! re-lowering is the reason this half exists.
 //!
 //! # What this crate is not
 //!
