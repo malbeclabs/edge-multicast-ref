@@ -262,9 +262,9 @@ not measured the other two inherit the blame.
 delta since the previous datagram into `RecordedDatagram::drop_delta` and, as
 described below, into the archive itself. In `AF_PACKET` mode that number comes
 from `PACKET_STATISTICS`, whose `tp_drops` counts frames the kernel could not
-fit in the ring buffer. In socket mode it is `SO_RXQ_OVFL`, reported in a control
-message on each `recvmsg` as a running count of datagrams dropped because the
-receive queue was full. Offline, a gap in a channel instance's sequence is
+fit in the ring buffer. In socket mode it is `SO_RXQ_OVFL`, reported in a
+control message on each `recvmsg` as a running count of datagrams dropped
+because the receive queue was full. Offline, a gap in a channel instance's sequence is
 subtracted against the recorder's own admitted losses before it is reported as
 network or publisher loss.
 
@@ -568,13 +568,12 @@ idempotent and a re-run after an analyser fix replaces rather than duplicates.
 ## The health tier
 
 Runs in the recorder process. Links `dz-edge-core` only. Keys everything on the
-**channel instance** — `(source address, Channel ID, destination port)` — for
-the reason that governs every instance-keyed tracker: an operator may run two
-publishers
-serving the same channel to the same group and port, each advancing its own
-sequence space and its own `Reset Count`, and a tracker keyed any less finely
-reads every alternation as backward motion in one direction and lets one
-publisher's heartbeats cover the other's total outage in the other.
+**channel instance** — `(source IP address, Channel ID, destination port)` —
+for the reason that governs every instance-keyed tracker: an operator may run
+two publishers serving the same channel to the same group and port, each
+advancing its own sequence space and its own `Reset Count`, and a tracker keyed
+any less finely reads every alternation as backward motion in one direction and
+lets one publisher's heartbeats cover the other's total outage in the other.
 
 A source address not seen before opens a new series **silently**: no gap, no
 loss, no alert. A tunnel address is a lease, it can be reassigned under a live

@@ -177,7 +177,7 @@ pub struct RecordedDatagram<'a> {
 }
 ```
 
-`ChannelInstance` is `(Ipv4Addr, u8, u16)` — source address, `Channel ID`, destination port — with `Hash`, `Eq` and `Copy`. It lives here rather than in the health crate because the manifest keys on it too.
+`ChannelInstance` is `(Ipv4Addr, u8, u16)` — source IP address, `Channel ID`, destination port — with `Hash`, `Eq` and `Copy`. It lives here rather than in the health crate because the manifest keys on it too.
 
 The three traits are exactly the spec's. `Sink::rotate` returns `Result<Option<CompletedSegment>, SinkError>`; `None` means the segment held nothing and no object was produced, which is not an error and must not be logged as one.
 
