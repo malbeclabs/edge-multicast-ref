@@ -28,9 +28,10 @@
 //! | a pulled snapshot | — | `0x20`/`0x42`/`0x22` on snapshot |
 //!
 //! `Trade` is the row that needs an argument. The wire's cross-specification
-//! policy requires `0x04` to be **byte-for-byte identical** across a venue's
-//! sibling feeds, and in one existing publisher that obligation is held by a
-//! doc comment across two separate encoder implementations, checked by hand.
+//! policy requires `0x04` to be **byte-for-byte identical** across the feeds in
+//! the family a venue publishes, and in one existing publisher that obligation
+//! is held by a doc comment across two separate encoder implementations,
+//! checked by hand.
 //! `dz-publisher-lowering` made it one function; this makes it one *value*. The
 //! trade is lowered once and the same `Trade` is handed to both send paths, so
 //! the two are not two things that agree — they are one thing, and there is no
@@ -1287,11 +1288,11 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                 );
                 match lowered {
                     // **One value, both feeds.** The wire requires `0x04` to be
-                    // byte-for-byte identical across a venue's sibling feeds,
-                    // and this is the mechanism: there is one lowered trade and
-                    // no second call site to drift. A trade also stamps no
-                    // `Per-Instrument Seq` — the message has no such field, and
-                    // it is not a book mutation.
+                    // byte-for-byte identical across the feeds in the family a
+                    // venue publishes, and this is the mechanism: there is one
+                    // lowered trade and no second call site to drift. A trade
+                    // also stamps no `Per-Instrument Seq` — the message has no
+                    // such field, and it is not a book mutation.
                     Ok(trade) => {
                         let mut reached = false;
                         timed(&self.metrics, EgressMessageType::Trade, || {

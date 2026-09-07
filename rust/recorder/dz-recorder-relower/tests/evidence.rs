@@ -49,8 +49,8 @@ fn depth_archive(messages: &[Msg], framing: Framing) -> DatagramLog {
 fn datagrams_from_another_stream_are_counted_and_never_decoded() {
     // The archive also holds the synthetic publisher's traffic, whose delimiter
     // is deliberately not any real feed's. `Magic` is the only thing that stops
-    // a datagram misrouted from a sibling feed being parsed at the wrong
-    // layout, so the foreign datagrams are counted as foreign — not as
+    // a datagram misrouted from another feed in the family being parsed at the
+    // wrong layout, so the foreign datagrams are counted as foreign — not as
     // undecodable, which would say something quite different about the archive,
     // and not as messages.
     let mut archive = depth_archive(

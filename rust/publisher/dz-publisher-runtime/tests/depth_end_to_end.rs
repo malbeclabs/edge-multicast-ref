@@ -312,12 +312,12 @@ fn a_trade_on_a_depth_channel_spends_no_per_instrument_number() {
 #[test]
 fn one_trade_reaches_both_feeds_as_the_same_bytes() {
     // The wire's cross-specification policy for `0x04`: a Type ID appearing in
-    // more than one sibling feed carries the same meaning in each, and `Trade`
-    // is byte-for-byte identical between them. In one existing publisher that
-    // obligation is held by a doc comment across two encoder implementations,
-    // checked by hand. Here the trade is lowered **once** and the same value is
-    // handed to both send paths, so the two feeds do not carry two things that
-    // agree — they carry one thing.
+    // more than one feed in the family carries the same meaning in each, and
+    // `Trade` is byte-for-byte identical between them. In one existing
+    // publisher that obligation is held by a doc comment across two encoder
+    // implementations, checked by hand. Here the trade is lowered **once** and
+    // the same value is handed to both send paths, so the two feeds do not
+    // carry two things that agree — they carry one thing.
     let mut h = harness_both();
     let mut adapter = FakeAdapter::new(&["A-B"]);
     h.publisher.poll_listings(&mut adapter);

@@ -55,9 +55,10 @@ fn i64_at(buf: &[u8], at: usize) -> i64 {
 
 #[test]
 fn the_feed_magic_is_this_feeds_own() {
-    // A sibling feed's datagram misrouted onto this group is refused by this
-    // value and by nothing else, so it is worth asserting against the literal
-    // rather than against a constant that could drift with it.
+    // A datagram from another feed in the family misrouted onto this group is
+    // refused by this value and by nothing else, so it is worth asserting
+    // against the literal rather than against a constant that could drift with
+    // it.
     assert_eq!(MAGIC_MBP, 0x4442);
     assert_ne!(MAGIC_MBP, dz_edge_tob::MAGIC_TOB);
 }
@@ -270,7 +271,8 @@ fn a_short_buffer_is_refused_before_its_type_id_is_judged() {
 
 #[test]
 fn a_body_at_another_types_id_is_refused() {
-    // What a misrouted sibling message looks like once framing has accepted it.
+    // What a message misrouted from another feed in the family looks like once
+    // framing has accepted it.
     let mut buf = encoded(&level_update());
     buf[0] = 0x03; // Quote, in the top-of-book feed.
     assert!(matches!(

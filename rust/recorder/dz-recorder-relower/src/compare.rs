@@ -212,7 +212,8 @@ pub fn compare(wire: &WireCapture, re_lowered: &ReLowered) -> RelowerReport {
 /// directly.
 ///
 /// `expected_magic` is required, because `Magic` is the only thing that stops a
-/// datagram misrouted from a sibling feed being parsed at the wrong layout.
+/// datagram misrouted from another feed in the family being parsed at the wrong
+/// layout.
 ///
 /// # Errors
 ///

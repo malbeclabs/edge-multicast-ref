@@ -1,7 +1,8 @@
 /// A feed in the DoubleZero Edge family.
 ///
-/// `Magic` is what rejects a datagram misrouted from a sibling feed, so it
-/// belongs to the feed rather than to a call site that has to remember it.
+/// `Magic` is what rejects a datagram misrouted from another feed in the
+/// family, so it belongs to the feed rather than to a call site that has to
+/// remember it.
 pub trait Feed {
     /// The datagram delimiter for this feed.
     const MAGIC: u16;
@@ -25,10 +26,10 @@ pub trait Feed {
     /// and it is caught the same way: by holding the code to a table
     /// transcribed from the specification rather than to itself.
     ///
-    /// A shared Type ID appears in every sibling that carries it. The wire's
-    /// cross-specification policy requires such a message to mean the same
-    /// thing in each, which is why one entry in several tables is correct
-    /// rather than a duplication to factor out.
+    /// A shared Type ID appears in every feed in the family that carries it.
+    /// The wire's cross-specification policy requires such a message to mean
+    /// the same thing in each, which is why one entry in several tables is
+    /// correct rather than a duplication to factor out.
     const CARRIES: &'static [u8];
 
     /// Whether this feed's specification carries a Type ID.

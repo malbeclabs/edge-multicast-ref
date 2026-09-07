@@ -702,7 +702,7 @@ impl FeedSpec {
 ///
 /// [`ChannelEgress`](dz_publisher_egress::ChannelEgress) is generic over the
 /// feed, because `Magic` belongs to the feed and is what rejects a datagram
-/// misrouted from a sibling. So a send path is
+/// misrouted from another feed in the family. So a send path is
 /// `FeedPipeline<TopOfBook>` or `FeedPipeline<MarketByPrice>` and the feed is
 /// known at compile time — but the *routing* has to know which specification it
 /// is holding, because the codec will not stop a `Quote` being pushed into a

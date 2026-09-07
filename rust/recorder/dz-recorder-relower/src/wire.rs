@@ -174,8 +174,9 @@ impl WireCapture {
     ///
     /// `expected_magic` is required and has no default, for the reason the
     /// codec's own walk requires it: `Magic` is the only thing that stops a
-    /// datagram misrouted from a sibling feed being parsed at the wrong layout,
-    /// and only the caller knows which feed it believes it is holding.
+    /// datagram misrouted from another feed in the family being parsed at the
+    /// wrong layout, and only the caller knows which feed it believes it is
+    /// holding.
     ///
     /// # Errors
     ///

@@ -328,8 +328,8 @@ fn each_channel_instance_is_described_under_the_role_it_arrived_on() {
 
 #[test]
 fn the_archive_declares_this_feeds_own_magic_and_schema() {
-    // A datagram of this feed archived under a sibling's magic would decode at
-    // the wrong layout for anyone reading the object later.
+    // A datagram of this feed archived under another feed's magic would decode
+    // at the wrong layout for anyone reading the object later.
     let (_, archive) = recorded();
     for dg in replay(&archive.object) {
         assert_eq!(
