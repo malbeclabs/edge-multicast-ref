@@ -174,7 +174,7 @@ fn to_signed(magnitude: u64, negative: bool) -> Result<i64, ScaleError> {
         } else if magnitude <= i64::MAX as u64 {
             // Cannot overflow: the guard above admits only magnitudes up to
             // i64::MAX, and the one i64 whose negation would overflow -
-            // i64::MIN - is already handled by the MIN_MAGNITUDE arm.
+            // i64::MIN - is already handled by the MIN_MAGNITUDE branch.
             Ok(-(magnitude as i64))
         } else {
             Err(ScaleError::Overflow)

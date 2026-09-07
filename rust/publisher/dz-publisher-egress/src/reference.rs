@@ -240,7 +240,7 @@ impl DatagramSink for ReferenceStream {
     /// A failure here costs a consumer of a copy and nothing else. Ending the
     /// process over it would turn an auxiliary outage into a feed outage, which
     /// is exactly the trade the tee exists to refuse. The other line is the
-    /// `ConsumerAbsent` arm above: this one decides what a *dropped* member
+    /// `ConsumerAbsent` branch above: this one decides what a *dropped* member
     /// costs, and that one decides whether an absent recorder drops the member
     /// at all.
     fn failure_scope(&self) -> FailureScope {

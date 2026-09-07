@@ -452,9 +452,9 @@ impl<'a> Driver<'a> {
                         connection,
                     };
                     self.observer.bytes(bytes.len() as u64);
-                    // The scope opens here and closes when `sink` is dropped at
-                    // the end of this arm, so every event the adapter emits -
-                    // and only those - is attributable to this payload.
+                    // The scope opens here and closes when `sink` is dropped
+                    // at the end of this branch, so every event the adapter
+                    // emits - and only those - is attributable to this payload.
                     {
                         let mut sink = PayloadSink::open(
                             &mut *events,

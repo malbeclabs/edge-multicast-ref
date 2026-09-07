@@ -107,7 +107,7 @@ pub enum RecordWriteError {
     ///
     /// `Event` is `#[non_exhaustive]` and this crate is not the one that
     /// defines it, so a variant added there compiles here and arrives at the
-    /// wildcard arm — a runtime case, not the build failure this method's
+    /// wildcard branch — a runtime case, not the build failure this method's
     /// documentation used to claim.
     ///
     /// Recoverable, and it used to be a `todo!`. Three things could happen to
@@ -396,8 +396,8 @@ impl RecordWriter {
     /// [`RecordWriteError::UnsupportedEvent`] for an `Event` variant this
     /// encoding does not cover. `Event` is `#[non_exhaustive]` and lives in
     /// another crate, so a variant added to it does *not* fail this build — it
-    /// reaches the wildcard arm at runtime. Nothing is appended to `out` in that
-    /// case, so a refused event leaves no partial record behind.
+    /// reaches the wildcard branch at runtime. Nothing is appended to `out` in
+    /// that case, so a refused event leaves no partial record behind.
     pub fn write(
         &mut self,
         symbol: &str,

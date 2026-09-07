@@ -227,9 +227,9 @@ pub struct SnapshotRefusals {
 impl SnapshotRefusals {
     /// Count one refusal.
     ///
-    /// An exhaustive match rather than a fallback arm, so that a cause added to
-    /// [`SnapshotError`] has to be classified here instead of landing in
-    /// whichever bucket a `_` named.
+    /// An exhaustive match rather than a fallback branch, so that a cause
+    /// added to [`SnapshotError`] has to be classified here instead of landing
+    /// in whichever bucket a `_` named.
     fn record(&mut self, error: &SnapshotError) {
         match error {
             SnapshotError::Adapter(AdapterError::NotReady { .. }) => self.not_ready += 1,
@@ -300,7 +300,7 @@ impl Refusals {
     /// An exhaustive match over both enumerations rather than a lookup on
     /// `LoweringError::reason`'s token, so that a reason added on either side
     /// fails to compile here instead of being counted under whichever bucket a
-    /// fallback arm named.
+    /// fallback branch named.
     fn record(&mut self, error: LoweringError, metrics: &PublisherMetrics) {
         // One match for both the count and the label, so the two cannot
         // disagree about which reason a refusal was. Splitting them into two
@@ -1218,8 +1218,8 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
     }
 
     fn event(&mut self, event: Event<'_>) {
-        // Read once, before the match, so every arm labels its observation the
-        // same way and a new arm cannot forget to.
+        // Read once, before the match, so every branch labels its observation
+        // the same way and a new branch cannot forget to.
         let kind = event_kind(&event);
         let now_mono = dz_publisher_refdata::Clock::monotonic_ns(&self.clock);
         let now_unix = self.clock.unix_ns();
@@ -1233,8 +1233,8 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                 ask,
             } => {
                 // Refused before the lowering when no feed carries it, which
-                // costs nothing here and is the same rule the depth arms below
-                // need for a stronger reason.
+                // costs nothing here and is the same rule the depth branches
+                // below need for a stronger reason.
                 let Some(_) = self.feeds.top_of_book.as_ref() else {
                     self.unroutable += 1;
                     return;
@@ -1390,7 +1390,7 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
 
             // A variant a later boundary release adds — the market-by-order
             // ones, when `dz-edge-mbo` lands. Counted and dropped without being
-            // lowered, for the same reason the depth arms check first.
+            // lowered, for the same reason the depth branches check first.
             _ => self.unroutable += 1,
         }
     }
