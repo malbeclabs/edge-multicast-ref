@@ -6,9 +6,9 @@
 //! say whether it was never sent. This sink is the other half of that question:
 //! byte-identical copies of every datagram a publisher composed, delivered to a
 //! consumer on the publisher host — a recorder — so the two archives can be
-//! diffed on `(source, Channel ID, destination port, Sequence Number)`. Network
-//! loss, reordering, MTU drops and one-way latency become measured rather than
-//! inferred.
+//! diffed on `(source address, Channel ID, destination port, Sequence
+//! Number)`. Network loss, reordering, MTU drops and one-way latency become
+//! measured rather than inferred.
 //!
 //! It sees what the publisher decided to send and nothing upstream of that, so
 //! a mapping defect is faithfully reproduced on both sides. That limit is the

@@ -620,9 +620,9 @@ fn two_groups_on_one_port_each_record_their_own_and_nothing_of_the_other() {
     // and with a wildcard bind it gives it every group any socket on the host
     // has joined — so a recorder can be entirely correct about the datagrams it
     // was handed and still archive a feed nobody asked it to keep. And it fails
-    // quietly: ChannelInstance is (source, channel id, port), with no group in
-    // it, so the two sequence spaces merge into one coverage row and the
-    // archive that results reads as a single feed with impossible gaps.
+    // quietly: ChannelInstance is (source address, channel id, port), with no
+    // group in it, so the two sequence spaces merge into one coverage row and
+    // the archive that results reads as a single feed with impossible gaps.
     let ours_binding = PortBinding::new(PortRole::Mktdata, GROUP, SHARED_PORT);
     let theirs_binding = PortBinding::new(PortRole::Mktdata, OTHER_GROUP, SHARED_PORT);
 

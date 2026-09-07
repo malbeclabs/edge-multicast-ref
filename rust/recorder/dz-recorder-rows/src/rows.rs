@@ -417,8 +417,8 @@ pub struct SequenceGap {
     /// Present at another site. Absent until the cross-site join has run.
     pub seen_elsewhere: Option<u8>,
     /// Present in another instance on this channel and port. Absent when this
-    /// channel and port carried no second source in this object, because then
-    /// there is nothing to have looked in.
+    /// channel and port carried no second source address in this object,
+    /// because then there is nothing to have looked in.
     pub on_redundant_path: Option<u8>,
     pub verdict: Verdict,
     /// Where the evidence is.

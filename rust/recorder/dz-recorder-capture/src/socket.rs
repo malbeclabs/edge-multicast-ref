@@ -358,7 +358,7 @@ impl<K: Copy + Eq + Hash + Ord> LastSeen<K> {
     }
 }
 
-/// Whether a datagram's source is one the recorder was told to expect.
+/// Whether a datagram's source address is one the recorder was told to expect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceVerdict {
     Expected,
@@ -393,8 +393,8 @@ impl SourceGate {
         Self::new(Arc::new(expected.into_iter().collect()), capacity)
     }
 
-    /// Records the sighting and judges the source. Nothing here can refuse
-    /// delivery: it returns a verdict, not a decision.
+    /// Records the sighting and judges the source address. Nothing here can
+    /// refuse delivery: it returns a verdict, not a decision.
     pub fn observe(&mut self, key: SourceKey) -> SourceVerdict {
         self.seen.observe(key);
         // An empty list is not an expectation, so it cannot be violated.

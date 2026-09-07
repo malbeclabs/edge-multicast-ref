@@ -108,9 +108,9 @@ pub struct PublisherMetricsConfig<'a> {
     /// counts individually on `dz_publisher_ingress_messages_total`.
     ///
     /// Anything the upstream sends that is not named here is counted under
-    /// `other`. The label is the source's vocabulary and this crate cannot
-    /// enumerate it, but an unbounded label on the highest-frequency path
-    /// is the cardinality blow-up the crate refuses elsewhere: many
+    /// `other`. The label is the upstream source's vocabulary and this crate
+    /// cannot enumerate it, but an unbounded label on the highest-frequency
+    /// path is the cardinality blow-up the crate refuses elsewhere: many
     /// upstream APIs name a message after the subscription that carried
     /// it, which is one series per instrument.
     pub ingress_message_types: &'a [&'a str],

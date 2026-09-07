@@ -738,10 +738,10 @@ fn interface_drop_delta(
 /// those is the fill rate — the number that says whether the redundancy is
 /// earning its cost.
 ///
-/// `None` when this channel and port carried no second source in this object:
-/// there is then nothing to have looked in, and a `0` would say we looked and
-/// found nothing. The judgement is per object, which is why the column is
-/// nullable rather than a claim about the feed.
+/// `None` when this channel and port carried no second source address in this
+/// object: there is then nothing to have looked in, and a `0` would say we
+/// looked and found nothing. The judgement is per object, which is why the
+/// column is nullable rather than a claim about the feed.
 fn on_redundant_path(
     report: &dz_recorder_loss::LossReport,
     loss: &InstanceLoss,
