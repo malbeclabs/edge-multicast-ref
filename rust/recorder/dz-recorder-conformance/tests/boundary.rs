@@ -68,14 +68,38 @@ impl Report {
         }
     }
 
+    /// Where the stand-in copies this report from.
+    ///
+    /// Everything is staged under [`STAGED`] rather than read out of
+    /// `tests/fixtures` directly, so that every report path handed to the
+    /// stand-in has a space in it. The path is interpolated into a shell
+    /// script, and an unquoted one splits into two words: without this the
+    /// quoting would be tested only on a checkout under `/home/some one/`, and
+    /// the failure it produces — an empty file where a report should be — is
+    /// one several of these tests already assert for other reasons.
     fn source(self, dir: &Path) -> Option<PathBuf> {
+        let staged = dir.join(STAGED);
         match self {
             Self::None => None,
-            Self::Clean => Some(fixture("report-clean.json")),
-            Self::Violation => Some(fixture("report-violation.json")),
-            Self::Garbage => Some(dir.join("garbage.json")),
+            Self::Clean => Some(staged.join("report-clean.json")),
+            Self::Violation => Some(staged.join("report-violation.json")),
+            Self::Garbage => Some(staged.join("garbage.json")),
         }
     }
+}
+
+/// The directory the stand-ins' reports are staged in, named on purpose.
+const STAGED: &str = "reports with a space";
+
+/// One shell word that is exactly `s`, whatever is in it.
+///
+/// Single quotes and not none: a fixture path is a workspace path, and a
+/// workspace path may hold a space or a `$`. A stand-in that failed for that
+/// reason would fail as a report that could not be read, which is a verdict
+/// several of these tests are here to assert about the boundary rather than
+/// about the harness.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 /// What the stand-in answers `--version` with.
@@ -150,8 +174,13 @@ impl StandIns {
     fn build() -> Self {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let at = dir.path().to_path_buf();
+        let staged = at.join(STAGED);
+        std::fs::create_dir(&staged).expect("somewhere to stage the reports");
+        for name in ["report-clean.json", "report-violation.json"] {
+            std::fs::copy(fixture(name), staged.join(name)).expect("the fixture is readable");
+        }
         std::fs::write(
-            at.join("garbage.json"),
+            staged.join("garbage.json"),
             b"time=12:00 level=INFO msg=\"5 rules evaluated\"\n",
         )
         .expect("a file that is not a report");
@@ -179,12 +208,15 @@ impl StandIns {
     /// file.
     fn write(at: &Path, spec: FakeSpec) {
         let copy = spec.report.source(at).map_or_else(String::new, |src| {
-            format!("[ -n \"$out\" ] && cat {} > \"$out\"\n", src.display())
+            format!(
+                "[ -n \"$out\" ] && cat {} > \"$out\"\n",
+                sh_quote(&src.display().to_string())
+            )
         });
         let script = format!(
             "#!/bin/sh\n\
              if [ \"$1\" = \"--version\" ]; then\n\
-             \x20 printf '%s' '{version_stdout}'\n\
+             \x20 printf '%s' {version_stdout}\n\
              \x20 exit {version_exit}\n\
              fi\n\
              prev=\"\"\n\
@@ -200,7 +232,7 @@ impl StandIns {
              for a in \"$@\"; do printf '%s\\n' \"$a\" >> \"$argv\"; done\n\
              {copy}\
              exit {exit}\n",
-            version_stdout = spec.version.stdout(),
+            version_stdout = sh_quote(&spec.version.stdout()),
             version_exit = spec.version_exit,
             copy = copy,
             exit = spec.exit,
