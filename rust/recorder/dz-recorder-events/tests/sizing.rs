@@ -370,3 +370,34 @@ fn a_silent_channel_has_no_ratio_rather_than_a_zero_one() {
         "nothing was walked, so nothing is reported"
     );
 }
+
+/// A window that never held the feed asked for is not a window of a quiet feed.
+///
+/// The two look identical in a table — no rows either way — and they are
+/// opposite facts. One says the publisher sent nothing worth counting; the other
+/// says the question was put to an archive that could not answer it, because
+/// what it holds is another feed. A caller that cannot tell them apart enables a
+/// derivation against a ratio nobody measured.
+#[test]
+fn a_window_of_another_feed_measures_nothing_rather_than_zero() {
+    let mut log = DatagramLog::new(pack::<MarketByPrice>(&levels(4), PortRole::Mktdata, 0));
+    let measured = Sizing::measure(&mut log, MAGIC_TOB).expect("the log does not fail");
+    assert!(
+        measured.is_empty(),
+        "four datagrams of the other feed's Magic measure no channel of this one"
+    );
+    assert!(
+        measured.feed(primary()).is_none(),
+        "and the channel that carried them is not one of this feed's"
+    );
+
+    // The same archive read as the feed it holds is the contrast, and it is what
+    // says `is_empty` tracks the question rather than the archive.
+    let mut same = DatagramLog::new(pack::<MarketByPrice>(&levels(4), PortRole::Mktdata, 0));
+    let held = Sizing::measure(&mut same, MAGIC_MBP).expect("the log does not fail");
+    assert!(
+        !held.is_empty(),
+        "read as its own feed it measures a channel"
+    );
+    assert_eq!(held.feed(primary()).expect("the channel").messages(), 4);
+}

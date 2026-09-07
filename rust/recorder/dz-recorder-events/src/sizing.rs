@@ -251,6 +251,20 @@ impl Sizing {
     pub fn feed(&self, channel: Channel) -> Option<&FeedSizing> {
         self.by_channel.get(&channel)
     }
+
+    /// Whether the window measured no channel of this feed at all.
+    ///
+    /// Every other absence in this report is a channel saying it cannot be
+    /// decided against yet. This one is the window saying it never held the feed
+    /// that was asked for — an archive of another feed, or a `Magic` the caller
+    /// got wrong — and it is the difference between *no answer* and *an answer
+    /// of nothing*. A caller that prints the table and stops treats the two
+    /// alike, and a table with no rows reads as a feed that was quiet rather
+    /// than as a question that was never asked.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.by_channel.is_empty()
+    }
 }
 
 /// Snapshot cycles that both began and ended inside the window, per channel.

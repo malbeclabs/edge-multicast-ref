@@ -106,7 +106,8 @@ document argues is not a key.
 
 **The row machinery exists.** `dz-recorder-rows` defines the row model,
 `dz-recorder-clickhouse` owns the checked-in migrations and the insert sink, and
-`dz-recorder-load` is the loader: read a host's own completed objects read-only,
+`dz-recorder-load` is the loader: it opens a host's own completed objects
+read-only,
 keep a ledger keyed on `(object key, sha256)`, insert idempotently, and expose
 how far behind it is.
 
@@ -121,7 +122,16 @@ Three tables, in `recorder`, beside the five that exist — `datagram`, `era`,
 `segment_coverage`, `sequence_gap` and `conformance_finding`. Every one carries
 the identity block those rows carry — `site`, `recorder`, `env`, `feed`,
 `port_role`, `source_addr`, `channel_id`, `dst_port` — so that a market data
-question and a loss question can be asked in one join. That is the whole reason
+question and a loss question can be asked in one join.
+
+**`book_top` carries that block without `port_role`, and it is the one table that
+cannot.** A book spans port roles by construction: its anchor arrives on
+`snapshot` and the deltas that move it on `mktdata`, so a role stamped on the row
+would name whichever message wrote it last and would be read as *the role this
+state came from*, which no single role is. A join from `book_top` to
+`sequence_gap` or `era` is therefore per channel and era rather than per channel
+instance, and the question *was this state derived by applying a snapshot* is
+answered by a column of its own rather than by a role. That is the whole reason
 for putting them in the same database rather than in a second one.
 
 ### 1. `event` — one row per decoded message
@@ -191,8 +201,26 @@ CREATE TABLE IF NOT EXISTS recorder.event (
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(recv_ts)
 ORDER BY (channel_id, instrument_id, sequence_number, message_index,
-          source_addr, dst_port, site, recv_ts);
+          source_addr, dst_port, site, recorder, env, feed, recv_ts);
 ```
+
+**The sort key holds every identity column, because `ReplacingMergeTree`
+deduplicates on the whole of it.** An identity column left out does not sort
+badly — it *deletes*. Two recorders at one site see the same datagrams and
+produce rows agreeing on channel, instrument, sequence number and index, so
+`recorder` is what keeps them two rows rather than one silently replacing the
+other; `env` is the same argument across a boundary nothing else in the row
+crosses; and `feed` is what stops two feeds that happen to share a `Channel ID`
+and an `Instrument ID` from being merged on the strength of that coincidence.
+Relying on `recv_ts` to differ is not a key, it is a coincidence between two
+clocks.
+
+Two identity columns are deliberately **not** in the key. `port_role` is
+recoverable from `dst_port`, which is in it, so adding the name beside the number
+widens every key to restate a fact already there. And `recv_ts_kind` is a
+property of how a timestamp was taken rather than of which row this is: two rows
+differing only in it are one datagram read twice, and keying on it would file
+them as two.
 
 **One table with nullable per-type columns, not one table per message type.** The
 bodies share every column above `message_type` — identity, sequencing, instrument
@@ -351,7 +379,8 @@ CREATE TABLE IF NOT EXISTS recorder.instrument (
 )
 ENGINE = ReplacingMergeTree(last_seen_ts)
 PARTITION BY toYYYYMMDD(first_seen_ts)
-ORDER BY (channel_id, instrument_id, from_sequence, source_addr, dst_port, site, recorder);
+ORDER BY (channel_id, instrument_id, from_sequence, source_addr, dst_port,
+          site, recorder, env, feed);
 ```
 
 The era-scoped accumulator, as a table. It exists for three reasons, each of
@@ -412,7 +441,7 @@ CREATE TABLE IF NOT EXISTS recorder.book_top (
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(recv_ts)
 ORDER BY (channel_id, instrument_id, recv_ts, sequence_number,
-          message_index, observation);
+          message_index, observation, env, feed);
 ```
 
 One row per *change*, where a change is a change in **either** the visible top

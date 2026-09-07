@@ -67,7 +67,9 @@ So the deriver holds book state **per `(feed, channel instance, instrument)`**, 
 
 Add `src`, `dst` and `recv_ts_kind` to `WireProvenance`, populate them in `absorb_datagram`, and correct the type's doc comment: it says every field is one a batching or pacing decision moves, which was true and stops being true here. These three are identity, not timing, and they are still never compared.
 
-**Verification:** `cargo test -p dz-recorder-relower` green with no test changed — the walk's output is a superset. One new test asserts that a datagram recorded from a known address and port produces provenance carrying them, and that two datagrams differing only in source address produce provenance that differs.
+**Verification:** `cargo test -p dz-recorder-relower` green with **no existing
+test changed or removed** — the walk's output is a superset, so nothing that
+passed before needs adjusting — and new coverage beside them. One new test asserts that a datagram recorded from a known address and port produces provenance carrying them, and that two datagrams differing only in source address produce provenance that differs.
 
 ### 2. Surface the messages the walk only counts
 

@@ -93,7 +93,25 @@ fn main() -> ExitCode {
         }
     }
 
-    print!("{}", Sizing::of(&capture));
+    // A window that never held this feed is a question that was not asked, and
+    // it exits as one. Printing the empty table and succeeding is the worst of
+    // the available behaviours: `--feed top-of-book` against an archive of the
+    // other feed produces a header, no rows, and a zero exit — which reads as
+    // *this feed is quiet* to the operator and to anything scripting this.
+    let sizing = Sizing::of(&capture);
+    if sizing.is_empty() {
+        let skipped = capture.skipped();
+        eprintln!(
+            "no datagram in {} archive(s) carried this feed's Magic: {} of {} carried another \
+             feed's. Nothing here is a ratio.",
+            archives.len(),
+            skipped.foreign_magic,
+            capture.datagrams()
+        );
+        return ExitCode::FAILURE;
+    }
+
+    print!("{sizing}");
     println!(
         "\n{} archive(s), {} datagram(s) read in all, {:?} skipped",
         archives.len(),
