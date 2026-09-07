@@ -8,9 +8,9 @@
 
 A single multicast group and port pair carries **two redundant publishers**,
 interleaved packet by packet and distinguished by their source IP and by
-`Channel ID` in the frame header. Their content is equivalent, but each
-maintains its own **independent per-publisher counters**: frame sequence numbers
-and Reset Count.
+`Channel ID` in the datagram header. Their content is equivalent, but each
+maintains its own **independent per-publisher counters**: datagram sequence
+numbers and Reset Count.
 
 Any such counter held as a single global value is wrong, and wrong silently. The
 wire is well formed, no error is logged, and the derived metric or state simply
@@ -29,14 +29,14 @@ Two instances exist in this repo. One is fixed:
 ## Observed evidence
 
 On the market-by-price snapshot port, one tracker spanning two sequence spaces
-reported ~409k `frames_missing_total` and ~38k gaps against ~5.9M frames received,
-while the host reported zero UDP `RcvbufErrors` and zero `InErrors`.
+reported ~409k `frames_missing_total` and ~38k gaps against ~5.9M datagrams
+received, while the host reported zero UDP `RcvbufErrors` and zero `InErrors`.
 
 The market-by-price mktdata port and the top-of-book group both carry two
 publishers as well, yet report almost no gaps. Their publisher pairs happen to
-stay frame-synchronised, so the conflated tracker sees a near-monotonic sequence.
-That is luck, not design: the top-of-book parser holds the identical latent bug
-and will report the same phantom loss the moment its pair drifts.
+stay datagram-synchronised, so the conflated tracker sees a near-monotonic
+sequence. That is luck, not design: the top-of-book parser holds the identical
+latent bug and will report the same phantom loss the moment its pair drifts.
 
 **This design makes the metric correct. It does not by itself establish how much
 of the residual snapshot loss is real** — that is answered by reading the
@@ -97,7 +97,7 @@ omit it. That matters here specifically: this code is triplicated across three
 parsers, and putting the invariant in the type is what stops the third copy from
 drifting back.
 
-The caller reads the channel from the frame header:
+The caller reads the channel from the datagram header:
 
 ```go
 const frameHeaderChannelOffset = 3
@@ -130,7 +130,7 @@ sequence gaps there remain meaningless by design.
 `frame_seq_gaps_total` and `frames_missing_total` gain **`source_ip`** and
 **`channel_id`** labels, giving `(port, source_ip, channel_id)` — the same tuple
 the tracker keys on, so the metric can answer "which publisher is losing
-frames" directly.
+datagrams" directly.
 
 The channel label is named `channel_id`, not `channel`, because
 `topofbook-parser` already uses `channel` to mean the port. Prometheus cannot
@@ -157,7 +157,7 @@ normal Prometheus behaviour and needs no handling.
   one enormous phantom gap. This is an improvement on current behaviour, and it
   is what makes a rehomed source safe.
 - Reorders and duplicates (`seq <= last`) stay ignored, now per publisher.
-- Frames shorter than 12 bytes are skipped as today; byte 3 is only read inside
+- Datagrams shorter than 12 bytes are skipped as today; byte 3 is only read inside
   that guard.
 
 **Known limitation, out of scope.** If a publisher restarts and its sequence
@@ -189,7 +189,7 @@ Extend `seqtracker_test.go` in each parser with a table covering:
   the regression test for this bug
 - a genuine gap within one publisher is still counted, and attributed to that
   publisher
-- the first frame seen from a publisher is silent
+- the first datagram seen from a publisher is silent
 - reorders and duplicates are handled per publisher, without disturbing the other
 - **two sources sharing one `channel_id` stay separate** — the case `source_ip`
   exists to cover, and the one not reachable through a channel-only key

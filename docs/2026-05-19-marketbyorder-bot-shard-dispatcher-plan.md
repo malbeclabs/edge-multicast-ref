@@ -859,7 +859,7 @@ git commit -m "marketbyorder-bot: add shard type with per-instrument state and p
 - Modify: `go/marketbyorder-bot/shard.go`
 - Modify: `go/marketbyorder-bot/shard_test.go`
 
-This ports the dispatcher-closure body from `main.go:110-185` (events writing, snapshot frame routing, `MarkDirty`, metric increments) onto the shard, scoped to its instruments. `apply()` stays pure (book only); a new `handle()` calls `apply()` then does persistence.
+This ports the dispatcher-closure body from `main.go:110-185` (events writing, snapshot record routing, `MarkDirty`, metric increments) onto the shard, scoped to its instruments. `apply()` stays pure (book only); a new `handle()` calls `apply()` then does persistence.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1423,7 +1423,7 @@ git commit -m "marketbyorder-bot: add coordinator with classification and instru
 - Modify: `go/marketbyorder-bot/coordinator.go`
 - Modify: `go/marketbyorder-bot/coordinator_test.go`
 
-Implements the design's "Channel-reset barrier": hold `R`, goroutine-per-shard `resetMarker` send, wait N acks, clear coordinator state, then route held `R` as first new-era frame.
+Implements the design's "Channel-reset barrier": hold `R`, goroutine-per-shard `resetMarker` send, wait N acks, clear coordinator state, then route held `R` as first new-era record.
 
 - [ ] **Step 1: Write the failing test**
 

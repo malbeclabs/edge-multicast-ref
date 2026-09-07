@@ -6,7 +6,7 @@ How-to material does not live here, for the reason above: a guide has to stay tr
 
 `superpowers/specs/` and `superpowers/plans/` are the current convention: a spec argues a design and is reviewed before code, a plan turns it into ordered tasks, and they pair by name and date. The dated files at this level predate that split.
 
-Older documents also predate [GLOSSARY.md](https://github.com/malbeclabs/edge-feed-spec/blob/main/GLOSSARY.md) and say `frame` for `datagram` and `bot` for `book-builder`. They are left as written.
+Older documents predate [GLOSSARY.md](https://github.com/malbeclabs/edge-feed-spec/blob/main/GLOSSARY.md). Their prose now follows it, with two things left as written: `Frame Length`, which is the spec's own field name, and `bot` for `book-builder`, which is what the three Go binaries are still called.
 
 ## Publisher crates
 

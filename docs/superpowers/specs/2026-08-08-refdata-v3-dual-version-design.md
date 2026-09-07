@@ -8,7 +8,7 @@
 
 The feed specs bumped to `3.0.0`. Across all five tagged feeds the wire change is
 confined to one message: `InstrumentDefinition` grows from 80 to 130 bytes.
-`Schema Version` in the frame header goes `1` to `3`.
+`Schema Version` in the datagram header goes `1` to `3`.
 
 Two independent changes stack inside that message:
 
@@ -63,16 +63,16 @@ the event stream.
 
 ## Decisions
 
-### Version is read per frame, and both are accepted
+### Version is read per datagram, and both are accepted
 
-The frame header already carries `Schema Version`; each parser currently rejects
-anything but `1`. That widens to accept `1` and `3`, and the value is passed down
-to `InstrumentDefinition` decoding.
+The datagram header already carries `Schema Version`; each parser currently
+rejects anything but `1`. That widens to accept `1` and `3`, and the value is
+passed down to `InstrumentDefinition` decoding.
 
-Per frame rather than locking to the first version seen, because a publisher can
-then cut over mid-run without restarting every parser, and a capture spanning the
-cutover replays correctly. The cost is one branch on a cold path; refdata is the
-lowest-rate port.
+Per datagram rather than locking to the first version seen, because a publisher
+can then cut over mid-run without restarting every parser, and a capture spanning
+the cutover replays correctly. The cost is one branch on a cold path; refdata is
+the lowest-rate port.
 
 ### The accepted set is `{1, 3}`, not a range
 
@@ -81,7 +81,7 @@ stating explicitly because the natural implementation is wrong.
 
 `topofbook-parser` validates its version with a ceiling: `SchemaVersion == 0 ||
 SchemaVersion > maxSchemaVersion`. Raising that ceiling to `3` would admit
-version 2 frames into the decoder, where they would fail later on a length
+version 2 datagrams into the decoder, where they would fail later on a length
 mismatch, in a different error bucket, for a reason that reads as corruption
 rather than as a version that does not exist. The ceiling check becomes explicit
 set membership.
@@ -96,13 +96,13 @@ unsupported version, rejected at the header, counted, channel kept.
 
 ### Message length is the cross-check
 
-A v1 frame must declare an 80-byte `InstrumentDefinition` (76-byte body); a v3
-frame must declare 130 (126-byte body). A frame whose header version and message
-length disagree is malformed: count it, skip the message, keep the channel, the
-same handling every other malformed message already gets.
+A v1 datagram must declare an 80-byte `InstrumentDefinition` (76-byte body); a v3
+datagram must declare 130 (126-byte body). A datagram whose header version and
+message length disagree is malformed: count it, skip the message, keep the
+channel, the same handling every other malformed message already gets.
 
 This is what catches a publisher that bumps the header but not the payload, or
-the reverse. Without it, a v3-declared frame carrying a v1 body would decode
+the reverse. Without it, a v3-declared datagram carrying a v1 body would decode
 `Source ID` and `Symbol` across 66 bytes of adjacent fields and produce
 plausible-looking garbage rather than an error.
 
@@ -167,21 +167,21 @@ Revisit if v1 outlives expectations or a fourth parser appears.
 ### The decoded version is exposed as a metric label, not in the record
 
 What ships is a `frames_total{port,schema_version}` counter in each parser,
-incremented once per successfully parsed frame. `records_total` is untouched and
-carries no version label.
+incremented once per successfully parsed datagram. `records_total` is untouched
+and carries no version label.
 
 A label on `records_total` was the original plan, but it does not fit: that
 counter is incremented from a decoded *record*, and a record deliberately
 carries no version, so there is nothing to key the label off at that point.
 Worse, the three parsers' `ParseFrame`/`Parse` return different shapes (defect
 structs, record slices) with no uniform place to thread a version value through
-to per-record instrumentation. A frame-level counter sidesteps both problems:
-the runner already reads the frame header once per datagram, so it can read the
+to per-record instrumentation. A datagram-level counter sidesteps both problems:
+the runner already reads the datagram header once per datagram, so it can read the
 Schema Version byte and label a purpose-built counter without touching record
 decoding at all.
 
-The version is read from byte 2 of the frame, the frame header's Schema Version
-field, directly in each parser's `runner.go` after `Parse`/`ParseFrame`
+The version is read from byte 2 of the datagram, the datagram header's Schema
+Version field, directly in each parser's `runner.go` after `Parse`/`ParseFrame`
 succeeds, rather than threaded through the parser's return value. This is
 deliberate, for the same reason as above: it is observability, not data the
 parser needs, and reading it independently means all three runners can do it
@@ -193,9 +193,9 @@ decode path can be retired. Do not look for this on `records_total`; it was
 never built there, for the reasons above.
 
 `frames_total{schema_version="2"}` should never be observed. The counter is
-incremented only after a frame parses successfully, and version 2 is rejected at
-the header, so a nonzero count there means a publisher is emitting a version this
-repo believes does not exist. That is worth alerting on.
+incremented only after a datagram parses successfully, and version 2 is rejected
+at the header, so a nonzero count there means a publisher is emitting a version
+this repo believes does not exist. That is worth alerting on.
 
 ## Per-parser notes
 

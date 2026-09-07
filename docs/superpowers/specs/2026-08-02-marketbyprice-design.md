@@ -15,12 +15,12 @@ market-by-price, so there is no reference implementation to point subscribers at
 and no way to observe the feed in the demo stack.
 
 Market-by-price is structurally close to market-by-order — same three-port
-channel model, same 24-byte frame header, four byte-identical message payloads —
-but the addressing model differs in a way that changes the consumer materially.
-A level is keyed by `(Side, Price)`, quantities are absolute rather than
-incremental, and the feed carries three obligations the sibling has no concept
-of: a declared depth bound, a crossed-book defect counter, and a bounded delta
-buffer with a stated overflow policy.
+channel model, same 24-byte datagram header, four byte-identical message payloads
+— but the addressing model differs in a way that changes the consumer
+materially. A level is keyed by `(Side, Price)`, quantities are absolute rather
+than incremental, and the feed carries three obligations the sibling has no
+concept of: a declared depth bound, a crossed-book defect counter, and a bounded
+delta buffer with a stated overflow policy.
 
 ## Scope
 
@@ -53,8 +53,8 @@ multicast (3 ports)  →  marketbyprice-parser  →  unix socket (JSONL)  →  m
                         stateless frame decode                           book state machine     marketbyprice db
 ```
 
-The parser is stateless: decode a frame, emit one `Record` per application
-message, count per-port frame-sequence gaps, write to the sink. All book state
+The parser is stateless: decode a datagram, emit one `Record` per application
+message, count per-port datagram-sequence gaps, write to the sink. All book state
 lives in the bot. This is the existing split for both shipping feeds and it does
 not change.
 
@@ -66,7 +66,7 @@ Package `main`, files mirroring `go/marketbyorder-parser`:
 
 | File | Contents |
 |------|----------|
-| `marketbyprice_wire.go` | Frame header, message header, one body struct + parse func per type |
+| `marketbyprice_wire.go` | Datagram header, message header, one body struct + parse func per type |
 | `marketbyprice.go` | Parser registration, `ParseFrame`, `decodeMessage`, enum stringers |
 | `parser.go` | `Record`, `Parser` interface, registry (copy) |
 | `sink.go`, `sink_json.go`, `sink_socket.go` | Output sinks (copy) |
@@ -78,8 +78,8 @@ Package `main`, files mirroring `go/marketbyorder-parser`:
 
 ### Wire layout
 
-Magic `0x4442`, Schema Version 1, 24-byte frame header and 4-byte application
-message header identical to the sibling feeds. Maximum frame 1,232 bytes.
+Magic `0x4442`, Schema Version 1, 24-byte datagram header and 4-byte application
+message header identical to the sibling feeds. Maximum datagram 1,232 bytes.
 
 Thirteen message types. Body sizes below are the message size minus the 4-byte
 header, since that is what the parse functions receive:
@@ -101,7 +101,7 @@ header, since that is what the parse functions receive:
 | `0x42` | SnapshotLevel | 32 | 28 | snapshot | **new** |
 
 `0x03` and `0x05` are reserved and intentionally unused, so a misrouted
-top-of-book or midpoint frame cannot cross-decode. `Magic` is the primary
+top-of-book or midpoint datagram cannot cross-decode. `Magic` is the primary
 rejection.
 
 The three new bodies, at body-relative offsets:
@@ -123,13 +123,13 @@ Quantity `u64` @12, Order Count `u16` @20, Side `u8` @22, Level Flags `u8` @23,
 
 Body length checks are exact equality (`len(buf) != N`), matching the sibling
 parsers, not `>=`. The spec's forward-compatibility rule that a decoder should
-ignore trailing bytes only applies across a Schema Version bump, and the frame
+ignore trailing bytes only applies across a Schema Version bump, and the datagram
 header rejects unimplemented versions before any body is parsed. Within v1, a
 body of unexpected length is malformed.
 
 The one place this could mislead a reader is `0x20 SnapshotBegin`, which the
 spec describes as a prefix-superset of market-by-order's shorter layout. That
-rule exists so a market-by-order decoder can read a market-by-price frame; it
+rule exists so a market-by-order decoder can read a market-by-price datagram; it
 does not license a market-by-price decoder to accept a 32-byte body. A comment
 in the code says so.
 
@@ -167,22 +167,22 @@ motivates directly:
   `Scope = 1` with `Clear Side = 2`, which the spec declares malformed because
   one price cannot bound both sides, and requires the subscriber to discard and
   count. This is the only value this metric emits — a sub-floor `Message
-  Length` (see below) fails the whole frame instead, and is counted in
+  Length` (see below) fails the whole datagram instead, and is counted in
   `parse_errors_total{reason="frame_length"}`, since `malformed_total`'s own
-  purpose is messages dropped without failing their frame.
+  purpose is messages dropped without failing their datagram.
 
-  A `Message Length < 4` case fails the frame rather than being counted here.
+  A `Message Length < 4` case fails the datagram rather than being counted here.
   The feed spec motivates that floor by noting a length of `0` advances the
   walk by zero bytes and spins forever, which is true of a walk driven by
   remaining bytes (`for len(body) > 0`). This parser's walk is bounded by the
-  frame header's `Message Count` instead, so the floor is not what prevents a
+  datagram header's `Message Count` instead, so the floor is not what prevents a
   hang here — a hang is not reachable. What it prevents is a slice-bounds panic
   on `body[4:mh.Length]` when `Message Length` is below the header size. Both
   are reasons to keep the check; only the second describes this implementation.
   Stating it precisely matters because the wrong rationale invites a test that
   guards nothing: a timeout-based test passes whether or not the check exists.
 
-As with the sibling parsers, per-port frame-sequence gap tracking excludes
+As with the sibling parsers, per-port datagram-sequence gap tracking excludes
 `refdata`, which is a low-rate periodic-retransmit stream where gaps are not a
 loss signal.
 
@@ -286,7 +286,7 @@ evidence of having actually missed deltas.
 §Cold Start step 6 says that on a snapshot validation failure the subscriber
 discards the partial book and reverts to `awaiting-snapshot`. Applied literally
 to an instrument that reached step 6 via the re-bootstrap branch above, that is
-precisely the regression the June work removed: one lost `SnapshotLevel` frame
+precisely the regression the June work removed: one lost `SnapshotLevel` datagram
 evicts a live, correct book for a full round-robin cycle.
 
 Resolution: snapshots build into a shadow `PendingSnapshot` and commit
@@ -302,7 +302,7 @@ the literal text: the spec's own §Gap Recovery says an instrument holding bad
 state is repaired by the next round-robin snapshot on exactly the schedule it
 would have been repaired anyway, so dropping a book that deltas are keeping
 correct buys nothing and costs a cycle of availability. Snapshot loss is
-amplified by book width — a wide-book snapshot spans many frames, and this feed
+amplified by book width — a wide-book snapshot spans many datagrams, and this feed
 has wider books than its sibling — so the failure rate this guards against is
 higher here, not lower.
 
@@ -479,8 +479,8 @@ walkthrough section in `demo/README.md`, and the live port table in
 
 ## Error handling
 
-Malformed frames are counted and dropped, never fatal, and never reset a
-channel. The frame walk bounds-checks `Message Length` against both the 4-byte
+Malformed datagrams are counted and dropped, never fatal, and never reset a
+channel. The datagram walk bounds-checks `Message Length` against both the 4-byte
 floor and the bytes remaining before using it to advance. Unknown Type IDs are
 skipped by length. Parse errors are classified into `bad_magic`,
 `schema_version`, `frame_length`, `truncated`, and `other` for the metric label,
@@ -503,7 +503,7 @@ from JSON, `Order Count = 0` emitted.
 
 - Cold start: buffer deltas, apply snapshot, replay only `mktdata_seq > anchor`.
 - Duplicate delta (`<= last_applied`) discarded silently during replay — a
-  duplicated frame during bootstrap must not cost a re-bootstrap.
+  duplicated delta during bootstrap must not cost a re-bootstrap.
 - Forward per-instrument gap beyond the reorder window demotes to `gap`.
 - Snapshot-while-ready, both branches: `K > tracker` re-bootstraps,
   `K <= tracker` is ignored.
