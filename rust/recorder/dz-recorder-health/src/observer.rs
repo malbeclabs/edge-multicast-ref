@@ -258,7 +258,7 @@ impl HealthObserver {
         }
     }
 
-    /// Carries the capture's own counters across, as deltas over a sweep.
+    /// Carries the capture's own counters across, as deltas over one pass.
     ///
     /// These are the capture crate's counters and not this tier's: a membership
     /// replaced, a replacement that failed, a datagram from a source nobody
@@ -283,7 +283,8 @@ impl HealthObserver {
     /// Publishes where this feed's retained history starts, in Unix seconds, and
     /// how many objects it is the front of.
     ///
-    /// Set on every sweep, including a sweep that evicted nothing: this is a
+    /// Set on every retention pass, including one that evicted nothing: this
+    /// is a
     /// level and not an event, and a gauge only written when something was
     /// deleted would sit at the last eviction's value while the archive filled
     /// up behind it. `None` — nothing retained — leaves it at 0, which the
@@ -433,10 +434,10 @@ impl HealthObserver {
     }
 }
 
-/// One sweep's worth of the capture's own counters, as deltas.
+/// One pass's worth of the capture's own counters, as deltas.
 ///
 /// Deltas rather than totals, because these counters are cumulative on both
-/// sides and a total handed to a counter would count every earlier sweep again.
+/// sides and a total handed to a counter would count every earlier pass again.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CaptureDeltas {
     pub rejoins: u64,

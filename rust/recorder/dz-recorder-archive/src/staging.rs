@@ -85,7 +85,7 @@ pub(crate) fn manifest_name(start_ns: u64, end_ns: u64, segment_seq: u64) -> Str
 ///
 /// Hidden and suffixed, so a shipper that matches object keys never sees a
 /// partial object, and so the compressor's own temporary files are identifiable
-/// as such by anything sweeping the directory.
+/// as such by anything scanning the directory.
 #[must_use]
 pub(crate) fn temp_name(final_name: &str) -> String {
     format!(".{final_name}.part")
@@ -144,9 +144,9 @@ pub struct StagingWatermark {
     /// Where the retained history started as of the last [`enforce`](Self::enforce).
     ///
     /// Kept rather than recomputed because `enforce` already scans both
-    /// directories, and the caller that wants this — the sweep that publishes
-    /// the retention gauge — runs immediately after it. A second scan for the
-    /// same answer doubles the directory reads of every sweep.
+    /// directories, and the caller that wants this — the retention pass that
+    /// publishes the gauge — runs immediately after it. A second scan for the
+    /// same answer doubles the directory reads of every pass.
     retained_floor_ns: Option<u64>,
     /// How many published objects that floor is the front of, as of the same
     /// pass. **The floor alone cannot say "nothing".**
@@ -287,7 +287,8 @@ impl StagingWatermark {
     /// still on the disk, or `None` when there was none.
     ///
     /// **This is the retention question, and eviction counts cannot answer
-    /// it.** A budget that is full evicts on every sweep for ever, so the
+    /// it.** A budget that is full evicts on every retention pass for ever, so
+    /// the
     /// eviction counter rises at steady state by design and says nothing about
     /// how much history is left — which is what somebody chasing a loss report
     /// from last night actually needs to know. From `start_ns` rather than a
@@ -295,9 +296,9 @@ impl StagingWatermark {
     /// a property of the traffic, and it is the same clock the object key and
     /// the manifest are stamped with.
     ///
-    /// From the sweep's own scan and not a fresh one: `enforce` reads both
+    /// From the pass's own scan and not a fresh one: `enforce` reads both
     /// directories already, so recomputing this would double the directory
-    /// reads of every sweep for an answer that pass had in hand. `None` before
+    /// reads of every pass for an answer it had in hand. `None` before
     /// the first `enforce`.
     #[must_use]
     pub const fn retained_floor_ns(&self) -> Option<u64> {
@@ -342,7 +343,8 @@ impl StagingWatermark {
 
     /// Deletes oldest-first until the archive is inside its budget.
     ///
-    /// Called on rotation and on a periodic sweep, never on the write path.
+    /// Called on rotation and on a periodic retention pass, never on the write
+    /// path.
     /// Whole objects go first and partial segments last: a partial is the only
     /// copy of the window it holds, so it is the last history worth giving up.
     pub fn enforce(&mut self) -> Result<(), SinkError> {
@@ -359,7 +361,7 @@ impl StagingWatermark {
         // Only what eviction can actually take. Counting the rest in here is
         // how one stray file in completed_dir — a shipper's own, a mount point,
         // anything this module cannot name — at or over the budget makes every
-        // sweep delete the entire archive and still report success: the total
+        // pass delete the entire archive and still report success: the total
         // never falls below a floor eviction cannot move, so the loop runs to
         // the end every time, and the disk is no emptier for it.
         let mut total = governed_bytes(&objects, &residue) - unreclaimable;
@@ -382,7 +384,7 @@ impl StagingWatermark {
         }
 
         // One undeletable file must not stop the buffer from being bounded, so
-        // the sweep runs to the end and reports afterwards.
+        // the pass runs to the end and reports afterwards.
         let mut failure = None;
         let mut objects_evicted = 0usize;
         // Where the retained history starts, as an index rather than a count.
@@ -477,7 +479,7 @@ impl StagingWatermark {
     /// One candidate: unlink it unless the compressor is reading it, and say
     /// what the running total should lose either way.
     ///
-    /// The refusal is the case worth arguing. The phase this sweep decided on
+    /// The refusal is the case worth arguing. The phase this pass decided on
     /// came from a scan that has since walked two directories, stat'd
     /// everything in them and sorted the result, so a queued segment the
     /// compressor picked up in the meantime is one whose source it is reading
@@ -489,12 +491,12 @@ impl StagingWatermark {
     /// `governed_bytes` the way the open segment is, because it is a bounded
     /// transient the compressor is about to remove itself. Keeping them in the
     /// total makes the loop go on evicting *other* history to reach a number
-    /// the budget has effectively already reached — the sweep gives up a
+    /// the budget has effectively already reached — the pass gives up a
     /// segment to pay for bytes that were about to be reclaimed for free.
     ///
     /// The cost of being wrong this way is bounded and the cost of being wrong
     /// the other way is not, which is what settles it. Under-count and staging
-    /// stays over budget by at most one segment until the next sweep — a
+    /// stays over budget by at most one segment until the next pass — a
     /// tolerance the design already has, since the newest queued segment is
     /// protected and the open one is excluded. Over-count and history is gone,
     /// and this module's own rule is that a wrongly kept datagram is
@@ -518,7 +520,7 @@ impl StagingWatermark {
     /// recorder gave up that history and an operator has to be able to see how
     /// much.
     ///
-    /// **Already gone.** The paths a sweep unlinks come from a scan that ran
+    /// **Already gone.** The paths a pass unlinks come from a scan that ran
     /// before the walk of two directories, the stat of everything in them and
     /// the sort, and two things legitimately remove a file inside that window: a
     /// shipper taking an object out of `completed_dir`, and a publication
@@ -789,7 +791,8 @@ mod tests {
     #[test]
     fn the_retention_floor_is_the_oldest_windows_start_and_moves_as_history_goes() {
         // **The question the eviction counter cannot answer.** A full budget
-        // evicts on every sweep for ever, so that counter rises at steady state
+        // evicts on every retention pass for ever, so that counter rises at
+        // steady state
         // by design; what somebody chasing last night's loss report needs is how
         // far back the archive still reaches, and this is that number.
         let dir = tempfile::tempdir().expect("a temporary directory");
@@ -949,7 +952,7 @@ mod tests {
         std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
         fs::set_permissions(&completed, perms).expect("the directory is ours");
 
-        assert!(outcome.is_err(), "the sweep could not delete anything");
+        assert!(outcome.is_err(), "the pass could not delete anything");
         assert_eq!(
             w.retained_floor_ns(),
             Some(1_000),
@@ -995,13 +998,13 @@ mod tests {
     }
 
     #[test]
-    fn a_segment_being_published_survives_a_sweep_that_has_to_evict() {
+    fn a_segment_being_published_survives_a_pass_that_has_to_evict() {
         // The loss this whole change exists to prevent, asserted where it is
         // wired in and not only on the type.
         //
         // What it covers and what it does not, because the difference is the
         // reason the guard below it also exists. Marking the segment in flight
-        // before the sweep is the state `scan` itself skips, so this is the
+        // before the pass is the state `scan` itself skips, so this is the
         // property test: an `enforce` that cannot meet its budget does not take
         // a segment mid-publication. `remove_evictable`'s guard covers a
         // different moment — the compressor picking a *queued* segment up after
@@ -1015,7 +1018,7 @@ mod tests {
         fs::create_dir_all(&completed).expect("completed");
 
         let custody = Arc::new(Custody::default());
-        // A budget the sweep cannot meet, so the loop runs to the end and gives
+        // A budget the pass cannot meet, so the loop runs to the end and gives
         // up everything it is allowed to: what survives, survives because it
         // may not be taken rather than because the total fell first.
         let mut w = StagingWatermark::new(staging.clone(), completed, 100);
@@ -1039,7 +1042,7 @@ mod tests {
         );
         assert!(
             !paths[1].exists(),
-            "the queue was not bounded: the sweep took nothing at all"
+            "the queue was not bounded: the pass took nothing at all"
         );
         assert!(
             paths[2].exists(),
@@ -1085,7 +1088,7 @@ mod tests {
     }
 
     #[test]
-    fn the_removal_the_sweep_calls_refuses_a_segment_in_flight() {
+    fn the_removal_the_pass_calls_refuses_a_segment_in_flight() {
         // The guard at the point `enforce` actually calls, which is the one
         // place a plain `fs::remove_file` would still compile and still pass
         // every other test in this crate — because `scan` skipping in-flight
@@ -1108,11 +1111,11 @@ mod tests {
         custody.start(&being_read);
         assert!(
             w.remove_evictable(&being_read).is_none(),
-            "the sweep was handed an outcome for a file it must not touch"
+            "the pass was handed an outcome for a file it must not touch"
         );
         assert!(
             being_read.exists(),
-            "the segment the compressor is reading was deleted by the sweep"
+            "the segment the compressor is reading was deleted by the pass"
         );
 
         // And a queued one is still the budget's to take, or the queue is
@@ -1136,7 +1139,7 @@ mod tests {
         // the total even though the file stays, because a fresh scan would not
         // have counted them: an in-flight segment is a bounded transient the
         // compressor removes itself, excluded from `governed_bytes` the way the
-        // open segment is. Keeping them in would make the sweep evict *other*
+        // open segment is. Keeping them in would make the pass evict *other*
         // history to pay for bytes that were about to be reclaimed for free.
         //
         // Tested on the candidate step rather than through `enforce`, for the
@@ -1160,7 +1163,7 @@ mod tests {
         let (reclaimed, error) = w.evict_candidate(&being_read, 1000);
         assert_eq!(
             reclaimed, 1000,
-            "the sweep will go on evicting history to reach a total the budget has reached"
+            "the pass will go on evicting history to reach a total the budget has reached"
         );
         assert!(
             error.is_none(),

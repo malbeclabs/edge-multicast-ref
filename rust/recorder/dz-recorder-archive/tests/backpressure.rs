@@ -47,8 +47,9 @@ impl Archive {
         }
     }
 
-    /// One full segment, landed and swept: the watermark is enforced on
-    /// rotation and on the sweep, never on the write path.
+    /// One full segment, landed and then put through a retention pass: the
+    /// watermark is enforced on rotation and on that pass, never on the write
+    /// path.
     fn rotate_a_full_segment(&mut self, at: u64) {
         write_bytes(&mut self.w, SEGMENT_PAYLOAD_BYTES);
         self.w.rotate_at(at).unwrap().unwrap();
@@ -377,7 +378,7 @@ fn a_failed_write_abandons_the_segment_rather_than_appending_after_a_partial_blo
 #[test]
 fn a_segment_a_dead_run_left_is_adopted_into_the_budget_and_can_be_evicted() {
     // Kill the recorder while the compressor is mid-publish of segment-5: the
-    // sweep removes only .part files, this run's sequence restarts at 0, and the
+    // pass removes only .part files, this run's sequence restarts at 0, and the
     // preserve-partial path only ever reaches segment-0. Excluded from the
     // accounting by the shape of its name, that file sits in staging for ever —
     // never published, never counted, never reachable by eviction — and repeated
@@ -542,7 +543,7 @@ fn a_failed_flush_abandons_the_segment_and_still_tells_the_caller() {
 fn a_file_eviction_cannot_reach_does_not_cost_the_whole_archive() {
     // completed_dir is a directory a shipper writes into, so it can hold a file
     // this crate did not write and must not delete. Counting those bytes
-    // against the budget makes the total unreachable: every sweep deletes every
+    // against the budget makes the total unreachable: every pass deletes every
     // object, the total never falls, and the disk is no emptier — the archive is
     // gone and the file that displaced it is still there.
     let segment = one_segment_footprint();

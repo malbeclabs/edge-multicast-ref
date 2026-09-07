@@ -31,10 +31,11 @@ use crate::startup::{FeedPlan, Plan};
 /// the case an age bound exists for.
 const POLL: Duration = Duration::from_millis(100);
 
-/// How often the staging budget is swept and the capture's own counters are
-/// read across into the health tier. Objects land asynchronously, so the budget
-/// is enforced on a cadence as well as on rotation.
-const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
+/// How often the retention pass runs: the staging budget is enforced and the
+/// capture's own counters are read across into the health tier. Objects land
+/// asynchronously, so the budget is enforced on a cadence as well as on
+/// rotation.
+const RETENTION_INTERVAL: Duration = Duration::from_secs(1);
 
 /// How long shutdown spends taking datagrams that were already captured.
 ///
@@ -315,10 +316,10 @@ struct FeedRecorder {
     segments_published: u64,
     segments_evicted_seen: u64,
     interface_drops_seen: u64,
-    /// The capture's counters as of the last sweep, so what reaches the health
-    /// tier is a delta and not every earlier sweep counted again.
+    /// The capture's counters as of the last retention pass, so what reaches
+    /// the health tier is a delta and not every earlier pass counted again.
     capture_seen: CaptureStats,
-    last_sweep: Instant,
+    last_retention_pass: Instant,
     last_error: Option<String>,
 }
 
@@ -358,7 +359,7 @@ impl FeedRecorder {
             segments_evicted_seen: 0,
             interface_drops_seen: 0,
             capture_seen: CaptureStats::default(),
-            last_sweep: Instant::now(),
+            last_retention_pass: Instant::now(),
             last_error: None,
         })
     }
@@ -404,13 +405,13 @@ impl FeedRecorder {
                 Err(e) => self.note(&e.to_string()),
             }
         }
-        if self.last_sweep.elapsed() >= SWEEP_INTERVAL {
-            self.sweep();
+        if self.last_retention_pass.elapsed() >= RETENTION_INTERVAL {
+            self.retention_pass();
         }
     }
 
-    fn sweep(&mut self) {
-        self.last_sweep = Instant::now();
+    fn retention_pass(&mut self) {
+        self.last_retention_pass = Instant::now();
         self.writer.sweep_staging();
 
         // Eviction is bounded, counted history — and an alert. It reaches the
@@ -423,14 +424,14 @@ impl FeedRecorder {
         self.segments_evicted_seen = evicted;
 
         // And how much history is left, which the count above cannot say. A
-        // full budget evicts on every sweep for ever, so that counter rises at
+        // full budget evicts on every pass for ever, so that counter rises at
         // steady state by design; this is the level somebody chasing last
-        // night's loss report actually needs. Published on every sweep, evicted
+        // night's loss report actually needs. Published on every pass, evicted
         // or not, because it moves when a segment is *written* too.
         //
-        // Read from the sweep above rather than measured here: that pass has
-        // already scanned both directories, and asking the disk again would
-        // double the reads of every sweep for an answer it just computed.
+        // Read from the enforcement above rather than measured here: that pass
+        // has already scanned both directories, and asking the disk again would
+        // double the reads of every pass for an answer it just computed.
         self.observer.record_archive_oldest_segment(
             self.writer.retained_floor_ns().map(|ns| ns / 1_000_000_000),
             self.writer.retained_objects(),
@@ -475,7 +476,7 @@ impl FeedRecorder {
     }
 
     /// Reported once per distinct fault: an unwritable destination would
-    /// otherwise fill a log with one line per sweep and bury the first one.
+    /// otherwise fill a log with one line per pass and bury the first one.
     fn note(&mut self, error: &str) {
         if self.last_error.as_deref() == Some(error) {
             return;
@@ -544,7 +545,7 @@ impl FeedRecorder {
         }
         // Last, so the eviction count and any fault the compressor recorded
         // while publishing the final segment are in the numbers reported.
-        self.sweep();
+        self.retention_pass();
 
         Summary {
             feed: self.feed.clone(),
