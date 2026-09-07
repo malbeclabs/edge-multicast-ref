@@ -23,8 +23,9 @@ func buildDatagramHeader(magic uint16, schema, channel uint8, seq uint64, ts tim
 }
 
 func TestMagicIsMarketByPrice(t *testing.T) {
-	// 0x4442 is this feed's magic. It must differ from the sibling feeds so a
-	// misrouted datagram is rejected rather than cross-decoded.
+	// 0x4442 is this feed's magic. It must differ from every other feed in the
+	// DoubleZero Edge family so a misrouted datagram is rejected rather than
+	// cross-decoded.
 	if mbpMagic != 0x4442 {
 		t.Fatalf("magic: got %#x want 0x4442", mbpMagic)
 	}

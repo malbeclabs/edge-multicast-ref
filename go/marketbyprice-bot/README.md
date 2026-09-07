@@ -55,7 +55,7 @@ An `order_count` of `0xFFFF` on the wire reads out as `0`, because the sentinel 
 
 When `--clickhouse-url` is non-empty, the book-builder writes to five ClickHouse tables:
 
-| Table | Source | Contents |
+| Table | Written from | Contents |
 |---|---|---|
 | `instruments` | `instrument_definition` | Refdata: symbol, exponents, contract terms. |
 | `events` | Applied deltas, trades, liquidations, instrument resets, batch boundaries | One row per applied `level_update` or `book_clear`, per trade, per liquidation, per `InstrumentReset` — and one row per `BatchBoundary`, written by the Coordinator. See the caveats below. |

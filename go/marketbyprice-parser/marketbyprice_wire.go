@@ -29,9 +29,10 @@ const (
 )
 
 // Message type IDs. Types 0x03 and 0x05 are reserved and intentionally unused
-// (Quote in top-of-book, and a reserved slot) so a misrouted sibling datagram
-// cannot cross-decode. 0x13, 0x14, 0x22, and the 0x02/0x04 bodies are
-// byte-for-byte identical to the market-by-order feed.
+// (Quote in top-of-book, and a reserved slot) so a misrouted datagram from
+// another feed in the DoubleZero Edge family cannot cross-decode. 0x13, 0x14,
+// 0x22, and the 0x02/0x04 bodies are byte-for-byte identical to the
+// market-by-order feed.
 const (
 	msgTypeHeartbeat            uint8 = 0x01
 	msgTypeInstrumentDefinition uint8 = 0x02
@@ -146,7 +147,7 @@ func fixedString(buf []byte) string {
 	return string(buf)
 }
 
-// readTSNs reads an 8-byte little-endian nanoseconds-since-epoch timestamp.
+// readTSNs reads an 8-byte little-endian nanoseconds-since-Unix-epoch timestamp.
 func readTSNs(buf []byte) time.Time {
 	ns := binary.LittleEndian.Uint64(buf)
 	return time.Unix(0, int64(ns)).UTC()

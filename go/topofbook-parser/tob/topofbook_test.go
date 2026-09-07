@@ -141,12 +141,12 @@ func putInt64LE(buf []byte, v int64) {
 }
 
 // decodeOneQuoteWithTS builds and parses a single quote datagram and returns the
-// decoded Record along with the source and send timestamps that were encoded.
+// decoded Record along with the source_ts and send timestamps that were encoded.
 func decodeOneQuoteWithTS(t *testing.T) (Record, uint64, uint64) {
 	t.Helper()
 	p := NewTopOfBookParser()
 
-	// Use distinct values so source != send.
+	// Use distinct values so source_ts != send_ts.
 	sourceNS := uint64(1_777_050_000_111_000_000)
 	sendNS := uint64(1_777_050_000_222_000_000)
 
@@ -365,9 +365,9 @@ func TestTopOfBookParser_QuoteBuffering(t *testing.T) {
 	if records[1].Fields["send_timestamp_ns"] != ts {
 		t.Errorf("expected flushed quote send_timestamp_ns %d, got %v", ts, records[1].Fields["send_timestamp_ns"])
 	}
-	// Flushed buffered records must carry the top-level source/send ns fields the
+	// Flushed buffered records must carry the top-level source_ts/send_ts ns fields the
 	// book-builder reads for latency (regression: the flush path once left these zero,
-	// producing 1970-epoch publisher_send_ts in ClickHouse).
+	// producing Unix-epoch publisher_send_ts in ClickHouse).
 	if records[1].SendTSNS != ts {
 		t.Errorf("expected flushed quote SendTSNS %d, got %d", ts, records[1].SendTSNS)
 	}

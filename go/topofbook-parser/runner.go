@@ -199,7 +199,7 @@ func (r *Runner) listenPort(ctx context.Context, port int, label string) error {
 			continue
 		}
 
-		// Refdata is a low-rate periodic-retransmit stream; datagram-seq gaps there
+		// Refdata is low-rate periodic-retransmit traffic; datagram-seq gaps there
 		// are not a meaningful loss signal, so it's excluded.
 		if n >= datagramHeaderMinLen && label != "refdata" {
 			ch := buf[datagramHeaderChannelOffset]

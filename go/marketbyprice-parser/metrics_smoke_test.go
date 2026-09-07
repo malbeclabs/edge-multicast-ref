@@ -56,12 +56,12 @@ func TestMetricsNamespaceAndDefectCounters(t *testing.T) {
 		mustContain(t, names, want)
 	}
 
-	// This module must not register anything under a sibling feed's namespace.
-	// Copying metrics.go from marketbyorder-parser and missing the namespace
-	// constant is the exact mistake this guards.
+	// This module must not register anything under the namespace of another feed
+	// in the DoubleZero Edge family. Copying metrics.go from marketbyorder-parser
+	// and missing the namespace constant is the exact mistake this guards.
 	for _, n := range names {
 		if strings.HasPrefix(n, "dz_mbo_") || strings.HasPrefix(n, "dz_tob_") {
-			t.Errorf("metric %s registered under a sibling feed namespace", n)
+			t.Errorf("metric %s registered under another family feed's namespace", n)
 		}
 	}
 }

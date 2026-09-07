@@ -28,7 +28,7 @@ go generate ./...
 go build -o xdp-receiver .
 ```
 
-`go generate` invokes `bpf2go` to compile the C eBPF program into Go-embedded ELF objects. The resulting `.o` files and Go bindings are checked in, so `go generate` is only needed when modifying the eBPF C source.
+`go generate` invokes `bpf2go` to compile the C eBPF program into Go-embedded ELF objects. The resulting `.o` files and Go bindings are checked in, so `go generate` is only needed when modifying the eBPF C source code.
 
 ## Capabilities
 

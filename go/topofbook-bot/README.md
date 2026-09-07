@@ -104,7 +104,7 @@ All prefixed `dz_bot_`. Per-symbol gauges use the `symbol` label; cardinality is
 3. Socket read delay at the book-builder (sub-ms)
 4. NTP skew between the publisher host and the book-builder host
 
-It is a useful trend indicator and relative health signal. Absolute latency attribution requires single-host measurements or a shared time source.
+It is a useful trend indicator and relative health signal. Absolute latency attribution requires single-host measurements or a shared clock.
 
 ## Reconnect behavior
 

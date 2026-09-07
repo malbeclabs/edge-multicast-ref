@@ -82,7 +82,7 @@ func (c *captureServer) count() int {
 // cancelled, then returns — typically in microseconds. Running it on the SAME
 // context as the shard and snapshot-writer goroutines therefore stopped the
 // consumer while the producers were still running: every row enqueued after that
-// point sat in the channel forever, never written and never counted dropped,
+// point sat in the `chan` forever, never written and never counted dropped,
 // while joining the already-finished batchers made shutdown look clean.
 //
 // The producer here models a shard still working through its inbox after

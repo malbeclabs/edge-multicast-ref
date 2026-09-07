@@ -203,7 +203,7 @@ func TestMetricsNamespace(t *testing.T) {
 			sawBuildInfo = true
 		}
 		if strings.HasPrefix(n, "dz_mbo_") || strings.HasPrefix(n, "dz_tob_") {
-			t.Errorf("metric %s registered under a sibling feed namespace", n)
+			t.Errorf("metric %s registered under another family feed's namespace", n)
 		}
 	}
 	if !sawBuildInfo {

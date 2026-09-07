@@ -212,7 +212,7 @@ func TestSocketSink_DropsDisconnectedClient(t *testing.T) {
 // a client's queue is full, that the queue_full drop counter is incremented,
 // and that a healthy second client continues to receive records.
 //
-// We inject a clientWriter whose channel is pre-filled (capacity 0 — i.e.
+// We inject a clientWriter whose `chan` is pre-filled (capacity 0 — i.e.
 // unbuffered and already consumed by no one) alongside a real connected client.
 // This isolates the non-blocking select in Write() from OS socket buffer sizes.
 func TestSocketSink_BackPressure(t *testing.T) {
@@ -235,7 +235,7 @@ func TestSocketSink_BackPressure(t *testing.T) {
 	// Give the accept loop time to register the good client.
 	time.Sleep(50 * time.Millisecond)
 
-	// Inject a fake clientWriter with a zero-capacity (unbuffered) channel.
+	// Inject a fake clientWriter with a zero-capacity (unbuffered) `chan`.
 	// Write's non-blocking select will immediately take the default branch,
 	// recording a queue_full drop — without involving any OS socket buffer.
 	fakeConn, fakeServer := net.Pipe()
@@ -260,7 +260,7 @@ func TestSocketSink_BackPressure(t *testing.T) {
 		{Type: "quote", Timestamp: ts, ChannelID: 1, SequenceNumber: 1, InstrumentID: 7},
 	}
 
-	// A single Write is enough: the fake client's unbuffered channel causes an
+	// A single Write is enough: the fake client's unbuffered `chan` causes an
 	// immediate queue_full drop. Multiple writes confirm Write never blocks.
 	const writes = 5
 	done := make(chan struct{})
@@ -303,7 +303,7 @@ func TestSocketSink_BackPressure(t *testing.T) {
 }
 
 // TestSocketSink_ConcurrentWriteClose verifies that concurrent Write() calls
-// racing against Close() never panic (e.g. send-on-closed-channel) and that
+// racing against Close() never panic (e.g. send on a closed `chan`) and that
 // the sink shuts down cleanly with no goroutine leaks. Run under -race to
 // detect data races.
 func TestSocketSink_ConcurrentWriteClose(t *testing.T) {
@@ -314,7 +314,7 @@ func TestSocketSink_ConcurrentWriteClose(t *testing.T) {
 		t.Fatalf("creating socket sink: %v", err)
 	}
 
-	// Connect a client so Write has real channels to send on.
+	// Connect a client so Write has real `chan`s to send on.
 	conn, err := net.Dial("unix", sockPath)
 	if err != nil {
 		t.Fatalf("connecting client: %v", err)

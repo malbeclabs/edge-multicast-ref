@@ -310,7 +310,7 @@ func decodeTopOfBookBody(msgType uint8, buf []byte, schemaVersion uint8) (any, e
 		// v3 inserts Source ID (u16) after Instrument ID and widens Symbol from
 		// char[16] to char[64]; every later field shifts by 50 bytes. The body
 		// length cross-checks the declared version, because reading a v1 body
-		// under the v3 layout would consume adjacent fields as source and symbol
+		// under the v3 layout would consume adjacent fields as Source ID and symbol
 		// bytes and yield a plausible instrument rather than an error.
 		var symLen, wantLen int
 		hasSourceID := false

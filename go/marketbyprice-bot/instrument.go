@@ -100,7 +100,7 @@ type Instrument struct {
 	// LastAppliedSendTS is the publisher's send timestamp on the last record that
 	// actually changed this book — an applied delta, or the snapshot_end that
 	// committed a shadow. It is maintained alongside LastAppliedMktdataSeq and is
-	// the only honest source for level_snapshots.publisher_send_ts: the read-out
+	// the only honest input for level_snapshots.publisher_send_ts: the read-out
 	// is computed by this process, so it has no send timestamp of its own, and
 	// stamping recv_ts into both columns made the schema's MATERIALIZED
 	// wire_latency_ms structurally 0.0 for every row that could ever exist.

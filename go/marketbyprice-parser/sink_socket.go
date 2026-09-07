@@ -173,15 +173,15 @@ func (s *SocketSink) Write(records []Record) error {
 func (s *SocketSink) Close() error {
 	s.mu.Lock()
 	if s.closed {
-		// Idempotent: second Close() is a no-op (channels are already closed).
+		// Idempotent: second Close() is a no-op (the `chan`s are already closed).
 		s.mu.Unlock()
 		return nil
 	}
 	s.closed = true
 	clients := s.clients
 	s.clients = make(map[net.Conn]*clientWriter)
-	// Close all channels while holding mu. This is safe because Write() also
-	// holds mu during its sends, so we can never close a channel that Write
+	// Close every client `chan` while holding mu. This is safe because Write() also
+	// holds mu during its sends, so we can never close a `chan` that Write
 	// is currently sending on.
 	for _, cw := range clients {
 		close(cw.ch)

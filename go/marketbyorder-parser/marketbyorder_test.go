@@ -455,7 +455,7 @@ func TestParseDatagram_BatchBoundaryHasNoSourceTS(t *testing.T) {
 	sendTS := time.Unix(1700000020, 111111111)
 	body := make([]byte, 12)
 	binary.LittleEndian.PutUint32(body[0:4], 7000)        // BatchID
-	binary.LittleEndian.PutUint64(body[4:12], 1025401179) // BatchTime (counter, not epoch ns)
+	binary.LittleEndian.PutUint64(body[4:12], 1025401179) // BatchTime (counter, not Unix-epoch ns)
 
 	msgLen := uint8(messageHeaderSize + 12)
 	datagramLen := datagramHeaderSize + int(msgLen)

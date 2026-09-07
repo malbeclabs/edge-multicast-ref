@@ -71,9 +71,9 @@ func TestSeqTracker(t *testing.T) {
 			wantGaps:    0,
 			wantMissing: 0,
 		},
-		// The case a channel-only key cannot reach: same channel id, two sources.
+		// The case a channel-only key cannot reach: same channel id, two source addresses.
 		{
-			name: "same channel id from two sources stays separate",
+			name: "same channel id from two source addresses stays separate",
 			obs: []obs{
 				{a, 1, 1000}, {b, 1, 7000},
 				{a, 1, 1001}, {b, 1, 7001},
@@ -82,7 +82,7 @@ func TestSeqTracker(t *testing.T) {
 			wantMissing: 0,
 		},
 		{
-			name: "same source on two channels stays separate",
+			name: "same source address on two channels stays separate",
 			obs: []obs{
 				{a, 1, 1000}, {a, 2, 9000},
 				{a, 1, 1001}, {a, 2, 9001},

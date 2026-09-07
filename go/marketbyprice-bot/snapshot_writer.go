@@ -235,7 +235,7 @@ func (w *SnapshotWriter) flushDue() {
 }
 
 // updateBookGauges refreshes the book-state gauges from a freshly computed
-// read-out, so they stay current without a separate sweep.
+// read-out, so they stay current without a separate periodic pass.
 func (w *SnapshotWriter) updateBookGauges(snap LevelSnapshot) {
 	if w.metrics == nil {
 		return
@@ -298,7 +298,7 @@ func (w *SnapshotWriter) write(k instKey, snap LevelSnapshot, lastSeq uint64, la
 	// recv_ts - publisher_send_ts, so writing recv_ts into both pinned that
 	// column at 0.0 for every row — advertising a latency measurement that could
 	// not exist. A zero value here means no record has been applied yet, which
-	// encodes as the epoch, matching how `events` already spells an absent send
+	// encodes as the Unix epoch, matching how `events` already spells an absent send
 	// timestamp rather than silently reading as zero latency.
 	sendTS := lastSendTS
 	if sendTS.IsZero() {

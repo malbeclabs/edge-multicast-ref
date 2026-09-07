@@ -35,7 +35,7 @@ type BatcherConfig struct {
 	Table         string
 	BatchSize     int           // flush once this many rows have accumulated
 	BatchInterval time.Duration // maximum time between flushes
-	BufferSize    int           // channel capacity; rows are dropped when full
+	BufferSize    int           // `chan` capacity; rows are dropped when full
 }
 
 // Client owns one Batcher per configured table.
@@ -61,7 +61,7 @@ func New(rawURL, database string, configs []BatcherConfig, obs Observer) (*Clien
 	// fatal at a distance:
 	//   - BatchInterval <= 0 panics time.NewTicker inside a batcher goroutine,
 	//     unrecovered, so the whole process dies after startup looked fine.
-	//   - BufferSize <= 0 makes an unbuffered channel, and Enqueue's deliberately
+	//   - BufferSize <= 0 makes an unbuffered `chan`, and Enqueue's deliberately
 	//     non-blocking send then drops very nearly every row to a counter.
 	//   - BatchSize <= 0 flushes on every single row, defeating batching.
 	// Returning an error lets the caller fail fast with a message naming the flag.

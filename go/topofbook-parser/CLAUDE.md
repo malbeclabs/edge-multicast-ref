@@ -40,7 +40,7 @@ magic          u16   0x445A ("DZ", on wire: 5A 44)
 schema_ver     u8    1 or 3 (no version 2; see InstrumentDefinition below)
 channel_id     u8
 sequence       u64   monotonic per publisher
-send_ts        u64   publisher wall clock, ns since epoch
+send_ts        u64   publisher wall clock, ns since the Unix epoch
 msg_count      u8
 reserved       u8
 frame_length   u16
@@ -74,7 +74,7 @@ Fixed-point integers with per-instrument exponents from InstrumentDefinition. `f
 
 Unknown message types are skipped, not rejected. Schema version is checked — unsupported versions are rejected cleanly.
 
-## Architecture and source map
+## Architecture and file map
 
 | File | What it does |
 |---|---|
