@@ -125,7 +125,7 @@ mistakes a synthesised field for a captured one.
 
 Prose follows [GLOSSARY.md](https://github.com/malbeclabs/edge-feed-spec/blob/main/GLOSSARY.md): a **datagram** is one UDP payload, a header plus N **messages**; a **channel** is a shard named by `Channel ID`; a **parser** decodes and republishes; a **book-builder** consumes parser output.
 
-The `-bot` paths and the `dz_mbo_bot` and `dz_mbp_bot` metric namespaces predate that glossary and are kept because CI jobs, binaries and dashboards reference them. `Frame Length` is the spec's own field name at offset 22, so `parse_errors_total{reason="frame_length"}` matches it deliberately.
+The `-bot` paths and the `dz_bot_*`, `dz_mbo_bot_*` and `dz_mbp_bot_*` metric names predate that glossary and are kept because CI jobs, binaries and dashboards reference them. `Frame Length` is the spec's own field name at offset 22, so `parse_errors_total{reason="frame_length"}` matches it deliberately.
 
 **A `match` arm is a `branch` here, and that is not what Rust calls it.** The language reference says *arm*, so the word a contributor reaches for is the one the glossary bans outright — in every sense, with only `ARM64` and the `ARM` vendor surviving. The glossary names this exact case in its replacement list: "a `match` or `select!` branch is a `branch`". It is repeated here because the next person to touch a `match` reads this file and not that one, and a rule nobody finds is a rule that drifts back one site at a time.
 
