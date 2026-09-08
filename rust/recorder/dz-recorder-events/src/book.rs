@@ -119,6 +119,22 @@ impl Certainty {
             reason,
         }
     }
+
+    /// Uncertain with no sequence number to blame.
+    ///
+    /// `since` is "the sequence number that made it so", and for a book that was
+    /// never anchored nothing did. `0` is a real sequence number, so writing it
+    /// here would answer a question that has no answer, and answer it plausibly:
+    /// the column is `Nullable(UInt64)` and a reader filtering or ordering on it
+    /// would take the sentinel for an observation. Same rule as `order_count`,
+    /// where the wire's absent value serialises as `NULL` rather than a number.
+    const fn unanchored(reason: UncertainReason) -> Self {
+        Self {
+            certain: false,
+            since: None,
+            reason,
+        }
+    }
 }
 
 /// What one instrument's book is, and whether it can be believed.
@@ -286,7 +302,7 @@ impl Book {
                 return None;
             }
             book.said_no_anchor = true;
-            let certainty = Certainty::unknown(0, UncertainReason::NoAnchor);
+            let certainty = Certainty::unanchored(UncertainReason::NoAnchor);
             book.certainty = Some(certainty);
             // One row, with no prices, rather than absence: absence cannot be
             // told from a silent feed, and a lookup into an unanchored window

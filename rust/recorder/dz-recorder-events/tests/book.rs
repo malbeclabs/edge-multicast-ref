@@ -194,6 +194,13 @@ fn a_delta_book_says_no_anchor_once_and_then_says_nothing() {
     assert_eq!(row.uncertain_reason, UncertainReason::NoAnchor);
     assert_eq!(row.bid_px_raw, None);
     assert_eq!(row.ask_px_raw, None);
+    // Nothing made this one uncertain — it was never anchored — and the column
+    // is nullable so that it can say that. `0` is a real sequence number, and a
+    // reader ordering on this column cannot tell a sentinel from an observation.
+    assert_eq!(
+        row.uncertain_since, None,
+        "an unanchored book names no sequence number, because none made it so"
+    );
 }
 
 #[test]
