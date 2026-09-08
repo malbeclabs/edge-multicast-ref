@@ -392,6 +392,12 @@ pub fn derive<S: Source + ?Sized>(
             // this object — where a `pass` row would be a pass over a rule that
             // never ran.
             conformance_finding: Vec::new(),
+            // The market data tables, likewise written by a derivation that is
+            // not this one: this fold has no book and no reference data, and a
+            // row it invented here would be a book state nothing observed.
+            event: Vec::new(),
+            instrument: Vec::new(),
+            book_top: Vec::new(),
         },
         trailer: SegmentTrailer {
             segment_seq: manifest.segment_seq,
@@ -761,10 +767,10 @@ fn interface_drop_delta(
 /// those is the fill rate — the number that says whether the redundancy is
 /// earning its cost.
 ///
-/// `None` when this channel and port carried no second source in this object:
-/// there is then nothing to have looked in, and a `0` would say we looked and
-/// found nothing. The judgement is per object, which is why the column is
-/// nullable rather than a claim about the feed.
+/// `None` when this channel and port carried no second source address in this
+/// object: there is then nothing to have looked in, and a `0` would say we
+/// looked and found nothing. The judgement is per object, which is why the
+/// column is nullable rather than a claim about the feed.
 fn on_redundant_path(
     report: &dz_recorder_loss::LossReport,
     loss: &InstanceLoss,

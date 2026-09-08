@@ -900,7 +900,7 @@ Writing it surfaced three things worth stating up front, because the obvious imp
 Sequencing rules, from the spec's steady state, per `(channel_id, instrument_id)`:
 
 - `Per-Instrument Seq == last_applied + 1` → apply.
-- `<= last_applied` → duplicate or late, discard silently. A duplicated frame during bootstrap must not cost a re-bootstrap.
+- `<= last_applied` → duplicate or late, discard silently. A duplicated delta during bootstrap must not cost a re-bootstrap.
 - `> last_applied + 1` → hold in `Pending` within a small reorder window; beyond the window it is a genuine gap, so mark the instrument `gap`, drop `Pending`, buffer the delta, and count `PerInstrumentGapsTotal`.
 
 The reorder window is carried over from the sibling bot, where the snapshot stream was observed reordering on the live path.

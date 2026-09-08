@@ -8,8 +8,8 @@
 //!
 //! # Generic over the feed, because `Magic` belongs to the feed
 //!
-//! A datagram's `Magic` is what rejects one misrouted from a sibling feed, so
-//! it is [`Feed`](dz_edge_core::Feed)'s and
+//! A datagram's `Magic` is what rejects one misrouted from another feed in the
+//! family, so it is [`Feed`](dz_edge_core::Feed)'s and
 //! [`ChannelEgress`] is generic over it. That makes a send path
 //! `FeedPipeline<TopOfBook>` or `FeedPipeline<MarketByPrice>`, decided at
 //! compile time, with no dynamic dispatch on the datagram path.
@@ -71,7 +71,8 @@ pub struct Port {
     /// From the transmitter, so the composer inherits the socket's identity
     /// rather than being told it a second time.
     pub endpoint: EgressEndpoint,
-    /// The fan-out. One member is the transmitter; a second would be the tee.
+    /// The fan-out. One member is the transmitter; a second would be the
+    /// `[adapter.tee]` copy.
     pub sink: Tee,
 }
 
@@ -247,9 +248,10 @@ impl<F: EmittedFeed> FeedPipeline<F> {
     ///
     /// Takes an already-lowered `Trade` rather than lowering one, and that is
     /// the mechanism behind the cross-specification obligation: the wire
-    /// requires `0x04` to be **byte-for-byte identical** across a venue's
-    /// sibling feeds, and a publisher emitting two of them sends *one* lowered
-    /// value to both send paths rather than two values that agree.
+    /// requires `0x04` to be **byte-for-byte identical** across the feeds in
+    /// the family a venue publishes, and a publisher emitting two of them sends
+    /// *one* lowered value to both send paths rather than two values that
+    /// agree.
     ///
     /// # Errors
     ///
@@ -570,7 +572,7 @@ impl<F: EmittedFeed> FeedPipeline<F> {
 
     /// The `Sequence Number` this feed's mktdata series will stamp next.
     ///
-    /// This is a snapshot's `Anchor Seq`: the point in the live stream the book
+    /// This is a snapshot's `Anchor Seq`: the point in the live feed the book
     /// state is true as of, which is what tells a subscriber which live
     /// messages to apply after it and which to discard.
     #[must_use]

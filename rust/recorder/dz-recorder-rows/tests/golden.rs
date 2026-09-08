@@ -24,8 +24,8 @@ use dz_recorder_replay::synthetic::{
 };
 use dz_recorder_replay::Fault;
 use dz_recorder_rows::{
-    Derivation, DropScope, Grain, PortRoleLabel, RecvTsKindLabel, SegmentTrailer, SequenceGap,
-    Verdict,
+    Derivation, DropScope, Grain, PortRoleLabel, RecvTsKindLabel, RowBatch, SegmentTrailer,
+    SequenceGap, Verdict,
 };
 
 const STREAM: usize = 100;
@@ -83,6 +83,30 @@ fn a_clean_segment_of_heartbeats_has_span_minus_count_of_zero() {
     }
 }
 
+/// Every provenance value one grain's rows carry, by exhaustive match.
+///
+/// A `match` and not a lookup, deliberately: a grain added to [`Grain`] fails to
+/// compile here rather than being silently skipped, which is the failure a test
+/// that enumerated five vectors by hand actually had when three more grains
+/// arrived. The same discipline the column-store sink applies when it
+/// destructures a batch.
+fn provenance(rows: &RowBatch, grain: Grain) -> Vec<Derivation> {
+    match grain {
+        Grain::Datagram => rows.datagram.iter().map(|r| r.derivation).collect(),
+        Grain::Era => rows.era.iter().map(|r| r.derivation).collect(),
+        Grain::SegmentCoverage => rows.segment_coverage.iter().map(|r| r.derivation).collect(),
+        Grain::SequenceGap => rows.sequence_gap.iter().map(|r| r.derivation).collect(),
+        Grain::ConformanceFinding => rows
+            .conformance_finding
+            .iter()
+            .map(|r| r.derivation)
+            .collect(),
+        Grain::Event => rows.event.iter().map(|r| r.derivation).collect(),
+        Grain::Instrument => rows.instrument.iter().map(|r| r.derivation).collect(),
+        Grain::BookTop => rows.book_top.iter().map(|r| r.derivation).collect(),
+    }
+}
+
 /// Every grain says the datagrams behind it were kept and verified.
 ///
 /// One test over every grain rather than a line in each, because the failure it
@@ -116,16 +140,14 @@ fn every_row_derived_from_an_object_says_it_came_from_one() {
             }
         }
 
-        let live = |d: Derivation| d == Derivation::Live;
-        assert!(!rows.datagram.iter().map(|r| r.derivation).any(live));
-        assert!(!rows.era.iter().map(|r| r.derivation).any(live));
-        assert!(!rows.segment_coverage.iter().map(|r| r.derivation).any(live));
-        assert!(!rows.sequence_gap.iter().map(|r| r.derivation).any(live));
-        assert!(!rows
-            .conformance_finding
-            .iter()
-            .map(|r| r.derivation)
-            .any(live));
+        for grain in Grain::ALL {
+            assert!(
+                provenance(rows, grain)
+                    .iter()
+                    .all(|d| *d == Derivation::Archive),
+                "a {grain} row derived from an object claims it was not"
+            );
+        }
     }
 
     // Without this the assertions above would pass over four empty vectors.
@@ -168,32 +190,14 @@ fn the_same_object_derived_as_a_live_window_differs_only_in_provenance() {
         let live = recorded.rows_as_live();
 
         assert_eq!(live.rows.derivation, Derivation::Live, "the batch");
-        let archive = |d: &Derivation| *d == Derivation::Archive;
-        assert!(!live
-            .rows
-            .datagram
-            .iter()
-            .map(|r| &r.derivation)
-            .any(archive));
-        assert!(!live.rows.era.iter().map(|r| &r.derivation).any(archive));
-        assert!(!live
-            .rows
-            .segment_coverage
-            .iter()
-            .map(|r| &r.derivation)
-            .any(archive));
-        assert!(!live
-            .rows
-            .sequence_gap
-            .iter()
-            .map(|r| &r.derivation)
-            .any(archive));
-        assert!(!live
-            .rows
-            .conformance_finding
-            .iter()
-            .map(|r| &r.derivation)
-            .any(archive));
+        for grain in Grain::ALL {
+            assert!(
+                provenance(&live.rows, grain)
+                    .iter()
+                    .all(|d| *d == Derivation::Live),
+                "a {grain} row derived in flight claims it came from an object"
+            );
+        }
 
         let mut normalised = live.rows.clone();
         normalised.derivation = Derivation::Archive;

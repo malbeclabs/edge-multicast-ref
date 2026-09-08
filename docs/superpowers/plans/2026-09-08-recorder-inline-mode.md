@@ -89,15 +89,25 @@ a task below that would otherwise be written wrong.
 
 ### 1. The provenance column
 
-- [ ] `dz-recorder-rows/src/rows.rs`: a `derivation` field on all five grains —
-      `Datagram`, `SegmentCoverage`, `SequenceGap`, `Era`, `ConformanceFinding`.
+- [ ] `dz-recorder-rows/src/rows.rs`: a `derivation` field on all eight grains —
+      `Datagram`, `SegmentCoverage`, `SequenceGap`, `Era`, `ConformanceFinding`,
+      and the market data three, `Event`, `Instrument` and `BookTop`.
       A two-token type, not a bare `String`, so a third value cannot be written
       by accident; `archive` and `live` are its tokens.
-- [ ] `dz-recorder-rows/src/derive.rs`: `derive` writes `archive`. Inline mode
-      overrides it on the batch it gets back, which keeps `derive` a function of
-      the window and nothing else.
-- [ ] `dz-recorder-clickhouse/db/clickhouse/005_recorder_derivation.sql`:
-      `derivation LowCardinality(String) DEFAULT 'archive'` on the five tables.
+- [ ] `dz-recorder-rows/src/derive.rs`: `DeriveInput` carries the provenance and
+      has no `Default`, so a derivation states it or does not compile;
+      `derive_object` says `archive` because it verified the digest itself.
+      An input rather than a patch applied to the batch afterwards: it is the
+      same kind of fact as `drop_scope` — one the caller knows and the
+      derivation cannot observe — and stamping it costs nothing where walking
+      a hundred thousand rows to overwrite a field would.
+      `dz-recorder-events` takes the same field on `EventInput`, for the market
+      data grains.
+- [ ] `dz-recorder-clickhouse/db/clickhouse/008_recorder_derivation.sql`:
+      `derivation LowCardinality(String) DEFAULT 'archive'` on the eight tables.
+      `005` through `007` are the market data migrations, so this is `008`; the
+      column is declared in `001` and `005` beside the tables themselves, and
+      this file is what reaches a deployment whose tables already exist.
       In no `ORDER BY`. The file states why the default exists — rows written
       before this migration were all derived from archived objects.
 - [ ] `dz-recorder-rows/tests/column_names.rs`: the literal, so a rename cannot
@@ -113,10 +123,15 @@ task must not touch.
 Mechanical, and **no behaviour changes**. The existing tests are the net.
 
 - [ ] `src/lib.rs` exposing `ledger` (`Ledger`, `Entry`, `LedgerError`),
-      `metrics` (`LoaderMetrics` and its label discipline), and the pieces of
-      `loader` inline mode reuses: `Pending`, `record_landed`, `now_unix_nanos`.
-- [ ] `main.rs` keeps the binary's own concerns — CLI, config, the directory
-      walk, the pass loop — and reaches the rest through the library.
+      `metrics` (`LoaderMetrics` and its label discipline), the pieces of
+      `loader` inline mode reuses (`Pending`, `record_landed`, `now_unix_nanos`),
+      and — less tidily than this plan first assumed — `config` and
+      `market_data`. The pass reaches into both for `MarketDataFeed` and for the
+      market data derivation, and the pass cannot be a library while half of
+      what it calls is not.
+- [ ] `main.rs` keeps the binary's own concerns — the command line, the metrics
+      endpoint, the build identity, the directory walk and the pass loop — and
+      reaches the rest through the library.
 - [ ] The crate's description says it is both.
 
 **Test:** the whole existing suite, unchanged, plus the binary test. A diff that

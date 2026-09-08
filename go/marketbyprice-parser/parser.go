@@ -6,7 +6,7 @@ import (
 )
 
 // Record is the JSON-serialised envelope emitted by the parser for every
-// wire message. Bot consumes these one per line on the parser socket.
+// wire message. The book-builder consumes these one per line on the parser socket.
 type Record struct {
 	Type           string         `json:"type"`
 	Timestamp      time.Time      `json:"ts"`
@@ -22,21 +22,21 @@ type Record struct {
 	Fields         map[string]any `json:"fields,omitempty"`
 }
 
-// Parser decodes a wire frame received on a given port and returns zero or
-// more Records, plus any publisher defects observed in that frame.
+// Parser decodes a wire datagram received on a given port and returns zero or
+// more Records, plus any publisher defects observed in that datagram.
 //
-// Defects are returned per frame rather than accumulated on the Parser because
+// Defects are returned per datagram rather than accumulated on the Parser because
 // the Runner shares one Parser across all three port goroutines; a counter
 // field on the Parser would be a data race. This is why the signature differs
 // from the topofbook and marketbyorder parsers, which surface no defect counts.
 //
-// On success the returned slice is non-nil but may be empty, meaning the frame
+// On success the returned slice is non-nil but may be empty, meaning the datagram
 // was valid and every message in it was skipped or dropped; callers must test
-// len, not nil. A non-nil error indicates the frame should be dropped and a
+// len, not nil. A non-nil error indicates the datagram should be dropped and a
 // counter incremented, and the record slice is then nil.
 type Parser interface {
 	Name() string
-	ParseFrame(port string, frame []byte) ([]Record, Defects, error)
+	ParseDatagram(port string, datagram []byte) ([]Record, Defects, error)
 }
 
 var parserRegistry = map[string]func() Parser{}

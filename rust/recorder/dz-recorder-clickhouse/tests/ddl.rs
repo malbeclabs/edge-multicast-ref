@@ -15,6 +15,19 @@ use std::collections::BTreeSet;
 use dz_recorder_clickhouse::{migrations, schema, Migration};
 use dz_recorder_rows::Grain;
 
+/// The grains `001` declares: the envelope of a datagram, and what is derived
+/// from it.
+const TRANSPORT_GRAINS: [Grain; 5] = [
+    Grain::Datagram,
+    Grain::Era,
+    Grain::SegmentCoverage,
+    Grain::SequenceGap,
+    Grain::ConformanceFinding,
+];
+
+/// The grains `005` declares: what the messages said.
+const MARKET_DATA_GRAINS: [Grain; 3] = [Grain::Event, Grain::Instrument, Grain::BookTop];
+
 /// The columns one `CREATE TABLE recorder.<table>` block declares, in order.
 fn columns(sql: &str, table: &str) -> Vec<String> {
     let needle = format!("CREATE TABLE IF NOT EXISTS recorder.{table} (");
@@ -47,33 +60,87 @@ fn columns(sql: &str, table: &str) -> Vec<String> {
 }
 
 fn rows_sql() -> &'static str {
+    sql_of("001_recorder_rows.sql")
+}
+
+/// The market data tables, which are `005` rather than `001`.
+fn market_data_sql() -> &'static str {
+    sql_of("005_recorder_market_data.sql")
+}
+
+/// The pairing views, which are `006`.
+fn pairing_sql() -> &'static str {
+    sql_of("006_recorder_book_top_pairing.sql")
+}
+
+/// The cross-site views, which are `007`.
+fn cross_site_sql() -> &'static str {
+    sql_of("007_recorder_cross_site.sql")
+}
+
+/// One `CREATE OR REPLACE VIEW recorder.<name>` statement, up to the next one.
+fn view_body(sql: &'static str, name: &str) -> &'static str {
+    let needle = format!("CREATE OR REPLACE VIEW recorder.{name} AS");
+    let start = sql
+        .find(&needle)
+        .unwrap_or_else(|| panic!("the schema declares no view `{name}`"));
+    let body = &sql[start..];
+    body.find("\nCREATE OR REPLACE VIEW")
+        .map_or(body, |end| &body[..end])
+}
+
+fn sql_of(name: &str) -> &'static str {
     migrations()
         .into_iter()
-        .find(|m| m.name == "001_recorder_rows.sql")
-        .expect("the tables are in 001")
+        .find(|m| m.name == name)
+        .unwrap_or_else(|| panic!("{name} is a migration"))
         .sql
 }
 
 /// A field with no column, or a column with no field, fails here.
 #[test]
 fn every_column_has_a_field_and_every_field_has_a_column() {
-    let sql = rows_sql();
-    for (grain, fields) in [
-        (Grain::Datagram, field_names(&fixtures::datagram())),
-        (Grain::Era, field_names(&fixtures::era())),
+    for (sql, grain, fields) in [
         (
+            rows_sql(),
+            Grain::Datagram,
+            field_names(&fixtures::datagram()),
+        ),
+        (rows_sql(), Grain::Era, field_names(&fixtures::era())),
+        (
+            rows_sql(),
             Grain::SegmentCoverage,
             field_names(&fixtures::segment_coverage()),
         ),
-        (Grain::SequenceGap, field_names(&fixtures::sequence_gap())),
         (
+            rows_sql(),
+            Grain::SequenceGap,
+            field_names(&fixtures::sequence_gap()),
+        ),
+        (
+            rows_sql(),
             Grain::ConformanceFinding,
             field_names(&fixtures::conformance_finding()),
+        ),
+        (
+            market_data_sql(),
+            Grain::Event,
+            field_names(&fixtures::event()),
+        ),
+        (
+            market_data_sql(),
+            Grain::Instrument,
+            field_names(&fixtures::instrument()),
+        ),
+        (
+            market_data_sql(),
+            Grain::BookTop,
+            field_names(&fixtures::book_top()),
         ),
     ] {
         let declared: BTreeSet<String> = columns(sql, grain.table()).into_iter().collect();
         let mut expected = fields;
-        if grain == Grain::Datagram {
+        if grain == Grain::Datagram || grain == Grain::Event {
             // The one column the loader never sends: the engine computes it, and
             // inserting into a MATERIALIZED column is an error.
             expected.insert("send_recv_ms".to_owned());
@@ -82,6 +149,168 @@ fn every_column_has_a_field_and_every_field_has_a_column() {
             declared, expected,
             "{grain}: the schema and the row type disagree about columns"
         );
+    }
+}
+
+/// The `ORDER BY (...)` of one table, as one line.
+///
+/// The key may wrap, so this joins until the closing parenthesis rather than
+/// reading a line: a key that fits on one line and a key that does not are the
+/// same key, and a test that could only read the first would quietly stop
+/// checking the moment one grew.
+fn sort_key(sql: &str, table: &str) -> String {
+    let after = sql
+        .split_once(&format!("CREATE TABLE IF NOT EXISTS recorder.{table} ("))
+        .unwrap_or_else(|| panic!("{table} is declared"))
+        .1;
+    let key = after
+        .split_once("ORDER BY (")
+        .unwrap_or_else(|| panic!("{table} has an ORDER BY"))
+        .1;
+    let key = key
+        .split_once(");")
+        .unwrap_or_else(|| panic!("{table}'s ORDER BY is closed"))
+        .0;
+    key.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The market data keys carry everything that distinguishes two genuine rows.
+///
+/// `ReplacingMergeTree` deduplicates on the whole sort key, so a key missing an
+/// identity column does not merely sort badly — it deletes rows. Each assertion
+/// here is a row that would have been lost.
+#[test]
+fn the_market_data_sort_keys_carry_what_distinguishes_two_rows() {
+    let sql = market_data_sql();
+    let event = sort_key(sql, "event");
+
+    // Two paths publishing one Channel ID. Without these, one collapses into the
+    // other and the feed reads as though a publisher went backwards.
+    assert!(event.contains("source_addr"), "event key: {event}");
+    assert!(event.contains("dst_port"), "event key: {event}");
+    // A duplicated datagram: same sequence number, same message index, different
+    // arrival. Without this it deletes the original rather than sitting beside it.
+    assert!(event.contains("recv_ts"), "event key: {event}");
+    // Several messages for one instrument packed into one datagram.
+    assert!(event.contains("message_index"), "event key: {event}");
+    // And the instrument leads, because the dominant question is per instrument
+    // over a window — the one place these keys depart from `datagram`'s.
+    assert!(
+        event.starts_with("channel_id, instrument_id"),
+        "event key does not lead with the instrument: {event}"
+    );
+    // And no era column, for the reason `datagram` has none: an era's anchor is
+    // only observable as the first datagram of that era *in this object*, so a
+    // stored one splits an era across prefixes. The era is a range join.
+    assert!(
+        !event.contains("era_anchor_ts"),
+        "event stores a per-object era anchor: {event}"
+    );
+
+    let book_top = sort_key(sql, "book_top");
+    assert!(book_top.contains("message_index"), "book_top: {book_top}");
+    assert!(book_top.contains("observation"), "book_top: {book_top}");
+
+    // An era belongs to one channel instance, so an instrument table keyed
+    // without the address and the port merges two eras that are not the same era.
+    let instrument = sort_key(sql, "instrument");
+    assert!(instrument.contains("source_addr"), "{instrument}");
+    assert!(instrument.contains("dst_port"), "{instrument}");
+    // Keyed on where the statement came into force, which is identical in every
+    // object that carries it, so two loads of one era replace rather than
+    // accumulate.
+    assert!(instrument.contains("from_sequence"), "{instrument}");
+
+    // The vantage, on all three. Two recorders at one site see the same
+    // datagrams and agree on channel, instrument, sequence number and index;
+    // `recv_ts` differing is two clocks not colliding rather than a key, so
+    // `recorder` is what keeps them apart — and `book_top` folds site and
+    // recorder into `observation`.
+    assert!(event.contains("recorder"), "event key: {event}");
+    assert!(instrument.contains("recorder"), "{instrument}");
+    assert!(
+        book_top.contains("observation"),
+        "book_top names its vantage through `observation`: {book_top}"
+    );
+
+    // And the columns that are labels rather than keys, in none of the three.
+    //
+    // `env`: one database holds one environment, which is the convention `001`
+    // already follows for `datagram`, `era`, `segment_coverage` and
+    // `sequence_gap`. Keying on it here would make these three the only tables
+    // in the recorder that do.
+    //
+    // `feed`: recoverable from the channel instance, because no two feeds serve
+    // one `(source address, destination port)`. The coincidence a key has to
+    // survive is a Channel ID collision, and `dst_port` is what survives it.
+    //
+    // `port_role`: recoverable from `dst_port` for the same reason, so keying on
+    // the name beside the number widens every key to restate a fact. `book_top`
+    // has no such column at all, because a book spans port roles.
+    for (name, key) in [
+        ("event", &event),
+        ("book_top", &book_top),
+        ("instrument", &instrument),
+    ] {
+        for column in ["env", "feed", "port_role"] {
+            assert!(
+                !key.contains(column),
+                "{name} keys on {column}, which is a label the rest of the \
+                 recorder does not key on: {key}"
+            );
+        }
+    }
+}
+
+/// The retention split, one table further down than `002` put it.
+#[test]
+fn the_market_data_retention_expires_the_events_and_keeps_the_book() {
+    let sql = market_data_sql();
+    assert!(
+        sql.contains("ALTER TABLE recorder.event")
+            && sql.contains("MODIFY TTL toDateTime(recv_ts) + INTERVAL 2 DAY"),
+        "the expensive base table has no TTL"
+    );
+    assert!(
+        sql.contains("ALTER TABLE recorder.book_top")
+            && sql.contains("MODIFY TTL toDateTime(recv_ts) + INTERVAL 30 DAY"),
+        "the derived table's longer window is not stated"
+    );
+    // `instrument` is what makes every other row's symbol and exponents mean
+    // anything after the fact. Expiring it leaves prices that no longer decode.
+    assert!(
+        !sql.contains("ALTER TABLE recorder.instrument"),
+        "reference data must not expire"
+    );
+    // Whole days, so a TTL is a partition drop rather than a treadmill of part
+    // rewrites — the reason `002` gives for the same shape.
+    for window in ["INTERVAL 2 DAY", "INTERVAL 30 DAY"] {
+        assert!(
+            sql.contains(window),
+            "{window} is not a whole number of days"
+        );
+    }
+}
+
+/// The columns that can be unknown are nullable, on the market data tables too.
+#[test]
+fn the_market_data_columns_that_can_be_unknown_are_nullable() {
+    let sql = market_data_sql();
+    for column in [
+        // The sentinel translation's destination. A count the venue does not
+        // expose is absent, not sixty-five thousand.
+        "order_count        Nullable(UInt16)",
+        "level_index        Nullable(UInt16)",
+        // A message that carries no venue time.
+        "upstream_ts        Nullable(DateTime64(9))",
+        // The reset's recovery anchor, and the snapshot's.
+        "anchor_seq         Nullable(UInt64)",
+        // Absent rather than zero: a zero reads as a feed publishing nothing.
+        "declared_count Nullable(UInt32)",
+        // Certain rows have no sequence number to point at.
+        "uncertain_since   Nullable(UInt64)",
+    ] {
+        assert!(sql.contains(column), "not nullable: {column}");
     }
 }
 
@@ -149,7 +378,24 @@ fn the_sort_keys_are_the_ones_the_rows_were_shaped_for() {
     );
 }
 
-/// Provenance is in no sort key, on any table.
+/// The migration that declares one grain's table.
+///
+/// Five grains are in `001` and the three market data ones in `005`. A test that
+/// assumed one file would not fail on the grains it could not find — `columns`
+/// panics rather than returning nothing, which is what makes that safe to rely
+/// on here.
+fn sql_declaring(grain: Grain) -> &'static str {
+    match grain {
+        Grain::Event | Grain::Instrument | Grain::BookTop => market_data_sql(),
+        Grain::Datagram
+        | Grain::Era
+        | Grain::SegmentCoverage
+        | Grain::SequenceGap
+        | Grain::ConformanceFinding => rows_sql(),
+    }
+}
+
+/// Provenance is on every grain, and in no sort key.
 ///
 /// A datagram recorded once is one row whichever mode derived it. Put
 /// `derivation` in a sort key and the archive-derived row and the live-derived
@@ -157,26 +403,38 @@ fn the_sort_keys_are_the_ones_the_rows_were_shaped_for() {
 /// window loaded both ways doubles, and every count over it is wrong in a
 /// direction nobody would suspect. The column exists to be *read*, and this is
 /// where that stays true.
+///
+/// Both halves matter and neither is enough alone. Without the column check the
+/// sort-key check passes over a table that has no provenance at all; without the
+/// sort-key check a later migration can quietly break deduplication. The grain
+/// enumeration is what makes a grain added next year fail here rather than ship
+/// rows nobody can attribute.
 #[test]
-fn the_provenance_column_is_in_no_sort_key() {
-    let sql = rows_sql();
-    for line in sql.lines() {
-        let line = line.trim_start();
-        if line.starts_with("ORDER BY") || line.starts_with("PRIMARY KEY") {
-            assert!(
-                !line.contains("derivation"),
-                "provenance reached a sort key: {line}"
-            );
-        }
-    }
-    // And it is a column on every one of them, or the assertion above is vacuous
-    // for the table that is missing it.
+fn provenance_is_on_every_grain_and_in_no_sort_key() {
     for grain in Grain::ALL {
+        let sql = sql_declaring(grain);
         let declared = columns(sql, grain.table());
         assert!(
             declared.iter().any(|c| c == "derivation"),
             "{grain} declares no derivation column: {declared:?}"
         );
+    }
+
+    for sql in [
+        rows_sql(),
+        market_data_sql(),
+        pairing_sql(),
+        cross_site_sql(),
+    ] {
+        for line in sql.lines() {
+            let line = line.trim_start();
+            if line.starts_with("ORDER BY") || line.starts_with("PRIMARY KEY") {
+                assert!(
+                    !line.contains("derivation"),
+                    "provenance reached a sort key: {line}"
+                );
+            }
+        }
     }
 }
 
@@ -189,15 +447,25 @@ fn the_provenance_column_is_in_no_sort_key() {
 /// somebody can take.
 #[test]
 fn every_table_is_partitioned_by_a_day() {
-    let sql = rows_sql();
     let expected = [
-        (Grain::Datagram, "toYYYYMMDD(recv_ts)"),
-        (Grain::Era, "toYYYYMMDD(anchor_ts)"),
-        (Grain::SegmentCoverage, "toYYYYMMDD(start_ts)"),
-        (Grain::SequenceGap, "toYYYYMMDD(before_ts)"),
-        (Grain::ConformanceFinding, "toYYYYMMDD(window_start)"),
+        (rows_sql(), Grain::Datagram, "toYYYYMMDD(recv_ts)"),
+        (rows_sql(), Grain::Era, "toYYYYMMDD(anchor_ts)"),
+        (rows_sql(), Grain::SegmentCoverage, "toYYYYMMDD(start_ts)"),
+        (rows_sql(), Grain::SequenceGap, "toYYYYMMDD(before_ts)"),
+        (
+            rows_sql(),
+            Grain::ConformanceFinding,
+            "toYYYYMMDD(window_start)",
+        ),
+        (market_data_sql(), Grain::Event, "toYYYYMMDD(recv_ts)"),
+        (
+            market_data_sql(),
+            Grain::Instrument,
+            "toYYYYMMDD(first_seen_ts)",
+        ),
+        (market_data_sql(), Grain::BookTop, "toYYYYMMDD(recv_ts)"),
     ];
-    for (grain, partition) in expected {
+    for (sql, grain, partition) in expected {
         assert!(
             sql.contains(&format!("PARTITION BY {partition}")),
             "{grain} is not partitioned by {partition}"
@@ -206,9 +474,14 @@ fn every_table_is_partitioned_by_a_day() {
     // One `PARTITION BY` per table, so a table added later without one fails
     // here rather than being noticed on a graph months afterwards.
     assert_eq!(
-        sql.matches("PARTITION BY ").count(),
-        Grain::COUNT,
-        "a table has no PARTITION BY, or one has two"
+        rows_sql().matches("PARTITION BY ").count(),
+        TRANSPORT_GRAINS.len(),
+        "a table in 001 has no PARTITION BY, or one has two"
+    );
+    assert_eq!(
+        market_data_sql().matches("PARTITION BY ").count(),
+        MARKET_DATA_GRAINS.len(),
+        "a table in 005 has no PARTITION BY, or one has two"
     );
 }
 
@@ -423,6 +696,160 @@ fn resolving_a_datagram_to_its_era_needs_no_window_and_no_final() {
     );
 }
 
+/// The pairing numbers the occurrences, and never joins on the key alone.
+///
+/// `state_key` is not unique and must not be — a book returning to a previous
+/// state produces the same key again — so a join on the key is a cross product
+/// on any instrument that oscillates, and `ASOF` is the obvious repair and the
+/// wrong one: it selects the nearest right-hand row independently for each
+/// left-hand row, with no notion of consuming a match, so several occurrences at
+/// one observation point all pair with the same occurrence at the other. The
+/// lead times that come out are plausible, biased, and counted from one arrival
+/// several times, which is why the reasoning is required to be in the file and
+/// not only in a review.
+#[test]
+fn the_race_numbers_the_occurrences_rather_than_pairing_by_proximity() {
+    let sql = pairing_sql();
+    assert!(
+        sql.contains("row_number() OVER ("),
+        "the ordinal is a window function over the rows and nothing else"
+    );
+    assert!(
+        sql.contains("PARTITION BY b.observation, b.channel_id, b.instrument_id,")
+            && sql.contains("e.anchor_ts, b.state_key"),
+        "the ordinal is per observation point, per instrument, per era, per state"
+    );
+    assert!(
+        sql.contains("ORDER BY b.recv_ts"),
+        "and it is ordered by the arrival, which is what a race compares"
+    );
+
+    let race = view_body(sql, "book_top_race");
+    assert!(
+        !race.contains("ASOF") && !race.contains("JOIN"),
+        "the pairing is an aggregate over the ordinal, not a join: {race}"
+    );
+    assert!(
+        sql.contains("no notion of consuming a match"),
+        "why `ASOF` is wrong here belongs beside the thing that does not use it"
+    );
+}
+
+/// A snapshot-derived row is excluded *before* the numbering.
+///
+/// A snapshot anchors a book and never times one: the runtime pulls it on its
+/// own cadence and the archive records when it was published rather than when it
+/// was asked for, so its arrival stamp measures the publisher's scheduler. The
+/// filter is in the same statement as the window, where `WHERE` runs first and
+/// an anchor row consumes no ordinal. Filtered afterwards it would leave every
+/// later occurrence at that observation point numbered one too high — which does
+/// not read as a mistake downstream, it reads as a lead time.
+#[test]
+fn an_anchor_row_takes_no_ordinal_because_it_is_filtered_before_the_window() {
+    let occurrence = view_body(pairing_sql(), "book_top_occurrence");
+    assert!(
+        occurrence.contains("row_number() OVER (")
+            && occurrence.contains("WHERE b.from_anchor = 0"),
+        "the exclusion and the numbering are one statement: {occurrence}"
+    );
+    assert!(
+        !view_body(pairing_sql(), "book_top_race").contains("from_anchor"),
+        "so nothing below has to remember to repeat it"
+    );
+    assert!(
+        pairing_sql().contains("measures the publisher's scheduler"),
+        "why a snapshot is not an observation has to be stated where it is excluded"
+    );
+}
+
+/// The era is in the numbering and not in the pairing, and that asymmetry is the
+/// point.
+///
+/// An `Instrument ID` is unique within an era, so one point's own ordinals must
+/// not run across a boundary. But an era's stored identity is its anchor, and an
+/// anchor is a *receive* stamp — one observation point's observation of that
+/// era. Two recorders of one feed open their eras at two instants and two
+/// transports share no sequence space at all, so a pairing grouped on any era
+/// column pairs nothing across observation points and reports a total outage as
+/// a clean feed.
+#[test]
+fn the_pairing_groups_on_the_state_and_the_ordinal_and_on_no_era() {
+    let sql = pairing_sql();
+    assert!(
+        sql.contains("GROUP BY channel_id, instrument_id, state_key, occurrence"),
+        "the pairing key is the state and its ordinal"
+    );
+    let race = view_body(sql, "book_top_race");
+    assert!(
+        !race.contains("GROUP BY channel_id, instrument_id, state_key, occurrence, era")
+            && !race.contains("era_anchor_ts,\n"),
+        "an era column in the grouping would pair nothing at all: {race}"
+    );
+    assert!(
+        sql.contains("uniqExact(observation)"),
+        "and distinct observation points are counted, not rows, because an \
+         ordinal restarts at each era"
+    );
+}
+
+/// An occurrence with no counterpart is a row, and its lead time is null.
+///
+/// The fact worth seeing: it usually means one observation point missed a state
+/// the other saw. A join would have dropped it, and a zero lead would have
+/// entered every average over the column as evidence that the two paths tied.
+#[test]
+fn an_unpaired_occurrence_is_visible_and_carries_no_lead_time() {
+    let race = view_body(pairing_sql(), "book_top_race");
+    assert!(
+        race.contains("if(uniqExact(observation) > 1,"),
+        "the lead exists only where there were two points to measure between"
+    );
+    assert!(
+        race.contains("NULL)") && race.contains("AS lead_ms"),
+        "and is null rather than zero otherwise: {race}"
+    );
+    assert!(
+        race.contains("groupUniqArray(observation)"),
+        "the row names the points that saw the state, so an unpaired one is \
+         readable rather than merely present"
+    );
+    assert!(
+        pairing_sql().contains("bound is a property of the two paths"),
+        "the |Δt| bound is the caller's, and why has to be written down"
+    );
+}
+
+/// The replacing collapse is applied once, below everything that numbers.
+///
+/// A re-run after a fix is a replace, so between the second load and the merge
+/// one arrival is in the table twice. Numbered without the collapse the
+/// duplicate becomes a second occurrence, and it does not merely inflate a
+/// count: the surplus occurrences pair with each other and the last one at each
+/// point pairs with nothing, so a re-load reports states both points saw as
+/// states one of them missed.
+#[test]
+fn the_collapse_is_applied_once_beneath_the_numbering() {
+    let sql = pairing_sql();
+    assert_eq!(
+        sql.matches("recorder.book_top FINAL").count(),
+        1,
+        "the collapse is written once"
+    );
+    assert!(
+        view_body(sql, "book_top_occurrence").contains("FROM recorder.book_top_settled AS b"),
+        "and the numbering reads the collapsed view rather than the table"
+    );
+    assert!(
+        !view_body(sql, "book_top_race").contains("FINAL"),
+        "nothing above it pays for the collapse a second time"
+    );
+    assert!(
+        sql.contains("manufacture evidence of loss"),
+        "what a duplicate would do here is worse than a double count, and the \
+         file has to say so"
+    );
+}
+
 /// Every file splits into statements a server takes one at a time, and no
 /// statement is a fragment of prose.
 #[test]
@@ -453,10 +880,46 @@ fn every_migration_splits_into_whole_statements() {
         }
     }
 
+    // The three views of the pairing, and nothing split across two of them.
+    let pairing = migration("006_recorder_book_top_pairing.sql").statements();
+    assert_eq!(pairing.len(), 3, "three views");
+    for view in ["book_top_settled", "book_top_occurrence", "book_top_race"] {
+        assert_eq!(
+            pairing
+                .iter()
+                .filter(|s| s.contains(&format!("CREATE OR REPLACE VIEW recorder.{view} AS")))
+                .count(),
+            1,
+            "{view}"
+        );
+    }
+
+    // The seven views of the cross-site join, and nothing split across two.
+    let cross_site = migration("007_recorder_cross_site.sql").statements();
+    assert_eq!(cross_site.len(), 7, "seven views");
+    for view in [
+        "segment_overflow",
+        "gap_missing_seq",
+        "instance_vantage_day",
+        "gap_vantage_seq",
+        "gap_cross_site_evidence",
+        "gap_sent_elsewhere",
+        "sequence_gap_cross_site",
+    ] {
+        assert_eq!(
+            cross_site
+                .iter()
+                .filter(|s| s.contains(&format!("CREATE OR REPLACE VIEW recorder.{view} AS")))
+                .count(),
+            1,
+            "{view}"
+        );
+    }
+
     // The five tables and the database, and nothing split across two of them.
     let statements = migration("001_recorder_rows.sql").statements();
     assert_eq!(statements.len(), 6, "one database and five tables");
-    for grain in Grain::ALL {
+    for grain in TRANSPORT_GRAINS {
         assert_eq!(
             statements
                 .iter()
@@ -493,6 +956,182 @@ fn the_schema_names_no_venue_and_no_address_outside_the_documentation_ranges() {
     }
 }
 
+/// The escalation reads a `NULL` as unknown and never as a `no`.
+///
+/// `seen_elsewhere` is three-valued and the whole column exists for the third
+/// value: `1` present elsewhere, `0` absent at every vantage that could speak,
+/// `NULL` nobody else could speak yet. A condition written `!= 1` promotes on
+/// every one of those nulls — a site that has not loaded, a site that
+/// overflowed, a site that went quiet — and each of those is a `publisher`
+/// finding drawn from an archive that did not look.
+#[test]
+fn the_cross_site_escalation_tests_absence_and_never_the_absence_of_presence() {
+    let view = view_body(cross_site_sql(), "sequence_gap_cross_site");
+    assert!(
+        view.contains("ifNull(seen_elsewhere = 0, 0)"),
+        "the promotion is on a known absence: {view}"
+    );
+    assert!(
+        !view.contains("seen_elsewhere != 1") && !view.contains("seen_elsewhere <> 1"),
+        "and never on the absence of a presence: {view}"
+    );
+    // And only ever upwards from `unverifiable`. The other three verdicts are
+    // exculpatory and decided from evidence one object holds; nothing found at
+    // another site makes a gap our own ring admitted anything other than ours.
+    assert!(
+        view.contains("if(g.verdict = 'unverifiable'"),
+        "the escalation runs from one verdict only: {view}"
+    );
+    assert_eq!(
+        view.matches("'publisher'").count(),
+        1,
+        "and writes the accusation in exactly one place"
+    );
+    assert!(
+        cross_site_sql().contains("promotes on ignorance"),
+        "why `!= 1` is wrong has to be written where the condition is"
+    );
+}
+
+/// Absence is decided on rows that have no TTL, and the base rows are read for
+/// one thing only.
+///
+/// The obvious join expands the missing sequence numbers and looks for them in
+/// `datagram` at the other sites. That answers *present* correctly and *absent*
+/// catastrophically: `datagram` is the one table `002` expires, so two days on
+/// every sequence number looks absent everywhere and every stale gap in the
+/// archive is promoted to `publisher` on a timer.
+#[test]
+fn the_cross_site_absence_is_read_from_the_rows_that_outlive_the_datagrams() {
+    let sql = cross_site_sql();
+    assert_eq!(
+        sql.matches("recorder.datagram").count(),
+        1,
+        "the base rows are read once, and it is not for the verdict"
+    );
+    assert!(
+        view_body(sql, "gap_sent_elsewhere").contains("recorder.datagram"),
+        "the one read is the send stamps, which only a site that received the \
+         datagram can supply"
+    );
+    for view in ["gap_vantage_seq", "gap_cross_site_evidence"] {
+        assert!(
+            !view_body(sql, view).contains("recorder.datagram"),
+            "{view} decides admissibility and must not read an expiring table"
+        );
+    }
+    assert!(
+        view_body(sql, "gap_vantage_seq").contains("recorder.segment_overflow")
+            && view_body(sql, "gap_vantage_seq").contains("recorder.gap_missing_seq"),
+        "it reads the coverage rows and the other sites' own gap rows, which \
+         within a covered range are exhaustive"
+    );
+}
+
+/// Both sides of the vantage join are bounded in time, because the sequence
+/// space repeats.
+///
+/// A `Reset Count` restarts the numbering, so `(instance, sequence number)` is a
+/// key one instance revisits era after era — which is why `era_anchor_ts` is in
+/// `sequence_gap`'s sort key at all. Bounding only the coverage row leaves the
+/// other half open: a gap that vantage recorded at this number in an earlier era
+/// answers for the datagram missing now, as *missed* and, with its own stale
+/// residue, as an admissible absence. That is the accusing direction, on
+/// evidence about a different datagram.
+#[test]
+fn the_cross_site_vantage_join_bounds_the_gap_rows_as_well_as_the_coverage_rows() {
+    let view = view_body(cross_site_sql(), "gap_vantage_seq");
+    assert!(
+        view.contains("AND o.start_ts <= m.after_ts")
+            && view.contains("AND o.end_ts   >= m.before_ts"),
+        "a coverage row speaks only over the bracket the datagram was sent in: {view}"
+    );
+    // Against the admitting segment's window and never our own bracket: two
+    // sites' brackets are readings of two clocks at two ends of a path, and
+    // requiring theirs to overlap ours rejects the ordinary case where both
+    // really did miss the datagram — which reads as *held*, and exonerates.
+    assert!(
+        view.contains("arrayFilter(x -> x.1 <= o.end_ts AND x.2 >= o.start_ts"),
+        "and its gap rows are narrowed to that same window, on that same host's \
+         clock: {view}"
+    );
+    // In the match and not after it: a vantage whose only gap at this number is
+    // an old one held the datagram now, and a filter applied to the result would
+    // drop its row and turn a site that spoke into a site that was silent.
+    assert!(
+        view.contains(
+            "GROUP BY site, recorder, source_addr, channel_id, dst_port, sequence_number"
+        ),
+        "folded to one row per vantage and number, so the window narrows the \
+         evidence rather than the rows: {view}"
+    );
+    assert!(
+        cross_site_sql().contains("THE SEQUENCE SPACE REPEATS"),
+        "and why both halves need it is written where the join is"
+    );
+}
+
+/// Overflow is read as a delta, and a missing predecessor is unknown rather
+/// than clean.
+///
+/// `capture_drop_total` is cumulative and never resets, so a host that dropped a
+/// burst an hour ago carries it for ever: a rule reading the total would find no
+/// site admissible on any host that ever overflowed, and one reading a
+/// defaulted predecessor as zero would admit exactly the absence a missing
+/// segment conceals.
+#[test]
+fn the_cross_site_overflow_test_is_a_delta_with_no_predecessor_left_unknown() {
+    let view = view_body(cross_site_sql(), "segment_overflow");
+    assert!(
+        view.contains("p.present = 1 AND p.segment_seq + 1 = c.segment_seq"),
+        "adjacency is checked and never assumed: {view}"
+    );
+    assert!(
+        view.contains("NULL) AS capture_drop_delta"),
+        "and a delta with no predecessor is null rather than zero: {view}"
+    );
+    assert!(
+        view.contains("if(isNull(capture_drop_delta), NULL, toUInt8(capture_drop_delta = 0))"),
+        "so unknown and clean stay two answers: {view}"
+    );
+    assert!(
+        cross_site_sql().contains("where an unaccounted burst hides"),
+        "why a hole is not a zero has to be stated where the null is written"
+    );
+}
+
+/// The evidence is counted in distinct vantages and distinct sequence numbers,
+/// never in rows.
+///
+/// A re-run after an analyser fix is a replace, and between the second load and
+/// the merge every row is in the tables twice. Counted as rows, one site's
+/// single absence is two — and since the verdict turns on how many sites agreed,
+/// that is the one arithmetic error here that promotes a finding on evidence
+/// nobody has. It is the same reason `006` counts `uniqExact(observation)`.
+#[test]
+fn the_cross_site_evidence_counts_distinct_vantages_and_never_rows() {
+    let view = view_body(cross_site_sql(), "gap_cross_site_evidence");
+    assert!(
+        view.contains("uniqExactIf(other_site, absence_admissible = 1)      AS absent_sites"),
+        "the sites that agreed are distinct sites: {view}"
+    );
+    assert!(
+        !view.contains("count()") && !view.contains("countIf(") && !view.contains("sum("),
+        "and nothing here counts rows: {view}"
+    );
+    assert!(
+        view_body(cross_site_sql(), "gap_missing_seq").contains("recorder.sequence_gap FINAL"),
+        "the collapse is applied once, beneath the expansion"
+    );
+    assert_eq!(
+        cross_site_sql()
+            .matches("recorder.sequence_gap FINAL")
+            .count(),
+        1,
+        "and written once, so nothing above pays for it twice"
+    );
+}
+
 fn migration(name: &str) -> Migration {
     migrations()
         .into_iter()
@@ -515,11 +1154,129 @@ mod fixtures {
     use std::net::Ipv4Addr;
 
     use dz_recorder_rows::{
-        ConformanceFinding, Datagram, Derivation, DropScope, Era, FindingVerdict, Nanos,
-        PortRoleLabel, RecvTsKindLabel, SegmentCoverage, SequenceGap, Verdict,
+        BookTop, ConformanceFinding, Datagram, Derivation, DropScope, Era, Event, FindingVerdict,
+        Instrument, MessageTypeLabel, Nanos, PortRoleLabel, RecvTsKindLabel, SegmentCoverage,
+        SequenceGap, UncertainReason, Verdict,
     };
 
     const ADDR: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 10);
+
+    pub fn event() -> Event {
+        Event {
+            recv_ts: Nanos(0),
+            send_ts: Nanos(0),
+            upstream_ts: None,
+            recv_ts_kind: RecvTsKindLabel::KernelSoftware,
+            site: String::new(),
+            recorder: String::new(),
+            env: String::new(),
+            feed: String::new(),
+            port_role: PortRoleLabel::Mktdata,
+            source_addr: ADDR,
+            channel_id: 0,
+            dst_port: 0,
+            sequence_number: 0,
+            reset_count: 0,
+            segment_seq: 0,
+            message_index: 0,
+            source_id: 0,
+            instrument_id: 0,
+            symbol: String::new(),
+            price_exp: 0,
+            qty_exp: 0,
+            per_instrument_seq: None,
+            message_type: MessageTypeLabel::Quote,
+            side_raw: None,
+            action_raw: None,
+            reason_raw: None,
+            flags_raw: None,
+            price_raw: None,
+            qty_raw: None,
+            order_count: None,
+            level_index: None,
+            bid_px_raw: None,
+            bid_qty_raw: None,
+            bid_source_count: None,
+            ask_px_raw: None,
+            ask_qty_raw: None,
+            ask_source_count: None,
+            trade_id: None,
+            cumulative_volume: None,
+            snapshot_id: None,
+            anchor_seq: None,
+            total_levels: None,
+            levels_seen: None,
+            depth_bound: None,
+            object_key: String::new(),
+            object_sha256: String::new(),
+            derivation: Derivation::Archive,
+            datagram_index: 0,
+        }
+    }
+
+    pub fn instrument() -> Instrument {
+        Instrument {
+            site: String::new(),
+            recorder: String::new(),
+            env: String::new(),
+            feed: String::new(),
+            port_role: PortRoleLabel::Refdata,
+            source_addr: ADDR,
+            channel_id: 0,
+            dst_port: 0,
+            source_id: 0,
+            instrument_id: 0,
+            from_sequence: 0,
+            reset_count: 0,
+            symbol: String::new(),
+            price_exp: 0,
+            qty_exp: 0,
+            contract_value: 0,
+            first_seen_ts: Nanos(0),
+            last_seen_ts: Nanos(0),
+            manifest_seq: None,
+            declared_count: None,
+            object_key: String::new(),
+            derivation: Derivation::Archive,
+        }
+    }
+
+    pub fn book_top() -> BookTop {
+        BookTop {
+            recv_ts: Nanos(0),
+            send_ts: Nanos(0),
+            site: String::new(),
+            recorder: String::new(),
+            env: String::new(),
+            feed: String::new(),
+            observation: String::new(),
+            source_addr: ADDR,
+            channel_id: 0,
+            dst_port: 0,
+            source_id: 0,
+            instrument_id: 0,
+            symbol: String::new(),
+            sequence_number: 0,
+            message_index: 0,
+            reset_count: 0,
+            segment_seq: 0,
+            bid_px_raw: None,
+            bid_qty_raw: None,
+            bid_source_count: None,
+            ask_px_raw: None,
+            ask_qty_raw: None,
+            ask_source_count: None,
+            price_exp: 0,
+            qty_exp: 0,
+            state_key: 0,
+            from_anchor: 0,
+            book_certain: 1,
+            uncertain_since: None,
+            uncertain_reason: UncertainReason::None,
+            object_key: String::new(),
+            derivation: Derivation::Archive,
+        }
+    }
 
     pub fn datagram() -> Datagram {
         Datagram {

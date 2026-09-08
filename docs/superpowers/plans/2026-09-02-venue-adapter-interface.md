@@ -33,7 +33,7 @@ not.
 | Plan | Lands | Delivers |
 |---|---|---|
 | **1 — the interface** (this one) | `dz-adapter-core`, `dz-publisher-lowering`, the registry and config binding, `dz-recorder-relower` | a venue can write an adapter and prove its mapping in CI; an archive can be re-lowered and diffed |
-| **2 — the runtime and the tee** | `dz-ingress-core`/`-websocket`, the `DatagramSink` fan-out, `dz-publisher-runtime` wiring, the reference recorder | a venue can *run*, and Modes A and B become live |
+| **2 — the runtime and the fan-out** | `dz-ingress-core`/`-websocket`, the `DatagramSink` fan-out, `dz-publisher-runtime` wiring, the reference recorder | a venue can *run*, and Modes A and B become live |
 
 Plan 1 is sized so that every task is a merge into this repository with a test
 that runs in CI. No task in it requires a venue repository to change.
@@ -480,7 +480,7 @@ the audit's own failure, as a test.
 - [x] A length-delimited normalized-event **record** encoding, one event per
       record, versioned in a header byte.
 - [x] `UdsAdapter`, a built-in `Adapter` reading that encoding, so a non-Rust
-      integration can be the source.
+      integration can be the adapter.
 - [x] The same encoding, written: a `RecordWriter` plan 2 uses for
       `[adapter.tee]`.
 
@@ -585,7 +585,7 @@ keeps the tool usable.
 > `dz-ingress-*` did **not** stay planned — the websocket transport landed, so
 > the publisher's planned table now names what actually remains: the other
 > transports, market-by-order behind its missing codec crate, and the egress
-> tee, which was waiting on a framing that task 8 has now written.
+> fan-out, which was waiting on a framing that task 8 has now written.
 >
 > One correction rather than an addition: `rust/README.md` claimed CI ran on
 > changes under a list of paths. There is no path filter — CI runs on every pull
@@ -637,12 +637,12 @@ the venue's own exponents on the definition.
 
 **Two things only the real run could find.**
 
-Unpinned, the transmitter resolves its source off the route to the group — which
-is the discipline, and on a host whose route to that group leaves by the default
-interface, a subscriber joined on loopback hears nothing. The publisher reports
-a clean teardown, because nothing in the send path is wrong: the two ends chose
-different interfaces. That is what `[egress] pin` is for, and it is invisible to
-every test that holds a fake socket.
+Unpinned, the transmitter resolves its source address off the route to the
+group — which is the discipline, and on a host whose route to that group leaves
+by the default interface, a subscriber joined on loopback hears nothing. The
+publisher reports a clean teardown, because nothing in the send path is wrong:
+the two ends chose different interfaces. That is what `[egress] pin` is for, and
+it is invisible to every test that holds a fake socket.
 
 And `check-public-repo-rules.sh` refused the first group the example used. A
 multicast address outside MCAST-TEST-NET in a public repository is exactly what

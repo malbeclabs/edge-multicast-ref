@@ -29,8 +29,8 @@
 | `go/marketbyorder-parser/main.go` | CLI flags, signal handling, wiring |
 | `go/marketbyorder-parser/runner.go` | Three goroutines: refdata + mktdata + snapshot UDP receivers |
 | `go/marketbyorder-parser/parser.go` | Parser interface + Record envelope + parser registry |
-| `go/marketbyorder-parser/marketbyorder.go` | TopOfBookParser-style impl: routes wire frames into Record stream |
-| `go/marketbyorder-parser/marketbyorder_wire.go` | Binary frame decoder for all 13 DZ-MBO message types |
+| `go/marketbyorder-parser/marketbyorder.go` | TopOfBookParser-style impl: routes wire datagrams into Record stream |
+| `go/marketbyorder-parser/marketbyorder_wire.go` | Binary datagram decoder for all 13 DZ-MBO message types |
 | `go/marketbyorder-parser/sink.go` | OutputSink interface + factory |
 | `go/marketbyorder-parser/sink_socket.go` | Broadcast Unix socket sink (copied from TOB) |
 | `go/marketbyorder-parser/sink_json.go` | JSONL file sink (copied from TOB) |
@@ -310,22 +310,22 @@ git commit -m "scaffold(mbo): rename example-bot, add marketbyorder-parser and m
 
 ---
 
-### Task 2: Parser wire decoder — frame header + reader helpers + inherited message types
+### Task 2: Parser wire decoder — datagram header + reader helpers + inherited message types
 
 **Files:**
 - Create: `go/marketbyorder-parser/marketbyorder_wire.go`
 - Create: `go/marketbyorder-parser/marketbyorder_test.go` (initial — wire tests only)
 
-This task implements the binary decoder for the 24-byte frame header, the 4-byte application-message header, and the five inherited message types (Heartbeat, InstrumentDefinition, Trade, EndOfSession, ManifestSummary). The reader uses the sticky-error pattern from [go/topofbook-parser/topofbook_wire.go](../go/topofbook-parser/topofbook_wire.go) — read it as a structural template before writing this file.
+This task implements the binary decoder for the 24-byte datagram header, the 4-byte application-message header, and the five inherited message types (Heartbeat, InstrumentDefinition, Trade, EndOfSession, ManifestSummary). The reader uses the sticky-error pattern from [go/topofbook-parser/topofbook_wire.go](../go/topofbook-parser/topofbook_wire.go) — read it as a structural template before writing this file.
 
 **Important wire-format notes from the spec:**
 - Magic = `0x4444` (LE bytes: `0x44 0x44`)
 - All multi-byte fields are little-endian
-- Frame header is 24 bytes; app message header is 4 bytes
+- Datagram header is 24 bytes; app message header is 4 bytes
 - Frame Length field at offset 22 includes the 24-byte header
 - Message Length field at offset 1 of each app message includes the 4-byte app header
 
-- [ ] **Step 1: Write the decoder file with frame header + reader helpers**
+- [ ] **Step 1: Write the decoder file with datagram header + reader helpers**
 
 Create `go/marketbyorder-parser/marketbyorder_wire.go`:
 
@@ -582,7 +582,7 @@ func ParseTrade(buf []byte) (TradeBody, error) {
 }
 ```
 
-- [ ] **Step 2: Write tests for the frame header and inherited messages**
+- [ ] **Step 2: Write tests for the datagram header and inherited messages**
 
 Create `go/marketbyorder-parser/marketbyorder_test.go`:
 
@@ -1189,7 +1189,7 @@ git commit -m "feat(mbo-parser): wire decoder for MBO-specific message types"
 
 ---
 
-### Task 4: Parser Record envelope + frame routing (marketbyorder.go + parser.go)
+### Task 4: Parser Record envelope + datagram routing (marketbyorder.go + parser.go)
 
 **Files:**
 - Create: `go/marketbyorder-parser/parser.go`
@@ -4509,7 +4509,7 @@ func (w *SnapshotWriter) flushDue() {
 		}
 		snap := ComputeLevels(inst, w.depth)
 		w.write(snap, inst, e.dirtiedAt, now)
-		// re-arm: next write earliest in coalesceInterval
+		// reset the window: next write earliest in coalesceInterval
 		w.mu.Lock()
 		// (entry was deleted; if a new MarkDirty arrived during write, it'll be there)
 		w.mu.Unlock()

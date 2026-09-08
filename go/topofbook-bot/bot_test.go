@@ -158,7 +158,7 @@ func TestBot_HandleHeartbeat_NoSymbolCountsButNoGauge(t *testing.T) {
 }
 
 func TestBot_ReadLoop_DecodesJSONLines(t *testing.T) {
-	// Stand up a socketpair: one side is the "parser", other is the bot.
+	// Stand up a socketpair: one side is the "parser", other is the book-builder.
 	tmp := t.TempDir()
 	sock := filepath.Join(tmp, "t.sock")
 
@@ -209,7 +209,7 @@ func TestBot_ReadLoop_DecodesJSONLines(t *testing.T) {
 		close(done)
 	}()
 
-	// Run the bot until we see our expected counters, then cancel.
+	// Run the book-builder until we see our expected counters, then cancel.
 	botDone := make(chan struct{})
 	go func() {
 		_ = b.Run(ctx)

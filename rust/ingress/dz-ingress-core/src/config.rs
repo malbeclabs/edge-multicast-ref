@@ -262,9 +262,9 @@ mod tests {
 
     #[test]
     fn every_unit_the_error_message_offers_is_a_unit_the_parser_takes() {
-        // The message and the match arms are two lists, and a unit named in one
-        // and missing from the other is a documented syntax that does not
-        // parse.
+        // The message and the match branches are two lists, and a unit named
+        // in one and missing from the other is a documented syntax that does
+        // not parse.
         for unit in ["ns", "us", "ms", "s", "m", "h"] {
             assert!(
                 parse_duration(&format!("1{unit}")).is_ok(),

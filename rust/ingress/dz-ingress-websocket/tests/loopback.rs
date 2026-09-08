@@ -168,7 +168,7 @@ async fn serve_recording_upgrades(
 ///
 /// Case-insensitive because HTTP is, and because `http` lowercases every name
 /// it parses — a test that asserted on the venue's own capitalisation would be
-/// asserting about that normalisation and not about this transport.
+/// asserting about that case-folding and not about this transport.
 fn upgrade_header(upgrades: &Upgrades, handshake: usize, name: &str) -> Option<String> {
     upgrades
         .lock()

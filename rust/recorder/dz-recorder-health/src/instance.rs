@@ -91,8 +91,8 @@ pub(crate) struct InstanceState {
     /// replayed archive is the order the traffic actually had.
     pub(crate) last_seen_ns: u64,
     /// `None` until the first heartbeat-shaped datagram, so the first one
-    /// establishes the baseline rather than reporting an interval measured from
-    /// the epoch.
+    /// establishes the baseline rather than reporting an interval measured
+    /// from the Unix epoch.
     pub(crate) last_heartbeat_ns: Option<u64>,
     /// Whether the operator declared this source. A declared source's series
     /// were pre-created at startup and survive eviction: an operator's own

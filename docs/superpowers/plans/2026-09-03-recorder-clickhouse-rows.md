@@ -37,7 +37,7 @@ because "a table set per feed" is the intuition a reader arrives with:
   columns carry those same names for those same things. Splitting by feed in one
   half and not the other is how the live panel and the historical panel start
   disagreeing about what a channel is.
-- **The count of lanes is the argument's other end.** A recorder in a live
+- **The count of feeds is the argument's other end.** A recorder in a live
   deployment already carries a dozen feeds and the capture beside it reads
   dozens more; per-feed tables multiply every future materialised view and every
   TTL by that number, and many small parts is the access pattern this engine is
@@ -129,9 +129,9 @@ So the batch is a number in the sink configuration, not a sentiment:
 
 | Key | Default | Why |
 |---|---|---|
-| `insert_max_rows` | 1,000,000 | An object's rows land in one or two parts. The busiest lane measured on a live recorder is 224,000 datagrams a minute, which is about 1.1 million rows in a time-rotated object. |
-| `insert_min_rows` | 50,000 | Rows from several objects coalesce into one insert rather than each becoming a part. The quietest lanes measured run 130-150 datagrams a minute — about 700 rows an object — and one part per object per lane is the pathological profile the cluster already has two examples of. |
-| `insert_max_delay` | `15m` | The bound on coalescing, so a quiet lane is late rather than absent. At the rates above the worst case is roughly 2,000 rows a part. |
+| `insert_max_rows` | 1,000,000 | An object's rows land in one or two parts. The busiest feed measured on a live recorder is 224,000 datagrams a minute, which is about 1.1 million rows in a time-rotated object. |
+| `insert_min_rows` | 50,000 | Rows from several objects coalesce into one insert rather than each becoming a part. The quietest feeds measured run 130-150 datagrams a minute — about 700 rows an object — and one part per object per feed is the pathological profile the cluster already has two examples of. |
+| `insert_max_delay` | `15m` | The bound on coalescing, so a quiet feed is late rather than absent. At the rates above the worst case is roughly 2,000 rows a part. |
 | `insert_max_bytes` | `256MiB` | Not a merge-pressure bound and not in the reasoning above: a row count says nothing about a row's width, and the widest grain carries an object key and two digests. This is what keeps one request reasonable whatever the row count says. |
 
 Never per datagram, and never per row. One insert per grain: a batch spanning
@@ -140,8 +140,8 @@ grains is refused, while a batch spanning objects is ordinary, because
 marks an object loaded only once every grain carrying its rows has landed.
 
 Steady state per host is then on the order of a couple of thousand inserts a day
-across every grain and lane, with rows per part between about 2,000 on the
-quietest lane and about a million on the busiest — better on both axes than the
+across every grain and feed, with rows per part between about 2,000 on the
+quietest feed and about a million on the busiest — better on both axes than the
 best-behaved high-volume table on the destination cluster, which sustains 166,000
 inserts a day at 78,700 rows a part.
 

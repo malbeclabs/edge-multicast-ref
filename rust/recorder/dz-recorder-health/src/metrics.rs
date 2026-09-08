@@ -849,15 +849,16 @@ impl HealthMetrics {
                 "Unix receive-window start of the OLDEST object still on the disk, per feed. \
                  How much history this host can still answer from, which is the question \
                  dz_recorder_segments_evicted_total cannot answer: a budget that is full \
-                 evicts on every sweep for ever, so that counter rises at steady state by \
-                 design and an alert on it fires permanently. Alert on `time() - this` \
-                 instead, against the window a loss investigation needs — and guard it on \
-                 the recorder having archived something, the same way \
-                 dz_recorder_last_datagram_timestamp_seconds asks: this renders 0 for a feed \
-                 with nothing retained — which under that rule reads as a window decades \
-                 long and silences it in exactly the state it exists to catch. Pair every \
-                 rule on this with dz_recorder_archive_segments_retained == 0, which is the \
-                 term that says nothing is held.",
+                 evicts on every retention pass for ever, so that counter rises at \
+                 steady state by design and an alert on it fires permanently. Alert on \
+                 `time() - this` instead, against the window a loss investigation \
+                 needs — and guard it on the recorder having archived something, the \
+                 same way dz_recorder_last_datagram_timestamp_seconds asks: this renders \
+                 0 for a feed with nothing retained — which under that rule reads as a \
+                 window decades long and silences it in exactly the state it exists to \
+                 catch. Pair every rule on this with \
+                 dz_recorder_archive_segments_retained == 0, which is the term that says \
+                 nothing is held.",
                 &labels,
                 &["feed"],
             ),

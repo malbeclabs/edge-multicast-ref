@@ -8,7 +8,7 @@
 -- keeps none of them: nothing verified those bytes and nothing can re-derive
 -- them.
 --
--- Both write into these five tables. Without this column they are
+-- Both write into these eight tables. Without this column they are
 -- indistinguishable, and a query cannot tell a finding drawn from verified
 -- evidence from one drawn from a window nobody can go back to.
 --
@@ -24,6 +24,12 @@
 -- the existing data rather than a convenience. It also means this file can be
 -- applied to a live deployment before the binary that writes the column is
 -- rolled, which is the order a deploy wants: the schema leads.
+--
+-- THE MARKET DATA TABLES TOO. `event`, `instrument` and `book_top` are derived
+-- from the same datagrams by the same pass, so a reader joining an event row to
+-- the datagram row it came from must find the same answer on both. A provenance
+-- that covered only the five original tables would be a column that stops being
+-- true exactly where the join gets interesting.
 --
 -- WHY THIS IS CHEAP ON A HUNDRED MILLION ROWS A DAY. Adding a column with a
 -- DEFAULT to a MergeTree is a metadata change. Existing parts are not rewritten;
@@ -42,11 +48,11 @@
 -- A per-column grant would have needed updating here, which is one reason it is
 -- not written that way.
 --
--- WHAT THIS FILE IS FOR, GIVEN THAT 001 DECLARES THE COLUMN TOO. 001 is the
--- authoritative definition of these tables — its `CREATE TABLE` blocks are what
--- the row types are held against, column for column, in `tests/ddl.rs` — so the
--- column is declared there and a deployment created from scratch has it before
--- this file runs. This file is for the deployments that applied 001 when it did
+-- WHAT THIS FILE IS FOR, GIVEN THAT 001 AND 005 DECLARE THE COLUMN TOO. Those
+-- two are the authoritative definitions of these tables — their `CREATE TABLE`
+-- blocks are what the row types are held against, column for column, in
+-- `tests/ddl.rs` — so the column is declared there and a deployment created from
+-- scratch has it before this file runs. This file is for the deployments that applied 001 when it did
 -- not: their tables exist, `CREATE TABLE IF NOT EXISTS` will not alter them, and
 -- an `ALTER` is the only thing that reaches them. On a fresh deployment every
 -- statement below is a no-op, which is why it is safe to apply unconditionally
@@ -74,5 +80,20 @@ ALTER TABLE recorder.sequence_gap
     AFTER object_key;
 
 ALTER TABLE recorder.conformance_finding
+    ADD COLUMN IF NOT EXISTS derivation LowCardinality(String) DEFAULT 'archive'
+    AFTER object_key;
+
+-- The market data grains, from 005. Same rule, same reason: an event row and the
+-- datagram row it was derived from must not disagree about whether anybody kept
+-- the bytes.
+ALTER TABLE recorder.event
+    ADD COLUMN IF NOT EXISTS derivation LowCardinality(String) DEFAULT 'archive'
+    AFTER object_sha256;
+
+ALTER TABLE recorder.instrument
+    ADD COLUMN IF NOT EXISTS derivation LowCardinality(String) DEFAULT 'archive'
+    AFTER object_key;
+
+ALTER TABLE recorder.book_top
     ADD COLUMN IF NOT EXISTS derivation LowCardinality(String) DEFAULT 'archive'
     AFTER object_key;

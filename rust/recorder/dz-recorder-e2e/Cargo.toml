@@ -25,6 +25,12 @@ dz-recorder-replay = { path = "../dz-recorder-replay" }
 # against datagrams the real encoder produced rather than against a fixture of
 # what the derivation expects.
 dz-recorder-rows = { path = "../dz-recorder-rows" }
+# The market data derivation, held against the same archive the transport tier
+# is held against: one encoder, one writer, two derivations, one set of bytes.
+dz-recorder-events = { path = "../dz-recorder-events" }
+# The column store, for the half of the market data suite that runs against a
+# real server. Behind `clickhouse-tests`, so the default build needs no host.
+dz-recorder-clickhouse = { path = "../dz-recorder-clickhouse" }
 dz-recorder-capture = { path = "../dz-recorder-capture" }
 tempfile = { workspace = true }
 # `SegmentManifest` is `Deserialize`, so the per-instance coverage rows are
@@ -48,3 +54,12 @@ socket-e2e = []
 # than skip when it is absent, because a conformance gate that passes when it
 # could not run reports a clean feed for a stream nobody validated.
 conformance = []
+# The market data rows against a real column store: the checked-in DDL applied,
+# the rows inserted through the real sink, and the counts read back. Off by
+# default because it needs the container the demo provisions; on, the tests fail
+# rather than skip when the server is absent, because a schema gate that passes
+# when it could not run reports a clean schema for a schema nobody applied.
+#
+# `DZ_LOADER_CLICKHOUSE_URL` points at the server, as it does for
+# dz-recorder-clickhouse's own suite.
+clickhouse-tests = ["dz-recorder-clickhouse/clickhouse-tests"]

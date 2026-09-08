@@ -103,8 +103,8 @@ All tunables live in `.env`:
 
 Three tables under the `topofbook` database:
 
-- `quotes` — one row per Quote frame. Materialized `mid`, `spread`, `spread_bps`, `wire_latency_ms` columns.
-- `trades` — one row per Trade frame. `price`, `qty`, `aggressor_side`, `trade_id`, `cumulative_volume`.
+- `quotes` — one row per Quote message. Materialized `mid`, `spread`, `spread_bps`, `wire_latency_ms` columns.
+- `trades` — one row per Trade message. `price`, `qty`, `aggressor_side`, `trade_id`, `cumulative_volume`.
 - `instruments` — instrument definitions (ReplacingMergeTree — latest row per `instrument_id`).
 
 All tables partition by day (`toYYYYMMDD(recv_ts)`) and `ORDER BY (symbol, recv_ts)` for efficient per-symbol time-range scans.

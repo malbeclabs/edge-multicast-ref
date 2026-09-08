@@ -363,7 +363,7 @@ func (s *Shard) resetChannel(ch uint8) {
 		}
 	}
 	// Batch boundaries are channel-scoped on the wire but this flag is not, so
-	// the surviving channel's next boundary re-arms it.
+	// the surviving channel's next boundary sets it again.
 	s.sawBatchBoundary = false
 	// Republish both gauges. Zeroing the state without re-exporting leaves each
 	// series holding its pre-reset value indefinitely on a shard that then goes

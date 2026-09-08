@@ -3,7 +3,7 @@ package main
 import "time"
 
 // Record mirrors the topofbook-parser's JSON Lines output format.
-// We decode just the fields the bot uses — unknown fields are ignored.
+// We decode just the fields the book-builder uses — unknown fields are ignored.
 type Record struct {
 	Type           string         `json:"type"`
 	Timestamp      time.Time      `json:"ts"`

@@ -76,7 +76,9 @@ loader that quietly spoke plain HTTP to an endpoint an operator wrote as `https`
 would put the password on the wire in the clear having been told not to. The
 failure mode is a startup failure, which is the good kind — but it is a startup
 failure, so the build and deploy pipeline has to enable the feature *before* the
-unit is enabled, and `--check` is where it is caught.
+unit is enabled, and `--check` is where it is caught. The released asset is that
+pipeline's answer and carries the feature already, so this is a thing to do only
+for a binary built by hand.
 
 **Apply `004_recorder_loader_user.sql`, with the password as a parameter.** The
 account is checked in beside the schema and bounded at creation: `INSERT` on the
@@ -94,12 +96,39 @@ dangerous is not this process misbehaving but the queries somebody later points
 at the rows it wrote. A workload added without limits is discovered weeks later
 by someone reading a graph, and by then it is a table too big to fix cheaply.
 
+## Releases, and what the version number is
+
+`dz-recorder-load release` in `.github/workflows/` publishes
+`dz-recorder-load_<version>_linux_amd64.tar.gz` under the tag
+`dz-recorder-load/<version>`, built on Ubuntu 24.04 with `--features tls` so
+that one asset serves both an `http://` destination and an `https://` one. The
+unit and `loader.example.toml` travel in the tarball beside the binary, because
+a unit fetched from a branch is the unpinned copy the release exists to replace.
+
+**The version is the loader's own, and does not track `dz-recorder`'s.** The
+crate states it in its own `Cargo.toml` rather than taking
+`version.workspace = true`, and the reason is what a pin is for: a number that
+advanced because the recorder was bumped tells an operator comparing two pins
+nothing about whether the loader changed. So a loader and a recorder carrying
+different numbers are not a mismatched pair, and equal numbers are not a matched
+one. What the two must agree about is the archive format, and every object
+states that in its Section Header block and the manifest beside it — where this
+process checks it, and refuses.
+
+**Neither the unit nor `loader.example.toml` names a version**, deliberately.
+Both would then be a second number somebody keeps in step with the installed
+binary by hand, and nothing would enforce it — the failure the paragraph above
+is arranged to avoid, reintroduced one directory down. The installed binary
+answers the question itself: `dz-recorder-load --version` reports the version
+and the commit it was built from, and `ExecStartPre` already runs that binary at
+every start.
+
 ## What the sink sends, and why it holds
 
 **One insert is one part, so merge pressure is set by rows per part rather than
 rows per day** — and merge work never appears in a query log, only as the gap
 between a provider's CPU graph and query-attributed CPU. A sink that posted once
-per object would write one part per object per lane, and the quietest lanes
+per object would write one part per object per feed, and the quietest feeds
 measured produce about 700 rows in a time-rotated object.
 
 So the sink holds rows across objects:
@@ -107,8 +136,8 @@ So the sink holds rows across objects:
 | Key | Default | |
 |---|---|---|
 | `insert_max_rows` | 1,000,000 | an object's rows land in one or two parts |
-| `insert_min_rows` | 50,000 | the floor that stops one part per object per lane |
-| `insert_max_delay` | 900s | the bound on holding, so a quiet lane is late rather than absent |
+| `insert_min_rows` | 50,000 | the floor that stops one part per object per feed |
+| `insert_max_delay` | 900s | the bound on holding, so a quiet feed is late rather than absent |
 
 **Which means accepted is not loaded.** `dz_loader_held_objects` is the part of
 the backlog that is the sink coalescing as designed; `dz_loader_unloaded_objects`
@@ -127,6 +156,55 @@ kept indefinitely and carries one row per channel instance per segment. A
 time-ranged panel joins `recorder.datagram_in_era` or `recorder.sequence_gap`
 instead — both key on the era's anchor, and both prune. `003_recorder_era_rank.sql`
 states which is which and why.
+
+## Market data is derived per feed, and off
+
+The four transport tables are written for every object. `event`, `instrument`
+and `book_top` are written only for the feeds a `[[market_data]]` entry names,
+and there are no entries by default — so a host that upgrades this binary and
+changes no configuration writes exactly what it wrote before.
+
+```toml
+[[market_data]]
+feed = "market-by-price"   # the manifest's feed, matched exactly
+magic = 0x4442             # required, and no registry to look it up in
+persist_snapshot_levels = false
+```
+
+**Per feed rather than one switch, because the cost is per feed and it is not
+small.** An object's messages outnumber its datagrams by whatever the packing
+was, and a snapshot cycle is `total_levels` messages per instrument on the
+publisher's cadence rather than on the market's. A switch whose blast radius is
+every feed on the host is a switch nobody turns on.
+
+**`persist_snapshot_levels` decides rows and never state.** The book consumes
+every level either way — skipping one before the book has seen it leaves a cycle
+that never completes, so nothing ever anchors, which is the one thing consuming
+them is for. `SnapshotBegin` and `SnapshotEnd` are always written, so a cycle is
+always a row, and `total_levels` on the begin against `levels_seen` on the end
+answers *was the snapshot complete* with the levels absent.
+
+### And it has a lag of its own
+
+| | |
+|---|---|
+| `dz_loader_market_data_unloaded_objects` | how much of it is waiting |
+| `dz_loader_market_data_oldest_unloaded_age_seconds` | how close the oldest of it is to being evicted |
+
+Not `dz_loader_oldest_unloaded_age_seconds`, and the difference is not
+cosmetic: that gauge counts **every** object, including the objects of feeds
+that derive nothing. Alerting on it for market data pages about objects that
+hold no book rows — and, in the direction that costs history, lets a feed that
+*is* deriving hide inside a backlog of feeds that are not. On a host where
+nothing derives, these two read 0 whatever the load's read, which is the honest
+statement that no market data is at risk here.
+
+`dz_loader_market_data_refused_total{reason}` is the other one worth a panel.
+Every refusal is a row that is not in a table, and a derivation that resolves
+nothing writes an empty `event` table — indistinguishable from a feed nobody
+published on. `unresolved_instrument` climbing from zero is reference data that
+never arrived, which is the shape a wrong `Magic` and an unjoined `refdata` port
+both take.
 
 ## Idempotence is a property, not a procedure
 

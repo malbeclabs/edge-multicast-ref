@@ -1,6 +1,20 @@
 [package]
 name = "dz-recorder"
-version.workspace = true
+# The recorder's own version, and deliberately not `version.workspace = true`,
+# for the reason the loader's manifest states at length: a binary's version is a
+# pin, and the question a pin answers is *did this binary change*, which a number
+# travelling with an unrelated release cannot answer.
+#
+# It was the workspace's until now, and that is what RELEASING.md exists to
+# prevent: releasing `dz-recorder/v0.1.1` meant bumping `[workspace.package]`
+# from 0.1.0 to 0.1.1, which moved the version of every library crate a consumer
+# resolves for a change to a binary, and left the libraries claiming 0.1.1 with
+# no `v0.1.1` tag to match. Starting at 0.1.1 rather than 0.1.0 keeps this equal
+# to the release already published under that name.
+#
+# `.github/workflows/recorder-release.yml` reads this key and refuses to publish
+# a tag that disagrees with it.
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

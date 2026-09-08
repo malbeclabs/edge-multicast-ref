@@ -88,7 +88,7 @@ impl LoweringError {
 
     /// Attach a field name to a scaling refusal, for use as a `map_err`
     /// argument so the field is named once per call site rather than in every
-    /// arm of the conversion.
+    /// branch of the conversion.
     ///
     /// Public because the reference-data owner converts the scalars a venue
     /// states in its listing — the tick, the lot — through the same functions

@@ -41,6 +41,38 @@ poll_interval = 30
 # 0 is no bound.
 max_objects_per_pass = 60
 
+# MARKET DATA DERIVATION IS OFF, AND IT IS OFF BY THE ABSENCE OF THIS SECTION.
+#
+# A feed with no entry here is loaded exactly as everything is loaded today:
+# datagram, era, segment_coverage and sequence_gap, and nothing about
+# instruments. Naming a feed turns on a second walk of every one of its objects
+# with the codec, and fills event, instrument and book_top.
+#
+# Per feed and not a global switch, because the cost is per feed and it is not
+# small: an object's messages outnumber its datagrams, and a snapshot cycle is
+# `total_levels` messages per instrument on the publisher's cadence. Measure it
+# for the feed before turning it on — the sizing number is messages walked over
+# datagrams walked, over a window that includes a burst and a snapshot cycle.
+#
+# [[market_data]]
+# The manifest's `feed`, matched exactly: the feed specification's name, never a
+# venue's. This is what the recorder writes into every manifest it publishes.
+# feed = "market-by-price"
+#
+# The feed's Magic. Required, with no default and no registry to look it up in:
+# it is the only thing that stops a datagram misrouted from another feed in the
+# family being parsed at the wrong layout, and a value that matches nothing
+# derives an empty table that reads exactly like a feed nobody published on.
+# `--check` says back which value was read.
+# magic = 0x4442
+#
+# Whether every SnapshotLevel becomes an `event` row. Off, and the book consumes
+# them either way — the switch is about rows, not about state. SnapshotBegin and
+# SnapshotEnd are always written, so a cycle is always visible, and
+# `total_levels` on the begin against `levels_seen` on the end answers "was the
+# snapshot complete" without the levels being there to count.
+# persist_snapshot_levels = false
+
 [clickhouse]
 # No path and no query: those are the loader's. `https` is refused unless the
 # binary was built with the `tls` feature, rather than silently downgraded — so
@@ -52,22 +84,22 @@ max_objects_per_pass = 60
 # an unbounded account is discovered weeks later by somebody reading a graph.
 endpoint = "http://192.0.2.20:8123"
 database = "recorder"
-user = "loader"
+user = "dz_loader"
 
 # One insert is one atomic block and becomes one part, so these three decide
 # what a day of loading costs the destination — and merge work never appears in
 # a query log, only as the gap between a provider's CPU graph and
 # query-attributed CPU. A chatty inserter raises it silently.
 #
-# insert_max_rows lands an object's rows in one or two parts. The busiest lane
+# insert_max_rows lands an object's rows in one or two parts. The busiest feed
 # measured on a live recorder is 224,000 datagrams a minute, about 1.1 million
 # rows in a time-rotated object.
 insert_max_rows = 1000000
-# The floor that stops one part per object per lane, which is the pathological
-# profile. The quietest lanes measured run 130-150 datagrams a minute, about 700
+# The floor that stops one part per object per feed, which is the pathological
+# profile. The quietest feeds measured run 130-150 datagrams a minute, about 700
 # rows an object: rows from several objects coalesce into one insert instead.
 insert_min_rows = 50000
-# The bound on that coalescing, so a quiet lane is late rather than absent. At
+# The bound on that coalescing, so a quiet feed is late rather than absent. At
 # the rates above the worst case is roughly 2,000 rows a part.
 insert_max_delay = 900
 # Not a merge-pressure bound: a row count says nothing about a row's width, and

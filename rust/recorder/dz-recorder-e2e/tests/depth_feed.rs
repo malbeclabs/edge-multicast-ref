@@ -92,7 +92,7 @@ fn snapshot_level(price_raw: i64, qty_raw: u64, side: u8) -> SnapshotLevel {
 /// The three ports of one depth feed, as a publisher drives them: live level
 /// changes on `mktdata`, the instrument's definition on `refdata`, and one
 /// instrument's book state on `snapshot`.
-fn depth_stream() -> Vec<OwnedDatagram> {
+fn depth_feed() -> Vec<OwnedDatagram> {
     let mut wire = Wire::new();
 
     let mut mktdata = fresh(MKTDATA_CHANNEL);
@@ -209,7 +209,7 @@ fn instrument_definition() -> InstrumentDefinition {
 }
 
 fn recorded() -> (Vec<OwnedDatagram>, Recorded) {
-    let sent = depth_stream();
+    let sent = depth_feed();
     let archive = record(&sent, ALL_ROLES);
     (sent, archive)
 }
@@ -328,8 +328,8 @@ fn each_channel_instance_is_described_under_the_role_it_arrived_on() {
 
 #[test]
 fn the_archive_declares_this_feeds_own_magic_and_schema() {
-    // A datagram of this feed archived under a sibling's magic would decode at
-    // the wrong layout for anyone reading the object later.
+    // A datagram of this feed archived under another feed's magic would decode
+    // at the wrong layout for anyone reading the object later.
     let (_, archive) = recorded();
     for dg in replay(&archive.object) {
         assert_eq!(

@@ -29,15 +29,15 @@ type Metrics struct {
 	BuildInfo         *prometheus.GaugeVec
 	UptimeSeconds     prometheus.GaugeFunc
 
-	// Frame header sequence gap tracking (real UDP datagram loss).
-	FrameSeqGaps  *prometheus.CounterVec
-	FramesMissing *prometheus.CounterVec
+	// Datagram header sequence gap tracking (real UDP datagram loss).
+	DatagramSeqGaps  *prometheus.CounterVec
+	DatagramsMissing *prometheus.CounterVec
 
-	// FramesTotal counts successfully parsed frames by port and wire schema
+	// DatagramsTotal counts successfully parsed datagrams by port and wire schema
 	// version. The version label is what makes a publisher's v1-to-v3 cutover
 	// observable: v3 climbs, v1 goes flat, and v1 reaching zero is when the
 	// legacy decode path can be retired.
-	FramesTotal *prometheus.CounterVec // labels: port, schema_version
+	DatagramsTotal *prometheus.CounterVec // labels: port, schema_version
 
 	startTime time.Time
 }
@@ -61,7 +61,7 @@ func NewMetrics(version, commit string) *Metrics {
 
 	m.ParseErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricsNamespace, Name: "parse_errors_total",
-		Help: "Frame decode failures by reason",
+		Help: "Datagram decode failures by reason",
 	}, []string{"port", "reason"})
 
 	m.RecordsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -101,17 +101,17 @@ func NewMetrics(version, commit string) *Metrics {
 		Help: "Sink write failures",
 	})
 
-	m.FrameSeqGaps = prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.DatagramSeqGaps = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricsNamespace, Name: "datagram_seq_gaps_total",
 		Help: "Number of UDP datagram header sequence discontinuities (real datagram loss events), by port and publisher.",
 	}, []string{"port", "source_ip", "channel_id"})
 
-	m.FramesMissing = prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.DatagramsMissing = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricsNamespace, Name: "datagrams_missing_total",
 		Help: "Total UDP datagrams missing (sum of gap magnitudes in header seq), by port and publisher.",
 	}, []string{"port", "source_ip", "channel_id"})
 
-	m.FramesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.DatagramsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricsNamespace, Name: "datagrams_total",
 		Help: "Successfully parsed datagrams, by port and wire schema version.",
 	}, []string{"port", "schema_version"})
@@ -129,7 +129,7 @@ func NewMetrics(version, commit string) *Metrics {
 	reg.MustRegister(
 		m.IngressPackets, m.IngressBytes, m.ParseErrors, m.RecordsTotal, m.SourceLatency, m.SendLatency,
 		m.SocketClients, m.SocketClientDrops, m.SocketRecordsSent, m.SinkWriteErrors,
-		m.FrameSeqGaps, m.FramesMissing, m.FramesTotal,
+		m.DatagramSeqGaps, m.DatagramsMissing, m.DatagramsTotal,
 		m.BuildInfo, m.UptimeSeconds,
 	)
 	m.BuildInfo.WithLabelValues(version, commit).Set(1)

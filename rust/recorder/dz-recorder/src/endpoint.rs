@@ -17,8 +17,8 @@ use tiny_http::{Method, Response, StatusCode};
 /// Dropping this value stops the accept loop and joins its thread.
 ///
 /// Bind it to a non-public interface. It describes a live data path — the
-/// groups, the ports, the sources and the timing of a feed — and exposing it
-/// publicly leaks all of that.
+/// groups, the ports, the source addresses and the timing of a feed — and
+/// exposing it publicly leaks all of that.
 #[must_use = "the endpoint stops serving as soon as this value is dropped"]
 pub struct MetricsServer {
     server: Arc<tiny_http::Server>,

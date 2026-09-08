@@ -5,7 +5,7 @@ mod common;
 
 use std::collections::BTreeSet;
 
-use common::{batch, config, no_wait, Answer, FakeTransport, NOW, SECOND_NS};
+use common::{batch, config, no_wait, race_fixture, Answer, FakeTransport, NOW, SECOND_NS};
 use dz_recorder_clickhouse::{send_order, ClickHouseSink, Credentials};
 use dz_recorder_replay::Fault;
 use dz_recorder_rows::{Grain, RowSink, RowSinkError};
@@ -360,6 +360,48 @@ fn a_failure_on_a_later_grain_fails_the_whole_object() {
     );
 }
 
+/// A grain the send order names is a grain the sink actually posts.
+///
+/// The market data grains were named in [`send_order`] and carried nowhere: the
+/// rows were counted as accepted, the object was credited as loaded, and the
+/// rows were dropped on the floor. That is the one outcome this crate is built
+/// to make impossible — a failure has to cost the object, and a success has to
+/// mean the rows are in the table — and it produced neither an error nor a
+/// counter, because from the sink's own point of view nothing had gone wrong.
+///
+/// So the assertion is not that the order is right but that every grain exists:
+/// a batch carrying rows for a grain produces a request for that grain's table,
+/// with the rows it carried in it.
+#[test]
+fn a_batch_carrying_market_data_posts_it_rather_than_counting_it() {
+    let rows = race_fixture(NOW);
+    let tops = rows.rows(Grain::BookTop);
+    let eras = rows.rows(Grain::Era);
+    assert!(tops > 0 && eras > 0, "the fixture states both");
+
+    let mut sink = sink(FakeTransport::new());
+    sink.write_batch(rows, NOW).expect("the batch lands");
+
+    let sent = sink_sent(&sink);
+    let book_top = sent
+        .iter()
+        .find(|s| s.table() == "recorder.book_top")
+        .expect("the book_top rows were accepted, so they were sent");
+    assert_eq!(
+        book_top.rows().len(),
+        tops,
+        "every accepted row is in the request, or the object is credited for \
+         rows nobody stored"
+    );
+    // The transport grain beside it, so this is about the grain and not about a
+    // sink that posts nothing at all.
+    let era = sent
+        .iter()
+        .find(|s| s.table() == "recorder.era")
+        .expect("an era request");
+    assert_eq!(era.rows().len(), eras);
+}
+
 /// The base rows go first, so the alarming intermediate state cannot happen.
 ///
 /// An object whose gap rows are present and whose datagram rows are not reads as
@@ -373,7 +415,10 @@ fn the_base_grain_is_sent_before_the_grains_derived_from_it() {
             Grain::Era,
             Grain::SegmentCoverage,
             Grain::SequenceGap,
-            Grain::ConformanceFinding
+            Grain::ConformanceFinding,
+            Grain::Instrument,
+            Grain::Event,
+            Grain::BookTop
         ]
     );
 
@@ -429,14 +474,14 @@ fn sink_sent(sink: &ClickHouseSink<FakeTransport>) -> Vec<common::Sent> {
 }
 
 // ---------------------------------------------------------------------------
-// Coalescing: what stops one part per object per lane
+// Coalescing: what stops one part per object per feed
 // ---------------------------------------------------------------------------
 
-/// A quiet lane's objects are held and posted together, not one part each.
+/// A quiet feed's objects are held and posted together, not one part each.
 ///
 /// **This is the whole reason the sink holds anything.** An insert is one atomic
 /// block and becomes one part, so a sink that posted per object would write one
-/// part per object per lane — and the quietest lanes measured produce about 700
+/// part per object per feed — and the quietest feeds measured produce about 700
 /// rows in a time-rotated object. Merge pressure is set by rows per part, and it
 /// never appears in a query log, only as the gap between a provider's CPU graph
 /// and query-attributed CPU.
@@ -508,7 +553,7 @@ fn rows_from_several_objects_coalesce_into_one_insert() {
     }
 }
 
-/// The age bound: a lane too quiet to reach the floor is late, never absent.
+/// The age bound: a feed too quiet to reach the floor is late, never absent.
 #[test]
 fn held_rows_are_posted_once_the_delay_is_up() {
     let mut tuned = config();
@@ -542,7 +587,7 @@ fn held_rows_are_posted_once_the_delay_is_up() {
 
 /// The age is measured from the oldest held row, not from the last write.
 ///
-/// A lane that trickles one object per interval would otherwise reset the clock
+/// A feed that trickles one object per interval would otherwise reset the clock
 /// on every arrival and never post at all — which is the failure the bound
 /// exists to prevent, arriving by a longer route.
 #[test]
@@ -655,12 +700,12 @@ fn the_insert_bounds_default_to_the_measured_write_pattern() {
     );
     assert_eq!(
         default.insert_min_rows, 50_000,
-        "the floor that stops one part per object per lane"
+        "the floor that stops one part per object per feed"
     );
     assert_eq!(
         default.insert_max_delay,
         std::time::Duration::from_secs(15 * 60),
-        "so a quiet lane is late rather than absent"
+        "so a quiet feed is late rather than absent"
     );
     // And a floor above the cap is refused, because every insert would then
     // wait for the delay.

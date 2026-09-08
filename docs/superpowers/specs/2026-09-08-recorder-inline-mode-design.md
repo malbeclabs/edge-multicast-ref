@@ -115,7 +115,7 @@ loaded unit, carrying the trailer so that a restart resumes with the certainty a
 continuous run had. Inline mode's spool needs exactly that and reuses it.
 
 **Deduplication does not depend on the object.** No `ORDER BY` in the checked-in
-DDL includes the object key or its digest; the five tables collapse on the
+DDL includes the object key or its digest; the eight tables collapse on the
 channel instance and the row's own identity. A retried insert is a replace
 whether or not an object ever existed, so inline mode needs no synthetic
 idempotence key and no schema change to the deduplication.
@@ -266,7 +266,7 @@ the loader's own documentation warns about, and the same answer.
 
 ## Provenance: the `derivation` column
 
-One column on all five grains, `archive` or `live`, defaulting to `archive` so
+One column on all eight grains, `archive` or `live`, defaulting to `archive` so
 that rows already written keep their meaning.
 
 It is a column rather than an inference for the reason the recorder synthesises

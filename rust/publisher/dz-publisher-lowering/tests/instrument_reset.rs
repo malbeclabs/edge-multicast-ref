@@ -78,7 +78,7 @@ fn a_silence_is_not_upgraded_into_a_claim_about_which_reason_it_was() {
 fn the_anchor_is_the_sequence_the_send_path_gave_it() {
     // `New Anchor Seq` is a promise about where the recovery snapshot will
     // apply, and the reset takes effect immediately — so the anchor is where
-    // the stream is *now*, which only the send path knows. The specification's
+    // the feed is *now*, which only the send path knows. The specification's
     // own conformance subscriber grades a mismatch a violation, and the
     // off-by-one it catches is reading the number off the last delta instead.
     let instruments = table();

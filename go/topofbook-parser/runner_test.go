@@ -7,23 +7,23 @@ import (
 	"github.com/malbeclabs/edge-multicast-ref/go/topofbook-parser/tob"
 )
 
-// Frame/message layout constants, mirrored from tob/topofbook_wire.go (which
+// Datagram/message layout constants, mirrored from tob/topofbook_wire.go (which
 // keeps them unexported) so these tests can build raw datagrams without
 // depending on the tob package's own test helpers.
 const (
-	tobFrameHeaderBytes = 24
-	tobMsgHeaderBytes   = 4
+	tobDatagramHeaderBytes = 24
+	tobMsgHeaderBytes      = 4
 
 	tobMsgHeartbeat            = 0x01
 	tobMsgInstrumentDefinition = 0x02
 )
 
-// buildTobFrame assembles a frame header plus a single application message.
-func buildTobFrame(schemaVersion uint8, msgType uint8, body []byte) []byte {
+// buildTobDatagram assembles a datagram header plus a single application message.
+func buildTobDatagram(schemaVersion uint8, msgType uint8, body []byte) []byte {
 	msgLen := tobMsgHeaderBytes + len(body)
-	frameLen := tobFrameHeaderBytes + msgLen
+	datagramLen := tobDatagramHeaderBytes + msgLen
 
-	buf := make([]byte, frameLen)
+	buf := make([]byte, datagramLen)
 	buf[0] = 0x5A
 	buf[1] = 0x44
 	buf[2] = schemaVersion
@@ -32,9 +32,9 @@ func buildTobFrame(schemaVersion uint8, msgType uint8, body []byte) []byte {
 	binary.LittleEndian.PutUint64(buf[12:20], 1700000000) // send timestamp
 	buf[20] = 1                                           // msg count
 	buf[21] = 0                                           // reset count
-	binary.LittleEndian.PutUint16(buf[22:24], uint16(frameLen))
+	binary.LittleEndian.PutUint16(buf[22:24], uint16(datagramLen))
 
-	off := tobFrameHeaderBytes
+	off := tobDatagramHeaderBytes
 	buf[off] = msgType
 	buf[off+1] = uint8(msgLen)
 	binary.LittleEndian.PutUint16(buf[off+2:off+4], 0) // flags
@@ -75,7 +75,7 @@ func buildHeartbeatBody() []byte {
 //   - bad magic still classifies as "bad_magic".
 //
 // This guards the ordering dependency I1 removed: before I1, a version-2
-// frame carrying InstrumentDefinition decoded as v1 silently and was only
+// datagram carrying InstrumentDefinition decoded as v1 silently and was only
 // later rejected by validateHeader, so the "schema_version" and "truncated"
 // paths could not previously be told apart at the InstrumentDefinition layer.
 func TestClassifyParseErr_PinsReasons(t *testing.T) {
@@ -89,29 +89,29 @@ func TestClassifyParseErr_PinsReasons(t *testing.T) {
 		{
 			name: "bad magic",
 			data: func() []byte {
-				buf := make([]byte, tobFrameHeaderBytes)
+				buf := make([]byte, tobDatagramHeaderBytes)
 				return buf // magic bytes left zero, i.e. wrong
 			}(),
 			want: "bad_magic",
 		},
 		{
 			name: "instrument_definition length disagrees with declared version 1",
-			data: buildTobFrame(1, tobMsgInstrumentDefinition, make([]byte, 70)), // want 76
+			data: buildTobDatagram(1, tobMsgInstrumentDefinition, make([]byte, 70)), // want 76
 			want: "truncated",
 		},
 		{
 			name: "instrument_definition length disagrees with declared version 3",
-			data: buildTobFrame(3, tobMsgInstrumentDefinition, buildInstDefBody76()), // want 126
+			data: buildTobDatagram(3, tobMsgInstrumentDefinition, buildInstDefBody76()), // want 126
 			want: "truncated",
 		},
 		{
 			name: "unsupported schema version at instrument_definition decode",
-			data: buildTobFrame(2, tobMsgInstrumentDefinition, buildInstDefBody76()),
+			data: buildTobDatagram(2, tobMsgInstrumentDefinition, buildInstDefBody76()),
 			want: "schema_version",
 		},
 		{
 			name: "unsupported schema version caught by validateHeader",
-			data: buildTobFrame(2, tobMsgHeartbeat, buildHeartbeatBody()),
+			data: buildTobDatagram(2, tobMsgHeartbeat, buildHeartbeatBody()),
 			want: "schema_version",
 		},
 	}

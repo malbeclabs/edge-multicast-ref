@@ -83,11 +83,11 @@ pub trait PayloadArchive {
 /// the tests use.
 ///
 /// Whatever loads a real window — a file, an object store, the Unix socket the
-/// tee writes — decodes into this or implements the trait itself. Holding the
-/// window in memory is what an offline tier can afford and the record path
-/// cannot — the same split the datagram side already makes between a borrowed
-/// [`RecordedDatagram`](dz_recorder_core::RecordedDatagram) and the owned form
-/// the replay crate hands an iterator.
+/// `[adapter.tee]` writes — decodes into this or implements the trait itself.
+/// Holding the window in memory is what an offline tier can afford and the
+/// record path cannot — the same split the datagram side already makes between
+/// a borrowed [`RecordedDatagram`](dz_recorder_core::RecordedDatagram) and the
+/// owned form the replay crate hands an iterator.
 #[derive(Debug, Clone, Default)]
 pub struct PayloadLog {
     entries: Vec<Entry>,

@@ -213,7 +213,7 @@ git commit -m "marketbyorder-parser: capture kernel NIC receive timestamp"
 
 ### Task 2: MBO parser — emit four timestamp fields on every Record
 
-Add `SourceTSNS`, `SendTSNS`, `RecvTSNS`, `RecvTSKind` to the parser Record and populate them. `send_ts_ns` = frame header send time; `source_ts_ns` = per-type block/venue time; recv fields come from the runner (Task 3 wires the runner).
+Add `SourceTSNS`, `SendTSNS`, `RecvTSNS`, `RecvTSKind` to the parser Record and populate them. `send_ts_ns` = datagram header send time; `source_ts_ns` = per-type block/venue time; recv fields come from the runner (Task 3 wires the runner).
 
 **Files:**
 - Modify: `go/marketbyorder-parser/parser.go:10-19` (Record struct)
@@ -222,7 +222,7 @@ Add `SourceTSNS`, `SendTSNS`, `RecvTSNS`, `RecvTSKind` to the parser Record and 
 
 - [ ] **Step 1: Write the failing test**
 
-Find an existing helper in `marketbyorder_test.go` that builds an `order_add` frame and parses it (search for `OrderAdd` / `ParseFrame`). Add:
+Find an existing helper in `marketbyorder_test.go` that builds an `order_add` datagram and parses it (search for `OrderAdd` / `ParseFrame`). Add:
 
 ```go
 func TestParseFrame_OrderAddEmitsSourceAndSendTS(t *testing.T) {
@@ -248,7 +248,7 @@ func TestParseFrame_OrderAddEmitsSourceAndSendTS(t *testing.T) {
 }
 ```
 
-If no reusable `buildOrderAddFrameWithTS` helper exists, write one in the test file that constructs a minimal valid MBO frame with one `order_add` message, returning the frame plus the `enter_timestamp` ns and frame `send_timestamp` ns it encoded. Model it on the existing frame-construction helpers already in `marketbyorder_test.go`.
+If no reusable `buildOrderAddFrameWithTS` helper exists, write one in the test file that constructs a minimal valid MBO datagram with one `order_add` message, returning the datagram plus the `enter_timestamp` ns and datagram `send_timestamp` ns it encoded. Model it on the existing frame-construction helpers already in `marketbyorder_test.go`.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -554,7 +554,7 @@ func TestQuoteEmitsTopLevelSourceAndSendTS(t *testing.T) {
 }
 ```
 
-If no `decodeOneQuoteWithTS` helper exists, adapt the existing quote test's frame builder into one that also returns the encoded source/send ns.
+If no `decodeOneQuoteWithTS` helper exists, adapt the existing quote test's datagram builder into one that also returns the encoded source/send ns.
 
 - [ ] **Step 2: Run test to verify it fails**
 

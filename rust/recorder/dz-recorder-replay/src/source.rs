@@ -448,7 +448,7 @@ impl ArchiveSource {
             }
 
             let Reader::PcapNg(reader) = &mut self.reader else {
-                unreachable!("the classic arm returns above")
+                unreachable!("the classic branch returns above")
             };
             let Some(result) = reader.next_block() else {
                 self.termination = Termination::Eof;

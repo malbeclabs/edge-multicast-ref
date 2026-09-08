@@ -241,12 +241,12 @@ func TestChWriter_BufferFullDropsRows(t *testing.T) {
 }
 
 func TestBuildQuoteRow_WritesSourceSendRecvColumns(t *testing.T) {
-	source := time.Unix(1717689600, 0).UTC()
-	send := source.Add(150 * time.Millisecond)
-	recv := source.Add(230 * time.Millisecond)
+	sourceTS := time.Unix(1717689600, 0).UTC()
+	send := sourceTS.Add(150 * time.Millisecond)
+	recv := sourceTS.Add(230 * time.Millisecond)
 	rec := &Record{
 		Type:       "quote",
-		SourceTSNS: uint64(source.UnixNano()),
+		SourceTSNS: uint64(sourceTS.UnixNano()),
 		SendTSNS:   uint64(send.UnixNano()),
 		RecvTSNS:   uint64(recv.UnixNano()),
 		RecvTSKind: "kernel_udp_software",
@@ -256,8 +256,8 @@ func TestBuildQuoteRow_WritesSourceSendRecvColumns(t *testing.T) {
 	if row["publisher_send_ts"] != chTime(send) {
 		t.Errorf("publisher_send_ts = %v, want %v", row["publisher_send_ts"], chTime(send))
 	}
-	if row["source_ts"] != chTime(source) {
-		t.Errorf("source_ts = %v, want %v", row["source_ts"], chTime(source))
+	if row["source_ts"] != chTime(sourceTS) {
+		t.Errorf("source_ts = %v, want %v", row["source_ts"], chTime(sourceTS))
 	}
 	if row["recv_ts"] != chTime(recv) {
 		t.Errorf("recv_ts = %v, want %v", row["recv_ts"], chTime(recv))
@@ -284,7 +284,7 @@ func TestBuildInstrumentRow_CarriesSourceID(t *testing.T) {
 	rec := &Record{
 		InstrumentID: 4242,
 		Symbol:       "BTC-USDT",
-		// float64, not uint16: records reach this bot as decoded JSON.
+		// float64, not uint16: records reach this book-builder as decoded JSON.
 		Fields: map[string]any{"source_id": float64(77)},
 	}
 	row := buildInstrumentRow(rec, now)

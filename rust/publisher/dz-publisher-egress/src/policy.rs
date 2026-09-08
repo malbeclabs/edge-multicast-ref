@@ -207,8 +207,8 @@ impl EgressPolicy {
         // and binding to it hands the source-address choice back to the kernel
         // per datagram. That is not merely unpinned: the channel instance a
         // subscriber tracks is keyed on the source address, so a publisher
-        // whose datagrams change source mid-run is read as two publishers
-        // alternating, each seeing the other's gaps.
+        // whose datagrams change source address mid-run is read as two
+        // publishers alternating, each seeing the other's gaps.
         if source.is_unspecified() {
             return Err(PolicyError::Unspecified { destination });
         }

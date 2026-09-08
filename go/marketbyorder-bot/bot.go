@@ -17,7 +17,8 @@ type Dispatcher interface {
 	Dispatch(rec Record)
 }
 
-// Bot reads JSONL Records from a parser Unix socket and dispatches them.
+// Bot is the market-by-order book-builder: it reads JSONL Records from a
+// parser Unix socket and dispatches them.
 // Reconnects with exponential backoff on disconnect.
 type Bot struct {
 	socketPath string

@@ -179,7 +179,7 @@ do **not** use this path (no fence) — they are written directly with no drain.
 Today `ChannelState.Apply` (channel.go:69–82) detects a `reset_count` change,
 emits `channel_reset`, calls `c.reset()` (wipes Instruments / Refdata /
 Manifest / DeltaBuffer / SeqLast), then applies the triggering record as the
-first new-era frame. Sharded version, as an **in-band FIFO barrier**:
+first new-era record. Sharded version, as an **in-band FIFO barrier**:
 
 1. Coordinator (owns `ResetCount`) sees a record `R` whose `reset_count`
    differs. It **holds `R`** — does not route it.
@@ -202,9 +202,9 @@ first new-era frame. Sharded version, as an **in-band FIFO barrier**:
 5. Coordinator increments `ChannelResetsTotal`, clears its own
    `snapshotRoute`, `SeqLast`, `Manifest`, adopts the new `ResetCount`.
 6. Coordinator routes the **held `R`** through the full classifier as the
-   first new-era frame. Because the classifier is type-first, an `R` that is
+   first new-era record. Because the classifier is type-first, an `R` that is
    channel-scoped (`heartbeat` / `manifest_summary` are legitimate first
-   new-era frames — they carry `reset_count` but no `instrument_id`) takes the
+   new-era records — they carry `reset_count` but no `instrument_id`) takes the
    coordinator direct-write path, not a shard hash.
 
 Explicitly **not** done: broadcasting reset out-of-band before inboxes drain.
@@ -286,8 +286,8 @@ in-flight flush there is still valid old-era data and may complete normally.
   a `reset_count` bump mid-stream with records still queued; assert (a) all
   old-era rows written before the reset, (b) no new-era record applied to
   pre-wipe state, (c) SnapshotWriter dirty map cleared, (d) held triggering
-  record applied as the first new-era frame, including the case where the
-  triggering frame is `manifest_summary` (channel-scoped).
+  record applied as the first new-era record, including the case where the
+  triggering record is `manifest_summary` (channel-scoped).
 - **Reset vs in-flight flush test:** force a `flushDue` batch to be extracted
   (dirty entries moved into the local `due` slice) and then deliver the reset
   before the batch's ClickHouse writes complete; assert no old-era

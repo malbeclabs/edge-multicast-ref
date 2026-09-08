@@ -176,9 +176,9 @@ func (w *SnapshotWriter) flushDue() {
 		}
 		w.mu.Lock()
 		if e2, ok := w.dirty[e.instrumentID]; ok {
-			rearm := now.Add(w.coalesceInterval)
-			if e2.nextAllowedAt.Before(rearm) {
-				e2.nextAllowedAt = rearm
+			nextAllowed := now.Add(w.coalesceInterval)
+			if e2.nextAllowedAt.Before(nextAllowed) {
+				e2.nextAllowedAt = nextAllowed
 			}
 		}
 		w.mu.Unlock()
@@ -196,7 +196,7 @@ func (w *SnapshotWriter) updateBookGauges(snap LevelSnapshot, symbol string) {
 	// Order counts: use raw order maps via snap — snap.Bids/Asks are aggregated
 	// price levels, not individual orders. We want individual order counts, which
 	// are available as the OrderCount fields summed across levels, but the simpler
-	// and more accurate source is the instrument's map sizes. However, we only have
+	// and more accurate input is the instrument's map sizes. However, we only have
 	// the snapshot here, so derive from the level OrderCount totals.
 	var bidOrders, askOrders uint32
 	for _, lvl := range snap.Bids {

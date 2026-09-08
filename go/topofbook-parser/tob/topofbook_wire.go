@@ -12,7 +12,7 @@ import (
 
 // Wire format for the DoubleZero Top-of-Book feed, v0.1.0.
 //
-// One UDP datagram carries one frame. A frame is a fixed 24-byte header
+// One UDP datagram carries one datagram. A datagram is a fixed 24-byte header
 // followed by a sequence of application messages. Every multi-byte
 // integer is little-endian. The layout is fixed-size (no varints, no
 // length-prefixed strings beyond fixed arrays), making a straight
@@ -29,11 +29,11 @@ import (
 //   0x07 manifest summary
 
 const (
-	frameHeaderBytes = 24
+	datagramHeaderBytes = 24
 
-	// Magic bytes at the start of every frame: "DZ".
-	frameMagic0 = 0x5A
-	frameMagic1 = 0x44
+	// Magic bytes at the start of every datagram: "DZ".
+	datagramMagic0 = 0x5A
+	datagramMagic1 = 0x44
 )
 
 // InstrumentDefinition body lengths and Symbol widths, excluding the 4-byte
@@ -64,8 +64,8 @@ const (
 	msgManifestSummary      uint8 = 0x07
 )
 
-// topOfBookFrame is one decoded UDP datagram.
-type topOfBookFrame struct {
+// topOfBookDatagram is one decoded UDP datagram.
+type topOfBookDatagram struct {
 	Header   topOfBookHeader
 	Messages []topOfBookAppMessage
 }
@@ -81,7 +81,7 @@ type topOfBookHeader struct {
 	FrameLength    uint16
 }
 
-// topOfBookAppMessage is a single message inside a frame. Body is one
+// topOfBookAppMessage is a single message inside a datagram. Body is one
 // of the *topOfBook* body types below, selected by MsgType; unknown
 // message types leave Body nil so the parser can skip them.
 type topOfBookAppMessage struct {
@@ -231,21 +231,21 @@ func (r *wireReader) skip(n int) {
 	}
 }
 
-// decodeTopOfBookFrame parses one UDP datagram into a topOfBookFrame.
+// decodeTopOfBookDatagram parses one UDP datagram into a topOfBookDatagram.
 // Unknown message types are still counted and skipped so their bytes
 // are consumed; their Body field is left nil and callers should ignore
 // them.
-func decodeTopOfBookFrame(data []byte) (*topOfBookFrame, error) {
-	if len(data) < frameHeaderBytes {
-		return nil, fmt.Errorf("datagram too short: %d bytes (minimum %d)", len(data), frameHeaderBytes)
+func decodeTopOfBookDatagram(data []byte) (*topOfBookDatagram, error) {
+	if len(data) < datagramHeaderBytes {
+		return nil, fmt.Errorf("datagram too short: %d bytes (minimum %d)", len(data), datagramHeaderBytes)
 	}
 
 	r := &wireReader{buf: data}
 
-	var f topOfBookFrame
+	var f topOfBookDatagram
 	f.Header.Magic[0] = r.u8()
 	f.Header.Magic[1] = r.u8()
-	if f.Header.Magic[0] != frameMagic0 || f.Header.Magic[1] != frameMagic1 {
+	if f.Header.Magic[0] != datagramMagic0 || f.Header.Magic[1] != datagramMagic1 {
 		return nil, fmt.Errorf("bad magic: 0x%02x 0x%02x (expected 0x5A 0x44)",
 			f.Header.Magic[0], f.Header.Magic[1])
 	}
@@ -257,7 +257,7 @@ func decodeTopOfBookFrame(data []byte) (*topOfBookFrame, error) {
 	f.Header.ResetCount = r.u8()
 	f.Header.FrameLength = r.u16()
 	if r.err != nil {
-		return nil, fmt.Errorf("decoding frame header: %w", r.err)
+		return nil, fmt.Errorf("decoding datagram header: %w", r.err)
 	}
 
 	f.Messages = make([]topOfBookAppMessage, 0, f.Header.MsgCount)
@@ -310,7 +310,7 @@ func decodeTopOfBookBody(msgType uint8, buf []byte, schemaVersion uint8) (any, e
 		// v3 inserts Source ID (u16) after Instrument ID and widens Symbol from
 		// char[16] to char[64]; every later field shifts by 50 bytes. The body
 		// length cross-checks the declared version, because reading a v1 body
-		// under the v3 layout would consume adjacent fields as source and symbol
+		// under the v3 layout would consume adjacent fields as Source ID and symbol
 		// bytes and yield a plausible instrument rather than an error.
 		var symLen, wantLen int
 		hasSourceID := false
@@ -326,7 +326,7 @@ func decodeTopOfBookBody(msgType uint8, buf []byte, schemaVersion uint8) (any, e
 			// layout. This includes version 2, which was specified upstream and
 			// superseded before any publisher emitted it. Call order in Parse
 			// means validateHeader's accepted-version check would otherwise
-			// catch this frame too, but nothing should depend on that ordering —
+			// catch this datagram too, but nothing should depend on that ordering —
 			// this decoder must be correct on its own.
 			return nil, fmt.Errorf("instrument_definition: unsupported schema version %d", schemaVersion)
 		}

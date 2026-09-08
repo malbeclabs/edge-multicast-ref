@@ -171,6 +171,13 @@ jobs:
       - name: Clippy (clickhouse-tests)
         working-directory: rust
         run: cargo clippy -p dz-recorder-clickhouse --features clickhouse-tests --all-targets -- -D warnings
+      # The market data half of the end-to-end suite, which is the only place
+      # the derivation's rows meet the checked-in DDL. A column whose type
+      # cannot hold what the deriver puts in it is refused by the server and by
+      # nobody else, so without this line that failure has no gate at all.
+      - name: Clippy (dz-recorder-e2e, clickhouse-tests)
+        working-directory: rust
+        run: cargo clippy -p dz-recorder-e2e --features clickhouse-tests --all-targets -- -D warnings
       - name: Test (the DDL against a real server)
         working-directory: rust
         env:
@@ -178,6 +185,13 @@ jobs:
         # Serially: each test creates and drops a database of its own, and
         # `OPTIMIZE ... FINAL` is a server-wide operation worth not overlapping.
         run: cargo test -p dz-recorder-clickhouse --features clickhouse-tests -- --test-threads=1
+      - name: Test (market data rows against a real server)
+        working-directory: rust
+        env:
+          DZ_LOADER_CLICKHOUSE_URL: http://127.0.0.1:8123
+        # Serially, for the reason above: each test creates and drops a
+        # database of its own.
+        run: cargo test -p dz-recorder-e2e --features clickhouse-tests -- --test-threads=1
 
   # The specification's own rule set, over what this repository's publisher
   # writes and its recorder keeps. Everything else here compares the chain

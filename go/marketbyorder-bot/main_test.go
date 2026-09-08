@@ -7,7 +7,7 @@ import (
 
 // A typed nil pointer stored in an interface is NOT == nil. Handing *ch*
 // straight to the writers therefore made every `w.ch == nil` fast path dead —
-// including under the default --clickhouse-url="", where the bot would build
+// including under the default --clickhouse-url="", where the book-builder would build
 // and discard a row map per record (and per level, for snapshots) instead of
 // returning immediately.
 func TestEnqueuerFor_NilClientYieldsNilInterface(t *testing.T) {

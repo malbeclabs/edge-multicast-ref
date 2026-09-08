@@ -508,7 +508,7 @@ func TestDispatch_SnapshotLevelStampedWithOpenGroupInstrument(t *testing.T) {
 		t.Errorf("level must be stamped with the open group's instrument: got %d want 5", level.InstrumentID)
 	}
 	// The incoming record genuinely carried no instrument id, so the stamp is
-	// the only source of that identity.
+	// the only carrier of that identity.
 	if snapLevel(0, 7, 1000).InstrumentID != 0 {
 		t.Fatal("test fixture should model the wire: no instrument_id on snapshot_level")
 	}

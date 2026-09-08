@@ -8,7 +8,7 @@ import (
 )
 
 // This file covers the wire→Record mapping layer: for every implemented Type ID,
-// that ParseFrame produces the expected record Type and Fields. The wire-level
+// that ParseDatagram produces the expected record Type and Fields. The wire-level
 // Parse* functions are tested in marketbyprice_wire_test.go; what is asserted
 // here is the part a wrong field name or a swapped stringer would break silently.
 
@@ -167,12 +167,12 @@ func fieldKeys(rec Record) []string {
 	return keys
 }
 
-// TestParseFrame_AllTypesDecodeToRecords walks every implemented Type ID through
-// ParseFrame and asserts the record Type plus the Fields entries most likely to
+// TestParseDatagram_AllTypesDecodeToRecords walks every implemented Type ID through
+// ParseDatagram and asserts the record Type plus the Fields entries most likely to
 // be wrong: enum stringers, and the keys whose names are the decoder's contract
-// with the bot. Each case uses its spec-assigned port and the matching snapshot
+// with the book-builder. Each case uses its spec-assigned port and the matching snapshot
 // flag, so a non-zero SnapshotFlagMismatch would also fail here.
-func TestParseFrame_AllTypesDecodeToRecords(t *testing.T) {
+func TestParseDatagram_AllTypesDecodeToRecords(t *testing.T) {
 	cases := []struct {
 		name     string
 		msgType  uint8
@@ -406,12 +406,12 @@ func TestParseFrame_AllTypesDecodeToRecords(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			p := &marketByPriceParser{}
-			frame := buildFrame(t, 1, 42, time.Unix(1700000301, 0), 0,
+			datagram := buildDatagram(t, 1, 42, time.Unix(1700000301, 0), 0,
 				buildMsg(tc.msgType, tc.flags, tc.body),
 			)
-			recs, defects, err := p.ParseFrame(tc.port, frame)
+			recs, defects, err := p.ParseDatagram(tc.port, datagram)
 			if err != nil {
-				t.Fatalf("ParseFrame: %v", err)
+				t.Fatalf("ParseDatagram: %v", err)
 			}
 			if len(recs) != 1 {
 				t.Fatalf("records: got %d want 1", len(recs))
@@ -422,7 +422,7 @@ func TestParseFrame_AllTypesDecodeToRecords(t *testing.T) {
 			if defects != (Defects{}) {
 				t.Errorf("a well-formed, correctly-flagged message must produce no defects: %+v", defects)
 			}
-			// Envelope fields come from the frame header for every type.
+			// Envelope fields come from the datagram header for every type.
 			if recs[0].ChannelID != 1 || recs[0].SequenceNumber != 42 || recs[0].Port != tc.port {
 				t.Errorf("envelope: %+v", recs[0])
 			}
@@ -433,12 +433,12 @@ func TestParseFrame_AllTypesDecodeToRecords(t *testing.T) {
 
 // Scope=1 is the only case in which From Price is meaningful, so it is the only
 // case in which the key may appear.
-func TestParseFrame_BookClearFromPriceOnlyWhenScopeIsFromPrice(t *testing.T) {
+func TestParseDatagram_BookClearFromPriceOnlyWhenScopeIsFromPrice(t *testing.T) {
 	p := &marketByPriceParser{}
-	frame := buildFrame(t, 0, 1, time.Unix(1700000302, 0), 0,
+	datagram := buildDatagram(t, 0, 1, time.Unix(1700000302, 0), 0,
 		buildMsg(msgTypeBookClear, 0, bookClearBody(11, 0, 1, 3, -500)),
 	)
-	recs, _, err := p.ParseFrame("mktdata", frame)
+	recs, _, err := p.ParseDatagram("mktdata", datagram)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -459,16 +459,16 @@ func TestParseFrame_BookClearFromPriceOnlyWhenScopeIsFromPrice(t *testing.T) {
 }
 
 // An unrecognised enum value is never an error; it renders as the unknown member.
-func TestParseFrame_UnrecognisedEnumValuesDegradeToUnknown(t *testing.T) {
+func TestParseDatagram_UnrecognisedEnumValuesDegradeToUnknown(t *testing.T) {
 	p := &marketByPriceParser{}
-	frame := buildFrame(t, 0, 1, time.Unix(1700000303, 0), 0,
+	datagram := buildDatagram(t, 0, 1, time.Unix(1700000303, 0), 0,
 		// side=9, action=200, update_reason=100: none are defined values.
 		buildMsg(msgTypeLevelUpdate, 0, levelUpdateBody(11, 9, 1, 1000, 50, 1, 0, 200, 100)),
 		buildMsg(msgTypeBookClear, 0, bookClearBody(11, 9, 9, 9, 0)),
 	)
-	recs, defects, err := p.ParseFrame("mktdata", frame)
+	recs, defects, err := p.ParseDatagram("mktdata", datagram)
 	if err != nil {
-		t.Fatalf("unrecognised enum values must not fail the frame: %v", err)
+		t.Fatalf("unrecognised enum values must not fail the datagram: %v", err)
 	}
 	if len(recs) != 2 {
 		t.Fatalf("records: got %d want 2", len(recs))
@@ -493,14 +493,14 @@ func TestParseFrame_UnrecognisedEnumValuesDegradeToUnknown(t *testing.T) {
 
 // Skipping an unimplemented Type ID is spec-legal, but it must be observable:
 // otherwise a publisher turning on a new message type silently loses data.
-func TestParseFrame_UnknownTypeCounted(t *testing.T) {
+func TestParseDatagram_UnknownTypeCounted(t *testing.T) {
 	p := &marketByPriceParser{}
-	frame := buildFrame(t, 0, 1, time.Unix(1700000304, 0), 0,
+	datagram := buildDatagram(t, 0, 1, time.Unix(1700000304, 0), 0,
 		buildMsg(0x55, 0, make([]byte, 20)), // reserved positional-index range
 		buildMsg(0x03, 0, make([]byte, 8)),  // reserved: Quote in the top-of-book feed
 		buildMsg(msgTypeLevelUpdate, 0, levelUpdateBody(11, 0, 1, 1000, 50, 1, 0, 1, 1)),
 	)
-	recs, defects, err := p.ParseFrame("mktdata", frame)
+	recs, defects, err := p.ParseDatagram("mktdata", datagram)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -517,18 +517,18 @@ func TestParseFrame_UnknownTypeCounted(t *testing.T) {
 	}
 }
 
-// A frame whose messages do not account for every byte Frame Length declares has
+// A datagram whose messages do not account for every byte Frame Length declares has
 // Message Lengths inconsistent with Frame Length, which the spec makes a
-// malformed frame. Silently ignoring the remainder loses the extra messages.
-func TestParseFrame_TrailingBytesRejected(t *testing.T) {
+// malformed datagram. Silently ignoring the remainder loses the extra messages.
+func TestParseDatagram_TrailingBytesRejected(t *testing.T) {
 	t.Run("trailing garbage", func(t *testing.T) {
 		p := &marketByPriceParser{}
 		msg := buildMsg(msgTypeLevelUpdate, 0, levelUpdateBody(11, 0, 1, 1000, 50, 1, 0, 1, 1))
-		total := frameHeaderSize + len(msg) + 6 // 6 bytes the walk never reaches
-		frame := buildFrameHeader(mbpMagic, mbpSchemaVersionV1, 0, 1, time.Unix(1700000305, 0), 1, 0, uint16(total))
-		frame = append(frame, msg...)
-		frame = append(frame, 0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00)
-		if _, _, err := p.ParseFrame("mktdata", frame); !errors.Is(err, errFrameLength) {
+		total := datagramHeaderSize + len(msg) + 6 // 6 bytes the walk never reaches
+		datagram := buildDatagramHeader(mbpMagic, mbpSchemaVersionV1, 0, 1, time.Unix(1700000305, 0), 1, 0, uint16(total))
+		datagram = append(datagram, msg...)
+		datagram = append(datagram, 0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00)
+		if _, _, err := p.ParseDatagram("mktdata", datagram); !errors.Is(err, errFrameLength) {
 			t.Fatalf("expected errFrameLength, got %v", err)
 		}
 	})
@@ -538,23 +538,23 @@ func TestParseFrame_TrailingBytesRejected(t *testing.T) {
 		p := &marketByPriceParser{}
 		a := buildMsg(msgTypeLevelUpdate, 0, levelUpdateBody(11, 0, 1, 1000, 50, 1, 0, 1, 1))
 		b := buildMsg(msgTypeLevelUpdate, 0, levelUpdateBody(11, 1, 2, 1010, 60, 1, 0, 1, 1))
-		total := frameHeaderSize + len(a) + len(b)
-		frame := buildFrameHeader(mbpMagic, mbpSchemaVersionV1, 0, 1, time.Unix(1700000306, 0), 1, 0, uint16(total))
-		frame = append(frame, a...)
-		frame = append(frame, b...)
-		if _, _, err := p.ParseFrame("mktdata", frame); !errors.Is(err, errFrameLength) {
+		total := datagramHeaderSize + len(a) + len(b)
+		datagram := buildDatagramHeader(mbpMagic, mbpSchemaVersionV1, 0, 1, time.Unix(1700000306, 0), 1, 0, uint16(total))
+		datagram = append(datagram, a...)
+		datagram = append(datagram, b...)
+		if _, _, err := p.ParseDatagram("mktdata", datagram); !errors.Is(err, errFrameLength) {
 			t.Fatalf("expected errFrameLength, got %v", err)
 		}
 	})
 }
 
-// The spec gives Message Count a range of 1-255. A bare 24-byte frame is the one
+// The spec gives Message Count a range of 1-255. A bare 24-byte datagram is the one
 // remaining shape that would otherwise decode as valid-but-empty and be counted
 // nowhere, since the loop body is unreachable and no body bytes are left over.
-func TestParseFrame_ZeroMessageCountRejected(t *testing.T) {
+func TestParseDatagram_ZeroMessageCountRejected(t *testing.T) {
 	p := &marketByPriceParser{}
-	frame := buildFrameHeader(mbpMagic, mbpSchemaVersionV1, 0, 1, time.Unix(1700000308, 0), 0, 0, frameHeaderSize)
-	if _, _, err := p.ParseFrame("mktdata", frame); !errors.Is(err, errMessageCount) {
+	datagram := buildDatagramHeader(mbpMagic, mbpSchemaVersionV1, 0, 1, time.Unix(1700000308, 0), 0, 0, datagramHeaderSize)
+	if _, _, err := p.ParseDatagram("mktdata", datagram); !errors.Is(err, errMessageCount) {
 		t.Fatalf("expected errMessageCount, got %v", err)
 	}
 	// The reason label an operator sees must name the real cause, not fall
@@ -564,14 +564,14 @@ func TestParseFrame_ZeroMessageCountRejected(t *testing.T) {
 	}
 }
 
-// A frame in which every message is skipped is valid and yields an empty,
+// A datagram in which every message is skipped is valid and yields an empty,
 // non-nil slice — the contract documented on the Parser interface.
-func TestParseFrame_AllSkippedYieldsEmptyNonNilSlice(t *testing.T) {
+func TestParseDatagram_AllSkippedYieldsEmptyNonNilSlice(t *testing.T) {
 	p := &marketByPriceParser{}
-	frame := buildFrame(t, 0, 1, time.Unix(1700000307, 0), 0,
+	datagram := buildDatagram(t, 0, 1, time.Unix(1700000307, 0), 0,
 		buildMsg(0x55, 0, make([]byte, 20)),
 	)
-	recs, defects, err := p.ParseFrame("mktdata", frame)
+	recs, defects, err := p.ParseDatagram("mktdata", datagram)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -586,34 +586,34 @@ func TestParseFrame_AllSkippedYieldsEmptyNonNilSlice(t *testing.T) {
 	}
 }
 
-// FuzzParseFrame asserts that no attacker-controlled datagram can panic the
-// decoder, and that ParseFrame's post-conditions hold for every input that
-// decodes. The frame body is fully attacker-controlled over multicast, so the
+// FuzzParseDatagram asserts that no attacker-controlled datagram can panic the
+// decoder, and that ParseDatagram's post-conditions hold for every input that
+// decodes. The datagram body is fully attacker-controlled over multicast, so the
 // bounds arithmetic in the message walk is the highest-value thing to fuzz.
-func FuzzParseFrame(f *testing.F) {
-	valid := buildFrameHeader(mbpMagic, mbpSchemaVersionV1, 1, 10, recordTestTS, 1, 0, frameHeaderSize+48)
+func FuzzParseDatagram(f *testing.F) {
+	valid := buildDatagramHeader(mbpMagic, mbpSchemaVersionV1, 1, 10, recordTestTS, 1, 0, datagramHeaderSize+48)
 	valid = append(valid, buildMsg(msgTypeLevelUpdate, 0, levelUpdateBody(11, 0, 1, 1000, 50, 1, 0, 1, 1))...)
 	f.Add(valid)
 
-	clear := buildFrameHeader(mbpMagic, mbpSchemaVersionV1, 1, 11, recordTestTS, 1, 0, frameHeaderSize+36)
+	clear := buildDatagramHeader(mbpMagic, mbpSchemaVersionV1, 1, 11, recordTestTS, 1, 0, datagramHeaderSize+36)
 	clear = append(clear, buildMsg(msgTypeBookClear, 0, bookClearBody(11, 0, 1, 1, 100))...)
 	f.Add(clear)
 
 	f.Add([]byte{})
-	f.Add(make([]byte, frameHeaderSize))
+	f.Add(make([]byte, datagramHeaderSize))
 	// Bare well-formed header, Message Count 0 — must be rejected, not read as an
-	// empty frame.
-	f.Add(buildFrameHeader(mbpMagic, mbpSchemaVersionV1, 0, 1, recordTestTS, 0, 0, frameHeaderSize))
+	// empty datagram.
+	f.Add(buildDatagramHeader(mbpMagic, mbpSchemaVersionV1, 0, 1, recordTestTS, 0, 0, datagramHeaderSize))
 	// Message Length 0 — the walk must not advance by zero and spin.
-	spin := buildFrameHeader(mbpMagic, mbpSchemaVersionV1, 0, 1, recordTestTS, 255, 0, frameHeaderSize+4)
+	spin := buildDatagramHeader(mbpMagic, mbpSchemaVersionV1, 0, 1, recordTestTS, 255, 0, datagramHeaderSize+4)
 	f.Add(append(spin, 0x40, 0x00, 0x00, 0x00))
 
 	p := &marketByPriceParser{}
 	ports := []string{"refdata", "mktdata", "snapshot"}
 
-	f.Fuzz(func(t *testing.T, frame []byte) {
+	f.Fuzz(func(t *testing.T, datagram []byte) {
 		for _, port := range ports {
-			recs, defects, err := p.ParseFrame(port, frame)
+			recs, defects, err := p.ParseDatagram(port, datagram)
 			if err != nil {
 				if recs != nil {
 					t.Errorf("records must be nil on error, got %d", len(recs))
@@ -625,7 +625,7 @@ func FuzzParseFrame(f *testing.F) {
 			}
 			// Every message either yields a record or is counted, and the walk is
 			// bounded by Message Count.
-			count := int(frame[20])
+			count := int(datagram[20])
 			if len(recs)+defects.UnknownType+defects.MalformedBookClear+defects.MalformedOther != count {
 				t.Errorf("port %s: %d records + %d unknown + %d malformed != message count %d",
 					port, len(recs), defects.UnknownType,

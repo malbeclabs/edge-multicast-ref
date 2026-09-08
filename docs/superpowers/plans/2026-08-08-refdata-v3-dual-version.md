@@ -4,7 +4,7 @@
 
 **Goal:** Decode `InstrumentDefinition` at wire schema versions 1 and 3 in all three parsers, carry the new `Source ID` field through to ClickHouse, and rebuild branch `feat/refdata-v2-dual-version` so the superseded v2 layout never appears in its history.
 
-**Architecture:** Each parser owns a full copy of its wire decoder (separate Go modules, no shared package). The frame header's Schema Version byte is read per frame and passed into `InstrumentDefinition` decoding, which selects between a 76-byte v1 body and a 126-byte v3 body. The declared version and the body length cross-check each other in both directions. `Source ID` rides the parsers' existing free-form `Fields` map down to the bots, which write it to a new `source_id` column.
+**Architecture:** Each parser owns a full copy of its wire decoder (separate Go modules, no shared package). The datagram header's Schema Version byte is read per datagram and passed into `InstrumentDefinition` decoding, which selects between a 76-byte v1 body and a 126-byte v3 body. The declared version and the body length cross-check each other in both directions. `Source ID` rides the parsers' existing free-form `Fields` map down to the bots, which write it to a new `source_id` column.
 
 **Tech Stack:** Go 1.x (three independent modules under `go/`), Prometheus client_golang, ClickHouse via HTTP JSONEachRow inserts, Docker Compose for the demo stack.
 
@@ -170,7 +170,7 @@ func TestParseFrameHeader_AcceptsV1AndV3(t *testing.T) {
 }
 ```
 
-In `TestParseFrame_FollowsVersionSwitchMidStream`, change the cutover frame and its expectations:
+In `TestParseFrame_FollowsVersionSwitchMidStream`, change the cutover datagram and its expectations:
 
 ```go
 	v1Frame := build(1, buildInstDefV1("SHORT"))
@@ -516,7 +516,7 @@ func TestParseFrameHeader_AcceptsV1AndV3(t *testing.T) {
 }
 ```
 
-In `TestParseFrame_FollowsVersionSwitchMidStream`, swap the cutover frame:
+In `TestParseFrame_FollowsVersionSwitchMidStream`, swap the cutover datagram:
 
 ```go
 	v1Frame := build(1, buildInstDefV1("SHORT"))
@@ -685,7 +685,7 @@ git commit -m "marketbyprice-parser: decode instrument definitions at schema v1 
 This parser differs from the other two in two ways, and both matter:
 
 1. It uses a **sequential byte reader** (`br.u32()`, `br.bytes(n)`) rather than explicit offsets, so the `Source ID` read is a conditional insertion in the read sequence rather than an offset change.
-2. Its header validation uses a **version ceiling** (`SchemaVersion > maxSchemaVersion`). Raising that ceiling to 3 would admit version 2 frames into the decoder, where they would fail later on a length mismatch, in the wrong error bucket. The ceiling must become explicit set membership.
+2. Its header validation uses a **version ceiling** (`SchemaVersion > maxSchemaVersion`). Raising that ceiling to 3 would admit version 2 datagrams into the decoder, where they would fail later on a length mismatch, in the wrong error bucket. The ceiling must become explicit set membership.
 
 **Files:**
 - Modify: `go/topofbook-parser/tob/topofbook_wire.go:39-49` (length constants), `:88-90` (`topOfBookInstrumentDef` struct), `:305-345` (`msgInstrumentDefinition` decode branch)

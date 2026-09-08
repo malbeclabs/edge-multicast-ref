@@ -12,9 +12,9 @@ import (
 	dto "github.com/prometheus/client_model/go"
 )
 
-// genStream produces a deterministic multi-instrument stream: define, snapshot
+// genRecords produces a deterministic multi-instrument sequence: define, snapshot
 // (empty), then ordered deltas per instrument.
-func genStream(instruments int, deltasPer int, seed int64) []Record {
+func genRecords(instruments int, deltasPer int, seed int64) []Record {
 	rng := rand.New(rand.NewSource(seed))
 	var recs []Record
 	seq := uint64(1)
@@ -113,7 +113,7 @@ func runSharded(t *testing.T, n int, recs []Record) (map[uint32]instFP, *Metrics
 }
 
 func TestParity_ShardedMatchesSingleShard(t *testing.T) {
-	recs := genStream(50, 20, 12345)
+	recs := genRecords(50, 20, 12345)
 	base, _ := runSharded(t, 1, recs)
 	for _, n := range []int{2, 4, 8} {
 		got, _ := runSharded(t, n, recs)
@@ -148,7 +148,7 @@ func TestAcceptance_ThroughputSoakAndParity(t *testing.T) {
 	if testing.Short() {
 		t.Skip("soak test")
 	}
-	recs := genStream(330, 50, 99)
+	recs := genRecords(330, 50, 99)
 
 	base, _ := runSharded(t, 1, recs)
 
@@ -157,7 +157,7 @@ func TestAcceptance_ThroughputSoakAndParity(t *testing.T) {
 		got, m := runSharded(t, n, recs)
 		elapsed := time.Since(start)
 
-		// (1) No spurious per-instrument gaps — the stream is contiguous.
+		// (1) No spurious per-instrument gaps — the records are contiguous.
 		if g := counterVal(t, m.PerInstrumentGapsTotal); g != 0 {
 			t.Fatalf("n=%d: per_instrument_gaps_total=%v (want 0) — sharding reordered an instrument", n, g)
 		}

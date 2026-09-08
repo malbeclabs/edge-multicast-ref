@@ -53,8 +53,8 @@ const BACKWARD_MOTION: u8 = 24;
 const UNIMPLEMENTED_SCHEMA_VERSION: u8 = 9;
 
 /// A delimiter that is not this feed's. What matters is only that it differs
-/// from `TopOfBook::MAGIC`: magic is what rejects a datagram misrouted from a
-/// sibling feed.
+/// from `TopOfBook::MAGIC`: magic is what rejects a datagram misrouted from
+/// another feed in the family.
 const ANOTHER_FEEDS_MAGIC: u16 = 0x445B;
 
 /// One malformed datagram, and what a conformant subscriber does with it.
@@ -111,8 +111,8 @@ fn malformed() -> Vec<Malformed> {
     below_the_bytes[22..24].copy_from_slice(&(whole as u16 - 20).to_le_bytes());
 
     // Magic belongs to the feed rather than to a call site, so a datagram
-    // carrying a sibling's delimiter reached this group by misrouting or by a
-    // publisher writing the wrong feed's constant. Either way it must not be
+    // carrying another feed's delimiter reached this group by misrouting or by
+    // a publisher writing the wrong feed's constant. Either way it must not be
     // parsed at this feed's layout — and it must still be recorded, because the
     // misrouting is the finding.
     let mut foreign_magic = one_quote(FOREIGN_MAGIC);

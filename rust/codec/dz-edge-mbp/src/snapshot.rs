@@ -2,11 +2,11 @@
 //! sequence of datagrams.
 //!
 //! A snapshot is only useful if a subscriber can tell whether it received all
-//! of it, and against which point in the live stream it applies. `anchor_seq`
+//! of it, and against which point in the live feed it applies. `anchor_seq`
 //! answers the second question and `total_levels` the first: a subscriber that
 //! counted fewer `SnapshotLevel`s than the `SnapshotBegin` promised has an
 //! incomplete book state and must not apply it, and one that applied it against
-//! the wrong point in the stream has a book that never existed.
+//! the wrong point in the feed has a book that never existed.
 
 use dz_edge_core::{AppMessage, DecodeError, PortRole};
 

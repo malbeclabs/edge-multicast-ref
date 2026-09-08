@@ -51,7 +51,7 @@ fn a_desynchronised_instrument_is_announced_on_the_market_data_port() {
 #[test]
 fn the_anchor_is_the_sequence_number_of_the_datagram_that_carries_it() {
     // **The rule the specification's own conformance subscriber grades.** The
-    // reset takes effect immediately, so the anchor is where the stream is
+    // reset takes effect immediately, so the anchor is where the feed is
     // *now* — and the off-by-one it catches is reading the number off the last
     // delta instead, which is one behind.
     let mut h = harness(depth_feed());
@@ -122,7 +122,7 @@ fn an_instrument_owed_twice_is_owed_once() {
     assert!(owed[0].1 > 0, "the later reset's anchor");
 
     // Both announcements still reached the wire, because each is a statement
-    // about a different moment in the stream.
+    // about a different moment in the feed.
     let resets = h
         .only()
         .mktdata
@@ -138,7 +138,7 @@ fn the_snapshot_that_follows_is_anchored_where_the_reset_promised() {
     // **The obligation, closed, and the reason it needed its own path.** A
     // subscriber records the reset's anchor as the minimum it will accept for
     // that instrument. The reset's own datagram advances the sequence, so a
-    // snapshot captured afterwards and anchored where the stream has *since*
+    // snapshot captured afterwards and anchored where the feed has *since*
     // reached is at least one number later - and is one the subscriber
     // discards, leaving the instrument waiting for something that already went
     // past. This test found that: the reset promised 0 and a routine capture

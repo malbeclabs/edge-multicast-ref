@@ -250,7 +250,7 @@ impl DepthLowering {
     ///
     /// `sequence_number` is the number the datagram carrying this message will
     /// take, and it becomes `New Anchor Seq`. That is not a diagnostic: the
-    /// reset takes effect immediately, so the anchor is where the stream is
+    /// reset takes effect immediately, so the anchor is where the feed is
     /// *now*, and the specification's own conformance subscriber grades a
     /// mismatch a violation. The caller passes it because the send path is the
     /// only layer that knows it.

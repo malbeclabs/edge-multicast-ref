@@ -9,7 +9,7 @@
 //!
 //! Only the depth-grain messages live here. `Heartbeat`, `ManifestSummary` and
 //! the rest are the family's and live in `dz-edge-core`; `Trade` and
-//! `InstrumentDefinition` are byte-identical to their siblings' and live in
+//! `InstrumentDefinition` are byte-identical to the other feeds' and live in
 //! `dz-edge-tob` and `dz-edge-refdata`. This crate holds what only this feed
 //! has.
 //!
@@ -45,8 +45,8 @@ pub use snapshot::{SnapshotBegin, SnapshotEnd, SnapshotLevel};
 /// wire.
 ///
 /// Distinct from the top-of-book feed's, which is what makes a datagram
-/// misrouted between two sibling feeds refusable rather than parseable at the
-/// wrong layout.
+/// misrouted between two feeds in the family refusable rather than parseable
+/// at the wrong layout.
 pub const MAGIC_MBP: u16 = 0x4442;
 
 /// The bid side of a book.

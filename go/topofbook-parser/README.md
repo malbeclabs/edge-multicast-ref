@@ -82,7 +82,7 @@ records, err := parser.Parse(datagram, tob.PacketMeta{
 })
 ```
 
-Create a separate parser instance per publisher/source. If a quote or trade is buffered while awaiting refdata, the flushed record keeps the original datagram receive metadata, not the later refdata packet timestamp.
+Create a separate parser instance per source publisher. If a quote or trade is buffered while awaiting refdata, the flushed record keeps the original datagram receive metadata, not the later refdata packet timestamp.
 
 ## CLI flags
 

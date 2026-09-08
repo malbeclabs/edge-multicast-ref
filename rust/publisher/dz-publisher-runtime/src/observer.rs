@@ -115,8 +115,9 @@ impl IngressObserver for MetricsObserver {
     }
 
     fn adapter_error(&self, error: AdapterError) {
-        // Exhaustive, so a fourth `AdapterError` is a build failure here rather
-        // than a refusal counted under whichever bucket a fallback arm named.
+        // Exhaustive, so a fourth `AdapterError` is a build failure here
+        // rather than a refusal counted under whichever bucket a fallback
+        // branch named.
         let reason = match error {
             AdapterError::NotReady { .. } => AdapterErrorReason::NotReady,
             AdapterError::UnknownInstrument => AdapterErrorReason::UnknownInstrument,

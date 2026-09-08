@@ -45,7 +45,6 @@
 #![forbid(unsafe_code)]
 
 mod cli;
-mod config;
 mod endpoint;
 mod identity;
 
@@ -58,7 +57,7 @@ use dz_recorder_rows::{FileSink, RowSink};
 use thiserror::Error;
 
 use cli::{Args, CliError, Invocation, Mode};
-use config::LoaderConfig;
+use dz_recorder_load::config::{self, LoaderConfig};
 // The pass, the ledger and the metrics are the library's, because inline mode
 // needs them and a second copy of the ledger would be a second answer to
 // *is this loaded*. See `lib.rs`.
@@ -240,7 +239,7 @@ fn drive<S: RowSink>(
     };
     let mut first_failure: Option<String> = None;
     let mut failed = 0u64;
-    // Carried across passes because the sink is: a quiet lane's rows may be
+    // Carried across passes because the sink is: a quiet feed's rows may be
     // held for the whole `insert_max_delay`, which is several passes.
     let mut pending: Vec<loader::Pending> = Vec::new();
 
@@ -253,6 +252,7 @@ fn drive<S: RowSink>(
             ledger,
             sink,
             metrics,
+            market_data: &config.market_data,
             pending: &mut pending,
         }
         .run_once(&stopping);
@@ -275,6 +275,15 @@ fn drive<S: RowSink>(
             pass.held,
             pass.oldest_unloaded_age_seconds
         );
+        // Only where a feed derives. A line reading "0 unloaded" on every host
+        // that turned nothing on is a line an operator learns to skip, and the
+        // one host that did turn something on is the host whose line matters.
+        if !config.market_data.is_empty() {
+            eprintln!(
+                "dz-recorder-load: market data: {} unloaded, oldest {}s behind",
+                pass.market_data_unloaded, pass.market_data_oldest_unloaded_age_seconds
+            );
+        }
 
         if args.mode == Mode::Once || stopping() {
             break;

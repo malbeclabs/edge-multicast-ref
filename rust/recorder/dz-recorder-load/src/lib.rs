@@ -30,19 +30,33 @@
 //!
 //! # What stays in the binary
 //!
-//! The command line, the configuration file, the metrics endpoint and the build
-//! identity. Each is a statement about *this* binary — inline mode reads its own
-//! configuration, serves its own endpoint on the recorder's port, and reports the
-//! recorder's build — so exporting them would offer a caller the wrong one.
+//! The command line, the metrics endpoint and the build identity. Each is a
+//! statement about *this* binary — inline mode serves its own endpoint on the
+//! recorder's port and reports the recorder's build — so exporting them would
+//! offer a caller the wrong one.
+//!
+//! [`config`] is here rather than there, and that is not the split this crate
+//! first drew. `LoaderConfig` is the archive-mode binary's own file and inline
+//! mode reads a different one, so on shape alone it belongs beside the command
+//! line. But [`loader`] and [`metrics`] both reach into it for
+//! [`MarketDataFeed`] and into [`market_data`] for the derivation and its
+//! refusal kinds, and the pass cannot be a library while half of what it calls
+//! is not. Splitting `MarketDataFeed` out of the configuration to restore the
+//! tidier boundary would move a type away from the keys that give it meaning
+//! for no gain a caller can see: a crate exporting a configuration nobody has
+//! to read costs nothing.
 //!
 //! Nothing here changed behaviour when it moved. The binary's own test suite is
 //! what says so.
 #![forbid(unsafe_code)]
 
+pub mod config;
 pub mod ledger;
 pub mod loader;
+pub mod market_data;
 pub mod metrics;
 
+pub use config::{ConfigError, LoaderConfig, MarketDataFeed};
 pub use ledger::{Entry, Ledger, LedgerError};
 pub use loader::{now_unix_nanos, record_landed, Candidate, Loader, Pass, Pending, Recorded};
 pub use metrics::{ErrorKind, LoaderMetrics, SkipReason};

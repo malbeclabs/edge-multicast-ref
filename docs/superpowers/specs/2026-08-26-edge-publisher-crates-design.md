@@ -98,7 +98,7 @@ on:
   space, and what is missing is spec coverage.
 - **Perp-stats** names the ID and excludes it: type IDs `0x03`, `0x04`, `0x05`
   and `0x08` are *"intentionally not carried on this feed"*, so that a datagram
-  misrouted from a sibling feed cannot cross-decode. An emission there is
+  misrouted from another feed in the family cannot cross-decode. An emission there is
   documented as excluded rather than undocumented, and remains a live finding.
   It is constructed conditionally, so whether it reaches the wire today is a
   deployment question rather than a code one.

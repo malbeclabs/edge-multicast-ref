@@ -172,7 +172,7 @@ CREATE TABLE IF NOT EXISTS recorder.datagram (
     -- `archive` when the datagrams behind the row were kept and their object's
     -- sha256 checked against its manifest before a row was derived; `live` when
     -- they were derived as they arrived and not kept. In no sort key, so the two
-    -- modes' views of one datagram stay one row. See 005, which adds this to a
+    -- modes' views of one datagram stay one row. See 008, which adds this to a
     -- deployment that applied this file before the column existed.
     derivation       LowCardinality(String) DEFAULT 'archive'
 )
@@ -235,7 +235,7 @@ CREATE TABLE IF NOT EXISTS recorder.era (
     -- `archive` when the datagrams behind the row were kept and their object's
     -- sha256 checked against its manifest before a row was derived; `live` when
     -- they were derived as they arrived and not kept. In no sort key, so the two
-    -- modes' views of one datagram stay one row. See 005, which adds this to a
+    -- modes' views of one datagram stay one row. See 008, which adds this to a
     -- deployment that applied this file before the column existed.
     derivation     LowCardinality(String) DEFAULT 'archive'
 )
@@ -287,7 +287,7 @@ CREATE TABLE IF NOT EXISTS recorder.segment_coverage (
     -- `archive` when the datagrams behind the row were kept and their object's
     -- sha256 checked against its manifest before a row was derived; `live` when
     -- they were derived as they arrived and not kept. In no sort key, so the two
-    -- modes' views of one datagram stay one row. See 005, which adds this to a
+    -- modes' views of one datagram stay one row. See 008, which adds this to a
     -- deployment that applied this file before the column existed.
     derivation           LowCardinality(String) DEFAULT 'archive',
     build_version        String,
@@ -362,7 +362,7 @@ CREATE TABLE IF NOT EXISTS recorder.sequence_gap (
     -- `archive` when the datagrams behind the row were kept and their object's
     -- sha256 checked against its manifest before a row was derived; `live` when
     -- they were derived as they arrived and not kept. In no sort key, so the two
-    -- modes' views of one datagram stay one row. See 005, which adds this to a
+    -- modes' views of one datagram stay one row. See 008, which adds this to a
     -- deployment that applied this file before the column existed.
     derivation        LowCardinality(String) DEFAULT 'archive'
 )
@@ -398,7 +398,7 @@ CREATE TABLE IF NOT EXISTS recorder.conformance_finding (
     -- `archive` when the datagrams behind the row were kept and their object's
     -- sha256 checked against its manifest before a row was derived; `live` when
     -- they were derived as they arrived and not kept. In no sort key, so the two
-    -- modes' views of one datagram stay one row. See 005, which adds this to a
+    -- modes' views of one datagram stay one row. See 008, which adds this to a
     -- deployment that applied this file before the column existed.
     derivation       LowCardinality(String) DEFAULT 'archive',
     first_seq        UInt64,                   -- the evidence range

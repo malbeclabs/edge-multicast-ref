@@ -190,7 +190,7 @@ fn every_live_member_receives_the_same_bytes() {
 
 #[test]
 fn a_fan_out_collapse_reaches_the_composer_as_a_countable_error() {
-    // The composer counts what it receives, and the tee counts what it
+    // The composer counts what it receives, and the fan-out counts what it
     // absorbs, so nothing is counted twice: one `socket_error` from the
     // member's failure, one `not_registered` from the send that then had
     // nowhere to go.

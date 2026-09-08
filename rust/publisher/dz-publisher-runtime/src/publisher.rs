@@ -28,9 +28,10 @@
 //! | a pulled snapshot | — | `0x20`/`0x42`/`0x22` on snapshot |
 //!
 //! `Trade` is the row that needs an argument. The wire's cross-specification
-//! policy requires `0x04` to be **byte-for-byte identical** across a venue's
-//! sibling feeds, and in one existing publisher that obligation is held by a
-//! doc comment across two separate encoder implementations, checked by hand.
+//! policy requires `0x04` to be **byte-for-byte identical** across the feeds in
+//! the family a venue publishes, and in one existing publisher that obligation
+//! is held by a doc comment across two separate encoder implementations,
+//! checked by hand.
 //! `dz-publisher-lowering` made it one function; this makes it one *value*. The
 //! trade is lowered once and the same `Trade` is handed to both send paths, so
 //! the two are not two things that agree — they are one thing, and there is no
@@ -227,9 +228,9 @@ pub struct SnapshotRefusals {
 impl SnapshotRefusals {
     /// Count one refusal.
     ///
-    /// An exhaustive match rather than a fallback arm, so that a cause added to
-    /// [`SnapshotError`] has to be classified here instead of landing in
-    /// whichever bucket a `_` named.
+    /// An exhaustive match rather than a fallback branch, so that a cause
+    /// added to [`SnapshotError`] has to be classified here instead of landing
+    /// in whichever bucket a `_` named.
     fn record(&mut self, error: &SnapshotError) {
         match error {
             SnapshotError::Adapter(AdapterError::NotReady { .. }) => self.not_ready += 1,
@@ -300,7 +301,7 @@ impl Refusals {
     /// An exhaustive match over both enumerations rather than a lookup on
     /// `LoweringError::reason`'s token, so that a reason added on either side
     /// fails to compile here instead of being counted under whichever bucket a
-    /// fallback arm named.
+    /// fallback branch named.
     fn record(&mut self, error: LoweringError, metrics: &PublisherMetrics) {
         // One match for both the count and the label, so the two cannot
         // disagree about which reason a refusal was. Splitting them into two
@@ -519,7 +520,7 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
     ///
     /// **The anchor travels with the debt, and that is not an optimisation.**
     /// The specification obliges a snapshot with `Anchor Seq` *equal to* the
-    /// value the reset named — not equal to wherever the stream has reached by
+    /// value the reset named — not equal to wherever the feed has reached by
     /// the time the book is captured. Those differ by at least one, because the
     /// reset's own datagram advanced the sequence, and a snapshot anchored a
     /// number later is one a subscriber discards: it records the reset's anchor
@@ -665,7 +666,7 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
         adapter: &dyn Adapter,
         instrument: InstrumentRef,
     ) -> Result<Snapshot, SnapshotError> {
-        // The point in the live stream this book state is true as of, which is
+        // The point in the live feed this book state is true as of, which is
         // what tells a subscriber which live messages to apply after it and
         // which to discard.
         let anchor = match self.feeds.market_by_price.as_ref() {
@@ -684,7 +685,7 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
     ///
     /// **Not the live sequence.** A subscriber records the reset's anchor as
     /// the minimum `Anchor Seq` it will accept for that instrument, so a
-    /// snapshot captured later and anchored where the stream has since reached
+    /// snapshot captured later and anchored where the feed has since reached
     /// is one it discards — leaving the instrument waiting for something that
     /// already went past. The anchor comes from
     /// [`owed_snapshots`](Self::owed_snapshots), which carries it for exactly
@@ -1173,7 +1174,7 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
             self.unroutable += 1;
             return;
         };
-        // The anchor is where the stream is *now*: the reset takes effect
+        // The anchor is where the feed is *now*: the reset takes effect
         // immediately, so it is the number the datagram carrying it will take,
         // read off the send path because nothing else knows it.
         let anchor = pipeline.mktdata_sequence().unwrap_or(0);
@@ -1218,8 +1219,8 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
     }
 
     fn event(&mut self, event: Event<'_>) {
-        // Read once, before the match, so every arm labels its observation the
-        // same way and a new arm cannot forget to.
+        // Read once, before the match, so every branch labels its observation
+        // the same way and a new branch cannot forget to.
         let kind = event_kind(&event);
         let now_mono = dz_publisher_refdata::Clock::monotonic_ns(&self.clock);
         let now_unix = self.clock.unix_ns();
@@ -1233,8 +1234,8 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                 ask,
             } => {
                 // Refused before the lowering when no feed carries it, which
-                // costs nothing here and is the same rule the depth arms below
-                // need for a stronger reason.
+                // costs nothing here and is the same rule the depth branches
+                // below need for a stronger reason.
                 let Some(_) = self.feeds.top_of_book.as_ref() else {
                     self.unroutable += 1;
                     return;
@@ -1287,11 +1288,11 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                 );
                 match lowered {
                     // **One value, both feeds.** The wire requires `0x04` to be
-                    // byte-for-byte identical across a venue's sibling feeds,
-                    // and this is the mechanism: there is one lowered trade and
-                    // no second call site to drift. A trade also stamps no
-                    // `Per-Instrument Seq` — the message has no such field, and
-                    // it is not a book mutation.
+                    // byte-for-byte identical across the feeds in the family a
+                    // venue publishes, and this is the mechanism: there is one
+                    // lowered trade and no second call site to drift. A trade
+                    // also stamps no `Per-Instrument Seq` — the message has no
+                    // such field, and it is not a book mutation.
                     Ok(trade) => {
                         let mut reached = false;
                         timed(&self.metrics, EgressMessageType::Trade, || {
@@ -1390,7 +1391,7 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
 
             // A variant a later boundary release adds — the market-by-order
             // ones, when `dz-edge-mbo` lands. Counted and dropped without being
-            // lowered, for the same reason the depth arms check first.
+            // lowered, for the same reason the depth branches check first.
             _ => self.unroutable += 1,
         }
     }

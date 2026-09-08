@@ -4,7 +4,7 @@
 
 **Goal:** Build `go/marketbyprice-parser` — a multicast subscriber that joins the three ports of a DoubleZero Market-by-Price channel, decodes the binary wire format, and emits one JSON record per application message to a Unix socket or file, with Prometheus metrics.
 
-**Architecture:** Stateless decode. A `Runner` opens one multicast UDP socket per port (refdata, mktdata, snapshot) and runs a goroutine each. Every datagram is one frame: validate the 24-byte frame header, walk the packed application messages by `Message Length`, decode each into a `Record`, and hand the batch to an `OutputSink`. No book state, no cross-frame state except a per-port sequence-gap tracker. This mirrors `go/marketbyorder-parser` exactly, which is the reference precedent for this repo.
+**Architecture:** Stateless decode. A `Runner` opens one multicast UDP socket per port (refdata, mktdata, snapshot) and runs a goroutine each. Every datagram is decoded on its own: validate the 24-byte datagram header, walk the packed application messages by `Message Length`, decode each into a `Record`, and hand the batch to an `OutputSink`. No book state, no cross-datagram state except a per-port sequence-gap tracker. This mirrors `go/marketbyorder-parser` exactly, which is the reference precedent for this repo.
 
 **Tech Stack:** Go 1.25.0 (toolchain go1.26.0 installed), package `main`, standard library plus `github.com/prometheus/client_golang v1.23.2`. Tests use the standard `testing` package. Go workspace at `go/go.work`.
 
@@ -20,7 +20,7 @@
 - Module path `github.com/malbeclabs/edge-multicast-ref/go/marketbyprice-parser`.
 - Package `main` for every file in this module. No subpackages.
 - Prometheus metric namespace exactly `dz_mbp_parser`.
-- Magic `0x4442`. Schema Version `1`. Frame header 24 bytes. Message header 4 bytes. Max frame 1232 bytes.
+- Magic `0x4442`. Schema Version `1`. Datagram header 24 bytes. Message header 4 bytes. Max datagram 1232 bytes.
 - All multi-byte integers little-endian.
 - Body length checks are **exact equality**, never `>=`. A v1 body of unexpected length is malformed.
 - The `u16` value `0xFFFF` in `Order Count` and `Level Index` means *absent*. It MUST NOT reach JSON as `65535`; the key is omitted instead.
@@ -38,8 +38,8 @@ All paths relative to `go/marketbyprice-parser/`.
 - `.gitignore` — built binary. Task 1.
 - `marketbyprice_wire.go` — constants, sentinel errors, `FrameHeader`, `MessageHeader`, and one body struct + parse function per message type. Tasks 1, 2, 3.
 - `marketbyprice_wire_test.go` — byte-exact tests for every parse function. Tasks 1, 2, 3.
-- `marketbyprice.go` — `marketByPriceParser`, `ParseFrame` (frame walk), `decodeMessage` (dispatch), enum stringers. Task 4.
-- `marketbyprice_test.go` — frame walk and dispatch tests. Task 4.
+- `marketbyprice.go` — `marketByPriceParser`, `ParseFrame` (datagram walk), `decodeMessage` (dispatch), enum stringers. Task 4.
+- `marketbyprice_test.go` — datagram walk and dispatch tests. Task 4.
 - `parser.go` — `Record`, `Parser` interface, parser registry. Task 5.
 - `metrics.go` — `Metrics`, `NewMetrics`, `ServeHTTP`, plus the two defect counters. Task 5.
 - `metrics_smoke_test.go` — namespace and defect-counter registration. Task 5.
@@ -71,7 +71,7 @@ Baseline before starting: `go vet` and `go test` pass for every module except `x
 
 ---
 
-## Task 1: Module scaffolding and frame/message headers
+## Task 1: Module scaffolding and datagram/message headers
 
 **Files:**
 - Create: `go/marketbyprice-parser/go.mod`
@@ -1128,7 +1128,7 @@ git commit -m "marketbyprice-parser: decode level update, book clear, and snapsh
 
 ---
 
-## Task 4: Frame walk and record dispatch
+## Task 4: Datagram walk and record dispatch
 
 **Files:**
 - Create: `go/marketbyprice-parser/marketbyprice.go`
@@ -1141,7 +1141,7 @@ git commit -m "marketbyprice-parser: decode level update, book clear, and snapsh
 - Consumes: everything from Tasks 1–3.
 - Produces:
   - `Record` struct with JSON tags (fields listed in Step 3).
-  - `Defects struct { SnapshotFlagMismatch int; MalformedBookClear int }` — per-frame publisher-defect counts.
+  - `Defects struct { SnapshotFlagMismatch int; MalformedBookClear int }` — per-datagram publisher-defect counts.
   - `Parser` interface: `Name() string`, `ParseFrame(port string, frame []byte) ([]Record, Defects, error)`. **This three-value signature differs from the sibling parsers' two-value one**, which is deliberate: see Step 3.
   - `registerParser(name string, ctor func() Parser)`, `newParser(name string) (Parser, error)`.
   - `marketByPriceParser` implementing `Parser`, registered as `"marketbyprice"`. It has **no fields** and holds no state.
@@ -1553,7 +1553,7 @@ type Record struct {
 
 - [ ] **Step 4: Write `marketbyprice.go`**
 
-Create it with the registration, defect counters, frame walk, dispatch, and stringers:
+Create it with the registration, defect counters, datagram walk, dispatch, and stringers:
 
 ```go
 package main
@@ -2285,7 +2285,7 @@ Copy `timestamp_linux.go` and `timestamp_other.go` from `go/marketbyorder-parser
 
 Copy `go/marketbyorder-parser/runner.go`, then make these changes:
 
-1. `ParseFrame` returns per-frame defect counts as its second value (see Task 4). Change the call in `receive` from the sibling's two-value form to:
+1. `ParseFrame` returns per-datagram defect counts as its second value (see Task 4). Change the call in `receive` from the sibling's two-value form to:
 
 ```go
 		records, defects, perr := r.parser.ParseFrame(port, buf[:n])
@@ -2314,7 +2314,7 @@ Copy `go/marketbyorder-parser/runner.go`, then make these changes:
 
 3. Add `message_length_underflow` accounting: in `classifyError`, `errMessageLength` already maps to `"frame_length"`. Leave that mapping alone for parity with the sibling parsers — the dedicated `malformed_total` counter covers the spec-specific cases and the parse-error histogram keeps its existing shape.
 
-Everything else — the multicast open with a 64 MiB read buffer, the 500 ms read deadline so `ctx` cancellation is observed, the `refdata` exclusion from frame-sequence gap tracking, and `observeLatencies` — copies unchanged.
+Everything else — the multicast open with a 64 MiB read buffer, the 500 ms read deadline so `ctx` cancellation is observed, the `refdata` exclusion from datagram-sequence gap tracking, and `observeLatencies` — copies unchanged.
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
@@ -2324,7 +2324,7 @@ Expected: PASS.
 - [ ] **Step 6: Check for data races**
 
 Run: `go test -race ./...`
-Expected: PASS with no race reports. One `Parser` is shared by three port goroutines, so this is the check that the per-frame defect return actually avoided shared mutable state.
+Expected: PASS with no race reports. One `Parser` is shared by three port goroutines, so this is the check that the per-datagram defect return actually avoided shared mutable state.
 
 - [ ] **Step 7: Vet and commit**
 
@@ -2461,7 +2461,7 @@ git commit -m "marketbyprice-parser: add entry point, container, and readme"
 - From `go/`: `go vet ./marketbyprice-parser/...`, `go test ./marketbyprice-parser/...`, and `go test -race ./marketbyprice-parser/...` are green, and `go build -o /tmp/dz-marketbyprice-parser ./marketbyprice-parser/` succeeds.
 - The six other buildable modules still vet and test clean; `xdp-receiver` remains untouched in its pre-existing broken state.
 - Every one of the 13 message types has a byte-exact decode test.
-- Sentinel omission, unknown-type skip, `Message Length = 0` termination, and malformed-`BookClear` drop-without-frame-failure each have a test.
+- Sentinel omission, unknown-type skip, `Message Length = 0` termination, and malformed-`BookClear` drop-without-datagram-failure each have a test.
 - `dz-marketbyprice-parser --version` runs; the container builds.
 - No book state anywhere in the module.
 

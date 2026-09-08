@@ -29,7 +29,7 @@ type SocketSink struct {
 }
 
 // outQueueLen bounds per-client buffered batches. Sized to absorb
-// burst variance when the bot's single-goroutine dispatch falls behind;
+// burst variance when the book-builder's single-goroutine dispatch falls behind;
 // dropping here is preferred over dropping at the kernel UDP socket.
 const outQueueLen = 16384
 
@@ -185,15 +185,15 @@ func (s *SocketSink) Write(records []Record) error {
 func (s *SocketSink) Close() error {
 	s.mu.Lock()
 	if s.closed {
-		// Idempotent: second Close() is a no-op (channels are already closed).
+		// Idempotent: second Close() is a no-op (the Go channels are already closed).
 		s.mu.Unlock()
 		return nil
 	}
 	s.closed = true
 	clients := s.clients
 	s.clients = make(map[net.Conn]*clientWriter)
-	// Close all channels while holding mu. This is safe because Write() also
-	// holds mu during its sends, so we can never close a channel that Write
+	// Close every client Go channel while holding mu. This is safe because Write() also
+	// holds mu during its sends, so we can never close a Go channel that Write
 	// is currently sending on.
 	for _, cw := range clients {
 		close(cw.ch)

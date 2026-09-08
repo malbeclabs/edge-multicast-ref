@@ -1,11 +1,11 @@
 //! `0x04 Trade`: one implementation, and the file exists to say so.
 //!
 //! The wire's cross-specification policy is explicit about this message: a
-//! Type ID appearing in more than one sibling feed must carry the same meaning
-//! in each, and `Trade` is **byte-for-byte identical** between the top-of-book
-//! feed, the market-by-price feed and the market-by-order feed. So a venue
-//! publishing two of those feeds owes the same bytes on both, for the same
-//! execution.
+//! Type ID appearing in more than one feed in the family must carry the same
+//! meaning in each, and `Trade` is **byte-for-byte identical** between the
+//! top-of-book feed, the market-by-price feed and the market-by-order feed. So
+//! a venue publishing two of those feeds owes the same bytes on both, for the
+//! same execution.
 //!
 //! In one existing publisher that obligation is held by a doc comment across
 //! two separate encoder implementations, checked by hand. Here it is held by

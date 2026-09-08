@@ -17,8 +17,8 @@ use crate::error::SinkError;
 /// an auxiliary outage into a feed outage.
 ///
 /// Stated per transmitter rather than inferred from its port role, because the
-/// same port role can be both: the socket is essential, and a tee'd copy of the
-/// same bytes on the same role is not.
+/// same port role can be both: the socket is essential, and a fanned-out copy
+/// of the same bytes on the same role is not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FailureScope {
     /// A failure here darkens the publisher. The runtime's guard ends the
@@ -84,7 +84,7 @@ pub trait DatagramSink {
 
 /// Every datagram to several sinks.
 ///
-/// One tee serves one port role, because that is the granularity the metric
+/// One `Tee` serves one port role, because that is the granularity the metric
 /// families are labelled at and because its members all carry the same
 /// numbered series.
 ///
@@ -111,8 +111,8 @@ pub trait DatagramSink {
 /// [`FailureScope`] says the publisher is now dark, for the runtime's guard to
 /// act on between ticks rather than mid-datagram.
 ///
-/// The one outcome that *is* returned is a tee with nothing live left, which is
-/// not a member's failure but the absence of any destination at all.
+/// The one outcome that *is* returned is a `Tee` with nothing live left, which
+/// is not a member's failure but the absence of any destination at all.
 pub struct Tee {
     port_role: PortRole,
     metrics: Arc<PublisherMetrics>,
@@ -128,8 +128,8 @@ struct Member {
 
 impl Tee {
     /// An empty fan-out for one port role. `port_role` is the label every
-    /// failure this tee absorbs is counted under, so it must be the role its
-    /// members actually serve.
+    /// failure this fan-out absorbs is counted under, so it must be the role
+    /// its members actually serve.
     #[must_use]
     pub fn new(port_role: PortRole, metrics: Arc<PublisherMetrics>) -> Self {
         Self {
@@ -239,8 +239,9 @@ impl DatagramSink for Tee {
 
     /// The widest scope any member declares.
     ///
-    /// A tee holding one essential transmitter is essential: the copy going to
-    /// the auxiliary consumer does not make the mktdata socket optional.
+    /// A fan-out holding one essential transmitter is essential: the copy
+    /// going to the auxiliary consumer does not make the mktdata socket
+    /// optional.
     fn failure_scope(&self) -> FailureScope {
         if self
             .members

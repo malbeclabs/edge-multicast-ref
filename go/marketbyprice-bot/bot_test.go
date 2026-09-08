@@ -102,7 +102,7 @@ func TestBot_ReconnectsOnDisconnect(t *testing.T) {
 	defer listener.Close()
 
 	// Accept twice: serve one record, hang up, then serve another on the
-	// reconnect. The bot's first backoff is 250ms, so this stays quick.
+	// reconnect. The book-builder's first backoff is 250ms, so this stays quick.
 	go func() {
 		for i := 0; i < 2; i++ {
 			conn, err := listener.Accept()
@@ -203,7 +203,7 @@ func TestMetricsNamespace(t *testing.T) {
 			sawBuildInfo = true
 		}
 		if strings.HasPrefix(n, "dz_mbo_") || strings.HasPrefix(n, "dz_tob_") {
-			t.Errorf("metric %s registered under a sibling feed namespace", n)
+			t.Errorf("metric %s registered under another family feed's namespace", n)
 		}
 	}
 	if !sawBuildInfo {

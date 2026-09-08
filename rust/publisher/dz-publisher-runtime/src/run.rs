@@ -601,7 +601,7 @@ fn open_ports(
         if config.adapter.tee.enabled {
             let destination = config.adapter.tee.destination(feed.spec, port_role)?;
             eprintln!(
-                "teeing {} {} datagrams to {}",
+                "fanning out {} {} datagrams to {}",
                 feed.spec.as_str(),
                 port_role.as_str(),
                 destination.display()
@@ -826,7 +826,7 @@ async fn signalled() {
     // A handler that cannot be installed is not a reason to refuse to publish:
     // the process is still killable, and the cost is an abrupt end rather than
     // an `EndOfSession`. Reported and then waited on forever, so the select
-    // arm simply never fires.
+    // branch simply never fires.
     let install = |kind: SignalKind, name: &str| match signal(kind) {
         Ok(stream) => Some(stream),
         Err(error) => {

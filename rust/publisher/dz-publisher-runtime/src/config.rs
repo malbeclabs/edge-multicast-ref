@@ -517,11 +517,12 @@ pub struct AdapterConfig {
 
 /// `[adapter.tee]`: the reference stream, and why it sits here.
 ///
-/// The tee is a second [`DatagramSink`](dz_publisher_egress::DatagramSink)
-/// carrying byte-identical copies of every datagram to a local socket a
-/// recorder archives, so that a subscriber-site archive can be diffed against a
-/// reference archive datagram for datagram — network loss, reordering, MTU
-/// drops and one-way latency measured rather than inferred.
+/// The section names a second
+/// [`DatagramSink`](dz_publisher_egress::DatagramSink) carrying byte-identical
+/// copies of every datagram to a local socket a recorder archives, so that a
+/// subscriber-site archive can be diffed against a reference archive datagram
+/// for datagram — network loss, reordering, MTU drops and one-way latency
+/// measured rather than inferred.
 ///
 /// **It sits under `[adapter]` rather than `[egress]` deliberately.** It is not
 /// a transmitter: it darkens nothing when it fails, and it must never be able to
@@ -575,8 +576,8 @@ impl TeeConfig {
     ///
     /// [`StartupError::TeeWithoutPath`] when the section is on and names no
     /// path. Checked again here as well as at load, because a prefix is not
-    /// something to default: a tee that quietly wrote to a relative path would
-    /// have an operator believing copies were being archived.
+    /// something to default: a fan-out that quietly wrote to a relative path
+    /// would have an operator believing copies were being archived.
     pub fn destination(
         &self,
         spec: FeedSpec,
@@ -702,7 +703,7 @@ impl FeedSpec {
 ///
 /// [`ChannelEgress`](dz_publisher_egress::ChannelEgress) is generic over the
 /// feed, because `Magic` belongs to the feed and is what rejects a datagram
-/// misrouted from a sibling. So a send path is
+/// misrouted from another feed in the family. So a send path is
 /// `FeedPipeline<TopOfBook>` or `FeedPipeline<MarketByPrice>` and the feed is
 /// known at compile time — but the *routing* has to know which specification it
 /// is holding, because the codec will not stop a `Quote` being pushed into a
