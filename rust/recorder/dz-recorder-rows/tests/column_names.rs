@@ -16,8 +16,8 @@
 use std::net::Ipv4Addr;
 
 use dz_recorder_rows::{
-    ConformanceFinding, Datagram, DropScope, Era, FindingVerdict, Grain, Nanos, PortRoleLabel,
-    RecvTsKindLabel, RoleJoinRow, SegmentCoverage, SequenceGap, Verdict,
+    ConformanceFinding, Datagram, Derivation, DropScope, Era, FindingVerdict, Grain, Nanos,
+    PortRoleLabel, RecvTsKindLabel, RoleJoinRow, SegmentCoverage, SequenceGap, Verdict,
 };
 use serde_json::{json, Value};
 
@@ -55,6 +55,7 @@ fn a_datagram_row_carries_exactly_the_datagram_columns() {
         drop_scope: DropScope::PortRole,
         object_key: KEY.to_owned(),
         object_sha256: SHA.to_owned(),
+        derivation: Derivation::Archive,
     };
 
     assert_eq!(
@@ -81,6 +82,7 @@ fn a_datagram_row_carries_exactly_the_datagram_columns() {
             "drop_scope": "port-role",
             "object_key": KEY,
             "object_sha256": SHA,
+            "derivation": "archive",
         })
     );
 }
@@ -126,6 +128,7 @@ fn an_era_row_carries_exactly_the_era_columns() {
         continuation: 0,
         object_key: KEY.to_owned(),
         object_sha256: SHA.to_owned(),
+        derivation: Derivation::Archive,
     };
 
     assert_eq!(
@@ -145,6 +148,7 @@ fn an_era_row_carries_exactly_the_era_columns() {
             "continuation": 0,
             "object_key": KEY,
             "object_sha256": SHA,
+            "derivation": "archive",
         })
     );
 }
@@ -172,6 +176,7 @@ fn a_segment_coverage_row_carries_exactly_the_manifest_columns() {
         roles_joined: vec![RoleJoinRow("mktdata".to_owned(), GROUP, 40_000)],
         object_key: KEY.to_owned(),
         object_sha256: SHA.to_owned(),
+        derivation: Derivation::Archive,
         build_version: "0.1.0".to_owned(),
         build_commit: "unknown".to_owned(),
         config_hash: "a".repeat(64),
@@ -203,6 +208,7 @@ fn a_segment_coverage_row_carries_exactly_the_manifest_columns() {
             "roles_joined": [["mktdata", "233.252.0.10", 40_000]],
             "object_key": KEY,
             "object_sha256": SHA,
+            "derivation": "archive",
             "build_version": "0.1.0",
             "build_commit": "unknown",
             "config_hash": "a".repeat(64),
@@ -242,6 +248,7 @@ fn a_sequence_gap_row_carries_exactly_the_gap_columns() {
         on_redundant_path: Some(0),
         verdict: Verdict::Unverifiable,
         object_key: KEY.to_owned(),
+        derivation: Derivation::Archive,
     };
 
     assert_eq!(
@@ -279,6 +286,7 @@ fn a_sequence_gap_row_carries_exactly_the_gap_columns() {
             "on_redundant_path": 0,
             "verdict": "unverifiable",
             "object_key": KEY,
+            "derivation": "archive",
         })
     );
 }
@@ -333,6 +341,7 @@ fn a_conformance_finding_row_carries_exactly_the_finding_columns() {
         verdict: FindingVerdict::Na,
         detail: "no port role joined".to_owned(),
         object_key: KEY.to_owned(),
+        derivation: Derivation::Archive,
         first_seq: 0,
         last_seq: 99,
     };
@@ -356,6 +365,7 @@ fn a_conformance_finding_row_carries_exactly_the_finding_columns() {
             "verdict": "na",
             "detail": "no port role joined",
             "object_key": KEY,
+            "derivation": "archive",
             "first_seq": 0,
             "last_seq": 99,
         })
@@ -376,6 +386,8 @@ fn every_label_token_is_spelled_as_the_specification_states_it() {
     assert_eq!(of(as_json(&PortRoleLabel::Snapshot)), "snapshot");
     assert_eq!(of(as_json(&DropScope::PortRole)), "port-role");
     assert_eq!(of(as_json(&DropScope::CaptureHandle)), "capture-handle");
+    assert_eq!(of(as_json(&Derivation::Archive)), "archive");
+    assert_eq!(of(as_json(&Derivation::Live)), "live");
     assert_eq!(
         of(as_json(&RecvTsKindLabel::KernelSoftware)),
         "kernel-software"
@@ -460,6 +472,7 @@ fn datagram() -> Datagram {
         drop_scope: DropScope::CaptureHandle,
         object_key: KEY.to_owned(),
         object_sha256: SHA.to_owned(),
+        derivation: Derivation::Archive,
     }
 }
 
@@ -494,5 +507,6 @@ fn gap() -> SequenceGap {
         on_redundant_path: None,
         verdict: Verdict::Unverifiable,
         object_key: KEY.to_owned(),
+        derivation: Derivation::Archive,
     }
 }

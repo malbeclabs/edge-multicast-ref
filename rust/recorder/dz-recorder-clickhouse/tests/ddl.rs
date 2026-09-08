@@ -149,6 +149,37 @@ fn the_sort_keys_are_the_ones_the_rows_were_shaped_for() {
     );
 }
 
+/// Provenance is in no sort key, on any table.
+///
+/// A datagram recorded once is one row whichever mode derived it. Put
+/// `derivation` in a sort key and the archive-derived row and the live-derived
+/// row of the same datagram stop collapsing under `ReplacingMergeTree` — so a
+/// window loaded both ways doubles, and every count over it is wrong in a
+/// direction nobody would suspect. The column exists to be *read*, and this is
+/// where that stays true.
+#[test]
+fn the_provenance_column_is_in_no_sort_key() {
+    let sql = rows_sql();
+    for line in sql.lines() {
+        let line = line.trim_start();
+        if line.starts_with("ORDER BY") || line.starts_with("PRIMARY KEY") {
+            assert!(
+                !line.contains("derivation"),
+                "provenance reached a sort key: {line}"
+            );
+        }
+    }
+    // And it is a column on every one of them, or the assertion above is vacuous
+    // for the table that is missing it.
+    for grain in Grain::ALL {
+        let declared = columns(sql, grain.table());
+        assert!(
+            declared.iter().any(|c| c == "derivation"),
+            "{grain} declares no derivation column: {declared:?}"
+        );
+    }
+}
+
 /// Every table is partitioned by a day, and none is an exception.
 ///
 /// `era` was, and the exception was not a decision — it was the one table whose
@@ -484,8 +515,8 @@ mod fixtures {
     use std::net::Ipv4Addr;
 
     use dz_recorder_rows::{
-        ConformanceFinding, Datagram, DropScope, Era, FindingVerdict, Nanos, PortRoleLabel,
-        RecvTsKindLabel, SegmentCoverage, SequenceGap, Verdict,
+        ConformanceFinding, Datagram, Derivation, DropScope, Era, FindingVerdict, Nanos,
+        PortRoleLabel, RecvTsKindLabel, SegmentCoverage, SequenceGap, Verdict,
     };
 
     const ADDR: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 10);
@@ -513,6 +544,7 @@ mod fixtures {
             drop_scope: DropScope::PortRole,
             object_key: String::new(),
             object_sha256: String::new(),
+            derivation: Derivation::Archive,
         }
     }
 
@@ -532,6 +564,7 @@ mod fixtures {
             continuation: 0,
             object_key: String::new(),
             object_sha256: String::new(),
+            derivation: Derivation::Archive,
         }
     }
 
@@ -557,6 +590,7 @@ mod fixtures {
             roles_joined: Vec::new(),
             object_key: String::new(),
             object_sha256: String::new(),
+            derivation: Derivation::Archive,
             build_version: String::new(),
             build_commit: String::new(),
             config_hash: String::new(),
@@ -594,6 +628,7 @@ mod fixtures {
             on_redundant_path: None,
             verdict: Verdict::Unverifiable,
             object_key: String::new(),
+            derivation: Derivation::Archive,
         }
     }
 
@@ -615,6 +650,7 @@ mod fixtures {
             verdict: FindingVerdict::Pass,
             detail: String::new(),
             object_key: String::new(),
+            derivation: Derivation::Archive,
             first_seq: 0,
             last_seq: 0,
         }

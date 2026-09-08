@@ -168,7 +168,13 @@ CREATE TABLE IF NOT EXISTS recorder.datagram (
     -- publisher finding this whole tier exists to prevent.
     drop_scope       LowCardinality(String),
     object_key       String,
-    object_sha256    String
+    object_sha256    String,
+    -- `archive` when the datagrams behind the row were kept and their object's
+    -- sha256 checked against its manifest before a row was derived; `live` when
+    -- they were derived as they arrived and not kept. In no sort key, so the two
+    -- modes' views of one datagram stay one row. See 005, which adds this to a
+    -- deployment that applied this file before the column existed.
+    derivation       LowCardinality(String) DEFAULT 'archive'
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(recv_ts)
@@ -225,7 +231,13 @@ CREATE TABLE IF NOT EXISTS recorder.era (
     -- segment ended in, so it opens no era.
     continuation   UInt8,
     object_key     String,
-    object_sha256  String
+    object_sha256  String,
+    -- `archive` when the datagrams behind the row were kept and their object's
+    -- sha256 checked against its manifest before a row was derived; `live` when
+    -- they were derived as they arrived and not kept. In no sort key, so the two
+    -- modes' views of one datagram stay one row. See 005, which adds this to a
+    -- deployment that applied this file before the column existed.
+    derivation     LowCardinality(String) DEFAULT 'archive'
 )
 ENGINE = ReplacingMergeTree(anchor_certain)
 -- Partitioned, like every other table here. It was the one exception, and the
@@ -272,6 +284,12 @@ CREATE TABLE IF NOT EXISTS recorder.segment_coverage (
     roles_joined         Array(Tuple(String, IPv4, UInt16)),  -- role, group, port
     object_key           String,
     object_sha256        String,
+    -- `archive` when the datagrams behind the row were kept and their object's
+    -- sha256 checked against its manifest before a row was derived; `live` when
+    -- they were derived as they arrived and not kept. In no sort key, so the two
+    -- modes' views of one datagram stay one row. See 005, which adds this to a
+    -- deployment that applied this file before the column existed.
+    derivation           LowCardinality(String) DEFAULT 'archive',
     build_version        String,
     build_commit         String,
     config_hash          String
@@ -340,7 +358,13 @@ CREATE TABLE IF NOT EXISTS recorder.sequence_gap (
     -- is a rule set nobody trusts twice. A loader over one object never writes
     -- `publisher`; the cross-site pass does.
     verdict           LowCardinality(String),
-    object_key        String              -- where the evidence is
+    object_key        String,             -- where the evidence is
+    -- `archive` when the datagrams behind the row were kept and their object's
+    -- sha256 checked against its manifest before a row was derived; `live` when
+    -- they were derived as they arrived and not kept. In no sort key, so the two
+    -- modes' views of one datagram stay one row. See 005, which adds this to a
+    -- deployment that applied this file before the column existed.
+    derivation        LowCardinality(String) DEFAULT 'archive'
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(before_ts)
@@ -371,6 +395,12 @@ CREATE TABLE IF NOT EXISTS recorder.conformance_finding (
     verdict          LowCardinality(String),   -- pass | violation | unverifiable | na
     detail           String,
     object_key       String,
+    -- `archive` when the datagrams behind the row were kept and their object's
+    -- sha256 checked against its manifest before a row was derived; `live` when
+    -- they were derived as they arrived and not kept. In no sort key, so the two
+    -- modes' views of one datagram stay one row. See 005, which adds this to a
+    -- deployment that applied this file before the column existed.
+    derivation       LowCardinality(String) DEFAULT 'archive',
     first_seq        UInt64,                   -- the evidence range
     last_seq         UInt64
 )

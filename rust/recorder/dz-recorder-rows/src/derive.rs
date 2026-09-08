@@ -56,8 +56,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::rows::{
-    Datagram, DropScope, Era, Nanos, PortRoleLabel, RoleJoinRow, RowBatch, SegmentCoverage,
-    SequenceGap, Verdict,
+    Datagram, Derivation, DropScope, Era, Nanos, PortRoleLabel, RoleJoinRow, RowBatch,
+    SegmentCoverage, SequenceGap, Verdict,
 };
 
 /// Bytes read from the object at a time while its digest is checked.
@@ -184,6 +184,14 @@ pub struct DeriveInput<'a> {
     /// The immediately preceding segment's trailer, when the loader has it.
     /// `None` is *unknown*, and never *there was none*.
     pub preceding: Option<&'a SegmentTrailer>,
+    /// Whether the datagrams behind this window were kept and verified.
+    ///
+    /// An input because it is a fact about where they came from, which the
+    /// caller knows and this crate cannot observe: the same bytes reach `derive`
+    /// from an object whose digest was checked and from a live capture that kept
+    /// nothing. There is no default — a derivation states its provenance or does
+    /// not compile.
+    pub derivation: Derivation,
 }
 
 /// The rows, and what the next segment's derivation will want.
@@ -231,6 +239,9 @@ pub fn derive_object(
         manifest: input_manifest,
         drop_scope,
         preceding,
+        // This function verified the digest against the manifest before it
+        // opened the object, and the bytes are still on disk behind it.
+        derivation: Derivation::Archive,
     };
     let derived = derive(&mut source, &input)?;
 
@@ -273,6 +284,7 @@ pub fn derive<S: Source + ?Sized>(
 ) -> Result<Derived, DeriveError> {
     let manifest = input.manifest;
     let scope = DropScope::from(input.drop_scope);
+    let derivation = input.derivation;
     let limits = DeriverLimits::default();
 
     let mut loss = LossDeriver::new(input.drop_scope);
@@ -310,7 +322,7 @@ pub fn derive<S: Source + ?Sized>(
                 .entry((key, header.sequence_number))
                 .or_insert(dg.drop_delta);
         }
-        datagram.push(datagram_row(manifest, scope, &dg, &header));
+        datagram.push(datagram_row(manifest, scope, derivation, &dg, &header));
     }
 
     let report = loss.finish();
@@ -322,6 +334,7 @@ pub fn derive<S: Source + ?Sized>(
         for coverage in &loss.eras {
             era.push(era_row(
                 manifest,
+                derivation,
                 key,
                 coverage,
                 boundary(coverage, key, input),
@@ -343,6 +356,7 @@ pub fn derive<S: Source + ?Sized>(
             sequence_gap.push(gap_row(
                 manifest,
                 scope,
+                derivation,
                 loss,
                 run,
                 GapEvidence {
@@ -360,13 +374,14 @@ pub fn derive<S: Source + ?Sized>(
     let segment_coverage = manifest
         .instances
         .iter()
-        .map(|(key, coverage)| coverage_row(manifest, scope, *key, coverage))
+        .map(|(key, coverage)| coverage_row(manifest, scope, derivation, *key, coverage))
         .collect();
 
     Ok(Derived {
         rows: RowBatch {
             object_key: manifest.object_key.clone(),
             object_sha256: manifest.sha256.clone(),
+            derivation,
             datagram,
             era,
             segment_coverage,
@@ -461,6 +476,7 @@ fn resolve_scope(
 fn datagram_row(
     manifest: &SegmentManifest,
     drop_scope: DropScope,
+    derivation: Derivation,
     dg: &RecordedDatagram<'_>,
     header: &DatagramHeader,
 ) -> Datagram {
@@ -486,6 +502,7 @@ fn datagram_row(
         drop_scope,
         object_key: manifest.object_key.clone(),
         object_sha256: manifest.sha256.clone(),
+        derivation,
     }
 }
 
@@ -520,6 +537,7 @@ fn boundary(coverage: &EraCoverage, key: ChannelInstance, input: &DeriveInput<'_
 
 fn era_row(
     manifest: &SegmentManifest,
+    derivation: Derivation,
     key: ChannelInstance,
     coverage: &EraCoverage,
     (anchor_certain, continuation): (u8, u8),
@@ -539,12 +557,14 @@ fn era_row(
         continuation,
         object_key: manifest.object_key.clone(),
         object_sha256: manifest.sha256.clone(),
+        derivation,
     }
 }
 
 fn coverage_row(
     manifest: &SegmentManifest,
     drop_scope: DropScope,
+    derivation: Derivation,
     key: ChannelInstance,
     coverage: &InstanceCoverage,
 ) -> SegmentCoverage {
@@ -573,6 +593,7 @@ fn coverage_row(
             .collect(),
         object_key: manifest.object_key.clone(),
         object_sha256: manifest.sha256.clone(),
+        derivation,
         build_version: manifest.build_version.clone(),
         build_commit: manifest.build_commit.clone(),
         config_hash: manifest.config_hash.clone(),
@@ -625,6 +646,7 @@ fn admitted_for_run(
 fn gap_row(
     manifest: &SegmentManifest,
     drop_scope: DropScope,
+    derivation: Derivation,
     loss: &InstanceLoss,
     run: &dz_recorder_loss::SequenceRun,
     evidence: GapEvidence,
@@ -673,6 +695,7 @@ fn gap_row(
             evidence.on_redundant_path,
         ),
         object_key: manifest.object_key.clone(),
+        derivation,
     }
 }
 

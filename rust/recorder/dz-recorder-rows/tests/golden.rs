@@ -24,7 +24,8 @@ use dz_recorder_replay::synthetic::{
 };
 use dz_recorder_replay::Fault;
 use dz_recorder_rows::{
-    DropScope, Grain, PortRoleLabel, RecvTsKindLabel, SegmentTrailer, SequenceGap, Verdict,
+    Derivation, DropScope, Grain, PortRoleLabel, RecvTsKindLabel, SegmentTrailer, SequenceGap,
+    Verdict,
 };
 
 const STREAM: usize = 100;
@@ -78,6 +79,145 @@ fn a_clean_segment_of_heartbeats_has_span_minus_count_of_zero() {
         assert_eq!(row.drop_scope, DropScope::PortRole);
         assert_eq!(row.port_role, PortRoleLabel::Mktdata);
         assert_eq!(row.segment_seq, recorded.manifest.segment_seq);
+        assert_eq!(row.derivation, Derivation::Archive);
+    }
+}
+
+/// Every grain says the datagrams behind it were kept and verified.
+///
+/// One test over every grain rather than a line in each, because the failure it
+/// guards is a grain whose field gets filled from `Default` — and a row
+/// claiming `archive` when nothing hashed the bytes behind it is the single
+/// mistake this column exists to make impossible. `derive_object` checks the
+/// digest before it opens the object, so `archive` here is earned rather than
+/// assumed.
+///
+/// Three fixtures, because no one of them populates every grain: a clean
+/// segment has no gap row, and a segment with a gap has one era.
+/// `conformance_finding` is absent from all three by design — no runner ran —
+/// and the count below is what stops this test passing on empty vectors.
+#[test]
+fn every_row_derived_from_an_object_says_it_came_from_one() {
+    let mut populated: BTreeSet<Grain> = BTreeSet::new();
+
+    for publisher in [
+        SyntheticPublisher::clean(STREAM),
+        SyntheticPublisher::with_fault(STREAM, Fault::SequenceGap),
+        SyntheticPublisher::with_fault(STREAM, Fault::ResetCountAdvance),
+    ] {
+        let recorded = record(&publisher);
+        let derived = recorded.rows();
+        let rows = &derived.rows;
+
+        assert_eq!(rows.derivation, Derivation::Archive, "the batch");
+        for grain in Grain::ALL {
+            if rows.rows(grain) > 0 {
+                populated.insert(grain);
+            }
+        }
+
+        let live = |d: Derivation| d == Derivation::Live;
+        assert!(!rows.datagram.iter().map(|r| r.derivation).any(live));
+        assert!(!rows.era.iter().map(|r| r.derivation).any(live));
+        assert!(!rows.segment_coverage.iter().map(|r| r.derivation).any(live));
+        assert!(!rows.sequence_gap.iter().map(|r| r.derivation).any(live));
+        assert!(!rows
+            .conformance_finding
+            .iter()
+            .map(|r| r.derivation)
+            .any(live));
+    }
+
+    // Without this the assertions above would pass over four empty vectors.
+    for grain in [
+        Grain::Datagram,
+        Grain::Era,
+        Grain::SegmentCoverage,
+        Grain::SequenceGap,
+    ] {
+        assert!(
+            populated.contains(&grain),
+            "no fixture produced a {grain} row, so nothing above was asserted about one"
+        );
+    }
+}
+
+/// The same datagrams derived as a live window say `live`, and say nothing else
+/// differently.
+///
+/// **This is the test that makes the provenance a threaded value rather than a
+/// constant per grain.** Every assertion in the test above passes just as well
+/// if a grain ignores what it was handed and writes `archive` itself, because
+/// the archive path only ever hands it `archive`. Here the identical datagrams
+/// are derived with the other value, so a grain that decides for itself fails.
+///
+/// And the second half is the property inline mode rests on: normalise the
+/// provenance and the two batches are *equal*. Not equal in count, equal in
+/// every field of every row. If that ever stops being true, deriving in flight
+/// has stopped being the same analysis as deriving from an object, and no column
+/// saying so would make the rows comparable.
+#[test]
+fn the_same_object_derived_as_a_live_window_differs_only_in_provenance() {
+    for publisher in [
+        SyntheticPublisher::clean(STREAM),
+        SyntheticPublisher::with_fault(STREAM, Fault::SequenceGap),
+        SyntheticPublisher::with_fault(STREAM, Fault::ResetCountAdvance),
+    ] {
+        let recorded = record(&publisher);
+        let archived = recorded.rows();
+        let live = recorded.rows_as_live();
+
+        assert_eq!(live.rows.derivation, Derivation::Live, "the batch");
+        let archive = |d: &Derivation| *d == Derivation::Archive;
+        assert!(!live
+            .rows
+            .datagram
+            .iter()
+            .map(|r| &r.derivation)
+            .any(archive));
+        assert!(!live.rows.era.iter().map(|r| &r.derivation).any(archive));
+        assert!(!live
+            .rows
+            .segment_coverage
+            .iter()
+            .map(|r| &r.derivation)
+            .any(archive));
+        assert!(!live
+            .rows
+            .sequence_gap
+            .iter()
+            .map(|r| &r.derivation)
+            .any(archive));
+        assert!(!live
+            .rows
+            .conformance_finding
+            .iter()
+            .map(|r| &r.derivation)
+            .any(archive));
+
+        let mut normalised = live.rows.clone();
+        normalised.derivation = Derivation::Archive;
+        for row in &mut normalised.datagram {
+            row.derivation = Derivation::Archive;
+        }
+        for row in &mut normalised.era {
+            row.derivation = Derivation::Archive;
+        }
+        for row in &mut normalised.segment_coverage {
+            row.derivation = Derivation::Archive;
+        }
+        for row in &mut normalised.sequence_gap {
+            row.derivation = Derivation::Archive;
+        }
+        for row in &mut normalised.conformance_finding {
+            row.derivation = Derivation::Archive;
+        }
+        assert_eq!(
+            normalised, archived.rows,
+            "the provenance is the only thing that may differ"
+        );
+        assert_eq!(live.short_datagrams, archived.short_datagrams);
+        assert_eq!(live.trailer, archived.trailer);
     }
 }
 
