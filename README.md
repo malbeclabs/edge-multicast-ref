@@ -35,7 +35,7 @@ $ ip a s doublezero1
 
 **[BRINGING-UP-A-FEED.md](BRINGING-UP-A-FEED.md)** is the path in order: what a venue implements, how its publisher is built and configured, how the recorder is pointed at it, and what the infrastructure repositories own.
 
-Crates a publisher depends on from its own repository. See [rust/README.md](rust/README.md).
+Crates a publisher depends on from its own repository — by git tag, which [RELEASING.md](RELEASING.md) explains. See [rust/README.md](rust/README.md).
 
 | Crate | Owns |
 |---|---|
