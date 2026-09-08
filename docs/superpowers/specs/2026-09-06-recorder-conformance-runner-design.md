@@ -578,6 +578,17 @@ noted here so that it is taken deliberately rather than discovered.
 **Two of these are asks on the specification's repository, and they are the
 reason this document cannot end with an implementation note.**
 
+**Both have been raised upstream.** Not linked from here, for the same reason
+nothing else in this document names the venue: the naming rules apply to prose
+in this repository whatever it points at. That matters for reading the plan
+rather than as a formality — the argument for building the runner against
+fixtures first, and touching the real tool only at the last task, rests on these
+two landing eventually rather than on hoping they will. Until they do, the
+runner refuses what it cannot version, and this repository's own CI stamps the
+binary it builds so that the wiring has something to test against. A green
+conformance job therefore means the wiring works, and never that the interface
+arrived.
+
 - **A per-rule outcome placed and ranged.** The tool already writes a declared
   report — `-json-report` emits `{version, commit, strict, read_error, rules}`,
   and each rule entry carries `rule_id`, `severity` and a map of `counts`. So the
