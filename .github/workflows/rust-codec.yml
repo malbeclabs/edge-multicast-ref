@@ -207,6 +207,14 @@ jobs:
       # Stamped, because an unstamped build answers `dev+none` from `--version`
       # and from its own report — a value where a commit belongs. A verdict that
       # cannot name the rule set that reached it is a verdict about a file.
+      #
+      # This is a stand-in and not the fix. The runner refuses when it cannot
+      # resolve a rule-set version, so a `dz-conformance` built anywhere but this
+      # job still answers `dev+none` and is still refused: what passes here is a
+      # binary this repository patched at build time. The upstream build is
+      # expected to stamp itself, and until it does, a green conformance job
+      # means the wiring works and not that the interface landed. Delete these
+      # `-ldflags` when upstream carries its own commit.
       - name: Build dz-conformance
         working-directory: edge-feed-spec/tools/conformance
         run: |

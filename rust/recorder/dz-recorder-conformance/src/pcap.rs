@@ -23,6 +23,18 @@
 //! Rebuilding over the captured case discards the identification field, the
 //! fragmentation flags and the checksums the archive kept on purpose.
 //!
+//! **The timestamp is microseconds, and that is a choice rather than an
+//! oversight.** The archive holds nanoseconds and a classic pcap record's last
+//! header field is microseconds, so three digits are dropped here. Classic pcap
+//! has a nanosecond variant — magic `0xa1b23c4d`, identical layout, the field
+//! read as nanoseconds — so keeping them would cost one constant and no
+//! arithmetic. It is not taken because no rule in the set reasons about
+//! sub-microsecond spacing: the rules are structural and per-datagram, and the
+//! ordering questions they do ask are answered by sequence numbers rather than
+//! by arrival times. If a rule ever does reason at that resolution, this is the
+//! one place that makes the evidence coarser than the archive, and swapping the
+//! magic is the whole change.
+//!
 //! **One file per multicast group.** The tool takes one `-group` and one port
 //! per role, so an archive holding several groups needs one invocation each and
 //! therefore one file each. A single file holding every group would be read
