@@ -491,7 +491,7 @@ impl<S: RowSink> Loader<'_, S> {
 
 /// What one recording did.
 #[derive(Debug, Default, PartialEq, Eq)]
-pub(crate) struct Recorded {
+pub struct Recorded {
     /// Objects whose entry is now in the ledger.
     pub recorded: u64,
     /// One message per object whose entry could not be written. Their rows are
@@ -526,7 +526,7 @@ pub(crate) struct Recorded {
 /// leaves `pending` whatever the ledger did. An object whose entry did not get
 /// written has no entry, which is exactly what makes the next pass derive it
 /// again.
-pub(crate) fn record_landed(
+pub fn record_landed(
     landed: &[ObjectId],
     pending: &mut Vec<Pending>,
     ledger: &mut Ledger,
@@ -610,7 +610,7 @@ fn now_unix_seconds() -> i64 {
         .unwrap_or(0)
 }
 
-pub(crate) fn now_unix_nanos() -> u64 {
+pub fn now_unix_nanos() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)

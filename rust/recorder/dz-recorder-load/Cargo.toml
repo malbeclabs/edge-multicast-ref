@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "The loader: walks a directory of completed objects and turns them into rows, idempotently"
+description = "The loader: walks a directory of completed objects and turns them into rows, idempotently — and the library that half is shared through"
 
 [dependencies]
 dz-recorder-rows = { path = "../dz-recorder-rows" }
