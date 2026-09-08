@@ -20,6 +20,23 @@
 //! young objects is a busy loader; one object an hour older than the eviction
 //! window is history already gone.
 //!
+//! # And market data has a lag of its own, which is not that one
+//!
+//! The datagram tier loads **every** object; the derivation loads the objects of
+//! the feeds it was turned on for, and it is off by default. So the two tiers
+//! are behind on two different sets of objects, and one gauge cannot answer for
+//! both: on a host where no feed derives — which is every host today —
+//! `dz_loader_unloaded_objects` may be anything at all while nothing whatever is
+//! at risk of being lost as market data, because none of those objects was ever
+//! going to produce a row about an instrument.
+//!
+//! [`market_data_unloaded_objects`](LoaderMetrics::market_data_unloaded_objects)
+//! and its age are the same two numbers over the objects derivation is on for.
+//! They are always a subset, and reading the load's gauges as if they were these
+//! is how a page gets sent about book rows for objects that hold none — or, in
+//! the direction that costs history, how a feed that *is* deriving hides behind
+//! a backlog of feeds that are not.
+//!
 //! # Why the last error is a timestamp and not a label
 //!
 //! A message is unbounded text written by a column store, and a label value
@@ -31,6 +48,8 @@
 use prometheus::{IntCounter, IntCounterVec, IntGauge, Opts, Registry, TextEncoder};
 
 use dz_recorder_rows::Grain;
+
+use crate::market_data::RefusalKind;
 
 /// What went wrong, as a bounded label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,6 +155,9 @@ pub struct LoaderMetrics {
     held_objects: IntGauge,
     oldest_unloaded_age_seconds: IntGauge,
     ledger_entries: IntGauge,
+    market_data_unloaded_objects: IntGauge,
+    market_data_oldest_unloaded_age_seconds: IntGauge,
+    market_data_refused_total: IntCounterVec,
 }
 
 impl LoaderMetrics {
@@ -262,6 +284,38 @@ impl LoaderMetrics {
                 "Lines in the load ledger after compaction.",
                 &labels,
             ),
+            market_data_unloaded_objects: gauge(
+                &registry,
+                "dz_loader_market_data_unloaded_objects",
+                "Unloaded objects of a feed whose market data derivation is on. A subset of \
+                 dz_loader_unloaded_objects and never the same number: derivation is per feed \
+                 and off by default, so an object of a feed that does not derive is in that \
+                 count and not in this one. Zero here with a backlog there means nothing is at \
+                 risk as market data.",
+                &labels,
+            ),
+            market_data_oldest_unloaded_age_seconds: gauge(
+                &registry,
+                "dz_loader_market_data_oldest_unloaded_age_seconds",
+                "How old the oldest of those is, from its own receive window. THE GATE ON \
+                 DERIVATION, and the reason it is not dz_loader_oldest_unloaded_age_seconds: \
+                 that one rises for feeds nobody derives, so alerting on it for market data \
+                 pages about objects holding no book rows — and, worse, lets a feed that IS \
+                 deriving hide inside a backlog of feeds that are not. Alert on this against \
+                 the recorder's eviction window.",
+                &labels,
+            ),
+            market_data_refused_total: counter_vec(
+                &registry,
+                "dz_loader_market_data_refused_total",
+                "Messages the derivation declined to attribute, by cause. Every one is a row \
+                 that is not in a table, and a derivation that resolved nothing writes an \
+                 empty event table — which is indistinguishable from a feed nobody published \
+                 on. unresolved_instrument climbing from zero is reference data that never \
+                 arrived, and it is the shape a wrong Magic or an unjoined refdata port takes.",
+                &labels,
+                &["reason"],
+            ),
             // Last, so every borrow above has been released by the time the
             // registry itself is moved into the struct.
             registry,
@@ -280,6 +334,11 @@ impl LoaderMetrics {
         }
         for kind in ErrorKind::ALL {
             metrics.errors_total.with_label_values(&[kind.as_str()]);
+        }
+        for reason in RefusalKind::ALL {
+            metrics
+                .market_data_refused_total
+                .with_label_values(&[reason.as_str()]);
         }
         metrics
     }
@@ -337,6 +396,26 @@ impl LoaderMetrics {
         self.ledger_entries.set(ledger_entries);
         self.passes_total.inc();
         self.last_pass_timestamp_seconds.set(now_unix_seconds);
+    }
+
+    /// The derivation's own lag, published beside the load's and never as it.
+    ///
+    /// Both halves again, because either alone misleads in exactly the way the
+    /// load's do — and over the objects of feeds that derive, because those are
+    /// the only objects whose market data an eviction can take.
+    pub fn market_data_pass_finished(&self, unloaded: i64, oldest_unloaded_age_seconds: i64) {
+        self.market_data_unloaded_objects.set(unloaded);
+        self.market_data_oldest_unloaded_age_seconds
+            .set(oldest_unloaded_age_seconds);
+    }
+
+    /// What one object's derivation declined to attribute.
+    pub fn market_data_refused(&self, refusals: &[(RefusalKind, u64)]) {
+        for (reason, count) in refusals {
+            self.market_data_refused_total
+                .with_label_values(&[reason.as_str()])
+                .inc_by(*count);
+        }
     }
 
     /// The exposition text `GET /metrics` serves.
@@ -415,6 +494,9 @@ mod tests {
             "dz_loader_held_objects",
             "dz_loader_oldest_unloaded_age_seconds",
             "dz_loader_ledger_entries",
+            "dz_loader_market_data_unloaded_objects",
+            "dz_loader_market_data_oldest_unloaded_age_seconds",
+            "dz_loader_market_data_refused_total",
         ] {
             assert!(text.contains(family), "{family} is absent from:\n{text}");
         }
@@ -431,6 +513,13 @@ mod tests {
         }
         for kind in ErrorKind::ALL {
             assert!(text.contains(&format!("kind=\"{}\"", kind.as_str())));
+        }
+        for reason in RefusalKind::ALL {
+            assert!(
+                text.contains(&format!("reason=\"{}\"", reason.as_str())),
+                "{} is absent",
+                reason.as_str()
+            );
         }
     }
 
@@ -494,6 +583,77 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("dz_loader_passes_total{recorder=\"r\",site=\"s\"} 1"));
+    }
+
+    /// Two lags, two series, and the derivation's is the smaller one.
+    ///
+    /// The number that would be wrong if they shared a name is this one: a host
+    /// with a backlog of objects and no feed deriving is a host with nothing at
+    /// all at risk as market data, and a single gauge would have it paging.
+    #[test]
+    fn the_derivations_lag_is_its_own_series_and_not_the_loads() {
+        let metrics = LoaderMetrics::new("s", "r");
+        metrics.pass_finished(7, 3, 4_000, 12, 1_700_000_000);
+        metrics.market_data_pass_finished(2, 900);
+        let text = metrics.render();
+
+        assert!(
+            text.contains("dz_loader_market_data_unloaded_objects{recorder=\"r\",site=\"s\"} 2"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "dz_loader_market_data_oldest_unloaded_age_seconds{recorder=\"r\",site=\"s\"} 900"
+            ),
+            "{text}"
+        );
+        // And the load's are untouched by it: seven objects are waiting, two of
+        // them hold market data anybody asked for.
+        assert!(
+            text.contains("dz_loader_unloaded_objects{recorder=\"r\",site=\"s\"} 7"),
+            "{text}"
+        );
+        assert!(
+            text.contains("dz_loader_oldest_unloaded_age_seconds{recorder=\"r\",site=\"s\"} 4000"),
+            "{text}"
+        );
+    }
+
+    /// A refusal is a row that is not there, and the causes do not have the same
+    /// answer.
+    ///
+    /// Counted rather than logged because the shape it takes downstream is an
+    /// empty table, and an empty table is indistinguishable from a feed nobody
+    /// published on.
+    #[test]
+    fn what_the_derivation_would_not_attribute_is_counted_by_cause() {
+        let metrics = LoaderMetrics::new("s", "r");
+        metrics.market_data_refused(&[
+            (RefusalKind::UnresolvedInstrument, 12),
+            (RefusalKind::StaleCycle, 1),
+        ]);
+        let text = metrics.render();
+        assert!(
+            text.contains(
+                "dz_loader_market_data_refused_total{reason=\"unresolved_instrument\",\
+                 recorder=\"r\",site=\"s\"} 12"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "dz_loader_market_data_refused_total{reason=\"stale_cycle\",recorder=\"r\",\
+                 site=\"s\"} 1"
+            ),
+            "{text}"
+        );
+        // Only the bounded causes, and never a series per message.
+        assert_eq!(
+            text.lines()
+                .filter(|l| l.starts_with("dz_loader_market_data_refused_total{"))
+                .count(),
+            RefusalKind::ALL.len()
+        );
     }
 
     /// The message is not a label, and this is where that stays true.

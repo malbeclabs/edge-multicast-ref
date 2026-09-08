@@ -14,7 +14,7 @@
 
 mod common;
 
-use common::{batch, batch_on_role};
+use common::{batch, batch_on_role, now_ns, race_fixture, REPEATED};
 use dz_edge_core::PortRole;
 use dz_recorder_clickhouse::{migrations, schema, ClickHouseConfig, ClickHouseSink};
 use dz_recorder_replay::Fault;
@@ -532,4 +532,127 @@ fn the_ttl_expires_the_base_rows_and_leaves_the_derived_ones() {
          difference between `no loss` and `nothing kept`"
     );
     assert_eq!(scratch.count("era"), eras, "and the era boundaries");
+}
+
+/// A repeating state pairs one-to-one, and the occurrence nobody matched stays
+/// visible.
+///
+/// This is the assertion the occurrence ordinal exists for, and only a server
+/// can make it. The obvious shape — `ASOF JOIN` on the key — has no notion of
+/// consuming a match, so each of the three occurrences at one point pairs with
+/// whichever occurrence at the other is nearest, one arrival is counted several
+/// times, and the lead times that come out are plausible and biased. Numbering
+/// the occurrences and pairing ordinal to ordinal is one-to-one by
+/// construction, and what it cannot pair it *shows*.
+#[test]
+fn a_repeating_state_pairs_one_to_one_and_the_unpaired_occurrence_stays_visible() {
+    let mut scratch = Scratch::open("pairing");
+    let base = now_ns();
+    let rows = race_fixture(base);
+    let tops = rows.rows(Grain::BookTop) as u64;
+    scratch.sink.write_batch(rows, NOW).expect("the load");
+    assert_eq!(
+        scratch.count("book_top"),
+        tops,
+        "every fixture row is in the table, or nothing below is about the view"
+    );
+
+    // Four occurrences of the repeated state, three of them seen by both
+    // observation points and the fourth by one. Not three, which is what
+    // dropping the unpaired row would give, and not six, which is what pairing
+    // by proximity would.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT groupArray(observations) FROM (SELECT observations FROM \
+             {}.book_top_race WHERE state_key = {REPEATED} ORDER BY occurrence)",
+            scratch.database
+        )),
+        "[2,2,2,1]",
+        "a repeating state pairs one-to-one, and the fourth occurrence is unpaired"
+    );
+
+    // Unpaired means visible and *unmeasured*. A zero lead would be a
+    // measurement nobody made, and it would enter every average over the column
+    // as evidence that the two paths tied.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT concat(toString(count()), ' ', arrayStringConcat(any(observed_by), ',')) \
+             FROM {}.book_top_race WHERE state_key = {REPEATED} AND observations = 1 \
+             AND isNull(lead_ms)",
+            scratch.database
+        )),
+        "1 a",
+        "the unpaired occurrence is a row that names the point that saw it"
+    );
+
+    // Every pair is the two milliseconds the fixture stated. A pairing that
+    // matched the wrong occurrences would still produce numbers, and they would
+    // be multiples of twenty.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT groupUniqArray(round(lead_ms, 3)) FROM {}.book_top_race \
+             WHERE state_key = {REPEATED} AND observations = 2",
+            scratch.database
+        )),
+        "[2]",
+        "the lead is the one the fixture stated, so the ordinals lined up"
+    );
+
+    // The snapshot row consumed no ordinal. A snapshot anchors a book and never
+    // times one: the runtime pulls it on its own cadence and the archive records
+    // when it was published, so a race that counted it would measure the
+    // publisher's scheduler and would renumber everything after it.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT max(occurrence) FROM {}.book_top_occurrence \
+             WHERE observation = 'b' AND state_key = {REPEATED}",
+            scratch.database
+        )),
+        "3",
+        "four rows at `b`, one of them an anchor, and three ordinals"
+    );
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT count() FROM {}.book_top_occurrence",
+            scratch.database
+        )),
+        (tops - 1).to_string(),
+        "the anchor row is excluded from the numbering and nothing else is"
+    );
+}
+
+/// Loading the same object twice does not manufacture evidence of loss.
+///
+/// `book_top` is a `ReplacingMergeTree` and a re-run after a fix is a replace,
+/// so between the second load and the merge that follows it one arrival is in
+/// the table twice. Numbered without the collapse, the duplicate becomes a
+/// second occurrence — and the surplus occurrence at each point then pairs with
+/// the surplus at the other while the *last* one at each pairs with nothing. So
+/// a re-load would not merely inflate a count: it would report states that both
+/// observation points saw as states one of them missed.
+#[test]
+fn a_re_load_before_the_merge_does_not_invent_occurrences() {
+    let mut scratch = Scratch::open("pairing_reload");
+    let base = now_ns();
+    scratch
+        .sink
+        .write_batch(race_fixture(base), NOW)
+        .expect("the first load");
+    scratch
+        .sink
+        .write_batch(race_fixture(base), NOW)
+        .expect("the second load");
+
+    // Deliberately no `OPTIMIZE`: the window between a re-load and the merge is
+    // exactly the window this is about, and a test that merged first would
+    // assert the engine's behaviour rather than the view's.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT groupArray(observations) FROM (SELECT observations FROM \
+             {}.book_top_race WHERE state_key = {REPEATED} ORDER BY occurrence)",
+            scratch.database
+        )),
+        "[2,2,2,1]",
+        "the collapse is applied at read time, so a re-load changes nothing"
+    );
 }
