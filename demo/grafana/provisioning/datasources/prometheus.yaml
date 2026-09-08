@@ -1,4 +1,4 @@
-# Prometheus datasource for bot/parser Prometheus metrics.
+# Prometheus datasource for book-builder/parser Prometheus metrics.
 # The prometheus service scrapes dz_mbo_bot_* and dz_tob_* endpoints.
 apiVersion: 1
 
