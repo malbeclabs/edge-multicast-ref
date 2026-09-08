@@ -307,4 +307,60 @@ user = "loader"
         assert!(summary.contains("user=loader"), "{summary}");
         assert!(!summary.to_lowercase().contains("password"), "{summary}");
     }
+
+    /// The name of the account `004` creates, read out of the DDL.
+    ///
+    /// Parsed rather than written down here, because a constant would be a
+    /// third copy of the same string and the one nothing checks.
+    fn account_created_by(sql: &str) -> Option<String> {
+        sql.lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("--"))
+            .find_map(|line| line.strip_prefix("CREATE USER "))
+            .map(|rest| {
+                rest.strip_prefix("IF NOT EXISTS ")
+                    .unwrap_or(rest)
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+            .filter(|name| !name.is_empty())
+    }
+
+    /// The example configuration names the account the checked-in DDL creates.
+    ///
+    /// Two files that have to agree and nothing that would notice when they
+    /// stop: `004` provisions the account, and this is the file an operator
+    /// copies in order to point at it. They had disagreed — the DDL creates
+    /// `dz_loader` and the example said `loader` — and the symptom is the
+    /// expensive shape. It is not a configuration error, so `check` passes it;
+    /// it surfaces as an authentication failure against a destination that has
+    /// to be reachable before anything can say the name was wrong, which is a
+    /// provisioning mistake wearing a connectivity mistake's clothes.
+    ///
+    /// The expected name is read out of the DDL rather than written here, so
+    /// what this holds is that the two files agree — not that both of them
+    /// match a third copy of the string.
+    #[test]
+    fn the_example_names_the_account_the_ddl_creates() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("loader.example.toml");
+        let example = std::fs::read_to_string(&path).expect("the example ships with the crate");
+        // Parsed, not only scanned: an example an operator copies has to be a
+        // configuration this binary accepts, and nothing had held it to that.
+        let config = LoaderConfig::parse(&example).expect("the example parses");
+
+        let sql = dz_recorder_clickhouse::migrations()
+            .into_iter()
+            .find(|migration| migration.name == "004_recorder_loader_user.sql")
+            .expect("the account migration is one of the four")
+            .sql;
+        let account = account_created_by(sql).expect("`004` creates an account");
+
+        assert_eq!(
+            config.clickhouse.user, account,
+            "the example points at `{}` and the DDL creates `{account}`",
+            config.clickhouse.user
+        );
+    }
 }
