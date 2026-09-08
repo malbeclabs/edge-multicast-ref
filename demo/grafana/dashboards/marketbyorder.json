@@ -410,7 +410,7 @@
           "format": 1
         }
       ],
-      "description": "Wall-clock age of the newest row (now − max recv_ts). Rising means the feed stalled or the parser/bot fell behind — steady-state should sit near one publish interval."
+      "description": "Wall-clock age of the newest row (now − max recv_ts). Rising means the feed stalled or the parser/book-builder fell behind — steady-state should sit near one publish interval."
     },
     {
       "type": "row",

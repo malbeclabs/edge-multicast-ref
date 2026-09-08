@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Key every per-publisher counter by the publisher that owns it — frame sequence numbers in all three parsers, and Reset Count in `marketbyorder-bot` — so loss metrics and book state stop conflating two interleaved publishers.
+**Goal:** Key every per-publisher counter by the publisher that owns it — datagram sequence numbers in all three parsers, and Reset Count in `marketbyorder-bot` — so loss metrics and book state stop conflating two interleaved publishers.
 
-**Architecture:** One multicast group and port carries two redundant publishers, distinguished by source IP and by `Channel ID` (frame header byte 3). `seqTracker` moves from a single `last uint64` per port to a `map[pubKey]uint64` keyed by `(source_ip, channel_id)`, and `readDatagram` starts returning the sender address it currently discards. `marketbyorder-bot` gets the same per-channel reset treatment already applied to `marketbyprice-bot` in PR #38.
+**Architecture:** One multicast group and port carries two redundant publishers, distinguished by source IP and by `Channel ID` (datagram header byte 3). `seqTracker` moves from a single `last uint64` per port to a `map[pubKey]uint64` keyed by `(source_ip, channel_id)`, and `readDatagram` starts returning the sender address it currently discards. `marketbyorder-bot` gets the same per-channel reset treatment already applied to `marketbyprice-bot` in PR #38.
 
 **Tech Stack:** Go 1.25.0, `net/netip`, `prometheus/client_golang`, standard `testing`.
 
@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Go 1.25.0. Each parser and bot is its own module under a `go.work` workspace — run `go test` from inside the module directory.
-- **Never name the upstream venue in commit messages, PR titles, or PR bodies.** Venue names are fine inside code and comments, so grep the existing source if you need to know which ones are meant. In commit and PR prose, describe the feed as "the live feed", "the publishers", or by lane (top-of-book, market-by-price, market-by-order).
+- **Never name the upstream venue in commit messages, PR titles, or PR bodies.** Venue names are fine inside code and comments, so grep the existing source if you need to know which ones are meant. In commit and PR prose, describe the feed as "the live feed", "the publishers", or by name (top-of-book, market-by-price, market-by-order).
 - **Never quote live symbol strings** in commit messages or PR text. Numeric counts, port numbers, channel ids, and field names are all fine.
 - Commit message style follows the repo: `<component>: <lowercase description>`, e.g. `marketbyprice-parser: key sequence tracking by publisher`.
 - Do **not** add a `Co-Authored-By` trailer.
@@ -1003,7 +1003,7 @@ Run:
 ```bash
 curl -s localhost:9095/metrics | grep -E '^dz_mbp_parser_(frames_missing|frame_seq_gaps|frames_total)'
 ```
-Write the numbers down. Expect roughly 7% of snapshot-port frames counted missing, with no `source_ip` or `channel_id` labels present.
+Write the numbers down. Expect roughly 7% of snapshot-port datagrams counted missing, with no `source_ip` or `channel_id` labels present.
 
 - [ ] **Step 2: Rebuild and restart the parsers**
 

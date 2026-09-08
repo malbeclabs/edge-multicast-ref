@@ -6,7 +6,11 @@ How-to material does not live here, for the reason above: a guide has to stay tr
 
 `superpowers/specs/` and `superpowers/plans/` are the current convention: a spec argues a design and is reviewed before code, a plan turns it into ordered tasks, and they pair by name and date. The dated files at this level predate that split.
 
-Older documents also predate [GLOSSARY.md](https://github.com/malbeclabs/edge-feed-spec/blob/main/GLOSSARY.md) and say `frame` for `datagram` and `bot` for `book-builder`. They are left as written.
+Older documents predate [GLOSSARY.md](https://github.com/malbeclabs/edge-feed-spec/blob/main/GLOSSARY.md). Their **prose** now follows it. **Fenced code blocks do not**, and are left as written: a block in a dated document is a record of the code, the command or the metric name as it stood that day, and rewriting it would make the document describe a tree that never existed. So a fence may still say `frame` where the prose beside it says `datagram`, and a `curl` line may still grep `dz_mbp_parser_frames_total` where the metric is now `dz_mbp_parser_datagrams_total`. The same holds for a metric named in prose in a document dated before the rename.
+
+One word does not get that exemption. `arm` is banned by the glossary "in every sense and every place: specs, docs, plans, identifiers, CLI flags, config keys, metric names, log fields, and code comments alike", so a fenced Go comment saying `re-arm` was changed to say what it does — reset a window — while the `rearm` identifier in the same block was left alone, being real Go that the plan's own code still declares.
+
+Names we do not own, or have not renamed, are left as written wherever they appear: `Frame Length`, which is the wire spec's own field name; and `bot`, which is still the name of the three Go module directories, the demo's compose service, and the `dz_mbo_bot` / `dz_mbp_bot` metric namespaces. Prose calls them book-builders.
 
 ## Publisher crates
 
@@ -14,7 +18,7 @@ Older documents also predate [GLOSSARY.md](https://github.com/malbeclabs/edge-fe
 |---|---|
 | [Shared publisher crates](superpowers/specs/2026-08-26-edge-publisher-crates-design.md) | The design behind [`rust/codec`](../rust/codec/) and [`rust/publisher`](../rust/publisher/) |
 | [Codec crates: Top-of-Book path](superpowers/plans/2026-08-26-codec-crates-top-of-book.md) | Plan for the first three codec crates |
-| [The venue adapter interface](superpowers/specs/2026-09-02-venue-adapter-interface-design.md) · [plan](superpowers/plans/2026-09-02-venue-adapter-interface.md) | The trait a venue repository implements to turn its own source into our messages, and how the recorder re-lowers it to compare against multicast |
+| [The venue adapter interface](superpowers/specs/2026-09-02-venue-adapter-interface-design.md) · [plan](superpowers/plans/2026-09-02-venue-adapter-interface.md) | The trait a venue repository implements to turn its own upstream source into our messages, and how the recorder re-lowers it to compare against multicast |
 
 ## Feeds
 

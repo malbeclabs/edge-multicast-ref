@@ -12,8 +12,8 @@ silently measure different intervals:
 
 - **TOB** stores the per-message **`SourceTimestamp`** (the Hyperliquid block
   `time`, i.e. when the validator set produced the block) in `publisher_send_ts`.
-- **MBO** stores the frame header **`SendTimestamp`** (the publisher's multicast
-  egress wall-clock) in `publisher_send_ts`.
+- **MBO** stores the datagram header **`SendTimestamp`** (the publisher's
+  multicast egress wall-clock) in `publisher_send_ts`.
 
 This is the entire observed gap (e.g. ~262 ms TOB vs ~83 ms MBO for the same
 symbol): TOB folds in the block→publisher segment; MBO starts its clock at
@@ -30,7 +30,7 @@ Authoritative semantics (publisher repo `malbeclabs/hyperliquid`,
 | MBO `OrderAdd.enter_timestamp` | block `time` × 10⁶ |
 | MBO `Trade.source_timestamp` | fill `time` × 10⁶ |
 | MBO order_cancel/execute timestamp | event block time |
-| frame header `send_timestamp_ns` (both) | publisher multicast egress wall-clock |
+| datagram header `send_timestamp_ns` (both) | publisher multicast egress wall-clock |
 
 A second problem: neither bot records the **parser's kernel receive time**. The
 TOB parser captures it via `SO_TIMESTAMPNS` and emits `parser_kernel_recv_ts_ns`,
@@ -68,7 +68,7 @@ This normalization is the core of the change — it removes the ambiguity where
 | JSON field | Type | Meaning | Per-feed source |
 |---|---|---|---|
 | `source_ts_ns` | uint64 ns (0 = absent) | block/venue time | TOB: quote/trade `SourceTimestamp`. MBO: `enter_ts` (order_add), event block-ts (order_cancel/order_execute), fill ts (trade), batch time (batch_boundary) |
-| `send_ts_ns` | uint64 ns | publisher egress | frame header `SendTimestamp` (both) |
+| `send_ts_ns` | uint64 ns | publisher egress | datagram header `SendTimestamp` (both) |
 | `parser_kernel_recv_ts_ns` | uint64 ns | kernel NIC arrival | `SO_TIMESTAMPNS` (TOB already emits top-level; **add to MBO**) |
 | `recv_ts_kind` | string | `kernel_udp_software` / `app_udp_fallback` | which clock produced the recv ts (existing TOB constants, reused for MBO) |
 
@@ -121,7 +121,7 @@ Notes:
 
 ### TOB parser (`go/topofbook-parser/`)
 - Already captures the kernel recv time; keep it.
-- Additionally emit `send_ts_ns` (frame header `SendTimestamp`, currently
+- Additionally emit `send_ts_ns` (datagram header `SendTimestamp`, currently
   discarded for quotes/trades) and `source_ts_ns` (the value currently in `ts`).
 - Leave `ts` unchanged (it stays the source timestamp on TOB); bots read the
   explicit `send_ts_ns`/`source_ts_ns` fields, not `ts` (see the field-model note
@@ -181,8 +181,8 @@ For each of `topofbook.json` and `marketbyorder.json`:
   (mirroring TOB's `timestamp_*` tests).
 - **Both parsers:** golden tests that JSON output carries `source_ts_ns`,
   `send_ts_ns`, `parser_kernel_recv_ts_ns`, `recv_ts_kind` with the correct values
-  from sample frames, per record type (esp. the TOB send-vs-source split and the
-  MBO per-type `source_ts`).
+  from sample datagrams, per record type (esp. the TOB send-vs-source split and
+  the MBO per-type `source_ts`).
 - **Both bots:** writer tests asserting the three timestamp columns map correctly
   per record type.
 - **Schema:** the materialized `send_latency_ms` / `source_latency_ms` compute the

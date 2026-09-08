@@ -117,7 +117,7 @@ pre-v1.0.0 drafts; a manual bump step is not wanted yet).
 1. `go build ./...` and `go test ./...` across the Go workspace (run from `go/`).
 2. `docker compose -f demo/docker-compose.yml config` validates the rewritten
    compose + env interpolation.
-3. Grep sweep confirms zero residual references, excluding the intentional
+3. A grep pass confirms zero residual references, excluding the intentional
    `--depth` flag:
    - `grep -rIiE 'depth[ -]?of[ -]?book|depthofbook'` → no matches
    - `grep -rIE 'DZ_DOB|DOB_BOT|schema_dob|dob\.sock'` → no matches

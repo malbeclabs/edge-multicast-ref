@@ -4,7 +4,7 @@
 
 **Goal:** Rename the depth-of-book parser/bot and all runtime keys to market-by-order, and add loose spec linkage from every feed component to its spec in edge-feed-spec.
 
-**Architecture:** Behavior-preserving rename. Two token mappings: `depthofbook`→`marketbyorder` (names) and `dob`/`DOB`→`mbo`/`MBO` (abbreviations). The `--depth` CLI flag and all `topofbook` code are NOT renamed. Each task is verified by the existing Go tests staying green and grep sweeps confirming no residual references — there is no new behavior, so no new tests.
+**Architecture:** Behavior-preserving rename. Two token mappings: `depthofbook`→`marketbyorder` (names) and `dob`/`DOB`→`mbo`/`MBO` (abbreviations). The `--depth` CLI flag and all `topofbook` code are NOT renamed. Each task is verified by the existing Go tests staying green and grep passes confirming no residual references — there is no new behavior, so no new tests.
 
 **Tech Stack:** Go 1.25 (multi-module workspace via `go.work`), Docker Compose, ClickHouse SQL, Grafana JSON dashboards, GitHub Actions.
 
@@ -398,7 +398,7 @@ git commit -m "docs: link feed parsers/bots to edge-feed-spec specs"
 
 ---
 
-### Task 7: Final whole-repo verification sweep
+### Task 7: Final whole-repo verification pass
 
 **Files:** none (verification only)
 

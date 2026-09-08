@@ -51,7 +51,7 @@ The split between parser and bot mirrors how production trading systems separate
 ### Data flow
 
 1. Parser binds three UDP sockets on `(multicast_group, refdata_port)`, `(group, mktdata_port)`, `(group, snapshot_port)`. Each runs in its own goroutine.
-2. Parser decodes each wire frame, emits one JSONL `Record` per application message on a broadcast Unix socket.
+2. Parser decodes each wire datagram, emits one JSONL `Record` per application message on a broadcast Unix socket.
 3. Bot connects to the parser socket, reads JSONL line-by-line, dispatches each Record into its channel state machine.
 4. Bot maintains an in-memory order book per `(channel_id, instrument_id)` keyed by `order_id`. Implements the spec's cold-start, snapshot reassembly, gap detection, and reset procedures.
 5. Bot writes to ClickHouse on three paths:
@@ -92,9 +92,9 @@ The `sink.go`, `sink_socket.go`, and `sink_json.go` files are copies of the TOB 
 | Flag | Required | Default | Description |
 |---|---|---|---|
 | `--group` | yes | — | Multicast group IP (e.g., `239.10.10.20`) |
-| `--refdata-port` | yes | — | UDP port for refdata channel |
-| `--mktdata-port` | yes | — | UDP port for mktdata channel |
-| `--snapshot-port` | yes | — | UDP port for snapshot channel |
+| `--refdata-port` | yes | — | UDP port for the `refdata` port role |
+| `--mktdata-port` | yes | — | UDP port for the `mktdata` port role |
+| `--snapshot-port` | yes | — | UDP port for the `snapshot` port role |
 | `--interface` | no | system default | Network interface for IGMP join (e.g., `doublezero1`) |
 | `--output` | yes | — | `unix:///path/to/sock` or `file:///path/to/log` |
 | `--format` | no | `json` | `json` (only one supported in v1; CSV does not handle the variable-width fields) |
@@ -183,7 +183,7 @@ All prices and quantities are emitted as **raw signed/unsigned integers** in the
 - `ingress_packets_total{port}`, `ingress_bytes_total{port}`
 - `parse_errors_total{port,reason}` — reasons: `bad_magic`, `schema_version`, `frame_length`, `truncated`, `other`
 - `records_total{type}`
-- `wire_latency_seconds{port}` — histogram of `now() - frame.send_ts` at parse time (includes clock skew)
+- `wire_latency_seconds{port}` — histogram of `now() - datagram.send_ts` at parse time (includes clock skew)
 - `socket_clients`
 - `socket_client_drops_total{reason}` — `slow_writer`, `disconnected`
 - `socket_records_sent_total`
@@ -570,7 +570,7 @@ One commit, no logic changes, no metric prefix changes (existing `dz_bot_*` Prom
 ### Parser
 
 - UDP socket creation: fatal if `bind` or `IP_ADD_MEMBERSHIP` fails on any of the three ports
-- Per-frame: bad magic / wrong schema version / wrong frame_length / truncated frame → `parse_errors_total{port,reason}++`, drop frame, continue
+- Per-datagram: bad magic / wrong schema version / wrong frame_length / truncated datagram → `parse_errors_total{port,reason}++`, drop the datagram, continue
 - Per-message: unknown `msg_type` → skip via `msg_length` and continue (forward-compat per spec)
 - Sink errors: `sink_write_errors_total++`, log, continue
 - Socket clients that block: drop and increment `socket_client_drops_total{reason="slow_writer"}`
@@ -599,10 +599,10 @@ Standard Go unit tests via `go test ./...` per binary.
 
 ### Parser
 
-- **Wire decoder** — golden-frame tests for each of the 13 message types. Specifically verifies:
-  - Multiple messages packed in one frame
-  - 1232-byte MTU edge case (max frame, just under GRE-affected MTU)
-  - Bad magic / wrong schema_version / truncated frame each return their specific error code
+- **Wire decoder** — golden-datagram tests for each of the 13 message types. Specifically verifies:
+  - Multiple messages packed in one datagram
+  - 1232-byte MTU edge case (max datagram, just under GRE-affected MTU)
+  - Bad magic / wrong schema_version / truncated datagram each return their specific error code
   - Forward-compat: unknown msg_type is skipped via msg_length
 - **Sink** — socket sink with N concurrent fake consumers verifying:
   - Each consumer receives every record (broadcast semantics)

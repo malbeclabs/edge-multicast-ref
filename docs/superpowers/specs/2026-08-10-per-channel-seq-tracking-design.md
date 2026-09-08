@@ -8,9 +8,9 @@
 
 A single multicast group and port pair carries **two redundant publishers**,
 interleaved packet by packet and distinguished by their source IP and by
-`Channel ID` in the frame header. Their content is equivalent, but each
-maintains its own **independent per-publisher counters**: frame sequence numbers
-and Reset Count.
+`Channel ID` in the datagram header. Their content is equivalent, but each
+maintains its own **independent per-publisher counters**: datagram sequence
+numbers and Reset Count.
 
 Any such counter held as a single global value is wrong, and wrong silently. The
 wire is well formed, no error is logged, and the derived metric or state simply
@@ -29,14 +29,14 @@ Two instances exist in this repo. One is fixed:
 ## Observed evidence
 
 On the market-by-price snapshot port, one tracker spanning two sequence spaces
-reported ~409k `frames_missing_total` and ~38k gaps against ~5.9M frames received,
-while the host reported zero UDP `RcvbufErrors` and zero `InErrors`.
+reported ~409k `frames_missing_total` and ~38k gaps against ~5.9M datagrams
+received, while the host reported zero UDP `RcvbufErrors` and zero `InErrors`.
 
 The market-by-price mktdata port and the top-of-book group both carry two
 publishers as well, yet report almost no gaps. Their publisher pairs happen to
-stay frame-synchronised, so the conflated tracker sees a near-monotonic sequence.
-That is luck, not design: the top-of-book parser holds the identical latent bug
-and will report the same phantom loss the moment its pair drifts.
+stay datagram-synchronised, so the conflated tracker sees a near-monotonic
+sequence. That is luck, not design: the top-of-book parser holds the identical
+latent bug and will report the same phantom loss the moment its pair drifts.
 
 **This design makes the metric correct. It does not by itself establish how much
 of the residual snapshot loss is real** — that is answered by reading the
@@ -52,11 +52,11 @@ break, and the spec should be honest about that. Measured over a 25-second
 capture of both groups:
 
 - 67 distinct `(source_ip, channel_id)` pairs against 64 distinct `channel_id`
-  values, so some channel id is genuinely reused across sources.
+  values, so some channel id is genuinely reused across source IP addresses.
 - The only case of one `(group, port, channel_id)` arriving from more than one
-  source was on a port no parser binds. On the three ports the parsers do bind,
-  the publishers follow an `N` / `N+100` channel-id convention, so `channel_id`
-  alone currently separates them.
+  source IP address was on a port no parser binds. On the three ports the
+  parsers do bind, the publishers follow an `N` / `N+100` channel-id convention,
+  so `channel_id` alone currently separates them.
 
 `source_ip` earns its place because that convention is a convention, not a
 guarantee, and because the failure it prevents is the silent kind this whole
@@ -97,7 +97,7 @@ omit it. That matters here specifically: this code is triplicated across three
 parsers, and putting the invariant in the type is what stops the third copy from
 drifting back.
 
-The caller reads the channel from the frame header:
+The caller reads the channel from the datagram header:
 
 ```go
 const frameHeaderChannelOffset = 3
@@ -122,7 +122,7 @@ That is two build-tagged files per parser, six in total. The signature becomes
 change that touches anything outside the receive loop and the tracker.
 
 **refdata stays excluded.** Per-channel keying fixes the "shared seq space" half
-of the existing exclusion, but refdata is a periodic-retransmit stream, so
+of the existing exclusion, but refdata is retransmitted periodically, so
 sequence gaps there remain meaningless by design.
 
 ## Metric surface
@@ -130,7 +130,7 @@ sequence gaps there remain meaningless by design.
 `frame_seq_gaps_total` and `frames_missing_total` gain **`source_ip`** and
 **`channel_id`** labels, giving `(port, source_ip, channel_id)` — the same tuple
 the tracker keys on, so the metric can answer "which publisher is losing
-frames" directly.
+datagrams" directly.
 
 The channel label is named `channel_id`, not `channel`, because
 `topofbook-parser` already uses `channel` to mean the port. Prometheus cannot
@@ -155,9 +155,9 @@ normal Prometheus behaviour and needs no handling.
   joined to one multicast group. No eviction required.
 - A publisher first seen mid-stream initialises silently, instead of emitting
   one enormous phantom gap. This is an improvement on current behaviour, and it
-  is what makes a rehomed source safe.
+  is what makes a rehomed source IP address safe.
 - Reorders and duplicates (`seq <= last`) stay ignored, now per publisher.
-- Frames shorter than 12 bytes are skipped as today; byte 3 is only read inside
+- Datagrams shorter than 12 bytes are skipped as today; byte 3 is only read inside
   that guard.
 
 **Known limitation, out of scope.** If a publisher restarts and its sequence
@@ -189,11 +189,12 @@ Extend `seqtracker_test.go` in each parser with a table covering:
   the regression test for this bug
 - a genuine gap within one publisher is still counted, and attributed to that
   publisher
-- the first frame seen from a publisher is silent
+- the first datagram seen from a publisher is silent
 - reorders and duplicates are handled per publisher, without disturbing the other
-- **two sources sharing one `channel_id` stay separate** — the case `source_ip`
-  exists to cover, and the one not reachable through a channel-only key
-- the same source on two channel ids stays separate
+- **two source IP addresses sharing one `channel_id` stay separate** — the case
+  `source_ip` exists to cover, and the one not reachable through a channel-only
+  key
+- the same source IP address on two channel ids stays separate
 
 For `marketbyorder-bot`, mirror the two tests from PR #38: interleaved
 channels with distinct steady Reset Counts run no barrier, and a real Reset Count

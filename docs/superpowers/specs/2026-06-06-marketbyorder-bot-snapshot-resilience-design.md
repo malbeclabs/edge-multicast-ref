@@ -22,18 +22,18 @@ NIC and socket drop counters both zero):
 
 | Stream | loss | notes |
 |--------|------|-------|
-| MBO mktdata (deltas) | **0.0015%** | essentially lossless; one frame in 67k |
+| MBO mktdata (deltas) | **0.0015%** | essentially lossless; one datagram in 67k |
 | MBO snapshot | ~0.5–0.9% + 0.37% reorder | bursty; the raw seq-gap number is inflated by reordering |
 | snapshot completeness | **3.66% arrive short** | matches the bot's own ~4.6% failure rate |
 | steady iperf (publisher→sub, 60s, 100 Mbit/s) | 0.025% | the path floor under non-bursty load |
 
 The harm is amplification, not loss magnitude. A full-book snapshot for a large
-instrument is ~143 frames (MTU 1232, 27 `SnapshotOrder` per frame). At the
-iperf-measured 0.025% per-frame loss, the probability that a 143-frame snapshot
-loses at least one frame is `1 − 0.99975^143 ≈ 3.5%`. Snapshot microbursts push
-the in-burst rate well above the steady floor, so the observed ~3.7% short rate
-is consistent. The point: **even a near-perfect link fails large all-or-nothing
-snapshots a few percent of the time.**
+instrument is ~143 datagrams (MTU 1232, 27 `SnapshotOrder` per datagram). At the
+iperf-measured 0.025% per-datagram loss, the probability that a 143-datagram
+snapshot loses at least one datagram is `1 − 0.99975^143 ≈ 3.5%`. Snapshot
+microbursts push the in-burst rate well above the steady floor, so the observed
+~3.7% short rate is consistent. The point: **even a near-perfect link fails large
+all-or-nothing snapshots a few percent of the time.**
 
 Because mktdata is ~lossless, instruments almost never truly desync from delta
 loss. Nearly all the observed churn is self-inflicted: the bot processes
@@ -47,7 +47,7 @@ In `go/marketbyorder-bot`:
 1. `instrument.go EndSnapshot()` — on `OpenSnapshot == nil`, snapshot_id
    mismatch, anchor mismatch, **or `ReceivedOrders != TotalOrders`** sets
    `Status = StatusAwaitingSnapshot` and discards the book. So one lost
-   `SnapshotOrder` frame evicts a book that mktdata was keeping correct.
+   `SnapshotOrder` datagram evicts a book that mktdata was keeping correct.
 
 2. `shard.go applySnapshotBegin()` skips the begin for an already-`Ready`,
    caught-up instrument (`Status == StatusReady && anchor <= LastAppliedMktdataSeq`),
@@ -149,7 +149,7 @@ The decisive properties:
 - `applySnapshotBegin()`: only start a shadow when `Status != READY` or the
   instrument is in `GAP`. A `READY`, in-sync instrument returns without building.
 - `applySnapshotOrder()`: route into the shadow by snapshot_id (count-based, so
-  reordered order frames within the build window are still counted).
+  reordered order records within the build window are still counted).
 - `applySnapshotEnd()`:
   - no shadow → `return nil` (no-op, no demote).
   - shadow complete → `Commit()` then `replayBuffer()`.
@@ -195,10 +195,10 @@ Without this, an FPGA team re-implements the demote bug in silicon.
 
 ## Correctness notes / edge cases
 
-- **Forward reconciliation keys on `per_instrument_seq`, not mktdata frame seq.**
-  On commit at `last_instrument_seq = L`, replay buffered deltas with
-  `piSeq > L`. Mixing the two seq spaces would double-apply or skip. Dedicated
-  unit test required.
+- **Forward reconciliation keys on `per_instrument_seq`, not the mktdata
+  datagram seq.** On commit at `last_instrument_seq = L`, replay buffered deltas
+  with `piSeq > L`. Mixing the two seq spaces would double-apply or skip.
+  Dedicated unit test required.
 - **Empty book** (`total_orders == 0`): begin+end with no orders commits an empty
   book → `READY`. Unchanged.
 - **`reset_count` era change**: still handled by the coordinator barrier
@@ -214,7 +214,7 @@ Without this, an FPGA team re-implements the demote bug in silicon.
 
 ## Alternatives considered
 
-- **FEC / parity frames on the snapshot stream.** Rejected: forces a decoder on
+- **FEC / parity datagrams on the snapshot stream.** Rejected: forces a decoder on
   every consumer including FPGAs; adds wire complexity; contradicts the
   simple-one-way-feed goal.
 - **Partially apply a short snapshot.** Rejected: a snapshot is a full state
@@ -249,7 +249,7 @@ Unit (`go/marketbyorder-bot`):
 
 Integration:
 5. Replay a captured pcap (recorder warehouse, Tokyo MBO) with synthetic 1%
-   snapshot-frame loss injected; assert steady-state ready-fraction ≈ 100% and
+   snapshot-datagram loss injected; assert steady-state ready-fraction ≈ 100% and
    `book_demotions_total == 0`.
 6. Golden parity: against a lossless replay, final books per instrument are
    byte-identical to the pre-change bot.

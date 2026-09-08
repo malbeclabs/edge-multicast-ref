@@ -386,7 +386,7 @@ reported as half, and the join keys are the sort key's own columns.
 *we* lost. In socket mode there is one accumulator per port role, so the number
 is per role and may be subtracted per role. In `AF_PACKET` mode the ring counts
 frames dropped **before demultiplexing**, so the number belongs to the capture
-handle and not to any one role — a delta caused by `mktdata` frames may ride on
+handle and not to any one role — a delta caused by `mktdata` datagrams may ride on
 the next `refdata` datagram that gets through. Subtracting it per role would
 credit one role with another's losses and leave the first role's gap looking
 unexplained, which manufactures exactly the publisher finding this whole design
