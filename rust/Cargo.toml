@@ -26,6 +26,7 @@ members = [
     "recorder/dz-recorder-clickhouse",
     "recorder/dz-recorder-conformance",
     "recorder/dz-recorder-load",
+    "recorder/dz-recorder-inline",
     "recorder/dz-recorder-e2e",
     "recorder/dz-recorder",
 ]
