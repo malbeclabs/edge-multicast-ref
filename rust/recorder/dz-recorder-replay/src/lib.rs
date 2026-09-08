@@ -17,10 +17,12 @@
 //! path is exercised in CI.
 #![forbid(unsafe_code)]
 
-pub mod owned;
 pub mod source;
 pub mod synthetic;
 
-pub use owned::OwnedDatagram;
+// Moved to `dz-recorder-core`, beside the borrowed form it mirrors. Re-exported
+// so that the round-trip tests and every other caller reach it where they always
+// have.
+pub use dz_recorder_core::OwnedDatagram;
 pub use source::{ArchiveSource, LinkHeaderProvenance, PortRoles, Termination};
 pub use synthetic::{Fault, StarvationWindow, SyntheticPublisher};

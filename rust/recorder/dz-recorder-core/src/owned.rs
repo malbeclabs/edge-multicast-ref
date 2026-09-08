@@ -1,15 +1,22 @@
-//! An owned datagram, for the two callers that cannot hold a borrow.
+//! An owned datagram, for the callers that cannot hold a borrow.
 //!
 //! [`RecordedDatagram`] borrows its payload from the receive buffer, which is
-//! what keeps the record path allocation-free. Two callers cannot live with
-//! that: an iterator has to hand out values that outlive the reader's buffer,
-//! and a test comparing what was emitted against what came back has to hold
-//! both streams at once. Both are offline, so both may allocate.
+//! what keeps the record path allocation-free. Three callers cannot live with
+//! that: an archive iterator has to hand out values that outlive the reader's
+//! buffer, a test comparing what was emitted against what came back has to hold
+//! both streams at once, and a hand-off between threads has to own what it
+//! carries.
+//!
+//! It lives beside [`RecordedDatagram`] rather than in the replay crate, where
+//! the first two callers put it, because the third is a live capture handing
+//! datagrams to a derivation in the same process — and reaching the type through
+//! the archive reader would have pulled a pcapng parser and a decompressor into
+//! a path that reads no archive at all.
 
 use std::net::SocketAddrV4;
 
+use crate::{RecordedDatagram, RecvTsKind};
 use dz_edge_core::PortRole;
-use dz_recorder_core::{RecordedDatagram, RecvTsKind};
 
 /// The same fields as [`RecordedDatagram`], owning its payload.
 ///
@@ -59,7 +66,7 @@ impl OwnedDatagram {
     /// Borrows it back, so a synthetic stream reaches a [`Sink`] through exactly
     /// the type a live capture would use.
     ///
-    /// [`Sink`]: dz_recorder_core::Sink
+    /// [`Sink`]: crate::Sink
     #[must_use]
     pub fn as_recorded(&self) -> RecordedDatagram<'_> {
         RecordedDatagram {

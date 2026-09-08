@@ -19,6 +19,7 @@ pub mod config;
 pub mod datagram;
 pub mod error;
 pub mod identity;
+pub mod owned;
 pub mod sequence;
 pub mod traits;
 
@@ -29,5 +30,6 @@ pub use config::{
 pub use datagram::{CaptureDropScope, ChannelInstance, RecordedDatagram, RecvTsKind};
 pub use error::{SinkError, SourceError};
 pub use identity::RecorderIdentity;
+pub use owned::OwnedDatagram;
 pub use sequence::{SequenceOutcome, SequenceTracker, MAX_FORWARD_JUMP, REORDER_WINDOW};
 pub use traits::{CompletedSegment, Observer, Sink, Source};

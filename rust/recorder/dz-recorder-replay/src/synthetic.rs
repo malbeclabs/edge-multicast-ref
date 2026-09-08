@@ -15,7 +15,7 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 use dz_edge_core::{AppMessage, Heartbeat, PortRole, DATAGRAM_HEADER_SIZE, SCHEMA_VERSION};
 use dz_recorder_core::{RecvTsKind, Sink, SinkError};
 
-use crate::owned::OwnedDatagram;
+use dz_recorder_core::OwnedDatagram;
 
 /// The delimiter the synthetic stream carries.
 ///
