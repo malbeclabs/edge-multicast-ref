@@ -52,7 +52,7 @@ max_objects_per_pass = 60
 # an unbounded account is discovered weeks later by somebody reading a graph.
 endpoint = "http://192.0.2.20:8123"
 database = "recorder"
-user = "loader"
+user = "dz_loader"
 
 # One insert is one atomic block and becomes one part, so these three decide
 # what a day of loading costs the destination — and merge work never appears in
