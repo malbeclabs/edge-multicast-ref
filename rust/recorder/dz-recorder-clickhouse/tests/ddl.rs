@@ -216,25 +216,11 @@ fn the_market_data_sort_keys_carry_what_distinguishes_two_rows() {
     // accumulate.
     assert!(instrument.contains("from_sequence"), "{instrument}");
 
-    // The rest of the identity block, on all three. Two recorders at one site
-    // see the same datagrams and agree on channel, instrument, sequence number
-    // and index; `recv_ts` differing is two clocks not colliding rather than a
-    // key, and `book_top` folds site and recorder into `observation`. `env` is
-    // the same argument across a boundary nothing else in the row crosses, and
-    // `feed` is what stops two feeds sharing a Channel ID and an Instrument ID
-    // from merging on the strength of that coincidence.
-    for (name, key) in [
-        ("event", &event),
-        ("book_top", &book_top),
-        ("instrument", &instrument),
-    ] {
-        for column in ["env", "feed"] {
-            assert!(
-                key.contains(column),
-                "{name} key omits {column}, so two of them merge: {key}"
-            );
-        }
-    }
+    // The vantage, on all three. Two recorders at one site see the same
+    // datagrams and agree on channel, instrument, sequence number and index;
+    // `recv_ts` differing is two clocks not colliding rather than a key, so
+    // `recorder` is what keeps them apart — and `book_top` folds site and
+    // recorder into `observation`.
     assert!(event.contains("recorder"), "event key: {event}");
     assert!(instrument.contains("recorder"), "{instrument}");
     assert!(
@@ -242,19 +228,32 @@ fn the_market_data_sort_keys_carry_what_distinguishes_two_rows() {
         "book_top names its vantage through `observation`: {book_top}"
     );
 
-    // And `port_role` is in none of them, deliberately: it is recoverable from
-    // `dst_port`, which is in every key that has a channel instance in it, so
-    // keying on the name beside the number widens every key to restate a fact.
-    // `book_top` has no such column at all, because a book spans port roles.
+    // And the columns that are labels rather than keys, in none of the three.
+    //
+    // `env`: one database holds one environment, which is the convention `001`
+    // already follows for `datagram`, `era`, `segment_coverage` and
+    // `sequence_gap`. Keying on it here would make these three the only tables
+    // in the recorder that do.
+    //
+    // `feed`: recoverable from the channel instance, because no two feeds serve
+    // one `(source address, destination port)`. The coincidence a key has to
+    // survive is a Channel ID collision, and `dst_port` is what survives it.
+    //
+    // `port_role`: recoverable from `dst_port` for the same reason, so keying on
+    // the name beside the number widens every key to restate a fact. `book_top`
+    // has no such column at all, because a book spans port roles.
     for (name, key) in [
         ("event", &event),
         ("book_top", &book_top),
         ("instrument", &instrument),
     ] {
-        assert!(
-            !key.contains("port_role"),
-            "{name} key restates the port as a name as well as a number: {key}"
-        );
+        for column in ["env", "feed", "port_role"] {
+            assert!(
+                !key.contains(column),
+                "{name} keys on {column}, which is a label the rest of the \
+                 recorder does not key on: {key}"
+            );
+        }
     }
 }
 

@@ -13,6 +13,14 @@
 -- arrival — deletes the original instead of sitting beside it. `datagram` in
 -- `001` carries all three for exactly this reason.
 --
+-- WHICH IS NOT EVERY COLUMN IN THE IDENTITY BLOCK. `env` and `feed` are on
+-- these rows and in none of these keys, which is the convention `001` already
+-- follows for `datagram`, `era`, `segment_coverage` and `sequence_gap`: one
+-- database holds one environment, and a feed is recoverable from the channel
+-- instance because no two feeds serve one `(source address, destination port)`.
+-- Keying on them here would make these three tables the only ones in the
+-- recorder that do. The design document argues this at length.
+--
 -- They sit AFTER `instrument_id` rather than before it, which is the one place
 -- these keys depart from `datagram`'s. Every question asked of `datagram` is per
 -- channel instance; the dominant question here is per instrument over a window,
@@ -124,7 +132,7 @@ CREATE TABLE IF NOT EXISTS recorder.event (
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(recv_ts)
 ORDER BY (channel_id, instrument_id, sequence_number, message_index,
-          source_addr, dst_port, site, recorder, env, feed, recv_ts);
+          source_addr, dst_port, site, recorder, recv_ts);
 
 -- The era-scoped reference data, kept.
 --
@@ -169,7 +177,7 @@ CREATE TABLE IF NOT EXISTS recorder.instrument (
 ENGINE = ReplacingMergeTree(last_seen_ts)
 PARTITION BY toYYYYMMDD(first_seen_ts)
 ORDER BY (channel_id, instrument_id, from_sequence, source_addr, dst_port,
-          site, recorder, env, feed);
+          site, recorder);
 
 -- One row per change in an instrument's top of book, where a change is a change
 -- in EITHER the visible top OR the certainty of it.
@@ -230,11 +238,13 @@ CREATE TABLE IF NOT EXISTS recorder.book_top (
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(recv_ts)
--- FOUR IDENTITY COLUMNS ARE DELIBERATELY NOT IN THIS KEY, and this is the table
+-- FOUR MORE COLUMNS ARE DELIBERATELY NOT IN THIS KEY, and this is the table
 -- where that needs saying: `event` and `instrument` above both key on
 -- `source_addr`, `dst_port`, `site` and `recorder`, and the comment on
--- `instrument` says an omitted identity column deletes rows rather than sorting
--- badly. Read in order, this key looks like the place that forgot.
+-- `instrument` says a column that distinguishes two genuine rows deletes them
+-- when it is left out. Read in order, this key looks like the place that forgot.
+-- (`env` and `feed` are absent here for the reason they are absent from those
+-- two as well — they are labels, see the header. These four are not.)
 --
 -- `site` and `recorder` are already in `observation`, which is `site/recorder`.
 -- Keying on all three restates a fact the key holds, the way `port_role` beside
@@ -247,7 +257,7 @@ PARTITION BY toYYYYMMDD(recv_ts)
 -- exponents decode the other's prices; a top of book holds no per-path state,
 -- and folding the paths is the point. The columns say which path wrote the row.
 ORDER BY (channel_id, instrument_id, recv_ts, sequence_number,
-          message_index, observation, env, feed);
+          message_index, observation);
 
 -- THE RETENTION SPLIT, ONE TABLE FURTHER DOWN THAN `002` PUT IT.
 --
