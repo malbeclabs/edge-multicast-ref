@@ -182,6 +182,20 @@ pub struct BookRefused {
     /// applying it would rebuild from a book the publisher had disowned, and mark
     /// it certain.
     pub stale_cycle: u64,
+    /// Cycles still open when the object ended, so they anchored nothing.
+    ///
+    /// The book is rebuilt per object, and a cycle is `begin`, `total_levels`
+    /// levels and `end` on the runtime's cadence while objects rotate on time or
+    /// size. A cycle that straddles the boundary therefore anchors neither
+    /// object: the levels after the boundary land as `orphan_snapshot_level` and
+    /// the `end` finds no open cycle, while the part before it was simply
+    /// dropped with the book — counted nowhere at all until now.
+    ///
+    /// This is the number to read before believing a delta feed that sits at
+    /// `book_certain = 0` with `no_anchor`. Non-zero and persistent says the
+    /// anchoring is losing a race against object rotation rather than the
+    /// publisher failing to send cycles.
+    pub unclosed_cycle: u64,
 }
 
 /// What a message did to a book.
@@ -357,6 +371,16 @@ impl Book {
             UncertainReason::InstrumentReset,
         ));
         changed(was, book)
+    }
+
+    /// Count the cycles that never saw their `end`, called once the object's
+    /// last message has been folded.
+    ///
+    /// Separate from `snapshot_begin` displacing an open cycle on a repeated
+    /// `snapshot_id`: that is one publisher's mistake, and this is the boundary.
+    pub fn close_object(&mut self) {
+        self.refused.unclosed_cycle += self.cycles.len() as u64;
+        self.cycles.clear();
     }
 
     pub fn snapshot_begin(&mut self, channel: Channel, begin: &SnapshotBegin) {

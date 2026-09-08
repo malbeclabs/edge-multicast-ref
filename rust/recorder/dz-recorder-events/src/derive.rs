@@ -262,6 +262,9 @@ pub fn derive_events<S: Source + ?Sized>(
         }
     }
 
+    // Before the counters are read: a cycle still open here anchored nothing,
+    // and nothing else in the fold would ever say so.
+    book.close_object();
     out.book_refused = book.refused;
     out.instrument = seen
         .into_iter()

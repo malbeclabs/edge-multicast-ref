@@ -509,3 +509,33 @@ fn a_reordered_datagram_is_not_a_gap() {
         "no row reports a gap, because no datagram went missing"
     );
 }
+
+#[test]
+fn a_cycle_the_object_ended_in_the_middle_of_anchors_nothing_and_says_so() {
+    // Object rotation does not wait for a snapshot cycle: this one's `begin` and
+    // levels are here and its `end` is in the next object. The book is rebuilt
+    // per object, so this anchors neither — and until `unclosed_cycle` existed,
+    // the half before the boundary was dropped with the book and counted
+    // nowhere, leaving a depth feed at `no_anchor` with nothing saying why.
+    let whole = cycle(ANCHOR_SEQ, &[(SIDE_BID, 9_950, 12), (SIDE_ASK, 10_050, 7)]);
+    let straddled = &whole[..whole.len() - 1];
+
+    let d = derive::<MarketByPrice>(
+        &[
+            Group(&defs(), PortRole::Refdata, 10),
+            Group(straddled, PortRole::Snapshot, 100),
+        ],
+        MAGIC_MBP,
+    );
+
+    assert_eq!(
+        d.book_refused.unclosed_cycle, 1,
+        "a cycle left open by the object boundary is counted, not dropped"
+    );
+    // And it did not quietly anchor anything on the way out.
+    assert!(
+        d.book_top.iter().all(|r| r.book_certain == 0),
+        "an unfinished cycle anchors no book"
+    );
+    assert_eq!(d.book_refused.incomplete_cycle, 0, "the end never arrived");
+}
