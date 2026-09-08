@@ -443,6 +443,29 @@ ORDER BY (channel_id, instrument_id, recv_ts, sequence_number,
           message_index, observation, env, feed);
 ```
 
+**Four identity columns are deliberately not in this key, and this is the table
+where that needs saying**, because two sections up this document argues in bold
+that an omitted identity column deletes rows rather than sorting badly.
+
+`site` and `recorder` are absent because `observation` already carries both: it
+is `site/recorder` for a recorder reading its own objects, which is the string
+the Section Header block's hardware option holds. Keying on all three would
+widen every key to restate a fact already in it — the same argument this document
+makes for leaving `port_role` out of `event`, where `dst_port` already implies
+it. Two recorders at one site are therefore two observations and two rows, which
+is the property `event` needs `recorder` in its key to get.
+
+`source_addr` and `dst_port` are absent because a book is one book whichever
+redundant path delivered the message that moved it. That is the difference
+between this table and `instrument`, where they *are* keys: an era is opened per
+path, so two paths keying together would let one path's exponents decode the
+other path's prices. A top of book has no such per-path state — the two paths
+carry the same messages, and folding them is the point — so the columns record
+which path wrote the row and are not identity for it. `port_role` is absent for
+the stronger version of the same reason: a book spans roles by construction, its
+anchor arriving on `snapshot` and the deltas that move it on `mktdata`, so no
+single role is the role this state came from.
+
 One row per *change*, where a change is a change in **either** the visible top
 **or** the certainty of it. A message that moves neither produces no row: a feed
 whose depth updates rarely reach the top would otherwise pay per-event volume for
