@@ -115,6 +115,19 @@ pub struct RingReceiver {
     counters: Arc<RingCounters>,
 }
 
+/// What one wait found, with nothing borrowed.
+///
+/// Separate from [`Waited`] because a caller that waits inside a loop and then
+/// returns the datagram cannot hold a borrow across the loop: the borrow checker
+/// cannot see that the previous iteration's is dead. So the wait yields no
+/// borrow, and [`RingReceiver::in_hand`] produces one afterwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Arrival {
+    Datagram,
+    TimedOut,
+    Ended,
+}
+
 /// What one wait on the ring found.
 #[derive(Debug)]
 pub enum Waited<'a> {
@@ -247,6 +260,34 @@ impl RingSender {
 }
 
 impl RingReceiver {
+    /// Waits at most `timeout`, taking a slot in hand without lending it out.
+    ///
+    /// The pair of this and [`in_hand`](Self::in_hand) is what a caller that
+    /// waits in a loop needs; [`recv_within`](Self::recv_within) is the same two
+    /// steps for a caller that does not.
+    pub fn wait(&mut self, timeout: Duration) -> Arrival {
+        if let Some(slot) = self.current.take() {
+            let _ = self.free.try_send(slot);
+        }
+        match self.full.recv_timeout(timeout) {
+            Ok(slot) => {
+                self.current = Some(slot);
+                Arrival::Datagram
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Arrival::TimedOut,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Arrival::Ended,
+        }
+    }
+
+    /// The datagram the last [`wait`](Self::wait) took, if it took one.
+    ///
+    /// Borrowed from the slot, so it ends at the next wait — a caller that wants
+    /// to keep it must copy it.
+    #[must_use]
+    pub fn in_hand(&self) -> Option<RecordedDatagram<'_>> {
+        self.current.as_ref().map(OwnedDatagram::as_recorded)
+    }
+
     /// Waits at most `timeout` for the next datagram.
     ///
     /// The slot handed out by the previous call goes back to the pool here,
@@ -259,22 +300,12 @@ impl RingReceiver {
     /// mean a ring of one accepts a datagram only when the deriver has asked for
     /// the next one, and a capacity worth configuring starts well above that.
     pub fn recv_within(&mut self, timeout: Duration) -> Waited<'_> {
-        if let Some(slot) = self.current.take() {
-            // The pool holds every slot, so this cannot fail for want of room;
-            // a disconnected capture means nothing will ask for it again.
-            let _ = self.free.try_send(slot);
-        }
-        match self.full.recv_timeout(timeout) {
-            Ok(slot) => {
-                self.current = Some(slot);
-                let held = self
-                    .current
-                    .as_ref()
-                    .expect("the slot was just placed in hand");
-                Waited::Datagram(held.as_recorded())
+        match self.wait(timeout) {
+            Arrival::Datagram => {
+                Waited::Datagram(self.in_hand().expect("the wait took a slot in hand"))
             }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Waited::TimedOut,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Waited::Ended,
+            Arrival::TimedOut => Waited::TimedOut,
+            Arrival::Ended => Waited::Ended,
         }
     }
 
