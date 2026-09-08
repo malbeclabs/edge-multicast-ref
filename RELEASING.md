@@ -83,8 +83,8 @@ Every example below pins `v0.1.0` deliberately; a reader who opens
 a tag they can pin. The gap is this rule being learned the expensive way:
 `dz-recorder/v0.1.1` was released by bumping the workspace version, which moved
 every library crate for a change to a binary and produced a number with no
-library tag behind it. The loader states its own `version`, `dz-recorder` is
-being given one, and once both do the next library release closes the gap and
+library tag behind it. Under the rule above a binary released on its own stream
+carries its own `version`, so the next library release closes the gap and
 nothing reopens it.
 
 ## What a version promises
