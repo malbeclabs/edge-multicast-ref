@@ -216,10 +216,16 @@ jobs:
           set -euo pipefail
           PRERELEASE_ARGS=()
           [[ "${VERSION}" == *-* ]] && PRERELEASE_ARGS+=(--prerelease)
+          # `--latest=false`, because gh's default is "automatic based on date and
+          # version" and the release streams here share one tag namespace. Left
+          # unset, this binary's tarball takes the Latest badge from the `v*`
+          # library tag a consumer is meant to pin, which is what happened at
+          # v0.1.1.
           gh release create "dz-recorder/${VERSION}" \
             --repo "${GITHUB_REPOSITORY}" \
             --title "dz-recorder ${VERSION}" \
             --generate-notes \
+            --latest=false \
             "${PRERELEASE_ARGS[@]}" \
             "$DIST/${STAGE_NAME}.tar.gz" \
             "$DIST/${STAGE_NAME}.tar.gz.sha256"

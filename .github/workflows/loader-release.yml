@@ -298,11 +298,19 @@ jobs:
           [[ "${VERSION}" == *-* ]] && ARGS+=(--prerelease)
           # Absent on the first release, when the notes run from the beginning.
           [[ -n "${PREVIOUS}" ]] && ARGS+=(--notes-start-tag "${PREVIOUS}")
+          # `--latest=false` for the same reason `--notes-start-tag` is set above:
+          # three release streams share this repository's tags, and gh's default
+          # is "automatic based on date and version", so the Latest badge lands on
+          # whichever stream published most recently. A binary is not what a
+          # consumer pins — the `v*` library tags are, and RELEASING.md says so —
+          # and a badge pointing at a loader tarball contradicts that document
+          # from the releases page, which is the first place a reader looks.
           gh release create "dz-recorder-load/${VERSION}" \
             --repo "${GITHUB_REPOSITORY}" \
             --title "dz-recorder-load ${VERSION}" \
             --notes "${NOTES}" \
             --generate-notes \
+            --latest=false \
             "${ARGS[@]}" \
             "$DIST/${STAGE_NAME}.tar.gz" \
             "$DIST/${STAGE_NAME}.tar.gz.sha256"
