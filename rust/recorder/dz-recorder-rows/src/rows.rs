@@ -458,6 +458,298 @@ pub struct ConformanceFinding {
     pub last_seq: u64,
 }
 
+/// The message a market data row was decoded from, as the column holds it.
+///
+/// Spelled as the codec spells the type, so that a row and a specification can
+/// be read against each other without a translation table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum MessageTypeLabel {
+    Quote,
+    Trade,
+    LevelUpdate,
+    BookClear,
+    InstrumentReset,
+    SnapshotBegin,
+    SnapshotLevel,
+    SnapshotEnd,
+}
+
+impl std::fmt::Display for MessageTypeLabel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Quote => "Quote",
+            Self::Trade => "Trade",
+            Self::LevelUpdate => "LevelUpdate",
+            Self::BookClear => "BookClear",
+            Self::InstrumentReset => "InstrumentReset",
+            Self::SnapshotBegin => "SnapshotBegin",
+            Self::SnapshotLevel => "SnapshotLevel",
+            Self::SnapshotEnd => "SnapshotEnd",
+        })
+    }
+}
+
+/// The depth feed's absent-value sentinel, as a `Nullable` column holds it.
+///
+/// `order_count` and `level_index` carry `0xFFFF` when the venue exposes
+/// neither, and the specification is explicit that the value is not a count and
+/// not a rank. Written through, it becomes an instrument with sixty-five
+/// thousand orders at a level — which is not a subtle wrongness, but it is a
+/// silent one, and it survives every average taken over it.
+///
+/// Top of book says *unavailable* with zero instead, which is the opposite
+/// answer to the same question from the other specification. So this translation
+/// belongs to the depth fields alone and is deliberately not a blanket rule.
+#[must_use]
+pub fn absent_if_sentinel(value: u16) -> Option<u16> {
+    const U16_UNAVAILABLE: u16 = 0xFFFF;
+    (value != U16_UNAVAILABLE).then_some(value)
+}
+
+/// One decoded message.
+///
+/// The expensive table, and the only one whose row count is not a function of
+/// the datagram count: a datagram carries as many messages as the publisher
+/// packed into it, so a burst batched into one datagram is one transport row and
+/// hundreds of these.
+///
+/// **One table with nullable per-type columns rather than one table per message
+/// type.** The types share every column above `message_type` and differ in at
+/// most six, and the dominant question — everything that happened to this
+/// instrument over this window — is a union across eight tables otherwise, one
+/// that has to be rewritten whenever the family gains a message.
+///
+/// **Prices and quantities stay raw, with their exponents beside them.** A
+/// decimal computed at load time bakes in a scale a later era can change and
+/// loses the integer the wire carried, which is the only value a conformance
+/// question can be asked against.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Event {
+    pub recv_ts: Nanos,
+    pub send_ts: Nanos,
+    /// The venue's own event time, where the message carries one.
+    ///
+    /// Never part of an equivalence key: its resolution and its meaning differ
+    /// between transports, so one book state carried over two of them would hash
+    /// two ways and no pair would ever be found.
+    pub upstream_ts: Option<Nanos>,
+    pub recv_ts_kind: RecvTsKindLabel,
+
+    pub site: String,
+    pub recorder: String,
+    pub env: String,
+    pub feed: String,
+    pub port_role: PortRoleLabel,
+    pub source_addr: Ipv4Addr,
+    pub channel_id: u8,
+    pub dst_port: u16,
+
+    pub sequence_number: u64,
+    /// The wire value, as sent. A fact and never a key: it is a `u8` and it
+    /// wraps, so two eras 256 resets apart share a value.
+    pub reset_count: u8,
+    /// Monotonic per recorder run, and what places this row in the archive.
+    ///
+    /// The era is **not** a column here, for the reason `datagram` has none: an
+    /// era's anchor is only observable as *the first datagram of that era in
+    /// this object*, so a stored anchor differs between two objects of one era
+    /// and would split that era across sort-key prefixes. `reset_count` is the
+    /// wire fact, `segment_seq` places the row, and the era is resolved by range
+    /// join to `era` — where the openings, and their certainty, already are.
+    pub segment_seq: u64,
+    /// Position of the message inside its datagram.
+    ///
+    /// In the sort key, because a publisher may pack several messages for one
+    /// instrument into one datagram: they share a sequence number and a receive
+    /// stamp, and without this a `ReplacingMergeTree` collapses a run of genuine
+    /// events into whichever one merged last.
+    pub message_index: u8,
+
+    /// From the message where it carries one, and from era-qualified reference
+    /// data where it does not. Never invented, and never carried over from an
+    /// adjacent message of another type.
+    pub source_id: u16,
+    pub instrument_id: u32,
+    /// Display and filtering only, resolved at this era. Nothing joins on it.
+    pub symbol: String,
+    pub price_exp: i8,
+    pub qty_exp: i8,
+    pub per_instrument_seq: Option<u32>,
+
+    pub message_type: MessageTypeLabel,
+    pub side_raw: Option<u8>,
+    pub action_raw: Option<u8>,
+    pub reason_raw: Option<u8>,
+    pub flags_raw: Option<u8>,
+    pub price_raw: Option<i64>,
+    pub qty_raw: Option<u64>,
+    /// `NULL` where the wire said `0xFFFF`. See [`absent_if_sentinel`].
+    pub order_count: Option<u16>,
+    /// `NULL` where the wire said `0xFFFF`, and derived rather than read on a
+    /// snapshot level, which carries no such field at all.
+    pub level_index: Option<u16>,
+
+    pub bid_px_raw: Option<i64>,
+    pub bid_qty_raw: Option<u64>,
+    pub bid_source_count: Option<u16>,
+    pub ask_px_raw: Option<i64>,
+    pub ask_qty_raw: Option<u64>,
+    pub ask_source_count: Option<u16>,
+
+    pub trade_id: Option<u64>,
+    pub cumulative_volume: Option<u64>,
+
+    pub snapshot_id: Option<u32>,
+    /// On a `SnapshotBegin` and a `SnapshotEnd`, the sequence number the book is
+    /// true as of. On an `InstrumentReset`, `new_anchor_seq` — the terms of its
+    /// own recovery, and the reason a deriver that drops this field is unsafe
+    /// rather than lossy: without it, a snapshot already in flight when the
+    /// reset was published is accepted, and a book the publisher had disowned is
+    /// rebuilt from as certain.
+    pub anchor_seq: Option<u64>,
+    pub total_levels: Option<u32>,
+    /// How many levels the cycle actually carried, on its `SnapshotEnd`.
+    ///
+    /// Against `total_levels` on the begin row, this answers *was the snapshot
+    /// complete* from rows alone — which is what makes persisting every level
+    /// optional rather than the only way to ask.
+    pub levels_seen: Option<u32>,
+    pub depth_bound: Option<u32>,
+
+    pub object_key: String,
+    pub object_sha256: String,
+    pub datagram_index: u64,
+}
+
+/// One instrument, as one definition stated it, in force from a sequence number.
+///
+/// Era-qualified, and it carries the whole identity block including the channel
+/// instance. An `era_anchor_ts` is only meaningful for one instance, because a
+/// `Reset Count` is that instance's: two paths publishing one `Channel ID` open
+/// their eras independently, so a key without the address and the port merges
+/// two eras that are not the same era and lets one path's exponents decode the
+/// other path's prices.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Instrument {
+    pub site: String,
+    pub recorder: String,
+    pub env: String,
+    pub feed: String,
+    /// Reference data arrives on the `refdata` role. It is on the row so that a
+    /// reader joining from a `mktdata` event can see that the roles differ
+    /// rather than discover it.
+    pub port_role: PortRoleLabel,
+    pub source_addr: Ipv4Addr,
+    pub channel_id: u8,
+    pub dst_port: u16,
+    pub source_id: u16,
+    pub instrument_id: u32,
+    /// The sequence number this statement came into force at.
+    ///
+    /// A stable era-scoped identity where an anchor timestamp is not: it is the
+    /// position of the definition that made the statement, identical in every
+    /// object that carries it, so two loads of one era replace each other
+    /// instead of accumulating.
+    pub from_sequence: u64,
+    pub reset_count: u8,
+    pub symbol: String,
+    pub price_exp: i8,
+    pub qty_exp: i8,
+    pub contract_value: u64,
+    pub first_seen_ts: Nanos,
+    pub last_seen_ts: Nanos,
+    pub manifest_seq: Option<u16>,
+    /// What a valid `ManifestSummary` said the published set held.
+    ///
+    /// Absent rather than zero while a summary is not valid yet: a zero here
+    /// reads as a feed publishing nothing. Against the count of distinct
+    /// instruments observed, it is the only statement of published-set coverage
+    /// an archive can make.
+    pub declared_count: Option<u32>,
+    pub object_key: String,
+}
+
+/// One change in an instrument's top of book.
+///
+/// A change is a change in **either** the visible top **or** the certainty of
+/// it. Emitting only on price movement loses the transition that matters most: a
+/// gap arrives, nothing later happens to move the top, and every lookup from
+/// then on returns a row saying the book is certain, which is now false.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BookTop {
+    pub recv_ts: Nanos,
+    pub send_ts: Nanos,
+    pub site: String,
+    pub recorder: String,
+    pub env: String,
+    pub feed: String,
+    /// Where this view of the book came from, as `site` names a recorder.
+    ///
+    /// Two recorders of one multicast feed are two observations; a multicast
+    /// feed and some other transport carrying the same instruments are two
+    /// observations. Nothing in the schema knows which is which, and nothing
+    /// should — a race is one `state_key` seen at more than one of these.
+    pub observation: String,
+    pub source_addr: Ipv4Addr,
+    pub channel_id: u8,
+    pub dst_port: u16,
+    pub source_id: u16,
+    pub instrument_id: u32,
+    pub symbol: String,
+    pub sequence_number: u64,
+    pub message_index: u8,
+    pub reset_count: u8,
+    pub segment_seq: u64,
+    pub bid_px_raw: Option<i64>,
+    pub bid_qty_raw: Option<u64>,
+    pub bid_source_count: Option<u16>,
+    pub ask_px_raw: Option<i64>,
+    pub ask_qty_raw: Option<u64>,
+    pub ask_source_count: Option<u16>,
+    pub price_exp: i8,
+    pub qty_exp: i8,
+    /// The equivalence key: a hash over the instrument and both sides, and over
+    /// nothing else. No timestamp, no sequence number, no bytes.
+    pub state_key: u64,
+    /// 1 when this top came from applying a snapshot rather than from a
+    /// message the market produced.
+    ///
+    /// Such a row is a starting state and never an observation in a race: the
+    /// runtime pulls a snapshot on its own cadence and the archive records when
+    /// it was *published*, not when it was asked for, so its timestamp measures
+    /// the publisher's scheduler. The pairing excludes these.
+    pub from_anchor: u8,
+    /// 0 once the book is unknowable.
+    pub book_certain: u8,
+    pub uncertain_since: Option<u64>,
+    pub uncertain_reason: UncertainReason,
+    pub object_key: String,
+}
+
+/// Why a top of book cannot be believed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum UncertainReason {
+    /// Certain. The column is not nullable because a reason of *none* is a
+    /// reading a query can filter on, where a NULL invites a join that drops the
+    /// row.
+    #[serde(rename = "none")]
+    None,
+    /// A run of sequence values nobody delivered, between two deltas.
+    #[serde(rename = "gap")]
+    Gap,
+    /// The publisher disowned its own book for this instrument.
+    #[serde(rename = "instrument_reset")]
+    InstrumentReset,
+    /// A delta book with no complete snapshot cycle yet.
+    ///
+    /// Emitted once, with no prices, rather than represented by absence:
+    /// absence cannot be told from a silent feed, and a lookup into an
+    /// unanchored window would return whatever preceded it — possibly from
+    /// another era.
+    #[serde(rename = "no_anchor")]
+    NoAnchor,
+}
+
 /// One table's worth of rows, named so that a sink can label a counter and a
 /// batch can name the destination it failed to reach.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -467,15 +759,21 @@ pub enum Grain {
     SegmentCoverage,
     SequenceGap,
     ConformanceFinding,
+    Event,
+    Instrument,
+    BookTop,
 }
 
 impl Grain {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 8] = [
         Self::Datagram,
         Self::Era,
         Self::SegmentCoverage,
         Self::SequenceGap,
         Self::ConformanceFinding,
+        Self::Event,
+        Self::Instrument,
+        Self::BookTop,
     ];
     pub const COUNT: usize = Self::ALL.len();
 
@@ -489,6 +787,9 @@ impl Grain {
             Self::SegmentCoverage => "segment_coverage",
             Self::SequenceGap => "sequence_gap",
             Self::ConformanceFinding => "conformance_finding",
+            Self::Event => "event",
+            Self::Instrument => "instrument",
+            Self::BookTop => "book_top",
         }
     }
 
@@ -499,6 +800,9 @@ impl Grain {
             Self::SegmentCoverage => 2,
             Self::SequenceGap => 3,
             Self::ConformanceFinding => 4,
+            Self::Event => 5,
+            Self::Instrument => 6,
+            Self::BookTop => 7,
         }
     }
 }
@@ -524,6 +828,9 @@ pub struct RowBatch {
     pub segment_coverage: Vec<SegmentCoverage>,
     pub sequence_gap: Vec<SequenceGap>,
     pub conformance_finding: Vec<ConformanceFinding>,
+    pub event: Vec<Event>,
+    pub instrument: Vec<Instrument>,
+    pub book_top: Vec<BookTop>,
 }
 
 impl RowBatch {
@@ -535,6 +842,9 @@ impl RowBatch {
             Grain::SegmentCoverage => self.segment_coverage.len(),
             Grain::SequenceGap => self.sequence_gap.len(),
             Grain::ConformanceFinding => self.conformance_finding.len(),
+            Grain::Event => self.event.len(),
+            Grain::Instrument => self.instrument.len(),
+            Grain::BookTop => self.book_top.len(),
         }
     }
 

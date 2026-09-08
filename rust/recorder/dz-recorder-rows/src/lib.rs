@@ -53,7 +53,8 @@ pub use derive::{
 };
 pub use file::FileSink;
 pub use rows::{
-    ConformanceFinding, Datagram, DropScope, Era, FindingVerdict, Grain, Nanos, PortRoleLabel,
-    RecvTsKindLabel, RoleJoinRow, RowBatch, SegmentCoverage, SequenceGap, Verdict,
+    absent_if_sentinel, BookTop, ConformanceFinding, Datagram, DropScope, Era, Event,
+    FindingVerdict, Grain, Instrument, MessageTypeLabel, Nanos, PortRoleLabel, RecvTsKindLabel,
+    RoleJoinRow, RowBatch, SegmentCoverage, SequenceGap, UncertainReason, Verdict,
 };
 pub use sink::{Accepted, Landed, ObjectId, RowSink, RowSinkError, Written};
