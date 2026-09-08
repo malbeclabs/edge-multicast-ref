@@ -368,6 +368,24 @@ pub fn midday_ns() -> u64 {
     (now_ns() / DAY) * DAY + 12 * 3_600 * SECOND_NS
 }
 
+/// Five seconds past a midnight, so a fixture's window segment opens on one day
+/// and its gap falls on the next.
+///
+/// The deliberate opposite of [`midday_ns`], and it is pinned rather than left
+/// to the clock for the same reason that one is: the straddle happens on every
+/// run instead of one minute in every 1,440. `Segment::window` opens at
+/// `base - 60s`, so a base this close to midnight puts `start_ts` on the day
+/// before `before_ts` — which is the one condition under which the census of
+/// reporting vantages, grouped on the segment's opening day, has no row to
+/// return for the gap's day.
+#[must_use]
+pub fn just_after_midnight_ns() -> u64 {
+    const DAY: u64 = 86_400 * SECOND_NS;
+    // Tomorrow's midnight, so the whole fixture — including the era three hours
+    // behind it — stays in the future-facing direction and never underflows.
+    (now_ns() / DAY) * DAY + DAY + 5 * SECOND_NS
+}
+
 /// The cross-site case, carried in the `Channel ID`.
 ///
 /// One channel instance per case, so the cases cannot contaminate one another

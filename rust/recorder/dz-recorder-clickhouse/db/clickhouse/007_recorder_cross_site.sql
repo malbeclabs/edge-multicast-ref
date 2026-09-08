@@ -195,6 +195,14 @@
 -- `present` is carried out of the subquery because an `ASOF LEFT JOIN` fills an
 -- unmatched row with column defaults and not with nulls, and a defaulted
 -- `segment_seq` of 0 is adjacent to segment 1 by arithmetic.
+--
+-- No `FINAL` here, on either read of `segment_coverage`, and deliberately:
+-- everything that consumes this view folds through `uniqExact`, `uniqExactIf`
+-- and `groupUniqArray`, so a duplicate row from a `ReplacingMergeTree` mid-merge
+-- collapses upstairs by construction — a better defence than `FINAL`, and the
+-- reason `gap_cross_site_evidence` counts distinct rather than counting rows.
+-- Anything added here that counts rows instead of distinct values loses that,
+-- so read the note at `gap_cross_site_evidence` before adding a `count()`.
 CREATE OR REPLACE VIEW recorder.segment_overflow AS
 SELECT
     c.site,
@@ -609,6 +617,23 @@ SELECT
             AND q.seqs_absent = q.seqs_expanded
             AND q.absent_sites > 0
             AND q.blocked_vantages = 0
+            -- The census actually answered. `c` is a LEFT JOIN and an unmatched
+            -- row fills `vantages` with the array default, so `silent_vantages`
+            -- comes back 0 because nobody was *counted* rather than because
+            -- nobody was silent — and 0 is what this branch needs. The way in
+            -- is the day: the census groups on `toYYYYMMDD(start_ts)`, the
+            -- segment's opening day, and this joins on the gap's day, so a
+            -- segment that opens at 23:50 and runs past midnight registers its
+            -- vantages under the opening day alone and a gap in its
+            -- post-midnight portion finds no row at all. Without this line that
+            -- gap is escalated to `publisher` on the strength of a census that
+            -- returned nothing.
+            --
+            -- Third guard of the same shape in this file, after `present` out of
+            -- the ASOF subquery and `q.seqs_expanded > 0` below it: a default
+            -- fill is indistinguishable from a measurement until something says
+            -- the measurement happened.
+            AND length(c.vantages) > 0
             AND silent_vantages = 0, toNullable(toUInt8(0)),
         NULL) AS seen_elsewhere,
     -- Null rather than our own bracket: a stamp nobody measured would be read

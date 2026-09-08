@@ -15,8 +15,8 @@
 mod common;
 
 use common::{
-    batch, batch_on_role, cross_site_fixture, midday_ns, now_ns, race_fixture,
-    ABSENT_BUT_A_SITE_OVERFLOWED, ABSENT_EVERYWHERE, A_SITE_IS_UP_AND_SILENT,
+    batch, batch_on_role, cross_site_fixture, just_after_midnight_ns, midday_ns, now_ns,
+    race_fixture, ABSENT_BUT_A_SITE_OVERFLOWED, ABSENT_EVERYWHERE, A_SITE_IS_UP_AND_SILENT,
     A_SITE_REUSED_THE_SEQUENCE, MISSING_FROM, MISSING_TO, NOBODY_ELSE_HAS_LOADED,
     ONLY_A_CO_LOCATED_RECORDER, OUR_OWN_SCOPE_CANNOT_SUBTRACT, PRESENT_AT_ANOTHER_SITE, REPEATED,
 };
@@ -777,6 +777,52 @@ fn absent_from_every_site_with_no_overflow_anywhere_is_the_publisher() {
         )),
         "unverifiable unknown",
         "the stored row still says what one site could see, which is nothing"
+    );
+}
+
+/// A census that returned nothing is not a census in which nobody was silent.
+///
+/// The evidence here is the same evidence as
+/// `absent_from_every_site_with_no_overflow_anywhere_is_the_publisher` — every
+/// missing sequence number absent at an admissible other site, nothing blocked
+/// — and the only difference is the clock. The window segment opens at 23:59:05
+/// and the gap falls five seconds after midnight.
+///
+/// `instance_vantage_day` groups on `toYYYYMMDD(start_ts)`, the segment's
+/// opening day, and the final view joins it on the gap's day. So the segment
+/// registers its vantages under the earlier day, this gap finds no census row,
+/// `c.vantages` takes the `LEFT JOIN` array default, and `silent_vantages`
+/// comes back 0 — the value the escalation reads as *nobody was silent*.
+///
+/// Without the `length(c.vantages) > 0` guard this returns `0 publisher`: the
+/// strongest finding the tier makes, on a census that measured nothing. `NULL`
+/// is the honest answer and `unverifiable` is the honest verdict.
+#[test]
+fn a_gap_whose_census_came_back_empty_is_not_promoted_to_the_publisher() {
+    let mut scratch = Scratch::open("cross_site_midnight");
+    let base = just_after_midnight_ns();
+    load_cross_site(&mut scratch, base);
+
+    assert_eq!(
+        scratch.cross_site(
+            ABSENT_EVERYWHERE,
+            "concat(ifNull(toString(seen_elsewhere), 'unknown'), ' ', verdict)"
+        ),
+        "unknown unverifiable",
+        "the census had nothing to say, so neither does the column"
+    );
+    // The census really is the thing that is empty, and not the evidence: `q`
+    // matched and reported exactly what the midday case reports.
+    assert_eq!(
+        scratch.cross_site(
+            ABSENT_EVERYWHERE,
+            "concat(toString(seqs_absent), '/', toString(seqs_expanded), ' ', \
+             toString(absent_sites), ' ', toString(blocked_vantages), ' ', \
+             toString(silent_vantages))"
+        ),
+        "3/3 1 0 0",
+        "every condition but the census is satisfied, which is what makes this \
+         the dangerous case rather than an obviously incomplete one"
     );
 }
 
