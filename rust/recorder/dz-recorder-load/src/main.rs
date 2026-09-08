@@ -240,7 +240,7 @@ fn drive<S: RowSink>(
     };
     let mut first_failure: Option<String> = None;
     let mut failed = 0u64;
-    // Carried across passes because the sink is: a quiet lane's rows may be
+    // Carried across passes because the sink is: a quiet feed's rows may be
     // held for the whole `insert_max_delay`, which is several passes.
     let mut pending: Vec<loader::Pending> = Vec::new();
 

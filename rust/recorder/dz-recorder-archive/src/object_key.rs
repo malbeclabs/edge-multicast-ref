@@ -34,7 +34,7 @@ pub fn object_key(
     )
 }
 
-/// Year, month, day and hour in UTC for a nanosecond epoch.
+/// Year, month, day and hour in UTC for a nanosecond Unix timestamp.
 ///
 /// Hand-rolled because a partition prefix is not worth a date dependency in a
 /// crate that has none, and because the arithmetic is fixed: no zones, no

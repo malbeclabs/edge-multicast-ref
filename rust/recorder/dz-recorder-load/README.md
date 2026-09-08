@@ -128,7 +128,7 @@ every start.
 **One insert is one part, so merge pressure is set by rows per part rather than
 rows per day** — and merge work never appears in a query log, only as the gap
 between a provider's CPU graph and query-attributed CPU. A sink that posted once
-per object would write one part per object per lane, and the quietest lanes
+per object would write one part per object per feed, and the quietest feeds
 measured produce about 700 rows in a time-rotated object.
 
 So the sink holds rows across objects:
@@ -136,8 +136,8 @@ So the sink holds rows across objects:
 | Key | Default | |
 |---|---|---|
 | `insert_max_rows` | 1,000,000 | an object's rows land in one or two parts |
-| `insert_min_rows` | 50,000 | the floor that stops one part per object per lane |
-| `insert_max_delay` | 900s | the bound on holding, so a quiet lane is late rather than absent |
+| `insert_min_rows` | 50,000 | the floor that stops one part per object per feed |
+| `insert_max_delay` | 900s | the bound on holding, so a quiet feed is late rather than absent |
 
 **Which means accepted is not loaded.** `dz_loader_held_objects` is the part of
 the backlog that is the sink coalescing as designed; `dz_loader_unloaded_objects`

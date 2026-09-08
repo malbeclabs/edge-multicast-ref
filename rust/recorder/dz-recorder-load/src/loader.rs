@@ -94,7 +94,7 @@ pub struct Loader<'a, S: RowSink> {
     /// loaded whose rows are still in memory — and a crash would lose them with
     /// nothing recording that it did.
     ///
-    /// Carried across passes because the sink is: a quiet lane's rows may be
+    /// Carried across passes because the sink is: a quiet feed's rows may be
     /// held for the whole `insert_max_delay`, which is several passes.
     pub pending: &'a mut Vec<Pending>,
 }
@@ -282,7 +282,7 @@ impl<S: RowSink> Loader<'_, S> {
             }
         }
 
-        // Once a pass, including a pass that found no new object: a lane quiet
+        // Once a pass, including a pass that found no new object: a feed quiet
         // enough to produce nothing would otherwise hold its last rows until
         // something else arrived, which is the opposite of what the age bound is
         // for.

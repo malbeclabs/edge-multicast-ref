@@ -51,7 +51,7 @@ fn a_route_resolving_the_wildcard_address_is_refused() {
     // The wildcard is what an unrouted socket reports, and binding to it hands
     // the source-address choice back to the kernel per datagram. The channel
     // instance a subscriber tracks is keyed on the source address, so a
-    // publisher whose datagrams change source mid-run is read as two
+    // publisher whose datagrams change source address mid-run is read as two
     // publishers alternating, each seeing the other's gaps.
     let policy = EgressPolicy::default();
     let route = FakeRoute::resolving(Ipv4Addr::UNSPECIFIED);

@@ -1,7 +1,7 @@
 //! `0x04` across two feeds, which is the whole of plan task 5.
 //!
 //! The wire's cross-specification policy: a Type ID appearing in more than one
-//! sibling feed must carry the same meaning in each, and `Trade` is
+//! feed in the family must carry the same meaning in each, and `Trade` is
 //! **byte-for-byte identical** between the top-of-book feed, the
 //! market-by-price feed and the market-by-order feed. A venue publishing two of
 //! them owes the same bytes on both for the same execution.

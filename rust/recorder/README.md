@@ -38,7 +38,8 @@ destroyed.
 Both sit behind one `Source`, and both write the same archive format.
 
 **`AF_PACKET` on the arrival interface is the default.** It records what the
-network delivered, so the source, destination, TTL and payload are *captured*
+network delivered, so the source address, destination, TTL and payload are
+*captured*
 rather than synthesised, and a datagram the recorder's own socket would have
 lost to receive-queue overflow is still in the archive, correctly attributed.
 The multicast socket is still opened and joined — the network has no reason to

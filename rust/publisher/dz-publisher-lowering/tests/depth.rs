@@ -211,8 +211,8 @@ fn the_sequence_starts_at_one_is_dense_and_is_shared_with_clears() {
 
 #[test]
 fn each_instrument_has_its_own_series() {
-    // The field narrows a gap to the instruments that were in the lost frame,
-    // which it can only do if the numbers are per instrument.
+    // The field narrows a gap to the instruments that were in the lost
+    // datagram, which it can only do if the numbers are per instrument.
     let mut instruments = InstrumentTable::new();
     let first = instruments.admit(Instrument {
         instrument_id: 41,

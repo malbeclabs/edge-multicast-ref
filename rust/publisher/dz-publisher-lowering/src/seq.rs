@@ -9,8 +9,8 @@ use dz_adapter_core::InstrumentRef;
 /// decides it.
 ///
 /// The first is what the field is for: it narrows the blast radius of a channel
-/// gap. A subscriber that lost a datagram knows a frame is missing but not
-/// which instruments were in it; on the next delta for each instrument it
+/// gap. A subscriber that saw a sequence gap knows a datagram is missing but
+/// not which instruments were in it; on the next delta for each instrument it
 /// compares this number to what it last applied, and continuity means that
 /// instrument is clean. That only works if the series is **dense** — the
 /// specification requires no skips — which is a property of the publisher's

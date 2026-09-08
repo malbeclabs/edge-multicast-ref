@@ -4,7 +4,7 @@ The Market-by-Price feed's wire format: the five messages only this feed has.
 
 `Heartbeat`, `ManifestSummary`, `BatchBoundary` and the rest belong to the
 family and live in [`dz-edge-core`](../dz-edge-core); `Trade` and
-`InstrumentDefinition` are byte-identical to their siblings' and live in
+`InstrumentDefinition` are byte-identical to the other feeds' and live in
 [`dz-edge-tob`](../dz-edge-tob) and [`dz-edge-refdata`](../dz-edge-refdata).
 Duplicating them here would create two definitions of one layout, which is the
 drift these crates exist to prevent.

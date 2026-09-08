@@ -92,7 +92,7 @@ impl RowSink for FileSink {
     ///
     /// **This sink deliberately does not coalesce.** The column store's sink
     /// holds rows across objects because merge pressure there is set by rows per
-    /// part, and one part per object per lane is the pathological profile. A file
+    /// part, and one part per object per feed is the pathological profile. A file
     /// has no parts and no merges, so holding would buy nothing and cost the two
     /// things this sink exists for: a golden test would have to flush before it
     /// could read, and a `--dry-run` would report objects as pending that it had

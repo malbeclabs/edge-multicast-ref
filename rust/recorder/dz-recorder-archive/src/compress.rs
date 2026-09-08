@@ -34,7 +34,7 @@ pub(crate) struct Faults {
     publications_failed: AtomicU64,
     /// Recovery is not fault, and the two share nothing but a reader.
     ///
-    /// Sweeping a dead run's temporary files and adopting the segments it left
+    /// Removing a dead run's temporary files and adopting the segments it left
     /// is routine work after an unclean restart, and it is worth stating — but
     /// recorded as a fault it puts a message in `last_error` after every such
     /// restart while `publications_failed_total` stays zero, so anything reading
@@ -113,8 +113,9 @@ pub(crate) enum Phase {
 /// scan asked the two sets at two different moments, and a transition landing
 /// between those two reads showed it a path that was in neither — not queued,
 /// so not protected as the newest queued entry, and not in flight, so not
-/// skipped. Its own name then made it evictable, and a sweep whose budget was
-/// over deleted the file the compressor was at that moment reading. The
+/// skipped. Its own name then made it evictable, and a retention pass whose
+/// budget was over deleted the file the compressor was at that moment reading.
+/// The
 /// publication failed with `ENOENT`, the object never landed, and the window it
 /// held was gone.
 ///
@@ -161,7 +162,8 @@ impl Custody {
     /// `None` when the file was left alone because it is in flight. Otherwise
     /// the result of the unlink.
     ///
-    /// The phase a sweep decided on came from a scan that has since had to walk
+    /// The phase a retention pass decided on came from a scan that has since
+    /// had to walk
     /// two directories, stat everything in them and sort the result — plenty of
     /// time for the compressor to pick a queued segment up. Re-reading the
     /// phase here would only narrow that window; taking the lock closes it,
@@ -566,8 +568,9 @@ mod tests {
         // which asked the two sets at two different moments and saw a
         // transition land between the two answers. A segment in neither phase
         // is neither protected as the queue's newest entry nor skipped as one
-        // being read, and its own name then makes it evictable: the sweep
-        // deleted the file the compressor was at that moment compressing, the
+        // being read, and its own name then makes it evictable: the retention
+        // pass deleted the file the compressor was at that moment compressing,
+        // the
         // publication failed on a source that was gone, and the window it held
         // never became an object.
         //

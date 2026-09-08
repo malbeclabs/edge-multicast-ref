@@ -70,8 +70,8 @@ pub const SOURCE_ID: u16 = 41;
 pub struct Recorder {
     datagrams: Rc<RefCell<Vec<Vec<u8>>>>,
     /// The feed's own `Magic`, so that decoding here is the comparison a
-    /// subscriber makes: a datagram misrouted from a sibling feed is refusable
-    /// rather than parseable at the wrong layout.
+    /// subscriber makes: a datagram misrouted from another feed in the family
+    /// is refusable rather than parseable at the wrong layout.
     magic: u16,
 }
 

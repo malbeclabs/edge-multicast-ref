@@ -90,9 +90,9 @@ impl ArchiveWriter {
         // name shape.
         watermark.track_custody(compressor.custody());
         // So a budget that cannot be met reaches last_error rather than being
-        // known only to the sweep that discovered it.
+        // known only to the pass that discovered it.
         watermark.track_faults(Arc::clone(&faults));
-        sweep_dead_temps(&cfg.staging_dir, &faults);
+        remove_dead_temps(&cfg.staging_dir, &faults);
         // Before this run's sequence starts at 0 again, so that a segment a dead
         // run left under a working name is accounted and evictable rather than
         // sitting in staging for ever.
@@ -310,7 +310,8 @@ impl ArchiveWriter {
     }
 
     /// Recovery work an unclean restart made necessary, and which succeeded:
-    /// temporary files swept, segments a dead run left adopted into the budget.
+    /// temporary files removed, segments a dead run left adopted into the
+    /// budget.
     /// Stated separately from [`ArchiveWriter::last_error`], because a recovery
     /// that worked is not a fault and anything reading `last_error` as a health
     /// signal would report one.
@@ -560,7 +561,7 @@ fn close(writer: OpenSegment) -> Result<SegmentStats, SinkError> {
 /// segment — and this runs before this run submits anything, so a `.part` file
 /// here belongs to a process that is gone. Left alone it is unaccounted bytes
 /// nothing will ever reach.
-fn sweep_dead_temps(staging_dir: &Path, faults: &Faults) {
+fn remove_dead_temps(staging_dir: &Path, faults: &Faults) {
     let Ok(entries) = fs::read_dir(staging_dir) else {
         return;
     };

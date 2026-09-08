@@ -189,13 +189,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // than one the send path would actually use is how a feed ends up
     // unjoinable.
     // **Pinned, and a real run is what showed why.** Left unpinned, the
-    // transmitter resolves its source off the route to the group — which is the
-    // discipline, and on this host that route leaves by the default interface.
-    // A subscriber joined on loopback then hears nothing, and the publisher
-    // reports a clean teardown, because nothing in the send path is wrong: the
-    // two ends simply chose different interfaces. That is the failure mode the
-    // pin exists for, and it is invisible to every test that holds a fake
-    // socket.
+    // transmitter resolves its source address off the route to the group —
+    // which is the discipline, and on this host that route leaves by the
+    // default interface. A subscriber joined on loopback then hears nothing,
+    // and the publisher reports a clean teardown, because nothing in the send
+    // path is wrong: the two ends simply chose different interfaces. That is
+    // the failure mode the pin exists for, and it is invisible to every test
+    // that holds a fake socket.
     let pin: Ipv4Addr = arg("--pin")
         .unwrap_or_else(|| "127.0.0.1".to_string())
         .parse()?;

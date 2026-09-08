@@ -24,7 +24,7 @@
 //! two thread pools and two timer wheels. Note where it is *not*: nothing in
 //! this crate starts a runtime or spawns a task. Starting one is the binary's
 //! decision, and a transport that spawned its own reader would put the receive
-//! path behind a channel whose depth nobody chose.
+//! path behind a queue whose depth nobody chose.
 //!
 //! # TLS
 //!

@@ -429,14 +429,14 @@ fn sink_sent(sink: &ClickHouseSink<FakeTransport>) -> Vec<common::Sent> {
 }
 
 // ---------------------------------------------------------------------------
-// Coalescing: what stops one part per object per lane
+// Coalescing: what stops one part per object per feed
 // ---------------------------------------------------------------------------
 
-/// A quiet lane's objects are held and posted together, not one part each.
+/// A quiet feed's objects are held and posted together, not one part each.
 ///
 /// **This is the whole reason the sink holds anything.** An insert is one atomic
 /// block and becomes one part, so a sink that posted per object would write one
-/// part per object per lane — and the quietest lanes measured produce about 700
+/// part per object per feed — and the quietest feeds measured produce about 700
 /// rows in a time-rotated object. Merge pressure is set by rows per part, and it
 /// never appears in a query log, only as the gap between a provider's CPU graph
 /// and query-attributed CPU.
@@ -508,7 +508,7 @@ fn rows_from_several_objects_coalesce_into_one_insert() {
     }
 }
 
-/// The age bound: a lane too quiet to reach the floor is late, never absent.
+/// The age bound: a feed too quiet to reach the floor is late, never absent.
 #[test]
 fn held_rows_are_posted_once_the_delay_is_up() {
     let mut tuned = config();
@@ -542,7 +542,7 @@ fn held_rows_are_posted_once_the_delay_is_up() {
 
 /// The age is measured from the oldest held row, not from the last write.
 ///
-/// A lane that trickles one object per interval would otherwise reset the clock
+/// A feed that trickles one object per interval would otherwise reset the clock
 /// on every arrival and never post at all — which is the failure the bound
 /// exists to prevent, arriving by a longer route.
 #[test]
@@ -655,12 +655,12 @@ fn the_insert_bounds_default_to_the_measured_write_pattern() {
     );
     assert_eq!(
         default.insert_min_rows, 50_000,
-        "the floor that stops one part per object per lane"
+        "the floor that stops one part per object per feed"
     );
     assert_eq!(
         default.insert_max_delay,
         std::time::Duration::from_secs(15 * 60),
-        "so a quiet lane is late rather than absent"
+        "so a quiet feed is late rather than absent"
     );
     // And a floor above the cap is refused, because every insert would then
     // wait for the delay.

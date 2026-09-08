@@ -190,7 +190,7 @@ pub trait RowSink {
     /// landed.
     ///
     /// Called once a pass, including a pass that found no new object: without
-    /// that, a lane quiet enough to produce nothing would hold its last rows
+    /// that, a feed quiet enough to produce nothing would hold its last rows
     /// until something else arrived, which is the opposite of what an age bound
     /// is for.
     ///

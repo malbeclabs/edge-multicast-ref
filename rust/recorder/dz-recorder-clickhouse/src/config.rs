@@ -36,26 +36,26 @@ pub const PASSWORD_FILE_ENV: &str = "DZ_LOADER_CLICKHOUSE_PASSWORD_FILE";
 /// as the gap between a provider's CPU graph and query-attributed CPU. A chatty
 /// inserter raises it silently.
 ///
-/// A million rows lands an object's rows in one or two parts. The busiest lane
+/// A million rows lands an object's rows in one or two parts. The busiest feed
 /// measured on a live recorder is 224,000 datagrams a minute, which is about 1.1
 /// million rows in a time-rotated object.
 pub const DEFAULT_INSERT_MAX_ROWS: usize = 1_000_000;
 
 /// The number of rows below which the sink keeps holding.
 ///
-/// **The bound that stops one part per object per lane**, which is the
+/// **The bound that stops one part per object per feed**, which is the
 /// pathological profile — and the reason a row *maximum* alone is not enough. The
-/// quietest lanes measured run 130 to 150 datagrams a minute, about 700 rows in
+/// quietest feeds measured run 130 to 150 datagrams a minute, about 700 rows in
 /// a time-rotated object, so a sink that posted per object would write a
-/// 700-row part per object per lane for ever. Rows from several objects coalesce
+/// 700-row part per object per feed for ever. Rows from several objects coalesce
 /// into one insert instead.
 pub const DEFAULT_INSERT_MIN_ROWS: usize = 50_000;
 
 /// How long the sink may hold rows short of [`DEFAULT_INSERT_MIN_ROWS`].
 ///
-/// The bound on coalescing, so a quiet lane is **late rather than absent**. At
+/// The bound on coalescing, so a quiet feed is **late rather than absent**. At
 /// the rates above the worst case is roughly 2,000 rows a part, which is far
-/// better than one part per object and is the price of not letting a quiet lane
+/// better than one part per object and is the price of not letting a quiet feed
 /// go unqueryable indefinitely.
 pub const DEFAULT_INSERT_MAX_DELAY: Duration = Duration::from_secs(15 * 60);
 
