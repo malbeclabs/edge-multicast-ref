@@ -331,6 +331,25 @@ nanosecond as an old one's — is the same residual `datagram`'s key carries for
 duplicate whose receive stamp matches to the nanosecond, and nothing here closes
 it either.
 
+**`env` and `feed` are not in it either, and that is the tier's convention
+rather than an omission.** A row here is identified by which rule, over which
+channel instance, over which window, seen from which vantage — and `env` and
+`feed` describe the deployment that wrote the row rather than distinguishing it
+from another. One database holds one environment, which is what `001`'s
+`datagram`, `era`, `segment_coverage` and `sequence_gap` already assume; and a
+feed is recoverable from the channel instance, because no two feeds serve one
+`(source address, destination port)` and `dst_port` is in this key.
+
+Worth stating because it was briefly ambiguous:
+`2026-09-05-recorder-market-data-rows-design.md` (on a branch in review at the
+time of writing) argued at one point that the sort key holds every column in the
+identity block, `env` and `feed` included, which would have made its three
+tables the only ones in the recorder keying on them. That document now states
+the same convention as this one, and says which columns are labels and why. The
+one thing neither table settles is `datagram`'s and `sequence_gap`'s lack of
+`recorder`, which those two do rely on a stamp to cover; that design names it as
+a rebuild to be done on its own.
+
 **A finding attaches to the instance the rule set names, and to no other.** Some
 rules span port roles — a snapshot anchors on one role and the deltas it anchors
 arrive on another, and those are two channel instances because the destination
