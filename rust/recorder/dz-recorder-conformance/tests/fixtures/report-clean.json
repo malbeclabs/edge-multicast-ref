@@ -1,0 +1,20 @@
+{
+  "report_format": 1,
+  "feed": "mbp",
+  "rules": [
+    {
+      "rule_id": "MBP.DELTA.ABSOLUTE_APPLY",
+      "outcome": "pass",
+      "instance": { "source": "192.0.2.1", "channel_id": 3, "dst_port": 40000 },
+      "evidence": { "reset_count": 0, "first_seq": 0, "last_seq": 41 },
+      "detail": ""
+    },
+    {
+      "rule_id": "MBP.SNAP.GROUP_STRUCTURE",
+      "outcome": "pass",
+      "instance": { "source": "192.0.2.1", "channel_id": 4, "dst_port": 40002 },
+      "evidence": { "reset_count": 0, "first_seq": 0, "last_seq": 2 },
+      "detail": ""
+    }
+  ]
+}
