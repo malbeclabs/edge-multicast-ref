@@ -18,7 +18,7 @@ Putting both in one crate would hand every adapter a websocket client's dependen
 ## A feed can have several sources
 
 A venue often carries the same book twice by different paths, and they are not
-the same stream. `[[source]]` in the publisher's document states one block per
+the same source. `[[source]]` in the publisher's document states one block per
 upstream — its name, its transport, and whether it is the one that publishes —
 and the runtime builds **one driver per source**, which is the shape this crate
 was written for: the connection, the backoff and the rate limit are per upstream,
@@ -31,7 +31,7 @@ which every source shares.
 What the runtime does **not** do is merge them. Every source reaches one adapter
 and each payload carries its `ConnectionId`, so reconciling two views of one book
 is the venue's — the same rule as the book state machine, and what one shipped
-publisher already does with two validator streams.
+publisher already does with two validator sources.
 
 ## The driver is where the two halves meet
 
