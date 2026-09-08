@@ -76,7 +76,9 @@ loader that quietly spoke plain HTTP to an endpoint an operator wrote as `https`
 would put the password on the wire in the clear having been told not to. The
 failure mode is a startup failure, which is the good kind — but it is a startup
 failure, so the build and deploy pipeline has to enable the feature *before* the
-unit is enabled, and `--check` is where it is caught.
+unit is enabled, and `--check` is where it is caught. The released asset is that
+pipeline's answer and carries the feature already, so this is a thing to do only
+for a binary built by hand.
 
 **Apply `004_recorder_loader_user.sql`, with the password as a parameter.** The
 account is checked in beside the schema and bounded at creation: `INSERT` on the
@@ -93,6 +95,33 @@ write-path workload and should be cheap; what makes an unbounded account
 dangerous is not this process misbehaving but the queries somebody later points
 at the rows it wrote. A workload added without limits is discovered weeks later
 by someone reading a graph, and by then it is a table too big to fix cheaply.
+
+## Releases, and what the version number is
+
+`dz-recorder-load release` in `.github/workflows/` publishes
+`dz-recorder-load_<version>_linux_amd64.tar.gz` under the tag
+`dz-recorder-load/<version>`, built on Ubuntu 24.04 with `--features tls` so
+that one asset serves both an `http://` destination and an `https://` one. The
+unit and `loader.example.toml` travel in the tarball beside the binary, because
+a unit fetched from a branch is the unpinned copy the release exists to replace.
+
+**The version is the loader's own, and does not track `dz-recorder`'s.** The
+crate states it in its own `Cargo.toml` rather than taking
+`version.workspace = true`, and the reason is what a pin is for: a number that
+advanced because the recorder was bumped tells an operator comparing two pins
+nothing about whether the loader changed. So a loader and a recorder carrying
+different numbers are not a mismatched pair, and equal numbers are not a matched
+one. What the two must agree about is the archive format, and every object
+states that in its Section Header block and the manifest beside it — where this
+process checks it, and refuses.
+
+**Neither the unit nor `loader.example.toml` names a version**, deliberately.
+Both would then be a second number somebody keeps in step with the installed
+binary by hand, and nothing would enforce it — the failure the paragraph above
+is arranged to avoid, reintroduced one directory down. The installed binary
+answers the question itself: `dz-recorder-load --version` reports the version
+and the commit it was built from, and `ExecStartPre` already runs that binary at
+every start.
 
 ## What the sink sends, and why it holds
 

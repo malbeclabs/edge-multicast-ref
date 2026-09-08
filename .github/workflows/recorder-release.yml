@@ -77,10 +77,28 @@ jobs:
           fi
           # The binary reports CARGO_PKG_VERSION, so a tag the source code does not
           # carry would publish an asset whose --version contradicts its name.
+          # Read from the crate's own `[package]` and never from the workspace:
+          # they are allowed to differ, and this number is the one an operator
+          # pins. Reading the workspace is what made releasing this binary move
+          # every library crate's version, which is the thing RELEASING.md is
+          # written to prevent.
           EXPECTED="${VERSION#v}"
-          GOT=$(awk -F\" '/^\[workspace.package\]/{s=1} s && /^version[[:space:]]*=/{print $2; exit}' Cargo.toml)
+          MANIFEST=recorder/dz-recorder/Cargo.toml
+          GOT=$(awk -F\" '
+            /^\[package\]/ {s=1; next}
+            /^\[/          {s=0}
+            s && /^version[[:space:]]*=/ {print $2; exit}
+          ' "${MANIFEST}")
+          # `version.workspace = true` does not match the key above, so a manifest
+          # that stops stating its own version lands here rather than as a
+          # puzzling mismatch against an empty string.
+          if [[ -z "${GOT}" ]]; then
+            echo "${MANIFEST} states no literal version in [package]; the" >&2
+            echo "recorder's release pin cannot be re-coupled to the workspace." >&2
+            exit 1
+          fi
           if [[ "${GOT}" != "${EXPECTED}" ]]; then
-            echo "workspace version is '${GOT}', expected '${EXPECTED}' — bump it on main first." >&2
+            echo "dz-recorder version is '${GOT}', expected '${EXPECTED}' — bump it on main first." >&2
             exit 1
           fi
           # An existing tag is only a conflict when it names a different commit.
@@ -216,10 +234,16 @@ jobs:
           set -euo pipefail
           PRERELEASE_ARGS=()
           [[ "${VERSION}" == *-* ]] && PRERELEASE_ARGS+=(--prerelease)
+          # `--latest=false`, because gh's default is "automatic based on date and
+          # version" and the release streams here share one tag namespace. Left
+          # unset, this binary's tarball takes the Latest badge from the `v*`
+          # library tag a consumer is meant to pin, which is what happened at
+          # v0.1.1.
           gh release create "dz-recorder/${VERSION}" \
             --repo "${GITHUB_REPOSITORY}" \
             --title "dz-recorder ${VERSION}" \
             --generate-notes \
+            --latest=false \
             "${PRERELEASE_ARGS[@]}" \
             "$DIST/${STAGE_NAME}.tar.gz" \
             "$DIST/${STAGE_NAME}.tar.gz.sha256"
