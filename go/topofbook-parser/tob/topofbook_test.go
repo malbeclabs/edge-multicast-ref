@@ -7,20 +7,20 @@ import (
 	"time"
 )
 
-// buildFrame constructs a raw Top-of-Book frame from a header and message payloads.
-func buildFrame(channelID uint8, seq uint64, sendTS uint64, msgs ...[]byte) []byte {
-	return buildFrameWithReset(channelID, seq, sendTS, 0, msgs...)
+// buildDatagram constructs a raw Top-of-Book datagram from a header and message payloads.
+func buildDatagram(channelID uint8, seq uint64, sendTS uint64, msgs ...[]byte) []byte {
+	return buildDatagramWithReset(channelID, seq, sendTS, 0, msgs...)
 }
 
-func buildFrameWithReset(channelID uint8, seq uint64, sendTS uint64, resetCount uint8, msgs ...[]byte) []byte {
+func buildDatagramWithReset(channelID uint8, seq uint64, sendTS uint64, resetCount uint8, msgs ...[]byte) []byte {
 	headerSize := 24
 	bodySize := 0
 	for _, m := range msgs {
 		bodySize += len(m)
 	}
-	frameLen := headerSize + bodySize
+	datagramLen := headerSize + bodySize
 
-	buf := make([]byte, frameLen)
+	buf := make([]byte, datagramLen)
 	// Magic "DZ" = 0x445A little-endian → bytes 0x5A, 0x44
 	buf[0] = 0x5A
 	buf[1] = 0x44
@@ -30,7 +30,7 @@ func buildFrameWithReset(channelID uint8, seq uint64, sendTS uint64, resetCount 
 	binary.LittleEndian.PutUint64(buf[12:], sendTS)
 	buf[20] = uint8(len(msgs)) // msg count
 	buf[21] = resetCount
-	binary.LittleEndian.PutUint16(buf[22:], uint16(frameLen))
+	binary.LittleEndian.PutUint16(buf[22:], uint16(datagramLen))
 
 	off := headerSize
 	for _, m := range msgs {
@@ -140,25 +140,25 @@ func putInt64LE(buf []byte, v int64) {
 	binary.LittleEndian.PutUint64(buf, uint64(v))
 }
 
-// decodeOneQuoteWithTS builds and parses a single quote frame and returns the
-// decoded Record along with the source and send timestamps that were encoded.
+// decodeOneQuoteWithTS builds and parses a single quote datagram and returns the
+// decoded Record along with the source_ts and send timestamps that were encoded.
 func decodeOneQuoteWithTS(t *testing.T) (Record, uint64, uint64) {
 	t.Helper()
 	p := NewTopOfBookParser()
 
-	// Use distinct values so source != send.
+	// Use distinct values so source_ts != send_ts.
 	sourceNS := uint64(1_777_050_000_111_000_000)
 	sendNS := uint64(1_777_050_000_222_000_000)
 
 	instDef := buildInstrumentDef(42, "BTC-USDT", "BTC", "USDT", -2, -8)
-	defFrame := buildFrame(1, 100, sendNS, instDef)
-	if _, err := p.Parse(defFrame, PacketMeta{}); err != nil {
+	defDatagram := buildDatagram(1, 100, sendNS, instDef)
+	if _, err := p.Parse(defDatagram, PacketMeta{}); err != nil {
 		t.Fatalf("parse instrument def: %v", err)
 	}
 
 	quote := buildQuote(42, 1, sourceNS, 6743250, 125000000, 6743300, 80000000, 0)
-	quoteFrame := buildFrame(1, 101, sendNS, quote)
-	records, err := p.Parse(quoteFrame, PacketMeta{})
+	quoteDatagram := buildDatagram(1, 101, sendNS, quote)
+	records, err := p.Parse(quoteDatagram, PacketMeta{})
 	if err != nil {
 		t.Fatalf("parse quote: %v", err)
 	}
@@ -183,9 +183,9 @@ func TestTopOfBookParser_InstrumentDefinition(t *testing.T) {
 
 	ts := uint64(time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC).UnixNano())
 	instDef := buildInstrumentDef(42, "BTC-USDT", "BTC", "USDT", -2, -8)
-	frame := buildFrame(1, 100, ts, instDef)
+	datagram := buildDatagram(1, 100, ts, instDef)
 
-	records, err := p.Parse(frame, PacketMeta{})
+	records, err := p.Parse(datagram, PacketMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -227,8 +227,8 @@ func TestTopOfBookParser_QuoteWithDefinition(t *testing.T) {
 
 	// First send instrument definition.
 	instDef := buildInstrumentDef(42, "BTC-USDT", "BTC", "USDT", -2, -8)
-	frame1 := buildFrame(1, 100, ts, instDef)
-	_, err := p.Parse(frame1, PacketMeta{})
+	datagram1 := buildDatagram(1, 100, ts, instDef)
+	_, err := p.Parse(datagram1, PacketMeta{})
 	if err != nil {
 		t.Fatalf("error parsing instrument def: %v", err)
 	}
@@ -236,9 +236,9 @@ func TestTopOfBookParser_QuoteWithDefinition(t *testing.T) {
 	// Now send a quote.
 	srcTS := uint64(time.Date(2026, 4, 10, 12, 0, 1, 0, time.UTC).UnixNano())
 	quote := buildQuote(42, 1, srcTS, 6743250, 125000000, 6743300, 80000000, 0)
-	frame2 := buildFrame(1, 101, ts, quote)
+	datagram2 := buildDatagram(1, 101, ts, quote)
 
-	records, err := p.Parse(frame2, PacketMeta{})
+	records, err := p.Parse(datagram2, PacketMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -306,9 +306,9 @@ func TestTopOfBookParser_ResetCount(t *testing.T) {
 
 	ts := uint64(time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC).UnixNano())
 	instDef := buildInstrumentDef(42, "BTC-USDT", "BTC", "USDT", -2, -8)
-	frame := buildFrameWithReset(1, 100, ts, 7, instDef)
+	datagram := buildDatagramWithReset(1, 100, ts, 7, instDef)
 
-	records, err := p.Parse(frame, PacketMeta{})
+	records, err := p.Parse(datagram, PacketMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -328,9 +328,9 @@ func TestTopOfBookParser_QuoteBuffering(t *testing.T) {
 	// Send a quote BEFORE the instrument definition — should be buffered.
 	srcTS := uint64(time.Date(2026, 4, 10, 12, 0, 1, 0, time.UTC).UnixNano())
 	quote := buildQuote(42, 1, srcTS, 6743250, 125000000, 6743300, 80000000, 0)
-	frame1 := buildFrame(1, 101, ts, quote)
+	datagram1 := buildDatagram(1, 101, ts, quote)
 
-	records, err := p.Parse(frame1, PacketMeta{})
+	records, err := p.Parse(datagram1, PacketMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -343,9 +343,9 @@ func TestTopOfBookParser_QuoteBuffering(t *testing.T) {
 
 	// Now send the instrument definition — buffered quote should flush.
 	instDef := buildInstrumentDef(42, "BTC-USDT", "BTC", "USDT", -2, -8)
-	frame2 := buildFrame(1, 102, ts, instDef)
+	datagram2 := buildDatagram(1, 102, ts, instDef)
 
-	records, err = p.Parse(frame2, PacketMeta{})
+	records, err = p.Parse(datagram2, PacketMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -365,9 +365,9 @@ func TestTopOfBookParser_QuoteBuffering(t *testing.T) {
 	if records[1].Fields["send_timestamp_ns"] != ts {
 		t.Errorf("expected flushed quote send_timestamp_ns %d, got %v", ts, records[1].Fields["send_timestamp_ns"])
 	}
-	// Flushed buffered records must carry the top-level source/send ns fields the
-	// bot reads for latency (regression: the flush path once left these zero,
-	// producing 1970-epoch publisher_send_ts in ClickHouse).
+	// Flushed buffered records must carry the top-level source_ts/send_ts ns fields the
+	// book-builder reads for latency (regression: the flush path once left these zero,
+	// producing Unix-epoch publisher_send_ts in ClickHouse).
 	if records[1].SendTSNS != ts {
 		t.Errorf("expected flushed quote SendTSNS %d, got %d", ts, records[1].SendTSNS)
 	}
@@ -391,11 +391,11 @@ func TestTopOfBookParser_RecordIncludesPacketMeta(t *testing.T) {
 		Port:            5000,
 		Channel:         "marketdata",
 	}
-	frame := buildFrame(1, 10, srcTS,
+	datagram := buildDatagram(1, 10, srcTS,
 		buildInstrumentDef(42, "BTC", "BTC", "USD", -2, -8),
 		buildQuote(42, 1, srcTS, 100, 200, 300, 400, 0),
 	)
-	records, err := p.Parse(frame, meta)
+	records, err := p.Parse(datagram, meta)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -422,8 +422,8 @@ func TestTopOfBookParser_BufferedRecordPreservesOriginalPacketMeta(t *testing.T)
 	quoteRecv := time.Unix(0, int64(srcTS+1_000)).UTC()
 	refRecv := time.Unix(0, int64(srcTS+9_000)).UTC()
 
-	quoteFrame := buildFrame(1, 100, srcTS, buildQuote(42, 1, srcTS, 100, 200, 300, 400, 0))
-	records, err := p.Parse(quoteFrame, PacketMeta{
+	quoteDatagram := buildDatagram(1, 100, srcTS, buildQuote(42, 1, srcTS, 100, 200, 300, 400, 0))
+	records, err := p.Parse(quoteDatagram, PacketMeta{
 		RecvTimestamp:   quoteRecv,
 		RecvTSKind:      "kernel_udp_software",
 		PublisherSource: "10.0.0.1",
@@ -438,8 +438,8 @@ func TestTopOfBookParser_BufferedRecordPreservesOriginalPacketMeta(t *testing.T)
 		t.Fatalf("records before refdata = %d, want 0", len(records))
 	}
 
-	refFrame := buildFrame(2, 101, srcTS, buildInstrumentDef(42, "BTC", "BTC", "USD", -2, -8))
-	records, err = p.Parse(refFrame, PacketMeta{
+	refDatagram := buildDatagram(2, 101, srcTS, buildInstrumentDef(42, "BTC", "BTC", "USD", -2, -8))
+	records, err = p.Parse(refDatagram, PacketMeta{
 		RecvTimestamp:   refRecv,
 		RecvTSKind:      "kernel_udp_software",
 		PublisherSource: "10.0.0.1",
@@ -471,15 +471,15 @@ func TestTopOfBookParser_Trade(t *testing.T) {
 
 	// Register instrument first.
 	instDef := buildInstrumentDef(42, "ETH-USDT", "ETH", "USDT", -2, -6)
-	frame1 := buildFrame(1, 100, ts, instDef)
-	p.Parse(frame1, PacketMeta{})
+	datagram1 := buildDatagram(1, 100, ts, instDef)
+	p.Parse(datagram1, PacketMeta{})
 
 	// Send a trade (sell aggressor).
 	srcTS := uint64(time.Date(2026, 4, 10, 12, 0, 5, 0, time.UTC).UnixNano())
 	trade := buildTrade(42, 1, srcTS, 350025, 1500000, 2)
-	frame2 := buildFrame(1, 101, ts, trade)
+	datagram2 := buildDatagram(1, 101, ts, trade)
 
-	records, err := p.Parse(frame2, PacketMeta{})
+	records, err := p.Parse(datagram2, PacketMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -507,9 +507,9 @@ func TestTopOfBookParser_Heartbeat(t *testing.T) {
 
 	ts := uint64(time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC).UnixNano())
 	hb := buildHeartbeat(3, ts)
-	frame := buildFrame(3, 50, ts, hb)
+	datagram := buildDatagram(3, 50, ts, hb)
 
-	records, err := p.Parse(frame, PacketMeta{})
+	records, err := p.Parse(datagram, PacketMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -531,13 +531,13 @@ func TestTopOfBookParser_ChannelReset(t *testing.T) {
 
 	// Add an instrument definition.
 	instDef := buildInstrumentDef(42, "BTC-USDT", "BTC", "USDT", -2, -8)
-	frame1 := buildFrame(1, 100, ts, instDef)
-	p.Parse(frame1, PacketMeta{})
+	datagram1 := buildDatagram(1, 100, ts, instDef)
+	p.Parse(datagram1, PacketMeta{})
 
 	// Channel reset should clear instruments.
 	reset := buildChannelReset(ts)
-	frame2 := buildFrame(1, 101, ts, reset)
-	records, err := p.Parse(frame2, PacketMeta{})
+	datagram2 := buildDatagram(1, 101, ts, reset)
+	records, err := p.Parse(datagram2, PacketMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -551,8 +551,8 @@ func TestTopOfBookParser_ChannelReset(t *testing.T) {
 	// A quote for the same instrument should now be buffered (definition was cleared).
 	srcTS := uint64(time.Date(2026, 4, 10, 12, 0, 1, 0, time.UTC).UnixNano())
 	quote := buildQuote(42, 1, srcTS, 100, 200, 300, 400, 0)
-	frame3 := buildFrame(1, 102, ts, quote)
-	records, err = p.Parse(frame3, PacketMeta{})
+	datagram3 := buildDatagram(1, 102, ts, quote)
+	records, err = p.Parse(datagram3, PacketMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -564,19 +564,19 @@ func TestTopOfBookParser_ChannelReset(t *testing.T) {
 	}
 }
 
-func TestTopOfBookParser_MultipleMessagesInFrame(t *testing.T) {
+func TestTopOfBookParser_MultipleMessagesInDatagram(t *testing.T) {
 	p := NewTopOfBookParser()
 
 	ts := uint64(time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC).UnixNano())
 
-	// Build a frame with an instrument definition + a quote for that instrument.
+	// Build a datagram with an instrument definition + a quote for that instrument.
 	instDef := buildInstrumentDef(1, "SOL-USDT", "SOL", "USDT", -4, -6)
 	srcTS := uint64(time.Date(2026, 4, 10, 12, 0, 1, 0, time.UTC).UnixNano())
 	quote := buildQuote(1, 1, srcTS, 1850000, 5000000, 1860000, 3000000, 0)
 
-	frame := buildFrame(1, 200, ts, instDef, quote)
+	datagram := buildDatagram(1, 200, ts, instDef, quote)
 
-	records, err := p.Parse(frame, PacketMeta{})
+	records, err := p.Parse(datagram, PacketMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -619,15 +619,15 @@ func TestTopOfBookParser_SnapshotFlag(t *testing.T) {
 
 	// Register instrument.
 	instDef := buildInstrumentDef(1, "BTC-USDT", "BTC", "USDT", -2, -8)
-	frame1 := buildFrame(1, 100, ts, instDef)
-	p.Parse(frame1, PacketMeta{})
+	datagram1 := buildDatagram(1, 100, ts, instDef)
+	p.Parse(datagram1, PacketMeta{})
 
 	// Send a quote with snapshot flag set (flags bit 0 = 1).
 	srcTS := uint64(time.Date(2026, 4, 10, 12, 0, 1, 0, time.UTC).UnixNano())
 	quote := buildQuote(1, 1, srcTS, 100, 200, 300, 400, 1) // flags=1 → snapshot
-	frame2 := buildFrame(1, 101, ts, quote)
+	datagram2 := buildDatagram(1, 101, ts, quote)
 
-	records, err := p.Parse(frame2, PacketMeta{})
+	records, err := p.Parse(datagram2, PacketMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -651,9 +651,9 @@ func TestTopOfBookParser_UnknownMessageTypeSkipped(t *testing.T) {
 	// rest is zeros
 
 	hb := buildHeartbeat(1, ts)
-	frame := buildFrame(1, 100, ts, unknownMsg, hb)
+	datagram := buildDatagram(1, 100, ts, unknownMsg, hb)
 
-	records, err := p.Parse(frame, PacketMeta{})
+	records, err := p.Parse(datagram, PacketMeta{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -697,10 +697,10 @@ func TestTopOfBookParser_GarbageData(t *testing.T) {
 		{"frame length mismatch", func() []byte {
 			ts := uint64(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).UnixNano())
 			hb := buildHeartbeat(1, ts)
-			frame := buildFrame(1, 1, ts, hb)
+			datagram := buildDatagram(1, 1, ts, hb)
 			// Corrupt frame length to be larger than datagram.
-			binary.LittleEndian.PutUint16(frame[22:], uint16(len(frame)+100))
-			return frame
+			binary.LittleEndian.PutUint16(datagram[22:], uint16(len(datagram)+100))
+			return datagram
 		}()},
 		{"random bytes", []byte{0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x11, 0x22, 0x33,
 			0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB,

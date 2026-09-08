@@ -25,7 +25,7 @@ func readySnapshotInstrument(id uint32, symbol string) *Instrument {
 }
 
 // Two channels sharing an instrument ID must not collide. A dirty map keyed by
-// bare uint32 — as the sibling market-by-order bot uses — would fold these two
+// bare uint32 — as the market-by-order book-builder uses — would fold these two
 // books into one entry and persist whichever flushed last.
 func TestSnapshotWriter_KeysByChannelAndInstrument(t *testing.T) {
 	st := newStubEnqueuer()
@@ -196,7 +196,7 @@ func TestSnapshotWriter_NilClientIsNoOp(t *testing.T) {
 
 // With persistence disabled nothing is enqueued, so snapshot_writes_total must
 // stay at zero. Incrementing it unconditionally reported writes that never
-// happened — a metric with no writer behind it, which is precisely what this bot
+// happened — a metric with no writer behind it, which is precisely what this book-builder
 // refuses to register.
 func TestSnapshotWriter_NilClientCountsNoWrites(t *testing.T) {
 	m := NewMetrics("t", "t")

@@ -8,7 +8,7 @@ import "context"
 //
 // Dispatch is NOT safe for concurrent callers: it mutates resetCount/
 // snapshotRoute/seqLast/manifest without locks, on the assumption that the
-// only caller is the synchronous bot read loop.
+// only caller is the synchronous book-builder read loop.
 type Coordinator struct {
 	ctx     context.Context // used to escape barrier/fence ack waits on shutdown
 	shards  []*Shard
@@ -47,7 +47,7 @@ func NewCoordinator(ctx context.Context, shards []*Shard, eventsW *EventsWriter,
 	}
 }
 
-// Dispatch implements Dispatcher. Called synchronously from the bot read loop.
+// Dispatch implements Dispatcher. Called synchronously from the book-builder read loop.
 func (c *Coordinator) Dispatch(rec Record) {
 	// Channel-reset barrier: reset_count change. (Implemented in Task 7.)
 	if prev, seen := c.resetCount[rec.ChannelID]; seen && rec.ResetCount != prev {
@@ -105,10 +105,10 @@ func recPtr(rec Record) *Record {
 // --- barrier / fence / channel-health ---
 
 // runResetBarrier executes the in-band FIFO reset barrier, then routes the
-// held triggering record as the first new-era frame.
+// held triggering record as the first new-era datagram.
 //
 // Barrier sends and ack-waits are ctx-aware: if ctx is cancelled mid-barrier
-// (the bot is shutting down), we abandon the barrier and return without
+// (the book-builder is shutting down), we abandon the barrier and return without
 // routing the held record. No consistency requirement to uphold post-shutdown.
 func (c *Coordinator) runResetBarrier(held Record) {
 	ch := held.ChannelID
@@ -141,7 +141,7 @@ func (c *Coordinator) runResetBarrier(held Record) {
 	c.manifest = ManifestState{}
 	c.resetCount[ch] = held.ResetCount
 
-	// Route the held record as the first new-era frame, via the full classifier.
+	// Route the held record as the first new-era datagram, via the full classifier.
 	// resetCount[ch] now equals held.ResetCount, so this re-entry into Dispatch
 	// falls through to normal classification.
 	c.Dispatch(held)

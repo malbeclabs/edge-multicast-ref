@@ -14,7 +14,7 @@ import (
 
 const metricsNamespace = "dz_mbp_bot"
 
-// Metrics is the bot's full Prometheus metric set. Replaces the stub in bot.go.
+// Metrics is the book-builder's full Prometheus metric set. Replaces the stub in bot.go.
 type Metrics struct {
 	registry *prometheus.Registry
 

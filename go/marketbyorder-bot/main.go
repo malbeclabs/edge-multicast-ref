@@ -130,7 +130,7 @@ func main() {
 // The guard is load-bearing, not defensive style. A typed nil pointer stored
 // in an interface is NOT == nil, so assigning a nil *ClickhouseClient straight
 // into an enqueuer field makes the writers' `ch == nil` fast path false
-// forever — including under the default --clickhouse-url="", where the bot
+// forever — including under the default --clickhouse-url="", where the book-builder
 // would then build and immediately discard a row map for every record, and
 // SnapshotWritesTotal would count writes that never happened.
 func enqueuerFor(ch *ClickhouseClient) enqueuer {

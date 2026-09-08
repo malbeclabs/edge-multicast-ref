@@ -41,7 +41,7 @@ func TestMetricsNamespaceAndDefectCounters(t *testing.T) {
 
 	// A CounterVec reports no metric family until a label set is observed, so
 	// touch each vec before asserting on it.
-	m.FrameSeqGaps.WithLabelValues("mktdata", "10.0.0.1", "1").Inc()
+	m.DatagramSeqGaps.WithLabelValues("mktdata", "10.0.0.1", "1").Inc()
 	m.SnapshotFlagMismatch.WithLabelValues("mktdata").Inc()
 	m.MalformedMessages.WithLabelValues("bookclear_scope_side").Inc()
 	m.SkippedMessages.WithLabelValues("unknown_type").Inc()
@@ -56,12 +56,12 @@ func TestMetricsNamespaceAndDefectCounters(t *testing.T) {
 		mustContain(t, names, want)
 	}
 
-	// This module must not register anything under a sibling feed's namespace.
-	// Copying metrics.go from marketbyorder-parser and missing the namespace
-	// constant is the exact mistake this guards.
+	// This module must not register anything under the namespace of another feed
+	// in the DoubleZero Edge family. Copying metrics.go from marketbyorder-parser
+	// and missing the namespace constant is the exact mistake this guards.
 	for _, n := range names {
 		if strings.HasPrefix(n, "dz_mbo_") || strings.HasPrefix(n, "dz_tob_") {
-			t.Errorf("metric %s registered under a sibling feed namespace", n)
+			t.Errorf("metric %s registered under another family feed's namespace", n)
 		}
 	}
 }
@@ -72,19 +72,19 @@ func TestMetricsNamespaceAndDefectCounters(t *testing.T) {
 func TestDatagramsTotal_LabelsSchemaVersion(t *testing.T) {
 	m := NewMetrics("test", "test")
 
-	m.FramesTotal.WithLabelValues("refdata", "1").Inc()
-	m.FramesTotal.WithLabelValues("refdata", "3").Inc()
-	m.FramesTotal.WithLabelValues("refdata", "3").Inc()
+	m.DatagramsTotal.WithLabelValues("refdata", "1").Inc()
+	m.DatagramsTotal.WithLabelValues("refdata", "3").Inc()
+	m.DatagramsTotal.WithLabelValues("refdata", "3").Inc()
 
 	// A CounterVec reports no metric family until a label set is observed
 	// (see the comment above), so the registration check runs after the
 	// increments rather than before.
 	mustContain(t, gatheredNames(t, m), "dz_mbp_parser_datagrams_total")
 
-	if got := readCounterVec(t, m.FramesTotal, "refdata", "1"); got != 1 {
-		t.Errorf("v1 frames: got %v want 1", got)
+	if got := readCounterVec(t, m.DatagramsTotal, "refdata", "1"); got != 1 {
+		t.Errorf("v1 datagrams: got %v want 1", got)
 	}
-	if got := readCounterVec(t, m.FramesTotal, "refdata", "3"); got != 2 {
-		t.Errorf("v3 frames: got %v want 2", got)
+	if got := readCounterVec(t, m.DatagramsTotal, "refdata", "3"); got != 2 {
+		t.Errorf("v3 datagrams: got %v want 2", got)
 	}
 }

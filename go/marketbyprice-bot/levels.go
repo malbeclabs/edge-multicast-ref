@@ -43,7 +43,7 @@ type LevelSnapshot struct {
 //
 // Rank is derived here by sorting price keys, never stored: the spec forbids
 // keying book state on rank, because a positional key is invalidated by every
-// insertion at a better price. Unlike the sibling market-by-order bot there is
+// insertion at a better price. Unlike the market-by-order book-builder there is
 // no aggregation step — this feed is already price-aggregated on the wire, so a
 // level is a direct read of the map.
 func ComputeLevels(inst *Instrument, n int) LevelSnapshot {

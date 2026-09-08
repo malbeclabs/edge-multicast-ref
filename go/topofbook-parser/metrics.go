@@ -29,10 +29,10 @@ type metrics struct {
 	registry *prometheus.Registry
 
 	// Ingress (UDP → parser)
-	ingressPackets    *prometheus.CounterVec
-	ingressBytes      *prometheus.CounterVec
-	parseErrors       *prometheus.CounterVec
-	frameHeaderErrors *prometheus.CounterVec
+	ingressPackets       *prometheus.CounterVec
+	ingressBytes         *prometheus.CounterVec
+	parseErrors          *prometheus.CounterVec
+	datagramHeaderErrors *prometheus.CounterVec
 
 	// Decoded output
 	records         *prometheus.CounterVec
@@ -47,15 +47,15 @@ type metrics struct {
 	sourceLatency *prometheus.HistogramVec
 	sendLatency   *prometheus.HistogramVec
 
-	// Frame header sequence gap tracking (real UDP datagram loss).
-	frameSeqGaps  *prometheus.CounterVec
-	framesMissing *prometheus.CounterVec
+	// Datagram header sequence gap tracking (real UDP datagram loss).
+	datagramSeqGaps  *prometheus.CounterVec
+	datagramsMissing *prometheus.CounterVec
 
-	// framesTotal counts successfully parsed frames by port and wire schema
+	// datagramsTotal counts successfully parsed datagrams by port and wire schema
 	// version. The version label is what makes a publisher's v1-to-v3 cutover
 	// observable: v3 climbs, v1 goes flat, and v1 reaching zero is when the
 	// legacy decode path can be retired.
-	framesTotal *prometheus.CounterVec // labels: port, schema_version
+	datagramsTotal *prometheus.CounterVec // labels: port, schema_version
 
 	// Socket sink
 	socketClients     prometheus.Gauge
@@ -87,10 +87,10 @@ func newMetrics() *metrics {
 
 	m.parseErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "dz_subscriber_parse_errors_total",
-		Help: "Frames that failed to decode, by channel and reason.",
+		Help: "Datagrams that failed to decode, by channel and reason.",
 	}, []string{"channel", "reason"})
 
-	m.frameHeaderErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.datagramHeaderErrors = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "dz_subscriber_datagram_header_errors_total",
 		Help: "Datagrams rejected by header validation, by reason.",
 	}, []string{"reason"})
@@ -132,17 +132,17 @@ func newMetrics() *metrics {
 		Buckets: latencyBuckets,
 	}, []string{"type"})
 
-	m.frameSeqGaps = prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.datagramSeqGaps = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "dz_subscriber_datagram_seq_gaps_total",
 		Help: "Number of UDP datagram header sequence discontinuities (real datagram loss events), by port and publisher.",
 	}, []string{"port", "source_ip", "channel_id"})
 
-	m.framesMissing = prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.datagramsMissing = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "dz_subscriber_datagrams_missing_total",
 		Help: "Total UDP datagrams missing (sum of gap magnitudes in header seq), by port and publisher.",
 	}, []string{"port", "source_ip", "channel_id"})
 
-	m.framesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	m.datagramsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "dz_subscriber_datagrams_total",
 		Help: "Successfully parsed datagrams, by port and wire schema version.",
 	}, []string{"port", "schema_version"})
@@ -175,11 +175,11 @@ func newMetrics() *metrics {
 	})
 
 	reg.MustRegister(
-		m.ingressPackets, m.ingressBytes, m.parseErrors, m.frameHeaderErrors,
+		m.ingressPackets, m.ingressBytes, m.parseErrors, m.datagramHeaderErrors,
 		m.records, m.sinkWriteErrors,
 		m.buffered, m.bufferDrops, m.instrumentsTracked,
 		m.sourceLatency, m.sendLatency,
-		m.frameSeqGaps, m.framesMissing, m.framesTotal,
+		m.datagramSeqGaps, m.datagramsMissing, m.datagramsTotal,
 		m.socketClients, m.socketClientDrops, m.socketRecordsSent,
 		m.buildInfo, m.uptime,
 	)

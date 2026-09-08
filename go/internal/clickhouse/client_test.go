@@ -157,7 +157,7 @@ func TestClient_DropsWhenBufferFull(t *testing.T) {
 	defer srv.Close()
 
 	obs := newRecordingObserver()
-	// Never Run(), so nothing drains the channel.
+	// Never Run(), so nothing drains the Go channel.
 	c, err := New(srv.URL, "testdb", []BatcherConfig{
 		{Table: "events", BatchSize: 100, BatchInterval: time.Hour, BufferSize: 2},
 	}, obs)
@@ -240,7 +240,7 @@ func TestClient_FlushesOnShutdown(t *testing.T) {
 }
 
 // An empty URL disables persistence: New returns a nil Client whose methods are
-// safe no-ops, so the bot runs exactly as it does without ClickHouse.
+// safe no-ops, so the book-builder runs exactly as it does without ClickHouse.
 func TestClient_EmptyURLDisables(t *testing.T) {
 	c, err := New("", "testdb", nil, nil)
 	if err != nil {
@@ -259,7 +259,7 @@ func TestClient_EmptyURLDisables(t *testing.T) {
 // A non-positive BatchInterval panicked time.NewTicker inside a batcher
 // goroutine — unrecovered, so --clickhouse-batch-interval=0 killed the process
 // after startup had already reported success. A non-positive BufferSize is
-// quieter but no better: an unbuffered channel makes Enqueue's deliberately
+// quieter but no better: an unbuffered Go channel makes Enqueue's deliberately
 // non-blocking send drop very nearly every row.
 func TestNew_RejectsNonPositiveBatcherConfig(t *testing.T) {
 	valid := BatcherConfig{Table: "events", BatchSize: 10, BatchInterval: time.Second, BufferSize: 10}

@@ -40,7 +40,7 @@ magic          u16   0x445A ("DZ", on wire: 5A 44)
 schema_ver     u8    1 or 3 (no version 2; see InstrumentDefinition below)
 channel_id     u8
 sequence       u64   monotonic per publisher
-send_ts        u64   publisher wall clock, ns since epoch
+send_ts        u64   publisher wall clock, ns since the Unix epoch
 msg_count      u8
 reserved       u8
 frame_length   u16
@@ -59,7 +59,7 @@ flags          u16   (0x0001 = snapshot)
 | ID | Name | Body bytes | Channel | Notes |
 |---:|---|---:|---|---|
 | 0x01 | Heartbeat | 16 | either | Idle liveness |
-| 0x02 | InstrumentDefinition | 80 (v1) / 130 (v3) | refdata | instrument_id → source_id, symbol, price/qty exponents. Both lengths are exact, matching the Schema Version in the frame header — a frame whose declared version disagrees with the message length it actually carries is rejected, not guessed at. There is no version 2 |
+| 0x02 | InstrumentDefinition | 80 (v1) / 130 (v3) | refdata | instrument_id → source_id, symbol, price/qty exponents. Both lengths are exact, matching the Schema Version in the datagram header — a datagram whose declared version disagrees with the message length it actually carries is rejected, not guessed at. There is no version 2 |
 | 0x03 | Quote (BBO) | 60 | marketdata | Best bid/ask per instrument |
 | 0x04 | Trade | 52 | marketdata | Single trade |
 | 0x05 | ChannelReset | 12 | either | Publisher startup — drop cached state |
@@ -74,14 +74,14 @@ Fixed-point integers with per-instrument exponents from InstrumentDefinition. `f
 
 Unknown message types are skipped, not rejected. Schema version is checked — unsupported versions are rejected cleanly.
 
-## Architecture and source map
+## Architecture and file map
 
 | File | What it does |
 |---|---|
 | `main.go` | CLI flags, signal handling, creates parser + sink + runner, runs until signal |
 | `runner.go` | Two goroutines: one on the marketdata port, one on the refdata port. Reads UDP datagrams, hands them to the parser, writes records to the sink. A third goroutine logs a summary every 30s. Accepts `--interface` to resolve and pass a `*net.Interface` to `ListenMulticastUDP` instead of nil. |
 | `parser.go` | `Parser` interface + `Record` type + parser registry. `Record` is the unit of output — a typed struct with `Type`, `Timestamp`, `ChannelID`, `SequenceNumber`, `InstrumentID`, `Symbol`, and a `Fields map[string]any` for type-specific data. |
-| `topofbook_wire.go` | Wire format types and the `decodeTopOfBookFrame` function. `wireReader` is a small helper with sticky errors so the decoder can do a block of reads and check `err` once. Types are unexported (`topOfBookFrame`, `topOfBookQuote`, etc.) — only the parser uses them. |
+| `topofbook_wire.go` | Wire format types and the `decodeTopOfBookDatagram` function. `wireReader` is a small helper with sticky errors so the decoder can do a block of reads and check `err` once. Types are unexported (`topOfBookDatagram`, `topOfBookQuote`, etc.) — only the parser uses them. |
 | `topofbook.go` | `TopOfBookParser` implementation. Stateful: holds `map[instrumentID]*instrumentInfo` learned from InstrumentDefinition messages. Uses those to convert raw ints → floats on Quote/Trade. |
 | `sink.go` | `OutputSink` interface + `NewSink` factory. Routes on format (json/csv) and path prefix (unix:// → socket, else file). |
 | `sink_json.go` | JSON Lines file sink. |

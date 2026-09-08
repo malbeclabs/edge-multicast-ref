@@ -103,7 +103,7 @@ func TestCoordinator_ResetBarrierWipesShardsThenRoutesHeldRecord(t *testing.T) {
 			"symbol": "A", "price_exponent": float64(-2), "qty_exponent": float64(-8)}})
 	time.Sleep(50 * time.Millisecond)
 
-	// Era 2: reset_count bump on a new instrument_definition (the held first new-era frame).
+	// Era 2: reset_count bump on a new instrument_definition (the held first new-era datagram).
 	c.Dispatch(Record{Type: "instrument_definition", ChannelID: 0, InstrumentID: 5, ResetCount: 2,
 		Timestamp: time.Unix(1700000000, 0), Fields: map[string]any{
 			"symbol": "B", "price_exponent": float64(-2), "qty_exponent": float64(-8)}})
@@ -206,7 +206,7 @@ func TestCoordinator_HeartbeatNotFenced(t *testing.T) {
 	}
 }
 
-func TestCoordinator_ResetBarrierHandlesChannelScopedFirstFrame(t *testing.T) {
+func TestCoordinator_ResetBarrierHandlesChannelScopedFirstDatagram(t *testing.T) {
 	metrics := stubMetrics()
 	n := 2
 	shards := make([]*Shard, n)
@@ -228,7 +228,7 @@ func TestCoordinator_ResetBarrierHandlesChannelScopedFirstFrame(t *testing.T) {
 	}
 	c.Dispatch(Record{Type: "heartbeat", ChannelID: 0, ResetCount: 1,
 		Timestamp: time.Unix(1700000000, 0), Fields: map[string]any{}})
-	// First new-era frame is channel-scoped (manifest_summary) — must not panic / not hash.
+	// First new-era datagram is channel-scoped (manifest_summary) — must not panic / not hash.
 	c.Dispatch(Record{Type: "manifest_summary", ChannelID: 0, ResetCount: 2,
 		Timestamp: time.Unix(1700000000, 0), Fields: map[string]any{
 			"manifest_seq": float64(1), "valid": float64(1), "instrument_count": float64(0)}})

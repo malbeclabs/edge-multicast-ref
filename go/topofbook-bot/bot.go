@@ -46,10 +46,10 @@ func (f filter) list() []string {
 	return out
 }
 
-// Bot connects to the topofbook-parser's Unix socket, decodes JSON Lines
-// records, filters by symbol, and emits Prometheus metrics. When a
-// ClickHouse writer is attached, quote/trade/instrument records are also
-// forwarded there for tick-level persistence.
+// Bot is the top-of-book book-builder: it connects to the topofbook-parser's
+// Unix socket, decodes JSON Lines records, filters by symbol, and emits
+// Prometheus metrics. When a ClickHouse writer is attached, quote/trade/
+// instrument records are also forwarded there for tick-level persistence.
 type Bot struct {
 	sockPath string
 	filter   filter

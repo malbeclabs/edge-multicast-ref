@@ -11,7 +11,7 @@ COPY go/internal/go.mod go/internal/go.sum ./go/internal/
 COPY go/marketbyprice-parser/go.mod go/marketbyprice-parser/go.sum ./go/marketbyprice-parser/
 
 # Copy all workspace members referenced by go.work so `go mod download` works.
-# We don't need the source of the other modules, just their go.mod/go.sum.
+# We don't need the source code of the other modules, just their go.mod/go.sum.
 COPY go/kernel-receiver/go.mod go/kernel-receiver/go.sum ./go/kernel-receiver/
 COPY go/xdp-receiver/go.mod go/xdp-receiver/go.sum ./go/xdp-receiver/
 COPY go/topofbook-bot/go.mod go/topofbook-bot/go.sum ./go/topofbook-bot/
@@ -23,7 +23,7 @@ COPY go/marketbyprice-bot/go.mod go/marketbyprice-bot/go.sum ./go/marketbyprice-
 WORKDIR /src/go/marketbyprice-parser
 RUN go mod download
 
-# Now copy only the parser's source.
+# Now copy only the parser's source code.
 COPY go/marketbyprice-parser/ ./
 
 ARG VERSION=dev

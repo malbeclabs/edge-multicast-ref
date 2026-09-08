@@ -20,7 +20,7 @@ import (
 const maxBufferedDeltasPerShard = 200000
 
 // reorderWindow is how far ahead of last_applied a delta may arrive and still be
-// treated as reordering rather than a gap. Carried over from the sibling bot,
+// treated as reordering rather than a gap. Carried over from the market-by-order book-builder,
 // where the live path was observed reordering.
 const reorderWindow = 16
 
@@ -230,7 +230,7 @@ func (s *Shard) applyDeltaToReady(k instKey, inst *Instrument, rec Record) []Cha
 	expected := inst.LastAppliedInstrumentSeq + 1
 
 	if piSeq < expected {
-		// Duplicate or late. Discarded without demoting: a duplicated frame during
+		// Duplicate or late. Discarded without demoting: a duplicated datagram during
 		// bootstrap must not cost a re-bootstrap.
 		//
 		// Counted, though, because this path is also the only symptom of a wedged
@@ -339,7 +339,7 @@ func (s *Shard) applyOne(inst *Instrument, rec Record) ChannelEvent {
 // this quadratic in the buffer's length — 2.0 us/record at 1k buffered but
 // 36.7 us at 40k — and that cost lands in the shard goroutine, the only reader
 // of its inbox. Once it exceeds the arrival rate it back-pressures through the
-// inbox into Coordinator.send and then into the socket read loop, so the bot
+// inbox into Coordinator.send and then into the socket read loop, so the book-builder
 // stops draining the parser exactly when one hot instrument is gapped waiting
 // for a snapshot: the case the buffer exists to survive.
 func (s *Shard) bufferDelta(k instKey, rec Record) {

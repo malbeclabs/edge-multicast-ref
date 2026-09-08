@@ -234,7 +234,7 @@ func pow10f(e int) float64 {
 
 // Enum stringers for instrument_definition. The parser stringifies side, action
 // and the reason fields inline, but leaves these four as raw uint8, so the
-// mapping lives here. Values match the sibling market-by-order bot.
+// mapping lives here. Values match the market-by-order book-builder.
 func assetClassString(v uint8) string {
 	switch v {
 	case 1:

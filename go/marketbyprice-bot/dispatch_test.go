@@ -14,7 +14,7 @@ func instDefRec(instID uint32, symbol string, manifestSeq uint16) Record {
 		InstrumentID: instID,
 		Fields: map[string]any{
 			"symbol": symbol,
-			// float64, not uint16: records reach the bot as decoded JSON, so
+			// float64, not uint16: records reach the book-builder as decoded JSON, so
 			// this is the type the production path actually sees.
 			"source_id":      float64(77),
 			"price_exponent": float64(-2),

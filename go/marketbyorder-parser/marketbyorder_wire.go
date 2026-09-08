@@ -15,9 +15,9 @@ const (
 	mboMagic           uint16 = 0x4444
 	mboSchemaVersionV1 uint8  = 1 // v1: InstrumentDefinition, 76-byte body (80-byte message)
 	mboSchemaVersionV3 uint8  = 3 // v3: InstrumentDefinition, 126-byte body (130-byte message)
-	frameHeaderSize           = 24
+	datagramHeaderSize        = 24
 	messageHeaderSize         = 4
-	maxFrameSize              = 1232
+	maxDatagramSize           = 1232
 )
 
 // Message type IDs.
@@ -39,17 +39,17 @@ const (
 
 // Wire decoding errors.
 var (
-	errBadMagic        = errors.New("bad magic")
-	errSchemaVersion   = errors.New("unsupported schema version")
-	errFrameTooShort   = errors.New("frame too short for header")
-	errFrameLength     = errors.New("frame length mismatch")
-	errMessageTooShort = errors.New("message too short for header")
-	errMessageLength   = errors.New("message length out of range")
-	errTruncated       = errors.New("truncated message body")
+	errBadMagic         = errors.New("bad magic")
+	errSchemaVersion    = errors.New("unsupported schema version")
+	errDatagramTooShort = errors.New("datagram too short for header")
+	errFrameLength      = errors.New("frame length mismatch")
+	errMessageTooShort  = errors.New("message too short for header")
+	errMessageLength    = errors.New("message length out of range")
+	errTruncated        = errors.New("truncated message body")
 )
 
-// FrameHeader is the 24-byte frame header common to all three ports.
-type FrameHeader struct {
+// DatagramHeader is the 24-byte datagram header common to all three ports.
+type DatagramHeader struct {
 	Magic         uint16
 	SchemaVersion uint8
 	ChannelID     uint8
@@ -69,14 +69,14 @@ type MessageHeader struct {
 
 const flagSnapshot uint16 = 0x0001
 
-// ParseFrameHeader decodes the 24-byte frame header from buf.
+// ParseDatagramHeader decodes the 24-byte datagram header from buf.
 // Returns the header, the number of bytes consumed (always 24), and any error.
-// Caller is responsible for verifying buf length is at least frameHeaderSize.
-func ParseFrameHeader(buf []byte) (FrameHeader, error) {
-	if len(buf) < frameHeaderSize {
-		return FrameHeader{}, errFrameTooShort
+// Caller is responsible for verifying buf length is at least datagramHeaderSize.
+func ParseDatagramHeader(buf []byte) (DatagramHeader, error) {
+	if len(buf) < datagramHeaderSize {
+		return DatagramHeader{}, errDatagramTooShort
 	}
-	h := FrameHeader{
+	h := DatagramHeader{
 		Magic:         binary.LittleEndian.Uint16(buf[0:2]),
 		SchemaVersion: buf[2],
 		ChannelID:     buf[3],
@@ -121,7 +121,7 @@ func fixedString(buf []byte) string {
 	return string(buf)
 }
 
-// readTSNs reads an 8-byte little-endian nanoseconds-since-epoch timestamp.
+// readTSNs reads an 8-byte little-endian nanoseconds-since-Unix-epoch timestamp.
 func readTSNs(buf []byte) time.Time {
 	ns := binary.LittleEndian.Uint64(buf)
 	return time.Unix(0, int64(ns)).UTC()
@@ -216,7 +216,7 @@ const (
 )
 
 // ParseInstrumentDefinition decodes an InstrumentDefinition body using the
-// layout for the frame's schema version.
+// layout for the datagram's schema version.
 //
 // The body length cross-checks the declared version. They can only disagree if a
 // publisher bumped the header without the payload or the reverse, and the

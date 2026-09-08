@@ -15,7 +15,7 @@ import (
 
 // A typed nil pointer stored in an interface is NOT == nil. Handing the client
 // value straight to the writers therefore made every `ch == nil` check dead —
-// including under the default --clickhouse-url="", where the bot built and
+// including under the default --clickhouse-url="", where the book-builder built and
 // discarded a row map per record and per level, and counted snapshot writes that
 // never happened.
 func TestEnqueuerFor_NilClientYieldsNilInterface(t *testing.T) {
@@ -82,7 +82,7 @@ func (c *captureServer) count() int {
 // cancelled, then returns — typically in microseconds. Running it on the SAME
 // context as the shard and snapshot-writer goroutines therefore stopped the
 // consumer while the producers were still running: every row enqueued after that
-// point sat in the channel forever, never written and never counted dropped,
+// point sat in the Go channel forever, never written and never counted dropped,
 // while joining the already-finished batchers made shutdown look clean.
 //
 // The producer here models a shard still working through its inbox after

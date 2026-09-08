@@ -20,7 +20,7 @@ type ClickHouseConfig struct {
 	Database      string        // e.g. topofbook
 	BatchSize     int           // flush when per-table accumulator hits this
 	BatchInterval time.Duration // max time between flushes
-	BufferSize    int           // per-table channel capacity; new rows dropped when full
+	BufferSize    int           // per-table Go channel capacity; new rows dropped when full
 	HTTPTimeout   time.Duration // per-request timeout
 }
 
@@ -36,8 +36,8 @@ func DefaultClickHouseConfig() ClickHouseConfig {
 }
 
 // chWriter owns per-table batchers and exposes enqueue methods that the
-// bot calls on every record. All enqueues are non-blocking: a full buffer
-// drops the oldest-sent (actually just the new row, per Go channel
+// book-builder calls on every record. All enqueues are non-blocking: a full buffer
+// drops the oldest-sent (actually just the new row, per Go Go channel
 // semantics) and increments a drop counter.
 type chWriter struct {
 	cfg      ClickHouseConfig
@@ -153,7 +153,7 @@ func buildInstrumentRow(rec *Record, recvTime time.Time) map[string]any {
 		// uintOrZero, not intOrZero: intOrZero returns int64 and serves the
 		// signed exponents below, and an unsigned venue ID must not be able to
 		// arrive sign-extended. Both read through floatField, because records
-		// reach this bot as decoded JSON.
+		// reach this book-builder as decoded JSON.
 		"source_id":      uintOrZero(rec, "source_id"),
 		"symbol":         rec.Symbol,
 		"price_exponent": intOrZero(rec, "price_exponent"),
@@ -161,7 +161,7 @@ func buildInstrumentRow(rec *Record, recvTime time.Time) map[string]any {
 	}
 }
 
-// submit marshals and non-blockingly sends to the named batcher's channel.
+// submit marshals and non-blockingly sends to the named batcher's Go channel.
 // Marshal error drops the row with "marshal" reason; full buffer drops
 // with "buffer_full" reason.
 func (w *chWriter) submit(table string, row map[string]any) {

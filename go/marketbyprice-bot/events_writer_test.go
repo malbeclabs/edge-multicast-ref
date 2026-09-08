@@ -203,7 +203,7 @@ func TestEventsWriter_ChannelHealth(t *testing.T) {
 	}
 }
 
-// A nil client must be a safe no-op so the bot runs with persistence disabled.
+// A nil client must be a safe no-op so the book-builder runs with persistence disabled.
 func TestEventsWriter_NilClientIsNoOp(t *testing.T) {
 	w := NewEventsWriter(nil)
 	w.Write(ChannelEvent{Kind: KindAppliedDelta, Record: levelUpdateRec(11, 900, 6, "bid", 1000, 5)}, 0, "SYM", 0, 0)

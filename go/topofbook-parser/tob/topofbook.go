@@ -27,7 +27,7 @@ type bufferedMsg struct {
 	msg       *topOfBookAppMessage
 }
 
-// TopOfBookParser decodes DoubleZero Top-of-Book v0.1.0 frames.
+// TopOfBookParser decodes DoubleZero Top-of-Book v0.1.0 datagrams.
 type TopOfBookParser struct {
 	mu          sync.RWMutex
 	instruments map[uint32]*instrumentInfo
@@ -69,13 +69,13 @@ func (p *TopOfBookParser) InstrumentCount() int {
 }
 
 const (
-	frameHeaderSize = 24
+	datagramHeaderSize = 24
 
 	// Accepted wire schema versions, as a set rather than a range. There is no
 	// version 2: a 128-byte InstrumentDefinition carrying the widened Symbol
 	// without Source ID was specified upstream and superseded before any
 	// publisher emitted it. A ceiling check (version <= max) would admit those
-	// frames into the decoder, where they would fail later on a length mismatch
+	// datagrams into the decoder, where they would fail later on a length mismatch
 	// and be counted as truncation rather than as an unsupported version.
 	schemaVersionV1 = 1
 	schemaVersionV3 = 3
@@ -90,23 +90,23 @@ const (
 )
 
 func (p *TopOfBookParser) Parse(data []byte, meta PacketMeta) ([]Record, error) {
-	frame, err := decodeTopOfBookFrame(data)
+	datagram, err := decodeTopOfBookDatagram(data)
 	if err != nil {
-		return nil, fmt.Errorf("decoding frame: %w", err)
+		return nil, fmt.Errorf("decoding datagram: %w", err)
 	}
 
-	if err := p.validateHeader(frame, len(data)); err != nil {
+	if err := p.validateHeader(datagram, len(data)); err != nil {
 		return nil, err
 	}
 
-	channelID := frame.Header.ChannelID
-	seq := frame.Header.SequenceNumber
-	reset := frame.Header.ResetCount
-	sendTS := frame.Header.SendTimestamp
+	channelID := datagram.Header.ChannelID
+	seq := datagram.Header.SequenceNumber
+	reset := datagram.Header.ResetCount
+	sendTS := datagram.Header.SendTimestamp
 
 	var records []Record
-	for i := range frame.Messages {
-		msg := &frame.Messages[i]
+	for i := range datagram.Messages {
+		msg := &datagram.Messages[i]
 		recs, err := p.processMessage(channelID, seq, reset, sendTS, meta, msg)
 		if err != nil {
 			return records, fmt.Errorf("processing message type 0x%02x: %w", msg.MsgType, err)
@@ -121,10 +121,10 @@ func (p *TopOfBookParser) Parse(data []byte, meta PacketMeta) ([]Record, error) 
 	return records, nil
 }
 
-// validateHeader performs sanity checks on the frame header that go beyond
+// validateHeader performs sanity checks on the datagram header that go beyond
 // what the wire-format decoder validates (magic bytes only).
-func (p *TopOfBookParser) validateHeader(frame *topOfBookFrame, datagramLen int) error {
-	h := frame.Header
+func (p *TopOfBookParser) validateHeader(datagram *topOfBookDatagram, datagramLen int) error {
+	h := datagram.Header
 
 	if h.SchemaVersion != schemaVersionV1 && h.SchemaVersion != schemaVersionV3 {
 		return fmt.Errorf("unsupported schema version %d (expected %d or %d)",
@@ -136,10 +136,10 @@ func (p *TopOfBookParser) validateHeader(frame *topOfBookFrame, datagramLen int)
 	}
 
 	if h.MsgCount == 0 {
-		return fmt.Errorf("frame has zero messages")
+		return fmt.Errorf("datagram has zero messages")
 	}
 	if h.MsgCount > maxReasonableMsgs {
-		return fmt.Errorf("frame claims %d messages (max %d)", h.MsgCount, maxReasonableMsgs)
+		return fmt.Errorf("datagram claims %d messages (max %d)", h.MsgCount, maxReasonableMsgs)
 	}
 
 	return nil
