@@ -9,10 +9,10 @@
 //! re-lowering comparison possible at all.
 
 use dz_adapter_core::{
-    Adapter, AdapterError, AssetClass, ConnectionId, DisconnectReason, Event, EventSink,
-    InstrumentRef, InstrumentSpec, ListingSink, MarketModel, ParseError, Payload, Presence,
-    PriceBound, Scalar, SettleType, Side, SideUpdate, SnapshotSink, TradeFlags, UpstreamSink,
-    VenueTimestampKind,
+    Adapter, AdapterError, AssetClass, ConnectionId, DepthBound, DisconnectReason, Event,
+    EventSink, InstrumentRef, InstrumentSpec, ListingSink, MarketModel, ParseError, Payload,
+    Presence, PriceBound, Scalar, SettleType, Side, SideUpdate, SnapshotSink, TradeFlags,
+    UpstreamSink, VenueTimestampKind,
 };
 
 // ---------------------------------------------------------------- the runtime
@@ -264,7 +264,7 @@ impl Adapter for LineAdapter {
         &self,
         instrument: InstrumentRef,
         out: &mut dyn SnapshotSink,
-    ) -> Result<(), AdapterError> {
+    ) -> Result<DepthBound, AdapterError> {
         if Some(instrument) != self.admitted {
             return Err(AdapterError::UnknownInstrument);
         }
@@ -272,7 +272,9 @@ impl Adapter for LineAdapter {
             return Err(AdapterError::NotReady { detail: "no book" });
         };
         out.level(Side::Bid, Scalar::text(px), Scalar::text(qty), None);
-        Ok(())
+        // Everything this adapter holds is in the snapshot, so it says so.
+        // `Complete` has to be typed; there is no value it could have omitted.
+        Ok(DepthBound::Complete)
     }
 }
 
@@ -416,8 +418,8 @@ fn a_book_that_has_not_bootstrapped_is_not_ready_rather_than_broken() {
 
 #[test]
 fn a_top_of_book_adapter_needs_no_snapshot_and_no_connection() {
-    // Everything a feed with no snapshot port and no outbound connection has to
-    // write is nothing, and the defaults are what let it write nothing.
+    // A feed with no snapshot port and no outbound connection writes nothing,
+    // and the defaults are what let it compile without saying so.
     struct Minimal;
 
     impl Adapter for Minimal {
@@ -436,9 +438,20 @@ fn a_top_of_book_adapter_needs_no_snapshot_and_no_connection() {
 
     let adapter: Box<dyn Adapter> = Box::new(Minimal);
     let mut levels = Levels::default();
-    assert!(adapter
-        .snapshot(InstrumentRef::from_admission(0), &mut levels)
-        .is_ok());
+    let refused = adapter.snapshot(InstrumentRef::from_admission(0), &mut levels);
+
+    // **The default refuses, and that is the fix rather than a regression.**
+    // A snapshot's `Depth Bound` is a `u32` whose zero is a positive claim of
+    // a complete book, so a default that returned `Ok` would have to return
+    // one - and an adapter that wrote no levels would then be claiming its
+    // empty snapshot was the whole book. There is no honest value here, so
+    // there is no `Ok`.
+    //
+    // It costs a top-of-book adapter nothing: the runtime pulls a snapshot
+    // only for a feed that carries the snapshot port role, so this one is
+    // never asked. What it catches is a *depth* adapter that left the method
+    // defaulted, which is the case that used to be silent.
+    assert!(matches!(refused, Err(AdapterError::Internal { .. })));
     assert!(levels.0.is_empty());
 }
 

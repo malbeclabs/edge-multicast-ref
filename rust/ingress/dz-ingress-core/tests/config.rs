@@ -29,7 +29,7 @@ fn the_section_as_the_design_documents_it_parses_to_those_values() {
     )
     .expect("the documented section must parse");
 
-    assert_eq!(config.kind, "websocket");
+    assert_eq!(config.kind.as_deref(), Some("websocket"));
     assert_eq!(config.connect_timeout, Duration::from_secs(5));
     assert_eq!(config.reconnect_backoff_initial, Duration::from_millis(500));
     assert_eq!(config.reconnect_backoff_max, Duration::from_secs(30));
@@ -39,7 +39,7 @@ fn the_section_as_the_design_documents_it_parses_to_those_values() {
 
 #[test]
 fn only_the_transport_is_required_and_the_defaults_are_the_documented_values() {
-    let config = parse(r#"kind = "websocket""#).expect("only `kind` is required");
+    let config = parse(r#"kind = "websocket""#).expect("`kind` alone is a section");
     assert_eq!(config.connect_timeout, Duration::from_secs(5));
     assert_eq!(config.reconnect_backoff_initial, Duration::from_millis(500));
     assert_eq!(config.reconnect_backoff_max, Duration::from_secs(30));
@@ -48,11 +48,30 @@ fn only_the_transport_is_required_and_the_defaults_are_the_documented_values() {
 
 #[test]
 fn a_missing_transport_is_a_load_error_rather_than_a_default() {
-    // There is no default transport, and this is the one key that must not have
-    // one: the audit's misspelled section became the wrong transport precisely
-    // because something defaulted.
-    let error = parse(r#"connect_timeout = "5s""#).expect_err("`kind` has no default");
-    assert!(error.to_string().contains("kind"), "{error}");
+    // There is still no default transport, and this is the one key that must
+    // not have one: the audit's misspelled section became the wrong transport
+    // precisely because something defaulted.
+    //
+    // **The refusal moved from the parse to the resolve**, because a publisher
+    // may now name its transport once per `[[source]]` block instead of here —
+    // so a section without `kind` is a shape, not yet a mistake, and what is
+    // refused is resolving one transport out of a document that named none.
+    let config = parse(r#"connect_timeout = "5s""#).expect("the section itself is well formed");
+    assert_eq!(config.kind, None);
+
+    let error = config
+        .resolve()
+        .expect_err("no transport was named anywhere");
+    let message = error.to_string();
+    // Both places, because the operator has to choose one and the message is
+    // where they learn there are two.
+    assert!(message.contains("[ingress] kind"), "{message}");
+    assert!(message.contains("[[source]] ingress"), "{message}");
+    // And the policy alone still resolves: a document with sources takes this
+    // half and names its transports elsewhere.
+    config
+        .policy()
+        .expect("the policy does not need a transport");
 }
 
 #[test]

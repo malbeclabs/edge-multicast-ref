@@ -12,7 +12,7 @@ mod harness;
 use std::time::Duration;
 
 use dz_edge_core::PortRole;
-use dz_publisher_runtime::{Document, FeedSpec, StartupError};
+use dz_publisher_runtime::{Document, FeedSpec, StartupError, TeeConfig};
 use harness::{Doc, CHANNEL_ID, GROUP, MKTDATA_PORT, REFDATA_PORT, SOURCE_ID};
 
 // ---------------------------------------------------------------------------
@@ -682,4 +682,373 @@ fn a_transport_this_binary_was_not_built_with_is_a_different_error() {
     for kind in ["websocket", "fix", "multicast", "rest", "filetail", "uds"] {
         assert!(message.contains(kind), "{message}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// `[[feed]] snapshot_cycle`: the periodic rotation.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_depth_feed_resolves_a_snapshot_cycle() {
+    let config = Document::parse(
+        &Doc::valid()
+            .feed(format!(
+                "{}snapshot_cycle = \"5s\"\n",
+                Doc::depth_feed_block()
+            ))
+            .render(),
+    )
+    .expect("valid")
+    .resolve()
+    .expect("resolvable");
+
+    assert_eq!(config.feeds[0].snapshot_cycle, Some(Duration::from_secs(5)));
+}
+
+#[test]
+fn a_depth_feed_without_the_key_rotates_nothing() {
+    // Absent is a real answer and the one every existing configuration gives:
+    // recovery snapshots and nothing else. It is `None` rather than a default
+    // cadence because a cadence nobody asked for would put datagrams on the
+    // snapshot port of every depth publisher that upgrades.
+    let config = Document::parse(&Doc::valid().feed(Doc::depth_feed_block()).render())
+        .expect("valid")
+        .resolve()
+        .expect("resolvable");
+
+    assert_eq!(config.feeds[0].snapshot_cycle, None);
+}
+
+#[test]
+fn a_snapshot_cycle_on_a_feed_with_no_snapshot_port_is_refused() {
+    // The same rule as `snapshot_port` itself, one key along: a cadence for a
+    // port role the feed does not carry is a key nobody reads, and an operator
+    // who wrote it believes snapshots are going out.
+    let error = Document::parse(
+        &Doc::valid()
+            .feed(format!("{}snapshot_cycle = \"5s\"\n", Doc::valid().feed))
+            .render(),
+    )
+    .expect("parses")
+    .resolve()
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            StartupError::SnapshotCycleWithoutPort {
+                spec: "top-of-book"
+            }
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_zero_snapshot_cycle_is_refused_rather_than_run_every_tick() {
+    let error = Document::parse(
+        &Doc::valid()
+            .feed(format!(
+                "{}snapshot_cycle = \"0s\"\n",
+                Doc::depth_feed_block()
+            ))
+            .render(),
+    )
+    .expect("parses")
+    .resolve()
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            StartupError::ZeroDuration {
+                key: "[[feed]] snapshot_cycle"
+            }
+        ),
+        "{error}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Two feeds, one publisher: the keys that cannot differ.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn two_feeds_disagreeing_on_the_definition_cycle_are_refused() {
+    // **This runtime used to take the first block's answer and ignore the
+    // second.** One reference-data registry serves every feed, because
+    // `Instrument ID` identity is the one thing there can only be one of - so
+    // there is one cadence to pace it with, and a document stating two is a
+    // document that cannot be obeyed. An operator who set the second was being
+    // ignored in fact while being obeyed on paper.
+    // The first block states 30s, which is also the default; the second states
+    // 10s, so the two disagree.
+    let two = format!(
+        "{}\n{}definition_cycle = \"10s\"\n",
+        Doc::valid().feed,
+        Doc::depth_feed_block()
+    );
+    let error = Document::parse(&Doc::valid().feed(two).render())
+        .expect("parses")
+        .resolve()
+        .unwrap_err();
+
+    match error {
+        StartupError::FeedsDisagree { key, one, another } => {
+            assert_eq!(key, "[[feed]] definition_cycle");
+            // Both values are named, because the operator has to be told which
+            // two of their own keys are in conflict.
+            assert_eq!(one, Duration::from_secs(30));
+            assert_eq!(another, Duration::from_secs(10));
+        }
+        other => panic!("expected a disagreement, got {other}"),
+    }
+}
+
+#[test]
+fn two_feeds_disagreeing_on_the_idle_guard_are_refused() {
+    // One guard, because the silence it measures is the publisher's: upstream
+    // delivering and nothing reaching any wire. The shipped publisher that once
+    // had one guard per feed now has exactly one venue-wide guard with a
+    // fallback to its first feed's key, and the fallback is the trap this
+    // refuses instead.
+    let two = format!(
+        "{}\n{}idle_guard = \"5m\"\n",
+        Doc::valid().feed,
+        Doc::depth_feed_block()
+    );
+    let error = Document::parse(&Doc::valid().feed(two).render())
+        .expect("parses")
+        .resolve()
+        .unwrap_err();
+
+    match error {
+        StartupError::FeedsDisagree { key, one, another } => {
+            assert_eq!(key, "[[feed]] idle_guard");
+            assert_eq!(one, Duration::from_secs(60));
+            assert_eq!(another, Duration::from_secs(300));
+        }
+        other => panic!("expected a disagreement, got {other}"),
+    }
+}
+
+#[test]
+fn two_feeds_agreeing_on_both_resolve() {
+    // The control. Two feeds are the ordinary case - it is what `[[feed]]`
+    // being an array is for - and the refusal above must be about the values
+    // rather than about there being two blocks.
+    // The depth block states neither key, so it takes the defaults - which are
+    // what the first block states. Agreement by default is still agreement, and
+    // it is the path every existing single-feed document already takes.
+    let two = format!("{}\n{}", Doc::valid().feed, Doc::depth_feed_block());
+    let config = Document::parse(&Doc::valid().feed(two).render())
+        .expect("parses")
+        .resolve()
+        .expect("two feeds that agree are one publisher");
+
+    assert_eq!(config.feeds.len(), 2);
+    // And a snapshot cycle stated on the depth feed only is not a
+    // disagreement: it is a key the other feed cannot carry at all.
+    assert_eq!(config.feeds[0].snapshot_cycle, None);
+}
+
+#[test]
+fn a_value_stated_on_one_feed_and_omitted_on_the_other_governs_both() {
+    // **A key the file does not contain cannot be one of two conflicting
+    // values.** Both keys were serde-defaulted, so `feeds[0]` carried a value
+    // whether or not that block stated one - and a document setting
+    // `idle_guard = "300s"` on its depth feed and omitting it on its
+    // top-of-book feed was refused for a conflict between 300s and a 60s
+    // default the operator never typed. A publisher that started yesterday
+    // would refuse to start today, naming two values one of which is not in
+    // the file.
+    //
+    // Absent is absent: one stated value settles it, and it governs every feed
+    // rather than only the block it appears in.
+    let top_of_book_without_the_keys = Doc::valid()
+        .feed
+        .replace("definition_cycle = \"30s\"\n", "")
+        .replace("idle_guard = \"60s\"\n", "");
+    let two = format!(
+        "{}\n{}definition_cycle = \"45s\"\nidle_guard = \"300s\"\n",
+        top_of_book_without_the_keys,
+        Doc::depth_feed_block()
+    );
+    let config = Document::parse(&Doc::valid().feed(two).render())
+        .expect("parses")
+        .resolve()
+        .expect("one stated value is not a disagreement");
+
+    assert_eq!(config.feeds.len(), 2);
+    for feed in &config.feeds {
+        assert_eq!(
+            (feed.definition_cycle, feed.idle_guard),
+            (Duration::from_secs(45), Duration::from_secs(300)),
+            "the stated value governs the feed that omitted it too: {:?}",
+            feed.spec
+        );
+    }
+}
+
+#[test]
+fn a_zero_stated_for_a_publisher_wide_cadence_is_still_refused() {
+    // The zero check moved with the key, and zero is what an unset integer
+    // reads as in a document that spells its durations as bare numbers.
+    let error = Document::parse(
+        &Doc::valid()
+            .feed(
+                Doc::valid()
+                    .feed
+                    .replace("definition_cycle = \"30s\"", "definition_cycle = \"0s\""),
+            )
+            .render(),
+    )
+    .expect("parses")
+    .resolve()
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            error,
+            StartupError::ZeroDuration {
+                key: "[[feed]] definition_cycle"
+            }
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_snapshot_cycle_on_one_of_two_feeds_is_not_a_disagreement() {
+    let two = format!(
+        "{}\n{}snapshot_cycle = \"5s\"\n",
+        Doc::valid().feed,
+        Doc::depth_feed_block()
+    );
+    let config = Document::parse(&Doc::valid().feed(two).render())
+        .expect("parses")
+        .resolve()
+        .expect("resolvable");
+
+    assert_eq!(config.feeds.len(), 2);
+    let depth = config
+        .feeds
+        .iter()
+        .find(|feed| feed.spec == FeedSpec::MarketByPrice)
+        .expect("the depth feed");
+    assert_eq!(depth.snapshot_cycle, Some(Duration::from_secs(5)));
+}
+
+#[test]
+fn a_tee_enabled_with_no_path_is_refused_at_load() {
+    // The same shape as `[adapter.replay]`: a section switched on and left
+    // incomplete is an operator who believes copies are being archived. Refused
+    // before a socket is opened, because nothing about it needs one.
+    let error = Document::parse(
+        &Doc::valid()
+            .adapter("[adapter]\nkind = \"a-venue\"\n\n[adapter.tee]\nenabled = true\n")
+            .render(),
+    )
+    .expect("parses")
+    .resolve()
+    .unwrap_err();
+
+    assert!(matches!(error, StartupError::TeeWithoutPath), "{error}");
+}
+
+#[test]
+fn a_tee_with_a_path_resolves() {
+    let config = Document::parse(
+        &Doc::valid()
+            .adapter(
+                "[adapter]\nkind = \"a-venue\"\n\n[adapter.tee]\nenabled = true\n\
+                 path = \"/run/a-publisher/tee\"\n",
+            )
+            .render(),
+    )
+    .expect("parses")
+    .resolve()
+    .expect("resolvable");
+
+    assert!(config.adapter.tee.enabled);
+    // A prefix, not a socket: the feed's `spec` and the port role's token are
+    // appended per socket. See the test below.
+    assert_eq!(
+        config.adapter.tee.path.as_deref(),
+        Some(std::path::Path::new("/run/a-publisher/tee"))
+    );
+}
+
+#[test]
+fn a_tee_socket_is_named_by_the_feed_as_well_as_the_port_role() {
+    // **The feed is in the name because a publisher emits more than one.** A
+    // Unix datagram carries neither a destination port nor a group, and the diff
+    // this stream exists for is keyed on both - so two feeds' mktdata copies
+    // arriving on one socket are datagrams a recorder cannot attribute without
+    // decoding them, which is the one thing a record path does not do. Keyed on
+    // the port role alone, that is exactly what a two-feed publisher produced,
+    // and the per-role split was for this very problem.
+    let tee = TeeConfig {
+        enabled: true,
+        path: Some(std::path::PathBuf::from("/run/a-publisher/tee")),
+    };
+
+    let named = |spec: FeedSpec, role: PortRole| {
+        tee.destination(spec, role)
+            .expect("the path is stated")
+            .display()
+            .to_string()
+    };
+
+    assert_eq!(
+        named(FeedSpec::TopOfBook, PortRole::Mktdata),
+        "/run/a-publisher/tee.top-of-book.mktdata"
+    );
+    assert_eq!(
+        named(FeedSpec::TopOfBook, PortRole::Refdata),
+        "/run/a-publisher/tee.top-of-book.refdata"
+    );
+    assert_eq!(
+        named(FeedSpec::MarketByPrice, PortRole::Mktdata),
+        "/run/a-publisher/tee.market-by-price.mktdata"
+    );
+    assert_eq!(
+        named(FeedSpec::MarketByPrice, PortRole::Snapshot),
+        "/run/a-publisher/tee.market-by-price.snapshot"
+    );
+
+    // The property, stated as one: every socket a publisher emitting both feeds
+    // opens is distinct. A name missing either half collapses two of these.
+    let mut sockets: Vec<String> = FeedSpec::ALL
+        .into_iter()
+        .flat_map(|spec| {
+            spec.port_roles()
+                .iter()
+                .map(move |role| named(spec, *role))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let opened = sockets.len();
+    sockets.sort();
+    sockets.dedup();
+    assert_eq!(
+        sockets.len(),
+        opened,
+        "two port roles of two feeds share a socket: {sockets:?}"
+    );
+}
+
+#[test]
+fn a_tee_that_is_on_with_no_path_names_no_socket() {
+    // The same refusal the load already produced, checked again where the
+    // socket is named: a prefix is not something to default, and a tee quietly
+    // writing to a relative path is an operator believing copies are archived.
+    let tee = TeeConfig {
+        enabled: true,
+        path: None,
+    };
+    let error = tee
+        .destination(FeedSpec::TopOfBook, PortRole::Mktdata)
+        .expect_err("no path was stated");
+    assert!(matches!(error, StartupError::TeeWithoutPath), "{error}");
 }

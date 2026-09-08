@@ -89,6 +89,7 @@
 #![forbid(unsafe_code)]
 
 pub mod adapter;
+pub mod depth;
 pub mod error;
 pub mod event;
 pub mod instrument;
@@ -98,6 +99,7 @@ pub mod sink;
 pub mod timestamp;
 
 pub use adapter::Adapter;
+pub use depth::DepthBound;
 pub use error::{AdapterError, ParseError};
 pub use event::{Aggressor, ClearScope, Desync, Event, Presence, Side, SideUpdate, TradeFlags};
 pub use instrument::{

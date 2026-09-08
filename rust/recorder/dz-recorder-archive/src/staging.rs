@@ -141,6 +141,16 @@ pub struct StagingWatermark {
     staging_dir: PathBuf,
     completed_dir: PathBuf,
     staging_max: u64,
+    /// Where the retained history started as of the last [`enforce`](Self::enforce).
+    ///
+    /// Kept rather than recomputed because `enforce` already scans both
+    /// directories, and the caller that wants this — the sweep that publishes
+    /// the retention gauge — runs immediately after it. A second scan for the
+    /// same answer doubles the directory reads of every sweep.
+    retained_floor_ns: Option<u64>,
+    /// How many published objects that floor is the front of, as of the same
+    /// pass. **The floor alone cannot say "nothing".**
+    retained_objects: usize,
     /// Which `segment-{seq}.pcapng` is the one being written right now.
     ///
     /// Only that one file is genuinely transient. Every other name of that shape
@@ -184,6 +194,8 @@ impl StagingWatermark {
             staging_dir,
             completed_dir,
             staging_max,
+            retained_floor_ns: None,
+            retained_objects: 0,
             open_segment_seq: 0,
             custody: None,
             faults: None,
@@ -270,6 +282,41 @@ impl StagingWatermark {
         self.objects().first().map(|o| o.segment_seq)
     }
 
+    /// Where the retained history starts, as of the last
+    /// [`enforce`](Self::enforce): the receive window of the oldest object then
+    /// still on the disk, or `None` when there was none.
+    ///
+    /// **This is the retention question, and eviction counts cannot answer
+    /// it.** A budget that is full evicts on every sweep for ever, so the
+    /// eviction counter rises at steady state by design and says nothing about
+    /// how much history is left — which is what somebody chasing a loss report
+    /// from last night actually needs to know. From `start_ns` rather than a
+    /// file's mtime, because the mtime is a property of the copy while this is
+    /// a property of the traffic, and it is the same clock the object key and
+    /// the manifest are stamped with.
+    ///
+    /// From the sweep's own scan and not a fresh one: `enforce` reads both
+    /// directories already, so recomputing this would double the directory
+    /// reads of every sweep for an answer that pass had in hand. `None` before
+    /// the first `enforce`.
+    #[must_use]
+    pub const fn retained_floor_ns(&self) -> Option<u64> {
+        self.retained_floor_ns
+    }
+
+    /// Published objects still on the disk as of the last
+    /// [`enforce`](Self::enforce).
+    ///
+    /// The companion the floor needs to be alertable. Retention is watched as
+    /// `now - floor < target`, and a feed retaining nothing publishes a floor of
+    /// `0` — which reads as a window decades long and silences that rule in
+    /// exactly the state it exists to catch. This is the term that says
+    /// "nothing", and no other exposed series does.
+    #[must_use]
+    pub const fn retained_objects(&self) -> usize {
+        self.retained_objects
+    }
+
     #[must_use]
     pub fn segments_evicted_total(&self) -> u64 {
         self.segments_evicted_total
@@ -300,6 +347,10 @@ impl StagingWatermark {
     /// copy of the window it holds, so it is the last history worth giving up.
     pub fn enforce(&mut self) -> Result<(), SinkError> {
         let (objects, residue) = self.scan();
+        // Before the early return below, so a pass that evicts nothing still
+        // publishes a floor and a count.
+        self.retained_floor_ns = objects.first().map(|o| o.start_ns);
+        self.retained_objects = objects.len();
         let unreclaimable: u64 = residue
             .iter()
             .filter(|r| !r.evictable)
@@ -333,8 +384,17 @@ impl StagingWatermark {
         // One undeletable file must not stop the buffer from being bounded, so
         // the sweep runs to the end and reports afterwards.
         let mut failure = None;
-        for object in objects {
+        let mut objects_evicted = 0usize;
+        // Where the retained history starts, as an index rather than a count.
+        // **A count of removals is only a position when every removal
+        // succeeded**: one failure in the middle leaves an older file behind a
+        // newer one that went, and the count then points past it at an object
+        // eviction did take. This is the first object still on the disk.
+        let mut first_kept: Option<usize> = None;
+        let mut visited = objects.len();
+        for (index, object) in objects.iter().enumerate() {
             if total <= self.staging_max {
+                visited = index;
                 break;
             }
             let outcome = fs::remove_file(&object.path);
@@ -346,8 +406,29 @@ impl StagingWatermark {
             }
             let (reclaimed, error) = self.account_removal(object.bytes, true, outcome);
             total = total.saturating_sub(reclaimed);
+            // Only a removal that happened. A file that could not be deleted is
+            // still on the disk and still the oldest history there is, so
+            // counting the attempt would advance the floor past it — and with a
+            // read-only completed_dir every attempt fails, the count reaches the
+            // whole list, and the gauge reports no retained history over an
+            // intact archive. `NotFound` counts: account_removal reports it as
+            // reclaimed because the file is gone either way.
+            let removed = error.is_none();
             failure = failure.or(error);
+            if removed {
+                objects_evicted += 1;
+            } else if first_kept.is_none() {
+                first_kept = Some(index);
+            }
         }
+        // The oldest object still on the disk: the first one eviction could not
+        // take, or — if it took everything it tried — the first it did not reach.
+        // The count is right for how MANY are left whatever order the failures
+        // fell in; it is only the position that needs the index.
+        self.retained_floor_ns = objects
+            .get(first_kept.unwrap_or(visited))
+            .map(|o| o.start_ns);
+        self.retained_objects = objects.len() - objects_evicted;
         // Orphans first and queued segments last, for the reason objects come
         // before either: a queued segment is the only copy of the window it
         // holds and an object nothing else can now produce, so it is the last
@@ -703,6 +784,178 @@ mod tests {
             2000,
             "a queue of three counts two: the newest is the bounded transient"
         );
+    }
+
+    #[test]
+    fn the_retention_floor_is_the_oldest_windows_start_and_moves_as_history_goes() {
+        // **The question the eviction counter cannot answer.** A full budget
+        // evicts on every sweep for ever, so that counter rises at steady state
+        // by design; what somebody chasing last night's loss report needs is how
+        // far back the archive still reaches, and this is that number.
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let staging = dir.path().join("staging");
+        let completed = dir.path().join("completed");
+        fs::create_dir_all(&staging).expect("staging");
+        fs::create_dir_all(&completed).expect("completed");
+
+        // Written newest-first, so a `last()` where `first()` belongs, or a
+        // reliance on directory order, reads the wrong end.
+        for (start, end, seq) in [
+            (3_000u64, 3_500u64, 2u64),
+            (1_000, 1_500, 0),
+            (2_000, 2_500, 1),
+        ] {
+            let path = completed.join(format!("{start}-{end}-{seq}{ZSTD_SUFFIX}"));
+            fs::write(&path, vec![0u8; 600]).expect("an object");
+            fs::write(completed.join(manifest_name(start, end, seq)), b"{}").expect("a manifest");
+        }
+
+        // A budget nothing exceeds: the pass evicts nothing and still has to
+        // publish a floor, which is also where reading the wrong end shows up.
+        let mut wide = StagingWatermark::new(staging.clone(), completed.clone(), 10_000);
+        assert_eq!(wide.retained_floor_ns(), None, "nothing scanned yet");
+        wide.enforce().expect("a pass that evicts nothing");
+        assert_eq!(wide.objects_evicted_total(), 0);
+        assert_eq!(
+            wide.retained_floor_ns(),
+            Some(1_000),
+            "the floor is the oldest window, whatever order the directory lists"
+        );
+
+        // 602 bytes an object, manifest included, so a 1500-byte budget has room
+        // for two and eviction takes exactly one.
+        let mut tight = StagingWatermark::new(staging, completed, 1_500);
+        tight.enforce().expect("eviction");
+        assert_eq!(tight.objects_evicted_total(), 1, "exactly the oldest");
+        assert_eq!(
+            tight.retained_floor_ns(),
+            Some(2_000),
+            "the floor is a level and has to follow the history that was dropped"
+        );
+        assert_eq!(wide.retained_objects(), 3);
+        assert_eq!(tight.retained_objects(), 2, "the count follows the floor");
+    }
+
+    /// **A feed retaining nothing has to say so with something other than the
+    /// floor.**
+    ///
+    /// The floor publishes `0` when there is nothing, and retention is watched
+    /// as `now - floor < target` — under which `0` reads as a window decades long
+    /// and the rule stays silent in exactly the state it exists to catch. The
+    /// count is the term that fires.
+    #[test]
+    fn an_archive_holding_nothing_reports_a_count_of_zero() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let staging = dir.path().join("staging");
+        let completed = dir.path().join("completed");
+        fs::create_dir_all(&staging).expect("staging");
+        fs::create_dir_all(&completed).expect("completed");
+
+        let mut w = StagingWatermark::new(staging, completed, 10_000);
+        w.enforce().expect("a pass over an empty archive");
+        assert_eq!(w.retained_objects(), 0, "nothing is held");
+        assert_eq!(
+            w.retained_floor_ns(),
+            None,
+            "and the floor has nothing to report, which the gauge renders as 0"
+        );
+    }
+
+    /// **A failure in the MIDDLE is what makes the floor a position and not a
+    /// count.**
+    ///
+    /// Count the removals that succeeded and you have how many objects are left,
+    /// which is right whatever order the failures fell in. Use that count as an
+    /// index and it points past the file that stayed — at one eviction actually
+    /// took — so the gauge reports history starting later than it does, and the
+    /// oldest thing on the disk is the one it does not name.
+    ///
+    /// The oldest object here is a *directory* wearing an object's name: the scan
+    /// takes any entry whose name parses, and `remove_file` refuses a directory
+    /// while the regular file behind it deletes normally. That is a mid-list
+    /// failure without root.
+    #[test]
+    fn a_failure_in_the_middle_leaves_the_floor_on_the_file_that_stayed() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let staging = dir.path().join("staging");
+        let completed = dir.path().join("completed");
+        fs::create_dir_all(&staging).expect("staging");
+        fs::create_dir_all(&completed).expect("completed");
+
+        // Oldest: a directory, so its removal fails.
+        fs::create_dir(completed.join(format!("1000-1500-0{ZSTD_SUFFIX}"))).expect("a decoy");
+        fs::write(completed.join(manifest_name(1_000, 1_500, 0)), b"{}").expect("its manifest");
+        // Newer: a real object, which eviction takes.
+        fs::write(
+            completed.join(format!("2000-2500-1{ZSTD_SUFFIX}")),
+            vec![0u8; 600],
+        )
+        .expect("an object");
+        fs::write(completed.join(manifest_name(2_000, 2_500, 1)), b"{}").expect("a manifest");
+
+        // Low enough that eviction tries every object it can see.
+        let mut w = StagingWatermark::new(staging, completed, 1);
+        let _ = w.enforce();
+
+        assert_eq!(
+            w.objects_evicted_total(),
+            1,
+            "the file went and the directory did not"
+        );
+        assert_eq!(
+            w.retained_floor_ns(),
+            Some(1_000),
+            "the floor named the object eviction took, not the one still there"
+        );
+    }
+
+    /// **A removal that failed must not advance the floor past a file still on
+    /// the disk.**
+    ///
+    /// With `completed_dir` read-only every removal fails. Counting the attempt
+    /// rather than the removal walks the floor off the end of the list and
+    /// reports an empty archive over an intact one — the same false "no history"
+    /// the count above exists to make honest.
+    #[test]
+    fn a_removal_that_failed_leaves_the_floor_where_it_was() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let staging = dir.path().join("staging");
+        let completed = dir.path().join("completed");
+        fs::create_dir_all(&staging).expect("staging");
+        fs::create_dir_all(&completed).expect("completed");
+        for (start, end, seq) in [(1_000u64, 1_500u64, 0u64), (2_000, 2_500, 1)] {
+            fs::write(
+                completed.join(format!("{start}-{end}-{seq}{ZSTD_SUFFIX}")),
+                vec![0u8; 600],
+            )
+            .expect("an object");
+            fs::write(completed.join(manifest_name(start, end, seq)), b"{}").expect("a manifest");
+        }
+        // Read-only, so unlink inside it fails with EACCES rather than removing.
+        let mut perms = fs::metadata(&completed)
+            .expect("the directory")
+            .permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o555);
+        fs::set_permissions(&completed, perms).expect("the directory is ours");
+
+        let mut w = StagingWatermark::new(staging, completed.clone(), 100);
+        let outcome = w.enforce();
+
+        // Restore before asserting, so a failure here does not leave a
+        // directory the temp-dir teardown cannot remove.
+        let mut perms = fs::metadata(&completed)
+            .expect("the directory")
+            .permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        fs::set_permissions(&completed, perms).expect("the directory is ours");
+
+        assert!(outcome.is_err(), "the sweep could not delete anything");
+        assert_eq!(
+            w.retained_floor_ns(),
+            Some(1_000),
+            "the floor moved past a file eviction could not take"
+        );
+        assert_eq!(w.retained_objects(), 2, "both are still on the disk");
     }
 
     #[test]

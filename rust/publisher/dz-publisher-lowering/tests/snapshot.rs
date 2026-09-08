@@ -5,8 +5,8 @@
 //! `Adapter::snapshot`, and close it.
 
 use dz_adapter_core::{
-    Adapter, AdapterError, EventSink, InstrumentRef, ListingSink, ParseError, Payload, Scalar,
-    Side, SnapshotSink,
+    Adapter, AdapterError, DepthBound, EventSink, InstrumentRef, ListingSink, ParseError, Payload,
+    Scalar, Side, SnapshotSink,
 };
 use dz_edge_core::AppMessage;
 use dz_edge_mbp::{SnapshotBegin, SnapshotEnd, SnapshotLevel, SIDE_ASK, SIDE_BID, U16_UNAVAILABLE};
@@ -45,6 +45,10 @@ struct FakeBook {
     bids: Vec<(&'static str, &'static str)>,
     asks: Vec<(&'static str, &'static str)>,
     bootstrapped: bool,
+    /// What this book says about its own depth. A field rather than a constant
+    /// because it is the venue's answer, and the point of the type is that the
+    /// framing takes whatever the adapter returned.
+    depth: DepthBound,
 }
 
 impl FakeBook {
@@ -55,6 +59,7 @@ impl FakeBook {
             bids: vec![("0.41", "5"), ("0.40", "7")],
             asks: vec![("0.43", "9")],
             bootstrapped: true,
+            depth: DepthBound::levels(25).expect("25 is not zero"),
         }
     }
 }
@@ -78,7 +83,7 @@ impl Adapter for FakeBook {
         &self,
         instrument: InstrumentRef,
         out: &mut dyn SnapshotSink,
-    ) -> Result<(), AdapterError> {
+    ) -> Result<DepthBound, AdapterError> {
         if instrument != handle() {
             return Err(AdapterError::UnknownInstrument);
         }
@@ -93,7 +98,7 @@ impl Adapter for FakeBook {
         for (px, qty) in &self.asks {
             out.level(Side::Ask, Scalar::text(px), Scalar::text(qty), None);
         }
-        Ok(())
+        Ok(self.depth)
     }
 }
 
@@ -104,12 +109,15 @@ fn a_pulled_snapshot_frames_as_begin_then_its_levels_then_end() {
     let adapter = FakeBook::two_sided();
 
     let mut framer = lowering
-        .open_snapshot(&instruments, handle(), 9_001, 1_700_000_000, 25)
+        .open_snapshot(&instruments, handle(), 9_001, 1_700_000_000)
         .expect("the table holds this instrument");
-    adapter
+    // The bound is threaded from the adapter to the framing, which is the whole
+    // of the change this asserts: nothing between them can supply one, so the
+    // 25 below is the venue's answer and not a default.
+    let bound = adapter
         .snapshot(handle(), &mut framer)
         .expect("the book is bootstrapped");
-    let snapshot = framer.finish().expect("every level states exactly");
+    let snapshot = framer.finish(bound).expect("every level states exactly");
 
     assert_eq!(
         snapshot.begin,
@@ -209,9 +217,14 @@ fn the_begin_declares_the_sequence_the_deltas_have_reached() {
     let _ = lowering.lower_clear(&instruments, handle(), 2, ClearScope::BothSides);
 
     let framer = lowering
-        .open_snapshot(&instruments, handle(), 9_002, 1, 0)
+        .open_snapshot(&instruments, handle(), 9_002, 1)
         .expect("held");
-    let snapshot = framer.finish().expect("an empty book frames");
+    // A venue with no resting interest has a complete book of nothing, which is
+    // a different statement from a bound of nothing - and the only one of the
+    // two this can express.
+    let snapshot = framer
+        .finish(DepthBound::Complete)
+        .expect("an empty book frames");
     assert_eq!(snapshot.begin.last_instrument_seq, 2);
     assert_eq!(snapshot.begin.total_levels, 0, "an empty book is a book");
 }
@@ -239,9 +252,9 @@ fn opening_a_snapshot_does_not_reset_the_delta_series() {
         Presence::New,
     );
     let _ = lowering
-        .open_snapshot(&instruments, handle(), 9_003, 1, 0)
+        .open_snapshot(&instruments, handle(), 9_003, 1)
         .expect("held")
-        .finish()
+        .finish(DepthBound::Complete)
         .expect("frames");
 
     let after = lowering
@@ -272,16 +285,16 @@ fn two_snapshots_for_one_instrument_carry_different_ids() {
     let adapter = FakeBook::two_sided();
 
     let mut first = lowering
-        .open_snapshot(&instruments, handle(), 1, 1, 0)
+        .open_snapshot(&instruments, handle(), 1, 1)
         .expect("held");
     adapter.snapshot(handle(), &mut first).expect("writes");
-    let first = first.finish().expect("frames");
+    let first = first.finish(DepthBound::Complete).expect("frames");
 
     let mut second = lowering
-        .open_snapshot(&instruments, handle(), 2, 2, 0)
+        .open_snapshot(&instruments, handle(), 2, 2)
         .expect("held");
     adapter.snapshot(handle(), &mut second).expect("writes");
-    let second = second.finish().expect("frames");
+    let second = second.finish(DepthBound::Complete).expect("frames");
 
     assert_ne!(first.begin.snapshot_id, second.begin.snapshot_id);
     // And every level carries its own snapshot's id, which is what a subscriber
@@ -314,10 +327,10 @@ fn a_level_that_cannot_be_stated_exactly_refuses_the_whole_snapshot() {
             &self,
             _instrument: InstrumentRef,
             out: &mut dyn SnapshotSink,
-        ) -> Result<(), AdapterError> {
+        ) -> Result<DepthBound, AdapterError> {
             out.level(Side::Bid, Scalar::text("0.41"), Scalar::text("5"), None);
             out.level(Side::Bid, Scalar::text("0.41005"), Scalar::text("5"), None);
-            Ok(())
+            Ok(DepthBound::Complete)
         }
     }
 
@@ -325,11 +338,13 @@ fn a_level_that_cannot_be_stated_exactly_refuses_the_whole_snapshot() {
     let mut lowering = DepthLowering::new(source_id());
 
     let mut framer = lowering
-        .open_snapshot(&instruments, handle(), 1, 1, 0)
+        .open_snapshot(&instruments, handle(), 1, 1)
         .expect("held");
     TooPrecise.snapshot(handle(), &mut framer).expect("writes");
 
-    let error = framer.finish().expect_err("a fifth decimal place at -4");
+    let error = framer
+        .finish(DepthBound::Complete)
+        .expect_err("a fifth decimal place at -4");
     assert_eq!(error.reason(), "too_precise");
     assert_eq!(error.field(), Some("snapshot_price"));
 }
@@ -341,7 +356,7 @@ fn an_unheld_handle_cannot_open_a_snapshot() {
 
     assert_eq!(
         lowering
-            .open_snapshot(&instruments, InstrumentRef::from_admission(9_999), 1, 1, 0)
+            .open_snapshot(&instruments, InstrumentRef::from_admission(9_999), 1, 1)
             .expect_err("not held"),
         LoweringError::UnknownInstrument
     );
@@ -361,7 +376,7 @@ fn an_adapter_that_is_not_ready_is_the_runtimes_to_skip() {
     };
 
     let mut framer = lowering
-        .open_snapshot(&instruments, handle(), 1, 1, 0)
+        .open_snapshot(&instruments, handle(), 1, 1)
         .expect("held");
     assert!(matches!(
         adapter.snapshot(handle(), &mut framer),

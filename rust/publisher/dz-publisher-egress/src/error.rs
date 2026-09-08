@@ -37,6 +37,29 @@ pub enum SinkError {
     #[error("send failed: {0}")]
     Socket(#[from] io::Error),
 
+    /// Nothing is receiving at the destination *yet*: no socket file at the
+    /// path (`ENOENT`), or a path whose socket nobody is bound to
+    /// (`ECONNREFUSED`).
+    ///
+    /// **Transient**, and it is the whole reason this variant is not
+    /// [`Self::Socket`]. A [`ReferenceStream`](crate::ReferenceStream) sends
+    /// unconnected precisely so that a consumer which has not started, or which
+    /// has restarted leaving a stale socket file behind, costs the datagrams it
+    /// was not there for and nothing else — and a publisher starting before its
+    /// recorder is the ordinary order, not an exception. Counted as
+    /// non-transient it becomes the opposite: [`Tee`](crate::Tee) drops the
+    /// member on its first send, nothing restores it, and the reference stream
+    /// is over for the life of the process.
+    ///
+    /// It carries no metric label of its own. The `reason` set is closed by the
+    /// governing playbook, `socket_error` is what a failed send to a socket is
+    /// counted under, and the operator's action for both is the same — look at
+    /// the far end of that socket. What the two must not share is
+    /// [`Self::is_transient`], which is a decision about this process rather
+    /// than a label on a dashboard.
+    #[error("nothing is receiving at the destination: {0}")]
+    ConsumerAbsent(#[source] io::Error),
+
     /// The datagram is longer than the mandated cap.
     ///
     /// Checked again where the bytes meet the socket, even though
@@ -60,7 +83,8 @@ impl SinkError {
     pub const fn reason(&self) -> EgressErrorReason {
         match self {
             Self::WouldBlock => EgressErrorReason::SendWouldBlock,
-            Self::Socket(_) => EgressErrorReason::SocketError,
+            // One label for two variants, deliberately: see `ConsumerAbsent`.
+            Self::Socket(_) | Self::ConsumerAbsent(_) => EgressErrorReason::SocketError,
             Self::TooLarge { .. } => EgressErrorReason::MtuExceeded,
             Self::NotRegistered => EgressErrorReason::NotRegistered,
         }
@@ -72,9 +96,15 @@ impl SinkError {
     /// [`Tee`](crate::Tee)). A full send buffer drains; a socket whose route
     /// has gone does not, and a per-datagram syscall that has failed the same
     /// way for an hour is a cost paid to learn nothing.
+    ///
+    /// A consumer that is not there yet drains too, and that is the second
+    /// value here rather than a special case: the thing on the other end of a
+    /// local socket is a process, processes start and restart, and the
+    /// unconnected send exists so that its absence costs the datagrams it was
+    /// absent for. See [`Self::ConsumerAbsent`].
     #[must_use]
     pub const fn is_transient(&self) -> bool {
-        matches!(self, Self::WouldBlock)
+        matches!(self, Self::WouldBlock | Self::ConsumerAbsent(_))
     }
 }
 

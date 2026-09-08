@@ -70,6 +70,19 @@ pub struct EraCoverage {
     pub ordinal: u64,
     /// The wire `Reset Count`, kept as a fact and never used as a key.
     pub reset_count: u8,
+    /// The sequence number of the datagram that *opened* this era.
+    ///
+    /// Not [`first_seq`](Self::first_seq), and the difference is the whole
+    /// reason it is carried: a datagram below the opening value arriving
+    /// afterwards — a reordering, or backward motion the archive holds anyway —
+    /// lowers the delivered span without moving the opening. The era's anchor is
+    /// what an offline tier records as *where this era began*, and a rank over
+    /// those openings is what identifies an era; deriving it from the span would
+    /// make an era's identity depend on a datagram that arrived later.
+    pub anchor_seq: u64,
+    /// Receive stamp of that same datagram, which is what a range join from a
+    /// per-datagram row resolves an era by.
+    pub anchor_ts_ns: u64,
     /// Lowest sequence number delivered in this era.
     pub first_seq: u64,
     /// Highest sequence number delivered in this era.
@@ -518,6 +531,11 @@ enum Delivery {
 struct Era {
     ordinal: u64,
     reset_count: u8,
+    /// The datagram that opened the era, kept apart from the ranges below
+    /// because a later arrival at a lower sequence number widens those and must
+    /// not move this.
+    anchor_seq: u64,
+    anchor_ts_ns: u64,
     /// Disjoint and non-adjacent, ascending.
     delivered: Vec<Delivered>,
 }
@@ -527,6 +545,8 @@ impl Era {
         Self {
             ordinal,
             reset_count,
+            anchor_seq: seq,
+            anchor_ts_ns: ts_ns,
             delivered: vec![Delivered::single(seq, ts_ns)],
         }
     }
@@ -623,6 +643,8 @@ impl Era {
         EraCoverage {
             ordinal: self.ordinal,
             reset_count: self.reset_count,
+            anchor_seq: self.anchor_seq,
+            anchor_ts_ns: self.anchor_ts_ns,
             first_seq: first.start,
             last_seq: last.end,
             delivered: self.delivered.iter().map(Delivered::width).sum(),

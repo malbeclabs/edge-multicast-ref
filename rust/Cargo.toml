@@ -21,13 +21,16 @@ members = [
     "recorder/dz-recorder-health",
     "recorder/dz-recorder-loss",
     "recorder/dz-recorder-relower",
+    "recorder/dz-recorder-rows",
+    "recorder/dz-recorder-clickhouse",
+    "recorder/dz-recorder-load",
     "recorder/dz-recorder-e2e",
     "recorder/dz-recorder",
 ]
 exclude = ["kernel-receiver", "xdp-receiver"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.88.0"
 license = "Apache-2.0"

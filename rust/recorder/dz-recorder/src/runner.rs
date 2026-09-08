@@ -422,6 +422,20 @@ impl FeedRecorder {
         }
         self.segments_evicted_seen = evicted;
 
+        // And how much history is left, which the count above cannot say. A
+        // full budget evicts on every sweep for ever, so that counter rises at
+        // steady state by design; this is the level somebody chasing last
+        // night's loss report actually needs. Published on every sweep, evicted
+        // or not, because it moves when a segment is *written* too.
+        //
+        // Read from the sweep above rather than measured here: that pass has
+        // already scanned both directories, and asking the disk again would
+        // double the reads of every sweep for an answer it just computed.
+        self.observer.record_archive_oldest_segment(
+            self.writer.retained_floor_ns().map(|ns| ns / 1_000_000_000),
+            self.writer.retained_objects(),
+        );
+
         // Loss upstream of the capture point. Fed to the health tier, which
         // counts it per feed, and deliberately not to the archive, whose
         // interface-drop accounting is per port role: at capture-handle scope

@@ -26,12 +26,26 @@ A fleet dashboard only works if every publisher emits the same names, so publish
 
 `dz-publisher-runtime::run` takes an `AdapterRegistry` the venue's `main` populates. `[adapter] kind` resolves against it, and a `kind` naming an unregistered adapter is a startup error listing what *is* registered — never a fallback and never a default.
 
+One name resolves without a venue registering it: `uds`, the built-in record adapter, for an integration that is not Rust and therefore cannot implement the trait. It is a registered kind and not a fallback — it is consulted after the venue's own entries, a venue registering the same name wins, and a `kind` naming neither is still the startup error. Its transport does not exist yet, so its `Input` refuses at connect and names `[adapter.replay]`, which is the path that works.
+
+It serves a top-of-book feed and **refuses a depth one at startup**. The record encoding carries `Level` and `Clear`, so it is depth-capable on the delta path — but it holds no book by design, the source process having already applied the microstructure, so it can answer no snapshot. Run against a `market-by-price` feed it would publish deltas with no recovery snapshot after a reset and no periodic snapshot at all, which is the mid-session-join failure `snapshot_cycle` closes reopened one `kind` along. A depth feed needs an adapter that holds the book.
+
+## Depth: the two things a snapshot needs
+
+| Decision | Owner | Why there |
+|---|---|---|
+| `Depth Bound` — complete book, or top N | the **adapter**, returned from `snapshot` | The wire's `0` is a positive claim of completeness, so there is no honest default for a layer that does not hold the book. Returned rather than passed in, so it cannot be omitted |
+| The cadence — `[[feed]] snapshot_cycle` | `-runtime` | One full pass over the published set, one instrument per derived tick. A recovery snapshot answers a reset; only a periodic one lets a subscriber join mid-session |
+
+`snapshot_cycle` is optional, and absent means recovery snapshots and nothing else. Both shipped publishers run a periodic snapshot at five seconds; a depth feed configured without one says so at startup, because the symptom otherwise is a subscriber that can never build a book and a publisher that looks healthy throughout.
+
 ## Still planned
 
 | Crate | Waits on |
 |---|---|
 | `dz-ingress-fix` and the other transports | A venue that needs one; `dz-ingress-websocket` is the shape they follow |
+| `dz-ingress-uds` | The production half of the non-Rust path; the adapter and the record encoding exist, the socket reader does not |
 | Market-by-order support | `dz-edge-mbo`, which does not exist |
-| The egress tee | A framing to write, which [`dz-adapter-uds`](../adapter/dz-adapter-uds/) now provides |
+| A level-budget snapshot scheduler | A published set large enough to need one: the rotation is one instrument per tick, and a set whose per-instrument tick falls below the runtime's own laps more slowly than configured |
 
 Design: [the publisher crates](../../docs/superpowers/specs/2026-08-26-edge-publisher-crates-design.md) and [the venue adapter interface](../../docs/superpowers/specs/2026-09-02-venue-adapter-interface-design.md).

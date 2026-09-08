@@ -1,0 +1,93 @@
+# The loader, as a unit.
+#
+# It runs on the recorder host and reads that host's own completed directory.
+# The two processes share that directory and nothing else, so everything below is
+# arranged to make "the loader cannot affect the recorder" a property of the unit
+# and not a promise in a comment.
+#
+#   install -o root -g root -m 0644 dz-recorder-load.service /etc/systemd/system/
+#   install -d -o dz-loader -g dz-loader -m 0750 /var/lib/dz-recorder-load
+#   systemd-creds encrypt --name=clickhouse-password - /etc/dz-recorder-load/password.cred
+#   systemctl daemon-reload && systemctl enable --now dz-recorder-load
+#
+# Its own service user, and the objects directory is mounted read-only into the
+# unit: a loader that could write there could delete an object the recorder's
+# staging budget is accounting for.
+
+[Unit]
+Description=DoubleZero edge recorder: the row loader
+Documentation=https://github.com/malbeclabs/edge-multicast-ref
+# After, not Requires: the loader reads what the recorder has already written, so
+# it is useful on a host whose recorder is stopped and must not take the recorder
+# down with it.
+After=network-online.target dz-recorder.service
+
+[Service]
+Type=simple
+User=dz-loader
+Group=dz-loader
+
+# The gate a deployment runs before it restarts anything. It validates the
+# configuration and reaches for the destination and loads nothing, so a unit that
+# would come up unable to write fails here instead of an hour later in a panel.
+ExecStartPre=/usr/local/bin/dz-recorder-load --config /etc/dz-recorder-load/loader.toml --check
+ExecStart=/usr/local/bin/dz-recorder-load --config /etc/dz-recorder-load/loader.toml --watch
+
+# SIGTERM finishes the object being loaded and then stops, so a restart never
+# leaves one half-loaded — and because loading is idempotent on
+# (object key, sha256), a restart that re-loads one costs a replace and nothing
+# else. The timeout is generous for that reason: there is nothing to lose by
+# waiting and nothing to lose by not.
+KillSignal=SIGTERM
+TimeoutStopSec=60
+Restart=always
+RestartSec=10s
+
+# The only place a password enters the process. There is no configuration key
+# for it: a key that exists is a key somebody fills in, and a configuration file
+# is a thing people commit.
+# A credential and not a variable: systemd hands the unit a file under
+# $CREDENTIALS_DIRECTORY that is readable by the service user alone and is not
+# inherited by anything the process spawns, while a variable is readable through
+# /proc/<pid>/environ by anything running as the same user.
+LoadCredentialEncrypted=clickhouse-password:/etc/dz-recorder-load/password.cred
+Environment=DZ_LOADER_CLICKHOUSE_PASSWORD_FILE=%d/clickhouse-password
+
+# It needs no capability at all: no socket is bound but the metrics port, no
+# device is opened, and nothing is captured. This is the whole difference between
+# this unit and the recorder's.
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+# The archive, read-only. The loader must not be able to write here: an object
+# it deleted or truncated is history the recorder's own budget was accounting for
+# and that no re-run can recover.
+ReadOnlyPaths=/var/lib/dz-recorder/completed
+# The ledger, which the loader owns. Deliberately not inside the archive
+# directory: a file the recorder's staging budget cannot classify is a file
+# eviction cannot reach.
+ReadWritePaths=/var/lib/dz-recorder-load
+
+# The metrics endpoint is bound on the loopback address by default. It describes
+# a live data path — the feeds, the sites and the timing of an archive — so it is
+# not to be published.
+IPAddressAllow=localhost
+RestrictAddressFamilies=AF_UNIX AF_INET
+
+[Install]
+WantedBy=multi-user.target

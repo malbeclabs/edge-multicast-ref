@@ -37,6 +37,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
 
+use dz_adapter_core::ConnectionId;
 use dz_edge_core::{Feed as WireFeed, PortRole};
 use dz_edge_mbp::MarketByPrice;
 use dz_edge_tob::TopOfBook;
@@ -46,7 +47,7 @@ use dz_publisher_lowering::SourceId;
 use dz_publisher_refdata::SelectionPolicy;
 use serde::Deserialize;
 
-use crate::duration::de_duration;
+use crate::duration::{de_duration, de_optional_duration};
 use crate::error::StartupError;
 
 /// The whole document.
@@ -82,9 +83,182 @@ pub struct Document {
     /// Owned by `dz-ingress-core`. This crate holds the document; that crate
     /// holds the shape of this section, so nothing there needs a parser and
     /// nothing here needs to know what a backoff is.
+    ///
+    /// **Defaultable, because every key in it has a default and `kind` is
+    /// optional.** A publisher that names its transport once per `[[source]]`
+    /// has nothing to state here, and required this failed at parse with
+    /// `missing field `ingress`` at line 1, column 1 — an error pointing at the
+    /// whole file rather than at the section nobody wrote. A document that
+    /// names a transport in *neither* place still reaches
+    /// [`ConfigError::NoKind`], which names both ways of stating it, so the
+    /// default cannot make a publisher with no transport start.
+    #[serde(default)]
     pub ingress: IngressConfig,
 
+    /// One per upstream connection this publisher opens.
+    ///
+    /// **Absent is one source, named by the transport the venue builds**, which
+    /// is what every document said before this array existed and what a
+    /// publisher with one upstream still says. See [`SourceSection`].
+    #[serde(default, rename = "source")]
+    pub sources: Vec<SourceSection>,
+
     pub adapter: AdapterConfig,
+}
+
+/// `[[source]]`: one upstream connection, and what this publisher does with it.
+///
+/// # Why a feed has more than one source
+///
+/// A venue often publishes the same book twice by different paths — a websocket
+/// and a FIX session, a local socket and a remote stream, two validators of one
+/// chain. They are not the same stream: conflation differs, per-connection
+/// sequencing differs, and each arrives at its own moment. So which one a
+/// publisher publishes from is a decision, and it is one an operator has to be
+/// able to change without a rebuild.
+///
+/// Both shipped publishers already live this. One has two adapters for one
+/// product line, over a websocket and over FIX, and picks between them by which
+/// binary it runs. The other takes two validator streams and reconciles them
+/// inside its own listener, with a reorder window and a grace fallback.
+///
+/// # What the runtime does, and what it deliberately does not
+///
+/// It opens every enabled source, drives each with its own connection, backoff
+/// and rate limit, and hands every payload to **one** adapter, which tells them
+/// apart by [`Payload::connection`](dz_adapter_core::Payload::connection).
+///
+/// It does not merge them. Merging two views of one book is the venue's, for the
+/// same reason the book state machine is: which of two prices is current, and
+/// when to fail over, follows the venue's microstructure and nothing here can
+/// know it.
+///
+/// # What `role` is, and the one thing it decides
+///
+/// **The runtime cannot enforce that a `comparison` source stays off the wire.**
+/// The adapter emits events and no event carries the source it came from, so
+/// there is no seam at which one source's data could be held back from a feed.
+/// So `role` is a declaration and a metric label, and it is *not* a gate on
+/// what reaches the wire. Nothing here pretends otherwise, and the one rule that
+/// depends on it — exactly one enabled `primary` — is publisher-wide for exactly
+/// that reason: a per-feed rule would describe routing the runtime does not do.
+///
+/// What it does decide, and the reason it is not decoration:
+/// **only a `primary`'s fatal error ends the process.** `Driver::run` returns
+/// only on [`IngressError::Fatal`](dz_ingress_core::IngressError::Fatal), whose
+/// documented causes are the per-source configuration faults found at connect —
+/// an invalid endpoint, a missing credential path, an unsupported scheme. A
+/// mistyped URL on a source that by design must not reach the wire took the
+/// healthy primary down and kept it down across restarts. Now that source's
+/// driver is dropped and named, its `connection_state` stays at 0 — which is
+/// the alert for exactly this case — and the primary carries on.
+///
+/// # There is no `carries`
+///
+/// There was, and it declared which feeds a source's data reached. It could not
+/// be honoured: every payload reaches one adapter and every event it emits
+/// reaches every feed the event belongs to, so a source cannot be confined to a
+/// subset of feeds by anything in this crate. A key that reads as a partition
+/// while nothing partitions is worse than no key — it made two primaries with
+/// disjoint declarations resolve cleanly while both upstreams' events landed on
+/// one channel instance under one `Sequence Number` series.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceSection {
+    /// This connection's name, and the `connection` label on every
+    /// `dz_publisher_ingress_*` series it moves.
+    ///
+    /// From configuration rather than from the venue's code, so that the file an
+    /// operator reads and the label a dashboard groups by are the same string.
+    /// It has to outlive the process to be a label — see [`Source::connection`].
+    pub name: String,
+
+    /// Which transport carries it, by [`Kind`]'s own token.
+    ///
+    /// Named here rather than at `[ingress]` when there are several sources, and
+    /// naming it in both places is refused.
+    pub ingress: String,
+
+    /// `false` keeps the block and opens nothing.
+    ///
+    /// A disabled source is not opened, is not handed to the adapter and is
+    /// **not declared to the metrics registry** — a connection-state series
+    /// pre-created at 0 for a connection nobody meant to open is an alert that
+    /// fires for a decision somebody took on purpose.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// What this publisher does with it. See [`SourceRole`].
+    #[serde(default)]
+    pub role: Option<String>,
+
+    /// The venue's own endpoint keys for this source, deserialized by the
+    /// venue's own code.
+    #[serde(default)]
+    pub upstream: toml::Table,
+
+    /// Paths, never secrets — checked exactly as `[adapter.credentials]` is.
+    #[serde(default)]
+    pub credentials: toml::Table,
+}
+
+/// What a publisher does with one source.
+///
+/// A closed set of tokens, so a value outside it is a load error naming what
+/// would have been accepted rather than a role nothing implements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum SourceRole {
+    /// The source this publisher publishes from.
+    ///
+    /// **Exactly one enabled `primary`, publisher-wide** — not one per feed.
+    /// Every source's payloads reach one adapter, the adapter emits events, and
+    /// no event carries the source it came from, so nothing here can confine one
+    /// source's data to one feed; a per-feed rule would describe routing the
+    /// runtime does not do. See [`resolve_sources`] for the check and
+    /// [`StartupError::SourcePrimaries`](crate::StartupError::SourcePrimaries)
+    /// for what a document that breaks it is told.
+    #[default]
+    Primary,
+    /// Connected, driven and counted, and carried for the race comparison
+    /// against the primary — *which one saw a given state first*.
+    ///
+    /// Not an event-for-event diff, and the design says why: two connections to
+    /// one venue do not deliver identical streams, so what is comparable is
+    /// state at aligned instants plus the distributions of first observation.
+    Comparison,
+}
+
+impl SourceRole {
+    /// Every role, in the order the tokens below are listed.
+    pub const ALL: [Self; 2] = [Self::Primary, Self::Comparison];
+
+    /// The token a document states, and the metric label value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Primary => "primary",
+            Self::Comparison => "comparison",
+        }
+    }
+
+    /// The tokens, for an error message.
+    pub const TOKEN_LIST: &'static str = "primary, comparison";
+
+    /// Resolve a token.
+    ///
+    /// # Errors
+    ///
+    /// [`StartupError::UnknownSourceRole`] naming the token and the set.
+    pub fn resolve(token: &str) -> Result<Self, StartupError> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|role| role.as_str() == token)
+            .ok_or_else(|| StartupError::UnknownSourceRole {
+                token: token.to_owned(),
+                supported: Self::TOKEN_LIST,
+            })
+    }
 }
 
 /// `[egress]`: how the source address is chosen, and the TTL.
@@ -128,6 +302,11 @@ const fn default_ttl() -> u8 {
 /// is the opposite of `[adapter] kind` — that one has no default because a
 /// wrong guess is invisible, and these have one because a missing value would
 /// otherwise leave a publisher with no heartbeat at all.
+///
+/// Two of the four are `Option` here even so, and it is not a change of that
+/// rule: they still default, once, in [`Document::resolve`] rather than per
+/// block. See [`definition_cycle`](Self::definition_cycle) for the failure that
+/// distinction fixes.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FeedSection {
@@ -166,6 +345,29 @@ pub struct FeedSection {
     #[serde(default)]
     pub snapshot_port: Option<u16>,
 
+    /// One full pass of the snapshot rotation. Depth feeds only, and optional.
+    ///
+    /// # Why the key exists, and why it is a cycle
+    ///
+    /// A recovery snapshot answers a reset the publisher announced; it does
+    /// nothing for the subscriber that joins mid-session, and that subscriber
+    /// cannot build a book without one. Both shipped publishers carry a periodic
+    /// snapshot for that reason and both set it to five seconds — one of them
+    /// under this exact name and this exact meaning, a full round-robin pass
+    /// with one instrument per tick.
+    ///
+    /// A *cycle* and not an interval, for the reason `definition_cycle` is one:
+    /// an interval per instrument has the whole published set falling due
+    /// together, and a snapshot is several datagrams per instrument. See
+    /// [`SnapshotRotation`](crate::rotation::SnapshotRotation).
+    ///
+    /// Absent means recovery snapshots and nothing else, which is what this
+    /// runtime did before the key existed. It is refused on a feed with no
+    /// snapshot port role rather than ignored: see
+    /// [`StartupError::SnapshotCycleWithoutPort`].
+    #[serde(default, deserialize_with = "de_optional_duration")]
+    pub snapshot_cycle: Option<Duration>,
+
     #[serde(default = "default_heartbeat", deserialize_with = "de_duration")]
     pub heartbeat_interval: Duration,
 
@@ -173,8 +375,22 @@ pub struct FeedSection {
     /// definition**, not a lap target. `dz-publisher-refdata` paces one lap
     /// across 80% of it, which is what stops the burst the reference-data
     /// specification forbids.
-    #[serde(default = "default_definition_cycle", deserialize_with = "de_duration")]
-    pub definition_cycle: Duration,
+    ///
+    /// # Why this one is an `Option` and the two beside it are not
+    ///
+    /// It is per-feed in the document and **single in the publisher**: it paces
+    /// one reference-data registry, and there is one because `Instrument ID`
+    /// identity can only be one thing. Two enabled blocks stating different
+    /// values is therefore a document that cannot be obeyed and is refused —
+    /// see [`StartupError::FeedsDisagree`] — and that refusal is only about the
+    /// operator's own keys if a stated value is distinguishable from an absent
+    /// one. Serde-defaulted, a document stating this on its depth feed and
+    /// omitting it on its top-of-book feed was refused for a conflict between
+    /// the value they typed and a default they never did.
+    ///
+    /// So absent is absent, and the default is applied once after the check.
+    #[serde(default, deserialize_with = "de_optional_duration")]
+    pub definition_cycle: Option<Duration>,
 
     #[serde(default = "default_manifest_cadence", deserialize_with = "de_duration")]
     pub manifest_cadence: Duration,
@@ -184,8 +400,13 @@ pub struct FeedSection {
     /// point, what it refuses to measure — `[ingress] idle_timeout` is the
     /// other one, and the two are deliberately spelled differently so that
     /// neither can be read as the other.
-    #[serde(default = "default_idle_guard", deserialize_with = "de_duration")]
-    pub idle_guard: Duration,
+    ///
+    /// An `Option` for the reason
+    /// [`definition_cycle`](Self::definition_cycle) is one: there is a single
+    /// guard, because the silence it measures is the publisher's, so two stated
+    /// values are refused — and an omission is not one of the two.
+    #[serde(default, deserialize_with = "de_optional_duration")]
+    pub idle_guard: Option<Duration>,
 }
 
 const fn default_true() -> bool {
@@ -308,12 +529,27 @@ pub struct AdapterConfig {
 /// what reaches subscribers, which is the section an operator reads as *this can
 /// take the feed down*.
 ///
-/// **Parsed, defaulted off, and plumbed nowhere.** The framing the tee writes is
-/// the same framing the offline comparison needs, and that framing does not
-/// exist yet — so the alternative to leaving this unplumbed is inventing a wire
-/// format here that a later crate would have to match. What the section already
-/// buys is that an operator who enables it gets a load error naming the
-/// unplumbed state, rather than a silently ignored key.
+/// # One socket per feed *and* port role, and no framing at all
+///
+/// `path` is a **prefix**: the feed's own `spec` token and the role's are
+/// appended, so a `path` of `/run/a-publisher/tee` on a publisher emitting both
+/// feeds is written to as `tee.top-of-book.mktdata`, `tee.top-of-book.refdata`,
+/// `tee.market-by-price.mktdata`, `tee.market-by-price.refdata` and
+/// `tee.market-by-price.snapshot`.
+///
+/// Both halves of that name are load-bearing, for one reason: **a Unix datagram
+/// carries neither a destination port nor a group**, and the diff this stream
+/// exists for is keyed on both. A recorder handed two roles on one socket, or
+/// two feeds' copies of one role on one socket, cannot attribute a datagram
+/// without decoding it — and decoding is the one thing a record path does not
+/// do. `[[feed]]` is an array, so a publisher emitting two feeds is the ordinary
+/// case rather than the exception; a name keyed on the role alone is right only
+/// for the publisher that happens to emit one feed. The shape mirrors the
+/// recorder's own configuration, which keys its ports per feed.
+///
+/// The socket is `SOCK_DGRAM`, so one datagram in is one datagram out and there
+/// is no framing to invent, agree on or get wrong. See
+/// [`ReferenceStream`](dz_publisher_egress::ReferenceStream).
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TeeConfig {
@@ -325,6 +561,38 @@ pub struct TeeConfig {
     /// The Unix socket the publisher fans encoded datagrams out to.
     #[serde(default)]
     pub path: Option<PathBuf>,
+}
+
+impl TeeConfig {
+    /// The socket one feed's one port role is copied to.
+    ///
+    /// `<path>.<feed spec>.<port role>`, in the tokens the document itself
+    /// states — the `spec` an operator wrote in the `[[feed]]` block and the
+    /// role's own name — so the file, the socket and the recorder's
+    /// configuration all spell the same two things the same way.
+    ///
+    /// # Errors
+    ///
+    /// [`StartupError::TeeWithoutPath`] when the section is on and names no
+    /// path. Checked again here as well as at load, because a prefix is not
+    /// something to default: a tee that quietly wrote to a relative path would
+    /// have an operator believing copies were being archived.
+    pub fn destination(
+        &self,
+        spec: FeedSpec,
+        port_role: PortRole,
+    ) -> Result<PathBuf, StartupError> {
+        let prefix = self.path.as_deref().ok_or(StartupError::TeeWithoutPath)?;
+        // Built on the `OsString` rather than with `join` or `set_extension`:
+        // the suffix is appended to the last component, and `join` would make it
+        // a child directory instead.
+        let mut destination = prefix.as_os_str().to_owned();
+        destination.push(".");
+        destination.push(spec.as_str());
+        destination.push(".");
+        destination.push(port_role.as_str());
+        Ok(PathBuf::from(destination))
+    }
 }
 
 /// `[adapter.replay]`: a fixture directory for an offline run.
@@ -468,9 +736,17 @@ pub struct Feed {
     pub mktdata_port: u16,
     pub refdata_port: u16,
     pub snapshot_port: Option<u16>,
+    /// One full pass of the snapshot rotation; `None` for recovery snapshots
+    /// only. See [`FeedSection::snapshot_cycle`].
+    pub snapshot_cycle: Option<Duration>,
     pub heartbeat_interval: Duration,
+    /// The publisher-wide value, which every feed carries identically: it paces
+    /// one reference-data registry. Either the one an enabled `[[feed]]` block
+    /// stated, or the default — see [`one_stated`].
     pub definition_cycle: Duration,
     pub manifest_cadence: Duration,
+    /// The publisher-wide value, as [`definition_cycle`](Self::definition_cycle)
+    /// is: there is one guard, and the silence it measures is the publisher's.
     pub idle_guard: Duration,
 }
 
@@ -479,6 +755,59 @@ pub struct Feed {
 pub struct Refdata {
     pub state_dir: PathBuf,
     pub selection: SelectionPolicy,
+}
+
+/// One upstream connection, resolved.
+pub struct Source {
+    /// The name, as every metric label carries it.
+    ///
+    /// # Why this is leaked, once, at startup
+    ///
+    /// [`ConnectionId`] holds a `&'static str` on purpose:
+    /// `dz_publisher_ingress_connection_state` is pre-created at 0 for each
+    /// declared name, which is what lets the `== 0` alert fire for a publisher
+    /// whose upstream never came up at all — the case the metric most exists
+    /// for. A name that only became known when a connection first succeeded
+    /// would have no series until then, which is exactly the case that has to
+    /// alert.
+    ///
+    /// The name now comes from the document, so that the file an operator reads
+    /// and the label a dashboard groups by are one string. Reconciling those two
+    /// facts costs one leak per configured source, before the metric registry
+    /// exists and never again: it is bounded by the document, it happens once,
+    /// and the alternatives are a label the file cannot state or a series that
+    /// appears too late to be alerted on.
+    pub connection: ConnectionId,
+    /// Which transport carries it.
+    pub kind: Kind,
+    /// What this publisher does with it. Consumed at runtime: only a
+    /// `primary`'s fatal error ends the process. See [`SourceSection`].
+    pub role: SourceRole,
+    /// The venue's own endpoint keys.
+    pub upstream: toml::Table,
+    /// The venue's own credential paths.
+    pub credentials: toml::Table,
+}
+
+impl std::fmt::Debug for Source {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Source")
+            .field("connection", &self.connection.as_str())
+            .field("kind", &self.kind)
+            .field("role", &self.role.as_str())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Source {
+    /// Whether a fatal error from this source ends the process.
+    ///
+    /// Only a primary's does. Everything else is dropped, named and left with
+    /// its `connection_state` at 0.
+    #[must_use]
+    pub const fn is_primary(&self) -> bool {
+        matches!(self.role, SourceRole::Primary)
+    }
 }
 
 /// The whole document, checked, with every section handed to its owner's
@@ -495,8 +824,17 @@ pub struct Config {
     pub feeds: Vec<Feed>,
     pub refdata: Refdata,
     pub metrics: MetricsSection,
-    pub ingress_kind: Kind,
+    /// The document-level `[ingress] kind`, for a publisher with one source.
+    ///
+    /// `None` when the document names its transports per `[[source]]` instead,
+    /// which is the case [`Config::sources`] is non-empty for. The two are
+    /// mutually exclusive by construction: naming a transport in both places is
+    /// refused at load.
+    pub ingress_kind: Option<Kind>,
     pub ingress: Policy,
+    /// Every enabled `[[source]]`, resolved. Empty means one source, named by
+    /// the transport the venue builds — see [`SourceSection`].
+    pub sources: Vec<Source>,
     pub adapter: AdapterConfig,
 }
 
@@ -528,13 +866,46 @@ impl Document {
         // failure an operator sees and a wrong `Channel ID` is worth hearing
         // about before a misspelled adapter: the second is a typo in one line
         // and the first is a conversation with subscribers.
+        // **Two keys are per-feed in the document and not per-feed in the
+        // publisher, so a document that states two answers is refused rather
+        // than silently given the first feed's.**
+        //
+        // `definition_cycle` paces one registry, and one registry is deliberate:
+        // `Instrument ID` identity is the one thing there can only be one of,
+        // so every feed publishes the same set from the same table and a second
+        // cadence over it would emit the same definition at two rates. See
+        // `Publisher::new`.
+        //
+        // `idle_guard` is one guard because the silence it measures is the
+        // publisher's — upstream delivering and nothing reaching any wire. The
+        // shipped publisher that once had one guard per feed now has exactly one
+        // venue-wide guard, with a fallback to its first feed's key; the
+        // fallback is the part that is a trap, and this is where it is refused
+        // instead.
+        //
+        // **Only two stated values are a disagreement**, which is why both keys
+        // are `Option` in the section and defaulted once here: a document
+        // stating `idle_guard` on its depth feed and omitting it on its
+        // top-of-book feed states one answer, and refusing it for a conflict
+        // with a default the operator never typed is a refusal to start over a
+        // key the file does not contain.
+        let enabled: Vec<FeedSection> =
+            self.feeds.into_iter().filter(|feed| feed.enabled).collect();
+        let definition_cycle = one_stated(
+            "[[feed]] definition_cycle",
+            enabled.iter().map(|feed| feed.definition_cycle),
+            default_definition_cycle(),
+        )?;
+        let idle_guard = one_stated(
+            "[[feed]] idle_guard",
+            enabled.iter().map(|feed| feed.idle_guard),
+            default_idle_guard(),
+        )?;
+
         let mut feeds = Vec::new();
         let mut seen: BTreeMap<&'static str, ()> = BTreeMap::new();
-        for section in self.feeds {
-            if !section.enabled {
-                continue;
-            }
-            let feed = section.resolve()?;
+        for section in enabled {
+            let feed = section.resolve(definition_cycle, idle_guard)?;
             if seen.insert(feed.spec.as_str(), ()).is_some() {
                 return Err(StartupError::DuplicateFeedSpec {
                     spec: feed.spec.as_str().to_owned(),
@@ -565,9 +936,39 @@ impl Document {
             self.refdata.selection.warn_published_above,
         )?;
 
-        let (ingress_kind, ingress) = self.ingress.resolve()?;
+        // **The transport is named once**, either at `[ingress]` for a publisher
+        // with one source or once per `[[source]]`, and never in both places. A
+        // key that is read only when another is absent is a key an operator
+        // cannot reason about from the file in front of them.
+        let (ingress_kind, ingress) = if self.sources.is_empty() {
+            let (kind, policy) = self.ingress.resolve()?;
+            (Some(kind), policy)
+        } else {
+            if let Some(document) = self.ingress.kind.clone() {
+                return Err(StartupError::Ingress {
+                    source: dz_ingress_core::ConfigError::KindNamedTwice {
+                        document,
+                        sources: self.sources.len(),
+                    },
+                });
+            }
+            (None, self.ingress.policy()?)
+        };
+
+        let sources = resolve_sources(self.sources)?;
 
         check_credentials(&self.adapter.credentials)?;
+        for source in &sources {
+            check_credentials(&source.credentials)?;
+        }
+
+        // Checked at load rather than where the socket is opened: a section
+        // switched on and left incomplete is an operator who believes copies
+        // are being archived, and there is no reason to open a multicast socket
+        // before saying so.
+        if self.adapter.tee.enabled && self.adapter.tee.path.is_none() {
+            return Err(StartupError::TeeWithoutPath);
+        }
 
         Ok(Config {
             venue: self.venue,
@@ -580,6 +981,7 @@ impl Document {
             metrics: self.metrics,
             ingress_kind,
             ingress,
+            sources,
             adapter: self.adapter,
         })
     }
@@ -610,6 +1012,16 @@ impl Config {
         ids.sort_unstable();
         ids.dedup();
         ids
+    }
+
+    /// Every enabled feed's specification, in the document's own order.
+    ///
+    /// Handed to a venue's constructor through
+    /// [`AdapterContext::feeds`](crate::AdapterContext::feeds), which is where
+    /// the reason it exists is written down.
+    #[must_use]
+    pub fn feed_specs(&self) -> Vec<FeedSpec> {
+        self.feeds.iter().map(|feed| feed.spec).collect()
     }
 
     /// Exactly the port roles this publisher operates, across every enabled
@@ -651,8 +1063,69 @@ impl EgressSection {
     }
 }
 
+/// The one value an enabled `[[feed]]` block set states for a key the publisher
+/// holds once, or the default if none of them states one.
+///
+/// # Absent is absent, and that is the whole point of the function
+///
+/// Both callers' keys used to be serde-defaulted, so every block carried a
+/// value whether or not it stated one — and the disagreement check then read a
+/// document that set `idle_guard = "300s"` on its depth feed and omitted it on
+/// its top-of-book feed as a conflict between 300s and a 60s default the
+/// operator never typed. A publisher that started yesterday would refuse to
+/// start today, naming two values, one of which is not in the file.
+///
+/// So the sections carry `Option`, only two stated values are a disagreement,
+/// and the default is applied once — here, after the check, so that a single
+/// stated value governs every feed rather than only the block it appears in.
+///
+/// The zero check is here too, for the same reason it is a refusal at all: zero
+/// is what an unset key reads as in a document that spells its durations as
+/// bare numbers, and a cadence of zero is not a slower cadence.
+///
+/// # Errors
+///
+/// [`StartupError::ZeroDuration`] for a stated zero, and
+/// [`StartupError::FeedsDisagree`] naming both values when two blocks state
+/// different ones.
+fn one_stated(
+    key: &'static str,
+    stated: impl Iterator<Item = Option<Duration>>,
+    default: Duration,
+) -> Result<Duration, StartupError> {
+    let mut settled: Option<Duration> = None;
+    for value in stated.flatten() {
+        if value.is_zero() {
+            return Err(StartupError::ZeroDuration { key });
+        }
+        match settled {
+            None => settled = Some(value),
+            // Named in the document's own order, so the two values in the
+            // message are the first and the one that disagreed with it.
+            Some(one) if one != value => {
+                return Err(StartupError::FeedsDisagree {
+                    key,
+                    one,
+                    another: value,
+                })
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(settled.unwrap_or(default))
+}
+
 impl FeedSection {
-    fn resolve(self) -> Result<Feed, StartupError> {
+    /// Check one block, with the two publisher-wide cadences already settled.
+    ///
+    /// They are arguments rather than fields of the block because they are not
+    /// per-feed values: see [`one_stated`]. Every resolved [`Feed`] carries the
+    /// same pair by construction.
+    fn resolve(
+        self,
+        definition_cycle: Duration,
+        idle_guard: Duration,
+    ) -> Result<Feed, StartupError> {
         let spec = FeedSpec::resolve(&self.spec)?;
         let source_id = SourceId::new(self.source_id).ok_or(StartupError::BadSourceId {
             source_id: self.source_id,
@@ -717,12 +1190,25 @@ impl FeedSection {
             }
         }
 
+        // A cadence for a port role this feed does not carry is a key nobody
+        // reads, which is the failure the whole document is checked against.
+        if self.snapshot_cycle.is_some() && self.snapshot_port.is_none() {
+            return Err(StartupError::SnapshotCycleWithoutPort {
+                spec: spec.as_str(),
+            });
+        }
+
+        // `definition_cycle` and `idle_guard` are not here: they are checked
+        // once, across every enabled block, by `one_stated`.
         for (key, value) in [
             ("[[feed]] heartbeat_interval", self.heartbeat_interval),
-            ("[[feed]] definition_cycle", self.definition_cycle),
             ("[[feed]] manifest_cadence", self.manifest_cadence),
-            ("[[feed]] idle_guard", self.idle_guard),
-        ] {
+        ]
+        .into_iter()
+        .chain(
+            self.snapshot_cycle
+                .map(|cycle| ("[[feed]] snapshot_cycle", cycle)),
+        ) {
             if value.is_zero() {
                 return Err(StartupError::ZeroDuration { key });
             }
@@ -736,12 +1222,107 @@ impl FeedSection {
             mktdata_port: self.mktdata_port,
             refdata_port: self.refdata_port,
             snapshot_port: self.snapshot_port,
+            snapshot_cycle: self.snapshot_cycle,
             heartbeat_interval: self.heartbeat_interval,
-            definition_cycle: self.definition_cycle,
+            definition_cycle,
             manifest_cadence: self.manifest_cadence,
-            idle_guard: self.idle_guard,
+            idle_guard,
         })
     }
+}
+
+/// Resolve `[[source]]`, and refuse every document that names alternatives
+/// without saying which one publishes.
+///
+/// # The one rule that has to be a startup error
+///
+/// **Exactly one enabled `primary`, publisher-wide.** Two primaries are two
+/// publishers' worth of events on the channel instances they reach: the
+/// `Sequence Number` series is per channel instance, so a subscriber's gap
+/// detection reads the two interleaved as its own losses and cannot tell which.
+/// None is a publisher whose data has no path to the wire, heartbeating channels
+/// it never fills.
+///
+/// **Publisher-wide, and not per feed.** A per-feed rule would be a statement
+/// about routing this runtime does not do: every source's payloads reach one
+/// adapter, the adapter emits events, and no event carries the source it came
+/// from — so nothing here can confine one source's data to one feed. The rule
+/// as written is the one the runtime upholds, and it is checkable from the
+/// document alone.
+///
+/// A `comparison` source is refused nothing else: several are fine, and one
+/// arriving beside the primary is the whole point of the role.
+fn resolve_sources(sections: Vec<SourceSection>) -> Result<Vec<Source>, StartupError> {
+    let mut sources: Vec<Source> = Vec::new();
+    let mut seen: BTreeMap<String, ()> = BTreeMap::new();
+
+    for section in sections {
+        // Trimmed once, and then held against what was written: the name is the
+        // `connection` metric label, and a name that differs from its trim
+        // would be one string in the file and another in a dashboard.
+        let name = section.name.trim();
+        if name.is_empty() {
+            return Err(StartupError::UnnamedSource);
+        }
+        if name != section.name {
+            return Err(StartupError::SourceNameNotTrimmed {
+                trimmed: name.to_owned(),
+                name: section.name,
+            });
+        }
+        // Checked across every block rather than only the enabled ones: two
+        // blocks sharing a name are two descriptions of one connection, and
+        // which of them is in force would depend on which was enabled today.
+        if seen.insert(section.name.clone(), ()).is_some() {
+            return Err(StartupError::DuplicateSourceName { name: section.name });
+        }
+        if !section.enabled {
+            continue;
+        }
+
+        let kind =
+            Kind::resolve(&section.ingress).map_err(|source| StartupError::Ingress { source })?;
+        let role = match section.role.as_deref() {
+            Some(token) => SourceRole::resolve(token)?,
+            None => SourceRole::default(),
+        };
+
+        sources.push(Source {
+            // Leaked once, here, before the metric registry exists. See
+            // `Source::connection` for why a label cannot be anything else.
+            connection: ConnectionId::new(Box::leak(section.name.into_boxed_str())),
+            kind,
+            role,
+            upstream: section.upstream,
+            credentials: section.credentials,
+        });
+    }
+
+    if !seen.is_empty() && sources.is_empty() {
+        return Err(StartupError::NoEnabledSource);
+    }
+    // Only when the array is in use: a document with no `[[source]]` block has
+    // one implicit source and nothing to disambiguate.
+    if seen.is_empty() {
+        return Ok(sources);
+    }
+
+    let primaries: Vec<&str> = sources
+        .iter()
+        .filter(|source| source.is_primary())
+        .map(|source| source.connection.as_str())
+        .collect();
+    if primaries.len() != 1 {
+        return Err(StartupError::SourcePrimaries {
+            primaries: if primaries.is_empty() {
+                "none".to_owned()
+            } else {
+                primaries.join(", ")
+            },
+        });
+    }
+
+    Ok(sources)
 }
 
 /// The checkable half of *paths only, never inline secrets*.

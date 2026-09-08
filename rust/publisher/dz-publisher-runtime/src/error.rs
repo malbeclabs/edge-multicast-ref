@@ -114,6 +114,137 @@ pub enum StartupError {
     )]
     SnapshotPortNotCarried { spec: &'static str, port: u16 },
 
+    /// A feed with a `snapshot_cycle` and no snapshot port role.
+    ///
+    /// The same rule as [`Self::SnapshotPortNotCarried`], one key along: a
+    /// cadence for a port role the feed does not carry is a key nobody reads,
+    /// and an operator who wrote it believes snapshots are going out.
+    #[error(
+        "`[[feed]] spec = \"{spec}\"` carries no snapshot port role, so \
+         `snapshot_cycle` would pace snapshots nothing sends"
+    )]
+    SnapshotCycleWithoutPort { spec: &'static str },
+
+    /// Two enabled feeds stating different values for a key the publisher holds
+    /// once.
+    ///
+    /// **Refused rather than resolved to the first feed's**, which is what this
+    /// runtime silently did. Both keys are per-feed in the document because they
+    /// are properties of a feed, and both are single in the publisher because of
+    /// what they drive: `definition_cycle` paces one reference-data registry,
+    /// which is one because `Instrument ID` identity can only be one thing, and
+    /// `idle_guard` measures one publisher's silence. Taking the first block's
+    /// answer means an operator who set the second is obeyed on paper and
+    /// ignored in fact.
+    #[error(
+        "two enabled `[[feed]]` blocks state different `{key}`, {one:?} and \
+         {another:?}, and this publisher holds one"
+    )]
+    FeedsDisagree {
+        key: &'static str,
+        one: std::time::Duration,
+        another: std::time::Duration,
+    },
+
+    /// The venue's constructor handed back no transport at all.
+    ///
+    /// A publisher with nothing to read from would come up, publish nothing,
+    /// and look like a quiet venue.
+    #[error("the adapter's constructor returned no source: this publisher would read nothing")]
+    NoVenueSource,
+
+    /// The venue built several transports and the document declares none.
+    ///
+    /// Refused rather than run: with no `[[source]]` block there is nothing
+    /// that says what the second connection is, which feed it carries or
+    /// whether it is meant to publish — and its name would be the venue's
+    /// rather than the operator's.
+    #[error(
+        "the adapter's constructor returned {built} sources and the document declares none; \
+         state one `[[source]]` block per connection"
+    )]
+    SourcesUndeclared { built: usize },
+
+    /// The document's sources and the venue's transports are not the same set.
+    ///
+    /// Every way they can disagree is silent. A transport the document did not
+    /// declare moves traffic under a `connection` label the metric registry
+    /// never pre-created, so it is counted under nothing; a declared source the
+    /// venue did not build is a series sitting at zero, which reads exactly
+    /// like an upstream that is down.
+    #[error(
+        "the `[[source]]` blocks and the adapter's transports are different sets: declared \
+         {declared}; built {built}"
+    )]
+    SourcesDisagree { declared: String, built: String },
+
+    /// A `[[source]]` block with an empty `name`.
+    ///
+    /// The name is the `connection` metric label, so an empty one is a series
+    /// nobody can group by and a log line nobody can read.
+    #[error("a `[[source]]` block has an empty `name`")]
+    UnnamedSource,
+
+    /// A `name` with leading or trailing whitespace.
+    ///
+    /// Refused rather than trimmed, because the name is used three times and
+    /// trimming it in one of them is worse than either. The emptiness check
+    /// above reads the trimmed string; the duplicate check and the leak that
+    /// produces the `connection` label read what was written. So `"ws"` and
+    /// `"ws "` resolve as two distinct sources carrying two label values a
+    /// dashboard cannot tell apart, and an error listing them renders them as
+    /// `ws, ws `. Trimming silently would fix the label and leave an operator
+    /// reading a file that does not say what the label says; refusing names the
+    /// typo where it was made.
+    #[error(
+        "`[[source]] name = \"{name}\"` has leading or trailing whitespace: the name is the \
+         `connection` metric label, and `\"{trimmed}\"` and `\"{name}\"` would be two series a \
+         dashboard cannot tell apart"
+    )]
+    SourceNameNotTrimmed { name: String, trimmed: String },
+
+    /// Two `[[source]]` blocks sharing a name.
+    ///
+    /// Checked across every block and not only the enabled ones: two blocks
+    /// with one name are two descriptions of a single connection, and which of
+    /// them is in force would depend on which happened to be enabled today.
+    #[error("two `[[source]]` blocks are named `{name}`")]
+    DuplicateSourceName { name: String },
+
+    /// `[[source]] role` is a token the closed set does not carry.
+    #[error("`[[source]] role = \"{token}\"` is not a role; the roles are {supported}")]
+    UnknownSourceRole {
+        token: String,
+        supported: &'static str,
+    },
+
+    /// Every `[[source]]` block is disabled.
+    #[error("every `[[source]]` block is disabled: this publisher would connect to nothing")]
+    NoEnabledSource,
+
+    /// No enabled `primary` source, or more than one.
+    ///
+    /// **The rule the whole array exists to make checkable, and it is
+    /// publisher-wide rather than per feed** — because that is the rule the
+    /// runtime actually upholds. Every source's payloads reach one adapter, the
+    /// adapter emits events, and no event carries the source it came from, so
+    /// the runtime cannot route one source's data to one feed and another's to
+    /// another. A per-feed rule would have accepted two primaries with disjoint
+    /// declarations and let both upstreams' events land on one channel instance
+    /// under one `Sequence Number` series, which a subscriber reads as its own
+    /// gap-detection losses and cannot attribute.
+    ///
+    /// Two primaries are therefore two publishers' worth of events wherever
+    /// they land. None is a publisher whose data has no path to the wire at all,
+    /// heartbeating channels it never fills.
+    #[error(
+        "exactly one enabled `[[source]]` must have `role = \"primary\"`; there {} {primaries}. \
+         Every source's payloads reach one adapter and no event carries the source it came \
+         from, so this is a publisher-wide rule and not a per-feed one",
+        if primaries.contains(',') { "are" } else { "is" }
+    )]
+    SourcePrimaries { primaries: String },
+
     /// Two enabled feeds naming different `source_id`s.
     ///
     /// A `Source ID` is the publisher's registered identity and is the same for
@@ -257,6 +388,26 @@ pub enum StartupError {
     /// No configuration file was named.
     #[error("no configuration file: {usage}")]
     NoConfigPath { usage: &'static str },
+
+    /// `[adapter.tee] enabled = true` with no `path`.
+    ///
+    /// The same shape as [`Self::ReplayWithoutPath`]: a section switched on and
+    /// left incomplete is an operator who believes copies are being archived.
+    #[error("[adapter.tee] is enabled but names no path")]
+    TeeWithoutPath,
+
+    /// The reference stream's own socket would not open.
+    ///
+    /// Not the consumer's socket: nothing is connected there, so a recorder
+    /// that has not started yet is the ordinary case and not a startup failure.
+    /// This is a host on which an unbound datagram socket cannot be created at
+    /// all.
+    #[error("the reference stream for {path} would not open: {source}")]
+    Tee {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 
     /// `[adapter.replay] enabled = true` with no `path`.
     ///

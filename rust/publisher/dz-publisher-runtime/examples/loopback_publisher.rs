@@ -237,6 +237,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         mktdata_port,
         refdata_port,
         snapshot_port: None,
+        // Top-of-book carries no snapshot port, so there is no rotation to
+        // configure; a cycle here would be refused at load.
+        snapshot_cycle: None,
         heartbeat_interval: Duration::from_secs(1),
         definition_cycle: Duration::from_secs(1),
         manifest_cadence: Duration::from_millis(200),

@@ -1,6 +1,6 @@
 //! Framing a pulled snapshot: begin, the levels, end.
 
-use dz_adapter_core::{InstrumentRef, Scalar, Side, SnapshotSink};
+use dz_adapter_core::{DepthBound, InstrumentRef, Scalar, Side, SnapshotSink};
 use dz_edge_mbp::{SnapshotBegin, SnapshotEnd, SnapshotLevel, SIDE_ASK, SIDE_BID, U16_UNAVAILABLE};
 
 use crate::depth::DepthLowering;
@@ -52,7 +52,6 @@ pub struct SnapshotFramer {
     snapshot_id: u32,
     last_instrument_seq: u32,
     timestamp_ns: u64,
-    depth_bound: u32,
     levels: Vec<SnapshotLevel>,
     /// The first refusal, kept. The first rather than the last, because it is
     /// the one whose cause the operator can still reason about.
@@ -98,11 +97,19 @@ impl SnapshotSink for SnapshotFramer {
 }
 
 impl SnapshotFramer {
-    /// Close the snapshot.
+    /// Close the snapshot at the depth the adapter declared.
     ///
     /// The level count the begin declares is what was actually written, so a
     /// subscriber counting fewer than promised has genuinely lost one rather
     /// than been told a number the publisher invented.
+    ///
+    /// `depth_bound` is whatever
+    /// [`Adapter::snapshot`](dz_adapter_core::Adapter::snapshot) returned, and
+    /// it is a parameter here rather than a field set at
+    /// [`open_snapshot`](DepthLowering::open_snapshot) so that the value on the
+    /// wire is the one the layer holding the book stated. `Complete` and no
+    /// levels is the ordinary shape of an instrument with no resting interest,
+    /// and is not refused.
     ///
     /// # Errors
     ///
@@ -110,7 +117,7 @@ impl SnapshotFramer {
     /// exactly at this instrument's exponents. Nothing partial is returned: an
     /// incomplete snapshot is worse than none, because a subscriber cannot tell
     /// the difference.
-    pub fn finish(self) -> Result<Snapshot, LoweringError> {
+    pub fn finish(self, depth_bound: DepthBound) -> Result<Snapshot, LoweringError> {
         if let Some(error) = self.refused {
             return Err(error);
         }
@@ -132,7 +139,7 @@ impl SnapshotFramer {
                 snapshot_id: self.snapshot_id,
                 last_instrument_seq: self.last_instrument_seq,
                 timestamp_ns: self.timestamp_ns,
-                depth_bound: self.depth_bound,
+                depth_bound: depth_bound.encoded(),
             },
             levels: self.levels,
             end: SnapshotEnd {
@@ -149,8 +156,13 @@ impl DepthLowering {
     /// [`Adapter::snapshot`](dz_adapter_core::Adapter::snapshot).
     ///
     /// `anchor_seq` is the channel sequence number the resulting book state is
-    /// true as of, and `depth_bound` how deep the publisher's book goes — both
-    /// the runtime's, because both are what a subscriber's recovery depends on.
+    /// true as of, and it is the runtime's because it is what a subscriber's
+    /// recovery depends on. The `Depth Bound` is deliberately **not** here: it
+    /// is how deep the adapter's own book goes, so it arrives at
+    /// [`SnapshotFramer::finish`] from what
+    /// [`Adapter::snapshot`](dz_adapter_core::Adapter::snapshot) returned. A
+    /// bound this function accepted would be a bound the runtime could fill in,
+    /// and the value it would fill in is `0`, which is a claim of completeness.
     ///
     /// `Last Instrument Seq` is filled from the sequence this lowering has been
     /// stamping, which is the whole reason the counter lives here: it is the
@@ -170,7 +182,6 @@ impl DepthLowering {
         instrument: InstrumentRef,
         anchor_seq: u64,
         timestamp_ns: u64,
-        depth_bound: u32,
     ) -> Result<SnapshotFramer, LoweringError> {
         let inst = *instruments.get(instrument)?;
         let last_instrument_seq = self.sequence().last(instrument);
@@ -183,7 +194,6 @@ impl DepthLowering {
             snapshot_id,
             last_instrument_seq,
             timestamp_ns,
-            depth_bound,
             levels: Vec::new(),
             refused: None,
         })

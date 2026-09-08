@@ -65,6 +65,7 @@ pub mod era;
 pub mod error;
 pub mod instance;
 pub mod policy;
+pub mod reference;
 pub mod sequencer;
 pub mod sink;
 pub mod transmitter;
@@ -76,6 +77,7 @@ pub use instance::{ChannelInstance, EgressEndpoint};
 pub use policy::{
     EgressPolicy, Ipv4Prefix, KernelRoute, PolicyError, PrefixError, RouteLookup, DEFAULT_TTL,
 };
+pub use reference::ReferenceStream;
 pub use sequencer::Sequencer;
 pub use sink::{DatagramSink, FailureScope, Tee};
 pub use transmitter::{DatagramSocket, KernelSocket, MulticastTransmitter, OpenError};

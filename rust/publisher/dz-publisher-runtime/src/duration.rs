@@ -65,6 +65,22 @@ pub(crate) fn de_duration<'de, D: Deserializer<'de>>(de: D) -> Result<Duration, 
     parse_duration(&raw).map_err(D::Error::custom)
 }
 
+/// A duration for a key whose absence means something.
+///
+/// `None` is the key not being written, which for `[[feed]] snapshot_cycle` is
+/// *recovery snapshots and nothing else*. A key that is written badly is still
+/// an error: the absence has a meaning, and a value that could not be read is
+/// not that meaning.
+pub(crate) fn de_optional_duration<'de, D: Deserializer<'de>>(
+    de: D,
+) -> Result<Option<Duration>, D::Error> {
+    let raw = Option::<String>::deserialize(de)?;
+    match raw {
+        None => Ok(None),
+        Some(raw) => parse_duration(&raw).map(Some).map_err(D::Error::custom),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

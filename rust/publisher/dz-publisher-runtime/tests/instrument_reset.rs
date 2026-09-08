@@ -144,10 +144,14 @@ fn the_snapshot_that_follows_is_anchored_where_the_reset_promised() {
     // past. This test found that: the reset promised 0 and a routine capture
     // produced 1.
     let mut h = harness(depth_feed());
-    let mut adapter = FakeAdapter::new(&["ONE"]).with_book(&[
-        (dz_adapter_core::Side::Bid, "0.41", "5"),
-        (dz_adapter_core::Side::Ask, "0.43", "7"),
-    ]);
+    let mut adapter = FakeAdapter::new(&["ONE"])
+        // A bounded book, so the assertion below can tell the venue's answer
+        // apart from the zero this path used to hardcode.
+        .with_depth_bound(16)
+        .with_book(&[
+            (dz_adapter_core::Side::Bid, "0.41", "5"),
+            (dz_adapter_core::Side::Ask, "0.43", "7"),
+        ]);
     h.publisher.poll_listings(&mut adapter);
 
     let one = dz_adapter_core::InstrumentRef::from_admission(0);
@@ -163,7 +167,7 @@ fn the_snapshot_that_follows_is_anchored_where_the_reset_promised() {
     for (instrument, anchor) in h.publisher.owed_snapshots() {
         assert_eq!(anchor, promised, "the debt carries the promised anchor");
         h.publisher
-            .snapshot_anchored_at(&adapter, instrument, anchor, 0)
+            .snapshot_anchored_at(&adapter, instrument, anchor)
             .expect("the book is there to capture");
     }
 
@@ -186,6 +190,16 @@ fn the_snapshot_that_follows_is_anchored_where_the_reset_promised() {
         anchor, promised,
         "the snapshot must be anchored where the reset said it would be"
     );
+
+    // **And it carries the depth the adapter declared, which the recovery path
+    // used to fill in with zero.** Zero is not a neutral value on this field:
+    // it is a positive claim that the snapshot carries the complete book, and
+    // this repository's own subscriber sums a snapshot's levels into available
+    // liquidity only under that claim. A publisher whose adapter holds sixteen
+    // levels a side and whose recovery snapshot says `0` understates the market
+    // and gives a subscriber no way to know it.
+    let depth_bound = u32::from_le_bytes(begin.1[36..40].try_into().expect("four bytes"));
+    assert_eq!(depth_bound, 16);
 }
 
 #[test]
