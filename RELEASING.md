@@ -77,6 +77,15 @@ answer. So a binary released on its own stream states its own `version` in its
 own manifest, and its tag names which binary it is rather than sharing the `v*`
 tags a consumer pins.
 
+**The current library tag is `v0.1.0`, and `[workspace.package]` says 0.1.1.**
+Every example below pins `v0.1.0` deliberately; a reader who opens
+[`rust/Cargo.toml`](rust/Cargo.toml) and sees a higher number is not looking at
+a tag they can pin. The gap is this rule being learned the expensive way:
+`dz-recorder/v0.1.1` was released by bumping the workspace version, which moved
+every library crate for a change to a binary and produced a number with no
+library tag behind it. Both binaries now state their own `version`, so the next
+library release is the one that closes the gap, and nothing will reopen it.
+
 ## What a version promises
 
 **Pre-1.0, so a minor release may break you.** `0.x` is what these crates are,
