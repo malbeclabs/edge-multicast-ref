@@ -88,7 +88,7 @@ func main() {
 	// On cancellation a batcher drains what is buffered at that instant and
 	// returns — typically in microseconds — so sharing ctx left every row the
 	// shards and snapshot writers produced after that point stranded in a
-	// `chan`: never written, never counted dropped, while the join below made
+	// Go channel: never written, never counted dropped, while the join below made
 	// shutdown look clean.
 	//
 	// chDone closes once every batcher has drained and flushed. See the
