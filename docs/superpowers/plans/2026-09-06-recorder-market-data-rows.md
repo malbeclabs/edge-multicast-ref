@@ -38,15 +38,20 @@ A snapshot cycle is `total_levels` messages per instrument per cycle. Persisting
 
 This costs one column that the spec does not have: `SnapshotEnd` rows carry **`levels_seen`**, the count the deriver actually observed, so that `total_levels` on the begin row and `levels_seen` on the end row answer "was the snapshot complete" from rows alone — which is the question persisting the levels would otherwise have been the only way to ask. **If this decision is accepted, that column is a one-line addendum to the spec's mapping table and DDL**, and task 4 makes it.
 
-### 4. The book is stateful across objects, and the ledger says as of when.
+### 4. The book folds over one object, and the cost of that is a counter.
 
-Everything derived so far folds over one object. A book does not: an anchor in object *n* is what makes object *n+1* certain, and objects arrive one at a time.
+**Corrected from an earlier draft of this plan, which said the opposite.** That draft required the deriver to hold book state per `(feed, channel instance, instrument)` across objects, advanced in object order, with the ledger recording the object the state is valid as of. What tasks 5 to 7 built is a `Book` constructed inside `derive_events` and dropped when the object ends, and this decision now describes that rather than the draft.
 
-So the deriver holds book state **per `(feed, channel instance, instrument)`**, advanced in object order, and the ledger records the object the state is valid as of. Three consequences, all of which are cheaper to accept now than to discover in task 6:
+The reason for correcting the plan rather than the code is scope. Cross-object state is not one change: it is `derive_events` taking the book as a parameter, the loader holding it between objects, a ledger column and the migration that adds it, and a guard so that an object arriving out of order does not rewind. That is its own task and its own review, and **it is task 6 of a follow-up plan rather than a late amendment to this one** — this plan is already at nine thousand lines of implementation.
 
-- **An object that arrives out of order does not rewind the book.** It is loaded for `event` rows and the book is marked uncertain from it, because a book rebuilt backwards is a book nobody can reason about.
-- **A restart re-anchors rather than resumes.** Book state is not persisted between processes; the first cycle after a restart is what makes it certain again, and until then `book_certain = 0` with `no_anchor`.
-- **`Quote` needs none of this.** A quote-only feed is stateless and is unaffected by every line above, which is the second reason decision 1 of the spec matters.
+**What per-object costs, stated so that it is not discovered in an incident.** A snapshot cycle is `SnapshotBegin`, `total_levels` levels and `SnapshotEnd` on the runtime's cadence; objects rotate on time or size. A cycle that straddles the boundary anchors neither object — the levels after the cut land as `orphan_snapshot_level`, the `end` finds no open cycle, and the part before the cut goes with the book. So a delta book becomes certain only when a whole cycle falls inside one object, and a depth feed whose cycles are long relative to its objects can sit at `book_certain = 0` with `no_anchor` across most of them.
+
+That is a real limit and not a rounding error, which is why it is measured rather than described: **`BookRefused::unclosed_cycle`** counts the cycles still open when an object ends. Non-zero and persistent says the anchoring is losing a race against object rotation — a different fault, with a different fix, from a publisher that is not sending cycles. Nothing counted it before, and neither of the two paths that drop a straddled cycle is a refusal, so the symptom had no number at all.
+
+Two consequences from the earlier draft survive unchanged, because they are properties of the derivation rather than of where the state lives:
+
+- **A restart re-anchors rather than resumes.** Book state is not persisted between processes; the first cycle after a restart is what makes it certain again, and until then `book_certain = 0` with `no_anchor`. Per-object folding makes this the normal case rather than the restart case.
+- **`Quote` needs none of this.** A quote-only feed is self-anchoring and is unaffected by every line above, which is the second reason decision 1 of the spec matters. The limit above is a depth-feed limit and only a depth-feed limit.
 
 ---
 
@@ -105,7 +110,9 @@ The fold: walk an object, join each message to the `InstrumentTable`, emit `Even
 
 Two derivations, as the spec has them: `Quote` self-anchoring, and a delta book anchored only on a complete cycle whose `anchor_seq` satisfies any preceding `InstrumentReset`. `book_certain` falls to 0 on a sequence gap or a reset and is restored only as the spec allows for each derivation. A certainty transition emits a row.
 
-**Verification:** golden tests over the `faults` fixtures that already exist — a gap, a reset, a backward run — each with an asserted `book_certain` sequence. One fixture asserts the case the whole design exists for: a gap, then no price movement, then a query, and the answer is uncertain rather than stale. One asserts that a snapshot in flight when a reset was published is refused.
+Within one object, per decision 4: the book is built by `derive_events` and dropped with it. Carrying it between objects is a follow-up plan, not this task.
+
+**Verification:** golden tests over the `faults` fixtures that already exist — a gap, a reset, a backward run — each with an asserted `book_certain` sequence. One fixture asserts the case the whole design exists for: a gap, then no price movement, then a query, and the answer is uncertain rather than stale. One asserts that a snapshot in flight when a reset was published is refused. One asserts that a cycle the object ended in the middle of anchors nothing and is counted as `unclosed_cycle`, which is the limit decision 4 accepts.
 
 ### 7. `state_key`, and the pairing view
 
