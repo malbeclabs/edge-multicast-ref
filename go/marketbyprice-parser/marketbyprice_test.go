@@ -171,7 +171,7 @@ func TestParseDatagram_BadMagicRejected(t *testing.T) {
 	}
 }
 
-// A malformed BookClear is dropped from the record stream and counted, without
+// A malformed BookClear is dropped from the records and counted, without
 // failing the whole datagram — its neighbors still decode.
 func TestParseDatagram_MalformedBookClearDropsMessageNotDatagram(t *testing.T) {
 	p := &marketByPriceParser{}

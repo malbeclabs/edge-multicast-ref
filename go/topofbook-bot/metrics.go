@@ -90,7 +90,7 @@ func newMetrics() *metrics {
 
 	m.decodeError = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "dz_bot_decode_errors_total",
-		Help: "JSON decode failures on the socket stream.",
+		Help: "JSON decode failures on the socket.",
 	})
 
 	m.bidPrice = prometheus.NewGaugeVec(prometheus.GaugeOpts{

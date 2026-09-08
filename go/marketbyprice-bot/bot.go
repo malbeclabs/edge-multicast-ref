@@ -20,7 +20,8 @@ type Dispatcher interface {
 
 // DisconnectAware is an optional Dispatcher capability. A dispatcher holding
 // state that spans records — an open snapshot group, say — cannot tell that the
-// stream was interrupted, because the reader simply resumes after reconnecting.
+// connection was interrupted, because the reader simply resumes after
+// reconnecting.
 // Implementing this lets it drop what the break invalidated.
 type DisconnectAware interface {
 	OnDisconnect()
@@ -68,7 +69,7 @@ func (b *Bot) Run(ctx context.Context) {
 		reason := b.read(ctx, conn)
 		_ = conn.Close()
 		b.metrics.SocketConnected.Set(0)
-		// Tell the dispatcher the stream broke, before any reconnect can feed it
+		// Tell the dispatcher the connection broke, before any reconnect can feed it
 		// records that its pre-drop state would misroute.
 		if d, ok := b.dispatcher.(DisconnectAware); ok {
 			d.OnDisconnect()
