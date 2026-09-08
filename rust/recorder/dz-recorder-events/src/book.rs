@@ -212,11 +212,25 @@ impl Book {
         role: PortRole,
         sequence_number: u64,
     ) -> Vec<(u32, Change)> {
-        let previous = self.last_sequence.insert(instance, sequence_number);
+        // A high-water mark, not a last-seen. `insert` unconditionally would let a
+        // reordered datagram move the mark backwards, and the next in-order one
+        // then reads as a hole: arrivals 10, 9, 11 reported a gap at 10 with
+        // nothing missing, and named the datagram that arrived first as the one
+        // that went missing. Every established book on the instance went to
+        // `book_certain = 0` for a window that was completely delivered.
+        let previous = self.last_sequence.get(&instance).copied();
         let Some(previous) = previous else {
+            self.last_sequence.insert(instance, sequence_number);
             return Vec::new();
         };
-        if sequence_number <= previous + 1 {
+        if sequence_number <= previous {
+            // Reordered or duplicated, and neither is loss. `dz-recorder-loss`
+            // owns that distinction over these same bytes and counts them apart;
+            // this only has to not invent a gap.
+            return Vec::new();
+        }
+        self.last_sequence.insert(instance, sequence_number);
+        if sequence_number == previous + 1 {
             return Vec::new();
         }
         // A hole on `refdata` is the reference data's problem, and one on

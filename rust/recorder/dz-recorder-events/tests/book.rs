@@ -462,3 +462,43 @@ fn one_state_hashes_the_same_way_twice() {
         state_key(CHANNEL_ID, AAA + 1, &top)
     );
 }
+
+#[test]
+fn a_reordered_datagram_is_not_a_gap() {
+    let d = derive::<MarketByPrice>(
+        &[
+            Group(&defs(), PortRole::Refdata, 10),
+            Group(
+                &cycle(ANCHOR_SEQ, &[(SIDE_BID, 9_950, 12), (SIDE_ASK, 10_050, 7)]),
+                PortRole::Snapshot,
+                100,
+            ),
+            // Arrival order 200, 199, 201. Every one of 199, 200 and 201 arrived,
+            // so nothing is missing and the book stays believable. A last-seen
+            // mark would be dragged back to 199 by the late one and read 201 as a
+            // hole — then blame 200, the datagram that arrived first.
+            Group(&[level(SIDE_BID, 9_000, 1, 4)], PortRole::Mktdata, 200),
+            Group(&[level(SIDE_BID, 8_999, 1, 5)], PortRole::Mktdata, 199),
+            Group(&[level(SIDE_BID, 9_960, 3, 6)], PortRole::Mktdata, 201),
+        ],
+        MAGIC_MBP,
+    );
+
+    // The last message moves the top, so there is a row to ask.
+    let row = last(&d.book_top);
+    assert_eq!(row.bid_px_raw, Some(9_960));
+    assert_eq!(
+        row.book_certain, 1,
+        "a window that was completely delivered is certain"
+    );
+    assert_eq!(row.uncertain_since, None);
+    assert_eq!(row.uncertain_reason, UncertainReason::None);
+    // And no earlier row claimed a gap either: the false one would have made
+    // every established book on the instance uncertain, not just this top.
+    assert!(
+        d.book_top
+            .iter()
+            .all(|r| r.uncertain_reason != UncertainReason::Gap),
+        "no row reports a gap, because no datagram went missing"
+    );
+}
