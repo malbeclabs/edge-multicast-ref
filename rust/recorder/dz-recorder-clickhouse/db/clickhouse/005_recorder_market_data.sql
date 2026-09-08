@@ -230,6 +230,22 @@ CREATE TABLE IF NOT EXISTS recorder.book_top (
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(recv_ts)
+-- FOUR IDENTITY COLUMNS ARE DELIBERATELY NOT IN THIS KEY, and this is the table
+-- where that needs saying: `event` and `instrument` above both key on
+-- `source_addr`, `dst_port`, `site` and `recorder`, and the comment on
+-- `instrument` says an omitted identity column deletes rows rather than sorting
+-- badly. Read in order, this key looks like the place that forgot.
+--
+-- `site` and `recorder` are already in `observation`, which is `site/recorder`.
+-- Keying on all three restates a fact the key holds, the way `port_role` beside
+-- `dst_port` would. Two recorders at one site are two observations and stay two
+-- rows, which is what `event` needs `recorder` for.
+--
+-- `source_addr` and `dst_port` are absent because a book is one book whichever
+-- redundant path delivered the message that moved it. `instrument` needs them
+-- because an era is opened per path and merging two would let one path's
+-- exponents decode the other's prices; a top of book holds no per-path state,
+-- and folding the paths is the point. The columns say which path wrote the row.
 ORDER BY (channel_id, instrument_id, recv_ts, sequence_number,
           message_index, observation, env, feed);
 
