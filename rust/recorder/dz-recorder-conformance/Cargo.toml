@@ -1,0 +1,26 @@
+[package]
+name = "dz-recorder-conformance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The seam between a replayed archive and the specification's own rule set"
+
+# No codec crate, deliberately. The runner never decodes a payload: it hands
+# bytes to a rule set that does its own decoding, and a dependency on
+# `dz-edge-mbp` here would be the first step towards a rule written in this
+# repository. `dz-edge-core` is present for `PortRole` alone, which is a token
+# in a command line rather than a message type.
+#
+# `tempfile` is a dependency and not only a dev-dependency: each invocation of
+# the tool writes its report into a directory of its own, so that a report left
+# behind by an earlier run can never be read as this one's.
+[dependencies]
+dz-edge-core = { path = "../../codec/dz-edge-core" }
+dz-recorder-core = { path = "../dz-recorder-core" }
+dz-recorder-replay = { path = "../dz-recorder-replay" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
