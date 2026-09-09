@@ -331,22 +331,30 @@ fn the_default_shard_contributes_no_component_and_a_named_one_does() {
     );
 }
 
-/// A shard index the guard admits and the send paths do not hold is **counted,
-/// not a panic**.
+/// A send for a shard whose send paths this publisher does not hold is refused
+/// **before the lowering**, and counted.
 ///
-/// The guard answers `true` for an instrument on no shard, deliberately, so
-/// that the lowering refuses it as an unknown instrument — a better diagnostic
-/// than *unroutable*. What that leaves is a send reached with an index the send
-/// paths may not hold, and it used to `expect("checked above")`.
+/// The registry and the send paths are indexed by the same `Config::shards()`,
+/// so this state is one a refactor of either list produces and no document can.
+/// The guard is what catches it, and this is where that is asserted.
 ///
-/// It survives in production only because the lowering opens with
-/// `instruments.get(instrument)?` and the registry clears that table and the
-/// slot together — an invariant in another crate that nothing at the send site
-/// states. This test breaks that invariant on purpose: a registry that knows
-/// two shards and send paths that hold one, which is the state a later refactor
-/// of either list produces.
+/// # What this test does *not* cover, and the reason is worth stating
+///
+/// The four send sites used to `expect("checked above")` on the pipeline, and
+/// the reviewer who found them was right that nothing at those sites states the
+/// invariant keeping them safe. They are now counted refusals instead — but
+/// **that change has no test that can fail**, and the revert was run to find
+/// out: restoring the `expect` leaves this test passing, because the guard
+/// returns `false` here and returns before the lowering ever runs.
+///
+/// Reaching an `expect` needs the guard to answer `true` *and* the pipeline to
+/// be missing, which happens only for an instrument whose shard is `None` and
+/// whose lowering succeeds. The registry owns the lowering's instrument table
+/// and clears it with the slot, so the two cannot disagree through any public
+/// path. The panic was unreachable and the refusal that replaces it is a latent
+/// hazard removed rather than a behaviour changed.
 #[test]
-fn a_send_for_a_shard_with_no_pipeline_is_counted_rather_than_a_panic() {
+fn a_send_for_a_shard_with_no_pipeline_is_refused_before_the_lowering() {
     let feeds_list = two_shard_feeds();
     let metrics = metrics_for(&feeds_list);
     let shards = shards_of(&feeds_list);
@@ -407,6 +415,6 @@ fn a_send_for_a_shard_with_no_pipeline_is_counted_rather_than_a_panic() {
     assert_eq!(
         publisher.unroutable(),
         before + 1,
-        "a send for a shard with no pipeline has to be counted, and it used to panic"
+        "a send for a shard with no pipeline has to be refused and counted"
     );
 }
