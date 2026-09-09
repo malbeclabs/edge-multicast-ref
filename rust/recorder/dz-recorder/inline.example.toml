@@ -47,6 +47,20 @@
 # `--no-default-features` is the record-only one, can only be in archive mode,
 # and refuses a configuration that selects inline mode by the feature's name.
 
+# THE SECTION THAT EXISTS IN ORDER TO BE REFUSED. Archive mode's loader takes
+# `[[market_data]]` entries naming the feeds whose messages become `event`,
+# `instrument` and `book_top` rows. The same section is accepted here and every
+# entry in it is refused at startup, naming the feed — because without it there
+# was no way to ask, and a feed pointed at this arrangement had three
+# permanently empty tables with nothing anywhere saying they would be.
+#
+#   [[market_data]]
+#   feed  = "top-of-book"   # refused: run archive mode for this feed instead
+#   magic = 62721
+#
+# Leave it out to derive the transport rows and no others, which is what this
+# arrangement does. `--check` says so on its own line whether or not you ask.
+
 [inline]
 # The window is inline mode's unit: a bound's worth of datagrams, derived and
 # then discarded. It closes on bytes or on age, whichever comes first, for the

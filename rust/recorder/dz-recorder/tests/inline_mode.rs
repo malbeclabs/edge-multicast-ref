@@ -386,6 +386,51 @@ fn a_configuration_stating_both_arrangements_is_refused_by_key_and_by_file() {
     }
 }
 
+/// **A feed whose market data rows were asked for is refused at `--check`, and
+/// the run that would have left three tables empty never starts.**
+///
+/// This is the finding at the altitude that matters: a deployment pipeline
+/// running `--check` as an `ExecStartPre` gets a non-zero exit and the feed's
+/// name, rather than a host that comes up healthy and writes nothing to
+/// `event`, `instrument` or `book_top` for as long as nobody queries them.
+#[cfg(feature = "inline")]
+#[test]
+fn a_feed_whose_market_data_rows_were_asked_for_is_refused_at_check() {
+    let host = Host::new();
+    let ran = host.check(ToOwned::to_owned, |text| {
+        format!("{text}\n[[market_data]]\nfeed = \"top-of-book\"\nmagic = 62721\n")
+    });
+    assert_eq!(ran.code(), 1, "{}{}", ran.stdout, ran.stderr);
+    assert!(ran.stderr.contains("top-of-book"), "{}", ran.stderr);
+    assert!(ran.stderr.contains("book_top"), "{}", ran.stderr);
+    // Before the destination is reached, so a host learns this whether or not
+    // the column store is up — the refusal is about what this arrangement
+    // derives, not about whether it can write.
+    assert!(
+        !ran.stderr.contains("could not be reached"),
+        "the market data refusal must come before the destination probe: {}",
+        ran.stderr
+    );
+    host.nothing_was_written();
+}
+
+/// **And a host that never asked is told anyway**, beside the mode line.
+///
+/// The refusal above only reaches an operator who tried. Three empty tables
+/// reach the one who did not, and an empty table is indistinguishable from a
+/// feed nobody published on — which is the one diagnosis this whole tier exists
+/// to make. So the summary states it, in the output `--check` prints before it
+/// reaches for the destination.
+#[cfg(feature = "inline")]
+#[test]
+fn the_check_states_that_no_market_data_rows_are_derived() {
+    let host = Host::new();
+    let ran = host.check(ToOwned::to_owned, ToOwned::to_owned);
+    assert!(ran.stdout.contains("market_data=none"), "{}", ran.stdout);
+    assert!(ran.stdout.contains("book_top"), "{}", ran.stdout);
+    assert!(ran.stdout.contains("dz-recorder-load"), "{}", ran.stdout);
+}
+
 /// A file the spool's budget cannot classify is a file eviction cannot reach.
 #[cfg(feature = "inline")]
 #[test]

@@ -1,14 +1,16 @@
 //! Inline mode's second configuration file, and what the recorder refuses on
 //! it.
 //!
-//! **Inline mode is what a command line naming no mode is read as**, so this
-//! module is also where the default is enforced. Two of its refusals exist for
-//! that reason alone: a configuration describing an archive is refused by key
-//! rather than read as this mode, and a command line naming no mode with no
-//! file here is refused naming both flags rather than started on a guessed
-//! destination. Between them there is no configuration shape that can enter
-//! either arrangement by accident, which is what makes the default safe — the
-//! flag is not what makes it safe.
+//! **This file is what selects inline mode**, and the selection itself is not
+//! here: it is [`crate::startup::Arrangement::selected_by`], which reads this
+//! file's presence beside the recorder configuration's two archive directories.
+//! The refusals for a configuration stating both arrangements or neither live
+//! there with it, because the condition they read is the condition that selects
+//! — a second reading of it downstream is a reading that can disagree.
+//!
+//! What is here is what inline mode refuses *once it is the arrangement*: a
+//! spool it cannot open, a ledger it cannot separate from the spool, a budget
+//! that divides to nothing, and a feed whose market data rows were asked for.
 //!
 //! **The record path's own file gains no key from any of this.**
 //! `RecorderConfig` documents the absence of an endpoint, a credential and a
@@ -41,6 +43,8 @@ use thiserror::Error;
 
 #[cfg(feature = "inline")]
 use dz_recorder_clickhouse::{ClickHouseConfig, ClickHouseSink};
+#[cfg(feature = "inline")]
+use dz_recorder_load::MarketDataFeed;
 #[cfg(feature = "inline")]
 use serde::{Deserialize, Serialize};
 
@@ -177,6 +181,34 @@ pub enum InlineConfigError {
     )]
     LedgerInsideSpool { ledger: String, spool: String },
 
+    /// Market data rows asked for in the arrangement that derives none.
+    ///
+    /// **The entry exists so that this refusal can.** Without a
+    /// `[[market_data]]` section there was no way to ask, and a feed pointed at
+    /// inline mode left `event`, `instrument` and `book_top` empty —
+    /// indistinguishable from a feed nobody published on, and with nothing
+    /// anywhere saying it would be. Answering the ask is what this is for; the
+    /// answer happens to be no.
+    ///
+    /// Refused rather than derived for two reasons, both in the design. Market
+    /// data derivation is a codec walk, and nothing in the record path decodes a
+    /// datagram — the rule that makes the transport grains trustworthy, since a
+    /// message a decoder would reject still carries the sequence number whose
+    /// absence is the finding. And a definition is in force from the instant it
+    /// was received, so resolving a price message needs the definitions seen
+    /// before it: per window, that is state spanning the unit the spool exists to
+    /// bound.
+    #[cfg(feature = "inline")]
+    #[error(
+        "`[[market_data]]` names feed `{feed}`, and inline mode derives no market data rows. \
+         `event`, `instrument` and `book_top` would stay empty for it, which reads as a feed \
+         nobody published on — so this is refused rather than accepted and ignored. Deriving them \
+         is a codec walk, and nothing in this arrangement's record path decodes a datagram. Run \
+         archive mode for this feed and name it in the loader's own `[[market_data]]`, or remove \
+         the entry to derive the transport rows and no others."
+    )]
+    MarketDataNotDerived { feed: String },
+
     #[cfg(feature = "inline")]
     #[error("{0}")]
     ClickHouse(#[from] dz_recorder_clickhouse::ConfigError),
@@ -201,6 +233,25 @@ pub struct InlineConfig {
     /// credential comes from. Two spellings of *where the rows go* is how two
     /// halves of one host end up loading into two databases.
     pub clickhouse: ClickHouseConfig,
+    /// The feeds whose market data rows were asked for — **every one of which
+    /// is refused**.
+    ///
+    /// A section that exists in order to be refused, which wants its reason
+    /// stated rather than assumed. Inline mode derives the five transport
+    /// grains and none of the three market data ones, and that emptiness is not
+    /// what this refuses: archive mode leaves the same three tables empty for a
+    /// feed with no entry in the *loader's* configuration, and defends it there.
+    /// What inline mode had that archive mode does not is **no way to ask and
+    /// nothing saying so** — three permanently empty tables, and a key an
+    /// operator could not have written to find out.
+    ///
+    /// So the ask is spelled the way archive mode spells it, using the loader's
+    /// own [`MarketDataFeed`] rather than a second type: one spelling of *which
+    /// feeds derive market data*, so the two arrangements cannot grow two. An
+    /// entry here is [`InlineConfigError::MarketDataNotDerived`], at `--check`,
+    /// before a socket is bound.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub market_data: Vec<MarketDataFeed>,
 }
 
 /// What the mode itself is bounded by.
@@ -344,6 +395,15 @@ impl InlineConfig {
                 spool: self.inline.spool_dir.display().to_string(),
             });
         }
+        // Before the destination and after everything cheap, because it is a
+        // refusal about what this host will *derive* rather than about whether a
+        // path is usable — and an operator who asked for market data rows should
+        // be told so whether or not the column store is up.
+        if let Some(derived) = self.market_data.first() {
+            return Err(InlineConfigError::MarketDataNotDerived {
+                feed: derived.feed.clone(),
+            });
+        }
         self.clickhouse.check()?;
         Ok(())
     }
@@ -404,6 +464,12 @@ impl InlineConfig {
             "destination={} database={} user={}",
             self.clickhouse.endpoint, self.clickhouse.database, self.clickhouse.user
         );
+        // Stated, and stated in both arrangements. Three tables that are empty
+        // because of what this host derives are indistinguishable from three
+        // tables that are empty because nobody published — so the arrangement
+        // says which, beside the mode line it is read with, rather than leaving
+        // an operator to find out by querying.
+        let _ = writeln!(out, "{INLINE_MARKET_DATA}");
         out
     }
 }
@@ -416,6 +482,18 @@ impl InlineConfig {
 #[cfg(feature = "inline")]
 pub const INLINE_MODE: &str =
     "mode=inline: rows are derived from the live capture and NO DATAGRAM IS KEPT";
+
+/// What the summary says about the three market data grains.
+///
+/// Printed in both arrangements, beside the mode line, because an empty table
+/// says nothing about *why* it is empty: a feed nobody published on and a feed
+/// this host derives no market data for look the same in the column store, and
+/// only one of them is a finding. Archive mode's counterpart names the loader,
+/// which is the process that decides there.
+#[cfg(feature = "inline")]
+pub const INLINE_MARKET_DATA: &str = "market_data=none: `event`, `instrument` and `book_top` are \
+                                      not derived in this arrangement; archive mode derives them \
+                                      in dz-recorder-load";
 
 /// Inline mode, from the two files to the refusals to `--check`.
 ///
@@ -717,6 +795,67 @@ listen_addr = "127.0.0.1:0"
 
     fn recorder_config(text: &str) -> RecorderConfig {
         RecorderConfig::parse(text).expect("the fixture parses")
+    }
+
+    /// **Asking for market data rows is answered, and the answer is a refusal.**
+    ///
+    /// The point of the section is that the question can be put at all. Before
+    /// it, a feed pointed at this arrangement had `event`, `instrument` and
+    /// `book_top` permanently empty, indistinguishable from a feed nobody
+    /// published on, and no key an operator could have written to find out. The
+    /// refusal names the feed, so an operator with several knows which entry to
+    /// take out, and names archive mode, which is the arrangement that derives
+    /// them.
+    #[test]
+    fn a_feed_whose_market_data_rows_were_asked_for_is_refused_by_name() {
+        let fixture = Fixture::new();
+        let message = fixture.refusal(|text| {
+            format!("{text}\n[[market_data]]\nfeed = \"top-of-book\"\nmagic = 62721\n")
+        });
+        assert!(message.contains("top-of-book"), "{message}");
+        assert!(message.contains("book_top"), "{message}");
+        assert!(message.contains("archive mode"), "{message}");
+    }
+
+    /// And the section is the loader's own type, so the two arrangements cannot
+    /// grow two spellings of the same question.
+    ///
+    /// Asserted through `deny_unknown_fields`: `persist_snapshot_levels` is a
+    /// `MarketDataFeed` key and parses, and a key that is not one is a parse
+    /// error rather than a field silently dropped. A second type here would
+    /// drift from the loader's one key at a time, and the first sign of it
+    /// would be an operator copying a working entry between two files and
+    /// having it rejected.
+    #[test]
+    fn the_market_data_entry_is_the_loaders_own_type() {
+        let fixture = Fixture::new();
+        let message = fixture.refusal(|text| {
+            format!(
+                "{text}\n[[market_data]]\nfeed = \"depth\"\nmagic = 62722\n\
+                 persist_snapshot_levels = true\n"
+            )
+        });
+        assert!(message.contains("depth"), "{message}");
+
+        let message = fixture.refusal(|text| {
+            format!("{text}\n[[market_data]]\nfeed = \"depth\"\nmagic = 62722\nlevels = true\n")
+        });
+        assert!(message.contains("levels"), "{message}");
+    }
+
+    /// **The summary says the tables are empty on purpose**, and says it whether
+    /// or not anybody asked.
+    ///
+    /// A refusal only reaches an operator who tried. This line reaches the one
+    /// who did not, which is the one who would otherwise find three empty tables
+    /// and read them as a feed nobody published on.
+    #[test]
+    fn the_summary_states_that_no_market_data_rows_are_derived() {
+        let fixture = Fixture::new();
+        let summary = fixture.config().summary();
+        assert!(summary.contains("market_data=none"), "{summary}");
+        assert!(summary.contains("book_top"), "{summary}");
+        assert!(summary.contains("dz-recorder-load"), "{summary}");
     }
 
     #[test]
