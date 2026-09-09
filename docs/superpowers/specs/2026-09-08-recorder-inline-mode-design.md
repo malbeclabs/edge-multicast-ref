@@ -395,8 +395,8 @@ written as though it had been.**
 |---|---|
 | `site`, `recorder`, `env`, `feed`, `build_version`, `build_commit`, `config_hash` | Observed. The recorder's own identity, exactly as archive mode writes it. |
 | `segment_seq`, `start_ns`, `end_ns`, `datagram_count`, `payload_byte_count`, `instances`, `short_datagrams`, `instances_dropped`, `capture_drop_scope`, `roles_joined`, `link_headers`, `link_header_exceptions` | Observed. The window counts what the writer would have counted, from the same datagrams. |
-| `capture_drop_total` | Observed, and by the archive writer's own arithmetic: the sum of every `drop_delta` the window walked, whatever port role carried it. The same field, over the same unit, so the two modes' coverage rows are subtractable against each other. |
-| `interface_drop_total` | **Zero, and the same zero archive mode writes.** Loss upstream of the capture point is read per capture handle, and the manifest's own accounting for it is per port role, so the record path routes it to the health tier and never into a segment. Inline mode writing a number where archive mode writes none would make one mode's coverage row incomparable with the other's, over a quantity neither mode's manifest can attribute. |
+| `capture_drop_total` | Observed, **cumulative and never reset** — see *[The one column whose zero is an accusation](#the-one-column-whose-zero-is-an-accusation)*. Every `drop_delta` the capture has declared this run, plus every datagram this recorder's own ring refused, read from the ring's counters when the window closes. |
+| `interface_drop_total` | **Zero, and the same zero archive mode writes.** Loss upstream of the capture point is read per capture handle, and the manifest's own accounting for it is per port role, so the record path routes it to the health tier and never into a segment. No admissibility gate reads it — it is not in `segment_overflow`, and the only verdict it can reach is `upstream`, which is an exculpation and not an accusation — so a zero there withholds an explanation rather than manufacturing one. A number in one mode only would make the two modes reach different verdicts on the same traffic, which is the equivalence the whole design rests on. |
 | `object_key` | The window's key. It carries the window's start in wall-clock nanoseconds, so it is unique and orders windows across runs — but it names no object anyone can fetch. |
 | `sha256`, `byte_count` | **Empty and zero.** No datagrams were kept, so nothing was hashed. An invented digest is worse than an absent one: it is a claim that something was verified. |
 
@@ -435,6 +435,41 @@ zero the second run's window *k* carries the first run's sort key and replaces
 it. The window key carries a wall-clock start precisely so that cannot happen,
 and a manifest built before the walk is how the guard is lost.
 
+### The one column whose zero is an accusation
+
+`capture_drop_total` is not a diagnostic. It is read by
+`recorder.segment_overflow`, which subtracts consecutive windows of it and calls
+a zero difference `overflow_free = 1` — and `overflow_free` is one of the four
+conditions deciding whether **a site's absence may be used as evidence about
+the publisher**. The cross-site view states the rule it enforces: a site that
+dropped datagrams itself cannot contribute an absence, because its gap may be
+its own ring, and counting it as evidence about the publisher is the
+subtraction the drop scope exists to forbid.
+
+So a wrong zero here is not a missing number. It is this path: kernel
+receive-queue overflow on this host, datagrams the derivation never sees, an
+absence in the sequence, `overflow_free = 1`, and the cross-site machinery
+admitting that absence as evidence *against the publisher*. That is the finding
+this recorder exists to make correctly, made against the wrong party, by a
+column nobody looked at. Row-level attribution is unaffected — that travels on
+`drop_delta` through the ring's debt — and it is the only half that is.
+
+Two consequences for what inline mode writes.
+
+**It is cumulative, never per-window.** The view computes
+`c.capture_drop_total - least(p.capture_drop_total, c.capture_drop_total)`,
+which is a delta over a running total. Given per-window figures, a window that
+dropped less than its predecessor subtracts to zero and is certified clean, so a
+per-window number is the same defect at lower frequency rather than a fix.
+
+**It includes what the ring refused.** The ring is inline mode's own place to
+lose a datagram and it does not exist in archive mode, so a datagram it dropped
+is exactly the kind of loss `overflow_free` must refuse to certify away. The two
+summands are what the capture declared and what the ring refused; both are
+cumulative counters on the capture thread, which is where the facts are, and the
+derivation stage reads them through the ring's own counters when a window
+closes.
+
 ### An empty window spends no window sequence number
 
 A hole in `segment_seq` is how a reader learns the derivation had one, and it is
@@ -459,6 +494,23 @@ windows are strictly sequential, are never evicted before derivation, and carry
 their trailer into the ledger — so the anchor is certain from the second window
 onward, and stays certain across a restart. This is the one analytical result
 inline mode improves.
+
+**What an uncertain anchor costs, traced rather than assumed.** The trailer is
+written to the ledger and is not yet read back, so today the first window after
+every restart derives with no predecessor. Following that through: the
+derivation's own verdict function cannot reach `publisher` at all — it is not
+among its outcomes, by design, because `publisher` needs a datagram absent from
+every site and one vantage has neither half of that — so the first window after
+a restart answers `recorder` where its residue is fully admitted and
+`unverifiable` otherwise. The cross-site pass that turns `unverifiable` into
+`publisher` requires, per gap occurrence, that the vantage's era boundary be
+settled: `anchor_certain = 1`. An uncertain anchor therefore makes that
+window's absences **inadmissible**.
+
+So the cost is a window's worth of evidence, once per restart, and never an
+accusation drawn from ignorance. That is the right direction for the failure to
+lean, and it is why reading the trailer back is an improvement to make rather
+than a correctness hole to stop the mode for.
 
 One case gives it back, and gives it back deliberately. **A window the spool
 could not take does not hand its trailer to the next window.** Its rows are not
@@ -685,6 +737,22 @@ feed nobody joined.
 saw nothing, and the sequence numbers either side of it are consecutive. The
 window after the silence carries a certain era anchor, which is the same
 assertion from the other end.
+
+**The capture loss total is cumulative, and a test says so at the second
+window.** A per-window figure passes every assertion a single window can make,
+so the gate is two windows on one ring: the second reports the first's drops as
+well as its own. Nothing else in this repository can catch that — the view which
+reads the column lives in SQL, and the equivalence gate's synthetic feed has no
+kernel drops, so both paths report zero and agree.
+
+**The fault list is all nine, `SilentChannel` included.** A channel that stops
+publishing is an ordinary overnight occurrence rather than an injected
+condition, and it is the fault whose *production* behaviour differs most between
+the modes: archive mode finds it when a segment rotates on its interval, inline
+mode when a window closes on age. What the gate can assert is the derivation
+half — one quiet channel among several, the same rows both ways — and it is
+worth being explicit that the timing half is not asserted by it, because a
+window and a segment holding the same datagrams is the fixture's whole premise.
 
 **The debt test is the one whose mutant must die.** Force the ring to drop, and
 assert the next accepted datagram declares the loss — and, at the row altitude,

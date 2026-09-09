@@ -261,6 +261,20 @@ New crate `rust/recorder/dz-recorder-inline`, added to workspace `members`.
       restart"* is a claim about the intended behaviour and not about this
       tree. The first window after every restart writes an uncertain anchor.
 
+      **Traced, at a review's asking, so that the open item carries its
+      consequence rather than a worry.** It cannot reach `publisher`.
+      `dz-recorder-rows/src/derive.rs:718` enumerates the verdicts a single
+      vantage may write and `Verdict::Publisher` is deliberately not among
+      them, so the first window after a restart answers `recorder` where its
+      residue is wholly admitted and `unverifiable` otherwise. The pass that
+      turns `unverifiable` into `publisher` is
+      `007_recorder_cross_site.sql`, and its `absence_admissible` requires
+      per gap occurrence that `anchor_certain = 1` (`:442`) — so an uncertain
+      anchor makes that window's absences **inadmissible**. The cost is one
+      window's evidence per restart, withheld; it is not an accusation drawn
+      from ignorance, which is why this stays an improvement to make rather
+      than a hole that stops the mode.
+
 **Tests:**
 
 - A window closes on its byte bound and on its age bound, and a datagram
@@ -378,14 +392,16 @@ In `dz-recorder-e2e`, which already holds `archive_to_rows.rs`.
       address, a source IP address that disappears, a duplicate, a reordered pair,
       an oversized declared length and an unknown schema version.
       `inline_vs_archive.rs:256-266`.
-- [ ] **Outstanding: `Fault::SilentChannel`.** It exists
-      (`dz-recorder-replay/src/synthetic.rs:104`) and the replay crate's own
-      faults test exercises it (`dz-recorder-replay/tests/faults.rs:37`), but it
-      is the one of the nine this gate does not run. It is also the fault whose
-      inline behaviour is least like archive mode's: a channel that stops
-      publishing is found by a window closing on *age* with nothing in it, and
-      the age bound is inline mode's own key. Absent from the gate, the one
-      grain shape only a quiet feed produces is compared by nothing.
+- [x] **`Fault::SilentChannel`, the ninth.** It was the one of the nine this
+      gate did not run, and it is the fault whose *production* behaviour differs
+      most between the modes: archive mode finds a quiet channel when a segment
+      rotates on its interval, inline mode when a window closes on age, and age
+      is inline mode's own key rather than a shared one. Added in task 12, and
+      with it a statement of what the gate does **not** cover: the timing half.
+      One window holding the same datagrams as one segment is this fixture's
+      premise, so what it asserts is that the derivation agrees over a channel
+      that fell silent, and not that the two bounds fire at comparable moments.
+      Closing that would want a fixture with a clock, which is a different test.
 - [x] A ring drop is asserted at the row altitude: the gap it causes is *not*
       given a `publisher` verdict. `inline_vs_archive.rs:303`
       `a_gap_the_ring_caused_is_not_attributed_to_the_publisher`, asserting
@@ -636,11 +652,17 @@ still valid — with `--archive`.
 
 ### 12. The review: the manifest, the sequence number, the trailer and the ring
 
-Four things a review of the whole branch found, and one of them writes rows a
-reader cannot detect are wrong. Each is a defect in something tasks 4, 6 and 7
+What two reviews of the whole branch found: six things, two of which write rows
+a reader cannot detect are wrong. Each is a defect in something tasks 4, 6 and 7
 claimed, which is why they are answered here rather than by a new design: the
 design said what to build in every case, and this is the tree being made to say
 it too.
+
+One item raised by a review is deliberately **not** here: whether the mode
+should be inferred from the configuration rather than selected by `--archive`.
+The repository owner has accepted that alternative and it is queued as its own
+change on this branch, so nothing in this task assumes the inversion is
+permanent — and nothing in it touches mode selection, so the two do not race.
 
 **The manifest was built from a window nothing had walked.** The blocker. Its
 mechanism is task 4's new bullet and its consequence is the design's
@@ -662,15 +684,51 @@ standing beside it — and no coverage row was written at all, because
       side is the derivation stage's own two passes rather than a second
       arrangement of them.
 
-**The capture drop totals.** Decided rather than merely wired, because the two
-halves of it have different answers:
+**The capture drop totals, and this half is blocker-class too.** A second
+reviewer found what the first left as a finding and the plan had left as an
+open bullet: **a view consumes the column.**
+`007_recorder_cross_site.sql:226` computes `capture_drop_delta` between
+consecutive windows and `:229` reads a zero delta as `overflow_free = 1`, and
+`overflow_free` is one of the four conditions in `absence_admissible` (`:421`)
+deciding whether a site's absence may be used as evidence about the publisher.
+Pinned at zero, every inline host is certified provably overflow-free — so
+kernel receive-queue overflow on an inline host becomes an absence admitted as
+evidence *against the publisher*, which is the finding the ring's `PendingLoss`
+work exists to prevent, arriving one layer up through a column nobody read. The
+design's
+*[The one column whose zero is an accusation](../specs/2026-09-08-recorder-inline-mode-design.md#the-one-column-whose-zero-is-an-accusation)*
+is that argument, and it settles two things this task first got wrong:
 
-- [x] `capture_drop_total` is **wired**, and from the archive writer's own
-      arithmetic: `WindowTally` sums every `drop_delta` the window walked,
-      whatever port role carried it, which is what `SegmentWriter` sums into the
-      same field (`dz-recorder-archive/src/writer.rs:359`). The two modes'
-      coverage rows are then subtractable against each other, which is the whole
-      point of the column.
+- [x] **It is cumulative, never per-window.** This task's first attempt summed
+      the `drop_delta` one window walked, on the strength of
+      `SegmentWriter` summing the same field
+      (`dz-recorder-archive/src/writer.rs:359`). That is the wrong shape: the
+      view subtracts consecutive rows, so a window that dropped less than its
+      predecessor subtracts to zero and is certified clean — the same defect at
+      lower frequency rather than a fix. `rows.rs:395`, `007:94` and
+      `derive.rs:737` all state the column as cumulative and never reset, and
+      that is what inline mode now writes.
+- [x] **It includes what the ring refused.** The ring is inline mode's own
+      place to lose a datagram and archive mode has no equivalent, so a
+      datagram it dropped is exactly the loss `overflow_free` must not certify
+      away. Both summands are cumulative counters on the capture thread —
+      `RingCounters::capture_declared` and the existing `dropped` — and
+      `RingCounters::capture_drop_total` is their sum. **No new plumbing was
+      needed**: the reviewer suggested a shared atomic the derivation stage
+      reads at window close, and the ring's counters already are that, shared
+      through the `Arc` both ends hold. `WindowSource` samples them on every
+      call, so the figure a manifest reads is the one that was true when the
+      window closed.
+- [x] **Found and not fixed: archive mode's own value is per-segment.**
+      `SegmentWriter` is constructed per segment (`rotate.rs:454`) with
+      `capture_drops: 0` (`writer.rs:287`), so archive mode writes a
+      per-segment figure into a column three documents define as cumulative,
+      and `segment_overflow` mis-certifies archive hosts in the same way for
+      any segment that dropped less than its predecessor. It is outside this
+      plan's scope — *"it does not change what archive mode does"* — and it
+      wants its own change with its own tests. Recorded here because inline
+      mode now writes the specified semantics and archive mode does not, and
+      the difference should be somebody's decision rather than a surprise.
 - [x] `interface_drop_total` **stays zero**, and the zero moves from a literal
       at a call site into the manifest builder with the reason on it. It is not
       a column nobody wired: **archive mode leaves it at zero too**, and
@@ -681,6 +739,17 @@ halves of it have different answers:
       to. Inline mode writing a number there would be one mode claiming a
       measurement the other declines to make, in a column a reader subtracts
       across both.
+
+      **Checked against the same view, because the finding above is a reason to
+      distrust this answer.** It is not the same case. `interface_drop_total`
+      appears in no admissibility gate: `007` reads it nowhere except as a
+      passthrough on the gap row (`:592`), and the only verdict it can reach
+      through `derive.rs:729` is `upstream`, which *exculpates* the publisher.
+      A zero there therefore withholds an explanation and can never manufacture
+      one — the opposite direction from `capture_drop_total`, whose zero is an
+      accusation. Plumbing it in one mode only would make the two modes reach
+      different verdicts on identical traffic, which is the equivalence the
+      design rests on.
 - [x] `window_manifest` loses both parameters. A builder with no parameter to
       pass a zero to is a builder no caller can get this wrong in again, which
       is what made the defect survive review once already.
@@ -735,6 +804,25 @@ overrun. That branch also skipped `pending.undelivered()`.
       `pending.undelivered()` and count it. A drop nobody can carry the
       admission for is still a drop, and `RingCounters::dropped`'s rustdoc says
       which of the two it is.
+
+**The mode line was the first line in one arrangement and the middle of the
+other.** Archive mode prints `ARCHIVE_MODE` and then the plan (`main.rs:154`,
+`:161`); inline mode printed the plan first and the mode arrived inside
+`config.summary()` further down. The description argues the mode line is the one
+thing an operator must not miss — it is what a command line can now get wrong by
+saying nothing — and an operator scanning two hosts read it in two places.
+
+- [x] `INLINE_MODE` moves out of `InlineConfig::summary` and is printed before
+      the plan in both branches of `inline_config::run`, so it is the first line
+      in both arrangements and appears once. The tests read the *first line*
+      rather than searching the output, in both files, because `contains` is
+      what let the two orders diverge unnoticed.
+
+**`Fault::SilentChannel`, task 7's outstanding bullet**, closed here rather than
+there because it is one line in the same file this task already changes.
+
+- [x] The ninth fault joins the list, and the test's own rustdoc says which half
+      of the fault the gate covers and which it does not.
 
 **Tests, and the revert that killed each. Every one was run — reverted, watched
 fail, restored:**
