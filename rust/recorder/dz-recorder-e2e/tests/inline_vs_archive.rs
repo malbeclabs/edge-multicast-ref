@@ -252,23 +252,94 @@ fn a_clean_feed_derives_identically_through_both_paths() {
 /// different test and not this one.
 #[test]
 fn every_injected_fault_derives_identically_through_both_paths() {
-    for fault in [
-        Fault::SequenceGap,
-        Fault::BackwardMotion,
-        Fault::ResetCountAdvance,
-        Fault::NewSourceAddress,
-        Fault::SourceAddressDisappears,
-        Fault::Duplicate,
-        Fault::ReorderedPair,
-        Fault::OversizedDeclaredLength,
-        Fault::UnknownSchemaVersion,
-        Fault::SilentChannel,
-    ] {
+    for fault in GATED {
         both_paths_agree(
             &SyntheticPublisher::with_fault(200, fault),
             &format!("{fault:?}"),
         );
     }
+}
+
+/// The faults this gate runs.
+const GATED: [Fault; 10] = [
+    Fault::SequenceGap,
+    Fault::BackwardMotion,
+    Fault::ResetCountAdvance,
+    Fault::NewSourceAddress,
+    Fault::SourceAddressDisappears,
+    Fault::Duplicate,
+    Fault::ReorderedPair,
+    Fault::OversizedDeclaredLength,
+    Fault::UnknownSchemaVersion,
+    Fault::SilentChannel,
+];
+
+/// Every fault the replay crate injects, whether this gate runs it or not.
+///
+/// Kept beside [`GATED`] rather than derived from it, because a list compared
+/// against itself compares nothing. The function below is what keeps *this* one
+/// honest: a new `Fault` variant is a compile error there, and a compile error
+/// is the only reminder that survives a year.
+const EVERY: [Fault; 11] = [
+    Fault::None,
+    Fault::SequenceGap,
+    Fault::BackwardMotion,
+    Fault::ResetCountAdvance,
+    Fault::NewSourceAddress,
+    Fault::SourceAddressDisappears,
+    Fault::Duplicate,
+    Fault::ReorderedPair,
+    Fault::OversizedDeclaredLength,
+    Fault::UnknownSchemaVersion,
+    Fault::SilentChannel,
+];
+
+/// Nothing calls this. Its `match` is the guard on [`EVERY`].
+#[allow(dead_code)]
+fn a_new_fault_is_a_compile_error_here(fault: Fault) {
+    match fault {
+        Fault::None
+        | Fault::SequenceGap
+        | Fault::BackwardMotion
+        | Fault::ResetCountAdvance
+        | Fault::NewSourceAddress
+        | Fault::SourceAddressDisappears
+        | Fault::Duplicate
+        | Fault::ReorderedPair
+        | Fault::OversizedDeclaredLength
+        | Fault::UnknownSchemaVersion
+        | Fault::SilentChannel => {}
+    }
+}
+
+/// The gate runs every fault there is, and this is what says so.
+///
+/// **A list of faults is exactly the kind of thing that quietly falls one
+/// short.** `SilentChannel` was missing from this gate for the life of the
+/// branch and nothing failed, because a fault absent from a loop is not a fault
+/// that fails — it is a fault nobody runs, which looks identical to a pass. So
+/// the completeness of the list is itself an assertion, and dropping a fault
+/// from [`GATED`] fails a named test rather than quietly narrowing the gate.
+///
+/// `Fault::None` is excepted by name: it is the clean feed, and
+/// [`a_clean_feed_derives_identically_through_both_paths`] runs it on its own.
+#[test]
+fn the_gate_runs_every_fault_the_replay_crate_injects() {
+    for fault in EVERY {
+        if fault == Fault::None {
+            continue;
+        }
+        assert!(
+            GATED.contains(&fault),
+            "{fault:?} is not in the equivalence gate's list, so the two paths are compared \
+             over every fault but that one"
+        );
+    }
+    assert_eq!(
+        GATED.len(),
+        EVERY.len() - 1,
+        "the gate's list and the full list have drifted: {GATED:?} against {EVERY:?}"
+    );
 }
 
 /// A gap the ring caused is not charged to the publisher.
