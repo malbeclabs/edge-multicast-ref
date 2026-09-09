@@ -525,7 +525,7 @@ pub struct AdapterConfig {
     pub replay: ReplayConfig,
 }
 
-/// `[adapter.tee]`: the reference stream, and why it sits here.
+/// `[adapter.tee]`: the reference copy, and why it sits here.
 ///
 /// The section names a second
 /// [`DatagramSink`](dz_publisher_egress::DatagramSink) carrying byte-identical
@@ -544,16 +544,17 @@ pub struct AdapterConfig {
 ///
 /// `path` is a **prefix**: the feed's own `spec` token, the shard's name where
 /// it is not the default, and the role's are appended, so a `path` of
-/// `/run/a-publisher/tee` on a publisher emitting both feeds of the default
-/// shard is written to as `tee.top-of-book.mktdata`, `tee.top-of-book.refdata`,
-/// `tee.market-by-price.mktdata`, `tee.market-by-price.refdata` and
-/// `tee.market-by-price.snapshot`, and the same publisher carrying a shard the
-/// document named `alpha` writes that shard's copies to
-/// `tee.top-of-book.alpha.mktdata` and the rest of the five alongside.
+/// `/run/a-publisher/fan-out` on a publisher emitting both feeds of the default
+/// shard is written to as `fan-out.top-of-book.mktdata`,
+/// `fan-out.top-of-book.refdata`, `fan-out.market-by-price.mktdata`,
+/// `fan-out.market-by-price.refdata` and `fan-out.market-by-price.snapshot`,
+/// and the same publisher carrying a shard the document named `alpha` writes
+/// that shard's copies to `fan-out.top-of-book.alpha.mktdata` and the rest of
+/// the five alongside.
 ///
 /// All three parts of that name are load-bearing, for one reason: **a Unix
 /// datagram carries neither a destination port nor a group**, and the diff this
-/// stream exists for is keyed on both. A recorder handed two roles on one
+/// fan-out exists for is keyed on both. A recorder handed two roles on one
 /// socket, two feeds' copies of one role on one socket, or **two shards' copies
 /// of one feed's role on one socket**, cannot attribute a datagram without
 /// decoding it — and decoding is the one thing a record path does not do.
@@ -568,8 +569,8 @@ pub struct AdapterConfig {
 /// The default shard is spelled by its **absence**, as its era file is. A shard
 /// segment for it would rename the socket every existing deployment's recorder
 /// is bound to, and the fan-out would then write to a path with nobody on it —
-/// which is a copy stream that reports every datagram dropped, or worse, an
-/// operator who believes copies are still being archived.
+/// every datagram dropped and counted, or worse, an operator who believes
+/// copies are still being archived.
 ///
 /// The socket is `SOCK_DGRAM`, so one datagram in is one datagram out and there
 /// is no framing to invent, agree on or get wrong. See
@@ -599,8 +600,8 @@ impl TeeConfig {
     /// The default shard's absence from the name is [`ShardName::era_shard`]'s
     /// reasoning applied to a socket, and it is here rather than at the call
     /// site for the same reason: what a caller would naturally write is
-    /// `shard.as_str()`, which moves every existing deployment's copy stream to
-    /// a path its recorder is not bound to.
+    /// `shard.as_str()`, which moves every existing deployment's fan-out to a
+    /// path its recorder is not bound to.
     ///
     /// # Errors
     ///

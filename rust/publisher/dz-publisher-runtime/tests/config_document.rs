@@ -46,13 +46,13 @@ fn the_adapter_tee_parses_when_it_is_present() {
                    \n\
                    [adapter.tee]\n\
                    enabled = true\n\
-                   path = \"/run/a-publisher/tee.sock\"\n"
+                   path = \"/run/a-publisher/fan-out.sock\"\n"
         .to_owned();
     let document = Document::parse(&doc.render()).expect("valid");
     assert!(document.adapter.tee.enabled);
     assert_eq!(
         document.adapter.tee.path.as_deref(),
-        Some(std::path::Path::new("/run/a-publisher/tee.sock"))
+        Some(std::path::Path::new("/run/a-publisher/fan-out.sock"))
     );
 }
 
@@ -1121,7 +1121,7 @@ fn a_snapshot_cycle_on_one_of_two_feeds_is_not_a_disagreement() {
 }
 
 #[test]
-fn a_tee_enabled_with_no_path_is_refused_at_load() {
+fn a_fan_out_enabled_with_no_path_is_refused_at_load() {
     // The same shape as `[adapter.replay]`: a section switched on and left
     // incomplete is an operator who believes copies are being archived. Refused
     // before a socket is opened, because nothing about it needs one.
@@ -1138,12 +1138,12 @@ fn a_tee_enabled_with_no_path_is_refused_at_load() {
 }
 
 #[test]
-fn a_tee_with_a_path_resolves() {
+fn a_fan_out_with_a_path_resolves() {
     let config = Document::parse(
         &Doc::valid()
             .adapter(
                 "[adapter]\nkind = \"a-venue\"\n\n[adapter.tee]\nenabled = true\n\
-                 path = \"/run/a-publisher/tee\"\n",
+                 path = \"/run/a-publisher/fan-out\"\n",
             )
             .render(),
     )
@@ -1156,26 +1156,27 @@ fn a_tee_with_a_path_resolves() {
     // appended per socket. See the test below.
     assert_eq!(
         config.adapter.tee.path.as_deref(),
-        Some(std::path::Path::new("/run/a-publisher/tee"))
+        Some(std::path::Path::new("/run/a-publisher/fan-out"))
     );
 }
 
 #[test]
-fn a_tee_socket_is_named_by_the_feed_as_well_as_the_port_role() {
+fn a_fan_out_socket_is_named_by_the_feed_as_well_as_the_port_role() {
     // **The feed is in the name because a publisher emits more than one.** A
     // Unix datagram carries neither a destination port nor a group, and the diff
-    // this stream exists for is keyed on both - so two feeds' mktdata copies
+    // this fan-out exists for is keyed on both - so two feeds' mktdata copies
     // arriving on one socket are datagrams a recorder cannot attribute without
     // decoding them, which is the one thing a record path does not do. Keyed on
     // the port role alone, that is exactly what a two-feed publisher produced,
     // and the per-role split was for this very problem.
-    let tee = TeeConfig {
+    let fan_out = TeeConfig {
         enabled: true,
-        path: Some(std::path::PathBuf::from("/run/a-publisher/tee")),
+        path: Some(std::path::PathBuf::from("/run/a-publisher/fan-out")),
     };
 
     let named = |spec: FeedSpec, role: PortRole| {
-        tee.destination(spec, &ShardName::default_shard(), role)
+        fan_out
+            .destination(spec, &ShardName::default_shard(), role)
             .expect("the path is stated")
             .display()
             .to_string()
@@ -1187,23 +1188,23 @@ fn a_tee_socket_is_named_by_the_feed_as_well_as_the_port_role() {
     // same way by hand.
     assert_eq!(
         named(FeedSpec::TopOfBook, PortRole::Mktdata),
-        "/run/a-publisher/tee.top-of-book.mktdata"
+        "/run/a-publisher/fan-out.top-of-book.mktdata"
     );
     assert_eq!(
         named(FeedSpec::TopOfBook, PortRole::Refdata),
-        "/run/a-publisher/tee.top-of-book.refdata"
+        "/run/a-publisher/fan-out.top-of-book.refdata"
     );
     assert_eq!(
         named(FeedSpec::MarketByPrice, PortRole::Mktdata),
-        "/run/a-publisher/tee.market-by-price.mktdata"
+        "/run/a-publisher/fan-out.market-by-price.mktdata"
     );
     assert_eq!(
         named(FeedSpec::MarketByPrice, PortRole::Refdata),
-        "/run/a-publisher/tee.market-by-price.refdata"
+        "/run/a-publisher/fan-out.market-by-price.refdata"
     );
     assert_eq!(
         named(FeedSpec::MarketByPrice, PortRole::Snapshot),
-        "/run/a-publisher/tee.market-by-price.snapshot"
+        "/run/a-publisher/fan-out.market-by-price.snapshot"
     );
 
     // The property, stated as one: every socket a publisher emitting both feeds
@@ -1236,13 +1237,14 @@ fn a_tee_socket_is_named_by_the_feed_as_well_as_the_port_role() {
 /// decoding them. Before this, four channel instances fanned out to five
 /// sockets.
 #[test]
-fn a_tee_socket_is_named_by_the_shard_as_well_as_the_feed_and_the_role() {
-    let tee = TeeConfig {
+fn a_fan_out_socket_is_named_by_the_shard_as_well_as_the_feed_and_the_role() {
+    let fan_out = TeeConfig {
         enabled: true,
-        path: Some(std::path::PathBuf::from("/run/a-publisher/tee")),
+        path: Some(std::path::PathBuf::from("/run/a-publisher/fan-out")),
     };
     let named = |spec: FeedSpec, shard: &ShardName, role: PortRole| {
-        tee.destination(spec, shard, role)
+        fan_out
+            .destination(spec, shard, role)
             .expect("the path is stated")
             .display()
             .to_string()
@@ -1252,24 +1254,24 @@ fn a_tee_socket_is_named_by_the_shard_as_well_as_the_feed_and_the_role() {
 
     assert_eq!(
         named(FeedSpec::TopOfBook, &alpha, PortRole::Mktdata),
-        "/run/a-publisher/tee.top-of-book.alpha.mktdata"
+        "/run/a-publisher/fan-out.top-of-book.alpha.mktdata"
     );
     assert_eq!(
         named(FeedSpec::MarketByPrice, &beta, PortRole::Snapshot),
-        "/run/a-publisher/tee.market-by-price.beta.snapshot"
+        "/run/a-publisher/fan-out.market-by-price.beta.snapshot"
     );
 
     // **The default shard is spelled by its absence**, as its era file is. A
     // shard segment for it renames the socket every existing deployment's
     // recorder is bound to, and the fan-out then writes to a path with nobody
-    // on it - which is the upgrade meant to be safe taking the copy stream down.
+    // on it - which is the upgrade meant to be safe taking the fan-out down.
     assert_eq!(
         named(
             FeedSpec::TopOfBook,
             &ShardName::default_shard(),
             PortRole::Mktdata
         ),
-        "/run/a-publisher/tee.top-of-book.mktdata"
+        "/run/a-publisher/fan-out.top-of-book.mktdata"
     );
 
     // Every socket two shards of both feeds open, distinct: two shards, two
@@ -1306,21 +1308,21 @@ fn a_tee_socket_is_named_by_the_shard_as_well_as_the_feed_and_the_role() {
     // a `join` or a `set_extension` would each get wrong in its own way.
     assert_eq!(
         named(FeedSpec::TopOfBook, &shards[0], PortRole::Refdata),
-        "/run/a-publisher/tee.top-of-book.alpha.refdata"
+        "/run/a-publisher/fan-out.top-of-book.alpha.refdata"
     );
 }
 
 #[test]
-fn a_tee_that_is_on_with_no_path_names_no_socket() {
+fn a_fan_out_that_is_on_with_no_path_names_no_socket() {
     // The same refusal the load already produced, checked again where the
     // socket is named: a prefix is not something to default, and a fan-out
     // quietly writing to a relative path is an operator believing copies are
     // archived.
-    let tee = TeeConfig {
+    let fan_out = TeeConfig {
         enabled: true,
         path: None,
     };
-    let error = tee
+    let error = fan_out
         .destination(
             FeedSpec::TopOfBook,
             &ShardName::default_shard(),

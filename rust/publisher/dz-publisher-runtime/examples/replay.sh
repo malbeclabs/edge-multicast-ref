@@ -119,7 +119,7 @@ kind = "uds"
 enabled = true
 path = "$work/payloads"
 
-# The reference stream. The path is a prefix: one socket per feed, shard *and*
+# The reference copy. The path is a prefix: one socket per feed, shard *and*
 # port role, so a recorder can attribute a copy without decoding it — a Unix
 # datagram carries neither the destination port nor the group the diff is keyed
 # on, and neither the shard. This run binds two of them and counts what arrives:
@@ -130,7 +130,7 @@ path = "$work/payloads"
 # command substitution.
 [adapter.tee]
 enabled = true
-path = "$work/tee"
+path = "$work/fan-out"
 TOML
     # The built-in record adapter's instrument set, one block per symbol.
     # Stated in full rather than as a bare symbol: every field is one a
@@ -161,10 +161,10 @@ echo "building the subscriber"
 (cd "$repo/go/topofbook-parser" && go build -o "$work/subscriber" .)
 
 # One listener per reference-copy socket, bound before the publisher starts: the
-# tee sends unconnected, so a datagram with nobody bound is dropped and counted
-# rather than queued.
-bind_tee() {
-    python3 - "$1" "$2" <<'TEE' &
+# fan-out sends unconnected, so a datagram with nobody bound is dropped and
+# counted rather than queued.
+bind_fan_out() {
+    python3 - "$1" "$2" <<'FANOUT' &
 import os, socket, sys
 
 path, out = sys.argv[1], sys.argv[2]
@@ -183,14 +183,14 @@ with open(out, "w") as f:
     f.write(f"{len(datagrams)}\n")
     f.write(f"{datagrams[0][:2].hex() if datagrams else ''}\n")
     f.write(f"{max((len(d) for d in datagrams), default=0)}\n")
-TEE
+FANOUT
 }
 
-echo "binding the reference streams"
-bind_tee "$work/tee.top-of-book.mktdata" "$work/tee.default.count"
-default_tee=$!
-bind_tee "$work/tee.top-of-book.alpha.mktdata" "$work/tee.alpha.count"
-alpha_tee=$!
+echo "binding the reference copies"
+bind_fan_out "$work/fan-out.top-of-book.mktdata" "$work/fan-out.default.count"
+default_fan_out=$!
+bind_fan_out "$work/fan-out.top-of-book.alpha.mktdata" "$work/fan-out.alpha.count"
+alpha_fan_out=$!
 sleep 1
 
 # One subscriber per channel instance. Each joins its own group and binds its
@@ -320,9 +320,9 @@ print("  Go subscriber read its own shard's instruments and nobody else's")
 PY
 
 echo
-echo "what the reference streams received:"
-wait "$default_tee" "$alpha_tee" 2>/dev/null || true
-python3 - "$work/tee.default.count" "$work/tee.alpha.count" <<'TEE'
+echo "what the reference copies received:"
+wait "$default_fan_out" "$alpha_fan_out" 2>/dev/null || true
+python3 - "$work/fan-out.default.count" "$work/fan-out.alpha.count" <<'FANOUT'
 import sys
 
 def read(path):
@@ -331,21 +331,21 @@ def read(path):
 
 default_count, default_magic, default_longest = read(sys.argv[1])
 alpha_count, alpha_magic, alpha_longest = read(sys.argv[2])
-print(f"  tee.top-of-book.mktdata       {default_count} datagrams, longest {default_longest} bytes, first magic 0x{default_magic}")
-print(f"  tee.top-of-book.alpha.mktdata {alpha_count} datagrams, longest {alpha_longest} bytes, first magic 0x{alpha_magic}")
+print(f"  fan-out.top-of-book.mktdata       {default_count} datagrams, longest {default_longest} bytes, first magic 0x{default_magic}")
+print(f"  fan-out.top-of-book.alpha.mktdata {alpha_count} datagrams, longest {alpha_longest} bytes, first magic 0x{alpha_magic}")
 
-# The tee is a copy of what left the mktdata socket, so the datagrams are the
-# feed's own — magic and all — with no framing added. `5a44` is `DZ` little
+# The fan-out is a copy of what left the mktdata socket, so the datagrams are
+# the feed's own — magic and all — with no framing added. `5a44` is `DZ` little
 # endian, the top-of-book magic.
 for count, magic, longest in ((default_count, default_magic, default_longest),
                               (alpha_count, alpha_magic, alpha_longest)):
-    assert count > 0, "a reference stream received nothing"
+    assert count > 0, "a reference copy received nothing"
     assert magic == "5a44", f"the copy is not a top-of-book datagram: 0x{magic}"
     # And the mandated cap holds on the copy too, which is the check that would
-    # catch a tee that concatenated or framed.
+    # catch a fan-out that concatenated or framed.
     assert longest <= 1232, longest
 
 print()
 print("  two channel instances of one specification fanned out to two sockets,")
 print("  and the default shard's kept the name it has always had")
-TEE
+FANOUT
