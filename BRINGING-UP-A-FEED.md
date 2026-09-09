@@ -196,7 +196,7 @@ venue = "a-venue"
 
 [egress]
 pin = "192.0.2.10"      # the source address to send from, not discovered
-ttl = 1
+ttl = 1                 # required; no default. 1 is the attached segment only
 
 [[feed]]
 spec = "top-of-book"
@@ -238,6 +238,16 @@ kind = "a-venue-tob"
   address off the default route sends from the wrong interface the moment the
   feed lives on a tunnel — and the IGMP report leaves by the wrong path too, so
   the symptom is silence that reads as a clean feed.
+- **`ttl` has no default, and a document that omits it is refused at load.** It
+  used to default to one hop, which is the right value for a host whose
+  subscribers share its segment and invisible when it is wrong: a locally
+  attached subscriber receives, so a check on the publisher's own host passes;
+  every datagram is sent successfully, so nothing in the egress series moves,
+  because the kernel accepted each one and a router discarded it; and a
+  subscriber that never joined has nothing to number, so gap detection reports
+  nothing either. State the hop count the group's path actually takes. If the
+  subscribers are on the attached segment, that value is `1` and stating it
+  costs one line.
 - **`source_id` and `channel_id` are identity on the wire.** Two publishers
   sharing a `Source ID` on one group are indistinguishable to a subscriber's gap
   detection. Two `[[feed]]` blocks in one document sharing a `channel_id` are

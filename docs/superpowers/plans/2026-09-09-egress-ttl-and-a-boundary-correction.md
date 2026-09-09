@@ -16,11 +16,12 @@ Turns [the design](../specs/2026-09-09-egress-ttl-and-a-boundary-correction-desi
 
 ### 1. `[egress] ttl` is stated or the publisher does not start
 
-- [ ] `EgressSection::ttl` becomes `Option<u8>` with `#[serde(default)]`. The section stays optional.
-- [ ] `StartupError::TtlUnstated`, refused in `EgressSection::resolve`, naming the key, saying there is no default, and stating that `ttl = 1` publishes on the attached segment only — which is what a document omitting it did before. The message is the operator's one line.
-- [ ] `default_ttl` and `#[serde(default = "default_ttl")]` go. `DEFAULT_TTL` stays and its doc comment gains the sentence that it is not the document's default, so that the constant's name cannot restore one.
-- [ ] `EgressPolicy::default()` is unchanged at one hop, and its doc comment says where the document's requirement now lives, so the two cannot be read as disagreeing.
-- [ ] Every in-tree document that omits `ttl` gains it: the test harness's `Doc`, the two example scripts, and any fixture under `rust/`. A document in a *dated* design or plan is left as written — a fence in a dated document is a record of that day.
+- [x] `EgressSection::ttl` becomes `Option<u8>` with `#[serde(default)]`. The section stays optional.
+- [x] `StartupError::TtlUnstated`, refused in `EgressSection::resolve`, naming the key, saying there is no default, and stating that `ttl = 1` publishes on the attached segment only — which is what a document omitting it did before. The message is the operator's one line.
+- [x] `default_ttl` and `#[serde(default = "default_ttl")]` go. `DEFAULT_TTL` stays and its doc comment gains the sentence that it is not the document's default, so that the constant's name cannot restore one.
+- [x] `EgressPolicy::default()` is unchanged at one hop, and its doc comment says where the document's requirement now lives, so the two cannot be read as disagreeing.
+- [x] Every in-tree document that omits `ttl` gains it. **There were none**: the test harness's `Doc`, `loopback.sh` and `replay.sh` all state `ttl = 1` already, and the whole suite stayed green when the key became required. Two *tests* did need it — see the revert below — and no document in a dated design or plan was touched, because a fence in a dated document is a record of that day.
+- [x] Nothing asserted the old default. The suite passing unchanged is the evidence: no test resolved a document that omitted `ttl` and checked the 1 that came back, so the value a publisher would have shipped with was never held to anything.
 
 **Test** (`dz-publisher-runtime/tests/config_document.rs`):
 - a document with no `[egress]` section at all is refused with `TtlUnstated`;
@@ -29,14 +30,18 @@ Turns [the design](../specs/2026-09-09-egress-ttl-and-a-boundary-correction-desi
 - `ttl = 64` resolves and the policy carries 64, which is the value a deployment that exists uses;
 - the message names the key and the value, asserted as substrings, because the message *is* the remedy and a message that stopped naming the value would leave an operator to guess it.
 
-**The revert:** restore `#[serde(default = "default_ttl")]`. `a_document_that_states_no_ttl_is_refused` and `an_egress_section_without_a_ttl_is_refused_like_an_absent_one` both fail — they are the same mistake and both have to be able to fail, or the section-absent case is passing for the wrong reason.
+**The revert, and what it actually killed.** Restoring `#[serde(default = "default_ttl")]` fails **`an_egress_section_without_a_ttl_is_refused_like_an_absent_one`** and *not* `a_document_that_states_no_ttl_is_refused`. This plan predicted both and was wrong, which is the reason for running the revert rather than reasoning about it.
+
+The two cases are one refusal and **two mechanisms**. `Document::egress` is `#[serde(default)]`, so a document with no `[egress]` section builds `EgressSection::default()` — the derived one, where `Option::default()` is `None` — and never consults a field-level serde default at all. That default only applies to a field missing from a table that is present. So the absent-section case refuses under the mutant too, and the only test guarding the field's default is the one whose document states the other two keys.
+
+Both tests stay, and the reason is now stated rather than assumed: they cover two paths to one error, and a change to either mechanism can break one without the other. Two existing tests were also found to be passing for a second reason — the expected-prefix and pin refusals used documents that stated no TTL, so each had two things wrong with it and passed on whichever `resolve` checked first. Both now state a TTL.
 
 ---
 
 ### 2. The clause at the boundary that is untrue
 
-- [ ] `ListingSink::list_on`'s doc comment stops claiming that every implementor is in this workspace. It says implementors outside this workspace exist, and keeps the argument: the break falls on implementors rather than callers, and a compile error in a test double is found by the next `cargo test` where a silently collapsed published set is found by a subscriber.
-- [ ] Nothing else in that doc comment moves. The `compile_fail,E0046` doctest, the direction of the default and the signature are the design's and are not what was wrong.
+- [x] `ListingSink::list_on`'s doc comment stops claiming that every implementor is in this workspace. It says implementors outside this workspace exist, and keeps the argument: the break falls on implementors rather than callers, and a compile error in a test double is found by the next `cargo test` where a silently collapsed published set is found by a subscriber.
+- [x] Nothing else in that doc comment moves. The `compile_fail,E0046` doctest, the direction of the default and the signature are the design's and are not what was wrong.
 
 **Test:** the existing `compile_fail,E0046` doctest and the doctest beside it still compile and still fail respectively, which is what says the correction touched prose and not the trait.
 
@@ -46,8 +51,8 @@ Turns [the design](../specs/2026-09-09-egress-ttl-and-a-boundary-correction-desi
 
 ### 3. The documents that have to stay true
 
-- [ ] `BRINGING-UP-A-FEED.md`'s configuration block shows `ttl` without a comment marking it optional, and the note beside `pin` gains one line: the key has no default, and one hop is what a document that omitted it used to publish.
-- [ ] `docs/README.md` carries the row for this pair.
+- [x] `BRINGING-UP-A-FEED.md`'s configuration block shows `ttl` without a comment marking it optional, and the note beside `pin` gains one line: the key has no default, and one hop is what a document that omitted it used to publish.
+- [x] `docs/README.md` carries the row for this pair.
 
 **Test:** `scripts/check-public-repo-rules.sh`, plus a read of the new prose against the glossary's banned-word table.
 
@@ -62,7 +67,7 @@ The plan is done when:
 3. the guide shows the key as required;
 4. `list_on`'s doc comment claims nothing about implementors outside this workspace that is untrue;
 
-and when restoring the serde default makes both of task 1's refusal tests fail.
+and when restoring the serde default makes `an_egress_section_without_a_ttl_is_refused_like_an_absent_one` fail — one test and not both, for the reason recorded under task 1.
 
 ## What this plan does not do
 
