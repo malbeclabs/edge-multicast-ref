@@ -230,12 +230,9 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
         ingress_message_types: &message_types,
     }));
 
-    // **Here and not earlier, because earlier does not exist.** The normative
-    // set is built from `Adapter::message_types`, which needs the adapter,
-    // which the venue's constructor is what returns — so at the moment a venue
-    // is asked to build itself there is no registry to hand it. Its collectors
-    // travel up instead, and are registered once there is somewhere to put
-    // them.
+    // **Here and not earlier, because earlier does not exist.** See
+    // `Venue::collectors` for why a venue's collectors travel up rather than
+    // registering themselves.
     //
     // A reserved name is a startup failure and not a warning. The whole point
     // of the second registry is that a venue cannot shadow a series somebody
@@ -1078,11 +1075,8 @@ where
 /// Registers a venue's own collectors into the second registry.
 ///
 /// **Called after the normative set exists, because it cannot be called
-/// before.** [`PublisherMetrics`] is built from `Adapter::message_types`, which
-/// needs the adapter, which the venue's constructor is what returns — so at the
-/// moment a venue is asked to build itself there is no registry to hand it. Its
-/// collectors travel up out of that constructor instead, on
-/// [`Venue::collectors`](crate::Venue::collectors), and land here.
+/// before.** See [`Venue::collectors`](crate::Venue::collectors) for why its
+/// argument arrives here rather than at construction.
 ///
 /// # Errors
 ///
@@ -1175,13 +1169,17 @@ mod tests {
         );
     }
 
-    /// One bad collector refuses the run rather than half-registering it.
+    /// A refused collector stops registration at that point; it does not roll
+    /// back what registered before it.
     ///
-    /// A publisher that started with some of a venue's series present and some
-    /// absent is one whose dashboard has holes nobody can distinguish from a
-    /// venue that never counted them.
+    /// The collector ahead of the refusal is already registered when this
+    /// returns `Err`, and it stays registered. That is harmless only because
+    /// the caller treats the error as a startup failure and the process never
+    /// runs with the gap — a fact about the caller, not about this function.
+    /// This asserts what the function itself guarantees: the collector after
+    /// the refusal is never attempted, and the one before it is not undone.
     #[test]
-    fn a_refused_collector_stops_the_whole_registration() {
+    fn a_refused_collector_stops_registration_without_rolling_it_back() {
         let metrics = metrics();
         let error = register_venue_collectors(
             &metrics,
@@ -1193,6 +1191,10 @@ mod tests {
         );
         assert!(error.is_err());
         let rendered = metrics.render();
+        assert!(
+            rendered.contains("venue_first_total"),
+            "the collector registered before the refusal must still be there: {rendered}"
+        );
         assert!(
             !rendered.contains("venue_third_total"),
             "registration continued past the refusal: {rendered}"

@@ -88,6 +88,12 @@ use crate::error::{AdapterInitError, StartupError};
 /// and the constructor builds the transport that kind names. What the runtime
 /// cannot check is that it built the *matching* one, which is the honest cost of
 /// this and is stated rather than hidden.
+///
+/// `#[non_exhaustive]`: this is the second breaking addition to this struct's
+/// fields, and every field is public. Build one through [`Venue::single`] or
+/// [`Venue::new`], and add to one through [`Venue::with_collectors`], so the
+/// next field is additive rather than another break.
+#[non_exhaustive]
 pub struct Venue {
     /// The venue's mapping from its upstream's payloads onto normalized events.
     ///
@@ -132,6 +138,21 @@ pub struct Venue {
 }
 
 impl Venue {
+    /// A venue with its adapter and its transports, named however many
+    /// `[[source]]` entries the document resolved to.
+    ///
+    /// The general constructor: [`Venue::single`] is the one-upstream
+    /// convenience built on top of it, and both leave `collectors` empty,
+    /// which [`with_collectors`](Self::with_collectors) adds to.
+    #[must_use]
+    pub fn new(adapter: Box<dyn Adapter>, sources: Vec<Box<dyn Input>>) -> Self {
+        Self {
+            adapter,
+            sources,
+            collectors: Vec::new(),
+        }
+    }
+
     /// A venue with one upstream.
     ///
     /// The shape every publisher had before a feed could have several sources,
@@ -139,11 +160,7 @@ impl Venue {
     /// exactly this.
     #[must_use]
     pub fn single(adapter: Box<dyn Adapter>, input: Box<dyn Input>) -> Self {
-        Self {
-            adapter,
-            sources: vec![input],
-            collectors: Vec::new(),
-        }
+        Self::new(adapter, vec![input])
     }
 
     /// The same venue, with its own series to publish.
