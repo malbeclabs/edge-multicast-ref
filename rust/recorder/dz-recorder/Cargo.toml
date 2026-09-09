@@ -54,16 +54,17 @@ ctrlc = { version = "3", features = ["termination"] }
 tempfile = { workspace = true }
 
 [features]
-# Inline mode is the default mode, so its feature is in the default set. A binary
-# that refused the arrangement its own command line asks for when told nothing
-# would be a binary whose default it cannot honour, and the mode it can run —
-# archive mode — would be the one that takes a flag.
+# Inline mode's feature is in the default set, and not because the mode is a
+# default: neither arrangement is. It is because the arrangement is a property of
+# a host's CONFIGURATION and the released asset is one asset for the fleet. A
+# default build carrying only one arrangement would have to be matched to
+# configurations at deploy time — a second thing to get right, whose wrong answer
+# is a startup refusal on a host whose configuration was correct.
 #
-# `--no-default-features` is the record-only build. It carries no column-store
-# client, no HTTP client and no row crates, can only ever be in archive mode, and
-# refuses a command line naming no mode by this feature's name and by
-# `--archive`. That build is what the feature is still for; what changed is which
-# way round the default runs.
+# `--no-default-features` is the record-only build, asked for by name. It carries
+# no column-store client, no HTTP client and no row crates, can only ever be in
+# archive mode, and refuses a configuration that SELECTS inline mode by this
+# feature's name. That build is what the feature is still for.
 default = ["inline"]
 # AF_PACKET capture, which needs libpcap-dev at build time. Off by default so the
 # binary builds where that package is not installed; a configuration asking for
@@ -71,8 +72,8 @@ default = ["inline"]
 afpacket = ["dz-recorder-capture/afpacket"]
 # Inline mode: one process captures a feed, derives its rows through the same
 # derivation archive mode uses, and loads them — keeping no datagrams. In
-# `default`, above, because the mode is what a command line naming no mode is
-# read as.
+# `default`, above, because one released binary serves hosts in both
+# arrangements.
 #
 # A command line naming no mode in a build without this feature fails at startup
 # naming it, exactly as `capture.mode = "afpacket"` does for its own. Falling

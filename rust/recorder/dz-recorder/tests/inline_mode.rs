@@ -174,15 +174,19 @@ fn path_str(path: &Path) -> &str {
 /// an archive instead.
 ///
 /// The mode is behind a build feature so that a `--no-default-features`
-/// recorder gains no column-store crate, no HTTP client and no row crates. The
-/// command line this build actually meets names no mode at all — inline mode is
-/// what that is read as — so the refusal has to cover that shape and not only
-/// the flag. Falling back would put a host in the arrangement nobody chose,
-/// keeping bytes where rows were asked for, and it would look like a working
-/// recorder while doing it.
+/// recorder gains no column-store crate, no HTTP client and no row crates. What
+/// this build has to refuse is a configuration that *selects* inline mode — a
+/// second file given, no archive directory — because falling back would put a
+/// host in the arrangement nobody chose, keeping bytes where rows were asked
+/// for, and it would look like a working recorder while doing it.
+///
+/// It is reached by a positive statement and not by silence: a configuration
+/// stating no arrangement is refused earlier, by `NoArrangementStated`, in this
+/// build and every other. So the operator reading this one asked for inline
+/// mode on purpose, and the answer they need is the feature.
 #[cfg(not(feature = "inline"))]
 #[test]
-fn a_build_without_the_mode_refuses_the_default_mode_and_names_the_feature() {
+fn a_build_without_the_mode_refuses_a_configuration_selecting_it() {
     let host = Host::new();
     let ran = host.check(ToOwned::to_owned, ToOwned::to_owned);
     assert_eq!(ran.code(), 1, "{}", ran.stderr);
@@ -194,14 +198,16 @@ fn a_build_without_the_mode_refuses_the_default_mode_and_names_the_feature() {
     );
     host.nothing_was_written();
 
-    // The same with no mode named at all, which is the ordinary command line
-    // for this build and the one the inverted default routes into inline mode.
+    // A configuration stating no arrangement at all is a different refusal, and
+    // it is made before this one: an operator who stated nothing is told so,
+    // rather than being told about a build feature for a mode they did not ask
+    // for.
     let recorder = host.write("recorder.toml", RECORDER);
     let ran = run(&["--config", path_str(&recorder), "--check"]);
     assert_eq!(ran.code(), 1, "{}", ran.stderr);
-    assert!(ran.stderr.contains("--features inline"), "{}", ran.stderr);
-    assert!(ran.stderr.contains("--archive"), "{}", ran.stderr);
-    assert!(!ran.stdout.contains("mode=archive"), "{}", ran.stdout);
+    assert!(ran.stderr.contains("--inline-config"), "{}", ran.stderr);
+    assert!(ran.stderr.contains("archive.staging_dir"), "{}", ran.stderr);
+    assert!(!ran.stdout.contains("mode="), "{}", ran.stdout);
 
     // And recording, not only checking: the refusal is what stops a supervisor
     // starting this unit and getting archive mode, which is the arrangement
@@ -219,21 +225,22 @@ fn a_build_without_the_mode_refuses_the_default_mode_and_names_the_feature() {
     assert!(!ran.stderr.contains("mode=archive"), "{}", ran.stderr);
 }
 
-/// **A command line naming no mode and giving no file is refused, naming both
-/// flags.**
+/// **A configuration stating no arrangement is refused, naming both ways of
+/// stating one.**
 ///
-/// The default is a *reading* and not an invention. Inline mode needs a spool
-/// directory, a ledger and a destination, and there is no defensible value to
-/// guess for any of them — a recorder that guessed a destination would load
-/// rows into a database nobody chose. So the arrangement that says nothing at
-/// all does not start, and the refusal names the two ways out rather than the
-/// state it is in.
+/// There is no default to fall through to, and that is the point: five keys
+/// could have settled which arrangement this host is in and not one of them has
+/// a defensible value to invent — a recorder that guessed a destination would
+/// load rows into a database nobody chose, and one that guessed a staging
+/// directory would keep bytes on a disk nobody sized. So a configuration that
+/// says nothing does not start, and the refusal names both ways out rather than
+/// the state it is in.
 #[cfg(feature = "inline")]
 #[test]
-fn a_command_line_naming_no_mode_and_no_second_file_is_refused_by_name() {
+fn a_configuration_stating_no_arrangement_is_refused_by_name() {
     let host = Host::new();
-    // No `[archive]` section, so nothing here identifies the configuration as
-    // either arrangement's: this is the case with no shape at all.
+    // No `[archive]` section and no second file, so nothing here states an
+    // arrangement: this is the fourth of the four cases.
     let recorder = host.write("recorder.toml", RECORDER);
     let ran = run(&["--config", path_str(&recorder), "--check"]);
 
@@ -244,23 +251,32 @@ fn a_command_line_naming_no_mode_and_no_second_file_is_refused_by_name() {
         ran.stdout
     );
     assert!(ran.stderr.contains("--inline-config"), "{}", ran.stderr);
-    assert!(ran.stderr.contains("--archive"), "{}", ran.stderr);
+    assert!(ran.stderr.contains("archive.staging_dir"), "{}", ran.stderr);
+    assert!(
+        ran.stderr.contains("archive.completed_dir"),
+        "{}",
+        ran.stderr
+    );
     // And it does not invent one: no spool directory was guessed at, so nothing
     // was created anywhere.
     host.nothing_was_written();
 }
 
-/// **Inline mode is a default feature, because it is the default mode.**
+/// **Inline mode is a default feature, and the reason has changed with the
+/// selection.**
 ///
-/// A binary that refused the arrangement its own command line asks for when
-/// told nothing would be a binary whose default it cannot honour — and the
-/// arrangement it *could* run would be the one that takes a flag.
+/// Not because a binary must honour its own default mode — there is no default
+/// mode. Because the arrangement is a property of a host's configuration and
+/// the released asset is one asset for the fleet: a default build carrying one
+/// arrangement would have to be matched to configurations at deploy time, and
+/// its wrong answer is a startup refusal on a host whose configuration was
+/// correct.
 ///
 /// Asserted over the manifest text rather than over `cfg!`, deliberately: a
 /// `cfg!` assertion is compiled out in exactly the build it exists to catch, so
 /// it would pass in the build where the default set is wrong.
 #[test]
-fn inline_mode_is_a_default_feature_because_it_is_the_default_mode() {
+fn inline_mode_is_a_default_feature_because_one_asset_serves_both_arrangements() {
     let manifest = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
         .expect("this crate's own manifest");
     assert!(
@@ -330,11 +346,19 @@ fn check_validates_both_files_reaches_for_the_destination_and_touches_nothing() 
     host.nothing_was_written();
 }
 
-/// Nothing writes an object in inline mode, so a configured archive directory
-/// is an operator expecting bytes they will not get.
+/// **A configuration stating both arrangements is refused, naming both
+/// statements.**
+///
+/// The third of the four cases, and the one whose wrong resolution loses
+/// evidence: read as inline mode, this host is one somebody believes is keeping
+/// bytes for a year that it never kept for a second; read as archive mode, it
+/// is a host that asked for rows and keeps bytes. Neither statement is treated
+/// as the mistake, because which of them an operator wrote and which they
+/// inherited is not something this process can know — so the refusal names the
+/// key *and* the file, and does so for either key on its own.
 #[cfg(feature = "inline")]
 #[test]
-fn an_archive_directory_in_inline_mode_is_refused_by_key() {
+fn a_configuration_stating_both_arrangements_is_refused_by_key_and_by_file() {
     for (key, section) in [
         (
             "archive.staging_dir",
@@ -349,7 +373,15 @@ fn an_archive_directory_in_inline_mode_is_refused_by_key() {
         let ran = host.check(|text| format!("{text}\n{section}"), ToOwned::to_owned);
         assert_eq!(ran.code(), 1, "{}", ran.stderr);
         assert!(ran.stderr.contains(key), "{}", ran.stderr);
-        assert!(ran.stderr.contains("never kept"), "{}", ran.stderr);
+        // The other statement, so both are on the screen. A refusal naming only
+        // the key would read as a complaint about the archive rather than as a
+        // contradiction between two things somebody stated.
+        assert!(ran.stderr.contains("inline.toml"), "{}", ran.stderr);
+        assert!(
+            !ran.stdout.contains("mode="),
+            "a contradiction was resolved into an arrangement: {}",
+            ran.stdout
+        );
         host.nothing_was_written();
     }
 }
@@ -424,8 +456,9 @@ fn a_second_file_that_is_not_there_names_the_path() {
 /// A configuration valid for archive mode is still valid for archive mode, in
 /// both builds, and the summary says which arrangement it is.
 ///
-/// With `--archive`, which is the whole of what the inverted default changed
-/// for this host: the keys, the refusals and the summary are what they were.
+/// **On the same command line it ran on before this branch existed**, which is
+/// the whole of what selecting from the configuration buys: the keys, the
+/// refusals, the summary and the invocation are what they were.
 #[test]
 fn a_configuration_valid_for_archive_mode_is_still_valid_and_says_so() {
     let host = Host::new();
@@ -437,7 +470,7 @@ fn a_configuration_valid_for_archive_mode_is_still_valid_and_says_so() {
         completed = host.dir.path().join("completed").display(),
     );
     let recorder = host.write("recorder.toml", &text);
-    let ran = run(&["--config", path_str(&recorder), "--archive", "--check"]);
+    let ran = run(&["--config", path_str(&recorder), "--check"]);
     assert_eq!(ran.code(), 0, "{}", ran.stderr);
     assert!(ran.stdout.contains("mode=archive"), "{}", ran.stdout);
     assert!(

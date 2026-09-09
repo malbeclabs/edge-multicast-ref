@@ -2,24 +2,32 @@
 # is not obvious. Pass it with `--inline-config`, beside the recorder's own
 # `--config`.
 #
-# INLINE MODE IS THE DEFAULT — it is what a command line naming no mode is read
-# as — AND IT KEEPS NO DATAGRAM. Rows are derived from the live capture and the
-# bytes behind them are discarded: a conformance rule written next month has
-# nothing to run against, a row cannot be re-derived, and nothing verifies what
-# the derivation read. Every row this mode writes says so, in its `derivation`
-# column. A host recording a feed for evidence runs archive mode, which takes
-# `--archive` and no longer arrives by saying nothing.
+# THIS FILE IS WHAT SELECTS INLINE MODE, and inline mode KEEPS NO DATAGRAM. Rows
+# are derived from the live capture and the bytes behind them are discarded: a
+# conformance rule written next month has nothing to run against, a row cannot be
+# re-derived, and nothing verifies what the derivation read. Every row this mode
+# writes says so, in its `derivation` column. A host recording a feed for
+# evidence runs archive mode, which is selected by the two `[archive]`
+# directories it has always required.
 #
-# THE DEFAULT IS A READING AND NOT AN INVENTION. This file has no defensible
-# host values to fall back on — there is no spool directory, ledger or
-# destination worth guessing — so a command line naming no mode and giving no
-# `--inline-config` is refused naming both flags rather than started.
+# IT SELECTS THE MODE BECAUSE IT IS WHAT THE MODE NEEDS. There are no defensible
+# host values to fall back on here — no spool directory, ledger or destination
+# worth guessing — so this is a file an operator states rather than a switch they
+# set, and a configuration stating neither this nor an archive is refused naming
+# both rather than started. Neither arrangement is a default and no flag names
+# either.
 #
 # BECAUSE NOTHING WRITES AN OBJECT, the recorder's own `[archive] staging_dir`
-# and `completed_dir` must carry no value — leave the section out. A recorder
-# that finds one refuses to start rather than leaving an operator believing in
-# bytes nobody kept, and because that refusal runs both ways it is also what
-# catches an archive-mode host whose command line has forgotten `--archive`.
+# and `completed_dir` must carry no value — leave the section out. A
+# configuration that states both this file and an archive directory is a
+# contradiction rather than a mode, and it is refused naming the key and this
+# file.
+#
+# NO MARKET DATA ROWS ARE DERIVED HERE. `event`, `instrument` and `book_top` come
+# from a codec walk, which archive mode runs in the loader and which this
+# arrangement will not run on the record path. A `[[market_data]]` entry below is
+# refused by name rather than ignored, so asking is answered instead of leaving
+# three tables empty for a feed somebody expected them from.
 #
 # THERE IS NO PASSWORD KEY. The column store's password comes from
 # DZ_LOADER_CLICKHOUSE_PASSWORD_FILE — a systemd credential, readable by the
@@ -35,9 +43,9 @@
 # the recorder's too: one process, one exposition, one port.
 #
 # The mode needs a build carrying `inline`, which is a default feature because
-# the mode is the default mode. A build made with `--no-default-features` is the
-# record-only one, can only be in archive mode, and refuses a command line
-# naming no mode by the feature's name and by `--archive`.
+# one released binary serves hosts in both arrangements. A build made with
+# `--no-default-features` is the record-only one, can only be in archive mode,
+# and refuses a configuration that selects inline mode by the feature's name.
 
 [inline]
 # The window is inline mode's unit: a bound's worth of datagrams, derived and

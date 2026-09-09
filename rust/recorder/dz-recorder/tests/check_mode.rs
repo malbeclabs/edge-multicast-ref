@@ -6,11 +6,12 @@
 //! stderr and names the key, and that a valid configuration touches nothing.
 //! Every address here is documentation-range: this repository is public.
 //!
-//! **Every check here passes `--archive`**, because that is now what archive
-//! mode takes: inline mode is what a command line naming no mode is read as.
-//! The one test that leaves the flag off is
-//! [`an_archive_configuration_with_no_mode_named_is_refused_and_names_the_flag`],
-//! and it asserts a refusal.
+//! **No check here passes a flag naming the arrangement**, because there is no
+//! such flag: the fixture states `archive.staging_dir` and
+//! `archive.completed_dir`, which is what selects archive mode and what archive
+//! mode has always required. That is the whole of the migration this branch
+//! asks of the fleet, and it is visible here as the edit these tests did not
+//! need.
 #![forbid(unsafe_code)]
 
 use std::path::{Path, PathBuf};
@@ -81,41 +82,47 @@ fn config_in(dir: &Path, text: &str) -> PathBuf {
 
 /// Runs `--check` over a configuration made by editing the valid one.
 ///
-/// `--archive`, because the configuration is an archive-mode one: the flag is
-/// how that arrangement is asked for, and without it every one of these
-/// refusals would be replaced by the one about a configured staging directory.
+/// No arrangement flag, because there is none: the fixture's two archive
+/// directories are what select archive mode, so these refusals are reached the
+/// way a host reaches them.
 fn check(edit: impl FnOnce(&str) -> String) -> Ran {
     let dir = tempfile::tempdir().expect("a temporary directory");
     let path = config_in(dir.path(), &edit(VALID));
-    run(&[
-        "--config",
-        path.to_str().expect("a utf-8 path"),
-        "--archive",
-        "--check",
-    ])
+    run(&["--config", path.to_str().expect("a utf-8 path"), "--check"])
 }
 
-/// **Archive mode takes a flag now, and the configuration that used to be
-/// enough on its own is refused rather than reinterpreted.**
+/// **A configuration stating neither arrangement is refused, naming both ways
+/// of stating one.**
 ///
-/// This is the whole safety argument of the inverted default, at the altitude
-/// an operator meets it. The fixture describes an archive — it names
-/// `staging_dir` and `completed_dir`, and with `--archive` it checks out clean
-/// two tests below. Without the flag it must not start, must not print
-/// `mode=archive`, and must say what to add: the host this happens to is one
-/// recording a production feed for evidence, on the restart nobody was
-/// watching, and a log line would have been read weeks later as a year of
-/// retention that was never kept.
+/// This is the row that leaves no silence for a default to be placed on, at the
+/// altitude an operator meets it. It must not start, must not print a mode line,
+/// and must name the keys and the file — because the operator reading it has
+/// stated neither arrangement and there is nothing to infer from what they
+/// wrote.
+///
+/// Held in every build, and asserted without a `cfg!` branch: this refusal is
+/// made before either arrangement's own checks, so a `--no-default-features`
+/// build makes it in the same words. A refusal that read differently per build
+/// would be a refusal an operator could not be taught.
 #[test]
-fn an_archive_configuration_with_no_mode_named_is_refused_and_names_the_flag() {
+fn a_configuration_stating_no_arrangement_is_refused_and_names_both() {
     let dir = tempfile::tempdir().expect("a temporary directory");
-    let path = config_in(dir.path(), VALID);
+    let text = VALID
+        .replace(
+            r#"staging_dir     = "/var/lib/dz-recorder/staging""#,
+            r#"staging_dir     = """#,
+        )
+        .replace(
+            r#"completed_dir   = "/var/lib/dz-recorder/completed""#,
+            r#"completed_dir   = """#,
+        );
+    let path = config_in(dir.path(), &text);
     let ran = run(&["--config", path.to_str().expect("a utf-8 path"), "--check"]);
 
     assert_eq!(ran.code(), 1, "{}{}", ran.stdout, ran.stderr);
     assert!(
-        !ran.stdout.contains("mode=archive"),
-        "a command line naming no mode was read as archive mode: {}",
+        !ran.stdout.contains("mode="),
+        "a configuration stating no arrangement was read as one: {}",
         ran.stdout
     );
     assert!(
@@ -123,22 +130,13 @@ fn an_archive_configuration_with_no_mode_named_is_refused_and_names_the_flag() {
         "a refusal is not a result: {}",
         ran.stdout
     );
-    // The flag to add. This message is the migration instruction as much as the
-    // refusal, and it is the only place that instruction is certain to be read.
-    assert!(ran.stderr.contains("--archive"), "{}", ran.stderr);
-
-    if cfg!(feature = "inline") {
-        // And the key the operator actually wrote: inline mode writes no
-        // object, so a staging directory carrying a value is what identifies
-        // this configuration as the other arrangement's.
-        assert!(ran.stderr.contains("archive.staging_dir"), "{}", ran.stderr);
-        assert!(ran.stderr.contains("never kept"), "{}", ran.stderr);
-    } else {
-        // A `--no-default-features` build never reaches the key: it refuses the
-        // default mode by the feature's name first, which is the more useful
-        // answer for a binary that cannot derive a row at all.
-        assert!(ran.stderr.contains("--features inline"), "{}", ran.stderr);
-    }
+    assert!(ran.stderr.contains("archive.staging_dir"), "{}", ran.stderr);
+    assert!(
+        ran.stderr.contains("archive.completed_dir"),
+        "{}",
+        ran.stderr
+    );
+    assert!(ran.stderr.contains("--inline-config"), "{}", ran.stderr);
 }
 
 #[test]
@@ -158,7 +156,11 @@ fn a_valid_configuration_checks_out_and_creates_nothing() {
         );
     let path = config_in(dir.path(), &text);
 
-    let ran = run(&["--config", path.to_str().unwrap(), "--archive", "--check"]);
+    // No flag naming the arrangement, because there is none: the two
+    // directories in the fixture are what select archive mode. This is the
+    // fleet's migration in miniature — the command line an archive host runs
+    // today is the command line that runs here.
+    let ran = run(&["--config", path.to_str().unwrap(), "--check"]);
     assert_eq!(ran.code(), 0, "{}", ran.stderr);
     assert!(
         ran.stdout.contains("configuration is valid"),

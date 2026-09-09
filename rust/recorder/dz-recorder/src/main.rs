@@ -31,10 +31,9 @@
 mod cli;
 mod endpoint;
 mod identity;
-/// Declared in every build, feature or not: inline mode is what a command line
-/// naming no mode is read as, so a build without the mode compiled in is
-/// precisely the build that has to refuse that command line — naming the feature
-/// and naming `--archive`. A refusal that only exists in the builds which do not
+/// Declared in every build, feature or not: a build without the mode compiled in
+/// is precisely the build that has to refuse a configuration selecting it,
+/// naming the feature. A refusal that only exists in the builds which do not
 /// need it is no refusal at all.
 mod inline_config;
 /// The record path for inline mode, which exists only where the mode does.
@@ -49,7 +48,7 @@ use std::process::ExitCode;
 use thiserror::Error;
 
 use cli::{Args, CliError, Invocation};
-use startup::{Plan, StartupError};
+use startup::{Arrangement, Plan, StartupError};
 
 /// The command line could not be understood, which is a different failure from
 /// a recorder that refused to start: a deployment pipeline distinguishes them.
@@ -72,13 +71,23 @@ enum Failure {
 /// read.
 ///
 /// Two arrangements exist and they keep different things. A summary that named
-/// neither would leave an operator to infer the mode from which keys were
+/// neither would leave an operator to infer the arrangement from which keys were
 /// echoed back, and the one they need to be sure of is whether this host is
-/// keeping the bytes — which is also the thing a command line can now get wrong
-/// by saying nothing, so the line is printed in both modes and not only in the
-/// one that was asked for.
+/// keeping the bytes. It is the first line in both arrangements, and it is the
+/// line a deployment pipeline reads to see which one it has just deployed.
 const ARCHIVE_MODE: &str =
     "mode=archive: every datagram is written to an object, and the loader derives the rows";
+
+/// What archive mode says about the three market data grains.
+///
+/// Printed beside the mode line in both arrangements, because a table that is
+/// empty for want of an entry in another process's configuration is
+/// indistinguishable from a table that is empty for want of a feed. The
+/// recorder is not the process that would derive them here, so the honest answer
+/// names the process that decides.
+const ARCHIVE_MARKET_DATA: &str = "market_data=loader: `event`, `instrument` and `book_top` are \
+                                   derived by dz-recorder-load, for the feeds its own \
+                                   `[[market_data]]` entries name";
 
 fn main() -> ExitCode {
     let invocation = match cli::parse(std::env::args().skip(1)) {
@@ -123,35 +132,37 @@ fn run(args: &Args) -> Result<(), Failure> {
             path: args.config.clone(),
             source,
         })?;
-    // **Inline mode unless archive mode was asked for by name.** The default
-    // decides how a command line naming no mode is read, and it is put on the
-    // reading whose wrong choice is loud: a configuration describing an archive
-    // arriving here is refused naming `archive.staging_dir`, because nothing in
-    // inline mode writes an object. Read the other way round, the same silence
-    // would have been a host that quietly stopped keeping bytes and went on
-    // looking healthy — and nobody reads a log line on the restart that did it.
+    // **The arrangement, before either arrangement's own checks.** Neither is a
+    // default: archive mode is stated by the two directories it has always
+    // required and inline mode by the file it cannot run without, and a
+    // configuration stating both or neither is refused here rather than
+    // resolved. Doing it first is what makes the refusals readable — an operator
+    // whose arrangement is unclear is told that, and not told about a spool
+    // directory or a staging directory belonging to a mode nothing chose.
     //
-    // Before the archive plan and never after it, for the reason it always was:
-    // the directories this mode refuses a value for are the ones that plan
-    // requires one of. A build without the feature refuses here too, rather than
-    // falling back to the arrangement nobody chose.
-    if !args.archive {
-        return Ok(inline_config::run(
+    // A build without the feature reaches the inline branch and refuses there,
+    // rather than falling back to the arrangement nobody chose.
+    match Arrangement::selected_by(&config, args.inline_config.as_deref())? {
+        Arrangement::Inline => Ok(inline_config::run(
             &config,
             args.inline_config.as_deref(),
             args.check,
             args.run_for,
         )
-        .map_err(Box::new)?);
+        .map_err(Box::new)?),
+        Arrangement::Archive => run_archive(&config, args),
     }
+}
 
-    let plan = Plan::from_config(&config)?;
+fn run_archive(config: &dz_recorder_core::RecorderConfig, args: &Args) -> Result<(), Failure> {
+    let plan = Plan::from_config(config)?;
 
     if args.check {
         // Nothing is bound, nothing is created and nothing is joined: this runs
         // in a deployment pipeline, against a host that may already be
         // recording, before anything is restarted.
         println!("{ARCHIVE_MODE}");
+        println!("{ARCHIVE_MARKET_DATA}");
         print!("{}", plan.summary());
         println!("configuration is valid");
         return Ok(());
@@ -159,6 +170,7 @@ fn run(args: &Args) -> Result<(), Failure> {
 
     eprintln!("dz-recorder: {}", cli::version_line());
     eprintln!("{ARCHIVE_MODE}");
+    eprintln!("{ARCHIVE_MARKET_DATA}");
     eprint!("{}", plan.summary());
     runner::run(&plan, args.run_for)?;
     Ok(())

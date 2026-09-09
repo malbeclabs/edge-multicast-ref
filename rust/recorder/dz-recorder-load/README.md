@@ -6,11 +6,16 @@ directory with it and nothing more.
 
 This process is **archive mode's other half**: `dz-recorder` keeps the bytes and
 this derives rows from them. That arrangement is what a host recording a
-production feed for evidence runs, and the recorder beside it is started with
-`--archive` — the other arrangement, inline mode, is what a recorder command
-line naming no mode is read as, and it needs no loader at all. Nothing here
-changes for it; see [the two modes](../README.md#the-two-modes) for what it
-gives up and what the default costs.
+production feed for evidence runs, and the recorder beside it selects it by
+stating `archive.staging_dir` and `archive.completed_dir` — which is what it has
+always stated, so nothing about that host's command line changes. The other
+arrangement, inline mode, is selected by `--inline-config` and needs no loader at
+all. Nothing here changes for it; see
+[the two modes](../README.md#the-two-modes) for what it gives up.
+
+**The `[[market_data]]` entries below are archive mode's alone.** Inline mode
+refuses them by name: `event`, `instrument` and `book_top` are derived here, in
+this process, over bytes already stored and already hashed.
 
 ```bash
 dz-recorder-load --config /etc/dz-recorder-load/loader.toml --check

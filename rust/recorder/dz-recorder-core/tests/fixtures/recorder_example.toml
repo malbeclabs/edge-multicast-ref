@@ -1,6 +1,8 @@
-# An ARCHIVE-MODE configuration, run with `--archive`:
+# An ARCHIVE-MODE configuration. The `[archive] staging_dir` and `completed_dir`
+# below are what select that arrangement — there is no flag, and this file is
+# the whole of the statement:
 #
-#   dz-recorder --config recorder.toml --archive
+#   dz-recorder --config recorder.toml
 #
 # The flag is not optional. Inline mode is what a command line naming no mode is
 # read as, and it writes no object — so this file's `[archive] staging_dir`

@@ -5,10 +5,17 @@
 # NO DATAGRAM IS KEPT. There is no archive, no manifest and no digest — a
 # conformance rule written next month has nothing to run against, a row cannot be
 # re-derived, and nothing verified the bytes the rows came from. A host recording
-# a production feed for evidence runs archive mode instead, which takes
-# --archive: this mode is what a command line naming no mode is read as, so a
-# unit for the other arrangement states its flag and a unit that forgets it is
-# refused at startup by key rather than left deriving rows and keeping nothing.
+# a production feed for evidence runs archive mode instead, which is selected by
+# `[archive] staging_dir` and `completed_dir` in the recorder's own file. No flag
+# names either arrangement: this unit is in inline mode because it passes
+# --inline-config, and a recorder configuration that also stated an archive
+# directory would be refused at startup naming both rather than left deriving
+# rows and keeping nothing.
+#
+# NO MARKET DATA ROWS ARE DERIVED HERE either: `event`, `instrument` and
+# `book_top` come from a codec walk that archive mode runs in the loader. A
+# [[market_data]] entry in the inline file is refused by name, so a host that
+# wanted those tables learns it from ExecStartPre.
 #
 #   install -o root -g root -m 0644 dz-recorder-inline.service /etc/systemd/system/
 #   install -d -o dz-recorder -g dz-recorder -m 0750 /var/lib/dz-recorder-inline
@@ -17,7 +24,8 @@
 #   systemctl daemon-reload && systemctl enable --now dz-recorder-inline
 #
 # The binary carries the mode by default: `inline` is a default feature, because
-# the mode is the default mode. Add `tls` for an https destination and `afpacket`
+# one released binary serves hosts in both arrangements and the arrangement is a
+# property of this file. Add `tls` for an https destination and `afpacket`
 # for `[capture] mode = "afpacket"`. Each of the three is refused at startup by
 # name in a build that lacks it, rather than downgraded or fallen back from — an
 # https endpoint spoken as plain HTTP would put the password on the wire having

@@ -51,21 +51,21 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Error)]
 pub enum InlineConfigError {
     /// Only a build that has to make this refusal carries it: with the feature
-    /// compiled in there is no command line that can reach it.
+    /// compiled in there is no configuration that can reach it.
     ///
-    /// Reached by *saying nothing*, not by asking. Inline mode is the default
-    /// mode, `inline` is therefore a default feature, and a build that lacks it
-    /// was made with `--no-default-features` — so the command line that trips
-    /// this is the ordinary one, and the answer it needs is `--archive`.
+    /// Reached by a configuration that *states* inline mode — a second file
+    /// given and no archive directory — and not by silence, which is refused
+    /// before this by [`crate::startup::StartupError::NoArrangementStated`]. So
+    /// the operator reading it asked for this arrangement on purpose, and what
+    /// they need is the feature rather than an alternative they did not choose.
     #[cfg(not(feature = "inline"))]
     #[error(
-        "no mode was named, so this is inline mode — and this build has no inline mode compiled \
-         in. The `inline` feature is in the default set, because the mode is the default mode, so \
-         this binary was built without the default features; rebuild with them, or with \
-         `--features inline`. A build that cannot derive rows can still record an archive: pass \
-         `--archive`, and state `[archive] staging_dir` and `completed_dir`. Falling back to that \
-         unasked would leave this host keeping bytes where rows were asked for, which is the \
-         arrangement nobody chose."
+        "`--inline-config` states inline mode, and this build has no inline mode compiled in. \
+         The `inline` feature is in the default set, so this binary was built without the default \
+         features; rebuild with them, or with `--features inline`. A build that cannot derive \
+         rows can still record an archive: drop `--inline-config` and state `[archive] \
+         staging_dir` and `completed_dir` instead. Falling back to that unasked would leave this \
+         host keeping bytes where rows were asked for, which is the arrangement nobody chose."
     )]
     NotCompiledIn,
 
@@ -83,27 +83,6 @@ pub enum InlineConfigError {
     #[error("{0}")]
     Run(crate::runner::RunError),
 
-    /// The default mode, with no file to run it from.
-    ///
-    /// Inline mode needs a spool directory, a ledger and a destination, and not
-    /// one of them has a defensible value to invent. So the default is a
-    /// *reading* and never an invention: a recorder that guessed a destination
-    /// would load rows into a database nobody chose, and one that fell back to
-    /// archive mode would keep bytes on a host that asked for rows.
-    ///
-    /// Named after [`crate::startup::StartupError::DirectoryNotStated`],
-    /// because it is that refusal in the other arrangement — a required path
-    /// with no host default worth having.
-    #[cfg(feature = "inline")]
-    #[error(
-        "no mode was named, so this is inline mode — and `--inline-config` was not given. The \
-         mode needs a spool directory, a ledger and a destination, and there is no defensible \
-         value to invent for any of them, so this is refused rather than guessed at. State the \
-         file, or pass `--archive` to record an archive from the `[archive]` section of the \
-         configuration instead."
-    )]
-    NotStated,
-
     #[cfg(feature = "inline")]
     #[error("reading {path}: {source}")]
     Read {
@@ -117,24 +96,6 @@ pub enum InlineConfigError {
         path: PathBuf,
         source: toml::de::Error,
     },
-
-    /// An archive directory in the mode that writes no object.
-    ///
-    /// **This message is the migration instruction as well as the refusal.**
-    /// Inline mode is what a command line naming no mode is read as, so an
-    /// archive-mode host whose command line has not changed reaches it on its
-    /// first restart — and this is the only place that instruction is certain to
-    /// be read, which is why it names the flag rather than describing a state.
-    #[cfg(feature = "inline")]
-    #[error(
-        "`archive.{key}` = `{path}`, and inline mode writes no object — nothing would ever be \
-         written there and nothing would ever read from it, so a host configured this way is \
-         believed to be keeping bytes it never kept for a second. Inline mode is what a command \
-         line naming no mode is read as: pass `--archive` to record the archive this \
-         configuration describes, or remove the `[archive]` directories to derive rows and keep \
-         none."
-    )]
-    ArchiveDirectoryConfigured { key: &'static str, path: String },
 
     #[cfg(feature = "inline")]
     #[error(
@@ -458,16 +419,23 @@ pub const INLINE_MODE: &str =
 
 /// Inline mode, from the two files to the refusals to `--check`.
 ///
-/// `path` is `None` when the command line named no mode and gave no file, which
-/// is the ordinary shape of a mistake now that the mode is the default. It is a
-/// refusal naming both flags and never a fallback.
+/// `path` is the file that selected this arrangement, so it is always `Some`
+/// here: `Arrangement::selected_by` answered `Inline` because it was given, and
+/// a configuration with no file selects archive mode or is refused. It is taken
+/// as an `Option` because the no-feature form below has to accept the same
+/// arguments, and asserted rather than assumed.
 ///
 /// # Errors
 ///
-/// [`InlineConfigError`], naming the key or the flag. A build without the
+/// [`InlineConfigError`], naming the key or the file. A build without the
 /// feature refuses here and never falls back to archive mode: a host silently
 /// recording bytes where rows were asked for is in the arrangement nobody
 /// chose.
+///
+/// # Panics
+///
+/// If `path` is `None`, which is a caller that reached inline mode without the
+/// file that selects it.
 #[cfg(feature = "inline")]
 pub fn run(
     recorder: &RecorderConfig,
@@ -475,14 +443,12 @@ pub fn run(
     check: bool,
     run_for: Option<std::time::Duration>,
 ) -> Result<(), InlineConfigError> {
-    // **The archive directories first, and before the missing-file refusal.**
-    // The command line most likely to arrive here by mistake is an archive-mode
-    // host's, unchanged since before the default was inverted: it carries the
-    // two directories and no second file. The useful answer names the key that
-    // host actually wrote and the flag it is now missing — not a file it never
-    // wanted and would not know what to put in.
-    check_archive_is_not_configured(recorder)?;
-    let path = path.ok_or(InlineConfigError::NotStated)?;
+    // Not a refusal: the file is what selected this arrangement, so its absence
+    // here is a dispatch that has stopped agreeing with the selection rather
+    // than anything an operator can have written. The refusal for a
+    // configuration that states no arrangement is `NoArrangementStated`, made
+    // before this is reached.
+    let path = path.expect("inline mode is selected by the file, so the file is in hand");
 
     let text = std::fs::read_to_string(path).map_err(|source| InlineConfigError::Read {
         path: path.to_path_buf(),
@@ -544,11 +510,10 @@ pub fn run(
 ///
 /// # Errors
 ///
-/// Always [`InlineConfigError::NotCompiledIn`], whether or not a second file was
-/// given: a build that cannot run the default mode cannot run it with a file
-/// either. It fails at startup rather than falling back to archive mode, which
-/// would put a host in the arrangement nobody chose — and the message names
-/// `--archive`, which is the arrangement this binary *can* run.
+/// Always [`InlineConfigError::NotCompiledIn`]. It fails at startup rather than
+/// falling back to archive mode, which would put a host in the arrangement
+/// nobody chose — and the message names the two directories, which are how the
+/// arrangement this binary *can* run is stated.
 #[cfg(not(feature = "inline"))]
 pub fn run(
     _recorder: &RecorderConfig,
@@ -557,27 +522,6 @@ pub fn run(
     _run_for: Option<std::time::Duration>,
 ) -> Result<(), InlineConfigError> {
     Err(InlineConfigError::NotCompiledIn)
-}
-
-/// An archive directory configured in the mode that writes no object.
-///
-/// Refused rather than ignored: nothing would ever be written there, and a host
-/// whose configuration names a staging directory is a host somebody believes is
-/// keeping bytes for a year that it never kept for a second.
-#[cfg(feature = "inline")]
-fn check_archive_is_not_configured(config: &RecorderConfig) -> Result<(), InlineConfigError> {
-    for (key, dir) in [
-        ("staging_dir", &config.archive.staging_dir),
-        ("completed_dir", &config.archive.completed_dir),
-    ] {
-        if !dir.as_os_str().is_empty() {
-            return Err(InlineConfigError::ArchiveDirectoryConfigured {
-                key,
-                path: dir.display().to_string(),
-            });
-        }
-    }
-    Ok(())
 }
 
 /// The identity every row carries, checked here because inline mode reads it
@@ -910,10 +854,16 @@ listen_addr = "127.0.0.1:0"
         assert!(message.contains("http://"), "{message}");
     }
 
-    /// Nothing writes an object in inline mode, so a directory with a value in
-    /// it is an operator expecting an archive they will not get.
+    /// A directory with a value in it beside a second file is two arrangements
+    /// stated at once, and the refusal names both statements.
+    ///
+    /// The refusal lives in `startup` and not here, because the condition it
+    /// reads is the condition that *selects* the arrangement — a second reading
+    /// of the same two keys downstream of the selection is a reading that can
+    /// disagree with it. What this asserts is that inline mode is reachable only
+    /// through that selection.
     #[test]
-    fn an_archive_directory_in_inline_mode_is_refused_by_key() {
+    fn an_archive_directory_beside_the_second_file_is_refused_by_key() {
         for (key, section) in [
             (
                 "archive.staging_dir",
@@ -925,36 +875,46 @@ listen_addr = "127.0.0.1:0"
             ),
         ] {
             let config = recorder_config(&format!("{RECORDER}\n{section}"));
-            let message = check_archive_is_not_configured(&config)
-                .expect_err("an archive directory in inline mode is refused")
-                .to_string();
+            let message = crate::startup::Arrangement::selected_by(
+                &config,
+                Some(std::path::Path::new("inline.toml")),
+            )
+            .expect_err("an archive directory beside a second file states both")
+            .to_string();
             assert!(message.contains(key), "{message}");
-            assert!(message.contains("never kept"), "{message}");
+            assert!(message.contains("inline.toml"), "{message}");
         }
     }
 
-    /// A recorder configuration with no `[archive]` section is what inline mode
-    /// takes, and the absence is the statement.
+    /// A recorder configuration with no `[archive]` section, plus the second
+    /// file, is what inline mode takes — and the file is what states it.
     #[test]
-    fn a_recorder_file_with_no_archive_section_is_what_inline_mode_takes() {
+    fn a_recorder_file_with_no_archive_section_and_the_file_is_inline_mode() {
         let config = recorder_config(RECORDER);
-        check_archive_is_not_configured(&config).expect("no directory is configured");
+        assert_eq!(
+            crate::startup::Arrangement::selected_by(
+                &config,
+                Some(std::path::Path::new("inline.toml"))
+            )
+            .expect("no directory is configured and the file is given"),
+            crate::startup::Arrangement::Inline
+        );
         crate::startup::Plan::for_inline(&config)
             .expect("the identity is stated and the feed wires");
     }
 
     /// The other half of that: a configuration valid for archive mode is still
-    /// valid for archive mode, and this module cannot have changed it.
+    /// valid for archive mode, and selects it with no flag at all.
     #[test]
-    fn a_configuration_valid_for_archive_mode_is_still_valid() {
+    fn a_configuration_valid_for_archive_mode_is_still_valid_and_selects_it() {
         let config = crate::startup::tests::valid_config();
         crate::startup::Plan::from_config(&config).expect("archive mode is unchanged");
-        // And the same file is refused for inline mode, by the key that says
-        // why: it names directories nothing would ever write to.
-        let message = check_archive_is_not_configured(&config)
-            .expect_err("an archive configuration is not an inline one")
-            .to_string();
-        assert!(message.contains("archive.staging_dir"), "{message}");
+        assert_eq!(
+            crate::startup::Arrangement::selected_by(&config, None)
+                .expect("the two directories state archive mode"),
+            crate::startup::Arrangement::Archive,
+            "an archive host selects its arrangement by saying what it already said"
+        );
     }
 
     /// The identity is refused by the plan, in the wording archive mode uses.
@@ -1164,26 +1124,30 @@ mod tests {
     ///
     /// The mode is behind a build feature so that a `--no-default-features`
     /// recorder gains no HTTP client, no column-store crate and no row crates.
-    /// Inline mode is what a command line naming no mode is read as, so this
-    /// build refuses that command line naming the feature — and names
-    /// `--archive`, which is the arrangement it can run.
+    /// What reaches this build is a configuration that *selects* inline mode —
+    /// `--inline-config` given — so the refusal names the feature and points at
+    /// the two directories that select the arrangement this binary can run.
+    ///
+    /// It is never reached by silence: a configuration stating no arrangement is
+    /// refused earlier by `NoArrangementStated`, in this build as in every
+    /// other. So the operator reading this asked for inline mode on purpose.
     #[test]
-    fn a_build_without_inline_mode_refuses_the_default_mode_and_names_both_ways_out() {
+    fn a_build_without_inline_mode_refuses_a_configuration_selecting_it() {
         let config =
             RecorderConfig::parse(crate::startup::tests::VALID).expect("the fixture parses");
-        // No second file, which is the shape of the command line this build
-        // actually meets: nobody asked for anything, and inline mode is what
-        // that is read as.
-        let message = run(&config, None, true, None)
-            .expect_err("a build without the feature refuses the default mode")
+        // With the file, which is what selects inline mode and therefore the
+        // only way this refusal is reached.
+        let message = run(&config, Some(Path::new("inline.toml")), true, None)
+            .expect_err("a build without the feature refuses inline mode")
             .to_string();
         assert!(message.contains("--features inline"), "{message}");
-        assert!(message.contains("--archive"), "{message}");
+        assert!(message.contains("staging_dir"), "{message}");
         assert!(message.contains("nobody chose"), "{message}");
 
-        // And with a file, because a build that cannot run the mode cannot run
-        // it with a configuration either.
-        let message = run(&config, Some(Path::new("inline.toml")), true, None)
+        // And the same without one, because this form of `run` cannot tell the
+        // two apart and must not start either way: a build that cannot run the
+        // mode cannot run it with a file or without.
+        let message = run(&config, None, true, None)
             .expect_err("a build without the feature refuses inline mode")
             .to_string();
         assert!(message.contains("--features inline"), "{message}");

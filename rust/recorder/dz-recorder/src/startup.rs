@@ -167,6 +167,53 @@ pub enum StartupError {
         per_feed: u64,
         rotate_bytes: u64,
     },
+
+    /// The configuration states an archive and the command line states inline
+    /// mode.
+    ///
+    /// Both statements are on the screen, deliberately. An operator who reaches
+    /// this has written one of them and inherited the other, and which is which
+    /// is not something this process can know — so it names both rather than
+    /// choosing one to call the mistake.
+    ///
+    /// Refused and never resolved. Reading it as inline mode leaves a host
+    /// somebody believes is keeping bytes for a year that it never kept for a
+    /// second; reading it as archive mode leaves a host that was asked for rows
+    /// keeping bytes instead. There is no third reading, and a recorder that
+    /// picked one would be picking which of an operator's two statements to
+    /// ignore.
+    #[error(
+        "`archive.{key}` = `{path}` states an archive, and `--inline-config {inline_config}` \
+         states inline mode. One process runs one arrangement: archive mode writes every \
+         datagram to an object and derives no row, inline mode derives rows and keeps no \
+         datagram. Remove the `[archive]` directories to derive rows, or drop `--inline-config` \
+         to record the archive this configuration describes."
+    )]
+    BothArrangementsStated {
+        key: &'static str,
+        path: String,
+        inline_config: String,
+    },
+
+    /// Nothing states an arrangement.
+    ///
+    /// This is what silence means, and it is the row that makes the other three
+    /// a reading rather than a guess: with no default, a configuration that says
+    /// nothing about the arrangement says nothing at all, and is refused before
+    /// a socket is bound.
+    ///
+    /// Named for the shape of the failure and not for either mode, because an
+    /// operator who reaches it has not chosen one. Five keys could have settled
+    /// it and none of them is defaulted, which is the whole reason there is
+    /// nothing here to invent.
+    #[error(
+        "nothing states an arrangement. Archive mode is selected by `archive.staging_dir` and \
+         `archive.completed_dir`, inline mode by `--inline-config`, and neither is given. Not one \
+         of the five keys that would settle it has a defensible value to invent: a recorder that \
+         guessed would keep bytes on a disk nobody sized or load rows into a database nobody \
+         chose. State the two directories to record an archive, or the file to derive rows."
+    )]
+    NoArrangementStated,
 }
 
 /// What `feed.interface` states, before a mode has said what it can use.
@@ -245,22 +292,87 @@ pub fn compression(compression: Compression) -> Result<ArchiveCompression, Start
 pub enum Arrangement {
     /// Objects are written and a loader derives rows from them.
     ///
-    /// Asked for by `--archive`. A configuration describing an archive whose
-    /// command line names no mode is refused by key rather than read as this,
-    /// which is what stops the default losing a host's bytes quietly.
+    /// Selected by `archive.staging_dir` and `archive.completed_dir` carrying a
+    /// value, which is what this arrangement has required since it existed — so
+    /// a host that recorded an archive yesterday selects it by saying what it
+    /// already said.
     Archive,
     /// Rows are derived from the live capture and no datagram is kept.
     ///
-    /// **The default**: what a command line naming no mode is read as.
+    /// Selected by `--inline-config`, which names the file carrying the spool
+    /// directory, the ledger and the destination this arrangement cannot run
+    /// without.
     ///
-    /// Reachable only in a build with the feature — which is in the default
-    /// feature set, because a binary that could not run its own default mode
-    /// would refuse every command line that named none. A
-    /// `--no-default-features` build has no inline mode to be in, and a variant
-    /// it can never construct is a variant its dead-code analysis is right to
-    /// flag.
-    #[cfg(feature = "inline")]
+    /// **Constructible in every build, feature or not.** It used to be behind
+    /// the feature, on the argument that a variant a build can never construct
+    /// is one its dead-code analysis is right to flag. That is no longer true:
+    /// a build without inline mode constructs this variant in order to *refuse*
+    /// it, which is the one thing such a build must do rather than fall back to
+    /// the arrangement nobody chose.
     Inline,
+}
+
+impl Arrangement {
+    /// Which arrangement a configuration and a command line state, or the
+    /// refusal that neither or both were stated.
+    ///
+    /// **The four cases live here and nowhere else**, and the two predicates
+    /// they are drawn from are the two the refusals name: an archive directory
+    /// carrying a value, and a second file given. Each arrangement requires what
+    /// the other has no use for and no member of either key set is defaulted, so
+    /// the four are total — which is asserted in its own test, because four
+    /// cases enumerated by hand are four cases somebody can add a fifth to.
+    ///
+    /// Either directory is enough to state an archive, not both. A
+    /// half-stated archive is a *statement* about the arrangement and an
+    /// incomplete one about the archive, so it selects archive mode and is then
+    /// refused by [`StartupError::DirectoryNotStated`], naming the key that is
+    /// missing. Reading it as inline mode instead would answer an operator who
+    /// wrote `staging_dir` with a complaint about a spool directory they have
+    /// never heard of.
+    ///
+    /// Compiled in every build. A build without inline mode is precisely the
+    /// build that has to refuse a configuration selecting it, and a refusal
+    /// that exists only in the builds which do not need it is no refusal at
+    /// all.
+    ///
+    /// # Errors
+    ///
+    /// [`StartupError::BothArrangementsStated`] or
+    /// [`StartupError::NoArrangementStated`], each naming both statements rather
+    /// than choosing one of them to call the mistake.
+    pub fn selected_by(
+        config: &RecorderConfig,
+        inline_config: Option<&Path>,
+    ) -> Result<Self, StartupError> {
+        let stated = archive_directory_stated(config);
+        match (stated, inline_config) {
+            (Some(_), None) => Ok(Self::Archive),
+            (None, Some(_)) => Ok(Self::Inline),
+            (Some((key, path)), Some(file)) => Err(StartupError::BothArrangementsStated {
+                key,
+                path: path.display().to_string(),
+                inline_config: file.display().to_string(),
+            }),
+            (None, None) => Err(StartupError::NoArrangementStated),
+        }
+    }
+}
+
+/// The first archive directory carrying a value, and the key it was written
+/// under.
+///
+/// The key travels with the path because the refusals name it: an operator who
+/// stated `completed_dir` and not `staging_dir` is told about the one they
+/// wrote, and a message naming the other would read as a complaint about a key
+/// they never touched.
+fn archive_directory_stated(config: &RecorderConfig) -> Option<(&'static str, &Path)> {
+    [
+        ("staging_dir", config.archive.staging_dir.as_path()),
+        ("completed_dir", config.archive.completed_dir.as_path()),
+    ]
+    .into_iter()
+    .find(|(_, dir)| !dir.as_os_str().is_empty())
 }
 
 /// One feed, wired.
@@ -378,7 +490,10 @@ impl FeedPlan {
             membership_interface,
             device,
             archive: match arrangement {
-                #[cfg(feature = "inline")]
+                // Reachable only through `Plan::for_inline`, which the feature
+                // gates — but the variant exists in every build now, because a
+                // build without the feature constructs it to refuse it, so this
+                // branch is written in every build too.
                 Arrangement::Inline => None,
                 Arrangement::Archive => Some(ArchiveWriterConfig {
                     staging_dir,
@@ -426,10 +541,11 @@ impl Plan {
     /// Archive mode: the directories are required, the staging budget is
     /// divided, and every feed is wired with a writer configuration.
     ///
-    /// Reached only when `--archive` was asked for. The two directories this
-    /// requires are the two [`for_inline`](Self::for_inline) refuses a value
-    /// for, which is why a configuration cannot be valid for both arrangements
-    /// and why neither can be entered by accident.
+    /// Reached when [`Arrangement::selected_by`] answered
+    /// [`Arrangement::Archive`], which is to say when this configuration states
+    /// one of the two directories. Stating one and not the other reaches here
+    /// too, and is refused by key: the arrangement was stated and the archive
+    /// was not finished.
     pub fn from_config(config: &RecorderConfig) -> Result<Self, StartupError> {
         check_identity(config)?;
         let feeds = check_feeds_are_named(config)?;
@@ -554,14 +670,7 @@ impl Plan {
     /// if one is ever added — has one place to answer it.
     #[must_use]
     pub fn writes_an_archive(&self) -> bool {
-        #[cfg(feature = "inline")]
-        {
-            self.arrangement == Arrangement::Archive
-        }
-        #[cfg(not(feature = "inline"))]
-        {
-            true
-        }
+        self.arrangement == Arrangement::Archive
     }
 
     /// What `--check` prints: enough for a deployment pipeline to see what this
@@ -858,6 +967,117 @@ listen_addr = "127.0.0.1:0"
 
     pub fn valid_config() -> RecorderConfig {
         RecorderConfig::parse(VALID).expect("the fixture parses")
+    }
+
+    /// `VALID` with the two archive directories emptied: the shape inline mode
+    /// runs on, and the shape that states no archive.
+    fn config_stating_no_archive() -> RecorderConfig {
+        let text = VALID
+            .replace(
+                r#"staging_dir     = "/var/lib/dz-recorder/staging""#,
+                r#"staging_dir     = """#,
+            )
+            .replace(
+                r#"completed_dir   = "/var/lib/dz-recorder/completed""#,
+                r#"completed_dir   = """#,
+            );
+        RecorderConfig::parse(&text).expect("the fixture parses")
+    }
+
+    /// Every combination of the two predicates the selection reads, and the
+    /// outcome each one is required to reach.
+    ///
+    /// **This is the test the other four cannot be.** Four cases asserted one
+    /// at a time are four cases somebody can add a fifth to — a third
+    /// arrangement, a defaulted `staging_dir` — and all four would still pass
+    /// over a rule that had stopped being total. So the enumeration itself is
+    /// the assertion: both predicates, all four combinations, each required to
+    /// reach a named outcome, and nothing left over.
+    ///
+    /// The two that refuse are what make the two that run a reading rather than
+    /// a guess, so they are asserted at the same altitude and in the same test
+    /// rather than filed as error-path coverage.
+    #[test]
+    fn the_four_configuration_shapes_are_total_and_two_of_them_run() {
+        let archive_stated = valid_config();
+        let no_archive = config_stating_no_archive();
+        let file = std::path::Path::new("inline.toml");
+
+        // An archive stated and no file: archive mode, which is what every
+        // host recording an archive today already states.
+        assert_eq!(
+            Arrangement::selected_by(&archive_stated, None).expect("an archive is stated"),
+            Arrangement::Archive
+        );
+
+        // A file and no archive: inline mode.
+        assert_eq!(
+            Arrangement::selected_by(&no_archive, Some(file)).expect("the file is stated"),
+            Arrangement::Inline
+        );
+
+        // Both: refused, with both statements in the message. Never resolved —
+        // resolving it is starting a recorder in an arrangement its own
+        // configuration contradicts.
+        let message = Arrangement::selected_by(&archive_stated, Some(file))
+            .expect_err("both arrangements were stated")
+            .to_string();
+        assert!(message.contains("archive.staging_dir"), "{message}");
+        assert!(message.contains("inline.toml"), "{message}");
+
+        // Neither: refused, naming both ways of stating one. This is the row
+        // that leaves no silence for a default to be placed on.
+        let message = Arrangement::selected_by(&no_archive, None)
+            .expect_err("nothing states an arrangement")
+            .to_string();
+        assert!(message.contains("archive.staging_dir"), "{message}");
+        assert!(message.contains("archive.completed_dir"), "{message}");
+        assert!(message.contains("--inline-config"), "{message}");
+    }
+
+    /// Either directory states an archive, and a half-stated one is then
+    /// refused by key rather than read as the other arrangement.
+    ///
+    /// The order matters and is asserted: an operator who wrote `completed_dir`
+    /// alone is answered about `completed_dir`. Told about `staging_dir`
+    /// instead, they would be reading a complaint about a key they never
+    /// touched; told about a spool directory, they would be reading about a
+    /// mode they never asked for.
+    #[test]
+    fn a_half_stated_archive_states_the_arrangement_and_is_refused_by_key() {
+        for (key, removed) in [
+            (
+                "staging_dir",
+                r#"staging_dir     = "/var/lib/dz-recorder/staging""#,
+            ),
+            (
+                "completed_dir",
+                r#"completed_dir   = "/var/lib/dz-recorder/completed""#,
+            ),
+        ] {
+            let text = VALID.replace(removed, "");
+            let config = RecorderConfig::parse(&text).expect("the fixture parses");
+            assert_eq!(
+                Arrangement::selected_by(&config, None)
+                    .expect("one directory is enough to state an archive"),
+                Arrangement::Archive,
+                "a half-stated archive is a statement about the arrangement"
+            );
+            let message = Plan::from_config(&config)
+                .expect_err("and an incomplete statement about the archive")
+                .to_string();
+            assert!(message.contains(key), "{message}");
+        }
+
+        // And the message an operator sees names the key they wrote, not the
+        // other one.
+        let text = VALID.replace(
+            r#"staging_dir     = "/var/lib/dz-recorder/staging""#,
+            r#"staging_dir     = """#,
+        );
+        let config = RecorderConfig::parse(&text).expect("the fixture parses");
+        let (key, _) = archive_directory_stated(&config).expect("completed_dir carries a value");
+        assert_eq!(key, "completed_dir");
     }
 
     #[cfg(feature = "inline")]
