@@ -12,6 +12,7 @@ mod harness;
 use std::time::Duration;
 
 use dz_edge_core::PortRole;
+use dz_publisher_runtime::config::ShardName;
 use dz_publisher_runtime::{Document, FeedSpec, StartupError, TeeConfig};
 use harness::{Doc, CHANNEL_ID, DEPTH_CHANNEL_ID, GROUP, MKTDATA_PORT, REFDATA_PORT, SOURCE_ID};
 
@@ -1069,12 +1070,16 @@ fn a_tee_socket_is_named_by_the_feed_as_well_as_the_port_role() {
     };
 
     let named = |spec: FeedSpec, role: PortRole| {
-        tee.destination(spec, role)
+        tee.destination(spec, &ShardName::default_shard(), role)
             .expect("the path is stated")
             .display()
             .to_string()
     };
 
+    // The five sockets a publisher emitting both feeds of the default shard
+    // opens, in full. Stated as literals rather than composed, because the
+    // whole point of the name is that a recorder's configuration spells it the
+    // same way by hand.
     assert_eq!(
         named(FeedSpec::TopOfBook, PortRole::Mktdata),
         "/run/a-publisher/tee.top-of-book.mktdata"
@@ -1086,6 +1091,10 @@ fn a_tee_socket_is_named_by_the_feed_as_well_as_the_port_role() {
     assert_eq!(
         named(FeedSpec::MarketByPrice, PortRole::Mktdata),
         "/run/a-publisher/tee.market-by-price.mktdata"
+    );
+    assert_eq!(
+        named(FeedSpec::MarketByPrice, PortRole::Refdata),
+        "/run/a-publisher/tee.market-by-price.refdata"
     );
     assert_eq!(
         named(FeedSpec::MarketByPrice, PortRole::Snapshot),
@@ -1113,6 +1122,86 @@ fn a_tee_socket_is_named_by_the_feed_as_well_as_the_port_role() {
     );
 }
 
+/// And by the shard, because two channel instances of one specification are
+/// ordinary now.
+///
+/// The same argument one noun further along: a Unix datagram carries neither a
+/// destination port nor a group, so two shards' copies of one feed's one role
+/// arriving on one socket are datagrams a recorder cannot attribute without
+/// decoding them. Before this, four channel instances fanned out to five
+/// sockets.
+#[test]
+fn a_tee_socket_is_named_by_the_shard_as_well_as_the_feed_and_the_role() {
+    let tee = TeeConfig {
+        enabled: true,
+        path: Some(std::path::PathBuf::from("/run/a-publisher/tee")),
+    };
+    let named = |spec: FeedSpec, shard: &ShardName, role: PortRole| {
+        tee.destination(spec, shard, role)
+            .expect("the path is stated")
+            .display()
+            .to_string()
+    };
+    let alpha = ShardName::new("alpha").expect("one path component");
+    let beta = ShardName::new("beta").expect("one path component");
+
+    assert_eq!(
+        named(FeedSpec::TopOfBook, &alpha, PortRole::Mktdata),
+        "/run/a-publisher/tee.top-of-book.alpha.mktdata"
+    );
+    assert_eq!(
+        named(FeedSpec::MarketByPrice, &beta, PortRole::Snapshot),
+        "/run/a-publisher/tee.market-by-price.beta.snapshot"
+    );
+
+    // **The default shard is spelled by its absence**, as its era file is. A
+    // shard segment for it renames the socket every existing deployment's
+    // recorder is bound to, and the fan-out then writes to a path with nobody
+    // on it - which is the upgrade meant to be safe taking the copy stream down.
+    assert_eq!(
+        named(
+            FeedSpec::TopOfBook,
+            &ShardName::default_shard(),
+            PortRole::Mktdata
+        ),
+        "/run/a-publisher/tee.top-of-book.mktdata"
+    );
+
+    // Every socket two shards of both feeds open, distinct: two shards, two
+    // specifications, three port roles between them. A name missing the shard
+    // collapses these in half, which is the pair of channel instances writing
+    // to one socket.
+    let shards = [alpha, beta, ShardName::default_shard()];
+    let mut sockets: Vec<String> = shards
+        .iter()
+        .flat_map(|shard| {
+            FeedSpec::ALL.into_iter().flat_map(move |spec| {
+                spec.port_roles()
+                    .iter()
+                    .map(move |role| named(spec, shard, *role))
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    let opened = sockets.len();
+    assert_eq!(opened, 15, "three shards of both feeds open five sockets each");
+    sockets.sort();
+    sockets.dedup();
+    assert_eq!(
+        sockets.len(),
+        opened,
+        "two channel instances share a socket: {sockets:?}"
+    );
+
+    // The suffix lands on the last component rather than becoming a child
+    // directory, which is what the `OsString` construction exists for and what
+    // a `join` or a `set_extension` would each get wrong in its own way.
+    assert_eq!(
+        named(FeedSpec::TopOfBook, &shards[0], PortRole::Refdata),
+        "/run/a-publisher/tee.top-of-book.alpha.refdata"
+    );
+}
+
 #[test]
 fn a_tee_that_is_on_with_no_path_names_no_socket() {
     // The same refusal the load already produced, checked again where the
@@ -1124,7 +1213,11 @@ fn a_tee_that_is_on_with_no_path_names_no_socket() {
         path: None,
     };
     let error = tee
-        .destination(FeedSpec::TopOfBook, PortRole::Mktdata)
+        .destination(
+            FeedSpec::TopOfBook,
+            &ShardName::default_shard(),
+            PortRole::Mktdata,
+        )
         .expect_err("no path was stated");
     assert!(matches!(error, StartupError::TeeWithoutPath), "{error}");
 }

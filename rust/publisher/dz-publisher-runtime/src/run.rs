@@ -638,7 +638,7 @@ fn open_ports(
         // own configuration, which keys its ports per feed. See
         // `TeeConfig::destination`.
         if config.adapter.tee.enabled {
-            let destination = config.adapter.tee.destination(feed.spec, port_role)?;
+            let destination = config.adapter.tee.destination(feed.spec, &feed.shard, port_role)?;
             eprintln!(
                 "fanning out {} {} datagrams to {}",
                 feed.spec.as_str(),

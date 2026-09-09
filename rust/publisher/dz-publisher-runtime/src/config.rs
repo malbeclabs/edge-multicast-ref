@@ -540,23 +540,36 @@ pub struct AdapterConfig {
 /// what reaches subscribers, which is the section an operator reads as *this can
 /// take the feed down*.
 ///
-/// # One socket per feed *and* port role, and no framing at all
+/// # One socket per feed, *shard* and port role, and no framing at all
 ///
-/// `path` is a **prefix**: the feed's own `spec` token and the role's are
-/// appended, so a `path` of `/run/a-publisher/tee` on a publisher emitting both
-/// feeds is written to as `tee.top-of-book.mktdata`, `tee.top-of-book.refdata`,
+/// `path` is a **prefix**: the feed's own `spec` token, the shard's name where
+/// it is not the default, and the role's are appended, so a `path` of
+/// `/run/a-publisher/tee` on a publisher emitting both feeds of the default
+/// shard is written to as `tee.top-of-book.mktdata`, `tee.top-of-book.refdata`,
 /// `tee.market-by-price.mktdata`, `tee.market-by-price.refdata` and
-/// `tee.market-by-price.snapshot`.
+/// `tee.market-by-price.snapshot`, and the same publisher carrying a shard the
+/// document named `alpha` writes that shard's copies to
+/// `tee.top-of-book.alpha.mktdata` and the rest of the five alongside.
 ///
-/// Both halves of that name are load-bearing, for one reason: **a Unix datagram
-/// carries neither a destination port nor a group**, and the diff this stream
-/// exists for is keyed on both. A recorder handed two roles on one socket, or
-/// two feeds' copies of one role on one socket, cannot attribute a datagram
-/// without decoding it — and decoding is the one thing a record path does not
-/// do. `[[feed]]` is an array, so a publisher emitting two feeds is the ordinary
-/// case rather than the exception; a name keyed on the role alone is right only
-/// for the publisher that happens to emit one feed. The shape mirrors the
-/// recorder's own configuration, which keys its ports per feed.
+/// All three parts of that name are load-bearing, for one reason: **a Unix
+/// datagram carries neither a destination port nor a group**, and the diff this
+/// stream exists for is keyed on both. A recorder handed two roles on one
+/// socket, two feeds' copies of one role on one socket, or **two shards' copies
+/// of one feed's role on one socket**, cannot attribute a datagram without
+/// decoding it — and decoding is the one thing a record path does not do.
+/// `[[feed]]` is an array, so a publisher emitting two feeds is the ordinary
+/// case rather than the exception, and two channel instances of one
+/// specification are the ordinary case now too; a name keyed on the role alone
+/// is right only for the publisher that happens to emit one feed, and one keyed
+/// on the feed and the role alone only for the one that carries a single shard.
+/// The shape mirrors the recorder's own configuration, which keys its ports per
+/// feed.
+///
+/// The default shard is spelled by its **absence**, as its era file is. A shard
+/// segment for it would rename the socket every existing deployment's recorder
+/// is bound to, and the fan-out would then write to a path with nobody on it —
+/// which is a copy stream that reports every datagram dropped, or worse, an
+/// operator who believes copies are still being archived.
 ///
 /// The socket is `SOCK_DGRAM`, so one datagram in is one datagram out and there
 /// is no framing to invent, agree on or get wrong. See
@@ -575,12 +588,19 @@ pub struct TeeConfig {
 }
 
 impl TeeConfig {
-    /// The socket one feed's one port role is copied to.
+    /// The socket one channel instance's one port role is copied to.
     ///
-    /// `<path>.<feed spec>.<port role>`, in the tokens the document itself
-    /// states — the `spec` an operator wrote in the `[[feed]]` block and the
-    /// role's own name — so the file, the socket and the recorder's
-    /// configuration all spell the same two things the same way.
+    /// `<path>.<feed spec>.<shard>.<port role>`, and
+    /// `<path>.<feed spec>.<port role>` for the default shard, in the tokens the
+    /// document itself states — the `spec` and the `shard` an operator wrote in
+    /// the `[[feed]]` block and the role's own name — so the file, the socket
+    /// and the recorder's configuration all spell the same things the same way.
+    ///
+    /// The default shard's absence from the name is [`ShardName::era_shard`]'s
+    /// reasoning applied to a socket, and it is here rather than at the call
+    /// site for the same reason: what a caller would naturally write is
+    /// `shard.as_str()`, which moves every existing deployment's copy stream to
+    /// a path its recorder is not bound to.
     ///
     /// # Errors
     ///
@@ -591,6 +611,7 @@ impl TeeConfig {
     pub fn destination(
         &self,
         spec: FeedSpec,
+        shard: &ShardName,
         port_role: PortRole,
     ) -> Result<PathBuf, StartupError> {
         let prefix = self.path.as_deref().ok_or(StartupError::TeeWithoutPath)?;
@@ -600,6 +621,10 @@ impl TeeConfig {
         let mut destination = prefix.as_os_str().to_owned();
         destination.push(".");
         destination.push(spec.as_str());
+        if !shard.is_default() {
+            destination.push(".");
+            destination.push(shard.as_str());
+        }
         destination.push(".");
         destination.push(port_role.as_str());
         Ok(PathBuf::from(destination))
