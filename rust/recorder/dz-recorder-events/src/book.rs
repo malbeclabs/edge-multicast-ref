@@ -83,6 +83,9 @@ impl Side {
         }
     }
 
+    /// Private, and it stays that way: `book_key` is what anything outside this
+    /// crate needs, so nothing has a reason to carry its own copy of what
+    /// absent means.
     const fn is_absent(&self) -> bool {
         self.price_raw.is_none() && self.qty_raw.is_none()
     }
@@ -561,8 +564,17 @@ fn changed(was: (Top, Option<Certainty>), book: &InstrumentBook) -> Option<Chang
     })
 }
 
-/// The equivalence key: a hash over the instrument and both sides, and nothing
-/// else.
+const KEY_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const KEY_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// **Is this the same book?**
+///
+/// A hash over the two sides and nothing else, so it is computable by anyone
+/// holding a top of book — including an observer that never saw a datagram and
+/// so can name neither the operator's channel nor a publisher-minted
+/// `Instrument ID`. That is what makes it the key two observers of one market
+/// pair on, carrying the symbol beside it because the symbol is the only
+/// instrument identity both sides hold.
 ///
 /// **FNV-1a rather than the standard library's hasher.** `DefaultHasher` is
 /// explicitly not stable across releases, and this value is compared between two
@@ -572,37 +584,57 @@ fn changed(was: (Top, Option<Certainty>), book: &InstrumentBook) -> Option<Chang
 ///
 /// An absent side is a distinguished tag rather than zeros: an empty side and a
 /// side priced at zero are different books, and the top-of-book convention of
-/// stating *unavailable* with a zero is exactly what would collapse them.
+/// stating *unavailable* with a zero is exactly what would collapse them. That
+/// tag is why the key is computed here and not copied out: `Side::is_absent`
+/// stays private, and a copy of it that drifted would be a race that stopped
+/// pairing with no symptom.
+#[must_use]
+pub fn book_key(top: &Top) -> u64 {
+    fold_top(KEY_OFFSET, top)
+}
+
+/// **Is this the same state of this channel's instrument?**
+///
+/// The channel and the instrument folded into [`book_key`]'s subject: the same
+/// two sides hashed the same way, over an accumulator that has already eaten
+/// both identifiers. Hashing the same bytes in the same order means the value is
+/// the one this function has always returned, which every row already written
+/// and every pairing already computed depends on.
+///
+/// This is what two recorders of one multicast feed pair on, because both read
+/// the same identifiers off the same datagrams. It is transport-independent and
+/// **observer-dependent**, so a join across two observers uses [`book_key`]
+/// instead.
 #[must_use]
 pub fn state_key(channel_id: u8, instrument_id: u32, top: &Top) -> u64 {
-    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
-    let mut hash = OFFSET;
-    let mut eat = |bytes: &[u8]| {
-        for byte in bytes {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(PRIME);
-        }
-    };
-    eat(&[channel_id]);
-    eat(&instrument_id.to_be_bytes());
+    let subject = eat(eat(KEY_OFFSET, &[channel_id]), &instrument_id.to_be_bytes());
+    fold_top(subject, top)
+}
+
+/// Both sides into an accumulator, whatever has already been eaten into it.
+fn fold_top(mut hash: u64, top: &Top) -> u64 {
     for side in [&top.bid, &top.ask] {
         if side.is_absent() {
-            eat(&[0]);
+            hash = eat(hash, &[0]);
             continue;
         }
-        eat(&[1]);
-        eat(&side.price_raw.unwrap_or(0).to_be_bytes());
-        eat(&side.qty_raw.unwrap_or(0).to_be_bytes());
+        hash = eat(hash, &[1]);
+        hash = eat(hash, &side.price_raw.unwrap_or(0).to_be_bytes());
+        hash = eat(hash, &side.qty_raw.unwrap_or(0).to_be_bytes());
         // Absent and zero are distinguished here too: a feed that carries no
         // count and one that counts none are not the same reading.
-        match side.source_count {
-            None => eat(&[0]),
-            Some(count) => {
-                eat(&[1]);
-                eat(&count.to_be_bytes());
-            }
-        }
+        hash = match side.source_count {
+            None => eat(hash, &[0]),
+            Some(count) => eat(eat(hash, &[1]), &count.to_be_bytes()),
+        };
+    }
+    hash
+}
+
+fn eat(mut hash: u64, bytes: &[u8]) -> u64 {
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(KEY_PRIME);
     }
     hash
 }
