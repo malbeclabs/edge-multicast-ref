@@ -394,12 +394,61 @@ written as though it had been.**
 | Manifest field | In inline mode |
 |---|---|
 | `site`, `recorder`, `env`, `feed`, `build_version`, `build_commit`, `config_hash` | Observed. The recorder's own identity, exactly as archive mode writes it. |
-| `segment_seq`, `start_ns`, `end_ns`, `datagram_count`, `payload_byte_count`, `instances`, `short_datagrams`, `instances_dropped`, `capture_drop_total`, `capture_drop_scope`, `interface_drop_total`, `roles_joined`, `link_headers`, `link_header_exceptions` | Observed. The window counts what the writer would have counted, from the same datagrams. |
+| `segment_seq`, `start_ns`, `end_ns`, `datagram_count`, `payload_byte_count`, `instances`, `short_datagrams`, `instances_dropped`, `capture_drop_scope`, `roles_joined`, `link_headers`, `link_header_exceptions` | Observed. The window counts what the writer would have counted, from the same datagrams. |
+| `capture_drop_total` | Observed, and by the archive writer's own arithmetic: the sum of every `drop_delta` the window walked, whatever port role carried it. The same field, over the same unit, so the two modes' coverage rows are subtractable against each other. |
+| `interface_drop_total` | **Zero, and the same zero archive mode writes.** Loss upstream of the capture point is read per capture handle, and the manifest's own accounting for it is per port role, so the record path routes it to the health tier and never into a segment. Inline mode writing a number where archive mode writes none would make one mode's coverage row incomparable with the other's, over a quantity neither mode's manifest can attribute. |
 | `object_key` | The window's key. It carries the window's start in wall-clock nanoseconds, so it is unique and orders windows across runs — but it names no object anyone can fetch. |
 | `sha256`, `byte_count` | **Empty and zero.** No datagrams were kept, so nothing was hashed. An invented digest is worse than an absent one: it is a claim that something was verified. |
 
 The rows' `derivation` column is what a reader is meant to consult, so that an
 empty digest is corroboration rather than the only signal.
+
+### The window is walked twice, and the second walk is not an optimisation
+
+`derive` stamps the manifest's key, its window sequence and its start and end
+onto every row as it reads, so the manifest has to exist before the first
+datagram is taken. A window's manifest describes what the window saw, and a
+window has seen nothing until it has been walked. Those two facts do not fit in
+one pass — and an object never had to make them fit: the writer counted as it
+wrote the object, and the loader walks the finished file again to derive.
+
+A window is the object's replacement, so the window is what has to be readable
+twice. The derivation stage therefore **drains the window into memory, builds
+the manifest from the completed tally, and derives from the buffer.** The buffer
+is reused window after window, slot by slot, each keeping the payload capacity
+it was allocated with — the ring's own pooling discipline, for the ring's own
+reason.
+
+What a single pass costs is not a slower derivation. It is a manifest built from
+an empty tally, which writes:
+
+| Field | What a manifest built before the walk carries |
+|---|---|
+| `start_ns`, `end_ns` | `0`, so every `segment_coverage` row is stamped at the Unix epoch |
+| `instances` | empty, so the window writes **no** `segment_coverage` row at all |
+| `object_key` | `live/…/0-<window_seq>` — one key for window *k* of every run this recorder ever makes |
+
+The third is data loss rather than a wrong number.
+`recorder.segment_coverage` is a `ReplacingMergeTree` whose sort key ends in
+`start_ts`, and `window_seq` restarts at zero on every run, so with the stamp at
+zero the second run's window *k* carries the first run's sort key and replaces
+it. The window key carries a wall-clock start precisely so that cannot happen,
+and a manifest built before the walk is how the guard is lost.
+
+### An empty window spends no window sequence number
+
+A hole in `segment_seq` is how a reader learns the derivation had one, and it is
+the whole of what distinguishes a recorder that was down from a feed that was
+quiet. A quiet feed closes windows on age, and that is ordinary — so a window
+that saw nothing leaves the sequence where it found it. Spending a number on it
+would put the hole that means *the derivation was down* in front of a reader
+whose feed was merely silent, once per window bound, for as long as the silence
+lasted.
+
+It is also what keeps the era anchor certain across the silence. The
+predecessor test is `segment_seq + 1`, so an empty window that spent a number
+would leave the next window's trailer two behind it, and every window following
+a quiet stretch would write an uncertain anchor.
 
 ### The era anchor gets better, not worse
 
@@ -410,6 +459,14 @@ windows are strictly sequential, are never evicted before derivation, and carry
 their trailer into the ledger — so the anchor is certain from the second window
 onward, and stays certain across a restart. This is the one analytical result
 inline mode improves.
+
+One case gives it back, and gives it back deliberately. **A window the spool
+could not take does not hand its trailer to the next window.** Its rows are not
+in the store, so the next window's predecessor is *unknown* — which is what
+`None` means there, and never *there was none*. Carrying the trailer across
+would let a reader join the two eras as one continuous sequence space over a
+hole nothing in the rows can explain, which is the merge an uncertain anchor
+exists to prevent.
 
 ---
 
@@ -606,10 +663,41 @@ what a row says about where it came from; there is no fourth, because
 inline mode is the same analysis with a different provenance. If they are not,
 the difference is a bug and the failing grain says where.
 
+**And the gate has to derive the way the derivation stage derives.** The gate
+builds its own window rather than starting a pipeline, which is what lets it run
+with no spool and no destination — and it is therefore also free to build a
+window the pipeline never has. It must call the same two-pass derivation from
+the same place, or it is asserting an equivalence between archive mode and a
+shape nothing runs, and the shape that does run is unasserted. A gate whose own
+fixture supplies the correctness under test is the one failure this gate cannot
+report, because it looks exactly like a pass.
+
+**Two runs of one recorder are two windows, asserted at the row.** `window_seq`
+restarts at zero on every run, so the row that proves the manifest was built
+from a walked window is a `segment_coverage` row: it exists at all, it is
+stamped with the window's own first and last receive timestamps, and the window
+key under it differs between two runs whose datagrams differ. All three fail
+together against a manifest built before the walk, and the first of them is what
+a reader would never think to check — a table with no rows in it looks like a
+feed nobody joined.
+
+**An empty window leaves no hole.** A quiet stretch is derived as windows that
+saw nothing, and the sequence numbers either side of it are consecutive. The
+window after the silence carries a certain era anchor, which is the same
+assertion from the other end.
+
 **The debt test is the one whose mutant must die.** Force the ring to drop, and
 assert the next accepted datagram declares the loss — and, at the row altitude,
 that no sequence gap caused by the recorder is given a `publisher` verdict.
 Revert the charge and the test must fail.
+
+**And the ring distinguishes a deriver that is behind from one that is gone.** A
+full ring is a drop and a counter, and it is the ordinary case. A derivation
+that is not there is not: it is a run of drops with no end and no window ever
+derived, which reads on every counter exactly like a ring that is merely
+overrun. So the outcome that says so is a tested outcome and not a branch left
+for a reader to reason about, and the datagram is charged either way — a drop
+nobody can carry the admission for is still a drop.
 
 **The spool tests are about the failures, not the happy path.** A destination
 that is down leaves windows on disk; one that recovers lands them oldest first

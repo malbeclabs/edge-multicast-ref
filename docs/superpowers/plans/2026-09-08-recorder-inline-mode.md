@@ -51,6 +51,7 @@ behaviour. Two things outside inline mode's own code do change:
 | 8–9 | the recorder binary's inline mode | nothing; a server behind `clickhouse-tests` |
 | 10 | documentation | — |
 | 11 | the default: inline mode is the reading, archive mode is asked for | nothing |
+| 12 | what a review of the whole of the above found | nothing |
 
 Tasks 1 and 2 are independent of each other and of everything after them. Task 7
 is the gate the design rests on and is written against tasks 3–6 only, not
@@ -104,6 +105,8 @@ a task below that would otherwise be written wrong.
 | the ring pools its slots | `OwnedDatagram::from_recorded` allocates a `Vec` per datagram, and an allocation per datagram on the capture thread is a regression against a path that today costs a copy and a buffered write |
 | a fresh `LossDeriver` per window is correct | it looks like state that must span windows; archive mode already creates one per object and carries continuity in the trailer, so a window behaves identically |
 | the window's manifest digest is empty, not synthesised | a digest over rows would be a different claim wearing the field name of a claim about datagrams |
+| the window is walked twice | `derive` stamps the manifest onto rows as it reads, and the manifest describes what the window saw — so one pass hands it a tally of nothing. It does not fail: it writes rows stamped at the Unix epoch under one key per window sequence number, which is one key for every run the recorder makes. **This row was added by a review, after the tree got it wrong** |
+| an empty window spends no window sequence number | it looks like a counter of windows opened. It is the thing that tells a reader the derivation was down, so spending one on a window a quiet feed produced puts that claim in front of somebody whose feed was merely silent — and leaves the next window's era anchor uncertain into the bargain |
 | the spool is written on every window | a disk path used only during an outage is first exercised during an outage. It is also what bounds a crash to one window, and what brings the ledger back |
 | the spool never applies backpressure | blocking derivation stalls the ring, overflows the receive queue, and turns a column-store outage into feed loss plus false publisher findings in every window written during it |
 | the ledger entry is written when rows land, not when accepted | a sink that coalesces has taken rows it has not sent; an entry on acceptance marks a window loaded whose rows a crash then loses |
@@ -218,21 +221,34 @@ New crate `rust/recorder/dz-recorder-inline`, added to workspace `members`.
       and instances dropped through the archive writer's own `CoverageTracker`
       (`manifest.rs:112`), the declared drop scope, the roles joined, and
       whether link headers were captured or synthesised (`manifest.rs:40-55`).
-- [ ] **Outstanding: the capture's cumulative drop totals.**
-      `window_manifest` takes `capture_drop_total` and `interface_drop_total`
-      as parameters and its only caller passes zeros —
+- [x] **The capture's cumulative drop totals.** `window_manifest` took
+      `capture_drop_total` and `interface_drop_total` as parameters and its only
+      caller passed zeros —
       `pipeline.rs:345`, `window_manifest(&identity, window.tally(), *window_seq, 0, 0)`
-      — so every inline `segment_coverage` row reports a capture that dropped
-      nothing. The row-level loss attribution is unaffected, because that
-      travels on `drop_delta` through the ring's debt; what is wrong is the
-      cumulative counter a reader would use to ask *did this host keep up*. The
-      equivalence gate cannot catch it: the synthetic feed has no kernel drops,
-      so both paths report zero and agree.
+      — so every inline `segment_coverage` row reported a capture that dropped
+      nothing. Row-level loss attribution was unaffected, because that travels
+      on `drop_delta` through the ring's debt; what was wrong is the cumulative
+      counter a reader uses to ask *did this host keep up*. The equivalence gate
+      could not catch it: the synthetic feed has no kernel drops, so both paths
+      reported zero and agreed. **Settled in task 12** — both parameters are
+      gone, `capture_drop_total` is the window's own sum of the `drop_delta` it
+      walked, and `interface_drop_total` is a zero the manifest builder writes
+      with the reason on it.
 - [x] `manifest.rs`: the synthesised `SegmentManifest`. Observed fields from the
       window and the recorder's identity; `object_key` a window key carrying the
       window's start in wall-clock nanoseconds; `sha256` empty and `byte_count`
       zero, with the rustdoc stating that an invented digest is a claim that
       something was verified.
+- [x] **The manifest is built from a window that has been walked.** This bullet
+      is the one this task never wrote down, and the tree got it wrong for
+      exactly that reason. `pipeline.rs:344-361` built the manifest from
+      `window.tally()` immediately after `WindowSource::open`, which is
+      `WindowTally::default()` — so `derive` was handed `start_ns = 0`,
+      `end_ns = 0` and no `instances`, and that value *was* the manifest the
+      rows were stamped from rather than a discarded first pass. A local named
+      `probe` and a comment describing two passes are the whole of the two-pass
+      shape that was there. **Settled in task 12**, which is also where the
+      design gained the section saying why one pass cannot work.
 - [x] The trailer of window *n* is the `preceding` of window *n+1*, within a
       run: `pipeline.rs:302` holds it, `:351` reads it into the next `derive`,
       `:390` replaces it.
@@ -345,6 +361,18 @@ In `dz-recorder-e2e`, which already holds `archive_to_rows.rs`.
       test erases the three by clearing them rather than skipping them
       (`inline_vs_archive.rs:130`), so a provenance field added later is
       compared without anyone remembering to add it.
+- [x] **And it derives the way the derivation stage derives.** As first written
+      this gate built the inline side itself: it walked the window, built the
+      manifest from the completed tally, then fed a *second* ring to a second
+      window for `derive` (`inline_vs_archive.rs:89-112`). Its own comment gave
+      the requirement — *"the manifest describes what the window saw, and the
+      window has not seen anything until the derivation has walked it"* — and
+      the derivation stage did not meet it, so the gate was asserting an
+      equivalence between archive mode and a shape nothing ran. That is the one
+      failure this gate cannot report: a fixture supplying the correctness under
+      test looks exactly like a pass. **Settled in task 12**: the two passes
+      live in one place and the gate calls it, so the shape under test is the
+      shape that runs.
 - [x] The same over the fault cases `dz-recorder-replay`'s `faults` test
       injects: a sequence gap, backward motion, a reset, a new source IP
       address, a source IP address that disappears, a duplicate, a reordered pair,
@@ -606,6 +634,121 @@ still valid — with `--archive`.
 
 ---
 
+### 12. The review: the manifest, the sequence number, the trailer and the ring
+
+Four things a review of the whole branch found, and one of them writes rows a
+reader cannot detect are wrong. Each is a defect in something tasks 4, 6 and 7
+claimed, which is why they are answered here rather than by a new design: the
+design said what to build in every case, and this is the tree being made to say
+it too.
+
+**The manifest was built from a window nothing had walked.** The blocker. Its
+mechanism is task 4's new bullet and its consequence is the design's
+*[The window is walked twice](../specs/2026-09-08-recorder-inline-mode-design.md#the-window-is-walked-twice-and-the-second-walk-is-not-an-optimisation)*.
+The corruption is not a wrong number: with `start_ns` at zero, every window of
+every run carries the sort key `recorder.segment_coverage` orders by, so a
+second run of the recorder replaces the first run's coverage rather than
+standing beside it — and no coverage row was written at all, because
+`manifest.instances` came from the same empty tally.
+
+- [ ] `window.rs`: a held window. One walk drains the ring into a buffer and
+      completes the tally; the second reads the buffer back as a `Source`. The
+      buffer is owned by the derivation stage and reused window after window,
+      refilled slot by slot through the ring's own `refill`, so the second pass
+      costs a copy and not an allocation per datagram.
+- [ ] `pipeline.rs`: drain, then build the manifest, then derive from the
+      buffer. The local named `probe` goes with the shape it was named for.
+- [ ] `inline_vs_archive.rs`: the gate calls the same held window, so its inline
+      side is the derivation stage's own two passes rather than a second
+      arrangement of them.
+
+**The capture drop totals.** Decided rather than merely wired, because the two
+halves of it have different answers:
+
+- [ ] `capture_drop_total` is **wired**, and from the archive writer's own
+      arithmetic: `WindowTally` sums every `drop_delta` the window walked,
+      whatever port role carried it, which is what `SegmentWriter` sums into the
+      same field (`dz-recorder-archive/src/writer.rs:359`). The two modes'
+      coverage rows are then subtractable against each other, which is the whole
+      point of the column.
+- [ ] `interface_drop_total` **stays zero**, and the zero moves from a literal
+      at a call site into the manifest builder with the reason on it. It is not
+      a column nobody wired: **archive mode leaves it at zero too**, and
+      deliberately — `dz-recorder/src/runner.rs:459-467` reads the interface
+      total and hands it to the health tier, never to the writer, because the
+      manifest's accounting for it is per port role and afpacket mode declares
+      its drops at capture-handle scope, where there is no role to charge them
+      to. Inline mode writing a number there would be one mode claiming a
+      measurement the other declines to make, in a column a reader subtracts
+      across both.
+- [ ] `window_manifest` loses both parameters. A builder with no parameter to
+      pass a zero to is a builder no caller can get this wrong in again, which
+      is what made the defect survive review once already.
+
+**An empty window spent a window sequence number.** `window.rs`'s `is_empty`
+said *"An empty window spends no window sequence number"* and `pipeline.rs:397`
+incremented for every window. **The doc is right and the code changes**, for
+three reasons and the third is the one that decides it:
+
+- a hole in `segment_seq` is defined here and in `manifest.rs:79-81` as a hole
+  in the derivation, which is what tells a reader the recorder was down rather
+  than the feed quiet. A quiet feed closes windows on age and `window.rs:71`
+  already calls that ordinary, so the code was writing *the derivation was down*
+  once per window bound for as long as a feed stayed silent;
+- the alternative reading — that a window sequence counts windows opened — has
+  no reader. Nothing joins on it, and `segment_coverage` is the only table that
+  carries it;
+- it takes the era anchor with it. `precedes` is a `segment_seq + 1` test, so an
+  empty window that spends a number leaves the next window's predecessor two
+  behind and every window after a silence writes an uncertain anchor —
+  contradicting the design's claim that the anchor is certain from the second
+  window onward.
+
+- [ ] `pipeline.rs`: the increment moves inside the non-empty branch.
+
+**A window the spool refused still became the next window's trailer.**
+`pipeline.rs:386` printed the error and `:390` set `*preceding = Some(trailer)`
+regardless, so the next window anchored certain on a window whose rows are not
+in the store. The fix is `None` — *unknown*, and never *there was none* — and
+the design's
+*[The era anchor gets better, not worse](../specs/2026-09-08-recorder-inline-mode-design.md#the-era-anchor-gets-better-not-worse)*
+now says so. Stale would give the same verdict by accident, one off-by-one away
+from giving the wrong one.
+
+- [ ] `pipeline.rs`: the trailer is handed on from the `Ok` branch, and the
+      `Err` branch clears it.
+
+**The ring could not report a derivation that had gone.** `ring.rs:222`'s
+`TryRecvError::Disconnected` was unreachable: `RingSender` held `free_return`,
+its own sending end of the free list, so the free list never disconnected while
+the sender existed. A derivation thread that really had gone took its slots with
+it, the free list stayed empty, and every offer after that returned `Dropped` —
+for ever, and indistinguishable on every counter from a ring that was merely
+overrun. That branch also skipped `pending.undelivered()`.
+
+- [ ] `ring.rs`: `free_return` becomes a `spare` slot held in the sender itself.
+      It does the one job `free_return` had — the unreachable
+      `TrySendError::Full` branch puts its slot somewhere rather than shrinking the
+      pool for the life of the process — without holding a sending end that
+      masks the disconnection, and it is one handle fewer rather than one more.
+- [ ] Both `Disconnected` branches charge the datagram through
+      `pending.undelivered()` and count it. A drop nobody can carry the
+      admission for is still a drop, and `RingCounters::dropped`'s rustdoc says
+      which of the two it is.
+
+**Tests:**
+
+- Two runs of one recorder produce two window keys and two sets of coverage
+  rows, at the row altitude the corruption appears at.
+- A window's `capture_drop_total` is the sum of the `drop_delta` it walked.
+- A quiet window leaves no hole in the sequence, and the window after it carries
+  a certain era anchor.
+- A spool that refuses a window leaves the next window's anchor uncertain.
+- A ring whose deriver is gone reports `Disconnected` rather than `Dropped`,
+  from both branches, and owes the datagram either way.
+
+---
+
 ## Order, and why it is this one
 
 1 and 2 first because they are independent, mechanical and reviewable on their
@@ -620,6 +763,12 @@ because a default can only be chosen once both readings exist, and because it is
 the only task whose diff changes what a command line already deployed means —
 so it wants the whole of the rest of this plan behind it, green, before it is
 written.
+
+12 is after all of them because it is a review of all of them, and its own
+internal order is the one thing about it that is not free: the design's
+corrections land before the code, and within the code the held window comes
+before the gate that has to call it. The sequence number, the trailer and the
+ring are independent of the blocker and of each other.
 
 ---
 
@@ -657,7 +806,7 @@ by a full ring is not attributed to the publisher.
 | 4 | **no** | the spool's own replay is asserted (`tests/spool.rs:444`); the `SIGKILL` of the process is task 9's missing test |
 | 5 | yes | `tests/inline_mode.rs:241`, both keys |
 | 6 | yes | task 11's two refusal tests |
-| the equivalence gate | yes, for eight of nine faults | `inline_vs_archive.rs:256`; `Fault::SilentChannel` is task 7's outstanding bullet |
+| the equivalence gate | yes, for eight of nine faults, and over the shape that runs | `inline_vs_archive.rs:256`; `Fault::SilentChannel` is task 7's outstanding bullet. Until task 12 the gate's inline side was its own two-pass arrangement and the derivation stage's was one pass, so the gate was green over a shape nothing ran |
 | a ring gap is not the publisher's | yes | `inline_vs_archive.rs:303` |
 
 Two criteria therefore remain open — 2 and 4 — and both need a host rather than
