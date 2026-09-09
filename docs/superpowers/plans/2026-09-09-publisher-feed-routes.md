@@ -162,10 +162,24 @@ unchanged, asserted by name so that a later task cannot delete it by accident.
 - [x] `fn list_on(&mut self, shard: &str, spec: &InstrumentSpec<'_>) -> Option<InstrumentRef>`
       on `ListingSink`, **required**; `list` becomes the defaulted method,
       forwarding with `DEFAULT_SHARD`.
-- [x] `dz-adapter-core` takes a major version. Recorded in its changelog as
-      breaking for implementors and additive for callers, with the one-line
-      reason: every implementor of `ListingSink` is in this workspace, and a
-      venue calls it.
+- [x] The break is signalled where `RELEASING.md` says a consumer looks: **the
+      tag message and the release notes**, in the shared-version bump. The
+      earlier wording here asked for two things this repository does not have —
+      a per-crate major version and a changelog. Every crate is
+      `version.workspace = true` at one shared version, which `RELEASING.md`
+      makes deliberate ("These crates are one workspace with one shared version
+      for exactly this reason"), pre-1.0 a minor release may break an
+      implementor, and its step 5 is *say what breaks* in the tag message. There
+      is no changelog in the tree.
+- [x] The reason that signal carries is corrected too. A venue *calls*
+      `ListingSink` and needs no change; an implementor of it does, and
+      **implementors outside this workspace exist** — `dz-adapter-core`'s own
+      `tests/adapter_is_usable.rs` calls exercising the trait end to end "the
+      property a venue's own mapping tests depend on", which is a venue's test
+      doubles implementing it. What makes the break worth asking for is where it
+      lands: a compile error in a test double is found by the next `cargo test`,
+      and a published set silently collapsed onto one channel is found by a
+      subscriber.
 - [x] `Registry` holds the configured shard set, handed to it through
       `RegistryConfig`.
 - [x] `Refusal::UnknownShard` and `Refusal::ShardRestated`, and their `Counts`
