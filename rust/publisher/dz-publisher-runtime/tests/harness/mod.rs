@@ -481,7 +481,12 @@ pub fn harness_with_broken_writes(feed: Feed) -> Harness {
 /// reference stream, at `FailureScope::Channel`. The second one costs nothing
 /// when it is healthy and it is what makes the two scopes distinguishable in a
 /// test: one of them ends the process and the other must never be able to.
-fn ports(feed: &Feed, metrics: &Arc<PublisherMetrics>, magic: u16) -> (Ports, FeedRecorders) {
+/// Recording send paths for one feed, and the recorders that read them back.
+///
+/// Public because `composition.rs` builds a `PortOpener` out of it: the real
+/// composition has to be handed ports that are not sockets, and inventing a
+/// second way to build them would be a second thing to keep in step.
+pub fn ports(feed: &Feed, metrics: &Arc<PublisherMetrics>, magic: u16) -> (Ports, FeedRecorders) {
     let open = |name: &'static str, reference_name: &'static str, role: PortRole, port: u16| {
         let sink = RecordingSink::new(name, FailureScope::Process, magic);
         let recorder = sink.recorder();

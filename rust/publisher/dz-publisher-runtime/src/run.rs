@@ -52,7 +52,7 @@ use dz_publisher_refdata::{
 };
 
 use crate::clock::{Clock, SystemClock};
-use crate::config::{Config, Feed, FeedSpec, Source, SourceRole};
+use crate::config::{Config, Feed, FeedSpec, ShardName, Source, SourceRole};
 use crate::error::StartupError;
 use crate::guard::{Exit, Inconsistency};
 use crate::observer::MetricsObserver;
@@ -281,59 +281,13 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
         clock.clone(),
     )?;
 
-    let route = KernelRoute;
-    let mut feeds = Feeds::default();
-    // **Shard-outer, block-inner, and the order is the whole point.** `Feeds`
-    // is indexed by shard, and the index a routing decision uses is the one
-    // `Registry::shard_of` returns — which is an index into
-    // `RegistryConfig.shards`, built above from this same `Config::shards()`.
-    // Iterating the shards here is what keeps the two lists in the same order.
-    //
-    // What a document that interleaves its blocks — top-of-book on one shard,
-    // market-by-price on another, then the other way round — can no longer do
-    // is separate a shard's two specifications: they are built together and
-    // held together in one `ShardFeeds`, so there is nothing left to pair up.
-    for shard in config.shards() {
-        let mut top_of_book = None;
-        let mut market_by_price = None;
-        for feed in config.feeds.iter().filter(|feed| feed.shard == shard) {
-            let ports = open_ports(feed, &config, &metrics, &route)?;
-            // The match is total over a set that is not `#[non_exhaustive]`, so
-            // a feed specification added to `FeedSpec` breaks the build here -
-            // which is the point. A value a configuration can name that nothing
-            // composes is a value that resolves to nothing at startup.
-            match feed.spec {
-                FeedSpec::TopOfBook => {
-                    top_of_book = Some(FeedPipeline::new(
-                        feed,
-                        Arc::clone(&metrics),
-                        eras.begin_era::<TopOfBook>(feed.shard.era_shard())?,
-                        ports,
-                    ));
-                }
-                FeedSpec::MarketByPrice => {
-                    market_by_price = Some(FeedPipeline::new(
-                        feed,
-                        Arc::clone(&metrics),
-                        eras.begin_era::<MarketByPrice>(feed.shard.era_shard())?,
-                        ports,
-                    ));
-                }
-            }
-        }
-        let Some(shard_feeds) = ShardFeeds::new(top_of_book, market_by_price) else {
-            // Unreachable from a resolved document: `Config::shards()` is the
-            // distinct shards *of the enabled blocks*, so a shard with neither
-            // specification is a shard nothing named. Refused rather than
-            // skipped, because skipping it would shift every later shard's
-            // index one off the registry's and publish a shard's instruments
-            // under another channel instance's sequence series.
-            return Err(StartupError::ShardWithNoFeed {
-                shard: shard.as_str().to_owned(),
-            });
-        };
-        feeds.push(shard_feeds);
-    }
+    // **The composition is a function now, and that is what makes it
+    // testable.** Inline here, nothing but a real socket could reach it: the
+    // whole suite passed with the shard order reversed, which publishes each
+    // shard's instruments under another channel instance's sequence series and
+    // is undetectable from a subscriber. See `compose_feeds` and `PortOpener`.
+    let ports = KernelPorts::new(&config, &metrics);
+    let feeds = compose_feeds(&config.shards(), &config.feeds, &eras, &metrics, &ports)?;
 
     let publisher = RefCell::new(Publisher::new(
         Arc::clone(&metrics),
@@ -609,6 +563,133 @@ fn primary_connection(config: &Config, venue: &crate::Venue) -> ConnectionId {
 /// one, so a depth feed with no snapshot port is a feed whose subscribers
 /// diverge one gap at a time and never recover. That is exactly why
 /// `snapshot_port` is required for a depth feed rather than optional.
+/// What opens one feed's send paths.
+///
+/// # Why this is a trait, and why the route was not enough
+///
+/// `RouteLookup` already puts the routing table behind a trait, and its own doc
+/// comment says why: "a test that needs a route to a multicast group is a test
+/// that does not run in CI". That is true and it is not the seam that was
+/// missing. `MulticastTransmitter::open` binds a socket and connects it, so a
+/// composition holding a `RouteLookup` still needs a network to compose.
+///
+/// **The consequence was that nothing in the suite reached the composition at
+/// all.** Reversing the shard order in [`compose_feeds`] — the edit that
+/// publishes each shard's instruments under another channel instance's sequence
+/// series — passed the whole suite, and passed the by-hand offline run too. Two
+/// things hid it: the end-to-end harness composes its own `Feeds`, and the
+/// definition path is keyed on a shard's *name* while the event path is keyed
+/// on its *index*. What the permutation costs is a quote that reaches another
+/// shard's pipeline, whose lowering does not hold the instrument, and is
+/// dropped before any wire.
+pub trait PortOpener {
+    /// The send paths for one `[[feed]]` block.
+    ///
+    /// # Errors
+    ///
+    /// [`StartupError`] for anything that stops this feed from being composed:
+    /// a route that does not resolve, an address outside the declared prefix, a
+    /// socket that cannot be opened, a fan-out path that is not a socket.
+    fn open(&self, feed: &Feed) -> Result<Ports, StartupError>;
+}
+
+/// The real one: real sockets, over the routing table the send path itself asks.
+pub struct KernelPorts<'a> {
+    config: &'a Config,
+    metrics: &'a Arc<PublisherMetrics>,
+    route: KernelRoute,
+}
+
+impl<'a> KernelPorts<'a> {
+    #[must_use]
+    pub fn new(config: &'a Config, metrics: &'a Arc<PublisherMetrics>) -> Self {
+        Self {
+            config,
+            metrics,
+            route: KernelRoute,
+        }
+    }
+}
+
+impl PortOpener for KernelPorts<'_> {
+    fn open(&self, feed: &Feed) -> Result<Ports, StartupError> {
+        open_ports(feed, self.config, self.metrics, &self.route)
+    }
+}
+
+/// One shard's send paths per shard, in the order the shard list states them.
+///
+/// **The order is the whole of it.** `Feeds` is indexed by shard, and the index
+/// a routing decision uses is the one `Registry::shard_of` returns — an index
+/// into the registry's shard list, built from the same `Config::shards()`.
+/// Iterating that one list here is what keeps the two in step, and a test that
+/// asserts this function's output order is the only thing that says so.
+///
+/// Shard-outer and block-inner, so a document that interleaves its blocks
+/// cannot separate a shard's two specifications: they are built together and
+/// held together in one `ShardFeeds`.
+///
+/// # Errors
+///
+/// [`StartupError::ShardWithNoFeed`] for a shard the feed list does not
+/// mention, which no document and no resolved `Config` can produce —
+/// `Config::shards()` is the distinct shards *of the enabled blocks* — and
+/// which is therefore reachable only from here. That is the reason the variant
+/// exists and the reason this function takes the two lists separately rather
+/// than a `Config`: an invariant no document can violate is one a later
+/// refactor can, and skipping the shard would shift every later shard's index
+/// one off the registry's.
+///
+/// Everything else the era store or the port opener refuses.
+pub fn compose_feeds(
+    shards: &[ShardName],
+    feeds: &[Feed],
+    eras: &EraStore,
+    metrics: &Arc<PublisherMetrics>,
+    ports: &dyn PortOpener,
+) -> Result<Feeds, StartupError> {
+    let mut composed = Feeds::default();
+    for shard in shards {
+        let mut top_of_book = None;
+        let mut market_by_price = None;
+        for feed in feeds.iter().filter(|feed| feed.shard == *shard) {
+            let opened = ports.open(feed)?;
+            // The match is total over a set that is not `#[non_exhaustive]`, so
+            // a feed specification added to `FeedSpec` breaks the build here -
+            // which is the point. A value a configuration can name that nothing
+            // composes is a value that resolves to nothing at startup.
+            match feed.spec {
+                FeedSpec::TopOfBook => {
+                    top_of_book = Some(FeedPipeline::new(
+                        feed,
+                        Arc::clone(metrics),
+                        eras.begin_era::<TopOfBook>(feed.shard.era_shard())?,
+                        opened,
+                    ));
+                }
+                FeedSpec::MarketByPrice => {
+                    market_by_price = Some(FeedPipeline::new(
+                        feed,
+                        Arc::clone(metrics),
+                        eras.begin_era::<MarketByPrice>(feed.shard.era_shard())?,
+                        opened,
+                    ));
+                }
+            }
+        }
+        let Some(shard_feeds) = ShardFeeds::new(top_of_book, market_by_price) else {
+            // Refused rather than skipped, because skipping would shift every
+            // later shard's index one off the registry's and publish a shard's
+            // instruments under another channel instance's sequence series.
+            return Err(StartupError::ShardWithNoFeed {
+                shard: shard.as_str().to_owned(),
+            });
+        };
+        composed.push(shard_feeds);
+    }
+    Ok(composed)
+}
+
 fn open_ports(
     feed: &Feed,
     config: &Config,

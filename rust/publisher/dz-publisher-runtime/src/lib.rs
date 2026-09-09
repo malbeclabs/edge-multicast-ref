@@ -173,4 +173,4 @@ pub use publisher::{
 pub use registry::{AdapterContext, AdapterRegistry, Venue};
 pub use replay::ReplayInput;
 pub use rotation::SnapshotRotation;
-pub use run::{check_sources, run};
+pub use run::{check_sources, compose_feeds, run, KernelPorts, PortOpener};

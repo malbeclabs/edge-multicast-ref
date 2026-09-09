@@ -230,7 +230,7 @@ ls -1 "$work/state" | sed 's/^/  /'
 echo
 echo "what each subscriber decoded:"
 python3 - "$work" "$CHANNELS" "${SHARDS[*]}" "${SYMBOLS[*]}" <<'PY'
-import json, pathlib, sys
+import collections, json, pathlib, sys
 
 work = pathlib.Path(sys.argv[1])
 channels = int(sys.argv[2])
@@ -275,6 +275,33 @@ for index in range(channels):
         f"channel {index} on {named} carried {carried}, and its shard's set is {per_shard[index]}"
     )
 
+    # **The floor: market data arrived at all.** Asserting definitions passes
+    # against a publisher that publishes no market data — which is exactly what
+    # a composition whose shard order is permuted produces, because a quote
+    # then reaches another shard's pipeline, whose lowering does not hold the
+    # instrument, and is dropped before any wire. Every channel loses its own
+    # market data and no channel gains any, so a count is not enough either:
+    # this asserts the kinds, per channel.
+    kinds = collections.Counter(r["type"] for r in decoded)
+    assert kinds["quote"] > 0, (
+        f"channel {index} on {named} carried definitions and no quote: {dict(kinds)}"
+    )
+    assert kinds["trade"] > 0, (
+        f"channel {index} on {named} carried definitions and no trade: {dict(kinds)}"
+    )
+
+    # And it is this shard's own instruments' market data, by `Instrument ID`:
+    # the definitions above name the symbols, so the ids they carry are the
+    # only ones this channel may show market data for.
+    described = {r["instrument_id"] for r in decoded if r["type"] == "instrument_definition"}
+    moved = {
+        r["instrument_id"] for r in decoded if r["type"] in ("quote", "trade")
+    }
+    assert moved and moved <= described, (
+        f"channel {index} on {named} carried market data for instruments it "
+        f"never described: {sorted(moved - described)}"
+    )
+
     # One `Channel ID` per channel instance, and it is this block's.
     ids = {r["channel_id"] for r in decoded}
     assert ids == {index}, f"channel {index} on {named} carried channel ids {ids}"
@@ -304,6 +331,7 @@ for index in range(channels):
     print(
         f"  channel {index:>2} {named:<18} "
         f"{len(decoded):>3} messages, era {announced}, seq from {min(seqs)}, "
+        f"{kinds['quote']} quotes, {kinds['trade']} trades, "
         f"definitions {','.join(carried)}"
     )
 

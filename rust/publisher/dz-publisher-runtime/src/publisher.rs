@@ -260,6 +260,25 @@ impl ShardFeeds {
     }
 }
 
+#[cfg(test)]
+mod shard_feeds_tests {
+    use super::ShardFeeds;
+
+    /// The property the rest of this module is written against: after
+    /// construction there is always a send path to read a name off, so
+    /// [`ShardFeeds::name`] is total and no caller has to handle a shard that
+    /// carries nothing.
+    ///
+    /// Tested directly because it cannot be reached through a document —
+    /// `Config::shards()` is the distinct shards of the enabled blocks — and an
+    /// invariant no document can violate is one a later refactor can, which is
+    /// what `StartupError::ShardWithNoFeed` exists for.
+    #[test]
+    fn a_shard_with_neither_specification_is_not_a_shard() {
+        assert!(ShardFeeds::new(None, None).is_none());
+    }
+}
+
 /// The send paths this publisher operates: one entry per shard, in the order
 /// the document states them.
 ///
