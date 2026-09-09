@@ -174,6 +174,14 @@ fn metadata() -> serde_json::Value {
             // A dependency graph is a fact about the committed lockfile, so
             // reading it must not be able to reach out and change one.
             "--offline",
+            // **Without this the graph is every platform's**, and a Linux job
+            // has never downloaded the packages that only another one resolves
+            // — so `--offline` fails on a file that was never fetched rather
+            // than on anything about this crate. It narrows what is *resolved*,
+            // not what is asserted: nothing forbidden here is platform-specific,
+            // and the positive control below still names what must be present.
+            "--filter-platform",
+            env!("HOST_TARGET"),
             "--manifest-path",
         ])
         .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
