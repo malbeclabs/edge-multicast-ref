@@ -87,7 +87,7 @@ pub struct Document {
     /// **Defaultable, because every key in it has a default and `kind` is
     /// optional.** A publisher that names its transport once per `[[source]]`
     /// has nothing to state here, and required this failed at parse with
-    /// `missing field `ingress`` at line 1, column 1 — an error pointing at the
+    /// ``missing field `ingress` `` at line 1, column 1 — an error pointing at the
     /// whole file rather than at the section nobody wrote. A document that
     /// names a transport in *neither* place still reaches
     /// [`ConfigError::NoKind`], which names both ways of stating it, so the
@@ -1250,9 +1250,10 @@ impl EgressSection {
         // Refused here rather than by serde, and the difference is the error an
         // operator reads. A required *field* on an optional section makes the
         // section required too, and this repository has already met what that
-        // costs: `[ingress]` required failed at parse with `missing field
-        // `ingress`` at line 1, column 1 — an error pointing at the whole file
-        // rather than at the section nobody wrote. One refusal covers both
+        // costs: `[ingress]` required failed at parse with the serde message
+        // "missing field `ingress`" at line 1, column 1 — an error pointing at
+        // the whole file rather than at the section nobody wrote. One refusal
+        // covers both
         // shapes of the same mistake: no `[egress]` at all, and an `[egress]`
         // that states everything except this.
         let ttl = self.ttl.ok_or(StartupError::TtlUnstated)?;
