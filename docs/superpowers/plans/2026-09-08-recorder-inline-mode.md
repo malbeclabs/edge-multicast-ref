@@ -480,42 +480,45 @@ This task is a list of the places the old default was written down. **A default
 expressed in ten places is a default that gets inverted in nine**, and the
 tenth is the one an operator reads.
 
-- [ ] `cli.rs`: `--archive`, and `Args` carries it beside `inline_config`. Both
+- [x] `cli.rs`: `--archive`, and `Args` carries it beside `inline_config`. Both
       flags together is `CliError::ArchiveAndInline`, refused on the command
       line for the reason `--check` with `--run-for` is: two arrangements that
       keep different things were asked for at once, and there is no reading of
       that which is what somebody meant.
-- [ ] `cli.rs`: `USAGE` inverted. `--archive` documents the arrangement and what
+- [x] `cli.rs`: `USAGE` inverted. `--archive` documents the arrangement and what
       omitting it now means; `--inline-config` stops describing itself as the
       whole of the opting in and becomes the file the default mode needs.
-- [ ] `main.rs`: the dispatch. `--archive` takes `Plan::from_config` and the
+- [x] `main.rs`: the dispatch. `--archive` takes `Plan::from_config` and the
       archive runner; anything else takes inline mode — including a command line
       that named no second file, which is a refusal and never a fallback.
-- [ ] `inline_config.rs`: `InlineConfigNotStated`, naming `--inline-config` and
-      `--archive`. Named after `StartupError::DirectoryNotStated` because it is
-      the same failure in the other arrangement: a required path with no
-      defensible value to invent.
-- [ ] `inline_config.rs`: `ArchiveDirectoryConfigured` names `--archive` instead
+- [x] `inline_config.rs`: `InlineConfigError::NotStated`, naming
+      `--inline-config` and `--archive`. Named after
+      `StartupError::DirectoryNotStated` because it is the same failure in the
+      other arrangement: a required path with no defensible value to invent.
+      Spelled `NotStated` and not `InlineConfigNotStated` as this plan first
+      had it — the type it sits in is already `InlineConfigError`, so the longer
+      name stuttered at every call site.
+- [x] `inline_config.rs`: `ArchiveDirectoryConfigured` names `--archive` instead
       of telling an operator to drop a flag they did not pass. This message is
       what every existing archive-mode host meets on its first restart after the
       default changed, so it is the migration instruction as much as the
       refusal, and it is the only place that instruction is guaranteed to be
       read.
-- [ ] `inline_config.rs`: `NotCompiledIn` says the default mode is one this
+- [x] `inline_config.rs`: `NotCompiledIn` says the default mode is one this
       build cannot run, and names `--archive` as what it can.
-- [ ] `startup.rs`: `Arrangement::Inline` documented as the default and
+- [x] `startup.rs`: `Arrangement::Inline` documented as the default and
       `Arrangement::Archive` as the one asked for by name. `writes_an_archive`
       is unchanged: a build without the feature is still only ever in archive
       mode, and returning `true` there is still right.
-- [ ] `Cargo.toml`: `default = ["inline"]`. A binary that refuses the
+- [x] `Cargo.toml`: `default = ["inline"]`. A binary that refuses the
       arrangement its own command line asks for when told nothing is a binary
       whose default it cannot honour.
-- [ ] `.github/workflows/rust-codec.yml`: a `--no-default-features` clippy and
+- [x] `.github/workflows/rust-codec.yml`: a `--no-default-features` clippy and
       test step for `dz-recorder`. The feature moving into the default set makes
       the record-only build the untested one, and it is the build that has to
       make the `NotCompiledIn` refusal — the same argument the workflow already
       makes beside the `afpacket` steps, for the same reason.
-- [ ] The prose, all of it: `rust/recorder/README.md`'s two-modes table and its
+- [x] The prose, all of it: `rust/recorder/README.md`'s two-modes table and its
       *what bounds it* and *which mode a host runs*,
       `dz-recorder-load/README.md`, `BRINGING-UP-A-FEED.md` and its bring-up
       checklist, `inline.example.toml`, and the systemd unit's header. A default
@@ -523,26 +526,51 @@ tenth is the one an operator reads.
       than one stated nowhere, because the wrong one will be the one somebody
       quotes.
 
-**Tests, and the revert that has to kill each:**
+Two things the task needed that the bullets above did not predict:
 
-- `an_archive_configuration_with_no_mode_named_is_refused_and_names_the_flag`
-  — the archive-shaped configuration that exits 0 under `--archive` exits 1
-  without it, names `archive.staging_dir` and `--archive`, and never prints
-  `mode=archive`. **Revert:** put `main.rs`'s dispatch back to
-  `if let Some(path) = &args.inline_config`. This test must fail.
-- `a_command_line_naming_no_mode_and_no_second_file_is_refused_by_name` — exits
-  1 naming `--inline-config` and `--archive`. **Revert:** substitute a defaulted
-  `InlineConfig` where `InlineConfigNotStated` is returned. It must fail, and
-  the interesting part is *how*: the refusal then names `inline.spool_dir`, a
-  key the operator never wrote in a file they never made.
-- `naming_both_modes_is_refused` — the command line's own case. **Revert:** drop
-  the `ArchiveAndInline` branch from `cli::parse`.
-- `inline_mode_is_a_default_feature_because_it_is_the_default_mode` — the
-  manifest carries `default = ["inline"]`. An assertion over the manifest text
-  and not over `cfg!`, because a `cfg!` assertion vanishes in exactly the build
-  it exists to catch. **Revert:** remove the default set.
-- Everything task 8 refuses, unchanged, and the archive-mode configuration still
-  valid — with `--archive`.
+- **The archive-directory refusal has to run before the missing-file one.** The
+  command line most likely to arrive here by mistake is an archive-mode host's,
+  unchanged: it carries the two directories and no second file. Told about the
+  missing file first, that operator is being answered about a file they never
+  wanted; told about `archive.staging_dir` first, they are told the key they
+  wrote and the flag they are missing. `run` therefore calls
+  `check_archive_is_not_configured` before it unwraps the path.
+- **`tests/check_mode.rs` was archive mode's binary-altitude suite and every
+  check in it needed the flag.** That is the shape of this cost across the
+  fleet, in miniature, and it is why the refusal test lives in that file rather
+  than beside inline mode's: the file that had to change is the file where the
+  proof belongs.
+
+**Tests, and the revert that killed each. Every one was run — reverted, watched
+fail, restored:**
+
+| Revert | Test that died |
+|---|---|
+| `main.rs`'s dispatch back to `if args.inline_config.is_some()` | `check_mode.rs`'s `an_archive_configuration_with_no_mode_named_is_refused_and_names_the_flag` **and** `inline_mode.rs`'s `a_command_line_naming_no_mode_and_no_second_file_is_refused_by_name` — both, because that one line is the default |
+| a defaulted `InlineConfig` where `NotStated` is returned | `a_command_line_naming_no_mode_and_no_second_file_is_refused_by_name` |
+| the `ArchiveAndInline` branch dropped from `cli::parse` | `cli::tests::naming_both_modes_is_refused` |
+| `default = ["inline"]` removed from `Cargo.toml` | `inline_mode_is_a_default_feature_because_it_is_the_default_mode` |
+| `ArchiveDirectoryConfigured` back to *"drop `--inline-config`"* | `an_archive_configuration_with_no_mode_named_is_refused_and_names_the_flag` |
+
+Two of those are worth reading past the table.
+
+**The defaulted-`InlineConfig` revert fails in the way that makes the case for
+the refusal.** Under it the recorder does not start either — it gets as far as
+`inline.spool_dir` being empty and refuses there. So the mutant is not *silent*;
+it is *unhelpful*, and the test is asserting the difference. An operator whose
+command line forgot `--archive` would be told about a key they never wrote, in
+a file they never made, on a host they thought was keeping bytes.
+
+**The default-feature revert is caught by nothing except the manifest
+assertion.** With `inline` out of the default set, the whole
+`#[cfg(feature = "inline")]` suite is compiled out rather than failed, and
+`an_archive_configuration_with_no_mode_named_is_refused_and_names_the_flag`
+still passes through its `cfg!(not(feature))` branch. That is exactly why the
+assertion reads the manifest text: a `cfg!` test disappears in the build it
+exists to catch, and a suite that shrinks is a suite that reports success.
+
+Everything task 8 refuses is unchanged, and the archive-mode configuration is
+still valid — with `--archive`.
 
 ---
 
