@@ -401,7 +401,16 @@ pub fn run(recorder: &RecorderConfig, path: &Path, check: bool) -> Result<(), In
     config.check()?;
 
     let identity = identity_of(recorder);
-    print!("{}", config.summary(&identity));
+    // Where the recorder's own summary goes, and for the same reason: `--check`
+    // is a result a pipeline reads on stdout, and a recording run's summary is
+    // a log line beside the version it prints on startup.
+    let summary = config.summary(&identity);
+    if check {
+        print!("{summary}");
+    } else {
+        eprintln!("dz-recorder: {}", crate::cli::version_line());
+        eprint!("{summary}");
+    }
 
     if check {
         // Nothing is bound, nothing is created and nothing is joined, and the
