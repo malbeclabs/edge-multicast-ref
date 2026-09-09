@@ -1,13 +1,13 @@
-# A document states its TTL, and one sentence at the boundary — plan
+# A document states its TTL — plan
 
 Turns [the design](../specs/2026-09-09-egress-ttl-and-a-boundary-correction-design.md) into ordered tasks.
 
-**Base:** `jo/publisher-feed-routes`. The TTL change is independent of that branch, but the boundary correction is a clause in a doc comment that branch wrote, so both land on top of it rather than being split across two bases for one review.
+**Base:** `jo/publisher-feed-routes`. The TTL change is independent of that branch and is stacked on it because it was split out of it; the boundary correction this plan was written with has moved onto that branch, for the reason task 2 records.
 
 ## Global constraints
 
 - **Vocabulary:** `GLOSSARY.md` governs every identifier, comment, test name, config key and commit message. No new key is added here, so the words at risk are in prose: a hop count is a hop count, `datagram` never `frame`, and `source` never appears bare — `source address` where the address is meant.
-- **Every test must be shown to kill its mutant.** Both tasks below have an obvious mutant and it is named with the task.
+- **Every test must be shown to kill its mutant.** Task 1 has an obvious mutant and it is named with the task; task 3 is documentation and says so rather than asserting prose against itself.
 - **The guide has to stay true.** `BRINGING-UP-A-FEED.md` is the one document in this repository that must not become a record of a date, and a key that changes from optional to required is exactly what an operator reads it for.
 
 ---
@@ -39,14 +39,14 @@ Both tests stay, and the reason is now stated rather than assumed: they cover tw
 
 ---
 
-### 2. The clause at the boundary that is untrue
+### 2. The clause at the boundary — moved to the base, not done here
 
-- [x] `ListingSink::list_on`'s doc comment stops claiming that every implementor is in this workspace. It says implementors outside this workspace exist, and keeps the argument: the break falls on implementors rather than callers, and a compile error in a test double is found by the next `cargo test` where a silently collapsed published set is found by a subscriber.
-- [x] Nothing else in that doc comment moves. The `compile_fail,E0046` doctest, the direction of the default and the signature are the design's and are not what was wrong.
+- [x] **Not in this change.** `ListingSink::list_on` claimed that every implementor of it is in this workspace, in two places, and both are in `jo/publisher-feed-routes`'s own diff. The correction landed there instead, with the sentence, because that branch lands first and a correction arriving behind the clause it corrects leaves the clause standing on the branch a reviewer reads.
+- [x] Nothing is owed here as a result. This branch's copy of the two adapter files is the base's, taken whole, so the pair cannot drift.
 
-**Test:** the existing `compile_fail,E0046` doctest and the doctest beside it still compile and still fail respectively, which is what says the correction touched prose and not the trait.
+**Test:** none is owed. The correction is on the base and is covered by the base's own gates; what this branch asserts about it is that its adapter files are byte-identical to the base's, which the empty diff says.
 
-**The revert:** there is no test that can distinguish two true sentences from one true and one false, and the plan says so rather than asserting a doc comment's text against itself. What guards this task is that the two doctests in the same comment are compiled by `cargo test`, so a correction that broke the example is a build failure.
+**The record this replaces.** The task was written and done on this branch first, and a review pointed out that the branch it was done on is not the branch the sentence is in. That is why it reads as a move rather than as a deletion.
 
 ---
 
@@ -66,7 +66,7 @@ The plan is done when:
 1. a document that states no `ttl`, with or without an `[egress]` section, is refused at load with a message naming the key and the value that reproduces one hop;
 2. `ttl = 1` and `ttl = 64` both resolve and both reach the policy as stated;
 3. the guide shows the key as required;
-4. `list_on`'s doc comment claims nothing about implementors outside this workspace that is untrue;
+4. `list_on`'s doc comment claims nothing untrue about implementors outside this workspace — on the base branch, where both copies of the clause live;
 
 and when restoring the serde default makes `an_egress_section_without_a_ttl_is_refused_like_an_absent_one` fail — one test and not both, for the reason recorded under task 1.
 

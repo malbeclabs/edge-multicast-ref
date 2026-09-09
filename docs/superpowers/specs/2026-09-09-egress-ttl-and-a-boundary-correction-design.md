@@ -1,6 +1,6 @@
-# A document states its TTL, and one sentence at the boundary is wrong
+# A document states its TTL
 
-**Status:** design. Two small changes with one property in common: each is a place where this repository currently answers a question nobody asked it, and is believed.
+**Status:** design. One change: a place where this repository currently answers a question nobody asked it, and is believed. A second change was written here and has moved — see section 2.
 
 ## 1. `[egress] ttl` has a default and should not
 
@@ -40,23 +40,20 @@ Every document that omits `ttl` stops loading. That is the point of the change a
 - **It is a breaking change to a key that currently has an answer**, so the crate takes the version bump that costs and the guide gains the key as required rather than optional.
 - **A configuration generator that omits the key** — a template, a chart, a rendered file — fails for every publisher it generates at once, rather than one at a time. That is loud in the way this change intends and it is worth an operator knowing before they upgrade, which is why the guide's row for the key changes in the same change.
 
-## 2. `ListingSink::list_on` argues from something untrue
+## 2. The clause at the boundary, and where it went
 
-The doc comment justifies its version bump like this:
+This design was written carrying a second change. `ListingSink::list_on` justified its version bump with "every implementor of it is in this workspace", in the crate-level documentation and in the trait's own doc comment. The clause is untrue — implementors outside this workspace exist, a venue's own test doubles among them — so the bump is not free, and a sentence saying it is makes the next decision of this shape easier than it should be.
 
-> a venue *calls* this trait rather than implementing it, so the break falls on implementors, and every implementor of it is in this workspace.
+**It is not in this change.** Both copies of the clause are in `jo/publisher-feed-routes`'s own diff, and that branch lands first, so the correction went there with the sentence rather than arriving behind it. It is not deferred and it is not dropped: it is on the base, and a reader of this document who wants it should read that branch's adapter commit.
 
-The last clause is false. Implementors exist outside this workspace — a venue's own test doubles implement the trait even where its adapter only calls it, and six of them exist in one integration. So the bump is not free, and the sentence that says it is makes the next decision of this shape easier than it should be.
+Nothing about the direction the trait chose was in question either way. `list_on` is required and `list` is defaulted because the other direction leaves an adapter that had not been updated admitting its whole universe to one shard, with no error, no counter and no log; the correction says only that the break lands on somebody, and that where it lands is what makes it worth asking for.
 
-**The direction the trait chose is still right**, and the correction must not read as though it were not. `list_on` is required and `list` is defaulted because the other direction leaves an adapter that had not been updated admitting its whole universe to one shard — with no error, no counter and no log. That is the trade, and it is still worth a compile error: a break in a test double is found by the next `cargo test`, where a silently collapsed published set is found by a subscriber holding definitions for instruments no message will ever arrive for.
+This file and the branch still carry the pair in their names. A branch with an open pull request cannot be renamed without closing that request, and the record of what a change is belongs in its text rather than in a slug.
 
-What changes is one clause, and it says what is true without naming anyone: implementors outside this workspace exist.
+## What this change does not do
 
-## What neither change does
-
-- **No new configuration key.** The TTL change adds none; it removes a default from one that exists. There is no `hops`, no `routed`, and no second way to say the same thing.
+- **No new configuration key.** This adds none; it removes a default from one that exists. There is no `hops`, no `routed`, and no second way to say the same thing.
 - **No change to the send path.** `ttl` reaches the socket exactly as it did.
-- **No change to `list_on`'s signature, its default or its direction.** One clause of one doc comment.
 - **No new metric.** The failure this makes loud is a failure a metric cannot see: every datagram was sent successfully. A series that counted "datagrams that a router discarded" would be a series a publisher cannot observe, and pre-creating one at zero would assert that none were discarded.
 
 ## Decisions
@@ -72,4 +69,4 @@ What changes is one clause, and it says what is true without naming anyone: impl
 
 ## Non-goals
 
-A key stating how far a group travels. A metric for datagrams a router discarded. Any change to `list_on`'s shape.
+A key stating how far a group travels. A metric for datagrams a router discarded.
