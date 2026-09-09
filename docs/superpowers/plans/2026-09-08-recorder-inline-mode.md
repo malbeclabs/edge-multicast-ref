@@ -449,6 +449,26 @@ branch.**
   is exactly this, and it is unproven; `tests/inline_mode.rs` is refusals and
   `--check` only.
 
+**And the reach of the default suite is part of the gap.** `cargo test
+--workspace` does not enable `socket-e2e`, `afpacket`, `clickhouse-tests` or
+`conformance`, and a suite behind one of those reports *0 tests* rather than
+*skipped* — so a green workspace run says nothing about it. That is how task 11
+shipped with `tests/shutdown.rs` unfixed. Anything asserting the binary's
+behaviour has to be run by naming the feature, and the features CI enables are
+the list to run before pushing:
+
+```bash
+cargo test --workspace
+cargo test -p dz-recorder --no-default-features
+cargo test -p dz-recorder --features socket-e2e
+cargo test -p dz-recorder-e2e --features socket-e2e -- --test-threads=1
+cargo test -p dz-recorder-e2e --features conformance
+cargo test -p dz-recorder-capture --features loopback-tests
+# these two need libpcap-dev, and a column store, respectively
+cargo test -p dz-recorder --features afpacket
+cargo test -p dz-recorder-e2e --features clickhouse-tests -- --test-threads=1
+```
+
 ### 10. Documentation
 
 - [x] `rust/recorder/README.md`: a *two modes* section beside the existing *two
@@ -518,6 +538,17 @@ tenth is the one an operator reads.
       the record-only build the untested one, and it is the build that has to
       make the `NotCompiledIn` refusal — the same argument the workflow already
       makes beside the `afpacket` steps, for the same reason.
+- [x] `tests/shutdown.rs`: `--archive`. **The eleventh place, and the one this
+      task's own list missed** — it spawns the real binary against an
+      archive-mode fixture and waits for a segment, which inline mode never
+      opens, so the inversion turned a 0.7-second test into a fifteen-second
+      timeout. Found by CI and not by `cargo test --workspace`, because the
+      suite is `#![cfg(feature = "socket-e2e")]` and the workspace run reports
+      it as *0 tests* rather than as skipped. The same class as task 9's
+      missing binary-altitude tests: a test at binary altitude that the default
+      suite does not reach. `rust/recorder/dz-recorder-core/tests/fixtures/recorder_example.toml`
+      gained the same statement in prose, being the archive-mode configuration
+      an operator copies.
 - [x] The prose, all of it: `rust/recorder/README.md`'s two-modes table and its
       *what bounds it* and *which mode a host runs*,
       `dz-recorder-load/README.md`, `BRINGING-UP-A-FEED.md` and its bring-up
@@ -551,6 +582,7 @@ fail, restored:**
 | the `ArchiveAndInline` branch dropped from `cli::parse` | `cli::tests::naming_both_modes_is_refused` |
 | `default = ["inline"]` removed from `Cargo.toml` | `inline_mode_is_a_default_feature_because_it_is_the_default_mode` |
 | `ArchiveDirectoryConfigured` back to *"drop `--inline-config`"* | `an_archive_configuration_with_no_mode_named_is_refused_and_names_the_flag` |
+| `--archive` dropped from `tests/shutdown.rs`'s spawn | `sigterm_publishes_the_open_segment_and_exits_zero`, after a fifteen-second wait for a segment inline mode never opens. Needs `--features socket-e2e` to run at all |
 
 Two of those are worth reading past the table.
 

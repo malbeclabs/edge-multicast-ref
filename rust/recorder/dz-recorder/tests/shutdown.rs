@@ -8,6 +8,14 @@
 //! exits. A recorder that hangs on SIGTERM is one a supervisor eventually
 //! SIGKILLs, and SIGKILL is exactly what abandons the open segment.
 //!
+//! **This is an archive-mode test and it says so**, with `--archive`. What it
+//! asserts is that the object the process was holding reaches
+//! `completed_dir` — an assertion only archive mode can make, because inline
+//! mode writes no object at all. Left mode-agnostic it would run in whichever
+//! arrangement the default happens to be, and a shutdown test that quietly
+//! became an inline-mode one would be asserting nothing: the segment it waits
+//! for would never be opened.
+//!
 //! Behind the `socket-e2e` feature: it sends over `IP_MULTICAST_LOOP` on a
 //! documentation-range group, which is a property of the host and not of the
 //! build. Every address here is documentation-range; this repository is public.
@@ -112,9 +120,14 @@ fn sigterm_publishes_the_open_segment_and_exits_zero() {
     std::fs::write(&config_path, config(dir.path(), interface)).expect("the configuration");
     let completed = dir.path().join("completed").join("top-of-book");
 
+    // `--archive`, because the configuration below describes one and because a
+    // command line naming no mode is read as inline mode — which writes no
+    // object, and would be refused by key on this fixture's `staging_dir`
+    // before it bound a socket.
     let mut child = Command::new(BINARY)
         .arg("--config")
         .arg(&config_path)
+        .arg("--archive")
         .spawn()
         .expect("the binary under test runs");
 

@@ -1,3 +1,13 @@
+# An ARCHIVE-MODE configuration, run with `--archive`:
+#
+#   dz-recorder --config recorder.toml --archive
+#
+# The flag is not optional. Inline mode is what a command line naming no mode is
+# read as, and it writes no object — so this file's `[archive] staging_dir`
+# would be refused by key before a socket was bound. That refusal is what stops
+# a host being read as the other arrangement and quietly ceasing to keep bytes;
+# inline mode's own keys are in a second file, `inline.example.toml`.
+#
 # Every value here is a placeholder, and every address is from a range reserved
 # for documentation: 233.252.0.0/24 is MCAST-TEST-NET and 192.0.2.0/24 is RFC
 # 5737. Neither RFC 1918 space nor 239.0.0.0/8 belongs in a public example —
