@@ -46,6 +46,7 @@ Names we do not own, or have not renamed, are left as written wherever they appe
 | [Dual-version refdata](superpowers/specs/2026-08-08-refdata-v3-dual-version-design.md) · [plan](superpowers/plans/2026-08-08-refdata-v3-dual-version.md) | Decoding `InstrumentDefinition` at schema versions 1 and 3, and watching a cutover |
 | [Per-publisher sequence tracking](superpowers/specs/2026-08-10-per-channel-seq-tracking-design.md) · [plan](superpowers/plans/2026-08-10-per-publisher-seq-tracking.md) | Why gap detection keys on `(source IP address, Channel ID, destination port)` |
 | [Cross-feed latency normalization](superpowers/specs/2026-06-06-cross-feed-latency-normalization-design.md) · [plan](superpowers/plans/2026-06-06-cross-feed-latency-normalization.md) | Comparing latency across feeds that timestamp differently |
+| [A key a venue side can compute](superpowers/specs/2026-09-09-book-key-and-the-composition-seam-design.md) · [plan](superpowers/plans/2026-09-09-book-key-and-the-composition-seam.md) | `book_key` over a book alone, a venue's own message identity at the boundary, and the venue composition seam moved out of the publisher's crate |
 | [The venue half of a feed race](superpowers/specs/2026-09-09-recorder-venue-observation-design.md) · [plan](superpowers/plans/2026-09-09-recorder-venue-observation.md) | Recording a venue's own upstream and pairing it against a channel's datagrams — why the join is a view on the symbol and not a row in `book_top` |
 
 ## Shred receivers

@@ -64,7 +64,7 @@ Task 1 is a correction to documents that are wrong **today**, and it lands first
 
 ### 4. The venue-side grains, and the columns they do not have
 
-- [ ] Venue-side row types carrying venue provenance: the observation, the upstream connection, the object key, the venue's own message identity where it has one, the symbol, the instrument's exponents as the venue states them, both sides of the top, and `state_key` computed by **the same function** the publisher side uses — not a second implementation, because two hashes of one book state pair with nothing.
+- [ ] Venue-side row types carrying venue provenance: the observation, the upstream connection, the object key, the venue's own message identity where it has one, the symbol, the instrument's exponents as the venue states them, both sides of the top, and `book_key` computed by **the same function** the publisher side uses — not a second implementation, because two hashes of one book state pair with nothing.
 - [ ] No `channel_id`, no `instrument_id`, no `sequence_number`, no `reset_count`, no `segment_seq`, no `drop_delta`, and no `era` column. Asserted as an absence: `tests/column_names.rs`'s pattern extended, holding the venue-side column set against a literal so that adding one of the six is a test failure rather than a review comment.
 - [ ] A migration for the venue-side tables, numbered after the highest existing one, with the same `ReplacingMergeTree` and the same day partitioning, so that a re-load replaces.
 
@@ -76,7 +76,7 @@ Task 1 is a correction to documents that are wrong **today**, and it lands first
 
 ### 5. The race, as a view
 
-- [ ] A view numbering venue-side occurrences per observation on `(observation, feed, symbol, state_key)` ordered by receive stamp, and a pairing grouping on `(feed, symbol, state_key, occurrence)` with `uniqExact(observation)`, `lead_ms` as a nullable column, and the bound on it left to the caller.
+- [ ] A view numbering venue-side occurrences per observation on `(observation, feed, symbol, book_key)` ordered by receive stamp, and a pairing grouping on `(feed, symbol, book_key, occurrence)` with `uniqExact(observation)`, `lead_ms` as a nullable column, and the bound on it left to the caller. **`book_key` and not `state_key`**: that one eats a `channel_id` and an `Instrument ID`, and a venue side can compute neither.
 - [ ] `symbols_agree` and `exponents_agree` as columns rather than assumptions, for the reason the publisher-side pairing carries `exponents_agree`: the key covers the raw prices and leaves the exponents out, and a pair whose exponents disagree is two different prices wearing one key.
 - [ ] Every argument the existing pairing makes is **cited, not restated**: why this is not an `ASOF JOIN`, why an unpaired occurrence is a row, why an anchored row consumes no ordinal, and why the bound is the caller's.
 

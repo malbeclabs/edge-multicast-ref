@@ -53,7 +53,11 @@ That promise is not keepable as the tables stand, for the eight-column reason ab
 
 So a venue-side observation could only pair by being handed the publisher's configuration and its live registry state, which breaks the boundary in the one direction it exists to prevent, and would still be wrong across an era boundary.
 
-The comparison a venue side can compute is on `(feed, symbol, state_key)`. `state_key` is already transport-independent by construction — "a hash over the instrument and both sides, and over nothing else. No timestamp, no sequence number, no bytes" — and `event.upstream_ts` is already documented as excluded from every equivalence key because "one book state carried over two of them would hash two ways and no pair would ever be found." The equivalence key was designed for this. The *provenance* and the *grouping* were not.
+The comparison a venue side can compute is on `(feed, symbol, book_key)`, and **not on `state_key`** — which is the one thing this section originally got wrong. The column's doc comment says "a hash over the instrument and both sides, and over nothing else", but `state_key(channel_id, instrument_id, top)` eats both identifiers before it eats a price. So the key is transport-independent and *observer-dependent*: two recorders of one multicast feed pair on it because both read the same identifiers off the same datagrams, and a venue side can compute neither the operator's channel mapping nor a publisher-minted `Instrument ID`.
+
+Keyed on `state_key`, this race would return **zero pairs** and read as each side missing every state the other saw — the failure that function's own comment names, where a key that stops matching "looks like a quiet feed". [`book_key`](2026-09-09-book-key-and-the-composition-seam-design.md) is the book-only key that makes this section implementable: the two sides and nothing else, with `state_key` folded onto it so no publisher-side value moves.
+
+What *was* designed for a cross-observer join is the exclusion: `event.upstream_ts` is documented as outside every equivalence key because "one book state carried over two of them would hash two ways and no pair would ever be found." The *provenance* and the *grouping* were not.
 
 **Whichever way this design goes, those two doc comments and that migration header are wrong today and should be corrected.** They promise a shape the columns refuse. That is a documentation defect in the current tree, independent of the venue side ever being built.
 
