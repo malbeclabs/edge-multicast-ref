@@ -18,7 +18,7 @@ at all in `dz-adapter-core` — see *Global constraints*. No async below
 
 ## Scope
 
-One plan, twelve tasks, all in this repository. No venue repository changes at
+One plan, thirteen tasks, all in this repository. No venue repository changes at
 any point: an adapter that never names a shard compiles unchanged against every
 task, and the last task is the one that lets a document ask for a second block
 of one specification.
