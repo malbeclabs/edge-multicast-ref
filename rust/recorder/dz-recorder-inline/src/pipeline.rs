@@ -56,9 +56,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use dz_recorder_archive::JoinedRole;
 use dz_recorder_core::{CaptureDropScope, RecorderIdentity};
 use dz_recorder_load::Ledger;
-use dz_recorder_rows::{derive, Derivation, DeriveInput, RowSink, SegmentTrailer};
+use dz_recorder_rows::{RowSink, SegmentTrailer};
 
-use crate::manifest::{window_manifest, WindowIdentity};
+use crate::derivation::WindowDeriver;
+use crate::manifest::WindowIdentity;
 use crate::ring::{RingReceiver, RingSender};
 use crate::spool::Spool;
 use crate::window::{Closed, WindowBound, WindowSource};
@@ -160,6 +161,7 @@ pub fn start<S: RowSink + Send + 'static>(
             spool: Arc::clone(&spool),
             window_seq: 0,
             preceding: None,
+            deriver: WindowDeriver::new(),
         },
         derivation_stage,
     );
@@ -293,13 +295,29 @@ struct Deriving {
     /// Monotonic within a run and restarting at zero across one, the same as
     /// `segment_seq`: a hole in it is a hole in the derivation, which is what
     /// distinguishes a recorder that was down from a feed that was quiet.
+    ///
+    /// **An empty window therefore spends none of it.** A quiet feed closes
+    /// windows on age as a matter of course, so spending a number on one would
+    /// write *the derivation was down* once a window bound for the whole of a
+    /// silence — and would leave every window after that silence with an
+    /// uncertain era anchor, the predecessor test being `segment_seq + 1`.
     window_seq: u64,
     /// The previous window's trailer, which decides one bit of the next
     /// window's first era: whether its anchor is certain. Windows here are
     /// strictly sequential and none is evicted before it is derived, so unlike
     /// an archive loader — whose predecessor is routinely gone — this is
     /// available for every window after the first.
+    ///
+    /// `None` is *unknown*, never *there was none*, which is why a window the
+    /// spool refused clears it rather than handing its trailer on: the rows that
+    /// window described are not in the store, and an anchor that called the next
+    /// window a continuation would merge two sequence spaces over a hole nothing
+    /// in the rows can explain.
     preceding: Option<SegmentTrailer>,
+    /// The two passes one window needs, and the buffer they share. Held across
+    /// windows and across a restart of this stage, so a window after the first
+    /// costs a copy per datagram rather than an allocation.
+    deriver: WindowDeriver,
 }
 
 /// The posting stage's state, held across a restart.
@@ -320,6 +338,7 @@ fn derivation_stage(state: &mut Deriving, stop: &AtomicBool, counters: &InlineCo
         spool,
         window_seq,
         preceding,
+        deriver,
     } = state;
 
     // No stop flag is consulted here, deliberately. The ring closing is the
@@ -337,28 +356,19 @@ fn derivation_stage(state: &mut Deriving, stop: &AtomicBool, counters: &InlineCo
             link_headers_captured: config.link_headers_captured,
         };
 
-        // Walked once, by the derivation itself. The manifest describes the
-        // tally, and the tally is only complete when the walk is — so it is
-        // built from a first pass over the window and the rows come from the
-        // same pass, through `derive`, which reads the window to its end.
-        let manifest = {
-            let probe = window_manifest(&identity, window.tally(), *window_seq, 0, 0);
-            match derive(
-                &mut window,
-                &DeriveInput {
-                    manifest: &probe,
-                    drop_scope: config.drop_scope,
-                    preceding: preceding.as_ref(),
-                    derivation: Derivation::Live,
-                },
-            ) {
+        // Drained, then described, then derived — in that order, because a
+        // manifest describes what the window saw and `derive` stamps that
+        // manifest onto every row as it reads. `WindowDeriver` owns the order
+        // and the equivalence gate calls the same thing, so the shape asserted
+        // is the shape that runs.
+        let derived =
+            match deriver.derive_window(&mut window, &identity, *window_seq, preceding.as_ref()) {
                 Ok(derived) => Some(derived),
                 Err(e) => {
                     eprintln!("dz-recorder: a window derived nothing: {e}");
                     None
                 }
-            }
-        };
+            };
 
         let closed = window.closed();
         let tally_start = window.tally().first_recv_ts_ns;
@@ -366,35 +376,57 @@ fn derivation_stage(state: &mut Deriving, stop: &AtomicBool, counters: &InlineCo
         drop(window);
 
         if empty {
+            // And it spends no window sequence number: a hole there says the
+            // derivation was down, and a feed that has gone quiet closes
+            // windows on age as a matter of course.
             counters.windows_empty.fetch_add(1, Ordering::Relaxed);
-        } else if let Some(derived) = manifest {
-            counters.windows_derived.fetch_add(1, Ordering::Relaxed);
-            counters
-                .rows_derived
-                .fetch_add(derived.rows.len() as u64, Ordering::Relaxed);
-            let trailer = derived.trailer.clone();
-            let mut held = spool
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            match held.store(tally_start, derived.rows, derived.trailer) {
-                Ok(()) => {
-                    counters.windows_stored.fetch_add(1, Ordering::Relaxed);
+        } else {
+            // Spent by every window that saw a datagram, whatever became of its
+            // rows. A window whose derivation or whose spool failed has lost
+            // rows, and a hole in the sequence is exactly what that is.
+            *window_seq += 1;
+            if let Some(derived) = derived {
+                counters.windows_derived.fetch_add(1, Ordering::Relaxed);
+
+                counters
+                    .rows_derived
+                    .fetch_add(derived.rows.len() as u64, Ordering::Relaxed);
+                let trailer = derived.trailer.clone();
+                let mut held = spool
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                match held.store(tally_start, derived.rows, derived.trailer) {
+                    Ok(()) => {
+                        counters.windows_stored.fetch_add(1, Ordering::Relaxed);
+                        *preceding = Some(trailer);
+                    }
+                    // Counted and carried on. A spool that cannot take a window
+                    // costs that window's rows; stopping here would cost every
+                    // window after it as well.
+                    //
+                    // **And the next window's anchor becomes uncertain.** The
+                    // trailer is true, but the rows it describes are not in the
+                    // store, so handing it on would let a reader join across a
+                    // hole as one continuous sequence space.
+                    Err(e) => {
+                        eprintln!("dz-recorder: a window could not be spooled: {e}");
+                        *preceding = None;
+                    }
                 }
-                // Counted and carried on. A spool that cannot take a window
-                // costs that window's rows; stopping here would cost every
-                // window after it as well.
-                Err(e) => eprintln!("dz-recorder: a window could not be spooled: {e}"),
+                counters.spool_bytes.store(held.bytes(), Ordering::Relaxed);
+                drop(held);
+            } else {
+                // A window that saw datagrams and derived nothing describes
+                // them nowhere, so the next window's predecessor is unknown for
+                // the same reason a window the spool refused makes it unknown.
+                *preceding = None;
             }
-            counters.spool_bytes.store(held.bytes(), Ordering::Relaxed);
-            drop(held);
-            *preceding = Some(trailer);
         }
 
         // An ending is the capture's, and there is no next window to open.
         if closed == Closed::CaptureEnded {
             return;
         }
-        *window_seq += 1;
     }
 }
 

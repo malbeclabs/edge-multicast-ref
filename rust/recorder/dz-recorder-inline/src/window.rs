@@ -36,7 +36,7 @@
 use std::time::{Duration, Instant};
 
 use dz_recorder_archive::CoverageTracker;
-use dz_recorder_core::{RecordedDatagram, Source, SourceError};
+use dz_recorder_core::{OwnedDatagram, RecordedDatagram, Source, SourceError};
 
 use crate::ring::{Arrival, RingReceiver};
 
@@ -91,6 +91,15 @@ pub struct WindowTally {
     /// can vouch for.
     pub first_recv_ts_ns: u64,
     pub last_recv_ts_ns: u64,
+    /// Every `drop_delta` the window walked, whatever port role carried it.
+    ///
+    /// The archive writer's own arithmetic over the same field, so the two
+    /// modes' `capture_drop_total` mean one thing and a reader can subtract one
+    /// mode's coverage row from the other's. At `capture-handle` scope that
+    /// total is the only one there is; at `port-role` scope the manifest still
+    /// carries one number for the window, because the coverage grain is the
+    /// window and not the role.
+    pub capture_drop_total: u64,
     pub coverage: CoverageTracker,
 }
 
@@ -118,7 +127,9 @@ impl<'a> WindowSource<'a> {
         }
     }
 
-    /// What the window saw. Meaningful once the derivation has read it out.
+    /// What the window saw. **Meaningful only once the window has been walked**
+    /// — see [`HeldWindow`], which is what walks it, and the manifest a caller
+    /// builds from this before then describes nothing.
     #[must_use]
     pub const fn tally(&self) -> &WindowTally {
         &self.tally
@@ -133,9 +144,17 @@ impl<'a> WindowSource<'a> {
 
     /// True when nothing arrived at all.
     ///
-    /// An empty window spends no window sequence number and derives no rows, for
-    /// the reason an empty segment spends no segment sequence number: a gap in
-    /// the sequence of windows is how a reader learns the derivation has one.
+    /// **An empty window spends no window sequence number** and derives no rows,
+    /// for the reason an empty segment spends no segment sequence number: a gap
+    /// in the sequence of windows is how a reader learns the derivation has one.
+    /// A quiet feed closes windows on age and that is ordinary, so a window
+    /// which spent a number on nothing would state *the derivation was down*
+    /// once a window bound for as long as the feed stayed silent.
+    ///
+    /// It is also what holds the era anchor across the silence: the
+    /// predecessor test is `segment_seq + 1`, so a spent number leaves the next
+    /// window's trailer two behind and an uncertain anchor after every quiet
+    /// stretch.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.tally.datagram_count == 0
@@ -179,6 +198,7 @@ impl Source for WindowSource<'_> {
             let dg = self.ring.in_hand().expect("the wait took a slot in hand");
             self.tally.datagram_count += 1;
             self.tally.payload_byte_count += dg.payload.len() as u64;
+            self.tally.capture_drop_total += u64::from(dg.drop_delta);
             if self.tally.first_recv_ts_ns == 0 {
                 self.tally.first_recv_ts_ns = dg.recv_ts_ns;
             }
@@ -186,5 +206,119 @@ impl Source for WindowSource<'_> {
             self.tally.coverage.observe(&dg);
         }
         Ok(self.ring.in_hand())
+    }
+}
+
+/// One window's datagrams, kept so that the window can be read a second time.
+///
+/// # Why a window is read twice
+///
+/// [`derive`] stamps its manifest — the window key, the window sequence, the
+/// start and the end — onto every row as it reads, so the manifest has to exist
+/// before the first datagram is taken. A window's manifest describes what the
+/// window saw, and a window has seen nothing until it has been walked. One pass
+/// cannot satisfy both, and an object never had to: the writer counted as it
+/// wrote the file and the loader walks the finished file again.
+///
+/// A window is what replaces the object, so the window is what has to be
+/// readable twice. This is that: [`fill`](Self::fill) drains the ring and
+/// completes the tally, and [`replay`](Self::replay) hands the same datagrams
+/// back in arrival order.
+///
+/// **What one pass writes instead is not a slower derivation.** It is a manifest
+/// built from [`WindowTally::default`]: `start_ns` and `end_ns` at zero, so
+/// every coverage row is stamped at the Unix epoch; no `instances`, so no
+/// coverage row is written at all; and a window key of `live/…/0-<window_seq>`,
+/// which is one key for window *k* of every run this recorder ever makes. That
+/// last is the loss — the coverage grain is deduplicated on a sort key ending in
+/// the start stamp, so a second run's window replaces the first's rather than
+/// standing beside it.
+///
+/// # It is reused, window after window
+///
+/// The buffer belongs to the derivation stage and outlives every window taken
+/// from it. Slots are refilled through the ring's own [`refill`], so a window
+/// after the first costs a copy per datagram and not an allocation — the
+/// discipline the ring's pooled slots follow, for the same reason, one thread
+/// further along.
+///
+/// [`derive`]: dz_recorder_rows::derive
+/// [`refill`]: crate::ring
+#[derive(Debug, Default)]
+pub struct HeldWindow {
+    /// Every slot ever needed, in arrival order for the first `filled` of them.
+    /// The rest are slots an earlier, longer window left behind, kept for the
+    /// payload capacity they have already grown to.
+    datagrams: Vec<OwnedDatagram>,
+    filled: usize,
+}
+
+impl HeldWindow {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            datagrams: Vec::new(),
+            filled: 0,
+        }
+    }
+
+    /// Drains `window` to its close, keeping every datagram it handed over.
+    ///
+    /// After this the window's [`tally`](WindowSource::tally),
+    /// [`closed`](WindowSource::closed) and [`is_empty`](WindowSource::is_empty)
+    /// all describe a completed window, which is when a manifest may be built
+    /// from them.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the window's source failed with. Nothing is retained: a window
+    /// that did not reach its close may not be derived, because the tally
+    /// describing it would be short by however much was not read.
+    pub fn fill(&mut self, window: &mut WindowSource<'_>) -> Result<(), SourceError> {
+        self.filled = 0;
+        while let Some(dg) = window.next()? {
+            if self.filled == self.datagrams.len() {
+                // Nothing reserved: a window of small datagrams holds many
+                // slots, and reserving a datagram's worth on each would cost
+                // orders of magnitude more than the window's own bound.
+                self.datagrams.push(crate::ring::slot(0));
+            }
+            // `dg.drop_delta` verbatim: it is already what the ring rewrote it
+            // to, and the debt the ring folded in is part of what this window
+            // has to admit.
+            crate::ring::refill(&mut self.datagrams[self.filled], &dg, dg.drop_delta);
+            self.filled += 1;
+        }
+        Ok(())
+    }
+
+    /// The datagrams [`fill`](Self::fill) kept, as a source that ends.
+    #[must_use]
+    pub fn replay(&self) -> Replay<'_> {
+        Replay {
+            datagrams: &self.datagrams[..self.filled],
+            next: 0,
+        }
+    }
+}
+
+/// A [`HeldWindow`]'s second pass: the same datagrams, in arrival order.
+#[derive(Debug)]
+pub struct Replay<'a> {
+    datagrams: &'a [OwnedDatagram],
+    next: usize,
+}
+
+impl Source for Replay<'_> {
+    fn next(&mut self) -> Result<Option<RecordedDatagram<'_>>, SourceError> {
+        // Copied out of `self` before the cursor moves: the borrow this returns
+        // comes from the buffer and not from the receiver, which is what lets a
+        // caller advance and read in one expression.
+        let datagrams = self.datagrams;
+        let Some(dg) = datagrams.get(self.next) else {
+            return Ok(None);
+        };
+        self.next += 1;
+        Ok(Some(dg.as_recorded()))
     }
 }

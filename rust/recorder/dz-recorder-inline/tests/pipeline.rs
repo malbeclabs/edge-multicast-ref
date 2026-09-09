@@ -25,6 +25,9 @@ use tempfile::TempDir;
 struct Store {
     landed_keys: Vec<String>,
     datagram_rows: usize,
+    /// Every batch, kept whole rather than counted, so a test can ask what a
+    /// row says and not only how many there were.
+    batches: Vec<RowBatch>,
     /// Writes remaining before this one panics. `None` never panics.
     panic_after: Option<usize>,
 }
@@ -45,6 +48,7 @@ impl RowSink for FakeSink {
         }
         store.datagram_rows += rows.datagram.len();
         store.landed_keys.push(rows.object_key.clone());
+        store.batches.push(rows.clone());
         let accepted = Written::of(&rows, 0);
         Ok(Accepted {
             accepted,
@@ -114,6 +118,235 @@ fn ledger_entries(path: &std::path::Path) -> usize {
         .lines()
         .filter(|l| !l.trim().is_empty())
         .count()
+}
+
+/// One whole run of the pipeline over `sent`, and the batches it posted.
+///
+/// A run of its own each time — its own spool, its own ledger, its own window
+/// sequence starting at zero — because that is what a process restart is, and
+/// two runs of one recorder are what the window key has to keep apart.
+fn run_over(sent: &[OwnedDatagram]) -> Vec<RowBatch> {
+    let store = Arc::new(Mutex::new(Store::default()));
+    let fixture = fixture();
+    let (mut tx, rx) = ring(256);
+    let mut cfg = config();
+    // Far longer than the run, so the only thing that closes the window is the
+    // capture ending: one window for the whole stream.
+    cfg.bound.interval = Duration::from_secs(3_600);
+    let pipeline = start(
+        rx,
+        fixture.spool,
+        fixture.ledger,
+        FakeSink(Arc::clone(&store)),
+        cfg,
+    );
+    for dg in sent {
+        assert_eq!(tx.offer(&dg.as_recorded()), Offered::Accepted);
+    }
+    pipeline.stop(tx);
+    let posted = std::mem::take(&mut store.lock().expect("the store is not poisoned").batches);
+    posted
+}
+
+/// The manifest describes the window the derivation walked, not an empty one.
+///
+/// **`recorder.segment_coverage` is a `ReplacingMergeTree` whose sort key ends
+/// in `start_ts`, and `window_seq` restarts at zero on every run.** The stamp is
+/// therefore the only thing in that key separating the second run's window *k*
+/// from the first run's window *k*, which is why the window key carries it. A
+/// manifest built before the window has been walked carries `start_ns = 0`,
+/// `end_ns = 0` and no per-instance coverage at all: every window of every run
+/// then shares one sort key and the second run replaces the first, and the rows
+/// that would have said which datagrams were covered are not written.
+#[test]
+fn two_runs_of_one_recorder_do_not_describe_one_window_twice() {
+    let first: Vec<OwnedDatagram> = SyntheticPublisher::clean(40).datagrams();
+    // The same recorder, the same feed and the same window sequence a minute
+    // later, over datagrams the first run never saw.
+    let mut second = first.clone();
+    for dg in &mut second {
+        dg.recv_ts_ns += 60_000_000_000;
+    }
+
+    let runs = [(run_over(&first), first), (run_over(&second), second)];
+    for (batches, sent) in &runs {
+        let batch = batches.first().expect("the run posted its window");
+        let first_ts = sent.first().expect("the stream is not empty").recv_ts_ns;
+        let last_ts = sent.last().expect("the stream is not empty").recv_ts_ns;
+
+        assert!(
+            !batch.segment_coverage.is_empty(),
+            "a window that walked {} datagrams describes no channel instance, so the \
+             manifest it was derived against saw nothing",
+            sent.len()
+        );
+        for row in &batch.segment_coverage {
+            assert_eq!(
+                row.start_ts.0, first_ts,
+                "the coverage row is stamped with something other than the window's first \
+                 receive timestamp"
+            );
+            assert_eq!(row.end_ts.0, last_ts, "and its end likewise");
+        }
+        assert!(
+            batch.object_key.ends_with(&format!("/{first_ts}-0")),
+            "the window key must carry the window's start stamp: {}",
+            batch.object_key
+        );
+    }
+
+    let [(one, _), (two, _)] = &runs;
+    let keys_one: Vec<&str> = one.iter().map(|b| b.object_key.as_str()).collect();
+    let keys_two: Vec<&str> = two.iter().map(|b| b.object_key.as_str()).collect();
+    assert_ne!(
+        keys_one, keys_two,
+        "two runs of one recorder produced one another's window keys, so the second run's \
+         rows replace the first run's"
+    );
+}
+
+/// The window sequence number each posted batch carries.
+fn window_sequence(batches: &[RowBatch]) -> Vec<u64> {
+    batches
+        .iter()
+        .map(|b| {
+            b.segment_coverage
+                .first()
+                .expect("a posted window describes what it covered")
+                .segment_seq
+        })
+        .collect()
+}
+
+/// A quiet stretch leaves no hole in the window sequence.
+///
+/// A hole in `segment_seq` is how a reader learns the derivation had one, which
+/// is the whole of what distinguishes a recorder that was down from a feed that
+/// was quiet. A feed that goes silent closes windows on age as a matter of
+/// course, so a window that saw nothing must leave the sequence where it found
+/// it — otherwise a silent feed states *the derivation was down* once a window
+/// bound for as long as the silence lasts.
+///
+/// The era anchor is the same assertion from the other end. The predecessor test
+/// is `segment_seq + 1`, so a spent number would leave the window after the
+/// silence two ahead of its trailer and its anchor uncertain.
+#[test]
+fn a_quiet_window_spends_no_window_sequence_number() {
+    let sent: Vec<OwnedDatagram> = SyntheticPublisher::clean(20).datagrams();
+    let store = Arc::new(Mutex::new(Store::default()));
+    let fixture = fixture();
+
+    let (mut tx, rx) = ring(256);
+    let mut cfg = config();
+    // Short, so that the silence below is several windows long rather than a
+    // fraction of one.
+    cfg.bound.interval = Duration::from_millis(120);
+    let pipeline = start(
+        rx,
+        fixture.spool,
+        fixture.ledger,
+        FakeSink(Arc::clone(&store)),
+        cfg,
+    );
+
+    for dg in &sent[..10] {
+        assert_eq!(tx.offer(&dg.as_recorded()), Offered::Accepted);
+    }
+    // Long enough for the burst's own window to close on age and for windows
+    // after it to close on age having seen nothing at all.
+    std::thread::sleep(Duration::from_millis(500));
+    for dg in &sent[10..] {
+        assert_eq!(tx.offer(&dg.as_recorded()), Offered::Accepted);
+    }
+    let counters = pipeline.stop(tx);
+
+    assert!(
+        counters.windows_empty() >= 1,
+        "the fixture is meant to leave a window with nothing in it"
+    );
+
+    let batches = std::mem::take(&mut store.lock().expect("the store is not poisoned").batches);
+    let seqs = window_sequence(&batches);
+    assert!(
+        seqs.len() >= 2,
+        "the fixture is meant to derive a window either side of the silence: {seqs:?}"
+    );
+    assert_eq!(
+        seqs,
+        (0..seqs.len() as u64).collect::<Vec<u64>>(),
+        "a window that saw nothing spent a sequence number, so the derivation reports a \
+         hole where a feed was merely quiet"
+    );
+
+    for batch in &batches[1..] {
+        for row in &batch.era {
+            assert_eq!(
+                row.anchor_certain, 1,
+                "the window after the silence cannot see its predecessor: {row:?}"
+            );
+        }
+    }
+}
+
+/// A window the spool refused hands its trailer to nobody.
+///
+/// The trailer is true — the derivation did read those datagrams — but the rows
+/// it describes are not in the store. Handing it on would let the next window
+/// declare a certain anchor and a continuation, and a reader would join two eras
+/// as one continuous sequence space across a hole nothing in the rows can
+/// explain. `None` there means *unknown*, and never *there was none*.
+#[cfg(unix)]
+#[test]
+fn a_window_the_spool_refused_leaves_the_next_window_uncertain() {
+    use std::os::unix::fs::PermissionsExt;
+
+    fn mode(dir: &std::path::Path, bits: u32) {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(bits))
+            .expect("the mode can be set");
+    }
+
+    let sent: Vec<OwnedDatagram> = SyntheticPublisher::clean(20).datagrams();
+    let store = Arc::new(Mutex::new(Store::default()));
+    let dir = TempDir::new().expect("a temporary directory");
+    let spool_dir = dir.path().join("spool");
+    let ledger_path = dir.path().join("ledger.jsonl");
+    let spool = Spool::open(&spool_dir, 64 * 1024 * 1024).expect("the spool opens");
+    let ledger = Ledger::open(&ledger_path).expect("the ledger opens");
+
+    let (mut tx, rx) = ring(256);
+    let mut cfg = config();
+    cfg.bound.interval = Duration::from_millis(120);
+    let pipeline = start(rx, spool, ledger, FakeSink(Arc::clone(&store)), cfg);
+
+    // Readable and listable, not writable: the first window derives and then
+    // cannot be written down, which is the case under test and not a spool bug.
+    mode(&spool_dir, 0o500);
+    for dg in &sent[..10] {
+        assert_eq!(tx.offer(&dg.as_recorded()), Offered::Accepted);
+    }
+    std::thread::sleep(Duration::from_millis(400));
+    // And writable again, so that there is a later window to read the anchor
+    // off. A run where nothing lands proves nothing about what landed.
+    mode(&spool_dir, 0o700);
+    for dg in &sent[10..] {
+        assert_eq!(tx.offer(&dg.as_recorded()), Offered::Accepted);
+    }
+    pipeline.stop(tx);
+
+    let batches = std::mem::take(&mut store.lock().expect("the store is not poisoned").batches);
+    let batch = batches
+        .first()
+        .expect("the window after the refusal reached the store");
+    assert!(
+        !batch.era.is_empty(),
+        "the window after the refusal derived no era, so this asserts nothing"
+    );
+    for row in &batch.era {
+        assert_eq!(
+            row.anchor_certain, 0,
+            "the window after a refused one anchored on a trailer whose rows were lost: {row:?}"
+        );
+    }
 }
 
 /// Datagrams offered to the ring reach the store, and the ledger records them.

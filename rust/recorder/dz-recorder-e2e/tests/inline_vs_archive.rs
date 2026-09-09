@@ -29,13 +29,14 @@ mod common;
 
 use common::{identity, record};
 use dz_edge_core::PortRole;
-use dz_recorder_core::{CaptureDropScope, OwnedDatagram, Source as _};
-use dz_recorder_inline::manifest::{window_manifest, WindowIdentity};
+use dz_recorder_core::{CaptureDropScope, OwnedDatagram};
+use dz_recorder_inline::derivation::WindowDeriver;
+use dz_recorder_inline::manifest::WindowIdentity;
 use dz_recorder_inline::ring::{ring, Offered};
 use dz_recorder_inline::window::{WindowBound, WindowSource};
 use dz_recorder_replay::synthetic::SyntheticPublisher;
 use dz_recorder_replay::Fault;
-use dz_recorder_rows::{derive, derive_object, Derivation, DeriveInput, Derived, RowBatch};
+use dz_recorder_rows::{derive_object, Derivation, Derived, RowBatch};
 
 /// Long enough that no window in this file ever closes on age: every one of them
 /// is meant to hold the whole stream, so that the comparison is window-for-
@@ -86,40 +87,21 @@ fn derive_inline(
             interval: NEVER,
         },
     );
-    // Read it out first: the manifest describes what the window saw, and the
-    // window has not seen anything until the derivation has walked it.
-    let mut walked = Vec::new();
-    while let Some(dg) = window.next().expect("the ring does not fail") {
-        walked.push(dg.recv_ts_ns);
-    }
-    assert_eq!(walked.len(), sent.len(), "the window saw the whole stream");
-
-    let manifest = window_manifest(&window_identity, window.tally(), segment_seq, 0, 0);
-
-    // A second window over the same datagrams, because the first was consumed
-    // reading the tally. The ring is empty now, so this one is fed directly.
-    let (mut tx, mut rx) = ring(sent.len() + 8);
-    for dg in sent {
-        assert_eq!(tx.offer(&dg.as_recorded()), Offered::Accepted);
-    }
-    drop(tx);
-    let mut window = WindowSource::open(
-        &mut rx,
-        WindowBound {
-            bytes: u64::MAX,
-            interval: NEVER,
-        },
+    // **The derivation stage's own two passes, called and not arranged here.**
+    // The manifest describes what the window saw and the window has seen
+    // nothing until it has been walked, so a window is drained and then derived
+    // from what was drained. This test used to do that itself, over a second
+    // ring — and the derivation stage did not, so the gate was green over a
+    // shape nothing ran, which is the one failure a gate cannot report.
+    let derived = WindowDeriver::new()
+        .derive_window(&mut window, &window_identity, segment_seq, None)
+        .expect("the window derives");
+    assert_eq!(
+        window.tally().datagram_count as usize,
+        sent.len(),
+        "the window saw the whole stream"
     );
-    derive(
-        &mut window,
-        &DeriveInput {
-            manifest: &manifest,
-            drop_scope,
-            preceding: None,
-            derivation: Derivation::Live,
-        },
-    )
-    .expect("the window derives")
+    derived
 }
 
 /// Erases the three fields that must differ, so `assert_eq!` can do the rest.
@@ -295,10 +277,12 @@ fn every_injected_fault_derives_identically_through_both_paths() {
 /// rest. The derivation drains concurrently, and the datagram that reopens the
 /// feed after the pause is the one that has to admit what was lost.
 ///
-/// The manifest is built from an empty tally on purpose: coverage rows are not
-/// what this asks about, and the equivalence tests above are what hold those
-/// honest. Gap rows come from the loss deriver reading `drop_delta`, which is
-/// exactly the path under test.
+/// Derived through the same two passes as everything above, so that what
+/// drains the ring here is what drains it in production: the first pass runs
+/// while the capture thread is still offering, which is the concurrency this
+/// test is about. Coverage rows are not what it asks — gap rows come from the
+/// loss deriver reading `drop_delta` — and the equivalence tests above are what
+/// hold the coverage grain honest.
 #[test]
 fn a_gap_the_ring_caused_is_not_attributed_to_the_publisher() {
     const CAPACITY: usize = 4;
@@ -324,19 +308,13 @@ fn a_gap_the_ring_caused_is_not_attributed_to_the_publisher() {
     });
 
     let id = identity();
-    let manifest = window_manifest(
-        &WindowIdentity {
-            identity: &id,
-            feed: "top-of-book",
-            roles_joined: &[],
-            drop_scope: CaptureDropScope::PortRole,
-            link_headers_captured: false,
-        },
-        &dz_recorder_inline::window::WindowTally::default(),
-        0,
-        0,
-        0,
-    );
+    let window_identity = WindowIdentity {
+        identity: &id,
+        feed: "top-of-book",
+        roles_joined: &[],
+        drop_scope: CaptureDropScope::PortRole,
+        link_headers_captured: false,
+    };
 
     let mut window = WindowSource::open(
         &mut rx,
@@ -345,16 +323,9 @@ fn a_gap_the_ring_caused_is_not_attributed_to_the_publisher() {
             interval: std::time::Duration::from_secs(5),
         },
     );
-    let derived = derive(
-        &mut window,
-        &DeriveInput {
-            manifest: &manifest,
-            drop_scope: CaptureDropScope::PortRole,
-            preceding: None,
-            derivation: Derivation::Live,
-        },
-    )
-    .expect("the window derives");
+    let derived = WindowDeriver::new()
+        .derive_window(&mut window, &window_identity, 0, None)
+        .expect("the window derives");
 
     let dropped = producer.join().expect("the capture thread does not panic");
     assert!(dropped > 0, "the ring was meant to be overrun");

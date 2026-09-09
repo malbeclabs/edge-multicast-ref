@@ -7,10 +7,10 @@
 //! though it had been.**
 //!
 //! Most of it is observed. The identity, the counts, the per-instance coverage,
-//! the declared drop scope, the roles joined and whether the link headers were
-//! captured are all facts about this window, and the archive path would write
-//! exactly the same values. Two fields are not, and both are left empty rather
-//! than filled with something plausible:
+//! the capture's own drop total, the declared drop scope, the roles joined and
+//! whether the link headers were captured are all facts about this window, and
+//! the archive path would write exactly the same values. Three fields are not,
+//! and each is left empty rather than filled with something plausible:
 //!
 //! - **`sha256` is the empty string.** No datagram was kept, so nothing was
 //!   hashed. A digest computed over anything else — the rows, the payloads in
@@ -20,6 +20,22 @@
 //!   makes it legible rather than merely missing.
 //! - **`byte_count` is zero**, for the same reason: there is no object to have a
 //!   size.
+//! - **`interface_drop_total` is zero, and so is archive mode's.** Loss upstream
+//!   of the capture point is read per capture handle, while this field's
+//!   accounting is per port role — so the record path hands it to the health
+//!   tier and never to a segment, deliberately, because at capture-handle scope
+//!   there is no role to charge it to and a guess recorded as a number is how a
+//!   false publisher-loss finding is made. Inline mode writing a number here
+//!   would be one mode claiming a measurement the other declines to make, in a
+//!   column a reader subtracts across both.
+//!
+//! `capture_drop_total` is on the observed side, and by the writer's own
+//! arithmetic: the window sums every `drop_delta` it walked, which is what
+//! `SegmentWriter` sums into the same field over the same unit. In inline mode
+//! that sum includes what the ring itself dropped, because the ring folds its
+//! debt into the same field before the derivation ever sees it — which is the
+//! honest total for a column asking whether this host kept up, and the reason
+//! the ring charges its drops there in the first place.
 //!
 //! `object_key` is a window key. It is not empty, because it identifies the
 //! window in the ledger and in the rows, and it carries the window's start in
@@ -79,13 +95,21 @@ pub fn window_key(identity: &WindowIdentity<'_>, start_ns: u64, window_seq: u64)
 /// `window_seq` is monotonic within a run and restarts at zero across one, the
 /// same as `segment_seq`: a hole in it is a hole in the derivation, which is
 /// what distinguishes a recorder that was down from a feed that was quiet.
+///
+/// **`tally` must describe a window that has been walked.** Every field below
+/// comes from it, so a tally taken before the walk produces a manifest that
+/// describes nothing and stamps that nothing onto every row — see
+/// [`HeldWindow`](crate::window::HeldWindow), which is what walks it.
+///
+/// There is deliberately no parameter here. Both cumulative drop totals used to
+/// be arguments, and both arrived as a literal zero from the one caller for as
+/// long as they existed: a builder that can be handed a number nobody observed
+/// is a builder that will be.
 #[must_use]
 pub fn window_manifest(
     identity: &WindowIdentity<'_>,
     tally: &WindowTally,
     window_seq: u64,
-    capture_drop_total: u64,
-    interface_drop_total: u64,
 ) -> SegmentManifest {
     let id = identity.identity;
     SegmentManifest {
@@ -115,9 +139,15 @@ pub fn window_manifest(
         short_datagrams: tally.coverage.short_datagrams(),
         instances_dropped: tally.coverage.instances_dropped(),
 
-        capture_drop_total,
+        // The archive writer's own arithmetic, over the same field and the same
+        // unit: the sum of every `drop_delta` the window walked.
+        capture_drop_total: tally.capture_drop_total,
         capture_drop_scope: scope_token(identity.drop_scope).to_owned(),
-        interface_drop_total,
+        // Zero, and the same zero archive mode writes. See the module
+        // documentation: neither mode's manifest can attribute loss upstream of
+        // the capture point, and one mode writing a number there would make the
+        // two modes' coverage rows unsubtractable.
+        interface_drop_total: 0,
 
         roles_joined: identity.roles_joined.to_vec(),
         link_headers: if identity.link_headers_captured {

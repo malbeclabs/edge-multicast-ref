@@ -49,6 +49,7 @@
 //! [`Source`]: dz_recorder_core::Source
 #![forbid(unsafe_code)]
 
+pub mod derivation;
 pub mod manifest;
 pub mod metrics;
 pub mod pipeline;

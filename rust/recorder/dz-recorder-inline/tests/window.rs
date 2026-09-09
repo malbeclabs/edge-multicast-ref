@@ -10,7 +10,7 @@ use dz_recorder_archive::JoinedRole;
 use dz_recorder_core::{CaptureDropScope, OwnedDatagram, RecorderIdentity, Source as _};
 use dz_recorder_inline::manifest::{window_key, window_manifest, WindowIdentity};
 use dz_recorder_inline::ring::{ring, Offered, RingSender};
-use dz_recorder_inline::window::{Closed, WindowBound, WindowSource};
+use dz_recorder_inline::window::{Closed, HeldWindow, WindowBound, WindowSource};
 use dz_recorder_replay::synthetic::{SyntheticPublisher, GROUP};
 
 const FEED: &str = "top-of-book";
@@ -215,7 +215,7 @@ fn a_window_manifest_leaves_the_digest_and_the_size_empty() {
     let id = identity();
     let roles = roles();
     let wid = window_identity(&id, &roles);
-    let manifest = window_manifest(&wid, window.tally(), 7, 3, 0);
+    let manifest = window_manifest(&wid, window.tally(), 7);
 
     assert_eq!(
         manifest.sha256, "",
@@ -224,6 +224,10 @@ fn a_window_manifest_leaves_the_digest_and_the_size_empty() {
     assert_eq!(
         manifest.byte_count, 0,
         "and there is no object to have a size"
+    );
+    assert_eq!(
+        manifest.interface_drop_total, 0,
+        "loss upstream of the capture point is not in either mode's manifest"
     );
 
     // Everything else is observed, and is what the archive path would write.
@@ -236,7 +240,10 @@ fn a_window_manifest_leaves_the_digest_and_the_size_empty() {
     assert_eq!(manifest.payload_byte_count, each * 5);
     assert_eq!(manifest.start_ns, first_ts);
     assert_eq!(manifest.end_ns, last_ts);
-    assert_eq!(manifest.capture_drop_total, 3);
+    assert_eq!(
+        manifest.capture_drop_total, 0,
+        "this stream declares no drops, and the window may not invent any"
+    );
     assert_eq!(manifest.capture_drop_scope, "port-role");
     assert_eq!(manifest.link_headers, "synthesised");
     assert_eq!(manifest.roles_joined.len(), 1);
@@ -269,4 +276,112 @@ fn a_window_key_carries_the_start_stamp_and_says_it_names_no_object() {
     assert!(first_run.starts_with("live/"), "{first_run}");
     assert!(first_run.contains("site=site-1"), "{first_run}");
     assert!(first_run.contains(&format!("feed={FEED}")), "{first_run}");
+}
+
+/// The window's capture drop total is the sum of what it walked, not a zero.
+///
+/// **A column that always says zero is worse than one nobody wrote**, because a
+/// reader asking *did this host keep up* gets an answer rather than a gap. The
+/// quantity is the archive writer's own: every `drop_delta` the unit saw,
+/// whatever port role carried it, so one mode's `segment_coverage` row can be
+/// subtracted from the other's.
+///
+/// Take the sum out of `window_manifest` and this fails.
+#[test]
+fn a_window_sums_the_capture_drops_it_walked() {
+    let mut datagrams = stream(5);
+    // Declared by the capture, before the ring: the kernel lost four datagrams
+    // before this one and two before that one.
+    datagrams[1].drop_delta = 4;
+    datagrams[3].drop_delta = 2;
+
+    let (mut tx, mut rx) = ring(64);
+    offer_all(&mut tx, &datagrams);
+    drop(tx);
+
+    let mut window = WindowSource::open(
+        &mut rx,
+        WindowBound {
+            bytes: u64::MAX,
+            interval: LONG,
+        },
+    );
+    while window.next().expect("the ring does not fail").is_some() {}
+
+    assert_eq!(
+        window.tally().capture_drop_total,
+        6,
+        "the window walked two declared deltas and reported {}",
+        window.tally().capture_drop_total
+    );
+
+    let id = identity();
+    let roles = roles();
+    let manifest = window_manifest(&window_identity(&id, &roles), window.tally(), 0);
+    assert_eq!(
+        manifest.capture_drop_total, 6,
+        "and the manifest carries what the window counted"
+    );
+}
+
+/// A held window hands the same datagrams back, so the second pass sees them.
+///
+/// The manifest describes what the window saw, and `derive` stamps it onto every
+/// row as it reads — so the window has to be readable twice. This is the half of
+/// that which is not the derivation: what goes in comes out, in arrival order,
+/// carrying the delta the ring wrote on it.
+#[test]
+fn a_held_window_replays_what_it_drained_in_arrival_order() {
+    let mut datagrams = stream(6);
+    datagrams[2].drop_delta = 3;
+
+    let (mut tx, mut rx) = ring(64);
+    offer_all(&mut tx, &datagrams);
+    drop(tx);
+
+    let mut held = HeldWindow::new();
+    let mut window = WindowSource::open(
+        &mut rx,
+        WindowBound {
+            bytes: u64::MAX,
+            interval: LONG,
+        },
+    );
+    held.fill(&mut window).expect("the ring does not fail");
+    assert_eq!(window.tally().datagram_count, 6, "the window was drained");
+
+    let mut replayed = Vec::new();
+    let mut source = held.replay();
+    while let Some(dg) = source.next().expect("a buffer does not fail") {
+        replayed.push((dg.recv_ts_ns, dg.drop_delta, dg.payload.to_vec()));
+    }
+
+    let expected: Vec<_> = datagrams
+        .iter()
+        .map(|dg| (dg.recv_ts_ns, dg.drop_delta, dg.payload.clone()))
+        .collect();
+    assert_eq!(replayed, expected, "the second pass is the first pass");
+
+    // And the buffer is reused rather than appended to: a shorter window after a
+    // longer one replays its own length, not the tail of its predecessor.
+    let (mut tx, mut rx) = ring(64);
+    offer_all(&mut tx, &datagrams[..2]);
+    drop(tx);
+    let mut window = WindowSource::open(
+        &mut rx,
+        WindowBound {
+            bytes: u64::MAX,
+            interval: LONG,
+        },
+    );
+    held.fill(&mut window).expect("the ring does not fail");
+    let mut source = held.replay();
+    let mut count = 0;
+    while source.next().expect("a buffer does not fail").is_some() {
+        count += 1;
+    }
+    assert_eq!(
+        count, 2,
+        "the second window replayed its predecessor's slots"
+    );
 }
