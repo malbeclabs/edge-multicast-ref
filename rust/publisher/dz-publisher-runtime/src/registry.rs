@@ -56,6 +56,11 @@ use std::collections::BTreeSet;
 
 use dz_adapter_core::Adapter;
 use dz_ingress_core::{Input, Kind};
+// Through the metrics crate's own re-export, not a direct dependency: a venue
+// whose manifest resolved a different major of `prometheus` would otherwise hit
+// the opaque `expected Box<dyn Collector>, found Box<dyn Collector>`. That
+// crate re-exports it for exactly this reason and says so.
+use dz_publisher_metrics::prometheus::core::Collector;
 use serde::de::DeserializeOwned;
 
 use crate::config::{AdapterConfig, FeedSpec, ReplayConfig, Source};
@@ -99,6 +104,31 @@ pub struct Venue {
     /// See the type's own note, and [`Venue::single`] for the publisher with
     /// one upstream.
     pub sources: Vec<Box<dyn Input>>,
+    /// The venue's own Prometheus collectors, for series the normative set does
+    /// not describe.
+    ///
+    /// **They travel up, out of the constructor, because they cannot travel
+    /// down into it.** [`PublisherMetrics`] is built from
+    /// [`Adapter::message_types`], which needs the adapter, which this
+    /// constructor is what returns — so there is no registry in existence at
+    /// the moment a venue is asked to build itself, and an
+    /// [`AdapterContext`] carrying one would be carrying a thing that does not
+    /// yet exist. A venue therefore hands its collectors back and the runtime
+    /// registers them once the normative set is there.
+    ///
+    /// **They go into a second registry, never the normative one.** That
+    /// registry refuses any name beginning `dz_publisher_`, so a venue cannot
+    /// shadow a series a subscriber's alert is written against — and the
+    /// refusal is a startup failure rather than a warning, because a publisher
+    /// that ran with a shadowed contract would be reporting one thing under the
+    /// name of another.
+    ///
+    /// Empty is the ordinary case and states nothing: a venue with no
+    /// microstructure worth counting is not a venue that failed to count it.
+    ///
+    /// [`PublisherMetrics`]: dz_publisher_metrics::PublisherMetrics
+    /// [`Adapter::message_types`]: dz_adapter_core::Adapter::message_types
+    pub collectors: Vec<Box<dyn Collector>>,
 }
 
 impl Venue {
@@ -112,7 +142,19 @@ impl Venue {
         Self {
             adapter,
             sources: vec![input],
+            collectors: Vec::new(),
         }
+    }
+
+    /// The same venue, with its own series to publish.
+    ///
+    /// A builder rather than a fourth argument to every constructor, because
+    /// most venues have none and the ones that do are stating something extra
+    /// rather than filling in something missing.
+    #[must_use]
+    pub fn with_collectors(mut self, collectors: Vec<Box<dyn Collector>>) -> Self {
+        self.collectors = collectors;
+        self
     }
 }
 

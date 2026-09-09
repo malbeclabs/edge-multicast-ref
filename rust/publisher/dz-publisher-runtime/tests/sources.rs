@@ -510,6 +510,7 @@ fn registry_building(builds: &'static [&'static str]) -> AdapterRegistry {
                         as Box<dyn dz_ingress_core::Input>
                 })
                 .collect(),
+            collectors: Vec::new(),
         })
     })
 }

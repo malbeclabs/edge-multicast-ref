@@ -204,6 +204,9 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
         }
         _ => venue.sources,
     };
+    // Taken before the adapter is, because both are fields of the same value
+    // and the adapter is about to be moved out of it.
+    let venue_collectors = venue.collectors;
     let adapter = Arc::new(Mutex::new(venue.adapter));
     let message_types = {
         let held = adapter.lock().unwrap_or_else(|held| held.into_inner());
@@ -226,6 +229,20 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
         channel_ids: &config.channel_ids(),
         ingress_message_types: &message_types,
     }));
+
+    // **Here and not earlier, because earlier does not exist.** The normative
+    // set is built from `Adapter::message_types`, which needs the adapter,
+    // which the venue's constructor is what returns — so at the moment a venue
+    // is asked to build itself there is no registry to hand it. Its collectors
+    // travel up instead, and are registered once there is somewhere to put
+    // them.
+    //
+    // A reserved name is a startup failure and not a warning. The whole point
+    // of the second registry is that a venue cannot shadow a series somebody
+    // else's alert is written against, and a publisher that ran anyway would be
+    // reporting one thing under the name of another for as long as nobody
+    // looked.
+    register_venue_collectors(&metrics, venue_collectors)?;
 
     let clock = SystemClock::new();
 
@@ -1058,9 +1075,132 @@ where
     std::task::Poll::Pending
 }
 
+/// Registers a venue's own collectors into the second registry.
+///
+/// **Called after the normative set exists, because it cannot be called
+/// before.** [`PublisherMetrics`] is built from `Adapter::message_types`, which
+/// needs the adapter, which the venue's constructor is what returns — so at the
+/// moment a venue is asked to build itself there is no registry to hand it. Its
+/// collectors travel up out of that constructor instead, on
+/// [`Venue::collectors`](crate::Venue::collectors), and land here.
+///
+/// # Errors
+///
+/// [`StartupError::VenueMetric`], and in practice one thing: a name beginning
+/// `dz_publisher_`. That prefix is reserved so a venue cannot shadow a series
+/// somebody else's alert is written against, and the refusal is a startup
+/// failure rather than a dropped collector — a publisher that ran anyway would
+/// report one thing under the name of another for as long as nobody looked.
+fn register_venue_collectors(
+    metrics: &PublisherMetrics,
+    collectors: Vec<Box<dyn dz_publisher_metrics::prometheus::core::Collector>>,
+) -> Result<(), StartupError> {
+    for collector in collectors {
+        metrics
+            .venue_registry()
+            .register(collector)
+            .map_err(|source| StartupError::VenueMetric { source })?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dz_publisher_metrics::prometheus::core::Collector;
+    use dz_publisher_metrics::prometheus::IntCounter;
+
+    /// A metrics set shaped like the smallest publisher there is.
+    fn metrics() -> PublisherMetrics {
+        PublisherMetrics::new(&PublisherMetricsConfig {
+            venue: "a-venue",
+            source_id: 1,
+            port_roles: &[dz_edge_core::PortRole::Mktdata],
+            connections: &["primary"],
+            channel_ids: &[0],
+            ingress_message_types: &["A-B"],
+        })
+    }
+
+    fn collector(name: &str) -> Box<dyn Collector> {
+        Box::new(IntCounter::new(name, "a venue's own count").expect("the metric is well formed"))
+    }
+
+    /// A venue's series reaches the exposition, under the venue registry.
+    ///
+    /// The whole ask: a venue counts something the normative set has no name
+    /// for, and an operator scraping one endpoint sees it beside the series
+    /// that set does describe.
+    #[test]
+    fn a_venue_collector_reaches_the_exposition() {
+        let metrics = metrics();
+        register_venue_collectors(&metrics, vec![collector("venue_books_crossed_total")])
+            .expect("a name outside the reserved prefix is taken");
+
+        let rendered = metrics.render();
+        assert!(
+            rendered.contains("venue_books_crossed_total"),
+            "the venue's own series is not in the exposition: {rendered}"
+        );
+        // And it did not displace the normative set, which is the other half of
+        // one endpoint carrying both.
+        assert!(rendered.contains("dz_publisher_"), "{rendered}");
+    }
+
+    /// A venue cannot shadow the normative contract, and finds out at startup.
+    ///
+    /// The reserved prefix exists so that a series a subscriber's alert is
+    /// written against means what that subscriber thinks it means. A collector
+    /// that was dropped with a warning would leave a publisher reporting one
+    /// thing under the name of another for as long as nobody read the log — so
+    /// this refuses, and the message names what was refused.
+    #[test]
+    fn a_reserved_name_is_refused_at_startup_and_named() {
+        let metrics = metrics();
+        let error = register_venue_collectors(
+            &metrics,
+            vec![collector("dz_publisher_egress_datagrams_total")],
+        )
+        .expect_err("the reserved prefix is not a venue's to use");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("dz_publisher_egress_datagrams_total"),
+            "the refusal has to name the series an operator must rename: {message}"
+        );
+    }
+
+    /// One bad collector refuses the run rather than half-registering it.
+    ///
+    /// A publisher that started with some of a venue's series present and some
+    /// absent is one whose dashboard has holes nobody can distinguish from a
+    /// venue that never counted them.
+    #[test]
+    fn a_refused_collector_stops_the_whole_registration() {
+        let metrics = metrics();
+        let error = register_venue_collectors(
+            &metrics,
+            vec![
+                collector("venue_first_total"),
+                collector("dz_publisher_not_yours_total"),
+                collector("venue_third_total"),
+            ],
+        );
+        assert!(error.is_err());
+        let rendered = metrics.render();
+        assert!(
+            !rendered.contains("venue_third_total"),
+            "registration continued past the refusal: {rendered}"
+        );
+    }
+
+    /// A venue with nothing to add is not a venue that failed to add it.
+    #[test]
+    fn a_venue_with_no_collectors_registers_nothing_and_succeeds() {
+        let metrics = metrics();
+        register_venue_collectors(&metrics, Vec::new()).expect("empty is the ordinary case");
+        assert!(metrics.render().contains("dz_publisher_"));
+    }
 
     #[test]
     fn a_repeated_refusal_is_printed_on_a_decade_schedule() {

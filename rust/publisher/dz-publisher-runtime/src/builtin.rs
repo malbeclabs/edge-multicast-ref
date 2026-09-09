@@ -249,6 +249,9 @@ fn uds(cx: &AdapterContext<'_>) -> Result<Venue, AdapterInitError> {
     Ok(Venue {
         adapter: Box::new(UdsAdapter::new(listings)),
         sources,
+        // The built-in adapter is this crate's own, and the normative set
+        // already describes everything it does.
+        collectors: Vec::new(),
     })
 }
 

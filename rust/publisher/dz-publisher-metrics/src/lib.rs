@@ -49,6 +49,13 @@
 //! does not cover. [`PublisherMetrics::venue_registry`] gives it a second,
 //! separate registry for exactly that, and refuses any name beginning
 //! `dz_publisher_` so a venue cannot shadow the normative contract.
+//!
+//! **A venue does not reach that registry directly, and cannot.** This set is
+//! built from the adapter's own message types, so it does not exist at the
+//! moment a venue's constructor runs. A venue hands its collectors back on
+//! `Venue::collectors` instead, and the runtime registers them here once there
+//! is somewhere to put them — which is also where a reserved name becomes a
+//! startup failure rather than a collector quietly dropped.
 
 #![forbid(unsafe_code)]
 

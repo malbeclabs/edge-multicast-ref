@@ -32,6 +32,18 @@ pub type AdapterInitError = Box<dyn std::error::Error + Send + Sync + 'static>;
 /// Why a publisher did not start.
 #[derive(Debug, thiserror::Error)]
 pub enum StartupError {
+    /// A venue handed up a collector the second registry refused.
+    ///
+    /// In practice one thing: a name beginning `dz_publisher_`, which is
+    /// reserved so that a venue cannot shadow a series a subscriber's alert is
+    /// written against. Refused at startup rather than dropped, because a
+    /// publisher reporting one thing under the name of another is wrong in a
+    /// way nobody reading the dashboard can see.
+    #[error("a venue metric was refused: {source}")]
+    VenueMetric {
+        #[source]
+        source: dz_publisher_metrics::MetricsError,
+    },
     #[error("the configuration file {path:?} could not be read: {source}")]
     Read {
         path: PathBuf,
