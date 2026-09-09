@@ -337,6 +337,7 @@ fn admitted_adapter() -> UdsAdapter {
 
     let mut adapter = UdsAdapter::new(vec![UdsListing {
         symbol: SYMBOL.to_string(),
+        shard: None,
         leg1: None,
         leg2: None,
         asset_class: AssetClass::CryptoSpot,

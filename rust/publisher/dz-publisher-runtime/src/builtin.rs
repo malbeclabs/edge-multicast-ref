@@ -102,6 +102,15 @@ struct Upstream {
 #[serde(deny_unknown_fields)]
 struct Listing {
     symbol: String,
+    /// Which shard this instrument is admitted to. Absent is the default shard,
+    /// which is what a source process that names no partition has always been.
+    ///
+    /// Unchecked here on purpose: a name that is not a configured shard is
+    /// declined at admission and counted, and the check that a *block's* shard
+    /// name is safe belongs to the block. This side is a venue's own word, and
+    /// the runtime already refuses the ones it has no channel for.
+    #[serde(default)]
+    shard: Option<String>,
     #[serde(default)]
     leg1: Option<String>,
     #[serde(default)]
@@ -126,6 +135,7 @@ impl Listing {
     fn into_uds(self) -> UdsListing {
         UdsListing {
             symbol: self.symbol,
+            shard: self.shard,
             leg1: self.leg1,
             leg2: self.leg2,
             asset_class: self.asset_class.into(),
