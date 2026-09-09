@@ -181,7 +181,7 @@ fn metadata() -> serde_json::Value {
             // not what is asserted: nothing forbidden here is platform-specific,
             // and the positive control below still names what must be present.
             "--filter-platform",
-            env!("HOST_TARGET"),
+            env!("BUILD_TARGET"),
             "--manifest-path",
         ])
         .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
