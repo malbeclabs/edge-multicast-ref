@@ -32,6 +32,10 @@ dz-recorder-events = { path = "../dz-recorder-events" }
 # real server. Behind `clickhouse-tests`, so the default build needs no host.
 dz-recorder-clickhouse = { path = "../dz-recorder-clickhouse" }
 dz-recorder-capture = { path = "../dz-recorder-capture" }
+# Inline mode, so that the one feed can be derived both ways in one test. The
+# equivalence between them is the gate that design rests on, and it belongs
+# here rather than in either crate: neither can hold the other's path.
+dz-recorder-inline = { path = "../dz-recorder-inline" }
 # The analysis tier's bridge to the specification's rule set. A plain
 # dev-dependency and not an optional one, because the `conformance` feature
 # gates the module that uses it rather than the crate itself: a second copy of

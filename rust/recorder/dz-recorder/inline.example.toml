@@ -1,0 +1,120 @@
+# Inline mode's second configuration file, with the reason for every key that
+# is not obvious. Pass it with `--inline-config`, beside the recorder's own
+# `--config`.
+#
+# INLINE MODE KEEPS NO DATAGRAM. Rows are derived from the live capture and the
+# bytes behind them are discarded: a conformance rule written next month has
+# nothing to run against, a row cannot be re-derived, and nothing verifies what
+# the derivation read. Every row this mode writes says so, in its `derivation`
+# column. A host recording a feed for evidence runs archive mode, which is the
+# default and is what omitting `--inline-config` gets.
+#
+# BECAUSE NOTHING WRITES AN OBJECT, the recorder's own `[archive] staging_dir`
+# and `completed_dir` must carry no value — leave the section out. A recorder
+# that finds one refuses to start rather than leaving an operator believing in
+# bytes nobody kept.
+#
+# THERE IS NO PASSWORD KEY. The column store's password comes from
+# DZ_LOADER_CLICKHOUSE_PASSWORD_FILE — a systemd credential, readable by the
+# service user alone — or from DZ_LOADER_CLICKHOUSE_PASSWORD, and from nowhere
+# else. That is where the loader's already comes from; inline mode invents no
+# second mechanism. A key that exists is a key somebody fills in, and a
+# configuration file is a thing people commit.
+#
+# THERE IS NO `site` OR `recorder` KEY EITHER, and that is the point of two
+# files. They come from the recorder's own configuration, because two files can
+# name one host differently — and then the live panel and the historical panel
+# of one dashboard describe two recorders that do not exist. The metrics port is
+# the recorder's too: one process, one exposition, one port.
+#
+# Needs a build with `--features inline`. A build without it refuses
+# `--inline-config` naming the feature.
+
+[inline]
+# The window is inline mode's unit: a bound's worth of datagrams, derived and
+# then discarded. It closes on bytes or on age, whichever comes first, for the
+# reasons rotation does — a size bound keeps windows uniform for the analysis
+# tier, and an age bound keeps a quiet feed's rows moving.
+#
+# Not `[archive] rotate_bytes`, and written here rather than borrowed from it,
+# because this bounds a derivation and not a file. Smaller than a rotation bound
+# by default: an object's size is a disk-sizing question, while a window's is how
+# long a row waits to be queryable — which is the loop that bringing up a feed
+# runs. The destination coalesces across windows on its own, so a small window
+# costs it no extra parts.
+window_bytes    = "16MiB"
+window_interval = "10s"
+
+# The ring between the capture and the derivation, in datagram slots — a count
+# and not a byte budget, so the number multiplies out against the capture length
+# the slots are pooled at. It is how far the derivation may fall behind before a
+# datagram is dropped; a drop is charged to the next datagram that gets through,
+# so the loss lands in the rows as this recorder's and never as the publisher's.
+#
+# The busiest feed measured on a live recorder is 224,000 datagrams a minute, so
+# this is on the order of two seconds of that feed.
+ring_datagrams  = 8192
+
+# Where a window's rows are written on the way to the column store, on every
+# window and not only under an outage. A recovery path that runs only during an
+# incident is a recovery path nobody has tested; this one is the ordinary path,
+# it bounds a crash to the open window, and it is what brings the ledger — and
+# with it idempotence — back after one.
+#
+# The directory must exist and be writable by the service user before the
+# recorder starts. It is far smaller than a staging budget for datagrams: rows
+# are about two orders of magnitude smaller than the bytes they describe.
+spool_dir       = "/var/lib/dz-recorder-inline/spool"
+
+# The spool's byte budget. When it is full the oldest window is evicted and
+# counted, and the derivation is never blocked — a spool that applied
+# backpressure would stall the derivation, fill the ring, overflow the receive
+# queue and turn a column-store outage into feed loss.
+#
+# Size it against the outage this host intends to survive. ALERT ON THE AGE OF
+# THE OLDEST UNPOSTED WINDOW, never on the eviction counter: a full budget
+# evicts on every pass at steady state by design, so the counter rises whether
+# or not anything is wrong, while one window older than the eviction window is
+# history already gone.
+spool_max       = "8GiB"
+
+# What has landed, so a restart resumes with the certainty a continuous run had:
+# a window whose insert was never acknowledged is replayed, the replace makes
+# that harmless, and the trailer it carries keeps the era anchor certain across
+# the restart.
+#
+# On this process's own writable path and NEVER inside `spool_dir`, for the
+# reason the loader's ledger may not live inside its objects directory: the
+# spool's budget classifies what it finds and evicts the oldest window, so a
+# file it cannot classify is a file eviction cannot reach.
+ledger          = "/var/lib/dz-recorder-inline/ledger.jsonl"
+
+[clickhouse]
+# The same section, the same type and the same defaults as the loader's file.
+# No path and no query: those belong to the client. `https` is refused unless
+# the binary was built with the `tls` feature, rather than silently downgraded,
+# so an https destination needs `--features inline,tls` in the build pipeline —
+# and `--check` is where a build without it is caught.
+#
+# The account this points at wants a read-bytes ceiling and a workload thread
+# share set where it is provisioned. Nothing here bounds what it can spend.
+endpoint = "http://192.0.2.20:8123"
+database = "recorder"
+user = "dz_loader"
+
+# One insert is one atomic block and becomes one part, so these three decide
+# what a day of loading costs the destination — and merge work never appears in
+# a query log, only as the gap between a provider's CPU graph and
+# query-attributed CPU. Rows from several windows coalesce into one insert,
+# which is what keeps a ten-second window from writing a part every ten seconds.
+insert_max_rows = 1000000
+insert_min_rows = 50000
+insert_max_delay = 900
+insert_max_bytes = 268435456
+
+# Attempts per batch, including the first. Bounded: the answer to a destination
+# that will not take a batch is to leave the window on the spool and come back
+# to it, and an unbounded retry inside one window is a recorder that stops
+# making progress on every other window while looking busy.
+attempts = 4
+timeout = 30

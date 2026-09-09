@@ -31,6 +31,10 @@
 mod cli;
 mod endpoint;
 mod identity;
+/// Declared in every build, feature or not: a build without inline mode still
+/// has to refuse `--inline-config` by name, and a refusal that only exists in
+/// the builds that do not need it is no refusal at all.
+mod inline_config;
 mod runner;
 mod startup;
 
@@ -51,8 +55,20 @@ enum Failure {
     #[error("{0}")]
     Startup(#[from] StartupError),
     #[error("{0}")]
+    Inline(#[from] inline_config::InlineConfigError),
+    #[error("{0}")]
     Run(#[from] runner::RunError),
 }
+
+/// Which arrangement this invocation is running, printed where the summary is
+/// read.
+///
+/// Two arrangements exist and they keep different things. A summary that named
+/// neither would leave an operator to infer the mode from which keys were
+/// echoed back, and the one they need to be sure of is whether this host is
+/// keeping the bytes.
+const ARCHIVE_MODE: &str =
+    "mode=archive: every datagram is written to an object, and the loader derives the rows";
 
 fn main() -> ExitCode {
     let invocation = match cli::parse(std::env::args().skip(1)) {
@@ -97,18 +113,28 @@ fn run(args: &Args) -> Result<(), Failure> {
             path: args.config.clone(),
             source,
         })?;
+    // Inline mode before the archive plan, and never after it: the mode writes
+    // no object, so the archive directories it refuses are the ones an archive
+    // plan requires. A build without the feature refuses here rather than
+    // falling back to the arrangement nobody chose.
+    if let Some(path) = &args.inline_config {
+        return Ok(inline_config::run(&config, path, args.check)?);
+    }
+
     let plan = Plan::from_config(&config)?;
 
     if args.check {
         // Nothing is bound, nothing is created and nothing is joined: this runs
         // in a deployment pipeline, against a host that may already be
         // recording, before anything is restarted.
+        println!("{ARCHIVE_MODE}");
         print!("{}", plan.summary());
         println!("configuration is valid");
         return Ok(());
     }
 
     eprintln!("dz-recorder: {}", cli::version_line());
+    eprintln!("{ARCHIVE_MODE}");
     eprint!("{}", plan.summary());
     runner::run(&plan, args.run_for)?;
     Ok(())

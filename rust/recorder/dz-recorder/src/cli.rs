@@ -1,4 +1,4 @@
-//! The command line, parsed by hand because there are four options and a
+//! The command line, parsed by hand because there are five options and a
 //! dependency to parse them is a dependency in the record path.
 
 use std::path::PathBuf;
@@ -12,18 +12,60 @@ pub const USAGE: &str = "\
 dz-recorder — captures an edge feed, archives the bytes, and says how it is doing.
 
 Usage:
-  dz-recorder --config <path> [--run-for <duration>]
-  dz-recorder --config <path> --check
+  dz-recorder --config <path> [--inline-config <path>] [--run-for <duration>]
+  dz-recorder --config <path> [--inline-config <path>] --check
   dz-recorder --version
   dz-recorder --help
 
 Options:
   --config <path>       The TOML configuration. Required.
 
+  --inline-config <path>
+                        Run inline mode: one process captures the feed, derives
+                        its rows and loads them into the column store.
+
+                        NO DATAGRAM IS KEPT. There is no archive, no manifest
+                        and no digest: a conformance rule written next month has
+                        nothing to run against, a row cannot be re-derived, and
+                        nothing verifies what the derivation read. Every row
+                        this mode writes says so, in its `derivation` column.
+
+                        What it keeps is rows, spooled to disk under a byte
+                        budget until the destination has taken them. What it
+                        does not keep is the bytes they were derived from. A
+                        host recording a feed for evidence runs archive mode,
+                        which is the default and is what omitting this flag
+                        gets.
+
+                        Because nothing writes an object, `[archive]
+                        staging_dir` and `completed_dir` must carry no value: a
+                        recorder that finds one refuses rather than leaving an
+                        operator believing in bytes nobody kept.
+
+                        The path is inline mode's own file — the window bound,
+                        the ring, the spool and its budget, the ledger, and the
+                        destination. `site` and `recorder` are not in it: they
+                        come from --config, so the live rows and the archived
+                        rows of one host cannot name two recorders that do not
+                        exist. Neither file has a password key; the
+                        destination's comes from
+                        DZ_LOADER_CLICKHOUSE_PASSWORD_FILE or
+                        DZ_LOADER_CLICKHOUSE_PASSWORD, and from nowhere else.
+
+                        Needs a build with `--features inline`. A build without
+                        it refuses this flag naming the feature rather than
+                        recording an archive nobody asked for.
+
   --check               Validate the configuration and exit, recording nothing.
                         Nothing is bound, nothing is created and nothing is
                         joined: this is what a deployment pipeline runs before
                         it restarts anything.
+
+                        With --inline-config it validates both files and asks
+                        the destination for `SELECT 1`, because a gate that
+                        passed without reaching the destination would let a
+                        pipeline restart a recorder that cannot write. The
+                        spool and the ledger are not touched.
 
   --run-for <duration>  Record for this long, then shut down through the whole
                         sequence: drain what is in flight, stop the capture,
@@ -83,6 +125,12 @@ pub enum Invocation {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Args {
     pub config: PathBuf,
+    /// Inline mode's own file, and the only thing that turns the mode on.
+    ///
+    /// `None` is archive mode, which is the default and is unchanged: the mode
+    /// is opt-in, and asking for it takes a flag the default configuration does
+    /// not carry. See [`USAGE`] for what it keeps and what it does not.
+    pub inline_config: Option<PathBuf>,
     pub check: bool,
     /// `None` records until a signal arrives, which runs the whole shutdown
     /// sequence and publishes the open segment. See [`USAGE`].
@@ -92,6 +140,7 @@ pub struct Args {
 /// Parses the arguments after the program name.
 pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Invocation, CliError> {
     let mut config: Option<PathBuf> = None;
+    let mut inline_config: Option<PathBuf> = None;
     let mut check = false;
     let mut run_for: Option<Duration> = None;
 
@@ -104,6 +153,12 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Invocation, CliE
             "--config" => {
                 config = Some(PathBuf::from(
                     args.next().ok_or(CliError::MissingValue("--config"))?,
+                ));
+            }
+            "--inline-config" => {
+                inline_config = Some(PathBuf::from(
+                    args.next()
+                        .ok_or(CliError::MissingValue("--inline-config"))?,
                 ));
             }
             "--run-for" => {
@@ -120,6 +175,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Invocation, CliE
     }
     Ok(Invocation::Run(Args {
         config,
+        inline_config,
         check,
         run_for,
     }))
@@ -189,6 +245,38 @@ mod tests {
         assert_eq!(args.run_for, None);
     }
 
+    /// The mode is opt-in, and this flag is the whole of the opting in.
+    #[test]
+    fn inline_mode_is_asked_for_by_its_own_file_and_is_off_otherwise() {
+        let Ok(Invocation::Run(args)) = parse_of(&["--config", "r.toml"]) else {
+            panic!("--config alone is an invocation");
+        };
+        assert_eq!(
+            args.inline_config, None,
+            "archive mode is what a command line that says nothing gets"
+        );
+
+        let Ok(Invocation::Run(args)) =
+            parse_of(&["--config", "r.toml", "--inline-config", "i.toml"])
+        else {
+            panic!("--inline-config is an invocation");
+        };
+        assert_eq!(args.inline_config, Some(PathBuf::from("i.toml")));
+        assert_eq!(args.config, PathBuf::from("r.toml"));
+    }
+
+    /// Where an operator learns what the mode costs is the flag that turns it
+    /// on: it keeps rows, and it keeps no datagram at all.
+    #[test]
+    fn the_usage_says_inline_mode_keeps_no_datagram() {
+        assert!(USAGE.contains("--inline-config"), "{USAGE}");
+        assert!(USAGE.contains("NO DATAGRAM IS KEPT"), "{USAGE}");
+        assert!(USAGE.contains("--features inline"), "{USAGE}");
+        // And that the identity is the recorder's own, which is what stops one
+        // host being two recorders in one dashboard.
+        assert!(USAGE.contains("are not in it"), "{USAGE}");
+    }
+
     #[test]
     fn a_bounded_run_takes_a_duration_with_a_unit() {
         let Ok(Invocation::Run(args)) = parse_of(&["--config", "r.toml", "--run-for", "90s"])
@@ -223,6 +311,10 @@ mod tests {
         assert_eq!(
             parse_of(&["--config", "r.toml", "--run-for"]),
             Err(CliError::MissingValue("--run-for"))
+        );
+        assert_eq!(
+            parse_of(&["--config", "r.toml", "--inline-config"]),
+            Err(CliError::MissingValue("--inline-config"))
         );
     }
 
