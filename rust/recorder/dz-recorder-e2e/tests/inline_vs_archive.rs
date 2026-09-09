@@ -231,9 +231,25 @@ fn a_clean_feed_derives_identically_through_both_paths() {
 /// The faults are the design's own list, and they are where the two paths would
 /// diverge if they were going to: a gap, backward motion, a reset, a second
 /// publisher, a duplicate, a reordered pair, an over-cap declared length, an
-/// unknown schema version. Each is a thing a publisher, a network or this
-/// recorder actually does, and each produces rows an archive-mode dashboard
-/// already reads.
+/// unknown schema version, and a channel that goes quiet. Each is a thing a
+/// publisher, a network or this recorder actually does, and each produces rows
+/// an archive-mode dashboard already reads.
+///
+/// # What `SilentChannel` covers here, and what it does not
+///
+/// It is the fault whose *production* behaviour differs most between the two
+/// modes: archive mode finds a quiet channel when a segment rotates on its
+/// interval, inline mode when a window closes on age, and age is inline mode's
+/// own key rather than one the modes share. That difference is a difference of
+/// **timing**, and this fixture cannot see it — one window holding the same
+/// datagrams as one segment is the fixture's whole premise, which is what makes
+/// the row comparison meaningful for every other fault.
+///
+/// What it does assert is the derivation half: with one channel among several
+/// falling silent partway through, the coverage, era and gap rows the two paths
+/// produce are the same. That is the half a dashboard reads. Asserting the
+/// timing half wants a fixture with a clock over several windows, which is a
+/// different test and not this one.
 #[test]
 fn every_injected_fault_derives_identically_through_both_paths() {
     for fault in [
@@ -246,6 +262,7 @@ fn every_injected_fault_derives_identically_through_both_paths() {
         Fault::ReorderedPair,
         Fault::OversizedDeclaredLength,
         Fault::UnknownSchemaVersion,
+        Fault::SilentChannel,
     ] {
         both_paths_agree(
             &SyntheticPublisher::with_fault(200, fault),

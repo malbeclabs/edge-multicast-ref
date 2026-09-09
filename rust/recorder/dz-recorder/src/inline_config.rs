@@ -408,21 +408,24 @@ impl InlineConfig {
         Ok(())
     }
 
-    /// What `--check` prints: which arrangement is running, what it keeps, and
-    /// what was read rather than what an operator believes they wrote.
+    /// What `--check` prints: what this arrangement keeps, and what was read
+    /// rather than what an operator believes they wrote.
     ///
-    /// The identity is not repeated here. The plan prints it, and `--check`
-    /// prints the plan first: an operator reading two `site=` lines has to work
-    /// out whether the two files disagree, and the answer is that they cannot —
-    /// inline mode takes the identity from the recorder's own file and this one
-    /// has no key for it.
+    /// **The mode line is not here, and that is deliberate.** It is printed
+    /// before the plan by [`run`], because archive mode prints its own before
+    /// the plan too and an operator comparing two hosts must find the same line
+    /// in the same place. Written here it would arrive in the middle of one
+    /// arrangement's output and at the top of the other's, or twice.
+    ///
+    /// The identity is not repeated here either. The plan prints it, and
+    /// `--check` prints the plan first: an operator reading two `site=` lines
+    /// has to work out whether the two files disagree, and the answer is that
+    /// they cannot — inline mode takes the identity from the recorder's own file
+    /// and this one has no key for it.
     #[must_use]
     pub fn summary(&self) -> String {
         use std::fmt::Write as _;
         let mut out = String::new();
-        // In the words the design uses: the two modes keep different things,
-        // and this is the line that says which one this host is.
-        let _ = writeln!(out, "{INLINE_MODE}");
         let _ = writeln!(
             out,
             "inline window={}B or {:?} ring={} datagrams",
@@ -506,11 +509,17 @@ pub fn run(
     // is a result a pipeline reads on stdout, and a recording run's summary is
     // a log line beside the version it prints on startup.
     let summary = config.summary();
+    // The mode first, in both arrangements. Archive mode prints its own line
+    // before the plan, and the one thing an operator scanning two hosts must
+    // not have to hunt for is which of them is keeping the bytes — which is
+    // also the thing a command line can get wrong by saying nothing.
     if check {
+        println!("{INLINE_MODE}");
         print!("{}", plan.summary());
         print!("{summary}");
     } else {
         eprintln!("dz-recorder: {}", crate::cli::version_line());
+        eprintln!("{INLINE_MODE}");
         eprint!("{}", plan.summary());
         eprint!("{summary}");
     }
@@ -970,12 +979,21 @@ listen_addr = "127.0.0.1:0"
         }
     }
 
+    /// The summary says what was read, and leaves the mode line to its caller.
+    ///
+    /// `run` prints `INLINE_MODE` before the plan so that it is the first line
+    /// in both arrangements, as archive mode's is. Written here as well it would
+    /// appear twice, and written *only* here it appears in the middle of one
+    /// arrangement's output and at the top of the other's — which is the shape
+    /// this test exists to keep out.
     #[test]
-    fn the_summary_says_which_mode_is_running_and_that_no_datagram_is_kept() {
+    fn the_summary_leaves_the_mode_line_to_the_caller_that_prints_it_first() {
         let fixture = Fixture::new();
         let summary = fixture.config().summary();
-        assert!(summary.contains("mode=inline"), "{summary}");
-        assert!(summary.contains("NO DATAGRAM IS KEPT"), "{summary}");
+        assert!(
+            !summary.contains("mode=inline"),
+            "the mode line is printed before the plan, and twice is worse than late: {summary}"
+        );
         assert!(summary.contains("database=recorder"), "{summary}");
         assert!(summary.contains("user=dz_loader"), "{summary}");
         assert!(!summary.to_lowercase().contains("password"), "{summary}");

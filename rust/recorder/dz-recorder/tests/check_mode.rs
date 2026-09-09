@@ -165,7 +165,18 @@ fn a_valid_configuration_checks_out_and_creates_nothing() {
         "{}",
         ran.stdout
     );
-    assert!(ran.stdout.contains("mode=archive"), "{}", ran.stdout);
+    // The first line, and asserted as the first line: inline mode's `--check`
+    // prints its own mode line first too, and an operator scanning two hosts
+    // must find the same statement in the same place. Spelled out here because
+    // this crate has no library target to import the constant from.
+    assert_eq!(
+        ran.stdout.lines().next(),
+        Some(
+            "mode=archive: every datagram is written to an object, and the loader derives the rows"
+        ),
+        "the mode is not the first line of what --check printed:\n{}",
+        ran.stdout
+    );
     // The check runs in a pipeline, against a host that may already be
     // recording. Nothing it does may touch that host's disk.
     assert!(!staging.exists(), "--check created {}", staging.display());

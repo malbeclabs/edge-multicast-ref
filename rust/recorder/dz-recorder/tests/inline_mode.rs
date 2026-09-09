@@ -22,6 +22,19 @@ use std::process::{Command, Output};
 
 const BINARY: &str = env!("CARGO_BIN_EXE_dz-recorder");
 
+/// The mode line, spelled out because this crate has no library target to
+/// import `INLINE_MODE` from.
+///
+/// A copy, and therefore a second place the sentence lives — which is the point:
+/// this suite spawns the real binary and reads its output, so a change to the
+/// line an operator sees is a change this test has to be shown.
+///
+/// Gated with the tests that read it: a `--no-default-features` build prints no
+/// mode line at all, because it refuses the default mode by the feature's name.
+#[cfg(feature = "inline")]
+const INLINE_MODE_LINE: &str =
+    "mode=inline: rows are derived from the live capture and NO DATAGRAM IS KEPT";
+
 /// A recorder configuration for inline mode: no `[archive]` section at all,
 /// because nothing in this mode writes an object.
 const RECORDER: &str = r#"
@@ -284,7 +297,22 @@ fn check_validates_both_files_reaches_for_the_destination_and_touches_nothing() 
 
     // What was read is printed, so an operator sees it rather than what they
     // believe they wrote — starting with which arrangement this host is in.
-    assert!(ran.stdout.contains("mode=inline"), "{}", ran.stdout);
+    // **The first line, and asserted as the first line**: archive mode prints
+    // its own before the plan, and an operator scanning two hosts must find the
+    // same statement in the same place. A `contains` here is what let the two
+    // orders diverge unnoticed.
+    assert_eq!(
+        ran.stdout.lines().next(),
+        Some(INLINE_MODE_LINE),
+        "the mode is not the first line of what --check printed:\n{}",
+        ran.stdout
+    );
+    assert_eq!(
+        ran.stdout.matches("mode=inline").count(),
+        1,
+        "the mode line is printed twice:\n{}",
+        ran.stdout
+    );
     assert!(ran.stdout.contains("NO DATAGRAM IS KEPT"), "{}", ran.stdout);
     assert!(
         ran.stdout.contains("site=site-a recorder=recorder-1"),
