@@ -243,13 +243,22 @@ pub fn compression(compression: Compression) -> Result<ArchiveCompression, Start
 /// this is a plan-level fact rather than a flag a caller could forget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Arrangement {
-    /// Objects are written and a loader derives rows from them. The default.
+    /// Objects are written and a loader derives rows from them.
+    ///
+    /// Asked for by `--archive`. A configuration describing an archive whose
+    /// command line names no mode is refused by key rather than read as this,
+    /// which is what stops the default losing a host's bytes quietly.
     Archive,
     /// Rows are derived from the live capture and no datagram is kept.
     ///
-    /// Reachable only in a build with the feature: a default build has no
-    /// inline mode to be in, and a variant it can never construct is a variant
-    /// its dead-code analysis is right to flag.
+    /// **The default**: what a command line naming no mode is read as.
+    ///
+    /// Reachable only in a build with the feature — which is in the default
+    /// feature set, because a binary that could not run its own default mode
+    /// would refuse every command line that named none. A
+    /// `--no-default-features` build has no inline mode to be in, and a variant
+    /// it can never construct is a variant its dead-code analysis is right to
+    /// flag.
     #[cfg(feature = "inline")]
     Inline,
 }
@@ -416,6 +425,11 @@ impl Plan {
     ///
     /// Archive mode: the directories are required, the staging budget is
     /// divided, and every feed is wired with a writer configuration.
+    ///
+    /// Reached only when `--archive` was asked for. The two directories this
+    /// requires are the two [`for_inline`](Self::for_inline) refuses a value
+    /// for, which is why a configuration cannot be valid for both arrangements
+    /// and why neither can be entered by accident.
     pub fn from_config(config: &RecorderConfig) -> Result<Self, StartupError> {
         check_identity(config)?;
         let feeds = check_feeds_are_named(config)?;

@@ -31,9 +31,11 @@
 mod cli;
 mod endpoint;
 mod identity;
-/// Declared in every build, feature or not: a build without inline mode still
-/// has to refuse `--inline-config` by name, and a refusal that only exists in
-/// the builds that do not need it is no refusal at all.
+/// Declared in every build, feature or not: inline mode is what a command line
+/// naming no mode is read as, so a build without the mode compiled in is
+/// precisely the build that has to refuse that command line — naming the feature
+/// and naming `--archive`. A refusal that only exists in the builds which do not
+/// need it is no refusal at all.
 mod inline_config;
 /// The record path for inline mode, which exists only where the mode does.
 #[cfg(feature = "inline")]
@@ -72,7 +74,9 @@ enum Failure {
 /// Two arrangements exist and they keep different things. A summary that named
 /// neither would leave an operator to infer the mode from which keys were
 /// echoed back, and the one they need to be sure of is whether this host is
-/// keeping the bytes.
+/// keeping the bytes — which is also the thing a command line can now get wrong
+/// by saying nothing, so the line is printed in both modes and not only in the
+/// one that was asked for.
 const ARCHIVE_MODE: &str =
     "mode=archive: every datagram is written to an object, and the loader derives the rows";
 
@@ -119,12 +123,26 @@ fn run(args: &Args) -> Result<(), Failure> {
             path: args.config.clone(),
             source,
         })?;
-    // Inline mode before the archive plan, and never after it: the mode writes
-    // no object, so the archive directories it refuses are the ones an archive
-    // plan requires. A build without the feature refuses here rather than
+    // **Inline mode unless archive mode was asked for by name.** The default
+    // decides how a command line naming no mode is read, and it is put on the
+    // reading whose wrong choice is loud: a configuration describing an archive
+    // arriving here is refused naming `archive.staging_dir`, because nothing in
+    // inline mode writes an object. Read the other way round, the same silence
+    // would have been a host that quietly stopped keeping bytes and went on
+    // looking healthy — and nobody reads a log line on the restart that did it.
+    //
+    // Before the archive plan and never after it, for the reason it always was:
+    // the directories this mode refuses a value for are the ones that plan
+    // requires one of. A build without the feature refuses here too, rather than
     // falling back to the arrangement nobody chose.
-    if let Some(path) = &args.inline_config {
-        return Ok(inline_config::run(&config, path, args.check, args.run_for).map_err(Box::new)?);
+    if !args.archive {
+        return Ok(inline_config::run(
+            &config,
+            args.inline_config.as_deref(),
+            args.check,
+            args.run_for,
+        )
+        .map_err(Box::new)?);
     }
 
     let plan = Plan::from_config(&config)?;

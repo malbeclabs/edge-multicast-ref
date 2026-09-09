@@ -1,5 +1,12 @@
-//! The command line, parsed by hand because there are five options and a
+//! The command line, parsed by hand because there are six options and a
 //! dependency to parse them is a dependency in the record path.
+//!
+//! Two of the six choose an arrangement, and only one of them has to be
+//! written down: inline mode is what a command line naming no mode is read
+//! as, and `--archive` is how the arrangement that keeps every datagram is
+//! asked for. Nothing here reads a file, so nothing here can tell whether
+//! the reading was right — that is what the refusals in
+//! [`crate::inline_config`] and [`crate::startup`] are for.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -9,63 +16,99 @@ use thiserror::Error;
 use crate::identity::{build_commit, BUILD_VERSION};
 
 pub const USAGE: &str = "\
-dz-recorder — captures an edge feed, archives the bytes, and says how it is doing.
+dz-recorder — captures an edge feed, derives its rows or archives its bytes, and
+says how it is doing.
+
+Two arrangements, and the one a command line naming no mode is read as is inline
+mode: rows, and no datagram kept. Archive mode keeps every datagram and is asked
+for by name.
 
 Usage:
-  dz-recorder --config <path> [--inline-config <path>] [--run-for <duration>]
-  dz-recorder --config <path> [--inline-config <path>] --check
+  dz-recorder --config <path> --inline-config <path> [--run-for <duration>]
+  dz-recorder --config <path> --archive [--run-for <duration>]
+  dz-recorder --config <path> [--inline-config <path> | --archive] --check
   dz-recorder --version
   dz-recorder --help
 
 Options:
   --config <path>       The TOML configuration. Required.
 
-  --inline-config <path>
-                        Run inline mode: one process captures the feed, derives
-                        its rows and loads them into the column store.
+  --archive             Run archive mode: every datagram is written to a hashed,
+                        manifested object, and dz-recorder-load derives the rows
+                        from it in a second process. The bytes are kept, so a
+                        conformance rule written next month can be run against
+                        them and a row can be re-derived from what was verified.
 
-                        NO DATAGRAM IS KEPT. There is no archive, no manifest
-                        and no digest: a conformance rule written next month has
-                        nothing to run against, a row cannot be re-derived, and
-                        nothing verifies what the derivation read. Every row
-                        this mode writes says so, in its `derivation` column.
+                        THIS IS WHAT A HOST RECORDING A PRODUCTION FEED FOR
+                        EVIDENCE RUNS, AND IT TAKES THIS FLAG. It used to be
+                        what omitting a flag got, and it is not any more. A
+                        configuration naming `[archive] staging_dir` or
+                        `completed_dir` without this flag is refused at startup
+                        naming the key, rather than read as a recorder that
+                        quietly stopped keeping bytes.
+
+                        Requires `[archive] staging_dir` and `completed_dir`,
+                        which are exactly the keys inline mode refuses a value
+                        for. That is why neither mode can be entered by
+                        accident, and why the two cannot both be asked for.
+
+  --inline-config <path>
+                        Inline mode's own file: the window bound, the ring, the
+                        spool and its budget, the ledger, and the destination.
+
+                        INLINE MODE IS THE DEFAULT — it is what a command line
+                        naming no mode is read as — AND NO DATAGRAM IS KEPT.
+                        There is no archive, no manifest and no digest: a
+                        conformance rule written next month has nothing to run
+                        against, a row cannot be re-derived, and nothing
+                        verifies what the derivation read. Every row this mode
+                        writes says so, in its `derivation` column.
+
+                        The default is a reading and not an invention. There is
+                        no defensible spool directory, ledger or destination to
+                        guess at, so a command line that names no mode and gives
+                        no file here is refused naming this flag and --archive,
+                        rather than started on a guess.
 
                         What it keeps is rows, spooled to disk under a byte
                         budget until the destination has taken them. What it
-                        does not keep is the bytes they were derived from. A
-                        host recording a feed for evidence runs archive mode,
-                        which is the default and is what omitting this flag
-                        gets.
+                        does not keep is the bytes they were derived from.
 
                         Because nothing writes an object, `[archive]
                         staging_dir` and `completed_dir` must carry no value: a
                         recorder that finds one refuses rather than leaving an
                         operator believing in bytes nobody kept.
 
-                        The path is inline mode's own file — the window bound,
-                        the ring, the spool and its budget, the ledger, and the
-                        destination. `site` and `recorder` are not in it: they
-                        come from --config, so the live rows and the archived
-                        rows of one host cannot name two recorders that do not
-                        exist. Neither file has a password key; the
-                        destination's comes from
-                        DZ_LOADER_CLICKHOUSE_PASSWORD_FILE or
+                        `site` and `recorder` are not in this file: they come
+                        from --config, so the live rows and the archived rows of
+                        one host cannot name two recorders that do not exist.
+                        Neither file has a password key; the destination's comes
+                        from DZ_LOADER_CLICKHOUSE_PASSWORD_FILE or
                         DZ_LOADER_CLICKHOUSE_PASSWORD, and from nowhere else.
 
-                        Needs a build with `--features inline`. A build without
-                        it refuses this flag naming the feature rather than
-                        recording an archive nobody asked for.
+                        The mode needs a build carrying `inline`, which is a
+                        default feature because the mode is the default mode. A
+                        build made with `--no-default-features` can only record
+                        an archive: it refuses a command line naming no mode by
+                        the feature's name and by --archive, and the way back is
+                        the default features or `--features inline`.
 
   --check               Validate the configuration and exit, recording nothing.
                         Nothing is bound, nothing is created and nothing is
                         joined: this is what a deployment pipeline runs before
                         it restarts anything.
 
-                        With --inline-config it validates both files and asks
-                        the destination for `SELECT 1`, because a gate that
-                        passed without reaching the destination would let a
-                        pipeline restart a recorder that cannot write. The
-                        spool and the ledger are not touched.
+                        In inline mode it validates both files and asks the
+                        destination for `SELECT 1`, because a gate that passed
+                        without reaching the destination would let a pipeline
+                        restart a recorder that cannot write. The spool and the
+                        ledger are not touched.
+
+                        It is also where a command line that names the wrong
+                        mode — or none — is caught, before anything is
+                        restarted. Run it as an ExecStartPre and a missing
+                        --archive costs a failed pre-check rather than a
+                        recorder that would not start.
 
   --run-for <duration>  Record for this long, then shut down through the whole
                         sequence: drain what is in flight, stop the capture,
@@ -112,6 +155,11 @@ pub enum CliError {
     BadDuration(String),
     #[error("--check and --run-for cannot both be asked for: one records nothing and one records")]
     CheckAndRun,
+    #[error(
+        "--archive and --inline-config cannot both be asked for: one keeps every datagram and \
+         one keeps none, and there is no reading of both that is what somebody meant"
+    )]
+    ArchiveAndInline,
 }
 
 /// What the command line asked for.
@@ -125,11 +173,21 @@ pub enum Invocation {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Args {
     pub config: PathBuf,
-    /// Inline mode's own file, and the only thing that turns the mode on.
+    /// Archive mode, asked for by name.
     ///
-    /// `None` is archive mode, which is the default and is unchanged: the mode
-    /// is opt-in, and asking for it takes a flag the default configuration does
-    /// not carry. See [`USAGE`] for what it keeps and what it does not.
+    /// Its absence is inline mode. A default decides how a command line naming
+    /// no mode is *read*, and this one is put on the reading that fails loudly:
+    /// a configuration describing an archive read as inline mode is refused by
+    /// key, because inline mode refuses the two directories archive mode
+    /// requires — where an inline-mode configuration read as archive mode would
+    /// have been a host that quietly stopped keeping bytes and looked healthy
+    /// doing it. See [`USAGE`].
+    pub archive: bool,
+    /// Inline mode's own file, which the default mode needs and cannot invent.
+    ///
+    /// Not the mode switch, which it used to be. `None` without
+    /// [`archive`](Self::archive) is still inline mode, and is a refusal naming
+    /// this flag rather than a fallback to the arrangement nobody asked for.
     pub inline_config: Option<PathBuf>,
     pub check: bool,
     /// `None` records until a signal arrives, which runs the whole shutdown
@@ -140,6 +198,7 @@ pub struct Args {
 /// Parses the arguments after the program name.
 pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Invocation, CliError> {
     let mut config: Option<PathBuf> = None;
+    let mut archive = false;
     let mut inline_config: Option<PathBuf> = None;
     let mut check = false;
     let mut run_for: Option<Duration> = None;
@@ -150,6 +209,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Invocation, CliE
             "--help" | "-h" => return Ok(Invocation::Help),
             "--version" => return Ok(Invocation::Version),
             "--check" => check = true,
+            "--archive" => archive = true,
             "--config" => {
                 config = Some(PathBuf::from(
                     args.next().ok_or(CliError::MissingValue("--config"))?,
@@ -173,8 +233,16 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Invocation, CliE
     if check && run_for.is_some() {
         return Err(CliError::CheckAndRun);
     }
+    // Refused here rather than at startup, because it is a contradiction in the
+    // command line itself and not in a file: the two arrangements keep different
+    // things, and a recorder that picked one of them would be picking which of
+    // an operator's two statements to ignore.
+    if archive && inline_config.is_some() {
+        return Err(CliError::ArchiveAndInline);
+    }
     Ok(Invocation::Run(Args {
         config,
+        archive,
         inline_config,
         check,
         run_for,
@@ -245,15 +313,26 @@ mod tests {
         assert_eq!(args.run_for, None);
     }
 
-    /// The mode is opt-in, and this flag is the whole of the opting in.
+    /// A command line naming no mode is inline mode, and archive mode takes a
+    /// flag.
+    ///
+    /// This is the whole of the default at the command line's altitude: nothing
+    /// here reads a file, so all it can say is which arrangement was asked for.
+    /// What makes the reading safe is the refusals — an archive-shaped
+    /// configuration reaching inline mode is refused by key — and those are
+    /// asserted in `inline_config` and at binary altitude.
     #[test]
-    fn inline_mode_is_asked_for_by_its_own_file_and_is_off_otherwise() {
+    fn a_command_line_naming_no_mode_is_inline_mode() {
         let Ok(Invocation::Run(args)) = parse_of(&["--config", "r.toml"]) else {
             panic!("--config alone is an invocation");
         };
+        assert!(
+            !args.archive,
+            "inline mode is what a command line naming no mode is read as"
+        );
         assert_eq!(
             args.inline_config, None,
-            "archive mode is what a command line that says nothing gets"
+            "and it has no file yet, which is a refusal and not a fallback"
         );
 
         let Ok(Invocation::Run(args)) =
@@ -261,20 +340,71 @@ mod tests {
         else {
             panic!("--inline-config is an invocation");
         };
+        assert!(!args.archive);
         assert_eq!(args.inline_config, Some(PathBuf::from("i.toml")));
         assert_eq!(args.config, PathBuf::from("r.toml"));
     }
 
-    /// Where an operator learns what the mode costs is the flag that turns it
-    /// on: it keeps rows, and it keeps no datagram at all.
+    /// Archive mode is asked for by name, and the flag carries no path: what it
+    /// needs is already the `[archive]` section of the recorder's own file.
     #[test]
-    fn the_usage_says_inline_mode_keeps_no_datagram() {
+    fn archive_mode_is_asked_for_by_name() {
+        let Ok(Invocation::Run(args)) = parse_of(&["--config", "r.toml", "--archive"]) else {
+            panic!("--archive is an invocation");
+        };
+        assert!(args.archive);
+        assert_eq!(args.inline_config, None);
+        assert_eq!(args.config, PathBuf::from("r.toml"));
+    }
+
+    /// One host cannot be both arrangements, and the contradiction is in the
+    /// command line rather than in a file.
+    #[test]
+    fn naming_both_modes_is_refused() {
+        assert_eq!(
+            parse_of(&[
+                "--config",
+                "r.toml",
+                "--archive",
+                "--inline-config",
+                "i.toml"
+            ]),
+            Err(CliError::ArchiveAndInline)
+        );
+        // Either order, because an operator's argument order is not a
+        // statement about which arrangement they meant.
+        assert_eq!(
+            parse_of(&[
+                "--config",
+                "r.toml",
+                "--inline-config",
+                "i.toml",
+                "--archive"
+            ]),
+            Err(CliError::ArchiveAndInline)
+        );
+    }
+
+    /// Where an operator learns what each arrangement costs is the flag that
+    /// selects it — and, for inline mode, the flag they did not have to pass.
+    #[test]
+    fn the_usage_says_which_mode_is_the_default_and_what_it_keeps() {
         assert!(USAGE.contains("--inline-config"), "{USAGE}");
         assert!(USAGE.contains("NO DATAGRAM IS KEPT"), "{USAGE}");
         assert!(USAGE.contains("--features inline"), "{USAGE}");
         // And that the identity is the recorder's own, which is what stops one
         // host being two recorders in one dashboard.
-        assert!(USAGE.contains("are not in it"), "{USAGE}");
+        assert!(USAGE.contains("are not in this file"), "{USAGE}");
+
+        // The inversion, in the two places an operator meets it: that saying
+        // nothing is inline mode, and that the arrangement which keeps the
+        // bytes now takes a flag it did not use to take.
+        assert!(USAGE.contains("INLINE MODE IS THE DEFAULT"), "{USAGE}");
+        assert!(USAGE.contains("--archive"), "{USAGE}");
+        assert!(
+            USAGE.contains("EVIDENCE RUNS, AND IT TAKES THIS FLAG"),
+            "{USAGE}"
+        );
     }
 
     #[test]

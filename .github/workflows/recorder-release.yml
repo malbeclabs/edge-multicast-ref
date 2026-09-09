@@ -154,6 +154,14 @@ jobs:
       # afpacket needs it at build time, and the released binary carries the
       # feature: a host on a plain interface uses it, and one on a DoubleZero
       # tunnel refuses it at open rather than recording nothing.
+      #
+      # The three steps below name `afpacket` and nothing else, and features are
+      # additive, so the asset also carries the default set — which includes
+      # `inline`. That is deliberate: inline mode is what a command line naming
+      # no mode is read as, and a released binary that could not run its own
+      # default mode would refuse every ordinary command line. A host that wants
+      # the record-only binary builds it with `--no-default-features` rather
+      # than taking this asset.
       - name: Install libpcap
         run: sudo apt-get update && sudo apt-get install -y libpcap-dev
 

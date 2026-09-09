@@ -2,17 +2,24 @@
 # is not obvious. Pass it with `--inline-config`, beside the recorder's own
 # `--config`.
 #
-# INLINE MODE KEEPS NO DATAGRAM. Rows are derived from the live capture and the
+# INLINE MODE IS THE DEFAULT — it is what a command line naming no mode is read
+# as — AND IT KEEPS NO DATAGRAM. Rows are derived from the live capture and the
 # bytes behind them are discarded: a conformance rule written next month has
 # nothing to run against, a row cannot be re-derived, and nothing verifies what
 # the derivation read. Every row this mode writes says so, in its `derivation`
-# column. A host recording a feed for evidence runs archive mode, which is the
-# default and is what omitting `--inline-config` gets.
+# column. A host recording a feed for evidence runs archive mode, which takes
+# `--archive` and no longer arrives by saying nothing.
+#
+# THE DEFAULT IS A READING AND NOT AN INVENTION. This file has no defensible
+# host values to fall back on — there is no spool directory, ledger or
+# destination worth guessing — so a command line naming no mode and giving no
+# `--inline-config` is refused naming both flags rather than started.
 #
 # BECAUSE NOTHING WRITES AN OBJECT, the recorder's own `[archive] staging_dir`
 # and `completed_dir` must carry no value — leave the section out. A recorder
 # that finds one refuses to start rather than leaving an operator believing in
-# bytes nobody kept.
+# bytes nobody kept, and because that refusal runs both ways it is also what
+# catches an archive-mode host whose command line has forgotten `--archive`.
 #
 # THERE IS NO PASSWORD KEY. The column store's password comes from
 # DZ_LOADER_CLICKHOUSE_PASSWORD_FILE — a systemd credential, readable by the
@@ -27,8 +34,10 @@
 # of one dashboard describe two recorders that do not exist. The metrics port is
 # the recorder's too: one process, one exposition, one port.
 #
-# Needs a build with `--features inline`. A build without it refuses
-# `--inline-config` naming the feature.
+# The mode needs a build carrying `inline`, which is a default feature because
+# the mode is the default mode. A build made with `--no-default-features` is the
+# record-only one, can only be in archive mode, and refuses a command line
+# naming no mode by the feature's name and by `--archive`.
 
 [inline]
 # The window is inline mode's unit: a bound's worth of datagrams, derived and
@@ -93,8 +102,9 @@ ledger          = "/var/lib/dz-recorder-inline/ledger.jsonl"
 # The same section, the same type and the same defaults as the loader's file.
 # No path and no query: those belong to the client. `https` is refused unless
 # the binary was built with the `tls` feature, rather than silently downgraded,
-# so an https destination needs `--features inline,tls` in the build pipeline —
-# and `--check` is where a build without it is caught.
+# so an https destination needs `--features tls` in the build pipeline — beside
+# the default features, which is where the mode itself comes from — and
+# `--check` is where a build without it is caught.
 #
 # The account this points at wants a read-bytes ceiling and a workload thread
 # share set where it is provisioned. Nothing here bounds what it can spend.

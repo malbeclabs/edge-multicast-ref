@@ -5,6 +5,12 @@
 //! experience — that the process exits non-zero, that the message reaches
 //! stderr and names the key, and that a valid configuration touches nothing.
 //! Every address here is documentation-range: this repository is public.
+//!
+//! **Every check here passes `--archive`**, because that is now what archive
+//! mode takes: inline mode is what a command line naming no mode is read as.
+//! The one test that leaves the flag off is
+//! [`an_archive_configuration_with_no_mode_named_is_refused_and_names_the_flag`],
+//! and it asserts a refusal.
 #![forbid(unsafe_code)]
 
 use std::path::{Path, PathBuf};
@@ -74,10 +80,65 @@ fn config_in(dir: &Path, text: &str) -> PathBuf {
 }
 
 /// Runs `--check` over a configuration made by editing the valid one.
+///
+/// `--archive`, because the configuration is an archive-mode one: the flag is
+/// how that arrangement is asked for, and without it every one of these
+/// refusals would be replaced by the one about a configured staging directory.
 fn check(edit: impl FnOnce(&str) -> String) -> Ran {
     let dir = tempfile::tempdir().expect("a temporary directory");
     let path = config_in(dir.path(), &edit(VALID));
-    run(&["--config", path.to_str().expect("a utf-8 path"), "--check"])
+    run(&[
+        "--config",
+        path.to_str().expect("a utf-8 path"),
+        "--archive",
+        "--check",
+    ])
+}
+
+/// **Archive mode takes a flag now, and the configuration that used to be
+/// enough on its own is refused rather than reinterpreted.**
+///
+/// This is the whole safety argument of the inverted default, at the altitude
+/// an operator meets it. The fixture describes an archive — it names
+/// `staging_dir` and `completed_dir`, and with `--archive` it checks out clean
+/// two tests below. Without the flag it must not start, must not print
+/// `mode=archive`, and must say what to add: the host this happens to is one
+/// recording a production feed for evidence, on the restart nobody was
+/// watching, and a log line would have been read weeks later as a year of
+/// retention that was never kept.
+#[test]
+fn an_archive_configuration_with_no_mode_named_is_refused_and_names_the_flag() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let path = config_in(dir.path(), VALID);
+    let ran = run(&["--config", path.to_str().expect("a utf-8 path"), "--check"]);
+
+    assert_eq!(ran.code(), 1, "{}{}", ran.stdout, ran.stderr);
+    assert!(
+        !ran.stdout.contains("mode=archive"),
+        "a command line naming no mode was read as archive mode: {}",
+        ran.stdout
+    );
+    assert!(
+        ran.stdout.is_empty(),
+        "a refusal is not a result: {}",
+        ran.stdout
+    );
+    // The flag to add. This message is the migration instruction as much as the
+    // refusal, and it is the only place that instruction is certain to be read.
+    assert!(ran.stderr.contains("--archive"), "{}", ran.stderr);
+
+    if cfg!(feature = "inline") {
+        // And the key the operator actually wrote: inline mode writes no
+        // object, so a staging directory carrying a value is what identifies
+        // this configuration as the other arrangement's.
+        assert!(ran.stderr.contains("archive.staging_dir"), "{}", ran.stderr);
+        assert!(ran.stderr.contains("never kept"), "{}", ran.stderr);
+    } else {
+        // A `--no-default-features` build never reaches the key: it refuses the
+        // default mode by the feature's name first, which is the more useful
+        // answer for a binary that cannot derive a row at all.
+        assert!(ran.stderr.contains("--features inline"), "{}", ran.stderr);
+    }
 }
 
 #[test]
@@ -97,13 +158,14 @@ fn a_valid_configuration_checks_out_and_creates_nothing() {
         );
     let path = config_in(dir.path(), &text);
 
-    let ran = run(&["--config", path.to_str().unwrap(), "--check"]);
+    let ran = run(&["--config", path.to_str().unwrap(), "--archive", "--check"]);
     assert_eq!(ran.code(), 0, "{}", ran.stderr);
     assert!(
         ran.stdout.contains("configuration is valid"),
         "{}",
         ran.stdout
     );
+    assert!(ran.stdout.contains("mode=archive"), "{}", ran.stdout);
     // The check runs in a pipeline, against a host that may already be
     // recording. Nothing it does may touch that host's disk.
     assert!(!staging.exists(), "--check created {}", staging.display());

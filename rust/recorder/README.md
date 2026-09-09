@@ -16,8 +16,9 @@ Plan: [`2026-08-30-edge-recorder-record-path.md`](../../docs/superpowers/plans/2
 
 Two processes, and the directory between them is the whole interface. Nothing
 else connects them: no socket, no queue, no shared memory. That is **archive
-mode**, the default and the arrangement everything below describes unless it
-says otherwise; [the two modes](#the-two-modes) is where the other one is.
+mode**, asked for by `--archive`, and the arrangement everything below describes
+unless it says otherwise; [the two modes](#the-two-modes) is where the other one
+is — and the other one is the default.
 
 ```
   the wire                    RECORD PATH  (dz-recorder)                        the disk
@@ -127,13 +128,27 @@ keeps. Designed in
 | Unit | an object — a rotation bound's worth of datagrams, compressed, hashed, manifested | a window — the same bound, in memory, derived and then discarded |
 | What is on disk afterwards | the datagrams, and then the rows | the rows, and only until the destination has taken them |
 | Every row says | `derivation = archive` | `derivation = live` |
-| Turned on by | nothing: it is the default | `--inline-config <path>`, on a build carrying `--features inline` |
+| Asked for by | `--archive` | nothing: it is what a command line naming no mode is read as |
+| A command line naming no mode | **refused**, naming `archive.staging_dir` and `--archive` | runs, given `--inline-config`; **refused** naming both flags without it |
 | Disk sized as | retention × bytes per second | a bounded backlog of rows |
 
-**Archive mode is the default, is unchanged, and is what a host recording a
-production feed for evidence should run.** Rows are derived and re-derivable;
-bytes are not, and a recorder that stored only its own interpretation would have
-thrown away the ability to be wrong about it.
+**Inline mode is the default: it is what a command line naming no mode is read
+as.** Archive mode is asked for by `--archive`, and it is still what a host
+recording a production feed for evidence should run — rows are derived and
+re-derivable, bytes are not, and a recorder that stored only its own
+interpretation would have thrown away the ability to be wrong about it.
+
+**What makes that default safe is not the flag.** Each mode refuses the keys the
+other requires: archive mode needs `[archive] staging_dir` and `completed_dir`,
+and inline mode refuses either of them carrying a value. So an archive-mode host
+whose command line names no mode is refused at startup **by key** and told to
+pass `--archive`; a configuration stating neither shape is refused naming both
+flags. There is no third case, so no host can be moved between the two
+arrangements quietly — which matters because the restart that would move it is
+the moment nobody is reading its log. Why the default sits here is
+[argued in the design](../../docs/superpowers/specs/2026-09-08-recorder-inline-mode-design.md#why-inline-mode-is-the-default),
+and what it costs — including the `--archive` every existing archive-mode
+command line now needs — is [named there](../../docs/superpowers/specs/2026-09-08-recorder-inline-mode-design.md#what-it-costs).
 
 **Inline mode keeps no datagrams.** One process joins the feed, derives its rows
 through the same derivation archive mode uses, spools them and loads them. There
@@ -158,11 +173,12 @@ Three losses, and none of them is recoverable later:
 
 ### What bounds it
 
-**It is a second arrangement, not a replacement.** Archive mode is unchanged —
+**Neither arrangement can be entered by accident.** Archive mode is unchanged —
 its configuration, its objects, its manifest, its metrics and the loader are all
-what they were — and inline mode is asked for by a flag the default
-configuration does not carry, in a build the default feature set does not
-produce.
+what they were — and it is asked for by `--archive`. Inline mode is what a
+command line naming no mode is read as, and an archive-shaped configuration
+reaching it is refused by key rather than started. That refusal is what the
+default rests on: weaken it and a host stops keeping bytes without saying so.
 
 **Every row says which it is.** A `derivation` column carries `archive` or
 `live` on all eight grains, so no query can mistake a row derived from verified
@@ -185,6 +201,8 @@ too: a gap the recorder itself caused is not given a `publisher` verdict.
 ```bash
 cargo test -p dz-recorder-inline
 cargo test -p dz-recorder-e2e --test inline_vs_archive
+# the record-only build, which is the one that has to refuse the default mode
+cargo test -p dz-recorder --no-default-features
 ```
 
 ### Rows reach disk before the column store, on every window
@@ -233,8 +251,8 @@ are disjoint and the health tier's series mean what they mean in archive mode.
 
 ### Which mode a host runs
 
-Inline mode exists for three cases, and archive mode is the answer everywhere
-else:
+Inline mode is what a host gets by saying nothing, and it exists for three
+cases:
 
 - **Bringing up a feed.** The question during bring-up is *are the rows right*,
   and answering it in archive mode takes a rotation, a pass and a query. Inline
@@ -244,6 +262,12 @@ else:
   host that wants the rows is otherwise paying for a disk it has no use for.
 - **One deploy unit.** One binary to pin, one configuration bundle, one metrics
   port, one service to stop and start.
+
+**Archive mode is the answer for a host recording a production feed for
+evidence, and that host states `--archive`.** Saying nothing used to get it; the
+default now sits on the reading whose wrong choice is a startup refusal, rather
+than the one whose wrong choice is an empty table nobody can tell apart from a
+feed nobody published on.
 
 Configuration is two files, because the record path's own file gains no key:
 `config_hash` is provenance written into every object and every coverage row, so
@@ -257,6 +281,14 @@ keys and what each one bounds,
 for the unit, and
 [BRINGING-UP-A-FEED.md](../../BRINGING-UP-A-FEED.md#pointing-a-feed-at-a-mode)
 for pointing a feed at either arrangement.
+
+The mode needs a build carrying `inline`, which is a **default feature** because
+the mode is the default mode: a binary that refused the arrangement its own
+command line asks for when told nothing would be a binary whose default it
+cannot honour. `--no-default-features` is the record-only build — no
+column-store client, no HTTP client, no row crates — and it can only ever be in
+archive mode, so it refuses a command line naming no mode by the feature's name
+and by `--archive`.
 
 ## The two capture modes
 

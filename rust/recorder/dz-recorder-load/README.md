@@ -5,11 +5,12 @@ nothing else. It is a **separate process from the recorder**, sharing one
 directory with it and nothing more.
 
 This process is **archive mode's other half**: `dz-recorder` keeps the bytes and
-this derives rows from them, which is the default arrangement and the one a host
-recording a production feed for evidence runs. There is a second arrangement —
-inline mode, one process that derives rows from the live capture and keeps no
-datagrams — and nothing here changes for it; see
-[the two modes](../README.md#the-two-modes) for what it gives up.
+this derives rows from them. That arrangement is what a host recording a
+production feed for evidence runs, and the recorder beside it is started with
+`--archive` — the other arrangement, inline mode, is what a recorder command
+line naming no mode is read as, and it needs no loader at all. Nothing here
+changes for it; see [the two modes](../README.md#the-two-modes) for what it
+gives up and what the default costs.
 
 ```bash
 dz-recorder-load --config /etc/dz-recorder-load/loader.toml --check

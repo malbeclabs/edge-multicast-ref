@@ -3,11 +3,12 @@
 //! Design:
 //! [`2026-09-08-recorder-inline-mode-design.md`](../../../docs/superpowers/specs/2026-09-08-recorder-inline-mode-design.md).
 //!
-//! # The second arrangement, not a replacement
+//! # The default arrangement, and what it gives up
 //!
-//! Archive mode is the default and is unchanged: `dz-recorder` writes hashed,
-//! manifested objects and `dz-recorder-load` derives rows from them. This crate
-//! is the other arrangement — one process that derives rows from the live
+//! Archive mode is unchanged and is asked for by `--archive`: `dz-recorder`
+//! writes hashed, manifested objects and `dz-recorder-load` derives rows from
+//! them. This crate is the other arrangement, and the one a recorder command
+//! line naming no mode is read as — one process that derives rows from the live
 //! capture and keeps none of the datagrams behind them.
 //!
 //! **That gives something up, and the rows say so.** Every row this path
@@ -15,6 +16,15 @@
 //! nothing verified those bytes and nothing can derive them again, so a rule
 //! written next month has nothing to run against and a derivation defect found
 //! later can be stopped but not corrected.
+//!
+//! The default sits here rather than on archive mode because of how each
+//! reading fails. A host that meant this mode and said nothing under the old
+//! default got a running recorder writing objects nobody derived — an empty
+//! table, indistinguishable from a feed nobody published on. A host that means
+//! archive mode and says nothing under this one is refused at startup naming
+//! `archive.staging_dir`, because nothing here writes an object and the mode
+//! refuses that key. Neither arrangement can be entered by accident; the
+//! refusals are what hold it, and the binary owns them.
 //!
 //! # Three stages, and the two rules that shape them
 //!

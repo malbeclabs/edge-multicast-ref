@@ -5,8 +5,10 @@
 # NO DATAGRAM IS KEPT. There is no archive, no manifest and no digest — a
 # conformance rule written next month has nothing to run against, a row cannot be
 # re-derived, and nothing verified the bytes the rows came from. A host recording
-# a production feed for evidence runs archive mode instead, which is what a unit
-# with no --inline-config gets.
+# a production feed for evidence runs archive mode instead, which takes
+# --archive: this mode is what a command line naming no mode is read as, so a
+# unit for the other arrangement states its flag and a unit that forgets it is
+# refused at startup by key rather than left deriving rows and keeping nothing.
 #
 #   install -o root -g root -m 0644 dz-recorder-inline.service /etc/systemd/system/
 #   install -d -o dz-recorder -g dz-recorder -m 0750 /var/lib/dz-recorder-inline
@@ -14,14 +16,16 @@
 #   systemd-creds encrypt --name=clickhouse-password - /etc/dz-recorder/password.cred
 #   systemctl daemon-reload && systemctl enable --now dz-recorder-inline
 #
-# The binary has to carry the mode: --features inline, plus `tls` for an https
-# destination and `afpacket` for `[capture] mode = "afpacket"`. Each of the three
-# is refused at startup by name in a build that lacks it, rather than downgraded
-# or fallen back from — an https endpoint spoken as plain HTTP would put the
-# password on the wire having been told not to, and recording an archive here
-# would leave the host in the arrangement nobody chose. ExecStartPre is where a
-# build missing one is caught, so the pipeline enables the features before the
-# unit is enabled.
+# The binary carries the mode by default: `inline` is a default feature, because
+# the mode is the default mode. Add `tls` for an https destination and `afpacket`
+# for `[capture] mode = "afpacket"`. Each of the three is refused at startup by
+# name in a build that lacks it, rather than downgraded or fallen back from — an
+# https endpoint spoken as plain HTTP would put the password on the wire having
+# been told not to, and recording an archive here would leave the host in the
+# arrangement nobody chose. A binary built with --no-default-features is the
+# record-only one and refuses this unit's command line by the feature's name.
+# ExecStartPre is where any of that is caught, so the pipeline builds with the
+# features it needs before the unit is enabled.
 
 [Unit]
 Description=DoubleZero edge recorder: inline mode, keeping rows and no datagrams

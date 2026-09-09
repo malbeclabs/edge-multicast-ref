@@ -397,16 +397,29 @@ Three things to know before the first run:
 ### Pointing a feed at a mode
 
 The configuration above is **archive mode**: `dz-recorder` writes objects and
-`dz-recorder-load` derives rows from them. It is the default, and it is what a
-host recording a production feed for evidence runs.
+`dz-recorder-load` derives rows from them. It is what a host recording a
+production feed for evidence runs, and **it takes `--archive`**:
 
-**Inline mode** is the other arrangement — one process that captures the feed,
-derives its rows and loads them, keeping no datagrams. It is for bringing a feed
-up, for a host that was never going to keep the bytes, and for one deploy unit.
-What it gives up is not small: a conformance rule written next month has nothing
-to run against, a row cannot be re-derived, and nothing verified the bytes the
-rows came from. Read
-[the two modes](rust/recorder/README.md#the-two-modes) before choosing it.
+```bash
+dz-recorder --config /etc/dz-recorder/recorder.toml --archive
+```
+
+**That flag is not optional and its absence is not archive mode.** Inline mode
+is what a command line naming no mode is read as, so a configuration naming
+`[archive] staging_dir` or `completed_dir` without `--archive` is refused at
+startup by key. It does not start and it does not quietly stop keeping bytes,
+which is the whole reason the default can sit where it does — but it does mean
+every unit, pipeline and runbook that starts a recorder for archive mode carries
+that word, on `ExecStart` and on the `ExecStartPre` that runs `--check`.
+
+**Inline mode** is the other arrangement, and the default — one process that
+captures the feed, derives its rows and loads them, keeping no datagrams. It is
+for bringing a feed up, for a host that was never going to keep the bytes, and
+for one deploy unit. What it gives up is not small: a conformance rule written
+next month has nothing to run against, a row cannot be re-derived, and nothing
+verified the bytes the rows came from. Read
+[the two modes](rust/recorder/README.md#the-two-modes) before leaving a host in
+it by saying nothing.
 
 **Two files, and neither has a password key.** The feed above stays in the
 recorder's own file — group, ports, `expected_sources`, `site` and `recorder` —
@@ -439,7 +452,14 @@ user     = "dz_loader"
 - **The `[archive]` section comes out.** Nothing writes an object, so a
   `staging_dir` or `completed_dir` carrying a value is refused at startup by
   key. Ignoring it quietly is how a host is believed to be keeping bytes for a
-  year that it never kept for a second.
+  year that it never kept for a second — and because that refusal runs in both
+  directions, it is also what stops an archive-mode host being read as this one
+  when its command line forgets `--archive`.
+- **A command line naming no mode and giving no `--inline-config` is refused
+  too**, naming both flags. Inline mode needs a spool directory, a ledger and a
+  destination, and there is no defensible value to invent for any of them: a
+  recorder that guessed a destination would load rows into a database nobody
+  chose. The default decides how silence is *read*, never what it fabricates.
 - **`spool_dir` must exist and be writable by the service user**, and `ledger`
   must not be inside it. Both are refused at startup, the second for the reason
   the loader's ledger may not live inside its objects directory: a file the
@@ -448,19 +468,22 @@ user     = "dz_loader"
   credential, readable by the service user alone — or from
   `DZ_LOADER_CLICKHOUSE_PASSWORD`, and from nowhere else. That is where the
   loader's already comes from; inline mode invents no second mechanism.
-- **The build has to carry the mode.** `--features inline`, and
-  `--features inline,tls` for an `https` destination. A build without it refuses
-  `--inline-config` naming the feature rather than recording an archive nobody
-  asked for, and an `https` endpoint is refused rather than silently downgraded
-  to plain HTTP with the password on the wire. The recorder's released asset is
-  built for archive mode, so a host running inline mode is running a binary a
-  pipeline built with the feature.
+- **The build carries the mode by default.** `inline` is a default feature,
+  because the mode is the default mode — a binary that could not run the
+  arrangement its own command line asks for when told nothing would refuse
+  every ordinary command line. Add `--features tls` for an `https` destination:
+  that
+  endpoint is refused rather than silently downgraded to plain HTTP with the
+  password on the wire. A binary built with `--no-default-features` is the
+  record-only one and can only be in archive mode, so it refuses a command line
+  naming no mode by the feature's name and by `--archive`. The released asset is
+  built with the default features, so it carries the mode.
 
 **`--check` is what the deployment pipeline runs before it restarts anything**,
 in either mode, and it is an `ExecStartPre` in the units:
 
 ```bash
-dz-recorder --config /etc/dz-recorder/recorder.toml --check
+dz-recorder --config /etc/dz-recorder/recorder.toml --archive --check
 dz-recorder --config /etc/dz-recorder/recorder.toml \
             --inline-config /etc/dz-recorder/inline.toml --check
 ```
@@ -468,7 +491,9 @@ dz-recorder --config /etc/dz-recorder/recorder.toml \
 It validates both files, plans the feeds — every refusal archive mode makes
 about a group, a port role or an interface is made here too — prints which
 arrangement is running and what it keeps, and asks the destination for
-`SELECT 1`. Nothing is bound, nothing is created and nothing is joined, and the
+`SELECT 1`. It is also where a command line that names the wrong mode, or none,
+is caught: run as an `ExecStartPre`, a missing `--archive` costs a failed
+pre-check rather than a recorder that will not start. Nothing is bound, nothing is created and nothing is joined, and the
 spool and the ledger are not touched, so it is safe against a host that is
 already recording. A gate that passed without reaching the destination would let
 a pipeline restart a recorder that cannot write.
@@ -544,7 +569,7 @@ infrastructure repositories, and each of those owns its own review.
 - [ ] config reviewed for `pin`, `source_id`, `channel_id`, group and ports
 - [ ] for a depth feed: `snapshot_cycle` set, and the adapter's `DepthBound` checked against what its book actually holds
 - [ ] a recorder is configured for the feed before the publisher is pointed at production
-- [ ] the recorder's mode is a decision: archive mode for a feed being recorded for evidence, inline mode only where nobody was going to keep the bytes — and, in inline mode, the alert on the age of the oldest unposted window exists
+- [ ] the recorder's mode is a decision, and it is stated: `--archive` for a feed being recorded for evidence, inline mode — which is what saying nothing gets — only where nobody was going to keep the bytes. In inline mode, the alert on the age of the oldest unposted window exists; in archive mode, `--archive` is on both `ExecStart` and the `ExecStartPre` that runs `--check`
 - [ ] metrics scraped, and the connection-state alert exists
 
 **A new feed type**, additionally

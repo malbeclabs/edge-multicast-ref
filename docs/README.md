@@ -33,7 +33,7 @@ Names we do not own, or have not renamed, are left as written wherever they appe
 |---|---|
 | [A generic recorder](superpowers/specs/2026-08-28-edge-recorder-crates-design.md) · [record path plan](superpowers/plans/2026-08-30-edge-recorder-record-path.md) | The design behind [`rust/recorder`](../rust/recorder/): what an archive has to hold for a gap in it to be attributable |
 | [Sequence loss and conformance rows](superpowers/specs/2026-08-31-sequence-loss-and-conformance-rows-design.md) · [plan](superpowers/plans/2026-09-03-recorder-clickhouse-rows.md) | Which sequence values nobody delivered, whose they are, and the rows an archive derives into |
-| [Inline mode](superpowers/specs/2026-09-08-recorder-inline-mode-design.md) · [plan](superpowers/plans/2026-09-08-recorder-inline-mode.md) | One process from capture to rows, keeping no datagrams — and what that costs |
+| [Inline mode](superpowers/specs/2026-09-08-recorder-inline-mode-design.md) · [plan](superpowers/plans/2026-09-08-recorder-inline-mode.md) | One process from capture to rows, keeping no datagrams; why it is what a command line naming no mode is read as, and what that default costs |
 
 ## Cross-cutting
 
