@@ -1673,11 +1673,25 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
         );
         match lowered {
             Ok(reset) => {
+                // **Resolved before the send, not unwrapped inside
+                // it.** The guard above answers `true` for an
+                // instrument on no shard, deliberately, so that the
+                // lowering refuses it as an unknown instrument — a
+                // better diagnostic than *unroutable*. What that leaves
+                // is a send path reached with an index the send paths
+                // may not hold, and it panicked. It survives today only
+                // because the lowering opens with `instruments.get(..)?`
+                // and the registry clears that table and the slot
+                // together — an invariant in another crate that nothing
+                // here states. Counted instead.
+                let Some(pipeline) =
+                    shard.and_then(|shard| self.feeds.market_by_price_on_mut(shard))
+                else {
+                    self.unroutable += 1;
+                    return;
+                };
                 let sent = timed(&self.metrics, EgressMessageType::InstrumentReset, || {
-                    shard
-                        .and_then(|shard| self.feeds.market_by_price_on_mut(shard))
-                        .expect("checked above")
-                        .send_instrument_reset(&reset, now_mono, now_unix)
+                    pipeline.send_instrument_reset(&reset, now_mono, now_unix)
                 });
                 if sent.is_ok() {
                     // Recorded only once the announcement reached the wire. A
@@ -1738,11 +1752,25 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                 );
                 match lowered {
                     Ok(quote) => {
+                        // **Resolved before the send, not unwrapped inside
+                        // it.** The guard above answers `true` for an
+                        // instrument on no shard, deliberately, so that the
+                        // lowering refuses it as an unknown instrument — a
+                        // better diagnostic than *unroutable*. What that leaves
+                        // is a send path reached with an index the send paths
+                        // may not hold, and it panicked. It survives today only
+                        // because the lowering opens with `instruments.get(..)?`
+                        // and the registry clears that table and the slot
+                        // together — an invariant in another crate that nothing
+                        // here states. Counted instead.
+                        let Some(pipeline) =
+                            shard.and_then(|shard| self.feeds.top_of_book_on_mut(shard))
+                        else {
+                            self.unroutable += 1;
+                            return;
+                        };
                         let sent = timed(&self.metrics, EgressMessageType::Quote, || {
-                            shard
-                                .and_then(|shard| self.feeds.top_of_book_on_mut(shard))
-                                .expect("checked above")
-                                .send_quote(&quote, now_mono, now_unix)
+                            pipeline.send_quote(&quote, now_mono, now_unix)
                         });
                         if sent.is_ok() {
                             self.published(now_mono, now_unix);
@@ -1837,11 +1865,25 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                 );
                 match lowered {
                     Ok(level) => {
+                        // **Resolved before the send, not unwrapped inside
+                        // it.** The guard above answers `true` for an
+                        // instrument on no shard, deliberately, so that the
+                        // lowering refuses it as an unknown instrument — a
+                        // better diagnostic than *unroutable*. What that leaves
+                        // is a send path reached with an index the send paths
+                        // may not hold, and it panicked. It survives today only
+                        // because the lowering opens with `instruments.get(..)?`
+                        // and the registry clears that table and the slot
+                        // together — an invariant in another crate that nothing
+                        // here states. Counted instead.
+                        let Some(pipeline) =
+                            shard.and_then(|shard| self.feeds.market_by_price_on_mut(shard))
+                        else {
+                            self.unroutable += 1;
+                            return;
+                        };
                         let sent = timed(&self.metrics, EgressMessageType::LevelUpdate, || {
-                            shard
-                                .and_then(|shard| self.feeds.market_by_price_on_mut(shard))
-                                .expect("checked above")
-                                .send_level(&level, now_mono, now_unix)
+                            pipeline.send_level(&level, now_mono, now_unix)
                         });
                         if sent.is_ok() {
                             self.published(now_mono, now_unix);
@@ -1870,11 +1912,25 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                 );
                 match lowered {
                     Ok(clear) => {
+                        // **Resolved before the send, not unwrapped inside
+                        // it.** The guard above answers `true` for an
+                        // instrument on no shard, deliberately, so that the
+                        // lowering refuses it as an unknown instrument — a
+                        // better diagnostic than *unroutable*. What that leaves
+                        // is a send path reached with an index the send paths
+                        // may not hold, and it panicked. It survives today only
+                        // because the lowering opens with `instruments.get(..)?`
+                        // and the registry clears that table and the slot
+                        // together — an invariant in another crate that nothing
+                        // here states. Counted instead.
+                        let Some(pipeline) =
+                            shard.and_then(|shard| self.feeds.market_by_price_on_mut(shard))
+                        else {
+                            self.unroutable += 1;
+                            return;
+                        };
                         let sent = timed(&self.metrics, EgressMessageType::BookClear, || {
-                            shard
-                                .and_then(|shard| self.feeds.market_by_price_on_mut(shard))
-                                .expect("checked above")
-                                .send_book_clear(&clear, now_mono, now_unix)
+                            pipeline.send_book_clear(&clear, now_mono, now_unix)
                         });
                         if sent.is_ok() {
                             self.published(now_mono, now_unix);

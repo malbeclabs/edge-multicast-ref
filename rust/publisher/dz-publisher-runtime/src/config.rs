@@ -838,11 +838,12 @@ impl ShardName {
     /// job to know that rather than each call site's.
     #[must_use]
     pub fn era_shard(&self) -> dz_publisher_egress::Shard<'_> {
-        if self.is_default() {
-            dz_publisher_egress::Shard::DEFAULT
-        } else {
-            dz_publisher_egress::Shard::named(&self.0)
-        }
+        // Delegated, not reimplemented. `Shard::resolve` is the mapping and it
+        // takes the token as an argument because `dz-publisher-egress` does not
+        // depend on the boundary crate that owns the constant — so the decision
+        // lives once, in the crate that owns `Shard`, and this method's job is
+        // to supply the token from the one place it is spelled.
+        dz_publisher_egress::Shard::resolve(&self.0, dz_adapter_core::DEFAULT_SHARD)
     }
 }
 
@@ -1055,8 +1056,10 @@ impl Document {
             {
                 return Err(StartupError::DuplicateChannelId {
                     channel_id: feed.channel_id,
-                    first: first.spec.as_str().to_owned(),
-                    second: feed.spec.as_str().to_owned(),
+                    first_spec: first.spec.as_str().to_owned(),
+                    first_shard: first.shard.as_str().to_owned(),
+                    second_spec: feed.spec.as_str().to_owned(),
+                    second_shard: feed.shard.as_str().to_owned(),
                 });
             }
             feeds.push(feed);

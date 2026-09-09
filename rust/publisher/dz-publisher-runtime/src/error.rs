@@ -344,15 +344,24 @@ pub enum StartupError {
     /// `heartbeat_last_sent`, `manifest_seq` and `manifest_valid`, each of them
     /// two channel instances deep with nothing saying so. One channel per
     /// specification made it unlikely; many make it a matter of time.
+    /// **Each block is named by its specification *and* its shard**, because
+    /// the specification alone stopped identifying a block the moment two of
+    /// them could carry one. Two blocks of one specification on different
+    /// shards sharing a `Channel ID` is the likely shape of this mistake — and
+    /// naming only the specification would print the same word twice and leave
+    /// an operator looking for a duplicate that reads as one block.
     #[error(
-        "the `[[feed]]` blocks for `{first}` and `{second}` both claim `channel_id = \
-         {channel_id}`. A `Channel ID` identifies a channel instance on the wire and in every \
-         series keyed on one, so two blocks sharing it publish two feeds into one set of numbers."
+        "the `[[feed]]` blocks for `{first_spec}` on shard `{first_shard}` and `{second_spec}` \
+         on shard `{second_shard}` both claim `channel_id = {channel_id}`. A `Channel ID` \
+         identifies a channel instance on the wire and in every series keyed on one, so two \
+         blocks sharing it publish two feeds into one set of numbers."
     )]
     DuplicateChannelId {
         channel_id: u8,
-        first: String,
-        second: String,
+        first_spec: String,
+        first_shard: String,
+        second_spec: String,
+        second_shard: String,
     },
 
     /// Every `[[feed]]` block is disabled, or there are none.

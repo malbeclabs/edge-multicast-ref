@@ -1465,3 +1465,44 @@ fn two_blocks_claiming_one_channel_id_are_refused_naming_both() {
     assert!(message.contains("top-of-book"), "{message}");
     assert!(message.contains("market-by-price"), "{message}");
 }
+
+/// And the shard, because the specification alone stopped identifying a block.
+///
+/// **This is the likely shape of the mistake now.** Two blocks of one
+/// specification on different shards are ordinary, so a `Channel ID` collision
+/// between them is what an operator will actually produce — and a message
+/// naming only the specification prints the same word twice and sends them
+/// looking for a duplicate that reads as one block.
+#[test]
+fn two_shards_of_one_specification_sharing_a_channel_id_are_refused_naming_both_shards() {
+    let mut doc = Doc::valid();
+    let second = doc
+        .feed
+        .replace(
+            &format!("channel_id = {CHANNEL_ID}"),
+            &format!("channel_id = {CHANNEL_ID}\nshard = \"beta\""),
+        )
+        .replace(
+            &format!("mktdata_port = {MKTDATA_PORT}"),
+            &format!("mktdata_port = {}", MKTDATA_PORT + 20),
+        )
+        .replace(
+            &format!("refdata_port = {REFDATA_PORT}"),
+            &format!("refdata_port = {}", REFDATA_PORT + 20),
+        );
+    doc.feed = format!("{}\n{second}", doc.feed);
+
+    let error = Document::parse(&doc.render())
+        .expect("parses")
+        .resolve()
+        .unwrap_err();
+    let message = error.to_string();
+    assert!(
+        matches!(error, StartupError::DuplicateChannelId { .. }),
+        "{message}"
+    );
+    // Both shards named. Without them the message says `top-of-book` twice and
+    // identifies neither block.
+    assert!(message.contains("`default`"), "{message}");
+    assert!(message.contains("`beta`"), "{message}");
+}

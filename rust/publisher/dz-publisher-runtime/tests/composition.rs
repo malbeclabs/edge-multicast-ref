@@ -28,12 +28,18 @@ use std::sync::Arc;
 
 use dz_edge_mbp::MAGIC_MBP;
 use dz_edge_tob::MAGIC_TOB;
+use std::time::Duration;
+
+use dz_adapter_core::EventSink as _;
 use dz_publisher_egress::EraStore;
 use dz_publisher_metrics::{PublisherMetrics, PublisherMetricsConfig};
+use dz_publisher_refdata::{
+    CycleSchedule, MemoryStore, Registry, RegistryConfig, SelectionPolicy, ShardConfig,
+};
 use dz_publisher_runtime::config::{Feed, FeedSpec, ShardName};
 use dz_publisher_runtime::pipeline::Ports;
-use dz_publisher_runtime::{compose_feeds, PortOpener, StartupError};
-use harness::two_shard_feeds;
+use dz_publisher_runtime::{compose_feeds, ManualClock, PortOpener, Publisher, StartupError};
+use harness::{quote, two_shard_feeds, FakeAdapter};
 
 /// A directory that goes away with the test.
 ///
@@ -303,5 +309,104 @@ fn a_shard_with_no_block_is_refused_rather_than_skipped() {
     assert!(
         matches!(&error, StartupError::ShardWithNoFeed { shard } if shard == "delta"),
         "{error}"
+    );
+}
+
+/// The era file's shard is one mapping, and it is the egress crate's.
+///
+/// `ShardName::era_shard` used to reimplement `Shard::resolve`, which had no
+/// caller outside its own test — so the decision that the default shard
+/// contributes no path component lived in two places. The mapping is what a
+/// renamed era file costs: it reads as *no file*, resolves to the first era, and
+/// a publisher on era 7 restarts on era 1 announcing nothing.
+#[test]
+fn the_default_shard_contributes_no_component_and_a_named_one_does() {
+    let default = ShardName::default_shard();
+    let alpha = ShardName::new("alpha").expect("one lowercase path component");
+
+    assert_eq!(default.era_shard(), dz_publisher_egress::Shard::DEFAULT);
+    assert_eq!(
+        alpha.era_shard(),
+        dz_publisher_egress::Shard::named("alpha")
+    );
+}
+
+/// A shard index the guard admits and the send paths do not hold is **counted,
+/// not a panic**.
+///
+/// The guard answers `true` for an instrument on no shard, deliberately, so
+/// that the lowering refuses it as an unknown instrument — a better diagnostic
+/// than *unroutable*. What that leaves is a send reached with an index the send
+/// paths may not hold, and it used to `expect("checked above")`.
+///
+/// It survives in production only because the lowering opens with
+/// `instruments.get(instrument)?` and the registry clears that table and the
+/// slot together — an invariant in another crate that nothing at the send site
+/// states. This test breaks that invariant on purpose: a registry that knows
+/// two shards and send paths that hold one, which is the state a later refactor
+/// of either list produces.
+#[test]
+fn a_send_for_a_shard_with_no_pipeline_is_counted_rather_than_a_panic() {
+    let feeds_list = two_shard_feeds();
+    let metrics = metrics_for(&feeds_list);
+    let shards = shards_of(&feeds_list);
+    let ports = RecordingPorts::new(Arc::clone(&metrics));
+    let dir = TempStateDir::new("no-pipeline");
+    let eras = EraStore::open(dir.path()).expect("an era store");
+
+    // Send paths for the **first** shard only.
+    let first_only: Vec<Feed> = feeds_list
+        .iter()
+        .filter(|feed| feed.shard == shards[0])
+        .cloned()
+        .collect();
+    let feeds = compose_feeds(&shards[..1], &first_only, &eras, &metrics, &ports)
+        .expect("one shard composes");
+
+    // A registry that knows **both**, which is the disagreement.
+    let refdata = Registry::open(
+        RegistryConfig {
+            source_id: feeds_list[0].source_id,
+            shards: shards
+                .iter()
+                .map(|shard| ShardConfig {
+                    name: shard.as_str().to_owned(),
+                    channel_id: feeds_list
+                        .iter()
+                        .find(|feed| &feed.shard == shard)
+                        .expect("a shard came from a feed")
+                        .channel_id,
+                })
+                .collect(),
+            selection: SelectionPolicy::new(8, 16, 8).expect("a coherent policy"),
+            schedule: CycleSchedule::new(Duration::from_secs(30), 1232, 1),
+        },
+        MemoryStore::new(),
+        ManualClock::at_unix_ns(1_700_000_000_000_000_000),
+    )
+    .expect("a registry");
+
+    let mut publisher = Publisher::new(
+        Arc::clone(&metrics),
+        refdata,
+        ManualClock::at_unix_ns(1_700_000_000_000_000_000),
+        feeds_list[0].source_id,
+        feeds,
+        Duration::from_secs(3_600),
+    );
+
+    // Admitted on the second shard, whose send paths this publisher does not
+    // hold.
+    let mut adapter = FakeAdapter::on_shards(&[("B-D", harness::SHARD_B)]);
+    assert!(publisher.poll_listings(&mut adapter));
+    let on_b = adapter.handles()[0];
+
+    let before = publisher.unroutable();
+    publisher.event(quote(on_b, 1));
+
+    assert_eq!(
+        publisher.unroutable(),
+        before + 1,
+        "a send for a shard with no pipeline has to be counted, and it used to panic"
     );
 }
