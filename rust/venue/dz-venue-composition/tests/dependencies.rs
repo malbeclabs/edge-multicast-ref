@@ -27,7 +27,7 @@
 //! anything that depends on this crate, so following those edges would report a
 //! dependency nobody has.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::BTreeSet;
 use std::process::Command;
 
 /// This crate.
@@ -105,94 +105,56 @@ fn the_closure_is_the_one_this_crate_actually_has() {
 
 /// Every crate linked into anything that depends on this one, by name.
 ///
-/// Breadth-first over `cargo metadata`'s resolved graph from this crate's own
-/// node, following normal and build edges and never `dev` ones. See the module
-/// documentation for why the distinction matters.
+/// The names in this crate's linked closure, from `cargo tree`.
+///
+/// # Why `cargo tree` and not a hand-walked graph
+///
+/// The first version of this test walked `cargo metadata`'s resolve nodes by
+/// hand — a hundred and thirty lines of breadth-first search whose own
+/// correctness nothing checked. `cargo tree` answers the same question, cargo
+/// computes the closure rather than this file, and the three flags carry the
+/// three decisions:
+///
+/// - `-e normal` drops dev edges. Several boundary crates take a publisher
+///   crate as a dev-dependency to hold a mirrored enumeration in step, and
+///   following those would report a dependency nobody actually has.
+/// - `--target` asks about one platform. Without it the answer is every
+///   platform's, which on a Linux job names packages that were never fetched.
+/// - `--prefix none` makes each line a package rather than a tree drawing.
+///
+/// `--offline` stays: a dependency graph is a fact about the committed
+/// lockfile, so reading it must not be able to reach out and change one.
 fn linked_closure() -> BTreeSet<String> {
-    let metadata = metadata();
-    let packages = metadata["packages"]
-        .as_array()
-        .expect("`packages` is an array");
-    let nodes = metadata["resolve"]["nodes"]
-        .as_array()
-        .expect("`resolve.nodes` is an array");
-
-    let name_of = |id: &str| -> String {
-        packages
-            .iter()
-            .find(|package| package["id"] == id)
-            .and_then(|package| package["name"].as_str())
-            .unwrap_or_else(|| panic!("no package named by the id `{id}`"))
-            .to_owned()
-    };
-
-    let root = nodes
-        .iter()
-        .find(|node| node["id"].as_str().is_some_and(|id| name_of(id) == ROOT))
-        .expect("this crate has a node in the resolved graph");
-
-    let mut seen = BTreeSet::new();
-    let mut queue = VecDeque::new();
-    queue.push_back(root["id"].as_str().expect("an id is a string").to_owned());
-    let mut visited: BTreeSet<String> = BTreeSet::new();
-
-    while let Some(id) = queue.pop_front() {
-        if !visited.insert(id.clone()) {
-            continue;
-        }
-        let node = nodes
-            .iter()
-            .find(|node| node["id"] == serde_json::Value::String(id.clone()))
-            .unwrap_or_else(|| panic!("no resolved node for `{id}`"));
-        for dep in node["deps"].as_array().expect("`deps` is an array") {
-            let linked = dep["dep_kinds"]
-                .as_array()
-                .expect("`dep_kinds` is an array")
-                .iter()
-                // `null` is a normal dependency; the other two spellings are
-                // `dev` and `build`.
-                .any(|dep_kind| dep_kind["kind"].as_str() != Some("dev"));
-            if !linked {
-                continue;
-            }
-            let pkg = dep["pkg"].as_str().expect("a package id is a string");
-            seen.insert(name_of(pkg));
-            queue.push_back(pkg.to_owned());
-        }
-    }
-
-    seen
-}
-
-/// `cargo metadata` for this crate's own workspace, with no network.
-fn metadata() -> serde_json::Value {
     let output = Command::new(env!("CARGO"))
         .args([
-            "metadata",
-            "--format-version",
-            "1",
-            // A dependency graph is a fact about the committed lockfile, so
-            // reading it must not be able to reach out and change one.
+            "tree",
             "--offline",
-            // **Without this the graph is every platform's**, and a Linux job
-            // has never downloaded the packages that only another one resolves
-            // — so `--offline` fails on a file that was never fetched rather
-            // than on anything about this crate. It narrows what is *resolved*,
-            // not what is asserted: nothing forbidden here is platform-specific,
-            // and the positive control below still names what must be present.
-            "--filter-platform",
+            "--package",
+            ROOT,
+            "--edges",
+            "normal",
+            "--prefix",
+            "none",
+            "--target",
             env!("BUILD_TARGET"),
             "--manifest-path",
         ])
         .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
         .output()
-        .expect("`cargo metadata` runs");
+        .expect("`cargo tree` runs");
 
     assert!(
         output.status.success(),
-        "`cargo metadata` failed: {}",
+        "`cargo tree` failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 
-    serde_json::from_slice(&output.stdout).expect("`cargo metadata` emits JSON")
+    // `name version (path) (*)` — the name is the first field, and a line that
+    // repeats a subtree already shown is marked and carries the same name.
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
