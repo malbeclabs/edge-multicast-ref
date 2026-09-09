@@ -327,10 +327,15 @@ struct RecordingAdapter {
     connect_results: VecDeque<Result<(), AdapterError>>,
     /// What to write upstream from `on_connected`.
     subscriptions: Vec<&'static str>,
-    /// Every connection `poll_upstream` was asked about, in order. The
-    /// **count** is what the cadence is asserted on: a driver asking on every
-    /// receive satisfies any assertion that only checks the message arrived.
-    upstream_polls: Vec<ConnectionId>,
+    /// Every `poll_upstream`, as the connection it named and **how many
+    /// payloads this adapter had seen by then**.
+    ///
+    /// The payload count is what makes this an assertion about a write that is
+    /// not a connect. Without it the test passes against a driver that asks
+    /// once, at logon, beside `on_connected` — which is the publisher this
+    /// whole mechanism exists to stop being, and which was caught by running
+    /// that revert rather than by reading the test.
+    upstream_polls: Vec<(ConnectionId, usize)>,
     /// What to write from each successive `poll_upstream`. Exhausted means the
     /// adapter has nothing outstanding, which is what an adapter answers most
     /// of the time and must be able to answer without writing.
@@ -366,7 +371,7 @@ impl Adapter for RecordingAdapter {
         conn: ConnectionId,
         out: &mut dyn UpstreamSink,
     ) -> Result<(), AdapterError> {
-        self.upstream_polls.push(conn);
+        self.upstream_polls.push((conn, self.payloads.len()));
         if let Some(Err(error)) = self.upstream_results.pop_front() {
             return Err(error);
         }
@@ -1425,8 +1430,10 @@ fn the_adapter_is_asked_while_the_connection_is_up() {
 
     assert_eq!(
         outcome.adapter.upstream_polls,
-        vec![CONNECTION],
-        "the adapter is asked once, on the connection it is asked about"
+        vec![(CONNECTION, 1)],
+        "asked once, on the connection it is asked about, and **after** that \
+         connection had delivered a payload — which a driver asking at logon \
+         cannot satisfy"
     );
     assert_eq!(
         outcome.sent,
