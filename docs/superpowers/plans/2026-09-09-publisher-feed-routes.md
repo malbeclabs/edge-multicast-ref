@@ -435,6 +435,31 @@ was two things no fake could have.
 
 ---
 
+### 13. The composition, under test — a hole the acceptance rule left open
+
+**Found after the fact, by perturbation.** Reversing the shard order in `run.rs`'s composition loop — the edit that publishes each shard's instruments under another channel instance's sequence series — leaves **all 1408 tests passing**. Nothing in the suite reaches `compose_and_run`. The only things that do are `examples/replay_publisher.rs` and the by-hand `examples/replay.sh`.
+
+That leaves this plan's own acceptance rule satisfied in every part but one. "Reverting task 3, 4, 7 or 9 kills a named test" holds for all four — but task 9's *composition* half, `run.rs composes one pipeline per block instead of assigning into an `Option``, has no test that dies. It is the half whose failure is invisible on the wire.
+
+**And the by-hand run does not catch it either**, which the perturbation also showed and which is a correction to the finding as first stated. Two reasons, both worth recording:
+
+- The definition path is **name-keyed**, not index-keyed: `ShardFeeds` derives its name from one of its own send paths, and the tick asks the registry by that name. So reversing the order leaves every reference-data port carrying exactly its own shard's definitions — which is what `replay.sh` asserts.
+- The *event* path is index-keyed. A quote resolves the registry's shard index and uses it to index `Feeds`, so under the reversal it reaches another shard's pipeline, whose lowering does not hold that instrument, and the message is dropped before any wire. Every channel loses exactly its own market data and no channel gains any — 38 messages became 32 — and `replay.sh` asserted the count in prose and never asserted that a **quote** arrived at all.
+
+So the mutant is killed by nothing, including the run this plan credits. Three things close it.
+
+- [ ] **A port opener behind a trait.** `open_ports` takes `route: &KernelRoute`, the concrete type, although `RouteLookup` exists and its own doc comment says it exists because "a test that needs a route to a multicast group is a test that does not run in CI". The route is not the missing seam: `MulticastTransmitter::open` binds and connects a real socket, so what has to go behind a trait is the thing that produces a feed's `Ports`. The real implementation is backed by `KernelRoute` and is what `run()` passes.
+- [ ] **The composition extracted and called with it.** One function taking the shard list, the feed list, the era store, the metrics and the opener, returning `Feeds`. A test with two shards then asserts that `Feeds`' order is `Config::shards()`' order and that each shard carries its own `Channel ID`s — which covers the order, the era file per shard, and the registry's shard list in one place, because all three are built from that one list.
+- [ ] **`ShardFeeds::new(None, None)` tested directly**, because no document can produce the empty pair: `Config::shards()` is the distinct shards *of the enabled blocks*. An invariant no document can violate is one a later refactor can, which is what the refusal is for.
+- [ ] **`StartupError::ShardWithNoFeed` exercised**, and this is where the decision about it lands. It cannot be reached through a document *or* through a hand-built `Config`, for the same reason — so it is reached through the extracted composition, handed a shard list that names a shard the feed list does not. A variant nothing exercises is worse than no variant; extracting the composition is what makes this one real rather than decorative.
+- [ ] **`replay.sh` gains the floor it was missing**: each channel carried its own instruments' **quotes and trades**, not only their definitions. Asserting a definition passes against a publisher that publishes no market data at all — the same shape of hole this plan found twice in its own unit tests and fixed both times.
+
+**Test:** `dz-publisher-runtime/tests/composition.rs`, over the existing harness's port builders — the fake opener hands back the same recording `Ports` the end-to-end suites already use, so nothing new has to be invented to build one.
+
+**The revert:** reverse the shard order in the composition, which is the perturbation that started this task. `the_composition_orders_the_shards_as_the_document_states_them` fails. Before this task, that edit failed nothing at all.
+
+---
+
 ## It ran
 
 Everything above is tested against fakes — sockets behind traits, injected
@@ -530,6 +555,12 @@ The plan is done when:
 and when reverting any one of tasks 3, 4, 7 or 9's changes makes at least one
 named test fail — because a plan whose tests all pass against the tree it was
 written for has documented the tree rather than changed it.
+
+**That rule was satisfied in every part but one, and task 13 is the part.** Task
+9's composition half had no test that died: nothing in the suite reached
+`compose_and_run`, and the by-hand run could not tell the difference either.
+The rule found it — one revert short of the four it asks for — which is the
+argument for the rule rather than against it.
 
 **Each of those four reverts was run, and this is what died.**
 
