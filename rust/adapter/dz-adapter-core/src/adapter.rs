@@ -137,6 +137,77 @@ pub trait Adapter: Send {
         Ok(())
     }
 
+    /// Write whatever is outstanding upstream on a connection that is already
+    /// open.
+    ///
+    /// Asked on a cadence, per connection, while the connection is up. The
+    /// counterpart to [`on_connected`](Self::on_connected), which is the only
+    /// other place an adapter may write upstream — and which happens once, at
+    /// logon, from the set the adapter held then.
+    ///
+    /// # The failure this exists for
+    ///
+    /// Without it, an instrument discovered mid-session can be admitted
+    /// completely — minted an `Instrument ID`, defined on the reference-data
+    /// port, counted in the manifest — and never subscribed, because the
+    /// subscription was composed at logon. Nothing reports that: the feed is
+    /// healthy, the manifest says the instrument is published, and no message
+    /// for it will ever arrive. A transport that re-subscribes for its own
+    /// reasons hides it; a session transport does not, and the instrument waits
+    /// for the next restart.
+    ///
+    /// It is also where a request the repair path needs goes. A publisher that
+    /// wants the venue to resend a book it has lost had nowhere to put the
+    /// request, which made a recovery-path metric a flat zero certifying a
+    /// repair that never ran.
+    ///
+    /// # This write is **not** deduplicated, and re-offering a listing is
+    ///
+    /// [`poll_listings`](Self::poll_listings) may re-offer its whole set every
+    /// time: the sink returns the handle already minted and nothing reaches a
+    /// venue. This is the opposite. The runtime does not understand a venue's
+    /// bytes, so it cannot tell a subscription it has already sent from a new
+    /// one, and an adapter that queues its whole set every time it is asked
+    /// sends that set to the venue on every cadence.
+    ///
+    /// So: write what is outstanding **on this connection**, and queue nothing
+    /// when nothing is. Getting it wrong looks, from here, like a venue rate
+    /// limiting or disconnecting a publisher that is working perfectly.
+    ///
+    /// # Per-connection state, for the reason `on_connected` gives
+    ///
+    /// One adapter serves every source a publisher opens, so what has been
+    /// written is a property of `conn` and not of the adapter. An adapter that
+    /// keeps one "subscribed" set is correct with one source and wrong the
+    /// moment a second is configured — and wrong silently, because the second
+    /// connection is told nothing and looks subscribed.
+    ///
+    /// No reason is passed, and that is deliberate. The runtime could say *a
+    /// poll admitted something* or *an instrument reset*, and either would
+    /// invite an adapter to key its state on the reason rather than on the
+    /// connection. The adapter already holds the handles
+    /// [`ListingSink::list_on`](crate::ListingSink::list_on) returned; the
+    /// difference between those and what it has written is its own.
+    ///
+    /// # Errors
+    ///
+    /// [`AdapterError`] when the adapter cannot compose what it wanted to send.
+    /// **The connection survives it**, which is the one place this differs from
+    /// `on_connected`: at logon a connection subscribed to nothing is worth
+    /// nothing, and mid-session it is still delivering everything subscribed
+    /// then. The error is counted and the next cadence asks again.
+    ///
+    /// A *send* that fails is not this: it ends the connection, the driver
+    /// reconnects, and `on_connected` writes the whole set again.
+    fn poll_upstream(
+        &mut self,
+        conn: ConnectionId,
+        out: &mut dyn UpstreamSink,
+    ) -> Result<(), AdapterError> {
+        let _ = (conn, out);
+        Ok(())
+    }
+
     /// Told that a connection has ended, and why.
     ///
     /// For an adapter that must invalidate per-connection state — a sequence it

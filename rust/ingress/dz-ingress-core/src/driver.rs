@@ -45,6 +45,35 @@ pub struct UpstreamQueue {
     messages: Vec<Queued>,
 }
 
+/// How often a driver asks an adapter whether it has anything outstanding to
+/// send on a connection that is already open.
+///
+/// # Why it is a constant, and why it is not the runtime's listing poll
+///
+/// A constant for the reason the runtime's own poll is one: no design names a
+/// key for it, and a key would be a value an operator could set wrong for no
+/// benefit. It bounds one thing — how long a newly admitted instrument waits
+/// for its subscription — and five seconds against a venue that lists in
+/// mid-session batches is nothing.
+///
+/// It is deliberately **slower** than the listing poll, which runs every
+/// second. That one is affordable by construction: re-offering a listing is a
+/// hash lookup against a set the runtime owns, and a poll that changes nothing
+/// writes nothing. This one is not. What an adapter queues here reaches a
+/// venue, and nothing in this crate can tell a subscription it has already sent
+/// from a new one — so the cadence is also the blast radius of an adapter that
+/// is wrong about what is outstanding.
+///
+/// # What it does not do
+///
+/// It does not fire on a silent connection. The driver asks after a receive
+/// returns, so an adapter is asked while the connection has something to say —
+/// a payload or a keepalive — and a connection with no traffic at all is the
+/// idle guard's business rather than this one's. That is the cost of not
+/// bounding the receive budget by this cadence: doing so would make an elapsed
+/// budget mean two things, and `Received::Idle` means exactly one.
+pub const UPSTREAM_POLL: Duration = Duration::from_secs(5);
+
 /// One queued message, owned, because the adapter's borrow of it ended when
 /// `on_connected` returned.
 #[derive(Debug)]
@@ -431,6 +460,11 @@ impl<'a> Driver<'a> {
     async fn pump(&mut self, events: &mut dyn EventSink, connection: ConnectionId) -> (Stop, bool) {
         let mut delivered = false;
         let mut last_payload_ns = self.clock.steady_ns();
+        // From now rather than from zero, so the first ask is one cadence after
+        // the connection came up. `on_connected` has just written whatever the
+        // adapter held at logon, and asking again immediately would invite a
+        // second copy of it.
+        let mut last_upstream_ns = self.clock.steady_ns();
         loop {
             // Recomputed every time round, because the budget is what is left
             // of the guard and not the whole of it: a connection answering a
@@ -483,6 +517,45 @@ impl<'a> Driver<'a> {
                         .disconnect_reason()
                         .unwrap_or(DisconnectReason::RemoteClose);
                     return (Stop::Reason(reason), delivered);
+                }
+            }
+
+            // Whatever the adapter has outstanding for *this* connection, on
+            // the cadence. Reached only after a payload or a keepalive: every
+            // other arm above has returned, which is what makes this the point
+            // where the connection is known to be alive.
+            let waited = self.clock.steady_ns().saturating_sub(last_upstream_ns);
+            if Duration::from_nanos(waited) >= UPSTREAM_POLL {
+                last_upstream_ns = self.clock.steady_ns();
+                // A queue per ask, not one carried: a message the adapter
+                // queued and a flush failed to send belongs to a connection
+                // that is now gone.
+                let mut queue = UpstreamQueue::new();
+                match self.adapter.poll_upstream(connection, &mut queue) {
+                    // Counted, and the connection **survives**. This is the one
+                    // place this differs from `on_connected`, where the same
+                    // refusal tears the connection down: at logon a connection
+                    // subscribed to nothing is worth nothing, and here it is
+                    // still delivering everything that was subscribed then.
+                    // Dropping it would cost those to save the one.
+                    Err(error) => self.observer.adapter_error(error),
+                    Ok(()) => {
+                        if let Err(error) = self.flush(&queue).await {
+                            // A send that fails is a connection that has ended,
+                            // exactly as it is anywhere else. The reconnect
+                            // calls `on_connected`, which writes the whole set
+                            // again, so nothing has to be reconciled.
+                            let fatal = error.is_fatal();
+                            let reason = error
+                                .disconnect_reason()
+                                .unwrap_or(DisconnectReason::RemoteClose);
+                            return if fatal {
+                                (Stop::Fatal(error), delivered)
+                            } else {
+                                (Stop::Reason(reason), delivered)
+                            };
+                        }
+                    }
                 }
             }
         }

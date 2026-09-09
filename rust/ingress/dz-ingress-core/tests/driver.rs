@@ -28,7 +28,7 @@ use dz_adapter_core::{
 };
 use dz_ingress_core::{
     BackoffPolicy, BoxFuture, Clock, ConnectFailureReason, Driver, IngressError, IngressObserver,
-    Input, Policy, Received, UpstreamMessage,
+    Input, Policy, Received, UpstreamMessage, UPSTREAM_POLL,
 };
 
 const CONNECTION: ConnectionId = ConnectionId::new("mktdata");
@@ -327,6 +327,16 @@ struct RecordingAdapter {
     connect_results: VecDeque<Result<(), AdapterError>>,
     /// What to write upstream from `on_connected`.
     subscriptions: Vec<&'static str>,
+    /// Every connection `poll_upstream` was asked about, in order. The
+    /// **count** is what the cadence is asserted on: a driver asking on every
+    /// receive satisfies any assertion that only checks the message arrived.
+    upstream_polls: Vec<ConnectionId>,
+    /// What to write from each successive `poll_upstream`. Exhausted means the
+    /// adapter has nothing outstanding, which is what an adapter answers most
+    /// of the time and must be able to answer without writing.
+    outstanding: VecDeque<Vec<&'static str>>,
+    /// What each successive `poll_upstream` returns. Exhausted means success.
+    upstream_results: VecDeque<Result<(), AdapterError>>,
 }
 
 impl Adapter for RecordingAdapter {
@@ -347,6 +357,21 @@ impl Adapter for RecordingAdapter {
         }
         for subscription in &self.subscriptions {
             out.send_text(subscription);
+        }
+        Ok(())
+    }
+
+    fn poll_upstream(
+        &mut self,
+        conn: ConnectionId,
+        out: &mut dyn UpstreamSink,
+    ) -> Result<(), AdapterError> {
+        self.upstream_polls.push(conn);
+        if let Some(Err(error)) = self.upstream_results.pop_front() {
+            return Err(error);
+        }
+        for message in self.outstanding.pop_front().unwrap_or_default() {
+            out.send_text(message);
         }
         Ok(())
     }
@@ -1367,4 +1392,181 @@ fn a_book_the_adapter_stopped_trusting_reaches_the_runtime_through_the_wrapper()
     // Reported from inside the payload's own scope, like every other report the
     // adapter makes about it.
     assert_eq!(outcome.events.scopes, vec![Some(RECV_A), None]);
+}
+
+// ---------------------------------------------------------------------------
+// An upstream write that is not a connect
+// ---------------------------------------------------------------------------
+
+/// The mechanism, and the failure it exists for.
+///
+/// Without it an instrument admitted mid-session is never subscribed: the
+/// subscription was composed at logon from the set the adapter held then, and
+/// nothing reports the difference — the manifest says the instrument is
+/// published and no message for it ever arrives.
+///
+/// The clock is advanced by a keepalive, which is what a live connection does
+/// while it is holding a receive open.
+#[test]
+fn the_adapter_is_asked_while_the_connection_is_up() {
+    let adapter = RecordingAdapter {
+        outstanding: VecDeque::from(vec![vec!["subscribe:A-B"]]),
+        ..RecordingAdapter::default()
+    };
+    let outcome = run(
+        policy(),
+        adapter,
+        vec![Connection::live(vec![
+            Read::Payload(b"a"),
+            Read::Keepalive(UPSTREAM_POLL),
+            Read::Ended(DisconnectReason::RemoteClose),
+        ])],
+    );
+
+    assert_eq!(
+        outcome.adapter.upstream_polls,
+        vec![CONNECTION],
+        "the adapter is asked once, on the connection it is asked about"
+    );
+    assert_eq!(
+        outcome.sent,
+        vec!["subscribe:A-B"],
+        "and what it queued left by that connection's transport"
+    );
+}
+
+/// It is not asked before the cadence, however much arrives.
+///
+/// Asserted as a count of calls rather than as an absence of messages, because
+/// an adapter with nothing outstanding writes nothing either way — so a driver
+/// asking on every receive would satisfy every other assertion in this section.
+/// The cost of asking too often is not this crate's to absorb: what an adapter
+/// queues reaches a venue, and nothing here can tell a subscription it has
+/// already sent from a new one.
+#[test]
+fn the_adapter_is_not_asked_before_the_cadence() {
+    let outcome = run(
+        policy(),
+        RecordingAdapter::default(),
+        vec![Connection::live(vec![
+            Read::Payload(b"a"),
+            Read::Payload(b"b"),
+            Read::Keepalive(UPSTREAM_POLL / 2),
+            Read::Payload(b"c"),
+            Read::Ended(DisconnectReason::RemoteClose),
+        ])],
+    );
+
+    assert!(
+        outcome.adapter.upstream_polls.is_empty(),
+        "asked {} times before the cadence was due",
+        outcome.adapter.upstream_polls.len()
+    );
+}
+
+/// A refusal costs one counted error and no connection.
+///
+/// The one place this differs from `on_connected`, where the same refusal tears
+/// the connection down. At logon a connection subscribed to nothing is worth
+/// nothing; mid-session it is still delivering everything subscribed then, and
+/// dropping it would cost those to save the one. The payload after the refusal
+/// is what says the connection survived.
+#[test]
+fn a_refusal_mid_session_is_counted_and_the_connection_survives() {
+    let adapter = RecordingAdapter {
+        upstream_results: VecDeque::from(vec![Err(AdapterError::NotReady {
+            detail: "the session has not authenticated",
+        })]),
+        ..RecordingAdapter::default()
+    };
+    let outcome = run(
+        policy(),
+        adapter,
+        vec![Connection::live(vec![
+            Read::Keepalive(UPSTREAM_POLL),
+            Read::Payload(b"after-the-refusal"),
+            Read::Ended(DisconnectReason::RemoteClose),
+        ])],
+    );
+
+    assert_eq!(outcome.observer.recorded().adapter_errors, 1);
+    assert_eq!(
+        outcome.adapter.payloads.len(),
+        1,
+        "the connection carried on delivering after the refusal"
+    );
+    assert_eq!(outcome.connects, 1, "and was not reconnected");
+}
+
+/// A send that fails ends the connection, and the reconnect writes the whole
+/// set again.
+///
+/// Which is why nothing has to be reconciled: the repair for a failed
+/// mid-session write is the path that already exists. `subscriptions` is empty
+/// so that the scripted `send` failure lands on the mid-session write and not
+/// on a logon.
+#[test]
+fn a_failed_mid_session_send_ends_the_connection_and_the_reconnect_subscribes_again() {
+    let adapter = RecordingAdapter {
+        outstanding: VecDeque::from(vec![vec!["subscribe:A-B"]]),
+        ..RecordingAdapter::default()
+    };
+    let mut failing = Connection::live(vec![
+        Read::Keepalive(UPSTREAM_POLL),
+        Read::Payload(b"never-reached"),
+    ]);
+    failing.send = Some(IngressError::ended(
+        DisconnectReason::RemoteClose,
+        "the session went away mid-write",
+    ));
+    let outcome = run(
+        policy(),
+        adapter,
+        vec![
+            failing,
+            Connection::live(vec![Read::Ended(DisconnectReason::RemoteClose)]),
+        ],
+    );
+
+    assert_eq!(
+        outcome.adapter.payloads.len(),
+        0,
+        "the read after the failed write never happened"
+    );
+    assert_eq!(
+        outcome.adapter.connected.len(),
+        2,
+        "the second connection re-ran `on_connected`"
+    );
+}
+
+/// What the adapter queues mid-session pays the same rate limit as a logon.
+///
+/// The limiter is what protects a venue from an adapter that is wrong about
+/// what is outstanding, so a mid-session write that bypassed it would be the
+/// one write nothing paces.
+#[test]
+fn a_mid_session_write_is_paced_like_a_subscription_at_logon() {
+    let adapter = RecordingAdapter {
+        outstanding: VecDeque::from(vec![vec!["one", "two"]]),
+        ..RecordingAdapter::default()
+    };
+    let outcome = run(
+        Policy {
+            rate_limit_per_second: 5,
+            ..policy()
+        },
+        adapter,
+        vec![Connection::live(vec![
+            Read::Keepalive(UPSTREAM_POLL),
+            Read::Ended(DisconnectReason::RemoteClose),
+        ])],
+    );
+
+    assert_eq!(outcome.sent, vec!["one", "two"]);
+    assert!(
+        outcome.clock.slept().contains(&Duration::from_millis(200)),
+        "the second message waited its slot: {:?}",
+        outcome.clock.slept()
+    );
 }
