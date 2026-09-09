@@ -95,13 +95,20 @@ fn main() -> std::io::Result<()> {
     for symbol in &symbols {
         for event in &events {
             let mut bytes = Vec::new();
-            // A refusal names the event and costs that record, not the stream:
-            // what a recorder does with one is count it and keep going.
+            // A refusal names the event and costs that record, not the whole
+            // recording: what a recorder does with one is count it and keep
+            // going. **And it writes no file.** `write` appends nothing when it
+            // refuses, so writing the buffer anyway would leave a zero-length
+            // `.record` that a reader cannot decode — a refusal that cost the
+            // replay rather than the record.
             if let Err(refused) = writer.write(symbol, event, &mut bytes) {
                 eprintln!("dz-adapter-uds: {refused}");
+                continue;
             }
             // Zero-padded, because a replay reads its directory in name order
-            // and `10` sorts before `9`.
+            // and `10` sorts before `9`. A refused event leaves a gap in the
+            // numbering, which costs nothing: the order is what the names carry
+            // and a reader takes the files that exist.
             let path = dir.join(format!("{n:04}.record"));
             std::fs::write(&path, &bytes)?;
             println!("{} ({} bytes) {symbol}", path.display(), bytes.len());

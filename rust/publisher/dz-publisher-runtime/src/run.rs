@@ -573,15 +573,15 @@ fn primary_connection(config: &Config, venue: &crate::Venue) -> ConnectionId {
 /// missing. `MulticastTransmitter::open` binds a socket and connects it, so a
 /// composition holding a `RouteLookup` still needs a network to compose.
 ///
-/// **The consequence was that nothing in the suite reached the composition at
-/// all.** Reversing the shard order in [`compose_feeds`] — the edit that
-/// publishes each shard's instruments under another channel instance's sequence
-/// series — passed the whole suite, and passed the by-hand offline run too. Two
-/// things hid it: the end-to-end harness composes its own `Feeds`, and the
-/// definition path is keyed on a shard's *name* while the event path is keyed
-/// on its *index*. What the permutation costs is a quote that reaches another
-/// shard's pipeline, whose lowering does not hold the instrument, and is
-/// dropped before any wire.
+/// **Without this seam nothing but a real socket can reach the composition**,
+/// and a permuted shard order is undetectable from anywhere else. The
+/// definition path is keyed on a shard's *name* — `ShardFeeds` derives it from
+/// one of its own send paths — so every reference-data port still carries
+/// exactly its own shard's definitions. The event path is keyed on the
+/// *index*, so a quote reaches another shard's pipeline, whose lowering does
+/// not hold the instrument, and is dropped before any wire: every channel
+/// loses its own market data and no channel gains any. The end-to-end harness
+/// composes its own `Feeds`, so it cannot see the difference either.
 pub trait PortOpener {
     /// The send paths for one `[[feed]]` block.
     ///

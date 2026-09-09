@@ -29,7 +29,7 @@ interface's, quoted below. What is new is choosing the word.
 | Candidate | Why not |
 |---|---|
 | `route` | The word is taken twice over. `[egress]` already means *the IP route to the group* by it — `pin` is documented as "an operator's override of route discovery" — so two unrelated senses would sit in one configuration document. Worse, `GLOSSARY.md` defines `path` as "one of several redundant routes carrying the same data", which makes "62 routes" read as sixty-two redundant paths carrying the same instruments. These carry **disjoint** instrument sets. The word says the opposite of what is meant. |
-| `category` | `GLOSSARY.md` 1.4.0 defines `Category` as a feed-registry field and is explicit about what it is not: "an arbitration boundary, not a taxonomy … It is not a place to describe what a market is about, and a value that reads like a description invites exactly that use." Rows differing in category "carry disjoint instrument sets and never contest each other's tape or book" — but these shards are one instrument set spread for capacity, they arbitrate as one, and they share a `(venue, category)`. Using the registry's word for a deployment partition would put a second meaning on a field the venue-wide tape gate reads. |
+| `category` | The word describes what a market is *about*, and a value that reads like a description invites exactly that use. What is being named here is the opposite of a taxonomy: one instrument set spread across channels for capacity, arbitrating as one, with instruments that an operator can move between them. A key whose name suggests a classification of markets would be filled in with one. |
 | `lane` | Banned outright. `feed` or `path`. |
 | `group` | Taken: the multicast group. |
 
