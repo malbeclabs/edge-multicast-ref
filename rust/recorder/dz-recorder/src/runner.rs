@@ -107,7 +107,7 @@ impl Capturing for dz_recorder_capture::AfPacketSource {
 }
 
 /// One capture handle, whichever mode the configuration asked for.
-enum Capture {
+pub(crate) enum Capture {
     Socket(SocketSource),
     #[cfg(feature = "afpacket")]
     AfPacket(dz_recorder_capture::AfPacketSource),
@@ -565,7 +565,7 @@ impl FeedRecorder {
     }
 }
 
-fn open_capture(plan: &Plan, feed: &FeedPlan) -> Result<Capture, RunError> {
+pub(crate) fn open_capture(plan: &Plan, feed: &FeedPlan) -> Result<Capture, RunError> {
     let failed = |source| RunError::Capture {
         feed: feed.spec.clone(),
         source,

@@ -84,7 +84,6 @@ pub enum InlineConfigError {
     ArchiveDirectoryConfigured { key: &'static str, path: String },
 
     #[cfg(feature = "inline")]
-    #[cfg(feature = "inline")]
     #[error(
         "`inline.{key}` is 0, and a bound of zero is not a bound: the window would close on the \
          first datagram it admitted, which posts an insert per datagram and turns this recorder's \
@@ -148,7 +147,8 @@ pub enum InlineConfigError {
     #[cfg(feature = "inline")]
     #[error(
         "the destination could not be reached, so no row derived here would land: {0}. The \
-         password comes from DZ_LOADER_CLICKHOUSE_PASSWORD and from nowhere else."
+         password comes from DZ_LOADER_CLICKHOUSE_PASSWORD_FILE, or second best from \
+         DZ_LOADER_CLICKHOUSE_PASSWORD, and from nowhere else."
     )]
     Unreachable(String),
 

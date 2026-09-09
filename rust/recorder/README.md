@@ -15,7 +15,9 @@ Plan: [`2026-08-30-edge-recorder-record-path.md`](../../docs/superpowers/plans/2
 ## What runs, on one host
 
 Two processes, and the directory between them is the whole interface. Nothing
-else connects them: no socket, no queue, no shared memory.
+else connects them: no socket, no queue, no shared memory. That is **archive
+mode**, the default and the arrangement everything below describes unless it
+says otherwise; [the two modes](#the-two-modes) is where the other one is.
 
 ```
   the wire                    RECORD PATH  (dz-recorder)                        the disk
@@ -102,6 +104,7 @@ One vantage point cannot tell those apart, which is why a `sequence_gap` row lan
 | `dz-recorder-events` | Market data rows: reference data scoped to an era, the fold that joins the messages to it, and the book that says when its top cannot be believed |
 | `dz-recorder-clickhouse` | The column store as one `RowSink`, plus the checked-in DDL |
 | `dz-recorder-load` | The loader binary ([README](dz-recorder-load/README.md)) |
+| `dz-recorder-inline` | Inline mode as a library: the ring, the window and its synthesised manifest, and the spool that holds rows until the column store has taken them |
 | `dz-recorder-e2e` | The tests that use the real encoder, the real writer and the real reader end to end |
 
 Take what you need. A publisher wanting a byte-exact record of its own egress
@@ -112,9 +115,155 @@ decodes a datagram** — a message a decoder rejects is a message the archive
 never holds, and the evidence needed to diagnose that bug is what the bug
 destroyed.
 
+## The two modes
+
+Two arrangements of the same crates, and what separates them is what the host
+keeps. Designed in
+[`2026-09-08-recorder-inline-mode-design.md`](../../docs/superpowers/specs/2026-09-08-recorder-inline-mode-design.md).
+
+| | **archive mode** | **inline mode** |
+|---|---|---|
+| Processes | two: `dz-recorder` writes objects, `dz-recorder-load` derives rows from them | one: capture, derivation and load in the same process |
+| Unit | an object — a rotation bound's worth of datagrams, compressed, hashed, manifested | a window — the same bound, in memory, derived and then discarded |
+| What is on disk afterwards | the datagrams, and then the rows | the rows, and only until the destination has taken them |
+| Every row says | `derivation = archive` | `derivation = live` |
+| Turned on by | nothing: it is the default | `--inline-config <path>`, on a build carrying `--features inline` |
+| Disk sized as | retention × bytes per second | a bounded backlog of rows |
+
+**Archive mode is the default, is unchanged, and is what a host recording a
+production feed for evidence should run.** Rows are derived and re-derivable;
+bytes are not, and a recorder that stored only its own interpretation would have
+thrown away the ability to be wrong about it.
+
+**Inline mode keeps no datagrams.** One process joins the feed, derives its rows
+through the same derivation archive mode uses, spools them and loads them. There
+is no object, no manifest to fetch and no digest: the window's synthesised
+manifest carries an empty `sha256` and a zero `byte_count`, because an invented
+digest is a claim that something was verified.
+
+### What that costs
+
+Three losses, and none of them is recoverable later:
+
+- **A rule written next month cannot be run against last month's traffic.** A
+  conformance rule set is a growing thing and an archive is what lets it grow
+  backwards. There is nothing to run a new rule against.
+- **A row cannot be re-derived.** A derivation defect found later is a defect in
+  rows that can be stopped and not corrected: the objects that would be re-read
+  do not exist.
+- **Nothing verified the bytes the rows came from.** In archive mode a digest
+  that disagrees with the manifest means no row is derived at all. Inline there
+  are no stored bytes for anything to disagree with, so no verification stands
+  behind a row.
+
+### What bounds it
+
+**It is a second arrangement, not a replacement.** Archive mode is unchanged —
+its configuration, its objects, its manifest, its metrics and the loader are all
+what they were — and inline mode is asked for by a flag the default
+configuration does not carry, in a build the default feature set does not
+produce.
+
+**Every row says which it is.** A `derivation` column carries `archive` or
+`live` on all eight grains, so no query can mistake a row derived from verified
+bytes for one derived in flight, and a panel that must not mix them can filter.
+It defaults to `archive`, so rows written before the column existed keep their
+meaning, and it is in no `ORDER BY`: a row is the same row whichever mode
+produced it, and provenance in the sort key would make two modes' views of one
+datagram two rows instead of one.
+
+**The derivation is the same function.** Inline mode supplies a third `Source`
+and calls `dz-recorder-rows::derive`, the one archive mode calls. What holds it
+there is a test:
+[`dz-recorder-e2e/tests/inline_vs_archive.rs`](dz-recorder-e2e/tests/inline_vs_archive.rs)
+feeds one synthetic feed through both paths — recorded to a real archive and
+derived with `derive_object`, and pushed through the ring and a window and
+derived with `derive` — and asserts the row sets are equal but for `derivation`,
+`object_key` and `object_sha256`. A ring drop is asserted at the row altitude
+too: a gap the recorder itself caused is not given a `publisher` verdict.
+
+```bash
+cargo test -p dz-recorder-inline
+cargo test -p dz-recorder-e2e --test inline_vs_archive
+```
+
+### Rows reach disk before the column store, on every window
+
+Not only when the destination is unreachable, and the reasons are why the spool
+is a directory with a byte budget rather than a buffer:
+
+- **A recovery path that only runs during an incident is a recovery path nobody
+  has tested.** If the disk were the exception, that code would first be
+  exercised on the day it is most needed.
+- **A crash otherwise loses what no archive can return.** The sink holds rows
+  across windows deliberately, to keep merge pressure a function of rows per
+  part. In archive mode that costs nothing — the objects are on disk and the
+  next pass re-derives them. Inline, that memory is the only copy, and an
+  out-of-memory kill, an uncaught panic or a host reboot takes it with nothing
+  recording that it did. With rows on disk first, a crash costs the open window.
+- **Windows on disk are what bring the ledger back, and idempotence with it.** A
+  window whose insert was never acknowledged is replayed on the next pass,
+  `ReplacingMergeTree` makes the replay a replace, and the ledger entry is
+  written when the rows land and never when the sink accepts them. That is the
+  loader's arrangement over rows instead of objects, reused rather than
+  restated.
+
+When the budget is full the oldest window is evicted and counted, and the
+derivation is never blocked. A spool that applied backpressure would stall the
+derivation, fill the ring behind it, overflow the receive queue and convert a
+column-store outage into feed loss — the same inversion the staging budget
+exists to prevent. Losing bounded history is recoverable; contaminating live
+data is not.
+
+### The one number to alert on
+
+**The age of the oldest unposted window, and never the eviction counter.** A
+full budget evicts on every window at steady state by design, so that counter
+rises whether or not anything is wrong, while one window older than the eviction
+horizon is history already gone. The gauge is `0` when the spool is empty rather
+than absent, so a rule written over it does not silence itself on the healthy
+case.
+
+The loader's README makes this argument about object lag, and this is the same
+rule over a different unit: see
+[the gate on that arrangement](dz-recorder-load/README.md#the-gate-on-that-arrangement).
+Inline mode publishes its own `dz_recorder_inline_*` family beside the health
+tier's, in one exposition on the recorder's own metrics port; the two families
+are disjoint and the health tier's series mean what they mean in archive mode.
+
+### Which mode a host runs
+
+Inline mode exists for three cases, and archive mode is the answer everywhere
+else:
+
+- **Bringing up a feed.** The question during bring-up is *are the rows right*,
+  and answering it in archive mode takes a rotation, a pass and a query. Inline
+  it takes a window.
+- **A host that was never going to keep the bytes.** The staging budget is
+  retention × bytes per second and it is the number that decides host sizing. A
+  host that wants the rows is otherwise paying for a disk it has no use for.
+- **One deploy unit.** One binary to pin, one configuration bundle, one metrics
+  port, one service to stop and start.
+
+Configuration is two files, because the record path's own file gains no key:
+`config_hash` is provenance written into every object and every coverage row, so
+a column-store endpoint there would make rotating a password change what an
+archive says produced it. `site` and `recorder` stay in the recorder's file and
+are not repeated in inline mode's, so one host cannot appear in a dashboard as
+two recorders that do not exist. See
+[`dz-recorder/inline.example.toml`](dz-recorder/inline.example.toml) for the
+keys and what each one bounds,
+[`dz-recorder/systemd/dz-recorder-inline.service`](dz-recorder/systemd/dz-recorder-inline.service)
+for the unit, and
+[BRINGING-UP-A-FEED.md](../../BRINGING-UP-A-FEED.md#pointing-a-feed-at-a-mode)
+for pointing a feed at either arrangement.
+
 ## The two capture modes
 
-Both sit behind one `Source`, and both write the same archive format.
+Both sit behind one `Source`, and both write the same archive format. The choice
+is orthogonal to the two modes above: inline mode derives from the same
+captures, and records the same distinction between a link header that was read
+off the interface and one that was synthesised.
 
 **`AF_PACKET` on the arrival interface is the default.** It records what the
 network delivered, so the source address, destination, TTL and payload are

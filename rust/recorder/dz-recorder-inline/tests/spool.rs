@@ -203,7 +203,7 @@ fn batch(key: &str, count: usize) -> RowBatch {
             site: "site".to_owned(),
             recorder: "recorder".to_owned(),
             feed: "feed".to_owned(),
-            source_addr: Ipv4Addr::new(10, 0, 0, 1),
+            source_addr: Ipv4Addr::new(192, 0, 2, 10),
             channel_id: 1,
             dst_port: 4000,
             anchor_ts: Nanos(n as u64),

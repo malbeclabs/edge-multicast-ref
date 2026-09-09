@@ -49,6 +49,22 @@ impl Drop for MetricsServer {
 /// nobody can see, and a health tier nobody scrapes is the archive-and-forget
 /// recorder the design rejects.
 pub fn serve(metrics: Arc<HealthMetrics>, addr: SocketAddr) -> io::Result<MetricsServer> {
+    serve_rendering(move || metrics.render(), addr)
+}
+
+/// The same, over anything that can produce an exposition.
+///
+/// Inline mode publishes two families from one process — the health tier's
+/// `dz_recorder_*` and the pipeline's `dz_recorder_inline_*` — and they come
+/// from two registries. One port and one scrape, because two would mean a
+/// second target for an operator to configure and a second thing to notice is
+/// missing; the families are disjoint, so concatenating the two expositions is
+/// the whole of it.
+pub fn serve_rendering<R>(render: R, addr: SocketAddr) -> io::Result<MetricsServer>
+where
+    R: Fn() -> String + Send + Sync + 'static,
+{
+    let render = Arc::new(render);
     let server = Arc::new(tiny_http::Server::http(addr).map_err(io::Error::other)?);
 
     let worker_server = Arc::clone(&server);
@@ -61,7 +77,7 @@ pub fn serve(metrics: Arc<HealthMetrics>, addr: SocketAddr) -> io::Result<Metric
                 // "target is up but returns 404" with nothing to explain it.
                 let path = request.url().split('?').next().unwrap_or_default();
                 let is_metrics = *request.method() == Method::Get && path == "/metrics";
-                let metrics = Arc::clone(&metrics);
+                let render = Arc::clone(&render);
 
                 // Every request leaves this thread. `respond` writes the whole
                 // body synchronously, so a peer whose receive window fills and
@@ -75,7 +91,7 @@ pub fn serve(metrics: Arc<HealthMetrics>, addr: SocketAddr) -> io::Result<Metric
                 // path. That is why there is no in-flight cap.
                 std::thread::spawn(move || {
                     let response = if is_metrics {
-                        Response::from_string(metrics.render()).boxed()
+                        Response::from_string(render()).boxed()
                     } else {
                         Response::empty(StatusCode(404)).boxed()
                     };

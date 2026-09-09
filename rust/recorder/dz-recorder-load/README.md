@@ -4,6 +4,13 @@ Turns a directory of completed objects into rows a dashboard can ask, and does
 nothing else. It is a **separate process from the recorder**, sharing one
 directory with it and nothing more.
 
+This process is **archive mode's other half**: `dz-recorder` keeps the bytes and
+this derives rows from them, which is the default arrangement and the one a host
+recording a production feed for evidence runs. There is a second arrangement —
+inline mode, one process that derives rows from the live capture and keeps no
+datagrams — and nothing here changes for it; see
+[the two modes](../README.md#the-two-modes) for what it gives up.
+
 ```bash
 dz-recorder-load --config /etc/dz-recorder-load/loader.toml --check
 dz-recorder-load --config /etc/dz-recorder-load/loader.toml --watch

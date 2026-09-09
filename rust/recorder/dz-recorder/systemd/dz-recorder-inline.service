@@ -1,0 +1,133 @@
+# Inline mode, as a unit.
+#
+# One process: it joins the feed, derives its rows through the same derivation
+# archive mode uses, spools them to disk and loads them into the column store.
+# NO DATAGRAM IS KEPT. There is no archive, no manifest and no digest — a
+# conformance rule written next month has nothing to run against, a row cannot be
+# re-derived, and nothing verified the bytes the rows came from. A host recording
+# a production feed for evidence runs archive mode instead, which is what a unit
+# with no --inline-config gets.
+#
+#   install -o root -g root -m 0644 dz-recorder-inline.service /etc/systemd/system/
+#   install -d -o dz-recorder -g dz-recorder -m 0750 /var/lib/dz-recorder-inline
+#   install -d -o dz-recorder -g dz-recorder -m 0750 /var/lib/dz-recorder-inline/spool
+#   systemd-creds encrypt --name=clickhouse-password - /etc/dz-recorder/password.cred
+#   systemctl daemon-reload && systemctl enable --now dz-recorder-inline
+#
+# The binary has to carry the mode: --features inline, plus `tls` for an https
+# destination and `afpacket` for `[capture] mode = "afpacket"`. Each of the three
+# is refused at startup by name in a build that lacks it, rather than downgraded
+# or fallen back from — an https endpoint spoken as plain HTTP would put the
+# password on the wire having been told not to, and recording an archive here
+# would leave the host in the arrangement nobody chose. ExecStartPre is where a
+# build missing one is caught, so the pipeline enables the features before the
+# unit is enabled.
+
+[Unit]
+Description=DoubleZero edge recorder: inline mode, keeping rows and no datagrams
+Documentation=https://github.com/malbeclabs/edge-multicast-ref
+# The destination is reached at every window, and ExecStartPre reaches it once
+# before anything is joined. Requires, not just After: a start that cannot
+# resolve the destination is a start that fails in the gate rather than an hour
+# later in a panel.
+After=network-online.target
+Requires=network-online.target
+# One feed is derived once. Two arrangements pointed at the same feed and the
+# same database write one datagram's rows twice, and `derivation` is in no
+# ORDER BY — so the deduplication collapses them into one row whose provenance
+# depends on which insert landed last, which is worse than either mode alone.
+# Nothing here can enforce that: the feeds are named in the configuration files,
+# so it is a review of what the units on this host are pointed at.
+
+[Service]
+Type=simple
+User=dz-recorder
+Group=dz-recorder
+
+# The gate a deployment runs before it restarts anything. It validates both
+# files, plans the feeds, prints which arrangement this host is in, and asks the
+# destination for SELECT 1. Nothing is bound, nothing is created and nothing is
+# joined, and the spool and the ledger are not touched — so it is safe against a
+# host that is already recording.
+ExecStartPre=/usr/local/bin/dz-recorder --version
+ExecStartPre=/usr/local/bin/dz-recorder --config /etc/dz-recorder/recorder.toml --inline-config /etc/dz-recorder/inline.toml --check
+ExecStart=/usr/local/bin/dz-recorder --config /etc/dz-recorder/recorder.toml --inline-config /etc/dz-recorder/inline.toml
+
+# SIGTERM runs the whole shutdown sequence: drain the ring, close the open
+# window, derive it, spool it, flush the sink and record what landed. A second
+# signal exits at once. The timeout is generous because the sequence is what
+# stops a restart from abandoning the window an operator is most likely to be
+# asking about, and because a window that is spooled and not posted is replayed
+# on the next start rather than lost.
+KillSignal=SIGTERM
+TimeoutStopSec=60
+Restart=always
+RestartSec=10s
+
+# The only place a password enters the process. There is no configuration key for
+# it in either file: a key that exists is a key somebody fills in, and a
+# configuration file is a thing people commit.
+# A credential and not a variable: systemd hands the unit a file under
+# $CREDENTIALS_DIRECTORY that is readable by the service user alone and is not
+# inherited by anything the process spawns, while a variable is readable through
+# /proc/<pid>/environ by anything running as the same user. This is where the
+# loader's password comes from too; inline mode invents no second mechanism.
+LoadCredentialEncrypted=clickhouse-password:/etc/dz-recorder/password.cred
+Environment=DZ_LOADER_CLICKHOUSE_PASSWORD_FILE=%d/clickhouse-password
+
+# AF_PACKET capture reads the network's copy of the traffic, so the datalink
+# handle needs CAP_NET_RAW and nothing else does. Drop this pair, and
+# `[capture] mode`, on a host running socket mode.
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+# Deliberately not the loader's `~@privileged @resources` on top of it. That unit
+# needs no capability at all, and this one opens a datalink handle and sizes a
+# receive buffer: a filter copied from a process that captures nothing is a
+# filter whose first failure is a recorder that will not start, or worse, one
+# that starts and drops. Tighten it on a host where it has been tested against
+# the capture mode that host runs.
+
+# The spool and the ledger, both of which this process owns and writes. The
+# spool holds a window's rows before the column store has taken them, on every
+# window and not only under an outage: with rows on disk first a crash costs the
+# open window, and the ledger is what brings idempotence back after one. A
+# recorder that could not write here would hold every row it derived in memory
+# and call itself healthy, so this is refused at startup rather than discovered
+# under load.
+ReadWritePaths=/var/lib/dz-recorder-inline
+
+# The ledger is deliberately NOT inside spool_dir, and the recorder refuses a
+# configuration that puts it there. The spool's byte budget classifies what it
+# finds and evicts the oldest window, so a file it cannot classify is a file
+# eviction cannot reach — and the ledger would be counted as history or deleted
+# as it. Both live under this directory, side by side:
+#
+#   /var/lib/dz-recorder-inline/spool          inline.spool_dir
+#   /var/lib/dz-recorder-inline/ledger.jsonl   inline.ledger
+#
+# No archive directory is listed, because nothing writes an object. A
+# configuration naming [archive] staging_dir or completed_dir is refused at
+# startup by key, rather than leaving an operator believing in bytes nobody kept.
+
+# The metrics endpoint is bound on the loopback address by default, and inline
+# mode renders its own family beside the health tier's into one exposition on
+# that one port. It describes a live data path — the feeds, the sites and the
+# timing of a capture — so it is not to be published.
+IPAddressAllow=localhost
+RestrictAddressFamilies=AF_UNIX AF_INET AF_NETLINK AF_PACKET
+
+[Install]
+WantedBy=multi-user.target

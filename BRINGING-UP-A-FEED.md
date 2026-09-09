@@ -394,6 +394,94 @@ Three things to know before the first run:
   into a feed-loss incident. It gives up history instead, counts what it gave
   up, and never gives up the segment it is publishing.
 
+### Pointing a feed at a mode
+
+The configuration above is **archive mode**: `dz-recorder` writes objects and
+`dz-recorder-load` derives rows from them. It is the default, and it is what a
+host recording a production feed for evidence runs.
+
+**Inline mode** is the other arrangement — one process that captures the feed,
+derives its rows and loads them, keeping no datagrams. It is for bringing a feed
+up, for a host that was never going to keep the bytes, and for one deploy unit.
+What it gives up is not small: a conformance rule written next month has nothing
+to run against, a row cannot be re-derived, and nothing verified the bytes the
+rows came from. Read
+[the two modes](rust/recorder/README.md#the-two-modes) before choosing it.
+
+**Two files, and neither has a password key.** The feed above stays in the
+recorder's own file — group, ports, `expected_sources`, `site` and `recorder` —
+because that file's `config_hash` is written into every row as provenance and a
+database endpoint is not part of what a recorder does. Inline mode's own file
+carries the window bound, the ring, the spool and its budget, the ledger and the
+destination, and is passed beside it:
+
+```bash
+dz-recorder --config /etc/dz-recorder/recorder.toml \
+            --inline-config /etc/dz-recorder/inline.toml
+```
+
+```toml
+# /etc/dz-recorder/inline.toml — see rust/recorder/dz-recorder/inline.example.toml
+[inline]
+window_bytes    = "16MiB"
+window_interval = "10s"
+ring_datagrams  = 8192
+spool_dir       = "/var/lib/dz-recorder-inline/spool"
+spool_max       = "8GiB"
+ledger          = "/var/lib/dz-recorder-inline/ledger.jsonl"
+
+[clickhouse]
+endpoint = "http://192.0.2.20:8123"
+database = "recorder"
+user     = "dz_loader"
+```
+
+- **The `[archive]` section comes out.** Nothing writes an object, so a
+  `staging_dir` or `completed_dir` carrying a value is refused at startup by
+  key. Ignoring it quietly is how a host is believed to be keeping bytes for a
+  year that it never kept for a second.
+- **`spool_dir` must exist and be writable by the service user**, and `ledger`
+  must not be inside it. Both are refused at startup, the second for the reason
+  the loader's ledger may not live inside its objects directory: a file the
+  budget cannot classify is a file eviction cannot reach.
+- **The password comes from `DZ_LOADER_CLICKHOUSE_PASSWORD_FILE`** — a systemd
+  credential, readable by the service user alone — or from
+  `DZ_LOADER_CLICKHOUSE_PASSWORD`, and from nowhere else. That is where the
+  loader's already comes from; inline mode invents no second mechanism.
+- **The build has to carry the mode.** `--features inline`, and
+  `--features inline,tls` for an `https` destination. A build without it refuses
+  `--inline-config` naming the feature rather than recording an archive nobody
+  asked for, and an `https` endpoint is refused rather than silently downgraded
+  to plain HTTP with the password on the wire. The recorder's released asset is
+  built for archive mode, so a host running inline mode is running a binary a
+  pipeline built with the feature.
+
+**`--check` is what the deployment pipeline runs before it restarts anything**,
+in either mode, and it is an `ExecStartPre` in the units:
+
+```bash
+dz-recorder --config /etc/dz-recorder/recorder.toml --check
+dz-recorder --config /etc/dz-recorder/recorder.toml \
+            --inline-config /etc/dz-recorder/inline.toml --check
+```
+
+It validates both files, plans the feeds — every refusal archive mode makes
+about a group, a port role or an interface is made here too — prints which
+arrangement is running and what it keeps, and asks the destination for
+`SELECT 1`. Nothing is bound, nothing is created and nothing is joined, and the
+spool and the ledger are not touched, so it is safe against a host that is
+already recording. A gate that passed without reaching the destination would let
+a pipeline restart a recorder that cannot write.
+
+**Alert on the age of the oldest unposted window, and never on the eviction
+counter.** A full spool budget evicts on every window at steady state by design,
+so the counter rises whether or not anything is wrong; one window older than the
+eviction horizon is history already gone, and no re-run recovers it. This is the
+same rule as
+[`dz_loader_oldest_unloaded_age_seconds`](rust/recorder/dz-recorder-load/README.md#the-gate-on-that-arrangement)
+in archive mode, over windows instead of objects. Size `spool_max` against the
+column-store outage the host intends to survive.
+
 ### Auditing what was recorded
 
 The point of keeping the bytes is answering *did the publisher send what the
@@ -456,6 +544,7 @@ infrastructure repositories, and each of those owns its own review.
 - [ ] config reviewed for `pin`, `source_id`, `channel_id`, group and ports
 - [ ] for a depth feed: `snapshot_cycle` set, and the adapter's `DepthBound` checked against what its book actually holds
 - [ ] a recorder is configured for the feed before the publisher is pointed at production
+- [ ] the recorder's mode is a decision: archive mode for a feed being recorded for evidence, inline mode only where nobody was going to keep the bytes — and, in inline mode, the alert on the age of the oldest unposted window exists
 - [ ] metrics scraped, and the connection-state alert exists
 
 **A new feed type**, additionally
