@@ -45,15 +45,22 @@ fn symbol_of(bytes: &[u8]) -> String {
         .to_owned()
 }
 
-/// Every symbol a reference-data port published a definition for.
+/// The distinct symbols a reference-data port published a definition for,
+/// sorted.
+///
+/// Distinct because a full lap of a two-instrument set repeats, and the
+/// question here is *which* instruments a channel described, not how often.
 fn symbols_on(recorders: &harness::FeedRecorders) -> Vec<String> {
-    recorders
+    let mut symbols: Vec<String> = recorders
         .refdata
         .messages()
         .iter()
         .filter(|(type_id, _)| *type_id == DEFINITION)
         .map(|(_, bytes)| symbol_of(bytes))
-        .collect()
+        .collect();
+    symbols.sort();
+    symbols.dedup();
+    symbols
 }
 
 /// An admission on one shard moves that shard's manifest and no other.
@@ -109,46 +116,51 @@ fn an_admission_on_one_shard_moves_one_manifest_and_leaves_the_others() {
 #[test]
 fn each_reference_data_port_carries_its_own_shards_definitions_and_none_of_the_others() {
     let mut h = harness_two_shards();
-    // Different instruments per shard, so that "carried B's" is a statement
-    // that can be false. Equal sets would make the exclusion unfalsifiable.
-    let mut adapter = FakeAdapter::on_shards(&[("A-B", SHARD_A), ("C-D", SHARD_B)]);
+    // Two instruments per shard, not one. With a single instrument each, the
+    // pacer owes one definition per lap and a publisher that packed everything
+    // onto everything would still put exactly one symbol on each port — so the
+    // failure would surface as "carries none of its own" and the exclusion
+    // below would never be reached. Two per shard is what makes a packing
+    // publisher show up as four symbols where two belong.
+    let mut adapter = FakeAdapter::on_shards(&[
+        ("A-B", SHARD_A),
+        ("A-C", SHARD_A),
+        ("B-D", SHARD_B),
+        ("B-E", SHARD_B),
+    ]);
     assert!(h.publisher.poll_listings(&mut adapter));
 
     // Two ticks with time between them, for the pacer's reason: the first tick
     // with a published set starts the lap and owes nothing, so a single tick
-    // would read as "no definitions" for a publisher that is working.
+    // would read as "no definitions" for a publisher that is working. The gap
+    // is wide enough for a whole lap of a two-instrument set.
     let _ = h.publisher.tick();
     h.clock.advance(std::time::Duration::from_secs(20));
     let _ = h.publisher.tick();
 
-    let mut carried: Vec<(usize, Vec<String>)> = Vec::new();
+    // Stated as equality, which is the inclusion and the exclusion in one
+    // assertion: A's port carries A's two and nothing else, B's carries B's.
+    let expected: [Vec<String>; 2] = [
+        vec!["A-B".to_owned(), "A-C".to_owned()],
+        vec!["B-D".to_owned(), "B-E".to_owned()],
+    ];
+    let mut ports = 0;
     for (index, shard) in h.shards.iter().enumerate() {
         for recorders in [shard.tob.as_ref(), shard.mbp.as_ref()].into_iter().flatten() {
-            carried.push((index, symbols_on(recorders)));
+            ports += 1;
+            assert_eq!(
+                symbols_on(recorders),
+                expected[index],
+                "shard {index}'s reference-data port does not carry exactly its \
+                 own published set"
+            );
         }
     }
-    assert!(
-        carried.iter().all(|(_, symbols)| !symbols.is_empty()),
-        "a reference-data port carried no definition at all, so nothing below is \
-         a statement about partitioning: {carried:?}"
+    assert_eq!(
+        ports, 4,
+        "four channel instances is the arrangement under test; {ports} ports \
+         means the harness changed and every assertion above narrowed with it"
     );
-
-    // Where the exclusion actually bites.
-    for (index, symbols) in &carried {
-        let mine = if *index == 0 { "A-B" } else { "C-D" };
-        let theirs = if *index == 0 { "C-D" } else { "A-B" };
-        assert!(
-            symbols.iter().any(|symbol| symbol == mine),
-            "shard {index}'s reference-data port carries none of its own \
-             definitions: {symbols:?}"
-        );
-        assert!(
-            !symbols.iter().any(|symbol| symbol == theirs),
-            "shard {index}'s reference-data port carries the other shard's \
-             instrument `{theirs}` — the published set is not partitioned: \
-             {symbols:?}"
-        );
-    }
 }
 
 /// A quote reaches its own shard's channel and no other.
