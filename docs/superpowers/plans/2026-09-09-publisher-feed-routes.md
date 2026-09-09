@@ -121,26 +121,26 @@ wrong.
 
 ### 1. `shard` in the document: parsed, checked, and still singular
 
-- [ ] `FeedSection::shard: Option<String>`, `#[serde(default)]`, under the
+- [x] `FeedSection::shard: Option<String>`, `#[serde(default)]`, under the
       existing `deny_unknown_fields`.
-- [ ] A checked `ShardName` on the resolved `Feed`, produced by a constructor
+- [x] A checked `ShardName` on the resolved `Feed`, produced by a constructor
       that owns the invariant — the pattern `SourceId` and `SelectionPolicy`
       already follow.
-- [ ] `DEFAULT_SHARD`, one token, in `dz-adapter-core` so that the boundary and
+- [x] `DEFAULT_SHARD`, one token, in `dz-adapter-core` so that the boundary and
       the configuration cannot spell it differently. An absent key resolves to
       it.
-- [ ] `StartupError::UnsafeShardName` — one lowercase path component, at most 64
+- [x] `StartupError::UnsafeShardName` — one lowercase path component, at most 64
       bytes of `[a-z0-9-]`, checked at load. The same rule `EraStore::path_for`
       already applies to a feed name, checked in the one place the value enters
       the process, because it becomes a path component in two places later.
-- [ ] `StartupError::ReservedShardName` for a block spelling the default token
+- [x] `StartupError::ReservedShardName` for a block spelling the default token
       explicitly: two spellings of one shard would be two era files.
-- [ ] `StartupError::DuplicateChannelId`, naming both blocks. New, and it closes
+- [x] `StartupError::DuplicateChannelId`, naming both blocks. New, and it closes
       a hole that exists today.
-- [ ] `Config::shards()` — the distinct shard names, in document order.
-- [ ] `Config::feed_specs()` returns the **distinct** specification set;
+- [x] `Config::shards()` — the distinct shard names, in document order.
+- [x] `Config::feed_specs()` returns the **distinct** specification set;
       `AdapterContext::shards()` added beside `feeds()`.
-- [ ] `DuplicateFeedSpec` unchanged and still in force.
+- [x] `DuplicateFeedSpec` unchanged and still in force.
 
 **Test** (`dz-publisher-runtime/tests/config_document.rs`, no filesystem — every
 case goes through `Document::parse` on a string): a name with an underscore, a
@@ -159,20 +159,20 @@ unchanged, asserted by name so that a later task cannot delete it by accident.
 
 ### 2. `ListingSink::list_on`, and the shard set the registry checks it against
 
-- [ ] `fn list_on(&mut self, shard: &str, spec: &InstrumentSpec<'_>) -> Option<InstrumentRef>`
+- [x] `fn list_on(&mut self, shard: &str, spec: &InstrumentSpec<'_>) -> Option<InstrumentRef>`
       on `ListingSink`, **required**; `list` becomes the defaulted method,
       forwarding with `DEFAULT_SHARD`.
-- [ ] `dz-adapter-core` takes a major version. Recorded in its changelog as
+- [x] `dz-adapter-core` takes a major version. Recorded in its changelog as
       breaking for implementors and additive for callers, with the one-line
       reason: every implementor of `ListingSink` is in this workspace, and a
       venue calls it.
-- [ ] `Registry` holds the configured shard set, handed to it through
+- [x] `Registry` holds the configured shard set, handed to it through
       `RegistryConfig`.
-- [ ] `Refusal::UnknownShard` and `Refusal::ShardRestated`, and their `Counts`
+- [x] `Refusal::UnknownShard` and `Refusal::ShardRestated`, and their `Counts`
       entries. No new metric family — `dz-publisher-refdata` constructs none,
       and the alertable signal is task 10's
       `dz_publisher_refdata_instruments_current{channel_id}` sitting at 0.
-- [ ] The unknown name is logged once per distinct value, not once per poll: an
+- [x] The unknown name is logged once per distinct value, not once per poll: an
       adapter may re-offer its whole set every second.
 
 **Test** (`dz-publisher-refdata/tests/identity.rs` and a new
@@ -192,19 +192,19 @@ at the design's paragraph.
 
 ### 3. The registry partitions its published set
 
-- [ ] Per shard: the published membership, `Instrument Count`, `Manifest Seq`,
+- [x] Per shard: the published membership, `Instrument Count`, `Manifest Seq`,
       `Valid`, and one `DefinitionPacer`.
-- [ ] Process-wide and untouched: the `Instrument ID` minting table, `next_id`,
+- [x] Process-wide and untouched: the `Instrument ID` minting table, `next_id`,
       the persisted record, the state-directory claim, `SelectionPolicy`, the
       `InstrumentTable` the lowerings borrow.
-- [ ] The shard is recorded on the registry's published entry. `InstrumentTable`
+- [x] The shard is recorded on the registry's published entry. `InstrumentTable`
       and `dz-publisher-lowering` are not touched.
-- [ ] `definition_tick` takes a shard and drains that shard's pacer;
+- [x] `definition_tick` takes a shard and drains that shard's pacer;
       `manifest()` takes a shard and composes that shard's summary with that
       shard's `channel_id`.
-- [ ] `RegistryConfig` carries the per-shard `Channel ID` rather than the first
+- [x] `RegistryConfig` carries the per-shard `Channel ID` rather than the first
       block's.
-- [ ] `seeding_complete` stays process-wide: one poll establishes the set.
+- [x] `seeding_complete` stays process-wide: one poll establishes the set.
 
 **Test** (`dz-publisher-refdata/tests/cycle.rs`, extended): with two shards
 configured, an admission on one bumps that shard's `Manifest Seq` and **not** the
@@ -220,12 +220,12 @@ byte-for-byte unchanged, which is the task's real gate.
 
 ### 4. The era store keyed on the channel instance
 
-- [ ] `begin_era` and `persisted_era` take the shard alongside the feed.
-- [ ] The path is `<spec>.era` for the default shard and `<spec>.<shard>.era`
+- [x] `begin_era` and `persisted_era` take the shard alongside the feed.
+- [x] The path is `<spec>.era` for the default shard and `<spec>.<shard>.era`
       for a named one. The shard component is already known safe from task 1;
       `path_for`'s own check stays as the second line of defence, because it is
       the function that builds the path.
-- [ ] `run.rs`'s two call sites pass the block's shard.
+- [x] `run.rs`'s two call sites pass the block's shard.
 
 **Test** (`dz-publisher-egress/tests/era_persistence.rs`, a temporary
 directory): a store holding `top-of-book.era` at 7 — written as the file, not
@@ -249,10 +249,10 @@ its shard twin.
 
 ### 5. The reference-copy fan-out socket keyed on the shard
 
-- [ ] `TeeConfig::destination` takes the shard:
+- [x] `TeeConfig::destination` takes the shard:
       `<path>.<spec>.<shard>.<port role>` for a named shard,
       `<path>.<spec>.<port role>` unchanged for the default one.
-- [ ] The doc comment gains the third noun. Its existing argument — a Unix
+- [x] The doc comment gains the third noun. Its existing argument — a Unix
       datagram carries neither a destination port nor a group, so a recorder
       handed two things on one socket cannot attribute a datagram without
       decoding it — is the same argument for shards and should be extended, not
@@ -269,17 +269,17 @@ the property the existing `OsString` construction exists for.
 
 ### 6. `Feeds` as two vectors, and routing by index
 
-- [ ] `Feeds { top_of_book: Vec<FeedPipeline<TopOfBook>>, market_by_price: Vec<FeedPipeline<MarketByPrice>> }`.
+- [x] `Feeds { top_of_book: Vec<FeedPipeline<TopOfBook>>, market_by_price: Vec<FeedPipeline<MarketByPrice>> }`.
       Two typed fields, no dynamic dispatch on the datagram path — fence 2's
       reason, kept.
-- [ ] A shard index resolved once per event beside the instrument lookup. No
+- [x] A shard index resolved once per event beside the instrument lookup. No
       string comparison on the hot path.
-- [ ] `Event::Quote`, `Level`, `Clear` route to the shard's pipeline for the
+- [x] `Event::Quote`, `Level`, `Clear` route to the shard's pipeline for the
       specification that carries them. `Event::Trade` goes to both of the
       shard's pipelines **from one lowered value** — one lowering, no second
       call site, unchanged.
-- [ ] `channel_ids`, `dark_transmitter` and `dropped_sinks` iterate.
-- [ ] `EventSink` unchanged. Not "unchanged in spirit" — the trait, its
+- [x] `channel_ids`, `dark_transmitter` and `dropped_sinks` iterate.
+- [x] `EventSink` unchanged. Not "unchanged in spirit" — the trait, its
       methods and its parameters are untouched, and a task that changes one has
       moved routing to the adapter.
 
@@ -296,12 +296,12 @@ rather than as a presence on one.
 
 ### 7. The snapshot rotation and the anchors
 
-- [ ] One `SnapshotRotation` per shard carrying a snapshot port role.
-- [ ] The per-instrument tick divides the cycle by **that shard's** published
+- [x] One `SnapshotRotation` per shard carrying a snapshot port role.
+- [x] The per-instrument tick divides the cycle by **that shard's** published
       count, from the membership task 3 holds.
-- [ ] `desynchronised` reads the `Anchor Seq` from the instrument's own shard's
+- [x] `desynchronised` reads the `Anchor Seq` from the instrument's own shard's
       market-by-price pipeline.
-- [ ] `snapshot` and `capture_and_send` likewise, and `SnapshotError::NoDepthFeed`
+- [x] `snapshot` and `capture_and_send` likewise, and `SnapshotError::NoDepthFeed`
       keeps its meaning per shard: an instrument on a shard whose blocks carry no
       snapshot port role.
 
@@ -317,12 +317,12 @@ first — a test that cannot pass by accident.
 
 ### 8. Teardown and the metric bridge, per channel instance
 
-- [ ] `shut_down` sends one final manifest with `Valid = 0` and one
+- [x] `shut_down` sends one final manifest with `Valid = 0` and one
       `EndOfSession` **per channel instance**, in the existing order within each:
       admissions closed, manifest, `EndOfSession`, flush. The manifest precedes
       `EndOfSession` because a subscriber that stops at the terminal statement
       would otherwise never see it, and that is a per-instance ordering.
-- [ ] `forward_counts` writes `manifest_seq` and `manifest_valid` from the
+- [x] `forward_counts` writes `manifest_seq` and `manifest_valid` from the
       shard that owns each `Channel ID`, not from one registry-wide value.
 
 **Test** (`depth_end_to_end.rs`): with two shards,
@@ -335,15 +335,15 @@ because equal sets would let a process-wide value pass.
 
 ### 9. The gate: a second `[[feed]]` of one specification
 
-- [ ] `DuplicateFeedSpec` becomes `DuplicateFeedShard { spec, shard }`, keyed on
+- [x] `DuplicateFeedSpec` becomes `DuplicateFeedShard { spec, shard }`, keyed on
       the pair.
-- [ ] `StartupError::ShardSpecsDisagree`, naming the shard and the specification
+- [x] `StartupError::ShardSpecsDisagree`, naming the shard and the specification
       it has no block for. This is the check that makes `list_on` total: an
       instrument admitted to a shard with no top-of-book block would have quotes
       that reach no wire and are counted only as unroutable.
-- [ ] `run.rs` composes one pipeline per block instead of assigning into an
+- [x] `run.rs` composes one pipeline per block instead of assigning into an
       `Option`.
-- [ ] The design's *Why this cannot land incrementally* section is the review
+- [x] The design's *Why this cannot land incrementally* section is the review
       note on this task: it is the change that makes tasks 3, 4 and 7 load-bearing
       rather than latent.
 
@@ -364,13 +364,13 @@ refdata port carries only its own shard's definitions.
 
 ### 10. Metrics: sizing, and the one label that moves
 
-- [ ] `dz_publisher_refdata_instruments_current` gains a `channel_id` label and
+- [x] `dz_publisher_refdata_instruments_current` gains a `channel_id` label and
       is pre-created per declared `Channel ID`. It is the gauge that mirrors the
       wire's `Instrument Count`, and that is per channel.
-- [ ] `definitions_emitted_total`, `new_listings_total` and `delistings_total`
+- [x] `definitions_emitted_total`, `new_listings_total` and `delistings_total`
       stay process-wide, and the reason goes in their doc comments so the next
       reader does not undo it.
-- [ ] No family is renamed and none is added, so `NORMATIVE_NAMES` is unchanged
+- [x] No family is renamed and none is added, so `NORMATIVE_NAMES` is unchanged
       — which is itself the assertion that this task added nothing to a set
       somebody else owns.
 
@@ -385,16 +385,16 @@ plus 2, so the ratio is asserted rather than asserted-about. The existing
 
 ### 11. The documents that have to stay true
 
-- [ ] `BRINGING-UP-A-FEED.md` gains `shard` in its configuration block, marked
+- [x] `BRINGING-UP-A-FEED.md` gains `shard` in its configuration block, marked
       optional, with one line on when an operator needs it. That guide is the
       one document in this repository that must stay true rather than be a
       record of a date, and a key it does not mention is a key an operator will
       not know exists.
-- [ ] The publisher crate READMEs describe the shard as the unit of reference
+- [x] The publisher crate READMEs describe the shard as the unit of reference
       data and the channel instance as the unit of sequencing, in the design's
       own words, because those two being different is what everything above
       turns on.
-- [ ] `docs/README.md` carries the row for this pair. Landed with the spec and
+- [x] `docs/README.md` carries the row for this pair. Landed with the spec and
       the plan, not here.
 
 **Test:** `scripts/check-public-repo-rules.sh`, which runs before the toolchain
@@ -405,12 +405,25 @@ The words most likely to slip in here are the three the Naming section rejected.
 
 ### 12. It has to run
 
-- [ ] `examples/replay.sh` extended to a document with two shards and both
-      specifications — four channel instances — over the built-in
+- [x] `examples/replay.sh` extended to a document with **four shards of one
+      specification** — four channel instances — over the built-in
       normalized-event encoding, read by **this repository's Go subscriber**.
-- [ ] The subscriber's own output is the assertion: four channel instances,
+      Two shards and both specifications is what this bullet asked for and it
+      is refused at startup: the built-in record adapter holds no book, so it
+      answers no snapshot and `AdapterRegistry` refuses it beside a
+      `market-by-price` block rather than publish deltas nothing can
+      resynchronise. Four blocks of one specification is the arrangement the
+      duplicate-specification gate refused, which is the half of the change
+      this run exists to exercise; the depth half has no venue in this
+      repository to run it. See *It ran*.
+- [x] One block names no shard, so the run covers the upgrade as well as the
+      feature: the default shard's era file has to keep the name it has always
+      had while the other three take one of their own.
+- [x] The subscriber's own output is the assertion: four channel instances,
       each with its own sequence series starting at 0, its own `Reset Count`,
       its own manifest, and only its own instruments' definitions.
+- [x] Run twice, because an era is only observable across a restart: every
+      channel instance's era advances by exactly one, independently.
 
 **Test:** the script itself, run by hand and recorded here in the plan's own
 "It ran" section, as the venue adapter plan does. It is deliberately not a CI
@@ -421,6 +434,75 @@ the split that made the last plan's real run worth doing, because what it found
 was two things no fake could have.
 
 ---
+
+## It ran
+
+Everything above is tested against fakes — sockets behind traits, injected
+clocks, recording sinks — which is what makes the suite run unprivileged with no
+network, and which means all of it was a hypothesis until four channels left
+four sockets.
+
+`rust/publisher/dz-publisher-runtime/examples/replay.sh` is that run. It writes
+a document with four `[[feed]]` blocks of one specification, records a directory
+of normalized-event payloads for eight instruments, runs `run()` over them —
+the real config, the real registry, the real built-in adapter, the real
+lowering, real multicast sockets, the real teardown — and reads the other end
+with four instances of **this repository's Go subscriber**, one per channel
+instance. Then it does the whole thing again, because an era is only observable
+across a restart.
+
+```text
+  channel  0 (the default shard)  38 messages, era 2, seq from 0, definitions REPLAY-D1,REPLAY-D2
+  channel  1 alpha                38 messages, era 2, seq from 0, definitions REPLAY-A1,REPLAY-A2
+  channel  2 beta                 38 messages, era 2, seq from 0, definitions REPLAY-B1,REPLAY-B2
+  channel  3 gamma                38 messages, era 2, seq from 0, definitions REPLAY-G1,REPLAY-G2
+
+  four eras, one per channel instance: [2, 2, 2, 2]
+  each advanced by exactly one across the restart
+
+  tee.top-of-book.mktdata       20 datagrams, longest 84 bytes, first magic 0x5a44
+  tee.top-of-book.alpha.mktdata 20 datagrams, longest 84 bytes, first magic 0x5a44
+```
+
+Each subscriber read its own `Channel ID` and no other, its own sequence series
+from 0, a `Reset Count` equal to its own era file, and **exactly its own
+shard's two definitions** — stated as an equality, because *carries mine*
+passes against a publisher that packs everything onto everything. Four era
+files sit under the state directory, the default shard's still
+`top-of-book.era`, and each advanced by one rather than by four, which is what
+a shared counter would have done.
+
+Two instruments per shard rather than one, for the end-to-end test's reason: a
+packing publisher owes one definition per lap and would still put exactly one
+symbol on each port, so with one each the failure reads as *carries none of its
+own* and the exclusion is never reached.
+
+**What could not be run, and why the plan asked for it anyway.** Task 12 asked
+for two shards and *both* specifications. The built-in record adapter holds no
+book, so it answers no snapshot, and `AdapterRegistry` refuses it beside a
+`market-by-price` block — a depth feed publishing deltas with no snapshot leaves
+a mid-session joiner wrong at every price it never saw an update for,
+indefinitely. That refusal is right and predates this plan; what it means is
+that a real depth run needs a venue with a book, and this repository has none.
+Four shards of one specification exercises everything the gate at task 9
+lifted; the depth path's shard routing is covered where it can be observed, by
+`depth_end_to_end.rs` and `shards_end_to_end.rs` against recording sinks.
+
+**Two things only the real run could find.**
+
+`GROUPS` is bash's own array of the invoking user's group ids, and assignments to
+it are silently ignored. The generated document therefore carried
+`multicast_group = "1000"`, and startup refused it by name — the failure this
+publisher is built to produce instead of starting on something that cannot be a
+group. A script that had defaulted the key, or a publisher that had parsed it
+loosely, would have joined nothing and looked healthy.
+
+And the reference-copy fan-out was still keyed on the feed and the port role
+alone. Four channel instances fanned out to five sockets, two shards' copies of
+one role arriving on one — which a recorder cannot attribute without decoding,
+the one thing a record path does not do. That is task 5, and the tasks-1-to-8
+commit had missed it: `tee.top-of-book.alpha.mktdata` did not exist until it
+landed, and the run's second reference stream is the assertion that it does.
 
 ## Acceptance
 
