@@ -440,6 +440,34 @@ pub enum StartupError {
     #[error("`{key}` must be greater than zero")]
     ZeroDuration { key: &'static str },
 
+    /// `[egress] ttl` is not stated, and it has no default.
+    ///
+    /// # Why the key lost its default rather than gaining a better one
+    ///
+    /// One hop is the right value for a host whose subscribers share its
+    /// segment. Being wrong about it is silent in every direction an operator
+    /// can look: a locally attached subscriber receives, so a smoke test on the
+    /// publisher's own host passes; every datagram is sent successfully, so
+    /// nothing in `dz_publisher_egress_*` moves, because the kernel accepted
+    /// each one and a router discarded it; and a subscriber that never joined
+    /// has nothing to number, so gap detection reports nothing either. A
+    /// publisher in production states 64 because its groups cross several hops,
+    /// so the operating value and the default are not the same number in a
+    /// deployment that exists.
+    ///
+    /// # The message is the remedy
+    ///
+    /// It names the line an operator has to write and what that line means, so
+    /// that an upgrade costs one key rather than a search — and so that an
+    /// operator who did not know they were publishing one hop finds out here
+    /// rather than from a subscriber that never received anything.
+    #[error(
+        "`[egress] ttl` is not stated and has no default. `ttl = 1` publishes on the \
+         attached segment only, which is what a document omitting this key used to do; a \
+         group that crosses a router needs the hop count its network takes."
+    )]
+    TtlUnstated,
+
     /// `[refdata.selection]` is not a coherent policy.
     #[error("`[refdata.selection]`: {source}")]
     Selection {

@@ -36,8 +36,19 @@
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 
-/// The default multicast TTL. One hop: the group is delivered on the attached
-/// segment and the network's own last-mile carries it from there.
+/// One hop: the group is delivered on the attached segment and the network's own
+/// last-mile carries it from there.
+///
+/// **This is not the configuration document's default, and the name is a
+/// leftover.** `[egress] ttl` has no default: it is stated or the publisher
+/// refuses to start, because a document that omitted it published one hop and
+/// every way an operator could have looked said the feed was healthy. What this
+/// constant still is: the value [`EgressPolicy::default`] carries for a
+/// hand-composed publisher, and the value the startup refusal names as the line
+/// that reproduces the old behaviour.
+///
+/// A reader who restores a serde default from this constant's name has undone
+/// the change it now documents.
 pub const DEFAULT_TTL: u8 = 1;
 
 /// An IPv4 prefix, for stating an invariant about a discovered address.
@@ -167,6 +178,13 @@ pub struct EgressPolicy {
 impl Default for EgressPolicy {
     /// Discovery, no invariant, one hop. A policy that states nothing is the
     /// policy of a host whose route is right, which is the normal case.
+    ///
+    /// **The configuration document has no such default for the TTL**, and the
+    /// asymmetry is deliberate rather than an oversight. The failure that made
+    /// the key required is an omission — a key nobody wrote, in a file nobody
+    /// diffed for it. This is a call, in a crate somebody authored, whose
+    /// meaning is written here at the definition and appears in a diff at the
+    /// call site. See `StartupError::TtlUnstated` in `dz-publisher-runtime`.
     fn default() -> Self {
         Self {
             pin: None,

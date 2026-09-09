@@ -733,7 +733,10 @@ fn an_incoherent_selection_policy_is_refused() {
 #[test]
 fn an_expected_prefix_that_is_not_a_prefix_is_refused() {
     let mut doc = Doc::valid();
-    doc.egress = "[egress]\nexpected_prefix = \"203.0.113.0\"\n".to_owned();
+    // `ttl` is stated so that this document has exactly one thing wrong with
+    // it. Without it the refusal below also has a second cause, and the test
+    // would pass on whichever `resolve` happens to check first.
+    doc.egress = "[egress]\nttl = 1\nexpected_prefix = \"203.0.113.0\"\n".to_owned();
     let error = Document::parse(&doc.render())
         .expect("parses")
         .resolve()
@@ -741,10 +744,97 @@ fn an_expected_prefix_that_is_not_a_prefix_is_refused() {
     assert!(matches!(error, StartupError::BadPrefix { .. }), "{error}");
 }
 
+/// A document that states no TTL does not start.
+///
+/// **The key lost its default because being wrong about it is silent in every
+/// direction an operator can look.** A locally attached subscriber receives, so
+/// a smoke test on the publisher's own host passes. Every datagram is sent
+/// successfully, so nothing in the egress series moves — the kernel accepted
+/// each one and a router discarded it. A subscriber that never joined has
+/// nothing to number, so gap detection reports nothing either. The publisher is
+/// healthy and the feed is empty.
+#[test]
+fn a_document_that_states_no_ttl_is_refused() {
+    let mut doc = Doc::valid();
+    // No `[egress]` section at all, which is the shape a document that never
+    // thought about the hop count has.
+    doc.egress = String::new();
+    let error = Document::parse(&doc.render())
+        .expect("parses")
+        .resolve()
+        .unwrap_err();
+    assert!(matches!(error, StartupError::TtlUnstated), "{error}");
+}
+
+/// An `[egress]` section that states everything except the TTL is the same
+/// mistake as no section at all, and gets the same refusal.
+///
+/// Both cases are asserted because the refusal is in `resolve` rather than in
+/// serde. A required *field* would have made the section required too, and this
+/// repository has already recorded what that costs: `missing field` at line 1,
+/// column 1 — an error pointing at the whole file rather than at the section
+/// nobody wrote.
+#[test]
+fn an_egress_section_without_a_ttl_is_refused_like_an_absent_one() {
+    let mut doc = Doc::valid();
+    doc.egress =
+        "[egress]\nexpected_prefix = \"203.0.113.0/24\"\npin = \"203.0.113.7\"\n".to_owned();
+    let error = Document::parse(&doc.render())
+        .expect("parses")
+        .resolve()
+        .unwrap_err();
+    assert!(matches!(error, StartupError::TtlUnstated), "{error}");
+}
+
+/// The message carries the line an operator has to write.
+///
+/// Asserted as substrings because the message **is** the remedy: an operator
+/// upgrading has one key to add, and a message that stopped naming the value
+/// would leave them to guess which number reproduces what they had.
+#[test]
+fn the_refusal_names_the_key_and_the_value_that_reproduces_one_hop() {
+    let message = StartupError::TtlUnstated.to_string();
+    assert!(message.contains("[egress] ttl"), "{message}");
+    assert!(message.contains("ttl = 1"), "{message}");
+    assert!(
+        message.contains("attached segment"),
+        "the message says what one hop means: {message}"
+    );
+}
+
+/// One hop is still expressible, and now it is stated.
+#[test]
+fn a_stated_ttl_of_one_resolves_to_one_hop() {
+    let mut doc = Doc::valid();
+    doc.egress = "[egress]\nttl = 1\n".to_owned();
+    let config = Document::parse(&doc.render())
+        .expect("parses")
+        .resolve()
+        .expect("one hop is a value, not a default");
+    assert_eq!(config.egress.ttl, 1);
+}
+
+/// And the value a deployment that exists uses.
+///
+/// 64 rather than 2: a publisher in production states it because its groups
+/// cross several hops, which is the whole reason the default was not the
+/// operating value.
+#[test]
+fn a_stated_ttl_of_sixty_four_reaches_the_policy() {
+    let mut doc = Doc::valid();
+    doc.egress = "[egress]\nttl = 64\n".to_owned();
+    let config = Document::parse(&doc.render())
+        .expect("parses")
+        .resolve()
+        .expect("a routed group is the case this key exists for");
+    assert_eq!(config.egress.ttl, 64);
+}
+
 #[test]
 fn a_pinned_source_address_that_is_not_an_address_is_refused() {
     let mut doc = Doc::valid();
-    doc.egress = "[egress]\npin = \"the-tunnel\"\n".to_owned();
+    // Stated, for the reason above.
+    doc.egress = "[egress]\nttl = 1\npin = \"the-tunnel\"\n".to_owned();
     let error = Document::parse(&doc.render())
         .expect("parses")
         .resolve()
