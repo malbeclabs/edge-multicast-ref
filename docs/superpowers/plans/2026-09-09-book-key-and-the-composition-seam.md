@@ -20,9 +20,9 @@ Task 1 is a correction to a document that is wrong now, and it lands first becau
 
 ### 1. The venue-observation design says what the function does
 
-- [ ] The sentence claiming `state_key` "is already transport-independent by construction" is replaced by what is true: it is transport-independent and observer-dependent, it eats the `channel_id` and the `instrument_id` before any price, and a venue side can compute neither.
-- [ ] The race view that design proposes keys on `book_key` and carries the symbol, since the symbol is the only instrument identity both sides have.
-- [ ] The column's own doc comment — "a hash over the instrument and both sides, and over nothing else" — is corrected where it overstates the function, and the correction says which of the two keys each sentence is about.
+- [x] The sentence claiming `state_key` "is already transport-independent by construction" is replaced by what is true: it is transport-independent and observer-dependent, it eats the `channel_id` and the `instrument_id` before any price, and a venue side can compute neither.
+- [x] The race view that design proposes keys on `book_key` and carries the symbol, since the symbol is the only instrument identity both sides have.
+- [x] The column's own doc comment — "a hash over the instrument and both sides, and over nothing else" — is corrected where it overstates the function, and the correction says which of the two keys each sentence is about. **This bullet names a Rust file, not a document**, and it was missed when the rest of task 1 landed on the documents branch: `dz-recorder-rows/src/rows.rs`'s `BookTop::state_key` kept the overstatement while `dz-recorder-events` gained a correct one, so the tree briefly held both. It is corrected here, where the code is.
 
 **Test:** none, and the plan says so. This is a document stating what a function does, and a test asserting a sentence against itself documents the sentence.
 
