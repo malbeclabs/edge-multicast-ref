@@ -39,6 +39,30 @@
 //! design, so the counter rises whether or not anything is wrong, while one
 //! window older than the eviction horizon is history already gone.
 //!
+//! # The insert happens with no lock held, which is why there is no `post`
+//!
+//! The derivation thread calls [`Spool::store`] and the posting thread drains
+//! the spool, so this sits behind a mutex. A method that took `&mut self` and
+//! made the insert inside it would hold that lock for the length of an HTTP
+//! request — and a slow or hung destination would then block `store`, block the
+//! derivation, fill the ring, and drop datagrams. That is the same backpressure
+//! chain the byte budget exists to prevent, arriving by the lock rather than by
+//! the disk, and by a route nobody would think to look at.
+//!
+//! So posting is three calls with the insert between them, and the middle one
+//! touches no spool state:
+//!
+//! ```text
+//! lock ─► take_oldest ─► unlock ─► write_batch ─► lock ─► record_landed / release
+//! ```
+//!
+//! [`take_oldest`](Spool::take_oldest) marks the window in flight, so nothing
+//! offers it twice while the insert is out; [`record_landed`](Spool::record_landed)
+//! takes the ids the sink says are durable — a list, because a sink that
+//! coalesces lands earlier windows together with the current one — and
+//! [`release`](Spool::release) puts everything in flight back when the
+//! destination refuses.
+//!
 //! # What one window directory holds
 //!
 //! A newline-delimited JSON file per grain, written through [`FileSink`], so
@@ -58,11 +82,18 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use dz_recorder_load::ledger::{Entry, Ledger};
+use dz_recorder_load::now_unix_nanos;
 use dz_recorder_rows::{
     BookTop, ConformanceFinding, Datagram, Derivation, Era, Event, FileSink, Grain, Instrument,
-    ObjectId, RowBatch, RowSink, RowSinkError, SegmentCoverage, SegmentTrailer, SequenceGap,
-    Written,
+    ObjectId, RowBatch, RowSink as _, RowSinkError, SegmentCoverage, SegmentTrailer, SequenceGap,
 };
+
+/// What one call to [`Spool::record_landed`] did.
+///
+/// The loader's type, not a second one of the same shape: "which units did the
+/// ledger get to hear about, and which could it not be told about" is one
+/// question, and two answers to it would drift.
+pub use dz_recorder_load::Recorded;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -126,23 +157,32 @@ pub enum SpoolError {
     Sink(#[from] RowSinkError),
 }
 
-/// What one call to [`Spool::post`] did.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct Posted {
-    /// Windows whose rows are in the store and whose ledger entry is written.
-    /// The directory of each is gone.
-    pub recorded: u64,
-    /// Rows handed to the sink by this call, per grain. Whether they are in the
-    /// store yet is `recorded`.
-    pub written: Written,
-    /// Bytes the sink actually sent, which is `0` for every call where it only
-    /// held.
-    pub bytes_posted: u64,
-    /// One message per window whose rows landed and whose ledger entry could not
-    /// be written. Those windows stay on disk and are posted again, which
-    /// `ReplacingMergeTree` makes a replace — the alternative is a spool that
-    /// has forgotten a window it loaded.
-    pub failures: Vec<String>,
+/// One window's rows, off the disk and handed out for an insert.
+///
+/// It exists so the insert can happen with the spool's lock released. The window
+/// stays on disk and stays in flight — nothing else will offer it — until the
+/// caller reports what landed to [`Spool::record_landed`] or gives it back with
+/// [`Spool::release`]. Dropping one without doing either leaves it in flight for
+/// the life of the process, which is a window nothing posts and nothing evicts
+/// until the budget reaches it.
+#[derive(Debug)]
+pub struct InFlightWindow {
+    id: ObjectId,
+    batch: RowBatch,
+}
+
+impl InFlightWindow {
+    /// Which window this is, for a log line or a counter label.
+    #[must_use]
+    pub const fn id(&self) -> &ObjectId {
+        &self.id
+    }
+
+    /// The rows, for [`RowSink::write_batch`](dz_recorder_rows::RowSink::write_batch).
+    #[must_use]
+    pub fn into_rows(self) -> RowBatch {
+        self.batch
+    }
 }
 
 /// One window's rows on their way to the column store.
@@ -162,6 +202,15 @@ struct Window {
     /// on a later call, and sending them again in the meantime is one insert's
     /// worth of work for a row already in flight.
     in_flight: bool,
+    /// The rows are in the store and the ledger entry could not be written.
+    ///
+    /// **What is owed is the entry, not the insert.** Re-posting these rows
+    /// would be a replace of rows that are already there, so the window is not
+    /// offered again — and it is not forgotten either, because an entry nobody
+    /// retries is a window whose trailer the next era anchor will never see.
+    /// [`Spool::record_landed`] retries it, which is why the pipeline calls that
+    /// once a pass even with nothing landed.
+    entry_owed: bool,
 }
 
 /// What the close writes beside the rows.
@@ -197,9 +246,11 @@ struct GrainDigest {
 
 /// Windows on disk, oldest first, under a byte budget.
 ///
-/// One owner: the posting stage holds it and the derivation hands windows to
-/// that stage. Every method takes `&mut self`, so storing and posting cannot
-/// interleave and the in-flight marks mean what they say.
+/// Two threads reach it — the derivation stores and the posting stage drains —
+/// so it lives behind a mutex, and every method here is short and touches no
+/// network. The one call that does is the caller's, between
+/// [`take_oldest`](Self::take_oldest) and [`record_landed`](Self::record_landed),
+/// with the lock released.
 #[derive(Debug)]
 pub struct Spool {
     dir: PathBuf,
@@ -311,7 +362,7 @@ impl Spool {
         // than hides. Here that would double a window's rows and hash the
         // doubling, so the directory starts empty whatever a previous attempt
         // left in it.
-        self.forget(&name);
+        self.windows.remove(&name);
         remove_tree(&dir)?;
 
         let mut sink = FileSink::create(&dir)?;
@@ -342,6 +393,7 @@ impl Spool {
                 id,
                 sidecar,
                 in_flight: false,
+                entry_owed: false,
             },
         );
         // After the window is on disk and never before it: eviction is what
@@ -351,87 +403,194 @@ impl Spool {
         Ok(())
     }
 
-    /// Posts what is on disk, oldest first, and records what lands.
+    /// The oldest window that is due to be posted, read off the disk and marked
+    /// so that nothing offers it again.
     ///
-    /// **The order is the whole point: the rows land, then the ledger entry is
-    /// written, then the directory is deleted.** An entry written when the sink
-    /// merely *accepted* the rows marks a window loaded whose rows are still in
-    /// the sink's memory, and a crash then loses them with nothing recording
-    /// that it did.
+    /// Due means neither in flight nor already in the store — a window whose
+    /// rows landed and whose ledger entry could not be written owes an entry and
+    /// not an insert, and offering it here would be a second insert of rows that
+    /// are already there and a loop that never ends.
     ///
-    /// A window the ledger already records is deleted without being posted
-    /// again: that is a crash between the entry and the delete, and re-sending
-    /// its rows would be an insert for rows already in the store.
+    /// Oldest by the start stamp in the window key, which orders windows across
+    /// runs where a per-run sequence number cannot — and in-order posting is
+    /// what keeps an era anchor certain when the evidence for it is there.
     ///
-    /// A window that will not load is discarded, counted and named, and the
-    /// windows around it are still posted. One damaged directory must not stop a
-    /// spool from draining.
+    /// `None` when every window on disk is already in flight, or there are none.
     ///
     /// # Errors
     ///
-    /// [`SpoolError::Sink`] when the destination refuses. Every window stays on
-    /// disk, including the ones the sink was holding: a failure at the sink
-    /// takes everything it held with it, so none of them is loaded and all of
-    /// them are posted again.
-    pub fn post(
-        &mut self,
-        sink: &mut dyn RowSink,
-        ledger: &mut Ledger,
-        now_ns: u64,
-    ) -> Result<Posted, SpoolError> {
-        let mut posted = Posted::default();
-        // Oldest first, and over a snapshot of the names: the map is written to
-        // as windows are recorded and discarded inside this loop.
-        let names: Vec<String> = self.windows.keys().cloned().collect();
-        for name in names {
-            let Some(window) = self.windows.get(&name) else {
-                continue;
-            };
-            if window.in_flight {
-                continue;
-            }
-            if ledger.is_loaded(&window.id.key, &window.id.sha256) {
-                self.delete(&name, &mut posted);
-                continue;
-            }
-
-            let batch = match self.load(&name) {
-                Ok(batch) => batch,
-                Err(e) => {
-                    self.discard(&name, e);
-                    continue;
-                }
-            };
-            let accepted = match sink.write_batch(batch, now_ns) {
-                Ok(accepted) => accepted,
-                Err(e) => {
-                    self.release();
-                    return Err(SpoolError::Sink(e));
-                }
-            };
-            posted.written.add(accepted.accepted);
-            posted.bytes_posted = posted.bytes_posted.saturating_add(accepted.bytes_posted);
-            if let Some(window) = self.windows.get_mut(&name) {
+    /// A window that will not load is discarded, counted and named *before* this
+    /// returns, so a caller that asks again gets the next one. One damaged
+    /// directory must not stop a spool from draining.
+    pub fn take_oldest(&mut self) -> Option<Result<InFlightWindow, SpoolError>> {
+        let name = self
+            .windows
+            .iter()
+            .find(|(_, w)| !w.in_flight && !w.entry_owed)
+            .map(|(name, _)| name.clone())?;
+        match self.load(&name) {
+            Ok(batch) => {
+                let window = self.windows.get_mut(&name)?;
                 window.in_flight = true;
-            }
-            self.record(&accepted.landed, ledger, now_ns, &mut posted);
-        }
-
-        // Once per call, including a call that found nothing on disk: a feed
-        // quiet enough to derive no window would otherwise leave the sink
-        // holding its last rows until something else arrived, which is the
-        // opposite of what the sink's age bound is for.
-        match sink.post_if_due(now_ns) {
-            Ok(landed) => {
-                posted.bytes_posted = posted.bytes_posted.saturating_add(landed.bytes_posted);
-                self.record(&landed.objects, ledger, now_ns, &mut posted);
+                Some(Ok(InFlightWindow {
+                    id: window.id.clone(),
+                    batch,
+                }))
             }
             Err(e) => {
-                self.release();
-                return Err(SpoolError::Sink(e));
+                let named = SpoolError::Unclosed {
+                    window: name.clone(),
+                    reason: e.to_string(),
+                };
+                self.discard(&name, e);
+                Some(Err(named))
             }
         }
-        Ok(posted)
+    }
+
+    /// Writes a ledger entry for every window whose rows are now durable, and
+    /// then deletes it.
+    ///
+    /// **The order is the whole point: the rows land, then the entry is written,
+    /// then the directory goes.** An entry written when the sink merely
+    /// *accepted* the rows marks a window loaded whose rows are still in the
+    /// sink's memory, and a crash then loses them with nothing recording that it
+    /// did.
+    ///
+    /// A list and never one id, because a sink that coalesces lands earlier
+    /// windows together with the current one: the insert that carried window *c*
+    /// is the insert that made *a* and *b* durable, and a caller that could only
+    /// report *c* would leave the other two on disk for ever.
+    ///
+    /// **Each entry is attempted independently and none of them is a `?`.** The
+    /// insert is over and the sink has forgotten these rows, so the only
+    /// question left is which windows the ledger gets to hear about — and a
+    /// return on the first failure would leave the rest marked in flight for rows
+    /// nobody holds any more, which is a window skipped on every later pass until
+    /// the process restarts.
+    ///
+    /// **Call it once a pass, including a pass where nothing landed.** An entry
+    /// that could not be written is retried here and nowhere else: the rows are
+    /// already in the store, so nothing will hand this spool that window's id a
+    /// second time.
+    pub fn record_landed(&mut self, landed: &[ObjectId], ledger: &mut Ledger) -> Recorded {
+        let mut out = Recorded::default();
+        let owed: Vec<String> = self
+            .windows
+            .iter()
+            .filter(|(_, w)| w.entry_owed)
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in owed {
+            self.write_entry(&name, ledger, &mut out);
+        }
+        for id in landed {
+            let Some(name) = self
+                .windows
+                .iter()
+                .find(|(_, w)| &w.id == id)
+                .map(|(name, _)| name.clone())
+            else {
+                // The sink named a window this spool is not holding. It cannot
+                // happen — a sink only ever lands what it was given — and if it
+                // did, an entry with no trailer behind it would put the next
+                // window's boundary check on evidence nobody derived.
+                continue;
+            };
+            let Some(window) = self.windows.get_mut(&name) else {
+                continue;
+            };
+            // Whatever the ledger says, these rows have gone: a window left in
+            // flight over rows the sink no longer holds is one nothing will ever
+            // post again.
+            window.in_flight = false;
+            self.write_entry(&name, ledger, &mut out);
+        }
+        out
+    }
+
+    /// Writes one window's ledger entry and then deletes it.
+    ///
+    /// The two happen here and only here, in this order, so that the rule has
+    /// one implementation: a window is deleted because its entry is written, and
+    /// never the other way round.
+    fn write_entry(&mut self, name: &str, ledger: &mut Ledger, out: &mut Recorded) {
+        let Some(window) = self.windows.get_mut(name) else {
+            return;
+        };
+        let entry = Entry {
+            object_key: window.id.key.clone(),
+            object_sha256: window.id.sha256.clone(),
+            // Read here rather than taken as a parameter, exactly as the loader
+            // reads it: the field is when this process wrote the rows, which is
+            // not when the traffic passed and is not a quantity any caller has a
+            // better answer for.
+            loaded_at_ns: now_unix_nanos(),
+            trailer: window.sidecar.trailer.clone(),
+        };
+        match ledger.record(entry) {
+            Ok(()) => {
+                out.recorded += 1;
+                if let Err(message) = self.delete(name) {
+                    out.failures.push(message);
+                }
+            }
+            // The rows are in the store and nothing records it. The window stays
+            // and the entry is owed — deleting it here would give up the trailer
+            // the next era anchor needs, and re-posting it would insert rows that
+            // are already there.
+            Err(e) => {
+                window.entry_owed = true;
+                out.failures.push(e.to_string());
+            }
+        }
+    }
+
+    /// Puts every window in flight back, to be posted again.
+    ///
+    /// Called when the sink refuses: [`RowSink::write_batch`] documents that a
+    /// failure takes every unit the sink was holding with it, so none of them is
+    /// loaded and all of them are due again. Also the way out of a posting stage
+    /// that panicked mid-insert — the windows it was holding are on disk, and
+    /// only this mark says otherwise.
+    ///
+    /// A window that owes a ledger entry is not released: its rows are in the
+    /// store already, so what it needs is
+    /// [`record_landed`](Self::record_landed) and not a second insert.
+    ///
+    /// [`RowSink::write_batch`]: dz_recorder_rows::RowSink::write_batch
+    pub fn release(&mut self) {
+        for window in self.windows.values_mut() {
+            window.in_flight = false;
+        }
+    }
+
+    /// Drops every window the ledger already accounts for, without posting it
+    /// again.
+    ///
+    /// Called once, after [`open`](Self::open) and before the first
+    /// [`take_oldest`](Self::take_oldest). A crash between a ledger entry and the
+    /// delete that follows it leaves a directory whose rows are already in the
+    /// store, and re-posting it is an insert for rows that are already there.
+    /// `ReplacingMergeTree` would make that a replace rather than a duplication,
+    /// so this is not what keeps the store correct — but the ledger's whole
+    /// meaning is *these rows are in the store*, and a spool that consulted it
+    /// nowhere would be asking the question and throwing the answer away.
+    ///
+    /// Returns how many, which is a number that should be `0` on every start
+    /// that followed a clean shutdown.
+    pub fn forget_loaded(&mut self, ledger: &Ledger) -> u64 {
+        let names: Vec<String> = self
+            .windows
+            .iter()
+            .filter(|(_, w)| ledger.is_loaded(&w.id.key, &w.id.sha256))
+            .map(|(name, _)| name.clone())
+            .collect();
+        let dropped = names.len() as u64;
+        for name in names {
+            let _ = self.delete(&name);
+        }
+        dropped
     }
 
     /// What eviction governs: every byte of every window directory.
@@ -596,76 +755,25 @@ impl Spool {
         })
     }
 
-    /// Writes a ledger entry for every window whose rows have landed, and then
-    /// deletes it.
+    /// Deletes a window whose rows the ledger now accounts for.
     ///
-    /// **Each entry is attempted independently and none of them is a `?`.** The
-    /// insert is over and the sink has forgotten these rows, so the only
-    /// question left is which windows the ledger gets to hear about — and a
-    /// return on the first failure would leave the rest marked in flight for
-    /// rows nobody holds any more, which is a window skipped on every later pass
-    /// until the process restarts.
-    fn record(
-        &mut self,
-        landed: &[ObjectId],
-        ledger: &mut Ledger,
-        now_ns: u64,
-        posted: &mut Posted,
-    ) {
-        for id in landed {
-            let Some(name) = self
-                .windows
-                .iter()
-                .find(|(_, w)| &w.id == id)
-                .map(|(name, _)| name.clone())
-            else {
-                // The sink named a window this spool is not holding. It cannot
-                // happen — a sink only ever lands what it was given — and if it
-                // did, an entry with no trailer behind it would put the next
-                // window's boundary check on evidence nobody derived.
-                continue;
-            };
-            let Some(window) = self.windows.get_mut(&name) else {
-                continue;
-            };
-            // Whatever the ledger says, these rows have gone: a window left in
-            // flight over rows the sink no longer holds is one nothing will ever
-            // post again.
-            window.in_flight = false;
-            let entry = Entry {
-                object_key: id.key.clone(),
-                object_sha256: id.sha256.clone(),
-                loaded_at_ns: now_ns,
-                trailer: window.sidecar.trailer.clone(),
-            };
-            match ledger.record(entry) {
-                Ok(()) => {
-                    posted.recorded += 1;
-                    self.delete(&name, posted);
-                }
-                // The rows are in the store and nothing records it, so the
-                // window stays and is posted again — a replace, and the honest
-                // one. Deleting it here would be a spool that gave up the only
-                // evidence of a load it could not write down.
-                Err(e) => posted.failures.push(e.to_string()),
-            }
-        }
-    }
-
-    /// Deletes a window whose rows are accounted for, and stops tracking it.
-    ///
-    /// A directory that will not delete keeps its entry, so that its bytes stay
-    /// inside the budget and the next pass tries again. Forgetting it would
-    /// leave bytes on the disk that nothing counts and eviction never reaches.
-    fn delete(&mut self, name: &str, posted: &mut Posted) {
-        let Some(window) = self.windows.get(name) else {
-            return;
+    /// A directory that will not delete stops being a window whatever else
+    /// happens: its rows are in the store, so leaving it counted as unposted
+    /// would hold [`oldest_age_seconds`](Self::oldest_age_seconds) above zero for
+    /// ever over a window nothing is waiting for — a lag alert that can never
+    /// clear. Its bytes move to
+    /// [`unreclaimable_bytes`](Self::unreclaimable_bytes), which is where bytes
+    /// this module can no longer reach belong.
+    fn delete(&mut self, name: &str) -> Result<(), String> {
+        let Some(window) = self.windows.remove(name) else {
+            return Ok(());
         };
         match remove_tree(&window.dir) {
-            Ok(()) => {
-                self.forget(name);
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.unreclaimable_bytes = self.unreclaimable_bytes.saturating_add(window.bytes);
+                Err(e.to_string())
             }
-            Err(e) => posted.failures.push(e.to_string()),
         }
     }
 
@@ -676,8 +784,16 @@ impl Spool {
     /// they are indistinguishable in the store from rows that were derived
     /// whole.
     fn discard(&mut self, name: &str, reason: SpoolError) {
-        let _ = remove_tree(&self.dir.join(name));
-        self.forget(name);
+        let dir = self.dir.join(name);
+        // Adopted at `open` before it is in the map, so its size may have to be
+        // read off the disk.
+        let bytes = self
+            .windows
+            .remove(name)
+            .map_or_else(|| tree_bytes(&dir), |w| w.bytes);
+        if remove_tree(&dir).is_err() {
+            self.unreclaimable_bytes = self.unreclaimable_bytes.saturating_add(bytes);
+        }
         self.windows_discarded_total += 1;
         self.discarded.push(reason);
     }
@@ -710,25 +826,10 @@ impl Spool {
             if remove_tree(&window.dir).is_err() {
                 return;
             }
-            self.forget(&name);
+            self.windows.remove(&name);
             self.windows_evicted_total += 1;
             self.bytes_evicted_total = self.bytes_evicted_total.saturating_add(bytes);
         }
-    }
-
-    /// Un-marks every window the sink was holding.
-    ///
-    /// Called when the sink fails: [`RowSink::write_batch`] documents that a
-    /// failure takes every unit the sink was holding with it, so none of them is
-    /// loaded and all of them are posted again.
-    fn release(&mut self) {
-        for window in self.windows.values_mut() {
-            window.in_flight = false;
-        }
-    }
-
-    fn forget(&mut self, name: &str) {
-        self.windows.remove(name);
     }
 
     /// Reads back what a previous run left under one window name.
@@ -762,6 +863,7 @@ impl Spool {
             },
             sidecar,
             in_flight: false,
+            entry_owed: false,
         })
     }
 }

@@ -10,11 +10,16 @@
 //! file writes, and it reads the ledger on every call so that the order of the
 //! two — rows first, entry second — is something a test can assert rather than
 //! something a reader has to take on trust.
+//!
+//! Most tests drive the spool through [`drain`], which is the posting stage the
+//! pipeline will write: take a window under the lock, insert with the lock
+//! released, record what landed under it again. Testing the three calls in some
+//! other order would be testing an arrangement nothing runs.
 
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 
-use dz_recorder_inline::spool::{Spool, SpoolError, CLOSED};
+use dz_recorder_inline::spool::{Recorded, Spool, SpoolError, CLOSED};
 use dz_recorder_load::ledger::Ledger;
 use dz_recorder_rows::{
     Accepted, Derivation, Era, FileSink, Grain, Landed, Nanos, ObjectId, RowBatch, RowSink,
@@ -46,9 +51,14 @@ enum Seen {
 struct FakeSink {
     ledger_path: PathBuf,
     seen: Vec<Seen>,
+    /// Era rows handed over, so a test can say the rows came back whole and not
+    /// merely that a window came back.
+    era_rows: usize,
     refuse: bool,
-    /// Take the rows and do not send them, the way a coalescing sink does.
-    hold: bool,
+    /// How many more inserts take the rows without sending them, the way a
+    /// coalescing sink does. The insert after the last of them carries
+    /// everything held, which is what a buffer becoming due looks like.
+    hold_writes: usize,
     /// Send what is held on the next `post_if_due`.
     due: bool,
     held: Vec<ObjectId>,
@@ -59,8 +69,9 @@ impl FakeSink {
         Self {
             ledger_path: ledger_path.to_path_buf(),
             seen: Vec::new(),
+            era_rows: 0,
             refuse: false,
-            hold: false,
+            hold_writes: 0,
             due: true,
             held: Vec::new(),
         }
@@ -90,9 +101,11 @@ impl RowSink for FakeSink {
             key: rows.object_key.clone(),
             ledger_entries: ledger_entries(&self.ledger_path),
         });
+        self.era_rows += rows.era.len();
         let id = ObjectId::of(&rows);
         let accepted = Written::of(&rows, 0);
-        if self.hold {
+        if self.hold_writes > 0 {
+            self.hold_writes -= 1;
             self.held.push(id);
             return Ok(Accepted {
                 accepted,
@@ -100,9 +113,13 @@ impl RowSink for FakeSink {
                 bytes_posted: 0,
             });
         }
+        // The insert that made the buffer due carries every window held behind
+        // it, not only this one.
+        let mut landed = std::mem::take(&mut self.held);
+        landed.push(id);
         Ok(Accepted {
             accepted,
-            landed: vec![id],
+            landed,
             bytes_posted: 1,
         })
     }
@@ -127,6 +144,42 @@ impl RowSink for FakeSink {
             bytes_posted: 1,
         })
     }
+}
+
+/// The posting stage, as the pipeline will run it: the insert happens between
+/// two short calls into the spool and never inside one.
+fn drain(
+    spool: &mut Spool,
+    sink: &mut FakeSink,
+    ledger: &mut Ledger,
+    now_ns: u64,
+) -> Result<Recorded, SpoolError> {
+    let mut out = Recorded::default();
+    while let Some(taken) = spool.take_oldest() {
+        // A window that would not load is already discarded and counted, and the
+        // next one is still due.
+        let Ok(window) = taken else { continue };
+        match sink.write_batch(window.into_rows(), now_ns) {
+            Ok(accepted) => merge(&mut out, spool.record_landed(&accepted.landed, ledger)),
+            Err(e) => {
+                spool.release();
+                return Err(SpoolError::Sink(e));
+            }
+        }
+    }
+    match sink.post_if_due(now_ns) {
+        Ok(landed) => merge(&mut out, spool.record_landed(&landed.objects, ledger)),
+        Err(e) => {
+            spool.release();
+            return Err(SpoolError::Sink(e));
+        }
+    }
+    Ok(out)
+}
+
+fn merge(into: &mut Recorded, other: Recorded) {
+    into.recorded += other.recorded;
+    into.failures.extend(other.failures);
 }
 
 fn ledger_entries(path: &Path) -> usize {
@@ -202,8 +255,7 @@ fn a_destination_that_refuses_leaves_the_window_on_disk_and_the_ledger_empty() {
         .store(10 * SECOND, batch("window-a", 3), trailer(0))
         .expect("the window reaches the disk");
 
-    let refused = spool
-        .post(&mut sink, &mut ledger, 11 * SECOND)
+    let refused = drain(&mut spool, &mut sink, &mut ledger, 11 * SECOND)
         .expect_err("a destination that is down is an error");
     assert!(
         matches!(refused, SpoolError::Sink(_)),
@@ -221,10 +273,9 @@ fn a_destination_that_refuses_leaves_the_window_on_disk_and_the_ledger_empty() {
     // And the window is still due: a refusal must not leave it marked as
     // something the sink is holding.
     sink.refuse = false;
-    let posted = spool
-        .post(&mut sink, &mut ledger, 12 * SECOND)
-        .expect("the destination is back");
-    assert_eq!(posted.recorded, 1);
+    let drained =
+        drain(&mut spool, &mut sink, &mut ledger, 12 * SECOND).expect("the destination is back");
+    assert_eq!(drained.recorded, 1);
     assert_eq!(spool.windows(), 0);
 }
 
@@ -248,17 +299,14 @@ fn a_destination_that_recovers_lands_the_windows_oldest_first_and_records_each_a
     spool
         .store(20 * SECOND, batch("window-b", 1), trailer(1))
         .expect("the second window reaches the disk");
-    spool
-        .post(&mut sink, &mut ledger, 31 * SECOND)
-        .expect_err("the destination is down");
+    drain(&mut spool, &mut sink, &mut ledger, 31 * SECOND).expect_err("the destination is down");
 
     sink.refuse = false;
-    let posted = spool
-        .post(&mut sink, &mut ledger, 40 * SECOND)
-        .expect("the destination is back");
+    let drained =
+        drain(&mut spool, &mut sink, &mut ledger, 40 * SECOND).expect("the destination is back");
 
-    assert_eq!(posted.recorded, 3);
-    assert!(posted.failures.is_empty(), "{:?}", posted.failures);
+    assert_eq!(drained.recorded, 3);
+    assert!(drained.failures.is_empty(), "{:?}", drained.failures);
     assert_eq!(
         sink.rows_written(),
         vec!["window-a", "window-b", "window-c"],
@@ -306,33 +354,29 @@ fn rows_the_sink_has_taken_and_not_sent_are_not_recorded_in_the_ledger() {
     let mut ledger = Ledger::open(&ledger_path).expect("a ledger");
     let mut sink = FakeSink::new(&ledger_path);
     // A sink that coalesces: it takes the rows and sends nothing.
-    sink.hold = true;
+    sink.hold_writes = usize::MAX;
     sink.due = false;
 
     spool
         .store(10 * SECOND, batch("window-a", 2), trailer(0))
         .expect("the window reaches the disk");
-    let posted = spool
-        .post(&mut sink, &mut ledger, 11 * SECOND)
-        .expect("the sink took the rows");
+    let drained =
+        drain(&mut spool, &mut sink, &mut ledger, 11 * SECOND).expect("the sink took the rows");
 
-    assert_eq!(posted.recorded, 0, "accepted is not landed");
+    assert_eq!(drained.recorded, 0, "accepted is not landed");
     assert_eq!(ledger.entries(), 0);
     assert_eq!(spool.windows(), 1, "the window stays until its rows land");
     assert_eq!(window_dirs(&spool_dir).len(), 1);
 
     // A second pass must not hand the same rows over again while the sink is
     // still holding them.
-    spool
-        .post(&mut sink, &mut ledger, 12 * SECOND)
-        .expect("nothing new is due");
+    drain(&mut spool, &mut sink, &mut ledger, 12 * SECOND).expect("nothing new is due");
     assert_eq!(sink.rows_written(), vec!["window-a"]);
 
     sink.due = true;
-    let posted = spool
-        .post(&mut sink, &mut ledger, 13 * SECOND)
-        .expect("the insert goes out");
-    assert_eq!(posted.recorded, 1);
+    let drained =
+        drain(&mut spool, &mut sink, &mut ledger, 13 * SECOND).expect("the insert goes out");
+    assert_eq!(drained.recorded, 1);
     assert_eq!(ledger_entries(&ledger_path), 1);
     assert_eq!(spool.windows(), 0);
     assert!(window_dirs(&spool_dir).is_empty(), "the directory is gone");
@@ -425,17 +469,12 @@ fn a_spool_abandoned_without_posting_is_replayed_on_the_next_open_and_lands() {
 
     let mut ledger = Ledger::open(&ledger_path).expect("a ledger");
     let mut sink = FakeSink::new(&ledger_path);
-    let posted = spool
-        .post(&mut sink, &mut ledger, 30 * SECOND)
-        .expect("the destination is up");
+    let drained =
+        drain(&mut spool, &mut sink, &mut ledger, 30 * SECOND).expect("the destination is up");
 
-    assert_eq!(posted.recorded, 2);
+    assert_eq!(drained.recorded, 2);
     assert_eq!(sink.rows_written(), vec!["window-a", "window-b"]);
-    assert_eq!(
-        posted.written.rows(Grain::Era),
-        4,
-        "the rows came back whole"
-    );
+    assert_eq!(sink.era_rows, 4, "the rows came back whole");
     assert_eq!(spool.windows(), 0);
     assert!(window_dirs(&spool_dir).is_empty());
 }
@@ -474,11 +513,10 @@ fn a_corrupted_grain_file_is_discarded_by_name_and_the_windows_around_it_still_l
     let mut spool = Spool::open(&spool_dir, 1 << 20).expect("a spool");
     let mut ledger = Ledger::open(&ledger_path).expect("a ledger");
     let mut sink = FakeSink::new(&ledger_path);
-    let posted = spool
-        .post(&mut sink, &mut ledger, 100 * SECOND)
+    let drained = drain(&mut spool, &mut sink, &mut ledger, 100 * SECOND)
         .expect("one damaged window is not a failed pass");
 
-    assert_eq!(posted.recorded, 2, "the windows around it still load");
+    assert_eq!(drained.recorded, 2, "the windows around it still load");
     assert_eq!(
         sink.rows_written(),
         vec!["window-a", "window-c"],
@@ -549,5 +587,223 @@ fn a_name_the_spool_did_not_write_is_counted_and_left_alone() {
     assert!(
         theirs.is_file(),
         "a budget is not a licence to delete somebody else's data"
+    );
+}
+
+#[test]
+fn a_refusal_between_taking_a_window_and_recording_it_leaves_it_on_disk_and_unrecorded() {
+    let root = tempfile::tempdir().expect("a temporary directory");
+    let ledger_path = root.path().join("ledger.jsonl");
+    let spool_dir = root.path().join("spool");
+    let mut spool = Spool::open(&spool_dir, 1 << 20).expect("a spool");
+    let mut ledger = Ledger::open(&ledger_path).expect("a ledger");
+    let mut sink = FakeSink::new(&ledger_path);
+    sink.refuse = true;
+
+    spool
+        .store(10 * SECOND, batch("window-a", 3), trailer(0))
+        .expect("the window reaches the disk");
+
+    // The three calls, spelled out: this is the shape the pipeline runs, with
+    // the insert in the middle and no lock held across it.
+    let taken = spool
+        .take_oldest()
+        .expect("a window is due")
+        .expect("it loads");
+    assert_eq!(taken.id().key, "window-a");
+    assert!(
+        spool.take_oldest().is_none(),
+        "a window in flight is not offered twice, so two posting passes cannot send it twice"
+    );
+
+    sink.write_batch(taken.into_rows(), 11 * SECOND)
+        .expect_err("the destination is down");
+    spool.release();
+
+    assert_eq!(
+        ledger.entries(),
+        0,
+        "nothing landed, so nothing is recorded"
+    );
+    assert_eq!(ledger_entries(&ledger_path), 0);
+    assert_eq!(spool.windows(), 1);
+    assert_eq!(window_dirs(&spool_dir).len(), 1);
+
+    // Released, so it is due again — and the second attempt is the ordinary
+    // path and not a recovery one.
+    sink.refuse = false;
+    let drained =
+        drain(&mut spool, &mut sink, &mut ledger, 12 * SECOND).expect("the destination is back");
+    assert_eq!(drained.recorded, 1);
+    assert_eq!(spool.windows(), 0);
+    assert!(window_dirs(&spool_dir).is_empty());
+}
+
+#[test]
+fn ids_landed_from_earlier_windows_are_recorded_when_a_later_insert_flushes_them() {
+    let root = tempfile::tempdir().expect("a temporary directory");
+    let ledger_path = root.path().join("ledger.jsonl");
+    let spool_dir = root.path().join("spool");
+    let mut spool = Spool::open(&spool_dir, 1 << 20).expect("a spool");
+    let mut ledger = Ledger::open(&ledger_path).expect("a ledger");
+    let mut sink = FakeSink::new(&ledger_path);
+    // The first two inserts hold; the third is the one that makes the buffer
+    // due, and it lands all three. This is what the column store's sink does,
+    // and it is why `record_landed` takes a list.
+    sink.hold_writes = 2;
+
+    for (n, key) in ["window-a", "window-b", "window-c"].iter().enumerate() {
+        spool
+            .store(
+                (n as u64 + 1) * 10 * SECOND,
+                batch(key, 2),
+                trailer(n as u64),
+            )
+            .expect("the window reaches the disk");
+    }
+
+    let drained =
+        drain(&mut spool, &mut sink, &mut ledger, 40 * SECOND).expect("the insert goes out");
+
+    assert_eq!(
+        drained.recorded, 3,
+        "the earlier windows are recorded by the insert that carried them"
+    );
+    assert!(drained.failures.is_empty(), "{:?}", drained.failures);
+    assert_eq!(
+        sink.seen,
+        vec![
+            Seen::Rows {
+                key: "window-a".to_owned(),
+                ledger_entries: 0
+            },
+            Seen::Rows {
+                key: "window-b".to_owned(),
+                ledger_entries: 0
+            },
+            Seen::Rows {
+                key: "window-c".to_owned(),
+                ledger_entries: 0
+            },
+        ],
+        "no entry was written while the rows were still only accepted"
+    );
+    assert_eq!(ledger_entries(&ledger_path), 3);
+    assert_eq!(spool.windows(), 0);
+    assert!(
+        window_dirs(&spool_dir).is_empty(),
+        "every window's directory went with its entry, not only the last one's"
+    );
+    assert_eq!(
+        ledger.trailer().map(|t| t.segment_seq),
+        Some(2),
+        "each window was recorded with its own trailer"
+    );
+}
+
+#[test]
+fn a_window_the_ledger_already_records_is_dropped_rather_than_posted_again() {
+    let root = tempfile::tempdir().expect("a temporary directory");
+    let ledger_path = root.path().join("ledger.jsonl");
+    let spool_dir = root.path().join("spool");
+
+    // A run that wrote the entry and died before deleting the directory.
+    {
+        let mut spool = Spool::open(&spool_dir, 1 << 20).expect("a spool");
+        let mut ledger = Ledger::open(&ledger_path).expect("a ledger");
+        let mut sink = FakeSink::new(&ledger_path);
+        spool
+            .store(10 * SECOND, batch("window-a", 2), trailer(0))
+            .expect("the window reaches the disk");
+        let taken = spool
+            .take_oldest()
+            .expect("a window is due")
+            .expect("it loads");
+        let accepted = sink
+            .write_batch(taken.into_rows(), 11 * SECOND)
+            .expect("the rows land");
+        let recorded = spool.record_landed(&accepted.landed, &mut ledger);
+        assert_eq!(recorded.recorded, 1);
+        // The entry is durable and the directory is gone. A crash between the
+        // two leaves the directory behind, which is what this puts back.
+        spool
+            .store(10 * SECOND, batch("window-a", 2), trailer(0))
+            .expect("the directory is on disk again");
+    }
+    assert_eq!(ledger_entries(&ledger_path), 1);
+    assert_eq!(window_dirs(&spool_dir).len(), 1);
+
+    let mut spool = Spool::open(&spool_dir, 1 << 20).expect("a spool");
+    let ledger = Ledger::open(&ledger_path).expect("a ledger");
+    assert_eq!(spool.windows(), 1, "the directory was adopted");
+
+    assert_eq!(spool.forget_loaded(&ledger), 1);
+    assert_eq!(spool.windows(), 0);
+    assert!(
+        window_dirs(&spool_dir).is_empty(),
+        "the directory goes without a second insert"
+    );
+    assert!(spool.take_oldest().is_none());
+}
+
+#[test]
+fn a_window_whose_ledger_entry_will_not_write_owes_an_entry_and_not_a_second_insert() {
+    let root = tempfile::tempdir().expect("a temporary directory");
+    let ledger_path = root.path().join("ledger.jsonl");
+    let spool_dir = root.path().join("spool");
+    let mut spool = Spool::open(&spool_dir, 1 << 20).expect("a spool");
+    let mut ledger = Ledger::open(&ledger_path).expect("a ledger");
+    let mut sink = FakeSink::new(&ledger_path);
+
+    spool
+        .store(10 * SECOND, batch("window-a", 2), trailer(0))
+        .expect("the window reaches the disk");
+    // Something else is at the ledger's path, so the append cannot be made. A
+    // full disk and a permission changed under a running recorder look the same
+    // to this code.
+    std::fs::create_dir(&ledger_path).expect("the ledger's path is taken");
+
+    let drained = drain(&mut spool, &mut sink, &mut ledger, 11 * SECOND)
+        .expect("the rows landed; only the recording did not");
+
+    assert_eq!(drained.recorded, 0);
+    assert!(
+        !drained.failures.is_empty() && drained.failures.iter().all(|f| f.contains("ledger")),
+        "the failures name the ledger: {:?}",
+        drained.failures
+    );
+    assert_eq!(
+        spool.windows(),
+        1,
+        "the rows are in the store and nothing records it, so the window stays"
+    );
+    assert_eq!(
+        window_dirs(&spool_dir).len(),
+        1,
+        "the directory holds the trailer the next era anchor needs"
+    );
+
+    // The next pass writes the entry it owed. It does **not** insert again: the
+    // rows are already in the store, and a spool that re-sent them would pay for
+    // a replace every pass until the ledger came back — and a caller looping on
+    // `take_oldest` would never leave the loop.
+    std::fs::remove_dir(&ledger_path).expect("the ledger's path is free again");
+    let drained =
+        drain(&mut spool, &mut sink, &mut ledger, 12 * SECOND).expect("the destination is up");
+
+    assert_eq!(drained.recorded, 1);
+    assert!(drained.failures.is_empty(), "{:?}", drained.failures);
+    assert_eq!(ledger_entries(&ledger_path), 1);
+    assert_eq!(spool.windows(), 0);
+    assert!(window_dirs(&spool_dir).is_empty());
+    assert_eq!(
+        sink.rows_written(),
+        vec!["window-a"],
+        "what was owed was the entry, not the insert"
+    );
+    assert_eq!(
+        ledger.trailer().map(|t| t.segment_seq),
+        Some(0),
+        "the trailer survived the ledger being unavailable"
     );
 }

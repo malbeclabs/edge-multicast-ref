@@ -55,7 +55,10 @@ enum Failure {
     #[error("{0}")]
     Startup(#[from] StartupError),
     #[error("{0}")]
-    Inline(#[from] inline_config::InlineConfigError),
+    /// Boxed: this is the widest variant by a long way — its refusals carry
+    /// paths and a parser's own error — and an unboxed one makes every `run`
+    /// result that size, including the overwhelmingly common `Ok`.
+    Inline(#[from] Box<inline_config::InlineConfigError>),
     #[error("{0}")]
     Run(#[from] runner::RunError),
 }
@@ -118,7 +121,7 @@ fn run(args: &Args) -> Result<(), Failure> {
     // plan requires. A build without the feature refuses here rather than
     // falling back to the arrangement nobody chose.
     if let Some(path) = &args.inline_config {
-        return Ok(inline_config::run(&config, path, args.check)?);
+        return Ok(inline_config::run(&config, path, args.check).map_err(Box::new)?);
     }
 
     let plan = Plan::from_config(&config)?;

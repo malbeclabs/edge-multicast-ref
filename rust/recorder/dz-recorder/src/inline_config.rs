@@ -35,9 +35,6 @@ use dz_recorder_clickhouse::{ClickHouseConfig, ClickHouseSink};
 #[cfg(feature = "inline")]
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "inline")]
-use crate::identity::identity_of;
-
 /// What inline mode refuses to start on.
 ///
 /// Each variant names the key an operator has to edit, because a refusal that
@@ -54,6 +51,14 @@ pub enum InlineConfigError {
          host in the arrangement nobody chose, keeping bytes where rows were asked for."
     )]
     NotCompiledIn,
+
+    /// A feed the plan refused. Inline mode joins what archive mode joins, so
+    /// every feed refusal is made here too — and it is carried through rather
+    /// than restated, so an operator reads one wording whichever arrangement
+    /// they are running.
+    #[cfg(feature = "inline")]
+    #[error("{0}")]
+    Startup(#[from] crate::startup::StartupError),
 
     #[cfg(feature = "inline")]
     #[error("reading {path}: {source}")]
@@ -79,14 +84,6 @@ pub enum InlineConfigError {
     ArchiveDirectoryConfigured { key: &'static str, path: String },
 
     #[cfg(feature = "inline")]
-    #[error(
-        "`{key}` is empty in the recorder's own configuration. Inline mode takes the identity \
-         every row and every series carries from that file and from nowhere else — which is what \
-         stops the live rows and the archived rows of one host naming two recorders — so it is \
-         the one thing this second file cannot supply."
-    )]
-    IdentityNotStated { key: &'static str },
-
     #[cfg(feature = "inline")]
     #[error(
         "`inline.{key}` is 0, and a bound of zero is not a bound: the window would close on the \
@@ -397,18 +394,29 @@ pub fn run(recorder: &RecorderConfig, path: &Path, check: bool) -> Result<(), In
     // has asked for two arrangements at once, and being told about the spool
     // before being told about that would answer the smaller question.
     check_archive_is_not_configured(recorder)?;
-    check_identity(recorder)?;
     config.check()?;
 
-    let identity = identity_of(recorder);
+    // **The feeds are planned here, not only the two files.** Inline mode joins
+    // exactly what archive mode joins, so every feed refusal archive mode makes
+    // has to be made here too — a group that is not multicast, a port role
+    // claimed twice, an interface that does not resolve. Letting one through
+    // would let it through on the arrangement that leaves an operator the least
+    // to diagnose it with: there is no archive to go back to.
+    //
+    // `for_inline` rather than `from_config`, because the archive directories
+    // this refuses a value for are the ones that one requires one of.
+    let plan = crate::startup::Plan::for_inline(recorder)?;
+    let identity = plan.identity.clone();
     // Where the recorder's own summary goes, and for the same reason: `--check`
     // is a result a pipeline reads on stdout, and a recording run's summary is
     // a log line beside the version it prints on startup.
     let summary = config.summary(&identity);
     if check {
+        print!("{}", plan.summary());
         print!("{summary}");
     } else {
         eprintln!("dz-recorder: {}", crate::cli::version_line());
+        eprint!("{}", plan.summary());
         eprint!("{summary}");
     }
 
@@ -468,19 +476,6 @@ fn check_archive_is_not_configured(config: &RecorderConfig) -> Result<(), Inline
 /// The identity every row carries, checked here because inline mode reads it
 /// from the recorder's own file and builds no archive plan to check it for.
 #[cfg(feature = "inline")]
-fn check_identity(config: &RecorderConfig) -> Result<(), InlineConfigError> {
-    for (key, value) in [
-        ("site", &config.site),
-        ("recorder", &config.recorder),
-        ("env", &config.env),
-    ] {
-        if value.trim().is_empty() {
-            return Err(InlineConfigError::IdentityNotStated { key });
-        }
-    }
-    Ok(())
-}
-
 /// Sizes carry a unit — `"16MiB"` — because both plausible readings of a bare
 /// number are wrong, one of them by orders of magnitude.
 ///
@@ -837,7 +832,8 @@ listen_addr = "127.0.0.1:0"
     fn a_recorder_file_with_no_archive_section_is_what_inline_mode_takes() {
         let config = recorder_config(RECORDER);
         check_archive_is_not_configured(&config).expect("no directory is configured");
-        check_identity(&config).expect("the identity is stated");
+        crate::startup::Plan::for_inline(&config)
+            .expect("the identity is stated and the feed wires");
     }
 
     /// The other half of that: a configuration valid for archive mode is still
@@ -854,6 +850,13 @@ listen_addr = "127.0.0.1:0"
         assert!(message.contains("archive.staging_dir"), "{message}");
     }
 
+    /// The identity is refused by the plan, in the wording archive mode uses.
+    ///
+    /// One refusal rather than two: inline mode takes `site`, `recorder` and
+    /// `env` from the recorder's own file — which is what stops one host's live
+    /// rows and archived rows naming two recorders — so the check belongs where
+    /// that file is validated, and an operator reads the same sentence whichever
+    /// arrangement they are running.
     #[test]
     fn the_identity_the_rows_carry_is_required_by_key() {
         for (key, line, blanked) in [
@@ -862,7 +865,7 @@ listen_addr = "127.0.0.1:0"
             ("env", r#"env      = "test""#, r#"env      = """#),
         ] {
             let config = recorder_config(&RECORDER.replace(line, blanked));
-            let message = check_identity(&config)
+            let message = crate::startup::Plan::for_inline(&config)
                 .expect_err("the identity every row carries is required")
                 .to_string();
             assert!(message.contains(key), "{key}: {message}");
@@ -872,7 +875,7 @@ listen_addr = "127.0.0.1:0"
     #[test]
     fn the_summary_says_which_mode_is_running_and_that_no_datagram_is_kept() {
         let fixture = Fixture::new();
-        let identity = identity_of(&recorder_config(RECORDER));
+        let identity = crate::identity::identity_of(&recorder_config(RECORDER));
         let summary = fixture.config().summary(&identity);
         assert!(summary.contains("mode=inline"), "{summary}");
         assert!(summary.contains("NO DATAGRAM IS KEPT"), "{summary}");

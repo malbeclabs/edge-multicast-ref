@@ -326,11 +326,15 @@ struct FeedRecorder {
 impl FeedRecorder {
     fn open(plan: &Plan, feed: &FeedPlan, metrics: &Arc<HealthMetrics>) -> Result<Self, RunError> {
         let capture = open_capture(plan, feed)?;
-        let writer = ArchiveWriter::new(feed.archive.clone(), now_ns()).map_err(|source| {
-            RunError::Archive {
-                feed: feed.spec.clone(),
-                source,
-            }
+        // Archive mode only: `run` is not the inline path, and a plan for one
+        // carries no writer configuration for exactly that reason.
+        let archive = feed
+            .archive
+            .clone()
+            .expect("an archive-mode plan wires every feed with a writer configuration");
+        let writer = ArchiveWriter::new(archive, now_ns()).map_err(|source| RunError::Archive {
+            feed: feed.spec.clone(),
+            source,
         })?;
         let observer = HealthObserver::new(
             Arc::clone(metrics),
@@ -609,6 +613,16 @@ fn open_capture(plan: &Plan, feed: &FeedPlan) -> Result<Capture, RunError> {
 /// recording thread exists: a bind that fails has to fail the process rather
 /// than leave one feed silently unrecorded while the others look healthy.
 pub fn run(plan: &Plan, run_for: Option<Duration>) -> Result<(), RunError> {
+    // This is the archive path. An inline plan carries no writer configuration
+    // — deliberately, so that a mode which opens no writer cannot be handed a
+    // set of directories somebody would expect to find objects in — and the
+    // assertion is here rather than at the unwrap below so that a wiring
+    // mistake names itself instead of surfacing as a panic in a feed thread.
+    debug_assert_eq!(
+        plan.arrangement,
+        crate::startup::Arrangement::Archive,
+        "the archive runner was handed an inline plan"
+    );
     let series: Vec<FeedSeries<'_>> = plan
         .feeds
         .iter()
@@ -643,11 +657,13 @@ pub fn run(plan: &Plan, run_for: Option<Duration>) -> Result<(), RunError> {
     let mut recorders = Vec::with_capacity(plan.feeds.len());
     for feed in &plan.feeds {
         recorders.push(FeedRecorder::open(plan, feed, &metrics)?);
-        eprintln!(
-            "dz-recorder: feed {} recording to {}",
-            feed.spec,
-            feed.archive.staging_dir.display()
-        );
+        if let Some(archive) = &feed.archive {
+            eprintln!(
+                "dz-recorder: feed {} recording to {}",
+                feed.spec,
+                archive.staging_dir.display()
+            );
+        }
     }
 
     let shutdown = Arc::new(AtomicBool::new(false));
