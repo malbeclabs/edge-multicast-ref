@@ -530,3 +530,20 @@ The plan is done when:
 and when reverting any one of tasks 3, 4, 7 or 9's changes makes at least one
 named test fail — because a plan whose tests all pass against the tree it was
 written for has documented the tree rather than changed it.
+
+**Each of those four reverts was run, and this is what died.**
+
+| Reverted | What was put back | Tests that failed |
+|---|---|---|
+| Task 3 | `definition_tick` emits every slot it walks, not only its shard's | `each_reference_data_port_carries_its_own_shards_definitions_and_none_of_the_others` |
+| Task 3 | `published_on` answers the process's published count | `an_admitted_instrument_joins_one_published_set_and_no_other`, `a_re_offer_naming_another_shard_leaves_the_instrument_where_it_is` |
+| Task 4 | the era file is `<spec>.era` for every shard | seven in `era_persistence.rs`, including `a_newly_named_shard_does_not_inherit_another_shards_era` and `adding_or_removing_a_shard_does_not_change_the_era_the_others_see_next` |
+| Task 7 | the rotation divides the cycle by the process's published count | `a_shards_snapshot_rotation_serves_its_own_instruments_at_its_own_cycle` |
+| Task 9 | the duplicate gate is keyed on the specification alone | `two_blocks_of_one_specification_on_different_shards_resolve`, `thirty_one_shards_of_both_specifications_resolve_as_sixty_two_channel_instances` |
+
+Task 5 was reverted twice, in both directions, because its two halves fail
+differently: always appending the shard fails the default's five literal
+destinations, and never appending it fails the distinctness of the fifteen
+sockets three shards of both feeds open. A revert that fails nothing is the
+finding, and there was one — the reference-copy socket had never been keyed on
+the shard at all. See *It ran*.
