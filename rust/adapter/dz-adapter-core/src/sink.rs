@@ -200,9 +200,17 @@ pub trait ListingSink {
     /// universe to [`DEFAULT_SHARD`] — every shard collapsed onto one channel,
     /// with no error, no counter and no log. Requiring this one makes that
     /// omission a compile error, and the crate pays the version bump that
-    /// costs: a venue *calls* this trait rather than implementing it, so the
-    /// break falls on implementors, and every implementor of it is in this
-    /// workspace.
+    /// costs.
+    ///
+    /// **The bump is not free.** A venue *calls* this trait rather than
+    /// implementing it, so the break falls on implementors — and implementors
+    /// outside this workspace exist: a test double for a venue's own adapter
+    /// implements this sink even where the adapter under test only calls it.
+    /// What makes the break worth asking for is not that nobody pays it. It is
+    /// where it lands: a compile error in a test double is found by the next
+    /// `cargo test`, and a silently collapsed published set is found by a
+    /// subscriber holding definitions for instruments no message will ever
+    /// arrive for on the channel it is bound to.
     fn list_on(&mut self, shard: &str, spec: &InstrumentSpec<'_>) -> Option<InstrumentRef>;
 
     /// Offer one instrument on the default shard.
