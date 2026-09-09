@@ -1037,10 +1037,7 @@ impl Document {
         for section in enabled {
             let feed = section.resolve(definition_cycle, idle_guard)?;
             if seen
-                .insert(
-                    (feed.spec.as_str(), feed.shard.as_str().to_owned()),
-                    (),
-                )
+                .insert((feed.spec.as_str(), feed.shard.as_str().to_owned()), ())
                 .is_some()
             {
                 return Err(StartupError::DuplicateFeedShard {

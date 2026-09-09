@@ -11,17 +11,33 @@ use dz_adapter_core::{Aggressor, Event, InstrumentRef, Scalar, SideUpdate, Trade
 use dz_adapter_uds::RecordWriter;
 
 fn arg(name: &str) -> Option<String> {
+    args(name).into_iter().next()
+}
+
+/// Every value given for a flag, in the order they were written.
+///
+/// `--symbol` is repeatable because a publisher carrying several shards needs a
+/// recording that names more than one instrument, and one file per symbol would
+/// make the replay's name order — which is its receive order — depend on how a
+/// script happened to interleave two invocations.
+fn args(name: &str) -> Vec<String> {
+    let mut found = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         if a == name {
-            return args.next();
+            if let Some(value) = args.next() {
+                found.push(value);
+            }
         }
     }
-    None
+    found
 }
 
 fn main() -> std::io::Result<()> {
-    let symbol = arg("--symbol").unwrap_or_else(|| "REPLAY-1".to_string());
+    let mut symbols = args("--symbol");
+    if symbols.is_empty() {
+        symbols.push("REPLAY-1".to_string());
+    }
     let dir = PathBuf::from(arg("--dir").unwrap_or_else(|| ".".to_string()));
     std::fs::create_dir_all(&dir)?;
 
@@ -70,19 +86,27 @@ fn main() -> std::io::Result<()> {
         },
     ];
 
+    // Every symbol carries the same three events, so that what a subscriber
+    // reads on one channel instance can be read against what another read on
+    // its own: a difference between two outputs is then the publisher's
+    // partitioning and not the recording's.
     let mut writer = RecordWriter::new();
-    for (n, event) in events.iter().enumerate() {
-        let mut bytes = Vec::new();
-        // A refusal names the event and costs that record, not the stream:
-        // what a recorder does with one is count it and keep going.
-        if let Err(refused) = writer.write(&symbol, event, &mut bytes) {
-            eprintln!("dz-adapter-uds: {refused}");
+    let mut n = 0;
+    for symbol in &symbols {
+        for event in &events {
+            let mut bytes = Vec::new();
+            // A refusal names the event and costs that record, not the stream:
+            // what a recorder does with one is count it and keep going.
+            if let Err(refused) = writer.write(symbol, event, &mut bytes) {
+                eprintln!("dz-adapter-uds: {refused}");
+            }
+            // Zero-padded, because a replay reads its directory in name order
+            // and `10` sorts before `9`.
+            let path = dir.join(format!("{n:04}.record"));
+            std::fs::write(&path, &bytes)?;
+            println!("{} ({} bytes) {symbol}", path.display(), bytes.len());
+            n += 1;
         }
-        // Zero-padded, because a replay reads its directory in name order and
-        // `10` sorts before `9`.
-        let path = dir.join(format!("{n:04}.record"));
-        std::fs::write(&path, &bytes)?;
-        println!("{} ({} bytes)", path.display(), bytes.len());
     }
     Ok(())
 }

@@ -39,7 +39,8 @@ const SCHEMA: u8 = 3;
 
 /// The symbol a definition names, with the NUL padding of the fixed field cut.
 fn symbol_of(bytes: &[u8]) -> String {
-    let definition = InstrumentDefinition::decode(bytes, SCHEMA).expect("this publisher composed it");
+    let definition =
+        InstrumentDefinition::decode(bytes, SCHEMA).expect("this publisher composed it");
     String::from_utf8_lossy(&definition.symbol)
         .trim_end_matches('\0')
         .to_owned()
@@ -146,7 +147,10 @@ fn each_reference_data_port_carries_its_own_shards_definitions_and_none_of_the_o
     ];
     let mut ports = 0;
     for (index, shard) in h.shards.iter().enumerate() {
-        for recorders in [shard.tob.as_ref(), shard.mbp.as_ref()].into_iter().flatten() {
+        for recorders in [shard.tob.as_ref(), shard.mbp.as_ref()]
+            .into_iter()
+            .flatten()
+        {
             ports += 1;
             assert_eq!(
                 symbols_on(recorders),
@@ -181,8 +185,11 @@ fn a_quote_reaches_its_own_shards_channel_and_no_other() {
 
     let mut reached: Vec<usize> = Vec::new();
     for (index, shard) in h.shards.iter().enumerate() {
-        for recorders in [shard.tob.as_ref(), shard.mbp.as_ref()].into_iter().flatten() {
-            if recorders.mktdata.type_ids().iter().any(|id| *id == 0x03) {
+        for recorders in [shard.tob.as_ref(), shard.mbp.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            if recorders.mktdata.type_ids().contains(&0x03) {
                 reached.push(index);
             }
         }
@@ -211,4 +218,3 @@ fn a_manifest_states_its_own_shards_instrument_count() {
         "the process-wide count is still the cap's number, and still three"
     );
 }
-

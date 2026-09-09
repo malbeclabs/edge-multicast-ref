@@ -45,8 +45,7 @@ struct Heard {
 
 impl ListingSink for Heard {
     fn list_on(&mut self, shard: &str, spec: &InstrumentSpec<'_>) -> Option<InstrumentRef> {
-        self.offers
-            .push((shard.to_owned(), spec.symbol.to_owned()));
+        self.offers.push((shard.to_owned(), spec.symbol.to_owned()));
         Some(InstrumentRef::from_admission(self.offers.len() as u32 - 1))
     }
     fn delist(&mut self, _instrument: InstrumentRef) {}

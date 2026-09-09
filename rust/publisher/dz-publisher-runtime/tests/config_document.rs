@@ -1184,7 +1184,10 @@ fn a_tee_socket_is_named_by_the_shard_as_well_as_the_feed_and_the_role() {
         })
         .collect();
     let opened = sockets.len();
-    assert_eq!(opened, 15, "three shards of both feeds open five sockets each");
+    assert_eq!(
+        opened, 15,
+        "three shards of both feeds open five sockets each"
+    );
     sockets.sort();
     sockets.dedup();
     assert_eq!(
