@@ -1086,11 +1086,16 @@ where
 ///
 /// # Errors
 ///
-/// [`StartupError::VenueMetric`], and in practice one thing: a name beginning
-/// `dz_publisher_`. That prefix is reserved so a venue cannot shadow a series
-/// somebody else's alert is written against, and the refusal is a startup
-/// failure rather than a dropped collector — a publisher that ran anyway would
-/// report one thing under the name of another for as long as nobody looked.
+/// [`StartupError::VenueMetric`], for any of the three things that registry
+/// refuses: a series name under the reserved `dz_publisher_` prefix, a label
+/// named `venue` or `source_id` — which it applies as constant labels, so a
+/// collector carrying either fails the whole scrape rather than one series —
+/// and whatever the underlying registration rejects, a duplicate descriptor
+/// being the one to expect.
+///
+/// Every one is a startup failure rather than a dropped collector. A publisher
+/// that ran anyway would report one thing under the name of another, or serve
+/// a scrape that fails whole, for as long as nobody looked.
 fn register_venue_collectors(
     metrics: &PublisherMetrics,
     collectors: Vec<Box<dyn dz_publisher_metrics::prometheus::core::Collector>>,
@@ -1192,6 +1197,35 @@ mod tests {
             !rendered.contains("venue_third_total"),
             "registration continued past the refusal: {rendered}"
         );
+    }
+
+    /// A reserved *label* is refused too, and the failure it prevents is worse.
+    ///
+    /// The registry applies `venue` and `source_id` as constant labels, so a
+    /// collector carrying either renders a sample with a repeated label name —
+    /// and the text parser rejects **the whole scrape**, not that one series. A
+    /// venue's own counter would take the normative set down with it.
+    #[test]
+    fn a_reserved_label_is_refused_and_named() {
+        use dz_publisher_metrics::prometheus::IntCounterVec;
+
+        let metrics = metrics();
+        let collector = IntCounterVec::new(
+            dz_publisher_metrics::prometheus::Opts::new("venue_books_crossed_total", "a count"),
+            &["venue"],
+        )
+        .expect("the metric is well formed");
+
+        let message = register_venue_collectors(&metrics, vec![Box::new(collector)])
+            .expect_err("a label the registry applies is not a venue's to apply")
+            .to_string();
+        assert!(
+            message.contains("venue"),
+            "the refusal has to name the label an operator must rename: {message}"
+        );
+        // And the exposition still renders, which is the thing the refusal
+        // protected.
+        assert!(metrics.render().contains("dz_publisher_"));
     }
 
     /// A venue with nothing to add is not a venue that failed to add it.

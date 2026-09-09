@@ -34,11 +34,20 @@ pub type AdapterInitError = Box<dyn std::error::Error + Send + Sync + 'static>;
 pub enum StartupError {
     /// A venue handed up a collector the second registry refused.
     ///
-    /// In practice one thing: a name beginning `dz_publisher_`, which is
-    /// reserved so that a venue cannot shadow a series a subscriber's alert is
-    /// written against. Refused at startup rather than dropped, because a
-    /// publisher reporting one thing under the name of another is wrong in a
-    /// way nobody reading the dashboard can see.
+    /// Three things, and an operator diagnosing this needs to know which:
+    ///
+    /// - a series name beginning `dz_publisher_`, reserved so a venue cannot
+    ///   shadow a series a subscriber's alert is written against;
+    /// - a label named `venue` or `source_id`, which that registry applies as
+    ///   constant labels — a collector carrying either renders a sample with a
+    ///   repeated label name, and the text parser rejects the whole scrape
+    ///   rather than that one series;
+    /// - anything the underlying registration refuses, a duplicate descriptor
+    ///   being the one to expect.
+    ///
+    /// Refused at startup rather than dropped, because a publisher reporting
+    /// one thing under the name of another — or one whose scrape fails whole —
+    /// is wrong in a way nobody reading the dashboard can see.
     #[error("a venue metric was refused: {source}")]
     VenueMetric {
         #[source]
