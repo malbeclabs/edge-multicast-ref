@@ -759,13 +759,51 @@ fn open_ports(
     })
 }
 
+/// The line an offer on an unknown shard name earns.
+///
+/// **Both halves, because either alone is unactionable.** The name the venue
+/// asked for says what its adapter believes; the names this document configures
+/// say what the process has. A misspelling is only visible as the pair, and an
+/// operator handed one of them has to go and find the other before the line
+/// means anything.
+///
+/// Separate from its call site so it can be asserted directly, which is the
+/// only part of this path a test can reach: the call site is inside the tick
+/// loop, and nothing in the suite runs that.
+fn unknown_shard_line(offered: &str, configured: &[String]) -> String {
+    let names = if configured.is_empty() {
+        "none".to_owned()
+    } else {
+        configured
+            .iter()
+            .map(|name| format!("`{name}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "dz-publisher-runtime: the venue offered instruments on `{offered}`, which is not a shard \
+         this publisher is configured with. They are declined and reach no channel. Configured: \
+         {names}. Said once for this name however many instruments were offered under it."
+    )
+}
+
 /// The numbers no series carries, on the way out.
 ///
-/// Five of them, each named where it is documented: lowering refusals by
+/// Seven of them, each named where it is documented: lowering refusals by
 /// reason, snapshots asked for and not sent, events this build had no feed to
-/// carry, adapter failures the closed family set has nowhere for, and fan-out
-/// members that are no longer being fed. A log line is not a substitute for a
-/// series and is not offered as one; it is what a closed metric set leaves.
+/// carry, adapter failures the closed family set has nowhere for, fan-out
+/// members that are no longer being fed, and the two shard refusals. A log line
+/// is not a substitute for a series and is not offered as one; it is what a
+/// closed metric set leaves.
+///
+/// The two shard refusals are the newest and the reason they are here is worth
+/// stating. `Counts` maps them to no family deliberately — the normative set is
+/// closed — and the gauge it points at instead,
+/// `refdata_instruments_current{channel_id}` at 0, only shows a venue that
+/// misnames *every* offer for a shard. One that misnames some of them leaves
+/// the gauge non-zero and those instruments unpublished. So these two numbers
+/// and the tick loop's own lines are the whole of the signal, and a number that
+/// only exists in a log has to actually be printed.
 fn report<S: StateStore, K: Clock + Clone>(
     publisher: &Publisher<S, K>,
     observer: &MetricsObserver,
@@ -812,6 +850,21 @@ fn report<S: StateStore, K: Clock + Clone>(
         eprintln!(
             "dz-publisher-runtime: {} adapter failures",
             observer.adapter_errors()
+        );
+    }
+    let counts = publisher.refdata().counts();
+    if counts.declined_unknown_shard > 0 {
+        eprintln!(
+            "dz-publisher-runtime: {} listings were declined naming a shard this publisher has \
+             no channel for; the names are in the lines written when they were first offered",
+            counts.declined_unknown_shard
+        );
+    }
+    if counts.declined_shard_restated > 0 {
+        eprintln!(
+            "dz-publisher-runtime: {} re-offers named a different shard for an instrument \
+             already published, which stayed on the shard it was admitted to",
+            counts.declined_shard_restated
         );
     }
 }
@@ -865,6 +918,25 @@ async fn tick_loop<S: StateStore, K: Clock + Clone>(
             {
                 let mut held = adapter.lock().unwrap_or_else(|held| held.into_inner());
                 publisher.poll_listings(&mut **held);
+                // A shard name the venue offered that this document has no
+                // channel for. Named here rather than left to the exit report,
+                // because the instruments under it are being declined *now* and
+                // the only series that could show it is a gauge at 0 — which
+                // says a channel is empty and cannot say what was asked for.
+                // The registry hands each distinct name back once and never
+                // again, so this is a line per name and not a line per poll,
+                // which matters because an adapter may re-offer its whole set
+                // every second.
+                let offered = publisher.take_unknown_shards();
+                if !offered.is_empty() {
+                    let configured: Vec<String> = (0..publisher.feeds().shard_count())
+                        .filter_map(|index| publisher.feeds().shard_name(index))
+                        .map(str::to_owned)
+                        .collect();
+                    for name in offered {
+                        eprintln!("{}", unknown_shard_line(&name, &configured));
+                    }
+                }
                 // The recovery snapshots an `InstrumentReset` obliged. Drained
                 // here rather than inside the adapter's own callback because
                 // capturing a book is a walk of it, and because a snapshot has
@@ -1211,6 +1283,40 @@ mod tests {
         // about the wrong bucket - and a line about a failure that did not
         // happen is worse than no line.
         assert!(!worth_a_line(0));
+    }
+
+    // -----------------------------------------------------------------------
+    // The unknown shard name, and the line an operator gets
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn the_unknown_shard_line_names_the_offer_and_the_configured_shards() {
+        // Both halves or the line is unactionable. `pepr` against `perp` is
+        // only a misspelling once the reader can see `perp`, and a line
+        // carrying either name alone sends an operator to open the document
+        // and work out the other half themselves.
+        let line = unknown_shard_line("pepr", &["perp".to_owned(), "spot".to_owned()]);
+        assert!(
+            line.contains("`pepr`"),
+            "the offered name is missing: {line}"
+        );
+        assert!(
+            line.contains("`perp`") && line.contains("`spot`"),
+            "the configured names are missing: {line}"
+        );
+        // And it says what happened to the instruments, because "not
+        // configured" on its own does not say whether they were published.
+        assert!(line.contains("declined"), "{line}");
+    }
+
+    #[test]
+    fn a_publisher_with_no_named_shard_still_names_what_it_has() {
+        // Every block defaulting to the default shard is the ordinary
+        // single-channel document, and it is the one most likely to meet an
+        // adapter that names shards. An empty list rendered as nothing at all
+        // would read as a truncated line rather than as an answer.
+        let line = unknown_shard_line("perp", &[]);
+        assert!(line.contains("none"), "{line}");
     }
 
     // -----------------------------------------------------------------------

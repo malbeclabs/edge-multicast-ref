@@ -1333,6 +1333,31 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
         &self.refdata
     }
 
+    /// Shard names the venue offered that this publisher has no channel for,
+    /// each distinct name once, drained.
+    ///
+    /// **The reference-data owner remembers them and writes nothing.** It
+    /// constructs no metric and it logs nothing, so the names it collects are
+    /// only a signal once something drains them; until this existed the
+    /// instruments were declined and no operator could see it, which is what a
+    /// review found. The caller is [`run`](crate::run), on the tick that
+    /// polled, beside the lines it already writes for a dropped fan-out member
+    /// and a refused snapshot.
+    ///
+    /// Once per **distinct value**, not once per offer: the boundary promises
+    /// an adapter may re-offer its whole set on every poll, so a venue
+    /// misnaming a shard for a thousand instruments must produce one line and
+    /// not a thousand. That property is the registry's and is asserted there;
+    /// what is asserted here is that this publisher drains it at all.
+    ///
+    /// This is on the publisher rather than reached through
+    /// [`refdata`](Self::refdata) because that accessor hands out a shared
+    /// reference and the drain needs a unique one — and because a test can
+    /// reach this, which is the only part of the path a test can reach.
+    pub fn take_unknown_shards(&mut self) -> Vec<String> {
+        self.refdata.take_unknown_shards()
+    }
+
     /// The send paths, for a diagnostic and for a test.
     #[must_use]
     pub const fn feeds(&self) -> &Feeds {

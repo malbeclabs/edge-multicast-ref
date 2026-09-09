@@ -143,10 +143,27 @@ struct PublishedSet {
 /// [`declined_at_cap`](Self::declined_at_cap) maps to nothing, deliberately: it
 /// is the selection policy working, and a series that climbs whenever a venue
 /// lists more instruments than a feed publishes would be alerting on the normal
-/// case. The two shard counts map to nothing for a different reason: the signal
-/// for a shard the venue cannot reach is `refdata_instruments_current` sitting
-/// at 0 for that shard's `Channel ID`, which is true from startup and needs no
-/// datagram — and a shard the venue misnames is already visible there.
+/// case.
+///
+/// # The two shard counts map to nothing, and what carries them instead
+///
+/// Also deliberate, and for the same reason the rest of this crate constructs
+/// no metric: the normative set is closed and this crate does not own it.
+///
+/// The signal for a shard the venue can never reach is
+/// `refdata_instruments_current` sitting at 0 for that shard's `Channel ID`,
+/// which is true from startup and needs no datagram. **That covers the total
+/// case only.** A gauge at 0 says a channel is empty; it cannot say a venue
+/// asked for a name this publisher has no channel for. And a venue that
+/// misnames only *some* of its offers leaves the gauge non-zero with those
+/// instruments unpublished, which no series in the closed set separates from a
+/// channel that holds fewer instruments.
+///
+/// So for the partial case the only signal is the name, and
+/// [`Registry::take_unknown_shards`] is where the runtime gets it. These two
+/// numbers are what the exit report prints beside it; between them a log line
+/// says which name was offered and a number says how much was declined under
+/// it. Neither is a substitute for a series and neither is offered as one.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Counts {
     pub admitted: u64,

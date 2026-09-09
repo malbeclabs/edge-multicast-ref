@@ -218,3 +218,54 @@ fn a_manifest_states_its_own_shards_instrument_count() {
         "the process-wide count is still the cap's number, and still three"
     );
 }
+
+/// A shard name this document has no channel for reaches the runtime, once.
+///
+/// The refusal itself was already right: the instrument is declined, the count
+/// climbs, and nothing is published on a channel nobody chose. What was missing
+/// was anybody seeing it. `dz-publisher-refdata` collects the distinct names and
+/// writes no line — it constructs no metric and it logs nothing — so those names
+/// are a signal only if the runtime drains them, and until this test nothing
+/// did.
+///
+/// **What this asserts, and what it does not.** It asserts the drain: the
+/// publisher hands the name up, once, and never again for the same name. It does
+/// **not** assert the `eprintln!` in `tick_loop` that writes it, because no test
+/// in this workspace runs that function and none captures stderr. That gap is
+/// named here rather than papered over with an assertion that would pass either
+/// way; the line's own composition is asserted in `run.rs`'s unit tests.
+#[test]
+fn a_shard_the_document_has_no_channel_for_is_named_once_however_often_it_is_offered() {
+    let mut h = harness_two_shards();
+    // Two instruments under one misspelling, so a drain reporting per offer
+    // rather than per distinct name would hand back two.
+    let mut adapter = FakeAdapter::on_shards(&[("A-B", "gamma"), ("C-D", "gamma")]);
+    assert!(h.publisher.poll_listings(&mut adapter));
+
+    assert_eq!(
+        h.publisher.take_unknown_shards(),
+        vec!["gamma".to_owned()],
+        "the runtime did not drain the name the venue offered"
+    );
+    assert_eq!(
+        h.publisher.refdata().published(),
+        0,
+        "an instrument on a shard this publisher has no channel for was published anyway"
+    );
+    assert_eq!(
+        h.publisher.refdata().counts().declined_unknown_shard,
+        2,
+        "both offers are counted even though one name is reported"
+    );
+
+    // The whole set again, which is what the boundary promises an adapter may
+    // do. A name already reported must not be reported twice: a venue
+    // re-offering every second would otherwise be a line a second.
+    h.clock.advance(dz_publisher_runtime::LISTING_POLL);
+    let mut again = FakeAdapter::on_shards(&[("A-B", "gamma"), ("C-D", "gamma")]);
+    assert!(h.publisher.poll_listings(&mut again));
+    assert!(
+        h.publisher.take_unknown_shards().is_empty(),
+        "a name already reported was reported again"
+    );
+}
