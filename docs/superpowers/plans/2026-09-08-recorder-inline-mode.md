@@ -1099,13 +1099,15 @@ from.
 
 | Revert | Test that died |
 |---|---|
-| `preceding: ledger.trailer().cloned()` — the fix the threads name | **nothing died.** 1456 passing before it, 1456 after. That is the finding rather than a gap in the tests |
-| the same, plus `window_seq` seeded from the trailer — the version that is not inert | `a_restart_does_not_anchor_its_first_window_on_the_ledgers_trailer`, on both of its assertions |
+| `preceding: ledger.trailer().cloned()` — the fix the threads name | **nothing died.** 1456 passing before it and 1456 after, on the head the threads were written against; 1457 with this task's own test present, which passes under the mutation as well |
+| the same, plus `window_seq: ledger.trailer().map_or(0, \|t\| t.segment_seq + 1)` — the version that is not inert | `a_restart_does_not_anchor_its_first_window_on_the_ledgers_trailer`, on both assertions: the window numbers itself 1, and the era row comes back `anchor_certain: 1, continuation: 1` over a boundary the capture stopped at |
 | `NoLedger`'s old wording restored | `a_ledger_is_required` |
 
 The first row is the reason this task exists at all. A mutation that kills no
 test is usually a missing test; here it is the answer, and the test written
 beside it is the one that dies under the mutation that *does* change an answer.
+The second row is what that mutation writes: not a missing verdict but a wrong
+one, `continuation: 1` across an interval in which nothing was captured.
 
 **Found while deciding this, and the loader's rather than this task's.**
 `Ledger::remember` keeps the trailer of the highest `segment_seq` it has seen,
