@@ -159,6 +159,23 @@ pub fn start<S: RowSink + Send + 'static>(
             receiver,
             config,
             spool: Arc::clone(&spool),
+            // **A run starts at zero and anchors on nothing, and the ledger's
+            // trailer changes neither.** These two lines are a decision rather
+            // than a gap: a restart is a run boundary, the capture stopped over
+            // it, and a `segment_seq` that begins again is how a reader is told
+            // so. The predecessor test is `segment_seq + 1`, so a trailer left
+            // by the previous run precedes nothing here and `derive` filters it
+            // out — reading it back on its own changes no answer anywhere.
+            //
+            // Continuing the number so that it *would* is the version to
+            // refuse. `007_recorder_cross_site.sql`'s `segment_overflow` takes
+            // the nearest earlier segment, checks `p.segment_seq + 1 =
+            // c.segment_seq`, and clamps a counter that went backwards to zero
+            // — and the capture-drop counter belongs to the capture handle, so
+            // the first window of the new run would report a delta of zero over
+            // a handle opened seconds earlier. That reads as this host having
+            // admitted nothing, which is one of the two things that make an
+            // absence usable against a publisher.
             window_seq: 0,
             preceding: None,
             deriver: WindowDeriver::new(),
@@ -306,7 +323,13 @@ struct Deriving {
     /// window's first era: whether its anchor is certain. Windows here are
     /// strictly sequential and none is evicted before it is derived, so unlike
     /// an archive loader — whose predecessor is routinely gone — this is
-    /// available for every window after the first.
+    /// available for every window after the first **of a run**.
+    ///
+    /// Not for the first window of one, and not from the ledger either: the
+    /// ledger's trailer describes a window of the run before, the predecessor
+    /// test is `segment_seq + 1`, and a run begins at zero. See the comment at
+    /// the two lines in [`start`] that hold this value and the sequence it is
+    /// checked against.
     ///
     /// `None` is *unknown*, never *there was none*, which is why a window the
     /// spool refused clears it rather than handing its trailer on: the rows that

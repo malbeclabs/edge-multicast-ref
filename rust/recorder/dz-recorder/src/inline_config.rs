@@ -167,7 +167,10 @@ pub enum InlineConfigError {
     #[cfg(feature = "inline")]
     #[error(
         "`inline.ledger` is required. Without it a restart re-posts every window the spool still \
-         holds, and loses the trailer that keeps the era anchor certain across the restart."
+         holds, and every one of those is a replace paid for rows already in the store. It is \
+         not what keeps the era anchor certain across a restart, and nothing is: a restart is a \
+         run boundary, the window sequence begins again at zero, and the first window of a run \
+         anchors on nothing."
     )]
     NoLedger,
 
@@ -965,6 +968,17 @@ listen_addr = "127.0.0.1:0"
         let message =
             fixture.refusal(|text| text.replace(&fixture.ledger.display().to_string(), ""));
         assert!(message.contains("inline.ledger"), "{message}");
+        // The reason that is true: a restart with no ledger re-posts what the
+        // spool still holds.
+        assert!(message.contains("re-posts every window"), "{message}");
+        // And the one that is not. A run begins at `window_seq` zero and the
+        // predecessor test is `segment_seq + 1`, so no ledger makes the first
+        // window of a run certain of its era boundary — a refusal promising it
+        // reads to an operator as a guarantee this arrangement keeps.
+        assert!(
+            !message.contains("keeps the era anchor certain across the restart"),
+            "the refusal promises a certainty a restart cannot give: {message}"
+        );
     }
 
     /// A file the budget cannot classify is a file eviction cannot reach.

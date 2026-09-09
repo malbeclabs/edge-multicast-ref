@@ -288,6 +288,113 @@ fn a_quiet_window_spends_no_window_sequence_number() {
     }
 }
 
+/// One run of the pipeline over `sent`, spooling and recording where the run
+/// after it will find them again.
+///
+/// The paths are the caller's, which is the whole difference from `run_over`: a
+/// restart is a second process over one spool directory and one ledger, and a
+/// test that gave each run its own would be testing two recorders.
+fn run_at(
+    spool_dir: &std::path::Path,
+    ledger_path: &std::path::Path,
+    sent: &[OwnedDatagram],
+) -> Vec<RowBatch> {
+    let store = Arc::new(Mutex::new(Store::default()));
+    let spool = Spool::open(spool_dir, 64 * 1024 * 1024).expect("the spool opens");
+    let ledger = Ledger::open(ledger_path).expect("the ledger opens");
+    let (mut tx, rx) = ring(256);
+    let mut cfg = config();
+    // Far longer than the run, so the only thing that closes the window is the
+    // capture ending: one window per run.
+    cfg.bound.interval = Duration::from_secs(3_600);
+    let pipeline = start(rx, spool, ledger, FakeSink(Arc::clone(&store)), cfg);
+    for dg in sent {
+        assert_eq!(tx.offer(&dg.as_recorded()), Offered::Accepted);
+    }
+    pipeline.stop(tx);
+    let posted = std::mem::take(&mut store.lock().expect("the store is not poisoned").batches);
+    posted
+}
+
+/// A restart does not anchor its first window on the ledger's trailer, and the
+/// trailer is there to be read.
+///
+/// **This is the decision, and not an omission.** The ledger holds the trailer
+/// of the last window whose rows landed, and reading it back at startup looks
+/// like the fix for the first window of every run writing an uncertain era
+/// anchor. It is not one. `window_seq` restarts at zero on every run and the
+/// predecessor test is `segment_seq + 1`, so a trailer left by the previous run
+/// precedes nothing in this one: handed to `derive` it is filtered out, and the
+/// anchor is uncertain exactly as it is without it.
+///
+/// The only wiring that would change the answer is one that also continues the
+/// window sequence across the restart, and that says *the derivation was not
+/// down* over the interval in which it was. `007_recorder_cross_site.sql`'s
+/// `segment_overflow` is what pays for it: nearest earlier segment,
+/// `p.segment_seq + 1 = c.segment_seq`, and a counter that went backwards
+/// clamped to zero — so the first window of the new run would report a
+/// capture-drop delta of zero over a capture handle opened seconds earlier, and
+/// a host that admitted nothing is a host whose absences may be used against a
+/// publisher.
+///
+/// So the assertions are two and they belong together: the ledger **does** hold
+/// a trailer, and the run beginning under it still numbers its first window
+/// zero and still writes an uncertain anchor. Without the first assertion this
+/// test would pass over an empty ledger and say nothing at all.
+#[test]
+fn a_restart_does_not_anchor_its_first_window_on_the_ledgers_trailer() {
+    // One instance, one era, contiguous sequence numbers split across the
+    // restart — the case where a continuation is at its most tempting, because
+    // it happens to be true and the recorder is in no position to know it.
+    let sent: Vec<OwnedDatagram> = SyntheticPublisher::clean(40).datagrams();
+    let dir = TempDir::new().expect("a temporary directory");
+    let spool_dir = dir.path().join("spool");
+    let ledger_path = dir.path().join("ledger.jsonl");
+
+    let first = run_at(&spool_dir, &ledger_path, &sent[..20]);
+    assert!(!first.is_empty(), "the first run posted no window");
+
+    // What the restart inherits, read the way a startup would read it.
+    let inherited = Ledger::open(&ledger_path).expect("the ledger opens");
+    let trailer = inherited
+        .trailer()
+        .expect("the first run landed a window, so its trailer is in the ledger");
+    assert_eq!(
+        trailer.segment_seq, 0,
+        "the fixture is meant to land exactly one window in the first run"
+    );
+
+    let second = run_at(&spool_dir, &ledger_path, &sent[20..]);
+    let batch = second.first().expect("the second run posted its window");
+
+    let seq = batch
+        .segment_coverage
+        .first()
+        .expect("a posted window describes what it covered")
+        .segment_seq;
+    assert_eq!(
+        seq, 0,
+        "the run after a restart continued the window sequence, so a reader is told the \
+         derivation was not down over the interval in which it was"
+    );
+
+    assert!(
+        !batch.era.is_empty(),
+        "the fixture is meant to write an era row for the instance it replayed"
+    );
+    for row in &batch.era {
+        assert_eq!(
+            row.anchor_certain, 0,
+            "the first window of a run declared a certain era anchor on a trailer from the \
+             run before it: {row:?}"
+        );
+        assert_eq!(
+            row.continuation, 0,
+            "and called itself a continuation of a window the capture stopped after: {row:?}"
+        );
+    }
+}
+
 /// A window the spool refused hands its trailer to nobody.
 ///
 /// The trailer is true — the derivation did read those datagrams — but the rows
