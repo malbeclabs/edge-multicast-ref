@@ -501,16 +501,17 @@ fn a_credential_that_is_not_a_path_is_refused_per_source_too() {
 /// document says.
 fn registry_building(builds: &'static [&'static str]) -> AdapterRegistry {
     AdapterRegistry::new().with("a-venue", move |_cx| {
-        Ok(Venue {
-            adapter: Box::new(harness::FakeAdapter::new(&["A-B"])),
-            sources: builds
-                .iter()
-                .map(|name| {
-                    Box::new(harness::refusing_input(ConnectionId::new(name)))
-                        as Box<dyn dz_ingress_core::Input>
-                })
-                .collect(),
-        })
+        let sources = builds
+            .iter()
+            .map(|name| {
+                Box::new(harness::refusing_input(ConnectionId::new(name)))
+                    as Box<dyn dz_ingress_core::Input>
+            })
+            .collect();
+        Ok(Venue::new(
+            Box::new(harness::FakeAdapter::new(&["A-B"])),
+            sources,
+        ))
     })
 }
 

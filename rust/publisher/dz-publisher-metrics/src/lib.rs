@@ -49,6 +49,12 @@
 //! does not cover. [`PublisherMetrics::venue_registry`] gives it a second,
 //! separate registry for exactly that, and refuses any name beginning
 //! `dz_publisher_` so a venue cannot shadow the normative contract.
+//!
+//! **A venue does not reach that registry directly, and cannot.** See
+//! `dz-publisher-runtime`'s `Venue::collectors` for why. The runtime registers
+//! its collectors here once the normative set exists, which is also where a
+//! reserved name becomes a startup failure rather than a collector quietly
+//! dropped.
 
 #![forbid(unsafe_code)]
 

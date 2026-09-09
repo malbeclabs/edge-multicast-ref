@@ -204,6 +204,9 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
         }
         _ => venue.sources,
     };
+    // Taken before the adapter is, because both are fields of the same value
+    // and the adapter is about to be moved out of it.
+    let venue_collectors = venue.collectors;
     let adapter = Arc::new(Mutex::new(venue.adapter));
     let message_types = {
         let held = adapter.lock().unwrap_or_else(|held| held.into_inner());
@@ -226,6 +229,17 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
         channel_ids: &config.channel_ids(),
         ingress_message_types: &message_types,
     }));
+
+    // **Here and not earlier, because earlier does not exist.** See
+    // `Venue::collectors` for why a venue's collectors travel up rather than
+    // registering themselves.
+    //
+    // A reserved name is a startup failure and not a warning. The whole point
+    // of the second registry is that a venue cannot shadow a series somebody
+    // else's alert is written against, and a publisher that ran anyway would be
+    // reporting one thing under the name of another for as long as nobody
+    // looked.
+    register_venue_collectors(&metrics, venue_collectors)?;
 
     let clock = SystemClock::new();
 
@@ -1058,9 +1072,352 @@ where
     std::task::Poll::Pending
 }
 
+/// Registers a venue's own collectors into the second registry.
+///
+/// **Called after the normative set exists, because it cannot be called
+/// before.** See [`Venue::collectors`](crate::Venue::collectors) for why its
+/// argument arrives here rather than at construction.
+///
+/// # Errors
+///
+/// [`StartupError::VenueMetric`], for any of the three things that registry
+/// refuses: a series name under the reserved `dz_publisher_` prefix, a label
+/// named `venue` or `source_id` — which it applies as constant labels, so a
+/// collector carrying either fails the whole scrape rather than one series —
+/// and whatever the underlying registration rejects, a duplicate descriptor
+/// being the one to expect.
+///
+/// Every one is a startup failure rather than a dropped collector. A publisher
+/// that ran anyway would report one thing under the name of another, or serve
+/// a scrape that fails whole, for as long as nobody looked.
+fn register_venue_collectors(
+    metrics: &PublisherMetrics,
+    collectors: Vec<Box<dyn dz_publisher_metrics::prometheus::core::Collector>>,
+) -> Result<(), StartupError> {
+    for collector in collectors {
+        metrics
+            .venue_registry()
+            .register(collector)
+            .map_err(|source| StartupError::VenueMetric { source })?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dz_publisher_metrics::prometheus::core::Collector;
+    use dz_publisher_metrics::prometheus::IntCounter;
+
+    /// A metrics set shaped like the smallest publisher there is.
+    fn metrics() -> PublisherMetrics {
+        PublisherMetrics::new(&PublisherMetricsConfig {
+            venue: "a-venue",
+            source_id: 1,
+            port_roles: &[dz_edge_core::PortRole::Mktdata],
+            connections: &["primary"],
+            channel_ids: &[0],
+            ingress_message_types: &["A-B"],
+        })
+    }
+
+    fn collector(name: &str) -> Box<dyn Collector> {
+        Box::new(IntCounter::new(name, "a venue's own count").expect("the metric is well formed"))
+    }
+
+    /// A venue's series reaches the exposition, under the venue registry.
+    ///
+    /// The whole ask: a venue counts something the normative set has no name
+    /// for, and an operator scraping one endpoint sees it beside the series
+    /// that set does describe.
+    #[test]
+    fn a_venue_collector_reaches_the_exposition() {
+        let metrics = metrics();
+        register_venue_collectors(&metrics, vec![collector("venue_books_crossed_total")])
+            .expect("a name outside the reserved prefix is taken");
+
+        let rendered = metrics.render();
+        assert!(
+            rendered.contains("venue_books_crossed_total"),
+            "the venue's own series is not in the exposition: {rendered}"
+        );
+        // And it did not displace the normative set, which is the other half of
+        // one endpoint carrying both.
+        assert!(rendered.contains("dz_publisher_"), "{rendered}");
+    }
+
+    /// A venue cannot shadow the normative contract, and finds out at startup.
+    ///
+    /// The reserved prefix exists so that a series a subscriber's alert is
+    /// written against means what that subscriber thinks it means. A collector
+    /// that was dropped with a warning would leave a publisher reporting one
+    /// thing under the name of another for as long as nobody read the log — so
+    /// this refuses, and the message names what was refused.
+    #[test]
+    fn a_reserved_name_is_refused_at_startup_and_named() {
+        let metrics = metrics();
+        let error = register_venue_collectors(
+            &metrics,
+            vec![collector("dz_publisher_egress_datagrams_total")],
+        )
+        .expect_err("the reserved prefix is not a venue's to use");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("dz_publisher_egress_datagrams_total"),
+            "the refusal has to name the series an operator must rename: {message}"
+        );
+    }
+
+    /// A refused collector stops registration at that point; it does not roll
+    /// back what registered before it.
+    ///
+    /// The collector ahead of the refusal is already registered when this
+    /// returns `Err`, and it stays registered. That is harmless only because
+    /// the caller treats the error as a startup failure and the process never
+    /// runs with the gap — a fact about the caller, not about this function.
+    /// This asserts what the function itself guarantees: the collector after
+    /// the refusal is never attempted, and the one before it is not undone.
+    #[test]
+    fn a_refused_collector_stops_registration_without_rolling_it_back() {
+        let metrics = metrics();
+        let error = register_venue_collectors(
+            &metrics,
+            vec![
+                collector("venue_first_total"),
+                collector("dz_publisher_not_yours_total"),
+                collector("venue_third_total"),
+            ],
+        );
+        assert!(error.is_err());
+        let rendered = metrics.render();
+        assert!(
+            rendered.contains("venue_first_total"),
+            "the collector registered before the refusal must still be there: {rendered}"
+        );
+        assert!(
+            !rendered.contains("venue_third_total"),
+            "registration continued past the refusal: {rendered}"
+        );
+    }
+
+    /// A reserved *label* is refused too, and the failure it prevents is worse.
+    ///
+    /// The registry applies `venue` and `source_id` as constant labels, so a
+    /// collector carrying either renders a sample with a repeated label name —
+    /// and the text parser rejects **the whole scrape**, not that one series. A
+    /// venue's own counter would take the normative set down with it.
+    #[test]
+    fn a_reserved_label_is_refused_and_named() {
+        use dz_publisher_metrics::prometheus::IntCounterVec;
+
+        let metrics = metrics();
+        let collector = IntCounterVec::new(
+            dz_publisher_metrics::prometheus::Opts::new("venue_books_crossed_total", "a count"),
+            &["venue"],
+        )
+        .expect("the metric is well formed");
+
+        let message = register_venue_collectors(&metrics, vec![Box::new(collector)])
+            .expect_err("a label the registry applies is not a venue's to apply")
+            .to_string();
+        // **The quoted tokens, not the bare words.** `MetricsError` renders as
+        // `venue metric "..." carries the reserved label name "..."`, so
+        // `contains("venue")` is satisfied by the boilerplate and by the metric
+        // name alike — it would pass against a message that named no label at
+        // all, or named `source_id`. What an operator needs from this refusal
+        // is which collector to change and which label to drop, so both are
+        // asserted as the formatter writes them.
+        assert!(
+            message.contains("\"venue\""),
+            "the refusal has to name the label an operator must drop: {message}"
+        );
+        assert!(
+            message.contains("\"venue_books_crossed_total\""),
+            "and the collector it has to be dropped from: {message}"
+        );
+        // And the exposition still renders, which is the thing the refusal
+        // protected.
+        assert!(metrics.render().contains("dz_publisher_"));
+    }
+
+    /// A venue with nothing to add is not a venue that failed to add it.
+    #[test]
+    fn a_venue_with_no_collectors_registers_nothing_and_succeeds() {
+        let metrics = metrics();
+        register_venue_collectors(&metrics, Vec::new()).expect("empty is the ordinary case");
+        assert!(metrics.render().contains("dz_publisher_"));
+    }
+
+    // -----------------------------------------------------------------------
+    // A venue's own collectors, travelling up through the composition
+    // -----------------------------------------------------------------------
+
+    /// A document every section of which is valid, naming the built-in record
+    /// adapter and whatever state directory the caller wants.
+    ///
+    /// Text rather than a `Config` assembled field by field, because what the
+    /// composition is handed is what an operator wrote: a typed value built
+    /// here would skip the resolution that decides which constructor runs at
+    /// all, and the constructor is the thing under test.
+    fn document(state_dir: &std::path::Path) -> String {
+        format!(
+            "venue = \"a-venue\"\n\
+             \n\
+             [egress]\n\
+             ttl = 1\n\
+             \n\
+             [[feed]]\n\
+             spec = \"top-of-book\"\n\
+             enabled = true\n\
+             channel_id = 3\n\
+             source_id = 41\n\
+             multicast_group = \"233.252.0.4\"\n\
+             mktdata_port = 30001\n\
+             refdata_port = 30002\n\
+             heartbeat_interval = \"1s\"\n\
+             definition_cycle = \"30s\"\n\
+             manifest_cadence = \"1s\"\n\
+             idle_guard = \"60s\"\n\
+             \n\
+             [refdata]\n\
+             state_dir = \"{}\"\n\
+             [refdata.selection]\n\
+             bootstrap_top_n = 8\n\
+             max_published = 16\n\
+             warn_published_above = 8\n\
+             \n\
+             [metrics]\n\
+             enabled = false\n\
+             listen_addr = \"127.0.0.1:9100\"\n\
+             \n\
+             [ingress]\n\
+             kind = \"uds\"\n\
+             connect_timeout = \"5s\"\n\
+             \n\
+             [adapter]\n\
+             kind = \"uds\"\n\
+             \n\
+             [adapter.upstream]\n\
+             [[adapter.upstream.listing]]\n\
+             symbol = \"A-B\"\n\
+             asset_class = \"crypto_spot\"\n\
+             price_exponent = -2\n\
+             qty_exponent = -3\n\
+             market_model = \"clob\"\n\
+             tick_size = \"0.01\"\n\
+             lot_size = \"0.001\"\n\
+             settle_type = \"cash\"\n\
+             price_bound = \"non_negative\"\n",
+            state_dir.display()
+        )
+    }
+
+    /// A `[refdata] state_dir` no directory can be created at: a path inside a
+    /// regular file.
+    ///
+    /// **The composition has to stop somewhere observable, and this is the
+    /// first such place.** [`EraStore::open`] is the step immediately after the
+    /// collectors are registered, and every step after *it* opens a socket — so
+    /// a state directory that cannot exist is what drives the whole of
+    /// `compose_and_run` up to and including the registration and no further,
+    /// with nothing bound and nothing to wait for.
+    fn state_dir_that_cannot_be_created(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "dz-venue-collectors-{label}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("a temporary directory");
+        let file = dir.join("regular-file");
+        std::fs::write(&file, b"not a directory").expect("the file is writable");
+        file.join("state")
+    }
+
+    /// A venue whose adapter is the built-in record adapter, and which counts
+    /// things of its own besides.
+    ///
+    /// Registered under `uds`, which the composition resolves to this entry
+    /// rather than to the built-in — a venue's own registration wins — so the
+    /// entry delegates for the adapter and the transport it has no reason to
+    /// invent, and adds what these tests are about through
+    /// [`Venue::with_collectors`]. That is the only way in a venue has: the
+    /// collectors leave the constructor inside a `Venue`, and the runtime is
+    /// what registers them.
+    fn a_venue_counting(series: &[&str]) -> AdapterRegistry {
+        let series: Vec<String> = series.iter().map(|name| (*name).to_owned()).collect();
+        AdapterRegistry::new().with("uds", move |cx| {
+            let built_in = crate::builtin::open(cx).expect("the built-in answers `uds`")?;
+            Ok(built_in.with_collectors(series.iter().map(|name| collector(name)).collect()))
+        })
+    }
+
+    /// Compose that document with that registry, and return the refusal.
+    fn compose(registry: &AdapterRegistry, state_dir: &std::path::Path) -> StartupError {
+        let config = crate::config::Document::parse(&document(state_dir))
+            .expect("the document is valid")
+            .resolve()
+            .expect("and it resolves");
+        compose_and_run(registry, config).expect_err("this document cannot be run")
+    }
+
+    /// A venue's collectors reach that registry through the composition, and
+    /// not only through the function that registers them.
+    ///
+    /// **The wire-up is what this path added, and nothing else here tests it.**
+    /// Every other test above hands collectors to `register_venue_collectors`
+    /// itself, so deleting its call site — or handing it `Vec::new()` — left
+    /// all of them green: nothing drove [`Venue::collectors`] as far as the
+    /// registry, and nothing called [`Venue::with_collectors`] at all.
+    ///
+    /// A reserved name is what makes the arrival observable from out here. The
+    /// `PublisherMetrics` the composition builds is a local value no test can
+    /// render, but that registry's refusal cannot be raised by a collector
+    /// which did not reach it — so a venue handing up a `dz_publisher_` series
+    /// is refused by name, and a composition that dropped the collectors
+    /// instead gets as far as the state directory and fails for that.
+    #[test]
+    fn a_venues_reserved_series_is_refused_by_the_composition() {
+        let error = compose(
+            &a_venue_counting(&["dz_publisher_egress_datagrams_total"]),
+            &state_dir_that_cannot_be_created("reserved"),
+        );
+
+        match error {
+            StartupError::VenueMetric { source } => assert!(
+                source
+                    .to_string()
+                    .contains("dz_publisher_egress_datagrams_total"),
+                "the refusal has to name the series an operator must rename: {source}"
+            ),
+            other => panic!(
+                "the venue's collectors never reached that registry: the composition refused \
+                 for {other} instead"
+            ),
+        }
+    }
+
+    /// A series that registry accepts does not stop the composition, and it is
+    /// registered before anything is opened.
+    ///
+    /// The other half of the wire-up. A venue with counters of its own has to
+    /// start, so an accepted name must not be a refusal; and the step the
+    /// composition reaches next is the state directory, which is what says the
+    /// registration happened before a socket existed. A venue that learns its
+    /// metric names are unusable only once the publisher is on the wire has
+    /// learned it too late.
+    #[test]
+    fn an_accepted_series_lets_the_composition_reach_the_state_directory() {
+        let error = compose(
+            &a_venue_counting(&["venue_books_crossed_total"]),
+            &state_dir_that_cannot_be_created("accepted"),
+        );
+
+        assert!(
+            matches!(error, StartupError::Era { .. }),
+            "an accepted collector is not a refusal, and the next step is the state \
+             directory: {error}"
+        );
+    }
 
     #[test]
     fn a_repeated_refusal_is_printed_on_a_decade_schedule() {

@@ -246,10 +246,9 @@ fn uds(cx: &AdapterContext<'_>) -> Result<Venue, AdapterInitError> {
             .map(|source| Box::new(NoTransport(source.connection)) as Box<dyn Input>)
             .collect()
     };
-    Ok(Venue {
-        adapter: Box::new(UdsAdapter::new(listings)),
-        sources,
-    })
+    // The built-in adapter is this crate's own, and the normative set already
+    // describes everything it does, so there are no collectors to add.
+    Ok(Venue::new(Box::new(UdsAdapter::new(listings)), sources))
 }
 
 /// `kind = "uds"` alongside a feed that carries a snapshot port role.
