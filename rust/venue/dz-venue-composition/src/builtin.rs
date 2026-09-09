@@ -52,8 +52,8 @@ use dz_adapter_uds::{UdsAdapter, UdsListing};
 use dz_ingress_core::{BoxFuture, IngressError, Input, Received, UpstreamMessage};
 use serde::Deserialize;
 
-use crate::error::AdapterInitError;
-use crate::registry::{AdapterContext, Venue};
+use crate::context::AdapterContext;
+use crate::registry::{AdapterInitError, Venue};
 
 /// The `[adapter] kind` tokens this crate answers to itself.
 ///
@@ -66,7 +66,13 @@ pub const BUILTIN_KINDS: &[&str] = &["uds"];
 const CONNECTION: &str = "records";
 
 /// Build the built-in adapter `cx.kind()` names, if it names one.
-pub(crate) fn open(cx: &AdapterContext<'_>) -> Option<Result<Venue, AdapterInitError>> {
+///
+/// `None` is *this crate answers to no such name*, which is what lets
+/// [`AdapterRegistry::open`](crate::AdapterRegistry::open) fall through to the
+/// error that lists both sets. Public because a runtime composing the built-in
+/// directly — which is what an offline record run is — has to be able to reach
+/// it without going through a registry.
+pub fn open(cx: &AdapterContext<'_>) -> Option<Result<Venue, AdapterInitError>> {
     match cx.kind() {
         "uds" => Some(uds(cx)),
         _ => None,

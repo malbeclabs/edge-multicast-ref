@@ -45,10 +45,26 @@ use dz_ingress_core::{IngressConfig, Kind, Policy};
 use dz_publisher_egress::{EgressPolicy, Ipv4Prefix, DEFAULT_TTL};
 use dz_publisher_lowering::SourceId;
 use dz_publisher_refdata::SelectionPolicy;
+use dz_venue_composition::AdapterSection;
 use serde::Deserialize;
 
 use crate::duration::{de_duration, de_optional_duration};
 use crate::error::StartupError;
+
+/// The four types a venue's constructor is handed by value, which left with the
+/// context that hands them out.
+///
+/// They are re-exported at the paths they had, so `crate::config::FeedSpec` is
+/// still `crate::config::FeedSpec` for every module here and for every venue.
+/// What stayed is everything the context does not expose: the document, the
+/// sections that parse it, and the startup error that names them.
+///
+/// The two `resolve` functions among them now refuse with a small error of that
+/// crate's own, because [`StartupError`] names the egress and the
+/// reference-data registry in other variants and cannot go there. Each is
+/// mapped back into the variant it always produced, at the one call site each
+/// has, so both the message and the variant's fields are unchanged.
+pub use dz_venue_composition::{FeedSpec, ReplayConfig, Source, SourceRole};
 
 /// The whole document.
 ///
@@ -200,65 +216,6 @@ pub struct SourceSection {
     /// Paths, never secrets — checked exactly as `[adapter.credentials]` is.
     #[serde(default)]
     pub credentials: toml::Table,
-}
-
-/// What a publisher does with one source.
-///
-/// A closed set of tokens, so a value outside it is a load error naming what
-/// would have been accepted rather than a role nothing implements.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum SourceRole {
-    /// The source this publisher publishes from.
-    ///
-    /// **Exactly one enabled `primary`, publisher-wide** — not one per feed.
-    /// Every source's payloads reach one adapter, the adapter emits events, and
-    /// no event carries the source it came from, so nothing here can confine one
-    /// source's data to one feed; a per-feed rule would describe routing the
-    /// runtime does not do. See [`resolve_sources`] for the check and
-    /// [`StartupError::SourcePrimaries`](crate::StartupError::SourcePrimaries)
-    /// for what a document that breaks it is told.
-    #[default]
-    Primary,
-    /// Connected, driven and counted, and carried for the race comparison
-    /// against the primary — *which one saw a given state first*.
-    ///
-    /// Not an event-for-event diff, and the design says why: two connections to
-    /// one venue do not deliver identical streams, so what is comparable is
-    /// state at aligned instants plus the distributions of first observation.
-    Comparison,
-}
-
-impl SourceRole {
-    /// Every role, in the order the tokens below are listed.
-    pub const ALL: [Self; 2] = [Self::Primary, Self::Comparison];
-
-    /// The token a document states, and the metric label value.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Primary => "primary",
-            Self::Comparison => "comparison",
-        }
-    }
-
-    /// The tokens, for an error message.
-    pub const TOKEN_LIST: &'static str = "primary, comparison";
-
-    /// Resolve a token.
-    ///
-    /// # Errors
-    ///
-    /// [`StartupError::UnknownSourceRole`] naming the token and the set.
-    pub fn resolve(token: &str) -> Result<Self, StartupError> {
-        Self::ALL
-            .iter()
-            .copied()
-            .find(|role| role.as_str() == token)
-            .ok_or_else(|| StartupError::UnknownSourceRole {
-                token: token.to_owned(),
-                supported: Self::TOKEN_LIST,
-            })
-    }
 }
 
 /// `[egress]`: how the source address is chosen, and the TTL.
@@ -525,6 +482,32 @@ pub struct AdapterConfig {
     pub replay: ReplayConfig,
 }
 
+/// The four values a venue's constructor reads out of this section.
+///
+/// The section is a publisher's — the fifth field is a second send path, and
+/// its one method returns a [`StartupError`] — so the type stays here and the
+/// four names travel. What that buys is the claim
+/// [`AdapterContext`](crate::AdapterContext) makes: the document a section came
+/// out of is not one of the four, so a process with a configuration of its own
+/// can build the same context for the same venue's constructor.
+impl AdapterSection for AdapterConfig {
+    fn kind(&self) -> &str {
+        &self.kind
+    }
+
+    fn upstream(&self) -> &toml::Table {
+        &self.upstream
+    }
+
+    fn credentials(&self) -> &toml::Table {
+        &self.credentials
+    }
+
+    fn replay(&self) -> &ReplayConfig {
+        &self.replay
+    }
+}
+
 /// `[adapter.tee]`: the reference copy, and why it sits here.
 ///
 /// The section names a second
@@ -629,107 +612,6 @@ impl TeeConfig {
         destination.push(".");
         destination.push(port_role.as_str());
         Ok(PathBuf::from(destination))
-    }
-}
-
-/// `[adapter.replay]`: a fixture directory for an offline run.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ReplayConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default)]
-    pub path: Option<PathBuf>,
-}
-
-/// A feed specification this build can emit.
-///
-/// A closed set and a total match, for the same reason
-/// [`dz_ingress_core::Kind`] is: what makes a feed emittable is something being
-/// able to compose, count and transmit its messages, and a value a
-/// configuration can name that nothing composes is a value that resolves to
-/// nothing at startup. Not `#[non_exhaustive]`, so a feed added here breaks
-/// every match over this type — including [`crate::run()`]'s, which is where the
-/// composing happens.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum FeedSpec {
-    /// `dz-edge-tob`: `Quote` and `Trade`, on the mktdata and refdata port
-    /// roles.
-    TopOfBook,
-    /// `dz-edge-mbp`: `LevelUpdate` and `BookClear` on mktdata, the three
-    /// snapshot message types on the snapshot port role, and `Trade` — which
-    /// is byte-identical to top-of-book's, per the wire's cross-specification
-    /// policy for `0x04`.
-    MarketByPrice,
-}
-
-impl FeedSpec {
-    /// Every specification, in the order an error message names them.
-    pub const ALL: [Self; 2] = [Self::TopOfBook, Self::MarketByPrice];
-
-    /// The specifications this build can emit, for an error message.
-    ///
-    /// A literal so that it is a `&'static str` usable in a `thiserror` format
-    /// string; held to [`ALL`](Self::ALL) by
-    /// `tests/feed_specs.rs::the_supported_list_is_the_specification_set`.
-    pub const SUPPORTED: &'static str = "top-of-book, market-by-price";
-
-    /// The configuration token, which is the codec crate's own `Feed::NAME`.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::TopOfBook => <TopOfBook as WireFeed>::NAME,
-            Self::MarketByPrice => <MarketByPrice as WireFeed>::NAME,
-        }
-    }
-
-    /// The port roles a feed of this specification operates.
-    ///
-    /// Handed to the metrics crate, which pre-creates one child series per role
-    /// — so passing a role this publisher does not operate would assert a
-    /// channel that does not exist, and omitting one it does operate would
-    /// leave a panel blank until the first datagram.
-    #[must_use]
-    pub const fn port_roles(self) -> &'static [PortRole] {
-        match self {
-            Self::TopOfBook => &[PortRole::Mktdata, PortRole::Refdata],
-            // The third role is the whole difference at this level: a
-            // subscriber to a depth feed holds a book that only exists because
-            // it applied every message in order, so it needs somewhere to
-            // recover from.
-            Self::MarketByPrice => &[PortRole::Mktdata, PortRole::Refdata, PortRole::Snapshot],
-        }
-    }
-
-    /// Whether this specification carries a snapshot port role.
-    #[must_use]
-    pub const fn has_snapshot_port(self) -> bool {
-        match self {
-            Self::TopOfBook => false,
-            Self::MarketByPrice => true,
-        }
-    }
-
-    /// Resolve a `[[feed]] spec` token.
-    ///
-    /// The tokens are the codec crates' own `Feed::NAME` constants rather than
-    /// literals here, so a configuration names a feed by the name the crate
-    /// that implements it gives it, and the two cannot drift.
-    ///
-    /// # Errors
-    ///
-    /// [`StartupError::UnsupportedFeedSpec`], naming what this build can emit.
-    /// There is no default: a feed is not a thing to guess at, and the audit's
-    /// misspelled section became the wrong transport precisely because
-    /// something defaulted.
-    pub fn resolve(token: &str) -> Result<Self, StartupError> {
-        Self::ALL
-            .into_iter()
-            .find(|spec| spec.as_str() == token)
-            .ok_or_else(|| StartupError::UnsupportedFeedSpec {
-                spec: token.to_owned(),
-                supported: Self::SUPPORTED.to_owned(),
-            })
     }
 }
 
@@ -885,59 +767,6 @@ pub struct Feed {
 pub struct Refdata {
     pub state_dir: PathBuf,
     pub selection: SelectionPolicy,
-}
-
-/// One upstream connection, resolved.
-pub struct Source {
-    /// The name, as every metric label carries it.
-    ///
-    /// # Why this is leaked, once, at startup
-    ///
-    /// [`ConnectionId`] holds a `&'static str` on purpose:
-    /// `dz_publisher_ingress_connection_state` is pre-created at 0 for each
-    /// declared name, which is what lets the `== 0` alert fire for a publisher
-    /// whose upstream never came up at all — the case the metric most exists
-    /// for. A name that only became known when a connection first succeeded
-    /// would have no series until then, which is exactly the case that has to
-    /// alert.
-    ///
-    /// The name now comes from the document, so that the file an operator reads
-    /// and the label a dashboard groups by are one string. Reconciling those two
-    /// facts costs one leak per configured source, before the metric registry
-    /// exists and never again: it is bounded by the document, it happens once,
-    /// and the alternatives are a label the file cannot state or a series that
-    /// appears too late to be alerted on.
-    pub connection: ConnectionId,
-    /// Which transport carries it.
-    pub kind: Kind,
-    /// What this publisher does with it. Consumed at runtime: only a
-    /// `primary`'s fatal error ends the process. See [`SourceSection`].
-    pub role: SourceRole,
-    /// The venue's own endpoint keys.
-    pub upstream: toml::Table,
-    /// The venue's own credential paths.
-    pub credentials: toml::Table,
-}
-
-impl std::fmt::Debug for Source {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Source")
-            .field("connection", &self.connection.as_str())
-            .field("kind", &self.kind)
-            .field("role", &self.role.as_str())
-            .finish_non_exhaustive()
-    }
-}
-
-impl Source {
-    /// Whether a fatal error from this source ends the process.
-    ///
-    /// Only a primary's does. Everything else is dropped, named and left with
-    /// its `connection_state` at 0.
-    #[must_use]
-    pub const fn is_primary(&self) -> bool {
-        matches!(self.role, SourceRole::Primary)
-    }
 }
 
 /// The whole document, checked, with every section handed to its owner's
@@ -1305,7 +1134,14 @@ impl FeedSection {
         definition_cycle: Duration,
         idle_guard: Duration,
     ) -> Result<Feed, StartupError> {
-        let spec = FeedSpec::resolve(&self.spec)?;
+        // Mapped rather than converted with `?`: the variant keeps its two
+        // fields and its own message, so nothing matching on it or reading it
+        // can tell that the token set moved crates.
+        let spec =
+            FeedSpec::resolve(&self.spec).map_err(|refused| StartupError::UnsupportedFeedSpec {
+                spec: refused.spec,
+                supported: refused.supported,
+            })?;
         // Before anything that could fail on a different key, because a
         // document with a bad shard name and a bad port should be told about
         // the shard: it is the one that decides where files are written.
@@ -1528,7 +1364,14 @@ fn resolve_sources(sections: Vec<SourceSection>) -> Result<Vec<Source>, StartupE
         let kind =
             Kind::resolve(&section.ingress).map_err(|source| StartupError::Ingress { source })?;
         let role = match section.role.as_deref() {
-            Some(token) => SourceRole::resolve(token)?,
+            // Mapped for the reason the feed specification above is: the
+            // variant keeps both fields and its own message.
+            Some(token) => {
+                SourceRole::resolve(token).map_err(|refused| StartupError::UnknownSourceRole {
+                    token: refused.token,
+                    supported: refused.supported,
+                })?
+            }
             None => SourceRole::default(),
         };
 

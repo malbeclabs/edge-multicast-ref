@@ -1,5 +1,5 @@
 //! `[adapter] kind`: a registry the venue's own `main` populates, and the one
-//! thing this crate cannot know.
+//! thing a runtime cannot know.
 //!
 //! # Why a registry and not a match
 //!
@@ -13,9 +13,9 @@
 //! only place the set is knowable is the venue's own `main`:
 //!
 //! ```no_run
-//! # use dz_publisher_runtime::{AdapterRegistry, Venue};
+//! use dz_venue_composition::{AdapterContext, AdapterRegistry, Venue};
 //! # struct VenueAdapter;
-//! # impl VenueAdapter { fn new(_: &dz_publisher_runtime::AdapterContext<'_>)
+//! # impl VenueAdapter { fn new(_: &AdapterContext<'_>)
 //! #     -> Result<Self, std::io::Error> { Ok(Self) } }
 //! # impl dz_adapter_core::Adapter for VenueAdapter {
 //! #     fn message_types(&self) -> &[&'static str] { &[] }
@@ -24,23 +24,26 @@
 //! #         _: &mut dyn dz_adapter_core::EventSink)
 //! #         -> Result<(), dz_adapter_core::ParseError> { Ok(()) }
 //! # }
-//! # fn venue_input(_: &dz_publisher_runtime::AdapterContext<'_>)
+//! # fn venue_input(_: &AdapterContext<'_>)
 //! #     -> Result<Box<dyn dz_ingress_core::Input>, std::io::Error> { unimplemented!() }
-//! fn main() -> std::process::ExitCode {
-//!     dz_publisher_runtime::run(AdapterRegistry::new().with("a-venue", |cx| {
+//! /// The venue's one line, written once and handed to whichever runtime links
+//! /// it: `E` is how *that* runtime reports a refusal, and nothing here names
+//! /// it. A publisher's `main` calls this on the registry it is about to run.
+//! fn register<E>(registry: AdapterRegistry<E>) -> AdapterRegistry<E> {
+//!     registry.with("a-venue", |cx| {
 //!         Ok(Venue::single(
 //!             Box::new(VenueAdapter::new(cx)?),
 //!             venue_input(cx)?,
 //!         ))
-//!     }))
+//!     })
 //! }
 //! ```
 //!
-//! The runtime owns configuration loading, the guards, the signals, the
-//! metrics, the egress and the reference data. The registry is the only thing
-//! it cannot know. Static dispatch where it matters, `cargo` resolving
-//! versions, no ABI, and a binary that cannot be pointed at an adapter it does
-//! not contain.
+//! A runtime owns configuration loading, the guards, the signals, the metrics,
+//! and — where it is a publisher — the egress and the reference data. The
+//! registry is the only thing it cannot know. Static dispatch where it matters,
+//! `cargo` resolving versions, no ABI, and a binary that cannot be pointed at
+//! an adapter it does not contain.
 //!
 //! # An unregistered `kind` is a startup error naming the registry
 //!
@@ -51,20 +54,81 @@
 //! default, and run the wrong transport while the operator believed otherwise.
 //! What the error names is the registry, because *what is in this binary* is
 //! the question an operator cannot answer from the file in front of them.
+//!
+//! # Whose error the refusal is reported in
+//!
+//! [`AdapterRegistry`] is generic over that error, through
+//! [`AdapterResolution`], and defaults to [`AdapterInitError`]. The two
+//! failures it reports — *no adapter answers this `kind`* and *the adapter this
+//! `kind` names refused* — are not about an egress, an era store or a
+//! reference-data registry, so they must not oblige a caller to link one.
+//! `dz-publisher-runtime` aliases the registry at its own `StartupError` and
+//! the alias is what a venue's `main` names, so the parameter is invisible to
+//! it; a venue's constructor never sees it at all, because that returns
+//! [`AdapterInitError`] whichever runtime is going to report the refusal. What
+//! the parameter buys is the third case: a venue can write
+//! `fn register<E>(AdapterRegistry<E>) -> AdapterRegistry<E>` once and hand the
+//! same adapters to two runtimes.
 
 use std::collections::BTreeSet;
+use std::marker::PhantomData;
 
 use dz_adapter_core::Adapter;
-use dz_ingress_core::{Input, Kind};
-// Through the metrics crate's own re-export, not a direct dependency: a venue
-// whose manifest resolved a different major of `prometheus` would otherwise hit
-// the opaque `expected Box<dyn Collector>, found Box<dyn Collector>`. That
-// crate re-exports it for exactly this reason and says so.
-use dz_publisher_metrics::prometheus::core::Collector;
-use serde::de::DeserializeOwned;
+use dz_ingress_core::Input;
+use prometheus::core::Collector;
 
-use crate::config::{AdapterConfig, FeedSpec, ReplayConfig, Source};
-use crate::error::{AdapterInitError, StartupError};
+use crate::context::AdapterContext;
+
+/// What the constructor a venue registered may fail with.
+///
+/// Boxed rather than a type of this crate's own, because the failure belongs to
+/// the venue: a credential file that is not there, an endpoint that does not
+/// parse, an upstream section missing a key only the adapter knows the name of.
+/// A closed enumeration here would have to anticipate all of them, and a venue
+/// whose failure did not fit would be pushed into whichever variant was nearest.
+pub type AdapterInitError = Box<dyn std::error::Error + Send + Sync + 'static>;
+
+/// How a caller's own error reports the two ways resolution fails.
+///
+/// One constructor per failure and nothing else, because that is the whole of
+/// what [`AdapterRegistry::open`] can go wrong in. A publisher implements it on
+/// the enumeration it already refuses startups with, so the message an operator
+/// reads is the one that crate has always produced; anything with no error of
+/// its own gets the blanket implementation on [`AdapterInitError`].
+pub trait AdapterResolution {
+    /// `[adapter] kind` named no adapter this binary registered.
+    ///
+    /// `registered` is [`AdapterRegistry::registered_list`], which is the
+    /// operator's next action rather than decoration: the set of adapters in a
+    /// binary is a property of the build, so being told only that a value was
+    /// refused leaves *fix a spelling* and *redo a build* indistinguishable.
+    fn unknown_kind(token: String, registered: String) -> Self;
+
+    /// The adapter that `kind` named refused to be built.
+    ///
+    /// `kind` is the name the entry was registered under and not the token the
+    /// document carried, so that a closure registered under several names
+    /// reports against the one that reached it.
+    fn adapter_init(kind: &'static str, source: AdapterInitError) -> Self;
+}
+
+/// The fallback for a caller with no startup error of its own.
+///
+/// It says the same two things in the same words. A runtime that refuses
+/// startups through an enumeration should implement the trait on that instead,
+/// so its refusals stay one type.
+impl AdapterResolution for AdapterInitError {
+    fn unknown_kind(token: String, registered: String) -> Self {
+        format!(
+            "`[adapter] kind = \"{token}\"` names no adapter this binary registered ({registered})"
+        )
+        .into()
+    }
+
+    fn adapter_init(kind: &'static str, source: AdapterInitError) -> Self {
+        format!("the adapter `{kind}` could not be built: {source}").into()
+    }
+}
 
 /// What a venue's constructor hands back: the mapping, and the transport it
 /// reads from.
@@ -82,12 +146,13 @@ use crate::error::{AdapterInitError, StartupError};
 /// a transport is linked when the crate implementing it is in the build, and a
 /// runtime depending on all of them would make every one of them always linked.
 ///
-/// So `[ingress] kind` is still resolved here, against the closed set, with the
-/// two distinguishable failures that resolution already reports; the resolved
-/// [`Kind`] is handed to the constructor in [`AdapterContext::ingress_kind`];
-/// and the constructor builds the transport that kind names. What the runtime
-/// cannot check is that it built the *matching* one, which is the honest cost of
-/// this and is stated rather than hidden.
+/// So `[ingress] kind` is still resolved by the runtime, against the closed set,
+/// with the two distinguishable failures that resolution already reports; the
+/// resolved [`Kind`](dz_ingress_core::Kind) is handed to the constructor in
+/// [`AdapterContext::ingress_kind`]; and the constructor builds the transport
+/// that kind names. What the runtime cannot check is that it built the
+/// *matching* one, which is the honest cost of this and is stated rather than
+/// hidden.
 ///
 /// `#[non_exhaustive]`: this is the second breaking addition to this struct's
 /// fields, and every field is public. Build one through [`Venue::single`] or
@@ -114,17 +179,27 @@ pub struct Venue {
     /// not describe.
     ///
     /// **They travel up, out of the constructor, because they cannot travel
-    /// down into it.** [`PublisherMetrics`] is built from
+    /// down into it.** A publisher's normative metric set is built from
     /// [`Adapter::message_types`], which needs the adapter, which this
     /// constructor is what returns — so there is no registry in existence at
-    /// the moment a venue is asked to build itself, and an
-    /// [`AdapterContext`] carrying one would be carrying a thing that does not
-    /// yet exist. A venue therefore hands its collectors back and the runtime
-    /// registers them once the normative set is there.
+    /// the moment a venue is asked to build itself, and an [`AdapterContext`]
+    /// carrying one would be carrying a thing that does not yet exist. A venue
+    /// therefore hands its collectors back and the runtime registers them once
+    /// the normative set is there.
     ///
-    /// **They go into a second registry, never the normative one.** That
-    /// registry refuses any name beginning `dz_publisher_`, so a venue cannot
-    /// shadow a series a subscriber's alert is written against — and the
+    /// **They are why this crate depends on `prometheus`.** The type is a
+    /// Prometheus one by construction: the runtime hands these same objects to
+    /// a Prometheus registry, so a trait object of our own could not be turned
+    /// back into one, and a field the composition dropped would put one
+    /// composition in two places. What is avoided is `dz-publisher-metrics`
+    /// itself, which carries the exposition server a process that records has
+    /// no port for. The client is re-exported as
+    /// [`prometheus`](crate::prometheus) for the reason that crate re-exports
+    /// it — see the crate documentation.
+    ///
+    /// **They go into a publisher's second registry, never the normative one.**
+    /// That registry refuses any name beginning `dz_publisher_`, so a venue
+    /// cannot shadow a series a subscriber's alert is written against — and the
     /// refusal is a startup failure rather than a warning, because a publisher
     /// that ran with a shadowed contract would be reporting one thing under the
     /// name of another.
@@ -132,7 +207,6 @@ pub struct Venue {
     /// Empty is the ordinary case and states nothing: a venue with no
     /// microstructure worth counting is not a venue that failed to count it.
     ///
-    /// [`PublisherMetrics`]: dz_publisher_metrics::PublisherMetrics
     /// [`Adapter::message_types`]: dz_adapter_core::Adapter::message_types
     pub collectors: Vec<Box<dyn Collector>>,
 }
@@ -184,148 +258,6 @@ impl std::fmt::Debug for Venue {
     }
 }
 
-/// What a venue's constructor is given.
-///
-/// Everything about the configuration that is the venue's, and nothing that is
-/// not. There is deliberately no `Channel ID`, `Source ID`, multicast group,
-/// port or era in here: those are the values the boundary exists to keep out of
-/// a venue's hands, and a context carrying them would hand them back.
-pub struct AdapterContext<'a> {
-    kind: &'a str,
-    ingress_kind: Option<Kind>,
-    venue: &'a str,
-    upstream: &'a toml::Table,
-    credentials: &'a toml::Table,
-    replay: &'a ReplayConfig,
-    sources: &'a [Source],
-    feeds: &'a [FeedSpec],
-}
-
-impl<'a> AdapterContext<'a> {
-    /// The context for one `[adapter]` section and one resolved `[ingress]
-    /// kind`.
-    #[must_use]
-    pub fn new(
-        adapter: &'a AdapterConfig,
-        ingress_kind: Option<Kind>,
-        venue: &'a str,
-        sources: &'a [Source],
-        feeds: &'a [FeedSpec],
-    ) -> Self {
-        Self {
-            kind: &adapter.kind,
-            ingress_kind,
-            venue,
-            upstream: &adapter.upstream,
-            credentials: &adapter.credentials,
-            replay: &adapter.replay,
-            sources,
-            feeds,
-        }
-    }
-
-    /// The `[adapter] kind` that selected this constructor.
-    ///
-    /// Worth having even though the constructor was chosen by it: one closure
-    /// may be registered under several names by a venue whose adapter covers
-    /// several of its own product lines.
-    #[must_use]
-    pub const fn kind(&self) -> &'a str {
-        self.kind
-    }
-
-    /// The transport the document-level `[ingress] kind` resolved to.
-    ///
-    /// `None` when the document names a transport per `[[source]]` instead, in
-    /// which case [`sources`](Self::sources) carries one [`Kind`] each and
-    /// there is no single answer to give. The two are mutually exclusive at
-    /// load: naming a transport in both places is refused.
-    #[must_use]
-    pub const fn ingress_kind(&self) -> Option<Kind> {
-        self.ingress_kind
-    }
-
-    /// Every enabled `[[source]]`, resolved.
-    ///
-    /// What a venue builds one [`Input`] from each of: the name to carry as its
-    /// [`ConnectionId`](dz_adapter_core::ConnectionId), the transport to open,
-    /// and its own `upstream` and `credentials` tables. Empty when the document
-    /// declares no sources, which is the publisher with one upstream — see
-    /// [`Venue::single`].
-    ///
-    /// **The `ConnectionId` is handed over rather than invented.** It is the
-    /// `connection` metric label, it is declared to the registry at startup so
-    /// the `== 0` alert exists before anything connects, and it comes from the
-    /// document so that the file an operator reads and the label a dashboard
-    /// groups by are one string. A venue that named its own would be a second
-    /// place for that string to live.
-    #[must_use]
-    pub const fn sources(&self) -> &'a [Source] {
-        self.sources
-    }
-
-    /// Every enabled `[[feed]] spec` this publisher emits.
-    ///
-    /// **Which normalized-event surface will be asked for, and nothing about
-    /// the wire.** No `Channel ID`, `Source ID`, group, port or era comes with
-    /// it — those are the values this boundary exists to keep out of a venue's
-    /// hands. A feed specification is the opposite kind of fact: it is what the
-    /// runtime will ask this adapter *for*, and an adapter is the only thing
-    /// that knows whether it can answer.
-    ///
-    /// It is here for the refusal that needs it. A depth feed obliges
-    /// [`Adapter::snapshot`](dz_adapter_core::Adapter::snapshot) — a subscriber
-    /// that lost a datagram has nowhere else to recover from, and one joining
-    /// mid-session has nowhere to start — so an adapter that holds no book must
-    /// be able to refuse that combination at startup rather than publish deltas
-    /// no subscriber can apply. See [`crate::builtin`].
-    #[must_use]
-    pub const fn feeds(&self) -> &'a [FeedSpec] {
-        self.feeds
-    }
-
-    /// The `venue` label, for an adapter that wants its own log lines to carry
-    /// the same identity the metrics do.
-    #[must_use]
-    pub const fn venue(&self) -> &'a str {
-        self.venue
-    }
-
-    /// `[adapter.upstream]`, as the adapter's own type.
-    ///
-    /// # Errors
-    ///
-    /// [`toml::de::Error`], which names the key and what was expected of it.
-    /// The adapter should return it as an [`AdapterInitError`], which is what
-    /// makes a missing endpoint a startup failure naming a key rather than a
-    /// connect that fails forever under a backoff.
-    pub fn upstream<T: DeserializeOwned>(&self) -> Result<T, toml::de::Error> {
-        self.upstream.clone().try_into()
-    }
-
-    /// `[adapter.credentials]`, as the adapter's own type.
-    ///
-    /// Every value here has already been checked to be a single-line string;
-    /// see [`StartupError::NotACredentialPath`]. What it points at is the
-    /// adapter's to read, and reading it in the constructor is right: a
-    /// credential file that is not there should stop a startup, not a
-    /// reconnect.
-    ///
-    /// # Errors
-    ///
-    /// [`toml::de::Error`].
-    pub fn credentials<T: DeserializeOwned>(&self) -> Result<T, toml::de::Error> {
-        self.credentials.clone().try_into()
-    }
-
-    /// `[adapter.replay]`: whether this run reads a fixture directory instead
-    /// of the live upstream, and which.
-    #[must_use]
-    pub const fn replay(&self) -> &'a ReplayConfig {
-        self.replay
-    }
-}
-
 /// What a venue registers: a name, and something that builds the integration.
 ///
 /// Boxed rather than an `fn` pointer, so that a `main` may close over what it
@@ -333,25 +265,46 @@ impl<'a> AdapterContext<'a> {
 /// registry stays inspectable — [`AdapterRegistry::kinds`] and the error
 /// message have to be able to name every entry whether or not one has been
 /// used.
+///
+/// **Not generic over the reported error.** A constructor's own refusal is the
+/// venue's, and it is an [`AdapterInitError`] whichever runtime is going to
+/// carry it — so registering an adapter is one piece of code for both, and the
+/// registry's type parameter never reaches a venue.
 type Constructor = Box<dyn Fn(&AdapterContext<'_>) -> Result<Venue, AdapterInitError>>;
 
 /// The adapters this binary contains, by the name `[adapter] kind` selects them
 /// with.
 ///
-/// Built in `main` and handed to [`run()`](crate::run()). See the module
-/// documentation for the whole argument; the two properties worth stating on the
-/// type are that resolution has no default, and that a name registered twice is
-/// a panic rather than a silent shadowing.
-#[derive(Default)]
-pub struct AdapterRegistry {
+/// Built in `main` and handed to the runtime. See the module documentation for
+/// the whole argument; the three properties worth stating on the type are that
+/// resolution has no default, that a name registered twice is a panic rather
+/// than a silent shadowing, and that `E` is only how a refusal is *reported* —
+/// nothing a venue writes mentions it.
+pub struct AdapterRegistry<E = AdapterInitError> {
     /// Registration order, kept: it is the order a `main` reads in, which is
     /// what a reader comparing the file to the code needs. The error message
     /// sorts instead, so that what an operator is shown does not depend on the
     /// order somebody happened to write the calls in.
     entries: Vec<(&'static str, Constructor)>,
+    /// `fn() -> E` rather than `E`, so that the parameter neither owns nor
+    /// borrows anything: a registry holds constructors and no error, and the
+    /// auto traits it gets should follow from the constructors alone.
+    reported: PhantomData<fn() -> E>,
 }
 
-impl AdapterRegistry {
+/// Hand-written rather than derived: `#[derive(Default)]` would demand
+/// `E: Default`, and `E` is a type a refusal is built into rather than a value
+/// a registry holds.
+impl<E> Default for AdapterRegistry<E> {
+    fn default() -> Self {
+        Self {
+            entries: Vec::new(),
+            reported: PhantomData,
+        }
+    }
+}
+
+impl<E> AdapterRegistry<E> {
     /// An empty registry.
     ///
     /// Empty is a legitimate state to build and an illegitimate state to run:
@@ -425,20 +378,21 @@ impl AdapterRegistry {
             format!("{} ({built_in})", kinds.join(", "))
         }
     }
+}
 
+impl<E: AdapterResolution> AdapterRegistry<E> {
     /// Resolve `[adapter] kind` and construct the integration it names.
     ///
     /// # Errors
     ///
-    /// [`StartupError::UnknownAdapterKind`] for a name this binary did not
+    /// [`AdapterResolution::unknown_kind`] for a name this binary did not
     /// register, **naming every name it did**; and
-    /// [`StartupError::AdapterInit`] carrying whatever the venue's constructor
-    /// refused with.
-    pub fn open(&self, cx: &AdapterContext<'_>) -> Result<Venue, StartupError> {
+    /// [`AdapterResolution::adapter_init`] carrying whatever the venue's
+    /// constructor refused with.
+    pub fn open(&self, cx: &AdapterContext<'_>) -> Result<Venue, E> {
         if let Some((name, constructor)) = self.entries.iter().find(|(name, _)| *name == cx.kind())
         {
-            return constructor(cx)
-                .map_err(|source| StartupError::AdapterInit { kind: name, source });
+            return constructor(cx).map_err(|source| E::adapter_init(name, source));
         }
         // **After the venue's own entries, and never instead of one.** A venue
         // that registers a name this crate also builds in gets its own — it is
@@ -451,11 +405,11 @@ impl AdapterRegistry {
                 .find(|name| **name == cx.kind())
                 .copied()
                 .unwrap_or("built-in");
-            return built_in.map_err(|source| StartupError::AdapterInit { kind, source });
+            return built_in.map_err(|source| E::adapter_init(kind, source));
         }
-        Err(StartupError::UnknownAdapterKind {
-            token: cx.kind().to_owned(),
-            registered: self.registered_list(),
-        })
+        Err(E::unknown_kind(
+            cx.kind().to_owned(),
+            self.registered_list(),
+        ))
     }
 }
