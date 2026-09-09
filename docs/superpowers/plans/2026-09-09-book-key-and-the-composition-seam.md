@@ -30,9 +30,9 @@ Task 1 is a correction to a document that is wrong now, and it lands first becau
 
 ### 2. `book_key`, and `state_key` folded onto it
 
-- [ ] `pub fn book_key(top: &Top) -> u64` over the two sides, with the absent-side tag and the FNV-1a constants exactly as they are today.
-- [ ] `state_key` keeps its signature and its value, defined as the channel and the instrument folded into `book_key`'s subject.
-- [ ] Both doc comments say which question each answers: *the same state of this channel's instrument* against *the same book*.
+- [x] `pub fn book_key(top: &Top) -> u64` over the two sides, with the absent-side tag and the FNV-1a constants exactly as they are today.
+- [x] `state_key` keeps its signature and its value, defined as the channel and the instrument folded into `book_key`'s subject.
+- [x] Both doc comments say which question each answers: *the same state of this channel's instrument* against *the same book*.
 
 **Test** (`dz-recorder-events`):
 - **`state_key`'s value is unchanged**, asserted against literals computed before the split — the property everything already written depends on;
@@ -42,16 +42,20 @@ Task 1 is a correction to a document that is wrong now, and it lands first becau
 
 **The revert:** make `book_key` eat the channel. The last test fails. Before this task there is no key that can pass it.
 
+**Run.** `book_key(channel_id, top)`, folding the channel ahead of the two sides, kills `one_book_under_two_channels_is_one_book_key_and_two_state_keys` and nothing else: one book on two channels came back as two keys. The second mutant the plan names — `state_key` eating the instrument before the channel — kills `state_keys_value_did_not_move` and nothing else. Neither mutant touches the other's test, which is the two questions being separable.
+
 ---
 
 ### 3. `EventSink::upstream_identity`, defaulted
 
-- [ ] `fn upstream_identity(&mut self, sid: Option<u64>, seq: Option<u64>)`, defaulted to ignoring both.
-- [ ] The doc says what a publisher does with it — nothing — and what a recorder does, and that neither value is ever a key, for the reason `event.upstream_ts` already carries.
+- [x] `fn upstream_identity(&mut self, sid: Option<u64>, seq: Option<u64>)`, defaulted to ignoring both.
+- [x] The doc says what a publisher does with it — nothing — and what a recorder does, and that neither value is ever a key, for the reason `event.upstream_ts` already carries.
 
 **Test** (`dz-adapter-core`): a sink implementing nothing new compiles and inherits the default; a recording sink sees what an adapter passed. The first is the whole of "no adapter changes", stated as a compile.
 
 **The revert:** remove the default. Every sink in the workspace fails to compile, which is a stronger signal than a test and is why the default is not optional.
+
+**Run.** No named test dies, because nothing gets as far as running. `cargo check --workspace --all-targets --keep-going` reports `E0046 missing: upstream_identity` at six `impl EventSink` sites across four crates: `dz-ingress-core/src/driver.rs`, `dz-recorder-relower/src/relower.rs`, both sinks in `dz-adapter-uds`'s lowering test, and both sinks in `dz-adapter-core`'s own tests. The two remaining sinks in the workspace are test targets of crates whose library failed first, so the check never reached them.
 
 ---
 
