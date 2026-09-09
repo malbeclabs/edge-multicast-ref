@@ -836,6 +836,10 @@ fail, restored:**
 | `*preceding = Some(trailer)` back outside the `Ok` branch | `pipeline.rs`'s `a_window_the_spool_refused_leaves_the_next_window_uncertain`, on an era row carrying `anchor_certain: 1, continuation: 1` over a window whose rows never reached the store |
 | the free list's `Disconnected` back to `Offered::Dropped`, which is what holding `free_return` made of it | `ring.rs`'s `a_ring_whose_deriver_is_gone_says_so_from_either_end` |
 | `pending.undelivered()` dropped from the full list's `Disconnected` | the same test, on the owed count: 3 where 4 was wanted |
+| the ring's own half dropped from `RingCounters::capture_drop_total` | `window.rs`'s `a_datagram_the_ring_refused_is_in_the_capture_loss_the_window_reports`: the ring refused ten and the window reported none |
+| `capture_drop_total` back to a per-window sum of the deltas walked | **both** capture-loss tests — `the_capture_loss_a_window_reports_is_cumulative_and_not_its_own` on the second window reporting 2 where 6 was wanted, and the ring-refusal test, which a per-window sum of rewritten deltas cannot see either |
+| `INLINE_MODE` back inside `InlineConfig::summary` | `inline_config::tests::the_summary_leaves_the_mode_line_to_the_caller_that_prints_it_first` **and** `inline_mode.rs`'s `check_validates_both_files_reaches_for_the_destination_and_touches_nothing`, on the first line of stdout |
+| `Fault::SilentChannel` dropped from the gate's list | `the_gate_runs_every_fault_the_replay_crate_injects` |
 
 Three of those are worth reading past the table.
 
@@ -854,6 +858,15 @@ and the second is the analytical claim the design makes.
 `continuation: 1` — a reader joining eras on that column would treat the two
 sides of a window whose rows were lost as one continuous sequence space, which
 is the merge `anchor_certain` exists to prevent.
+
+**The fault-list revert had no mutant until one was written, and that is the
+finding.** Dropping `Fault::SilentChannel` from the gate's list left every test
+passing: a fault absent from a loop is not a fault that fails, it is a fault
+nobody runs, which is indistinguishable from a pass. That is how it went missing
+for the life of the branch in the first place, so the completeness of the list is
+now an assertion of its own — the gate's list beside a list of every variant,
+with a `match` nobody calls making a new variant a compile error. Adding the
+ninth fault closed the instance; this closes the class.
 
 **Not tested, and it is the same gap the plan already records elsewhere:** that
 the `Disconnected` outcome reaches an operator. `inline_runner.rs:300` and `:323` discard
