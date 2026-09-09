@@ -440,6 +440,236 @@ fn a_full_budget_evicts_the_oldest_window_and_the_reported_age_is_the_oldest_lef
     );
 }
 
+/// The start stamp a window directory's name carries, zero-padded as the module
+/// pads it, so a test can say *which* window survived rather than how many did.
+fn stamp_of(name: &str) -> u64 {
+    name.strip_prefix("window-")
+        .and_then(|rest| rest.split('-').next())
+        .and_then(|s| s.parse().ok())
+        .expect("a window directory name carries its start stamp")
+}
+
+/// **The window owing a ledger entry is the last one the budget takes.**
+///
+/// It is the oldest, so a plain oldest-first rule takes it first — and taking it
+/// is not giving up rows that may yet land, because those rows *are* in the
+/// store. What goes with the directory is the only remaining evidence that they
+/// are, and the trailer the next era anchor is checked against. So it is
+/// preferred against while anything else remains, and the budget still bounds
+/// the disk because something else always does.
+///
+/// A window merely *in flight* is deliberately not protected, and this does not
+/// assert that it is: those rows may yet land and no entry has been earned, so
+/// it is evicted like any other.
+#[test]
+fn a_window_whose_rows_landed_is_the_last_one_the_budget_takes() {
+    let root = tempfile::tempdir().expect("a temporary directory");
+    let ledger_path = root.path().join("ledger.jsonl");
+    let spool_dir = root.path().join("spool");
+
+    // Sized from a window already on disk, so the budget holds two and not
+    // three whatever the rows happen to serialise to.
+    let mut measure = Spool::open(root.path().join("measure"), u64::MAX).expect("a spool");
+    measure
+        .store(0, batch("window-measure", 4), trailer(0))
+        .expect("one window, to measure");
+    let budget = measure.bytes() * 2 + measure.bytes() / 2;
+
+    let mut spool = Spool::open(&spool_dir, budget).expect("a spool");
+    let mut ledger = Ledger::open(&ledger_path).expect("a ledger");
+    let mut sink = FakeSink::new(&ledger_path);
+
+    // The oldest window lands and its entry will not write, so it owes one.
+    // Oldest is what makes this worth testing: the plain rule would take it.
+    spool
+        .store(10 * SECOND, batch("window-a", 4), trailer(0))
+        .expect("the window reaches the disk");
+    std::fs::create_dir(&ledger_path).expect("the ledger's path is taken");
+    let drained = drain(&mut spool, &mut sink, &mut ledger, 11 * SECOND)
+        .expect("the rows landed; only the recording did not");
+    assert_eq!(drained.recorded, 0);
+    assert_eq!(spool.windows(), 1, "the window stays, owing an entry");
+
+    spool
+        .store(20 * SECOND, batch("window-b", 4), trailer(1))
+        .expect("the window reaches the disk");
+    // And the third fills the budget, so something has to go.
+    spool
+        .store(30 * SECOND, batch("window-c", 4), trailer(2))
+        .expect("a full spool still takes the window");
+
+    assert_eq!(spool.windows_evicted_total(), 1);
+    assert!(spool.bytes() <= budget, "the budget still bounds the disk");
+    let left: Vec<u64> = window_dirs(&spool_dir)
+        .iter()
+        .map(|n| stamp_of(n))
+        .collect();
+    assert_eq!(
+        left,
+        vec![10 * SECOND, 30 * SECOND],
+        "the window owing an entry was evicted and the next-oldest was not"
+    );
+
+    // And the entry it was holding is still writable once the ledger comes
+    // back, which is the whole reason it was kept.
+    std::fs::remove_dir(&ledger_path).expect("the ledger's path is free again");
+    let drained =
+        drain(&mut spool, &mut sink, &mut ledger, 40 * SECOND).expect("the destination is up");
+    assert!(drained.failures.is_empty(), "{:?}", drained.failures);
+    assert_eq!(
+        drained.recorded, 2,
+        "the owed entry was written, and the window still due posted"
+    );
+    assert_eq!(spool.windows(), 0);
+}
+
+/// **A budget that cannot delete stops bounding one window, not every window.**
+///
+/// The pass stops, for the reason it always did: retrying the same undeletable
+/// directory would walk the whole spool into the same failure and leave the disk
+/// no emptier. What it must not do is leave that window counted — then `bytes()`
+/// is over the budget for ever, the same directory is chosen on every later
+/// pass, and the budget stops bounding the disk from the first failure on. So it
+/// stops being a window and its bytes move to `unreclaimable_bytes`, and the
+/// next pass tries the next one.
+#[cfg(unix)]
+#[test]
+fn an_eviction_that_cannot_delete_stops_being_a_window_rather_than_stopping_the_budget() {
+    use std::os::unix::fs::PermissionsExt;
+
+    fn mode(dir: &Path, bits: u32) {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(bits))
+            .expect("the mode can be set");
+    }
+
+    let root = tempfile::tempdir().expect("a temporary directory");
+    let spool_dir = root.path().join("spool");
+
+    let mut measure = Spool::open(root.path().join("measure"), u64::MAX).expect("a spool");
+    measure
+        .store(0, batch("window-measure", 4), trailer(0))
+        .expect("one window, to measure");
+    let budget = measure.bytes() * 2 + measure.bytes() / 2;
+
+    let mut spool = Spool::open(&spool_dir, budget).expect("a spool");
+    for (n, key) in ["window-a", "window-b"].iter().enumerate() {
+        spool
+            .store(
+                (n as u64 + 1) * 10 * SECOND,
+                batch(key, 4),
+                trailer(n as u64),
+            )
+            .expect("the window reaches the disk");
+    }
+
+    // The oldest will not delete: readable and listable, so its size can still
+    // be read, and not writable, so the files inside it cannot be unlinked. A
+    // permission changed under a running recorder looks like this.
+    let oldest = window_dirs(&spool_dir)
+        .into_iter()
+        .min()
+        .expect("two windows are on disk");
+    let oldest = spool_dir.join(oldest);
+    mode(&oldest, 0o500);
+
+    spool
+        .store(30 * SECOND, batch("window-c", 4), trailer(2))
+        .expect("a full spool still takes the window");
+
+    assert!(
+        oldest.is_dir(),
+        "the fixture is meant to leave a directory that will not delete"
+    );
+    assert!(
+        spool.unreclaimable_bytes() > 0,
+        "bytes this module can no longer reach are counted where they can be seen"
+    );
+    assert_eq!(
+        spool.windows(),
+        2,
+        "the undeletable directory stopped being a window this spool holds"
+    );
+    assert!(
+        window_dirs(&spool_dir)
+            .iter()
+            .map(|n| stamp_of(n))
+            .any(|s| s == 30 * SECOND),
+        "the window that triggered the eviction is still held"
+    );
+
+    // The budget bounds the disk from here on: the next store evicts the next
+    // window rather than choosing the undeletable one again and giving up.
+    let evicted_before = spool.windows_evicted_total();
+    spool
+        .store(40 * SECOND, batch("window-d", 4), trailer(3))
+        .expect("a full spool still takes the window");
+    assert!(
+        spool.windows_evicted_total() > evicted_before,
+        "the budget stopped evicting after one directory refused to go"
+    );
+    assert!(spool.bytes() <= budget);
+
+    mode(&oldest, 0o700);
+}
+
+/// **A store that fails leaves no bytes the spool's own numbers cannot see.**
+///
+/// The failure it guards is silent in the one number an operator would look at:
+/// a `store` that failed with a directory on disk used to leave it there and out
+/// of `self.windows`, so its bytes sat outside `bytes()`, `enforce()` and
+/// `unreclaimable_bytes` alike — the spool reporting itself empty while orphans
+/// accumulated, one per failed window, until a restart. The byte count is a
+/// claim about the disk, and a claim with an exception is not one.
+#[cfg(unix)]
+#[test]
+fn a_store_that_fails_leaves_no_bytes_the_spool_cannot_see() {
+    use std::os::unix::fs::PermissionsExt;
+
+    fn mode(dir: &Path, bits: u32) {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(bits))
+            .expect("the mode can be set");
+    }
+
+    let root = tempfile::tempdir().expect("a temporary directory");
+    let spool_dir = root.path().join("spool");
+    let mut spool = Spool::open(&spool_dir, 1 << 20).expect("a spool");
+
+    spool
+        .store(10 * SECOND, batch("window-a", 2), trailer(0))
+        .expect("the window reaches the disk");
+    let held = window_dirs(&spool_dir);
+    assert_eq!(held.len(), 1);
+    let dir = spool_dir.join(&held[0]);
+
+    // The same window written again — which `store` supports, and which starts
+    // by clearing whatever the last attempt left. Not writable, so the clearing
+    // fails: the window is already out of the map and a directory is on the
+    // disk, which is exactly the shape the orphan had.
+    mode(&dir, 0o500);
+    let refused = spool.store(10 * SECOND, batch("window-a", 2), trailer(0));
+    assert!(
+        refused.is_err(),
+        "the store must fail for this to test anything"
+    );
+
+    assert_eq!(
+        spool.windows(),
+        0,
+        "the window is not one this spool can still post"
+    );
+    assert_eq!(
+        spool.bytes(),
+        0,
+        "and its bytes are not counted as history it could hand over"
+    );
+    assert!(
+        spool.unreclaimable_bytes() > 0,
+        "but they are counted: bytes on the disk that no number reports are bytes nothing bounds"
+    );
+
+    mode(&dir, 0o700);
+}
+
 #[test]
 fn a_spool_abandoned_without_posting_is_replayed_on_the_next_open_and_lands() {
     let root = tempfile::tempdir().expect("a temporary directory");

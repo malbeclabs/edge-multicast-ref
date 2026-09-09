@@ -347,6 +347,17 @@ impl Spool {
     /// or made durable. The caller has lost this window and no other: nothing
     /// partial is left under a name a later run would load, because the sidecar
     /// that marks a window loadable is renamed into place last.
+    ///
+    /// **And nothing partial is left on the disk either.** A failure after the
+    /// directory was created used to leave it there and out of `self.windows`,
+    /// so its bytes sat outside [`bytes`](Self::bytes), [`enforce`](Self::enforce)
+    /// and [`unreclaimable_bytes`](Self::unreclaimable_bytes) alike — the spool
+    /// reporting itself empty while orphans accumulated, one per failed window,
+    /// until a restart adopted or discarded them. The byte count is a claim
+    /// about the disk, and a claim with an exception is not one. So the fallible
+    /// part is [`write_window`](Self::write_window) and this is its error path:
+    /// what it created is removed, and a removal that itself fails moves those
+    /// bytes to `unreclaimable_bytes` rather than forgetting them.
     pub fn store(
         &mut self,
         start_ns: u64,
@@ -354,15 +365,56 @@ impl Spool {
         trailer: SegmentTrailer,
     ) -> Result<(), SpoolError> {
         let id = ObjectId::of(&batch);
-        let derivation = batch.derivation;
         let name = window_name(start_ns, &id.key);
         let dir = self.dir.join(&name);
+
+        match self.write_window(start_ns, batch, trailer, &name, &dir, id) {
+            Ok(()) => {
+                // After the window is on disk and never before it: eviction is
+                // what keeps this from blocking, and a spool that made room
+                // first would be a spool that decided what to give up before it
+                // knew what it had.
+                self.enforce();
+                Ok(())
+            }
+            Err(e) => {
+                // Counted where it can still be seen. `remove_tree` on a
+                // directory that was never created succeeds, so this is the one
+                // path for every failure above — and a removal that fails leaves
+                // bytes this module can no longer reach, which is what
+                // `unreclaimable_bytes` is.
+                if remove_tree(&dir).is_err() {
+                    self.unreclaimable_bytes =
+                        self.unreclaimable_bytes.saturating_add(tree_bytes(&dir));
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Everything `store` does that can fail, so that one error path can undo
+    /// all of it.
+    ///
+    /// Separated for that reason alone: a `?` in the middle of a function that
+    /// has already created a directory is a `?` that leaks it, and there were
+    /// six of them.
+    fn write_window(
+        &mut self,
+        start_ns: u64,
+        batch: RowBatch,
+        trailer: SegmentTrailer,
+        name: &str,
+        dir: &Path,
+        id: ObjectId,
+    ) -> Result<(), SpoolError> {
+        let derivation = batch.derivation;
+        let dir = dir.to_path_buf();
 
         // `FileSink` appends, deliberately, so that a double load shows rather
         // than hides. Here that would double a window's rows and hash the
         // doubling, so the directory starts empty whatever a previous attempt
         // left in it.
-        self.windows.remove(&name);
+        self.windows.remove(name);
         remove_tree(&dir)?;
 
         let mut sink = FileSink::create(&dir)?;
@@ -385,7 +437,7 @@ impl Spool {
         write_sidecar(&dir, &sidecar)?;
 
         self.windows.insert(
-            name,
+            name.to_owned(),
             Window {
                 bytes: tree_bytes(&dir),
                 dir,
@@ -396,10 +448,6 @@ impl Spool {
                 entry_owed: false,
             },
         );
-        // After the window is on disk and never before it: eviction is what
-        // keeps this from blocking, and a spool that made room first would be a
-        // spool that decided what to give up before it knew what it had.
-        self.enforce();
         Ok(())
     }
 
@@ -806,30 +854,55 @@ impl Spool {
     /// anchor uncertain and says so, rather than claiming a continuity nothing
     /// on this host can still evidence.
     ///
+    /// **One window is the exception, and it is the one whose rows have already
+    /// landed.** A window owing a ledger entry is not rows that may yet land: the
+    /// rows *are* in the store, and its directory is the only thing left that can
+    /// record that they are, carrying the trailer the next era anchor is checked
+    /// against. So it goes last, preferred against while anything else remains —
+    /// and taken when nothing else does, because a budget that stopped bounding
+    /// the disk in order to protect an entry would trade a bounded backlog for an
+    /// unbounded one. `in_flight` is deliberately not in the preference: those
+    /// rows may yet land and no entry has been earned, which is the paragraph
+    /// above.
+    ///
     /// A window larger than the whole budget is evicted the moment it is
     /// written, which is a budget too small for one window and shows as an
     /// eviction against every window rather than as a spool that quietly kept
     /// nothing.
     ///
-    /// An eviction that cannot delete stops the loop, because retrying the same
-    /// undeletable directory for ever would delete the whole spool behind it and
-    /// leave the disk no emptier.
+    /// **An eviction that cannot delete stops the pass, and stops being a
+    /// window.** The pass stops because retrying the same undeletable directory
+    /// for ever would delete the whole spool behind it and leave the disk no
+    /// emptier. It stops being a window because leaving it in the map holds
+    /// [`bytes`](Self::bytes) over the budget for ever and makes it the choice on
+    /// every later pass — a budget that stops bounding the disk from the first
+    /// failure on. Its bytes move to
+    /// [`unreclaimable_bytes`](Self::unreclaimable_bytes), where bytes this
+    /// module can no longer reach belong, and the next pass tries the next
+    /// window.
     fn enforce(&mut self) {
         while self.bytes() > self.budget_bytes {
-            let Some(name) = self.windows.keys().next().cloned() else {
+            let Some(name) = self.oldest_evictable() else {
                 return;
             };
-            let Some(window) = self.windows.get(&name) else {
-                return;
-            };
-            let bytes = window.bytes;
-            if remove_tree(&window.dir).is_err() {
-                return;
-            }
-            self.windows.remove(&name);
+            let bytes = self.windows.get(&name).map_or(0, |w| w.bytes);
+            let undeletable = self.delete(&name).is_err();
             self.windows_evicted_total += 1;
             self.bytes_evicted_total = self.bytes_evicted_total.saturating_add(bytes);
+            if undeletable {
+                return;
+            }
         }
+    }
+
+    /// The window the budget takes next: the oldest whose rows are not already
+    /// in the store, and only then the oldest of those that are.
+    fn oldest_evictable(&self) -> Option<String> {
+        self.windows
+            .iter()
+            .find(|(_, w)| !w.entry_owed)
+            .or_else(|| self.windows.iter().next())
+            .map(|(name, _)| name.clone())
     }
 
     /// Reads back what a previous run left under one window name.

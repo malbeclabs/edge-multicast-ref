@@ -420,22 +420,107 @@ fn provenance_is_on_every_grain_and_in_no_sort_key() {
         );
     }
 
+    let mut clauses = 0;
     for sql in [
         rows_sql(),
         market_data_sql(),
         pairing_sql(),
         cross_site_sql(),
     ] {
-        for line in sql.lines() {
-            let line = line.trim_start();
-            if line.starts_with("ORDER BY") || line.starts_with("PRIMARY KEY") {
-                assert!(
-                    !line.contains("derivation"),
-                    "provenance reached a sort key: {line}"
-                );
-            }
+        for clause in sort_key_clauses(sql) {
+            clauses += 1;
+            assert!(
+                !clause.contains("derivation"),
+                "provenance reached a sort key: {clause}"
+            );
         }
     }
+    // The walker found something, and found all of it. A guard that reads more
+    // than one line is a guard whose *reading* is now the thing that can
+    // regress, and a walker that quietly went back to the first line would leave
+    // this green over exactly the hazard it was widened for. Nine: the eight
+    // table sort keys, plus the bare `ORDER BY` in `006`'s window specification,
+    // which is checked like any other because a column reaching a window's
+    // ordering is worth knowing about too. `003`'s is in a file this test does
+    // not read.
+    assert_eq!(clauses, 9, "the sort-key walker stopped finding clauses");
+}
+
+/// Every `ORDER BY` and `PRIMARY KEY` clause in one file, each as one string.
+///
+/// **A clause is not a line.** Three of the eight sort keys wrap onto a
+/// continuation line, so a guard reading only the line that begins `ORDER BY`
+/// reads two thirds of what it is guarding — and a column appended to the tail
+/// of a wrapped key passes it. The clause is accumulated from its first line
+/// until the parenthesis depth it opened returns to zero, which is what closes a
+/// tuple sort key on a later line and closes a bare one immediately.
+fn sort_key_clauses(sql: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut open: Option<(String, i32)> = None;
+    for line in sql.lines() {
+        let trimmed = line.trim_start();
+        let (mut clause, mut depth) = match open.take() {
+            Some(state) => state,
+            None if trimmed.starts_with("ORDER BY") || trimmed.starts_with("PRIMARY KEY") => {
+                (String::new(), 0)
+            }
+            None => continue,
+        };
+        clause.push(' ');
+        clause.push_str(trimmed);
+        depth += line.matches('(').count() as i32 - line.matches(')').count() as i32;
+        // Depth back to zero ends the clause, which is the closing parenthesis
+        // of a tuple key and the first line of a bare one. `;` ends it too, for
+        // a statement that closes without one.
+        if depth <= 0 || line.contains(';') {
+            out.push(clause);
+        } else {
+            open = Some((clause, depth));
+        }
+    }
+    // A clause that never closed is still a clause, and dropping it silently is
+    // how a walker stops reading a file without failing.
+    if let Some((clause, _)) = open {
+        out.push(clause);
+    }
+    out
+}
+
+/// The walker reads a whole clause, and not the line it starts on.
+///
+/// The mutant this kills is the guard as it was: `derivation` appended to the
+/// continuation line of a wrapped sort key. Asserted over a literal rather than
+/// over the migrations, because the migrations must never carry that column in a
+/// sort key — so the only way to hold the *reading* is to write the hazard out
+/// here.
+#[test]
+fn the_sort_key_walker_reads_a_clause_that_wraps() {
+    let wrapped = "ENGINE = ReplacingMergeTree\n                   PARTITION BY toYYYYMMDD(recv_ts)\n                   ORDER BY (channel_id, instrument_id, sequence_number,\n                   \x20         source_addr, derivation, recv_ts);\n";
+    let clauses = sort_key_clauses(wrapped);
+    assert_eq!(clauses.len(), 1, "{clauses:?}");
+    assert!(
+        clauses[0].contains("derivation"),
+        "a column on the continuation line was not read: {clauses:?}"
+    );
+
+    // A bare key inside a window specification closes on its own line, and does
+    // not swallow everything up to the next semicolon.
+    let windowed = "        ORDER BY anchor_ts\n        ROWS BETWEEN 1 PRECEDING AND CURRENT ROW\n";
+    let clauses = sort_key_clauses(windowed);
+    assert_eq!(
+        clauses,
+        vec![" ORDER BY anchor_ts".to_owned()],
+        "{clauses:?}"
+    );
+
+    // And a single-line tuple key is one clause, not the rest of the file.
+    let single = "ORDER BY (a, b, c);\nSOMETHING ELSE derivation\n";
+    let clauses = sort_key_clauses(single);
+    assert_eq!(
+        clauses,
+        vec![" ORDER BY (a, b, c);".to_owned()],
+        "{clauses:?}"
+    );
 }
 
 /// Every table is partitioned by a day, and none is an exception.
