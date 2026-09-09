@@ -255,14 +255,40 @@ pub enum StartupError {
     #[error("two enabled `[[feed]]` blocks name different source ids, {one} and {another}")]
     SeveralSourceIds { one: u16, another: u16 },
 
-    /// Two `[[feed]]` blocks name the same specification.
+    /// Two `[[feed]]` blocks name one specification **on one shard**.
     ///
-    /// Refused rather than merged: each block carries its own `Channel ID`,
-    /// ports and era, so two blocks for one feed are two channel instances of
-    /// the same feed — and a subscriber tracking either one sees the other's
-    /// numbering as its own gaps.
-    #[error("two `[[feed]]` blocks name `spec = \"{spec}\"`")]
-    DuplicateFeedSpec { spec: String },
+    /// Two blocks of one specification are now ordinary — that is the whole of
+    /// this change — but two on the same shard are not. Each block carries its
+    /// own `Channel ID`, ports and era, so two for one shard are two channel
+    /// instances publishing one partition of the instrument set, and a
+    /// subscriber tracking either one sees the other's numbering as its own
+    /// gaps.
+    ///
+    /// Keyed on the pair rather than on the specification: the specification
+    /// alone was the gate that held the rest of this design shut, and it is
+    /// the shard that carries the meaning now.
+    #[error(
+        "two `[[feed]]` blocks name `spec = \"{spec}\"` on shard `{shard}`. Two blocks of one \
+         specification are ordinary — on different shards. On one shard they are two channel \
+         instances publishing the same instruments, and a subscriber on either reads the other's \
+         numbering as its own gaps."
+    )]
+    DuplicateFeedShard { spec: String, shard: String },
+
+    /// A shard whose blocks do not cover the specifications the others do.
+    ///
+    /// **This is the check that makes `list_on` total.** An instrument admitted
+    /// to a shard with no top-of-book block has quotes that reach no wire and
+    /// are counted only as unroutable — a venue doing exactly what the
+    /// interface asked of it, and a feed silently missing for a third of the
+    /// instrument set. The publisher refuses rather than discovering it per
+    /// message.
+    #[error(
+        "shard `{shard}` has no `[[feed]]` block for `{spec}`, and another shard does. Every \
+         shard carries the same specifications or the instruments admitted to this one have a \
+         feed that reaches no wire."
+    )]
+    ShardSpecsDisagree { shard: String, spec: String },
 
     /// A `shard` name that cannot be a path component.
     ///

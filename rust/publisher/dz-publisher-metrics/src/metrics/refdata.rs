@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use dz_edge_core::PortRole;
-use prometheus::{Gauge, Histogram, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Registry};
+use prometheus::{Gauge, Histogram, IntCounter, IntCounterVec, IntGaugeVec, Registry};
 
 use crate::buckets::REFDATA_LOAD_DURATION_BUCKETS;
 use crate::labels::channel_id_label;
@@ -11,7 +11,7 @@ use crate::opts::{histogram_opts, opts};
 /// Metrics for the reference-data load-and-distribution path.
 pub struct RefdataMetrics {
     definitions_emitted_total: IntCounter,
-    instruments_current: IntGauge,
+    instruments_current: IntGaugeVec,
     load_duration_seconds: Histogram,
     load_errors_total: IntCounterVec,
     last_refresh_timestamp_seconds: Gauge,
@@ -44,15 +44,32 @@ impl RefdataMetrics {
             .register(Box::new(definitions_emitted_total.clone()))
             .expect("static metric registration");
 
-        let instruments_current = IntGauge::with_opts(opts(
-            "dz_publisher_refdata_instruments_current",
-            "Instruments currently known to the upstream reference-data source.",
-            labels,
-        ))
+        let instruments_current = IntGaugeVec::new(
+            opts(
+                "dz_publisher_refdata_instruments_current",
+                "Instruments in one Channel ID's published set: the `Instrument Count` that \
+                 channel's manifest carries. Keyed by Channel ID because the specification counts \
+                 the published set per channel; one process-wide total would report the whole \
+                 process against a channel whose subscribers will only ever get messages for \
+                 their own.",
+                labels,
+            ),
+            &["channel_id"],
+        )
         .expect("static metric definition");
         registry
             .register(Box::new(instruments_current.clone()))
             .expect("static metric registration");
+        // Pre-created for every declared Channel ID, and — unlike the two
+        // manifest gauges above — not gated on the refdata port role. 0 here
+        // is a true statement rather than a wrong one: the channel exists and
+        // holds nothing. That is also the case worth alerting on, because a
+        // channel no instrument was ever admitted to is one whose subscribers
+        // wait forever, and a series that only appears on first use cannot
+        // carry an alert for the thing never happening.
+        for channel_id in channel_ids {
+            instruments_current.with_label_values(&[channel_id_label(*channel_id)]);
+        }
 
         let load_duration_seconds = Histogram::with_opts(histogram_opts(
             "dz_publisher_refdata_load_duration_seconds",
@@ -167,13 +184,26 @@ impl RefdataMetrics {
     }
 
     /// Records one instrument definition emitted.
+    ///
+    /// Process-wide, and deliberately not keyed by Channel ID: this is a rate,
+    /// and a rate over channels aggregates honestly. The per-channel form of
+    /// the question is already answered by
+    /// `dz_publisher_egress_sequence_current{port_role="refdata"}`, so a
+    /// `channel_id` label here would add a series per declared channel that no
+    /// query reads.
     pub fn definition_emitted(&self) {
         self.definitions_emitted_total.inc();
     }
 
-    /// Sets the number of instruments currently known to the upstream reference-data source.
-    pub fn set_instruments_current(&self, n: i64) {
-        self.instruments_current.set(n);
+    /// Sets the `Instrument Count` one Channel ID's published set carries.
+    ///
+    /// The count is a `usize` here and a `u32` on the wire, and a Prometheus
+    /// gauge is `i64`; the saturating conversion is done here so the lossy step
+    /// is not repeated as an `as i64` at every call site.
+    pub fn set_instruments_current(&self, channel_id: u8, count: usize) {
+        self.instruments_current
+            .with_label_values(&[channel_id_label(channel_id)])
+            .set(i64::try_from(count).unwrap_or(i64::MAX));
     }
 
     /// Records the duration of a reference-data load.
@@ -194,11 +224,23 @@ impl RefdataMetrics {
     }
 
     /// Records one new instrument listing.
+    ///
+    /// Process-wide, for the reason
+    /// [`definition_emitted`](Self::definition_emitted) gives. The standing
+    /// per-channel answer is
+    /// [`set_instruments_current`](Self::set_instruments_current), which moves
+    /// on the channel the instrument was admitted to; this counter says how
+    /// often the published set changed at all.
     pub fn new_listing(&self) {
         self.new_listings_total.inc();
     }
 
     /// Records one instrument delisting.
+    ///
+    /// Process-wide, the mirror of [`new_listing`](Self::new_listing) and for
+    /// the same reason. The two have to aggregate the same way, or the
+    /// difference between them stops being the net change in the published
+    /// set.
     pub fn delisting(&self) {
         self.delistings_total.inc();
     }

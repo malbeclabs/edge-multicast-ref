@@ -22,6 +22,37 @@ A fleet dashboard only works if every publisher emits the same names, so publish
 | `Sequence Number`, `Reset Count`, the datagram | `-egress` | Per channel instance, persisted across restarts, and capped by the specification |
 | Config, guards, shutdown, `EndOfSession` | `-runtime` | Spec-timed, and the venue's `main` is one call into it |
 
+## The shard and the channel instance
+
+One `[[feed]]` block is one **channel instance**: its own `Channel ID`, its own group and ports, its own sequence series, its own `Reset Count`, its own era, its own snapshot cycle. `[[feed]] shard` names which partition of the instrument set the block carries, in the venue's own word, and several blocks may share one — a block of each specification for one shard is two channel instances carrying one published set. Absent is the default shard, which is what a publisher with one channel per specification has always been.
+
+**The shard is the unit of reference data, and the channel instance is the unit of sequencing.** The two are different, and that difference is what the rest of this turns on:
+
+| The shard owns | The channel instance owns |
+|---|---|
+| the published set and its `Instrument Count` | the `Sequence Number` series |
+| `Manifest Seq` | `Reset Count`, and the era it is persisted as |
+| `Valid` | the snapshot cycle |
+| one `DefinitionPacer`, and so one definition cycle | |
+
+Neither is the process, and reading either as the process is a wrong answer rather than a slow one. `reference-data/spec.md` increments `Manifest Seq` "every time the published instrument set changes on this channel" and defines `Valid` against "channel state", so one process-wide published set packed onto every refdata port gives a subscriber a manifest that advances for an admission on a channel it cannot see and an `Instrument Count` it will never receive that many definitions for. `GLOSSARY.md` puts the sequence series, the `Reset Count` and the snapshot cycle on the channel instance, so channel instances drawing eras from one counter get an era decided by their position in the document — and eventually one they have published under before, which a subscriber reads as no restart at all and answers by applying fresh deltas onto a stale book.
+
+What does not partition is identity. One `Registry`, one `Instrument ID` minting table, one writer, one `[refdata] state_dir`: a registry per shard would be N identity spaces over one state directory, and the single-writer claim refuses the second at startup. The selection policy's caps stay publisher-wide too — they are a cap on what this publisher publishes — while each shard's `Instrument Count` is stated on its own channel, which is the combination that shows a shard approaching a cap that is not per shard.
+
+**The default shard keeps the names it has**, and that is an upgrade property rather than a preference. Its era file is `<spec>.era` and not `<spec>.default.era`, because a renamed era file reads as *no* era file and resolves to the first era — a publisher on era 7 restarting on era 1 and announcing nothing is the corruption the corrupt-file refusal exists to prevent, delivered by the upgrade meant to be safe. And a document with no `shard` key means what it always meant, so there is no migration.
+
+Refused at load, each for a failure that is otherwise silent:
+
+| Refused | The failure it prevents |
+|---|---|
+| two blocks naming one `(spec, shard)` pair | two channel instances publishing one partition, whose numbering a subscriber on either reads as its own gaps |
+| two blocks sharing a `channel_id` | `Config::channel_ids()` sorts and dedups, so one set of metric series is pre-created and two channel instances write to it with nothing saying so |
+| a shard with no block for a specification another shard has one for | an instrument admitted to it has quotes that reach no wire, which is the check that makes `list_on` total |
+| a shard name that is not one lowercase path component of at most sixty-four bytes | the name becomes a path component later, and one with a slash in it writes somewhere nobody configured |
+| a block spelling the default shard's own token | two spellings of one shard, and so two era files for one channel instance |
+
+A venue names a shard and nothing else about where an instrument goes. `ListingSink::list_on` takes the name; the `Channel ID`, the group, the ports, the sequence series and the era that shard resolves to remain the configuration's, and the mapping between the two is the operator's. `list` is the defaulted method, forwarding to `list_on` with `DEFAULT_SHARD`, so an adapter with no partition to state never sees a shard — and the direction is deliberate, because a defaulted `list_on` would let an implementor who did not update admit every instrument to the default shard, every shard collapsed onto one channel with no error, no counter and no log. An unknown name is refused rather than defaulted, and the shard is fixed at admission: a re-offer naming a different one is refused too, since no message in the family says an instrument moved and a subscriber on the old channel would see it stop updating.
+
 ## Composing one
 
 `dz-publisher-runtime::run` takes an `AdapterRegistry` the venue's `main` populates. `[adapter] kind` resolves against it, and a `kind` naming an unregistered adapter is a startup error listing what *is* registered — never a fallback and never a default.

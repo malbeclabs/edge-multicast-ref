@@ -1006,12 +1006,21 @@ impl Document {
         )?;
 
         let mut feeds: Vec<Feed> = Vec::new();
-        let mut seen: BTreeMap<&'static str, ()> = BTreeMap::new();
+        // Keyed on the pair. Two blocks of one specification are ordinary now —
+        // on different shards — and it is the shard that carries the meaning.
+        let mut seen: BTreeMap<(&'static str, String), ()> = BTreeMap::new();
         for section in enabled {
             let feed = section.resolve(definition_cycle, idle_guard)?;
-            if seen.insert(feed.spec.as_str(), ()).is_some() {
-                return Err(StartupError::DuplicateFeedSpec {
+            if seen
+                .insert(
+                    (feed.spec.as_str(), feed.shard.as_str().to_owned()),
+                    (),
+                )
+                .is_some()
+            {
+                return Err(StartupError::DuplicateFeedShard {
                     spec: feed.spec.as_str().to_owned(),
+                    shard: feed.shard.as_str().to_owned(),
                 });
             }
             // Checked here rather than in `channel_ids`, which sorts and dedups
@@ -1032,6 +1041,7 @@ impl Document {
         if feeds.is_empty() {
             return Err(StartupError::NoEnabledFeed);
         }
+        check_shards_carry_the_same_specifications(&feeds)?;
         // One `Source ID` per process, because that is what a `Source ID` is:
         // the lowering takes it once and every message a process sends carries
         // it, so there is no per-message decision and no per-feed one either.
@@ -1393,6 +1403,51 @@ impl FeedSection {
             idle_guard,
         })
     }
+}
+
+/// Every shard carries the same specifications, or the publisher refuses.
+///
+/// **This is what makes [`ListingSink::list_on`] total.** A venue admits an
+/// instrument to a shard; if that shard has no block for a specification another
+/// shard has, the instrument's messages for that specification reach no wire and
+/// are counted only as unroutable. The venue did exactly what the interface
+/// asked, the configuration is the thing that is wrong, and nothing at run time
+/// can tell that apart from an instrument that simply never traded.
+///
+/// So it is a startup refusal, and it names the shard and the specification it
+/// has no block for — the two things an operator has to edit.
+///
+/// [`ListingSink::list_on`]: dz_adapter_core::ListingSink::list_on
+fn check_shards_carry_the_same_specifications(feeds: &[Feed]) -> Result<(), StartupError> {
+    let mut by_shard: BTreeMap<&str, Vec<FeedSpec>> = BTreeMap::new();
+    for feed in feeds {
+        by_shard
+            .entry(feed.shard.as_str())
+            .or_default()
+            .push(feed.spec);
+    }
+    // The union, because the question is not what the first shard carries but
+    // what any of them does: a specification one shard has is one every shard
+    // must have, whichever shard the document happens to list first.
+    let mut every: Vec<FeedSpec> = Vec::new();
+    for specs in by_shard.values() {
+        for spec in specs {
+            if !every.contains(spec) {
+                every.push(*spec);
+            }
+        }
+    }
+    for (shard, specs) in &by_shard {
+        for spec in &every {
+            if !specs.contains(spec) {
+                return Err(StartupError::ShardSpecsDisagree {
+                    shard: (*shard).to_owned(),
+                    spec: spec.as_str().to_owned(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Resolve `[[source]]`, and refuse every document that names alternatives

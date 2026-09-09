@@ -28,6 +28,8 @@ Every field names a set whose series are created at 0 up front, so an `== 0` ale
 
 `ingress_message_types` is the one open vocabulary; anything undeclared is counted under `other`, which is what bounds it.
 
+`channel_ids` is the set that can get long, and it should be sized rather than discovered. One `Channel ID` is declared per channel instance, so a publisher operating several channels of one feed specification from one process declares one per `[[feed]]` block, and every family keyed on `channel_id` pre-creates a series for each of them — the sequence gauge once per port role, the heartbeat, manifest and instrument-count gauges once — before a single datagram is sent. Nothing else grows with them: the port-role and message-type families carry no `channel_id`, and a label value costs nothing, since the decimal string for every `Channel ID` is interned at first use rather than formatted per call.
+
 ## Constraints
 
 - No method accepts an `instrument_id`.

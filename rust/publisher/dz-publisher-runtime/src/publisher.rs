@@ -1278,7 +1278,6 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
         self.forwarded = counts;
 
         let published = i64::try_from(self.refdata.published()).unwrap_or(i64::MAX);
-        refdata.set_instruments_current(published);
         // Per `Channel ID`, and read from the shard that owns that channel.
         // `Manifest Seq` increments when the published set changes *on this
         // channel*, so one process-wide value written to every series would
@@ -1293,9 +1292,15 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
                 continue;
             };
             let valid = self.refdata.is_valid(name);
+            // The count this shard's channels actually state on the wire.
+            // `published()` is the process's, which is the cap's number: written
+            // to every channel it would report N times what any subscriber will
+            // ever receive a message for.
+            let on_shard = self.refdata.published_on(name).unwrap_or(0);
             for channel_id in self.feeds.channel_ids_on(shard) {
                 refdata.set_manifest_seq(channel_id, u64::from(manifest_seq));
                 refdata.set_manifest_valid(channel_id, valid);
+                refdata.set_instruments_current(channel_id, on_shard);
             }
         }
         self.metrics.book().set_instruments_published(published);

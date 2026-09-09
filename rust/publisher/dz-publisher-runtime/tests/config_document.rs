@@ -529,8 +529,82 @@ fn two_feed_blocks_naming_one_specification_are_refused() {
         .resolve()
         .unwrap_err();
     assert!(
-        matches!(error, StartupError::DuplicateFeedSpec { .. }),
+        matches!(error, StartupError::DuplicateFeedShard { .. }),
         "{error}"
+    );
+}
+
+/// Two blocks of one specification on **different** shards resolve.
+///
+/// The whole change, in one assertion. This was refused outright until the gate
+/// lifted, and everything before it was ordered so that lifting it would not
+/// produce a publisher that starts and is wrong on the wire.
+#[test]
+fn two_blocks_of_one_specification_on_different_shards_resolve() {
+    let mut doc = Doc::valid();
+    let second = doc
+        .feed
+        .replace(
+            &format!("channel_id = {CHANNEL_ID}"),
+            "channel_id = 9\nshard = \"beta\"",
+        )
+        .replace(
+            &format!("mktdata_port = {MKTDATA_PORT}"),
+            &format!("mktdata_port = {}", MKTDATA_PORT + 20),
+        )
+        .replace(
+            &format!("refdata_port = {REFDATA_PORT}"),
+            &format!("refdata_port = {}", REFDATA_PORT + 20),
+        );
+    doc.feed = format!("{}\n{second}", doc.feed);
+
+    let config = Document::parse(&doc.render())
+        .expect("parses")
+        .resolve()
+        .expect("two shards of one specification is what this change is for");
+    assert_eq!(config.feeds.len(), 2);
+    assert_eq!(config.shards().len(), 2, "two distinct shards");
+    assert_eq!(
+        config.feed_specs().len(),
+        1,
+        "and one specification, however many shards carry it"
+    );
+}
+
+/// A shard with a block for one specification and not another is refused.
+///
+/// **This is the check that makes `list_on` total.** An instrument admitted to a
+/// shard with no block for a specification another shard has would have messages
+/// that reach no wire and are counted only as unroutable — the venue doing
+/// exactly what the interface asked, and a feed silently missing for part of the
+/// instrument set.
+#[test]
+fn a_shard_missing_a_specification_another_shard_has_is_refused_naming_both() {
+    let mut doc = Doc::valid();
+    // Shard beta carries market-by-price and nothing else; the default shard
+    // carries top-of-book. Neither covers what the other does.
+    let second = Doc::depth_feed_block().replace(
+        &format!("channel_id = {DEPTH_CHANNEL_ID}"),
+        "channel_id = 9\nshard = \"beta\"",
+    );
+    doc.feed = format!("{}\n{second}", doc.feed);
+
+    let error = Document::parse(&doc.render())
+        .expect("parses")
+        .resolve()
+        .unwrap_err();
+    let message = error.to_string();
+    assert!(
+        matches!(error, StartupError::ShardSpecsDisagree { .. }),
+        "a shard with no block for a specification another has was accepted: {message}"
+    );
+    assert!(
+        message.contains("beta") || message.contains("default"),
+        "{message}"
+    );
+    assert!(
+        message.contains("top-of-book") || message.contains("market-by-price"),
+        "{message}"
     );
 }
 
