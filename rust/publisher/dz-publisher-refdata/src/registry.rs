@@ -565,6 +565,56 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
     /// is publishable the moment it composes, and a subscriber joining during
     /// the seed collects definitions it can already use; what the manifest's
     /// `Valid` flag tells it is whether the *set* is final yet.
+    ///
+    /// # What the shared slot table costs a tick, measured
+    ///
+    /// The slots are one table for the process, because an `Instrument ID` is,
+    /// so a shard's tick walks past the slots of shards that are not its own
+    /// and the search for the next definition is linear in the number of
+    /// shards rather than in one. The snapshot rotation says the same of
+    /// itself and for the same reason; this is the definition cycle's half of
+    /// it, and a shard count is sized against both of them or against neither.
+    ///
+    /// **The cursor is what makes the walk affordable, and that is arithmetic
+    /// rather than a hope.** It persists across ticks and a shard emits its
+    /// whole published set exactly once a lap, so over one lap the cursor goes
+    /// round the table exactly once — `slots` visits per shard per lap,
+    /// whatever order admission interleaved the shards in, and `N * slots`
+    /// over the process. With equal shards `slots = N * p`, so the per-lap
+    /// work is quadratic in the shard count; divided by the ticks in a lap it
+    /// is `N * slots * tick / lap` a tick. The default 30 s cycle laps in 24 s
+    /// against a 10 ms runtime tick, which is 2,400 ticks a lap:
+    ///
+    /// | Shards | Published each | Slots | Walk visits a tick |
+    /// |---|---|---|---|
+    /// | 1 | 100 | 100 | 0.04 |
+    /// | 31 | 100 | 3,100 | 40 |
+    /// | 128 | 100 | 12,800 | 683 |
+    ///
+    /// A visit is an index into a `Vec<Option<_>>`, a discriminant test and a
+    /// `usize` comparison, and the walk is entered at all only on the ticks a
+    /// shard owes something — one tick in twenty-four at the middle row.
+    ///
+    /// **The larger term is the name lookup, which is worth knowing before
+    /// sizing anything against the walk.** `shard_index` resolves the shard by
+    /// scanning the configured shards and comparing strings, and it runs
+    /// before `due` is consulted — so it costs N comparisons on *every* tick
+    /// rather than on the ticks something is owed, `N^2` a tick over the
+    /// process. Timed over a whole lap on one core: 31 shards of 100
+    /// instruments cost 1.3 µs a tick, of which 1.1 µs is the name scan and
+    /// the remainder the walk; 128 shards of 100 cost 18.6 µs a tick, of which
+    /// 15.0 µs is the name scan.
+    ///
+    /// **Both are written down rather than removed.** 1.3 µs is thirteen parts
+    /// in a hundred thousand of a 10 ms tick, and the ceiling is not far above
+    /// it: `Channel ID` is a `u8` and no two feeds may state the same one, so
+    /// 256 is the most shards any document can describe, and half that where
+    /// every shard carries both feed specifications. What would remove the
+    /// walk is a per-shard list of slots, and what that costs is the property
+    /// that makes one table right — identity is one thing, so a withdrawn
+    /// instrument has to leave one hole rather than two that can disagree.
+    /// Neither trade is taken here; if one ever is, the name lookup is the one
+    /// to take first, and this note is the reason why.
     pub fn definition_tick(&mut self, shard: &str, out: &mut Vec<InstrumentDefinition>) {
         out.clear();
         let Some(index) = self.shard_index(shard) else {

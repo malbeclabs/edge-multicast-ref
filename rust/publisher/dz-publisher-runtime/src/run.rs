@@ -566,26 +566,6 @@ fn primary_connection(config: &Config, venue: &crate::Venue) -> ConnectionId {
         .unwrap_or_else(|| venue.sources[0].connection())
 }
 
-/// Open one feed's transmitters and wrap each in its own fan-out.
-///
-/// # Every port role is `FailureScope::Process`, and two of the three are the
-/// decision the design left open
-///
-/// A dead **mktdata** socket means this publisher is not publishing, which is a
-/// reason to end the process and let a supervisor restart it where the route
-/// works. That one the design states.
-///
-/// A dead **refdata** socket leaves existing subscribers served and makes the
-/// feed unjoinable: every `Instrument ID` on the wire resolves to a definition
-/// that is no longer being retransmitted, and the reference-data cycle is what a
-/// subscriber's whole view of identity is built on. Degrading silently into a
-/// feed nobody new can join is worse than a restart.
-///
-/// A dead **snapshot** socket is the same argument for a depth feed and slightly
-/// stronger: a subscriber that lost a datagram cannot rebuild its book without
-/// one, so a depth feed with no snapshot port is a feed whose subscribers
-/// diverge one gap at a time and never recover. That is exactly why
-/// `snapshot_port` is required for a depth feed rather than optional.
 /// What opens one feed's send paths.
 ///
 /// # Why this is a trait, and why the route was not enough
@@ -713,6 +693,26 @@ pub fn compose_feeds(
     Ok(composed)
 }
 
+/// Open one feed's transmitters and wrap each in its own fan-out.
+///
+/// # Every port role is `FailureScope::Process`, and two of the three are the
+/// decision the design left open
+///
+/// A dead **mktdata** socket means this publisher is not publishing, which is a
+/// reason to end the process and let a supervisor restart it where the route
+/// works. That one the design states.
+///
+/// A dead **refdata** socket leaves existing subscribers served and makes the
+/// feed unjoinable: every `Instrument ID` on the wire resolves to a definition
+/// that is no longer being retransmitted, and the reference-data cycle is what a
+/// subscriber's whole view of identity is built on. Degrading silently into a
+/// feed nobody new can join is worse than a restart.
+///
+/// A dead **snapshot** socket is the same argument for a depth feed and slightly
+/// stronger: a subscriber that lost a datagram cannot rebuild its book without
+/// one, so a depth feed with no snapshot port is a feed whose subscribers
+/// diverge one gap at a time and never recover. That is exactly why
+/// `snapshot_port` is required for a depth feed rather than optional.
 fn open_ports(
     feed: &Feed,
     config: &Config,

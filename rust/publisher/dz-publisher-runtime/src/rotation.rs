@@ -37,6 +37,11 @@
 //! walks past the slots of shards that are not its own, so the search for the
 //! next instrument is linear in the number of shards rather than in one.
 //!
+//! The definition cycle pays the same walk over the same shared table, and
+//! `Registry::definition_tick` states its own version of this ceiling with the
+//! arithmetic worked through. A shard count is sized against both of them or
+//! against neither.
+//!
 //! # The ceiling is a sum over shards, not a comparison per shard
 //!
 //! Stated at length because the per-shard form of it was wrong the moment there
