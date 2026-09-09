@@ -1219,9 +1219,20 @@ mod tests {
         let message = register_venue_collectors(&metrics, vec![Box::new(collector)])
             .expect_err("a label the registry applies is not a venue's to apply")
             .to_string();
+        // **The quoted tokens, not the bare words.** `MetricsError` renders as
+        // `venue metric "..." carries the reserved label name "..."`, so
+        // `contains("venue")` is satisfied by the boilerplate and by the metric
+        // name alike — it would pass against a message that named no label at
+        // all, or named `source_id`. What an operator needs from this refusal
+        // is which collector to change and which label to drop, so both are
+        // asserted as the formatter writes them.
         assert!(
-            message.contains("venue"),
-            "the refusal has to name the label an operator must rename: {message}"
+            message.contains("\"venue\""),
+            "the refusal has to name the label an operator must drop: {message}"
+        );
+        assert!(
+            message.contains("\"venue_books_crossed_total\""),
+            "and the collector it has to be dropped from: {message}"
         );
         // And the exposition still renders, which is the thing the refusal
         // protected.
