@@ -35,6 +35,9 @@ mod identity;
 /// has to refuse `--inline-config` by name, and a refusal that only exists in
 /// the builds that do not need it is no refusal at all.
 mod inline_config;
+/// The record path for inline mode, which exists only where the mode does.
+#[cfg(feature = "inline")]
+mod inline_runner;
 mod runner;
 mod startup;
 
@@ -121,7 +124,7 @@ fn run(args: &Args) -> Result<(), Failure> {
     // plan requires. A build without the feature refuses here rather than
     // falling back to the arrangement nobody chose.
     if let Some(path) = &args.inline_config {
-        return Ok(inline_config::run(&config, path, args.check).map_err(Box::new)?);
+        return Ok(inline_config::run(&config, path, args.check, args.run_for).map_err(Box::new)?);
     }
 
     let plan = Plan::from_config(&config)?;

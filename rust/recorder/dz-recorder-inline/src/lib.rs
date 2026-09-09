@@ -40,6 +40,7 @@
 #![forbid(unsafe_code)]
 
 pub mod manifest;
+pub mod metrics;
 pub mod pipeline;
 pub mod ring;
 pub mod spool;

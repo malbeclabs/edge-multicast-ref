@@ -60,6 +60,12 @@ pub enum InlineConfigError {
     #[error("{0}")]
     Startup(#[from] crate::startup::StartupError),
 
+    /// The record path failed. Carried through rather than restated, so a
+    /// failure reads the same whichever arrangement produced it.
+    #[cfg(feature = "inline")]
+    #[error("{0}")]
+    Run(crate::runner::RunError),
+
     #[cfg(feature = "inline")]
     #[error("reading {path}: {source}")]
     Read {
@@ -151,20 +157,6 @@ pub enum InlineConfigError {
          DZ_LOADER_CLICKHOUSE_PASSWORD, and from nowhere else."
     )]
     Unreachable(String),
-
-    /// The seam between this task and the one that wires the mode up.
-    ///
-    /// Stated rather than papered over: falling back to archive mode is the one
-    /// thing a build that cannot run inline mode must never do, and a binary
-    /// that recorded an archive here would leave a host in the arrangement
-    /// nobody chose.
-    #[cfg(feature = "inline")]
-    #[error(
-        "`--inline-config` checks out, and this build's inline record path is not wired up yet: \
-         `--check` validates both files and reaches the destination, and recording is what the \
-         next change lands. Recording an archive instead is refused rather than substituted."
-    )]
-    RecordPathNotWired,
 }
 
 /// One inline-mode host's second file.
@@ -383,7 +375,12 @@ pub const INLINE_MODE: &str =
 /// here and never falls back to archive mode: a host silently recording bytes
 /// where rows were asked for is in the arrangement nobody chose.
 #[cfg(feature = "inline")]
-pub fn run(recorder: &RecorderConfig, path: &Path, check: bool) -> Result<(), InlineConfigError> {
+pub fn run(
+    recorder: &RecorderConfig,
+    path: &Path,
+    check: bool,
+    run_for: Option<std::time::Duration>,
+) -> Result<(), InlineConfigError> {
     let text = std::fs::read_to_string(path).map_err(|source| InlineConfigError::Read {
         path: path.to_path_buf(),
         source,
@@ -433,7 +430,7 @@ pub fn run(recorder: &RecorderConfig, path: &Path, check: bool) -> Result<(), In
         return Ok(());
     }
 
-    Err(InlineConfigError::RecordPathNotWired)
+    crate::inline_runner::run(&plan, &config, run_for).map_err(InlineConfigError::Run)
 }
 
 /// The refusal a build with no inline mode makes, in place of everything above.
@@ -448,6 +445,7 @@ pub fn run(
     _recorder: &RecorderConfig,
     _path: &Path,
     _check: bool,
+    _run_for: Option<std::time::Duration>,
 ) -> Result<(), InlineConfigError> {
     Err(InlineConfigError::NotCompiledIn)
 }
@@ -978,7 +976,7 @@ mod tests {
     fn a_build_without_inline_mode_refuses_the_flag_and_names_the_feature() {
         let config =
             RecorderConfig::parse(crate::startup::tests::VALID).expect("the fixture parses");
-        let message = run(&config, Path::new("inline.toml"), true)
+        let message = run(&config, Path::new("inline.toml"), true, None)
             .expect_err("a build without the feature refuses inline mode")
             .to_string();
         assert!(message.contains("--features inline"), "{message}");

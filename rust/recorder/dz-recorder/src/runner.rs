@@ -72,6 +72,19 @@ pub enum RunError {
     CaptureEnded { feed: String },
     #[error("feed `{feed}`: the recorder thread panicked")]
     Panicked { feed: String },
+    /// Inline mode only. Refused at startup rather than warned about: the spool
+    /// is that arrangement's whole durability, and a recorder that could not
+    /// write it would hold every row it derived in memory and call itself
+    /// healthy.
+    #[cfg(feature = "inline")]
+    #[error("feed `{feed}`: the spool could not be opened: {message}")]
+    Spool { feed: String, message: String },
+    /// Inline mode only. Without a ledger a restart re-derives and re-inserts
+    /// every window still on disk — a replace rather than a duplicate, but one
+    /// paid for on every start.
+    #[cfg(feature = "inline")]
+    #[error("feed `{feed}`: the ledger could not be opened: {message}")]
+    Ledger { feed: String, message: String },
 }
 
 /// What one capture handle has to be, for the loop and for the shutdown.
@@ -685,28 +698,7 @@ pub fn run(plan: &Plan, run_for: Option<Duration>) -> Result<(), RunError> {
     //
     // The `termination` feature is what puts SIGTERM and SIGHUP on the same
     // handler as SIGINT; all three take this path.
-    {
-        let stop = Arc::clone(&shutdown);
-        let signals = AtomicU32::new(0);
-        if let Err(e) = ctrlc::set_handler(move || {
-            if signals.fetch_add(1, Ordering::Relaxed) == 0 {
-                stop.store(true, Ordering::Relaxed);
-                return;
-            }
-            eprintln!(
-                "dz-recorder: second signal; exiting without waiting for the open segment to be \
-                 published"
-            );
-            std::process::exit(130);
-        }) {
-            // Not fatal: a recorder that cannot install a handler still records,
-            // and saying so is better than refusing to start over it.
-            eprintln!(
-                "dz-recorder: no signal handler installed ({e}); a signal will \
-                 abandon the open segment, so stop this process with --run-for"
-            );
-        }
-    }
+    install_signal_handler(&shutdown, "the open segment");
     let threads: Vec<(String, JoinHandle<Result<Summary, RunError>>)> = recorders
         .into_iter()
         .map(|recorder| {
@@ -726,6 +718,44 @@ pub fn run(plan: &Plan, run_for: Option<Duration>) -> Result<(), RunError> {
     let outcome = join_all(threads);
     drop(endpoint);
     outcome
+}
+
+/// Stops the process gracefully on a signal, and at once on a second.
+///
+/// A recorder is stopped by its supervisor, and a supervisor stops things with a
+/// signal. Without this, every restart abandons `what` — the thing an operator
+/// is most likely to be asking about, lost on the one event that happens on
+/// every deploy. The handler only raises the flag the shutdown sequence already
+/// waits on, so a signal takes exactly the same path a bounded run does.
+///
+/// **A second signal exits, and it has to be made to.** `ctrlc` keeps its
+/// handler installed for the life of the process, so without this a second
+/// SIGINT only re-raises the same flag — and the shutdown waits on work that a
+/// hung destination or hung storage can stall for as long as they like, leaving
+/// SIGKILL as the only way out, which is precisely the way that abandons what
+/// is in hand. An operator signalling twice is saying the graceful path is
+/// taking too long, and the right answer then is to die.
+///
+/// The `termination` feature is what puts SIGTERM and SIGHUP on the same
+/// handler as SIGINT; all three take this path.
+pub(crate) fn install_signal_handler(shutdown: &Arc<AtomicBool>, what: &'static str) {
+    let stop = Arc::clone(shutdown);
+    let signals = AtomicU32::new(0);
+    if let Err(e) = ctrlc::set_handler(move || {
+        if signals.fetch_add(1, Ordering::Relaxed) == 0 {
+            stop.store(true, Ordering::Relaxed);
+            return;
+        }
+        eprintln!("dz-recorder: second signal; exiting without waiting for {what}");
+        std::process::exit(130);
+    }) {
+        // Not fatal: a recorder that cannot install a handler still records,
+        // and saying so is better than refusing to start over it.
+        eprintln!(
+            "dz-recorder: no signal handler installed ({e}); a signal will abandon {what}, so \
+             stop this process with --run-for"
+        );
+    }
 }
 
 /// Waits for the bounded run to end, or for a recorder to end on its own.
