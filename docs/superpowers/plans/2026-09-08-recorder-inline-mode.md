@@ -651,27 +651,27 @@ second run of the recorder replaces the first run's coverage rather than
 standing beside it — and no coverage row was written at all, because
 `manifest.instances` came from the same empty tally.
 
-- [ ] `window.rs`: a held window. One walk drains the ring into a buffer and
+- [x] `window.rs`: a held window. One walk drains the ring into a buffer and
       completes the tally; the second reads the buffer back as a `Source`. The
       buffer is owned by the derivation stage and reused window after window,
       refilled slot by slot through the ring's own `refill`, so the second pass
       costs a copy and not an allocation per datagram.
-- [ ] `pipeline.rs`: drain, then build the manifest, then derive from the
+- [x] `pipeline.rs`: drain, then build the manifest, then derive from the
       buffer. The local named `probe` goes with the shape it was named for.
-- [ ] `inline_vs_archive.rs`: the gate calls the same held window, so its inline
+- [x] `inline_vs_archive.rs`: the gate calls the same held window, so its inline
       side is the derivation stage's own two passes rather than a second
       arrangement of them.
 
 **The capture drop totals.** Decided rather than merely wired, because the two
 halves of it have different answers:
 
-- [ ] `capture_drop_total` is **wired**, and from the archive writer's own
+- [x] `capture_drop_total` is **wired**, and from the archive writer's own
       arithmetic: `WindowTally` sums every `drop_delta` the window walked,
       whatever port role carried it, which is what `SegmentWriter` sums into the
       same field (`dz-recorder-archive/src/writer.rs:359`). The two modes'
       coverage rows are then subtractable against each other, which is the whole
       point of the column.
-- [ ] `interface_drop_total` **stays zero**, and the zero moves from a literal
+- [x] `interface_drop_total` **stays zero**, and the zero moves from a literal
       at a call site into the manifest builder with the reason on it. It is not
       a column nobody wired: **archive mode leaves it at zero too**, and
       deliberately — `dz-recorder/src/runner.rs:459-467` reads the interface
@@ -681,7 +681,7 @@ halves of it have different answers:
       to. Inline mode writing a number there would be one mode claiming a
       measurement the other declines to make, in a column a reader subtracts
       across both.
-- [ ] `window_manifest` loses both parameters. A builder with no parameter to
+- [x] `window_manifest` loses both parameters. A builder with no parameter to
       pass a zero to is a builder no caller can get this wrong in again, which
       is what made the defect survive review once already.
 
@@ -704,7 +704,7 @@ three reasons and the third is the one that decides it:
   contradicting the design's claim that the anchor is certain from the second
   window onward.
 
-- [ ] `pipeline.rs`: the increment moves inside the non-empty branch.
+- [x] `pipeline.rs`: the increment moves inside the non-empty branch.
 
 **A window the spool refused still became the next window's trailer.**
 `pipeline.rs:386` printed the error and `:390` set `*preceding = Some(trailer)`
@@ -715,7 +715,7 @@ the design's
 now says so. Stale would give the same verdict by accident, one off-by-one away
 from giving the wrong one.
 
-- [ ] `pipeline.rs`: the trailer is handed on from the `Ok` branch, and the
+- [x] `pipeline.rs`: the trailer is handed on from the `Ok` branch, and the
       `Err` branch clears it.
 
 **The ring could not report a derivation that had gone.** `ring.rs:222`'s
@@ -726,26 +726,53 @@ it, the free list stayed empty, and every offer after that returned `Dropped` �
 for ever, and indistinguishable on every counter from a ring that was merely
 overrun. That branch also skipped `pending.undelivered()`.
 
-- [ ] `ring.rs`: `free_return` becomes a `spare` slot held in the sender itself.
+- [x] `ring.rs`: `free_return` becomes a `spare` slot held in the sender itself.
       It does the one job `free_return` had — the unreachable
       `TrySendError::Full` branch puts its slot somewhere rather than shrinking the
       pool for the life of the process — without holding a sending end that
       masks the disconnection, and it is one handle fewer rather than one more.
-- [ ] Both `Disconnected` branches charge the datagram through
+- [x] Both `Disconnected` branches charge the datagram through
       `pending.undelivered()` and count it. A drop nobody can carry the
       admission for is still a drop, and `RingCounters::dropped`'s rustdoc says
       which of the two it is.
 
-**Tests:**
+**Tests, and the revert that killed each. Every one was run — reverted, watched
+fail, restored:**
 
-- Two runs of one recorder produce two window keys and two sets of coverage
-  rows, at the row altitude the corruption appears at.
-- A window's `capture_drop_total` is the sum of the `drop_delta` it walked.
-- A quiet window leaves no hole in the sequence, and the window after it carries
-  a certain era anchor.
-- A spool that refuses a window leaves the next window's anchor uncertain.
-- A ring whose deriver is gone reports `Disconnected` rather than `Dropped`,
-  from both branches, and owes the datagram either way.
+| Revert | Test that died |
+|---|---|
+| `window_manifest` moved back above `HeldWindow::fill`, which is the one-pass shape | `pipeline.rs`'s `two_runs_of_one_recorder_do_not_describe_one_window_twice` **and** `inline_vs_archive.rs`'s `a_clean_feed_derives_identically_through_both_paths` and `every_injected_fault_derives_identically_through_both_paths`, on *"the two paths produced different numbers of segment_coverage rows"* |
+| `capture_drop_total: 0` in `window_manifest` | `window.rs`'s `a_window_sums_the_capture_drops_it_walked` |
+| the `capture_drop_total` sum dropped from `WindowSource::next` | the same test, on the tally rather than on the manifest |
+| `*window_seq += 1` back to unconditional | `pipeline.rs`'s `a_quiet_window_spends_no_window_sequence_number`, reporting `[0, 4]` where `[0, 1]` was wanted: three windows a quiet feed produced spent three numbers |
+| `*preceding = Some(trailer)` back outside the `Ok` branch | `pipeline.rs`'s `a_window_the_spool_refused_leaves_the_next_window_uncertain`, on an era row carrying `anchor_certain: 1, continuation: 1` over a window whose rows never reached the store |
+| the free list's `Disconnected` back to `Offered::Dropped`, which is what holding `free_return` made of it | `ring.rs`'s `a_ring_whose_deriver_is_gone_says_so_from_either_end` |
+| `pending.undelivered()` dropped from the full list's `Disconnected` | the same test, on the owed count: 3 where 4 was wanted |
+
+Three of those are worth reading past the table.
+
+**The blocker's revert is the only one that kills the gate, and that is the
+point.** Before task 12 the gate arranged the two passes itself and passed
+against a one-pass derivation stage. It now calls the same code the stage calls,
+so the revert that reintroduces the defect fails the gate on the grain the
+defect destroys — which is the property the gate was supposed to have all along.
+
+**The window-sequence revert also fails the second half of its own test.** The
+hole it leaves is what makes the following window's trailer two behind, so the
+era anchor after a silence goes uncertain as well. One mutant, two assertions,
+and the second is the analytical claim the design makes.
+
+**The spool-refusal revert prints its own hazard.** The era row it produces says
+`continuation: 1` — a reader joining eras on that column would treat the two
+sides of a window whose rows were lost as one continuous sequence space, which
+is the merge `anchor_certain` exists to prevent.
+
+**Not tested, and it is the same gap the plan already records elsewhere:** that
+the `Disconnected` outcome reaches an operator. `inline_runner.rs:300` and `:323` discard
+what `offer` returns, so the ring can now tell a caller its deriver is gone and
+no caller asks. The stage is restarted under `catch_unwind`, so in this tree the
+outcome is defensive rather than reachable — but the same argument the plan makes
+for a `last_error` gauge in task 6 applies to it.
 
 ---
 
