@@ -1249,6 +1249,176 @@ mod tests {
         assert!(metrics.render().contains("dz_publisher_"));
     }
 
+    // -----------------------------------------------------------------------
+    // A venue's own collectors, travelling up through the composition
+    // -----------------------------------------------------------------------
+
+    /// A document every section of which is valid, naming the built-in record
+    /// adapter and whatever state directory the caller wants.
+    ///
+    /// Text rather than a `Config` assembled field by field, because what the
+    /// composition is handed is what an operator wrote: a typed value built
+    /// here would skip the resolution that decides which constructor runs at
+    /// all, and the constructor is the thing under test.
+    fn document(state_dir: &std::path::Path) -> String {
+        format!(
+            "venue = \"a-venue\"\n\
+             \n\
+             [egress]\n\
+             ttl = 1\n\
+             \n\
+             [[feed]]\n\
+             spec = \"top-of-book\"\n\
+             enabled = true\n\
+             channel_id = 3\n\
+             source_id = 41\n\
+             multicast_group = \"233.252.0.4\"\n\
+             mktdata_port = 30001\n\
+             refdata_port = 30002\n\
+             heartbeat_interval = \"1s\"\n\
+             definition_cycle = \"30s\"\n\
+             manifest_cadence = \"1s\"\n\
+             idle_guard = \"60s\"\n\
+             \n\
+             [refdata]\n\
+             state_dir = \"{}\"\n\
+             [refdata.selection]\n\
+             bootstrap_top_n = 8\n\
+             max_published = 16\n\
+             warn_published_above = 8\n\
+             \n\
+             [metrics]\n\
+             enabled = false\n\
+             listen_addr = \"127.0.0.1:9100\"\n\
+             \n\
+             [ingress]\n\
+             kind = \"uds\"\n\
+             connect_timeout = \"5s\"\n\
+             \n\
+             [adapter]\n\
+             kind = \"uds\"\n\
+             \n\
+             [adapter.upstream]\n\
+             [[adapter.upstream.listing]]\n\
+             symbol = \"A-B\"\n\
+             asset_class = \"crypto_spot\"\n\
+             price_exponent = -2\n\
+             qty_exponent = -3\n\
+             market_model = \"clob\"\n\
+             tick_size = \"0.01\"\n\
+             lot_size = \"0.001\"\n\
+             settle_type = \"cash\"\n\
+             price_bound = \"non_negative\"\n",
+            state_dir.display()
+        )
+    }
+
+    /// A `[refdata] state_dir` no directory can be created at: a path inside a
+    /// regular file.
+    ///
+    /// **The composition has to stop somewhere observable, and this is the
+    /// first such place.** [`EraStore::open`] is the step immediately after the
+    /// collectors are registered, and every step after *it* opens a socket — so
+    /// a state directory that cannot exist is what drives the whole of
+    /// `compose_and_run` up to and including the registration and no further,
+    /// with nothing bound and nothing to wait for.
+    fn state_dir_that_cannot_be_created(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "dz-venue-collectors-{label}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("a temporary directory");
+        let file = dir.join("regular-file");
+        std::fs::write(&file, b"not a directory").expect("the file is writable");
+        file.join("state")
+    }
+
+    /// A venue whose adapter is the built-in record adapter, and which counts
+    /// things of its own besides.
+    ///
+    /// Registered under `uds`, which the composition resolves to this entry
+    /// rather than to the built-in — a venue's own registration wins — so the
+    /// entry delegates for the adapter and the transport it has no reason to
+    /// invent, and adds what these tests are about through
+    /// [`Venue::with_collectors`]. That is the only way in a venue has: the
+    /// collectors leave the constructor inside a `Venue`, and the runtime is
+    /// what registers them.
+    fn a_venue_counting(series: &[&str]) -> AdapterRegistry {
+        let series: Vec<String> = series.iter().map(|name| (*name).to_owned()).collect();
+        AdapterRegistry::new().with("uds", move |cx| {
+            let built_in = crate::builtin::open(cx).expect("the built-in answers `uds`")?;
+            Ok(built_in.with_collectors(series.iter().map(|name| collector(name)).collect()))
+        })
+    }
+
+    /// Compose that document with that registry, and return the refusal.
+    fn compose(registry: &AdapterRegistry, state_dir: &std::path::Path) -> StartupError {
+        let config = crate::config::Document::parse(&document(state_dir))
+            .expect("the document is valid")
+            .resolve()
+            .expect("and it resolves");
+        compose_and_run(registry, config).expect_err("this document cannot be run")
+    }
+
+    /// A venue's collectors reach that registry through the composition, and
+    /// not only through the function that registers them.
+    ///
+    /// **The wire-up is what this path added, and nothing else here tests it.**
+    /// Every other test above hands collectors to `register_venue_collectors`
+    /// itself, so deleting its call site — or handing it `Vec::new()` — left
+    /// all of them green: nothing drove [`Venue::collectors`] as far as the
+    /// registry, and nothing called [`Venue::with_collectors`] at all.
+    ///
+    /// A reserved name is what makes the arrival observable from out here. The
+    /// `PublisherMetrics` the composition builds is a local value no test can
+    /// render, but that registry's refusal cannot be raised by a collector
+    /// which did not reach it — so a venue handing up a `dz_publisher_` series
+    /// is refused by name, and a composition that dropped the collectors
+    /// instead gets as far as the state directory and fails for that.
+    #[test]
+    fn a_venues_reserved_series_is_refused_by_the_composition() {
+        let error = compose(
+            &a_venue_counting(&["dz_publisher_egress_datagrams_total"]),
+            &state_dir_that_cannot_be_created("reserved"),
+        );
+
+        match error {
+            StartupError::VenueMetric { source } => assert!(
+                source
+                    .to_string()
+                    .contains("dz_publisher_egress_datagrams_total"),
+                "the refusal has to name the series an operator must rename: {source}"
+            ),
+            other => panic!(
+                "the venue's collectors never reached that registry: the composition refused \
+                 for {other} instead"
+            ),
+        }
+    }
+
+    /// A series that registry accepts does not stop the composition, and it is
+    /// registered before anything is opened.
+    ///
+    /// The other half of the wire-up. A venue with counters of its own has to
+    /// start, so an accepted name must not be a refusal; and the step the
+    /// composition reaches next is the state directory, which is what says the
+    /// registration happened before a socket existed. A venue that learns its
+    /// metric names are unusable only once the publisher is on the wire has
+    /// learned it too late.
+    #[test]
+    fn an_accepted_series_lets_the_composition_reach_the_state_directory() {
+        let error = compose(
+            &a_venue_counting(&["venue_books_crossed_total"]),
+            &state_dir_that_cannot_be_created("accepted"),
+        );
+
+        assert!(
+            matches!(error, StartupError::Era { .. }),
+            "an accepted collector is not a refusal, and the next step is the state \
+             directory: {error}"
+        );
+    }
+
     #[test]
     fn a_repeated_refusal_is_printed_on_a_decade_schedule() {
         // The tick body runs every 10ms, so a permanent refusal printed on
