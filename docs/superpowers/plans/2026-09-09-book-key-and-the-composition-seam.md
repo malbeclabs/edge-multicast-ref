@@ -64,12 +64,20 @@ Task 1 is a correction to a document that is wrong now, and it lands first becau
 
 ### 4. The composition seam leaves `dz-publisher-runtime`
 
-- [ ] A crate over `dz-adapter-core` and `dz-ingress-core` holding `AdapterRegistry`, `Venue` and `AdapterContext`. Not either boundary crate: one that gained a registry would be a boundary crate with a composition in it.
-- [ ] `dz-publisher-runtime` re-exports all three, so no venue's `main` and no in-tree caller changes.
+**The design understated this task and has been corrected first.** A literal move of the three types does not produce "a small crate over the two boundary crates": `Venue` gained a `collectors` field of a Prometheus type, `AdapterContext`'s accessors hand out three config types of the publisher's, and `AdapterRegistry::open` both returns `StartupError` and resolves the built-in. The design now states each cost and where it is paid; this task builds what it says.
+
+- [ ] `rust/venue/dz-venue-composition`, over `dz-adapter-core`, `dz-ingress-core`, `dz-adapter-uds`, the three codec crates, `prometheus`, `serde`, `thiserror` and `toml`. Not either boundary crate: one that gained a registry would be a boundary crate with a composition in it. The name is argued against the glossary's banned-word table in the design.
+- [ ] It holds `AdapterRegistry`, `Venue`, `AdapterContext`, `AdapterInitError`, the built-in record adapter, and the four config types the context exposes — `ReplayConfig`, `Source`, `SourceRole`, `FeedSpec`. `EmittedFeed` stays with the publisher: it is about composing a send path.
+- [ ] `AdapterRegistry<E>` over an `AdapterResolution` trait, so `open`'s two failures are reported in the caller's own error. A venue's constructor still returns `Result<Venue, AdapterInitError>`; only the registry's report of a refusal is parameterized.
+- [ ] `AdapterSection`, the four values `AdapterContext::new` reads out of an `[adapter]` section, so `AdapterConfig` stays in `dz-publisher-runtime` and its `StartupError`-returning method stays with it.
+- [ ] `dz-publisher-runtime` re-exports all of it — `AdapterRegistry` as a type alias at `StartupError` — so no venue's `main` and no in-tree caller changes. `FeedSpec::resolve` and `SourceRole::resolve` return the new crate's own errors, mapped into the `StartupError` variants they always produced so both messages and both variants' fields are unchanged.
 - [ ] `AdapterContext`'s feed set keeps its name and gains the second reading in its doc: *what this process is recording* is the same question as *what this publisher publishes*, with the same value and the same refusal.
 - [ ] The new crate's own documentation states what it is for, which is that two runtimes compose a venue the same way.
+- [ ] `rust/venue` is added to the public-repository check's scan roots. That script fails loudly for a root that has gone missing and says nothing about one that was never added, so a new directory is a hole in it until it is told.
 
-**Test:** the existing `adapter_registry.rs` suite moves with the types and passes unchanged — this task is a refactor and that suite is its gate. Plus one new assertion that the new crate's dependency graph contains neither the egress nor the reference-data registry, which is the whole reason it exists; `cargo metadata` is where that is readable without a network.
+**Test:** the existing `adapter_registry.rs` suite passes unchanged — this task is a refactor and that suite is its gate. It does **not** move with the types, and the plan was wrong to say it would: it drives `Document::parse`, matches `StartupError`'s variants and asserts the built-in's name in `registered_list()`, so it is a suite about the publisher's registry rather than about the seam's. Unchanged and still in `dz-publisher-runtime` is the stronger statement anyway — it is the same file compiling against the same paths after the types left the crate.
+
+Plus one new assertion, in the new crate, that its resolved dependency graph contains neither `dz-publisher-egress` (the transmitters and the era store) nor `dz-publisher-refdata` (the reference-data registry) nor `dz-publisher-runtime`; `cargo metadata --offline` is where that is readable without a network.
 
 **The revert:** leave the types in `dz-publisher-runtime` and re-export from the new crate instead. The dependency assertion fails, and nothing else does — which is the point of asserting the graph rather than the behaviour.
 
