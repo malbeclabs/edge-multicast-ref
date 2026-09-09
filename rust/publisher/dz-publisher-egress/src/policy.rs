@@ -39,16 +39,15 @@ use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 /// One hop: the group is delivered on the attached segment and the network's own
 /// last-mile carries it from there.
 ///
-/// **This is not the configuration document's default, and the name is a
-/// leftover.** `[egress] ttl` has no default: it is stated or the publisher
-/// refuses to start, because a document that omitted it published one hop and
-/// every way an operator could have looked said the feed was healthy. What this
-/// constant still is: the value [`EgressPolicy::default`] carries for a
-/// hand-composed publisher, and the value the startup refusal names as the line
-/// that reproduces the old behaviour.
+/// **The configuration document has no default for `ttl`**, despite this
+/// constant's name: `[egress] ttl` is stated or the publisher refuses to start,
+/// because a wrong hop count is invisible from every direction an operator can
+/// look. A reader who adds a serde default here from the name has removed that
+/// refusal.
 ///
-/// A reader who restores a serde default from this constant's name has undone
-/// the change it now documents.
+/// What this constant is: the value [`EgressPolicy::default`] carries for a
+/// hand-composed publisher, and the value the startup refusal names as the one
+/// line a document needs to publish on the attached segment only.
 pub const DEFAULT_TTL: u8 = 1;
 
 /// An IPv4 prefix, for stating an invariant about a discovered address.

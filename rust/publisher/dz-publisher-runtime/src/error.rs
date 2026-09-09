@@ -442,7 +442,7 @@ pub enum StartupError {
 
     /// `[egress] ttl` is not stated, and it has no default.
     ///
-    /// # Why the key lost its default rather than gaining a better one
+    /// # Why the key is stated rather than defaulted
     ///
     /// One hop is the right value for a host whose subscribers share its
     /// segment. Being wrong about it is silent in every direction an operator
@@ -463,8 +463,8 @@ pub enum StartupError {
     /// rather than from a subscriber that never received anything.
     #[error(
         "`[egress] ttl` is not stated and has no default. `ttl = 1` publishes on the \
-         attached segment only, which is what a document omitting this key used to do; a \
-         group that crosses a router needs the hop count its network takes."
+         attached segment only, which is the whole of what a subscriber on that segment \
+         needs; a group that crosses a router needs the hop count its network takes."
     )]
     TtlUnstated,
 
