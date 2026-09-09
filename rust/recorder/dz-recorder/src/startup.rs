@@ -534,6 +534,22 @@ impl Plan {
         })
     }
 
+    /// Whether this arrangement writes objects.
+    ///
+    /// A method rather than a comparison at each site, so a third arrangement —
+    /// if one is ever added — has one place to answer it.
+    #[must_use]
+    pub fn writes_an_archive(&self) -> bool {
+        #[cfg(feature = "inline")]
+        {
+            self.arrangement == Arrangement::Archive
+        }
+        #[cfg(not(feature = "inline"))]
+        {
+            true
+        }
+    }
+
     /// What `--check` prints: enough for a deployment pipeline to see what this
     /// configuration would actually do, including the three things it derives
     /// rather than reads.
@@ -561,11 +577,17 @@ impl Plan {
             link_headers(self.mode).as_str(),
             drop_scope(self.mode).as_str(),
         );
-        let _ = writeln!(
-            out,
-            "archive rotate={}B or {:?} compression=zstd staging budget={}B per feed",
-            self.config.archive.rotate_bytes, self.rotate_interval, self.staging_max_per_feed,
-        );
+        // Only where an archive is written. In inline mode these keys are
+        // refused outright, and printing a rotation bound and a staging budget
+        // of zero would have an operator reading `--check` for a problem that
+        // is the absence of a thing this arrangement does not do.
+        if self.writes_an_archive() {
+            let _ = writeln!(
+                out,
+                "archive rotate={}B or {:?} compression=zstd staging budget={}B per feed",
+                self.config.archive.rotate_bytes, self.rotate_interval, self.staging_max_per_feed,
+            );
+        }
         let _ = writeln!(out, "metrics listen_addr={}", self.listen_addr);
         let _ = writeln!(
             out,
@@ -578,9 +600,9 @@ impl Plan {
                 .iter()
                 .map(|b| format!("{}={}", b.role.as_str(), b.port))
                 .collect();
-            let _ = writeln!(
+            let _ = write!(
                 out,
-                "feed {} group={} {} interface={} staging={} completed={}",
+                "feed {} group={} {} interface={}",
                 feed.spec,
                 feed.bindings
                     .first()
@@ -589,13 +611,16 @@ impl Plan {
                 feed.device
                     .as_deref()
                     .map_or_else(|| feed.membership_interface.to_string(), ToOwned::to_owned),
-                feed.archive
-                    .as_ref()
-                    .map_or_else(|| "-".to_owned(), |a| a.staging_dir.display().to_string()),
-                feed.archive
-                    .as_ref()
-                    .map_or_else(|| "-".to_owned(), |a| a.completed_dir.display().to_string()),
             );
+            if let Some(archive) = &feed.archive {
+                let _ = write!(
+                    out,
+                    " staging={} completed={}",
+                    archive.staging_dir.display(),
+                    archive.completed_dir.display(),
+                );
+            }
+            let _ = writeln!(out);
         }
         out
     }

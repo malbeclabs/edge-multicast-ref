@@ -320,23 +320,18 @@ impl InlineConfig {
     /// What `--check` prints: which arrangement is running, what it keeps, and
     /// what was read rather than what an operator believes they wrote.
     #[must_use]
-    pub fn summary(&self, identity: &dz_recorder_core::RecorderIdentity) -> String {
+    /// The identity is not repeated here.
+    ///
+    /// The plan prints it, and `--check` prints the plan first: an operator
+    /// reading two `site=` lines has to work out whether the two files disagree,
+    /// and the answer is that they cannot — inline mode takes the identity from
+    /// the recorder's own file and this one has no key for it.
+    pub fn summary(&self) -> String {
         use std::fmt::Write as _;
         let mut out = String::new();
-        // First, and in the words the design uses: the two modes keep different
-        // things, and this is the line that says which host this is.
+        // In the words the design uses: the two modes keep different things,
+        // and this is the line that says which one this host is.
         let _ = writeln!(out, "{INLINE_MODE}");
-        let _ = writeln!(
-            out,
-            "site={} recorder={} env={}",
-            identity.site, identity.recorder, identity.env
-        );
-        let _ = writeln!(
-            out,
-            "build version={} commit={}",
-            identity.build_version, identity.build_commit
-        );
-        let _ = writeln!(out, "config hash={}", identity.config_hash);
         let _ = writeln!(
             out,
             "inline window={}B or {:?} ring={} datagrams",
@@ -403,11 +398,10 @@ pub fn run(
     // `for_inline` rather than `from_config`, because the archive directories
     // this refuses a value for are the ones that one requires one of.
     let plan = crate::startup::Plan::for_inline(recorder)?;
-    let identity = plan.identity.clone();
     // Where the recorder's own summary goes, and for the same reason: `--check`
     // is a result a pipeline reads on stdout, and a recording run's summary is
     // a log line beside the version it prints on startup.
-    let summary = config.summary(&identity);
+    let summary = config.summary();
     if check {
         print!("{}", plan.summary());
         print!("{summary}");
@@ -873,18 +867,58 @@ listen_addr = "127.0.0.1:0"
     #[test]
     fn the_summary_says_which_mode_is_running_and_that_no_datagram_is_kept() {
         let fixture = Fixture::new();
-        let identity = crate::identity::identity_of(&recorder_config(RECORDER));
-        let summary = fixture.config().summary(&identity);
+        let summary = fixture.config().summary();
         assert!(summary.contains("mode=inline"), "{summary}");
         assert!(summary.contains("NO DATAGRAM IS KEPT"), "{summary}");
-        assert!(
-            summary.contains("site=site-a recorder=recorder-1"),
-            "{summary}"
-        );
-        assert!(summary.contains(&identity.config_hash), "{summary}");
         assert!(summary.contains("database=recorder"), "{summary}");
         assert!(summary.contains("user=dz_loader"), "{summary}");
         assert!(!summary.to_lowercase().contains("password"), "{summary}");
+    }
+
+    /// The identity appears once in what `--check` prints, and it is the plan's.
+    ///
+    /// Two `site=` lines would have an operator working out whether the two
+    /// files disagree — and the answer is that they cannot, because this file
+    /// has no key for it. A summary that repeated the identity would invent a
+    /// question the configuration makes unaskable.
+    #[test]
+    fn the_inline_summary_does_not_repeat_the_identity_the_plan_prints() {
+        let fixture = Fixture::new();
+        let config = recorder_config(RECORDER);
+        let inline = fixture.config().summary();
+        let plan = crate::startup::Plan::for_inline(&config)
+            .expect("the fixture is one inline mode can start on")
+            .summary();
+
+        assert!(plan.contains("site=site-a recorder=recorder-1"), "{plan}");
+        assert!(
+            !inline.contains("site=site-a"),
+            "the identity is the plan's, and printing it twice is what this guards: {inline}"
+        );
+        assert!(
+            !inline.contains("config hash="),
+            "and so is the provenance hash: {inline}"
+        );
+    }
+
+    /// `--check` in inline mode prints nothing about an archive.
+    ///
+    /// The keys are refused outright, so a rotation bound and a staging budget
+    /// of zero would have an operator reading the output for a problem that is
+    /// the absence of a thing this arrangement does not do.
+    #[test]
+    fn the_inline_plan_summary_names_no_archive() {
+        let config = recorder_config(RECORDER);
+        let summary = crate::startup::Plan::for_inline(&config)
+            .expect("the fixture is one inline mode can start on")
+            .summary();
+        assert!(!summary.contains("archive rotate="), "{summary}");
+        assert!(!summary.contains("staging budget="), "{summary}");
+        assert!(!summary.contains("staging="), "{summary}");
+        assert!(!summary.contains("completed="), "{summary}");
+        // And the feed is still there: what is dropped is the archive, not the
+        // thing an operator came to check.
+        assert!(summary.contains("feed top-of-book"), "{summary}");
     }
 
     /// A size or a duration without a unit is refused rather than guessed at,
