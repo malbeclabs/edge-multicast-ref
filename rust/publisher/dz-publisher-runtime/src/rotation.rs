@@ -37,13 +37,51 @@
 //! walks past the slots of shards that are not its own, so the search for the
 //! next instrument is linear in the number of shards rather than in one.
 //!
-//! **What that does not survive**, stated because it is the ceiling and not a
-//! detail: a set so large that `cycle / instruments` falls below the runtime's
-//! own tick laps more slowly than configured, and a single instrument whose book
-//! is enormous still goes out as one group. Both need a level-budget scheduler
-//! with mid-group resumption, which is a different design; the seam for it is
+//! # The ceiling is a sum over shards, not a comparison per shard
+//!
+//! Stated at length because the per-shard form of it was wrong the moment there
+//! was more than one rotation, and wrong in the direction that reads as fine.
+//!
+//! Each rotation divides *its own* cycle by *its own* published count, which is
+//! what makes each channel's `[[feed]] snapshot_cycle` mean what it says. The
+//! **serving** rate is not per shard: the tick body calls
 //! [`Publisher::periodic_snapshot`](crate::publisher::Publisher::periodic_snapshot)
-//! and replacing that changes nothing else in the loop.
+//! once and it returns at most one instrument, because a snapshot is a group of
+//! datagrams and the unit of progress is an instrument. So N shards draw on one
+//! budget of one snapshot per runtime tick. The demand adds up and the supply
+//! does not.
+//!
+//! The old statement of the ceiling was *a set so large that
+//! `cycle / instruments` falls below the runtime's own tick*. That was the whole
+//! of it with one rotation. With N it misses the case shards introduce:
+//!
+//! | | Derived tick | Reads as | Is |
+//! |---|---|---|---|
+//! | 1 shard, 1,000 instruments, 5 s cycle | 5 ms | breached, below the 10 ms tick | breached |
+//! | 31 shards, 100 instruments each, 5 s cycle | 50 ms | comfortable, five times the tick | 620 snapshots a second wanted, 100 available: every channel laps in 31 s |
+//!
+//! Every shard in the second row is comfortable and the process is not. The
+//! true condition is over the sum — `Σ (published_i / cycle_i) ≤ 1 / tick`, or
+//! equivalently `Σ (tick / tick_i) ≤ 1` — and [`schedule_share`] is that term
+//! for one shard, in integer arithmetic against [`WHOLE_SNAPSHOT_CAPACITY`], so
+//! that the sum can be asserted directly the way [`tick`] is.
+//!
+//! It is **counted rather than refused**, and that is a decision rather than an
+//! omission: the divisor is the published count, so at load there is nothing to
+//! divide, and a refusal on the first tick that could compute it would darken a
+//! publisher that is already sending — over a shortfall that degrades into a
+//! slower lap and never into a wrong answer, and whose remedy is a
+//! configuration edit an operator has to be told about rather than one the
+//! process can make. So
+//! [`Publisher::snapshot_schedule_overruns`](crate::publisher::Publisher::snapshot_schedule_overruns)
+//! counts the ticks and the exit report names them.
+//!
+//! **What no arithmetic here survives**, stated because it is the other ceiling
+//! and not a detail: a single instrument whose book is enormous still goes out
+//! as one group. That, and the shortfall above, both want a level-budget
+//! scheduler with mid-group resumption, which is a different design; the seam
+//! for it is `periodic_snapshot` and replacing that changes nothing else in the
+//! loop.
 
 use std::time::Duration;
 
@@ -82,6 +120,46 @@ pub struct SnapshotRotation {
 pub fn tick(cycle: Duration, instruments: usize) -> Duration {
     let instruments = u32::try_from(instruments.max(1)).unwrap_or(u32::MAX);
     (cycle / instruments).max(MIN_TICK)
+}
+
+/// One process's whole snapshot-serving capacity, as a share.
+///
+/// A scale rather than a unit, chosen so that [`schedule_share`] is integer
+/// arithmetic: a rational comparison of rates in floating point would have the
+/// answer depend on rounding at exactly the boundary this is asked about.
+pub const WHOLE_SNAPSHOT_CAPACITY: u64 = 1_000_000;
+
+/// The share of one process's snapshot capacity one rotation's schedule asks
+/// for.
+///
+/// `process_tick` is how often the runtime's loop serves one snapshot, and
+/// serving one is all it does per tick — see this module's note. So a shard
+/// wanting one snapshot every `tick_i` asks for `process_tick / tick_i` of the
+/// whole, and a configuration is achievable exactly when the shares of every
+/// shard sum to no more than [`WHOLE_SNAPSHOT_CAPACITY`].
+///
+/// Separate from the type for the same reason [`tick`] is: the sum is the whole
+/// of the claim, and a claim that cannot be asserted on its own is one that
+/// gets asserted through six other things or not at all.
+///
+/// **A shard with nothing published asks for nothing**, rather than for the
+/// share of a set of one that [`tick`]'s own clamp would imply. There is no
+/// pass to make over an empty published set and [`SnapshotRotation::due`] makes
+/// none; charging it for one would have a document's worth of empty channels
+/// add up to a shortfall nobody is experiencing.
+#[must_use]
+pub fn schedule_share(process_tick: Duration, cycle: Duration, instruments: usize) -> u64 {
+    if instruments == 0 {
+        return 0;
+    }
+    // `tick` clamps at `MIN_TICK`, so this divisor is never zero however the
+    // cycle and the count are arranged.
+    let per_instrument = tick(cycle, instruments).as_nanos();
+    let wanted = process_tick
+        .as_nanos()
+        .saturating_mul(u128::from(WHOLE_SNAPSHOT_CAPACITY))
+        / per_instrument;
+    u64::try_from(wanted).unwrap_or(u64::MAX)
 }
 
 impl SnapshotRotation {
@@ -234,6 +312,67 @@ mod tests {
              process does"
         );
         assert!(b.due(4_000_000_000, &table, 1, shard_b).is_some());
+    }
+
+    /// The process tick every share below is measured against, and the one the
+    /// runtime actually runs.
+    const PROCESS_TICK: Duration = crate::run::TICK;
+
+    #[test]
+    fn a_share_is_the_process_tick_over_the_shards_own_derived_tick() {
+        // The whole of the ceiling arithmetic, asserted as arithmetic. A shard
+        // wanting one snapshot every 50ms out of a process serving one every
+        // 10ms asks for a fifth of the process.
+        assert_eq!(
+            schedule_share(PROCESS_TICK, Duration::from_secs(5), 100),
+            WHOLE_SNAPSHOT_CAPACITY / 5
+        );
+        // And one wanting one every 10ms asks for the whole of it: achievable,
+        // and achievable only if it is the only shard.
+        assert_eq!(
+            schedule_share(PROCESS_TICK, Duration::from_secs(1), 100),
+            WHOLE_SNAPSHOT_CAPACITY
+        );
+    }
+
+    #[test]
+    fn a_shard_with_nothing_published_asks_for_nothing() {
+        // `tick` clamps an empty count to one, which would charge every empty
+        // channel in a long document for a pass it never makes. There is no
+        // pass to make over an empty published set and `due` makes none.
+        assert_eq!(schedule_share(PROCESS_TICK, Duration::from_secs(5), 0), 0);
+    }
+
+    #[test]
+    fn every_shards_derived_tick_can_be_comfortable_while_the_process_is_not() {
+        // The case the per-shard statement of the ceiling misses, and the whole
+        // reason this function exists. Each of these derives a 50ms tick, five
+        // times the process tick, and every one of them reads as comfortable.
+        let shards = 31;
+        let per_shard = schedule_share(PROCESS_TICK, Duration::from_secs(5), 100);
+        assert!(
+            tick(Duration::from_secs(5), 100) > PROCESS_TICK,
+            "the fixture must be one the per-shard reading calls comfortable"
+        );
+        let total = per_shard * shards;
+        assert!(
+            total > WHOLE_SNAPSHOT_CAPACITY,
+            "31 shards each asking for a fifth of the process is not achievable: {total}"
+        );
+        // 6.2 processes' worth, which is the 31-second lap of a five-second
+        // cycle stated as a share.
+        assert_eq!(total, WHOLE_SNAPSHOT_CAPACITY * 62 / 10);
+    }
+
+    #[test]
+    fn one_shard_below_the_process_tick_is_still_caught() {
+        // The case the old per-shard statement did catch, which the sum must
+        // not stop catching: a set so large that its derived tick falls below
+        // the process tick is one shard already over the whole budget.
+        assert!(tick(Duration::from_secs(5), 1_000) < PROCESS_TICK);
+        assert!(
+            schedule_share(PROCESS_TICK, Duration::from_secs(5), 1_000) > WHOLE_SNAPSHOT_CAPACITY
+        );
     }
 
     #[test]

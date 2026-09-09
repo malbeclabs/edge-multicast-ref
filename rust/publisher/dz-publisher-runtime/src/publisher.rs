@@ -83,7 +83,7 @@ use crate::clock::Clock;
 use crate::config::EmittedFeed;
 use crate::guard::{ConsistencyGuard, Exit, IdleGuard, Inconsistency};
 use crate::pipeline::{DroppedSink, FeedPipeline};
-use crate::rotation::SnapshotRotation;
+use crate::rotation::{schedule_share, SnapshotRotation, WHOLE_SNAPSHOT_CAPACITY};
 
 /// How often the runtime drains the adapter's listings.
 ///
@@ -750,6 +750,10 @@ pub struct Publisher<S: StateStore, K: Clock + Clone> {
     /// Which shard the search for a due snapshot starts at. See
     /// [`Publisher::due_snapshot`].
     snapshot_cursor: usize,
+    /// Ticks on which every shard's configured cycle together asked for more
+    /// snapshots than one process can send. See
+    /// [`Publisher::snapshot_schedule_overruns`].
+    snapshot_schedule_overruns: u64,
     seeded: bool,
 }
 
@@ -814,6 +818,7 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
             last_poll_ns: None,
             snapshots,
             snapshot_cursor: 0,
+            snapshot_schedule_overruns: 0,
             seeded: false,
         }
     }
@@ -939,6 +944,7 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
             }
         }
 
+        self.count_snapshot_schedule();
         self.forward_counts();
         self.check_consistency();
 
@@ -1117,6 +1123,69 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
         let now_mono = dz_publisher_refdata::Clock::monotonic_ns(&self.clock);
         let due = self.due_snapshot(now_mono)?;
         Some(self.snapshot(adapter, due))
+    }
+
+    /// Count this tick if the configured cycles ask for more than can be sent.
+    ///
+    /// **The ceiling is a sum, and stating it per shard stopped detecting it.**
+    /// Each rotation divides its own cycle by its own published count, so each
+    /// one's arithmetic can be comfortable while the process is asked for
+    /// several times what it can serve: [`Self::periodic_snapshot`] returns at
+    /// most one instrument per call and the loop calls it once per
+    /// [`TICK`](crate::run::TICK), so N shards draw on one budget. Thirty-one
+    /// shards of a hundred instruments on a five-second cycle each derive a
+    /// fifty-millisecond tick — five times the process tick, and comfortable by
+    /// the per-shard reading — while together they want six hundred and twenty
+    /// snapshots a second out of a hundred available.
+    ///
+    /// **This is the one thing in the tick body that depends on the caller's
+    /// interval**, and it has to be: every *cadence* here is read off the clock
+    /// as a debt, which is what makes a slow loop lap at the same rate as a
+    /// fast one, but how many snapshots a process can *serve* is exactly its
+    /// loop interval. So the constant is read rather than passed, and it is
+    /// public for this.
+    ///
+    /// Counted rather than refused — see `crate::rotation`'s note. The count is
+    /// per tick and not per shard: what an operator has to know is that the
+    /// process is behind, and which shards contribute is the arithmetic of
+    /// their own `[[feed]] snapshot_cycle` and `Instrument Count`, both of which
+    /// are already on the wire and in a gauge.
+    fn count_snapshot_schedule(&mut self) {
+        let mut share: u64 = 0;
+        for (index, rotation) in self.snapshots.iter().enumerate() {
+            let Some(rotation) = rotation else {
+                continue;
+            };
+            let Some(name) = self.feeds.shard_name(index) else {
+                continue;
+            };
+            // This shard's own count, as everywhere else: the process's would
+            // make every shard's demand look like every other's.
+            let Some(published) = self.refdata.published_on(name) else {
+                continue;
+            };
+            share = share.saturating_add(schedule_share(
+                crate::run::TICK,
+                rotation.cycle(),
+                published,
+            ));
+        }
+        if share > WHOLE_SNAPSHOT_CAPACITY {
+            self.snapshot_schedule_overruns = self.snapshot_schedule_overruns.saturating_add(1);
+        }
+    }
+
+    /// Ticks on which the configured snapshot cycles asked for more snapshots
+    /// than one process can send.
+    ///
+    /// Non-zero means every channel is lapping more slowly than its
+    /// `[[feed]] snapshot_cycle` states, by roughly the factor the demand
+    /// exceeds the supply — with nothing else saying so, because each shard's
+    /// rotation is honouring its own arithmetic and the datagram counters keep
+    /// moving. See [`Self::count_snapshot_schedule`].
+    #[must_use]
+    pub const fn snapshot_schedule_overruns(&self) -> u64 {
+        self.snapshot_schedule_overruns
     }
 
     /// The next instrument any shard's rotation owes, at most one per call.

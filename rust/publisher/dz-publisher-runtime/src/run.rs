@@ -66,7 +66,16 @@ use crate::registry::{AdapterContext, AdapterRegistry};
 /// a debt rather than counted in ticks, so this value changes only how promptly
 /// a due thing happens and never how much of it happens. Ten milliseconds is
 /// well below the shortest cadence the design's own configuration states.
-const TICK: Duration = Duration::from_millis(10);
+///
+/// **One thing the tick serves is not a debt, and that is why this is public.**
+/// The tick body takes at most one periodic snapshot, because a snapshot is a
+/// group of datagrams and the unit of progress is an instrument. So this value
+/// *is* the process's snapshot serving rate, every shard's rotation draws on
+/// that one budget, and
+/// [`rotation::schedule_share`](crate::rotation::schedule_share) needs it to say
+/// whether the configured cycles can all be met. See `crate::rotation`'s note on
+/// the ceiling.
+pub const TICK: Duration = Duration::from_millis(10);
 
 /// The most datagrams one definition tick may emit.
 ///
@@ -852,6 +861,15 @@ fn report<S: StateStore, K: Clock + Clone>(
             observer.adapter_errors()
         );
     }
+    if publisher.snapshot_schedule_overruns() > 0 {
+        eprintln!(
+            "dz-publisher-runtime: on {} ticks the configured `[[feed]] snapshot_cycle` values \
+             together asked for more snapshots than one process can send, so every channel \
+             lapped more slowly than its own key states. One process serves one periodic \
+             snapshot per {TICK:?}, and that budget is shared across every shard",
+            publisher.snapshot_schedule_overruns()
+        );
+    }
     let counts = publisher.refdata().counts();
     if counts.declined_unknown_shard > 0 {
         eprintln!(
@@ -984,7 +1002,21 @@ async fn tick_loop<S: StateStore, K: Clock + Clone>(
                     named_dropped.push(name);
                 }
             }
-            publisher.tick()
+            let exit = publisher.tick();
+            // The tick that just ran counted whether the configured cycles can
+            // be met. On the decade schedule, because a document that asks for
+            // more than the process can send asks for it on every tick
+            // thereafter and one line per tick is a hundred a second. The exit
+            // report names the total.
+            if worth_a_line(publisher.snapshot_schedule_overruns()) {
+                eprintln!(
+                    "dz-publisher-runtime: the configured snapshot cycles want more snapshots \
+                     than one process can send ({} ticks so far), so every channel is lapping \
+                     more slowly than its `[[feed]] snapshot_cycle` states",
+                    publisher.snapshot_schedule_overruns()
+                );
+            }
+            exit
         };
         if let Some(exit) = exit {
             return exit;

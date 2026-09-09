@@ -680,3 +680,75 @@ fn a_shards_snapshot_rotation_serves_its_own_instruments_at_its_own_cycle() {
         "the smaller shard's rotation never reached its own instrument"
     );
 }
+
+/// Every shard's cycle achievable on its own, and not together.
+///
+/// The rotation divisor is per shard, which is right. What that stopped
+/// detecting is that the *serving* rate is not: the tick body takes at most one
+/// periodic snapshot, so N shards draw on one budget of one per runtime tick and
+/// the demand adds up while the supply does not.
+///
+/// The fixture is the case the per-shard reading of the ceiling calls fine.
+/// Thirty milliseconds over two instruments is one snapshot every fifteen on
+/// each shard — comfortably above the runtime's own ten-millisecond tick, so
+/// neither shard's arithmetic is breached. Together they want one every seven
+/// and a half milliseconds out of a process that can serve one every ten, so
+/// both channels lap at four fifths of the rate their key states, and until
+/// this count nothing said so: each rotation is honouring its own arithmetic
+/// and every datagram counter keeps moving.
+#[test]
+fn cycles_that_are_achievable_per_shard_and_not_together_are_counted() {
+    let mut h = harness_two_shards_with_rotation(Duration::from_millis(30));
+    let mut adapter = FakeAdapter::on_shards(&[
+        ("A-B", SHARD_A),
+        ("C-D", SHARD_A),
+        ("E-F", SHARD_B),
+        ("G-H", SHARD_B),
+    ]);
+    assert!(h.publisher.poll_listings(&mut adapter));
+    assert_eq!(
+        h.publisher.snapshot_schedule_overruns(),
+        0,
+        "no tick has run yet, so there is nothing to have been behind on"
+    );
+
+    let _ = h.publisher.tick();
+    assert_eq!(
+        h.publisher.snapshot_schedule_overruns(),
+        1,
+        "two shards each asking for two thirds of the process is not achievable, and the \
+         per-shard arithmetic of both of them is comfortable"
+    );
+    let _ = h.publisher.tick();
+    assert_eq!(
+        h.publisher.snapshot_schedule_overruns(),
+        2,
+        "the count is per tick, because the shortfall is per tick"
+    );
+}
+
+/// The control: the same two shards on a cycle the process can actually serve.
+///
+/// Without this the count above passes against a publisher that increments on
+/// every tick regardless, which is a counter that says nothing.
+#[test]
+fn cycles_the_process_can_serve_are_not_counted() {
+    let mut h = harness_two_shards_with_rotation(Duration::from_millis(200));
+    let mut adapter = FakeAdapter::on_shards(&[
+        ("A-B", SHARD_A),
+        ("C-D", SHARD_A),
+        ("E-F", SHARD_B),
+        ("G-H", SHARD_B),
+    ]);
+    assert!(h.publisher.poll_listings(&mut adapter));
+
+    for _ in 0..4 {
+        let _ = h.publisher.tick();
+    }
+    assert_eq!(
+        h.publisher.snapshot_schedule_overruns(),
+        0,
+        "one snapshot every hundred milliseconds on each of two shards is a fifth of a process \
+         that serves one every ten"
+    );
+}

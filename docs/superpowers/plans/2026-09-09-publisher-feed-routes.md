@@ -190,7 +190,7 @@ unchanged, asserted by name so that a later task cannot delete it by accident.
       poll: an adapter may re-offer its whole set every second, and a line per
       offer would bury the first one. `Registry::take_unknown_shards` hands a
       caller each distinct name once and nothing twice.
-- [ ] **The caller.** This crate writes no line — it constructs no metric and it
+- [x] **The caller.** This crate writes no line — it constructs no metric and it
       logs nothing — so the item above is only half of what this bullet
       promised. It was checked off with the mechanism built and nothing calling
       it, which is a venue's misnamed shard dropping instruments with neither a
@@ -326,7 +326,7 @@ rather than as a presence on one.
 - [x] `snapshot` and `capture_and_send` likewise, and `SnapshotError::NoDepthFeed`
       keeps its meaning per shard: an instrument on a shard whose blocks carry no
       snapshot port role.
-- [ ] **The ceiling is a process ceiling, and dividing per shard stopped
+- [x] **The ceiling is a process ceiling, and dividing per shard stopped
       detecting it.** The rotation's own doc comment states the ceiling as a
       cycle divided by *one shard's* count falling below the runtime's tick.
       That was the whole of it when there was one rotation; with N of them the
@@ -514,13 +514,13 @@ ceiling that stopped being true when the divisor became per shard.
 
 ### 14. The unknown shard name reaches an operator
 
-- [ ] The runtime drains `Registry::take_unknown_shards` on the tick that
+- [x] The runtime drains `Registry::take_unknown_shards` on the tick that
       polled, and writes one line per distinct name, beside the tick lines it
       already writes for a dropped fan-out member and a refused snapshot.
-- [ ] The line names the shard the venue asked for **and the shards this
+- [x] The line names the shard the venue asked for **and the shards this
       publisher is configured with**, because that pair is what identifies a
       misspelling and neither half alone does.
-- [ ] The exit report carries `declined_unknown_shard` and
+- [x] The exit report carries `declined_unknown_shard` and
       `declined_shard_restated`, beside the five numbers no series carries that
       it already prints.
 
@@ -618,13 +618,16 @@ direction the fixture is arranged.
 
 ### 16. The snapshot ceiling is a sum over shards
 
-- [ ] `rotation.rs`'s module note states the ceiling as the sum it is: N
+- [x] `rotation.rs`'s module note states the ceiling as the sum it is: N
       rotations against one process's serving rate of one snapshot per tick,
       rather than each rotation against its own derived tick.
-- [ ] The arithmetic is a function, so it can be asserted directly the way
+- [x] The arithmetic is a function, so it can be asserted directly the way
       `tick` is.
-- [ ] The publisher counts the ticks on which the configured cycles ask for more
-      snapshots than one process can send, and the exit report names the count.
+- [x] The publisher counts the ticks on which the configured cycles ask for more
+      snapshots than one process can send. The tick loop names it on the decade
+      schedule `worth_a_line` already states — a document that asks for too much
+      asks for it on every tick thereafter, so an unfiltered line would be a
+      hundred a second — and the exit report names the total.
 
 **It counts, and it does not refuse.** A refusal would have to happen at load,
 and at load the number that decides it does not exist: the divisor is the
