@@ -85,7 +85,7 @@ That answers the request's "through that venue's own `Adapter`" exactly, and put
 
 Venue-side rows go to their own tables with venue provenance — the observation, the upstream connection, the object key, the venue's own message identity where it has one, the symbol — and **never** `channel_id`, `instrument_id`, `sequence_number`, `reset_count`, `segment_seq` or `drop_delta`.
 
-The comparison is a view joining venue-side occurrences to publisher-side occurrences on `(feed, symbol, state_key, occurrence)`, numbered per observation exactly as the existing pairing numbers its own, with `lead_ms` as a column and the bound on it left to the caller. Every argument the existing pairing migration makes carries over unchanged and is cited rather than restated: why this is not an `ASOF JOIN`, why an unpaired occurrence is a row rather than an absence, why a snapshot-anchored row consumes no ordinal, and why the bound is the caller's predicate.
+The comparison is a view joining venue-side occurrences to publisher-side occurrences on `(feed, symbol, book_key, occurrence)` — `book_key` and not `state_key`, for the reason above — numbered per observation exactly as the existing pairing numbers its own, with `lead_ms` as a column and the bound on it left to the caller. Every argument the existing pairing migration makes carries over unchanged and is cited rather than restated: why this is not an `ASOF JOIN`, why an unpaired occurrence is a row rather than an absence, why a snapshot-anchored row consumes no ordinal, and why the bound is the caller's predicate.
 
 That the join is a view and not a step in the derivation is the same decision the cross-site verdict already took: "a verdict decided while an object is loading is decided against whatever else had arrived by then."
 
@@ -113,7 +113,7 @@ That the join is a view and not a step in the derivation is the same decision th
 | The venue side archives raw upstream bytes and derives from objects | Restores `(object key, sha256)` idempotence, the batch boundary, and the ability to re-derive with a corrected adapter |
 | The derivation is a library, driven by a venue's own binary | Decoding venue bytes needs the venue's adapter, and this repository links no venue — the publisher side's own arrangement |
 | Venue rows are their own grains | Eight non-nullable provenance columns on `event` and `book_top` are statements about a datagram, and a venue message is not one |
-| The race is a view on `(feed, symbol, state_key, occurrence)` | The only key both sides can compute: `instrument_id` is minted by the publisher and `channel_id` is the operator's, which a venue may not name |
+| The race is a view on `(feed, symbol, book_key, occurrence)` | The only key both sides can compute. `state_key` is not it: that one hashes the `channel_id` and the `Instrument ID` before any price, and a venue side can name neither — the channel is the operator's mapping and the identifier is minted by the publisher's registry |
 | Raw bytes, not the normalized-event record encoding, are what is archived | That encoding is downstream of the venue's decode; the evidence has to be what the venue sent |
 | The `observation` doc comments and the pairing migration header are corrected | They promise venue rows in a table whose columns and grouping key refuse them |
 
