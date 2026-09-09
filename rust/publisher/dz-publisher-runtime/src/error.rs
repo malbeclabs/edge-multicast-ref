@@ -468,6 +468,31 @@ pub enum StartupError {
     )]
     TtlUnstated,
 
+    /// `[egress] ttl` is zero, which is not a smaller hop count.
+    ///
+    /// # Zero is worse than the value this key was made required for
+    ///
+    /// A wrong hop count is silent in every direction an operator can look, and
+    /// zero is silent in one more. The kernel accepts every datagram, so the
+    /// egress series stay green. Nothing joined, so gap detection reports
+    /// nothing. And the one check that catches a hop count set too low — a
+    /// subscriber on the publisher's own segment — fails too, because at zero
+    /// the datagram never leaves the host.
+    ///
+    /// It is also the value the refusal above invites. That message says
+    /// `ttl = 1` publishes on the attached segment only, so an operator who
+    /// wants exactly that learns the key is a hop count and has no reason to
+    /// read `0` as anything but *fewer hops than one*.
+    ///
+    /// Refused here rather than through a `NonZeroU8`, which would answer with
+    /// serde's own message and name no line to write.
+    #[error(
+        "`[egress] ttl = 0` keeps every datagram inside this host: the kernel accepts each one \
+         and none reaches an interface. It is not a smaller hop count than 1 — `ttl = 1` is the \
+         attached segment, and there is nothing below it."
+    )]
+    TtlZero,
+
     /// `[refdata.selection]` is not a coherent policy.
     #[error("`[refdata.selection]`: {source}")]
     Selection {

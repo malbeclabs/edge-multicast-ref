@@ -1257,6 +1257,12 @@ impl EgressSection {
         // shapes of the same mistake: no `[egress]` at all, and an `[egress]`
         // that states everything except this.
         let ttl = self.ttl.ok_or(StartupError::TtlUnstated)?;
+        // Zero is not a smaller hop count, it is no hop at all — and it is the
+        // value the refusal above invites, since that message teaches the key
+        // is a hop count and names 1 as the attached segment.
+        if ttl == 0 {
+            return Err(StartupError::TtlZero);
+        }
         Ok(EgressPolicy {
             pin,
             expected_prefix,

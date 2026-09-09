@@ -802,6 +802,35 @@ fn the_refusal_names_the_key_and_the_value_that_reproduces_one_hop() {
     );
 }
 
+/// Zero is refused, because it is not a smaller hop count.
+///
+/// **The value this key's own refusal invites.** That message says `ttl = 1`
+/// publishes on the attached segment only, so an operator who wants exactly
+/// that learns the key is a hop count and has no reason to read `0` as anything
+/// but *fewer hops than one*.
+///
+/// And it satisfies every clause of the argument for requiring the key, plus
+/// one more: the kernel accepts every datagram so the egress series stay green,
+/// nothing joined so gap detection reports nothing, and the one check that
+/// catches a hop count set too low — a subscriber on the publisher's own
+/// segment — fails too, because at zero the datagram never leaves the host.
+#[test]
+fn a_ttl_of_zero_is_refused_because_it_is_no_hop_at_all() {
+    let mut doc = Doc::valid();
+    doc.egress = "[egress]\nttl = 0\n".to_owned();
+    let error = Document::parse(&doc.render())
+        .expect("parses")
+        .resolve()
+        .unwrap_err();
+    assert!(matches!(error, StartupError::TtlZero), "{error}");
+    let message = error.to_string();
+    assert!(message.contains("[egress] ttl = 0"), "{message}");
+    assert!(
+        message.contains("inside this host"),
+        "the refusal has to say what zero does, not only that it is refused: {message}"
+    );
+}
+
 /// One hop is still expressible, and now it is stated.
 #[test]
 fn a_stated_ttl_of_one_resolves_to_one_hop() {
