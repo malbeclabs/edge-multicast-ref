@@ -85,6 +85,16 @@
 //! ```
 //!
 //! Nothing else is imported, because there is nothing else to import.
+//!
+//! # What breaks an implementor: [`ListingSink::list_on`]
+//!
+//! The sink gained a **required** method, so a tag carrying it is a break for
+//! an implementor and additive for a caller — a venue calls `ListingSink` and
+//! needs no code change, while every implementor of it is in this workspace.
+//! The safe-looking alternative, defaulting `list_on` to `list`, would instead
+//! have left an un-updated implementor admitting every instrument to
+//! [`DEFAULT_SHARD`] with nothing said anywhere; that is the trade, and
+//! `RELEASING.md`'s rule is that the tag message names the break.
 
 #![forbid(unsafe_code)]
 
@@ -107,5 +117,5 @@ pub use instrument::{
 };
 pub use payload::{ConnectionId, DisconnectReason, Payload};
 pub use scalar::Scalar;
-pub use sink::{EventSink, ListingSink, SnapshotSink, UpstreamSink};
+pub use sink::{EventSink, ListingSink, SnapshotSink, UpstreamSink, DEFAULT_SHARD};
 pub use timestamp::VenueTimestampKind;

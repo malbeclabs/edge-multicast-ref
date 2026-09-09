@@ -264,6 +264,53 @@ pub enum StartupError {
     #[error("two `[[feed]]` blocks name `spec = \"{spec}\"`")]
     DuplicateFeedSpec { spec: String },
 
+    /// A `shard` name that cannot be a path component.
+    ///
+    /// The name reaches a path in two places — the era file and the reference
+    /// copy's socket — so it is checked once, where the value enters the
+    /// process, rather than at each use where the third use is the one that
+    /// forgets. A name with a slash in it writes somewhere nobody configured;
+    /// one that differs from another only past sixty-four bytes shares its era
+    /// file.
+    #[error(
+        "`shard = \"{shard}\"` in the `[[feed]]` block for `{spec}` cannot be a path component. \
+         A shard name is one to sixty-four bytes of lower-case letters, digits and hyphens, \
+         because it names the block's era file and its reference-copy socket."
+    )]
+    UnsafeShardName { spec: String, shard: String },
+
+    /// A block spelling the default shard's own token.
+    ///
+    /// Refused rather than accepted as a synonym: a document with one block
+    /// naming it and one leaving the key out would have two spellings of one
+    /// shard, which is two era files and two published sets for one channel.
+    /// Leaving the key out is how a block says it carries the default.
+    #[error(
+        "the `[[feed]]` block for `{spec}` names `shard = \"{shard}\"`, which is the default \
+         shard's own token. Leave the key out to say that — spelling it as well would make one \
+         shard into two, with an era file and a published set each."
+    )]
+    ReservedShardName { spec: String, shard: String },
+
+    /// Two enabled blocks claiming one `Channel ID`.
+    ///
+    /// New, and it closes a hole that exists rather than one this change opens:
+    /// `Config::channel_ids()` sorts and dedups, so two blocks sharing an ID
+    /// pre-create one set of series and both write to it — `sequence_current`,
+    /// `heartbeat_last_sent`, `manifest_seq` and `manifest_valid`, each of them
+    /// two channel instances deep with nothing saying so. One channel per
+    /// specification made it unlikely; many make it a matter of time.
+    #[error(
+        "the `[[feed]]` blocks for `{first}` and `{second}` both claim `channel_id = \
+         {channel_id}`. A `Channel ID` identifies a channel instance on the wire and in every \
+         series keyed on one, so two blocks sharing it publish two feeds into one set of numbers."
+    )]
+    DuplicateChannelId {
+        channel_id: u8,
+        first: String,
+        second: String,
+    },
+
     /// Every `[[feed]]` block is disabled, or there are none.
     #[error("no `[[feed]]` block is enabled: this publisher would emit nothing")]
     NoEnabledFeed,

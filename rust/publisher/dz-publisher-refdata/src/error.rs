@@ -14,6 +14,10 @@ use crate::store::StateError;
 /// refuses to start is visible in one place. A publisher that started on a
 /// wrong ID map is visible in every subscriber, later, as a book keyed on an
 /// instrument that has become something else.
+///
+/// The two shard variants are not about identity, and they are here for the
+/// same reason: a shard set that cannot be resolved is a publisher whose
+/// channels stay empty with nothing on the wire to say why.
 #[derive(Debug, thiserror::Error)]
 pub enum RefdataError {
     /// The state directory is already held by a live writer.
@@ -35,6 +39,29 @@ pub enum RefdataError {
     /// A record is present and is not one this build can read.
     #[error("the persisted reference-data state is damaged")]
     CorruptState(#[from] RecordError),
+
+    /// No shard was configured, so there is nothing to admit to.
+    ///
+    /// Every offer would be refused with
+    /// [`Refusal::UnknownShard`](crate::Refusal::UnknownShard) and the
+    /// publisher would run with an empty published set on every channel — a
+    /// feed that is silent for a reason no datagram carries. A document always
+    /// resolves at least one shard, so reaching this means a caller composed
+    /// the configuration itself, which is exactly the caller that has no
+    /// document to check.
+    #[error("no shard was configured, so no instrument could ever be admitted")]
+    NoShardConfigured,
+
+    /// Two shards were configured under one name.
+    ///
+    /// A name resolves to one published set, so the second is unreachable: its
+    /// `Channel ID` would carry a manifest that stays at `Manifest Seq` 0 and
+    /// `Instrument Count` 0 for the life of the process while the venue went on
+    /// admitting instruments it believed were on that shard. The document check
+    /// refuses this first; this is the second line, in the code that does the
+    /// resolving.
+    #[error("the shard `{shard}` was configured twice, and a name resolves to one published set")]
+    ShardConfiguredTwice { shard: String },
 
     /// The record was minted under a different `Source ID`.
     ///

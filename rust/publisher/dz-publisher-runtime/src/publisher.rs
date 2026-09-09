@@ -10,9 +10,9 @@
 //!
 //! # What this type owns, and what it only holds
 //!
-//! It owns the routing — which lowering an event goes through, which feed
-//! carries the result, and which port role it is pushed onto — the cadences,
-//! the guards, and the order of the teardown. It owns none of the things the
+//! It owns the routing — which lowering an event goes through, which shard's
+//! feed carries the result, and which port role it is pushed onto — the
+//! cadences, the guards, and the order of the teardown. It owns none of the things the
 //! crates it holds own: not the `Instrument ID`, not the exponents, not
 //! `Update Flags`, not `Action`, not `Per-Instrument Seq`, not `Sequence
 //! Number`, not `Reset Count`, not the datagram cap, and not one metric name.
@@ -40,6 +40,16 @@
 //! An event no enabled feed carries — a `Quote` on a publisher that emits only
 //! depth, or a variant a later boundary release adds — is counted and dropped
 //! **before** it is lowered. See [`Publisher::unroutable`].
+//!
+//! # Which shard, and where that answer comes from
+//!
+//! Every row above is a row about one shard's feeds. The shard is the
+//! instrument's, recorded by the reference-data owner when the venue admitted
+//! it, and it is resolved once per event into an index into [`Feeds`] — never
+//! compared as a name on the datagram path, and never taken from anything the
+//! adapter states per message. An adapter that could name a shard per event
+//! would be an adapter deciding which channel a message leaves on, and the
+//! whole boundary is built on it deciding none of that.
 //!
 //! # The instrument table is borrowed per call, and that is the whole reason
 //!
@@ -86,69 +96,197 @@ use crate::rotation::SnapshotRotation;
 /// disk.
 pub const LISTING_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// The send paths this publisher operates, one per enabled `[[feed]]` block.
+/// The send paths this publisher operates, one per enabled `[[feed]]` block,
+/// indexed by shard.
 ///
-/// Two typed fields rather than a collection, because
+/// Two typed fields rather than one collection of feeds, because
 /// [`FeedPipeline`] is generic over the wire feed — `Magic` belongs to the feed
-/// — so the two are different types and a `Vec` of them would need dynamic
-/// dispatch on the datagram path to buy nothing. Every field is an `Option`
-/// because a publisher emits one feed or several, which is what `[[feed]]`
-/// being an array is for.
+/// — so the two specifications are different types and a collection of both
+/// would need dynamic dispatch on the datagram path to buy nothing. Several
+/// channel instances of *one* specification are all the same type, so a vector
+/// of them is one indexed load on a monomorphized type: the shape changes and
+/// the reason does not.
 ///
-/// A publisher with neither is refused before this type is built; see
-/// [`crate::StartupError::NoEnabledFeed`].
+/// # Both vectors are indexed by shard, and nothing re-checks it later
+///
+/// The index is a shard's position in the document's own order, resolved once
+/// per event from the instrument's admitted shard and never from a name — a
+/// string compared per message would put the size of the shard set on the
+/// datagram path. Nothing below this type checks that the pipeline at an index
+/// is the shard the caller meant, so a vector holding a shard at the wrong
+/// position publishes that shard's instruments under another channel
+/// instance's sequence series, which a subscriber reads as its own and cannot
+/// detect. [`push_shard`](Self::push_shard) is what keeps the order, and it is
+/// the only thing that does.
+///
+/// A vector is empty for a specification this publisher does not emit, which is
+/// what `[[feed]]` being an array is for. A publisher with neither is refused
+/// before this type is built; see [`crate::StartupError::NoEnabledFeed`].
 #[derive(Default)]
 pub struct Feeds {
-    pub top_of_book: Option<FeedPipeline<TopOfBook>>,
-    pub market_by_price: Option<FeedPipeline<MarketByPrice>>,
+    pub top_of_book: Vec<FeedPipeline<TopOfBook>>,
+    pub market_by_price: Vec<FeedPipeline<MarketByPrice>>,
 }
 
 impl Feeds {
-    /// Every enabled feed's `Channel ID`.
+    /// One shard's send paths, appended at the next shard index.
+    ///
+    /// Called once per shard, in the order the document states them, because
+    /// that order is the index every event resolves against.
+    ///
+    /// A specification this publisher does not emit is `None` on **every**
+    /// shard. `None` on some and `Some` on others would leave the two vectors
+    /// indexed differently, so one instrument's quotes and its levels would
+    /// reach two different shards' channels. The configuration refuses a shard
+    /// with a block for one specification and none for the other before this is
+    /// reached; the assertions here are the second line of defence, and they
+    /// fire while the publisher is being composed rather than on the first
+    /// datagram.
+    ///
+    /// # Panics
+    ///
+    /// If a specification is present on one shard and absent on another.
+    pub fn push_shard(
+        &mut self,
+        top_of_book: Option<FeedPipeline<TopOfBook>>,
+        market_by_price: Option<FeedPipeline<MarketByPrice>>,
+    ) {
+        let shard = self.shard_count();
+        match top_of_book {
+            Some(pipeline) => {
+                assert_eq!(
+                    self.top_of_book.len(),
+                    shard,
+                    "a top-of-book feed was pushed for shard {shard} and an earlier shard has none"
+                );
+                self.top_of_book.push(pipeline);
+            }
+            None => assert!(
+                self.top_of_book.is_empty(),
+                "shard {shard} has no top-of-book feed and an earlier shard has one"
+            ),
+        }
+        match market_by_price {
+            Some(pipeline) => {
+                assert_eq!(
+                    self.market_by_price.len(),
+                    shard,
+                    "a market-by-price feed was pushed for shard {shard} and an earlier shard has \
+                     none"
+                );
+                self.market_by_price.push(pipeline);
+            }
+            None => assert!(
+                self.market_by_price.is_empty(),
+                "shard {shard} has no market-by-price feed and an earlier shard has one"
+            ),
+        }
+    }
+
+    /// How many shards this publisher carries.
+    #[must_use]
+    pub fn shard_count(&self) -> usize {
+        self.top_of_book.len().max(self.market_by_price.len())
+    }
+
+    /// The name of the shard at an index, as the reference-data owner keys its
+    /// published sets on. `None` past the last shard.
+    ///
+    /// Read off the send path at that index rather than from a list held
+    /// alongside, so the shard a caller asks the registry about is the shard
+    /// the index selects.
+    #[must_use]
+    pub fn shard_name(&self, shard: usize) -> Option<&str> {
+        self.top_of_book
+            .get(shard)
+            .map(FeedPipeline::shard)
+            .or_else(|| self.market_by_price.get(shard).map(FeedPipeline::shard))
+    }
+
+    /// One shard's top-of-book send path, or `None` if this publisher carries
+    /// no top-of-book feed for it.
+    #[must_use]
+    pub fn top_of_book_on(&self, shard: usize) -> Option<&FeedPipeline<TopOfBook>> {
+        self.top_of_book.get(shard)
+    }
+
+    /// One shard's top-of-book send path, to send on.
+    pub fn top_of_book_on_mut(&mut self, shard: usize) -> Option<&mut FeedPipeline<TopOfBook>> {
+        self.top_of_book.get_mut(shard)
+    }
+
+    /// One shard's market-by-price send path, or `None` if this publisher
+    /// carries no depth feed for it.
+    #[must_use]
+    pub fn market_by_price_on(&self, shard: usize) -> Option<&FeedPipeline<MarketByPrice>> {
+        self.market_by_price.get(shard)
+    }
+
+    /// One shard's market-by-price send path, to send on.
+    pub fn market_by_price_on_mut(
+        &mut self,
+        shard: usize,
+    ) -> Option<&mut FeedPipeline<MarketByPrice>> {
+        self.market_by_price.get_mut(shard)
+    }
+
+    /// Every enabled feed's `Channel ID`, across every shard.
+    ///
+    /// Sorted and deduplicated because it is read to pre-create series and to
+    /// iterate channels, not to count blocks. Two blocks sharing a number are
+    /// refused at load — see [`crate::StartupError::DuplicateChannelId`] — so
+    /// the deduplication removes nothing a document can produce.
     #[must_use]
     pub fn channel_ids(&self) -> Vec<u8> {
-        let mut ids: Vec<u8> = [
-            self.top_of_book.as_ref().map(FeedPipeline::channel_id),
-            self.market_by_price.as_ref().map(FeedPipeline::channel_id),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
+        let mut ids: Vec<u8> = self
+            .top_of_book
+            .iter()
+            .map(FeedPipeline::channel_id)
+            .chain(self.market_by_price.iter().map(FeedPipeline::channel_id))
+            .collect();
         ids.sort_unstable();
         ids.dedup();
         ids
     }
 
+    /// The `Channel ID`s one shard publishes on: one per block it has.
+    ///
+    /// A shard carrying both specifications is two channel instances over one
+    /// published set, so a gauge keyed on `Channel ID` and fed from a shard's
+    /// reference data has two numbers to write and not one.
+    pub fn channel_ids_on(&self, shard: usize) -> impl Iterator<Item = u8> + '_ {
+        self.top_of_book_on(shard)
+            .map(FeedPipeline::channel_id)
+            .into_iter()
+            .chain(self.market_by_price_on(shard).map(FeedPipeline::channel_id))
+    }
+
     /// A dropped fan-out member whose failure darkens this publisher, on any
-    /// feed and any port role.
+    /// shard, any feed and any port role.
     #[must_use]
     pub fn dark_transmitter(&self) -> Option<String> {
         self.top_of_book
-            .as_ref()
-            .and_then(FeedPipeline::dark_transmitter)
+            .iter()
+            .find_map(FeedPipeline::dark_transmitter)
             .or_else(|| {
                 self.market_by_price
-                    .as_ref()
-                    .and_then(FeedPipeline::dark_transmitter)
+                    .iter()
+                    .find_map(FeedPipeline::dark_transmitter)
             })
             .map(str::to_owned)
     }
 
-    /// Every fan-out member, on any feed and any port role, that is no longer
-    /// being fed. See [`FeedPipeline::dropped_sinks`].
+    /// Every fan-out member, on any shard, any feed and any port role, that is
+    /// no longer being fed. See [`FeedPipeline::dropped_sinks`].
     #[must_use]
     pub fn dropped_sinks(&self) -> Vec<DroppedSink<'_>> {
-        let mut dropped = self
-            .top_of_book
-            .as_ref()
-            .map(FeedPipeline::dropped_sinks)
-            .unwrap_or_default();
-        dropped.extend(
-            self.market_by_price
-                .as_ref()
-                .map(FeedPipeline::dropped_sinks)
-                .unwrap_or_default(),
-        );
+        let mut dropped: Vec<DroppedSink<'_>> = Vec::new();
+        for pipeline in &self.top_of_book {
+            dropped.extend(pipeline.dropped_sinks());
+        }
+        for pipeline in &self.market_by_price {
+            dropped.extend(pipeline.dropped_sinks());
+        }
         dropped
     }
 }
@@ -363,10 +501,10 @@ pub enum TeardownStep {
     IngressStopped,
     /// `Valid` is 0 and nothing further is admitted.
     AdmissionsClosed,
-    /// The last `ManifestSummary`, carrying `Valid = 0`, is on every feed's
-    /// refdata port.
+    /// The last `ManifestSummary`, carrying `Valid = 0`, is on every channel
+    /// instance's refdata port, each describing its own shard's published set.
     FinalManifestSent,
-    /// `EndOfSession` is on every feed's mktdata port.
+    /// `EndOfSession` is on every channel instance's mktdata port.
     EndOfSessionSent,
     /// Every port role's open datagram has been sent.
     PortsFlushed,
@@ -454,9 +592,21 @@ pub struct Publisher<S: StateStore, K: Clock + Clone> {
     venue_timestamp_kind: Option<TimestampKind>,
     /// Monotonic. When the adapter's listings were last drained.
     last_poll_ns: Option<u64>,
-    /// The periodic snapshot rotation, when the depth feed configures a cycle.
-    /// `None` is a publisher that emits recovery snapshots and no others.
-    snapshots: Option<SnapshotRotation>,
+    /// One periodic snapshot rotation per shard, indexed as
+    /// [`Feeds`] is. `None` in a slot is a shard whose depth block configures
+    /// no cycle, which is a shard emitting recovery snapshots and no others.
+    ///
+    /// **One rotation per shard rather than one per publisher**, because
+    /// `[[feed]] snapshot_cycle` is one full pass over the published set of the
+    /// channel it is configured on. A single rotation shared across shards
+    /// would give each shard's instruments a fraction of the configured rate —
+    /// one part in the number of shards — so a subscriber joining mid-session
+    /// on any one channel waits that many cycles for its book, while the key
+    /// still reads as honoured.
+    snapshots: Vec<Option<SnapshotRotation>>,
+    /// Which shard the search for a due snapshot starts at. See
+    /// [`Publisher::due_snapshot`].
+    snapshot_cursor: usize,
     seeded: bool,
 }
 
@@ -470,14 +620,14 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
     /// paths arrive holding fan-outs whose members may be recording sinks rather
     /// than sockets.
     ///
-    /// **One registry serves every feed**, and that is right rather than a
-    /// simplification. `Instrument ID` identity is the one thing there can only
-    /// be one of, so two registries would be two ID spaces and a published ID
-    /// would resolve to two different definitions. `Manifest Seq` is a property
-    /// of the published set, which is the same set on every feed. And the
-    /// manifest's own redundant `Channel ID` field is stamped by the builder
-    /// from the datagram that frames it, so one composed manifest is truthful
-    /// on every feed's refdata port.
+    /// **One registry serves every channel instance**, and that is right rather
+    /// than a simplification. `Instrument ID` identity is the one thing there
+    /// can only be one of, so two registries would be two ID spaces and a
+    /// published ID would resolve to two different definitions. What is per
+    /// shard is inside that one registry — the published membership, the
+    /// `Manifest Seq` that describes it and the pacer that emits it — because
+    /// those are properties of a channel and the identity is a property of the
+    /// process.
     #[must_use]
     pub fn new(
         metrics: Arc<PublisherMetrics>,
@@ -487,11 +637,16 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
         feeds: Feeds,
         idle_guard: std::time::Duration,
     ) -> Self {
+        // One per shard, in the send paths' own order, so that the rotation at
+        // an index and the pipeline at that index are the same channel
+        // instance. A shard whose depth block states no cycle holds `None`
+        // rather than being left out, because leaving it out would shift every
+        // later shard's rotation onto another shard's instruments.
         let snapshots = feeds
             .market_by_price
-            .as_ref()
-            .and_then(FeedPipeline::snapshot_cycle)
-            .map(SnapshotRotation::new);
+            .iter()
+            .map(|pipeline| pipeline.snapshot_cycle().map(SnapshotRotation::new))
+            .collect();
         Self {
             metrics,
             refdata,
@@ -511,6 +666,7 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
             venue_timestamp_kind: None,
             last_poll_ns: None,
             snapshots,
+            snapshot_cursor: 0,
             seeded: false,
         }
     }
@@ -603,23 +759,40 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
     /// runtime ticking every 10ms and one ticking every 250ms lap the definition
     /// set in the same time and neither can be made to burst by ticking slowly.
     ///
-    /// The definition tick is drained **once** and packed onto every feed's
-    /// refdata port. Draining per feed would ask the pacer for the lap's debt
-    /// twice and emit twice as much of the set per tick, which is the burst the
-    /// pacer exists to prevent arriving through the caller.
+    /// The definition tick is drained **once per shard** and packed onto every
+    /// feed of that shard. Per shard is the unit, and both neighbouring
+    /// choices are wrong in opposite directions: draining per feed would ask
+    /// that shard's pacer for the lap's debt once for each feed carrying it and
+    /// emit that many times as much of the set per tick, which is the burst the
+    /// pacer exists to prevent arriving through the caller, while draining once
+    /// for the process would share one lap's debt out over every channel and
+    /// leave each one's definitions arriving at a fraction of the cycle it
+    /// configured.
     #[must_use]
     pub fn tick(&mut self) -> Option<Exit> {
         let now_mono = dz_publisher_refdata::Clock::monotonic_ns(&self.clock);
         let now_unix = self.clock.unix_ns();
 
-        self.refdata.definition_tick(&mut self.definitions);
-        let manifest = self.refdata.manifest();
-
-        if let Some(pipeline) = self.feeds.top_of_book.as_mut() {
-            tick_pipeline(pipeline, &self.definitions, &manifest, now_mono, now_unix);
-        }
-        if let Some(pipeline) = self.feeds.market_by_price.as_mut() {
-            tick_pipeline(pipeline, &self.definitions, &manifest, now_mono, now_unix);
+        for shard in 0..self.feeds.shard_count() {
+            let Some(name) = self.feeds.shard_name(shard) else {
+                continue;
+            };
+            self.refdata.definition_tick(name, &mut self.definitions);
+            // A shard the reference-data owner has no published set for cannot
+            // come out of one document, because the send paths and the registry
+            // are configured from the same blocks. If it ever did, a manifest
+            // composed from another shard's set would be a false statement
+            // about this channel's `Instrument Count`, so nothing is the honest
+            // answer.
+            let Some(manifest) = self.refdata.manifest(name) else {
+                continue;
+            };
+            if let Some(pipeline) = self.feeds.top_of_book.get_mut(shard) {
+                tick_pipeline(pipeline, &self.definitions, &manifest, now_mono, now_unix);
+            }
+            if let Some(pipeline) = self.feeds.market_by_price.get_mut(shard) {
+                tick_pipeline(pipeline, &self.definitions, &manifest, now_mono, now_unix);
+            }
         }
 
         self.forward_counts();
@@ -668,15 +841,21 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
     ) -> Result<Snapshot, SnapshotError> {
         // The point in the live feed this book state is true as of, which is
         // what tells a subscriber which live messages to apply after it and
-        // which to discard.
-        let anchor = match self.feeds.market_by_price.as_ref() {
-            Some(pipeline) => pipeline.mktdata_sequence().unwrap_or(0),
-            None => {
-                let error = SnapshotError::NoDepthFeed;
+        // which to discard — read off **this instrument's own shard**. Another
+        // shard's market-by-price send path is another channel instance's
+        // sequence series, and the subscriber compares the anchor against the
+        // numbers it has seen on its own channel: anchored from the wrong shard
+        // it is a wrong answer rather than a late one.
+        let shard = match self.depth_shard(instrument) {
+            Ok(shard) => shard,
+            Err(error) => {
                 self.snapshot_refusals.record(&error);
                 return Err(error);
             }
         };
+        let anchor = shard
+            .and_then(|shard| self.feeds.market_by_price_on(shard))
+            .map_or(0, |pipeline| pipeline.mktdata_sequence().unwrap_or(0));
         self.snapshot_anchored_at(adapter, instrument, anchor)
     }
 
@@ -720,9 +899,7 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
         anchor: u64,
     ) -> Result<Snapshot, SnapshotError> {
         let now_unix = self.clock.unix_ns();
-        let Some(_) = self.feeds.market_by_price.as_ref() else {
-            return Err(SnapshotError::NoDepthFeed);
-        };
+        let shard = self.depth_shard(instrument)?;
         let mut framer =
             self.depth
                 .open_snapshot(self.refdata.instruments(), instrument, anchor, now_unix)?;
@@ -732,19 +909,41 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
         // is the one field of the framing that is the venue's.
         let depth_bound: DepthBound = adapter.snapshot(instrument, &mut framer)?;
         let snapshot = framer.finish(depth_bound)?;
-        self.feeds
-            .market_by_price
-            .as_mut()
-            .expect("checked above")
+        shard
+            .and_then(|shard| self.feeds.market_by_price_on_mut(shard))
+            .expect("the framing resolved this instrument, so it is on a shard with a depth feed")
             .send_snapshot(&snapshot, now_unix)?;
         Ok(snapshot)
     }
 
+    /// Which shard's depth send path serves an instrument's snapshots.
+    ///
+    /// `Ok(None)` is a handle the published set does not hold, and it is
+    /// deliberately not refused here: the framing below refuses it as an
+    /// unknown instrument, which is the reason an operator acts on. What is
+    /// refused here is a publisher whose blocks for that instrument's shard
+    /// carry no depth feed — that shard has no book to serve and no port to
+    /// serve it on, whatever the other shards carry, and it is
+    /// [`SnapshotError::NoDepthFeed`] per shard for the same reason it was ever
+    /// per publisher.
+    ///
+    /// # Errors
+    ///
+    /// [`SnapshotError::NoDepthFeed`], and nothing else.
+    fn depth_shard(&self, instrument: InstrumentRef) -> Result<Option<usize>, SnapshotError> {
+        let shard = self.shard_of(instrument);
+        if self.market_by_price_carries(shard) {
+            Ok(shard)
+        } else {
+            Err(SnapshotError::NoDepthFeed)
+        }
+    }
+
     /// The next periodic snapshot the rotation owes, taken if one is due.
     ///
-    /// `None` covers three states that are all *nothing to do now*: this
-    /// publisher configured no `[[feed]] snapshot_cycle`, the derived tick has
-    /// not elapsed, or the published set is empty. `Some` carries the outcome of
+    /// `None` covers three states that are all *nothing to do now*: no shard
+    /// configured a `[[feed]] snapshot_cycle`, no shard's derived tick has
+    /// elapsed, or every published set is empty. `Some` carries the outcome of
     /// the one instrument that fell due — including its refusal, because a
     /// caller that discarded it would turn a book that never bootstraps into
     /// silence nobody reads.
@@ -772,21 +971,72 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
         adapter: &dyn Adapter,
     ) -> Option<Result<Snapshot, SnapshotError>> {
         let now_mono = dz_publisher_refdata::Clock::monotonic_ns(&self.clock);
-        let due = self
-            .snapshots
-            .as_mut()?
-            .due(now_mono, self.refdata.instruments())?;
+        let due = self.due_snapshot(now_mono)?;
         Some(self.snapshot(adapter, due))
     }
 
-    /// One full pass of the snapshot rotation, if this publisher runs one.
+    /// The next instrument any shard's rotation owes, at most one per call.
+    ///
+    /// The shards are searched from where the last due instrument was found
+    /// rather than from the first every time. One call serves one instrument —
+    /// a snapshot is a group of datagrams, so that is the unit of progress —
+    /// and a search that always started at the first shard would let it take
+    /// every call it is due for while the last shard's rotation waited behind
+    /// it.
+    fn due_snapshot(&mut self, now_mono_ns: u64) -> Option<InstrumentRef> {
+        let shards = self.snapshots.len();
+        if shards == 0 {
+            return None;
+        }
+        for offset in 0..shards {
+            let shard = (self.snapshot_cursor + offset) % shards;
+            let Some(name) = self.feeds.shard_name(shard) else {
+                continue;
+            };
+            // **This shard's published count, never the process's.** The tick
+            // is the cycle divided by the set one pass has to cover, and that
+            // set is the channel's; divided by every channel's instruments,
+            // each shard is paced as slowly as there are shards while
+            // `[[feed]] snapshot_cycle` still reads as honoured.
+            let Some(published) = self.refdata.published_on(name) else {
+                continue;
+            };
+            let Some(rotation) = self.snapshots[shard].as_mut() else {
+                continue;
+            };
+            let due = rotation.due(
+                now_mono_ns,
+                self.refdata.instruments(),
+                published,
+                // The slots are shared across shards, so a rotation that
+                // walked all of them would spend most of its ticks on
+                // instruments another channel serves and lap its own set as
+                // many times too slowly as there are shards.
+                |instrument| self.refdata.shard_of(instrument) == Some(shard),
+            );
+            if let Some(instrument) = due {
+                self.snapshot_cursor = (shard + 1) % shards;
+                return Some(instrument);
+            }
+        }
+        None
+    }
+
+    /// One full pass of a snapshot rotation, if this publisher runs one.
     ///
     /// For a log line at startup: a depth feed with no cadence is a feed no
     /// joining subscriber can bootstrap from, and that is worth stating rather
-    /// than leaving to be inferred from silence.
+    /// than leaving to be inferred from silence. The first shard that runs one
+    /// answers for the publisher, because what the line says is that a rotation
+    /// runs at all — every shard's cycle is its own block's key, and a shard
+    /// that configures none is the case this is `None` for.
     #[must_use]
     pub fn snapshot_cycle(&self) -> Option<std::time::Duration> {
-        self.snapshots.as_ref().map(SnapshotRotation::cycle)
+        self.snapshots
+            .iter()
+            .flatten()
+            .map(SnapshotRotation::cycle)
+            .next()
     }
 
     /// Shut down, in the order below, and record the exit.
@@ -807,10 +1057,17 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
     ///    stops reading at `EndOfSession` would never see it if the order were
     ///    reversed. Sending it first means a subscriber briefly sees a
     ///    non-authoritative set while mktdata is still live, which is exactly
-    ///    the truth.
+    ///    the truth. One per channel instance, each carrying **its own** shard's
+    ///    published set, because that is the set the subscribers on that channel
+    ///    have been collecting definitions against.
     /// 4. **`EndOfSession` goes out on mktdata.** The terminal statement for the
     ///    channel, and therefore last: anything after it contradicts it. On
-    ///    every feed, because every feed's mktdata channel is ending.
+    ///    every channel instance, because every one of them is ending.
+    ///
+    /// The order is a **per channel instance** order — every message in it is a
+    /// statement about one channel — and it is held here by phase rather than
+    /// by instance: every manifest precedes every `EndOfSession`, which implies
+    /// the constraint within each instance and costs nothing to read.
     /// 5. **Every port role flushes.** A datagram left open holds a number that
     ///    has been assigned, and abandoning it is a gap for no reason.
     /// 6. **The exit is recorded**, so that `dz_publisher_exit_reason_total`
@@ -834,27 +1091,34 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
         self.refdata.begin_shutdown();
         steps.push(TeardownStep::AdmissionsClosed);
 
-        let manifest = self.refdata.manifest();
-        if let Some(pipeline) = self.feeds.top_of_book.as_mut() {
-            let _ = pipeline.send_manifest(&manifest, now_mono, now_unix);
-        }
-        if let Some(pipeline) = self.feeds.market_by_price.as_mut() {
-            let _ = pipeline.send_manifest(&manifest, now_mono, now_unix);
+        for shard in 0..self.feeds.shard_count() {
+            let Some(name) = self.feeds.shard_name(shard) else {
+                continue;
+            };
+            let Some(manifest) = self.refdata.manifest(name) else {
+                continue;
+            };
+            if let Some(pipeline) = self.feeds.top_of_book.get_mut(shard) {
+                let _ = pipeline.send_manifest(&manifest, now_mono, now_unix);
+            }
+            if let Some(pipeline) = self.feeds.market_by_price.get_mut(shard) {
+                let _ = pipeline.send_manifest(&manifest, now_mono, now_unix);
+            }
         }
         steps.push(TeardownStep::FinalManifestSent);
 
-        if let Some(pipeline) = self.feeds.top_of_book.as_mut() {
+        for pipeline in &mut self.feeds.top_of_book {
             let _ = pipeline.send_end_of_session(now_mono, now_unix);
         }
-        if let Some(pipeline) = self.feeds.market_by_price.as_mut() {
+        for pipeline in &mut self.feeds.market_by_price {
             let _ = pipeline.send_end_of_session(now_mono, now_unix);
         }
         steps.push(TeardownStep::EndOfSessionSent);
 
-        if let Some(pipeline) = self.feeds.top_of_book.as_mut() {
+        for pipeline in &mut self.feeds.top_of_book {
             let _ = pipeline.flush(now_unix);
         }
-        if let Some(pipeline) = self.feeds.market_by_price.as_mut() {
+        for pipeline in &mut self.feeds.market_by_price {
             let _ = pipeline.flush(now_unix);
         }
         steps.push(TeardownStep::PortsFlushed);
@@ -935,6 +1199,47 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
         &mut self.depth
     }
 
+    /// Which shard's send paths carry an instrument's messages.
+    ///
+    /// Resolved once per event, beside the instrument lookup the lowering
+    /// performs anyway, and from the shard the venue admitted the instrument to
+    /// rather than from anything it states per message: routing an adapter
+    /// could influence per event is routing an adapter decides, and the whole
+    /// boundary is built on it deciding none of this.
+    ///
+    /// `None` is a handle the published set does not hold — forged, or
+    /// outliving its instrument's withdrawal. It is deliberately not refused
+    /// where it is resolved: the instrument table and the published set are
+    /// cleared together, so the lowering refuses the same handle as an unknown
+    /// instrument, and that is the reason an operator can act on. Counting it
+    /// as unroutable instead would say the message had nowhere to go rather
+    /// than that the handle was not this publisher's.
+    fn shard_of(&self, instrument: InstrumentRef) -> Option<usize> {
+        self.refdata.shard_of(instrument)
+    }
+
+    /// Whether a message for an instrument on this shard reaches a top-of-book
+    /// feed.
+    ///
+    /// Two questions, asked in this order. A publisher that emits no
+    /// top-of-book feed at all carries the message for no instrument, and that
+    /// is settled before any handle is considered. A publisher that emits one
+    /// carries this message only if *this instrument's* shard has a block for
+    /// it — an instrument admitted to a shard with no top-of-book block has
+    /// quotes that reach no wire, and they are counted rather than dropped
+    /// silently.
+    fn top_of_book_carries(&self, shard: Option<usize>) -> bool {
+        !self.feeds.top_of_book.is_empty()
+            && shard.is_none_or(|shard| self.feeds.top_of_book_on(shard).is_some())
+    }
+
+    /// Whether a message for an instrument on this shard reaches a
+    /// market-by-price feed. As [`top_of_book_carries`](Self::top_of_book_carries).
+    fn market_by_price_carries(&self, shard: Option<usize>) -> bool {
+        !self.feeds.market_by_price.is_empty()
+            && shard.is_none_or(|shard| self.feeds.market_by_price_on(shard).is_some())
+    }
+
     /// Forward the reference-data owner's counts to the registry, as deltas.
     ///
     /// The refdata crate constructs no metric — the normative set is closed and
@@ -974,12 +1279,24 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
 
         let published = i64::try_from(self.refdata.published()).unwrap_or(i64::MAX);
         refdata.set_instruments_current(published);
-        // Per `Channel ID`, because the manifest is what a subscriber to that
-        // channel reconciles against — and every feed advertises the same
-        // published set, which is why one registry serves them all.
-        for channel_id in self.feeds.channel_ids() {
-            refdata.set_manifest_seq(channel_id, u64::from(self.refdata.manifest_seq()));
-            refdata.set_manifest_valid(channel_id, self.refdata.is_valid());
+        // Per `Channel ID`, and read from the shard that owns that channel.
+        // `Manifest Seq` increments when the published set changes *on this
+        // channel*, so one process-wide value written to every series would
+        // move a quiet channel's gauge for an admission its subscribers cannot
+        // see — and an operator watching the gauge that mirrors the wire would
+        // be looking at a number no datagram carries.
+        for shard in 0..self.feeds.shard_count() {
+            let Some(name) = self.feeds.shard_name(shard) else {
+                continue;
+            };
+            let Some(manifest_seq) = self.refdata.manifest_seq(name) else {
+                continue;
+            };
+            let valid = self.refdata.is_valid(name);
+            for channel_id in self.feeds.channel_ids_on(shard) {
+                refdata.set_manifest_seq(channel_id, u64::from(manifest_seq));
+                refdata.set_manifest_valid(channel_id, valid);
+            }
         }
         self.metrics.book().set_instruments_published(published);
     }
@@ -1109,8 +1426,9 @@ fn timed<T>(
 ///
 /// A free function generic over the feed, because the two send paths are
 /// different types and this is the same behaviour for both. The definitions and
-/// the manifest arrive as arguments rather than being drained here, so that the
-/// pacer is asked once per tick however many feeds are enabled.
+/// the manifest arrive as arguments rather than being drained here, so that a
+/// shard's pacer is asked once per tick however many of that shard's feeds are
+/// enabled.
 fn tick_pipeline<F: EmittedFeed>(
     pipeline: &mut FeedPipeline<F>,
     definitions: &[InstrumentDefinition],
@@ -1167,17 +1485,24 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
         let now_mono = dz_publisher_refdata::Clock::monotonic_ns(&self.clock);
         let now_unix = self.clock.unix_ns();
 
-        let Some(pipeline) = self.feeds.market_by_price.as_mut() else {
-            // No depth feed carries `0x14`, so there is nothing to announce and
-            // nothing to recover. Counted as unroutable, which is what every
-            // other event no enabled feed carries is counted as.
+        let shard = self.shard_of(instrument);
+        if !self.market_by_price_carries(shard) {
+            // No depth feed on this instrument's shard carries `0x14`, so there
+            // is nothing to announce and nothing to recover. Counted as
+            // unroutable, which is what every other event no enabled feed
+            // carries is counted as.
             self.unroutable += 1;
             return;
-        };
-        // The anchor is where the feed is *now*: the reset takes effect
-        // immediately, so it is the number the datagram carrying it will take,
-        // read off the send path because nothing else knows it.
-        let anchor = pipeline.mktdata_sequence().unwrap_or(0);
+        }
+        // The anchor is where **this instrument's own channel** is now: the
+        // reset takes effect immediately, so it is the number the datagram
+        // carrying it will take, read off that shard's send path because
+        // nothing else knows it. Read off another shard's it is a number from
+        // another channel instance's series, which the subscriber will compare
+        // against its own — a wrong answer, not a late one.
+        let anchor = shard
+            .and_then(|shard| self.feeds.market_by_price_on(shard))
+            .map_or(0, |pipeline| pipeline.mktdata_sequence().unwrap_or(0));
 
         let lowered = self.depth.lower_instrument_reset(
             self.refdata.instruments(),
@@ -1189,9 +1514,8 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
         match lowered {
             Ok(reset) => {
                 let sent = timed(&self.metrics, EgressMessageType::InstrumentReset, || {
-                    self.feeds
-                        .market_by_price
-                        .as_mut()
+                    shard
+                        .and_then(|shard| self.feeds.market_by_price_on_mut(shard))
                         .expect("checked above")
                         .send_instrument_reset(&reset, now_mono, now_unix)
                 });
@@ -1233,13 +1557,18 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                 bid,
                 ask,
             } => {
-                // Refused before the lowering when no feed carries it, which
-                // costs nothing here and is the same rule the depth branches
-                // below need for a stronger reason.
-                let Some(_) = self.feeds.top_of_book.as_ref() else {
+                // Resolved once, here, and every send below is an indexed load
+                // on it. A name compared per message would put the size of the
+                // shard set on the datagram path for an answer the admission
+                // already settled.
+                let shard = self.shard_of(instrument);
+                // Refused before the lowering when no feed on this instrument's
+                // shard carries it, which costs nothing here and is the same
+                // rule the depth branches below need for a stronger reason.
+                if !self.top_of_book_carries(shard) {
                     self.unroutable += 1;
                     return;
-                };
+                }
                 let lowered = lowering.lower_quote(
                     self.refdata.instruments(),
                     instrument,
@@ -1250,9 +1579,8 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                 match lowered {
                     Ok(quote) => {
                         let sent = timed(&self.metrics, EgressMessageType::Quote, || {
-                            self.feeds
-                                .top_of_book
-                                .as_mut()
+                            shard
+                                .and_then(|shard| self.feeds.top_of_book_on_mut(shard))
                                 .expect("checked above")
                                 .send_quote(&quote, now_mono, now_unix)
                         });
@@ -1275,6 +1603,7 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                 cumulative_volume,
                 flags,
             } => {
+                let shard = self.shard_of(instrument);
                 let lowered = lowering.lower_trade(
                     self.refdata.instruments(),
                     instrument,
@@ -1287,19 +1616,26 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                     flags,
                 );
                 match lowered {
-                    // **One value, both feeds.** The wire requires `0x04` to be
-                    // byte-for-byte identical across the feeds in the family a
-                    // venue publishes, and this is the mechanism: there is one
-                    // lowered trade and no second call site to drift. A trade
-                    // also stamps no `Per-Instrument Seq` — the message has no
-                    // such field, and it is not a book mutation.
+                    // **One value, both of the shard's feeds.** The wire
+                    // requires `0x04` to be byte-for-byte identical across the
+                    // feeds in the family a venue publishes, and this is the
+                    // mechanism: there is one lowered trade and no second call
+                    // site to drift. Shards make it two sends of one value per
+                    // shard instead of two per process, which is more sends and
+                    // no more values. A trade also stamps no `Per-Instrument
+                    // Seq` — the message has no such field, and it is not a
+                    // book mutation.
                     Ok(trade) => {
                         let mut reached = false;
                         timed(&self.metrics, EgressMessageType::Trade, || {
-                            if let Some(pipeline) = self.feeds.top_of_book.as_mut() {
+                            if let Some(pipeline) =
+                                shard.and_then(|shard| self.feeds.top_of_book_on_mut(shard))
+                            {
                                 reached |= pipeline.send_trade(&trade, now_mono, now_unix).is_ok();
                             }
-                            if let Some(pipeline) = self.feeds.market_by_price.as_mut() {
+                            if let Some(pipeline) =
+                                shard.and_then(|shard| self.feeds.market_by_price_on_mut(shard))
+                            {
                                 reached |= pipeline.send_trade(&trade, now_mono, now_unix).is_ok();
                             }
                         });
@@ -1320,14 +1656,15 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                 order_count,
                 presence,
             } => {
+                let shard = self.shard_of(instrument);
                 // Before the lowering, and here that is the load-bearing order:
                 // `lower_level` stamps `Per-Instrument Seq`, and a number spent
                 // on a message that no feed will carry is a gap every
                 // subscriber reads as packet loss.
-                let Some(_) = self.feeds.market_by_price.as_ref() else {
+                if !self.market_by_price_carries(shard) {
                     self.unroutable += 1;
                     return;
-                };
+                }
                 let lowered = self.depth.lower_level(
                     self.refdata.instruments(),
                     instrument,
@@ -1341,9 +1678,8 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                 match lowered {
                     Ok(level) => {
                         let sent = timed(&self.metrics, EgressMessageType::LevelUpdate, || {
-                            self.feeds
-                                .market_by_price
-                                .as_mut()
+                            shard
+                                .and_then(|shard| self.feeds.market_by_price_on_mut(shard))
                                 .expect("checked above")
                                 .send_level(&level, now_mono, now_unix)
                         });
@@ -1361,10 +1697,11 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                 source_ts_ns,
                 scope,
             } => {
-                let Some(_) = self.feeds.market_by_price.as_ref() else {
+                let shard = self.shard_of(instrument);
+                if !self.market_by_price_carries(shard) {
                     self.unroutable += 1;
                     return;
-                };
+                }
                 let lowered = self.depth.lower_clear(
                     self.refdata.instruments(),
                     instrument,
@@ -1374,9 +1711,8 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                 match lowered {
                     Ok(clear) => {
                         let sent = timed(&self.metrics, EgressMessageType::BookClear, || {
-                            self.feeds
-                                .market_by_price
-                                .as_mut()
+                            shard
+                                .and_then(|shard| self.feeds.market_by_price_on_mut(shard))
                                 .expect("checked above")
                                 .send_book_clear(&clear, now_mono, now_unix)
                         });

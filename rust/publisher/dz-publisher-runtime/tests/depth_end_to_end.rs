@@ -18,11 +18,20 @@
 
 mod harness;
 
-use dz_adapter_core::{EventSink, Presence, Side};
+use std::time::Duration;
+
+use dz_adapter_core::{Desync, EventSink, Presence, Side};
 use dz_edge_mbp::{BookClear, LevelUpdate};
+use dz_edge_refdata::ManifestSummary;
 use dz_edge_tob::Trade;
 use dz_publisher_runtime::Exit;
-use harness::{depth_feed, harness, harness_both, FakeAdapter, SOURCE_ID};
+use harness::{
+    depth_feed, harness, harness_both, harness_two_shards, harness_two_shards_with_rotation,
+    FakeAdapter, SHARD_A, SHARD_B, SOURCE_ID,
+};
+
+/// `0x14 InstrumentReset`, from the market-by-price specification's table.
+const TYPE_INSTRUMENT_RESET: u8 = 0x14;
 
 // The wire values, transcribed from the market-by-price specification's own
 // tables. `dz-edge-mbp` exports each as a constant; the literals are written out
@@ -469,4 +478,205 @@ fn shutting_down_a_depth_publisher_ends_every_feeds_mktdata_channel() {
         .unwrap()
         .datagrams()
         .is_empty());
+}
+
+#[test]
+fn a_quote_reaches_its_own_shards_top_of_book_feed_and_no_other_sink() {
+    // Written as an emptiness rather than as a presence. *Shard A's quote is
+    // on shard A's mktdata port* passes against a publisher that packs every
+    // message onto every channel, which is the failure this whole partition
+    // exists to prevent; only *and on nothing else* can fail against it.
+    //
+    // The instrument is on the **second** shard, deliberately. On the first it
+    // would be at index 0, and a publisher that had lost the routing
+    // altogether and always reached for the first shard would pass.
+    let mut h = harness_two_shards();
+    let mut adapter = FakeAdapter::on_shards(&[("A-B", SHARD_A), ("C-D", SHARD_B)]);
+    h.publisher.poll_listings(&mut adapter);
+    let on_b = adapter.handles()[1];
+
+    h.publisher.event(harness::quote(on_b, 1));
+
+    let mut carried = Vec::new();
+    for (index, shard) in h.shards.iter().enumerate() {
+        for (spec, recorders) in [("top-of-book", &shard.tob), ("market-by-price", &shard.mbp)] {
+            let recorders = recorders.as_ref().expect("both specifications are carried");
+            if recorders.mktdata.type_ids().contains(&0x03) {
+                carried.push((index, spec));
+            }
+        }
+    }
+    assert_eq!(
+        carried,
+        [(1, "top-of-book")],
+        "a quote must reach the top-of-book feed of the shard its instrument was admitted to, and \
+         no other channel instance"
+    );
+    assert_eq!(h.publisher.unroutable(), 0);
+}
+
+#[test]
+fn a_reset_is_anchored_at_its_own_shards_sequence() {
+    // The sharpest of the failures the partition prevents, and the only one
+    // that is a wrong answer rather than a slow one: a subscriber records the
+    // anchor as the minimum `Anchor Seq` it will accept, and compares it
+    // against the numbers it has seen on its own channel. A number from
+    // another channel instance's series is one it will wait behind forever.
+    //
+    // The two shards' sequences are deliberately driven apart first, so the
+    // assertion cannot pass by both being the same number.
+    let mut h = harness_two_shards();
+    let mut adapter = FakeAdapter::on_shards(&[("A-B", SHARD_A), ("C-D", SHARD_B)]);
+    h.publisher.poll_listings(&mut adapter);
+    let on_a = adapter.handles()[0];
+    let on_b = adapter.handles()[1];
+
+    // Three levels on shard A and one on shard B, so the two channels are at
+    // different points in their own series.
+    for source_ts_ns in 1..=3 {
+        h.publisher.event(harness::bid_level(on_a, source_ts_ns));
+    }
+    h.publisher.event(harness::bid_level(on_b, 4));
+
+    let a = h.shards[0].mbp.as_ref().expect("shard A carries depth");
+    let b = h.shards[1].mbp.as_ref().expect("shard B carries depth");
+    assert_ne!(
+        a.mktdata.headers().last().map(|(sequence, _)| *sequence),
+        b.mktdata.headers().last().map(|(sequence, _)| *sequence),
+        "the two channels must be at different sequence numbers for this test to mean anything"
+    );
+
+    h.publisher.desynchronised(on_b, Desync::UpstreamGap);
+
+    let headers = b.mktdata.headers();
+    let messages = b.mktdata.messages();
+    let position = messages
+        .iter()
+        .position(|(type_id, _)| *type_id == TYPE_INSTRUMENT_RESET)
+        .expect("the reset reached shard B's market-data port");
+    let (sequence, _) = headers[position];
+    let anchor = u64::from_le_bytes(
+        messages[position].1[12..20]
+            .try_into()
+            .expect("eight bytes"),
+    );
+    assert_eq!(
+        anchor, sequence,
+        "the anchor must be the number of the datagram that carried it, on the reset instrument's \
+         own channel"
+    );
+    assert!(
+        !a.mktdata.type_ids().contains(&TYPE_INSTRUMENT_RESET),
+        "shard A's channel was told about a reset on an instrument it does not carry"
+    );
+}
+
+#[test]
+fn every_channel_instances_final_manifest_carries_its_own_shards_published_set() {
+    // The two shards hold different published sets, because equal ones would
+    // let a process-wide `Instrument Count` and a process-wide `Manifest Seq`
+    // pass this unnoticed.
+    let mut h = harness_two_shards();
+    let mut adapter = FakeAdapter::on_shards(&[
+        ("A-B", SHARD_A),
+        ("C-D", SHARD_B),
+        ("E-F", SHARD_B),
+        ("G-H", SHARD_B),
+    ]);
+    h.publisher.poll_listings(&mut adapter);
+
+    h.publisher.shut_down(Exit::Signal);
+
+    let mut counts = Vec::new();
+    for shard in &h.shards {
+        for recorders in [&shard.tob, &shard.mbp] {
+            let recorders = recorders.as_ref().expect("both specifications are carried");
+            // Every channel instance ends the same way: the final manifest on
+            // refdata and `EndOfSession` last on mktdata. One shard's teardown
+            // is not the process's.
+            assert_eq!(
+                recorders.mktdata.type_ids().last(),
+                Some(&0x06),
+                "a channel instance did not end with EndOfSession"
+            );
+            let last = recorders
+                .refdata
+                .messages()
+                .iter()
+                .rev()
+                .find(|(type_id, _)| *type_id == 0x07)
+                .map(|(_, bytes)| ManifestSummary::decode(bytes).expect("composed"))
+                .expect("a channel instance sent no final manifest");
+            assert_eq!(last.valid, 0, "the final manifest must carry `Valid = 0`");
+            counts.push((last.instrument_count, last.manifest_seq));
+        }
+    }
+    assert_eq!(
+        counts,
+        [(1, 1), (1, 1), (3, 3), (3, 3)],
+        "each channel instance's final manifest must describe its own shard's published set: one \
+         instrument and one change on the first shard, three of each on the second"
+    );
+}
+
+#[test]
+fn a_shards_snapshot_rotation_serves_its_own_instruments_at_its_own_cycle() {
+    // One shard publishes one instrument and the other three, over the same
+    // configured cycle. Paced by the process's four the smaller shard would
+    // wait four ticks for its one book; served from the shared slots without
+    // the membership check, either rotation would snapshot the other's
+    // instruments onto its own channel.
+    let mut h = harness_two_shards_with_rotation(Duration::from_secs(4));
+    let mut adapter = FakeAdapter::on_shards(&[
+        ("A-B", SHARD_A),
+        ("C-D", SHARD_B),
+        ("E-F", SHARD_B),
+        ("G-H", SHARD_B),
+    ])
+    .with_book(&[(Side::Bid, "100.00", "5.000")]);
+    h.publisher.poll_listings(&mut adapter);
+
+    // The first call of each rotation schedules rather than snapshots, so the
+    // first pass is asked for and returns nothing.
+    assert!(h.publisher.periodic_snapshot(&adapter).is_none());
+    // Shard A's tick is the cycle over its one instrument: four seconds. Shard
+    // B's is the cycle over its three, which is shorter, so B falls due first
+    // and A does not until its own tick has elapsed.
+    h.clock.advance(Duration::from_secs(2));
+    assert!(
+        h.publisher.periodic_snapshot(&adapter).is_some(),
+        "the larger shard's tick is its cycle over its own three instruments"
+    );
+    let a = h.shards[0].mbp.as_ref().expect("shard A carries depth");
+    let b = h.shards[1].mbp.as_ref().expect("shard B carries depth");
+    assert!(
+        a.snapshot
+            .as_ref()
+            .expect("a snapshot port")
+            .datagrams()
+            .is_empty(),
+        "the smaller shard is paced by the one instrument it publishes, not by the four the \
+         process does"
+    );
+    assert!(!b
+        .snapshot
+        .as_ref()
+        .expect("a snapshot port")
+        .datagrams()
+        .is_empty());
+
+    // And past the smaller shard's own tick, its one instrument is served -
+    // on its own channel.
+    h.clock.advance(Duration::from_secs(4));
+    for _ in 0..2 {
+        let _ = h.publisher.periodic_snapshot(&adapter);
+    }
+    assert!(
+        !a.snapshot
+            .as_ref()
+            .expect("a snapshot port")
+            .datagrams()
+            .is_empty(),
+        "the smaller shard's rotation never reached its own instrument"
+    );
 }

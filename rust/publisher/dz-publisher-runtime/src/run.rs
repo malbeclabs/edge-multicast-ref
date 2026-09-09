@@ -47,7 +47,9 @@ use dz_publisher_egress::{
     EraStore, FailureScope, KernelRoute, MulticastTransmitter, ReferenceStream, Tee,
 };
 use dz_publisher_metrics::{PublisherMetrics, PublisherMetricsConfig};
-use dz_publisher_refdata::{CycleSchedule, FileStore, Registry, RegistryConfig, StateStore};
+use dz_publisher_refdata::{
+    CycleSchedule, FileStore, Registry, RegistryConfig, ShardConfig, StateStore,
+};
 
 use crate::clock::{Clock, SystemClock};
 use crate::config::{Config, Feed, FeedSpec, Source, SourceRole};
@@ -246,10 +248,32 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
         MAX_DATAGRAM_SIZE as u16,
         MAX_DEFINITION_DATAGRAMS_PER_TICK,
     );
+    // One entry per distinct shard, in the document's own order, so that the
+    // index the registry addresses a published set by is the index the feed
+    // pipelines carry. Two orders that agree by convention rather than by
+    // construction is how a shard's definitions end up on another shard's port.
+    //
+    // The `Channel ID` is the first block carrying that shard, and it is the one
+    // a manifest states when nothing overwrites it. A shard carrying two
+    // specifications is two channel instances sharing one published set; the
+    // datagram builder stamps the header at push, so the copy in the message
+    // body cannot disagree with the port it left by.
+    let shards: Vec<ShardConfig> = config
+        .shards()
+        .into_iter()
+        .map(|shard| ShardConfig {
+            channel_id: config
+                .feeds
+                .iter()
+                .find(|feed| feed.shard == shard)
+                .map_or(identity.channel_id, |feed| feed.channel_id),
+            name: shard.as_str().to_owned(),
+        })
+        .collect();
     let refdata = Registry::open(
         RegistryConfig {
             source_id: identity.source_id,
-            channel_id: identity.channel_id,
+            shards,
             selection: config.refdata.selection,
             schedule,
         },
@@ -259,31 +283,46 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
 
     let route = KernelRoute;
     let mut feeds = Feeds::default();
-    for feed in &config.feeds {
-        // The match is total over a set that is not `#[non_exhaustive]`, so a
-        // feed specification added to `FeedSpec` breaks the build here - which
-        // is the point. A value a configuration can name that nothing composes
-        // is a value that resolves to nothing at startup.
-        match feed.spec {
-            FeedSpec::TopOfBook => {
-                let ports = open_ports(feed, &config, &metrics, &route)?;
-                feeds.top_of_book = Some(FeedPipeline::new(
-                    feed,
-                    Arc::clone(&metrics),
-                    eras.begin_era::<TopOfBook>()?,
-                    ports,
-                ));
-            }
-            FeedSpec::MarketByPrice => {
-                let ports = open_ports(feed, &config, &metrics, &route)?;
-                feeds.market_by_price = Some(FeedPipeline::new(
-                    feed,
-                    Arc::clone(&metrics),
-                    eras.begin_era::<MarketByPrice>()?,
-                    ports,
-                ));
+    // **Shard-outer, block-inner, and the order is the whole point.** Both
+    // vectors are indexed by shard, and the index a routing decision uses is
+    // the one `Registry::shard_of` returns — which is an index into
+    // `RegistryConfig.shards`, built above from this same `Config::shards()`.
+    //
+    // Pushing per block in document order would let a file that interleaves
+    // them — top-of-book on one shard, market-by-price on another, then the
+    // other way round — leave the two vectors in different orders. One
+    // instrument's quotes and its levels would then leave by two different
+    // channels, and nothing below `Feeds` re-checks the pairing. Building a
+    // shard at a time makes that unreachable rather than merely unlikely.
+    for shard in config.shards() {
+        let mut top_of_book = None;
+        let mut market_by_price = None;
+        for feed in config.feeds.iter().filter(|feed| feed.shard == shard) {
+            let ports = open_ports(feed, &config, &metrics, &route)?;
+            // The match is total over a set that is not `#[non_exhaustive]`, so
+            // a feed specification added to `FeedSpec` breaks the build here -
+            // which is the point. A value a configuration can name that nothing
+            // composes is a value that resolves to nothing at startup.
+            match feed.spec {
+                FeedSpec::TopOfBook => {
+                    top_of_book = Some(FeedPipeline::new(
+                        feed,
+                        Arc::clone(&metrics),
+                        eras.begin_era::<TopOfBook>(feed.shard.era_shard())?,
+                        ports,
+                    ));
+                }
+                FeedSpec::MarketByPrice => {
+                    market_by_price = Some(FeedPipeline::new(
+                        feed,
+                        Arc::clone(&metrics),
+                        eras.begin_era::<MarketByPrice>(feed.shard.era_shard())?,
+                        ports,
+                    ));
+                }
             }
         }
+        feeds.push_shard(top_of_book, market_by_price);
     }
 
     let publisher = RefCell::new(Publisher::new(

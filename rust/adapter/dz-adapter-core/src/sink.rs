@@ -121,21 +121,100 @@ pub trait EventSink {
     }
 }
 
+/// The shard an instrument is admitted to when nothing names one.
+///
+/// One token, spelled once, because both sides resolve to it: a configuration
+/// block that states no shard, and [`ListingSink::list`], which forwards here.
+/// Two spellings of one shard would be two published sets and two channels for
+/// what an operator wrote down as one, so a block that states this token
+/// explicitly is refused at load rather than accepted as a synonym.
+pub const DEFAULT_SHARD: &str = "default";
+
 /// Where an adapter declares the instruments it wants published.
+///
+/// # An implementor written before shards no longer compiles
+///
+/// [`list_on`](Self::list_on) is required and [`list`](Self::list) is
+/// defaulted, so a sink that implements only `list` is a compile error rather
+/// than a publisher that admits everything to one shard:
+///
+/// ```compile_fail,E0046
+/// use dz_adapter_core::{InstrumentRef, InstrumentSpec, ListingSink};
+///
+/// struct Everything;
+///
+/// impl ListingSink for Everything {
+///     fn list(&mut self, _spec: &InstrumentSpec<'_>) -> Option<InstrumentRef> {
+///         Some(InstrumentRef::from_admission(0))
+///     }
+///     fn delist(&mut self, _instrument: InstrumentRef) {}
+/// }
+/// ```
+///
+/// The one method an implementor writes instead, which is the same sink with
+/// the shard it was already being handed:
+///
+/// ```
+/// use dz_adapter_core::{InstrumentRef, InstrumentSpec, ListingSink};
+///
+/// struct Everything;
+///
+/// impl ListingSink for Everything {
+///     fn list_on(&mut self, _shard: &str, _spec: &InstrumentSpec<'_>) -> Option<InstrumentRef> {
+///         Some(InstrumentRef::from_admission(0))
+///     }
+///     fn delist(&mut self, _instrument: InstrumentRef) {}
+/// }
+/// ```
 pub trait ListingSink {
-    /// Offer one instrument for publication.
+    /// Offer one instrument for publication on a named shard.
     ///
-    /// Returns the handle to carry for it, or `None` when the runtime's
-    /// selection policy declined: over the published cap, or not admissible.
-    /// **A `None` is ordinary and is not an error** — a venue whose universe
-    /// exceeds what a feed publishes is the normal case, and the policy that
-    /// decides is the playbook's rather than the venue's.
+    /// Returns the handle to carry for it, or `None` when the runtime declined:
+    /// over the published cap, not admissible, or naming a shard this publisher
+    /// was not configured with. **A `None` is ordinary and is not an error** — a
+    /// venue whose universe exceeds what a feed publishes is the normal case,
+    /// and the policy that decides is the playbook's rather than the venue's.
     ///
     /// Offering the same instrument twice returns the handle already minted for
     /// it. An adapter may therefore re-offer its whole set without tracking
     /// what it has already offered, which is what makes a poll cheap to write
-    /// correctly.
-    fn list(&mut self, spec: &InstrumentSpec<'_>) -> Option<InstrumentRef>;
+    /// correctly. Re-offering it under a *different* shard does **not** move
+    /// it: the shard is fixed at admission, because no message in the family
+    /// says that an instrument moved, and a subscriber on the channel it left
+    /// would see it stop updating — which is indistinguishable from a market
+    /// that went quiet.
+    ///
+    /// # A shard is the most a venue may say about where an instrument goes
+    ///
+    /// The name is the venue's own word for a partition it computes. Which
+    /// `Channel ID`, group, port, sequence series and era that shard resolves
+    /// to is the operator's, stated in configuration, and unreachable from
+    /// here — there is no parameter to pass one through. An adapter with no
+    /// partition to state calls [`list`](Self::list) and never sees a shard at
+    /// all.
+    ///
+    /// # Required, while [`list`](Self::list) is defaulted
+    ///
+    /// The other direction is the trap. Defaulting `list_on` to `list` would
+    /// leave an implementor that had not been updated admitting its whole
+    /// universe to [`DEFAULT_SHARD`] — every shard collapsed onto one channel,
+    /// with no error, no counter and no log. Requiring this one makes that
+    /// omission a compile error, and the crate pays the version bump that
+    /// costs: a venue *calls* this trait rather than implementing it, so the
+    /// break falls on implementors, and every implementor of it is in this
+    /// workspace.
+    fn list_on(&mut self, shard: &str, spec: &InstrumentSpec<'_>) -> Option<InstrumentRef>;
+
+    /// Offer one instrument on the default shard.
+    ///
+    /// What an adapter that computes no partition calls, and what every adapter
+    /// written before shards existed already calls. Defaulted rather than
+    /// required because [`DEFAULT_SHARD`] is the answer for a venue that has
+    /// nothing to say here, and a sink that has to spell it out is a sink that
+    /// can spell it differently.
+    fn list(&mut self, spec: &InstrumentSpec<'_>) -> Option<InstrumentRef> {
+        self.list_on(DEFAULT_SHARD, spec)
+    }
 
     /// Withdraw an instrument that has reached the end of its life.
     ///

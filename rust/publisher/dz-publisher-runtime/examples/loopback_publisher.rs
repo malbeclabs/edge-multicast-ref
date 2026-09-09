@@ -31,8 +31,10 @@ use dz_publisher_egress::{
 };
 use dz_publisher_lowering::SourceId;
 use dz_publisher_metrics::{PublisherMetrics, PublisherMetricsConfig};
-use dz_publisher_refdata::{CycleSchedule, FileStore, Registry, RegistryConfig, SelectionPolicy};
-use dz_publisher_runtime::config::{Feed, FeedSpec};
+use dz_publisher_refdata::{
+    CycleSchedule, FileStore, Registry, RegistryConfig, SelectionPolicy, ShardConfig,
+};
+use dz_publisher_runtime::config::{Feed, FeedSpec, ShardName};
 use dz_publisher_runtime::pipeline::{FeedPipeline, Port, Ports};
 use dz_publisher_runtime::publisher::{Feeds, Publisher};
 use dz_publisher_runtime::{Exit, SystemClock};
@@ -231,6 +233,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let feed = Feed {
         spec: FeedSpec::TopOfBook,
+        shard: ShardName::default_shard(),
         channel_id: CHANNEL_ID,
         source_id,
         group,
@@ -246,7 +249,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         idle_guard: Duration::from_secs(3600),
     };
 
-    let era = EraStore::open(&state_dir)?.begin_era::<dz_edge_tob::TopOfBook>()?;
+    let era = EraStore::open(&state_dir)?
+        // One feed, no shard named: the file this example has always written.
+        .begin_era::<dz_edge_tob::TopOfBook>(dz_publisher_egress::Shard::DEFAULT)?;
     eprintln!("era {} state {state_dir}", era.get());
 
     let ports = Ports {
@@ -254,20 +259,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         refdata: open("refdata", PortRole::Refdata, refdata_port)?,
         snapshot: None,
     };
-    let feeds = Feeds {
-        top_of_book: Some(FeedPipeline::<TopOfBook>::new(
+    // One shard, so one entry in each vector and every routed index is 0.
+    let mut feeds = Feeds::default();
+    feeds.push_shard(
+        Some(FeedPipeline::<TopOfBook>::new(
             &feed,
             Arc::clone(&metrics),
             era,
             ports,
         )),
-        market_by_price: None,
-    };
+        None,
+    );
 
     let registry = Registry::open(
         RegistryConfig {
             source_id,
-            channel_id: CHANNEL_ID,
+            // The shard a document naming none resolves to, and the only one
+            // this example carries.
+            shards: vec![ShardConfig::default_shard(CHANNEL_ID)],
             selection: SelectionPolicy::new(8, 16, 8)?,
             schedule: CycleSchedule::new(feed.definition_cycle, 1232, 1),
         },

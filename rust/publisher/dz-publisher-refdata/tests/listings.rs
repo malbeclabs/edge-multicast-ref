@@ -12,7 +12,7 @@ use dz_adapter_core::{
 use dz_publisher_lowering::SourceId;
 use dz_publisher_refdata::{
     CycleSchedule, ManualClock, MemoryStore, Phase, Refusal, Registry, RegistryConfig,
-    SelectionPolicy,
+    SelectionPolicy, ShardConfig,
 };
 
 /// An instrument whose every scalar converts exactly at its own exponents:
@@ -39,7 +39,7 @@ fn spec(symbol: &str) -> InstrumentSpec<'_> {
 fn config(selection: SelectionPolicy) -> RegistryConfig {
     RegistryConfig {
         source_id: SourceId::new(7).expect("7 is an assigned production id"),
-        channel_id: 3,
+        shards: vec![ShardConfig::default_shard(3)],
         selection,
         schedule: CycleSchedule::new(std::time::Duration::from_secs(30), 1232, 8),
     }

@@ -9,7 +9,7 @@
 
 mod harness;
 
-use dz_adapter_core::EventSink;
+use dz_adapter_core::{EventSink, DEFAULT_SHARD};
 use dz_edge_core::{AppMessage, EndOfSession, Heartbeat};
 use dz_edge_refdata::ManifestSummary;
 use dz_edge_tob::Quote;
@@ -162,7 +162,7 @@ fn nothing_is_admitted_after_admissions_close() {
         "an offer was admitted after shutdown"
     );
     assert_eq!(h.publisher.refdata().published(), 1);
-    assert!(!h.publisher.refdata().is_valid());
+    assert!(!h.publisher.refdata().is_valid(DEFAULT_SHARD));
 }
 
 #[test]

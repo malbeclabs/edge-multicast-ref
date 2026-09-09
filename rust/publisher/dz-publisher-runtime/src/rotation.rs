@@ -20,12 +20,22 @@
 //! slower lap rather than a spike.
 //!
 //! **O(1) is a claim about two calls, and both had to be made true for it.**
-//! [`InstrumentTable::holds`] is a bounds check, and
-//! [`InstrumentTable::len`] — which [`SnapshotRotation::due`] reads on every
-//! tick to derive the per-instrument interval — is a cached count rather than a
-//! walk of the slots. It was the walk, which made the pacing arithmetic the
-//! most expensive thing in a tick that says here it is constant, and this is the
-//! invariant a maintainer would size a large published set against.
+//! [`InstrumentTable::holds`] is a bounds check, and the published count
+//! [`SnapshotRotation::due`] divides the cycle by is a cached number rather
+//! than a walk of the slots. It was the walk, which made the pacing arithmetic
+//! the most expensive thing in a tick that says here it is constant, and this
+//! is the invariant a maintainer would size a large published set against.
+//!
+//! # One rotation per shard, over slots every shard shares
+//!
+//! A rotation belongs to one channel instance, so the cycle it divides is
+//! divided by *its shard's* published count and the slots it accepts are its
+//! shard's. Both are the caller's to supply, because the instrument table is
+//! one table for the process — the lowering's — and putting the shard on it
+//! would drag a crate that publishes nothing into knowing where publication
+//! goes. What that costs is the one place the tick is not constant: a rotation
+//! walks past the slots of shards that are not its own, so the search for the
+//! next instrument is linear in the number of shards rather than in one.
 //!
 //! **What that does not survive**, stated because it is the ceiling and not a
 //! detail: a set so large that `cycle / instruments` falls below the runtime's
@@ -100,12 +110,27 @@ impl SnapshotRotation {
     /// whose snapshots stop.
     ///
     /// An empty table is `None` and schedules nothing: there is no pass to make.
-    pub fn due(&mut self, now_ns: u64, instruments: &InstrumentTable) -> Option<InstrumentRef> {
+    ///
+    /// `published` is **this rotation's own shard's** published count, and
+    /// `on_shard` is what says whether a slot holds one of its instruments. The
+    /// slots are shared across every shard, so both are the caller's to supply
+    /// and neither can be read off the table: divided by the process's count a
+    /// shard is paced as slowly as there are shards, and walking every shard's
+    /// slots spends most of a rotation's ticks on instruments another channel
+    /// serves. Both errors leave `[[feed]] snapshot_cycle` reading as honoured
+    /// and lap the channel's own set many times too slowly.
+    pub fn due(
+        &mut self,
+        now_ns: u64,
+        instruments: &InstrumentTable,
+        published: usize,
+        on_shard: impl Fn(InstrumentRef) -> bool,
+    ) -> Option<InstrumentRef> {
         let slots = u32::try_from(instruments.slots()).unwrap_or(u32::MAX);
         if slots == 0 {
             return None;
         }
-        let tick = tick(self.cycle(), instruments.len());
+        let tick = tick(self.cycle(), published);
 
         match self.next_due_ns {
             // The first call schedules the first snapshot rather than taking
@@ -130,7 +155,7 @@ impl SnapshotRotation {
         for _ in 0..slots {
             let candidate = InstrumentRef::from_admission(self.cursor);
             self.cursor = (self.cursor + 1) % slots;
-            if instruments.holds(candidate) {
+            if instruments.holds(candidate) && on_shard(candidate) {
                 return Some(candidate);
             }
         }
@@ -153,6 +178,17 @@ mod tests {
         table
     }
 
+    /// One shard's rotation over a table that is all its own, which is what
+    /// every test here but the two shard tests is about: the published count is
+    /// the table's and every slot is a member.
+    fn due(
+        rotation: &mut SnapshotRotation,
+        at_ns: u64,
+        table: &InstrumentTable,
+    ) -> Option<InstrumentRef> {
+        rotation.due(at_ns, table, table.len(), |_| true)
+    }
+
     fn instrument(instrument_id: u32) -> Instrument {
         Instrument {
             instrument_id,
@@ -168,6 +204,61 @@ mod tests {
         // instruments takes `cycle`, so a tick is `cycle / n`.
         assert_eq!(tick(Duration::from_secs(5), 5), Duration::from_secs(1));
         assert_eq!(tick(Duration::from_secs(5), 50), Duration::from_millis(100));
+    }
+
+    #[test]
+    fn a_shards_rotation_is_paced_by_its_own_published_count() {
+        // Five instruments in one table: four on one shard and one on the
+        // other. Divided by the process's five, the shard holding one would
+        // wait five ticks to snapshot it and its `[[feed]] snapshot_cycle`
+        // would still read as honoured - which is the whole of the bug.
+        let table = table(5);
+        let shard_a = |instrument: InstrumentRef| instrument.index() < 4;
+        let shard_b = |instrument: InstrumentRef| instrument.index() >= 4;
+        let mut a = SnapshotRotation::new(Duration::from_secs(4));
+        let mut b = SnapshotRotation::new(Duration::from_secs(4));
+        assert_eq!(a.due(0, &table, 4, shard_a), None);
+        assert_eq!(b.due(0, &table, 1, shard_b), None);
+
+        // Four seconds over four instruments is one a second.
+        assert!(
+            a.due(1_000_000_000, &table, 4, shard_a).is_some(),
+            "the larger shard laps its four instruments in its own cycle"
+        );
+        // Four seconds over one instrument is one every four seconds, and a
+        // divisor of five would have made it one every 800ms.
+        assert_eq!(
+            b.due(1_000_000_000, &table, 1, shard_b),
+            None,
+            "the smaller shard is paced by the one instrument it publishes, not by the five the \
+             process does"
+        );
+        assert!(b.due(4_000_000_000, &table, 1, shard_b).is_some());
+    }
+
+    #[test]
+    fn a_rotation_takes_only_its_own_shards_instruments() {
+        // The slots are one table for the process, so a rotation that took
+        // whatever it found would snapshot another channel's instruments on
+        // this channel's port and lap its own set half as often.
+        let table = table(4);
+        let odd_slots = |instrument: InstrumentRef| instrument.index() % 2 == 1;
+        let mut rotation = SnapshotRotation::new(Duration::from_secs(2));
+        assert_eq!(rotation.due(0, &table, 2, odd_slots), None);
+
+        let mut taken = Vec::new();
+        for second in 1..=4u64 {
+            taken.push(
+                rotation
+                    .due(second * 1_000_000_000, &table, 2, odd_slots)
+                    .map(InstrumentRef::index),
+            );
+        }
+        assert_eq!(
+            taken,
+            [Some(1), Some(3), Some(1), Some(3)],
+            "the rotation walks past the other shard's slots and laps its own two"
+        );
     }
 
     #[test]
@@ -189,7 +280,7 @@ mod tests {
         // delta for any of them, and a snapshot anchored before the first one
         // is a datagram spent to say nothing.
         let mut rotation = SnapshotRotation::new(Duration::from_secs(1));
-        assert_eq!(rotation.due(0, &table(1)), None);
+        assert_eq!(due(&mut rotation, 0, &table(1)), None);
     }
 
     #[test]
@@ -197,13 +288,13 @@ mod tests {
         let mut rotation = SnapshotRotation::new(Duration::from_secs(3));
         let table = table(3);
         // One pass over three instruments in three seconds is one per second.
-        assert_eq!(rotation.due(0, &table), None);
+        assert_eq!(due(&mut rotation, 0, &table), None);
         let mut taken = Vec::new();
         for second in 1..=6u64 {
             let at = second * 1_000_000_000;
             // Exactly one instrument per due tick, never a batch: a snapshot is
             // several datagrams, so the unit of progress is an instrument.
-            taken.push(rotation.due(at, &table).map(InstrumentRef::index));
+            taken.push(due(&mut rotation, at, &table).map(InstrumentRef::index));
         }
         assert_eq!(
             taken,
@@ -216,10 +307,10 @@ mod tests {
     fn nothing_is_due_before_the_tick_elapses() {
         let mut rotation = SnapshotRotation::new(Duration::from_secs(2));
         let table = table(2);
-        assert_eq!(rotation.due(0, &table), None);
+        assert_eq!(due(&mut rotation, 0, &table), None);
         // The tick is one second; half of one is not due.
-        assert_eq!(rotation.due(500_000_000, &table), None);
-        assert!(rotation.due(1_000_000_000, &table).is_some());
+        assert_eq!(due(&mut rotation, 500_000_000, &table), None);
+        assert!(due(&mut rotation, 1_000_000_000, &table).is_some());
     }
 
     #[test]
@@ -230,13 +321,9 @@ mod tests {
         let mut table = table(3);
         table.withdraw(InstrumentRef::from_admission(1));
         let mut rotation = SnapshotRotation::new(Duration::from_secs(2));
-        assert_eq!(rotation.due(0, &table), None);
-        let first = rotation
-            .due(1_000_000_000, &table)
-            .map(InstrumentRef::index);
-        let second = rotation
-            .due(2_000_000_000, &table)
-            .map(InstrumentRef::index);
+        assert_eq!(due(&mut rotation, 0, &table), None);
+        let first = due(&mut rotation, 1_000_000_000, &table).map(InstrumentRef::index);
+        let second = due(&mut rotation, 2_000_000_000, &table).map(InstrumentRef::index);
         assert_eq!((first, second), (Some(0), Some(2)));
     }
 
@@ -249,8 +336,8 @@ mod tests {
         table.withdraw(InstrumentRef::from_admission(0));
         table.withdraw(InstrumentRef::from_admission(1));
         let mut rotation = SnapshotRotation::new(Duration::from_secs(1));
-        assert_eq!(rotation.due(0, &table), None);
-        assert_eq!(rotation.due(10_000_000_000, &table), None);
+        assert_eq!(due(&mut rotation, 0, &table), None);
+        assert_eq!(due(&mut rotation, 10_000_000_000, &table), None);
     }
 
     #[test]
@@ -258,8 +345,11 @@ mod tests {
         // Distinct from the case above: there are no slots, so there is no pass
         // to make and nothing to schedule for later either.
         let mut rotation = SnapshotRotation::new(Duration::from_secs(1));
-        assert_eq!(rotation.due(0, &InstrumentTable::new()), None);
-        assert_eq!(rotation.due(10_000_000_000, &InstrumentTable::new()), None);
+        assert_eq!(due(&mut rotation, 0, &InstrumentTable::new()), None);
+        assert_eq!(
+            due(&mut rotation, 10_000_000_000, &InstrumentTable::new()),
+            None
+        );
     }
 
     #[test]
@@ -269,10 +359,10 @@ mod tests {
         // instead of shifting every later instrument by a tick.
         let mut rotation = SnapshotRotation::new(Duration::from_secs(2));
         let table = table(2);
-        assert_eq!(rotation.due(0, &table), None);
-        assert!(rotation.due(9_000_000_000, &table).is_some());
+        assert_eq!(due(&mut rotation, 0, &table), None);
+        assert!(due(&mut rotation, 9_000_000_000, &table).is_some());
         assert!(
-            rotation.due(10_000_000_000, &table).is_some(),
+            due(&mut rotation, 10_000_000_000, &table).is_some(),
             "a second instrument is due one tick after the late one, not one tick after when it \
              should have been"
         );

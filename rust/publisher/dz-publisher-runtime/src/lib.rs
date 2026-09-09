@@ -159,8 +159,8 @@ pub use builtin::BUILTIN_KINDS;
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use config::{
     AdapterConfig, Config, Document, EgressSection, EmittedFeed, Feed, FeedSection, FeedSpec,
-    MetricsSection, Refdata, RefdataSection, ReplayConfig, SelectionSection, Source, SourceRole,
-    SourceSection, TeeConfig,
+    MetricsSection, Refdata, RefdataSection, ReplayConfig, SelectionSection, ShardName, Source,
+    SourceRole, SourceSection, TeeConfig,
 };
 pub use error::{AdapterInitError, StartupError};
 pub use guard::{ConsistencyGuard, Exit, IdleGuard, Inconsistency, Upstream};

@@ -329,7 +329,7 @@ fn every_event_variant_survives_the_encoding_intact() {
 fn admitted_adapter() -> UdsAdapter {
     struct Admit;
     impl ListingSink for Admit {
-        fn list(&mut self, _spec: &InstrumentSpec<'_>) -> Option<InstrumentRef> {
+        fn list_on(&mut self, _shard: &str, _spec: &InstrumentSpec<'_>) -> Option<InstrumentRef> {
             Some(handle())
         }
         fn delist(&mut self, _instrument: InstrumentRef) {}

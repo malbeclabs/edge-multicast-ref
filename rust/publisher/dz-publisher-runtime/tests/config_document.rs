@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use dz_edge_core::PortRole;
 use dz_publisher_runtime::{Document, FeedSpec, StartupError, TeeConfig};
-use harness::{Doc, CHANNEL_ID, GROUP, MKTDATA_PORT, REFDATA_PORT, SOURCE_ID};
+use harness::{Doc, CHANNEL_ID, DEPTH_CHANNEL_ID, GROUP, MKTDATA_PORT, REFDATA_PORT, SOURCE_ID};
 
 // ---------------------------------------------------------------------------
 // `[adapter.tee]`
@@ -1053,4 +1053,138 @@ fn a_tee_that_is_on_with_no_path_names_no_socket() {
         .destination(FeedSpec::TopOfBook, PortRole::Mktdata)
         .expect_err("no path was stated");
     assert!(matches!(error, StartupError::TeeWithoutPath), "{error}");
+}
+
+/// A shard name that cannot be a path component is refused at load.
+///
+/// The name reaches a path in two places — the block's era file and its
+/// reference-copy socket — so it is checked where the value enters the process
+/// rather than at each use, where the third use is the one that forgets. A
+/// slash writes somewhere nobody configured; a name differing from another only
+/// past the length bound shares its era file.
+#[test]
+fn a_shard_name_that_cannot_be_a_path_component_is_refused() {
+    for bad in [
+        "sports_events", // an underscore
+        "sports/events", // a path separator
+        "Sports",        // an upper-case letter
+        &"s".repeat(65), // one byte past the bound
+        "",              // and nothing at all
+    ] {
+        let mut doc = Doc::valid();
+        doc.feed = doc.feed.replace(
+            &format!("channel_id = {CHANNEL_ID}"),
+            &format!("channel_id = {CHANNEL_ID}\nshard = \"{bad}\""),
+        );
+        let error = Document::parse(&doc.render())
+            .expect("parses")
+            .resolve()
+            .unwrap_err();
+        assert!(
+            matches!(error, StartupError::UnsafeShardName { .. }),
+            "`{bad}` was accepted: {error}"
+        );
+        // The message has to say what would have been accepted, or an operator
+        // is left guessing which of four rules they broke.
+        let message = error.to_string();
+        assert!(
+            message.contains("lower-case letters, digits and hyphens"),
+            "the refusal does not say what a shard name may be: {message}"
+        );
+    }
+}
+
+/// A name at the bound is accepted, so the refusal is a bound and not a mood.
+#[test]
+fn a_shard_name_of_exactly_the_bound_is_accepted() {
+    let mut doc = Doc::valid();
+    let name = "s".repeat(64);
+    doc.feed = doc.feed.replace(
+        &format!("channel_id = {CHANNEL_ID}"),
+        &format!("channel_id = {CHANNEL_ID}\nshard = \"{name}\""),
+    );
+    let config = Document::parse(&doc.render())
+        .expect("parses")
+        .resolve()
+        .expect("sixty-four bytes is the bound, not one past it");
+    assert_eq!(config.feeds[0].shard.as_str(), name);
+}
+
+/// Spelling the default shard's own token is refused.
+///
+/// Two spellings of one shard are two era files and two published sets, for one
+/// channel. Leaving the key out is how a block says it carries the default.
+#[test]
+fn a_block_may_not_spell_the_default_shard() {
+    let mut doc = Doc::valid();
+    doc.feed = doc.feed.replace(
+        &format!("channel_id = {CHANNEL_ID}"),
+        &format!(
+            "channel_id = {CHANNEL_ID}\nshard = \"{}\"",
+            dz_adapter_core::DEFAULT_SHARD
+        ),
+    );
+    let error = Document::parse(&doc.render())
+        .expect("parses")
+        .resolve()
+        .unwrap_err();
+    assert!(
+        matches!(error, StartupError::ReservedShardName { .. }),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("Leave the key out"),
+        "the refusal has to say what to do instead: {error}"
+    );
+}
+
+/// A document naming no shard resolves every block to the default.
+///
+/// This is what a publisher with one channel per specification has always been,
+/// and it has to keep being it: the change is additive or it is a migration.
+#[test]
+fn a_document_with_no_shard_key_resolves_to_the_default_shard() {
+    let config = Document::parse(&Doc::valid().render())
+        .expect("parses")
+        .resolve()
+        .expect("the fixture is a document a publisher can start on");
+    for feed in &config.feeds {
+        assert_eq!(feed.shard.as_str(), dz_adapter_core::DEFAULT_SHARD);
+    }
+    assert_eq!(
+        config.shards().len(),
+        1,
+        "one shard, however many blocks carry it"
+    );
+}
+
+/// Two enabled blocks claiming one `Channel ID` are refused, naming both.
+///
+/// **The mutant to check on this one is the check itself.** `channel_ids()`
+/// sorts and dedups, so without it the document loads, one set of series is
+/// pre-created, two channel instances write to it, and nothing anywhere says
+/// so — not an error, not a counter, not a log line.
+#[test]
+fn two_blocks_claiming_one_channel_id_are_refused_naming_both() {
+    let mut doc = Doc::valid();
+    // The harness's own depth block, so this test is about the `Channel ID`
+    // collision rather than about a market-by-price block's snapshot port —
+    // which is refused first, and by a different check.
+    let second = Doc::depth_feed_block().replace(
+        &format!("channel_id = {DEPTH_CHANNEL_ID}"),
+        &format!("channel_id = {CHANNEL_ID}"),
+    );
+    doc.feed = format!("{}\n{second}", doc.feed);
+
+    let error = Document::parse(&doc.render())
+        .expect("parses")
+        .resolve()
+        .unwrap_err();
+    let message = error.to_string();
+    assert!(
+        matches!(error, StartupError::DuplicateChannelId { .. }),
+        "two blocks shared a Channel ID and it was accepted: {message}"
+    );
+    assert!(message.contains("top-of-book"), "{message}");
+    assert!(message.contains("market-by-price"), "{message}");
 }

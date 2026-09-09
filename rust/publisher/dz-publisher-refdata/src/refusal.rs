@@ -2,8 +2,9 @@
 
 use dz_publisher_lowering::LoweringError;
 
-/// The reasons [`ListingSink::list`](dz_adapter_core::ListingSink::list)
-/// answers `None`.
+/// The reasons
+/// [`ListingSink::list_on`](dz_adapter_core::ListingSink::list_on) answers
+/// `None`.
 ///
 /// The boundary documents a `None` as ordinary rather than as an error, and for
 /// [`Capped`](Self::Capped) that is exactly right: a venue whose universe
@@ -20,10 +21,17 @@ use dz_publisher_lowering::LoweringError;
 /// is that the reasons stay distinguishable, which is what
 /// [`Registry::counts`](crate::Registry::counts) and
 /// [`Registry::last_refusal`](crate::Registry::last_refusal) hand the runtime.
-/// A refusal that is not [`Capped`](Self::Capped) is a reference-data load that
+/// A refusal about the instrument's own numbers is a reference-data load that
 /// did not fully load, and the runtime records it under the load-error family's
 /// `schema` reason, since what failed is the venue's statement of the
 /// instrument rather than the transport that carried it.
+///
+/// The two shard refusals are counted apart from those, because what they
+/// describe is where an instrument was to be published rather than whether it
+/// could be. Neither invents a family: the signal for a shard the venue cannot
+/// reach is `dz_publisher_refdata_instruments_current` sitting at 0 for that
+/// shard's `Channel ID`, which is pre-created at startup and needs no datagram
+/// to be true.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum Refusal {
     /// The published cap is reached, and admission is sticky, so nothing is
@@ -70,6 +78,38 @@ pub enum Refusal {
     /// relisting, which is what it is to a subscriber holding its book.
     #[error("an exponent or contract factor was restated for a published instrument")]
     ScaleRestated,
+
+    /// The venue named a shard this publisher was not configured with.
+    ///
+    /// Refused rather than defaulted. Falling back to the default shard would
+    /// put the instrument on a channel nobody chose, in a way that reads as a
+    /// working publisher: definitions on the wire, a manifest that counts them,
+    /// and a subscriber to the channel the operator meant seeing an instrument
+    /// that never arrives. Nothing is minted and nothing is admitted, so the
+    /// offer costs an `Instrument ID` only once the shard exists.
+    ///
+    /// The name is not carried here — this type is `Copy` and the shard is the
+    /// venue's own string. It is reported by
+    /// [`Registry::take_unknown_shards`](crate::Registry::take_unknown_shards),
+    /// once per distinct value rather than once per poll, because an adapter
+    /// may re-offer its whole set every second.
+    #[error("the venue named a shard this publisher was not configured with")]
+    UnknownShard,
+
+    /// The venue named a different shard for an instrument that is already
+    /// published.
+    ///
+    /// The shard is fixed at admission, exactly as an exponent is. Honouring
+    /// the restatement would be a *move* between channel instances, and no
+    /// message in the family says that an instrument moved: a subscriber on the
+    /// channel it left would see it stop updating, which is indistinguishable
+    /// from a market that went quiet. So the instrument stays where it was
+    /// published and the restatement is counted.
+    ///
+    /// An instrument that genuinely belongs on another shard is a delisting and
+    /// a relisting, which is what it is to a subscriber holding its book.
+    #[error("a different shard was named for a published instrument")]
+    ShardRestated,
 
     /// The `Instrument ID` space is exhausted.
     ///
