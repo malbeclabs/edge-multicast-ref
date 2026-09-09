@@ -566,55 +566,55 @@ Four combinations, and they are total because both key sets are required with no
 default and are disjoint. **The old list of ten places the default was written
 down is now a list of the places a flag was**, and every one of them loses it.
 
-- [ ] `startup.rs`: `Arrangement::selected_by(config, inline_config)`, the one
+- [x] `startup.rs`: `Arrangement::selected_by(config, inline_config)`, the one
       place the four cases exist. It returns `Arrangement::Archive`,
       `Arrangement::Inline`, or one of two refusals — and it is compiled in
       **every** build, feature or not, because a build that cannot run inline
       mode is precisely the build that has to refuse a configuration selecting
       it rather than fall back to the arrangement nobody chose.
-- [ ] `startup.rs`: `StartupError::BothArrangementsStated { key, path }`, naming
+- [x] `startup.rs`: `StartupError::BothArrangementsStated { key, path }`, naming
       the archive key an operator wrote *and* the second file, so the two
       statements that disagree are both on the screen. This is
       `InlineConfigError::ArchiveDirectoryConfigured` moved up a layer and
       stripped of its migration instruction: there is no migration any more, so
       the message is a contradiction report and nothing else.
-- [ ] `startup.rs`: `StartupError::NoArrangementStated`, naming both ways of
+- [x] `startup.rs`: `StartupError::NoArrangementStated`, naming both ways of
       stating one. This is `InlineConfigError::NotStated`, moved for the same
       reason and rewritten for the same one: it is no longer *"no mode was named,
       so this is inline mode"*, because no mode named is no longer inline mode.
-- [ ] `startup.rs`: `Arrangement::Inline` loses its `#[cfg(feature = "inline")]`.
+- [x] `startup.rs`: `Arrangement::Inline` loses its `#[cfg(feature = "inline")]`.
       The cfg was right when a build without the feature could never construct
       the variant; now that build constructs it in order to refuse it, and
       `writes_an_archive` becomes one comparison in every build instead of a
       comparison and a `true`.
-- [ ] `cli.rs`: `--archive` removed. `Args` loses `archive`, `CliError` loses
+- [x] `cli.rs`: `--archive` removed. `Args` loses `archive`, `CliError` loses
       `ArchiveAndInline` — the both-arrangements case moves to the configuration,
       where the archive half of it lives — and `USAGE` describes two arrangements
       selected by what each requires, with no flag naming either.
-- [ ] `main.rs`: `run` dispatches on `Arrangement::selected_by` rather than on
+- [x] `main.rs`: `run` dispatches on `Arrangement::selected_by` rather than on
       `args.archive`. The refusals happen **before** either mode's own checks,
       so an operator is told which arrangement is unclear before being told
       anything about the one the binary guessed at.
-- [ ] `inline_config.rs`: `check_archive_is_not_configured` is deleted, not
+- [x] `inline_config.rs`: `check_archive_is_not_configured` is deleted, not
       moved. Its condition is the selection, and a second reading of the same two
       keys downstream of the selection is a reading that can disagree with it.
       `ArchiveDirectoryConfigured` and `NotStated` go with it.
-- [ ] `inline_config.rs`: `NotCompiledIn` is reached by a configuration that
+- [x] `inline_config.rs`: `NotCompiledIn` is reached by a configuration that
       *states* inline mode rather than by silence, so its message names the
       second file that was given and stops telling an operator to pass a flag
       that no longer exists.
-- [ ] `Cargo.toml`: `default = ["inline"]` **stays**, with the comment rewritten.
+- [x] `Cargo.toml`: `default = ["inline"]` **stays**, with the comment rewritten.
       The old reason — a binary must honour its own default mode — is gone with
       the default. The reason now is that the arrangement is a property of a
       host's configuration and the released asset is one asset for the fleet, so
       a default build carrying one arrangement would have to be matched to
       configurations at deploy time.
-- [ ] `tests/shutdown.rs`, `tests/check_mode.rs`, `tests/inline_mode.rs`: every
+- [x] `tests/shutdown.rs`, `tests/check_mode.rs`, `tests/inline_mode.rs`: every
       `--archive` removed. The archive-mode fixtures select archive mode by the
       directories they already carried, which is the fleet's own migration in
       miniature and the reason the flag was retired: the tests that had to gain
       the flag are the tests that now need no edit beyond losing it.
-- [ ] `recorder_example.toml` and the prose, all of it: `rust/recorder/README.md`'s
+- [x] `recorder_example.toml` and the prose, all of it: `rust/recorder/README.md`'s
       two-modes table, `dz-recorder-load/README.md`, `BRINGING-UP-A-FEED.md` and
       its bring-up checklist, `inline.example.toml`, and the systemd unit's
       header. A selection stated correctly in nine places and wrongly in the
@@ -631,9 +631,9 @@ its own right: every combination of the two predicates is enumerated in one test
 and each is required to reach a named outcome, so a combination that reaches
 none fails by name.
 
-- [ ] `the_four_configuration_shapes_are_total_and_two_of_them_run`, in
+- [x] `the_four_configuration_shapes_are_total_and_two_of_them_run`, in
       `startup.rs`'s own tests, over both predicates and all four outcomes.
-- [ ] `a_flag_naming_an_arrangement_is_not_a_flag_this_binary_has`, asserting
+- [x] `a_flag_naming_an_arrangement_is_not_a_flag_this_binary_has`, asserting
       `--archive` is a usage error with exit code 2. A flag is cheap to add back
       and the argument against it is four paragraphs long, so the test is what
       carries the decision to whoever reaches for it next.
@@ -891,19 +891,19 @@ the spool exists to bound. What is *not* an argument is that the tables would be
 empty anyway — they are equally empty in archive mode for a feed with no
 `[[market_data]]` entry, which the loader's own configuration defends.
 
-- [ ] `inline_config.rs`: `InlineConfig` gains `market_data: Vec<MarketDataFeed>`,
+- [x] `inline_config.rs`: `InlineConfig` gains `market_data: Vec<MarketDataFeed>`,
       the loader's own type reused verbatim the way `ClickHouseConfig` is. One
       spelling of *which feeds derive market data*, so the two arrangements
       cannot grow two.
-- [ ] `inline_config.rs`: `InlineConfigError::MarketDataNotDerived { feed }`,
+- [x] `inline_config.rs`: `InlineConfigError::MarketDataNotDerived { feed }`,
       refused in `check()` — so `--check` is where a host learns it, before a
       socket is bound. It names the feed, the three tables, and archive mode.
-- [ ] `inline_config.rs`: `summary()` states which feeds derive market data rows,
+- [x] `inline_config.rs`: `summary()` states which feeds derive market data rows,
       and in inline mode that line says none and says which arrangement can.
       `startup.rs`'s `Plan::summary` says the same for archive mode, where the
       answer is *the loader's configuration decides* — because the recorder is
       not the process that would derive them.
-- [ ] The refusal is in `check()` and not in `parse()`: an unknown key is a parse
+- [x] The refusal is in `check()` and not in `parse()`: an unknown key is a parse
       error and this is a known key with an answer, which is a different failure
       and reads differently.
 
@@ -922,7 +922,7 @@ Designed in
 
 Two defects in one loop, and they are independent:
 
-- [ ] It selected `windows.keys().next()` with none of `take_oldest`'s filter, so
+- [x] It selected `windows.keys().next()` with none of `take_oldest`'s filter, so
       it could delete a window whose rows were already in the store and whose
       ledger entry was owed — giving up the only remaining evidence of a load
       that happened, and the trailer the next era anchor is checked against. A
@@ -932,7 +932,7 @@ Two defects in one loop, and they are independent:
       one. `in_flight` is deliberately **not** in the preference — the rustdoc's
       argument for evicting a held window is unchanged and still right, because
       those rows may yet land and no entry has been earned.
-- [ ] On a `remove_tree` failure it returned with the window still in the map, so
+- [x] On a `remove_tree` failure it returned with the window still in the map, so
       `bytes()` stayed over the budget for ever and the same undeletable
       directory was chosen on every later pass: the budget stopped bounding the
       disk from the first failure on. It now goes through `delete`, which takes
@@ -946,7 +946,7 @@ Two defects in one loop, and they are independent:
 Designed in
 *[Every byte the spool put on disk is a byte its budget can see](../specs/2026-09-08-recorder-inline-mode-design.md#every-byte-the-spool-put-on-disk-is-a-byte-its-budget-can-see)*.
 
-- [ ] A `store()` that failed after `FileSink::create` left the window directory
+- [x] A `store()` that failed after `FileSink::create` left the window directory
       on disk without inserting it into `self.windows`, so its bytes sat outside
       `bytes()`, `enforce()` and `unreclaimable_bytes` alike — the spool reported
       itself empty while orphans accumulated, one per failed window, until a
@@ -956,7 +956,7 @@ Designed in
 
 #### 13d. The sort-key guard read one line of a clause that wraps onto three
 
-- [ ] `ddl.rs`'s `provenance_is_on_every_grain_and_in_no_sort_key` checked only
+- [x] `ddl.rs`'s `provenance_is_on_every_grain_and_in_no_sort_key` checked only
       the line beginning `ORDER BY`, and three of the eight sort keys wrap
       (`005_recorder_market_data.sql:140`, `:191`, `:277`), so `derivation`
       appended to a continuation line would have passed. The guard now reads the
@@ -964,10 +964,59 @@ Designed in
       opened returns to zero — which also terminates correctly on the bare
       `ORDER BY anchor_ts` inside a window specification at
       `003_recorder_era_rank.sql:150`, where the depth is zero on the first line.
-- [ ] The walker is asserted in its own right, over a literal whose clause wraps.
+- [x] The walker is asserted in its own right, over a literal whose clause wraps.
       A guard that reads more than it did is a guard whose *reading* is now the
       thing that can regress, and a walker that quietly went back to one line
       would leave the guard green over exactly the hazard it was widened for.
+
+---
+
+### The reverts for tasks 11 and 13, and the test that died under each
+
+Every one was run: committed first, the mutation applied, the named test
+watched fail, the file restored from a copy. **Committed first because a
+`git checkout --` has eaten uncommitted work in this repository twice**, so
+nothing here was mutated out of a dirty tree.
+
+| Revert | Test that died |
+|---|---|
+| the neither-stated case falls back to `Arrangement::Inline` instead of refusing | `the_four_configuration_shapes_are_total_and_two_of_them_run`, and at binary altitude `check_mode.rs`'s `a_configuration_stating_no_arrangement_is_refused_and_names_both` |
+| the both-stated case resolves to `Arrangement::Archive` instead of refusing | `the_four_configuration_shapes_are_total_and_two_of_them_run`, `an_archive_directory_beside_the_second_file_is_refused_by_key`, and `inline_mode.rs`'s `a_configuration_stating_both_arrangements_is_refused_by_key_and_by_file` |
+| `--archive` accepted again as a flag `cli::parse` ignores | `a_flag_naming_an_arrangement_is_not_a_flag_this_binary_has` |
+| an archive is stated only when **both** directories carry a value | `a_half_stated_archive_states_the_arrangement_and_is_refused_by_key` and `an_archive_directory_beside_the_second_file_is_refused_by_key` |
+| the `[[market_data]]` entry accepted and ignored | `a_feed_whose_market_data_rows_were_asked_for_is_refused_by_name`, `the_market_data_entry_is_the_loaders_own_type`, and at binary altitude `a_feed_whose_market_data_rows_were_asked_for_is_refused_at_check` |
+| `enforce` back to the plain oldest, with no preference against a window owing an entry | `a_window_whose_rows_landed_is_the_last_one_the_budget_takes` |
+| an eviction that cannot delete left in the map, as it was | `an_eviction_that_cannot_delete_stops_being_a_window_rather_than_stopping_the_budget` |
+| a failed `store` forgetting what it left on the disk | `a_store_that_fails_leaves_no_bytes_the_spool_cannot_see` |
+| the sort-key walker back to the line the clause starts on | `the_sort_key_walker_reads_a_clause_that_wraps` |
+| **the hazard itself**: `derivation` appended to the continuation line of `005_recorder_market_data.sql:140` | `provenance_is_on_every_grain_and_in_no_sort_key` |
+
+Three of those are worth reading past the table.
+
+**The sort-key finding was demonstrated in both directions, which is the only
+way that one can be.** The widened guard fails on the hazard, as the last row
+says. Run with *both* mutations applied — the hazard in the SQL and the walker
+back to one line — `provenance_is_on_every_grain_and_in_no_sort_key` **passes**.
+That is the finding: not that the guard could be better, but that it was green
+over a column in a sort key. A guard whose reading is widened has a new thing
+that can regress, which is why the walker has a test of its own rather than only
+the migrations to check.
+
+**The market data refusal has a mutant and the summary line does not have a
+strong one.** `market_data=none` is asserted by
+`the_summary_states_that_no_market_data_rows_are_derived` and
+`the_check_states_that_no_market_data_rows_are_derived`, and removing the line
+fails both — but that is a test asserting a string is printed, which is the
+weakest shape of gate there is. Stated plainly rather than dressed up: the
+refusal is what carries this finding, the summary line is what reaches an
+operator who never asked, and only the first of the two is held by something
+that could catch a behavioural regression.
+
+**A window merely in flight is deliberately not protected, and nothing asserts
+that it is not.** The preference is against `entry_owed` alone; a test asserting
+that an in-flight window *is* evicted would be asserting the absence of a
+condition, which passes for as long as nobody adds it and says nothing about
+whether adding it would be wrong. The rustdoc carries the argument instead.
 
 ---
 
@@ -1035,7 +1084,7 @@ by a full ring is not attributed to the publisher.
 | 2 | **no** | no live feed and no live column store has been run. The path is covered against a fake sink at `dz-recorder-inline/tests/pipeline.rs:125`, and the derivation against an archive at `inline_vs_archive.rs:243`, but nothing has recorded real traffic |
 | 3 | partly | the library behaviour is asserted (`tests/spool.rs:245`, `:283`, `:391`) including the age gauge; the binary-altitude outage run is task 9's missing test |
 | 4 | **no** | the spool's own replay is asserted (`tests/spool.rs:444`); the `SIGKILL` of the process is task 9's missing test |
-| 5 | yes | task 11's both-arrangements refusal, at binary altitude in `tests/inline_mode.rs` |
+| 5 | yes | task 11's both-arrangements refusal, at binary altitude in `tests/inline_mode.rs:a_configuration_stating_both_arrangements_is_refused_by_key_and_by_file` |
 | 6 | yes | task 11's neither-stated refusal and its totality test |
 | 7 | yes | task 13a's refusal test |
 | the equivalence gate | yes, for eight of nine faults, and over the shape that runs | `inline_vs_archive.rs:256`; `Fault::SilentChannel` is task 7's outstanding bullet. Until task 12 the gate's inline side was its own two-pass arrangement and the derivation stage's was one pass, so the gate was green over a shape nothing ran |
