@@ -76,6 +76,10 @@ pub enum Offered {
 pub struct RingCounters {
     accepted: AtomicU64,
     dropped: AtomicU64,
+    /// Loss the capture declared, summed over every offer whether or not it got
+    /// through. The capture's own quantity, passed through rather than measured
+    /// here — the ring's own contribution is [`dropped`](Self::dropped).
+    capture_declared: AtomicU64,
 }
 
 impl RingCounters {
@@ -93,6 +97,32 @@ impl RingCounters {
     #[must_use]
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
+    }
+
+    /// **Everything lost before the derivation, cumulatively.** What a window's
+    /// `capture_drop_total` is, and the one number in this crate whose wrong
+    /// value is an accusation rather than a missing diagnostic.
+    ///
+    /// `recorder.segment_overflow` subtracts this over consecutive windows and
+    /// reads a zero difference as `overflow_free = 1`, which is one of the
+    /// conditions deciding whether a site's absence may be used as evidence
+    /// *about the publisher*. A site that dropped datagrams itself may not
+    /// contribute an absence, because its gap may be its own ring — so a total
+    /// that under-reports certifies this host clean and turns its own overflow
+    /// into a finding against somebody else.
+    ///
+    /// Two summands, and both belong. What the capture declared is the same
+    /// quantity archive mode's writer sums. What this ring refused exists only
+    /// in inline mode, and is exactly the loss that view must not certify away.
+    ///
+    /// **Cumulative and never reset**, because the reader subtracts consecutive
+    /// windows: a per-window figure would let a window that dropped less than
+    /// its predecessor subtract to zero and read as provably clean.
+    #[must_use]
+    pub fn capture_drop_total(&self) -> u64 {
+        self.capture_declared
+            .load(Ordering::Relaxed)
+            .saturating_add(self.dropped.load(Ordering::Relaxed))
     }
 }
 
@@ -215,6 +245,14 @@ impl RingSender {
     /// same reason.
     pub fn offer(&mut self, dg: &RecordedDatagram<'_>) -> Offered {
         self.pending.owe(dg.drop_delta);
+        // Before the offer and unconditionally, for the reason the debt is owed
+        // before it: what the capture declared is true whatever becomes of the
+        // datagram carrying the declaration, and a total that only counted
+        // declarations on datagrams which got through would under-report by
+        // exactly the drops it exists to make visible.
+        self.counters
+            .capture_declared
+            .fetch_add(u64::from(dg.drop_delta), Ordering::Relaxed);
 
         let mut slot = match self.spare.take() {
             Some(slot) => slot,

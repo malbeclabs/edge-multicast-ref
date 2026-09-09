@@ -29,13 +29,15 @@
 //!   would be one mode claiming a measurement the other declines to make, in a
 //!   column a reader subtracts across both.
 //!
-//! `capture_drop_total` is on the observed side, and by the writer's own
-//! arithmetic: the window sums every `drop_delta` it walked, which is what
-//! `SegmentWriter` sums into the same field over the same unit. In inline mode
-//! that sum includes what the ring itself dropped, because the ring folds its
-//! debt into the same field before the derivation ever sees it — which is the
-//! honest total for a column asking whether this host kept up, and the reason
-//! the ring charges its drops there in the first place.
+//! `capture_drop_total` is on the observed side, and it is **cumulative and
+//! never reset**, which is not a stylistic choice: `recorder.segment_overflow`
+//! subtracts it over consecutive windows and reads a zero difference as
+//! `overflow_free = 1`, and that flag is one of the conditions deciding whether
+//! a site's absence may be used as evidence *about the publisher*. A total that
+//! under-reports therefore certifies this host clean and converts its own
+//! receive-queue overflow into a finding against somebody else. It is read from
+//! [`RingCounters::capture_drop_total`], whose rustdoc carries the argument, and
+//! it counts what the ring itself refused as well as what the capture declared.
 //!
 //! `object_key` is a window key. It is not empty, because it identifies the
 //! window in the ledger and in the rows, and it carries the window's start in
@@ -45,6 +47,7 @@
 //!
 //! [`derive`]: dz_recorder_rows::derive
 //! [`Derivation::Live`]: dz_recorder_rows::Derivation::Live
+//! [`RingCounters::capture_drop_total`]: crate::ring::RingCounters::capture_drop_total
 
 use dz_recorder_archive::{JoinedRole, SegmentManifest};
 use dz_recorder_core::{CaptureDropScope, RecorderIdentity};
@@ -139,8 +142,10 @@ pub fn window_manifest(
         short_datagrams: tally.coverage.short_datagrams(),
         instances_dropped: tally.coverage.instances_dropped(),
 
-        // The archive writer's own arithmetic, over the same field and the same
-        // unit: the sum of every `drop_delta` the window walked.
+        // Cumulative and never reset, sampled from the ring's counters at the
+        // close. See the module documentation: the view that reads this column
+        // subtracts consecutive windows of it, and calls a zero difference
+        // proof that this host dropped nothing.
         capture_drop_total: tally.capture_drop_total,
         capture_drop_scope: scope_token(identity.drop_scope).to_owned(),
         // Zero, and the same zero archive mode writes. See the module

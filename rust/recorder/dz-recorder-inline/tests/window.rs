@@ -278,26 +278,88 @@ fn a_window_key_carries_the_start_stamp_and_says_it_names_no_object() {
     assert!(first_run.contains(&format!("feed={FEED}")), "{first_run}");
 }
 
-/// The window's capture drop total is the sum of what it walked, not a zero.
+/// The capture loss a window reports is the host's total, and it never restarts.
 ///
-/// **A column that always says zero is worse than one nobody wrote**, because a
-/// reader asking *did this host keep up* gets an answer rather than a gap. The
-/// quantity is the archive writer's own: every `drop_delta` the unit saw,
-/// whatever port role carried it, so one mode's `segment_coverage` row can be
-/// subtracted from the other's.
+/// **The one column here whose wrong value is an accusation.**
+/// `recorder.segment_overflow` subtracts `capture_drop_total` over consecutive
+/// windows and reads a zero difference as `overflow_free = 1`, which is one of
+/// the conditions admitting a site's absence as evidence *about the publisher*.
+/// A site that dropped datagrams itself may not contribute an absence, so a
+/// total pinned at zero — or restarted per window — certifies this host clean
+/// and turns its own receive-queue overflow into a finding against somebody
+/// else.
 ///
-/// Take the sum out of `window_manifest` and this fails.
+/// Two windows, because one window cannot tell the two shapes apart: a
+/// per-window figure passes every assertion the first window can make. The
+/// second is where it dies.
 #[test]
-fn a_window_sums_the_capture_drops_it_walked() {
-    let mut datagrams = stream(5);
+fn the_capture_loss_a_window_reports_is_cumulative_and_not_its_own() {
+    let mut datagrams = stream(6);
     // Declared by the capture, before the ring: the kernel lost four datagrams
-    // before this one and two before that one.
+    // before this one, and two before that one.
     datagrams[1].drop_delta = 4;
-    datagrams[3].drop_delta = 2;
+    datagrams[4].drop_delta = 2;
+    let each = datagrams[0].payload.len() as u64;
 
+    // Three datagrams each, so the two declarations fall in different windows.
+    // Offered a window at a time and not all at once, because a cumulative
+    // counter is advanced by the capture and a fixture that offered everything
+    // first would have both declarations in hand before either window opened.
+    let bound = WindowBound {
+        bytes: each * 3,
+        interval: LONG,
+    };
+    let id = identity();
+    let roles = roles();
     let (mut tx, mut rx) = ring(64);
-    offer_all(&mut tx, &datagrams);
+
+    offer_all(&mut tx, &datagrams[..3]);
+    let first = {
+        let mut window = WindowSource::open(&mut rx, bound);
+        while window.next().expect("the ring does not fail").is_some() {}
+        window_manifest(&window_identity(&id, &roles), window.tally(), 0)
+    };
+    offer_all(&mut tx, &datagrams[3..]);
     drop(tx);
+    let second = {
+        let mut window = WindowSource::open(&mut rx, bound);
+        while window.next().expect("the ring does not fail").is_some() {}
+        window_manifest(&window_identity(&id, &roles), window.tally(), 1)
+    };
+
+    assert_eq!(
+        first.capture_drop_total, 4,
+        "the first window's three datagrams declared four lost"
+    );
+    assert_eq!(
+        second.capture_drop_total, 6,
+        "the total restarted, so the delta between these two windows is what the second \
+         window dropped rather than what the host has dropped since it started — and a \
+         window that dropped less than its predecessor then reads as provably clean"
+    );
+}
+
+/// A datagram the ring refused is in the total, because the ring is ours.
+///
+/// The ring is inline mode's own place to lose a datagram and archive mode has
+/// no equivalent, so a datagram it dropped is exactly the loss `overflow_free`
+/// must not certify away. Row-level attribution already travels on `drop_delta`
+/// through the debt; this is the segment-level counter the cross-site machinery
+/// reads.
+#[test]
+fn a_datagram_the_ring_refused_is_in_the_capture_loss_the_window_reports() {
+    let datagrams = stream(12);
+    // Two slots against twelve datagrams: the ring cannot take them and every
+    // one it refuses is loss before the derivation.
+    let (mut tx, mut rx) = ring(2);
+    let mut refused = 0u64;
+    for dg in &datagrams {
+        if tx.offer(&dg.as_recorded()) == Offered::Dropped {
+            refused += 1;
+        }
+    }
+    drop(tx);
+    assert!(refused > 0, "the fixture is meant to overrun the ring");
 
     let mut window = WindowSource::open(
         &mut rx,
@@ -310,17 +372,10 @@ fn a_window_sums_the_capture_drops_it_walked() {
 
     assert_eq!(
         window.tally().capture_drop_total,
-        6,
-        "the window walked two declared deltas and reported {}",
+        refused,
+        "the ring refused {refused} datagrams and the window reports {} lost before the \
+         derivation",
         window.tally().capture_drop_total
-    );
-
-    let id = identity();
-    let roles = roles();
-    let manifest = window_manifest(&window_identity(&id, &roles), window.tally(), 0);
-    assert_eq!(
-        manifest.capture_drop_total, 6,
-        "and the manifest carries what the window counted"
     );
 }
 

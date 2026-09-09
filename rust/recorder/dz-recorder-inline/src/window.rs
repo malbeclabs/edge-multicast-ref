@@ -91,14 +91,18 @@ pub struct WindowTally {
     /// can vouch for.
     pub first_recv_ts_ns: u64,
     pub last_recv_ts_ns: u64,
-    /// Every `drop_delta` the window walked, whatever port role carried it.
+    /// **Not this window's own drops: the host's, cumulatively, as of this
+    /// window's close.** Sampled from [`RingCounters::capture_drop_total`],
+    /// which is where the reason lives — the view that reads this column
+    /// subtracts consecutive windows of it, so a per-window figure lets a
+    /// window that dropped less than its predecessor read as provably clean,
+    /// and *provably clean* is what admits a site's absence as evidence about
+    /// the publisher.
     ///
-    /// The archive writer's own arithmetic over the same field, so the two
-    /// modes' `capture_drop_total` mean one thing and a reader can subtract one
-    /// mode's coverage row from the other's. At `capture-handle` scope that
-    /// total is the only one there is; at `port-role` scope the manifest still
-    /// carries one number for the window, because the coverage grain is the
-    /// window and not the role.
+    /// It sits on the tally because that is what the manifest is built from,
+    /// and it is the one field here that is not a fact about this window alone.
+    ///
+    /// [`RingCounters::capture_drop_total`]: crate::ring::RingCounters::capture_drop_total
     pub capture_drop_total: u64,
     pub coverage: CoverageTracker,
 }
@@ -163,6 +167,11 @@ impl<'a> WindowSource<'a> {
 
 impl Source for WindowSource<'_> {
     fn next(&mut self) -> Result<Option<RecordedDatagram<'_>>, SourceError> {
+        // Sampled on every call, including the one that closes the window, so
+        // the figure the manifest reads is the one that was true at the close.
+        // Two relaxed loads, against a coverage observation per datagram.
+        self.tally.capture_drop_total = self.ring.counters().capture_drop_total();
+
         // Before the receive, never after: see the module documentation. A
         // datagram taken out of the ring and then found not to fit belongs to
         // no window at all.
@@ -198,7 +207,6 @@ impl Source for WindowSource<'_> {
             let dg = self.ring.in_hand().expect("the wait took a slot in hand");
             self.tally.datagram_count += 1;
             self.tally.payload_byte_count += dg.payload.len() as u64;
-            self.tally.capture_drop_total += u64::from(dg.drop_delta);
             if self.tally.first_recv_ts_ns == 0 {
                 self.tally.first_recv_ts_ns = dg.recv_ts_ns;
             }
