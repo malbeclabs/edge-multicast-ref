@@ -215,15 +215,23 @@ impl core::fmt::Display for Finding {
 /// dropped them would let a reader trust a clean report that checked nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Caveat {
-    /// The highest valid `ManifestSummary` declared a published set larger or
-    /// smaller than the definitions the archive yielded.
+    /// One channel's highest valid `ManifestSummary` declared a published set
+    /// larger or smaller than the definitions that channel carried.
     ///
     /// Larger is the ordinary case and means the refdata window is short: the
     /// definition cycle is paced, so a capture shorter than one cycle holds only
     /// part of the set. Every instrument whose definition is missing will be
     /// declined by the re-lowering and reported as a
     /// [`MissingDefinition`](crate::MissingDefinition).
+    ///
+    /// **Per channel, which is what makes it one caveat per short channel.**
+    /// `Instrument Count` describes the channel the datagram went out on, so an
+    /// archive covering several yields one of these for each that fell short
+    /// and none for those that did not. Without `channel_id` on it, two channels
+    /// short by the same numbers would be the same value and `push_once` would
+    /// collapse them into one line naming neither.
     ReferenceDataIncomplete {
+        channel_id: u8,
         manifest_seq: u16,
         declared: u32,
         reconstructed: usize,
@@ -325,12 +333,13 @@ impl core::fmt::Display for Caveat {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::ReferenceDataIncomplete {
+                channel_id,
                 manifest_seq,
                 declared,
                 reconstructed,
             } => write!(
                 f,
-                "manifest {manifest_seq} declares {declared} instruments and the archive yielded {reconstructed} definitions"
+                "channel {channel_id}'s manifest {manifest_seq} declares {declared} instruments and the archive yielded {reconstructed} definitions for it"
             ),
             Self::ScaleRestated {
                 instrument_id,

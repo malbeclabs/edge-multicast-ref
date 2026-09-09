@@ -28,7 +28,7 @@
 //! so — [`Caveat::ContractFactorNotOnTheWire`] — rather than guessing a factor
 //! that would make every price and quantity for that instrument differ.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use dz_edge_refdata::{InstrumentDefinition, ManifestSummary, SYMBOL_LEN};
 use dz_publisher_lowering::Instrument;
@@ -130,13 +130,55 @@ struct ManifestState {
 /// and which exponents that symbol was published under. Neither side can state
 /// the other's identity — an adapter cannot name an `Instrument ID`, and the wire
 /// does not carry a venue's handle — so the symbol is the only key there is.
+///
+/// # The manifest is per channel, and the symbol table is not
+///
+/// Two different scopes in one type, and both are deliberate.
+///
+/// `Instrument Count` and `Manifest Seq` describe **one channel's** published
+/// set: that is the reference-data specification's definition, and it is what a
+/// publisher operating several channel instances from one process states on each
+/// of them. So a manifest is held per `Channel ID` and each one is compared
+/// against the definitions that channel carried. Held as one for the archive —
+/// which is what this did — the check compares a union of every channel's
+/// definitions against whichever channel happened to have the highest
+/// `Manifest Seq`, and reports incomplete reference data on a complete capture
+/// or nothing at all on a short one, depending on nothing but the arrangement.
+///
+/// The symbol table stays one for the archive, because the re-lowering resolves
+/// a symbol without knowing which channel it will be found on: an adapter offers
+/// a symbol and the archive answers. Splitting it per channel would mean
+/// resolving against a channel a payload archive cannot name.
+///
+/// # Per channel, not per channel instance
+///
+/// The redundant paths of one channel publish the same set under the same count,
+/// and [`by_symbol`](Self::by_symbol) already unions them — raising
+/// [`Caveat::ScaleRestated`] where they disagree. Keyed on the instance, this
+/// check would raise a caveat against a path whose refdata window was shorter
+/// even where the union covers the set and the re-lowering declines nothing:
+/// a statement about capture coverage wearing the clothes of one about the
+/// archive. `GLOSSARY.md` has an instrument unique *within a channel*, the count
+/// is stated per channel, and the reconstruction resolves per channel.
+///
+/// The key is the **datagram header's** `Channel ID` rather than the
+/// `ManifestSummary`'s own field. The header is what a definition has — there is
+/// no `Channel ID` on `InstrumentDefinition` — so it is the only key both
+/// messages share, and keying the two halves of one comparison on two different
+/// fields would compare sets that are not the same channel's.
 #[derive(Debug, Clone, Default)]
 pub struct ArchivedRefdata {
     by_symbol: BTreeMap<[u8; SYMBOL_LEN], ArchivedInstrument>,
     /// `Instrument ID` back to `Symbol`, so a finding can name an instrument the
     /// way an operator will search for it.
     by_id: BTreeMap<u32, [u8; SYMBOL_LEN]>,
-    manifest: Option<ManifestState>,
+    /// The symbols each channel defined. Separate from
+    /// [`by_symbol`](Self::by_symbol) because that keeps the *first* statement
+    /// of a symbol and this is a membership: a symbol carried on two channels
+    /// belongs to both counts, and only one of them would insert.
+    defined_on: BTreeMap<u8, BTreeSet<[u8; SYMBOL_LEN]>>,
+    /// The highest valid manifest each channel stated.
+    manifests: BTreeMap<u8, ManifestState>,
     caveats: Vec<Caveat>,
 }
 
@@ -147,7 +189,8 @@ impl ArchivedRefdata {
         Self {
             by_symbol: BTreeMap::new(),
             by_id: BTreeMap::new(),
-            manifest: None,
+            defined_on: BTreeMap::new(),
+            manifests: BTreeMap::new(),
             caveats: Vec::new(),
         }
     }
@@ -170,7 +213,16 @@ impl ArchivedRefdata {
     /// message for that instrument after the restatement is compared against the
     /// wrong exponent. Keeping the last would have the same flaw pointed the
     /// other way and would silently discard the start of the window.
-    pub fn observe_definition(&mut self, definition: &InstrumentDefinition) {
+    pub fn observe_definition(&mut self, definition: &InstrumentDefinition, channel_id: u8) {
+        // Recorded before anything is decided about the symbol, and recorded
+        // even for a restatement: the question this answers is *which
+        // instruments did this channel define*, and a channel that stated one
+        // twice defined one. `channel_id` is the datagram header's, which is
+        // the only channel identity a definition carries.
+        self.defined_on
+            .entry(channel_id)
+            .or_default()
+            .insert(definition.symbol);
         if let Some(existing) = self.by_symbol.get(&definition.symbol).copied() {
             if existing.price_exponent != definition.price_exponent
                 || existing.qty_exponent != definition.qty_exponent
@@ -234,18 +286,25 @@ impl ArchivedRefdata {
     /// Only a summary with `valid = 1` counts. Zero is what a publisher sends
     /// while its set is not yet established and while it is shutting down, and
     /// the count beside it describes neither state.
-    pub fn observe_manifest(&mut self, summary: &ManifestSummary) {
+    pub fn observe_manifest(&mut self, summary: &ManifestSummary, channel_id: u8) {
         if summary.valid != 1 {
             return;
         }
-        let newer = self
-            .manifest
-            .is_none_or(|held| summary.manifest_seq > held.manifest_seq);
-        if newer {
-            self.manifest = Some(ManifestState {
+        // Highest `Manifest Seq` **on this channel**. Held as one for the
+        // archive it was highest across channels, which is a comparison between
+        // sequences that do not share a space: `Manifest Seq` increments when
+        // the published set changes on its own channel, so a busy channel's 40
+        // is not later than a quiet one's 3 and picking between them picks a
+        // number describing a set the other channel never published.
+        let held = self.manifests.entry(channel_id).or_insert(ManifestState {
+            manifest_seq: summary.manifest_seq,
+            instrument_count: summary.instrument_count,
+        });
+        if summary.manifest_seq > held.manifest_seq {
+            *held = ManifestState {
                 manifest_seq: summary.manifest_seq,
                 instrument_count: summary.instrument_count,
-            });
+            };
         }
     }
 
@@ -282,11 +341,24 @@ impl ArchivedRefdata {
         self.by_symbol.is_empty()
     }
 
-    /// What the highest valid `ManifestSummary` declared the published set to
-    /// hold, if the archive carried one.
+    /// What one channel's highest valid `ManifestSummary` declared its published
+    /// set to hold, if the archive carried one for that channel.
+    ///
+    /// **Per `Channel ID`, and there is no process-wide answer to offer
+    /// instead.** `Instrument Count` describes the channel the datagram went out
+    /// on; several channels' counts do not reduce to one number, and their sum
+    /// is not one either — it is the size of the union of disjoint published
+    /// sets, which no manifest states and no subscriber ever sees.
     #[must_use]
-    pub fn declared_instrument_count(&self) -> Option<u32> {
-        self.manifest.map(|state| state.instrument_count)
+    pub fn declared_instrument_count(&self, channel_id: u8) -> Option<u32> {
+        self.manifests
+            .get(&channel_id)
+            .map(|state| state.instrument_count)
+    }
+
+    /// The channels this archive carried a valid manifest for, ascending.
+    pub fn channels(&self) -> impl Iterator<Item = u8> + '_ {
+        self.manifests.keys().copied()
     }
 
     /// The `Source ID` values the definitions state.
@@ -319,10 +391,20 @@ impl ArchivedRefdata {
     /// property of the whole window: a definition cycle is paced, so a set that
     /// is short at the first manifest may be whole by the last.
     pub(crate) fn finalise(&mut self) {
-        if let Some(state) = self.manifest {
-            let reconstructed = self.by_symbol.len();
+        // One comparison per channel, each against its own definitions. A union
+        // against one channel's count is wrong in both directions at once: over
+        // an archive of two channels it exceeds the count of either, so a
+        // complete capture reports incomplete reference data, and a capture
+        // that is genuinely short on the channel with the lower `Manifest Seq`
+        // reports nothing at all.
+        for (channel_id, state) in &self.manifests {
+            let reconstructed = self
+                .defined_on
+                .get(channel_id)
+                .map_or(0, std::collections::BTreeSet::len);
             if u64::from(state.instrument_count) != reconstructed as u64 {
                 self.caveats.push(Caveat::ReferenceDataIncomplete {
+                    channel_id: *channel_id,
                     manifest_seq: state.manifest_seq,
                     declared: state.instrument_count,
                     reconstructed,

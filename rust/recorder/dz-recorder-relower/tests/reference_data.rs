@@ -4,7 +4,8 @@
 mod common;
 
 use common::{
-    pack, payloads, refdata_datagrams, DatagramLog, Framing, LineAdapter, Listed, Msg, SOURCE_ID,
+    pack, pack_on, payloads, refdata_datagrams, refdata_datagrams_on, DatagramLog, Framing,
+    LineAdapter, Listed, Msg, CHANNEL_ID, SOURCE_ID,
 };
 use dz_edge_core::PortRole;
 use dz_edge_mbp::{LevelUpdate, MarketByPrice, MAGIC_MBP};
@@ -16,6 +17,8 @@ const AAA: Listed = Listed::new("AAA", 11, -2, 0);
 /// A second instrument at entirely different exponents, so a table that held one
 /// pair for the whole feed would fail here.
 const BBB: Listed = Listed::new("BBB", 12, -6, -3);
+/// A third, for the archives that carry more than one channel.
+const CCC: Listed = Listed::new("CCC", 13, -3, -1);
 
 const ABSENT_U16: u16 = 0xFFFF;
 const SIDE_BID: u8 = 0;
@@ -54,7 +57,7 @@ fn the_reconstructed_table_matches_what_the_definitions_said() {
     assert_eq!(instrument.quoted_per_contract, None);
 
     // The manifest is read, not just the definitions.
-    assert_eq!(refdata.declared_instrument_count(), Some(2));
+    assert_eq!(refdata.declared_instrument_count(CHANNEL_ID), Some(2));
     assert!(
         refdata.caveats().is_empty(),
         "a complete set owes no caveats: {:?}",
@@ -183,6 +186,7 @@ fn a_manifest_declaring_more_instruments_than_the_archive_carries_is_reported() 
     assert_eq!(
         capture.refdata().caveats(),
         [Caveat::ReferenceDataIncomplete {
+            channel_id: CHANNEL_ID,
             manifest_seq: 3,
             declared: 5,
             reconstructed: 1,
@@ -218,7 +222,10 @@ fn a_manifest_that_is_not_valid_yet_declares_nothing() {
         .absorb(&mut archive, MAGIC_MBP)
         .expect("the archive is complete");
 
-    assert_eq!(capture.refdata().declared_instrument_count(), None);
+    assert_eq!(
+        capture.refdata().declared_instrument_count(CHANNEL_ID),
+        None
+    );
     assert!(capture.refdata().caveats().is_empty());
 }
 
@@ -368,4 +375,95 @@ fn a_definition_with_no_source_id_falls_back_to_the_messages() {
         .source_id()
         .expect("the messages state one the registry admits");
     assert_eq!(identity.get(), SOURCE_ID);
+}
+
+/// Two channels in one archive, and the completeness check is each channel's.
+///
+/// `Instrument Count` and `Manifest Seq` describe **one channel's** published
+/// set — the reference-data specification's own definition, and what a publisher
+/// operating several channel instances from one process states on each of them.
+/// Held as one manifest for the archive, this check compared the union of every
+/// channel's definitions against whichever channel happened to carry the highest
+/// `Manifest Seq`, and there is no arrangement of two channels in which that is
+/// the right comparison.
+///
+/// The fixture is the arrangement that shows both halves of the error at once.
+/// Channel 1 is complete at two instruments with the **higher** `Manifest Seq`;
+/// channel 2 declares three and carries one. Compared per channel, one caveat
+/// naming channel 2. Compared as a union against channel 1's count, three
+/// definitions against two — a caveat on a complete channel, with a
+/// `reconstructed` that belongs to neither and the short channel unmentioned.
+#[test]
+fn each_channels_manifest_is_checked_against_its_own_definitions() {
+    let mut definitions = refdata_datagrams_on::<MarketByPrice>(1, &[AAA, BBB], 9, 2);
+    // A third instrument, on the second channel, whose manifest declares three.
+    // Its `Manifest Seq` is lower, which is what made channel 1's the archive's.
+    definitions.extend(refdata_datagrams_on::<MarketByPrice>(2, &[CCC], 4, 3));
+
+    let mut archive = DatagramLog::new(definitions);
+    let mut capture = WireCapture::new();
+    capture
+        .absorb(&mut archive, MAGIC_MBP)
+        .expect("the archive is complete");
+
+    assert_eq!(
+        capture.refdata().caveats(),
+        [Caveat::ReferenceDataIncomplete {
+            channel_id: 2,
+            manifest_seq: 4,
+            declared: 3,
+            reconstructed: 1,
+        }],
+        "the complete channel owes no caveat and the short one owes exactly one"
+    );
+    // Named, because two channels short by the same numbers would otherwise be
+    // one line identifying neither.
+    assert!(capture.refdata().caveats()[0]
+        .to_string()
+        .contains("channel 2"));
+
+    // Each channel's declared count is its own, and there is no answer that is
+    // the archive's: the sum of two disjoint published sets is a number no
+    // manifest states.
+    assert_eq!(capture.refdata().declared_instrument_count(1), Some(2));
+    assert_eq!(capture.refdata().declared_instrument_count(2), Some(3));
+    assert_eq!(capture.refdata().declared_instrument_count(7), None);
+
+    // The symbol table stays one for the archive, because the re-lowering
+    // resolves a symbol without knowing which channel carried it.
+    assert_eq!(capture.refdata().len(), 3);
+}
+
+/// A channel that carried definitions and no valid manifest is not checked.
+///
+/// The manifest is the only thing that says how many there should be, so a
+/// channel without one is a channel nothing can be said about — and saying
+/// something anyway, by borrowing another channel's count, is exactly the
+/// failure this pair of tests exists to prevent.
+#[test]
+fn a_channel_with_no_manifest_of_its_own_borrows_no_other_channels_count() {
+    let mut definitions = refdata_datagrams_on::<MarketByPrice>(1, &[AAA], 9, 1);
+    // Two definitions on channel 2 and no manifest at all for it.
+    definitions.extend(pack_on::<MarketByPrice>(
+        2,
+        &[
+            Msg::Definition(BBB.definition(1)),
+            Msg::Definition(CCC.definition(1)),
+        ],
+        PortRole::Refdata,
+        Framing::tight(),
+    ));
+
+    let mut archive = DatagramLog::new(definitions);
+    let mut capture = WireCapture::new();
+    capture
+        .absorb(&mut archive, MAGIC_MBP)
+        .expect("the archive is complete");
+
+    assert!(
+        capture.refdata().caveats().is_empty(),
+        "a channel with no manifest was checked against something: {:?}",
+        capture.refdata().caveats()
+    );
+    assert_eq!(capture.refdata().channels().collect::<Vec<_>>(), vec![1]);
 }

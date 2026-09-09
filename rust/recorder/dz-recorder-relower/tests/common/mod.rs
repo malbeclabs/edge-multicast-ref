@@ -152,8 +152,25 @@ impl Framing {
 /// Pack messages into datagrams of one feed, on one port role.
 #[must_use]
 pub fn pack<F: Feed>(messages: &[Msg], role: PortRole, framing: Framing) -> Vec<OwnedDatagram> {
+    pack_on::<F>(CHANNEL_ID, messages, role, framing)
+}
+
+/// The same, on a named `Channel ID`.
+///
+/// One archive holding two channels is the ordinary shape once a publisher
+/// operates several channel instances of one specification, and every fixture
+/// here published on one until this existed — which is why a check comparing
+/// one channel's `Instrument Count` against every channel's definitions passed
+/// the suite.
+#[must_use]
+pub fn pack_on<F: Feed>(
+    channel_id: u8,
+    messages: &[Msg],
+    role: PortRole,
+    framing: Framing,
+) -> Vec<OwnedDatagram> {
     let mut sequence = ChannelSequence::resume(
-        CHANNEL_ID,
+        channel_id,
         ResetCount(framing.reset_count),
         framing.first_sequence,
     );
@@ -352,18 +369,35 @@ impl Listed {
 /// valid manifest declaring the count.
 #[must_use]
 pub fn refdata_datagrams<F: Feed>(listed: &[Listed], manifest_seq: u16) -> Vec<OwnedDatagram> {
+    refdata_datagrams_on::<F>(
+        CHANNEL_ID,
+        listed,
+        manifest_seq,
+        u32::try_from(listed.len()).expect("a small fixture"),
+    )
+}
+
+/// The same, on a named `Channel ID` and with the declared count stated rather
+/// than derived, so that a channel can be made short on purpose.
+#[must_use]
+pub fn refdata_datagrams_on<F: Feed>(
+    channel_id: u8,
+    listed: &[Listed],
+    manifest_seq: u16,
+    instrument_count: u32,
+) -> Vec<OwnedDatagram> {
     let mut messages: Vec<Msg> = listed
         .iter()
         .map(|instrument| Msg::Definition(instrument.definition(manifest_seq)))
         .collect();
     messages.push(Msg::Manifest(ManifestSummary {
-        channel_id: CHANNEL_ID,
+        channel_id,
         valid: 1,
         manifest_seq,
-        instrument_count: u32::try_from(listed.len()).expect("a small fixture"),
+        instrument_count,
         timestamp_ns: 1_700_000_000_000_000_000,
     }));
-    pack::<F>(&messages, PortRole::Refdata, Framing::tight())
+    pack_on::<F>(channel_id, &messages, PortRole::Refdata, Framing::tight())
 }
 
 /// An adapter over a one-line-per-payload upstream.

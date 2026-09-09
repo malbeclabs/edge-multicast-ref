@@ -571,16 +571,16 @@ channel's count, and it reports `ReferenceDataIncomplete` on complete reference
 data, or stays silent on incomplete data, depending on nothing but which channel
 happened to carry the higher `Manifest Seq`.
 
-- [ ] `ArchivedRefdata` holds a manifest **per `Channel ID`**, and the symbols
+- [x] `ArchivedRefdata` holds a manifest **per `Channel ID`**, and the symbols
       each channel defined, and `finalise` compares each channel's declared
       count against that channel's own definitions.
-- [ ] `Caveat::ReferenceDataIncomplete` names the channel. Two caveats that
+- [x] `Caveat::ReferenceDataIncomplete` names the channel. Two caveats that
       differ only in which channel was short are otherwise one line printed
       twice, and `push_once` would collapse them into one.
-- [ ] `observe_definition` and `observe_manifest` take the `Channel ID` the
+- [x] `observe_definition` and `observe_manifest` take the `Channel ID` the
       message was carried on. Both call sites already hold the provenance, so
       nothing new has to be threaded to reach them.
-- [ ] `declared_instrument_count` takes a `Channel ID`. There is no process-wide
+- [x] `declared_instrument_count` takes a `Channel ID`. There is no process-wide
       answer to compose from several channels' counts, and their sum is not one
       either: it is the sum of disjoint published sets, which is a number no
       manifest states and no subscriber sees.

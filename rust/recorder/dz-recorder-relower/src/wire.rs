@@ -424,7 +424,8 @@ impl WireCapture {
                 // and an archive can hold either.
                 match InstrumentDefinition::decode(bytes, schema_version) {
                     Ok(definition) => {
-                        self.refdata.observe_definition(&definition);
+                        self.refdata
+                            .observe_definition(&definition, provenance.channel_id);
                         self.reference.push(ReferenceMessage {
                             body: ReferenceBody::Definition(definition),
                             provenance,
@@ -437,7 +438,8 @@ impl WireCapture {
                 self.skipped.reference_data += 1;
                 match ManifestSummary::decode(bytes) {
                     Ok(summary) => {
-                        self.refdata.observe_manifest(&summary);
+                        self.refdata
+                            .observe_manifest(&summary, provenance.channel_id);
                         self.reference.push(ReferenceMessage {
                             body: ReferenceBody::Manifest(summary),
                             provenance,
