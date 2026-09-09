@@ -460,8 +460,8 @@ across a restart.
   four eras, one per channel instance: [2, 2, 2, 2]
   each advanced by exactly one across the restart
 
-  tee.top-of-book.mktdata       20 datagrams, longest 84 bytes, first magic 0x5a44
-  tee.top-of-book.alpha.mktdata 20 datagrams, longest 84 bytes, first magic 0x5a44
+  fan-out.top-of-book.mktdata       20 datagrams, longest 84 bytes, first magic 0x5a44
+  fan-out.top-of-book.alpha.mktdata 20 datagrams, longest 84 bytes, first magic 0x5a44
 ```
 
 Each subscriber read its own `Channel ID` and no other, its own sequence series
@@ -501,8 +501,8 @@ And the reference-copy fan-out was still keyed on the feed and the port role
 alone. Four channel instances fanned out to five sockets, two shards' copies of
 one role arriving on one — which a recorder cannot attribute without decoding,
 the one thing a record path does not do. That is task 5, and the tasks-1-to-8
-commit had missed it: `tee.top-of-book.alpha.mktdata` did not exist until it
-landed, and the run's second reference stream is the assertion that it does.
+commit had missed it: `fan-out.top-of-book.alpha.mktdata` did not exist until
+it landed, and the run's second reference copy is the assertion that it does.
 
 ## Acceptance
 
