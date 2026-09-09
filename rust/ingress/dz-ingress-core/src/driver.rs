@@ -464,7 +464,7 @@ impl<'a> Driver<'a> {
         // the connection came up. `on_connected` has just written whatever the
         // adapter held at logon, and asking again immediately would invite a
         // second copy of it.
-        let mut last_upstream_ns = self.clock.steady_ns();
+        let mut last_upstream_ns = last_payload_ns;
         loop {
             // Recomputed every time round, because the budget is what is left
             // of the guard and not the whole of it: a connection answering a
@@ -524,9 +524,9 @@ impl<'a> Driver<'a> {
             // the cadence. Reached only after a payload or a keepalive: every
             // other arm above has returned, which is what makes this the point
             // where the connection is known to be alive.
-            let waited = self.clock.steady_ns().saturating_sub(last_upstream_ns);
-            if Duration::from_nanos(waited) >= UPSTREAM_POLL {
-                last_upstream_ns = self.clock.steady_ns();
+            let now_ns = self.clock.steady_ns();
+            if Duration::from_nanos(now_ns.saturating_sub(last_upstream_ns)) >= UPSTREAM_POLL {
+                last_upstream_ns = now_ns;
                 // A queue per ask, not one carried: a message the adapter
                 // queued and a flush failed to send belongs to a connection
                 // that is now gone.

@@ -161,7 +161,7 @@ pub trait Adapter: Send {
     /// request, which made a recovery-path metric a flat zero certifying a
     /// repair that never ran.
     ///
-    /// # This write is **not** deduplicated, and re-offering a listing is
+    /// # This write is **not** deduplicated, where re-offering a listing is
     ///
     /// [`poll_listings`](Self::poll_listings) may re-offer its whole set every
     /// time: the sink returns the handle already minted and nothing reaches a
