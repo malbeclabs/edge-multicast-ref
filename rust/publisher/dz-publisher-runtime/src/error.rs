@@ -290,6 +290,24 @@ pub enum StartupError {
     )]
     ShardSpecsDisagree { shard: String, spec: String },
 
+    /// A shard reached the composition with no send path of either
+    /// specification.
+    ///
+    /// **No document produces this.** The shard set is the distinct shards of
+    /// the *enabled* blocks, so a shard with neither specification is a shard
+    /// nothing named. It is an error rather than a skip because skipping is the
+    /// silent failure: `Feeds` is indexed by shard and so is the reference-data
+    /// registry's shard list, both built from one `Config::shards()`, and
+    /// dropping an entry from one of them shifts every later shard's index —
+    /// which publishes a shard's instruments under another channel instance's
+    /// sequence series, and no subscriber can tell.
+    #[error(
+        "shard `{shard}` composed no `[[feed]]` block of either specification. The shard set \
+         comes from the enabled blocks themselves, so this is a bug in the composition rather \
+         than something a document can state."
+    )]
+    ShardWithNoFeed { shard: String },
+
     /// A `shard` name that cannot be a path component.
     ///
     /// The name reaches a path in two places — the era file and the reference

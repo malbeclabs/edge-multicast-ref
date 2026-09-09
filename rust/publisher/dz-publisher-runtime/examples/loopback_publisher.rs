@@ -36,7 +36,7 @@ use dz_publisher_refdata::{
 };
 use dz_publisher_runtime::config::{Feed, FeedSpec, ShardName};
 use dz_publisher_runtime::pipeline::{FeedPipeline, Port, Ports};
-use dz_publisher_runtime::publisher::{Feeds, Publisher};
+use dz_publisher_runtime::publisher::{Feeds, Publisher, ShardFeeds};
 use dz_publisher_runtime::{Exit, SystemClock};
 
 /// The one instrument this publishes, and the values a subscriber will see.
@@ -259,16 +259,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         refdata: open("refdata", PortRole::Refdata, refdata_port)?,
         snapshot: None,
     };
-    // One shard, so one entry in each vector and every routed index is 0.
+    // One shard, top-of-book only, so every routed index is 0.
     let mut feeds = Feeds::default();
-    feeds.push_shard(
-        Some(FeedPipeline::<TopOfBook>::new(
-            &feed,
-            Arc::clone(&metrics),
-            era,
-            ports,
-        )),
-        None,
+    feeds.push(
+        ShardFeeds::new(
+            Some(FeedPipeline::<TopOfBook>::new(
+                &feed,
+                Arc::clone(&metrics),
+                era,
+                ports,
+            )),
+            None,
+        )
+        .expect("one top-of-book send path is a shard"),
     );
 
     let registry = Registry::open(

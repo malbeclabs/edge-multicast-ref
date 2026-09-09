@@ -39,7 +39,7 @@ use dz_publisher_refdata::{
 };
 use dz_publisher_runtime::{
     EmittedFeed, Feed, FeedPipeline, FeedSpec, Feeds, ManualClock, Port, Ports, Publisher,
-    ShardName,
+    ShardFeeds, ShardName,
 };
 
 /// The documentation-range source address every endpoint here sends from.
@@ -558,8 +558,8 @@ fn pipeline<F: EmittedFeed>(
     )
 }
 
-/// A built send path and its recorders, taken apart: the pipeline goes to
-/// [`Feeds::push_shard`] and the recorders stay with the harness.
+/// A built send path and its recorders, taken apart: the pipeline goes into the
+/// shard's [`ShardFeeds`] and the recorders stay with the harness.
 fn split<F: EmittedFeed>(
     built: Option<(FeedPipeline<F>, FeedRecorders)>,
 ) -> (Option<FeedPipeline<F>>, Option<FeedRecorders>) {
@@ -593,10 +593,9 @@ fn harness_inner(configured: &[Feed], break_writes: bool) -> Harness {
     }));
 
     // Shard-outer and block-inner, in first-appearance order, because that
-    // order is the index the routing resolves against and `push_shard` is what
-    // holds the two vectors to it. Pushing per block in the order the slice
-    // states them would index the two specifications differently the moment a
-    // test interleaves them.
+    // order is the index the routing resolves against. A shard's two
+    // specifications go into one `ShardFeeds`, so a slice that interleaves them
+    // cannot land them under two different shards.
     let mut shards: Vec<ShardName> = Vec::new();
     for feed in configured {
         if !shards.contains(&feed.shard) {
@@ -623,7 +622,10 @@ fn harness_inner(configured: &[Feed], break_writes: bool) -> Harness {
         }
         let (top_of_book, tob) = split(top_of_book);
         let (market_by_price, mbp) = split(market_by_price);
-        feeds.push_shard(top_of_book, market_by_price);
+        feeds.push(
+            ShardFeeds::new(top_of_book, market_by_price)
+                .expect("a shard in the list has at least one block"),
+        );
         recorded.push(ShardRecorders { tob, mbp });
     }
 

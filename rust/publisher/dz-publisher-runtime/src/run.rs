@@ -57,7 +57,7 @@ use crate::error::StartupError;
 use crate::guard::{Exit, Inconsistency};
 use crate::observer::MetricsObserver;
 use crate::pipeline::{FeedPipeline, Port, Ports};
-use crate::publisher::{Feeds, Publisher, SnapshotError};
+use crate::publisher::{Feeds, Publisher, ShardFeeds, SnapshotError};
 use crate::registry::{AdapterContext, AdapterRegistry};
 
 /// How often the tick body runs.
@@ -283,17 +283,16 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
 
     let route = KernelRoute;
     let mut feeds = Feeds::default();
-    // **Shard-outer, block-inner, and the order is the whole point.** Both
-    // vectors are indexed by shard, and the index a routing decision uses is
-    // the one `Registry::shard_of` returns — which is an index into
+    // **Shard-outer, block-inner, and the order is the whole point.** `Feeds`
+    // is indexed by shard, and the index a routing decision uses is the one
+    // `Registry::shard_of` returns — which is an index into
     // `RegistryConfig.shards`, built above from this same `Config::shards()`.
+    // Iterating the shards here is what keeps the two lists in the same order.
     //
-    // Pushing per block in document order would let a file that interleaves
-    // them — top-of-book on one shard, market-by-price on another, then the
-    // other way round — leave the two vectors in different orders. One
-    // instrument's quotes and its levels would then leave by two different
-    // channels, and nothing below `Feeds` re-checks the pairing. Building a
-    // shard at a time makes that unreachable rather than merely unlikely.
+    // What a document that interleaves its blocks — top-of-book on one shard,
+    // market-by-price on another, then the other way round — can no longer do
+    // is separate a shard's two specifications: they are built together and
+    // held together in one `ShardFeeds`, so there is nothing left to pair up.
     for shard in config.shards() {
         let mut top_of_book = None;
         let mut market_by_price = None;
@@ -322,7 +321,18 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
                 }
             }
         }
-        feeds.push_shard(top_of_book, market_by_price);
+        let Some(shard_feeds) = ShardFeeds::new(top_of_book, market_by_price) else {
+            // Unreachable from a resolved document: `Config::shards()` is the
+            // distinct shards *of the enabled blocks*, so a shard with neither
+            // specification is a shard nothing named. Refused rather than
+            // skipped, because skipping it would shift every later shard's
+            // index one off the registry's and publish a shard's instruments
+            // under another channel instance's sequence series.
+            return Err(StartupError::ShardWithNoFeed {
+                shard: shard.as_str().to_owned(),
+            });
+        };
+        feeds.push(shard_feeds);
     }
 
     let publisher = RefCell::new(Publisher::new(
