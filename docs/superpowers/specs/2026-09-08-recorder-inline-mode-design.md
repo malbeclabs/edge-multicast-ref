@@ -22,11 +22,11 @@ manifested objects in a directory; the other walks that directory, derives rows
 and loads them into a column store. That arrangement is the one the recorder
 crates design settled and it is not in question here.
 
-This defines a **second arrangement**, and makes it the one a configuration
-that says nothing is read as: one process that captures a feed and derives its
-rows directly, keeping no datagrams. It exists for three cases, and
-*[Why inline mode is the default](#why-inline-mode-is-the-default)* is why those
-are the cases to point a default at.
+This defines a **second arrangement**: one process that captures a feed and
+derives its rows directly, keeping no datagrams. Neither arrangement is a
+default — each is selected by the configuration that only it can run on, and
+*[The configuration states the arrangement, and no flag names it](#the-configuration-states-the-arrangement-and-no-flag-names-it)*
+is how. It exists for three cases.
 
 **Bringing up a feed.** The question during bring-up is *are the rows right*,
 and the loop that answers it today is minutes long: rotate an object, wait for a
@@ -45,8 +45,8 @@ this document introduces:
 
 | | What it is | How it is entered | Where it is defined |
 |---|---|---|---|
-| **archive mode** | `dz-recorder` writes objects; `dz-recorder-load` derives rows from them. Unchanged in everything but how it is asked for. | `--archive` | the recorder crates design |
-| **inline mode** | one process captures, derives and loads. Keeps no datagrams. | nothing: it is what a command line naming no mode is read as | here |
+| **archive mode** | `dz-recorder` writes objects; `dz-recorder-load` derives rows from them. Unchanged, including how it is entered. | `archive.staging_dir` and `archive.completed_dir`, which it has always required | the recorder crates design |
+| **inline mode** | one process captures, derives and loads. Keeps no datagrams. | `--inline-config`, the file carrying the spool, the ledger and the destination it cannot run without | here |
 
 ---
 
@@ -72,22 +72,22 @@ soften it:
 Three things bound that loss, and they are why the mode is defensible rather
 than merely cheaper.
 
-**The two configurations refuse each other, so the default cannot be silently
-wrong.** Inline mode is what a command line naming no mode is read as, and
-archive mode is asked for by `--archive`. That is a default placed over a
-decision that already had an answer, and what makes it safe is not the flag: it
-is that each mode refuses the keys the other requires. Archive mode requires
-`archive.staging_dir` and `archive.completed_dir`; inline mode refuses either of
-them carrying a value. So an archive-mode host whose command line names no mode
-is **refused at startup, by key**, and told to pass `--archive` — it is never
-read as a recorder that quietly stopped keeping bytes. A configuration stating
-neither shape is refused too, naming both flags. There is no third case, and
-that is the whole of what makes the inversion defensible.
+**Neither arrangement can be entered without being stated, because each is
+named by what it cannot run without.** Archive mode requires
+`archive.staging_dir` and `archive.completed_dir`; inline mode requires a spool
+directory, a ledger and a destination, which live in the file `--inline-config`
+names. Not one of those five has a defensible value to invent, so a
+configuration cannot be ambiguous about the arrangement without stating **both**
+— refused — and cannot be silent about it without stating **neither** — refused
+too. There is no third case and there is no silence left over for a default to
+be placed on.
+*[The configuration states the arrangement, and no flag names it](#the-configuration-states-the-arrangement-and-no-flag-names-it)*
+argues the selection;
+*[What it costs](#what-it-costs)* names what it takes.
 
 Archive mode is also still what a host recording a production feed for evidence
-should run, and it now says so on its own command line rather than by silence.
-*[Why inline mode is the default](#why-inline-mode-is-the-default)* argues the
-reading; *[What it costs](#what-it-costs)* names what it takes.
+should run, and it says so by carrying the two directories that arrangement
+writes into.
 
 **The rows say so.** A `derivation` column carries `archive` or `live` on every
 row of every grain. No query can mistake a row derived from verified bytes for
@@ -104,173 +104,254 @@ came from and how long they are kept, never what a row means.
 
 ---
 
-## Why inline mode is the default
+## Why the arrangement is stated and never defaulted
 
 The recorder crates design's *"the archive is bytes, not rows"* is still the
 stronger argument for a host recording a production feed for evidence, and
-nothing here softens it. What a default decides is not which argument is
-stronger. It decides how a configuration that says nothing is **read**, and that
-is a different question with a different answer.
+nothing here softens it. This section does not answer which argument is
+stronger. It answers a different question: **what does a configuration that
+says nothing mean** — and the answer is that it means nothing, and is refused.
 
-**A default belongs on the arrangement whose wrong choice is loud.** Put the
-default on archive mode and a host that meant inline mode and said nothing gets
-a running recorder: it joins the feed, writes objects, publishes them and
-reports itself healthy. Nothing derives them, because the second process was
-never deployed. The symptom is an empty table, and an empty table is
-indistinguishable from a feed nobody published on — which is the one diagnosis
-this whole tier exists to make. Put the default on inline mode and a host that
-meant archive mode and said nothing gets a **startup refusal naming
-`archive.staging_dir`**, because it carries that key and inline mode refuses it.
-One reading fails as silence in a dashboard; the other fails as a non-zero exit
-code in front of the pipeline that caused it. The default belongs on the second.
+**A default belongs on the arrangement whose wrong choice is loud, and neither
+of these is.** Put the default on archive mode and a host that meant inline mode
+and said nothing gets a running recorder: it joins the feed, writes objects,
+publishes them and reports itself healthy. Nothing derives them, because the
+second process was never deployed. The symptom is an empty table, and an empty
+table is indistinguishable from a feed nobody published on — which is the one
+diagnosis this whole tier exists to make. Put the default on inline mode and a
+host that meant archive mode and said nothing needs a spool directory, a ledger
+and a destination it has not got, so it is refused — loudly, but for the wrong
+reason, telling an operator about a file they never wanted rather than about the
+arrangement they meant.
 
-**Bring-up is the first thing every feed does, and it is inline mode's own
-case.** *[Purpose](#purpose)* gives three cases for the mode and the first is
-bringing a feed up: the question is *are the rows right*, and the loop that
-answers it in archive mode is a rotation, a pass and a query. Every feed goes
-through that loop before it is a production feed at all. A default that is wrong
-for the first thing every feed does is a default every feed overrides once, and
-a default nobody keeps has only ever cost a line of configuration.
+So the loud reading is not one of the two arrangements. It is the **refusal**,
+and once the refusal is what silence means, there is nothing for a default to
+decide. That is the whole of this section's argument, and the four cases below
+are it in a table.
 
-**An archive-mode default makes a disk sizing the price of a first row.** The
-staging budget is retention × bytes per second and it is the number that decides
-host sizing — the recorder crates design says so plainly. Under an archive-mode
-default that number stands between every new host and its first queryable row,
-including the hosts that were never going to keep the bytes. Under an
-inline-mode default it stands only in front of the hosts that asked to keep
-them, which are the hosts the number is about.
+### Four cases, and two of them run
 
-**A row is the product; a byte is the evidence for it.** Archive mode's output
-is not rows: it is objects, plus a second process that has to be deployed
-somewhere else before anything can be asked a question. A recorder in archive
-mode with no loader behind it has produced nothing queryable at all. Inline
-mode's output is rows in the column store from one process, which is the shape
-of a thing that is finished when it starts.
+| `[archive]` directories | `--inline-config` | What runs |
+|---|---|---|
+| set | not given | **archive mode** |
+| not set | given | **inline mode** |
+| set | given | **refused**, naming `archive.staging_dir` and the file: two arrangements that keep different things |
+| not set | not given | **refused**, naming both: nothing states an arrangement, and neither has a value worth inventing |
 
-None of that changes which mode a host recording for evidence should run. It
-changes only what silence means, and silence now means the reading that gets
-caught.
+**It is total because each arrangement requires what the other has no use for.**
+Archive mode has required `archive.staging_dir` and `archive.completed_dir`
+since it existed, and refuses to start without them — a host recorded nothing
+before this document and records nothing after it if they are absent. Inline
+mode requires a spool directory, a ledger and a destination, none of which the
+recorder's own configuration carries or should: the second file exists precisely
+because those are what inline mode needs and archive mode does not. So the two
+sets of keys are disjoint, each set is required by exactly one arrangement, and
+neither set has a defaulted member. The four rows above are therefore every
+case, and no fifth one is reachable.
+
+**Every mode change is an edit that states the new mode, and every half-finished
+edit is a non-zero exit code.** This is the property a default cannot have. An
+operator who deletes an `[archive]` section to stop keeping bytes for an
+afternoon has reached the fourth row, not inline mode: the recorder refuses,
+names both, and nothing has been recorded wrongly because nothing has been
+recorded. An operator who adds `--inline-config` to a host that still carries
+the directories has reached the third row and is told which two statements
+disagree. Neither host can drift into an arrangement nobody chose, and neither
+finding arrives weeks later as a year of retention that was never kept.
+
+### Why this is not the inference the `derivation` column exists to forbid
+
+An earlier draft of this document rejected selecting the arrangement from the
+configuration, by analogy: the `derivation` column is a column rather than a
+test for an empty digest, *because a reader should not have to know that one
+value means nothing was ever verified*. Selecting a mode by whether a key has a
+value, the argument went, is that trap one layer up.
+
+**The analogy does not carry, and the difference is the whole of it.** What the
+`derivation` column replaces is a reading of an **absence** — an empty `sha256`,
+which is a hole a writer left and which a reader can only interpret by knowing
+how that writer behaved. Nobody stated it. Two directories in a configuration
+file are the opposite kind of thing: a **positive statement, written by the
+person who took the decision, in the file that is that decision's record.**
+Reading them is not inferring provenance from a hole; it is reading what was
+written, in the only place it was written.
+
+The analogy also fails on the failure it predicted. It predicted an operator who
+deletes an `[archive]` section and silently changes what a month of rows means.
+That requires a silence to be readable as an arrangement, and the fourth row is
+why there is none: deleting the directories and stating nothing else is refused.
+The prediction was correct about a *two*-case rule and wrong about a total one.
+
+And a flag would not have removed the reading, only moved it. `--archive` on a
+command line with no directories cannot record an archive — archive mode refuses
+by key — so the flag never was the thing that selected the arrangement. The
+directories always were. What the flag added was a second place to say it, which
+is the next section.
+
+---
+
+## Whether a flag survives as an explicit override
+
+**Decided: no. There is no `--archive`, and no flag names the arrangement.**
+
+The reading above needs no flag, and this section is why adding one back would
+make the design worse rather than more explicit. Four reasons, and the second is
+the one that decides it.
+
+**A flag has no case of its own left.** Every command line on which `--archive`
+would be legal is one whose configuration already selects archive mode, and
+every command line on which the configuration says otherwise is one of the two
+refusals. So the flag can only ever agree with the configuration or be refused
+by it. A word that decides nothing is a word an operator has to maintain, get
+right, and reconcile against the file that does decide.
+
+**What is left of it is the one thing it must not do.** The only power an
+override can add is the power to *resolve* a refusal. Resolving the third row
+starts a recorder whose configuration names an archive it will never write —
+which is a host somebody believes is keeping bytes for a year that it never kept
+for a second, the exact failure this arrangement's refusals exist for. Resolving
+the fourth starts one on paths nobody stated. An override is therefore a way to
+start a recorder in an arrangement the operator's own configuration contradicts,
+which is the thing this whole section is trying to make impossible; and it would
+arrive as a flag rather than as a default, which changes nothing about the
+outcome.
+
+**It would state in a second place a thing the configuration already states in a
+load-bearing one.** The arrangement is not a key in the recorder's own file
+because `config_hash` is provenance and any new key rewrites the hash of every
+configuration in the fleet. It is not a key in inline mode's own file because
+that file is read by only one of the two arrangements. The same objection
+retires the flag, and more sharply: a token that names the arrangement and does
+nothing else can **disagree** with the paths that do the work, and then somebody
+has to decide which wins. Each arrangement is now named by the resource it
+consumes — archive mode by the two directories it writes into, inline mode by
+the file carrying its spool, ledger and destination — and a name that is also
+the thing cannot disagree with itself.
+
+**What an override would have bought is bought better, and totally, by
+`--check`.** The real value in a flag is a deployment pipeline pinning the
+arrangement it believes it is deploying. `--check` does exactly that and does it
+for every host rather than for the ones that remembered the flag: it refuses
+unless exactly one arrangement is stated, prints the arrangement as the **first
+line** of its output, and exits non-zero — before anything is restarted, which
+is why that subcommand is an `ExecStartPre` rather than a convenience. An
+assertion that only protects the hosts carrying it has the same defect a default
+has.
+
+`--archive` therefore does not exist, and a command line carrying it gets the
+usage error any unknown flag gets: the message, `USAGE`, and exit code 2. That
+is the loudest answer available for a word the binary does not have, and it is
+the right one for a word that has never had a meaning in a released build.
+
+**What this depends on staying true.** Stated here so that a later change cannot
+undo it quietly: `archive.staging_dir` and `archive.completed_dir` must stay
+required with no default in archive mode, and `inline.spool_dir`,
+`inline.ledger` and the destination must stay required with no default in inline
+mode's own file. A defaulted `staging_dir` would make every configuration in the
+fleet state archive mode. A defaulted spool directory would make the second file
+optional, and an optional file cannot select an arrangement. Both are held by
+tests rather than by this paragraph.
 
 ---
 
 ## What it costs
 
-Three costs. The first is the one to read, and it is the one the inversion turns
-on.
+One cost, and it is a build-time one. The two costs an earlier draft of this
+document carried — a word on every archive-mode command line, and a fleet-wide
+edit to add it — are what selecting from the configuration removes, and they are
+recorded below as the reason it was chosen.
 
-### An evidence host states one word, and is refused if it does not
+### Nothing outside this repository changes
 
-A host recording a production feed for evidence needs `--archive` on its command
-line. What it loses if nobody sets it is **nothing quietly**: it does not start.
+This is the argument that decided the selection against a flag, and it is worth
+stating as a cost table with nothing in it.
 
-| Configuration shape | Mode named | What happens |
-|---|---|---|
-| `[archive]` directories set | `--archive` | archive mode, exactly as before |
-| `[archive]` directories set | nothing | **refused**, naming `archive.staging_dir` and `--archive` |
-| no `[archive]`, an inline file given | nothing | inline mode |
-| no `[archive]`, no inline file | nothing | **refused**, naming `--inline-config` and `--archive` |
-| both flags | both | **refused** on the command line: two arrangements that keep different things |
+Archive mode's configuration has always carried `archive.staging_dir` and
+`archive.completed_dir`, because archive mode has always refused to start
+without them. So every unit, pipeline and runbook that starts `dz-recorder`
+today keeps working unchanged: the host selects archive mode by saying what it
+already said, in the file it already said it in. Inline mode's command line
+carries `--inline-config` because the mode needs the file, so it too states its
+arrangement by carrying what it cannot run without. There is no `ExecStart` to
+edit, no `ExecStartPre` to edit, no restart-triggered failure attributed to
+whatever else was in flight, and no infrastructure repository this one does not
+contain to land a change in.
 
-There is no row in which a host that wanted an archive gets a running recorder
-without one, and that is a property of the refusals rather than of the default:
-**archive mode requires two directories that inline mode refuses a value for.**
+The code is smaller as well. The condition that selects the arrangement is the
+condition that already existed: the refusal an inline-mode host got for a
+configured archive directory read those two keys in order to name them, so the
+same read chooses the arrangement instead, and the separate check disappears
+into it.
 
-A log line saying `mode=inline` would not have been enough. The restart that
-changes a host's mode is the moment nobody is reading its log, and the finding
-would arrive weeks later as a year of retention that was never kept. So the
-loudness is a startup refusal with a non-zero exit code, made before a socket is
-bound; and `--check` makes it before anything is restarted at all, which is why
-that subcommand is an `ExecStartPre` rather than a convenience.
-
-**What the inversion therefore depends on is that both refusals stay refusals.**
-If archive mode ever gains a defaulted `staging_dir`, or inline mode ever
-downgrades its archive-directory refusal to a warning, this default becomes
-silent in the one direction that loses evidence. Both are held by tests rather
-than by this paragraph.
-
-### Every archive-mode command line stops working, once, at its next restart
-
-This is a breaking change to a default that has an answer today, and it is worth
-classing the way the publisher's feed-routes design classes its own costs:
-
-| Cost | Class |
-|---|---|
-| Every unit, pipeline and runbook that starts `dz-recorder` for archive mode needs `--archive` added — on `ExecStart` and on the `ExecStartPre` that runs `--check`. Those live in infrastructure repositories this one does not contain. | External, and not ours to land |
-| The failure surfaces on a restart, which is when something else was already being changed, so it arrives attributed to whatever else was in flight. | Restart-triggered |
-| No archive is lost and nothing is corrupted. The refusal is made before a socket is bound, so a host that refuses has not recorded the wrong thing — it has recorded nothing. | Recoverable |
-| The recovery is one word on one line, and `--check` proves it without restarting anything. | Cheap, and discoverable ahead of time |
-
-Nothing in that table is irreversible, which is what separates this cost from
-the class the feed-routes design had to reject an option over: an identity space
-spent cannot be spent back, and a command line can. The honest summary is a
-fleet-wide edit a pipeline can make and a `--check` can prove, in exchange for a
-default that fails loudly in the direction that matters.
-
-### The mode becomes a default build feature
+### The mode is a default build feature, for a new reason
 
 Inline mode is behind a build feature so that a recorder that only records
 carries no column-store client, no HTTP client and no row crates. That argument
-is untouched and the feature stays. What cannot stand alongside the inversion is
-the feature being **off** by default while the mode it gates is the default
-mode: a binary that refuses the arrangement its own command line asks for when
-told nothing is a binary whose default it cannot honour. So `inline` joins the
-default feature set, and the record-only build becomes
-`--no-default-features`.
+is untouched and the feature stays. `inline` is nonetheless in the **default**
+feature set, and the reason has changed with the selection: it is no longer that
+a binary must be able to honour its own default mode, because there is no
+default mode.
 
-What that costs is real and small: every default build of the recorder now
-compiles and links the column-store client, an HTTP client and the row crates.
-The property those crates were kept out for — **nothing in the record path
-reaches the destination** — was never enforced by the feature and is not
-weakened here: it is enforced by the capture path's own rule that it never
-blocks and never parses, and by the derivation and posting stages living off
-that path entirely. The feature buys a smaller build, not a safer one, and a
-host that wants the smaller build asks for it by name.
+The reason now is that **the arrangement is a property of a host's configuration
+and the binary is not.** Configuration is rendered per host; the released
+recorder asset is one asset for the fleet. A default build that carried only one
+arrangement would have to be matched to configurations at deploy time — a second
+thing to get right, whose wrong answer is a startup refusal on a host whose
+configuration was correct. So the default build carries both, and the record-only
+build is asked for by name with `--no-default-features`.
 
-A build made with `--no-default-features` can only ever be in archive mode, so
-a command line naming no mode is refused there by the feature's name and by
-`--archive`, rather than by the second file it would otherwise have needed.
+What that costs is real and small: every default build of the recorder compiles
+and links the column-store client, an HTTP client and the row crates. The
+property those crates were kept out for — **nothing in the record path reaches
+the destination** — was never enforced by the feature and is not weakened here:
+it is enforced by the capture path's own rule that it never blocks and never
+parses, and by the derivation and posting stages living off that path entirely.
+The feature buys a smaller build, not a safer one.
 
-One consequence is worth stating because it settles a deployment question this
-design would otherwise leave open: the released recorder asset is built with the
-default feature set plus `afpacket`, and features are additive, so the asset
-carries inline mode without the release pipeline naming it. A released binary
-that could not run its own default mode would be the alternative.
+A `--no-default-features` build can only ever be in archive mode, so a
+configuration that selects inline mode — a second file given, no archive
+directories — is refused there by the feature's name, rather than falling back to
+archive mode without being asked. That refusal exists only in the builds that
+need it, and it is reached by a configuration that positively asked for the
+arrangement this binary has not got.
 
 ---
+## Whether inline mode could write an archive beside its rows
 
-## Whether the default is inline only, or inline and an archive together
+Decided: **it could not, and there is no third arrangement.** Inline mode keeps
+no datagrams, and the code implements exactly that — one `Arrangement` per run,
+the two mutually exclusive by construction, and no configuration able to state
+both without being refused.
 
-Decided: **inline only.** The default keeps no datagrams, and the code
-implements exactly that — one `Arrangement` per run, the two mutually exclusive
-by construction, and no configuration or command line able to ask for both.
+The alternative has to be answered rather than waved at, because it is the
+obvious way to make the third row of
+*[Four cases, and two of them run](#four-cases-and-two-of-them-run)* run instead
+of refuse. If a host stating the archive directories *and* a second file kept its
+bytes and got its rows, nothing would be refused and no evidence would be at
+risk. Four reasons reject it, and the third is the one that decides it here.
 
-The alternative has to be answered rather than waved at, because the inversion
-is what gives it force. If the default derived rows inline *and* wrote the
-archive, a host that said nothing would keep its bytes and get its rows, no
-evidence would be lost to a silent default, and everything in
-*[What it costs](#what-it-costs)* would be unnecessary. Four reasons reject it.
-
-**A default has to be the arrangement that is cheapest to be wrong about, and
-that one is the most expensive.** A host that stated nothing would be sized for
-retention × bytes per second — the exact cost the mode exists to avoid — and
-would need a spool, a budget and a destination on top. The default would be the
-only arrangement carrying two disk budgets and two sizing questions, and the
-case that motivated the mode at all would be served by neither the default nor
-the explicit ask.
+**It would be the most expensive arrangement to be in by accident.** A host in
+it is sized for retention × bytes per second — the exact cost this mode exists to
+avoid — and needs a spool, a budget and a destination on top. It is the only
+arrangement carrying two disk budgets and two sizing questions, and the case that
+motivated the mode at all is served by neither it nor by archive mode.
 
 **It is the one arrangement no test covers.** The gate this design rests on
 compares two paths and asserts their rows are equal but for provenance. A third
 path that runs both at once has its own interleaving, its own backpressure and
 its own shutdown ordering, and an equivalence test between the other two
-exercises none of them. A default nothing tests is worse than a non-default that
-is tested.
+exercises none of them.
 
-**It would delete the refusal that makes the inversion safe.** An arrangement
-writing both has to *accept* `archive.staging_dir` in the mode that also derives
-inline. That refusal is what makes an archive-mode host's silent command line
-loud, and it is the whole argument of the first cost above. A default that had to
-accept those keys would be a default that could be silently wrong again, having
-gone to this trouble to stop being.
+**It would make the selection non-total, which is the property everything above
+rests on.** The four cases work because the two key sets are disjoint and each is
+required by exactly one arrangement — so *both stated* has no reading and is
+refused. An arrangement that writes both is precisely a reading for that row:
+`archive.staging_dir` accepted alongside a second file. Grant it and the third
+row stops being a refusal, and a configuration that states both is no longer a
+contradiction somebody has to resolve — it is a running recorder in the
+arrangement nobody sized a host for. The refusal is not an inconvenience the
+selection tolerates; it is what makes the selection a reading rather than a
+guess.
 
 **Writing both is not free at the capture.** Every datagram would go to the
 archive writer *and* into the ring: a second consumer on the record path and a
@@ -279,7 +360,7 @@ that against two sinks with unrelated failure characteristics — a full disk an
 a slow destination — is a harder property than holding it against one.
 
 A host that wants both runs archive mode and derives from the objects, which is
-what archive mode is. What it gives up against a hypothetical both-mode is
+what archive mode is. What it gives up against a hypothetical both-arrangement is
 latency to the first row, and that latency is the trade the two modes were drawn
 around.
 
@@ -566,6 +647,125 @@ design, so the counter rises whether or not anything is wrong, while one window
 older than the eviction window is history already gone. That is the same mistake
 the loader's own documentation warns about, and the same answer.
 
+### Eviction order, and the one window that goes last
+
+Eviction is oldest-first and a window the sink is holding is evicted like any
+other: it is the oldest, which is the rule, and the cost is one ledger entry
+that will not be written for rows that may yet land — which leaves the next
+window's era anchor uncertain and says so, rather than claiming a continuity
+nothing on this host can still evidence.
+
+**One window is the exception, and it is the one whose rows have already
+landed.** A window whose insert succeeded and whose ledger entry could not be
+written stays on disk to hold that entry: its rows are in the store, and its
+directory is the only thing left that can record that they are. Evicting it is
+not giving up rows that may yet land — the rows *have* landed — it is giving up
+the only remaining evidence of a load that happened, and with it the trailer the
+next era anchor is checked against. So a window owing a ledger entry is the last
+thing the budget takes, and it is taken only when nothing else is left to take,
+because a budget that stopped bounding the disk in order to protect an entry
+would trade a bounded backlog for an unbounded one.
+
+**A budget that cannot delete stops bounding at one window, not at every
+window.** An eviction whose directory will not delete stops that pass, for the
+reason it always did: retrying the same undeletable directory would walk the
+whole spool into the same failure and leave the disk no emptier. What it must not
+do is leave that window counted, because then the budget is over its bound for
+ever, the same directory is chosen on every later pass, and the disk stops being
+bounded from the first failure on. So the window stops being a window and its
+bytes move to the unreclaimable count, which is where bytes this module can no
+longer reach belong — and the next pass makes one more attempt, on the next
+window.
+
+### Every byte the spool put on disk is a byte its budget can see
+
+A window is written in one place and it either becomes a window in the map or
+leaves nothing behind. A store that failed after creating the directory used to
+leave that directory on disk and out of the map, so its bytes sat outside the
+byte count, outside eviction and outside the unreclaimable count alike: the
+spool reported itself empty while orphans accumulated, one per failed window,
+until a restart adopted or discarded them. The failure is silent in the one
+number an operator would look at, which is why it belongs in this document
+rather than only in a fix: **the spool's byte count is a claim about the disk,
+and a claim with an exception is not one.** A store that fails removes what it
+created, and a removal that itself fails moves those bytes to the unreclaimable
+count instead of forgetting them.
+
+---
+
+## Why no market data rows, and why that is refused rather than left empty
+
+Eight grains carry the `derivation` column and inline mode derives **five** of
+them: `datagram`, `era`, `segment_coverage`, `sequence_gap` and
+`conformance_finding`. The other three — `event`, `instrument` and `book_top` —
+are the market data grains, and inline mode derives none of them.
+
+**The gap as a reviewer found it, stated exactly.** In archive mode those three
+tables are also empty unless somebody asked: derivation is per feed and off
+everywhere, selected by a `[[market_data]]` entry in the loader's own
+configuration, and a host with no entry loads what it always loaded. So the
+emptiness is not what inline mode introduces. What inline mode introduced is
+that **there was no way to ask and nothing said so** — a feed pointed at this
+arrangement had three permanently empty tables, indistinguishable from a feed
+nobody published on, and no key an operator could have written to find out
+otherwise. The equivalence gate cannot see it, because its synthetic feed has no
+`[[market_data]]` entry on either side and both paths therefore agree on zero.
+
+### Why they are not derived
+
+Two reasons, and the first is a decision this design has already taken.
+
+**Nothing in the record path decodes a datagram.** That is one of this
+document's own decisions, and it is not about cost. Derivation reads the 24-byte
+datagram header through a peek that judges nothing but the buffer's length, and
+no message is decoded — so a message a decoder would reject still carries the
+sequence number whose absence is the finding, which is the whole reason the
+transport grains are trustworthy at all. Market data derivation is a codec walk.
+In archive mode it runs in the loader, off the host, over bytes already stored
+and already hashed, and a decoder that refuses or panics costs a loader pass. On
+the derivation stage of a recording process it costs **the window** — and with
+it that window's transport rows, which are the rows this whole tier exists for.
+Putting a codec there trades the grains that work for the grains that might.
+
+**An instrument table and a book are state that spans the unit the spool
+bounds.** `derive_events` builds its instrument table per call, and a definition
+is in force from the instant it was received until the next statement — so
+resolving a price message needs the definitions seen before it. An object is a
+rotation interval; a window is a window bound, orders of magnitude smaller.
+Derived per window, nearly every message after the first window would be refused
+for an unresolved instrument. Making them resolve means carrying the instrument
+table, the book and every open snapshot cycle across windows *and* across a
+restart — which is durable state spanning the unit the spool exists to bound, so
+a crash would stop costing one window. That is a design, with its own
+persistence and its own failure modes, and this branch does not have it.
+
+### Why the ask exists in order to be refused
+
+The alternative to deriving them was **announcing the gap** — a `--check` line,
+and nothing else. That is not enough on its own, and this repository's pattern
+is to refuse rather than to be quietly empty. So both:
+
+- **Inline mode's own file accepts a `[[market_data]]` section**, the loader's
+  `MarketDataFeed` type reused verbatim the way the destination's configuration
+  type is, and **refuses any entry at startup** — naming the feed, naming the
+  three tables that would stay empty, and naming archive mode as the arrangement
+  that derives them. An operator who asks is answered at `--check`, before a
+  socket is bound, instead of being handed three empty tables.
+- **`--check` and the startup summary state which feeds derive market data
+  rows**, in both arrangements, beside the mode line they already lead with. In
+  inline mode that line says none, and says which arrangement can.
+
+**Why the key is accepted-and-refused rather than required.** A required key
+whose one legal value is *none* was considered, and rejected: it would make
+inline mode stricter than archive mode about a decision the two arrangements
+make identically. A feed with no entry derives no market data rows in *either*
+arrangement, which is the equivalence the gate on this design asserts everywhere
+else, and it is defended in the loader's own configuration for the reason a
+global switch was refused there. If the un-asked case should be loud, that is a
+change to the loader as much as to this mode, and it belongs in one place rather
+than in the arrangement that happened to be reviewed. What inline mode owes is
+that the *ask* is possible and answered, and that is what this gives.
+
 ---
 
 ## Provenance: the `derivation` column
@@ -618,67 +818,71 @@ The second file carries the window bound, the ring capacity, the spool
 directory and its budget, the ledger path, and the destination — reusing the
 column-store configuration type verbatim.
 
-### The mode is stated on the command line, and `--archive` is not a new word
+### The configuration states the arrangement, and no flag names it
 
-The mode cannot be a key in the recorder's own file for the reason nothing else
-is: `config_hash` is provenance, and adding any key changes the hash of every
-configuration in the fleet. It could have been a key in inline mode's own file,
-except that this file's whole reason to exist is what inline mode needs *from*
-it — a spool and a destination — so a mode key inside it would be a mode chosen
-by a file only one of the two modes reads.
+The arrangement cannot be a key in the recorder's own file for the reason
+nothing else is: `config_hash` is provenance, and adding any key changes the
+hash of every configuration in the fleet. It could have been a key in inline
+mode's own file, except that this file's whole reason to exist is what inline
+mode needs *from* it — a spool and a destination — so a mode key inside it would
+be an arrangement chosen by a file only one of the two arrangements reads.
 
-So the mode is stated on the command line, as `--archive`, and the flag's
-absence is inline mode.
+**A mode token is therefore homeless, and it turns out not to be needed.** Each
+arrangement is already named, in the only place it could be, by the resource it
+cannot run without: archive mode by `archive.staging_dir` and
+`archive.completed_dir`, inline mode by the file `--inline-config` names. Both
+sets are required with no default, the sets are disjoint, and the four
+combinations are total — so the selection is a read of what an operator wrote
+rather than a second statement of it.
+*[Why the arrangement is stated and never defaulted](#why-the-arrangement-is-stated-and-never-defaulted)*
+argues the reading and answers the `derivation`-column analogy that an earlier
+draft rejected it by;
+*[Whether a flag survives as an explicit override](#whether-a-flag-survives-as-an-explicit-override)*
+is why no flag comes back beside it.
 
-**`--archive` mints no vocabulary.** `GLOSSARY.md` bans neither the word nor any
-sense of it, and the token is already this repository's four times over: the
-`[archive]` section of the recorder's configuration, the `archive` value of the
-rows' `derivation` column, `dz-recorder-archive`'s crate name, and the name this
-document has given the arrangement since its first paragraph. A genuinely new
-mode token would have had to be argued against the glossary the way the
-publisher's feed-routes design argued `route` out of existence before it became
-a key, a field and a metric label. This is that argument's opposite case: the
-word an operator has already read in three places, used for the fourth.
-
-The rejected alternative is inferring the mode from whether the `[archive]`
-directories carry a value, which needs no flag at all and reads *archive mode is
-what an operator asks for explicitly* literally. It is rejected because this
-design has already rejected an inference of exactly this shape one layer down:
-the `derivation` column is a column rather than a test for an empty digest,
-because a reader should not have to know that one value means nothing was ever
-verified. Choosing the arrangement by whether a key has a value is that trap
-above the rows instead of inside them, and its version of the failure is an
-operator who deletes an `[archive]` section to stop archiving for an afternoon
-and finds they have changed what a month of rows means.
+**Nothing here mints vocabulary either.** The keys are the ones archive mode has
+always required, and `--inline-config` names the file inline mode has to read.
+`GLOSSARY.md` bans no word used above, and no token that names an arrangement
+has been added to a key, a field or a metric label — which is the cost the
+publisher's feed-routes design argued `route` out of existence to avoid paying.
+The arrangement is a reading, and a reading spends no vocabulary at all.
 
 ### What it refuses at startup
 
-The recorder refuses rather than invents, and inline mode adds five refusals.
-Each names the key or the flag.
+The recorder refuses rather than invents, and this design adds six refusals.
+Each names the key or the file.
 
-- **An archive directory configured in inline mode.** Nothing writes objects, so
-  a `staging_dir` or `completed_dir` with a value is an operator expecting an
-  archive they will not get. Ignoring it silently is how a host is believed to
-  be keeping bytes for a year that it never kept for a second.
+- **A configuration stating both arrangements.** `archive.staging_dir` or
+  `archive.completed_dir` carrying a value *and* a second file given. Nothing
+  writes objects in inline mode, so a directory with a value is an operator
+  expecting an archive they will not get — and ignoring it silently is how a
+  host is believed to be keeping bytes for a year that it never kept for a
+  second. Refused naming the key and the file, so the two statements that
+  disagree are both on the screen.
+- **A configuration stating neither.** No archive directory and no second file.
+  Archive mode needs the two directories, inline mode needs a spool directory, a
+  ledger and a destination, and not one of the five has a defensible value to
+  invent — a recorder that invented them would keep bytes on a disk nobody sized
+  or load rows into a database nobody chose. Refused naming both ways of stating
+  an arrangement, because the operator reading it has stated neither.
 - **A spool directory that does not exist or cannot be written.** The spool is
   the durability of this mode; a recorder that could not write it would be
   holding every row in memory and calling itself healthy.
 - **A ledger inside the spool directory.** For the reason the loader's ledger
   may not live inside the objects directory: a file the budget cannot classify
   is a file eviction cannot reach.
-- **Inline mode with no file to run it from.** The mode is what a command line
-  naming no mode is read as, and it needs a spool directory and a destination,
-  neither of which has a defensible value to invent — a recorder that invented
-  one would load rows into a database nobody chose. Refused naming
-  `--inline-config`, and naming `--archive` as well, because the operator whose
-  host wanted the other arrangement is the one most likely to be reading it.
-- **The default mode asked for from a build that does not carry it.** The mode is
-  behind a build feature, and that feature is in the default set precisely
-  because the mode is the default mode. A `--no-default-features` build can only
-  be in archive mode, so a command line naming no mode fails at startup naming
-  the feature and naming `--archive` — rather than falling back to archive mode
-  without being asked, which would leave a host keeping bytes where rows were
-  asked for.
+- **A feed whose market data rows were asked for.** Inline mode derives the
+  transport grains and not the market data ones, and
+  *[Why no market data rows, and why that is refused rather than left empty](#why-no-market-data-rows-and-why-that-is-refused-rather-than-left-empty)*
+  argues it. The ask exists so that it can be refused by name, naming the feed
+  and the three tables that would otherwise be empty, rather than being a
+  question an operator has no way to put.
+- **Inline mode from a build that does not carry it.** The mode is behind a build
+  feature. A `--no-default-features` build can only be in archive mode, so a
+  configuration that selects inline mode — a second file given, no archive
+  directories — fails at startup naming the feature, rather than falling back to
+  archive mode without being asked, which would leave a host keeping bytes where
+  rows were asked for.
 
 ---
 
@@ -778,35 +982,61 @@ in part.
 its bound, the next one opens with the previous trailer, and the era anchor is
 certain from the second window — including across a restart, through the ledger.
 
-**The default is held by two refusals and a manifest assertion.** A default is
-the kind of decision that leaves no trace when it is wrong, so each half of it
-is a test rather than a paragraph: an archive-shaped configuration whose command
-line names no mode is refused naming `archive.staging_dir` and `--archive`; a
-configuration naming neither shape is refused naming `--inline-config` and
-`--archive`; and the build feature the default mode needs is asserted to be in
-the default feature set, because a mode entered by silence from a binary that
-cannot run it is a default that refuses itself. Reverting any one of the three
-fails a named test, and the plan records which.
+**The selection is held by a test per case, and there are four cases.** A
+selection is the kind of decision that leaves no trace when it is wrong, so each
+row of *[Four cases, and two of them run](#four-cases-and-two-of-them-run)* is a
+test rather than a paragraph: an archive-shaped configuration with no second
+file runs archive mode and says so on the first line of `--check`; an
+inline-shaped one with a second file runs inline mode and says so; a
+configuration stating both is refused naming `archive.staging_dir` and the file;
+a configuration stating neither is refused naming both ways of stating an
+arrangement. **A fifth test asserts the four are total** — that the two
+predicates the selection reads are exactly the two the refusals name — because
+four cases enumerated by hand are four cases somebody can add a fifth to. And
+the build feature is asserted to be in the default feature set, because the
+released asset is one asset for a fleet whose arrangements differ per host.
+Reverting any one of them fails a named test, and the plan records which.
+
+**A word that names an arrangement is asserted not to exist.** `--archive` was
+on this branch and is gone, so a command line carrying it is a usage error. That
+is asserted rather than left to the absence of code: a flag is cheap to add back
+and the argument against it is four paragraphs long, so the test is what carries
+the decision to whoever reaches for it next.
 
 ---
 
 ## Decisions
 
-**Inline mode is the default; archive mode is asked for by name.** A default
-decides how a configuration that says nothing is read, and it is put here
-because this reading fails loudly — an archive-mode host that names no mode is
-refused by key — while the other fails as an empty table nobody can distinguish
-from a silent feed. A host recording a production feed for evidence should still
-run archive mode, and now says so with `--archive`; inline mode is for bring-up,
-for hosts that were never keeping the bytes, and for one deploy unit. Neither
-mode can be entered by accident, because each refuses the keys the other
-requires.
+**Neither arrangement is a default; each is stated by the configuration only it
+can run on.** Archive mode is selected by the two directories it has always
+required, inline mode by the file carrying the spool, ledger and destination it
+cannot run without. Both stated is refused; neither stated is refused. The four
+cases are total, so nothing is left for a default to decide and no host can drift
+into an arrangement nobody chose. A host recording a production feed for evidence
+should still run archive mode, and states it by writing the directories that
+arrangement fills; inline mode is for bring-up, for hosts that were never keeping
+the bytes, and for one deploy unit.
 
-**The default is inline only, and never inline with an archive beside it.** A
-default that wrote both would be the only arrangement carrying two disk budgets,
-the one arrangement no test covers, and the one that would have to accept the
-archive keys whose refusal is what keeps this default from being silently
-wrong.
+**No flag names the arrangement, and `--archive` does not exist.** A flag could
+only agree with the configuration or be refused by it, and the one power it would
+add is the power to resolve one of the two refusals — which is starting a
+recorder in an arrangement its own configuration contradicts. Selecting from the
+configuration also costs no edit in any infrastructure repository, because every
+archive host's configuration already carries the keys that select it.
+
+**Inline mode never writes an archive beside its rows.** An arrangement that
+wrote both would be the only one carrying two disk budgets, the one no test
+covers, and — decisively — the reading that makes *both stated* run instead of
+refuse, which is what the totality of the selection rests on.
+
+**Inline mode derives the five transport grains and none of the three market
+data ones.** Not because the emptiness is acceptable — it is the same emptiness
+archive mode has for an unasked feed — but because deriving them would put a
+codec on the record path, against this design's own decision that nothing there
+decodes a datagram, and would need an instrument table and a book carried across
+windows and across a restart. So the ask exists in inline mode's own file in
+order to be **refused by name**, and the summary states in both arrangements
+which feeds derive them.
 
 **Derivation is not reimplemented.** Inline mode supplies a third `Source` and a
 synthesised manifest, and calls the same `derive`. A second derivation would be
@@ -845,17 +1075,27 @@ window is evicted like any other.
 
 **No datagram archive in inline mode, optional or otherwise.** A third
 arrangement would carry its own sizing, its own failure modes and its own tests,
-and it would have to accept the very keys whose refusal makes the default safe;
-*[Whether the default is inline only](#whether-the-default-is-inline-only-or-inline-and-an-archive-together)*
+and it would have to accept the very keys whose refusal makes the selection
+total;
+*[Whether inline mode could write an archive beside its rows](#whether-inline-mode-could-write-an-archive-beside-its-rows)*
 decides it at length. A host that wants bytes runs archive mode.
 
-**No change to what archive mode does.** Not to its configuration, not to its
-objects, not to its manifest, not to its metrics, and not to the loader. What
-changes is the one word that selects it: a command line that used to enter
-archive mode by saying nothing now says `--archive`, and is refused by key
-rather than reinterpreted if it does not. That refusal, and the cost of the edit
-it forces on every existing command line, is
-*[What it costs](#what-it-costs)*.
+**No change to what archive mode does, and none to how it is entered.** Not to
+its configuration, not to its objects, not to its manifest, not to its metrics,
+not to the loader, and not to a single `ExecStart` or `ExecStartPre` in any
+infrastructure repository. An archive-mode host selects archive mode by carrying
+`archive.staging_dir` and `archive.completed_dir`, which archive mode has
+required since it existed — so the configuration that ran yesterday runs
+unchanged, and *[What it costs](#what-it-costs)* is a cost table with nothing
+external in it.
+
+**No market data rows in inline mode.** Deriving them would put a codec on the
+record path and need reference-data state carried across windows and across a
+restart;
+*[Why no market data rows, and why that is refused rather than left empty](#why-no-market-data-rows-and-why-that-is-refused-rather-than-left-empty)*
+decides it. A feed whose `event`, `instrument` and `book_top` rows are wanted
+runs archive mode, and asking for them in inline mode is a refusal at `--check`
+rather than three empty tables.
 
 **No change to the deduplication keys.** The provenance column is in no sort key,
 and no grain's identity changes.
