@@ -284,3 +284,97 @@ fn the_lag_gauge_is_zero_when_every_window_has_landed() {
     );
     assert_eq!(counters.spool_bytes(), 0, "and the spool is empty");
 }
+
+/// A scrape samples and renders alone, and a second one waits.
+///
+/// The endpoint serves every request on its own thread, and a Prometheus
+/// counter cannot be assigned — only advanced — so a counter mirroring a total
+/// the stages keep is sampled by reading it, subtracting, and adding the
+/// difference. Two scrapes landing together would each read the same value and
+/// each add the same difference, leaving a `*_total` permanently wrong by an
+/// amount nothing records.
+///
+/// **Asserted on the exclusion rather than on the inflation.** A test that runs
+/// many scrapes and checks the total afterwards is a test that has to lose a
+/// race to fail: the sampling is a dozen atomic reads, so the window is narrow
+/// enough that such a test passes against an implementation with no lock at all
+/// — which is exactly what it did when it was written that way. This one holds
+/// the first scrape open and requires the second to have waited, which either
+/// happens or does not.
+#[test]
+fn a_second_scrape_waits_for_the_first_to_finish_sampling() {
+    use dz_recorder_inline::metrics::InlineMetrics;
+    use dz_recorder_inline::pipeline::InlineCounters;
+    use dz_recorder_inline::ring::ring;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let metrics = Arc::new(InlineMetrics::new("site-1", "recorder-1"));
+    let fixture = fixture();
+    let spool = Arc::new(Mutex::new(fixture.spool));
+
+    let (mut tx, _rx) = ring(1);
+    for dg in &SyntheticPublisher::clean(8).datagrams() {
+        let _ = tx.offer(&dg.as_recorded());
+    }
+    let dropped = tx.counters().dropped();
+    assert!(dropped > 0, "the fixture is meant to overrun the ring");
+    let ring_counters = Arc::clone(tx.counters());
+    let counters = Arc::new(InlineCounters::default());
+
+    let inside = Arc::new(AtomicBool::new(false));
+    let first_finished = Arc::new(AtomicBool::new(false));
+
+    let holder = {
+        let metrics = Arc::clone(&metrics);
+        let inside = Arc::clone(&inside);
+        let first_finished = Arc::clone(&first_finished);
+        let ring_counters = Arc::clone(&ring_counters);
+        let counters = Arc::clone(&counters);
+        let spool = Arc::clone(&spool);
+        std::thread::spawn(move || {
+            metrics.scrape(|m| {
+                inside.store(true, Ordering::SeqCst);
+                {
+                    // Scoped, so the wait below is on the sampling lock and not
+                    // on the spool's. Holding both would serialise the second
+                    // scrape for the wrong reason and the test would pass
+                    // against an implementation that takes no sampling lock at
+                    // all — which is what it did when it was written that way.
+                    let held = spool.lock().expect("the spool is not poisoned");
+                    m.observe("top-of-book", &ring_counters, &counters, &held, 0);
+                }
+                // Long enough that a second scrape which did not wait would
+                // have finished several times over.
+                std::thread::sleep(Duration::from_millis(300));
+                first_finished.store(true, Ordering::SeqCst);
+            });
+        })
+    };
+
+    while !inside.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let rendered = metrics.scrape(|m| {
+        let held = spool.lock().expect("the spool is not poisoned");
+        m.observe("top-of-book", &ring_counters, &counters, &held, 0);
+    });
+    assert!(
+        first_finished.load(Ordering::SeqCst),
+        "the second scrape sampled while the first was still inside its own"
+    );
+    holder.join().expect("the holding thread does not panic");
+
+    // And the consequence the exclusion protects: two samples of a total that
+    // never moved leave the counter reporting that total, not twice it.
+    let line = rendered
+        .lines()
+        .find(|l| l.starts_with("dz_recorder_inline_ring_dropped_total"))
+        .unwrap_or_else(|| panic!("the series is not in the exposition:\n{rendered}"));
+    let reported: u64 = line
+        .rsplit(' ')
+        .next()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| panic!("unreadable sample: {line}"));
+    assert_eq!(reported, dropped, "the counter was advanced twice: {line}");
+}

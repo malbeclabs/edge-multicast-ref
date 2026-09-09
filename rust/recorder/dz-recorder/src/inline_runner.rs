@@ -131,16 +131,22 @@ pub fn run(plan: &Plan, config: &InlineConfig, run_for: Option<Duration>) -> Res
         serve_rendering(
             move || {
                 let now = now_ns();
-                for s in &scraped {
-                    let spool = s
-                        .spool
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    inline.observe(&s.feed, &s.ring, &s.counters, &spool, now);
-                }
+                // Sampled and rendered under one lock: the endpoint serves every
+                // request on its own thread, and the inline counters are
+                // advanced by a difference rather than assigned, so two scrapes
+                // landing together would each add the same difference.
+                let inline_text = inline.scrape(|m| {
+                    for s in &scraped {
+                        let spool = s
+                            .spool
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        m.observe(&s.feed, &s.ring, &s.counters, &spool, now);
+                    }
+                });
                 // Two families from two registries, concatenated. They are
                 // disjoint, so there is nothing to merge.
-                format!("{}{}", health.render(), inline.render())
+                format!("{}{inline_text}", health.render())
             },
             plan.listen_addr,
         )

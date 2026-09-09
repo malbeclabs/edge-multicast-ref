@@ -23,6 +23,8 @@
 //!
 //! [`oldest_unposted_age_seconds`]: InlineMetrics::observe
 
+use std::sync::Mutex;
+
 use prometheus::{IntCounterVec, IntGaugeVec, Opts, Registry, TextEncoder};
 
 use crate::pipeline::InlineCounters;
@@ -32,6 +34,17 @@ use crate::spool::Spool;
 /// One registry for the process, with a `feed` label.
 #[derive(Debug)]
 pub struct InlineMetrics {
+    /// Held across a whole scrape, and the reason is not the registry.
+    ///
+    /// Prometheus counters cannot be assigned, only advanced, so a counter that
+    /// mirrors a total the stages already keep is sampled by adding the
+    /// difference — read, subtract, add. That is three steps, and the metrics
+    /// endpoint serves every request on its own thread. Two scrapes landing
+    /// together would each read the same value, each compute the same
+    /// difference, and each add it: a `*_total` inflated for the life of the
+    /// process, by an amount nothing records. So a scrape samples and renders
+    /// under this, and the concurrency the endpoint has stops at the door.
+    sampling: Mutex<()>,
     registry: Registry,
     ring_dropped: IntCounterVec,
     windows_derived: IntCounterVec,
@@ -144,7 +157,23 @@ impl InlineMetrics {
                  no re-run recovers it. Zero means nothing is waiting.",
             ),
             registry,
+            sampling: Mutex::new(()),
         }
+    }
+
+    /// One scrape: sample every feed, then render, with nothing else in between.
+    ///
+    /// The sampling is the caller's closure because only the caller knows which
+    /// feeds it is running and where their spools are — but *when* it happens
+    /// is this type's, because a sample that races another sample corrupts a
+    /// counter permanently. See [`Self::sampling`].
+    pub fn scrape<F: FnOnce(&Self)>(&self, sample: F) -> String {
+        let _held = self
+            .sampling
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        sample(self);
+        self.render()
     }
 
     /// Samples one feed's counters into the registry.
@@ -187,6 +216,11 @@ impl InlineMetrics {
             .set(i64::try_from(spool.oldest_age_seconds(now_ns)).unwrap_or(i64::MAX));
     }
 
+    /// The exposition as it stands.
+    ///
+    /// Prefer [`scrape`](Self::scrape), which samples first and holds the two
+    /// together. This is here for a caller that has already sampled and for the
+    /// tests.
     #[must_use]
     pub fn render(&self) -> String {
         let mut out = String::new();

@@ -129,6 +129,29 @@ pub enum InlineConfigError {
     )]
     SpoolBudgetIsZero,
 
+    /// The budget is not zero, but dividing it between the feeds makes it zero.
+    ///
+    /// The same failure as [`Self::SpoolBudgetIsZero`], reached by arithmetic
+    /// rather than by a literal, and therefore the one an operator will
+    /// actually hit: the host's budget is stated once and the feeds share the
+    /// disk, so two feeds and a small budget give each of them nothing. Archive
+    /// mode refuses the same shape with `StagingBudgetTooSmall`, and this is
+    /// that refusal for the arrangement that stages rows instead of bytes.
+    ///
+    /// Zero is the floor this can check and not a chosen one. A window's rows
+    /// are derived from datagrams, so how many bytes one costs is not knowable
+    /// from the configuration — inventing a multiple of the window bound would
+    /// be inventing a number. What is knowable is that a per-feed budget of
+    /// zero evicts every window as it is written.
+    #[cfg(feature = "inline")]
+    #[error(
+        "`inline.spool_max` is {spool_max} bytes across {feeds} feed(s), which is 0 bytes each. \
+         Every window would be evicted as soon as its rows were written, and the destination \
+         would stay empty while the recorder looked healthy. The budget is the host's and the \
+         feeds share the disk, so state it for all of them together."
+    )]
+    SpoolBudgetTooSmall { spool_max: u64, feeds: usize },
+
     #[cfg(feature = "inline")]
     #[error(
         "`inline.ledger` is required. Without it a restart re-posts every window the spool still \
@@ -317,15 +340,36 @@ impl InlineConfig {
         Ok(())
     }
 
+    /// The budget once it is divided between the feeds that share the disk.
+    ///
+    /// Separate from [`check`](Self::check) because it needs a number that file
+    /// does not carry: how many feeds the recorder's own configuration enables.
+    /// `spool_max` is the host's budget, stated once, exactly as `staging_max`
+    /// is in archive mode — and divided the same way.
+    ///
+    /// # Errors
+    ///
+    /// [`InlineConfigError::SpoolBudgetTooSmall`] when the division leaves a
+    /// feed nothing.
+    pub fn check_budget_covers(&self, feeds: usize) -> Result<(), InlineConfigError> {
+        if feeds > 0 && self.inline.spool_max / feeds as u64 == 0 {
+            return Err(InlineConfigError::SpoolBudgetTooSmall {
+                spool_max: self.inline.spool_max,
+                feeds,
+            });
+        }
+        Ok(())
+    }
+
     /// What `--check` prints: which arrangement is running, what it keeps, and
     /// what was read rather than what an operator believes they wrote.
-    #[must_use]
-    /// The identity is not repeated here.
     ///
-    /// The plan prints it, and `--check` prints the plan first: an operator
-    /// reading two `site=` lines has to work out whether the two files disagree,
-    /// and the answer is that they cannot — inline mode takes the identity from
-    /// the recorder's own file and this one has no key for it.
+    /// The identity is not repeated here. The plan prints it, and `--check`
+    /// prints the plan first: an operator reading two `site=` lines has to work
+    /// out whether the two files disagree, and the answer is that they cannot —
+    /// inline mode takes the identity from the recorder's own file and this one
+    /// has no key for it.
+    #[must_use]
     pub fn summary(&self) -> String {
         use std::fmt::Write as _;
         let mut out = String::new();
@@ -398,6 +442,10 @@ pub fn run(
     // `for_inline` rather than `from_config`, because the archive directories
     // this refuses a value for are the ones that one requires one of.
     let plan = crate::startup::Plan::for_inline(recorder)?;
+    // After the plan, because it needs the feed count, and before anything is
+    // opened, because `--check` is where a host learns this rather than after
+    // a night of derived rows nobody kept.
+    config.check_budget_covers(plan.feeds.len())?;
     // Where the recorder's own summary goes, and for the same reason: `--check`
     // is a result a pipeline reads on stdout, and a recording run's summary is
     // a log line beside the version it prints on startup.
@@ -899,6 +947,41 @@ listen_addr = "127.0.0.1:0"
             !inline.contains("config hash="),
             "and so is the provenance hash: {inline}"
         );
+    }
+
+    /// A budget that survives one feed and not two is refused, by arithmetic.
+    ///
+    /// The literal `spool_max = 0` was already refused, and it is the case
+    /// nobody writes. This is the one they hit: a host budget that looked ample
+    /// until a second feed was added to the same file, leaving each of them
+    /// nothing and the destination empty while the recorder reported itself
+    /// healthy.
+    #[test]
+    fn a_budget_that_divides_to_nothing_is_refused_and_names_the_arithmetic() {
+        let fixture = Fixture::new();
+        let config = fixture.config();
+
+        config
+            .check_budget_covers(1)
+            .expect("the fixture's budget covers one feed");
+
+        // A budget smaller than the number of feeds is the only shape that can
+        // divide to zero, and it is reachable by adding feeds rather than by
+        // editing the budget.
+        let text = fixture
+            .text()
+            .replace(r#"spool_max       = "8GiB""#, r#"spool_max       = "1B""#);
+        let tight = InlineConfig::parse(&text, std::path::Path::new("inline.toml"))
+            .expect("a one-byte budget parses; it is the division that refuses it");
+        tight
+            .check_budget_covers(1)
+            .expect("one feed still gets the whole byte");
+        let message = tight
+            .check_budget_covers(2)
+            .expect_err("two feeds share it and neither gets a byte")
+            .to_string();
+        assert!(message.contains("2 feed"), "{message}");
+        assert!(message.contains("0 bytes each"), "{message}");
     }
 
     /// `--check` in inline mode prints nothing about an archive.
