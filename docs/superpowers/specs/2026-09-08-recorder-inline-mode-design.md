@@ -387,8 +387,12 @@ that gets through. Inline mode adds one more place a datagram can be lost, and
 reuses that type rather than restating its arithmetic.
 
 **The ledger already exists.** `dz-recorder-load` owns a ledger keyed on the
-loaded unit, carrying the trailer so that a restart resumes with the certainty a
-continuous run had. Inline mode's spool needs exactly that and reuses it.
+loaded unit, so a restart posts nothing it has already posted. Inline mode's
+spool needs exactly that and reuses it. What it does not inherit is the ledger's
+other half: the trailer that lets a loader resume with the certainty a
+continuous run had settles nothing across a *recorder* run boundary, for the
+reason in *[The era anchor gets better, not worse — and stops at the run
+boundary](#the-era-anchor-gets-better-not-worse--and-stops-at-the-run-boundary)*.
 
 **Deduplication does not depend on the object.** No `ORDER BY` in the checked-in
 DDL includes the object key or its digest; the eight tables collapse on the
@@ -566,40 +570,139 @@ predecessor test is `segment_seq + 1`, so an empty window that spent a number
 would leave the next window's trailer two behind it, and every window following
 a quiet stretch would write an uncertain anchor.
 
-### The era anchor gets better, not worse
+### The era anchor gets better, not worse — and stops at the run boundary
 
 `Era::anchor_certain` is written uncertain when the preceding window's trailer
 is unknown, and in archive mode that is routine: the staging budget evicts, and
 the predecessor of the oldest surviving object is regularly gone. Inline
-windows are strictly sequential, are never evicted before derivation, and carry
-their trailer into the ledger — so the anchor is certain from the second window
-onward, and stays certain across a restart. This is the one analytical result
-inline mode improves.
+windows are strictly sequential and none is evicted before it is derived, so the
+anchor is certain from the second window of a run onward. That is the one
+analytical result inline mode improves, and it stops where the run does. **The
+first window of every run anchors on nothing, and that is the decision rather
+than the outstanding half of it.** The rest of this section is why.
 
 **What an uncertain anchor costs, traced rather than assumed.** The trailer is
-written to the ledger and is not yet read back, so today the first window after
-every restart derives with no predecessor. Following that through: the
-derivation's own verdict function cannot reach `publisher` at all — it is not
-among its outcomes, by design, because `publisher` needs a datagram absent from
-every site and one vantage has neither half of that — so the first window after
-a restart answers `recorder` where its residue is fully admitted and
-`unverifiable` otherwise. The cross-site pass that turns `unverifiable` into
-`publisher` requires, per gap occurrence, that the vantage's era boundary be
-settled: `anchor_certain = 1`. An uncertain anchor therefore makes that
-window's absences **inadmissible**.
+written to the ledger and is not read back, so the first window of every run
+derives with no predecessor. Following that through: the derivation's own
+verdict function cannot reach `publisher` at all — it is not among its outcomes,
+by design, because `publisher` needs a datagram absent from every site and one
+vantage has neither half of that — so the first window of a run answers
+`recorder` where its residue is fully admitted and `unverifiable` otherwise. The
+cross-site pass that turns `unverifiable` into `publisher` requires, per gap
+occurrence, that the vantage's era boundary be settled: `anchor_certain = 1`. An
+uncertain anchor therefore makes that window's absences **inadmissible**.
 
 So the cost is a window's worth of evidence, once per restart, and never an
 accusation drawn from ignorance. That is the right direction for the failure to
-lean, and it is why reading the trailer back is an improvement to make rather
-than a correctness hole to stop the mode for.
+lean, and the three questions below are whether the read that would buy the
+evidence back can be made without leaning the other way. It cannot.
 
-One case gives it back, and gives it back deliberately. **A window the spool
-could not take does not hand its trailer to the next window.** Its rows are not
-in the store, so the next window's predecessor is *unknown* — which is what
-`None` means there, and never *there was none*. Carrying the trailer across
-would let a reader join the two eras as one continuous sequence space over a
-hole nothing in the rows can explain, which is the merge an uncertain anchor
-exists to prevent.
+**A first run has no trailer legitimately, and an unreadable ledger is a
+different thing — the distinction is already made.** `None` has to stay a valid
+state whatever else is decided here: it is what a genuinely first window has,
+and it is what a window the spool refused hands on. What must not be collapsed
+into it is a ledger that exists and cannot be read. `Ledger::open` already keeps
+the two apart at the file's own front door: a path that is not there opens an
+empty ledger with no trailer, and a path that exists and cannot be read is
+`LedgerError::Io`, which the runner turns into a refusal of the whole feed
+before a socket is bound. A ledger that cannot be read is not one that is not
+there — starting on the second is resuming from nothing, and starting on the
+first is deriving beside rows that may already be in the store with nothing
+recording it. Between the two sits the torn last line a crash mid-append leaves,
+which is skipped: the trailer then falls back to the highest surviving entry,
+which is a trailer that precedes less rather than a trailer that precedes wrong.
+Every one of those degradations leans toward *uncertain*. No new refusal is
+owed, and this answer holds whether or not anything reads the trailer back.
+
+**Which trailer the ledger holds is not the one the read would want.**
+`Ledger::trailer()` is the trailer of the highest `segment_seq` the file knows,
+which is not the same statement as *the last window whose rows landed*. Within
+one run the two coincide, because the numbers only go up. Across a restart they
+come apart, and in the direction that matters: `window_seq` restarts at zero on
+every run, so a previous run's numbering outranks every entry the new run
+writes, and the ledger goes on answering with a window from the run before for
+as long as the new run takes to climb past it. The persisted trailer is
+therefore not exactly the wanted one, and it is not merely stale for the first
+window. The same shape reaches the archive loader, whose objects carry a
+`segment_seq` that restarts on every *recorder* run; that is the loader's to
+decide and is recorded here because it was found here.
+
+**An anchor that turns out wrong is worse than an uncertain one, and wrong is
+what this read would produce.** An uncertain anchor withholds a window's
+evidence; an anchor read from a previous run's trailer asserts a continuation
+nobody observed. The check that makes the second unreachable already exists, and
+it is `SegmentTrailer::precedes`: the predecessor test is `segment_seq + 1`, and
+a run that begins at zero has no predecessor a previous run could supply. So
+wiring the read on its own changes no answer anywhere — the trailer arrives,
+`boundary` filters it out, and the anchor is uncertain exactly as before.
+
+The only wiring that changes an answer is one that also continues the window
+sequence across the restart, and that is the claim the sequence exists to
+refuse. A hole in `segment_seq` is how a reader is told the derivation was down.
+A restart is a run boundary; the capture stopped over it, and the datagrams that
+passed in the interval were never offered to anything. A contiguous number
+across that interval says *the derivation was not down* over precisely the
+stretch in which it was.
+
+The reader that pays for it is `segment_overflow` in
+`007_recorder_cross_site.sql`. It takes the nearest earlier segment by
+`start_ts`, checks `p.segment_seq + 1 = c.segment_seq`, and clamps a counter
+that went backwards to zero — the clamp being right for the reboot it was
+written for, and reachable only because no two adjacent segments today come from
+two runs. The capture-drop counter belongs to the capture handle, and a new run
+has a new handle, so the first window of a continued sequence would report
+`capture_drop_delta = 0`: `overflow_free = 1`, a clean statement about this
+host's capture over a window that may have admitted drops. A clean statement
+there is one of the two things that make an absence usable against a publisher.
+
+**What certainty would have bought, measured before it was paid for.** Less than
+it looks. The first window of a run cannot be an absence witness for another
+site's gap whatever its anchor says, because `absence_admissible` also requires
+that vantage's `overflow_free = 1`, and a run's first segment has no predecessor
+to subtract from. The whole gain is that the window's *own* gaps become
+promotable past `unverifiable`, `sequence_gap_cross_site` testing
+`g.anchor_certain = 1`. One window's own gaps, once per restart, bought with a
+statement about that same window's capture health that the recorder is not in a
+position to make.
+
+**Decided: the trailer is not read back.** A run starts at `window_seq: 0` and
+`preceding: None`, both of them, and the pair is the decision. The refusal on a
+missing `inline.ledger` no longer promises an era anchor that survives a
+restart, because nothing does: the ledger is required because a restart without
+one re-posts every window the spool still holds, which is a replace paid for
+rows already in the store. What the trailer in an inline ledger is *for*, then,
+is that the entry is the loader's own entry — one type for both arrangements —
+and it is what a window spooled by one run and posted by the next writes.
+
+Two alternatives were weighed and both are worse. **Resuming the sequence with a
+deliberate hole** — `trailer.segment_seq + 2`, so the run boundary is a hole
+rather than a return to zero — leaves every answer where it already is, because
+the adjacency test fails either way, and buys a durable sequence whose loss with
+the ledger would be silent. **Continuing the sequence and the capture-drop total
+together**, so that the delta over the boundary is the new run's own drops,
+repairs the false zero but at the price of a column that means the kernel's
+counter in one arrangement and a synthetic cross-run sum in the other, read by
+views that cannot tell which wrote the row — and it still erases the hole that
+says the derivation was down.
+
+**What would change it.** One thing would make certainty across a restart honest
+rather than assumed: a per-instance last sequence value in the trailer, and a
+boundary that settles an era from the sequence itself rather than from segment
+adjacency. The first window of a run could then say *this instance resumed at
+the value after the one the last landed window ended on*, which is evidence, and
+the capture-drop delta would stay unknown, which is correct. It changes
+`SegmentTrailer`, which both arrangements write and the ledger serialises; it
+changes what `anchor_certain` means for the archive too, where `precedes`
+guards an eviction hole rather than a run boundary. That is its own design and
+not a line in this one.
+
+One case gives the anchor away inside a run, and gives it away deliberately. **A
+window the spool could not take does not hand its trailer to the next window.**
+Its rows are not in the store, so the next window's predecessor is *unknown* —
+which is what `None` means there, and never *there was none*. Carrying the
+trailer across would let a reader join the two eras as one continuous sequence
+space over a hole nothing in the rows can explain, which is the merge an
+uncertain anchor exists to prevent.
 
 ---
 
@@ -980,7 +1083,10 @@ in part.
 
 **The window tests cover the seam derivation cannot see.** A window closes on
 its bound, the next one opens with the previous trailer, and the era anchor is
-certain from the second window — including across a restart, through the ledger.
+certain from the second window of a run. Across a restart it is not, and a test
+says so by name rather than leaving the boundary untested: the ledger holds a
+trailer, the run begins at zero, and the first window of the new run anchors on
+nothing.
 
 **The selection is held by a test per case, and there are four cases.** A
 selection is the kind of decision that leaves no trace when it is wrong, so each

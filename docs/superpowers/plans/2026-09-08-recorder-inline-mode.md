@@ -255,14 +255,17 @@ New crate `rust/recorder/dz-recorder-inline`, added to workspace `members`.
 - [x] The trailer of window *n* is the `preceding` of window *n+1*, within a
       run: `pipeline.rs:302` holds it, `:351` reads it into the next `derive`,
       `:390` replaces it.
-- [ ] **Outstanding: the trailer is not read back from the ledger after a
-      restart.** `pipeline.rs:162` starts a run at `preceding: None`, and
-      nothing under `dz-recorder-inline/src/` or `dz-recorder/src/` calls
-      `Ledger::trailer()`. The trailer *is* persisted (`spool.rs:231`, `:529`),
-      so the data is on disk and only the read is missing — but until it is
-      wired the design's claim that the era anchor *"stays certain across a
-      restart"* is a claim about the intended behaviour and not about this
-      tree. The first window after every restart writes an uncertain anchor.
+- [x] **Decided in task 14: the trailer is not read back from the ledger after
+      a restart, and the first window of a run anchors on nothing.**
+      `pipeline.rs:162` starts a run at `window_seq: 0` and `:163` at
+      `preceding: None`, and the pair is the decision rather than the omission
+      it looked like. The trailer *is* persisted (`spool.rs:231`, `:529`), but
+      the predecessor test is `segment_seq + 1` and a run begins at zero, so a
+      previous run's trailer precedes nothing here: the read on its own changes
+      no answer, and the version that does changes it by claiming the
+      derivation was not down over the interval in which it was. The design's
+      claim that the anchor *"stays certain across a restart"* is corrected
+      rather than implemented.
 
       **Traced, at a review's asking, so that the open item carries its
       consequence rather than a worry.** It cannot reach `publisher`.
@@ -275,8 +278,8 @@ New crate `rust/recorder/dz-recorder-inline`, added to workspace `members`.
       per gap occurrence that `anchor_certain = 1` (`:442`) — so an uncertain
       anchor makes that window's absences **inadmissible**. The cost is one
       window's evidence per restart, withheld; it is not an accusation drawn
-      from ignorance, which is why this stays an improvement to make rather
-      than a hole that stops the mode.
+      from ignorance, which is the direction task 14 kept when it weighed that
+      cost against what buying the evidence back would have had to assert.
 
 **Tests:**
 
@@ -1019,6 +1022,104 @@ condition, which passes for as long as nobody adds it and says nothing about
 whether adding it would be wrong. The rustdoc carries the argument instead.
 
 ---
+
+### 14. The fourth review: the trailer that is not read back
+
+Two threads on one finding, at `pipeline.rs:162` and `:163` — which are the two
+lines that would have to change together, and only one of which anybody named.
+`preceding: None` starts every run, `Ledger::trailer()` has no caller in this
+crate, and the design said the era anchor *"stays certain across a restart"*.
+Task 4 carried it as an open item with its consequence traced; this is the
+decision the trace was still missing.
+
+Decided in
+*[The era anchor gets better, not worse — and stops at the run boundary](../specs/2026-09-08-recorder-inline-mode-design.md#the-era-anchor-gets-better-not-worse--and-stops-at-the-run-boundary)*.
+
+**Decided: the trailer is not read back, and the first window of a run anchors
+on nothing.** The three questions the decision had to answer:
+
+- **What a missing or unreadable trailer means.** Already distinguished, and by
+  nothing this task adds. `Ledger::open` returns an empty ledger for a path that
+  is not there and `LedgerError::Io` for a path that exists and cannot be read,
+  which `inline_runner.rs:241` turns into a refusal of the feed before a socket
+  is bound. The torn last line a crash mid-append leaves is skipped, and the
+  trailer falls back to the highest surviving entry — a trailer that precedes
+  less, never one that precedes wrong. `None` stays a valid state throughout,
+  because it is what a genuinely first window has.
+- **Which trailer.** Not the last window whose rows landed. `Ledger::trailer()`
+  is the trailer of the highest `segment_seq` the file knows
+  (`dz-recorder-load/src/ledger.rs:259`), and `window_seq` restarts at zero on
+  every run — so after a restart the ledger answers with a window from the run
+  before, and goes on answering with it until the new run's numbering climbs
+  past. Within one run the two readings coincide; across the boundary the read
+  would want, they do not.
+- **Whether an anchor that turns out wrong is worse than an uncertain one.**
+  Yes, and wrong is what this read produces. The check that stops it already
+  exists — `SegmentTrailer::precedes` is `segment_seq + 1` — so the read on its
+  own is **inert**: applied and run, the suite is unchanged. Making it effective
+  means continuing the window sequence across the restart, and a contiguous
+  number there says *the derivation was not down* over the one interval in which
+  it was. `007_recorder_cross_site.sql`'s `segment_overflow` is what pays for
+  that: nearest earlier segment by `start_ts`, `p.segment_seq + 1 =
+  c.segment_seq`, and a counter that went backwards clamped to zero — so the
+  first window of the new run would report `capture_drop_delta = 0` over a
+  capture handle opened seconds earlier. That is `overflow_free = 1`, and a
+  clean statement there is one of the two things that make an absence usable
+  against a publisher.
+
+What certainty would have bought, measured before it was paid for: only that
+window's *own* gaps becoming promotable, `sequence_gap_cross_site` testing
+`g.anchor_certain = 1`. It could not have been an absence witness for another
+site's gap either way, because `absence_admissible` also wants that vantage's
+`overflow_free = 1` and a run's first segment has no predecessor to subtract
+from.
+
+- [x] `pipeline.rs`: `window_seq: 0` and `preceding: None` keep their values and
+      gain their reason, at the two lines the review sat on. The `preceding`
+      field doc says *every window after the first of a run*, and says why the
+      ledger's trailer is not the predecessor of window zero.
+- [x] `inline_config.rs`: `InlineConfigError::NoLedger` loses the clause
+      promising an era anchor certain across a restart, which was the last
+      present-tense overclaim on the branch. The ledger is still required and
+      the reason that survives is the one that is true: a restart without it
+      re-posts every window the spool still holds, and each of those is a
+      replace paid for rows already in the store.
+
+**Tests:**
+
+- [x] `a_restart_does_not_anchor_its_first_window_on_the_ledgers_trailer`
+      (`dz-recorder-inline/tests/pipeline.rs`): two runs over one spool
+      directory and one ledger file, the second asserting that the ledger **does**
+      hold a trailer and that the run starting under it still numbers its first
+      window zero and still writes `anchor_certain = 0`. The trailer's presence
+      is half the test: without it the assertion would pass over an empty ledger
+      and say nothing about the decision.
+- [x] `a_ledger_is_required` (`inline_config.rs`) gains the reason it names and
+      the promise it must not make.
+
+| Revert | Test that died |
+|---|---|
+| `preceding: ledger.trailer().cloned()` — the fix the threads name | **nothing died.** 1456 passing before it, 1456 after. That is the finding rather than a gap in the tests |
+| the same, plus `window_seq` seeded from the trailer — the version that is not inert | `a_restart_does_not_anchor_its_first_window_on_the_ledgers_trailer`, on both of its assertions |
+| `NoLedger`'s old wording restored | `a_ledger_is_required` |
+
+The first row is the reason this task exists at all. A mutation that kills no
+test is usually a missing test; here it is the answer, and the test written
+beside it is the one that dies under the mutation that *does* change an answer.
+
+**Found while deciding this, and the loader's rather than this task's.**
+`Ledger::remember` keeps the trailer of the highest `segment_seq` it has seen,
+and `Loader::trailer` prefers the ledger's over a pending one whenever it is
+higher (`dz-recorder-load/src/loader.rs:454`). Object sequence numbers restart
+on every *recorder* run, so after a recorder restart the loader consults the
+previous run's trailer for every object of the new run until its numbering
+passes the old high mark — an uncertain anchor per object, for a run's worth of
+objects rather than for one. It leans the withholding way, which is why it is
+recorded and not a stop, and it wants the loader's own decision about how a run
+is to be identified.
+
+---
+
 
 ## Order, and why it is this one
 
