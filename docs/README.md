@@ -22,6 +22,7 @@ Names we do not own, or have not renamed, are left as written wherever they appe
 | [Several channel instances of one feed specification](superpowers/specs/2026-09-09-publisher-feed-routes-design.md) · [plan](superpowers/plans/2026-09-09-publisher-feed-routes.md) | One process operating many channels of one feed spec: a `shard` on `[[feed]]`, reference data per channel, and the era keyed on the channel instance |
 | [An upstream write that is not a connect](superpowers/specs/2026-09-09-upstream-write-after-a-listing-change-design.md) · [plan](superpowers/plans/2026-09-09-upstream-write-after-a-listing-change.md) | Why an instrument admitted mid-session was never subscribed, and why the write has to name the connection it goes out on |
 | [A polled transport](superpowers/specs/2026-09-09-polled-transport-design.md) · [plan](superpowers/plans/2026-09-09-polled-transport.md) | `[ingress] kind = "poll"`: a catalogue that is a request rather than a subscription, why the token is not `rest`, and why an unchanged response is not a payload |
+| [A session transport](superpowers/specs/2026-09-09-session-transport-design.md) · [plan](superpowers/plans/2026-09-09-session-transport.md) | `[ingress] kind = "fix"`: what a session layer owns, why the logon body is the adapter's, and why the sequence resets |
 
 ## Feeds
 
