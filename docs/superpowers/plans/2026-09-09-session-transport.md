@@ -4,7 +4,7 @@ Turns [the design](../specs/2026-09-09-session-transport-design.md) into ordered
 
 **Base:** `main`. Independent of `jo/publisher-feed-routes`.
 
-**Depends on** [`poll_upstream`](2026-09-09-upstream-write-after-a-listing-change.md). A session transport is the one that cannot re-subscribe for reasons of its own, so without that method an instrument admitted mid-session waits for a reconnect — which is the failure that measured it. Task 5 is where the two meet, and it is the last task for that reason.
+**Depends on** `Adapter::poll_upstream`, which is its own design and plan and is not in this repository yet. A session transport is the one that cannot re-subscribe for reasons of its own, so without that method an instrument admitted mid-session waits for a reconnect — which is the failure that measured it. Task 5 is where the two meet, and it is the last task for that reason.
 
 ## The ordering constraint
 

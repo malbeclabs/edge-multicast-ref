@@ -27,7 +27,7 @@ So there is no seam through which a venue hands a logon signer to a transport th
 
 The signature therefore stays in venue code, in the method that already writes at logon, and no injection point has to be invented. The transport reads the one field it must understand out of a message it is already framing, which is inside the job it already has.
 
-**This is also what makes an upstream write that is not a connect load-bearing rather than convenient.** A session transport is precisely the one that cannot re-subscribe for reasons of its own: its subscriptions live on the session, and an instrument admitted mid-session waits for a reconnect unless the adapter can write again. That mechanism is a [separate design](2026-09-09-upstream-write-after-a-listing-change-design.md), and this transport is the case that measured it.
+**This is also what makes an upstream write that is not a connect load-bearing rather than convenient.** A session transport is precisely the one that cannot re-subscribe for reasons of its own: its subscriptions live on the session, and an instrument admitted mid-session waits for a reconnect unless the adapter can write again. That mechanism is `Adapter::poll_upstream`, which is its own design and is not in this repository yet — this transport is the case that measured it.
 
 ## One session per credential, made an operator's decision
 

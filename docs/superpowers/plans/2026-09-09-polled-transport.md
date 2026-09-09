@@ -4,7 +4,7 @@ Turns [the design](../specs/2026-09-09-polled-transport-design.md) into ordered 
 
 **Base:** `main`. Independent of `jo/publisher-feed-routes`: nothing here touches the publisher runtime, the reference-data registry or the era store.
 
-**Depends on nothing, and is depended on.** A polled transport is what makes a mid-session listing routine rather than incidental, and [`poll_upstream`](2026-09-09-upstream-write-after-a-listing-change.md) is what subscribes what it discovers. Either can land first; a venue needs both.
+**Depends on nothing, and is depended on.** A polled transport is what makes a mid-session listing routine rather than incidental, and `Adapter::poll_upstream` — its own design and plan, not in this repository yet — is what subscribes what it discovers. Either can land first; a venue needs both.
 
 ## The ordering constraint
 

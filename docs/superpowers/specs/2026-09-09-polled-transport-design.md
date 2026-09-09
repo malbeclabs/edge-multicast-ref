@@ -8,7 +8,7 @@ An adapter is I/O-free by contract: it is handed payloads and asked what they me
 
 The family already declares the transport that removes all of that. With it, the catalogue arrives on a second `[[source]]` as payloads, `on_payload` decodes it like anything else, and the runtime keeps the cadence, the backoff, the failure classification and the connection-state series it already has for every other transport.
 
-This is also the half that makes an upstream write worth having: a poll tells an adapter that an instrument exists, and [`poll_upstream`](2026-09-09-upstream-write-after-a-listing-change-design.md) is how it gets subscribed. Neither is a substitute for the other.
+This is also the half that makes an upstream write worth having: a poll tells an adapter that an instrument exists, and `Adapter::poll_upstream` — its own design, not in this repository yet — is how it gets subscribed. Neither is a substitute for the other.
 
 ## Naming, before the word becomes a key, a field and a label
 
