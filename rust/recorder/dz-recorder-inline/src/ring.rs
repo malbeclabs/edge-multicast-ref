@@ -56,6 +56,14 @@ pub enum Offered {
     /// the next one that gets through.
     Dropped,
     /// The derivation thread is gone. Nothing will carry anything.
+    ///
+    /// **Distinct from [`Dropped`](Self::Dropped) because the two look the same
+    /// on every counter and mean opposite things.** A full ring is ordinary and
+    /// self-correcting: the deriver catches up and the next datagram is
+    /// accepted. A deriver that is not there produces the same drop, and the
+    /// same counter, for ever — and it takes its slots with it, so a sender
+    /// waiting for a free slot to notice would wait for one that is never
+    /// coming back.
     Disconnected,
 }
 
@@ -78,7 +86,10 @@ impl RingCounters {
     }
 
     /// Datagrams the derivation never saw, every one of them admitted in the
-    /// `drop_delta` of a later datagram.
+    /// `drop_delta` of a later datagram — where there is a later datagram. A
+    /// derivation that has gone leaves nothing to carry the admission, and
+    /// [`Offered::Disconnected`] is how a caller learns that this counter has
+    /// stopped meaning *the deriver is behind*.
     #[must_use]
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
@@ -92,13 +103,21 @@ impl RingCounters {
 pub struct RingSender {
     full: SyncSender<OwnedDatagram>,
     free: Receiver<OwnedDatagram>,
-    /// The free list's own sending end, held so that the unreachable branch in
-    /// [`offer`](Self::offer) can put a slot back instead of dropping it. A
-    /// dropped slot is a permanent loss of ring capacity that nothing reports —
-    /// the pool would shrink by one and the feed would simply tolerate a little
-    /// less lag from then on, which is the kind of quiet degradation this
-    /// recorder refuses everywhere else.
-    free_return: SyncSender<OwnedDatagram>,
+    /// A slot the unreachable branch in [`offer`](Self::offer) handed back,
+    /// held here until the next offer uses it. A dropped slot is a permanent
+    /// loss of ring capacity that nothing reports — the pool would shrink by
+    /// one and the feed would simply tolerate a little less lag from then on,
+    /// which is the kind of quiet degradation this recorder refuses everywhere
+    /// else.
+    ///
+    /// **Held here rather than returned down a sending end of the free list,
+    /// and that is the whole point.** A sender holding one of those keeps the
+    /// free list connected for as long as the sender lives, so the free
+    /// list's own disconnection — the deriver gone, and its slots gone with it
+    /// — becomes unobservable, and every offer after it reports
+    /// [`Offered::Dropped`] for ever. One slot in hand does the same job with
+    /// one handle fewer and leaves the disconnection visible.
+    spare: Option<OwnedDatagram>,
     /// Loss owed to the next datagram that reaches the derivation.
     pending: PendingLoss,
     counters: Arc<RingCounters>,
@@ -161,20 +180,8 @@ pub fn ring(capacity: usize) -> (RingSender, RingReceiver) {
     let (full_tx, full_rx) = sync_channel(capacity);
     let (free_tx, free_rx) = sync_channel(capacity);
     for _ in 0..capacity {
-        let slot = OwnedDatagram {
-            payload: Vec::with_capacity(MAX_DATAGRAM_SIZE),
-            src: SocketAddrV4::new(std::net::Ipv4Addr::UNSPECIFIED, 0),
-            dst: SocketAddrV4::new(std::net::Ipv4Addr::UNSPECIFIED, 0),
-            role: dz_edge_core::PortRole::Mktdata,
-            recv_ts_ns: 0,
-            recv_ts_kind: RecvTsKind::ApplicationFallback,
-            drop_delta: 0,
-            ttl: None,
-            link_headers: None,
-            wire_payload_len: 0,
-        };
         free_tx
-            .try_send(slot)
+            .try_send(slot(MAX_DATAGRAM_SIZE))
             .expect("the free list holds every slot it was sized for");
     }
 
@@ -183,7 +190,7 @@ pub fn ring(capacity: usize) -> (RingSender, RingReceiver) {
         RingSender {
             full: full_tx,
             free: free_rx,
-            free_return: free_tx.clone(),
+            spare: None,
             pending: PendingLoss::new(),
             counters: Arc::clone(&counters),
         },
@@ -209,17 +216,30 @@ impl RingSender {
     pub fn offer(&mut self, dg: &RecordedDatagram<'_>) -> Offered {
         self.pending.owe(dg.drop_delta);
 
-        let mut slot = match self.free.try_recv() {
-            Ok(slot) => slot,
-            // No slot free: the derivation is behind. This datagram is itself
-            // one more lost between the previous one and the next, and
-            // everything it declared is still owed.
-            Err(TryRecvError::Empty) => {
-                self.pending.undelivered();
-                self.counters.dropped.fetch_add(1, Ordering::Relaxed);
-                return Offered::Dropped;
-            }
-            Err(TryRecvError::Disconnected) => return Offered::Disconnected,
+        let mut slot = match self.spare.take() {
+            Some(slot) => slot,
+            None => match self.free.try_recv() {
+                Ok(slot) => slot,
+                // No slot free: the derivation is behind. This datagram is
+                // itself one more lost between the previous one and the next,
+                // and everything it declared is still owed.
+                Err(TryRecvError::Empty) => {
+                    self.pending.undelivered();
+                    self.counters.dropped.fetch_add(1, Ordering::Relaxed);
+                    return Offered::Dropped;
+                }
+                // The free list's only sending end belongs to the deriver, so
+                // this is the deriver gone with the slots it was holding.
+                // Charged like any other drop even though nothing will now
+                // carry the admission, because the accounting is the same
+                // either way and the caller is told the difference by the
+                // outcome rather than by the counter.
+                Err(TryRecvError::Disconnected) => {
+                    self.pending.undelivered();
+                    self.counters.dropped.fetch_add(1, Ordering::Relaxed);
+                    return Offered::Disconnected;
+                }
+            },
         };
 
         refill(&mut slot, dg, self.pending.owed());
@@ -235,12 +255,20 @@ impl RingSender {
             // accounting slip would stop the recorder, which is the failure
             // every rule in this file is arranged against.
             Err(TrySendError::Full(slot)) => {
-                let _ = self.free_return.try_send(slot);
+                self.spare = Some(slot);
                 self.pending.undelivered();
                 self.counters.dropped.fetch_add(1, Ordering::Relaxed);
                 Offered::Dropped
             }
-            Err(TrySendError::Disconnected(_)) => Offered::Disconnected,
+            // The deriver went while this slot was in hand. Kept rather than
+            // dropped, so that a caller which offers again is answered from
+            // the same state rather than from a pool one slot smaller.
+            Err(TrySendError::Disconnected(slot)) => {
+                self.spare = Some(slot);
+                self.pending.undelivered();
+                self.counters.dropped.fetch_add(1, Ordering::Relaxed);
+                Offered::Disconnected
+            }
         }
     }
 
@@ -315,12 +343,34 @@ impl RingReceiver {
     }
 }
 
+/// An empty pooled slot, with `payload_capacity` bytes reserved.
+///
+/// The ring reserves [`MAX_DATAGRAM_SIZE`] on every slot, because a capture
+/// thread must never allocate. A held window reserves nothing and lets each slot
+/// grow to the largest datagram that slot has held: its slots are filled on the
+/// derivation thread, where an allocation is ordinary, and there is one per
+/// datagram in a window rather than one per ring slot.
+pub(crate) fn slot(payload_capacity: usize) -> OwnedDatagram {
+    OwnedDatagram {
+        payload: Vec::with_capacity(payload_capacity),
+        src: SocketAddrV4::new(std::net::Ipv4Addr::UNSPECIFIED, 0),
+        dst: SocketAddrV4::new(std::net::Ipv4Addr::UNSPECIFIED, 0),
+        role: dz_edge_core::PortRole::Mktdata,
+        recv_ts_ns: 0,
+        recv_ts_kind: RecvTsKind::ApplicationFallback,
+        drop_delta: 0,
+        ttl: None,
+        link_headers: None,
+        wire_payload_len: 0,
+    }
+}
+
 /// Refills a pooled slot from a borrowed datagram, keeping its buffers.
 ///
 /// Field for field rather than by assignment from a constructed value, because
 /// the whole point is that `payload` and `link_headers` keep the capacity they
 /// were allocated with.
-fn refill(slot: &mut OwnedDatagram, dg: &RecordedDatagram<'_>, drop_delta: u32) {
+pub(crate) fn refill(slot: &mut OwnedDatagram, dg: &RecordedDatagram<'_>, drop_delta: u32) {
     slot.payload.clear();
     slot.payload.extend_from_slice(dg.payload);
 

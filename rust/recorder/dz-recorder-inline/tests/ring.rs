@@ -225,3 +225,47 @@ fn a_quiet_ring_times_out_and_a_closed_one_ends() {
     drop(tx);
     assert!(matches!(rx.recv_within(WAIT), Waited::Ended));
 }
+
+/// A derivation that has gone is reported as gone, and never as an endless drop.
+///
+/// **The two look identical on every counter and mean opposite things.** A full
+/// ring is ordinary and self-correcting: the deriver catches up and the next
+/// datagram is accepted. A deriver that is not there produces the same drop and
+/// the same counter for ever, and it took its slots with it — so a sender
+/// waiting for a free slot in order to notice would be waiting for one that is
+/// never coming back.
+///
+/// Both ends of the ring have to say so, because which one answers depends on
+/// whether a slot happened to be free when the deriver went. Give the sender a
+/// sending end of the free list — so that the free list stays connected for as
+/// long as the sender lives — and the first half of this fails with `Dropped`,
+/// for ever.
+#[test]
+fn a_ring_whose_deriver_is_gone_says_so_from_either_end() {
+    // Both slots spent before the deriver goes, so the free list is empty and
+    // its own disconnection is what has to answer.
+    let (mut tx, rx) = ring(2);
+    assert_eq!(tx.offer(&datagram(b"one", 0)), Offered::Accepted);
+    assert_eq!(tx.offer(&datagram(b"two", 0)), Offered::Accepted);
+    drop(rx);
+
+    assert_eq!(tx.offer(&datagram(b"lost", 7)), Offered::Disconnected);
+    assert_eq!(
+        tx.owed(),
+        8,
+        "the datagram and the seven it declared are still owed"
+    );
+    assert_eq!(tx.counters().dropped(), 1, "and it is counted as a drop");
+    assert_eq!(
+        tx.offer(&datagram(b"lost", 0)),
+        Offered::Disconnected,
+        "and it keeps saying so"
+    );
+
+    // A slot free when the deriver goes, so the full list is what answers.
+    let (mut tx, rx) = ring(2);
+    drop(rx);
+    assert_eq!(tx.offer(&datagram(b"lost", 3)), Offered::Disconnected);
+    assert_eq!(tx.owed(), 4);
+    assert_eq!(tx.counters().dropped(), 1);
+}
