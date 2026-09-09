@@ -572,6 +572,111 @@ fn two_blocks_of_one_specification_on_different_shards_resolve() {
     );
 }
 
+/// The document at the scale this change exists for: 31 shards, both
+/// specifications, 62 channel instances, and it starts.
+///
+/// The acceptance criterion, as a test rather than as a hand-run. Everything
+/// else about shards is asserted on two of them, which is enough to make a
+/// partition falsifiable and not enough to say the document scales: `channel_id`
+/// is a `u8`, so 62 is well inside the ceiling but the *set* checks — one shard
+/// missing a specification, two blocks on one `(spec, shard)` pair, a repeated
+/// `Channel ID` — are the ones that would quietly turn quadratic or, worse,
+/// disagree with themselves at size.
+///
+/// One shard is the default, named by the absence of the key, because a
+/// deployment that grows into shards grows out of a document that had none and
+/// the block it already had keeps meaning what it meant.
+#[test]
+fn thirty_one_shards_of_both_specifications_resolve_as_sixty_two_channel_instances() {
+    const SHARDS: u8 = 31;
+
+    let mut blocks = String::new();
+    for index in 0..SHARDS {
+        // Index 0 states no shard: it is the default one, and the era file and
+        // the reference-copy socket it keeps are the upgrade this document
+        // shape has to survive.
+        let shard = if index == 0 {
+            String::new()
+        } else {
+            format!("shard = \"shard-{index:02}\"\n")
+        };
+        // Two blocks per shard, and every port distinct across the document.
+        // Distinct because an operator writing 62 blocks by hand is exactly who
+        // collides two, and a test that shared them would be asserting against
+        // a document nobody would deploy.
+        let base = 41_000 + u16::from(index) * 10;
+        blocks.push_str(&format!(
+            "[[feed]]\n\
+             spec = \"top-of-book\"\n\
+             {shard}\
+             channel_id = {tob}\n\
+             source_id = {SOURCE_ID}\n\
+             multicast_group = \"{GROUP}\"\n\
+             mktdata_port = {mktdata}\n\
+             refdata_port = {refdata}\n\
+             heartbeat_interval = \"1s\"\n\
+             definition_cycle = \"30s\"\n\
+             manifest_cadence = \"1s\"\n\
+             idle_guard = \"60s\"\n\
+             \n\
+             [[feed]]\n\
+             spec = \"market-by-price\"\n\
+             {shard}\
+             channel_id = {mbp}\n\
+             source_id = {SOURCE_ID}\n\
+             multicast_group = \"{GROUP}\"\n\
+             mktdata_port = {depth_mktdata}\n\
+             refdata_port = {depth_refdata}\n\
+             snapshot_port = {snapshot}\n\
+             heartbeat_interval = \"1s\"\n\
+             definition_cycle = \"30s\"\n\
+             manifest_cadence = \"1s\"\n\
+             idle_guard = \"60s\"\n\
+             \n",
+            tob = index * 2,
+            mbp = index * 2 + 1,
+            mktdata = base,
+            refdata = base + 1,
+            depth_mktdata = base + 2,
+            depth_refdata = base + 3,
+            snapshot = base + 4,
+        ));
+    }
+
+    let config = Document::parse(&Doc::valid().feed(blocks).render())
+        .expect("parses")
+        .resolve()
+        .expect("31 shards of both specifications is the deployment this is for");
+
+    assert_eq!(config.feeds.len(), 62, "62 channel instances");
+    assert_eq!(config.shards().len(), usize::from(SHARDS), "31 shards");
+    assert_eq!(
+        config.feed_specs().len(),
+        2,
+        "and two specifications, however many shards carry them"
+    );
+
+    // 62 distinct `Channel ID`s, counted rather than assumed. A document this
+    // long is one an operator writes with a generator, and the duplicate a
+    // generator produces is the one nothing on the wire can tell apart.
+    let mut ids: Vec<u8> = config.feeds.iter().map(|feed| feed.channel_id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), 62, "62 distinct channel ids");
+
+    // Every shard carries a block for every specification. That is the property
+    // making `list_on` total, asserted here across the whole set rather than on
+    // the pair a refusal test uses.
+    for shard in config.shards() {
+        let carried = config
+            .feeds
+            .iter()
+            .filter(|feed| feed.shard == shard)
+            .count();
+        assert_eq!(carried, 2, "shard `{shard}` carries {carried} blocks");
+    }
+}
+
 /// A shard with a block for one specification and not another is refused.
 ///
 /// **This is the check that makes `list_on` total.** An instrument admitted to a
