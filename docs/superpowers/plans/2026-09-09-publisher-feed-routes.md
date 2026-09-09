@@ -448,15 +448,26 @@ That leaves this plan's own acceptance rule satisfied in every part but one. "Re
 
 So the mutant is killed by nothing, including the run this plan credits. Three things close it.
 
-- [ ] **A port opener behind a trait.** `open_ports` takes `route: &KernelRoute`, the concrete type, although `RouteLookup` exists and its own doc comment says it exists because "a test that needs a route to a multicast group is a test that does not run in CI". The route is not the missing seam: `MulticastTransmitter::open` binds and connects a real socket, so what has to go behind a trait is the thing that produces a feed's `Ports`. The real implementation is backed by `KernelRoute` and is what `run()` passes.
-- [ ] **The composition extracted and called with it.** One function taking the shard list, the feed list, the era store, the metrics and the opener, returning `Feeds`. A test with two shards then asserts that `Feeds`' order is `Config::shards()`' order and that each shard carries its own `Channel ID`s — which covers the order, the era file per shard, and the registry's shard list in one place, because all three are built from that one list.
-- [ ] **`ShardFeeds::new(None, None)` tested directly**, because no document can produce the empty pair: `Config::shards()` is the distinct shards *of the enabled blocks*. An invariant no document can violate is one a later refactor can, which is what the refusal is for.
-- [ ] **`StartupError::ShardWithNoFeed` exercised**, and this is where the decision about it lands. It cannot be reached through a document *or* through a hand-built `Config`, for the same reason — so it is reached through the extracted composition, handed a shard list that names a shard the feed list does not. A variant nothing exercises is worse than no variant; extracting the composition is what makes this one real rather than decorative.
-- [ ] **`replay.sh` gains the floor it was missing**: each channel carried its own instruments' **quotes and trades**, not only their definitions. Asserting a definition passes against a publisher that publishes no market data at all — the same shape of hole this plan found twice in its own unit tests and fixed both times.
+- [x] **A port opener behind a trait.** `open_ports` takes `route: &KernelRoute`, the concrete type, although `RouteLookup` exists and its own doc comment says it exists because "a test that needs a route to a multicast group is a test that does not run in CI". The route is not the missing seam: `MulticastTransmitter::open` binds and connects a real socket, so what has to go behind a trait is the thing that produces a feed's `Ports`. The real implementation is backed by `KernelRoute` and is what `run()` passes.
+- [x] **The composition extracted and called with it.** One function taking the shard list, the feed list, the era store, the metrics and the opener, returning `Feeds`. A test with two shards then asserts that `Feeds`' order is `Config::shards()`' order and that each shard carries its own `Channel ID`s — which covers the order, the era file per shard, and the registry's shard list in one place, because all three are built from that one list.
+- [x] **`ShardFeeds::new(None, None)` tested directly**, because no document can produce the empty pair: `Config::shards()` is the distinct shards *of the enabled blocks*. An invariant no document can violate is one a later refactor can, which is what the refusal is for.
+- [x] **`StartupError::ShardWithNoFeed` exercised**, and this is where the decision about it lands. It cannot be reached through a document *or* through a hand-built `Config`, for the same reason — so it is reached through the extracted composition, handed a shard list that names a shard the feed list does not. A variant nothing exercises is worse than no variant; extracting the composition is what makes this one real rather than decorative.
+- [x] **`replay.sh` gains the floor it was missing**: each channel carried its own instruments' **quotes and trades**, not only their definitions. Asserting a definition passes against a publisher that publishes no market data at all — the same shape of hole this plan found twice in its own unit tests and fixed both times.
 
 **Test:** `dz-publisher-runtime/tests/composition.rs`, over the existing harness's port builders — the fake opener hands back the same recording `Ports` the end-to-end suites already use, so nothing new has to be invented to build one.
 
-**The revert:** reverse the shard order in the composition, which is the perturbation that started this task. `the_composition_orders_the_shards_as_the_document_states_them` fails. Before this task, that edit failed nothing at all.
+**The reverts, run.**
+
+| Reverted | Test that failed |
+|---|---|
+| The shard order reversed in `compose_feeds` — the perturbation that started this task | `the_composition_orders_the_shards_as_the_document_states_them`, `a_shards_blocks_are_opened_together_before_the_next_shards` |
+| `ShardFeeds::new` defaults the name instead of refusing the empty pair | `a_shard_with_neither_specification_is_not_a_shard` |
+| A shard with no block is skipped instead of refused | `a_shard_with_no_block_is_refused_rather_than_skipped` |
+| The shard order reversed, against `replay.sh` | the run now **fails**, on the floor: `channel 0 on (the default shard) carried definitions and no quote: {'manifest_summary': 19, 'heartbeat': 3, 'instrument_definition': 9, 'end_of_session': 1}` |
+
+Before this task the first of those failed **nothing at all**, in the suite or by hand. The last row is what the missing floor cost: the script's own diagnostic now names the shape of the failure — every definition intact, no market data anywhere.
+
+**One thing beyond what was asked, recorded because it is why the perturbation was invisible.** The end-to-end harness composes its own `Feeds`, shard-outer and block-inner, duplicating the runtime's composition. So those suites assert the harness's ordering, and the two can drift. Rewiring the harness onto `compose_feeds` would put every end-to-end test on the real composition, and it is not done here: `compose_feeds` takes an `EraStore`, which writes files, and the harness hands each pipeline a literal `ResetCount` and touches no disk. Doing it properly means a second seam for the era, which is its own change.
 
 ---
 
