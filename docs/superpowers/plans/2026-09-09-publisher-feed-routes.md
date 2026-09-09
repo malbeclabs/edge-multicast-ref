@@ -749,7 +749,7 @@ written for has documented the tree rather than changed it.
 The rule found it — one revert short of the four it asks for — which is the
 argument for the rule rather than against it.
 
-**Each of those four reverts was run, and this is what died.**
+**Each of those reverts was run, and this is what died.**
 
 | Reverted | What was put back | Tests that failed |
 |---|---|---|
@@ -758,6 +758,26 @@ argument for the rule rather than against it.
 | Task 4 | the era file is `<spec>.era` for every shard | seven in `era_persistence.rs`, including `a_newly_named_shard_does_not_inherit_another_shards_era` and `adding_or_removing_a_shard_does_not_change_the_era_the_others_see_next` |
 | Task 7 | the rotation divides the cycle by the process's published count | `a_shards_snapshot_rotation_serves_its_own_instruments_at_its_own_cycle` |
 | Task 9 | the duplicate gate is keyed on the specification alone | `two_blocks_of_one_specification_on_different_shards_resolve`, `thirty_one_shards_of_both_specifications_resolve_as_sixty_two_channel_instances` |
+| Task 14 | `Publisher::take_unknown_shards` hands back nothing, which is the runtime as the review found it | `a_shard_the_document_has_no_channel_for_is_named_once_however_often_it_is_offered` |
+| Task 14 | the line drops the configured shard names and keeps the offered one | `the_unknown_shard_line_names_the_offer_and_the_configured_shards`, `a_publisher_with_no_named_shard_still_names_what_it_has` |
+| Task 15 | `finalise` compares each channel's count against the union of every channel's definitions | `each_channels_manifest_is_checked_against_its_own_definitions`, `a_channel_with_no_manifest_of_its_own_borrows_no_other_channels_count` |
+| Task 15 | one manifest for the archive, highest `Manifest Seq` across channels | the two above plus `the_reconstructed_table_matches_what_the_definitions_said` and `a_manifest_declaring_more_instruments_than_the_archive_carries_is_reported` |
+| Task 16 | the per-shard comparison the module note used to state, instead of the sum | `cycles_that_are_achievable_per_shard_and_not_together_are_counted` |
+| Task 16 | an empty published set is charged for the pass `tick`'s clamp implies | `a_shard_with_nothing_published_asks_for_nothing` |
+
+The two task-15 rows are worth reading together, because between them they show
+the shape of the defect rather than just its presence. Reverted to the union,
+the archive whose complete channel holds the higher `Manifest Seq` reports
+`ReferenceDataIncomplete { channel_id: 1, declared: 2, reconstructed: 3 }` — a
+caveat against the channel that is complete, carrying a count belonging to
+neither channel, with the channel that actually fell short unmentioned.
+
+**One part of task 14 has no revert, and it is named rather than covered.** The
+`eprintln!` in `tick_loop` is unreachable from the suite: no test calls that
+function and none captures stderr. What is killed is the drain it writes from
+and the line it writes; the call between them is not. That is the same gap
+`report` has always had, and the drain sits on `Publisher` precisely because
+that is the furthest along the path a test reaches.
 
 Task 5 was reverted twice, in both directions, because its two halves fail
 differently: always appending the shard fails the default's five literal
