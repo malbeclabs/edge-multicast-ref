@@ -16,9 +16,9 @@ Turns [the design](../specs/2026-09-09-upstream-write-after-a-listing-change-des
 
 ### 1. `Adapter::poll_upstream`, defaulted, carrying the connection
 
-- [ ] `fn poll_upstream(&mut self, conn: ConnectionId, out: &mut dyn UpstreamSink) -> Result<(), AdapterError>`, defaulted to `Ok(())`.
-- [ ] The doc comment carries three things the runtime cannot enforce: that the write is **not** deduplicated, unlike re-offering a listing, so an adapter must write only what is outstanding *on this connection*; that state belongs per `conn` for the reason `on_connected` gives; and what getting it wrong looks like from here, which is a venue rate-limiting a publisher that appears to be working.
-- [ ] It says what the method is for beyond the measured failure: a subscription for an instrument admitted mid-session, and a request the repair path needs, which had nowhere to go before.
+- [x] `fn poll_upstream(&mut self, conn: ConnectionId, out: &mut dyn UpstreamSink) -> Result<(), AdapterError>`, defaulted to `Ok(())`.
+- [x] The doc comment carries three things the runtime cannot enforce: that the write is **not** deduplicated, unlike re-offering a listing, so an adapter must write only what is outstanding *on this connection*; that state belongs per `conn` for the reason `on_connected` gives; and what getting it wrong looks like from here, which is a venue rate-limiting a publisher that appears to be working.
+- [x] It says what the method is for beyond the measured failure: a subscription for an instrument admitted mid-session, and a request the repair path needs, which had nowhere to go before.
 
 **Test** (`dz-adapter-core`, doctest): an adapter implementing only the required methods compiles and inherits the default — which is the whole of "no existing adapter changes", stated as a compile.
 
@@ -28,10 +28,10 @@ Turns [the design](../specs/2026-09-09-upstream-write-after-a-listing-change-des
 
 ### 2. The driver asks, on its own connection, and pays the same rate limit
 
-- [ ] `UPSTREAM_POLL`, a constant beside the driver, documented against the runtime's listing poll: nothing can be outstanding that a poll has not admitted, so asking more often buys nothing.
-- [ ] In `pump`, when due, `poll_upstream(connection, &mut queue)` into a fresh queue, then the existing paced `flush`. Due-ness is computed where the idle guard's arithmetic already is, so it costs a comparison and no second clock read.
-- [ ] A refusal is `observer.adapter_error(error)` and the connection **survives**. A send failure ends the connection through the existing path, which reconnects and lets `on_connected` write the whole set again.
-- [ ] The queue is per call, not carried: a message the adapter queued and the flush failed to send belongs to a connection that is now gone.
+- [x] `UPSTREAM_POLL`, a constant beside the driver, documented against the runtime's listing poll: nothing can be outstanding that a poll has not admitted, so asking more often buys nothing.
+- [x] In `pump`, when due, `poll_upstream(connection, &mut queue)` into a fresh queue, then the existing paced `flush`. Due-ness is computed where the idle guard's arithmetic already is, so it costs a comparison and no second clock read.
+- [x] A refusal is `observer.adapter_error(error)` and the connection **survives**. A send failure ends the connection through the existing path, which reconnects and lets `on_connected` write the whole set again.
+- [x] The queue is per call, not carried: a message the adapter queued and the flush failed to send belongs to a connection that is now gone.
 
 **Test** (`dz-ingress-core/tests/driver.rs`, over the scripted transport and the test clock):
 - with the clock advanced past the cadence, the adapter is asked and what it queued reaches `send`;
@@ -40,17 +40,19 @@ Turns [the design](../specs/2026-09-09-upstream-write-after-a-listing-change-des
 - a send failure on the mid-session write ends the connection and the next connect calls `on_connected` again;
 - what the adapter queues is paced: with a rate limit that admits one message, two queued messages produce a wait between them, asserted from the clock's own record of what the driver slept.
 
-**The revert (the plan's centre):** move the call from `pump` to the connect path, beside `on_connected`. `the_adapter_is_asked_while_the_connection_is_up` fails — and it is the only test that can fail, because every other assertion about the mechanism is satisfied by a call at logon. That is the failure this whole change exists to fix: a write that only happens at connect is what the publisher already had.
+**The revert (the plan's centre), and what it found.** Moving the call from `pump` to the connect path, beside `on_connected`, fails **`the_adapter_is_asked_while_the_connection_is_up`**, **`the_adapter_is_not_asked_before_the_cadence`** and **`a_failed_mid_session_send_ends_the_connection_and_the_reconnect_subscribes_again`**.
 
-**A second revert:** drop the due-ness check and ask on every receive. `the_adapter_is_not_asked_before_the_cadence` fails. Without it a venue receives a subscription set per payload.
+The first of those did **not** fail when the revert was first run. It asserted "asked once, on this connection, and the message reached `send`" — every word of which a call at logon satisfies exactly. So the test the plan called its centre did not distinguish the mechanism from the publisher it exists to replace, and the revert is what said so. It now records how many payloads the adapter had seen when it was asked and asserts one; a connect-time ask records zero.
+
+**A second revert:** dropping the due-ness check and asking on every receive fails `the_adapter_is_not_asked_before_the_cadence` and `the_adapter_is_asked_while_the_connection_is_up` — the second because the count is then two rather than one. Without the check a venue receives a subscription set per payload.
 
 ---
 
 ### 3. The documents that have to stay true
 
-- [ ] `BRINGING-UP-A-FEED.md`'s table of the methods a venue implements gains the row, marked optional, with one line on when a venue needs it: its instrument set changes without a reconnect.
-- [ ] The boundary crate's own module documentation names the method where it lists what an adapter may write.
-- [ ] `docs/README.md` carries the row for this pair.
+- [x] `BRINGING-UP-A-FEED.md`'s table of the methods a venue implements gains the row, marked optional, with one line on when a venue needs it: its instrument set changes without a reconnect.
+- [x] The boundary crate's own module documentation names the method where it lists what an adapter may write.
+- [x] `docs/README.md` carries the row for this pair.
 
 **Test:** `scripts/check-public-repo-rules.sh`, plus a read of the new prose against the glossary's banned-word table.
 
@@ -65,7 +67,7 @@ The plan is done when:
 3. an adapter that refuses mid-session costs one counted error and no connection;
 4. a mid-session write is paced by the same rate limit as a logon;
 
-and when moving the call to the connect path makes a named test fail — because a mechanism whose tests pass against a call at logon has documented `on_connected` rather than added anything.
+and when moving the call to the connect path makes a named test fail — because a mechanism whose tests pass against a call at logon has documented `on_connected` rather than added anything. That revert was run, and on its first run it failed nothing that a call at logon could not satisfy; the test was strengthened rather than the finding explained away.
 
 ## What this plan does not do
 

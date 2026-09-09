@@ -246,11 +246,24 @@ pub trait SnapshotSink {
 
 /// Where an adapter writes what it needs to send upstream.
 ///
-/// Used from [`Adapter::on_connected`](crate::Adapter::on_connected) to
-/// authenticate and subscribe. The adapter says *what* to send; the transport
-/// owns *when*, and owns the reconnection, the backoff and the rate limit that
-/// decide it. An adapter that opened its own socket here would be reimplementing
-/// the half of the problem this boundary exists to take away.
+/// Reached from two methods, and the difference between them is *when*:
+/// [`Adapter::on_connected`](crate::Adapter::on_connected) to authenticate and
+/// subscribe at logon, and
+/// [`Adapter::poll_upstream`](crate::Adapter::poll_upstream) for whatever is
+/// still outstanding on a connection that is already open — an instrument
+/// admitted after the subscription was composed, or a request the repair path
+/// needs.
+///
+/// The adapter says *what* to send; the transport owns *when*, and owns the
+/// reconnection, the backoff and the rate limit that decide it. An adapter that
+/// opened its own socket here would be reimplementing the half of the problem
+/// this boundary exists to take away.
+///
+/// **Nothing here is deduplicated.** The runtime does not understand a venue's
+/// bytes, so it cannot tell a subscription already sent from a new one. That
+/// costs nothing at logon, where the connection is new and so is everything
+/// written to it, and it is the whole contract of `poll_upstream`, which is
+/// asked repeatedly.
 pub trait UpstreamSink {
     /// Send a text message, for a transport that distinguishes one.
     fn send_text(&mut self, text: &str);

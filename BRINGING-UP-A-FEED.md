@@ -84,11 +84,22 @@ One type implementing `dz_adapter_core::Adapter`:
 | `message_types` | the upstream message names it will report, for one metric label |
 | `poll_listings` | the instruments it knows about, as `InstrumentSpec`s |
 | `on_connected` | the subscription it wants sent, after every connect — reconnects included, which is what makes a silently lost subscription come back |
+| `poll_upstream` | whatever is still outstanding on a connection that is already open — optional, and what a venue needs when its instrument set changes without a reconnect |
 | `on_payload` | one upstream payload, mapped onto normalized events |
 | `on_disconnected` | the session ended, and why |
 | `snapshot` | the book it holds for one instrument, and how deep that book goes — depth feeds only |
 
-Two rules that are easy to get wrong and expensive to get wrong:
+Three rules that are easy to get wrong and expensive to get wrong:
+
+- **An instrument admitted mid-session is not subscribed by admitting it.**
+  `poll_listings` offers instruments to the publisher; it says nothing to the
+  venue. A publisher whose venue lists a new instrument during a session will
+  publish that instrument's definition, count it in the manifest, and receive
+  nothing for it — the feed is healthy and the instrument is silent. If the
+  venue's set can change without a reconnect, implement `poll_upstream` and
+  write there what has not been written **on that connection**. Unlike
+  re-offering a listing, this write is not deduplicated: what it queues reaches
+  the venue every time it is queued.
 
 - **`Update Flags` states presence, not change.** A side's *updated* and *gone*
   bits are mutually exclusive. This is the opposite of what the field's name
