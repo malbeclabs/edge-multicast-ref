@@ -31,6 +31,55 @@ pub trait EventSink {
     /// series per instrument.
     fn upstream_message(&mut self, message_type: &'static str);
 
+    /// Name *which* upstream message this is, where the upstream numbers its
+    /// own.
+    ///
+    /// [`upstream_message`](Self::upstream_message) states the kind and this
+    /// states the identity: `sid` is the upstream's own session or connection
+    /// identifier and `seq` its own number within that session. Neither is a
+    /// `Sequence Number` in this family's sense — that one belongs to a channel
+    /// instance and is minted above this boundary — and an adapter passes both
+    /// through exactly as the upstream stated them, without renumbering,
+    /// rebasing or filling in a gap.
+    ///
+    /// **Both are `Option` because a venue that publishes one and not the other
+    /// is ordinary.** Plenty number their messages and never name the session;
+    /// some do the reverse. A pair of sentinels would make an adapter invent a
+    /// value for whichever half it does not have, and `0` is a number the other
+    /// kind of upstream really sends.
+    ///
+    /// **Neither value is ever a key.** The rule the `event.upstream_ts` column
+    /// already carries applies unchanged here: a numbering whose resolution and
+    /// meaning differ between transports would give one book state two hashes,
+    /// and a race keyed on it would find no pair and read as a quiet feed. This
+    /// is evidence a query reads, and nothing joins on it.
+    ///
+    /// # What each side does with it
+    ///
+    /// **A publisher does nothing.** A venue's own session numbering is a
+    /// transport's number rather than a book's, which is why the row tables
+    /// refuse it along with the rest of a venue's provenance, and why nothing
+    /// stated here reaches the wire.
+    ///
+    /// **A recorder keeps it, because for a recorder it is evidence.** It
+    /// separates a venue resending a state from the venue producing that state
+    /// again — two things that are the same book and not the same event — and
+    /// without it an unpaired occurrence has one fewer explanation available to
+    /// it. The only other way to obtain it is to decode the payload a second
+    /// time beside the adapter, and two decoders of one venue is a race
+    /// measuring its own decoders.
+    ///
+    /// # Defaulted, and what a default costs
+    ///
+    /// Ignoring this is the publisher's case, so the default is what a publisher
+    /// wants and costs it nothing. It is defaulted rather than required because
+    /// requiring it would make every sink in the workspace, and every venue's,
+    /// change in order to discard a value — which is the whole of "no adapter
+    /// changes", and is why the default is not optional.
+    fn upstream_identity(&mut self, sid: Option<u64>, seq: Option<u64>) {
+        let _ = (sid, seq);
+    }
+
     /// Emit one market event.
     ///
     /// Taking `Event` by value and not by reference is deliberate: it borrows
