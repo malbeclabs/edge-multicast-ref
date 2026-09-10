@@ -17,6 +17,8 @@ pub mod instruments;
 pub mod sizing;
 
 pub use book::{state_key, Book, BookRefused, Certainty, Change, Side, Top};
-pub use derive::{derive_events, DerivedEvents, EventInput, Refused};
+pub use derive::{
+    derive_events, derive_events_into, Derivation, DerivedEvents, EventInput, Refused,
+};
 pub use instruments::{At, Channel, InstrumentTable, Observed, Statement};
 pub use sizing::{FeedSizing, Incomplete, Sizing};
