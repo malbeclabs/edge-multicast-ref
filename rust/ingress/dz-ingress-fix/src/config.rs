@@ -34,7 +34,7 @@
 //! produces a session the venue tears down for a reason our own logs will not
 //! carry.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 
 use serde::Deserialize;
 
@@ -42,10 +42,13 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionConfig {
-    /// `host:port`, or `address:port`.
+    /// `host:port`, `address:port`, or `[address]:port` for an IPv6 literal.
     ///
     /// No scheme: this protocol has no URL form, and a key that accepted one
-    /// would be a second way to spell the same thing.
+    /// would be a second way to spell the same thing. One way to write each of
+    /// the three shapes, for the same reason — an IPv6 literal is bracketed and
+    /// an unbracketed host holds no colon — and a value that is neither is
+    /// refused at load naming it. See [`host_of`].
     pub endpoint: String,
 
     /// The name the certificate is verified against, when it is not the
@@ -164,28 +167,65 @@ impl SessionConfig {
     }
 }
 
-/// The host part of `host:port`.
+/// The host part of `host:port`, and a refusal for anything that is not that
+/// shape.
 ///
-/// Split from the right, so that a bracketed address literal keeps its colons.
+/// Two ways to write a host, and one way to write each:
+///
+/// - `[address]:port`. The brackets mean an IPv6 address literal, so a `]` has
+///   to close them, `:port` has to follow that `]` immediately, and what is
+///   between them has to parse as an address.
+/// - `host:port`. One colon, and none inside the host.
+///
+/// **Both halves are checked here rather than left to the connect.** Splitting
+/// at the last colon and stripping brackets wherever they appear accepts three
+/// values that are not endpoints — `[::1:9443` with nothing closing the
+/// bracket, `host::9443` with a colon too many, and a bare `::1:9443` whose
+/// colons are the address's own — and each of them resolves to a host and a
+/// port that look usable. What follows is a connect that fails under a backoff,
+/// three layers from the document that caused it, on an error naming a socket
+/// rather than a key. A configuration mistake is refused at load, naming the
+/// value, which is what an operator can act on.
 fn host_of(endpoint: &str) -> Result<&str, SessionConfigError> {
-    let (host, port) = endpoint
-        .rsplit_once(':')
-        .ok_or_else(|| SessionConfigError::Endpoint {
-            endpoint: endpoint.to_owned(),
-            detail: "there is no `:port`".to_owned(),
-        })?;
+    let refuse = |detail: &str| SessionConfigError::Endpoint {
+        endpoint: endpoint.to_owned(),
+        detail: detail.to_owned(),
+    };
+    let (host, port) = if let Some(bracketed) = endpoint.strip_prefix('[') {
+        let (inside, after) = bracketed
+            .split_once(']')
+            .ok_or_else(|| refuse("a `[` opens an address literal and nothing closes it"))?;
+        if inside.parse::<Ipv6Addr>().is_err() {
+            return Err(refuse(
+                "the brackets mean an IPv6 address literal, and what is between them is not one",
+            ));
+        }
+        let port = after
+            .strip_prefix(':')
+            .ok_or_else(|| refuse("the closing `]` is not followed by `:port`"))?;
+        (inside, port)
+    } else {
+        let (host, port) = endpoint
+            .rsplit_once(':')
+            .ok_or_else(|| refuse("there is no `:port`"))?;
+        if host.contains(':') {
+            return Err(refuse(
+                "an unbracketed host holds no colon; an IPv6 address literal is written \
+                 `[address]:port`",
+            ));
+        }
+        (host, port)
+    };
     if host.is_empty() {
+        return Err(refuse("there is no host before the `:`"));
+    }
+    if port.parse::<u16>().is_err() {
         return Err(SessionConfigError::Endpoint {
             endpoint: endpoint.to_owned(),
-            detail: "there is no host before the `:`".to_owned(),
+            detail: format!("`{port}` is not a port"),
         });
     }
-    port.parse::<u16>()
-        .map_err(|_| SessionConfigError::Endpoint {
-            endpoint: endpoint.to_owned(),
-            detail: format!("`{port}` is not a port"),
-        })?;
-    Ok(host.trim_start_matches('[').trim_end_matches(']'))
+    Ok(host)
 }
 
 /// Whether a host is unambiguously this machine.
@@ -307,6 +347,50 @@ mod tests {
             let error = config.resolve().expect_err("not an endpoint");
             assert!(error.to_string().contains(expected), "{endpoint}: {error}");
         }
+    }
+
+    #[test]
+    fn a_malformed_endpoint_is_refused_at_load_and_not_resolved_as_an_address() {
+        // The revert this test exists for: split at the last colon and strip
+        // brackets wherever they appear. Every value below then resolves —
+        // `[::1:9443` and `::1:9443` to the loopback address, `host::9443` to a
+        // host named `host:` — and the document that caused it is three layers
+        // from the connect that fails on it, under a backoff, on an error
+        // naming a socket rather than a key.
+        //
+        // `tls` is left at its default here on purpose: with `tls = false` two
+        // of these are caught by `PlaintextOffLoopback` instead, which reports
+        // the wrong fault about the right value.
+        for (endpoint, expected) in [
+            ("[::1:9443", "nothing closes it"),
+            ("[::1]9443", "is not followed by `:port`"),
+            ("[not-an-address]:9443", "is not one"),
+            ("[]:9443", "is not one"),
+            ("host::9443", "holds no colon"),
+            ("::1:9443", "holds no colon"),
+            ("[::1]:9443:9443", "is not a port"),
+        ] {
+            let config =
+                from_document(&format!("endpoint = \"{endpoint}\"\n")).expect("a document");
+            let error = config
+                .resolve()
+                .expect_err(&format!("{endpoint} is not `host:port`"));
+            let message = error.to_string();
+            assert!(message.contains(expected), "{endpoint}: {message}");
+            // Naming the value is what makes it a document to correct.
+            assert!(message.contains(endpoint), "{endpoint}: {message}");
+        }
+    }
+
+    #[test]
+    fn a_bracketed_address_literal_keeps_its_colons_and_every_other_host_has_none() {
+        assert_eq!(host_of("[::1]:9443"), Ok("::1"));
+        assert_eq!(host_of("[2001:db8::1]:9443"), Ok("2001:db8::1"));
+        assert_eq!(host_of("127.0.0.1:9443"), Ok("127.0.0.1"));
+        assert_eq!(
+            host_of("session.example.com:9443"),
+            Ok("session.example.com")
+        );
     }
 
     #[test]
