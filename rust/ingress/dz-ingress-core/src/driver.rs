@@ -38,8 +38,11 @@ use crate::observer::IngressObserver;
 /// afterwards — the adapter says *what*, the driver owns *when*.
 ///
 /// Allocating here is allowed for the same reason it is forbidden in
-/// `on_payload`: this happens once per connection, and a subscription message
-/// is a `String` the adapter built anyway.
+/// `on_payload`: this is built once per *ask* — at logon, and once every
+/// [`UPSTREAM_POLL`] on a connection that is up — and a subscription message is
+/// a `String` the adapter built anyway. A queue per ask rather than one carried
+/// across them, because a message the adapter queued and a flush failed to send
+/// belongs to a connection that is now gone.
 #[derive(Debug, Default)]
 pub struct UpstreamQueue {
     messages: Vec<Queued>,
@@ -574,6 +577,19 @@ impl<'a> Driver<'a> {
                                 (Stop::Reason(reason), delivered)
                             };
                         }
+                        // The idle guard measures **upstream silence**, and the
+                        // time this took is not that: it is this host obeying
+                        // its own `rate_limit_per_second` on a queue it chose
+                        // to send. Charged to the guard, a large outstanding
+                        // write ends the connection with
+                        // `DisconnectReason::Timeout` — the venue's series, the
+                        // venue's reconnect — for something the venue did not
+                        // do. At logon this could not happen, because those
+                        // writes are paced before `pump` starts the clock; the
+                        // mid-session ask is what brings the pacing inside the
+                        // budget, so it is what has to hand the time back.
+                        last_payload_ns = last_payload_ns
+                            .saturating_add(self.clock.steady_ns().saturating_sub(now_ns));
                     }
                 }
             }

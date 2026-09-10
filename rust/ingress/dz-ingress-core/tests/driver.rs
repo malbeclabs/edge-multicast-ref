@@ -1442,6 +1442,62 @@ fn the_adapter_is_asked_while_the_connection_is_up() {
     );
 }
 
+/// Pacing our own writes is not the venue going quiet.
+///
+/// `rate_limit_per_second` makes a flush take time, and the mid-session ask is
+/// the first place a flush happens *inside* the idle budget — at logon the
+/// subscriptions are paced before `pump` starts measuring. Charged to the
+/// guard, an adapter with a large outstanding set ends its own connection with
+/// `DisconnectReason::Timeout`, which is the venue's series and the venue's
+/// reconnect, for something the venue did not do.
+///
+/// Asserted on the budgets rather than on the disconnect reason, because the
+/// reason only differs once the arithmetic has crossed the guard — the budgets
+/// show the charge at the receive after the ask, whatever the guard is set to.
+#[test]
+fn the_time_spent_pacing_a_mid_session_write_is_not_charged_to_the_idle_guard() {
+    let adapter = RecordingAdapter {
+        // Three messages at five a second: the first goes at once and the other
+        // two wait their 200ms slots, so the ask costs 400ms.
+        outstanding: VecDeque::from(vec![vec!["one", "two", "three"]]),
+        ..RecordingAdapter::default()
+    };
+    let outcome = run(
+        Policy {
+            idle_timeout: Some(Duration::from_secs(10)),
+            rate_limit_per_second: 5,
+            ..policy()
+        },
+        adapter,
+        vec![Connection::live(vec![
+            Read::Keepalive(UPSTREAM_POLL),
+            Read::Keepalive(Duration::from_secs(1)),
+            Read::Ended(DisconnectReason::RemoteClose),
+        ])],
+    );
+
+    assert_eq!(
+        outcome.sent,
+        vec!["one", "two", "three"],
+        "the ask went out, which is what makes the pacing real"
+    );
+    assert_eq!(
+        outcome.budgets,
+        vec![
+            Some(Duration::from_secs(10)),
+            // 5s of keepalive spent, and the 400ms of pacing handed back.
+            Some(Duration::from_secs(5)),
+            Some(Duration::from_secs(4)),
+        ],
+        "the guard measures upstream silence; the 400ms was ours"
+    );
+    assert_eq!(
+        outcome.observer.recorded().rate_limited,
+        0,
+        "and our own pacing is still not the venue rate-limiting us"
+    );
+}
+
 /// A connection that has delivered no payload at all is still asked.
 ///
 /// This is the state `[ingress] idle_timeout` being absent puts the driver in,
