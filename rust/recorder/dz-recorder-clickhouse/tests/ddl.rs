@@ -267,6 +267,53 @@ fn the_venue_race_is_keyed_on_the_book_and_never_on_the_state_key() {
     );
 }
 
+/// **The symbol is folded once, and the fold says which case it folds.**
+///
+/// The fold appears twice in the ordinal — as the `symbol_key` a reader selects
+/// and as the partition the numbering runs over — and the pairing groups on the
+/// column. Two spellings of it are two folds: a `symbol_key` that folded one way
+/// beside a partition that folded another numbers a state's occurrences under a
+/// key nobody selected, and the pairing then groups the wrong rows together
+/// while every string on the row still looks right.
+///
+/// `upper` is ASCII case and `upperUTF8` is the Unicode one, so which is written
+/// is part of what the fold means. The file states it; this holds the code to
+/// it, and holds the fold to case and the padding around it — anything that
+/// stripped a separator or normalised a suffix would start merging instruments.
+#[test]
+fn the_venue_symbol_is_folded_once_and_the_fold_is_ascii_case() {
+    const FOLD: &str = "upper(trimBoth(symbol))";
+    let sql = venue_sql();
+    let occurrence = view_body(sql, "venue_book_top_occurrence");
+    assert_eq!(
+        occurrence.matches(FOLD).count(),
+        2,
+        "the `symbol_key` column and the numbering's partition are not one fold: \
+         {occurrence}"
+    );
+    assert!(
+        occurrence.contains(&format!("{FOLD} AS symbol_key")),
+        "the folded symbol is not the column a reader selects: {occurrence}"
+    );
+
+    let statements: Vec<&str> = sql
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("--"))
+        .collect();
+    for second_fold in [
+        "upperUTF8",
+        "lower(",
+        "lowerUTF8",
+        "replaceAll",
+        "replaceRegexpAll",
+    ] {
+        assert!(
+            !statements.iter().any(|line| line.contains(second_fold)),
+            "`{second_fold}` folds the symbol a second way, and two folds pair nothing"
+        );
+    }
+}
+
 /// `symbols_agree` and `exponents_agree` are columns rather than assumptions.
 ///
 /// The key covers the raw prices and leaves the exponents out, so a pair whose
@@ -645,6 +692,17 @@ fn sql_declaring(grain: Grain) -> &'static str {
 /// sort-key check a later migration can quietly break deduplication. The grain
 /// enumeration is what makes a grain added next year fail here rather than ship
 /// rows nobody can attribute.
+///
+/// **The venue grains are attributed by their object and not by a mode, and the
+/// column half is `Grain`'s enumeration.** `derivation` distinguishes a row
+/// derived from an archived object from one derived live over the same
+/// datagrams, and the venue side has no live path to distinguish: a derivation
+/// takes an object, so `object_key` and `object_sha256` on every venue row are
+/// the whole of their provenance and are what a reader reads instead. Held
+/// below as an assertion rather than left as a reason, because "there is no
+/// live venue path" is a claim a later migration can falsify. The sort-key half
+/// still walks `009`, because a column reaching a venue sort key is worth
+/// knowing about whether or not it is this one.
 #[test]
 fn provenance_is_on_every_grain_and_in_no_sort_key() {
     for grain in Grain::ALL {
@@ -653,6 +711,23 @@ fn provenance_is_on_every_grain_and_in_no_sort_key() {
         assert!(
             declared.iter().any(|c| c == "derivation"),
             "{grain} declares no derivation column: {declared:?}"
+        );
+    }
+
+    // The venue grains, whose provenance is the object they were derived from.
+    for grain in VENUE_GRAINS {
+        let declared = columns(venue_sql(), grain.table());
+        for column in ["object_key", "object_sha256"] {
+            assert!(
+                declared.iter().any(|c| c == column),
+                "{grain} declares no `{column}`, so a venue-side row states no \
+                 provenance at all: {declared:?}"
+            );
+        }
+        assert!(
+            !declared.iter().any(|c| c == "derivation"),
+            "{grain} declares `derivation`, so there is a second venue derivation \
+             mode and the object is no longer the whole of the provenance"
         );
     }
 

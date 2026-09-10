@@ -57,6 +57,26 @@
 -- exactly that reason.
 --
 --
+-- WHERE `env` IS AND WHERE IT IS NOT, WHICH IS `006`'S ARRANGEMENT
+--
+-- `env` is a column on both grains and is selected by the ordinal. It is in
+-- neither sort key, in neither the ordinal's partition nor the pairing's
+-- grouping. That is not an omission: `001`, `005` and `006` do exactly this —
+-- every grain carries `env`, and no sort key, numbering or pairing key mentions
+-- one — and this file races against those tables, so a column that was part of
+-- a row's identity here and a label there would be one column with two meanings
+-- inside a query that reads both.
+--
+-- The consequence is stated rather than left to be found. Two environments
+-- writing one database at one observation point would interleave into a single
+-- ordinal sequence, and two rows equal on
+-- `(observation, feed, symbol, recv_ts, message_index)` would collapse across
+-- them under `ReplacingMergeTree`. That is the exposure `book_top` and `event`
+-- already have under the same arrangement, and it belongs wherever theirs is
+-- answered: adding `env` to these two tables alone would answer it for the
+-- venue half of a pair and leave the publisher half as it is.
+--
+--
 -- WHAT THIS FILE DOES NOT YET JOIN, AND WHY IT IS WRITTEN AS THOUGH IT WILL
 --
 -- The publisher side does **not** feed the pairing below yet, and that is a
@@ -326,12 +346,27 @@ FROM recorder.venue_book_top FINAL;
 -- and the pairing key on the folded form, and the raw spellings are compared
 -- below where a disagreement is a value somebody can see.
 --
--- Case is the whole of the folding, deliberately. It is the divergence that
--- actually occurs between a venue's own naming and a published symbol, and it is
--- reversible: `symbols` on the pairing carries every spelling that went into a
--- pair, so nothing is lost. Anything more aggressive — stripping separators,
--- normalising a suffix — would start merging instruments, which is the one thing
--- an equivalence key must not do.
+-- THE FOLD IS `upper(trimBoth(symbol))`, WHICH IS ASCII CASE AND THE PADDING
+-- AROUND IT. Case is the divergence that actually occurs between a venue's own
+-- naming and a published symbol, and it is reversible: `symbols` on the pairing
+-- carries every spelling that went into a pair, so nothing is lost. `trimBoth`
+-- is there because whitespace either side of a symbol is padding from a
+-- fixed-width field rather than part of an identifier — no two instruments
+-- differ only by the spaces around them, so trimming merges nothing and the raw
+-- spellings still come back beside the verdict.
+--
+-- `upper` folds ASCII case and `upperUTF8` is the Unicode one, so which is
+-- written is part of what the fold means and is written down rather than left to
+-- be discovered from the function name. The coarseness it buys is stated the way
+-- the paragraph below states the numbering's: two spellings differing only in
+-- the case of a non-ASCII letter do not pair, which reads as a quiet feed on
+-- both paths. A venue that spells one is the reason to reach for `upperUTF8` —
+-- in the ordinal and in the `symbol_key` column together, because two folds
+-- that disagree number a state under a key nobody selected.
+--
+-- Anything more aggressive — stripping separators, normalising a suffix — would
+-- start merging instruments, which is the one thing an equivalence key must not
+-- do.
 --
 -- THERE IS NO ERA IN THIS PARTITION, AND NOTHING TO PUT THERE. `006` numbers
 -- within an era because an `Instrument ID` is only unique within one. An era is
