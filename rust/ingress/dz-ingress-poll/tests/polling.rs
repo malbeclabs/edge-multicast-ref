@@ -574,11 +574,11 @@ fn a_changed_body_is_a_payload_and_reaches_the_adapter() {
     assert!(run.exit.is_fatal(), "the run ends where the adapter says");
 }
 
-/// **The plan's centre.** An endpoint that answers forever and has stopped
-/// changing is the failure the `Liveness`/payload distinction exists for, and
-/// the assertion is *the idle guard still firing* rather than the value this
-/// transport returned — a `Liveness` that behaved like a payload would satisfy
-/// any test that only read the discriminant.
+/// **The one this whole transport turns on.** An endpoint that answers forever
+/// and has stopped changing is the failure the `Liveness`/payload distinction
+/// exists for, and the assertion is *the idle guard still firing* rather than
+/// the value this transport returned — a `Liveness` that behaved like a payload
+/// would satisfy any test that only read the discriminant.
 ///
 /// Run twice, because an endpoint has two ways of saying nothing has changed
 /// and this transport has to answer both the same way: a `304` to a conditional
