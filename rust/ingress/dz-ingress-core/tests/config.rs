@@ -269,3 +269,21 @@ fn a_transport_the_family_names_but_nobody_has_built_is_not_unknown_either() {
         "{error}"
     );
 }
+
+/// `rest` is gone rather than aliased.
+///
+/// The rename is only free while nothing names the old token. This asserts the
+/// old spelling resolves to nothing at all — not to `Poll` by an alias, which
+/// would leave two spellings for one transport and a configuration management
+/// system holding whichever it was written with first — and that the refusal
+/// names what an operator may write instead.
+#[test]
+fn the_old_spelling_of_the_polled_transport_is_refused_and_not_aliased() {
+    let error = Kind::resolve("rest").expect_err("`rest` names no transport in this family");
+    let message = error.to_string();
+    assert!(message.contains("rest"), "{message}");
+    assert!(message.contains("poll"), "{message}");
+    for kind in Kind::ALL {
+        assert!(message.contains(kind.as_token()), "{message}");
+    }
+}

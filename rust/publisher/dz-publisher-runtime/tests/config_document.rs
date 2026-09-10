@@ -989,7 +989,7 @@ fn a_transport_this_binary_was_not_built_with_is_a_different_error() {
     assert!(message.contains("names no transport"), "{message}");
     // And it names the built-in set, for the same reason the adapter registry
     // names itself.
-    for kind in ["websocket", "fix", "multicast", "rest", "filetail", "uds"] {
+    for kind in ["websocket", "fix", "multicast", "poll", "filetail", "uds"] {
         assert!(message.contains(kind), "{message}");
     }
 }
