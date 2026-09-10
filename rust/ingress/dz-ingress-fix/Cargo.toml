@@ -66,4 +66,28 @@ toml = { workspace = true }
 # loopback tests, which run a session against a listener on 127.0.0.1. Not in
 # `[dependencies]`: a library that starts a runtime takes a decision that
 # belongs to the binary.
-tokio = { version = "1", features = ["macros", "rt", "net", "time", "io-util"] }
+#
+# `test-util` for the runtime's paused clock, which is what lets the bound on
+# the logout write be asserted as a value rather than waited for. Dev-only, so
+# a venue does not inherit a feature that makes timers advance by themselves.
+tokio = { version = "1", features = [
+    "macros",
+    "rt",
+    "net",
+    "time",
+    "io-util",
+    "test-util",
+] }
+
+# A certificate for the loopback TLS listener the refusal test runs against.
+# What that test asserts is that verification is *on*: a listener on 127.0.0.1
+# presenting a certificate nothing in `webpki-roots` signed must make `open`
+# fail with `ConnectFailureReason::Tls`, and swapping the root store for a
+# verifier that accepts anything is one line that would otherwise pass every
+# test in the workspace and surface at a venue's security review.
+#
+# `default-features = false` with `ring`, so the generator uses the provider
+# this crate already links and no cmake-built C arrives by way of a default.
+# `pem` is left off: the DER is what a server configuration takes. Dev-only, so
+# a venue inherits none of it.
+rcgen = { version = "0.14", default-features = false, features = ["ring"] }

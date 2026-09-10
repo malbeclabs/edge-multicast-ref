@@ -32,6 +32,7 @@ use dz_ingress_core::{BoxFuture, Clock};
 use dz_ingress_fix::framing::{self, msg_type, Body, FramingError, Message, SOH};
 use dz_ingress_fix::session::{
     ByteStream, Incoming, Session, SessionError, SessionState, StreamError, LOGON_GRACE,
+    LOGOUT_GRACE,
 };
 
 const CONNECTION: ConnectionId = ConnectionId::new("mktdata");
@@ -172,6 +173,54 @@ impl ByteStream for Script {
                 Serve::Closed => Err(StreamError::Closed {
                     detail: "the script ended the stream".to_owned(),
                 }),
+            }
+        })
+    }
+
+    fn close(&mut self) -> BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+}
+
+/// A stream that carries the logon and then never completes another write.
+///
+/// What a venue that has stopped *reading* looks like from this side: the
+/// session establishes, the send window fills, and the next `write_all` sits
+/// inside the kernel's retransmit timeout for minutes. `Script`'s write is
+/// infallible and instantaneous, so no test built on it can see that — which is
+/// the whole reason this one exists.
+struct StallsAfterTheLogon {
+    writes: usize,
+    answer: Option<Vec<u8>>,
+}
+
+impl ByteStream for StallsAfterTheLogon {
+    fn write<'a>(&'a mut self, _bytes: &'a [u8]) -> BoxFuture<'a, Result<(), StreamError>> {
+        self.writes += 1;
+        let stalled = self.writes > 1;
+        Box::pin(async move {
+            if stalled {
+                // Never ready, and never an error either: a blocked write is
+                // not a failure a caller gets told about, which is exactly
+                // why an unbounded one is a hang rather than a disconnect.
+                std::future::pending::<()>().await;
+            }
+            Ok(())
+        })
+    }
+
+    fn read<'a>(
+        &'a mut self,
+        out: &'a mut Vec<u8>,
+        _budget: Duration,
+    ) -> BoxFuture<'a, Result<usize, StreamError>> {
+        Box::pin(async move {
+            match self.answer.take() {
+                Some(bytes) => {
+                    out.extend_from_slice(&bytes);
+                    Ok(bytes.len())
+                }
+                None => std::future::pending().await,
             }
         })
     }
@@ -328,6 +377,42 @@ async fn a_receive_on_a_session_with_no_logon_names_the_adapters_method() {
     assert!(writes.lock().expect("the recorder").is_empty());
 }
 
+#[tokio::test]
+async fn a_receive_after_a_refused_logon_does_not_blame_the_adapter() {
+    // The adapter did its job here: it queued a logon, this transport wrote it,
+    // and the venue refused it. So the refusal must not be the one that names
+    // `Adapter::on_connected`, which would send an operator to read the one
+    // piece of code that behaved.
+    let clock = ManualClock::new();
+    let (mut session, _writes) = session(
+        &clock,
+        vec![Serve::Bytes(from_venue("35=5|58=invalid credentials|", 1))],
+    );
+    session
+        .send(&adapter_logon(30))
+        .await
+        .expect_err("the venue refused the logon");
+    assert_eq!(session.state(), SessionState::LogonSent);
+
+    let error = session
+        .receive(Some(Duration::from_secs(1)))
+        .await
+        .expect_err("this session never came up");
+    assert!(
+        matches!(error, SessionError::LogonNotEstablished),
+        "{error}"
+    );
+    let rendered = error.to_string();
+    assert!(
+        !rendered.contains("on_connected"),
+        "the adapter queued a logon and must not be the thing named: {rendered}"
+    );
+    assert!(
+        rendered.contains("was written"),
+        "the refusal must say the logon went out: {rendered}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The cadence
 // ---------------------------------------------------------------------------
@@ -419,7 +504,14 @@ async fn silence_is_questioned_once_and_then_ends_the_session() {
         .await
         .expect_err("a session that says nothing at all");
     match error {
-        SessionError::Silent { interval } => assert_eq!(interval, Duration::from_secs(10)),
+        SessionError::Silent { interval, silence } => {
+            assert_eq!(interval, Duration::from_secs(10));
+            // The number the message states, and it is not two bare cadences:
+            // silence is questioned at a cadence plus the protocol's grace on
+            // it and the session is dead at two of those, so ten seconds is
+            // dead at twenty-four and not at twenty.
+            assert_eq!(silence, Duration::from_secs(24));
+        }
         other => panic!("{other}"),
     }
     let written = written_types(&writes);
@@ -592,6 +684,40 @@ async fn a_close_writes_a_logout_and_does_not_wait_for_its_answer() {
         vec![msg_type::LOGON.to_owned(), msg_type::LOGOUT.to_owned()]
     );
     assert_eq!(session.state(), SessionState::Closed);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_logout_the_venue_has_stopped_reading_is_bounded_and_not_a_hang() {
+    // `close` already declines to wait for the venue's logout back. What this
+    // asserts is the other half, which declining to wait does not give: the
+    // write of *our own* logout is bounded, so a venue that has stopped reading
+    // cannot hold the teardown path inside `write_all` for the kernel's
+    // retransmit timeout with nothing reporting it.
+    //
+    // The clock is the runtime's, paused: tokio advances virtual time to the
+    // next timer once every task is idle, so the assertion below is the budget
+    // the close applied and not a wait this suite paid for.
+    let clock = ManualClock::new();
+    let mut session = Session::new(CONNECTION, Arc::clone(&clock) as Arc<dyn Clock>);
+    session.open(Box::new(StallsAfterTheLogon {
+        writes: 0,
+        answer: Some(from_venue("35=A|98=0|108=30|", 1)),
+    }));
+    session.send(&adapter_logon(30)).await.expect("a logon");
+    assert_eq!(session.state(), SessionState::Established);
+
+    let started = tokio::time::Instant::now();
+    session.close().await;
+    assert_eq!(
+        started.elapsed(),
+        LOGOUT_GRACE,
+        "the teardown is bounded by the grace the constant states"
+    );
+    assert_eq!(
+        session.state(),
+        SessionState::Closed,
+        "a logout that could not be written still releases the session"
+    );
 }
 
 #[tokio::test]

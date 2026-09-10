@@ -51,6 +51,7 @@ use std::time::Duration;
 
 use dz_adapter_core::ConnectionId;
 use dz_ingress_core::{BoxFuture, Clock};
+use tokio::time::timeout;
 
 use crate::framing::{
     self, msg_type, Body, BodyError, Decoder, FramingError, Message, TAG_HEART_BT_INT,
@@ -73,6 +74,14 @@ pub const LOGON_GRACE: Duration = Duration::from_secs(10);
 /// The usual reason to be closing is that the peer has stopped answering, so
 /// the logout is written and its answer is not waited for. Waiting would put
 /// this delay in front of every reconnect.
+///
+/// **It bounds the whole teardown, which is the write and the stream's own
+/// close.** Declining to wait for the venue's logout back does not bound
+/// anything the venue can hold: a venue that has stopped *reading* fills the
+/// send window, and an unbounded `write_all` then sits inside the kernel's
+/// retransmit timeout — minutes — with the teardown path hung and nothing
+/// reporting it. One constant for both halves, because a second one would be
+/// two numbers to keep in agreement about one thing. See [`Session::close`].
 pub const LOGOUT_GRACE: Duration = Duration::from_millis(250);
 
 /// The heartbeat interval a logon may not state.
@@ -215,6 +224,23 @@ pub enum SessionError {
     )]
     NoLogon,
 
+    /// A receive on a session whose logon was written and not established.
+    ///
+    /// **Its own case, and not [`NoLogon`](Self::NoLogon).** In this state the
+    /// adapter did exactly its job: it queued a logon, this transport wrote it,
+    /// and the `send` that wrote it reported why the session did not come up.
+    /// Naming `Adapter::on_connected` here would send an operator to read the
+    /// one piece of code that behaved.
+    ///
+    /// A driver cannot reach it — the send it ignored is the send that returned
+    /// the real reason — so, like [`NotConnected`](Self::NotConnected), it is
+    /// the case where something else drove the session.
+    #[error(
+        "the logon was written and this session was not established: the `send` that wrote it \
+         is what reported why, and there is nothing to receive on a session that never came up"
+    )]
+    LogonNotEstablished,
+
     /// Something other than a logon was written before the session was
     /// established.
     ///
@@ -286,13 +312,23 @@ pub enum SessionError {
     )]
     ResendRequested { detail: String },
 
-    /// Nothing arrived for two cadences, with a test request unanswered in
-    /// between.
+    /// Nothing arrived for two graced cadences, with a test request unanswered
+    /// in between.
+    ///
+    /// Both numbers, because `silence` is the one that reaches a log line and
+    /// two cadences is not what it is: silence is questioned at one cadence
+    /// *plus the protocol's grace on it* and the session is dead at two of
+    /// those, so a thirty-second cadence is dead at seventy-two seconds and not
+    /// at sixty. See [`with_grace`].
     #[error(
-        "nothing arrived for two cadences of {interval:?} and a test request went unanswered: \
-         the session is gone whatever the socket says"
+        "nothing arrived for {silence:?} — two cadences of {interval:?} with the protocol's \
+         grace on each — and a test request went unanswered: the session is gone whatever the \
+         socket says"
     )]
-    Silent { interval: Duration },
+    Silent {
+        interval: Duration,
+        silence: Duration,
+    },
 
     /// The byte stream failed.
     #[error("{0}")]
@@ -304,6 +340,42 @@ pub enum SessionError {
     /// case where something else drove the session.
     #[error("there is no stream: this session is not connected")]
     NotConnected,
+}
+
+/// The message types the session layer composes, as a closed set.
+///
+/// **[`Session::compose`] takes one of these and not a `&str`**, which is what
+/// makes *this transport composes no order entry* a property of the code rather
+/// than a statement about a list. A `compose("D", …)` on some future path does
+/// not compile; a list of tokens checked against itself would have agreed with
+/// it.
+///
+/// Three, and the logon is not among them: a logon's body is the adapter's,
+/// composed in venue code and only framed here. See the crate documentation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Composed {
+    /// The cadence's own message, and the answer to the venue's test request.
+    Heartbeat,
+    /// The question a suspicion of silence asks.
+    TestRequest,
+    /// The orderly close.
+    Logout,
+}
+
+impl Composed {
+    /// The three of them, for the assertion that none is order entry.
+    pub const ALL: [Self; 3] = [Self::Heartbeat, Self::TestRequest, Self::Logout];
+
+    /// The `MsgType` this composes, which is one of
+    /// [`msg_type::SESSION`](crate::framing::msg_type::SESSION).
+    #[must_use]
+    pub const fn as_msg_type(self) -> &'static str {
+        match self {
+            Self::Heartbeat => msg_type::HEARTBEAT,
+            Self::TestRequest => msg_type::TEST_REQUEST,
+            Self::Logout => msg_type::LOGOUT,
+        }
+    }
 }
 
 /// What the message currently held is, as a value that borrows nothing.
@@ -509,7 +581,10 @@ impl Session {
             // wrote nothing, which is the whole of how it is detected: a
             // transport cannot know at connect what the adapter is about to
             // queue.
-            SessionState::Connected | SessionState::LogonSent => return Err(SessionError::NoLogon),
+            SessionState::Connected => return Err(SessionError::NoLogon),
+            // And the state where the adapter did queue one: naming its method
+            // here would tell an operator to fix the code that behaved.
+            SessionState::LogonSent => return Err(SessionError::LogonNotEstablished),
             SessionState::Established | SessionState::LoggingOut => {}
         }
         let deadline = budget.map(|budget| self.clock.steady_ns() + nanos(budget));
@@ -519,6 +594,10 @@ impl Session {
         // silence rather than sitting in a read.
         let interval = self.heartbeat.unwrap_or(MIN_HEARTBEAT);
         let questioned = with_grace(interval);
+        // The number the refusal below states, and the number its arithmetic
+        // uses: one expression, so that a log line saying "nothing arrived for
+        // N" cannot name a different N from the one that was waited.
+        let silence = 2 * questioned;
 
         loop {
             if self.take()? {
@@ -537,7 +616,7 @@ impl Session {
             let now = self.clock.steady_ns();
             let heartbeat_at = self.last_write_ns + nanos(interval);
             let question_at = self.last_read_ns + nanos(questioned);
-            let dead_at = self.last_read_ns + 2 * nanos(questioned);
+            let dead_at = self.last_read_ns + nanos(silence);
 
             if now >= heartbeat_at {
                 self.heartbeat().await?;
@@ -547,7 +626,7 @@ impl Session {
                 // A test request went out a cadence ago and nothing has come
                 // back. The socket may well still be open: that is exactly the
                 // failure a read timeout alone cannot see.
-                return Err(SessionError::Silent { interval });
+                return Err(SessionError::Silent { interval, silence });
             }
             if !self.test_request_outstanding && now >= question_at {
                 self.test_request().await?;
@@ -579,10 +658,37 @@ impl Session {
     /// for its half would put [`LOGOUT_GRACE`] in front of every reconnect.
     /// Every failure here is discarded: this is called on a path that has
     /// already decided the session is over.
+    ///
+    /// **The attempt is bounded by [`LOGOUT_GRACE`], and that bound is what
+    /// declining to wait does not give.** A venue that has stopped reading
+    /// fills the send window, and the write of our own logout then sits inside
+    /// the kernel's retransmit timeout — minutes — with the teardown path hung
+    /// and nothing reporting it. So the write and the stream's own close share
+    /// one budget, and whatever it leaves unfinished is dropped.
+    ///
+    /// Abandoning that write can leave part of a logout on the wire. That is
+    /// safe here and nowhere else in this crate: the stream is released on the
+    /// next line and the session is over, so there is no following message for
+    /// the numbering to be wrong for.
     pub async fn close(&mut self) {
+        let _ = timeout(LOGOUT_GRACE, self.logout()).await;
+        self.stream = None;
+        self.state = SessionState::Closed;
+        self.held.clear();
+        self.scratch.clear();
+        self.decoder.clear();
+        self.test_request_outstanding = false;
+    }
+
+    /// The logout and the stream's own half of the close, as one future.
+    ///
+    /// Split out so that [`LOGOUT_GRACE`] bounds both together rather than each
+    /// separately: what the teardown is allowed to cost is one number, and a
+    /// budget applied twice is twice that number.
+    async fn logout(&mut self) {
         if self.state == SessionState::Established {
             self.state = SessionState::LoggingOut;
-            self.compose(msg_type::LOGOUT, &[]);
+            self.compose(Composed::Logout, &[]);
             if let Ok(body) = Body::parse(&self.composed) {
                 let now = self.clock.wall_ns();
                 framing::frame(
@@ -601,12 +707,6 @@ impl Session {
         if let Some(stream) = self.stream.as_mut() {
             stream.close().await;
         }
-        self.stream = None;
-        self.state = SessionState::Closed;
-        self.held.clear();
-        self.scratch.clear();
-        self.decoder.clear();
-        self.test_request_outstanding = false;
     }
 
     /// Frame a body onto the session's own numbering and write it.
@@ -729,7 +829,7 @@ impl Session {
 
     /// The cadence's own message.
     async fn heartbeat(&mut self) -> Result<(), SessionError> {
-        self.compose(msg_type::HEARTBEAT, &[]);
+        self.compose(Composed::Heartbeat, &[]);
         self.write_composed().await
     }
 
@@ -740,7 +840,7 @@ impl Session {
     /// readable against the request in a capture.
     async fn test_request(&mut self) -> Result<(), SessionError> {
         let id = format!("{}", self.next_sequence);
-        self.compose(msg_type::TEST_REQUEST, &[(TAG_TEST_REQ_ID, id.as_bytes())]);
+        self.compose(Composed::TestRequest, &[(TAG_TEST_REQ_ID, id.as_bytes())]);
         self.write_composed().await?;
         self.test_request_outstanding = true;
         Ok(())
@@ -748,7 +848,7 @@ impl Session {
 
     /// Answer the venue's own test request, echoing its identifier.
     async fn answer_test_request(&mut self, id: &str) -> Result<(), SessionError> {
-        self.compose(msg_type::HEARTBEAT, &[(TAG_TEST_REQ_ID, id.as_bytes())]);
+        self.compose(Composed::Heartbeat, &[(TAG_TEST_REQ_ID, id.as_bytes())]);
         self.write_composed().await
     }
 
@@ -757,10 +857,15 @@ impl Session {
     /// Composed as a body and then framed through the same path an adapter's
     /// body takes, rather than assembled directly: one encoder means a session
     /// message and a subscription cannot disagree about the header.
-    fn compose(&mut self, msg_type: &str, fields: &[(u32, &[u8])]) {
+    ///
+    /// The type is a [`Composed`] and not a `&str`, which is what closes the
+    /// set: what this transport composes is three session messages, and a
+    /// fourth cannot arrive here as a literal.
+    fn compose(&mut self, msg_type: Composed, fields: &[(u32, &[u8])]) {
         self.composed.clear();
-        self.composed
-            .extend_from_slice(format!("{}={msg_type}", framing::TAG_MSG_TYPE).as_bytes());
+        self.composed.extend_from_slice(
+            format!("{}={}", framing::TAG_MSG_TYPE, msg_type.as_msg_type()).as_bytes(),
+        );
         self.composed.push(framing::SOH);
         for (tag, value) in fields {
             self.composed.extend_from_slice(tag.to_string().as_bytes());
@@ -903,6 +1008,51 @@ mod tests {
                 other => panic!("`{stated}` was refused as {other}"),
             }
         }
+    }
+
+    #[test]
+    fn no_message_this_crate_composes_is_an_order_entry_message() {
+        // The protocol defines an order-entry path and this transport has no
+        // reason to reach it: what leaves here is what the adapter wrote plus
+        // the session layer's own messages. `compose` takes a `Composed` and
+        // not a `&str`, so *the session layer's own* half of that is closed by
+        // the type — a `compose("D", …)` on a future path does not compile.
+        // What is left to assert is that the set is what it claims to be.
+        //
+        // The order-entry tokens are transcribed as literals rather than
+        // derived, because a list checked against itself agrees with its own
+        // mistake. `D` NewOrderSingle, `F` OrderCancelRequest,
+        // `G` OrderCancelReplaceRequest, `E` NewOrderList,
+        // `AB` NewOrderMultileg, `8` ExecutionReport, `9` OrderCancelReject,
+        // `H` OrderStatusRequest.
+        let composed: Vec<&str> = Composed::ALL
+            .iter()
+            .map(|composed| composed.as_msg_type())
+            .collect();
+        for order_entry in ["D", "F", "G", "E", "AB", "8", "9", "H"] {
+            assert!(
+                !composed.contains(&order_entry),
+                "`{order_entry}` is an order-entry message type and this crate composes none"
+            );
+        }
+        // And every one of them is the session layer's own, which is the other
+        // half of the claim: a type this crate composes that the decoder would
+        // hand to the adapter as a payload would be this crate writing
+        // application messages.
+        for one in &composed {
+            assert!(
+                msg_type::is_session(one),
+                "`{one}` is composed here and must be one of the session layer's own types"
+            );
+        }
+        let mut distinct = composed.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(
+            distinct.len(),
+            composed.len(),
+            "two of the composed messages share a token"
+        );
     }
 
     #[test]

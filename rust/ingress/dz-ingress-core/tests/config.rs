@@ -230,49 +230,73 @@ fn a_transport_no_token_answers_to_is_refused_naming_the_built_in_set() {
     }
 }
 
-#[cfg(feature = "websocket")]
-#[test]
-fn a_linked_transport_resolves_together_with_its_policy() {
-    let config = parse(r#"kind = "websocket""#).expect("the section parses");
-    let (kind, policy) = config.resolve().expect("websocket is linked in this build");
-    assert_eq!(kind, Kind::WebSocket);
-    assert_eq!(policy.connect_timeout, Duration::from_secs(5));
-    assert_eq!(policy.backoff.initial(), Duration::from_millis(500));
+/// The two answers a token the family names can get, and the one it must never
+/// get.
+///
+/// # Why this branches at runtime instead of under a `cfg`
+///
+/// A marker feature says *this build links that transport*, and it is turned on
+/// by the transport crate itself — `dz-ingress-websocket` depends on this crate
+/// with `features = ["websocket"]`. Cargo unifies features across a build, so
+/// every whole-workspace run has the marker on for every transport crate that
+/// is a member, and every per-crate run of this crate has them all off. A
+/// `cfg(feature = "…")` test is therefore compiled out of one of those two runs
+/// and a `cfg(not(feature = "…"))` test out of the other — with the test count
+/// unchanged and nothing to look at. The moment a crate implementing a token
+/// joins the workspace, a `not(feature)` test naming that token leaves the
+/// build the same silent way.
+///
+/// A branch on the value the code itself answers with exists in every build and
+/// cannot leave one, whichever transports a member crate brings.
+fn either_resolves_or_says_it_was_not_built_in(kind: Kind) {
+    let config = parse(&format!(r#"kind = "{}""#, kind.as_token())).expect("the section parses");
+    match config.resolve() {
+        Ok((resolved, policy)) => {
+            assert!(
+                kind.is_linked(),
+                "`{}` resolved in a build that links no implementation of it",
+                kind.as_token()
+            );
+            assert_eq!(resolved, kind);
+            // The policy travels with the kind: a resolution that produced the
+            // right transport and the wrong budgets is not a resolution.
+            assert_eq!(policy.connect_timeout, Duration::from_secs(5));
+            assert_eq!(policy.backoff.initial(), Duration::from_millis(500));
+        }
+        // A different error from an unknown token, because the operator's next
+        // action is different: one is a typo to fix in the file, the other is a
+        // build to redo. Collapsing them sends someone hunting for a spelling
+        // mistake in a value that is spelled correctly.
+        Err(ConfigError::KindNotLinked { token }) => {
+            assert!(
+                !kind.is_linked(),
+                "`{}` is linked in this build and was refused as not built in",
+                kind.as_token()
+            );
+            assert_eq!(token, kind.as_token());
+        }
+        Err(other) => panic!(
+            "`{}` is a token the family names and must never be unknown: {other}",
+            kind.as_token()
+        ),
+    }
 }
 
-#[cfg(not(feature = "websocket"))]
 #[test]
-fn a_transport_this_binary_was_not_built_with_says_so_and_not_unknown() {
-    // A different error from an unknown token, because the operator's next
-    // action is different: one is a typo to fix in the file, the other is a
-    // build to redo. Collapsing them sends someone hunting for a spelling
-    // mistake in a value that is spelled correctly.
-    let config = parse(r#"kind = "websocket""#).expect("the section parses");
-    let error = config
-        .resolve()
-        .expect_err("this build links no websocket transport");
-    assert!(
-        matches!(error, ConfigError::KindNotLinked { token: "websocket" }),
-        "{error}"
-    );
+fn a_transport_a_crate_here_implements_resolves_with_its_policy_or_says_it_was_not_built_in() {
+    // `websocket`, which a workspace member implements — so this is the linked
+    // half in a whole-workspace build and the unlinked half in this crate's
+    // own, and it runs in both.
+    either_resolves_or_says_it_was_not_built_in(Kind::WebSocket);
 }
 
-#[cfg(not(feature = "multicast"))]
 #[test]
 fn a_transport_the_family_names_but_nobody_has_built_is_not_unknown_either() {
     // The family is fixed by the design and part of it is not written yet. A
     // configuration naming one of those must not read as a spelling mistake.
     //
-    // `multicast`, because no crate in this repository implements it — so this
-    // test runs in a whole-workspace build as well as in this crate's own.
-    // A token a member crate does implement is linked whenever that crate is in
-    // the build, which cargo's feature unification makes true of every
-    // whole-workspace run, and the guard above would then quietly take this
-    // test out of CI.
-    let config = parse(r#"kind = "multicast""#).expect("the section parses");
-    let error = config.resolve().expect_err("nothing implements it yet");
-    assert!(
-        matches!(error, ConfigError::KindNotLinked { token: "multicast" }),
-        "{error}"
-    );
+    // `multicast`, which nothing in this repository implements today — and the
+    // branch above is what keeps this test in the build on the day something
+    // does.
+    either_resolves_or_says_it_was_not_built_in(Kind::Multicast);
 }

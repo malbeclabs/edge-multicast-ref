@@ -259,16 +259,16 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> ByteStream for Socket<S> {
 
     fn close(&mut self) -> BoxFuture<'_, ()> {
         Box::pin(async move {
-            // Bounded and discarded. The usual reason to be closing is that the
-            // peer has stopped answering, and waiting for its half of a
-            // shutdown would put this delay in front of every reconnect.
-            let _ = timeout(SHUTDOWN_GRACE, self.inner.shutdown()).await;
+            // Discarded, and bounded by the caller: `Session::close` runs the
+            // logout write and this together under `LOGOUT_GRACE`, which is one
+            // number for what a teardown may cost rather than a second one
+            // here to keep in agreement with it. The usual reason to be closing
+            // is that the peer has stopped answering, and waiting for its half
+            // of a shutdown would put that delay in front of every reconnect.
+            let _ = self.inner.shutdown().await;
         })
     }
 }
-
-/// How long a socket shutdown may take before the stream is simply dropped.
-const SHUTDOWN_GRACE: Duration = Duration::from_millis(250);
 
 /// A session transport, as an [`Input`].
 ///
@@ -457,6 +457,10 @@ fn classify(error: SessionError) -> IngressError {
         | SessionError::UnusableHeartbeatInterval { .. }
         | SessionError::Body(_) => IngressError::fatal(detail),
 
+        // Not fatal, and not venue code's fault either: a receive on a session
+        // whose logon failed is a driver that ignored what its own send
+        // returned, which is the group `NotConnected` is in below and for the
+        // same reason.
         SessionError::LogonRejected { .. } => {
             IngressError::connect(ConnectFailureReason::Unauthorized, detail)
         }
@@ -470,6 +474,7 @@ fn classify(error: SessionError) -> IngressError {
         | SessionError::ResendRequested { .. }
         | SessionError::Framing(_)
         | SessionError::Stream(_)
+        | SessionError::LogonNotEstablished
         | SessionError::NotConnected => IngressError::ended(DisconnectReason::RemoteClose, detail),
     }
 }
@@ -602,13 +607,15 @@ mod tests {
         // A silence is the one disconnect this layer can call a timeout: the
         // socket produced no error and no data, and a test request went
         // unanswered.
-        assert_eq!(
-            classify(SessionError::Silent {
-                interval: Duration::from_secs(30)
-            })
-            .disconnect_reason(),
-            Some(DisconnectReason::Timeout)
-        );
+        let silent = classify(SessionError::Silent {
+            interval: Duration::from_secs(30),
+            silence: Duration::from_secs(72),
+        });
+        assert_eq!(silent.disconnect_reason(), Some(DisconnectReason::Timeout));
+        // Both numbers reach the log line, and the one an operator counts
+        // against is the graced pair rather than two bare cadences.
+        assert!(silent.to_string().contains("72s"), "{silent}");
+        assert!(silent.to_string().contains("30s"), "{silent}");
 
         for ended in [
             SessionError::LoggedOut {
@@ -624,6 +631,7 @@ mod tests {
             SessionError::Stream(StreamError::Closed {
                 detail: String::new(),
             }),
+            SessionError::LogonNotEstablished,
             SessionError::NotConnected,
         ] {
             let classified = classify(ended.clone());

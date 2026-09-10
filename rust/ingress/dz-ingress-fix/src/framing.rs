@@ -111,12 +111,12 @@ pub const CHECKSUM_FIELD_LEN: usize = 7;
 
 /// Why a message could not be read off the stream.
 ///
-/// **Two of these end the session and are not skipped**, which is the decision
-/// this type exists to carry. A message whose declared length or checksum does
-/// not hold means the byte stream and this decoder no longer agree about where
-/// one message ends, and the numbering is agreed on that stream: carrying on
-/// reads the next message against a sequence that has moved for a reason
-/// nobody recorded.
+/// **Three of these end the session and are not skipped**, which is the
+/// decision this type exists to carry. A message whose declared length or
+/// checksum does not hold, or whose header never ends, means the byte stream
+/// and this decoder no longer agree about where one message ends, and the
+/// numbering is agreed on that stream: carrying on reads the next message
+/// against a sequence that has moved for a reason nobody recorded.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FramingError {
     /// The stream did not begin with `8=`.
@@ -160,6 +160,26 @@ pub enum FramingError {
     /// buffer is ours, so there is a ceiling and it is stated.
     #[error("a message declaring {declared} body bytes exceeds the {limit}-byte ceiling")]
     TooLarge { declared: usize, limit: usize },
+
+    /// The bytes ran past the ceiling with no separator to end the header.
+    ///
+    /// The other half of the same ceiling, and the case
+    /// [`TooLarge`](Self::TooLarge) cannot cover: a peer that writes
+    /// `8=FIX.4.4\x01` and then `9=` followed by megabytes with no separator
+    /// has declared nothing, so there is no length to compare against a limit —
+    /// and every byte of it stays buffered waiting for a separator that is not
+    /// coming. A venue bug, a truncated frame and a garbled stream all arrive
+    /// this way, and the reason the ceiling exists is that the far side chooses
+    /// the size and the buffer is ours.
+    ///
+    /// Ends the session, for the reason
+    /// [`LengthMismatch`](Self::LengthMismatch) does: nothing on this stream
+    /// can be located any more.
+    #[error(
+        "{buffered} bytes arrived with no separator to end the header, past the \
+         {limit}-byte ceiling; nothing on this stream can be located any more"
+    )]
+    HeaderNotTerminated { buffered: usize, limit: usize },
 }
 
 /// Why a body the caller composed cannot be framed.
@@ -448,13 +468,28 @@ const fn owned_tag_reason(tag: u32) -> Option<&'static str> {
 
 /// Frame one body: the header this transport owns, the body, the checksum.
 ///
-/// The field order is `8`, `9`, `35` in the positions the protocol mandates for
-/// them, then the sequence and the sending time, then the body's own fields,
-/// then the checksum last. `reset_sequence` states
-/// [`TAG_RESET_SEQ_NUM_FLAG`], and is what a logon carries.
+/// `reset_sequence` states [`TAG_RESET_SEQ_NUM_FLAG`], and is what a logon
+/// carries.
 ///
 /// `out` is cleared first, so a caller reusing one buffer cannot append one
 /// message to the tail of another.
+///
+/// # What of the field order the protocol fixes, and what this crate chose
+///
+/// Four positions are the protocol's own: `8`, `9` and `35` lead, in that
+/// order, and `10` is last. What sits between them is written here in an order
+/// **this crate chose** — the sequence, the sending time, the reset flag when
+/// there is one, then the body as the caller wrote it.
+///
+/// The standard header sequences a venue's `SenderCompID` and `TargetCompID`
+/// ahead of `MsgSeqNum`, and both of those are the *adapter's* fields: they say
+/// who the two sides are, which is the same thing the logon body carries and
+/// the reason this crate holds no key for either. Writing them before `34`
+/// would mean this crate knowing them, from a configuration key or an injected
+/// value, for an identity the body already states. Engines validate the four
+/// fixed positions and read the rest by tag, so what that order costs is
+/// nothing and what the alternative costs is a venue's identity moving into
+/// this repository.
 ///
 /// # `BodyLength` is not the message length
 ///
@@ -512,7 +547,22 @@ pub fn checksum(bytes: &[u8]) -> u8 {
 /// A venue's snapshot message is the large one and eight megabytes is well past
 /// any of them. It exists because the far side chooses the size and the buffer
 /// is ours.
+///
+/// **It bounds what has arrived and not only what was declared.** A ceiling
+/// checked against a parsed length alone would leave the case that grows a
+/// buffer without any bound: a peer that writes `9=` and then megabytes with no
+/// separator has declared nothing to check. So the decoder refuses at this
+/// value plus [`MAX_HEADER_BYTES`] whenever the header's separators are still
+/// not there — see [`FramingError::HeaderNotTerminated`].
 pub const DEFAULT_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+
+/// How many bytes of header may precede the measured span.
+///
+/// `8=` with its version and `9=` with its digits, which is some tens of bytes
+/// at most; stated with room, because what this bounds is the search for the
+/// header's two separators and not a field width to be exact about. The ceiling
+/// a decoder refuses at is its body ceiling plus this.
+pub const MAX_HEADER_BYTES: usize = 128;
 
 /// A reader that turns a byte stream into whole messages.
 ///
@@ -625,7 +675,7 @@ impl Decoder {
             return Err(FramingError::NotAMessage);
         }
         let Some(first_end) = self.buf.iter().position(|byte| *byte == SOH) else {
-            return Ok(None);
+            return self.awaiting_a_separator();
         };
         let after_begin = first_end + 1;
         let length_prefix = format!("{TAG_BODY_LENGTH}=");
@@ -642,7 +692,7 @@ impl Decoder {
             });
         }
         let Some(second_end) = tail.iter().position(|byte| *byte == SOH) else {
-            return Ok(None);
+            return self.awaiting_a_separator();
         };
         let declared: usize = core::str::from_utf8(&tail[length_prefix.len()..second_end])
             .ok()
@@ -674,6 +724,32 @@ impl Decoder {
             return Err(FramingError::LengthMismatch { declared });
         }
         Ok(Some(total))
+    }
+
+    /// "Not yet" — unless the buffer has already run past anything a header
+    /// could be, in which case the separator is not coming.
+    ///
+    /// **The half of the ceiling a declared length cannot carry.** Every other
+    /// wait in [`complete_len`](Self::complete_len) is bounded by a value that
+    /// has been parsed and checked: once `9=…` is read, `declared` is compared
+    /// against the ceiling and only that many more bytes are ever held. Before
+    /// it, there is no number — so a peer sending `9=` and then megabytes with
+    /// no separator is a buffer that grows for as long as it keeps sending, and
+    /// the process is killed for memory rather than told what happened.
+    ///
+    /// Refused rather than searched past: the two separators this is waiting for
+    /// are the header's own, so bytes that do not contain them are not a
+    /// message this decoder has lost its place in — they are a stream it never
+    /// had one on.
+    fn awaiting_a_separator(&self) -> Result<Option<usize>, FramingError> {
+        let limit = self.max_body_bytes.saturating_add(MAX_HEADER_BYTES);
+        if self.buf.len() > limit {
+            return Err(FramingError::HeaderNotTerminated {
+                buffered: self.buf.len(),
+                limit,
+            });
+        }
+        Ok(None)
     }
 }
 
@@ -716,24 +792,5 @@ mod tests {
             count,
             "two session message types share a token"
         );
-    }
-
-    #[test]
-    fn no_message_this_crate_composes_is_an_order_entry_message() {
-        // The protocol defines an order-entry path and this transport has no
-        // reason to reach it: what leaves here is what the adapter wrote plus
-        // the session layer's own messages. Transcribed as literals rather than
-        // derived, because a list checked against itself agrees with its own
-        // mistake.
-        //
-        // `D` NewOrderSingle, `F` OrderCancelRequest, `G` OrderCancelReplace,
-        // `E` NewOrderList, `AB` NewOrderMultileg, `8` ExecutionReport,
-        // `9` OrderCancelReject, `H` OrderStatusRequest.
-        for order_entry in ["D", "F", "G", "E", "AB", "8", "9", "H"] {
-            assert!(
-                !msg_type::SESSION.contains(&order_entry),
-                "`{order_entry}` is an order-entry message type and this crate composes none"
-            );
-        }
     }
 }

@@ -8,16 +8,29 @@
 //! runs the same on a build host with no route to the internet as on a
 //! developer's machine.
 //!
-//! **TLS is not tested and deliberately not faked**, which is the standard
+//! # TLS: the refusal is tested and the acceptance is not
+//!
+//! **A negotiation this crate should refuse is asserted here.**
+//! `a_certificate_no_compiled_in_anchor_signed_is_refused` puts a TLS listener
+//! on `127.0.0.1` with a self-signed certificate and asserts that
+//! `SocketConnector::open` fails with `ConnectFailureReason::Tls`. That fakes
+//! nothing and needs no root of our own — and it is the half that would
+//! otherwise go unnoticed: swapping the root store for a verifier that accepts
+//! anything, or leaving `RootCertStore::empty()` unpopulated, is one line that
+//! passes every other test in this workspace and surfaces at a venue's
+//! security review.
+//!
+//! **A negotiation this crate should accept is not**, which is the standard
 //! `dz-ingress-websocket` set for this family and the reason is the same:
-//! verifying the compiled-in trust anchors against a real certificate chain
-//! needs a real endpoint, and a self-signed certificate with a root of our own
-//! would exercise a configuration this crate does not build — it would assert
-//! that a test harness works. What can be checked without a network is checked
-//! in the unit tests: that the client configuration is constructible at all,
-//! which is where the provider-selection panic would land. So `tls = false` on
-//! a loopback endpoint is what these tests use, and that value is accepted
-//! nowhere else.
+//! verifying the compiled-in trust anchors against a chain that leads to one of
+//! them needs a real endpoint, and trusting a root of our own instead would
+//! exercise a configuration this crate does not build — it would assert that a
+//! test harness works. What can be checked without a network is also checked in
+//! the unit tests: that the client configuration is constructible at all, which
+//! is where the provider-selection panic would land.
+//!
+//! Every other test here uses `tls = false` on a loopback endpoint, and that
+//! value is accepted nowhere else.
 //!
 //! # What each test proves
 //!
@@ -47,7 +60,7 @@ use dz_ingress_core::{
     Policy, Received, TokioClock, UpstreamMessage,
 };
 use dz_ingress_fix::framing::{self, msg_type, Body, Decoder, SOH};
-use dz_ingress_fix::{FixInput, SessionConfig};
+use dz_ingress_fix::{Connector, Endpoint, FixInput, SessionConfig, SocketConnector};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -962,4 +975,95 @@ async fn a_mid_session_write_is_framed_and_numbered_on_the_same_session() {
         "a mid-session write is not a logon and states no reset: {:?}",
         seen[2]
     );
+}
+
+// ---------------------------------------------------------------------------
+// TLS: the refusal
+// ---------------------------------------------------------------------------
+
+/// A TLS listener on loopback presenting a certificate nothing signed but
+/// itself.
+///
+/// The certificate is generated here rather than committed, so there is no key
+/// material in this repository and nothing to expire. The listener negotiates
+/// and drops whatever it gets: what the test is about is the client's answer to
+/// the chain, which is decided before a byte of session traffic.
+async fn a_listener_no_anchor_vouches_for() -> SocketAddr {
+    use tokio_rustls::rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
+    use tokio_rustls::rustls::ServerConfig;
+    use tokio_rustls::TlsAcceptor;
+
+    let generated = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()])
+        .expect("a self-signed certificate for loopback");
+    // Round-tripped through `Vec<u8>` so that the types the server
+    // configuration holds are the ones this crate's own `rustls` defines,
+    // whatever the generator was built against.
+    let chain = vec![CertificateDer::from(generated.cert.der().to_vec())];
+    let key = PrivatePkcs8KeyDer::from(generated.signing_key.serialize_der());
+
+    // The provider named, for the reason `SocketConnector` names it: the
+    // process-wide default is decided somewhere other than here.
+    let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
+    let config = ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("the provider offers a protocol version")
+        .with_no_client_auth()
+        .with_single_cert(chain, key.into())
+        .expect("a server configuration");
+    let acceptor = TlsAcceptor::from(Arc::new(config));
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("loopback is bindable without a privilege");
+    let address = listener.local_addr().expect("a bound address");
+    tokio::spawn(async move {
+        while let Ok((socket, _peer)) = listener.accept().await {
+            let acceptor = acceptor.clone();
+            // Whatever the handshake does is the client's business: a refusal
+            // here is the expected outcome and not a failure to report.
+            tokio::spawn(async move {
+                let _ = acceptor.accept(socket).await;
+            });
+        }
+    });
+    address
+}
+
+#[tokio::test]
+async fn a_certificate_no_compiled_in_anchor_signed_is_refused() {
+    // The half of TLS that is testable without a network and without faking
+    // anything: whether verification is on at all. With only `webpki-roots`
+    // compiled in, a certificate signed by nobody must be refused — and the
+    // refusal must be `tls` rather than a refusal or a timeout, because those
+    // are different operator actions.
+    //
+    // The revert: swap `with_root_certificates(roots)` for a verifier that
+    // accepts anything, or leave the root store empty. One line, and it passes
+    // every other test in this workspace.
+    let address = a_listener_no_anchor_vouches_for().await;
+    let mut connector = SocketConnector::new(Endpoint {
+        address: address.to_string(),
+        server_name: "localhost".to_owned(),
+        tls: true,
+    })
+    .expect("a constructible client configuration");
+
+    let error = connector
+        .open(Duration::from_secs(5))
+        .await
+        .err()
+        .expect("a certificate no compiled-in anchor signed must not be accepted");
+    assert!(
+        matches!(
+            error,
+            IngressError::Connect {
+                reason: ConnectFailureReason::Tls,
+                ..
+            }
+        ),
+        "{error}"
+    );
+    // And the detail names the endpoint, because an operator reading a
+    // negotiation failure wants to know which one failed.
+    assert!(error.to_string().contains(&address.to_string()), "{error}");
 }

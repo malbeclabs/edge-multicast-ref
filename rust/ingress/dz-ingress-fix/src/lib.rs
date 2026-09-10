@@ -7,14 +7,21 @@
 //! layer's own messages, and the session layer composes nothing but session
 //! messages.
 //!
-//! # Where a venue's signature lives, and why it is not injected
+//! # Where a venue's signature lives, and why nothing is injected
 //!
-//! Transports in this family are constructed by the runtime from a closed
-//! [`Kind`](dz_ingress_core::Kind) match, deliberately: the family is fixed and
-//! lives in this repository. Adapters are the opposite — a registry the venue's
-//! own `main` populates. So there is no seam through which a venue could hand a
-//! logon signer to a transport this repository constructs, and inventing one
-//! would be inventing an injection point for a single field.
+//! **The seam exists and is declined on purpose.** A venue's own `main`
+//! constructs its transports and hands them back to the runtime, so a
+//! constructor here taking a logon signer would have been possible — this is
+//! not a case of there being nowhere to put one.
+//!
+//! It is declined because of what it would carry. A logon is not one field: it
+//! is an identity, a credential, whatever ordering or canonical form a venue's
+//! scheme signs over, and whatever else that scheme asks for. A signer
+//! parameter would put half of one logon in the adapter and the other half
+//! behind a callback this crate held, which is two places to look when a venue
+//! refuses a credential — and it would be this repository holding the shape of
+//! a venue's authentication, which is the thing that changes on the venue's
+//! schedule and not on ours.
 //!
 //! **The logon body is the adapter's and everything around it is this crate's.**
 //! `Adapter::on_connected` already exists for authentication frames and already
@@ -23,7 +30,9 @@
 //! crate:
 //!
 //! - frames it: the declared length over the span the protocol mandates, the
-//!   checksum, and the header fields in the positions they belong in;
+//!   checksum, and the four positions the protocol fixes — `8`, `9` and `35`
+//!   leading, in that order, and `10` last. What sits between them is this
+//!   crate's own order, and [`framing::frame`] says what it is and why;
 //! - numbers it, and every message after it, on the session's own outbound
 //!   sequence;
 //! - reads the heartbeat interval **out of it** and runs the cadence from that

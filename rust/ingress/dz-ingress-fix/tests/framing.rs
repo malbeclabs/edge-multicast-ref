@@ -412,6 +412,56 @@ fn a_declared_length_past_the_ceiling_is_refused_before_the_bytes_are_kept() {
 }
 
 #[test]
+fn bytes_with_no_separator_are_refused_rather_than_buffered_without_bound() {
+    // The half of the ceiling a declared length cannot carry, and the case that
+    // grows the buffer without any bound. A peer that writes `8=FIX.4.4` and
+    // then megabytes with no separator, or ends that field and then writes `9=`
+    // and megabytes with no separator, has declared nothing — so there is no
+    // length to compare against a limit, and without this the session's read
+    // loop keeps feeding, `take` keeps saying "not yet", and the process is
+    // killed for memory rather than told what happened. A venue bug, a
+    // truncated frame and a garbled stream all arrive this way.
+    //
+    // Both separator searches, because a guard on one of them leaves the other
+    // exactly as it was.
+    let limit = 64 + framing::MAX_HEADER_BYTES;
+    for prefix in [format!("8={BEGIN_STRING}"), format!("8={BEGIN_STRING}|9=")] {
+        let mut decoder = Decoder::with_max_body_bytes(64);
+        decoder.feed(&wire(&prefix));
+        let mut out = Vec::new();
+        // Fed the way a socket delivers it, so what is asserted is a decoder
+        // that refuses on the read which crosses the ceiling rather than one
+        // handed the whole thing at once.
+        let mut refusal = None;
+        for _ in 0..64 {
+            decoder.feed(&[b'7'; 16]);
+            match decoder.take(&mut out) {
+                Ok(false) => assert!(
+                    decoder.buffered() <= limit,
+                    "`{prefix}`: {} bytes held past the {limit}-byte ceiling",
+                    decoder.buffered()
+                ),
+                Ok(true) => panic!("`{prefix}`: there is no message in bytes with no separator"),
+                Err(error) => {
+                    refusal = Some(error);
+                    break;
+                }
+            }
+        }
+        match refusal.expect("a refusal, and not a buffer that keeps growing") {
+            FramingError::HeaderNotTerminated {
+                buffered,
+                limit: stated,
+            } => {
+                assert_eq!(stated, limit, "`{prefix}`");
+                assert!(buffered > limit, "`{prefix}`: {buffered}");
+            }
+            other => panic!("`{prefix}`: {other}"),
+        }
+    }
+}
+
+#[test]
 fn a_decoded_message_reads_back_its_own_header() {
     let message = framed("35=W|55=A-SYMBOL|", 11);
     let mut decoder = Decoder::new();
