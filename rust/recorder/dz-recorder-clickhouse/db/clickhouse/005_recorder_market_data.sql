@@ -127,6 +127,12 @@ CREATE TABLE IF NOT EXISTS recorder.event (
 
     object_key         String,
     object_sha256      String,
+    -- `archive` when the datagrams behind the row were kept and their object's
+    -- sha256 checked against its manifest before a row was derived; `live` when
+    -- they were derived as they arrived and not kept. In no sort key, so the two
+    -- modes' views of one datagram stay one row. See 008, which adds this to a
+    -- deployment that applied this file before the column existed.
+    derivation         LowCardinality(String) DEFAULT 'archive',
     datagram_index     UInt64
 )
 ENGINE = ReplacingMergeTree
@@ -172,7 +178,13 @@ CREATE TABLE IF NOT EXISTS recorder.instrument (
     -- publishing nothing. Against the count of distinct instruments observed, it
     -- is the only statement of published-set coverage an archive can make.
     declared_count Nullable(UInt32),
-    object_key     String
+    object_key     String,
+    -- `archive` when the datagrams behind the row were kept and their object's
+    -- sha256 checked against its manifest before a row was derived; `live` when
+    -- they were derived as they arrived and not kept. In no sort key, so the two
+    -- modes' views of one datagram stay one row. See 008, which adds this to a
+    -- deployment that applied this file before the column existed.
+    derivation     LowCardinality(String) DEFAULT 'archive'
 )
 ENGINE = ReplacingMergeTree(last_seen_ts)
 PARTITION BY toYYYYMMDD(first_seen_ts)
@@ -234,7 +246,13 @@ CREATE TABLE IF NOT EXISTS recorder.book_top (
     book_certain      UInt8,
     uncertain_since   Nullable(UInt64),
     uncertain_reason  LowCardinality(String),   -- none | gap | instrument_reset | no_anchor
-    object_key        String
+    object_key        String,
+    -- `archive` when the datagrams behind the row were kept and their object's
+    -- sha256 checked against its manifest before a row was derived; `live` when
+    -- they were derived as they arrived and not kept. In no sort key, so the two
+    -- modes' views of one datagram stay one row. See 008, which adds this to a
+    -- deployment that applied this file before the column existed.
+    derivation        LowCardinality(String) DEFAULT 'archive'
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(recv_ts)

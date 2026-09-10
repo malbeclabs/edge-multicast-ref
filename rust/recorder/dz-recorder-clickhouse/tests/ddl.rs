@@ -378,6 +378,151 @@ fn the_sort_keys_are_the_ones_the_rows_were_shaped_for() {
     );
 }
 
+/// The migration that declares one grain's table.
+///
+/// Five grains are in `001` and the three market data ones in `005`. A test that
+/// assumed one file would not fail on the grains it could not find — `columns`
+/// panics rather than returning nothing, which is what makes that safe to rely
+/// on here.
+fn sql_declaring(grain: Grain) -> &'static str {
+    match grain {
+        Grain::Event | Grain::Instrument | Grain::BookTop => market_data_sql(),
+        Grain::Datagram
+        | Grain::Era
+        | Grain::SegmentCoverage
+        | Grain::SequenceGap
+        | Grain::ConformanceFinding => rows_sql(),
+    }
+}
+
+/// Provenance is on every grain, and in no sort key.
+///
+/// A datagram recorded once is one row whichever mode derived it. Put
+/// `derivation` in a sort key and the archive-derived row and the live-derived
+/// row of the same datagram stop collapsing under `ReplacingMergeTree` — so a
+/// window loaded both ways doubles, and every count over it is wrong in a
+/// direction nobody would suspect. The column exists to be *read*, and this is
+/// where that stays true.
+///
+/// Both halves matter and neither is enough alone. Without the column check the
+/// sort-key check passes over a table that has no provenance at all; without the
+/// sort-key check a later migration can quietly break deduplication. The grain
+/// enumeration is what makes a grain added next year fail here rather than ship
+/// rows nobody can attribute.
+#[test]
+fn provenance_is_on_every_grain_and_in_no_sort_key() {
+    for grain in Grain::ALL {
+        let sql = sql_declaring(grain);
+        let declared = columns(sql, grain.table());
+        assert!(
+            declared.iter().any(|c| c == "derivation"),
+            "{grain} declares no derivation column: {declared:?}"
+        );
+    }
+
+    let mut clauses = 0;
+    for sql in [
+        rows_sql(),
+        market_data_sql(),
+        pairing_sql(),
+        cross_site_sql(),
+    ] {
+        for clause in sort_key_clauses(sql) {
+            clauses += 1;
+            assert!(
+                !clause.contains("derivation"),
+                "provenance reached a sort key: {clause}"
+            );
+        }
+    }
+    // The walker found something, and found all of it. A guard that reads more
+    // than one line is a guard whose *reading* is now the thing that can
+    // regress, and a walker that quietly went back to the first line would leave
+    // this green over exactly the hazard it was widened for. Nine: the eight
+    // table sort keys, plus the bare `ORDER BY` in `006`'s window specification,
+    // which is checked like any other because a column reaching a window's
+    // ordering is worth knowing about too. `003`'s is in a file this test does
+    // not read.
+    assert_eq!(clauses, 9, "the sort-key walker stopped finding clauses");
+}
+
+/// Every `ORDER BY` and `PRIMARY KEY` clause in one file, each as one string.
+///
+/// **A clause is not a line.** Three of the eight sort keys wrap onto a
+/// continuation line, so a guard reading only the line that begins `ORDER BY`
+/// reads two thirds of what it is guarding — and a column appended to the tail
+/// of a wrapped key passes it. The clause is accumulated from its first line
+/// until the parenthesis depth it opened returns to zero, which is what closes a
+/// tuple sort key on a later line and closes a bare one immediately.
+fn sort_key_clauses(sql: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut open: Option<(String, i32)> = None;
+    for line in sql.lines() {
+        let trimmed = line.trim_start();
+        let (mut clause, mut depth) = match open.take() {
+            Some(state) => state,
+            None if trimmed.starts_with("ORDER BY") || trimmed.starts_with("PRIMARY KEY") => {
+                (String::new(), 0)
+            }
+            None => continue,
+        };
+        clause.push(' ');
+        clause.push_str(trimmed);
+        depth += line.matches('(').count() as i32 - line.matches(')').count() as i32;
+        // Depth back to zero ends the clause, which is the closing parenthesis
+        // of a tuple key and the first line of a bare one. `;` ends it too, for
+        // a statement that closes without one.
+        if depth <= 0 || line.contains(';') {
+            out.push(clause);
+        } else {
+            open = Some((clause, depth));
+        }
+    }
+    // A clause that never closed is still a clause, and dropping it silently is
+    // how a walker stops reading a file without failing.
+    if let Some((clause, _)) = open {
+        out.push(clause);
+    }
+    out
+}
+
+/// The walker reads a whole clause, and not the line it starts on.
+///
+/// The mutant this kills is the guard as it was: `derivation` appended to the
+/// continuation line of a wrapped sort key. Asserted over a literal rather than
+/// over the migrations, because the migrations must never carry that column in a
+/// sort key — so the only way to hold the *reading* is to write the hazard out
+/// here.
+#[test]
+fn the_sort_key_walker_reads_a_clause_that_wraps() {
+    let wrapped = "ENGINE = ReplacingMergeTree\n                   PARTITION BY toYYYYMMDD(recv_ts)\n                   ORDER BY (channel_id, instrument_id, sequence_number,\n                   \x20         source_addr, derivation, recv_ts);\n";
+    let clauses = sort_key_clauses(wrapped);
+    assert_eq!(clauses.len(), 1, "{clauses:?}");
+    assert!(
+        clauses[0].contains("derivation"),
+        "a column on the continuation line was not read: {clauses:?}"
+    );
+
+    // A bare key inside a window specification closes on its own line, and does
+    // not swallow everything up to the next semicolon.
+    let windowed = "        ORDER BY anchor_ts\n        ROWS BETWEEN 1 PRECEDING AND CURRENT ROW\n";
+    let clauses = sort_key_clauses(windowed);
+    assert_eq!(
+        clauses,
+        vec![" ORDER BY anchor_ts".to_owned()],
+        "{clauses:?}"
+    );
+
+    // And a single-line tuple key is one clause, not the rest of the file.
+    let single = "ORDER BY (a, b, c);\nSOMETHING ELSE derivation\n";
+    let clauses = sort_key_clauses(single);
+    assert_eq!(
+        clauses,
+        vec![" ORDER BY (a, b, c);".to_owned()],
+        "{clauses:?}"
+    );
+}
+
 /// Every table is partitioned by a day, and none is an exception.
 ///
 /// `era` was, and the exception was not a decision — it was the one table whose
@@ -1094,9 +1239,9 @@ mod fixtures {
     use std::net::Ipv4Addr;
 
     use dz_recorder_rows::{
-        BookTop, ConformanceFinding, Datagram, DropScope, Era, Event, FindingVerdict, Instrument,
-        MessageTypeLabel, Nanos, PortRoleLabel, RecvTsKindLabel, SegmentCoverage, SequenceGap,
-        UncertainReason, Verdict,
+        BookTop, ConformanceFinding, Datagram, Derivation, DropScope, Era, Event, FindingVerdict,
+        Instrument, MessageTypeLabel, Nanos, PortRoleLabel, RecvTsKindLabel, SegmentCoverage,
+        SequenceGap, UncertainReason, Verdict,
     };
 
     const ADDR: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 10);
@@ -1149,6 +1294,7 @@ mod fixtures {
             depth_bound: None,
             object_key: String::new(),
             object_sha256: String::new(),
+            derivation: Derivation::Archive,
             datagram_index: 0,
         }
     }
@@ -1176,6 +1322,7 @@ mod fixtures {
             manifest_seq: None,
             declared_count: None,
             object_key: String::new(),
+            derivation: Derivation::Archive,
         }
     }
 
@@ -1212,6 +1359,7 @@ mod fixtures {
             uncertain_since: None,
             uncertain_reason: UncertainReason::None,
             object_key: String::new(),
+            derivation: Derivation::Archive,
         }
     }
 
@@ -1238,6 +1386,7 @@ mod fixtures {
             drop_scope: DropScope::PortRole,
             object_key: String::new(),
             object_sha256: String::new(),
+            derivation: Derivation::Archive,
         }
     }
 
@@ -1257,6 +1406,7 @@ mod fixtures {
             continuation: 0,
             object_key: String::new(),
             object_sha256: String::new(),
+            derivation: Derivation::Archive,
         }
     }
 
@@ -1282,6 +1432,7 @@ mod fixtures {
             roles_joined: Vec::new(),
             object_key: String::new(),
             object_sha256: String::new(),
+            derivation: Derivation::Archive,
             build_version: String::new(),
             build_commit: String::new(),
             config_hash: String::new(),
@@ -1319,6 +1470,7 @@ mod fixtures {
             on_redundant_path: None,
             verdict: Verdict::Unverifiable,
             object_key: String::new(),
+            derivation: Derivation::Archive,
         }
     }
 
@@ -1340,6 +1492,7 @@ mod fixtures {
             verdict: FindingVerdict::Pass,
             detail: String::new(),
             object_key: String::new(),
+            derivation: Derivation::Archive,
             first_seq: 0,
             last_seq: 0,
         }

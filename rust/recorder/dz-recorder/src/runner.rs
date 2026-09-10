@@ -72,6 +72,19 @@ pub enum RunError {
     CaptureEnded { feed: String },
     #[error("feed `{feed}`: the recorder thread panicked")]
     Panicked { feed: String },
+    /// Inline mode only. Refused at startup rather than warned about: the spool
+    /// is that arrangement's whole durability, and a recorder that could not
+    /// write it would hold every row it derived in memory and call itself
+    /// healthy.
+    #[cfg(feature = "inline")]
+    #[error("feed `{feed}`: the spool could not be opened: {message}")]
+    Spool { feed: String, message: String },
+    /// Inline mode only. Without a ledger a restart re-derives and re-inserts
+    /// every window still on disk — a replace rather than a duplicate, but one
+    /// paid for on every start.
+    #[cfg(feature = "inline")]
+    #[error("feed `{feed}`: the ledger could not be opened: {message}")]
+    Ledger { feed: String, message: String },
 }
 
 /// What one capture handle has to be, for the loop and for the shutdown.
@@ -107,7 +120,7 @@ impl Capturing for dz_recorder_capture::AfPacketSource {
 }
 
 /// One capture handle, whichever mode the configuration asked for.
-enum Capture {
+pub(crate) enum Capture {
     Socket(SocketSource),
     #[cfg(feature = "afpacket")]
     AfPacket(dz_recorder_capture::AfPacketSource),
@@ -326,11 +339,15 @@ struct FeedRecorder {
 impl FeedRecorder {
     fn open(plan: &Plan, feed: &FeedPlan, metrics: &Arc<HealthMetrics>) -> Result<Self, RunError> {
         let capture = open_capture(plan, feed)?;
-        let writer = ArchiveWriter::new(feed.archive.clone(), now_ns()).map_err(|source| {
-            RunError::Archive {
-                feed: feed.spec.clone(),
-                source,
-            }
+        // Archive mode only: `run` is not the inline path, and a plan for one
+        // carries no writer configuration for exactly that reason.
+        let archive = feed
+            .archive
+            .clone()
+            .expect("an archive-mode plan wires every feed with a writer configuration");
+        let writer = ArchiveWriter::new(archive, now_ns()).map_err(|source| RunError::Archive {
+            feed: feed.spec.clone(),
+            source,
         })?;
         let observer = HealthObserver::new(
             Arc::clone(metrics),
@@ -561,7 +578,7 @@ impl FeedRecorder {
     }
 }
 
-fn open_capture(plan: &Plan, feed: &FeedPlan) -> Result<Capture, RunError> {
+pub(crate) fn open_capture(plan: &Plan, feed: &FeedPlan) -> Result<Capture, RunError> {
     let failed = |source| RunError::Capture {
         feed: feed.spec.clone(),
         source,
@@ -609,6 +626,16 @@ fn open_capture(plan: &Plan, feed: &FeedPlan) -> Result<Capture, RunError> {
 /// recording thread exists: a bind that fails has to fail the process rather
 /// than leave one feed silently unrecorded while the others look healthy.
 pub fn run(plan: &Plan, run_for: Option<Duration>) -> Result<(), RunError> {
+    // This is the archive path. An inline plan carries no writer configuration
+    // — deliberately, so that a mode which opens no writer cannot be handed a
+    // set of directories somebody would expect to find objects in — and the
+    // assertion is here rather than at the unwrap below so that a wiring
+    // mistake names itself instead of surfacing as a panic in a feed thread.
+    debug_assert_eq!(
+        plan.arrangement,
+        crate::startup::Arrangement::Archive,
+        "the archive runner was handed an inline plan"
+    );
     let series: Vec<FeedSeries<'_>> = plan
         .feeds
         .iter()
@@ -643,11 +670,13 @@ pub fn run(plan: &Plan, run_for: Option<Duration>) -> Result<(), RunError> {
     let mut recorders = Vec::with_capacity(plan.feeds.len());
     for feed in &plan.feeds {
         recorders.push(FeedRecorder::open(plan, feed, &metrics)?);
-        eprintln!(
-            "dz-recorder: feed {} recording to {}",
-            feed.spec,
-            feed.archive.staging_dir.display()
-        );
+        if let Some(archive) = &feed.archive {
+            eprintln!(
+                "dz-recorder: feed {} recording to {}",
+                feed.spec,
+                archive.staging_dir.display()
+            );
+        }
     }
 
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -669,28 +698,7 @@ pub fn run(plan: &Plan, run_for: Option<Duration>) -> Result<(), RunError> {
     //
     // The `termination` feature is what puts SIGTERM and SIGHUP on the same
     // handler as SIGINT; all three take this path.
-    {
-        let stop = Arc::clone(&shutdown);
-        let signals = AtomicU32::new(0);
-        if let Err(e) = ctrlc::set_handler(move || {
-            if signals.fetch_add(1, Ordering::Relaxed) == 0 {
-                stop.store(true, Ordering::Relaxed);
-                return;
-            }
-            eprintln!(
-                "dz-recorder: second signal; exiting without waiting for the open segment to be \
-                 published"
-            );
-            std::process::exit(130);
-        }) {
-            // Not fatal: a recorder that cannot install a handler still records,
-            // and saying so is better than refusing to start over it.
-            eprintln!(
-                "dz-recorder: no signal handler installed ({e}); a signal will \
-                 abandon the open segment, so stop this process with --run-for"
-            );
-        }
-    }
+    install_signal_handler(&shutdown, "the open segment");
     let threads: Vec<(String, JoinHandle<Result<Summary, RunError>>)> = recorders
         .into_iter()
         .map(|recorder| {
@@ -710,6 +718,44 @@ pub fn run(plan: &Plan, run_for: Option<Duration>) -> Result<(), RunError> {
     let outcome = join_all(threads);
     drop(endpoint);
     outcome
+}
+
+/// Stops the process gracefully on a signal, and at once on a second.
+///
+/// A recorder is stopped by its supervisor, and a supervisor stops things with a
+/// signal. Without this, every restart abandons `what` — the thing an operator
+/// is most likely to be asking about, lost on the one event that happens on
+/// every deploy. The handler only raises the flag the shutdown sequence already
+/// waits on, so a signal takes exactly the same path a bounded run does.
+///
+/// **A second signal exits, and it has to be made to.** `ctrlc` keeps its
+/// handler installed for the life of the process, so without this a second
+/// SIGINT only re-raises the same flag — and the shutdown waits on work that a
+/// hung destination or hung storage can stall for as long as they like, leaving
+/// SIGKILL as the only way out, which is precisely the way that abandons what
+/// is in hand. An operator signalling twice is saying the graceful path is
+/// taking too long, and the right answer then is to die.
+///
+/// The `termination` feature is what puts SIGTERM and SIGHUP on the same
+/// handler as SIGINT; all three take this path.
+pub(crate) fn install_signal_handler(shutdown: &Arc<AtomicBool>, what: &'static str) {
+    let stop = Arc::clone(shutdown);
+    let signals = AtomicU32::new(0);
+    if let Err(e) = ctrlc::set_handler(move || {
+        if signals.fetch_add(1, Ordering::Relaxed) == 0 {
+            stop.store(true, Ordering::Relaxed);
+            return;
+        }
+        eprintln!("dz-recorder: second signal; exiting without waiting for {what}");
+        std::process::exit(130);
+    }) {
+        // Not fatal: a recorder that cannot install a handler still records,
+        // and saying so is better than refusing to start over it.
+        eprintln!(
+            "dz-recorder: no signal handler installed ({e}); a signal will abandon {what}, so \
+             stop this process with --run-for"
+        );
+    }
 }
 
 /// Waits for the bounded run to end, or for a recorder to end on its own.

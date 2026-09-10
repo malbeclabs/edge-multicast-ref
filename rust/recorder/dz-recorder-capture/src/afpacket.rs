@@ -50,11 +50,13 @@
 use crate::rejoin::Rejoiner;
 use crate::socket::{
     bind_or_retry, bump, hand_over, rejoin, Arrival, BindPlan, CaptureCounters, CaptureStats,
-    Captured, Extent, Offered, PendingLoss, PortBinding, SourceGate, SourceKey, SourceVerdict,
+    Captured, Extent, Offered, PortBinding, SourceGate, SourceKey, SourceVerdict,
 };
 use crate::{OverflowTracker, Waited};
 use dz_edge_core::{PortRole, MAX_DATAGRAM_SIZE};
-use dz_recorder_core::{RecordedDatagram, RecvTsKind, Source, SourceError, MAX_LINK_HEADER_SIZE};
+use dz_recorder_core::{
+    PendingLoss, RecordedDatagram, RecvTsKind, Source, SourceError, MAX_LINK_HEADER_SIZE,
+};
 use nix::errno::Errno;
 use nix::sys::socket::{recv, MsgFlags};
 use std::collections::BTreeSet;

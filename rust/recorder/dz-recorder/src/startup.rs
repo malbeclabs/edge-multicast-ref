@@ -167,6 +167,53 @@ pub enum StartupError {
         per_feed: u64,
         rotate_bytes: u64,
     },
+
+    /// The configuration states an archive and the command line states inline
+    /// mode.
+    ///
+    /// Both statements are on the screen, deliberately. An operator who reaches
+    /// this has written one of them and inherited the other, and which is which
+    /// is not something this process can know — so it names both rather than
+    /// choosing one to call the mistake.
+    ///
+    /// Refused and never resolved. Reading it as inline mode leaves a host
+    /// somebody believes is keeping bytes for a year that it never kept for a
+    /// second; reading it as archive mode leaves a host that was asked for rows
+    /// keeping bytes instead. There is no third reading, and a recorder that
+    /// picked one would be picking which of an operator's two statements to
+    /// ignore.
+    #[error(
+        "`archive.{key}` = `{path}` states an archive, and `--inline-config {inline_config}` \
+         states inline mode. One process runs one arrangement: archive mode writes every \
+         datagram to an object and derives no row, inline mode derives rows and keeps no \
+         datagram. Remove the `[archive]` directories to derive rows, or drop `--inline-config` \
+         to record the archive this configuration describes."
+    )]
+    BothArrangementsStated {
+        key: &'static str,
+        path: String,
+        inline_config: String,
+    },
+
+    /// Nothing states an arrangement.
+    ///
+    /// This is what silence means, and it is the row that makes the other three
+    /// a reading rather than a guess: with no default, a configuration that says
+    /// nothing about the arrangement says nothing at all, and is refused before
+    /// a socket is bound.
+    ///
+    /// Named for the shape of the failure and not for either mode, because an
+    /// operator who reaches it has not chosen one. Five keys could have settled
+    /// it and none of them is defaulted, which is the whole reason there is
+    /// nothing here to invent.
+    #[error(
+        "nothing states an arrangement. Archive mode is selected by `archive.staging_dir` and \
+         `archive.completed_dir`, inline mode by `--inline-config`, and neither is given. Not one \
+         of the five keys that would settle it has a defensible value to invent: a recorder that \
+         guessed would keep bytes on a disk nobody sized or load rows into a database nobody \
+         chose. State the two directories to record an archive, or the file to derive rows."
+    )]
+    NoArrangementStated,
 }
 
 /// What `feed.interface` states, before a mode has said what it can use.
@@ -234,6 +281,100 @@ pub fn compression(compression: Compression) -> Result<ArchiveCompression, Start
     }
 }
 
+/// Which of the two arrangements this host is running.
+///
+/// Not a capture mode and not a preference: it decides whether an archive is
+/// written at all, and therefore whether a feed has an [`ArchiveWriterConfig`]
+/// to be wired with. The two are mutually exclusive by construction — archive
+/// mode requires the directories and inline mode refuses them — which is why
+/// this is a plan-level fact rather than a flag a caller could forget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Arrangement {
+    /// Objects are written and a loader derives rows from them.
+    ///
+    /// Selected by `archive.staging_dir` and `archive.completed_dir` carrying a
+    /// value, which is what this arrangement has required since it existed — so
+    /// a host that recorded an archive yesterday selects it by saying what it
+    /// already said.
+    Archive,
+    /// Rows are derived from the live capture and no datagram is kept.
+    ///
+    /// Selected by `--inline-config`, which names the file carrying the spool
+    /// directory, the ledger and the destination this arrangement cannot run
+    /// without.
+    ///
+    /// **Constructible in every build, feature or not.** It used to be behind
+    /// the feature, on the argument that a variant a build can never construct
+    /// is one its dead-code analysis is right to flag. That is no longer true:
+    /// a build without inline mode constructs this variant in order to *refuse*
+    /// it, which is the one thing such a build must do rather than fall back to
+    /// the arrangement nobody chose.
+    Inline,
+}
+
+impl Arrangement {
+    /// Which arrangement a configuration and a command line state, or the
+    /// refusal that neither or both were stated.
+    ///
+    /// **The four cases live here and nowhere else**, and the two predicates
+    /// they are drawn from are the two the refusals name: an archive directory
+    /// carrying a value, and a second file given. Each arrangement requires what
+    /// the other has no use for and no member of either key set is defaulted, so
+    /// the four are total — which is asserted in its own test, because four
+    /// cases enumerated by hand are four cases somebody can add a fifth to.
+    ///
+    /// Either directory is enough to state an archive, not both. A
+    /// half-stated archive is a *statement* about the arrangement and an
+    /// incomplete one about the archive, so it selects archive mode and is then
+    /// refused by [`StartupError::DirectoryNotStated`], naming the key that is
+    /// missing. Reading it as inline mode instead would answer an operator who
+    /// wrote `staging_dir` with a complaint about a spool directory they have
+    /// never heard of.
+    ///
+    /// Compiled in every build. A build without inline mode is precisely the
+    /// build that has to refuse a configuration selecting it, and a refusal
+    /// that exists only in the builds which do not need it is no refusal at
+    /// all.
+    ///
+    /// # Errors
+    ///
+    /// [`StartupError::BothArrangementsStated`] or
+    /// [`StartupError::NoArrangementStated`], each naming both statements rather
+    /// than choosing one of them to call the mistake.
+    pub fn selected_by(
+        config: &RecorderConfig,
+        inline_config: Option<&Path>,
+    ) -> Result<Self, StartupError> {
+        let stated = archive_directory_stated(config);
+        match (stated, inline_config) {
+            (Some(_), None) => Ok(Self::Archive),
+            (None, Some(_)) => Ok(Self::Inline),
+            (Some((key, path)), Some(file)) => Err(StartupError::BothArrangementsStated {
+                key,
+                path: path.display().to_string(),
+                inline_config: file.display().to_string(),
+            }),
+            (None, None) => Err(StartupError::NoArrangementStated),
+        }
+    }
+}
+
+/// The first archive directory carrying a value, and the key it was written
+/// under.
+///
+/// The key travels with the path because the refusals name it: an operator who
+/// stated `completed_dir` and not `staging_dir` is told about the one they
+/// wrote, and a message naming the other would read as a complaint about a key
+/// they never touched.
+fn archive_directory_stated(config: &RecorderConfig) -> Option<(&'static str, &Path)> {
+    [
+        ("staging_dir", config.archive.staging_dir.as_path()),
+        ("completed_dir", config.archive.completed_dir.as_path()),
+    ]
+    .into_iter()
+    .find(|(_, dir)| !dir.as_os_str().is_empty())
+}
+
 /// One feed, wired.
 #[derive(Debug, Clone)]
 pub struct FeedPlan {
@@ -251,7 +392,11 @@ pub struct FeedPlan {
     /// The capture device, in AF_PACKET mode. `None` in socket mode, which
     /// captures on the sockets it joined and has no device to open.
     pub device: Option<String>,
-    pub archive: ArchiveWriterConfig,
+    /// `None` in inline mode, where nothing writes an object. Absent rather than
+    /// a value nobody uses: a writer configuration built for a mode that never
+    /// opens a writer is a set of directories an operator would reasonably
+    /// expect to find objects in.
+    pub archive: Option<ArchiveWriterConfig>,
 }
 
 impl FeedPlan {
@@ -263,6 +408,7 @@ impl FeedPlan {
         config: &RecorderConfig,
         identity: &RecorderIdentity,
         staging_max: u64,
+        arrangement: Arrangement,
     ) -> Result<Self, StartupError> {
         let spec = check_spec(feed, index)?;
         if !feed.multicast_group.is_multicast() {
@@ -343,18 +489,25 @@ impl FeedPlan {
             expected_channel_ids: feed.expected_channel_ids.clone(),
             membership_interface,
             device,
-            archive: ArchiveWriterConfig {
-                staging_dir,
-                completed_dir,
-                rotate_bytes: config.archive.rotate_bytes,
-                rotate_interval: config.archive.rotate_interval,
-                staging_max,
-                compression: compression(config.archive.compression)?,
-                identity: identity.clone(),
-                feed: spec.clone(),
-                roles_joined,
-                link_headers: link_headers(config.capture.mode),
-                capture_drop_scope: drop_scope(config.capture.mode),
+            archive: match arrangement {
+                // Reachable only through `Plan::for_inline`, which the feature
+                // gates — but the variant exists in every build now, because a
+                // build without the feature constructs it to refuse it, so this
+                // branch is written in every build too.
+                Arrangement::Inline => None,
+                Arrangement::Archive => Some(ArchiveWriterConfig {
+                    staging_dir,
+                    completed_dir,
+                    rotate_bytes: config.archive.rotate_bytes,
+                    rotate_interval: config.archive.rotate_interval,
+                    staging_max,
+                    compression: compression(config.archive.compression)?,
+                    identity: identity.clone(),
+                    feed: spec.clone(),
+                    roles_joined,
+                    link_headers: link_headers(config.capture.mode),
+                    capture_drop_scope: drop_scope(config.capture.mode),
+                }),
             },
             bindings,
             spec,
@@ -377,11 +530,22 @@ pub struct Plan {
     pub snaplen: usize,
     pub rotate_interval: Duration,
     /// The host's staging budget divided between the feeds that share the disk.
+    /// Zero in inline mode, which has no staging disk to divide.
     pub staging_max_per_feed: u64,
+    pub arrangement: Arrangement,
 }
 
 impl Plan {
     /// Every refusal, in the order an operator would read the file.
+    ///
+    /// Archive mode: the directories are required, the staging budget is
+    /// divided, and every feed is wired with a writer configuration.
+    ///
+    /// Reached when [`Arrangement::selected_by`] answered
+    /// [`Arrangement::Archive`], which is to say when this configuration states
+    /// one of the two directories. Stating one and not the other reaches here
+    /// too, and is refused by key: the arrangement was stated and the archive
+    /// was not finished.
     pub fn from_config(config: &RecorderConfig) -> Result<Self, StartupError> {
         check_identity(config)?;
         let feeds = check_feeds_are_named(config)?;
@@ -426,7 +590,14 @@ impl Plan {
             .iter()
             .enumerate()
             .map(|(index, feed)| {
-                FeedPlan::new(feed, index, config, &identity, staging_max_per_feed)
+                FeedPlan::new(
+                    feed,
+                    index,
+                    config,
+                    &identity,
+                    staging_max_per_feed,
+                    Arrangement::Archive,
+                )
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -440,7 +611,66 @@ impl Plan {
             config: config.clone(),
             identity,
             feeds,
+            arrangement: Arrangement::Archive,
         })
+    }
+
+    /// The same plan for a host that keeps no datagram.
+    ///
+    /// **Every feed check is the same one**, and that is the point of it being
+    /// here rather than a second function somewhere else: the group must still
+    /// be multicast, the port roles must still be distinct, the interface must
+    /// still resolve, and the capture mode must still be compiled in. Inline
+    /// mode joins exactly what archive mode joins and reads exactly what it
+    /// reads; what it does with the datagrams afterwards is the only difference,
+    /// and a plan that skipped these would let a misconfigured feed through on
+    /// the mode that gives an operator the least evidence to diagnose it with.
+    ///
+    /// What is *not* checked is the archive: no directories, no compression, no
+    /// staging budget. Those keys are refused outright by the inline
+    /// configuration — a host believed to be keeping bytes it never kept is the
+    /// failure that refusal exists for — so there is nothing here to validate.
+    #[cfg(feature = "inline")]
+    pub fn for_inline(config: &RecorderConfig) -> Result<Self, StartupError> {
+        check_identity(config)?;
+        check_feeds_are_named(config)?;
+        check_mode_is_compiled_in(config.capture.mode)?;
+
+        let identity = identity_of(config);
+        let feeds = config
+            .feed
+            .iter()
+            .enumerate()
+            .map(|(index, feed)| {
+                // No staging budget to divide: nothing is staged.
+                FeedPlan::new(feed, index, config, &identity, 0, Arrangement::Inline)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Self {
+            mode: config.capture.mode,
+            listen_addr: config.metrics.listen_addr,
+            buffer_bytes: config.capture.buffer,
+            snaplen: config.capture.snaplen(),
+            // The window bound is the inline configuration's, and this field is
+            // the archive's rotation. Carried so the summary can stay one
+            // function, and read by nothing in inline mode.
+            rotate_interval: config.archive.rotate_interval,
+            staging_max_per_feed: 0,
+            config: config.clone(),
+            identity,
+            feeds,
+            arrangement: Arrangement::Inline,
+        })
+    }
+
+    /// Whether this arrangement writes objects.
+    ///
+    /// A method rather than a comparison at each site, so a third arrangement —
+    /// if one is ever added — has one place to answer it.
+    #[must_use]
+    pub fn writes_an_archive(&self) -> bool {
+        self.arrangement == Arrangement::Archive
     }
 
     /// What `--check` prints: enough for a deployment pipeline to see what this
@@ -470,11 +700,17 @@ impl Plan {
             link_headers(self.mode).as_str(),
             drop_scope(self.mode).as_str(),
         );
-        let _ = writeln!(
-            out,
-            "archive rotate={}B or {:?} compression=zstd staging budget={}B per feed",
-            self.config.archive.rotate_bytes, self.rotate_interval, self.staging_max_per_feed,
-        );
+        // Only where an archive is written. In inline mode these keys are
+        // refused outright, and printing a rotation bound and a staging budget
+        // of zero would have an operator reading `--check` for a problem that
+        // is the absence of a thing this arrangement does not do.
+        if self.writes_an_archive() {
+            let _ = writeln!(
+                out,
+                "archive rotate={}B or {:?} compression=zstd staging budget={}B per feed",
+                self.config.archive.rotate_bytes, self.rotate_interval, self.staging_max_per_feed,
+            );
+        }
         let _ = writeln!(out, "metrics listen_addr={}", self.listen_addr);
         let _ = writeln!(
             out,
@@ -487,9 +723,9 @@ impl Plan {
                 .iter()
                 .map(|b| format!("{}={}", b.role.as_str(), b.port))
                 .collect();
-            let _ = writeln!(
+            let _ = write!(
                 out,
-                "feed {} group={} {} interface={} staging={} completed={}",
+                "feed {} group={} {} interface={}",
                 feed.spec,
                 feed.bindings
                     .first()
@@ -498,9 +734,16 @@ impl Plan {
                 feed.device
                     .as_deref()
                     .map_or_else(|| feed.membership_interface.to_string(), ToOwned::to_owned),
-                feed.archive.staging_dir.display(),
-                feed.archive.completed_dir.display(),
             );
+            if let Some(archive) = &feed.archive {
+                let _ = write!(
+                    out,
+                    " staging={} completed={}",
+                    archive.staging_dir.display(),
+                    archive.completed_dir.display(),
+                );
+            }
+            let _ = writeln!(out);
         }
         out
     }
@@ -680,6 +923,18 @@ fn same_directory(first: &Path, second: &Path) -> bool {
 pub mod tests {
     use super::*;
 
+    /// The writer configuration an archive-mode plan wires a feed with.
+    ///
+    /// `Option` since inline mode wires none, and these are archive-mode tests:
+    /// a plan of theirs that produced `None` is a bug in the plan rather than a
+    /// case to handle.
+    fn archive_of(plan: &Plan, feed: usize) -> &ArchiveWriterConfig {
+        plan.feeds[feed]
+            .archive
+            .as_ref()
+            .expect("an archive-mode plan wires every feed with a writer configuration")
+    }
+
     /// A configuration that every refusal below is a single edit away from.
     /// Documentation-range addresses only: this repository is public.
     pub const VALID: &str = r#"
@@ -712,6 +967,195 @@ listen_addr = "127.0.0.1:0"
 
     pub fn valid_config() -> RecorderConfig {
         RecorderConfig::parse(VALID).expect("the fixture parses")
+    }
+
+    /// `VALID` with the two archive directories emptied: the shape inline mode
+    /// runs on, and the shape that states no archive.
+    fn config_stating_no_archive() -> RecorderConfig {
+        let text = VALID
+            .replace(
+                r#"staging_dir     = "/var/lib/dz-recorder/staging""#,
+                r#"staging_dir     = """#,
+            )
+            .replace(
+                r#"completed_dir   = "/var/lib/dz-recorder/completed""#,
+                r#"completed_dir   = """#,
+            );
+        RecorderConfig::parse(&text).expect("the fixture parses")
+    }
+
+    /// Every combination of the two predicates the selection reads, and the
+    /// outcome each one is required to reach.
+    ///
+    /// **This is the test the other four cannot be.** Four cases asserted one
+    /// at a time are four cases somebody can add a fifth to — a third
+    /// arrangement, a defaulted `staging_dir` — and all four would still pass
+    /// over a rule that had stopped being total. So the enumeration itself is
+    /// the assertion: both predicates, all four combinations, each required to
+    /// reach a named outcome, and nothing left over.
+    ///
+    /// The two that refuse are what make the two that run a reading rather than
+    /// a guess, so they are asserted at the same altitude and in the same test
+    /// rather than filed as error-path coverage.
+    #[test]
+    fn the_four_configuration_shapes_are_total_and_two_of_them_run() {
+        let archive_stated = valid_config();
+        let no_archive = config_stating_no_archive();
+        let file = std::path::Path::new("inline.toml");
+
+        // An archive stated and no file: archive mode, which is what every
+        // host recording an archive today already states.
+        assert_eq!(
+            Arrangement::selected_by(&archive_stated, None).expect("an archive is stated"),
+            Arrangement::Archive
+        );
+
+        // A file and no archive: inline mode.
+        assert_eq!(
+            Arrangement::selected_by(&no_archive, Some(file)).expect("the file is stated"),
+            Arrangement::Inline
+        );
+
+        // Both: refused, with both statements in the message. Never resolved —
+        // resolving it is starting a recorder in an arrangement its own
+        // configuration contradicts.
+        let message = Arrangement::selected_by(&archive_stated, Some(file))
+            .expect_err("both arrangements were stated")
+            .to_string();
+        assert!(message.contains("archive.staging_dir"), "{message}");
+        assert!(message.contains("inline.toml"), "{message}");
+
+        // Neither: refused, naming both ways of stating one. This is the row
+        // that leaves no silence for a default to be placed on.
+        let message = Arrangement::selected_by(&no_archive, None)
+            .expect_err("nothing states an arrangement")
+            .to_string();
+        assert!(message.contains("archive.staging_dir"), "{message}");
+        assert!(message.contains("archive.completed_dir"), "{message}");
+        assert!(message.contains("--inline-config"), "{message}");
+    }
+
+    /// Either directory states an archive, and a half-stated one is then
+    /// refused by key rather than read as the other arrangement.
+    ///
+    /// The order matters and is asserted: an operator who wrote `completed_dir`
+    /// alone is answered about `completed_dir`. Told about `staging_dir`
+    /// instead, they would be reading a complaint about a key they never
+    /// touched; told about a spool directory, they would be reading about a
+    /// mode they never asked for.
+    #[test]
+    fn a_half_stated_archive_states_the_arrangement_and_is_refused_by_key() {
+        for (key, removed) in [
+            (
+                "staging_dir",
+                r#"staging_dir     = "/var/lib/dz-recorder/staging""#,
+            ),
+            (
+                "completed_dir",
+                r#"completed_dir   = "/var/lib/dz-recorder/completed""#,
+            ),
+        ] {
+            let text = VALID.replace(removed, "");
+            let config = RecorderConfig::parse(&text).expect("the fixture parses");
+            assert_eq!(
+                Arrangement::selected_by(&config, None)
+                    .expect("one directory is enough to state an archive"),
+                Arrangement::Archive,
+                "a half-stated archive is a statement about the arrangement"
+            );
+            let message = Plan::from_config(&config)
+                .expect_err("and an incomplete statement about the archive")
+                .to_string();
+            assert!(message.contains(key), "{message}");
+        }
+
+        // And the message an operator sees names the key they wrote, not the
+        // other one.
+        let text = VALID.replace(
+            r#"staging_dir     = "/var/lib/dz-recorder/staging""#,
+            r#"staging_dir     = """#,
+        );
+        let config = RecorderConfig::parse(&text).expect("the fixture parses");
+        let (key, _) = archive_directory_stated(&config).expect("completed_dir carries a value");
+        assert_eq!(key, "completed_dir");
+    }
+
+    #[cfg(feature = "inline")]
+    fn inline_plan_of(text: &str) -> Result<Plan, StartupError> {
+        Plan::for_inline(&RecorderConfig::parse(text).expect("the fixture parses"))
+    }
+
+    /// An inline plan wires no writer configuration, and says so by absence.
+    ///
+    /// A set of directories built for a mode that never opens a writer is a set
+    /// of directories an operator would reasonably expect to find objects in.
+    #[cfg(feature = "inline")]
+    #[test]
+    fn an_inline_plan_wires_no_writer_configuration() {
+        let plan = inline_plan_of(VALID).expect("the fixture is one inline mode can start on");
+        assert_eq!(plan.arrangement, Arrangement::Inline);
+        assert_eq!(plan.staging_max_per_feed, 0, "nothing is staged");
+        for feed in &plan.feeds {
+            assert!(
+                feed.archive.is_none(),
+                "feed {} was wired with a writer nothing will open",
+                feed.spec
+            );
+        }
+    }
+
+    /// Inline mode needs no archive directories, and archive mode still does.
+    ///
+    /// The two are mutually exclusive by construction, which is the whole reason
+    /// the plan has two constructors rather than a flag.
+    #[cfg(feature = "inline")]
+    #[test]
+    fn an_inline_plan_needs_no_archive_directories() {
+        let text = VALID
+            .replace(
+                r#"staging_dir     = "/var/lib/dz-recorder/staging""#,
+                r#"staging_dir     = """#,
+            )
+            .replace(
+                r#"completed_dir   = "/var/lib/dz-recorder/completed""#,
+                r#"completed_dir   = """#,
+            );
+        assert!(
+            inline_plan_of(&text).is_ok(),
+            "inline mode writes no object, so it has no directory to require"
+        );
+        assert!(
+            matches!(plan_of(&text), Err(StartupError::DirectoryNotStated { .. })),
+            "archive mode still requires them"
+        );
+    }
+
+    /// **Every feed check still runs.**
+    ///
+    /// Inline mode joins exactly what archive mode joins and reads exactly what
+    /// it reads. Letting a misconfigured feed through here would let it through
+    /// on the mode that gives an operator the least evidence to diagnose it
+    /// with — there is no archive to go back to.
+    #[cfg(feature = "inline")]
+    #[test]
+    fn an_inline_plan_refuses_every_feed_fault_an_archive_plan_refuses() {
+        let not_multicast = VALID.replace(
+            r#"multicast_group = "233.252.0.1""#,
+            r#"multicast_group = "192.0.2.1""#,
+        );
+        assert!(
+            matches!(
+                inline_plan_of(&not_multicast),
+                Err(StartupError::GroupNotMulticast { .. })
+            ),
+            "a group that is not multicast is refused in both arrangements"
+        );
+
+        let no_site = VALID.replace(r#"site     = "site-a""#, r#"site     = """#);
+        assert!(
+            inline_plan_of(&no_site).is_err(),
+            "an unnamed host is refused in both arrangements"
+        );
     }
 
     fn plan_of(text: &str) -> Result<Plan, StartupError> {
@@ -803,10 +1247,10 @@ listen_addr = "127.0.0.1:0"
     fn the_drop_scope_reaches_the_archive_configuration() {
         let plan = plan_of(VALID).expect("a valid configuration");
         assert_eq!(
-            plan.feeds[0].archive.capture_drop_scope,
+            archive_of(&plan, 0).capture_drop_scope,
             CaptureDropScope::PortRole
         );
-        assert_eq!(plan.feeds[0].archive.link_headers, LinkHeaders::Synthesised);
+        assert_eq!(archive_of(&plan, 0).link_headers, LinkHeaders::Synthesised);
     }
 
     #[test]
@@ -903,11 +1347,11 @@ listen_addr = "127.0.0.1:0"
         );
         let plan = plan_of(&text).expect("two feeds on two groups is a valid configuration");
         assert_ne!(
-            plan.feeds[0].archive.staging_dir,
-            plan.feeds[1].archive.staging_dir
+            archive_of(&plan, 0).staging_dir,
+            archive_of(&plan, 1).staging_dir
         );
-        assert!(plan.feeds[0].archive.staging_dir.ends_with("top-of-book"));
-        assert!(plan.feeds[1].archive.completed_dir.ends_with("depth"));
+        assert!(archive_of(&plan, 0).staging_dir.ends_with("top-of-book"));
+        assert!(archive_of(&plan, 1).completed_dir.ends_with("depth"));
     }
 
     #[test]
@@ -918,8 +1362,8 @@ listen_addr = "127.0.0.1:0"
         );
         let plan = plan_of(&text).expect("two feeds is a valid configuration");
         assert_eq!(plan.staging_max_per_feed, 1024 * 1024 * 1024 / 2);
-        assert_eq!(plan.feeds[0].archive.staging_max, plan.staging_max_per_feed);
-        assert_eq!(plan.feeds[1].archive.staging_max, plan.staging_max_per_feed);
+        assert_eq!(archive_of(&plan, 0).staging_max, plan.staging_max_per_feed);
+        assert_eq!(archive_of(&plan, 1).staging_max, plan.staging_max_per_feed);
     }
 
     #[test]
@@ -1039,10 +1483,10 @@ listen_addr = "127.0.0.1:0"
             );
         let plan = plan_of(&text).expect("afpacket on a named device is a valid configuration");
         assert_eq!(
-            plan.feeds[0].archive.capture_drop_scope,
+            archive_of(&plan, 0).capture_drop_scope,
             CaptureDropScope::CaptureHandle
         );
-        assert_eq!(plan.feeds[0].archive.link_headers, LinkHeaders::Captured);
+        assert_eq!(archive_of(&plan, 0).link_headers, LinkHeaders::Captured);
         assert_eq!(plan.feeds[0].device.as_deref(), Some("lo"));
         assert_eq!(
             plan.feeds[0].membership_interface,
@@ -1053,7 +1497,7 @@ listen_addr = "127.0.0.1:0"
         // write is provenance thrown away: a reader asking which interface a
         // segment arrived on would have to infer it from the device name.
         assert_eq!(
-            plan.feeds[0].archive.roles_joined[0].source,
+            archive_of(&plan, 0).roles_joined[0].source,
             Some(Ipv4Addr::LOCALHOST)
         );
     }

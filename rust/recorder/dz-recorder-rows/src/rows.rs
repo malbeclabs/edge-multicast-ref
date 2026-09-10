@@ -84,6 +84,61 @@ impl From<RecvTsKind> for RecvTsKindLabel {
     }
 }
 
+/// Whether the datagrams a row was derived from were kept and verified.
+///
+/// **This is not decoration, and it is not inferable from anything else on the
+/// row.** [`Self::Archive`] means the row came from an object whose sha256 was
+/// checked against its manifest before a single row was derived, and whose
+/// bytes are still there to derive again — under a rule that does not exist
+/// yet, or after a bug in this crate is fixed. [`Self::Live`] means the
+/// datagrams were derived as they arrived and then dropped: nothing verified
+/// them, nothing can re-derive them, and a derivation defect found later can be
+/// stopped but not corrected.
+///
+/// A reader could in principle notice that a live row's `object_sha256` is
+/// empty, and that is exactly why this exists instead. An empty digest field is
+/// a trap: a query that treats it as *verified* is wrong in the direction that
+/// matters, and nothing about the column's name warns anybody. The provenance of
+/// a finding is not something a reader should have to reconstruct from the
+/// absence of a value.
+///
+/// Deliberately in no `ORDER BY`. A datagram recorded once is one row, and
+/// putting provenance in a sort key would make two modes' views of it two.
+///
+/// # The default is [`Self::Archive`], and it is not what keeps a row honest
+///
+/// [`RowBatch`] derives `Default` because the column-store sink resets its
+/// buffer that way, and the batch-level fields of that buffer are never sent —
+/// only the per-grain vectors are. So the default exists for one caller that
+/// does not use it, and matches both the DDL's own `DEFAULT` and the meaning of
+/// every row written before this column existed.
+///
+/// What actually prevents a live row from claiming it was verified is that
+/// [`DeriveInput`](crate::DeriveInput) has no `Default`: a derivation must name
+/// its provenance, the compiler will not let it be omitted, and every row in
+/// the batch is stamped from that one value rather than filled in per grain.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum Derivation {
+    /// From a stored object, whose digest was checked before deriving.
+    #[default]
+    Archive,
+    /// From datagrams as they arrived, which were then not kept.
+    Live,
+}
+
+impl Derivation {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Archive => "archive",
+            Self::Live => "live",
+        }
+    }
+}
+
 /// The scope an admitted capture loss may be subtracted at.
 ///
 /// The field a dashboard is most likely to get wrong, which is why it travels on
@@ -243,6 +298,7 @@ pub struct Datagram {
     pub drop_scope: DropScope,
     pub object_key: String,
     pub object_sha256: String,
+    pub derivation: Derivation,
 }
 
 /// Where one era opened, so that the monotonic index is a rank over openings.
@@ -300,6 +356,7 @@ pub struct Era {
     pub continuation: u8,
     pub object_key: String,
     pub object_sha256: String,
+    pub derivation: Derivation,
 }
 
 /// The manifest, as a table: one row per segment per channel instance.
@@ -343,6 +400,7 @@ pub struct SegmentCoverage {
     pub roles_joined: Vec<RoleJoinRow>,
     pub object_key: String,
     pub object_sha256: String,
+    pub derivation: Derivation,
     pub build_version: String,
     pub build_commit: String,
     pub config_hash: String,
@@ -432,6 +490,7 @@ pub struct SequenceGap {
     pub verdict: Verdict,
     /// Where the evidence is.
     pub object_key: String,
+    pub derivation: Derivation,
 }
 
 /// The rule set's verdicts, kept.
@@ -462,6 +521,7 @@ pub struct ConformanceFinding {
     pub verdict: FindingVerdict,
     pub detail: String,
     pub object_key: String,
+    pub derivation: Derivation,
     /// The evidence range.
     pub first_seq: u64,
     pub last_seq: u64,
@@ -627,6 +687,7 @@ pub struct Event {
 
     pub object_key: String,
     pub object_sha256: String,
+    pub derivation: Derivation,
     pub datagram_index: u64,
 }
 
@@ -676,6 +737,7 @@ pub struct Instrument {
     /// an archive can make.
     pub declared_count: Option<u32>,
     pub object_key: String,
+    pub derivation: Derivation,
 }
 
 /// One change in an instrument's top of book.
@@ -733,6 +795,7 @@ pub struct BookTop {
     pub uncertain_since: Option<u64>,
     pub uncertain_reason: UncertainReason,
     pub object_key: String,
+    pub derivation: Derivation,
 }
 
 /// Why a top of book cannot be believed.
@@ -832,6 +895,9 @@ impl std::fmt::Display for Grain {
 pub struct RowBatch {
     pub object_key: String,
     pub object_sha256: String,
+    /// Stamped on every row in the batch, so a grain cannot disagree with its
+    /// siblings about where the datagrams behind it went.
+    pub derivation: Derivation,
     pub datagram: Vec<Datagram>,
     pub era: Vec<Era>,
     pub segment_coverage: Vec<SegmentCoverage>,

@@ -19,7 +19,7 @@ use pcap_file::pcapng::blocks::section_header::{SectionHeaderBlock, SectionHeade
 use pcap_file::pcapng::{Block, PcapNgReader};
 use pcap_file::{DataLink, PcapError};
 
-use crate::owned::OwnedDatagram;
+use dz_recorder_core::OwnedDatagram;
 
 /// Ethernet comes first, then the IPv4 header — whose length is read rather
 /// than assumed — then 8 bytes of UDP.

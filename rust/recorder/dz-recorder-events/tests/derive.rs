@@ -19,7 +19,7 @@ use dz_edge_mbp::{
 use dz_edge_refdata::ManifestSummary;
 use dz_edge_tob::{Quote, TopOfBook, Trade, MAGIC_TOB};
 use dz_recorder_events::{derive_events, DerivedEvents, EventInput};
-use dz_recorder_rows::{Event, MessageTypeLabel};
+use dz_recorder_rows::{Derivation, Event, MessageTypeLabel};
 
 const SNAPSHOT: u32 = 7;
 const ANCHOR_SEQ: u64 = 4_242;
@@ -33,6 +33,7 @@ fn input<'a>(identity: &'a dz_recorder_core::RecorderIdentity, magic: u16) -> Ev
         segment_seq: 3,
         magic,
         persist_snapshot_levels: true,
+        derivation: Derivation::Archive,
         observation: "observation",
     }
 }

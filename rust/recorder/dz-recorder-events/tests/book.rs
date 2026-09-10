@@ -18,7 +18,7 @@ use dz_edge_mbp::{
 };
 use dz_edge_tob::{Quote, TopOfBook, MAGIC_TOB};
 use dz_recorder_events::{derive_events, state_key, DerivedEvents, EventInput, Side, Top};
-use dz_recorder_rows::{BookTop, UncertainReason};
+use dz_recorder_rows::{BookTop, Derivation, UncertainReason};
 
 const SNAPSHOT: u32 = 7;
 const ANCHOR_SEQ: u64 = 4_242;
@@ -45,6 +45,7 @@ fn derive<F: dz_edge_core::Feed>(groups: &[Group<'_>], magic: u16) -> DerivedEve
             magic,
             observation: "observation",
             persist_snapshot_levels: false,
+            derivation: Derivation::Archive,
         },
     )
     .expect("the log does not fail")

@@ -29,6 +29,21 @@ dz-recorder-health = { path = "../dz-recorder-health" }
 dz-edge-core = { path = "../../codec/dz-edge-core" }
 thiserror = { workspace = true }
 tiny_http = { workspace = true }
+# Inline mode, and every one of them optional: a `--no-default-features` build of
+# the recorder has no column-store client, no HTTP client and no row crates in its
+# tree. That build is the record-only one and is asked for by name — the feature
+# is in the default set because the mode is the default mode. What keeps the
+# destination out of the record path is not this list: it is that the capture path
+# never blocks and never parses, and that derivation and posting are off it
+# entirely. See the `inline` feature below.
+dz-recorder-inline = { path = "../dz-recorder-inline", optional = true }
+dz-recorder-rows = { path = "../dz-recorder-rows", optional = true }
+dz-recorder-clickhouse = { path = "../dz-recorder-clickhouse", optional = true }
+dz-recorder-load = { path = "../dz-recorder-load", optional = true }
+# The second configuration file's parser. The recorder's own file is parsed by
+# `dz-recorder-core`, so a default build needs neither of these.
+serde = { workspace = true, optional = true }
+toml = { workspace = true, optional = true }
 # The only way to stop a recorder without losing the segment it holds. std has no
 # safe signal API and this crate forbids unsafe, so the handler is a dependency
 # rather than a syscall — the same one and the same feature the receivers in this
@@ -39,10 +54,46 @@ ctrlc = { version = "3", features = ["termination"] }
 tempfile = { workspace = true }
 
 [features]
+# Inline mode's feature is in the default set, and not because the mode is a
+# default: neither arrangement is. It is because the arrangement is a property of
+# a host's CONFIGURATION and the released asset is one asset for the fleet. A
+# default build carrying only one arrangement would have to be matched to
+# configurations at deploy time — a second thing to get right, whose wrong answer
+# is a startup refusal on a host whose configuration was correct.
+#
+# `--no-default-features` is the record-only build, asked for by name. It carries
+# no column-store client, no HTTP client and no row crates, can only ever be in
+# archive mode, and refuses a configuration that SELECTS inline mode by this
+# feature's name. That build is what the feature is still for.
+default = ["inline"]
 # AF_PACKET capture, which needs libpcap-dev at build time. Off by default so the
 # binary builds where that package is not installed; a configuration asking for
 # it then fails at startup rather than silently recording through the fallback.
 afpacket = ["dz-recorder-capture/afpacket"]
+# Inline mode: one process captures a feed, derives its rows through the same
+# derivation archive mode uses, and loads them — keeping no datagrams. In
+# `default`, above, because one released binary serves hosts in both
+# arrangements.
+#
+# A configuration stating the inline arrangement — `--inline-config`, and
+# neither archive directory carrying a value — fails at startup in a build
+# without this feature, naming it, exactly as `capture.mode = "afpacket"` does
+# for its own. Falling back to archive mode would leave a host keeping bytes
+# where rows were asked for, which is the arrangement nobody chose.
+inline = [
+    "dep:dz-recorder-inline",
+    "dep:dz-recorder-rows",
+    "dep:dz-recorder-clickhouse",
+    "dep:dz-recorder-load",
+    "dep:serde",
+    "dep:toml",
+]
+# TLS for the destination, passed through to the client that speaks to it. An
+# `https` endpoint is refused rather than downgraded by a build without this, so
+# a deployment that needs one turns it on beside `inline`. Weak, so that asking
+# for it does not pull the column-store client into a build that has no inline
+# mode.
+tls = ["dz-recorder-clickhouse?/tls"]
 # The shutdown test at binary altitude. It needs IP_MULTICAST_LOOP delivery to
 # this host, which is a property of the host rather than of the build, so it is
 # off by default and CI enables it in the job that has already probed for it.

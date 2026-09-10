@@ -331,11 +331,17 @@ dependencies = [
  "dz-edge-core",
  "dz-recorder-archive",
  "dz-recorder-capture",
+ "dz-recorder-clickhouse",
  "dz-recorder-core",
  "dz-recorder-health",
+ "dz-recorder-inline",
+ "dz-recorder-load",
+ "dz-recorder-rows",
+ "serde",
  "tempfile",
  "thiserror 1.0.69",
  "tiny_http",
+ "toml",
 ]
 
 [[package]]
@@ -419,6 +425,7 @@ dependencies = [
  "dz-recorder-conformance",
  "dz-recorder-core",
  "dz-recorder-events",
+ "dz-recorder-inline",
  "dz-recorder-replay",
  "dz-recorder-rows",
  "serde_json",
@@ -446,6 +453,24 @@ dependencies = [
  "dz-edge-core",
  "dz-recorder-core",
  "prometheus",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "dz-recorder-inline"
+version = "0.1.1"
+dependencies = [
+ "dz-edge-core",
+ "dz-recorder-archive",
+ "dz-recorder-core",
+ "dz-recorder-load",
+ "dz-recorder-replay",
+ "dz-recorder-rows",
+ "prometheus",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
  "thiserror 1.0.69",
 ]
 

@@ -19,8 +19,8 @@ use dz_recorder_archive::writer::{LinkHeaders, RoleJoin};
 use dz_recorder_archive::{Compression, SegmentManifest};
 use dz_recorder_core::{CaptureDropScope, RecorderIdentity};
 use dz_recorder_replay::synthetic::{port_for, SyntheticPublisher, GROUP};
-use dz_recorder_replay::OwnedDatagram;
-use dz_recorder_rows::{derive_object, Derived, SegmentTrailer};
+use dz_recorder_replay::{ArchiveSource, OwnedDatagram};
+use dz_recorder_rows::{derive, derive_object, Derivation, DeriveInput, Derived, SegmentTrailer};
 use tempfile::TempDir;
 
 pub const FEED: &str = "top-of-book";
@@ -46,6 +46,35 @@ impl Recorded {
     /// The same, with the predecessor's trailer in hand.
     pub fn rows_after(&self, preceding: &SegmentTrailer) -> Derived {
         derive_object(&self.object, &self.manifest, Some(preceding)).expect("the object derives")
+    }
+
+    /// The same datagrams, derived the way inline mode derives a live window:
+    /// through [`derive`] rather than `derive_object`, with no digest to check
+    /// and the provenance stated as [`Derivation::Live`].
+    ///
+    /// This is not inline mode — there is no capture here and no window bound.
+    /// It is the part of inline mode that can be exercised with no capture at
+    /// all: that the derivation is a function of the provenance it was handed,
+    /// rather than five grains each deciding for themselves.
+    pub fn rows_as_live(&self) -> Derived {
+        // From the manifest rather than assumed, so a fixture recorded at
+        // capture-handle scope derives at capture-handle scope here too.
+        let drop_scope = match self.manifest.capture_drop_scope.as_str() {
+            "port-role" => CaptureDropScope::PortRole,
+            "capture-handle" => CaptureDropScope::CaptureHandle,
+            other => panic!("the fixture's manifest states an unknown scope: `{other}`"),
+        };
+        let mut source = ArchiveSource::open(&self.object).expect("the object opens");
+        derive(
+            &mut source,
+            &DeriveInput {
+                manifest: &self.manifest,
+                drop_scope,
+                preceding: None,
+                derivation: Derivation::Live,
+            },
+        )
+        .expect("the object derives")
     }
 }
 

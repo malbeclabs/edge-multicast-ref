@@ -1,3 +1,16 @@
+# An ARCHIVE-MODE configuration. The `[archive] staging_dir` and `completed_dir`
+# below are what select that arrangement — there is no flag, and this file is
+# the whole of the statement:
+#
+#   dz-recorder --config recorder.toml
+#
+# Neither arrangement is a default, so this file states one and only one. Add
+# `--inline-config` beside it and the pair states both, which is refused by key
+# and by file before a socket is bound — that refusal is what stops a host being
+# read as the other arrangement and quietly ceasing to keep bytes. Inline mode's
+# own keys are in a second file, `inline.example.toml`, and a host running that
+# arrangement leaves the two directories below unstated.
+#
 # Every value here is a placeholder, and every address is from a range reserved
 # for documentation: 233.252.0.0/24 is MCAST-TEST-NET and 192.0.2.0/24 is RFC
 # 5737. Neither RFC 1918 space nor 239.0.0.0/8 belongs in a public example —

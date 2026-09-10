@@ -1,0 +1,1198 @@
+# Inline mode — Implementation Plan
+
+**Goal:** One `dz-recorder` process that captures a feed, derives its rows
+through the same derivation archive mode uses, spools them to disk and loads
+them into the column store — keeping no datagrams, and saying so on every row.
+And **neither arrangement is a default**: each is selected by the
+configuration only it can run on. Archive mode is entered by the two
+directories it has always required, inline mode by the file carrying its spool,
+ledger and destination; both stated is refused, neither stated is refused.
+
+**Progress marks:** a ticked box was verified against the tree — the identifier,
+error variant, config key, DDL literal or test function was grepped for and
+found at the path recorded beside the task. An unticked box is outstanding, and
+each task carrying one says what is missing and where the gap is. Where a
+bullet's text turned out not to describe what the tree does or should do, the
+text is amended and the reason given before the box is ticked.
+
+**Spec:** `docs/superpowers/specs/2026-09-08-recorder-inline-mode-design.md`
+
+**Tech stack:** Rust 2021, workspace MSRV. The new crate takes no dependency
+that is not already in the workspace. Everything the mode adds to the recorder
+binary is behind a build feature, and that feature is in the default set
+because the arrangement is a property of a host's configuration while the
+released asset is one asset for the fleet — so a recorder that only records asks
+for the smaller tree by name, with `--no-default-features`, and gets a binary
+with no HTTP client, no column-store crate and no row crates that can only ever
+be in archive mode.
+
+---
+
+## Scope, and what it is not
+
+This lands inline mode end to end: the ring, the window, the spool, the ledger,
+the pipeline, the configuration, the refusals, the metrics and the tests.
+
+It does **not** change what archive mode does. Not its configuration, not its
+objects, not its manifest, not its metrics, and not `dz-recorder-load`'s
+behaviour. Two things outside inline mode's own code do change:
+
+- the `derivation` column, which defaults to `archive` so that every row already
+  written keeps its meaning; and
+- nothing at all about how archive mode is entered. Task 11 selects the
+  arrangement from the configuration, and an archive-mode host's configuration
+  already carries the keys that select it — so no `ExecStart`, no `ExecStartPre`
+  and no infrastructure repository needs an edit. That is the argument the
+  selection was chosen on: see
+  *[What it costs](../specs/2026-09-08-recorder-inline-mode-design.md#what-it-costs)*.
+
+| Task group | Lands | Runs in CI with |
+|---|---|---|
+| 1 | the provenance column, in the rows and in the DDL | nothing |
+| 2 | `dz-recorder-load` as a library as well as a binary | nothing |
+| 3–6 | `dz-recorder-inline`, the whole mode as a library | nothing |
+| 7 | the equivalence gate | nothing |
+| 8–9 | the recorder binary's inline mode | nothing; a server behind `clickhouse-tests` |
+| 10 | documentation | — |
+| 11 | the arrangement, selected from the configuration by what each mode requires | nothing |
+| 12 | what a review of the whole of the above found | nothing |
+
+Tasks 1 and 2 are independent of each other and of everything after them. Task 7
+is the gate the design rests on and is written against tasks 3–6 only, not
+against the binary. Task 11 is last because it can only be written once both
+modes exist to choose between.
+
+---
+
+## Global constraints
+
+- **Vocabulary:** `GLOSSARY.md` governs every identifier, comment, test name,
+  metric name, config key and commit message. `datagram` never `frame`; `era`
+  never `epoch`; `feed` or `path` never `lane`; `fan-out` never `tee`; `arm` is
+  banned outright in every sense. `source` is never bare in an identifier, a
+  config key, a metric name or a log field — `WindowSource` is admissible only
+  because it is the qualified form the workspace already uses in
+  `ArchiveSource` and `SocketSource`.
+- **`RecorderConfig` gains no key.** Not the destination, not a credential, not
+  the window bound, not the spool. A task that needs one has misread the design:
+  every existing `config_hash` in the fleet must stay byte-for-byte what it is,
+  because that hash is written into archives as provenance.
+- **The capture path never blocks and never parses.** No task may make the
+  capture loop wait on the ring, on the spool, on the derivation or on the
+  destination. No task may decode a message anywhere in the process.
+- **Derivation is called, never reimplemented.** `dz-recorder-rows` is not
+  modified by any task after task 1. A task that wants to change `derive` has
+  found a bug in archive mode and should say so instead.
+- **Lints:** `#![forbid(unsafe_code)]` and the workspace clippy set on the new
+  crate. `cargo clippy --all-targets --all-features -- -D warnings` and
+  `cargo fmt --all --check` pass at every task boundary. CI's toolchain is newer
+  than local stable, so lint against CI's version before pushing.
+- **The default is a reading, not a fallback and not an invention.** No task may
+  make a command line naming no mode *fall back* to archive mode, and none may
+  invent a spool directory, a ledger path or a destination so that inline mode
+  can start without its own file. Both are refusals that name the flag. A
+  recorder that starts on a guess is the first property the binary documents,
+  and a default is the easiest place to break it.
+- **Every test in tasks 1–7 needs no socket, no privileges and no server.**
+
+---
+
+## The pieces where the obvious implementation is the wrong one
+
+Stated up front, because each was found by reading the existing code and each is
+a task below that would otherwise be written wrong.
+
+| Piece | Why it is not obvious |
+|---|---|
+| the ring charges its drops as loss | a datagram the deriver never saw is a sequence value with nothing admitted behind it, and the row that describes it gets a `publisher` verdict — the recorder's own loss reported as the publisher's. `PendingLoss` is the fix and it already exists |
+| the ring pools its slots | `OwnedDatagram::from_recorded` allocates a `Vec` per datagram, and an allocation per datagram on the capture thread is a regression against a path that today costs a copy and a buffered write |
+| a fresh `LossDeriver` per window is correct | it looks like state that must span windows; archive mode already creates one per object and carries continuity in the trailer, so a window behaves identically |
+| the window's manifest digest is empty, not synthesised | a digest over rows would be a different claim wearing the field name of a claim about datagrams |
+| the window is walked twice | `derive` stamps the manifest onto rows as it reads, and the manifest describes what the window saw — so one pass hands it a tally of nothing. It does not fail: it writes rows stamped at the Unix epoch under one key per window sequence number, which is one key for every run the recorder makes. **This row was added by a review, after the tree got it wrong** |
+| an empty window spends no window sequence number | it looks like a counter of windows opened. It is the thing that tells a reader the derivation was down, so spending one on a window a quiet feed produced puts that claim in front of somebody whose feed was merely silent — and leaves the next window's era anchor uncertain into the bargain |
+| the spool is written on every window | a disk path used only during an outage is first exercised during an outage. It is also what bounds a crash to one window, and what brings the ledger back |
+| the spool never applies backpressure | blocking derivation stalls the ring, overflows the receive queue, and turns a column-store outage into feed loss plus false publisher findings in every window written during it |
+| the ledger entry is written when rows land, not when accepted | a sink that coalesces has taken rows it has not sent; an entry on acceptance marks a window loaded whose rows a crash then loses |
+| three stages, not two | `write_batch` posts synchronously and retries, so posting on the derivation thread lets a slow destination reach the capture |
+| the provenance column is in no `ORDER BY` | putting it in the sort key makes two modes' views of one datagram two rows instead of one |
+| the mode is chosen on the command line | a key in `RecorderConfig` changes the archive's provenance hash, and a password rotation would change what an archive says produced it |
+| the two modes' refusals are what make the default safe, not the flag | archive mode requires two directories inline mode refuses a value for, so no host can be moved between the modes silently. Weaken either refusal and the default starts losing evidence quietly, which is the failure a default is worst at showing |
+| the default is a *reading*, not a manufactured configuration | inline mode needs a spool and a destination and neither has a defensible value to invent, so a command line naming no mode and giving no second file is a refusal naming both flags. A default that invented a path would be the recorder guessing, which is the one thing it documents that it does not do |
+| the build feature moves into the default set | a binary whose own default mode its feature set excludes refuses every command line that names no mode. The feature still exists, and `--no-default-features` is still the record-only build; what changes is which way round the default runs |
+
+---
+
+## Tasks
+
+### 1. The provenance column
+
+- [x] `dz-recorder-rows/src/rows.rs`: a `derivation` field on all eight grains —
+      `Datagram`, `SegmentCoverage`, `SequenceGap`, `Era`, `ConformanceFinding`,
+      and the market data three, `Event`, `Instrument` and `BookTop`.
+      A two-token type, not a bare `String`, so a third value cannot be written
+      by accident; `archive` and `live` are its tokens.
+- [x] `dz-recorder-rows/src/derive.rs`: `DeriveInput` carries the provenance and
+      has no `Default`, so a derivation states it or does not compile;
+      `derive_object` says `archive` because it verified the digest itself.
+      An input rather than a patch applied to the batch afterwards: it is the
+      same kind of fact as `drop_scope` — one the caller knows and the
+      derivation cannot observe — and stamping it costs nothing where walking
+      a hundred thousand rows to overwrite a field would.
+      `dz-recorder-events` takes the same field on `EventInput`, for the market
+      data grains.
+- [x] `dz-recorder-clickhouse/db/clickhouse/008_recorder_derivation.sql`:
+      `derivation LowCardinality(String) DEFAULT 'archive'` on the eight tables.
+      `005` through `007` are the market data migrations, so this is `008`; the
+      column is declared in `001` and `005` beside the tables themselves, and
+      this file is what reaches a deployment whose tables already exist.
+      In no `ORDER BY`. The file states why the default exists — rows written
+      before this migration were all derived from archived objects.
+- [x] `dz-recorder-rows/tests/column_names.rs`: the literal, so a rename cannot
+      pass.
+- [x] Golden tests updated.
+
+**Test:** a golden row set carries `archive` on every grain, and the DDL's
+`ORDER BY` clauses are asserted unchanged — the deduplication key is what this
+task must not touch.
+
+**Done.** `Derivation` at `rows.rs:124`, the field on all eight grains
+(`rows.rs:301`, `:359`, `:403`, `:493`, `:524`, `:690`, `:740`, `:798`), the
+migration on all eight tables and in no `ORDER BY`, and
+`dz-recorder-clickhouse/tests/ddl.rs:413`
+`provenance_is_on_every_grain_and_in_no_sort_key` holding both halves.
+
+### 2. `dz-recorder-load` gains a library
+
+Mechanical, and **no behaviour changes**. The existing tests are the net.
+
+- [x] `src/lib.rs` exposing `ledger` (`Ledger`, `Entry`, `LedgerError`),
+      `metrics` (`LoaderMetrics` and its label discipline), the pieces of
+      `loader` inline mode reuses (`Pending`, `record_landed`, `now_unix_nanos`),
+      and — less tidily than this plan first assumed — `config` and
+      `market_data`. The pass reaches into both for `MarketDataFeed` and for the
+      market data derivation, and the pass cannot be a library while half of
+      what it calls is not.
+- [x] `main.rs` keeps the binary's own concerns — the command line, the metrics
+      endpoint, the build identity, the directory walk and the pass loop — and
+      reaches the rest through the library.
+- [x] The crate's description says it is both.
+
+**Test:** the whole existing suite, unchanged, plus the binary test. A diff that
+touches a behaviour is a diff that has exceeded this task.
+
+**Done.** `dz-recorder-load/src/lib.rs:53-62` exports all seven names, and
+`main.rs` declares only `cli`, `endpoint` and `identity` of its own.
+
+### 3. `dz-recorder-inline`: the ring, and the debt
+
+New crate `rust/recorder/dz-recorder-inline`, added to workspace `members`.
+
+- [x] `ring.rs`: a bounded ring of pooled slots between the capture thread and
+      the derivation thread. Each slot owns buffers sized to the datagram cap
+      and is returned to the pool after derivation reads it, so steady state
+      allocates nothing.
+- [x] A push that does not fit drops the datagram, calls `PendingLoss::owe(1)`
+      and returns without waiting. **Never blocks, never waits, never grows.**
+      Reached through `PendingLoss::undelivered`, which *is* `owe(1)`
+      (`dz-recorder-capture/src/socket.rs:108`) — the debt's own vocabulary
+      rather than a second spelling of it.
+- [x] The next datagram accepted declares everything owed in its `drop_delta`,
+      on top of what the capture already charged it, and the debt is cleared
+      only once that datagram is in the ring. `ring.rs:225` charges,
+      `ring.rs:229` settles inside the `Ok` branch of the send, and a send that
+      fills re-owes at `ring.rs:237`.
+- [x] Saturating arithmetic on the debt, because a delta that wrapped would
+      report an outage as a clean stretch. `socket.rs:93`.
+
+**Tests, and the first is the one whose mutant must die:**
+
+- A full ring drops and counts rather than waiting; the next accepted datagram
+  carries the drop. Revert the `owe` and this test must fail.
+- The debt survives several consecutive drops and is charged once, in full.
+- A drop of the datagram that was already carrying a delta charges both.
+- Steady-state operation returns every slot to the pool: a run of N datagrams
+  through a ring of capacity K allocates K slots, not N.
+
+### 4. `dz-recorder-inline`: the window and its manifest
+
+- [x] `window.rs`: `WindowSource`, a `Source` over the ring that hands datagrams
+      through and returns `Ok(None)` at the window bound — bytes or age,
+      whichever comes first. A quiet feed's window closes on age, which is what
+      the age bound is for.
+- [x] The window counts most of what the archive writer counts: datagram and
+      payload totals (`window.rs:87`), per-instance coverage, short datagrams
+      and instances dropped through the archive writer's own `CoverageTracker`
+      (`manifest.rs:112`), the declared drop scope, the roles joined, and
+      whether link headers were captured or synthesised (`manifest.rs:40-55`).
+- [x] **The capture's cumulative drop totals.** `window_manifest` took
+      `capture_drop_total` and `interface_drop_total` as parameters and its only
+      caller passed zeros —
+      `pipeline.rs:345`, `window_manifest(&identity, window.tally(), *window_seq, 0, 0)`
+      — so every inline `segment_coverage` row reported a capture that dropped
+      nothing. Row-level loss attribution was unaffected, because that travels
+      on `drop_delta` through the ring's debt; what was wrong is the cumulative
+      counter a reader uses to ask *did this host keep up*. The equivalence gate
+      could not catch it: the synthetic feed has no kernel drops, so both paths
+      reported zero and agreed. **Settled in task 12** — both parameters are
+      gone, `capture_drop_total` is the window's own sum of the `drop_delta` it
+      walked, and `interface_drop_total` is a zero the manifest builder writes
+      with the reason on it.
+- [x] `manifest.rs`: the synthesised `SegmentManifest`. Observed fields from the
+      window and the recorder's identity; `object_key` a window key carrying the
+      window's start in wall-clock nanoseconds; `sha256` empty and `byte_count`
+      zero, with the rustdoc stating that an invented digest is a claim that
+      something was verified.
+- [x] **The manifest is built from a window that has been walked.** This bullet
+      is the one this task never wrote down, and the tree got it wrong for
+      exactly that reason. `pipeline.rs:344-361` built the manifest from
+      `window.tally()` immediately after `WindowSource::open`, which is
+      `WindowTally::default()` — so `derive` was handed `start_ns = 0`,
+      `end_ns = 0` and no `instances`, and that value *was* the manifest the
+      rows were stamped from rather than a discarded first pass. A local named
+      `probe` and a comment describing two passes are the whole of the two-pass
+      shape that was there. **Settled in task 12**, which is also where the
+      design gained the section saying why one pass cannot work.
+- [x] The trailer of window *n* is the `preceding` of window *n+1*, within a
+      run: `pipeline.rs:302` holds it, `:351` reads it into the next `derive`,
+      `:390` replaces it.
+- [x] **Decided in task 14: the trailer is not read back from the ledger after
+      a restart, and the first window of a run anchors on nothing.**
+      `pipeline.rs:162` starts a run at `window_seq: 0` and `:163` at
+      `preceding: None`, and the pair is the decision rather than the omission
+      it looked like. The trailer *is* persisted (`spool.rs:231`, `:529`), but
+      the predecessor test is `segment_seq + 1` and a run begins at zero, so a
+      previous run's trailer precedes nothing here: the read on its own changes
+      no answer, and the version that does changes it by claiming the
+      derivation was not down over the interval in which it was. The design's
+      claim that the anchor *"stays certain across a restart"* is corrected
+      rather than implemented.
+
+      **Traced, at a review's asking, so that the open item carries its
+      consequence rather than a worry.** It cannot reach `publisher`.
+      `dz-recorder-rows/src/derive.rs:718` enumerates the verdicts a single
+      vantage may write and `Verdict::Publisher` is deliberately not among
+      them, so the first window after a restart answers `recorder` where its
+      residue is wholly admitted and `unverifiable` otherwise. The pass that
+      turns `unverifiable` into `publisher` is
+      `007_recorder_cross_site.sql`, and its `absence_admissible` requires
+      per gap occurrence that `anchor_certain = 1` (`:442`) — so an uncertain
+      anchor makes that window's absences **inadmissible**. The cost is one
+      window's evidence per restart, withheld; it is not an accusation drawn
+      from ignorance, which is the direction task 14 kept when it weighed that
+      cost against what buying the evidence back would have had to assert.
+
+**Tests:**
+
+- A window closes on its byte bound and on its age bound, and a datagram
+  arriving after the close belongs to the next window —
+  `tests/window.rs:81`, `:109`, `:146`, `:170`.
+- The manifest's synthesised fields are empty or zero rather than plausible —
+  `tests/window.rs:197`, `:256`.
+- **Not written:** `derive` over a `WindowSource` yielding the grains with a
+  fresh `LossDeriver` per window and a certain second-window anchor. Neither
+  `derive` nor `anchor_certain` appears in `tests/window.rs`; the equivalence
+  gate covers the derivation over a window but asserts nothing about the
+  anchor.
+- **Not written, and it is the one that matters:** the anchor still certain
+  after a restart. It cannot pass against this tree, because of the outstanding
+  bullet above — which is how the gap was found.
+
+### 5. `dz-recorder-inline`: the spool and the ledger
+
+- [x] `spool.rs`: one window is one directory — a newline-delimited JSON file
+      per grain, written through `dz-recorder-rows::FileSink` so the spool holds
+      exactly the bytes the column-store sink will send, plus a digest over
+      them. `fsync` at close, once per window, not once per batch.
+- [x] Windows are consumed oldest first, by the start stamp in the window key,
+      which orders across runs where a per-run sequence cannot.
+- [x] A byte budget. When it is full the oldest window is evicted and counted,
+      and **derivation is never blocked.**
+- [x] Replay at start: windows the previous run left are loaded before any new
+      window is derived, so a crash costs the open window and nothing else.
+- [x] A window whose digest does not match is discarded, named in the error and
+      counted — never loaded in part.
+- [x] A window's rows land, then `Ledger::record`, then the directory is
+      deleted. In that order.
+
+**Tests:**
+
+- A destination that refuses leaves the window on disk and the ledger empty.
+- A destination that recovers lands the windows oldest first, and each ledger
+  entry follows its window's rows rather than preceding them.
+- A full budget evicts the oldest window and counts it, and the spool's own
+  reported age comes from the oldest window that is left.
+- A spool written and then abandoned is replayed on the next start and lands.
+- A truncated grain file is discarded by name; the windows around it still load.
+
+**Done, and over-delivered.** All five tests exist (`tests/spool.rs:245`,
+`:283`, `:391`, `:444`, `:483`) and seven more with them, including a window the
+ledger already records being dropped rather than posted twice (`:705`) and a
+ledger entry that will not write owing an entry rather than a second insert
+(`:750`).
+
+### 6. `dz-recorder-inline`: the pipeline and its metrics
+
+- [x] `pipeline.rs`: the derivation stage and the posting stage, each on its own
+      thread, with the ring between capture and derivation and the spool between
+      derivation and posting.
+- [x] A panic on either stage is caught, counted, and the stage restarted. The
+      capture thread is never one of them, and cannot be brought down by either.
+      `pipeline.rs:268` catches, `:273` counts, `:263` restarts, and the capture
+      holds only a `RingSender`.
+- [x] The `dz_recorder_inline_*` family: ring drops, windows derived and windows
+      empty, rows derived, windows landed and posts failed, stage restarts,
+      windows evicted and discarded, spool bytes and windows, and the age of the
+      oldest unposted window. Twelve series, `metrics.rs:98-154`, each labelled
+      `feed` with `site` and `recorder` as constants.
+- [ ] **Outstanding: rows written per grain, and the last error as a string.**
+      `dz_recorder_inline_rows_derived_total` is across every grain
+      (`metrics.rs:113`) with no `grain` label, so the reason the design gave
+      for wanting it per grain — the grains are orders of magnitude apart in
+      volume, so one total hides a grain that stopped — is not served. And
+      there is no `last_error` gauge anywhere in the crate, though archive mode
+      publishes one (`dz-recorder/src/runner.rs:294`), which is the asymmetry
+      that makes it worth keeping on the list rather than dropping.
+- [x] Shutdown in order: drain the ring, close the open window, derive it, spool
+      it, flush the sink, record what landed. `pipeline.rs:208`, and `stop`
+      takes the capture end so the ordering is the signature's rather than the
+      caller's.
+
+**Tests:**
+
+- A stage that panics is restarted and the counter says so; the capture keeps
+  going.
+- Shutdown leaves nothing in the ring, nothing underived, and nothing held by
+  the sink that the ledger does not account for.
+- The age gauge is the oldest unposted window's, and is zero when the spool is
+  empty rather than absent.
+
+### 7. The equivalence gate
+
+In `dz-recorder-e2e`, which already holds `archive_to_rows.rs`.
+
+- [x] `tests/inline_vs_archive.rs`: one synthetic feed, from the real encoder,
+      through both paths — captured to an archive and derived with
+      `derive_object`, and derived through inline mode — and the row sets are
+      asserted equal but for `derivation`, `object_key` and `object_sha256`.
+      **Three fields, not four.** This plan asked for `byte_count` as well and
+      no grain carries it: it is a manifest field, not a row field
+      (`dz-recorder-rows/src/rows.rs` has no `byte_count` at all), so a fourth
+      erasure would have been unimplementable rather than merely redundant. The
+      test erases the three by clearing them rather than skipping them
+      (`inline_vs_archive.rs:130`), so a provenance field added later is
+      compared without anyone remembering to add it.
+- [x] **And it derives the way the derivation stage derives.** As first written
+      this gate built the inline side itself: it walked the window, built the
+      manifest from the completed tally, then fed a *second* ring to a second
+      window for `derive` (`inline_vs_archive.rs:89-112`). Its own comment gave
+      the requirement — *"the manifest describes what the window saw, and the
+      window has not seen anything until the derivation has walked it"* — and
+      the derivation stage did not meet it, so the gate was asserting an
+      equivalence between archive mode and a shape nothing ran. That is the one
+      failure this gate cannot report: a fixture supplying the correctness under
+      test looks exactly like a pass. **Settled in task 12**: the two passes
+      live in one place and the gate calls it, so the shape under test is the
+      shape that runs.
+- [x] The same over the fault cases `dz-recorder-replay`'s `faults` test
+      injects: a sequence gap, backward motion, a reset, a new source IP
+      address, a source IP address that disappears, a duplicate, a reordered pair,
+      an oversized declared length and an unknown schema version.
+      `inline_vs_archive.rs:256-266`.
+- [x] **`Fault::SilentChannel`, the ninth.** It was the one of the nine this
+      gate did not run, and it is the fault whose *production* behaviour differs
+      most between the modes: archive mode finds a quiet channel when a segment
+      rotates on its interval, inline mode when a window closes on age, and age
+      is inline mode's own key rather than a shared one. Added in task 12, and
+      with it a statement of what the gate does **not** cover: the timing half.
+      One window holding the same datagrams as one segment is this fixture's
+      premise, so what it asserts is that the derivation agrees over a channel
+      that fell silent, and not that the two bounds fire at comparable moments.
+      Closing that would want a fixture with a clock, which is a different test.
+- [x] A ring drop is asserted at the row altitude: the gap it causes is *not*
+      given a `publisher` verdict. `inline_vs_archive.rs:303`
+      `a_gap_the_ring_caused_is_not_attributed_to_the_publisher`, asserting
+      `assert_ne!(.., Verdict::Publisher)` at `:369`.
+
+**This test is the gate on the design.** If the two paths agree, inline mode is
+the same analysis with a different provenance.
+
+### 8. `dz-recorder`: the second configuration, and the refusals
+
+- [x] `Cargo.toml`: feature `inline`, bringing `dz-recorder-inline`,
+      `dz-recorder-rows`, `dz-recorder-clickhouse` and `dz-recorder-load`'s
+      library. **In the default set**, which is task 11's doing and not this
+      task's: this task wrote it off by default, and the default set is where a
+      feature gating the default mode has to be. `--no-default-features` is the
+      record-only build.
+- [x] `cli.rs`: `--inline-config <path>`, with `USAGE` saying what the mode
+      keeps and what it does not. It is the file the mode needs and no longer
+      the switch that selects it — task 11 — and a build without the feature
+      fails at startup naming the feature.
+- [x] `inline_config.rs`: the second file. `[inline]` — window bound, ring
+      capacity, spool directory and budget, ledger path — and `[clickhouse]`,
+      reusing `ClickHouseConfig` verbatim, credential included.
+      `deny_unknown_fields` on every struct.
+- [x] `site` and `recorder` are **not** in this file; they come from
+      `RecorderConfig`, so the two halves cannot name the host differently.
+      Held by `inline_config.rs:740` `site_and_recorder_are_not_keys_in_this_file`
+      and `:757` `there_is_no_password_key_anywhere_in_this_file`.
+- [x] The refusals, each naming its key — an archive directory configured in
+      inline mode, a spool directory that is missing or unopenable, a ledger
+      inside the spool directory, and the mode asked for by a build without it.
+      **In `inline_config.rs`, not `startup.rs`**, which this plan named
+      wrongly: they are refusals about inline mode's own file, and putting them
+      in the archive plan's module would have made a build without the feature
+      carry checks over keys it has no type for. `ArchiveDirectoryConfigured`
+      `:90`, `SpoolDirUnusable` `:123` and `NoSpoolDir` `:114`,
+      `LedgerInsideSpool` `:170` and `NoLedger` `:160`, `NotCompiledIn` `:53` —
+      with four more the task did not ask for: `WindowBoundIsZero` `:98`,
+      `RingHoldsNothing` `:106`, `SpoolBudgetIsZero` `:130` and
+      `SpoolBudgetTooSmall` `:153`.
+- [x] `--check` in inline mode validates both files and probes the destination
+      with `SELECT 1`, as the loader's does. Nothing is bound, created or
+      joined. `inline_config.rs:468`, held by
+      `tests/inline_mode.rs:200`.
+- [x] The startup summary says which mode is running, and in inline mode says
+      that no datagram is kept. `INLINE_MODE` at `inline_config.rs:406`.
+
+**Tests:** each refusal, by key, in `startup.rs`'s existing table-driven style.
+A configuration valid for archive mode is still valid. `--check` in inline mode
+touches nothing.
+
+### 9. `dz-recorder`: the wiring
+
+- [x] The ring replaces the archive writer as what the capture loop delivers
+      into, and `pump`, `Capturing` and `drain_and_stop` are reused unchanged —
+      the shutdown ordering they encode is the part most worth not rewriting.
+      **In a new `inline_runner.rs` rather than inside `runner.rs`**, which is
+      the better shape and the reason to record it: `runner.rs` stays the
+      archive record path and exports the three reused pieces
+      (`inline_runner.rs:50`, used at `:302` and `:325`), so a
+      `--no-default-features` build compiles none of the inline wiring.
+- [x] `endpoint.rs`: a render closure, and inline mode renders both registries
+      into one exposition on one port. The two families are disjoint.
+      **Added beside `serve` rather than changing its signature**:
+      `serve_rendering` at `endpoint.rs:63`, with `serve` at `:51` delegating to
+      it. Archive mode's call site is therefore untouched, which is what *no
+      change to archive mode* asked for.
+- [x] The health tier is unchanged and runs in both modes. `inline_runner.rs:92`,
+      and the observer sees a datagram before the ring does (`:293`) so a ring
+      drop cannot hide from the health tier.
+- [x] Signals run the whole sequence, and a second signal exits at once, exactly
+      as archive mode documents — by reusing the handler,
+      `inline_runner.rs:162`.
+
+**Tests: none of the three are written, and this is the largest gap on the
+branch.**
+
+- **Not written:** a binary-altitude run under `--run-for` that derives, spools
+  and posts to a destination with no server. The plan asked for a `FileSink`
+  destination and the binary has no such destination to point at — `FileSink`
+  appears nowhere under `dz-recorder/src/` — so the test needs either that
+  destination or a stub HTTP server, and neither exists. The pipeline is
+  covered at library altitude (`dz-recorder-inline/tests/pipeline.rs:125`)
+  against a fake sink, which is why the gap is a wiring gap rather than a
+  derivation gap: nothing proves the binary's two files reach that pipeline.
+- **Not written:** the same against a real server behind `clickhouse-tests`.
+  `dz-recorder` names that feature nowhere.
+- **Not written:** the kill-and-restart durability case. Acceptance criterion 4
+  is exactly this, and it is unproven; `tests/inline_mode.rs` is refusals and
+  `--check` only.
+
+**And the reach of the default suite is part of the gap.** `cargo test
+--workspace` does not enable `socket-e2e`, `afpacket`, `clickhouse-tests` or
+`conformance`, and a suite behind one of those reports *0 tests* rather than
+*skipped* — so a green workspace run says nothing about it. That is how task 11
+shipped with `tests/shutdown.rs` unfixed. Anything asserting the binary's
+behaviour has to be run by naming the feature, and the features CI enables are
+the list to run before pushing:
+
+```bash
+cargo test --workspace
+cargo test -p dz-recorder --no-default-features
+cargo test -p dz-recorder --features socket-e2e
+cargo test -p dz-recorder-e2e --features socket-e2e -- --test-threads=1
+cargo test -p dz-recorder-e2e --features conformance
+cargo test -p dz-recorder-capture --features loopback-tests
+# these two need libpcap-dev, and a column store, respectively
+cargo test -p dz-recorder --features afpacket
+cargo test -p dz-recorder-e2e --features clickhouse-tests -- --test-threads=1
+```
+
+### 10. Documentation
+
+- [x] `rust/recorder/README.md`: a *two modes* section beside the existing *two
+      capture modes* section, which already establishes the shape. It must say
+      plainly that inline mode keeps no datagrams and what that costs.
+      `README.md:118`.
+- [x] `dz-recorder-load/README.md`: a sentence placing it as archive mode's half.
+      `:7`.
+- [x] `BRINGING-UP-A-FEED.md`: how a feed is pointed at each mode, and the spool
+      age alert. `:397` and the checklist line at `:547`.
+- [x] An example `inline.toml` and a systemd unit, with the credential coming
+      from where the loader's comes from. `dz-recorder/inline.example.toml`,
+      asserted parseable by `inline_config.rs:1021`, and
+      `systemd/dz-recorder-inline.service:75`.
+
+Each of these states the default in its own words, which is why task 11 has to
+come back through all four of them.
+
+### 11. The arrangement, selected from the configuration by what each mode requires
+
+Designed in
+*[Why the arrangement is stated and never defaulted](../specs/2026-09-08-recorder-inline-mode-design.md#why-the-arrangement-is-stated-and-never-defaulted)*,
+enumerated in
+*[Four cases, and two of them run](../specs/2026-09-08-recorder-inline-mode-design.md#four-cases-and-two-of-them-run)*,
+answered against its own earlier rejection in
+*[Why this is not the inference the `derivation` column exists to forbid](../specs/2026-09-08-recorder-inline-mode-design.md#why-this-is-not-the-inference-the-derivation-column-exists-to-forbid)*,
+and the flag decided in
+*[Whether a flag survives as an explicit override](../specs/2026-09-08-recorder-inline-mode-design.md#whether-a-flag-survives-as-an-explicit-override)*.
+
+**This task replaced its own mechanism, and the replaced version is worth
+recording rather than deleting.** As first landed it inverted the default —
+inline mode was what a command line naming no mode was read as, and archive mode
+was asked for by a new `--archive` flag. That is gone. The review's alternative
+was accepted: the same two keys that composed the archive-directory refusal
+select the arrangement instead, so the reading is total, no flag names anything,
+and the cost that version carried — a word added to every `ExecStart` and
+`ExecStartPre` in every infrastructure repository, landing on a restart — is
+zero. What survived from the first version is the analysis of *what silence must
+mean*; what did not survive is the conclusion that silence should mean a mode.
+
+The selection reads two predicates and nothing else:
+
+- `archive.staging_dir` or `archive.completed_dir` carrying a value → an archive
+  is stated;
+- `--inline-config` given → inline mode is stated.
+
+Four combinations, and they are total because both key sets are required with no
+default and are disjoint. **The old list of ten places the default was written
+down is now a list of the places a flag was**, and every one of them loses it.
+
+- [x] `startup.rs`: `Arrangement::selected_by(config, inline_config)`, the one
+      place the four cases exist. It returns `Arrangement::Archive`,
+      `Arrangement::Inline`, or one of two refusals — and it is compiled in
+      **every** build, feature or not, because a build that cannot run inline
+      mode is precisely the build that has to refuse a configuration selecting
+      it rather than fall back to the arrangement nobody chose.
+- [x] `startup.rs`: `StartupError::BothArrangementsStated { key, path }`, naming
+      the archive key an operator wrote *and* the second file, so the two
+      statements that disagree are both on the screen. This is
+      `InlineConfigError::ArchiveDirectoryConfigured` moved up a layer and
+      stripped of its migration instruction: there is no migration any more, so
+      the message is a contradiction report and nothing else.
+- [x] `startup.rs`: `StartupError::NoArrangementStated`, naming both ways of
+      stating one. This is `InlineConfigError::NotStated`, moved for the same
+      reason and rewritten for the same one: it is no longer *"no mode was named,
+      so this is inline mode"*, because no mode named is no longer inline mode.
+- [x] `startup.rs`: `Arrangement::Inline` loses its `#[cfg(feature = "inline")]`.
+      The cfg was right when a build without the feature could never construct
+      the variant; now that build constructs it in order to refuse it, and
+      `writes_an_archive` becomes one comparison in every build instead of a
+      comparison and a `true`.
+- [x] `cli.rs`: `--archive` removed. `Args` loses `archive`, `CliError` loses
+      `ArchiveAndInline` — the both-arrangements case moves to the configuration,
+      where the archive half of it lives — and `USAGE` describes two arrangements
+      selected by what each requires, with no flag naming either.
+- [x] `main.rs`: `run` dispatches on `Arrangement::selected_by` rather than on
+      `args.archive`. The refusals happen **before** either mode's own checks,
+      so an operator is told which arrangement is unclear before being told
+      anything about the one the binary guessed at.
+- [x] `inline_config.rs`: `check_archive_is_not_configured` is deleted, not
+      moved. Its condition is the selection, and a second reading of the same two
+      keys downstream of the selection is a reading that can disagree with it.
+      `ArchiveDirectoryConfigured` and `NotStated` go with it.
+- [x] `inline_config.rs`: `NotCompiledIn` is reached by a configuration that
+      *states* inline mode rather than by silence, so its message names the
+      second file that was given and stops telling an operator to pass a flag
+      that no longer exists.
+- [x] `Cargo.toml`: `default = ["inline"]` **stays**, with the comment rewritten.
+      The old reason — a binary must honour its own default mode — is gone with
+      the default. The reason now is that the arrangement is a property of a
+      host's configuration and the released asset is one asset for the fleet, so
+      a default build carrying one arrangement would have to be matched to
+      configurations at deploy time.
+- [x] `tests/shutdown.rs`, `tests/check_mode.rs`, `tests/inline_mode.rs`: every
+      `--archive` removed. The archive-mode fixtures select archive mode by the
+      directories they already carried, which is the fleet's own migration in
+      miniature and the reason the flag was retired: the tests that had to gain
+      the flag are the tests that now need no edit beyond losing it.
+- [x] `recorder_example.toml` and the prose, all of it: `rust/recorder/README.md`'s
+      two-modes table, `dz-recorder-load/README.md`, `BRINGING-UP-A-FEED.md` and
+      its bring-up checklist, `inline.example.toml`, and the systemd unit's
+      header. A selection stated correctly in nine places and wrongly in the
+      tenth is worse than one stated nowhere, because the wrong one will be the
+      one somebody quotes — which is what the first version of this task learned
+      and is why the list is exhaustive rather than representative.
+
+**A fifth test, for the thing four hand-written cases cannot hold.** The four
+rows are total *because* the two predicates the selection reads are the two the
+refusals name. Nothing about four separate tests says so, and a fifth predicate
+added later — a third arrangement, a defaulted `staging_dir` — would leave all
+four passing over a rule that is no longer total. So the totality is asserted in
+its own right: every combination of the two predicates is enumerated in one test
+and each is required to reach a named outcome, so a combination that reaches
+none fails by name.
+
+- [x] `the_four_configuration_shapes_are_total_and_two_of_them_run`, in
+      `startup.rs`'s own tests, over both predicates and all four outcomes.
+- [x] `a_flag_naming_an_arrangement_is_not_a_flag_this_binary_has`, asserting
+      `--archive` is a usage error with exit code 2. A flag is cheap to add back
+      and the argument against it is four paragraphs long, so the test is what
+      carries the decision to whoever reaches for it next.
+
+---
+
+### 12. The review: the manifest, the sequence number, the trailer and the ring
+
+What two reviews of the whole branch found: six things, two of which write rows
+a reader cannot detect are wrong. Each is a defect in something tasks 4, 6 and 7
+claimed, which is why they are answered here rather than by a new design: the
+design said what to build in every case, and this is the tree being made to say
+it too.
+
+One item raised by a review is deliberately **not** here: whether the
+arrangement should be selected from the configuration rather than by a flag. The
+repository owner accepted that alternative and it is task 11's rewrite, landed
+after this task — so nothing here assumes the inversion is permanent and nothing
+here touches the selection, which is why the two did not race.
+
+**The manifest was built from a window nothing had walked.** The blocker. Its
+mechanism is task 4's new bullet and its consequence is the design's
+*[The window is walked twice](../specs/2026-09-08-recorder-inline-mode-design.md#the-window-is-walked-twice-and-the-second-walk-is-not-an-optimisation)*.
+The corruption is not a wrong number: with `start_ns` at zero, every window of
+every run carries the sort key `recorder.segment_coverage` orders by, so a
+second run of the recorder replaces the first run's coverage rather than
+standing beside it — and no coverage row was written at all, because
+`manifest.instances` came from the same empty tally.
+
+- [x] `window.rs`: a held window. One walk drains the ring into a buffer and
+      completes the tally; the second reads the buffer back as a `Source`. The
+      buffer is owned by the derivation stage and reused window after window,
+      refilled slot by slot through the ring's own `refill`, so the second pass
+      costs a copy and not an allocation per datagram.
+- [x] `pipeline.rs`: drain, then build the manifest, then derive from the
+      buffer. The local named `probe` goes with the shape it was named for.
+- [x] `inline_vs_archive.rs`: the gate calls the same held window, so its inline
+      side is the derivation stage's own two passes rather than a second
+      arrangement of them.
+
+**The capture drop totals, and this half is blocker-class too.** A second
+reviewer found what the first left as a finding and the plan had left as an
+open bullet: **a view consumes the column.**
+`007_recorder_cross_site.sql:226` computes `capture_drop_delta` between
+consecutive windows and `:229` reads a zero delta as `overflow_free = 1`, and
+`overflow_free` is one of the four conditions in `absence_admissible` (`:421`)
+deciding whether a site's absence may be used as evidence about the publisher.
+Pinned at zero, every inline host is certified provably overflow-free — so
+kernel receive-queue overflow on an inline host becomes an absence admitted as
+evidence *against the publisher*, which is the finding the ring's `PendingLoss`
+work exists to prevent, arriving one layer up through a column nobody read. The
+design's
+*[The one column whose zero is an accusation](../specs/2026-09-08-recorder-inline-mode-design.md#the-one-column-whose-zero-is-an-accusation)*
+is that argument, and it settles two things this task first got wrong:
+
+- [x] **It is cumulative, never per-window.** This task's first attempt summed
+      the `drop_delta` one window walked, on the strength of
+      `SegmentWriter` summing the same field
+      (`dz-recorder-archive/src/writer.rs:359`). That is the wrong shape: the
+      view subtracts consecutive rows, so a window that dropped less than its
+      predecessor subtracts to zero and is certified clean — the same defect at
+      lower frequency rather than a fix. `rows.rs:395`, `007:94` and
+      `derive.rs:737` all state the column as cumulative and never reset, and
+      that is what inline mode now writes.
+- [x] **It includes what the ring refused.** The ring is inline mode's own
+      place to lose a datagram and archive mode has no equivalent, so a
+      datagram it dropped is exactly the loss `overflow_free` must not certify
+      away. Both summands are cumulative counters on the capture thread —
+      `RingCounters::capture_declared` and the existing `dropped` — and
+      `RingCounters::capture_drop_total` is their sum. **No new plumbing was
+      needed**: the reviewer suggested a shared atomic the derivation stage
+      reads at window close, and the ring's counters already are that, shared
+      through the `Arc` both ends hold. `WindowSource` samples them on every
+      call, so the figure a manifest reads is the one that was true when the
+      window closed.
+- [x] **Found and not fixed: archive mode's own value is per-segment.**
+      `SegmentWriter` is constructed per segment (`rotate.rs:454`) with
+      `capture_drops: 0` (`writer.rs:287`), so archive mode writes a
+      per-segment figure into a column three documents define as cumulative,
+      and `segment_overflow` mis-certifies archive hosts in the same way for
+      any segment that dropped less than its predecessor. It is outside this
+      plan's scope — *"it does not change what archive mode does"* — and it
+      wants its own change with its own tests. Recorded here because inline
+      mode now writes the specified semantics and archive mode does not, and
+      the difference should be somebody's decision rather than a surprise.
+- [x] `interface_drop_total` **stays zero**, and the zero moves from a literal
+      at a call site into the manifest builder with the reason on it. It is not
+      a column nobody wired: **archive mode leaves it at zero too**, and
+      deliberately — `dz-recorder/src/runner.rs:459-467` reads the interface
+      total and hands it to the health tier, never to the writer, because the
+      manifest's accounting for it is per port role and afpacket mode declares
+      its drops at capture-handle scope, where there is no role to charge them
+      to. Inline mode writing a number there would be one mode claiming a
+      measurement the other declines to make, in a column a reader subtracts
+      across both.
+
+      **Checked against the same view, because the finding above is a reason to
+      distrust this answer.** It is not the same case. `interface_drop_total`
+      appears in no admissibility gate: `007` reads it nowhere except as a
+      passthrough on the gap row (`:592`), and the only verdict it can reach
+      through `derive.rs:729` is `upstream`, which *exculpates* the publisher.
+      A zero there therefore withholds an explanation and can never manufacture
+      one — the opposite direction from `capture_drop_total`, whose zero is an
+      accusation. Plumbing it in one mode only would make the two modes reach
+      different verdicts on identical traffic, which is the equivalence the
+      design rests on.
+- [x] `window_manifest` loses both parameters. A builder with no parameter to
+      pass a zero to is a builder no caller can get this wrong in again, which
+      is what made the defect survive review once already.
+
+**An empty window spent a window sequence number.** `window.rs`'s `is_empty`
+said *"An empty window spends no window sequence number"* and `pipeline.rs:397`
+incremented for every window. **The doc is right and the code changes**, for
+three reasons and the third is the one that decides it:
+
+- a hole in `segment_seq` is defined here and in `manifest.rs:79-81` as a hole
+  in the derivation, which is what tells a reader the recorder was down rather
+  than the feed quiet. A quiet feed closes windows on age and `window.rs:71`
+  already calls that ordinary, so the code was writing *the derivation was down*
+  once per window bound for as long as a feed stayed silent;
+- the alternative reading — that a window sequence counts windows opened — has
+  no reader. Nothing joins on it, and `segment_coverage` is the only table that
+  carries it;
+- it takes the era anchor with it. `precedes` is a `segment_seq + 1` test, so an
+  empty window that spends a number leaves the next window's predecessor two
+  behind and every window after a silence writes an uncertain anchor —
+  contradicting the design's claim that the anchor is certain from the second
+  window onward.
+
+- [x] `pipeline.rs`: the increment moves inside the non-empty branch.
+
+**A window the spool refused still became the next window's trailer.**
+`pipeline.rs:386` printed the error and `:390` set `*preceding = Some(trailer)`
+regardless, so the next window anchored certain on a window whose rows are not
+in the store. The fix is `None` — *unknown*, and never *there was none* — and
+the design's
+*[The era anchor gets better, not worse](../specs/2026-09-08-recorder-inline-mode-design.md#the-era-anchor-gets-better-not-worse)*
+now says so. Stale would give the same verdict by accident, one off-by-one away
+from giving the wrong one.
+
+- [x] `pipeline.rs`: the trailer is handed on from the `Ok` branch, and the
+      `Err` branch clears it.
+
+**The ring could not report a derivation that had gone.** `ring.rs:222`'s
+`TryRecvError::Disconnected` was unreachable: `RingSender` held `free_return`,
+its own sending end of the free list, so the free list never disconnected while
+the sender existed. A derivation thread that really had gone took its slots with
+it, the free list stayed empty, and every offer after that returned `Dropped` —
+for ever, and indistinguishable on every counter from a ring that was merely
+overrun. That branch also skipped `pending.undelivered()`.
+
+- [x] `ring.rs`: `free_return` becomes a `spare` slot held in the sender itself.
+      It does the one job `free_return` had — the unreachable
+      `TrySendError::Full` branch puts its slot somewhere rather than shrinking the
+      pool for the life of the process — without holding a sending end that
+      masks the disconnection, and it is one handle fewer rather than one more.
+- [x] Both `Disconnected` branches charge the datagram through
+      `pending.undelivered()` and count it. A drop nobody can carry the
+      admission for is still a drop, and `RingCounters::dropped`'s rustdoc says
+      which of the two it is.
+
+**The mode line was the first line in one arrangement and the middle of the
+other.** Archive mode prints `ARCHIVE_MODE` and then the plan (`main.rs:154`,
+`:161`); inline mode printed the plan first and the mode arrived inside
+`config.summary()` further down. The description argues the mode line is the one
+thing an operator must not miss — it is what a command line can now get wrong by
+saying nothing — and an operator scanning two hosts read it in two places.
+
+- [x] `INLINE_MODE` moves out of `InlineConfig::summary` and is printed before
+      the plan in both branches of `inline_config::run`, so it is the first line
+      in both arrangements and appears once. The tests read the *first line*
+      rather than searching the output, in both files, because `contains` is
+      what let the two orders diverge unnoticed.
+
+**`Fault::SilentChannel`, task 7's outstanding bullet**, closed here rather than
+there because it is one line in the same file this task already changes.
+
+- [x] The ninth fault joins the list, and the test's own rustdoc says which half
+      of the fault the gate covers and which it does not.
+
+**Tests, and the revert that killed each. Every one was run — reverted, watched
+fail, restored:**
+
+| Revert | Test that died |
+|---|---|
+| `window_manifest` moved back above `HeldWindow::fill`, which is the one-pass shape | `pipeline.rs`'s `two_runs_of_one_recorder_do_not_describe_one_window_twice` **and** `inline_vs_archive.rs`'s `a_clean_feed_derives_identically_through_both_paths` and `every_injected_fault_derives_identically_through_both_paths`, on *"the two paths produced different numbers of segment_coverage rows"* |
+| `capture_drop_total: 0` in `window_manifest` | `window.rs`'s `a_window_sums_the_capture_drops_it_walked` |
+| the `capture_drop_total` sum dropped from `WindowSource::next` | the same test, on the tally rather than on the manifest |
+| `*window_seq += 1` back to unconditional | `pipeline.rs`'s `a_quiet_window_spends_no_window_sequence_number`, reporting `[0, 4]` where `[0, 1]` was wanted: three windows a quiet feed produced spent three numbers |
+| `*preceding = Some(trailer)` back outside the `Ok` branch | `pipeline.rs`'s `a_window_the_spool_refused_leaves_the_next_window_uncertain`, on an era row carrying `anchor_certain: 1, continuation: 1` over a window whose rows never reached the store |
+| the free list's `Disconnected` back to `Offered::Dropped`, which is what holding `free_return` made of it | `ring.rs`'s `a_ring_whose_deriver_is_gone_says_so_from_either_end` |
+| `pending.undelivered()` dropped from the full list's `Disconnected` | the same test, on the owed count: 3 where 4 was wanted |
+| the ring's own half dropped from `RingCounters::capture_drop_total` | `window.rs`'s `a_datagram_the_ring_refused_is_in_the_capture_loss_the_window_reports`: the ring refused ten and the window reported none |
+| `capture_drop_total` back to a per-window sum of the deltas walked | **both** capture-loss tests — `the_capture_loss_a_window_reports_is_cumulative_and_not_its_own` on the second window reporting 2 where 6 was wanted, and the ring-refusal test, which a per-window sum of rewritten deltas cannot see either |
+| `INLINE_MODE` back inside `InlineConfig::summary` | `inline_config::tests::the_summary_leaves_the_mode_line_to_the_caller_that_prints_it_first` **and** `inline_mode.rs`'s `check_validates_both_files_reaches_for_the_destination_and_touches_nothing`, on the first line of stdout |
+| `Fault::SilentChannel` dropped from the gate's list | `the_gate_runs_every_fault_the_replay_crate_injects` |
+
+Three of those are worth reading past the table.
+
+**The blocker's revert is the only one that kills the gate, and that is the
+point.** Before task 12 the gate arranged the two passes itself and passed
+against a one-pass derivation stage. It now calls the same code the stage calls,
+so the revert that reintroduces the defect fails the gate on the grain the
+defect destroys — which is the property the gate was supposed to have all along.
+
+**The window-sequence revert also fails the second half of its own test.** The
+hole it leaves is what makes the following window's trailer two behind, so the
+era anchor after a silence goes uncertain as well. One mutant, two assertions,
+and the second is the analytical claim the design makes.
+
+**The spool-refusal revert prints its own hazard.** The era row it produces says
+`continuation: 1` — a reader joining eras on that column would treat the two
+sides of a window whose rows were lost as one continuous sequence space, which
+is the merge `anchor_certain` exists to prevent.
+
+**The fault-list revert had no mutant until one was written, and that is the
+finding.** Dropping `Fault::SilentChannel` from the gate's list left every test
+passing: a fault absent from a loop is not a fault that fails, it is a fault
+nobody runs, which is indistinguishable from a pass. That is how it went missing
+for the life of the branch in the first place, so the completeness of the list is
+now an assertion of its own — the gate's list beside a list of every variant,
+with a `match` nobody calls making a new variant a compile error. Adding the
+ninth fault closed the instance; this closes the class.
+
+**Not tested, and it is the same gap the plan already records elsewhere:** that
+the `Disconnected` outcome reaches an operator. `inline_runner.rs:300` and `:323` discard
+what `offer` returns, so the ring can now tell a caller its deriver is gone and
+no caller asks. The stage is restarted under `catch_unwind`, so in this tree the
+outcome is defensive rather than reachable — but the same argument the plan makes
+for a `last_error` gauge in task 6 applies to it.
+
+---
+
+### 13. The third review: the market data gap, the spool's budget and the sort-key guard
+
+One Blocking finding and three Minor ones, from the review that also accepted
+the selection in task 11. None of them is a defect in something an earlier task
+claimed: each is a hole in something no task had looked at.
+
+#### 13a. Inline mode derives no market data rows, and nothing said so
+
+Designed in
+*[Why no market data rows, and why that is refused rather than left empty](../specs/2026-09-08-recorder-inline-mode-design.md#why-no-market-data-rows-and-why-that-is-refused-rather-than-left-empty)*.
+
+`recorder.event`, `instrument` and `book_top` come only from
+`derive_market_data`, which `InlineConfig` had no key for — so a feed pointed at
+this arrangement had three permanently empty tables, indistinguishable from a
+feed nobody published on.
+
+**Decided: not derived, and the ask exists in order to be refused.** The reasons
+are in the design and both are load-bearing: a codec on the record path
+contradicts this design's own decision that nothing there decodes a datagram, and
+an instrument table in force across windows is durable state spanning the unit
+the spool exists to bound. What is *not* an argument is that the tables would be
+empty anyway — they are equally empty in archive mode for a feed with no
+`[[market_data]]` entry, which the loader's own configuration defends.
+
+- [x] `inline_config.rs`: `InlineConfig` gains `market_data: Vec<MarketDataFeed>`,
+      the loader's own type reused verbatim the way `ClickHouseConfig` is. One
+      spelling of *which feeds derive market data*, so the two arrangements
+      cannot grow two.
+- [x] `inline_config.rs`: `InlineConfigError::MarketDataNotDerived { feed }`,
+      refused in `check()` — so `--check` is where a host learns it, before a
+      socket is bound. It names the feed, the three tables, and archive mode.
+- [x] `inline_config.rs`: `summary()` states which feeds derive market data rows,
+      and in inline mode that line says none and says which arrangement can.
+      `startup.rs`'s `Plan::summary` says the same for archive mode, where the
+      answer is *the loader's configuration decides* — because the recorder is
+      not the process that would derive them.
+- [x] The refusal is in `check()` and not in `parse()`: an unknown key is a parse
+      error and this is a known key with an answer, which is a different failure
+      and reads differently.
+
+**Why not required-with-one-legal-value.** Considered, and rejected in the
+design: a required `market_data` key whose only accepted value is *none* would
+make inline mode stricter than archive mode about a decision the two make
+identically, and the equivalence of the two arrangements is what the gate on this
+whole design asserts. If the un-asked case should be loud it is a change to the
+loader too, and it belongs in one place. **This is recorded rather than resolved,
+and it is the one finding in this task whose answer is arguable.**
+
+#### 13b. `enforce()` could evict the window whose rows had landed, or stop evicting
+
+Designed in
+*[Eviction order, and the one window that goes last](../specs/2026-09-08-recorder-inline-mode-design.md#eviction-order-and-the-one-window-that-goes-last)*.
+
+Two defects in one loop, and they are independent:
+
+- [x] It selected `windows.keys().next()` with none of `take_oldest`'s filter, so
+      it could delete a window whose rows were already in the store and whose
+      ledger entry was owed — giving up the only remaining evidence of a load
+      that happened, and the trailer the next era anchor is checked against. A
+      window owing an entry now goes **last**: preferred against only when
+      nothing else is left, because a budget that stopped bounding the disk in
+      order to protect an entry would trade a bounded backlog for an unbounded
+      one. `in_flight` is deliberately **not** in the preference — the rustdoc's
+      argument for evicting a held window is unchanged and still right, because
+      those rows may yet land and no entry has been earned.
+- [x] On a `remove_tree` failure it returned with the window still in the map, so
+      `bytes()` stayed over the budget for ever and the same undeletable
+      directory was chosen on every later pass: the budget stopped bounding the
+      disk from the first failure on. It now goes through `delete`, which takes
+      the window out of the map and moves its bytes to `unreclaimable_bytes`, and
+      *then* stops the pass — so the next pass makes one more attempt on the next
+      window, rather than walking the whole spool into the same failure in one
+      go.
+
+#### 13c. A failed `store()` left a directory outside every one of the spool's numbers
+
+Designed in
+*[Every byte the spool put on disk is a byte its budget can see](../specs/2026-09-08-recorder-inline-mode-design.md#every-byte-the-spool-put-on-disk-is-a-byte-its-budget-can-see)*.
+
+- [x] A `store()` that failed after `FileSink::create` left the window directory
+      on disk without inserting it into `self.windows`, so its bytes sat outside
+      `bytes()`, `enforce()` and `unreclaimable_bytes` alike — the spool reported
+      itself empty while orphans accumulated, one per failed window, until a
+      restart adopted or discarded them. The fallible part is now one function
+      whose error path removes what it created, and a removal that itself fails
+      moves those bytes to `unreclaimable_bytes` rather than forgetting them.
+
+#### 13d. The sort-key guard read one line of a clause that wraps onto three
+
+- [x] `ddl.rs`'s `provenance_is_on_every_grain_and_in_no_sort_key` checked only
+      the line beginning `ORDER BY`, and three of the eight sort keys wrap
+      (`005_recorder_market_data.sql:140`, `:191`, `:277`), so `derivation`
+      appended to a continuation line would have passed. The guard now reads the
+      **whole clause**, accumulating lines until the parenthesis depth the clause
+      opened returns to zero — which also terminates correctly on the bare
+      `ORDER BY anchor_ts` inside a window specification at
+      `003_recorder_era_rank.sql:150`, where the depth is zero on the first line.
+- [x] The walker is asserted in its own right, over a literal whose clause wraps.
+      A guard that reads more than it did is a guard whose *reading* is now the
+      thing that can regress, and a walker that quietly went back to one line
+      would leave the guard green over exactly the hazard it was widened for.
+
+---
+
+### The reverts for tasks 11 and 13, and the test that died under each
+
+Every one was run: committed first, the mutation applied, the named test
+watched fail, the file restored from a copy. **Committed first because a
+`git checkout --` has eaten uncommitted work in this repository twice**, so
+nothing here was mutated out of a dirty tree.
+
+| Revert | Test that died |
+|---|---|
+| the neither-stated case falls back to `Arrangement::Inline` instead of refusing | `the_four_configuration_shapes_are_total_and_two_of_them_run`, and at binary altitude `check_mode.rs`'s `a_configuration_stating_no_arrangement_is_refused_and_names_both` |
+| the both-stated case resolves to `Arrangement::Archive` instead of refusing | `the_four_configuration_shapes_are_total_and_two_of_them_run`, `an_archive_directory_beside_the_second_file_is_refused_by_key`, and `inline_mode.rs`'s `a_configuration_stating_both_arrangements_is_refused_by_key_and_by_file` |
+| `--archive` accepted again as a flag `cli::parse` ignores | `a_flag_naming_an_arrangement_is_not_a_flag_this_binary_has` |
+| an archive is stated only when **both** directories carry a value | `a_half_stated_archive_states_the_arrangement_and_is_refused_by_key` and `an_archive_directory_beside_the_second_file_is_refused_by_key` |
+| the `[[market_data]]` entry accepted and ignored | `a_feed_whose_market_data_rows_were_asked_for_is_refused_by_name`, `the_market_data_entry_is_the_loaders_own_type`, and at binary altitude `a_feed_whose_market_data_rows_were_asked_for_is_refused_at_check` |
+| `enforce` back to the plain oldest, with no preference against a window owing an entry | `a_window_whose_rows_landed_is_the_last_one_the_budget_takes` |
+| an eviction that cannot delete left in the map, as it was | `an_eviction_that_cannot_delete_stops_being_a_window_rather_than_stopping_the_budget` |
+| a failed `store` forgetting what it left on the disk | `a_store_that_fails_leaves_no_bytes_the_spool_cannot_see` |
+| the sort-key walker back to the line the clause starts on | `the_sort_key_walker_reads_a_clause_that_wraps` |
+| **the hazard itself**: `derivation` appended to the continuation line of `005_recorder_market_data.sql:140` | `provenance_is_on_every_grain_and_in_no_sort_key` |
+
+Three of those are worth reading past the table.
+
+**The sort-key finding was demonstrated in both directions, which is the only
+way that one can be.** The widened guard fails on the hazard, as the last row
+says. Run with *both* mutations applied — the hazard in the SQL and the walker
+back to one line — `provenance_is_on_every_grain_and_in_no_sort_key` **passes**.
+That is the finding: not that the guard could be better, but that it was green
+over a column in a sort key. A guard whose reading is widened has a new thing
+that can regress, which is why the walker has a test of its own rather than only
+the migrations to check.
+
+**The market data refusal has a mutant and the summary line does not have a
+strong one.** `market_data=none` is asserted by
+`the_summary_states_that_no_market_data_rows_are_derived` and
+`the_check_states_that_no_market_data_rows_are_derived`, and removing the line
+fails both — but that is a test asserting a string is printed, which is the
+weakest shape of gate there is. Stated plainly rather than dressed up: the
+refusal is what carries this finding, the summary line is what reaches an
+operator who never asked, and only the first of the two is held by something
+that could catch a behavioural regression.
+
+**A window merely in flight is deliberately not protected, and nothing asserts
+that it is not.** The preference is against `entry_owed` alone; a test asserting
+that an in-flight window *is* evicted would be asserting the absence of a
+condition, which passes for as long as nobody adds it and says nothing about
+whether adding it would be wrong. The rustdoc carries the argument instead.
+
+---
+
+### 14. The fourth review: the trailer that is not read back
+
+Two threads on one finding, at `pipeline.rs:162` and `:163` — which are the two
+lines that would have to change together, and only one of which anybody named.
+`preceding: None` starts every run, `Ledger::trailer()` has no caller in this
+crate, and the design said the era anchor *"stays certain across a restart"*.
+Task 4 carried it as an open item with its consequence traced; this is the
+decision the trace was still missing.
+
+Decided in
+*[The era anchor gets better, not worse — and stops at the run boundary](../specs/2026-09-08-recorder-inline-mode-design.md#the-era-anchor-gets-better-not-worse--and-stops-at-the-run-boundary)*.
+
+**Decided: the trailer is not read back, and the first window of a run anchors
+on nothing.** The three questions the decision had to answer:
+
+- **What a missing or unreadable trailer means.** Already distinguished, and by
+  nothing this task adds. `Ledger::open` returns an empty ledger for a path that
+  is not there and `LedgerError::Io` for a path that exists and cannot be read,
+  which `inline_runner.rs:241` turns into a refusal of the feed before a socket
+  is bound. The torn last line a crash mid-append leaves is skipped, and the
+  trailer falls back to the highest surviving entry — a trailer that precedes
+  less, never one that precedes wrong. `None` stays a valid state throughout,
+  because it is what a genuinely first window has.
+- **Which trailer.** Not the last window whose rows landed. `Ledger::trailer()`
+  is the trailer of the highest `segment_seq` the file knows
+  (`dz-recorder-load/src/ledger.rs:259`), and `window_seq` restarts at zero on
+  every run — so after a restart the ledger answers with a window from the run
+  before, and goes on answering with it until the new run's numbering climbs
+  past. Within one run the two readings coincide; across the boundary the read
+  would want, they do not.
+- **Whether an anchor that turns out wrong is worse than an uncertain one.**
+  Yes, and wrong is what this read produces. The check that stops it already
+  exists — `SegmentTrailer::precedes` is `segment_seq + 1` — so the read on its
+  own is **inert**: applied and run, the suite is unchanged. Making it effective
+  means continuing the window sequence across the restart, and a contiguous
+  number there says *the derivation was not down* over the one interval in which
+  it was. `007_recorder_cross_site.sql`'s `segment_overflow` is what pays for
+  that: nearest earlier segment by `start_ts`, `p.segment_seq + 1 =
+  c.segment_seq`, and a counter that went backwards clamped to zero — so the
+  first window of the new run would report `capture_drop_delta = 0` over a
+  capture handle opened seconds earlier. That is `overflow_free = 1`, and a
+  clean statement there is one of the two things that make an absence usable
+  against a publisher.
+
+What certainty would have bought, measured before it was paid for: only that
+window's *own* gaps becoming promotable, `sequence_gap_cross_site` testing
+`g.anchor_certain = 1`. It could not have been an absence witness for another
+site's gap either way, because `absence_admissible` also wants that vantage's
+`overflow_free = 1` and a run's first segment has no predecessor to subtract
+from.
+
+- [x] `pipeline.rs`: `window_seq: 0` and `preceding: None` keep their values and
+      gain their reason, at the two lines the review sat on. The `preceding`
+      field doc says *every window after the first of a run*, and says why the
+      ledger's trailer is not the predecessor of window zero.
+- [x] `inline_config.rs`: `InlineConfigError::NoLedger` loses the clause
+      promising an era anchor certain across a restart, which was the last
+      present-tense overclaim on the branch. The ledger is still required and
+      the reason that survives is the one that is true: a restart without it
+      re-posts every window the spool still holds, and each of those is a
+      replace paid for rows already in the store.
+
+**Tests:**
+
+- [x] `a_restart_does_not_anchor_its_first_window_on_the_ledgers_trailer`
+      (`dz-recorder-inline/tests/pipeline.rs`): two runs over one spool
+      directory and one ledger file, the second asserting that the ledger **does**
+      hold a trailer and that the run starting under it still numbers its first
+      window zero and still writes `anchor_certain = 0`. The trailer's presence
+      is half the test: without it the assertion would pass over an empty ledger
+      and say nothing about the decision.
+- [x] `a_ledger_is_required` (`inline_config.rs`) gains the reason it names and
+      the promise it must not make.
+
+| Revert | Test that died |
+|---|---|
+| `preceding: ledger.trailer().cloned()` — the fix the threads name | **nothing died.** 1456 passing before it and 1456 after, on the head the threads were written against; 1457 with this task's own test present, which passes under the mutation as well |
+| the same, plus `window_seq: ledger.trailer().map_or(0, \|t\| t.segment_seq + 1)` — the version that is not inert | `a_restart_does_not_anchor_its_first_window_on_the_ledgers_trailer`, on both assertions: the window numbers itself 1, and the era row comes back `anchor_certain: 1, continuation: 1` over a boundary the capture stopped at |
+| `NoLedger`'s old wording restored | `a_ledger_is_required` |
+
+The first row is the reason this task exists at all. A mutation that kills no
+test is usually a missing test; here it is the answer, and the test written
+beside it is the one that dies under the mutation that *does* change an answer.
+The second row is what that mutation writes: not a missing verdict but a wrong
+one, `continuation: 1` across an interval in which nothing was captured.
+
+**Found while deciding this, and the loader's rather than this task's.**
+`Ledger::remember` keeps the trailer of the highest `segment_seq` it has seen,
+and `Loader::trailer` prefers the ledger's over a pending one whenever it is
+higher (`dz-recorder-load/src/loader.rs:454`). Object sequence numbers restart
+on every *recorder* run, so after a recorder restart the loader consults the
+previous run's trailer for every object of the new run until its numbering
+passes the old high mark — an uncertain anchor per object, for a run's worth of
+objects rather than for one. It leans the withholding way, which is why it is
+recorded and not a stop, and it wants the loader's own decision about how a run
+is to be identified.
+
+---
+
+
+## Order, and why it is this one
+
+1 and 2 first because they are independent, mechanical and reviewable on their
+own — and because 2 is what stops task 5 from reimplementing a ledger. Then 3
+before 4 because the window reads the ring, 4 before 5 because the spool stores
+what the window derived, and 5 before 6 because the pipeline is the three of
+them wired together. 7 comes as soon as 6 exists and before any binary work,
+because it is the gate: if inline derivation and archive derivation disagree,
+nothing in 8 or 9 is worth writing. 8 and 9 before 10, because a binary is the
+easiest thing here to get right and the hardest thing to test. 11 last of all,
+because the selection can only be written once both arrangements exist to be
+selected between — and it wants the whole of the rest of this plan behind it,
+green, before it is written, because it is the one task every other task's
+tests run through.
+
+12 is after all of them because it is a review of all of them, and its own
+internal order is the one thing about it that is not free: the design's
+corrections land before the code, and within the code the held window comes
+before the gate that has to call it. The sequence number, the trailer and the
+ring are independent of the blocker and of each other.
+
+13 is after 12 and after 11's rewrite, because 11 changed the decision its own
+design argues and a review finding is answered against the tree the design now
+describes rather than the one it used to. Within 13 the four are independent —
+the market data refusal touches only the second configuration file, the two
+spool findings only the spool, and the sort-key guard only a test — so they land
+as separate commits and none of them blocks another.
+
+---
+
+## Acceptance
+
+Inline mode is done when, on a host with no staging disk sized for datagrams and
+no second service:
+
+1. `dz-recorder --config recorder.toml --inline-config inline.toml --check`
+   validates both files, reaches the destination, and touches nothing;
+2. the same command without `--check` records a live feed and rows appear in the
+   column store within one window bound, every one of them marked `live`;
+3. the destination can be stopped for longer than the sink's age bound and the
+   recorder keeps capturing, with the windows on disk and the oldest-window age
+   gauge climbing — and when it comes back, the windows land oldest first with a
+   ledger entry each;
+4. the process can be killed with `SIGKILL` mid-window and, on restart, the
+   spooled windows land;
+5. a configuration stating both arrangements — an archive directory and a second
+   file — is refused at startup, naming the key and the file;
+6. a configuration stating neither is refused at startup naming both ways of
+   stating one, and the four shapes are asserted to be every shape there is;
+7. a feed whose market data rows are asked for in inline mode is refused at
+   `--check`, naming the feed and the arrangement that derives them;
+
+and when, in this repository, one synthetic feed derived through both paths
+produces row sets that differ in nothing but their provenance, and a gap caused
+by a full ring is not attributed to the publisher.
+
+### Where that stands
+
+| | Met | By, or what is missing |
+|---|---|---|
+| 1 | yes, in this repository | `tests/inline_mode.rs:200`, against a documentation address nothing answers on. Against a real destination: not run |
+| 2 | **no** | no live feed and no live column store has been run. The path is covered against a fake sink at `dz-recorder-inline/tests/pipeline.rs:125`, and the derivation against an archive at `inline_vs_archive.rs:243`, but nothing has recorded real traffic |
+| 3 | partly | the library behaviour is asserted (`tests/spool.rs:245`, `:283`, `:391`) including the age gauge; the binary-altitude outage run is task 9's missing test |
+| 4 | **no** | the spool's own replay is asserted (`tests/spool.rs:444`); the `SIGKILL` of the process is task 9's missing test |
+| 5 | yes | task 11's both-arrangements refusal, at binary altitude in `tests/inline_mode.rs:a_configuration_stating_both_arrangements_is_refused_by_key_and_by_file` |
+| 6 | yes | task 11's neither-stated refusal and its totality test |
+| 7 | yes | task 13a's refusal test |
+| the equivalence gate | yes, for eight of nine faults, and over the shape that runs | `inline_vs_archive.rs:256`; `Fault::SilentChannel` is task 7's outstanding bullet. Until task 12 the gate's inline side was its own two-pass arrangement and the derivation stage's was one pass, so the gate was green over a shape nothing ran |
+| a ring gap is not the publisher's | yes | `inline_vs_archive.rs:303` |
+
+Two criteria therefore remain open — 2 and 4 — and both need a host rather than
+a test: they are the ones the design cannot close in this repository, and they
+should not be read as closed because everything runnable here is green.

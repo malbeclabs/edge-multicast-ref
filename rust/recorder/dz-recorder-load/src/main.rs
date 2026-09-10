@@ -45,13 +45,8 @@
 #![forbid(unsafe_code)]
 
 mod cli;
-mod config;
 mod endpoint;
 mod identity;
-mod ledger;
-mod loader;
-mod market_data;
-mod metrics;
 
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -62,10 +57,13 @@ use dz_recorder_rows::{FileSink, RowSink};
 use thiserror::Error;
 
 use cli::{Args, CliError, Invocation, Mode};
-use config::LoaderConfig;
-use ledger::Ledger;
-use loader::{now_unix_nanos, Loader};
-use metrics::LoaderMetrics;
+use dz_recorder_load::config::{self, LoaderConfig};
+// The pass, the ledger and the metrics are the library's, because inline mode
+// needs them and a second copy of the ledger would be a second answer to
+// *is this loaded*. See `lib.rs`.
+use dz_recorder_load::ledger::{self, Ledger};
+use dz_recorder_load::loader::{self, now_unix_nanos, Loader};
+use dz_recorder_load::metrics::LoaderMetrics;
 
 /// The command line could not be understood, which is a different failure from a
 /// loader that refused to start: a deployment pipeline distinguishes them.

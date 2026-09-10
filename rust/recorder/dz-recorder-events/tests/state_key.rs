@@ -29,6 +29,7 @@ use dz_edge_tob::{Quote, TopOfBook, MAGIC_TOB};
 use dz_recorder_events::{derive_events, state_key, EventInput, Side, Top};
 use dz_recorder_replay::synthetic::SECOND_SOURCE;
 use dz_recorder_replay::OwnedDatagram;
+use dz_recorder_rows::Derivation;
 
 /// The prices the fixture states, in order, one of them stated twice.
 ///
@@ -82,6 +83,7 @@ fn keys_at(datagrams: Vec<OwnedDatagram>, observation: &str) -> Vec<u64> {
             magic: MAGIC_TOB,
             observation,
             persist_snapshot_levels: false,
+            derivation: Derivation::Archive,
         },
     )
     .expect("the log does not fail");

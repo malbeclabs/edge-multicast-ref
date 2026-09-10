@@ -5,6 +5,13 @@
 //! experience — that the process exits non-zero, that the message reaches
 //! stderr and names the key, and that a valid configuration touches nothing.
 //! Every address here is documentation-range: this repository is public.
+//!
+//! **No check here passes a flag naming the arrangement**, because there is no
+//! such flag: the fixture states `archive.staging_dir` and
+//! `archive.completed_dir`, which is what selects archive mode and what archive
+//! mode has always required. That is the whole of the migration this branch
+//! asks of the fleet, and it is visible here as the edit these tests did not
+//! need.
 #![forbid(unsafe_code)]
 
 use std::path::{Path, PathBuf};
@@ -74,10 +81,62 @@ fn config_in(dir: &Path, text: &str) -> PathBuf {
 }
 
 /// Runs `--check` over a configuration made by editing the valid one.
+///
+/// No arrangement flag, because there is none: the fixture's two archive
+/// directories are what select archive mode, so these refusals are reached the
+/// way a host reaches them.
 fn check(edit: impl FnOnce(&str) -> String) -> Ran {
     let dir = tempfile::tempdir().expect("a temporary directory");
     let path = config_in(dir.path(), &edit(VALID));
     run(&["--config", path.to_str().expect("a utf-8 path"), "--check"])
+}
+
+/// **A configuration stating neither arrangement is refused, naming both ways
+/// of stating one.**
+///
+/// This is the row that leaves no silence for a default to be placed on, at the
+/// altitude an operator meets it. It must not start, must not print a mode line,
+/// and must name the keys and the file — because the operator reading it has
+/// stated neither arrangement and there is nothing to infer from what they
+/// wrote.
+///
+/// Held in every build, and asserted without a `cfg!` branch: this refusal is
+/// made before either arrangement's own checks, so a `--no-default-features`
+/// build makes it in the same words. A refusal that read differently per build
+/// would be a refusal an operator could not be taught.
+#[test]
+fn a_configuration_stating_no_arrangement_is_refused_and_names_both() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let text = VALID
+        .replace(
+            r#"staging_dir     = "/var/lib/dz-recorder/staging""#,
+            r#"staging_dir     = """#,
+        )
+        .replace(
+            r#"completed_dir   = "/var/lib/dz-recorder/completed""#,
+            r#"completed_dir   = """#,
+        );
+    let path = config_in(dir.path(), &text);
+    let ran = run(&["--config", path.to_str().expect("a utf-8 path"), "--check"]);
+
+    assert_eq!(ran.code(), 1, "{}{}", ran.stdout, ran.stderr);
+    assert!(
+        !ran.stdout.contains("mode="),
+        "a configuration stating no arrangement was read as one: {}",
+        ran.stdout
+    );
+    assert!(
+        ran.stdout.is_empty(),
+        "a refusal is not a result: {}",
+        ran.stdout
+    );
+    assert!(ran.stderr.contains("archive.staging_dir"), "{}", ran.stderr);
+    assert!(
+        ran.stderr.contains("archive.completed_dir"),
+        "{}",
+        ran.stderr
+    );
+    assert!(ran.stderr.contains("--inline-config"), "{}", ran.stderr);
 }
 
 #[test]
@@ -97,11 +156,27 @@ fn a_valid_configuration_checks_out_and_creates_nothing() {
         );
     let path = config_in(dir.path(), &text);
 
+    // No flag naming the arrangement, because there is none: the two
+    // directories in the fixture are what select archive mode. This is the
+    // fleet's migration in miniature — the command line an archive host runs
+    // today is the command line that runs here.
     let ran = run(&["--config", path.to_str().unwrap(), "--check"]);
     assert_eq!(ran.code(), 0, "{}", ran.stderr);
     assert!(
         ran.stdout.contains("configuration is valid"),
         "{}",
+        ran.stdout
+    );
+    // The first line, and asserted as the first line: inline mode's `--check`
+    // prints its own mode line first too, and an operator scanning two hosts
+    // must find the same statement in the same place. Spelled out here because
+    // this crate has no library target to import the constant from.
+    assert_eq!(
+        ran.stdout.lines().next(),
+        Some(
+            "mode=archive: every datagram is written to an object, and the loader derives the rows"
+        ),
+        "the mode is not the first line of what --check printed:\n{}",
         ran.stdout
     );
     // The check runs in a pipeline, against a host that may already be

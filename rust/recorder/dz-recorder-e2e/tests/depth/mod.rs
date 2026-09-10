@@ -37,6 +37,7 @@ use dz_edge_tob::{Trade, AGGRESSOR_BUY};
 use dz_recorder_core::RecorderIdentity;
 use dz_recorder_events::{derive_events, DerivedEvents, EventInput};
 use dz_recorder_replay::{ArchiveSource, OwnedDatagram};
+use dz_recorder_rows::Derivation;
 
 use crate::common::{Recorded, Wire, PUBLISHER_A, PUBLISHER_MTU};
 
@@ -305,6 +306,7 @@ pub fn derive(recorded: &Recorded, magic: u16, persist_snapshot_levels: bool) ->
             feed: &manifest.feed,
             object_key: &manifest.object_key,
             object_sha256: &manifest.sha256,
+            derivation: Derivation::Archive,
             segment_seq: manifest.segment_seq,
             magic,
             observation: &identity.hardware(),

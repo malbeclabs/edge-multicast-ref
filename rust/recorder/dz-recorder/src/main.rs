@@ -31,6 +31,14 @@
 mod cli;
 mod endpoint;
 mod identity;
+/// Declared in every build, feature or not: a build without the mode compiled in
+/// is precisely the build that has to refuse a configuration selecting it,
+/// naming the feature. A refusal that only exists in the builds which do not
+/// need it is no refusal at all.
+mod inline_config;
+/// The record path for inline mode, which exists only where the mode does.
+#[cfg(feature = "inline")]
+mod inline_runner;
 mod runner;
 mod startup;
 
@@ -40,7 +48,7 @@ use std::process::ExitCode;
 use thiserror::Error;
 
 use cli::{Args, CliError, Invocation};
-use startup::{Plan, StartupError};
+use startup::{Arrangement, Plan, StartupError};
 
 /// The command line could not be understood, which is a different failure from
 /// a recorder that refused to start: a deployment pipeline distinguishes them.
@@ -51,8 +59,35 @@ enum Failure {
     #[error("{0}")]
     Startup(#[from] StartupError),
     #[error("{0}")]
+    /// Boxed: this is the widest variant by a long way — its refusals carry
+    /// paths and a parser's own error — and an unboxed one makes every `run`
+    /// result that size, including the overwhelmingly common `Ok`.
+    Inline(#[from] Box<inline_config::InlineConfigError>),
+    #[error("{0}")]
     Run(#[from] runner::RunError),
 }
+
+/// Which arrangement this invocation is running, printed where the summary is
+/// read.
+///
+/// Two arrangements exist and they keep different things. A summary that named
+/// neither would leave an operator to infer the arrangement from which keys were
+/// echoed back, and the one they need to be sure of is whether this host is
+/// keeping the bytes. It is the first line in both arrangements, and it is the
+/// line a deployment pipeline reads to see which one it has just deployed.
+const ARCHIVE_MODE: &str =
+    "mode=archive: every datagram is written to an object, and the loader derives the rows";
+
+/// What archive mode says about the three market data grains.
+///
+/// Printed beside the mode line in both arrangements, because a table that is
+/// empty for want of an entry in another process's configuration is
+/// indistinguishable from a table that is empty for want of a feed. The
+/// recorder is not the process that would derive them here, so the honest answer
+/// names the process that decides.
+const ARCHIVE_MARKET_DATA: &str = "market_data=loader: `event`, `instrument` and `book_top` are \
+                                   derived by dz-recorder-load, for the feeds its own \
+                                   `[[market_data]]` entries name";
 
 fn main() -> ExitCode {
     let invocation = match cli::parse(std::env::args().skip(1)) {
@@ -97,18 +132,45 @@ fn run(args: &Args) -> Result<(), Failure> {
             path: args.config.clone(),
             source,
         })?;
-    let plan = Plan::from_config(&config)?;
+    // **The arrangement, before either arrangement's own checks.** Neither is a
+    // default: archive mode is stated by the two directories it has always
+    // required and inline mode by the file it cannot run without, and a
+    // configuration stating both or neither is refused here rather than
+    // resolved. Doing it first is what makes the refusals readable — an operator
+    // whose arrangement is unclear is told that, and not told about a spool
+    // directory or a staging directory belonging to a mode nothing chose.
+    //
+    // A build without the feature reaches the inline branch and refuses there,
+    // rather than falling back to the arrangement nobody chose.
+    match Arrangement::selected_by(&config, args.inline_config.as_deref())? {
+        Arrangement::Inline => Ok(inline_config::run(
+            &config,
+            args.inline_config.as_deref(),
+            args.check,
+            args.run_for,
+        )
+        .map_err(Box::new)?),
+        Arrangement::Archive => run_archive(&config, args),
+    }
+}
+
+fn run_archive(config: &dz_recorder_core::RecorderConfig, args: &Args) -> Result<(), Failure> {
+    let plan = Plan::from_config(config)?;
 
     if args.check {
         // Nothing is bound, nothing is created and nothing is joined: this runs
         // in a deployment pipeline, against a host that may already be
         // recording, before anything is restarted.
+        println!("{ARCHIVE_MODE}");
+        println!("{ARCHIVE_MARKET_DATA}");
         print!("{}", plan.summary());
         println!("configuration is valid");
         return Ok(());
     }
 
     eprintln!("dz-recorder: {}", cli::version_line());
+    eprintln!("{ARCHIVE_MODE}");
+    eprintln!("{ARCHIVE_MARKET_DATA}");
     eprint!("{}", plan.summary());
     runner::run(&plan, args.run_for)?;
     Ok(())

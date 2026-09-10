@@ -125,6 +125,9 @@ impl Held {
         let RowBatch {
             object_key: _,
             object_sha256: _,
+            // Like the pair above: the provenance is on every row, so the
+            // batch's own copy has nowhere to go once an insert spans objects.
+            derivation: _,
             datagram,
             era,
             segment_coverage,

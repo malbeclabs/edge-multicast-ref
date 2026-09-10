@@ -24,9 +24,16 @@ pub use device::{device_address, DeviceAddressError};
 pub use rejoin::Rejoiner;
 pub use socket::{
     bind_multicast, bind_or_retry, Arrival, ArrivalMetadata, BindPlan, CaptureStats,
-    OverflowTracker, PendingLoss, PortBinding, SocketSource, SocketSourceConfig, SourceGate,
-    SourceKey, SourceVerdict, Synthesiser, Waited,
+    OverflowTracker, PortBinding, SocketSource, SocketSourceConfig, SourceGate, SourceKey,
+    SourceVerdict, Synthesiser, Waited,
 };
+
+/// Re-exported because this is where a capture reads it, as
+/// [`OwnedDatagram`](dz_recorder_core::OwnedDatagram) is re-exported by
+/// `dz-recorder-replay`. It lives in `dz-recorder-core` so that a crate which
+/// only *accounts* for loss — inline mode's ring — does not link a capture, and
+/// with it `nix`, to name the accumulator.
+pub use dz_recorder_core::PendingLoss;
 
 #[cfg(feature = "afpacket")]
 pub use afpacket::{

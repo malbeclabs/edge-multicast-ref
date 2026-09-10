@@ -32,8 +32,8 @@ use dz_recorder_relower::{
     MessageBody, ReferenceBody, RelowerError, StateBody, WireCapture, WireProvenance,
 };
 use dz_recorder_rows::{
-    absent_if_sentinel, BookTop, Event, Instrument, MessageTypeLabel, Nanos, PortRoleLabel,
-    RecvTsKindLabel,
+    absent_if_sentinel, BookTop, Derivation, Event, Instrument, MessageTypeLabel, Nanos,
+    PortRoleLabel, RecvTsKindLabel,
 };
 
 use crate::book::{state_key, Book, BookRefused, Change};
@@ -68,6 +68,13 @@ pub struct EventInput<'a> {
     /// `total_levels` against `levels_seen` keeps completeness answerable from
     /// the begin and end rows alone.
     pub persist_snapshot_levels: bool,
+    /// Whether the datagrams behind these rows were kept and verified.
+    ///
+    /// An input for the reason [`object_sha256`](Self::object_sha256) is one: a
+    /// fold reads a `Source` and cannot see whether the bytes behind it were an
+    /// object whose digest was checked or a capture that kept nothing. No
+    /// default — a derivation states its provenance or does not compile.
+    pub derivation: Derivation,
 }
 
 /// What a fold could not attribute, counted rather than guessed.
@@ -290,6 +297,7 @@ pub fn derive_events<S: Source + ?Sized>(
             manifest_seq: Some(entry.statement.manifest_seq),
             declared_count: table.declared_count(Channel::of(instance)),
             object_key: input.object_key.to_owned(),
+            derivation: input.derivation,
         })
         .collect();
 
@@ -530,6 +538,7 @@ fn base_row(input: &EventInput<'_>, provenance: &WireProvenance, statement: &Sta
         depth_bound: None,
         object_key: input.object_key.to_owned(),
         object_sha256: input.object_sha256.to_owned(),
+        derivation: input.derivation,
         datagram_index: provenance.datagram_index,
     }
 }
@@ -581,5 +590,6 @@ fn book_row(
         uncertain_since: change.certainty.since,
         uncertain_reason: change.certainty.reason,
         object_key: input.object_key.to_owned(),
+        derivation: input.derivation,
     }
 }

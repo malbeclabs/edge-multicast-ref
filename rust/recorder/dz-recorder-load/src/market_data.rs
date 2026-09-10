@@ -40,7 +40,7 @@ use dz_recorder_archive::SegmentManifest;
 use dz_recorder_core::RecorderIdentity;
 use dz_recorder_events::{derive_events, DerivedEvents, EventInput};
 use dz_recorder_replay::{ArchiveSource, Termination};
-use dz_recorder_rows::RowBatch;
+use dz_recorder_rows::{Derivation, RowBatch};
 use thiserror::Error;
 
 use crate::config::MarketDataFeed;
@@ -115,6 +115,9 @@ pub fn derive_market_data(
             magic: derived.magic,
             observation: &identity.hardware(),
             persist_snapshot_levels: derived.persist_snapshot_levels,
+            // This function is handed an object and a manifest, and the caller
+            // verified the digest before it got here.
+            derivation: Derivation::Archive,
         },
     )
     .map_err(|source| MarketDataError::Walk {

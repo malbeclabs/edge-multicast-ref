@@ -57,7 +57,7 @@ pub use derive::{
 };
 pub use file::FileSink;
 pub use rows::{
-    absent_if_sentinel, BookTop, ConformanceFinding, Datagram, DropScope, Era, Event,
+    absent_if_sentinel, BookTop, ConformanceFinding, Datagram, Derivation, DropScope, Era, Event,
     FindingVerdict, Grain, Instrument, MessageTypeLabel, Nanos, PortRoleLabel, RecvTsKindLabel,
     RoleJoinRow, RowBatch, SegmentCoverage, SequenceGap, UncertainReason, Verdict,
 };

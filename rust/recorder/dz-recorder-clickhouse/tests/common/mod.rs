@@ -19,8 +19,8 @@ use dz_recorder_core::{CaptureDropScope, RecorderIdentity};
 use dz_recorder_replay::synthetic::{port_for, SyntheticPublisher, GROUP};
 use dz_recorder_replay::Fault;
 use dz_recorder_rows::{
-    derive_object, BookTop, Datagram, DropScope, Era, Nanos, PortRoleLabel, RecvTsKindLabel,
-    RoleJoinRow, RowBatch, SegmentCoverage, SequenceGap, UncertainReason, Verdict,
+    derive_object, BookTop, Datagram, Derivation, DropScope, Era, Nanos, PortRoleLabel,
+    RecvTsKindLabel, RoleJoinRow, RowBatch, SegmentCoverage, SequenceGap, UncertainReason, Verdict,
 };
 
 /// One request, as the sink issued it.
@@ -275,6 +275,7 @@ pub fn top(observation: &str, site: &str, base: u64, offset_ms: u64, state_key: 
         uncertain_since: None,
         uncertain_reason: UncertainReason::None,
         object_key: "object".to_owned(),
+        derivation: Derivation::Archive,
     }
 }
 
@@ -302,6 +303,7 @@ pub fn opening(site: &str, base: u64) -> Era {
         continuation: 0,
         object_key: "object".to_owned(),
         object_sha256: "sha".to_owned(),
+        derivation: Derivation::Archive,
     }
 }
 
@@ -332,6 +334,7 @@ pub fn race_fixture(base: u64) -> RowBatch {
     RowBatch {
         object_key: "object".to_owned(),
         object_sha256: "sha".to_owned(),
+        derivation: Derivation::Archive,
         era: vec![
             opening("one", base - 5_000_000),
             opening("two", base - 3_000_000),
@@ -519,6 +522,7 @@ pub fn coverage(site: &str, channel: u8, segment: Segment) -> SegmentCoverage {
         )],
         object_key: format!("{}", segment.segment_seq),
         object_sha256: "sha".to_owned(),
+        derivation: Derivation::Archive,
         build_version: "0.1.0".to_owned(),
         build_commit: "0000000".to_owned(),
         config_hash: "a".repeat(64),
@@ -600,6 +604,7 @@ pub fn gap(
         on_redundant_path: None,
         verdict: Verdict::Unverifiable,
         object_key: "5".to_owned(),
+        derivation: Derivation::Archive,
     }
 }
 
@@ -629,6 +634,7 @@ pub fn datagram(site: &str, channel: u8, sequence_number: u64, recv_ts: u64) -> 
         drop_scope: DropScope::PortRole,
         object_key: "5".to_owned(),
         object_sha256: "sha".to_owned(),
+        derivation: Derivation::Archive,
     }
 }
 

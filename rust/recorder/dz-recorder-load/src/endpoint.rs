@@ -11,7 +11,7 @@ use std::thread::JoinHandle;
 
 use tiny_http::{Method, Response, StatusCode};
 
-use crate::metrics::LoaderMetrics;
+use dz_recorder_load::metrics::LoaderMetrics;
 
 /// A background HTTP endpoint serving `GET /metrics`.
 ///
