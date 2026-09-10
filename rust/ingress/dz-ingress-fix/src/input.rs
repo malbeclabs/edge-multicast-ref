@@ -120,15 +120,27 @@ impl SocketConnector {
     /// negotiated connect — which a suite that cannot use the network never
     /// reaches. So the provider is constructed explicitly.
     fn tls_config() -> Result<Arc<ClientConfig>, IngressError> {
-        let mut roots = RootCertStore::empty();
-        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         let provider = Arc::new(tokio_rustls::rustls::crypto::ring::default_provider());
         let config = ClientConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
             .map_err(|error| IngressError::fatal(format!("the TLS provider is unusable: {error}")))?
-            .with_root_certificates(roots)
+            .with_root_certificates(Self::trust_anchors())
             .with_no_client_auth();
         Ok(Arc::new(config))
+    }
+
+    /// The anchors a venue's certificate chain is verified against.
+    ///
+    /// Its own function so that "there is something in here" is a value a test
+    /// reads back. An empty store is a configuration that negotiates with
+    /// nothing and looks exactly like a client with verification switched off
+    /// until the first real venue, which is a fault no refusal test can see:
+    /// both accept nothing and refuse everything, and only one of them is
+    /// correct.
+    fn trust_anchors() -> RootCertStore {
+        let mut roots = RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        roots
     }
 }
 
@@ -523,6 +535,25 @@ mod tests {
         })
         .expect("a constructible client configuration");
         assert!(connector.tls.is_some());
+    }
+
+    #[test]
+    fn the_chain_is_verified_against_the_anchors_compiled_into_this_binary() {
+        // The trust anchors are in the binary precisely so that a host with a
+        // stale CA bundle negotiates like every other host. An empty store is
+        // the failure this asserts against: it verifies against nothing, so it
+        // refuses every certificate — which a test that asserts a *refusal*
+        // cannot tell apart from verification working.
+        let anchors = SocketConnector::trust_anchors();
+        assert!(
+            !anchors.is_empty(),
+            "a client that trusts no anchor negotiates with no venue"
+        );
+        assert_eq!(
+            anchors.len(),
+            webpki_roots::TLS_SERVER_ROOTS.len(),
+            "every compiled-in anchor reaches the store"
+        );
     }
 
     #[test]
