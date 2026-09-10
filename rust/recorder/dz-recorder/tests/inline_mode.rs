@@ -3,18 +3,19 @@
 //!
 //! The unit tests cover the refusals as values. This covers them as an
 //! experience — that the process exits non-zero, that the message reaches
-//! stderr naming the key, that a build without the mode refuses the default
-//! mode rather than recording an archive, and that `--check` touches neither
-//! the spool nor the ledger. Nothing here needs a socket, a privilege or a
-//! server: every address is documentation-range, and the destination is one
-//! nothing answers on.
+//! stderr naming the key, that a build without the mode refuses the
+//! arrangement rather than recording an archive, and that `--check` touches
+//! neither the spool nor the ledger. Nothing here needs a socket, a privilege
+//! or a server: every address is documentation-range, and the destination is
+//! one nothing answers on.
 //!
-//! **Inline mode is what a command line naming no mode is read as**, so two of
-//! the tests here are about the default itself rather than about the mode: that
-//! a command line naming no mode and giving no file is refused naming both
-//! flags, and that the feature the default mode needs is in the default set.
-//! The third half of that argument — an archive-shaped configuration refused by
-//! key — lives in `check_mode.rs`, beside archive mode's own checks.
+//! **Neither arrangement is a default**, so two of the tests here are about the
+//! selection rather than about the mode: that a configuration stating neither
+//! is refused naming both statements, and that the feature inline mode needs is
+//! in the default set — one released binary serves hosts in both arrangements.
+//! The third half of that argument — an archive-shaped configuration beside the
+//! second file, refused by key — lives in `check_mode.rs`, beside archive
+//! mode's own checks.
 #![forbid(unsafe_code)]
 
 use std::path::{Path, PathBuf};

@@ -75,10 +75,11 @@ afpacket = ["dz-recorder-capture/afpacket"]
 # `default`, above, because one released binary serves hosts in both
 # arrangements.
 #
-# A command line naming no mode in a build without this feature fails at startup
-# naming it, exactly as `capture.mode = "afpacket"` does for its own. Falling
-# back to archive mode would leave a host keeping bytes where rows were asked
-# for, which is the arrangement nobody chose.
+# A configuration stating the inline arrangement — `--inline-config`, and
+# neither archive directory carrying a value — fails at startup in a build
+# without this feature, naming it, exactly as `capture.mode = "afpacket"` does
+# for its own. Falling back to archive mode would leave a host keeping bytes
+# where rows were asked for, which is the arrangement nobody chose.
 inline = [
     "dep:dz-recorder-inline",
     "dep:dz-recorder-rows",
