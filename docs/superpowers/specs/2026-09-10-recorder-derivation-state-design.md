@@ -176,18 +176,18 @@ An added entry point that takes the state by reference.
 pub struct Derivation { /* the table, the book, the attribution map, two counters */ }
 
 impl Derivation {
-    pub fn new() -> Self;
+    pub fn new() -> Self { /* … */ }
     /// The derivation ended: close open cycles and report what they refused.
-    pub fn close_object(&mut self) -> BookRefused;
+    pub fn close_object(&mut self) -> BookRefused { /* … */ }
     /// The reference data accumulated so far.
-    pub fn table(&self) -> &InstrumentTable;
+    pub fn table(&self) -> &InstrumentTable { /* … */ }
 }
 
 pub fn derive_events_into<S: Source + ?Sized>(
     state: &mut Derivation,
     source: &mut S,
     input: &EventInput<'_>,
-) -> Result<DerivedEvents, RelowerError>;
+) -> Result<DerivedEvents, RelowerError> { /* … */ }
 ```
 
 `derive_events` keeps its exact signature and becomes `Derivation::new()`, one
