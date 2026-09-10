@@ -1,0 +1,15 @@
+[package]
+name = "dz-ingress-fix"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "A session transport for dz-ingress-core: tag-value framing, the session lifecycle, and the logon the adapter composes"
+
+[dependencies]
+dz-ingress-core = { path = "../dz-ingress-core" }
+
+# The framing's two refusals and the body's five are errors an operator reads,
+# and `thiserror` is what every other crate in this family spells them with.
+thiserror = { workspace = true }

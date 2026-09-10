@@ -21,7 +21,14 @@ use crate::error::ConfigError;
 pub enum Kind {
     /// A websocket client. `dz-ingress-websocket`.
     WebSocket,
-    /// A session-oriented order-entry protocol. Not yet built.
+    /// A session-oriented, tag-value protocol, carrying market data as well
+    /// as order entry. `dz-ingress-fix`. Not yet built.
+    ///
+    /// **Named for the protocol and not for one of its uses.** The earlier
+    /// wording called it an order-entry protocol, which invites a market-data
+    /// publisher to read the token as not being for it — and the transport
+    /// this repository builds on it reads market data and composes no order
+    /// entry at all.
     Fix,
     /// A multicast receiver, for a venue that publishes one. Not yet built.
     Multicast,
