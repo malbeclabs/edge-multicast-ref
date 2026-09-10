@@ -1,16 +1,16 @@
 -- The race, as a query over `book_top`: number the occurrences, then pair
 -- ordinal to ordinal.
 --
--- No new table, for the reason the cross-site loss comparison needed none: both
--- sides' rows land in one table and the comparison is a query. `observation`
--- names which PUBLISHER-SIDE observation point a view of the book came from, as
--- `site` names a recorder, and two recorders of one multicast feed are two
--- observations.
+-- No new table, for the reason the cross-site loss comparison needed none: the
+-- rows of both observation points land in one table and the comparison is a
+-- query. `observation` names which PUBLISHER-SIDE observation point a view of
+-- the book came from, as `site` names a recorder, and two recorders of one
+-- multicast feed are two observations.
 --
 -- THAT IS THE WHOLE OF WHAT PAIRS HERE. A venue-side observation is not one of
 -- these and cannot become one: this query groups on `channel_id` and
 -- `instrument_id`, the first being the operator's mapping and the second minted
--- by the publisher's registry, so a venue side can compute neither -- and the
+-- by the publisher's registry, so a venue side can compute neither — and the
 -- rows it would pair carry eight non-nullable columns that are statements about
 -- a datagram. A venue-side race is its own view over its own grain, keyed on
 -- `book_key`, which is the one key both sides can compute. Every argument below
