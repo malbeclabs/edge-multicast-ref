@@ -168,13 +168,17 @@ operator cannot answer from the config file in front of them.
 
 The transport comes from [`rust/ingress`](rust/ingress/). `[ingress] kind` names
 one of a closed set — `websocket`, `fix`, `multicast`, `poll`, `filetail`,
-`uds` — and two of them are built:
+`uds` — and the ones that are built are:
 
 - **`websocket`**, for a venue that carries its book on a subscription. A venue
   that authenticates its upgrade passes a header provider, which runs on
   **every** connect attempt — a venue signing a fresh timestamp and headers
   computed once at startup gives a publisher that connects and can then never
   reconnect.
+- **`fix`**, for a venue whose feed arrives over a session. The transport owns
+  the framing, the outbound sequence, the heartbeat cadence, the logout and the
+  close; the logon's own fields are the venue's and are composed in
+  `on_connected`, beside the subscriptions and before them.
 - **`poll`**, for a venue whose instrument catalogue is a request rather than a
   subscription: the endpoint is asked on `poll_interval`, the body arrives as a
   payload, and no code in the venue's binary holds a timer, a backoff or a
@@ -359,6 +363,19 @@ role = "comparison"         # connected, driven, counted — for the race
   pass over a set divided by the set's size, and one tick here is one request
   with no set to divide by. A polled source that omits it does not parse, because
   a transport with no cadence polls in a loop or never.
+
+  **Keep `poll_interval` well under `[ingress] idle_timeout`.** The driver hands
+  a receive what is left of the idle guard, so a cadence longer than the guard
+  spends that budget and reports idle before the next request is due: the driver
+  ends the connection with `timeout`, reconnects, polls once, and does it again.
+  `poll_interval = "60s"` under `idle_timeout = "30s"` gives one payload per
+  window with `connection_state` flapping and
+  `reconnects_total{reason="timeout"}` climbing, on a document that reads as
+  correct. Nothing refuses it at load — the transport cannot see `[ingress]`,
+  and `[ingress]` does not know a source is polled — so this is the rule that
+  has to be read rather than enforced. An unchanged catalogue is liveness and
+  **does not reset the guard**, which is deliberate, so the guard has to be long
+  enough for a poll that answers.
 - **The name in the file is the metric label.** `dz_publisher_ingress_*` carries
   `connection`, pre-created at 0 for every declared source, so a second upstream
   that never came up is a series sitting at zero rather than no series at all. A

@@ -69,6 +69,29 @@ pub enum ConfigError {
 /// polls in a loop or never, and both are worse than a refusal — so a document
 /// that omits it does not parse.
 ///
+/// # It has to be well under `[ingress] idle_timeout`, and nothing checks it
+///
+/// The driver hands each receive **what is left of the idle guard**. When that
+/// is less than the time to the next poll, the transport spends the budget and
+/// returns [`Received::Idle`](dz_ingress_core::Received), which the driver ends
+/// the connection with `timeout` for — so a cadence longer than the guard is
+/// one payload per window, `connection_state` flapping, and
+/// `reconnects_total{reason="timeout"}` climbing, on a document that reads as
+/// correct. `poll_interval = "60s"` under `idle_timeout = "30s"` is the shape
+/// of it.
+///
+/// Not refused at load, and the reason is structural rather than an omission:
+/// this transport cannot see `[ingress]`, which is the core's section, and the
+/// core cannot know that a source is polled. Checking it would mean one of the
+/// two reading the other's table, which is the arrangement the per-crate rule
+/// exists to prevent. So it is a stated rule, stated in
+/// `BRINGING-UP-A-FEED.md` too.
+///
+/// Note also that an unchanged response is liveness and **does not reset the
+/// guard** — deliberately, so that a catalogue which has stopped changing
+/// still trips it — so the guard has to be long enough for a poll that
+/// answers.
+///
 /// # Why an interval and not a cycle
 ///
 /// This repository distinguishes the two deliberately. `definition_cycle` and
