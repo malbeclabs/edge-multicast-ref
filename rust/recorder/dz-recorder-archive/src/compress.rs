@@ -500,7 +500,7 @@ fn clean_up(job: &Job, names: &Names) -> String {
 ///
 /// # Errors
 ///
-/// [`SinkError`] when the source cannot be read, the destination cannot be
+/// [`SinkError`] when the segment cannot be read, the destination cannot be
 /// written, or the encoder fails.
 pub fn seal(
     source: &Path,

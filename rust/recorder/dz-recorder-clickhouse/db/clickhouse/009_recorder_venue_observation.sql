@@ -59,7 +59,7 @@
 --
 -- WHAT THIS FILE DOES NOT YET JOIN, AND WHY IT IS WRITTEN AS THOUGH IT WILL
 --
--- The publisher side is **not** an arm of the pairing below, and that is a
+-- The publisher side does **not** feed the pairing below yet, and that is a
 -- statement about `book_top` rather than about this design. `book_top` stores
 -- `state_key` and has no `book_key` column, and the two ways to bridge that are
 -- both refused: a new column on `book_top` is what the design this file
@@ -71,8 +71,8 @@
 -- an aggregate over the ordinal, exactly as `006`'s is — so two observations are
 -- a race, three of them are the same query, and a publisher-side observation
 -- enters it by contributing rows rather than by this view learning its name. The
--- day `book_top` carries a `book_key`, the change here is one arm on a union and
--- not a rewrite.
+-- day `book_top` carries a `book_key`, the change here is one branch of a union
+-- and not a rewrite.
 --
 --
 -- THE ARGUMENTS THIS FILE CITES RATHER THAN RESTATES

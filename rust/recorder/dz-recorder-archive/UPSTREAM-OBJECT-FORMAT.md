@@ -64,7 +64,7 @@ them again:
 | Question | Where it is answered |
 |---|---|
 | When does a segment rotate? | `rotate::RotationPolicy` — size or age, whichever comes first |
-| How is an object compressed and digested? | `compress::seal` — zstd with the frame checksum on, hashing the bytes that land |
+| How is an object compressed and digested? | `compress::seal` — zstd with its own per-frame checksum on, hashing the bytes that land |
 | Where does an object land? | `object_key::object_key` — the Hive-partitioned key, with the site and the recorder in it |
 | What is a re-derivation idempotent on? | `(object key, sha256)`, which the manifest states |
 
@@ -212,8 +212,8 @@ Named, so that nobody adds one of them by inferring it from an absence.
   charged to the handle rather than to a port role. A venue transport's loss is
   its session's, measured by the venue's own resend mechanism, and the two must
   not land in one field.
-- **No link headers, no destination group, no port role.** There is no frame,
-  no group and no port.
+- **No link headers, no destination group, no port role.** There is no link
+  layer here, no group and no port.
 - **No venue timestamp.** It is a field inside the bytes and it reaches a row
   through the event the adapter produces. An archive that carried it separately
   would let a derivation read it from the wrong place.

@@ -736,8 +736,8 @@ pub struct PublishedUpstreamObject {
 /// # Errors
 ///
 /// [`SinkError`] when the segment cannot be read, the object cannot be written,
-/// or the manifest cannot be serialised or moved. The source segment is left
-/// where it is on failure: a partial publication that also removed the segment
+/// or the manifest cannot be serialised or moved. The segment is left where it
+/// is on failure: a partial publication that also removed the segment
 /// would destroy the only copy of the window.
 pub fn publish(
     source: &Path,
