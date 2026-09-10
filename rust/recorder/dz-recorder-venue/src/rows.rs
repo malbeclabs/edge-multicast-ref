@@ -261,6 +261,16 @@ pub struct VenueObjectRow {
     /// book is the venue's, and this tier does not have a definition of it that
     /// a `min()` over a pair could safely mix with the publisher side's.
     pub desync_count: u64,
+    /// Events the adapter reported outside any payload scope.
+    ///
+    /// **A defect in the adapter, and visible rather than silent.** The
+    /// derivation opens the scope around `on_payload` and closes it after, so an
+    /// event outside one is an adapter that closed the scope itself — which the
+    /// sink's contract permits it to do. Such an event is attributable to no
+    /// upstream message: it has no receive stamp, no message index and no
+    /// identity, so there is no honest row to write and it is dropped. A drop
+    /// nothing counted would read as a venue that said less than it did.
+    pub unattributed_count: u64,
     /// Rows written to `venue_book_top` from this object.
     pub book_top_count: u64,
     /// Instruments the adapter offered while this object was being read.

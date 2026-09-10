@@ -254,6 +254,13 @@ CREATE TABLE IF NOT EXISTS recorder.venue_object (
     -- Times the adapter said it no longer trusts its own book. Evidence and not
     -- a verdict; see the note on the absent `book_certain` above.
     desync_count      UInt64,
+    -- Events the adapter reported outside any payload scope, which is a defect
+    -- in the adapter. The derivation opens the scope around the adapter's call
+    -- and closes it after, so an event outside one is attributable to no
+    -- upstream message: no receive stamp, no message index, no identity, and
+    -- therefore no honest row. Counted here because a drop nothing counted reads
+    -- as a venue that said less than it did.
+    unattributed_count UInt64,
     book_top_count    UInt64,
     instrument_count  UInt32
 )

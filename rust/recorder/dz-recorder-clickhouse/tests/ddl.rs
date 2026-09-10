@@ -1561,6 +1561,7 @@ mod fixtures {
             event_count: 1,
             unpriced_count: 0,
             desync_count: 0,
+            unattributed_count: 0,
             book_top_count: 1,
             instrument_count: 1,
         }

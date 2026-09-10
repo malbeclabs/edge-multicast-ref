@@ -584,6 +584,55 @@ fn a_price_the_exponent_cannot_state_is_counted_and_not_rounded() {
     );
 }
 
+/// **An event attributable to no payload is counted on the object row.**
+///
+/// The derivation opens the payload scope around the adapter's own call, so an
+/// event outside one is an adapter that closed the scope itself — which the
+/// sink's contract permits. Such an event has no receive stamp, no message index
+/// and no identity, so there is no honest row to write and it is dropped.
+///
+/// The mutant this kills is the drop nobody counted: it reads as a venue that
+/// said less than it did, and every sibling count — unpriced, desynchronised,
+/// refused — is on the object row for exactly that reason.
+#[test]
+fn an_event_outside_a_payload_scope_is_counted_and_never_written() {
+    let mut object = FixtureObject::of(
+        BASE,
+        &[
+            "chan=113 pubseq=990001 seq=1 sid=7 quote AAA 100.50 3 100.60 4",
+            // The adapter closes the scope and reports an event anyway.
+            "chan=113 pubseq=990001 seq=2 sid=7 unscoped AAA",
+        ],
+    );
+    let mut sink = CollectingSink::new();
+    let derived = derive_venue_object(&mut adapter(), &mut object, &mut sink).expect("the object");
+
+    assert_eq!(derived.unattributed_count, 1);
+    assert_eq!(
+        sink.objects()[0].unattributed_count,
+        1,
+        "the count reached no column, so nothing downstream can see the drop"
+    );
+    // Dropped, and not counted as an event the adapter placed: it moved no book
+    // and there is nothing to attribute it to.
+    assert_eq!(derived.event_count, 1);
+    assert_eq!(
+        derived.book_top_count, 1,
+        "a row with no message wrote itself"
+    );
+    assert_eq!(
+        tops(&sink),
+        vec![(
+            BASE,
+            "AAA".to_owned(),
+            Some(10_050),
+            Some(3),
+            Some(10_060),
+            Some(4)
+        )]
+    );
+}
+
 /// The same object derived twice produces the same rows.
 ///
 /// Acceptance: a venue-side object re-derived twice produces one set of rows,

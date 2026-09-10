@@ -126,6 +126,7 @@ fn a_venue_object_row_carries_exactly_the_venue_object_columns() {
         event_count: 98,
         unpriced_count: 1,
         desync_count: 0,
+        unattributed_count: 0,
         book_top_count: 40,
         instrument_count: 3,
     };
@@ -151,6 +152,7 @@ fn a_venue_object_row_carries_exactly_the_venue_object_columns() {
             "event_count": 98,
             "unpriced_count": 1,
             "desync_count": 0,
+            "unattributed_count": 0,
             "book_top_count": 40,
             "instrument_count": 3,
         })
@@ -315,6 +317,7 @@ fn object() -> VenueObjectRow {
         event_count: 10,
         unpriced_count: 0,
         desync_count: 0,
+        unattributed_count: 0,
         book_top_count: 4,
         instrument_count: 1,
     }

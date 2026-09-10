@@ -81,6 +81,7 @@ impl Listing {
 ///   trade  <symbol> <px> <qty>
 ///   listing <symbol> <price_exp> <qty_exp>
 ///   refuse <schema|unknown_field|malformed|truncated>
+///   unscoped <symbol>   -- closes the payload scope, then emits a quote
 /// ```
 #[derive(Debug, Default)]
 pub struct FixtureAdapter {
@@ -298,6 +299,32 @@ impl Adapter for FixtureAdapter {
                     trade_id: None,
                     cumulative_volume: None,
                     flags: dz_adapter_core::TradeFlags::NONE,
+                });
+            }
+            // The one op that closes the payload scope the derivation opened
+            // and then reports an event anyway, which the sink's contract
+            // permits an adapter to do. What follows is attributable to no
+            // upstream message, and this is how a test gets one.
+            "unscoped" => {
+                let symbol = fields.next().ok_or_else(|| ParseError::truncated("sym"))?;
+                let instrument = *self
+                    .handles
+                    .get(symbol)
+                    .ok_or_else(|| ParseError::unknown_field("symbol"))?;
+                out.payload_scope(None);
+                out.event(Event::Quote {
+                    instrument,
+                    source_ts_ns: payload.recv_ts_ns.saturating_sub(1_000),
+                    bid: SideUpdate::Present {
+                        px: Scalar::text("1.00"),
+                        qty: Scalar::text("1"),
+                        source_count: None,
+                    },
+                    ask: SideUpdate::Present {
+                        px: Scalar::text("2.00"),
+                        qty: Scalar::text("1"),
+                        source_count: None,
+                    },
                 });
             }
             "desync" => {

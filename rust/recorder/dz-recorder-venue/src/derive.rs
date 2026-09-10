@@ -120,6 +120,7 @@ pub struct Derived {
     pub event_count: u64,
     pub unpriced_count: u64,
     pub desync_count: u64,
+    pub unattributed_count: u64,
     pub book_top_count: u64,
     pub instrument_count: u32,
 }
@@ -209,6 +210,7 @@ pub fn derive_venue_object(
             event_count: derived.event_count,
             unpriced_count: derived.unpriced_count,
             desync_count: derived.desync_count,
+            unattributed_count: derived.unattributed_count,
             book_top_count: derived.book_top_count,
             instrument_count: derived.instrument_count,
         }],
@@ -381,6 +383,7 @@ impl Fold {
             event_count: self.event_count,
             unpriced_count: self.unpriced_count,
             desync_count: self.desync_count,
+            unattributed_count: self.unattributed_count,
             book_top_count: self.rows.len() as u64,
             instrument_count: u32::try_from(self.instruments.len()).unwrap_or(u32::MAX),
         }
@@ -585,6 +588,10 @@ impl EventSink for Fold {
         if self.in_payload.is_none() {
             // Attributable to no payload: a runtime's own tick, or a sink
             // written to by something that is not an adapter mapping a message.
+            // Counted onto the object row rather than dropped in silence — the
+            // derivation opens the scope around `on_payload`, so an event
+            // outside it is an adapter that closed the scope itself, which the
+            // sink's contract permits and nothing above could otherwise see.
             self.unattributed_count += 1;
             return;
         }
