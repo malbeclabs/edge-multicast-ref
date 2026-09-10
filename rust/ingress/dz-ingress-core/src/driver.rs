@@ -72,6 +72,25 @@ pub struct UpstreamQueue {
 /// idle guard's business rather than this one's. That is the cost of not
 /// bounding the receive budget by this cadence: doing so would make an elapsed
 /// budget mean two things, and `Received::Idle` means exactly one.
+///
+/// # It is a floor, and the transport is what makes it a bound
+///
+/// `recv` is handed `None` whenever `[ingress] idle_timeout` is absent, which
+/// is its default, so on a connection carrying no payloads nothing but the
+/// transport ends the wait. That is not a corner: a venue that has just listed
+/// an instrument and published nothing on it yet is exactly such a connection,
+/// and it is the one this ask exists for — the reason there is no traffic to
+/// ride on may be that the subscription has not gone out.
+///
+/// What bounds it is that a transport is expected to surface its own liveness,
+/// which [`Input::recv`](crate::Input::recv) states as an obligation rather
+/// than leaving to each implementation to decide. `dz-ingress-websocket` meets
+/// it by pinging on its own clock and returning [`Received::Liveness`] for the
+/// pong, so the interval between asks on a silent connection is that
+/// transport's `DEFAULT_PING_INTERVAL` and not this constant. A transport that
+/// neither delivers nor says it is alive, with no idle guard configured, is
+/// never asked at all — a property of that transport, and the reason the
+/// obligation is written down where an implementor reads it.
 pub const UPSTREAM_POLL: Duration = Duration::from_secs(5);
 
 /// One queued message, owned, because the adapter's borrow of it ended when

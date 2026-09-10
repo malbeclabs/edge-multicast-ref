@@ -1442,6 +1442,54 @@ fn the_adapter_is_asked_while_the_connection_is_up() {
     );
 }
 
+/// A connection that has delivered no payload at all is still asked.
+///
+/// This is the state `[ingress] idle_timeout` being absent puts the driver in,
+/// and `policy()` is that default: `recv` is handed `None`, so nothing but the
+/// transport ends the wait. It is also the case the ask exists for. A venue
+/// that has just listed an instrument and published nothing on it yet is this
+/// connection, and the reason there is no traffic to ride on may be that the
+/// subscription has not gone out.
+///
+/// So what reaches the ask is any receive that returns, not a payload — which
+/// is why `Input::recv` states liveness as an obligation on a transport rather
+/// than leaving it to each one. Gate the ask on `delivered` and this fails;
+/// what only this test pins is the zero beside the connection, which is the
+/// assertion that a payload was never a precondition.
+#[test]
+fn a_connection_that_delivers_only_keepalives_is_still_asked() {
+    let adapter = RecordingAdapter {
+        outstanding: VecDeque::from(vec![vec!["subscribe:A-B"]]),
+        ..RecordingAdapter::default()
+    };
+    let outcome = run(
+        policy(),
+        adapter,
+        vec![Connection::live(vec![
+            Read::Keepalive(UPSTREAM_POLL),
+            Read::Ended(DisconnectReason::RemoteClose),
+        ])],
+    );
+
+    assert_eq!(
+        outcome.adapter.upstream_polls,
+        vec![(CONNECTION, 0)],
+        "asked once, and the payload count beside it is zero: a keepalive \
+         proving the connection is up is the whole precondition the ask has"
+    );
+    assert_eq!(
+        outcome.sent,
+        vec!["subscribe:A-B"],
+        "and what it queued left by that connection's transport"
+    );
+    assert_eq!(
+        outcome.budgets,
+        vec![None, None],
+        "with no idle guard the transport is handed no budget, so the wait \
+         ends when the transport says so and never when the driver does"
+    );
+}
+
 /// It is not asked before the cadence, however much arrives.
 ///
 /// Asserted as a count of calls rather than as an absence of messages, because
