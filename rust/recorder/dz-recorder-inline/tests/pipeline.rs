@@ -5,7 +5,7 @@
 #![forbid(unsafe_code)]
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dz_recorder_core::{CaptureDropScope, OwnedDatagram, RecorderIdentity};
 use dz_recorder_inline::pipeline::{start, DerivationConfig};
@@ -252,9 +252,23 @@ fn a_quiet_window_spends_no_window_sequence_number() {
     for dg in &sent[..10] {
         assert_eq!(tx.offer(&dg.as_recorded()), Offered::Accepted);
     }
-    // Long enough for the burst's own window to close on age and for windows
-    // after it to close on age having seen nothing at all.
-    std::thread::sleep(Duration::from_millis(500));
+    // Waited for rather than slept through. A fixed sleep is a margin against
+    // this pipeline's own per-window latency and not a guarantee of one: a
+    // window's deadline is set when it opens, and deriving the burst's window,
+    // storing it to the spool and posting it all sit between its close and the
+    // next window's open. On a host slow enough that span covers the sleep, no
+    // window both opens and closes inside the silence, and the assertion below
+    // fails on a precondition the fixture never established rather than on the
+    // property it is about.
+    let waited = Instant::now();
+    while pipeline.counters().windows_empty() == 0 {
+        assert!(
+            waited.elapsed() < Duration::from_secs(10),
+            "no window closed empty in 10s, which is this fixture failing to arrange \
+             itself rather than the property under test"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
     for dg in &sent[10..] {
         assert_eq!(tx.offer(&dg.as_recorded()), Offered::Accepted);
     }
