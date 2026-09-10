@@ -707,7 +707,12 @@ async fn a_logout_the_venue_has_stopped_reading_is_bounded_and_not_a_hang() {
     assert_eq!(session.state(), SessionState::Established);
 
     let started = tokio::time::Instant::now();
-    session.close().await;
+    // The outer bound is this suite's and not the transport's: with the
+    // transport's grace gone, it makes the fault a failure that names itself
+    // rather than a job that hangs.
+    tokio::time::timeout(Duration::from_secs(30), session.close())
+        .await
+        .expect("`close` must return: an unbounded logout write is a hung teardown");
     assert_eq!(
         started.elapsed(),
         LOGOUT_GRACE,
