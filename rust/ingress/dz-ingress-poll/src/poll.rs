@@ -42,7 +42,7 @@ pub struct PollInput {
     connection: ConnectionId,
     endpoint: String,
     /// The scheme, host and port of `endpoint`, and nothing else. See the
-    /// `Debug` implementation for why the rest is dropped, and note that every
+    /// `Debug` implementation for why the remainder is dropped, and note that every
     /// error detail this type raises carries this and not the endpoint.
     authority: String,
     poll_interval: Duration,
@@ -146,13 +146,13 @@ impl PollInput {
 ///
 /// A string operation and not a URL parse, because what it is for is a log
 /// line and a `Debug`: the part that must not be printed is everything from the
-/// path onwards, and dropping it is the same operation whether or not the rest
-/// parses.
+/// path onwards, and dropping it is the same operation whether or not what
+/// follows parses.
 fn authority_of(endpoint: &str) -> String {
-    let Some((scheme, rest)) = endpoint.split_once("://") else {
+    let Some((scheme, after_scheme)) = endpoint.split_once("://") else {
         return "?".to_string();
     };
-    let host = rest
+    let host = after_scheme
         .split(['/', '?', '#'])
         .next()
         .unwrap_or_default()

@@ -212,7 +212,7 @@ mod tests {
     /// build with no TLS stack must say so at load rather than send whatever
     /// the query string carries in the clear.
     ///
-    /// Both arms, so that this test means something in both builds — which is
+    /// Both branches, so that this test means something in both builds — which is
     /// also what says the `tls` feature is real rather than declared.
     #[test]
     fn an_https_endpoint_without_tls_is_refused_at_load() {
