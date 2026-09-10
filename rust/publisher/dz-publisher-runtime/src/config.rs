@@ -320,6 +320,16 @@ pub struct FeedSection {
     /// The `Channel ID` shard. `channel` means this and nothing else.
     pub channel_id: u8,
 
+    /// Which shard of the instrument set this block carries, in the venue's own
+    /// word. Absent resolves to the default shard, which is what a publisher
+    /// with one channel per specification has always been.
+    ///
+    /// Naming the default explicitly is refused rather than accepted: two
+    /// spellings of one shard would be two era files. See
+    /// [`StartupError::ReservedShardName`].
+    #[serde(default)]
+    pub shard: Option<String>,
+
     /// This publisher's registered identity. Checked against the source
     /// registry's reserved ranges at startup rather than per message; see
     /// [`SourceId`].
@@ -515,7 +525,7 @@ pub struct AdapterConfig {
     pub replay: ReplayConfig,
 }
 
-/// `[adapter.tee]`: the reference stream, and why it sits here.
+/// `[adapter.tee]`: the reference copy, and why it sits here.
 ///
 /// The section names a second
 /// [`DatagramSink`](dz_publisher_egress::DatagramSink) carrying byte-identical
@@ -530,23 +540,37 @@ pub struct AdapterConfig {
 /// what reaches subscribers, which is the section an operator reads as *this can
 /// take the feed down*.
 ///
-/// # One socket per feed *and* port role, and no framing at all
+/// # One socket per feed, *shard* and port role, and no framing at all
 ///
-/// `path` is a **prefix**: the feed's own `spec` token and the role's are
-/// appended, so a `path` of `/run/a-publisher/tee` on a publisher emitting both
-/// feeds is written to as `tee.top-of-book.mktdata`, `tee.top-of-book.refdata`,
-/// `tee.market-by-price.mktdata`, `tee.market-by-price.refdata` and
-/// `tee.market-by-price.snapshot`.
+/// `path` is a **prefix**: the feed's own `spec` token, the shard's name where
+/// it is not the default, and the role's are appended, so a `path` of
+/// `/run/a-publisher/fan-out` on a publisher emitting both feeds of the default
+/// shard is written to as `fan-out.top-of-book.mktdata`,
+/// `fan-out.top-of-book.refdata`, `fan-out.market-by-price.mktdata`,
+/// `fan-out.market-by-price.refdata` and `fan-out.market-by-price.snapshot`,
+/// and the same publisher carrying a shard the document named `alpha` writes
+/// that shard's copies to `fan-out.top-of-book.alpha.mktdata` and the rest of
+/// the five alongside.
 ///
-/// Both halves of that name are load-bearing, for one reason: **a Unix datagram
-/// carries neither a destination port nor a group**, and the diff this stream
-/// exists for is keyed on both. A recorder handed two roles on one socket, or
-/// two feeds' copies of one role on one socket, cannot attribute a datagram
-/// without decoding it — and decoding is the one thing a record path does not
-/// do. `[[feed]]` is an array, so a publisher emitting two feeds is the ordinary
-/// case rather than the exception; a name keyed on the role alone is right only
-/// for the publisher that happens to emit one feed. The shape mirrors the
-/// recorder's own configuration, which keys its ports per feed.
+/// All three parts of that name are load-bearing, for one reason: **a Unix
+/// datagram carries neither a destination port nor a group**, and the diff this
+/// fan-out exists for is keyed on both. A recorder handed two roles on one
+/// socket, two feeds' copies of one role on one socket, or **two shards' copies
+/// of one feed's role on one socket**, cannot attribute a datagram without
+/// decoding it — and decoding is the one thing a record path does not do.
+/// `[[feed]]` is an array, so a publisher emitting two feeds is the ordinary
+/// case rather than the exception, and two channel instances of one
+/// specification are the ordinary case now too; a name keyed on the role alone
+/// is right only for the publisher that happens to emit one feed, and one keyed
+/// on the feed and the role alone only for the one that carries a single shard.
+/// The shape mirrors the recorder's own configuration, which keys its ports per
+/// feed.
+///
+/// The default shard is spelled by its **absence**, as its era file is. A shard
+/// segment for it would rename the socket every existing deployment's recorder
+/// is bound to, and the fan-out would then write to a path with nobody on it —
+/// every datagram dropped and counted, or worse, an operator who believes
+/// copies are still being archived.
 ///
 /// The socket is `SOCK_DGRAM`, so one datagram in is one datagram out and there
 /// is no framing to invent, agree on or get wrong. See
@@ -565,12 +589,19 @@ pub struct TeeConfig {
 }
 
 impl TeeConfig {
-    /// The socket one feed's one port role is copied to.
+    /// The socket one channel instance's one port role is copied to.
     ///
-    /// `<path>.<feed spec>.<port role>`, in the tokens the document itself
-    /// states — the `spec` an operator wrote in the `[[feed]]` block and the
-    /// role's own name — so the file, the socket and the recorder's
-    /// configuration all spell the same two things the same way.
+    /// `<path>.<feed spec>.<shard>.<port role>`, and
+    /// `<path>.<feed spec>.<port role>` for the default shard, in the tokens the
+    /// document itself states — the `spec` and the `shard` an operator wrote in
+    /// the `[[feed]]` block and the role's own name — so the file, the socket
+    /// and the recorder's configuration all spell the same things the same way.
+    ///
+    /// The default shard's absence from the name is [`ShardName::era_shard`]'s
+    /// reasoning applied to a socket, and it is here rather than at the call
+    /// site for the same reason: what a caller would naturally write is
+    /// `shard.as_str()`, which moves every existing deployment's fan-out to a
+    /// path its recorder is not bound to.
     ///
     /// # Errors
     ///
@@ -581,6 +612,7 @@ impl TeeConfig {
     pub fn destination(
         &self,
         spec: FeedSpec,
+        shard: &ShardName,
         port_role: PortRole,
     ) -> Result<PathBuf, StartupError> {
         let prefix = self.path.as_deref().ok_or(StartupError::TeeWithoutPath)?;
@@ -590,6 +622,10 @@ impl TeeConfig {
         let mut destination = prefix.as_os_str().to_owned();
         destination.push(".");
         destination.push(spec.as_str());
+        if !shard.is_default() {
+            destination.push(".");
+            destination.push(shard.as_str());
+        }
         destination.push(".");
         destination.push(port_role.as_str());
         Ok(PathBuf::from(destination))
@@ -727,10 +763,103 @@ impl EmittedFeed for MarketByPrice {
     const SPEC: FeedSpec = FeedSpec::MarketByPrice;
 }
 
+/// Which shard of the instrument set a block carries, as a venue names it.
+///
+/// A channel *is* "a logical shard of the instrument set, named by `Channel
+/// ID`", and this is the venue's word for that shard while `channel_id` is the
+/// configuration's number for it. The mapping between them is the document's,
+/// which is what keeps a venue unable to name a `Channel ID` — the constraint
+/// the whole adapter boundary is built on.
+///
+/// # Checked here because it becomes a path component later
+///
+/// The era store already refuses a feed name that is not one lowercase path
+/// component, and for the same reason: a name with a slash in it writes
+/// somewhere nobody configured. A shard name reaches a path in two places, so
+/// it is checked once, at load, in the one place the value enters the process —
+/// rather than at each use, where the third use is the one that forgets.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ShardName(String);
+
+impl ShardName {
+    /// The longest name a shard may have, in bytes.
+    ///
+    /// The era store's own bound. A longer one is refused rather than truncated:
+    /// two shards whose names differ past the cut would share an era file.
+    const MAX: usize = 64;
+
+    /// A shard name, or `None` for one that cannot be a path component.
+    ///
+    /// `None` is a startup error for the caller to report against its own
+    /// configuration key — the same shape as `SourceId::new`, and for the same
+    /// reason: a publisher with a name it cannot write must not start, and must
+    /// not discover it later when the first era file is written.
+    #[must_use]
+    pub fn new(value: &str) -> Option<Self> {
+        let safe = !value.is_empty()
+            && value.len() <= Self::MAX
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+        safe.then(|| Self(value.to_owned()))
+    }
+
+    /// The default shard, for a document that names none.
+    ///
+    /// The token is `dz-adapter-core`'s so that the boundary and the
+    /// configuration cannot spell it differently — two spellings of one shard
+    /// are two era files and two published sets, for one channel.
+    #[must_use]
+    pub fn default_shard() -> Self {
+        Self(dz_adapter_core::DEFAULT_SHARD.to_owned())
+    }
+
+    /// Whether this is the default, which a block may not spell explicitly.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        self.0 == dz_adapter_core::DEFAULT_SHARD
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// This shard as the era store keys its files on.
+    ///
+    /// **The one place the mapping is made, and it exists because the obvious
+    /// version is wrong.** A document that names no shard resolves to the
+    /// default token, so a caller reaching for `Shard::named(shard.as_str())` —
+    /// the natural thing to write — renames every existing deployment's era
+    /// file. A renamed file reads as *no file*, which resolves to the first
+    /// era: a publisher on era 7 restarts on era 1 and announces nothing.
+    ///
+    /// The default shard therefore keeps `<spec>.era`, and it is this method's
+    /// job to know that rather than each call site's.
+    #[must_use]
+    pub fn era_shard(&self) -> dz_publisher_egress::Shard<'_> {
+        // Delegated, not reimplemented. `Shard::resolve` is the mapping and it
+        // takes the token as an argument because `dz-publisher-egress` does not
+        // depend on the boundary crate that owns the constant — so the decision
+        // lives once, in the crate that owns `Shard`, and this method's job is
+        // to supply the token from the one place it is spelled.
+        dz_publisher_egress::Shard::resolve(&self.0, dz_adapter_core::DEFAULT_SHARD)
+    }
+}
+
+impl std::fmt::Display for ShardName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// One feed's configuration, checked.
 #[derive(Debug, Clone)]
 pub struct Feed {
     pub spec: FeedSpec,
+    /// The shard this block carries. A document naming none resolves every
+    /// block to [`ShardName::default_shard`].
+    pub shard: ShardName,
     pub channel_id: u8,
     pub source_id: SourceId,
     pub group: Ipv4Addr,
@@ -903,13 +1032,34 @@ impl Document {
             default_idle_guard(),
         )?;
 
-        let mut feeds = Vec::new();
-        let mut seen: BTreeMap<&'static str, ()> = BTreeMap::new();
+        let mut feeds: Vec<Feed> = Vec::new();
+        // Keyed on the pair. Two blocks of one specification are ordinary now —
+        // on different shards — and it is the shard that carries the meaning.
+        let mut seen: BTreeMap<(&'static str, String), ()> = BTreeMap::new();
         for section in enabled {
             let feed = section.resolve(definition_cycle, idle_guard)?;
-            if seen.insert(feed.spec.as_str(), ()).is_some() {
-                return Err(StartupError::DuplicateFeedSpec {
+            if seen
+                .insert((feed.spec.as_str(), feed.shard.as_str().to_owned()), ())
+                .is_some()
+            {
+                return Err(StartupError::DuplicateFeedShard {
                     spec: feed.spec.as_str().to_owned(),
+                    shard: feed.shard.as_str().to_owned(),
+                });
+            }
+            // Checked here rather than in `channel_ids`, which sorts and dedups
+            // and would therefore make a collision disappear on its way to the
+            // metrics that would have shown it.
+            if let Some(first) = feeds
+                .iter()
+                .find(|earlier| earlier.channel_id == feed.channel_id)
+            {
+                return Err(StartupError::DuplicateChannelId {
+                    channel_id: feed.channel_id,
+                    first_spec: first.spec.as_str().to_owned(),
+                    first_shard: first.shard.as_str().to_owned(),
+                    second_spec: feed.spec.as_str().to_owned(),
+                    second_shard: feed.shard.as_str().to_owned(),
                 });
             }
             feeds.push(feed);
@@ -917,6 +1067,7 @@ impl Document {
         if feeds.is_empty() {
             return Err(StartupError::NoEnabledFeed);
         }
+        check_shards_carry_the_same_specifications(&feeds)?;
         // One `Source ID` per process, because that is what a `Source ID` is:
         // the lowering takes it once and every message a process sends carries
         // it, so there is no per-message decision and no per-feed one either.
@@ -1022,7 +1173,34 @@ impl Config {
     /// the reason it exists is written down.
     #[must_use]
     pub fn feed_specs(&self) -> Vec<FeedSpec> {
-        self.feeds.iter().map(|feed| feed.spec).collect()
+        // Distinct, because the question it answers is *which feeds does this
+        // publisher emit* and an adapter handed one specification once per
+        // shard is being told something about the deployment rather than about
+        // the feeds. Document order, so the answer is stable and readable.
+        let mut specs: Vec<FeedSpec> = Vec::new();
+        for feed in &self.feeds {
+            if !specs.contains(&feed.spec) {
+                specs.push(feed.spec);
+            }
+        }
+        specs
+    }
+
+    /// The distinct shards this publisher carries, in the document's own order.
+    ///
+    /// One entry however many specifications carry it: a shard is a partition of
+    /// the instrument set, and a block of each specification for one shard is
+    /// two channel instances of one partition. It is the unit the reference-data
+    /// registry publishes a set for.
+    #[must_use]
+    pub fn shards(&self) -> Vec<ShardName> {
+        let mut shards: Vec<ShardName> = Vec::new();
+        for feed in &self.feeds {
+            if !shards.contains(&feed.shard) {
+                shards.push(feed.shard.clone());
+            }
+        }
+        shards
     }
 
     /// Exactly the port roles this publisher operates, across every enabled
@@ -1128,6 +1306,26 @@ impl FeedSection {
         idle_guard: Duration,
     ) -> Result<Feed, StartupError> {
         let spec = FeedSpec::resolve(&self.spec)?;
+        // Before anything that could fail on a different key, because a
+        // document with a bad shard name and a bad port should be told about
+        // the shard: it is the one that decides where files are written.
+        let shard = match &self.shard {
+            None => ShardName::default_shard(),
+            Some(stated) => {
+                let named =
+                    ShardName::new(stated).ok_or_else(|| StartupError::UnsafeShardName {
+                        spec: self.spec.clone(),
+                        shard: stated.clone(),
+                    })?;
+                if named.is_default() {
+                    return Err(StartupError::ReservedShardName {
+                        spec: self.spec.clone(),
+                        shard: stated.clone(),
+                    });
+                }
+                named
+            }
+        };
         let source_id = SourceId::new(self.source_id).ok_or(StartupError::BadSourceId {
             source_id: self.source_id,
         })?;
@@ -1217,6 +1415,7 @@ impl FeedSection {
 
         Ok(Feed {
             spec,
+            shard,
             channel_id: self.channel_id,
             source_id,
             group,
@@ -1230,6 +1429,51 @@ impl FeedSection {
             idle_guard,
         })
     }
+}
+
+/// Every shard carries the same specifications, or the publisher refuses.
+///
+/// **This is what makes [`ListingSink::list_on`] total.** A venue admits an
+/// instrument to a shard; if that shard has no block for a specification another
+/// shard has, the instrument's messages for that specification reach no wire and
+/// are counted only as unroutable. The venue did exactly what the interface
+/// asked, the configuration is the thing that is wrong, and nothing at run time
+/// can tell that apart from an instrument that simply never traded.
+///
+/// So it is a startup refusal, and it names the shard and the specification it
+/// has no block for — the two things an operator has to edit.
+///
+/// [`ListingSink::list_on`]: dz_adapter_core::ListingSink::list_on
+fn check_shards_carry_the_same_specifications(feeds: &[Feed]) -> Result<(), StartupError> {
+    let mut by_shard: BTreeMap<&str, Vec<FeedSpec>> = BTreeMap::new();
+    for feed in feeds {
+        by_shard
+            .entry(feed.shard.as_str())
+            .or_default()
+            .push(feed.spec);
+    }
+    // The union, because the question is not what the first shard carries but
+    // what any of them does: a specification one shard has is one every shard
+    // must have, whichever shard the document happens to list first.
+    let mut every: Vec<FeedSpec> = Vec::new();
+    for specs in by_shard.values() {
+        for spec in specs {
+            if !every.contains(spec) {
+                every.push(*spec);
+            }
+        }
+    }
+    for (shard, specs) in &by_shard {
+        for spec in &every {
+            if !specs.contains(spec) {
+                return Err(StartupError::ShardSpecsDisagree {
+                    shard: (*shard).to_owned(),
+                    spec: spec.as_str().to_owned(),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Resolve `[[source]]`, and refuse every document that names alternatives

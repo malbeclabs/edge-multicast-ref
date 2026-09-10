@@ -47,15 +47,17 @@ use dz_publisher_egress::{
     EraStore, FailureScope, KernelRoute, MulticastTransmitter, ReferenceStream, Tee,
 };
 use dz_publisher_metrics::{PublisherMetrics, PublisherMetricsConfig};
-use dz_publisher_refdata::{CycleSchedule, FileStore, Registry, RegistryConfig, StateStore};
+use dz_publisher_refdata::{
+    CycleSchedule, FileStore, Registry, RegistryConfig, ShardConfig, StateStore,
+};
 
 use crate::clock::{Clock, SystemClock};
-use crate::config::{Config, Feed, FeedSpec, Source, SourceRole};
+use crate::config::{Config, Feed, FeedSpec, ShardName, Source, SourceRole};
 use crate::error::StartupError;
 use crate::guard::{Exit, Inconsistency};
 use crate::observer::MetricsObserver;
 use crate::pipeline::{FeedPipeline, Port, Ports};
-use crate::publisher::{Feeds, Publisher, SnapshotError};
+use crate::publisher::{Feeds, Publisher, ShardFeeds, SnapshotError};
 use crate::registry::{AdapterContext, AdapterRegistry};
 
 /// How often the tick body runs.
@@ -64,7 +66,16 @@ use crate::registry::{AdapterContext, AdapterRegistry};
 /// a debt rather than counted in ticks, so this value changes only how promptly
 /// a due thing happens and never how much of it happens. Ten milliseconds is
 /// well below the shortest cadence the design's own configuration states.
-const TICK: Duration = Duration::from_millis(10);
+///
+/// **One thing the tick serves is not a debt, and that is why this is public.**
+/// The tick body takes at most one periodic snapshot, because a snapshot is a
+/// group of datagrams and the unit of progress is an instrument. So this value
+/// *is* the process's snapshot serving rate, every shard's rotation draws on
+/// that one budget, and
+/// [`rotation::schedule_share`](crate::rotation::schedule_share) needs it to say
+/// whether the configured cycles can all be met. See `crate::rotation`'s note on
+/// the ceiling.
+pub const TICK: Duration = Duration::from_millis(10);
 
 /// The most datagrams one definition tick may emit.
 ///
@@ -260,10 +271,32 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
         MAX_DATAGRAM_SIZE as u16,
         MAX_DEFINITION_DATAGRAMS_PER_TICK,
     );
+    // One entry per distinct shard, in the document's own order, so that the
+    // index the registry addresses a published set by is the index the feed
+    // pipelines carry. Two orders that agree by convention rather than by
+    // construction is how a shard's definitions end up on another shard's port.
+    //
+    // The `Channel ID` is the first block carrying that shard, and it is the one
+    // a manifest states when nothing overwrites it. A shard carrying two
+    // specifications is two channel instances sharing one published set; the
+    // datagram builder stamps the header at push, so the copy in the message
+    // body cannot disagree with the port it left by.
+    let shards: Vec<ShardConfig> = config
+        .shards()
+        .into_iter()
+        .map(|shard| ShardConfig {
+            channel_id: config
+                .feeds
+                .iter()
+                .find(|feed| feed.shard == shard)
+                .map_or(identity.channel_id, |feed| feed.channel_id),
+            name: shard.as_str().to_owned(),
+        })
+        .collect();
     let refdata = Registry::open(
         RegistryConfig {
             source_id: identity.source_id,
-            channel_id: identity.channel_id,
+            shards,
             selection: config.refdata.selection,
             schedule,
         },
@@ -271,34 +304,13 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
         clock.clone(),
     )?;
 
-    let route = KernelRoute;
-    let mut feeds = Feeds::default();
-    for feed in &config.feeds {
-        // The match is total over a set that is not `#[non_exhaustive]`, so a
-        // feed specification added to `FeedSpec` breaks the build here - which
-        // is the point. A value a configuration can name that nothing composes
-        // is a value that resolves to nothing at startup.
-        match feed.spec {
-            FeedSpec::TopOfBook => {
-                let ports = open_ports(feed, &config, &metrics, &route)?;
-                feeds.top_of_book = Some(FeedPipeline::new(
-                    feed,
-                    Arc::clone(&metrics),
-                    eras.begin_era::<TopOfBook>()?,
-                    ports,
-                ));
-            }
-            FeedSpec::MarketByPrice => {
-                let ports = open_ports(feed, &config, &metrics, &route)?;
-                feeds.market_by_price = Some(FeedPipeline::new(
-                    feed,
-                    Arc::clone(&metrics),
-                    eras.begin_era::<MarketByPrice>()?,
-                    ports,
-                ));
-            }
-        }
-    }
+    // **The composition is a function now, and that is what makes it
+    // testable.** Inline here, nothing but a real socket could reach it: the
+    // whole suite passed with the shard order reversed, which publishes each
+    // shard's instruments under another channel instance's sequence series and
+    // is undetectable from a subscriber. See `compose_feeds` and `PortOpener`.
+    let ports = KernelPorts::new(&config, &metrics);
+    let feeds = compose_feeds(&config.shards(), &config.feeds, &eras, &metrics, &ports)?;
 
     let publisher = RefCell::new(Publisher::new(
         Arc::clone(&metrics),
@@ -554,6 +566,133 @@ fn primary_connection(config: &Config, venue: &crate::Venue) -> ConnectionId {
         .unwrap_or_else(|| venue.sources[0].connection())
 }
 
+/// What opens one feed's send paths.
+///
+/// # Why this is a trait, and why the route was not enough
+///
+/// `RouteLookup` already puts the routing table behind a trait, and its own doc
+/// comment says why: "a test that needs a route to a multicast group is a test
+/// that does not run in CI". That is true and it is not the seam that was
+/// missing. `MulticastTransmitter::open` binds a socket and connects it, so a
+/// composition holding a `RouteLookup` still needs a network to compose.
+///
+/// **Without this seam nothing but a real socket can reach the composition**,
+/// and a permuted shard order is undetectable from anywhere else. The
+/// definition path is keyed on a shard's *name* — `ShardFeeds` derives it from
+/// one of its own send paths — so every reference-data port still carries
+/// exactly its own shard's definitions. The event path is keyed on the
+/// *index*, so a quote reaches another shard's pipeline, whose lowering does
+/// not hold the instrument, and is dropped before any wire: every channel
+/// loses its own market data and no channel gains any. The end-to-end harness
+/// composes its own `Feeds`, so it cannot see the difference either.
+pub trait PortOpener {
+    /// The send paths for one `[[feed]]` block.
+    ///
+    /// # Errors
+    ///
+    /// [`StartupError`] for anything that stops this feed from being composed:
+    /// a route that does not resolve, an address outside the declared prefix, a
+    /// socket that cannot be opened, a fan-out path that is not a socket.
+    fn open(&self, feed: &Feed) -> Result<Ports, StartupError>;
+}
+
+/// The real one: real sockets, over the routing table the send path itself asks.
+pub struct KernelPorts<'a> {
+    config: &'a Config,
+    metrics: &'a Arc<PublisherMetrics>,
+    route: KernelRoute,
+}
+
+impl<'a> KernelPorts<'a> {
+    #[must_use]
+    pub fn new(config: &'a Config, metrics: &'a Arc<PublisherMetrics>) -> Self {
+        Self {
+            config,
+            metrics,
+            route: KernelRoute,
+        }
+    }
+}
+
+impl PortOpener for KernelPorts<'_> {
+    fn open(&self, feed: &Feed) -> Result<Ports, StartupError> {
+        open_ports(feed, self.config, self.metrics, &self.route)
+    }
+}
+
+/// One shard's send paths per shard, in the order the shard list states them.
+///
+/// **The order is the whole of it.** `Feeds` is indexed by shard, and the index
+/// a routing decision uses is the one `Registry::shard_of` returns — an index
+/// into the registry's shard list, built from the same `Config::shards()`.
+/// Iterating that one list here is what keeps the two in step, and a test that
+/// asserts this function's output order is the only thing that says so.
+///
+/// Shard-outer and block-inner, so a document that interleaves its blocks
+/// cannot separate a shard's two specifications: they are built together and
+/// held together in one `ShardFeeds`.
+///
+/// # Errors
+///
+/// [`StartupError::ShardWithNoFeed`] for a shard the feed list does not
+/// mention, which no document and no resolved `Config` can produce —
+/// `Config::shards()` is the distinct shards *of the enabled blocks* — and
+/// which is therefore reachable only from here. That is the reason the variant
+/// exists and the reason this function takes the two lists separately rather
+/// than a `Config`: an invariant no document can violate is one a later
+/// refactor can, and skipping the shard would shift every later shard's index
+/// one off the registry's.
+///
+/// Everything else the era store or the port opener refuses.
+pub fn compose_feeds(
+    shards: &[ShardName],
+    feeds: &[Feed],
+    eras: &EraStore,
+    metrics: &Arc<PublisherMetrics>,
+    ports: &dyn PortOpener,
+) -> Result<Feeds, StartupError> {
+    let mut composed = Feeds::default();
+    for shard in shards {
+        let mut top_of_book = None;
+        let mut market_by_price = None;
+        for feed in feeds.iter().filter(|feed| feed.shard == *shard) {
+            let opened = ports.open(feed)?;
+            // The match is total over a set that is not `#[non_exhaustive]`, so
+            // a feed specification added to `FeedSpec` breaks the build here -
+            // which is the point. A value a configuration can name that nothing
+            // composes is a value that resolves to nothing at startup.
+            match feed.spec {
+                FeedSpec::TopOfBook => {
+                    top_of_book = Some(FeedPipeline::new(
+                        feed,
+                        Arc::clone(metrics),
+                        eras.begin_era::<TopOfBook>(feed.shard.era_shard())?,
+                        opened,
+                    ));
+                }
+                FeedSpec::MarketByPrice => {
+                    market_by_price = Some(FeedPipeline::new(
+                        feed,
+                        Arc::clone(metrics),
+                        eras.begin_era::<MarketByPrice>(feed.shard.era_shard())?,
+                        opened,
+                    ));
+                }
+            }
+        }
+        let Some(shard_feeds) = ShardFeeds::new(top_of_book, market_by_price) else {
+            // Refused rather than skipped, because skipping would shift every
+            // later shard's index one off the registry's and publish a shard's
+            // instruments under another channel instance's sequence series.
+            return Err(StartupError::ShardWithNoFeed {
+                shard: shard.as_str().to_owned(),
+            });
+        };
+        composed.push(shard_feeds);
+    }
+    Ok(composed)
+}
+
 /// Open one feed's transmitters and wrap each in its own fan-out.
 ///
 /// # Every port role is `FailureScope::Process`, and two of the three are the
@@ -613,7 +752,10 @@ fn open_ports(
         // own configuration, which keys its ports per feed. See
         // `TeeConfig::destination`.
         if config.adapter.tee.enabled {
-            let destination = config.adapter.tee.destination(feed.spec, port_role)?;
+            let destination = config
+                .adapter
+                .tee
+                .destination(feed.spec, &feed.shard, port_role)?;
             eprintln!(
                 "fanning out {} {} datagrams to {}",
                 feed.spec.as_str(),
@@ -640,13 +782,51 @@ fn open_ports(
     })
 }
 
+/// The line an offer on an unknown shard name earns.
+///
+/// **Both halves, because either alone is unactionable.** The name the venue
+/// asked for says what its adapter believes; the names this document configures
+/// say what the process has. A misspelling is only visible as the pair, and an
+/// operator handed one of them has to go and find the other before the line
+/// means anything.
+///
+/// Separate from its call site so it can be asserted directly, which is the
+/// only part of this path a test can reach: the call site is inside the tick
+/// loop, and nothing in the suite runs that.
+fn unknown_shard_line(offered: &str, configured: &[String]) -> String {
+    let names = if configured.is_empty() {
+        "none".to_owned()
+    } else {
+        configured
+            .iter()
+            .map(|name| format!("`{name}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!(
+        "dz-publisher-runtime: the venue offered instruments on `{offered}`, which is not a shard \
+         this publisher is configured with. They are declined and reach no channel. Configured: \
+         {names}. Said once for this name however many instruments were offered under it."
+    )
+}
+
 /// The numbers no series carries, on the way out.
 ///
-/// Five of them, each named where it is documented: lowering refusals by
+/// Seven of them, each named where it is documented: lowering refusals by
 /// reason, snapshots asked for and not sent, events this build had no feed to
-/// carry, adapter failures the closed family set has nowhere for, and fan-out
-/// members that are no longer being fed. A log line is not a substitute for a
-/// series and is not offered as one; it is what a closed metric set leaves.
+/// carry, adapter failures the closed family set has nowhere for, fan-out
+/// members that are no longer being fed, and the two shard refusals. A log line
+/// is not a substitute for a series and is not offered as one; it is what a
+/// closed metric set leaves.
+///
+/// The two shard refusals are the newest and the reason they are here is worth
+/// stating. `Counts` maps them to no family deliberately — the normative set is
+/// closed — and the gauge it points at instead,
+/// `refdata_instruments_current{channel_id}` at 0, only shows a venue that
+/// misnames *every* offer for a shard. One that misnames some of them leaves
+/// the gauge non-zero and those instruments unpublished. So these two numbers
+/// and the tick loop's own lines are the whole of the signal, and a number that
+/// only exists in a log has to actually be printed.
 fn report<S: StateStore, K: Clock + Clone>(
     publisher: &Publisher<S, K>,
     observer: &MetricsObserver,
@@ -693,6 +873,30 @@ fn report<S: StateStore, K: Clock + Clone>(
         eprintln!(
             "dz-publisher-runtime: {} adapter failures",
             observer.adapter_errors()
+        );
+    }
+    if publisher.snapshot_schedule_overruns() > 0 {
+        eprintln!(
+            "dz-publisher-runtime: on {} ticks the configured `[[feed]] snapshot_cycle` values \
+             together asked for more snapshots than one process can send, so every channel \
+             lapped more slowly than its own key states. One process serves one periodic \
+             snapshot per {TICK:?}, and that budget is shared across every shard",
+            publisher.snapshot_schedule_overruns()
+        );
+    }
+    let counts = publisher.refdata().counts();
+    if counts.declined_unknown_shard > 0 {
+        eprintln!(
+            "dz-publisher-runtime: {} listings were declined naming a shard this publisher has \
+             no channel for; the names are in the lines written when they were first offered",
+            counts.declined_unknown_shard
+        );
+    }
+    if counts.declined_shard_restated > 0 {
+        eprintln!(
+            "dz-publisher-runtime: {} re-offers named a different shard for an instrument \
+             already published, which stayed on the shard it was admitted to",
+            counts.declined_shard_restated
         );
     }
 }
@@ -746,6 +950,25 @@ async fn tick_loop<S: StateStore, K: Clock + Clone>(
             {
                 let mut held = adapter.lock().unwrap_or_else(|held| held.into_inner());
                 publisher.poll_listings(&mut **held);
+                // A shard name the venue offered that this document has no
+                // channel for. Named here rather than left to the exit report,
+                // because the instruments under it are being declined *now* and
+                // the only series that could show it is a gauge at 0 — which
+                // says a channel is empty and cannot say what was asked for.
+                // The registry hands each distinct name back once and never
+                // again, so this is a line per name and not a line per poll,
+                // which matters because an adapter may re-offer its whole set
+                // every second.
+                let offered = publisher.take_unknown_shards();
+                if !offered.is_empty() {
+                    let configured: Vec<String> = (0..publisher.feeds().shard_count())
+                        .filter_map(|index| publisher.feeds().shard_name(index))
+                        .map(str::to_owned)
+                        .collect();
+                    for name in offered {
+                        eprintln!("{}", unknown_shard_line(&name, &configured));
+                    }
+                }
                 // The recovery snapshots an `InstrumentReset` obliged. Drained
                 // here rather than inside the adapter's own callback because
                 // capturing a book is a walk of it, and because a snapshot has
@@ -793,7 +1016,21 @@ async fn tick_loop<S: StateStore, K: Clock + Clone>(
                     named_dropped.push(name);
                 }
             }
-            publisher.tick()
+            let exit = publisher.tick();
+            // The tick that just ran counted whether the configured cycles can
+            // be met. On the decade schedule, because a document that asks for
+            // more than the process can send asks for it on every tick
+            // thereafter and one line per tick is a hundred a second. The exit
+            // report names the total.
+            if worth_a_line(publisher.snapshot_schedule_overruns()) {
+                eprintln!(
+                    "dz-publisher-runtime: the configured snapshot cycles want more snapshots \
+                     than one process can send ({} ticks so far), so every channel is lapping \
+                     more slowly than its `[[feed]] snapshot_cycle` states",
+                    publisher.snapshot_schedule_overruns()
+                );
+            }
+            exit
         };
         if let Some(exit) = exit {
             return exit;
@@ -1435,6 +1672,40 @@ mod tests {
         // about the wrong bucket - and a line about a failure that did not
         // happen is worse than no line.
         assert!(!worth_a_line(0));
+    }
+
+    // -----------------------------------------------------------------------
+    // The unknown shard name, and the line an operator gets
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn the_unknown_shard_line_names_the_offer_and_the_configured_shards() {
+        // Both halves or the line is unactionable. `pepr` against `perp` is
+        // only a misspelling once the reader can see `perp`, and a line
+        // carrying either name alone sends an operator to open the document
+        // and work out the other half themselves.
+        let line = unknown_shard_line("pepr", &["perp".to_owned(), "spot".to_owned()]);
+        assert!(
+            line.contains("`pepr`"),
+            "the offered name is missing: {line}"
+        );
+        assert!(
+            line.contains("`perp`") && line.contains("`spot`"),
+            "the configured names are missing: {line}"
+        );
+        // And it says what happened to the instruments, because "not
+        // configured" on its own does not say whether they were published.
+        assert!(line.contains("declined"), "{line}");
+    }
+
+    #[test]
+    fn a_publisher_with_no_named_shard_still_names_what_it_has() {
+        // Every block defaulting to the default shard is the ordinary
+        // single-channel document, and it is the one most likely to meet an
+        // adapter that names shards. An empty list rendered as nothing at all
+        // would read as a truncated line rather than as an answer.
+        let line = unknown_shard_line("perp", &[]);
+        assert!(line.contains("none"), "{line}");
     }
 
     // -----------------------------------------------------------------------

@@ -84,7 +84,7 @@ fn touch_every_family(m: &PublisherMetrics) {
     m.book().set_instruments_published(1);
 
     m.refdata().definition_emitted();
-    m.refdata().set_instruments_current(1);
+    m.refdata().set_instruments_current(1, 1);
     m.refdata().observe_load_duration(0.5);
     m.refdata().load_error(RefdataLoadErrorReason::Timeout);
     m.refdata().set_last_refresh_timestamp(1.0);

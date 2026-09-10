@@ -27,7 +27,8 @@
 //!   discipline in [`transmitter`]. [`Tee`] is the fan-out, and absorbs a
 //!   member's failure rather than ending a send.
 //! - [`Sequencer`] holds a series per channel instance; [`EraStore`] holds the
-//!   `Reset Count` that survives a restart.
+//!   `Reset Count` that survives a restart, one per channel instance too —
+//!   keyed on a feed specification and a [`Shard`].
 //! - [`EgressPolicy`] decides the source address, from the route rather than
 //!   from configuration, and refuses one that fails the operator's stated
 //!   invariant.
@@ -71,7 +72,7 @@ pub mod sink;
 pub mod transmitter;
 
 pub use egress::ChannelEgress;
-pub use era::{EraError, EraStore, FIRST_ERA};
+pub use era::{EraError, EraStore, Shard, FIRST_ERA};
 pub use error::{EgressError, SinkError};
 pub use instance::{ChannelInstance, EgressEndpoint};
 pub use policy::{

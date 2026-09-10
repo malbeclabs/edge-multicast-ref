@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use dz_adapter_core::{InstrumentRef, InstrumentSpec, ListingSink};
+use dz_adapter_core::{InstrumentRef, InstrumentSpec, ListingSink, DEFAULT_SHARD};
 use dz_edge_refdata::{InstrumentDefinition, ManifestSummary, SYMBOL_LEN};
 use dz_publisher_lowering::{InstrumentTable, SourceId};
 
@@ -21,15 +21,58 @@ use crate::CycleSchedule;
 /// here keys on.
 type SymbolKey = [u8; SYMBOL_LEN];
 
+/// One shard, and the `Channel ID` its reference data is published on.
+///
+/// A shard is the partition the venue names at admission; a `Channel ID` is the
+/// configuration's, and the mapping between the two is the operator's. Both are
+/// here because a manifest composed without a datagram builder still has to
+/// state a truthful `Channel ID`, and the only truthful one is the channel that
+/// carries this shard's reference data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShardConfig {
+    /// What the venue names in
+    /// [`ListingSink::list_on`](dz_adapter_core::ListingSink::list_on).
+    /// Checked at load, because it becomes a path component elsewhere.
+    pub name: String,
+    /// The shard's own `Channel ID`.
+    ///
+    /// A shard carrying two feed specifications is two channel instances and
+    /// therefore two `Channel ID`s, sharing one published set. This is the one
+    /// a manifest states when nothing overwrites it; the datagram builder
+    /// stamps the header's `Channel ID` at push, so the copy in the message
+    /// body cannot disagree with the port it left by.
+    pub channel_id: u8,
+}
+
+impl ShardConfig {
+    /// The shard a document that names none resolves to.
+    ///
+    /// Spelled from [`DEFAULT_SHARD`] rather than typed, here and in the
+    /// configuration, so that the one token cannot become two.
+    #[must_use]
+    pub fn default_shard(channel_id: u8) -> Self {
+        Self {
+            name: DEFAULT_SHARD.to_string(),
+            channel_id,
+        }
+    }
+}
+
 /// What this publisher is, on the wire.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct RegistryConfig {
     /// Checked once at startup against the ranges the source registry reserves,
     /// and against the `Source ID` the persisted state was minted under.
     pub source_id: SourceId,
-    /// The `Channel ID` this publisher's reference data is published on, for
-    /// `ManifestSummary`'s own copy of it.
-    pub channel_id: u8,
+    /// Every shard an adapter may admit to, in the order the document states
+    /// them.
+    ///
+    /// One entry is the ordinary case and is what a document naming no shard
+    /// resolves to. A name that is not in here is refused rather than
+    /// defaulted — see [`Refusal::UnknownShard`] — so an empty set or a
+    /// repeated name is a startup failure rather than a publisher whose
+    /// channels are quietly empty.
+    pub shards: Vec<ShardConfig>,
     pub selection: SelectionPolicy,
     pub schedule: CycleSchedule,
 }
@@ -38,10 +81,42 @@ pub struct RegistryConfig {
 #[derive(Debug, Clone, Copy)]
 struct Published {
     symbol: SymbolKey,
+    /// Which shard's published set this instrument is in, as an index into the
+    /// configured shards.
+    ///
+    /// Held here rather than on [`InstrumentTable`] deliberately. The table is
+    /// the lowering's, and the lowering is linked by the offline re-lowering
+    /// without the runtime; a shard on it would drag a crate that publishes
+    /// nothing into knowing where publication goes.
+    shard: usize,
     /// `Manifest Seq` is [`definition::stamped`] on the way out, never held
     /// here: a definition sitting in this table between two changes to the
     /// published set would otherwise carry a manifest that no longer exists.
     definition: InstrumentDefinition,
+}
+
+/// One shard's published set.
+///
+/// `reference-data/spec.md` defines `Manifest Seq` as incrementing "every time
+/// the published instrument set changes **on this channel**", `Valid` against
+/// "**channel** state", and `Instrument Count` as what a subscriber to that
+/// channel compares its collected definitions against. One of these per shard
+/// is what makes those three true; one per process makes all three describe
+/// something no subscriber can see.
+///
+/// The pacer is here for the same reason and one of its own: obligation 6 —
+/// restart the definition cycle when `Manifest Seq` changes — is per channel,
+/// so a single pacer would restart every channel's cycle for an admission on
+/// one of them, which is the burst obligation 2 forbids arriving through the
+/// correct handling of obligation 6.
+#[derive(Debug)]
+struct PublishedSet {
+    published: usize,
+    manifest_seq: u16,
+    pacer: DefinitionPacer,
+    /// Where this shard's next lap resumes in [`Registry::slots`]. The slots
+    /// are shared, so a cursor is per shard and skips what is not its own.
+    cursor: usize,
 }
 
 /// Counts worth reporting, and where each one goes.
@@ -55,9 +130,12 @@ struct Published {
 /// - [`delisted`](Self::delisted) is `refdata_delistings_total`.
 /// - [`definitions_emitted`](Self::definitions_emitted) is
 ///   `refdata_definitions_emitted_total`.
-/// - [`Registry::published`] is `refdata_instruments_current`.
+/// - [`Registry::published`] is `refdata_instruments_current`, and
+///   [`Registry::published_on`] is that gauge's value for one `Channel ID` —
+///   the wire's `Instrument Count` is a channel's rather than a process's.
 /// - [`Registry::manifest_seq`] and [`Registry::is_valid`] are
-///   `refdata_manifest_seq` and `refdata_manifest_valid`, both by `Channel ID`.
+///   `refdata_manifest_seq` and `refdata_manifest_valid`, both by `Channel ID`,
+///   and each takes the shard that channel carries.
 /// - [`declined_unrepresentable`](Self::declined_unrepresentable) is a
 ///   reference-data load that did not fully load, under the load-error
 ///   family's `schema` reason.
@@ -66,6 +144,26 @@ struct Published {
 /// is the selection policy working, and a series that climbs whenever a venue
 /// lists more instruments than a feed publishes would be alerting on the normal
 /// case.
+///
+/// # The two shard counts map to nothing, and what carries them instead
+///
+/// Also deliberate, and for the same reason the rest of this crate constructs
+/// no metric: the normative set is closed and this crate does not own it.
+///
+/// The signal for a shard the venue can never reach is
+/// `refdata_instruments_current` sitting at 0 for that shard's `Channel ID`,
+/// which is true from startup and needs no datagram. **That covers the total
+/// case only.** A gauge at 0 says a channel is empty; it cannot say a venue
+/// asked for a name this publisher has no channel for. And a venue that
+/// misnames only *some* of its offers leaves the gauge non-zero with those
+/// instruments unpublished, which no series in the closed set separates from a
+/// channel that holds fewer instruments.
+///
+/// So for the partial case the only signal is the name, and
+/// [`Registry::take_unknown_shards`] is where the runtime gets it. These two
+/// numbers are what the exit report prints beside it; between them a log line
+/// says which name was offered and a number says how much was declined under
+/// it. Neither is a substitute for a series and neither is offered as one.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Counts {
     pub admitted: u64,
@@ -73,6 +171,13 @@ pub struct Counts {
     pub definitions_emitted: u64,
     pub declined_at_cap: u64,
     pub declined_unrepresentable: u64,
+    /// Offers naming a shard this publisher was not configured with. Counted
+    /// apart from [`declined_unrepresentable`](Self::declined_unrepresentable)
+    /// because nothing about the instrument was wrong.
+    pub declined_unknown_shard: u64,
+    /// Re-offers naming a different shard for a published instrument. The
+    /// instrument stayed where it was; see [`Refusal::ShardRestated`].
+    pub declined_shard_restated: u64,
     /// Symbols or legs that could not be stated honestly in their fixed-width
     /// field: truncated, or not representable as NUL-padded ASCII. Reported
     /// once per load rather than per message, which is what the codec's own
@@ -88,6 +193,21 @@ pub struct Counts {
 /// [`InstrumentTable`], maintains
 /// `Manifest Seq` and the `Valid` flag, and paces the definition cycle. A venue
 /// reaches all of that through [`ListingSink`] and can express none of it.
+///
+/// # One registry, N published sets
+///
+/// The registry is one per process and the **published set** is one per shard.
+/// The split is not a preference: identity can only be one thing, so the
+/// `Instrument ID` table, its persistence, the state-directory claim and the
+/// selection policy's caps are process-wide — while `Manifest Seq`, `Valid`,
+/// `Instrument Count` and the definition pacer are defined by
+/// `reference-data/spec.md` against the channel, so there is one of each per
+/// shard.
+///
+/// A registry per shard would be the other split, and it is wrong twice over:
+/// N `Instrument ID` spaces under one `Source ID`, and N writers on one state
+/// directory — where the single-writer guard would refuse the second, so it
+/// fails at startup rather than subtly, and is still a failure.
 ///
 /// # The guarantee, and what it costs
 ///
@@ -129,16 +249,35 @@ pub struct Registry<S: StateStore, C: Clock> {
     /// the published set in admission order and a withdrawn instrument leaves
     /// the same hole in both.
     slots: Vec<Option<Published>>,
+    /// What is published across every shard, which is what the selection
+    /// policy's caps are measured against. `max_published` is a cap on what
+    /// this publisher publishes and not on what a channel carries, so the
+    /// number it is compared against has to be the process's.
     published: usize,
     instruments: InstrumentTable,
-    manifest_seq: u16,
+    /// One per configured shard, in the order [`RegistryConfig::shards`] states
+    /// them, so an index into either is an index into the other.
+    sets: Vec<PublishedSet>,
     phase: Phase,
-    pacer: DefinitionPacer,
-    cursor: usize,
     counts: Counts,
+    /// Distinct shard names offered that this publisher has none of, in the
+    /// order they were first seen, and how many of them a caller has been
+    /// handed. An adapter re-offers its whole set every poll, so a name is
+    /// remembered rather than reported again.
+    unknown_shards: Vec<String>,
+    unknown_shards_taken: usize,
     last_refusal: Option<Refusal>,
     fault: Option<StateError>,
 }
+
+/// The most distinct unknown shard names one process reports.
+///
+/// A venue computing a name per instrument would otherwise grow that list from
+/// data this publisher does not control. Past the ceiling the count still
+/// climbs and [`Registry::last_refusal`] still names the refusal; what stops is
+/// the naming, which by then has already said the thing an operator has to act
+/// on.
+const MAX_REPORTED_UNKNOWN_SHARDS: usize = 64;
 
 impl<S: StateStore, C: Clock> Registry<S, C> {
     /// Claim the state directory, read what is in it, and be ready to admit.
@@ -153,6 +292,15 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
     /// each mints from its own copy of `next_id`, each flush overwrites the
     /// other's, and after the next restart whichever IDs lost the last flush
     /// resolve to nothing.
+    ///
+    /// # The shard set, read first
+    ///
+    /// A configuration with no shard, or with one name twice, is refused before
+    /// the claim is taken. Neither is reachable from a document — the load
+    /// checks refuse both — so what this catches is a caller composing the
+    /// configuration itself, and both failures are otherwise silent: every
+    /// offer refused as an unknown shard, or a `Channel ID` whose manifest
+    /// stays empty for the life of the process.
     ///
     /// # The three ways the persisted state can fail
     ///
@@ -177,6 +325,24 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
     /// Every [`RefdataError`]. All are startup failures and none is
     /// recoverable by continuing.
     pub fn open(config: RegistryConfig, mut store: S, clock: C) -> Result<Self, RefdataError> {
+        // The shard set is read before the directory is claimed, because a
+        // configuration this registry cannot serve is a failure that costs
+        // nothing to report and should not first take a claim off an incumbent
+        // that is serving one.
+        if config.shards.is_empty() {
+            return Err(RefdataError::NoShardConfigured);
+        }
+        for (index, shard) in config.shards.iter().enumerate() {
+            if config.shards[..index]
+                .iter()
+                .any(|earlier| earlier.name == shard.name)
+            {
+                return Err(RefdataError::ShardConfiguredTwice {
+                    shard: shard.name.clone(),
+                });
+            }
+        }
+
         match store.claim() {
             Ok(()) => {}
             Err(StateError::AlreadyHeld) => return Err(RefdataError::StateHeldByAnotherWriter),
@@ -198,6 +364,16 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             .iter()
             .map(|entry| (entry.symbol, entry.instrument_id))
             .collect();
+        let sets = config
+            .shards
+            .iter()
+            .map(|_| PublishedSet {
+                published: 0,
+                manifest_seq: 0,
+                pacer: DefinitionPacer::new(config.schedule),
+                cursor: 0,
+            })
+            .collect();
         Ok(Self {
             store,
             clock,
@@ -207,11 +383,11 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             slots: Vec::new(),
             published: 0,
             instruments: InstrumentTable::new(),
-            manifest_seq: 0,
+            sets,
             phase: Phase::Seeding,
-            pacer: DefinitionPacer::new(config.schedule),
-            cursor: 0,
             counts: Counts::default(),
+            unknown_shards: Vec::new(),
+            unknown_shards_taken: 0,
             last_refusal: None,
             fault: None,
             config,
@@ -228,30 +404,61 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         &self.instruments
     }
 
-    /// How many instruments are published right now.
+    /// How many instruments this publisher has published, across every shard.
+    ///
+    /// The number the selection policy's caps are measured against, and not the
+    /// `Instrument Count` any channel carries — that is
+    /// [`published_on`](Self::published_on). The caps are stated once for the
+    /// process and the counts are reported per channel, which is the pair that
+    /// lets an operator watch a shard consume headroom that is not per shard.
     #[must_use]
     pub const fn published(&self) -> usize {
         self.published
     }
 
-    /// The current `Manifest Seq`.
+    /// The `Instrument Count` one shard's channel carries.
     ///
-    /// Zero until the first published set exists, which is the value a
-    /// subscriber only ever sees paired with `Valid` at 0.
+    /// `None` for a shard this registry was not configured with, which is the
+    /// answer to a question about a channel that does not exist. `Some(0)`
+    /// says the shard exists and holds nothing — and paired with a
+    /// [`manifest_seq`](Self::manifest_seq) of 0 it says nothing was ever
+    /// admitted to it, which is a different operator problem from a shard
+    /// everything was withdrawn from.
     #[must_use]
-    pub const fn manifest_seq(&self) -> u16 {
-        self.manifest_seq
+    pub fn published_on(&self, shard: &str) -> Option<usize> {
+        Some(self.sets[self.shard_index(shard)?].published)
     }
 
-    /// The `Valid` flag: whether the published set is established.
+    /// One shard's `Manifest Seq`.
+    ///
+    /// Per shard because the specification defines it per channel: it
+    /// increments every time the published instrument set changes *on this
+    /// channel*. A process-wide one would advance on a quiet channel for an
+    /// admission its subscribers cannot see, and each of them would re-check a
+    /// set that had not changed.
+    ///
+    /// Zero until the shard's first published set exists, which is the value a
+    /// subscriber only ever sees paired with `Valid` at 0. `None` for a shard
+    /// this registry was not configured with.
+    #[must_use]
+    pub fn manifest_seq(&self, shard: &str) -> Option<u16> {
+        Some(self.sets[self.shard_index(shard)?].manifest_seq)
+    }
+
+    /// The `Valid` flag for one shard: whether its published set is
+    /// established.
     ///
     /// False while seeding and false again from the start of shutdown, which is
     /// the codec's own definition of the field — 1 once the published set is
     /// established, 0 while uninitialized or shutting down. It is not a health
     /// signal: a channel whose instruments are all dormant is silent and valid.
+    ///
+    /// False, too, for a shard this registry was not configured with. That is
+    /// the honest answer rather than a convenience: a channel with no published
+    /// set behind it has not established one.
     #[must_use]
-    pub const fn is_valid(&self) -> bool {
-        matches!(self.phase, Phase::Established)
+    pub fn is_valid(&self, shard: &str) -> bool {
+        self.shard_index(shard).is_some() && matches!(self.phase, Phase::Established)
     }
 
     #[must_use]
@@ -293,6 +500,11 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
 
     /// The seeding phase is over: the first poll has returned.
     ///
+    /// Process-wide, across every shard, because one poll is what the venue
+    /// answered with: an adapter offers its whole universe and the shards it
+    /// named are the shards that have members. A per-shard `seeding_complete`
+    /// would be waiting for a second statement the boundary never makes.
+    ///
     /// Two things change, and they change together because they are the same
     /// statement. The published set is established, so the manifest becomes
     /// `Valid`; and the seed limit gives way to the cap, so the headroom the
@@ -318,31 +530,104 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
 
     /// The definition of a published instrument, as it would go on the wire
     /// now.
+    ///
+    /// Stamped with its **own shard's** `Manifest Seq`, because that is the
+    /// manifest a subscriber to the channel it goes out on is reconciling
+    /// against. Stamping another shard's would hand a subscriber a definition
+    /// belonging to a manifest it has never seen.
     #[must_use]
     pub fn definition(&self, instrument: InstrumentRef) -> Option<InstrumentDefinition> {
-        self.slot(instrument)
-            .map(|published| definition::stamped(&published.definition, self.manifest_seq))
+        let entry = self.slot(instrument)?;
+        Some(definition::stamped(
+            &entry.definition,
+            self.sets[entry.shard].manifest_seq,
+        ))
     }
 
-    /// The definitions this tick owes, paced.
+    /// The definitions one shard's tick owes, paced.
     ///
     /// `out` is cleared and filled, so a caller keeps one buffer for the life of
-    /// the process. The count is [`DefinitionPacer`]'s and is capped, so a
-    /// caller cannot obtain the whole published set in one call however it
-    /// arranges its loop — the rule that publishers must not emit the entire
-    /// published set as a single burst is kept here rather than asked of the
-    /// caller.
+    /// the process. The count is that shard's [`DefinitionPacer`]'s and is
+    /// capped, so a caller cannot obtain the whole published set in one call
+    /// however it arranges its loop — the rule that publishers must not emit the
+    /// entire published set as a single burst is kept here rather than asked of
+    /// the caller.
+    ///
+    /// **Called once per shard per tick, and the buffer is then packed onto
+    /// every feed of that shard.** Per shard rather than per feed because the
+    /// pacer is per shard: asking it once per feed would ask for the lap's debt
+    /// twice and emit twice as much of the set, which is the burst arriving
+    /// through the caller. A shard this registry was not configured with owes
+    /// nothing and clears the buffer, so a caller iterating a stale shard list
+    /// emits nothing rather than another shard's set.
     ///
     /// The cycle continues while shutting down and while seeding. A definition
     /// is publishable the moment it composes, and a subscriber joining during
     /// the seed collects definitions it can already use; what the manifest's
     /// `Valid` flag tells it is whether the *set* is final yet.
-    pub fn definition_tick(&mut self, out: &mut Vec<InstrumentDefinition>) {
+    ///
+    /// # What the shared slot table costs a tick, measured
+    ///
+    /// The slots are one table for the process, because an `Instrument ID` is,
+    /// so a shard's tick walks past the slots of shards that are not its own
+    /// and the search for the next definition is linear in the number of
+    /// shards rather than in one. The snapshot rotation says the same of
+    /// itself and for the same reason; this is the definition cycle's half of
+    /// it, and a shard count is sized against both of them or against neither.
+    ///
+    /// **The cursor is what makes the walk affordable, and that is arithmetic
+    /// rather than a hope.** It persists across ticks and a shard emits its
+    /// whole published set exactly once a lap, so over one lap the cursor goes
+    /// round the table exactly once — `slots` visits per shard per lap,
+    /// whatever order admission interleaved the shards in, and `N * slots`
+    /// over the process. With equal shards `slots = N * p`, so the per-lap
+    /// work is quadratic in the shard count; divided by the ticks in a lap it
+    /// is `N * slots * tick / lap` a tick. The default 30 s cycle laps in 24 s
+    /// against a 10 ms runtime tick, which is 2,400 ticks a lap:
+    ///
+    /// | Shards | Published each | Slots | Walk visits a tick |
+    /// |---|---|---|---|
+    /// | 1 | 100 | 100 | 0.04 |
+    /// | 31 | 100 | 3,100 | 40 |
+    /// | 128 | 100 | 12,800 | 683 |
+    ///
+    /// A visit is an index into a `Vec<Option<_>>`, a discriminant test and a
+    /// `usize` comparison, and the walk is entered at all only on the ticks a
+    /// shard owes something — one tick in twenty-four at the middle row.
+    ///
+    /// **The larger term is the name lookup, which is worth knowing before
+    /// sizing anything against the walk.** `shard_index` resolves the shard by
+    /// scanning the configured shards and comparing strings, and it runs
+    /// before `due` is consulted — so it costs N comparisons on *every* tick
+    /// rather than on the ticks something is owed, `N^2` a tick over the
+    /// process. Timed over a whole lap on one core: 31 shards of 100
+    /// instruments cost 1.3 µs a tick, of which 1.1 µs is the name scan and
+    /// the remainder the walk; 128 shards of 100 cost 18.6 µs a tick, of which
+    /// 15.0 µs is the name scan.
+    ///
+    /// **Both are written down rather than removed.** 1.3 µs is thirteen parts
+    /// in a hundred thousand of a 10 ms tick, and the ceiling is not far above
+    /// it: `Channel ID` is a `u8` and no two feeds may state the same one, so
+    /// 256 is the most shards any document can describe, and half that where
+    /// every shard carries both feed specifications. What would remove the
+    /// walk is a per-shard list of slots, and what that costs is the property
+    /// that makes one table right — identity is one thing, so a withdrawn
+    /// instrument has to leave one hole rather than two that can disagree.
+    /// Neither trade is taken here; if one ever is, the name lookup is the one
+    /// to take first, and this note is the reason why.
+    pub fn definition_tick(&mut self, shard: &str, out: &mut Vec<InstrumentDefinition>) {
         out.clear();
-        let due = self.pacer.due(self.clock.monotonic_ns(), self.published);
+        let Some(index) = self.shard_index(shard) else {
+            return;
+        };
+        let now_ns = self.clock.monotonic_ns();
+        let published = self.sets[index].published;
+        let due = self.sets[index].pacer.due(now_ns, published);
         if due == 0 {
             return;
         }
+        let manifest_seq = self.sets[index].manifest_seq;
+        let mut cursor = self.sets[index].cursor;
         let slots = self.slots.len();
         while out.len() < due {
             let before = out.len();
@@ -350,13 +635,16 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
                 if out.len() == due {
                     break;
                 }
-                if let Some(published) = &self.slots[self.cursor] {
-                    out.push(definition::stamped(
-                        &published.definition,
-                        self.manifest_seq,
-                    ));
+                // Every slot is walked and only this shard's are emitted. The
+                // slots are shared because an `Instrument ID` is, and a lap
+                // that emitted another shard's definition would put it on a
+                // channel whose manifest does not count it.
+                if let Some(entry) = &self.slots[cursor] {
+                    if entry.shard == index {
+                        out.push(definition::stamped(&entry.definition, manifest_seq));
+                    }
                 }
-                self.cursor = (self.cursor + 1) % slots;
+                cursor = (cursor + 1) % slots;
             }
             // A pass over every slot that emitted nothing cannot be repeated
             // into progress. Reachable only if the published count and the
@@ -366,46 +654,83 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
                 break;
             }
         }
+        self.sets[index].cursor = cursor;
         self.counts.definitions_emitted += out.len() as u64;
     }
 
-    /// The manifest, as of now.
+    /// One shard's manifest, as of now.
+    ///
+    /// `None` for a shard this registry was not configured with: there is no
+    /// truthful `Channel ID` to state for a channel it has none of, and
+    /// composing one from another shard's would describe the wrong feed.
     ///
     /// `Channel ID` is set from configuration even though a builder-framed
     /// message has it stamped from the datagram header afterwards: a caller
     /// that encodes one without a builder still gets a truthful field, and a
     /// caller that uses a builder cannot end up with two different answers.
+    /// Where a shard carries two feed specifications, one composed summary is
+    /// truthful on both of its refdata ports, because both describe the one
+    /// published set and each datagram stamps its own header.
     #[must_use]
-    pub fn manifest(&self) -> ManifestSummary {
-        ManifestSummary {
-            channel_id: self.config.channel_id,
-            valid: u8::from(self.is_valid()),
-            manifest_seq: self.manifest_seq,
+    pub fn manifest(&self, shard: &str) -> Option<ManifestSummary> {
+        let index = self.shard_index(shard)?;
+        Some(ManifestSummary {
+            channel_id: self.config.shards[index].channel_id,
+            valid: u8::from(self.is_valid(shard)),
+            manifest_seq: self.sets[index].manifest_seq,
             // Saturating rather than truncating: a published set larger than a
             // u32 is unreachable through a policy whose cap is a `usize` an
             // operator sets, and a wrapped count would read as a small feed.
-            instrument_count: u32::try_from(self.published).unwrap_or(u32::MAX),
+            instrument_count: u32::try_from(self.sets[index].published).unwrap_or(u32::MAX),
             timestamp_ns: self.clock.unix_ns(),
-        }
+        })
     }
 
-    /// Offer an instrument, and report why it was declined.
+    /// The unknown shard names offered since this was last called.
     ///
-    /// [`ListingSink::list`] is this without the reason. An adapter is given
+    /// Each distinct name once, in the order it was first seen, for the log
+    /// line the runtime writes — this crate writes none. Once per **distinct
+    /// value** rather than once per offer, because an adapter may re-offer its
+    /// whole set every second and a line per offer would bury the first one.
+    /// Nothing is reported twice, so a caller that logs whatever it gets back
+    /// cannot repeat itself; see [`MAX_REPORTED_UNKNOWN_SHARDS`] for what
+    /// happens to a venue that invents names without bound.
+    pub fn take_unknown_shards(&mut self) -> Vec<String> {
+        let taken = self.unknown_shards[self.unknown_shards_taken..].to_vec();
+        self.unknown_shards_taken = self.unknown_shards.len();
+        taken
+    }
+
+    /// Offer an instrument on a shard, and report why it was declined.
+    ///
+    /// [`ListingSink::list_on`] is this without the reason. An adapter is given
     /// the `Option`, because the boundary carries no vocabulary for a refusal
     /// and a venue can act on none of them; the runtime wiring the registry up
     /// gets this one, because it can.
     ///
+    /// The shard is resolved before anything else is considered, including
+    /// whether the symbol is already published: a name this publisher has no
+    /// channel for is a statement it cannot honour whatever the instrument is.
+    ///
     /// # Errors
     ///
     /// Every [`Refusal`]. [`Refusal::Capped`] is ordinary; the rest are not.
-    pub fn offer(&mut self, spec: &InstrumentSpec<'_>) -> Result<InstrumentRef, Refusal> {
+    pub fn offer(
+        &mut self,
+        shard: &str,
+        spec: &InstrumentSpec<'_>,
+    ) -> Result<InstrumentRef, Refusal> {
+        let Some(index) = self.shard_index(shard) else {
+            self.remember_unknown_shard(shard);
+            self.count_refusal(Refusal::UnknownShard);
+            return Err(Refusal::UnknownShard);
+        };
         let (symbol, _fit) = definition::symbol_field(spec.symbol);
         if let Some(&handle) = self.handles.get(&symbol) {
-            self.reoffer(handle, spec);
+            self.reoffer(handle, index, spec);
             return Ok(handle);
         }
-        self.admit(symbol, spec).inspect_err(|&refusal| {
+        self.admit(symbol, index, spec).inspect_err(|&refusal| {
             self.count_refusal(refusal);
         })
     }
@@ -417,10 +742,19 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
     /// this is one hash lookup, one composition — arithmetic on stack values,
     /// no allocation and no I/O — and a comparison. Only a definition that has
     /// actually changed touches anything.
-    fn reoffer(&mut self, handle: InstrumentRef, spec: &InstrumentSpec<'_>) {
-        let Some(current) = self.slot(handle).map(|published| published.definition) else {
+    fn reoffer(&mut self, handle: InstrumentRef, shard: usize, spec: &InstrumentSpec<'_>) {
+        let Some(entry) = self.slot(handle).copied() else {
             return;
         };
+        // Checked before the definition is composed, because it is not a
+        // question about the definition. The instrument stays on the shard it
+        // was admitted to and the restatement is counted; moving it would be a
+        // channel change no message in the family can announce.
+        if entry.shard != shard {
+            self.count_refusal(Refusal::ShardRestated);
+            return;
+        }
+        let current = entry.definition;
         let composed = match definition::compose(spec, current.instrument_id, self.config.source_id)
         {
             Ok(composed) => composed,
@@ -462,14 +796,15 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             slot.definition = composed.definition;
         }
         // The published content changed, so the manifest a subscriber is
-        // reconciling against has too.
-        self.advance_manifest();
+        // reconciling against has too — this shard's, and no other's.
+        self.advance_manifest(shard);
     }
 
     /// A symbol that has never been published in this process.
     fn admit(
         &mut self,
         symbol: SymbolKey,
+        shard: usize,
         spec: &InstrumentSpec<'_>,
     ) -> Result<InstrumentRef, Refusal> {
         if matches!(self.phase, Phase::ShuttingDown) {
@@ -514,13 +849,15 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         }
         self.slots[index] = Some(Published {
             symbol,
+            shard,
             definition: composed.definition,
         });
         self.handles.insert(symbol, handle);
         self.published += 1;
+        self.sets[shard].published += 1;
         self.counts.admitted += 1;
         self.count_fits(composed.fits);
-        self.advance_manifest();
+        self.advance_manifest(shard);
         Ok(handle)
     }
 
@@ -569,35 +906,74 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         let Some(index) = self.published_index(instrument) else {
             return;
         };
-        let symbol = self.slots[index].expect("checked above").symbol;
+        let entry = self.slots[index].expect("checked above");
         self.slots[index] = None;
-        self.handles.remove(&symbol);
+        self.handles.remove(&entry.symbol);
         self.instruments.withdraw(instrument);
         self.published -= 1;
+        self.sets[entry.shard].published -= 1;
         self.counts.delisted += 1;
         // The persisted entry stays. It is what stops the ID being minted for
         // something else, and what gives the symbol its own ID back if the
         // venue relists it - so a delisting writes nothing, which is why it
         // cannot fail.
-        self.advance_manifest();
+        self.advance_manifest(entry.shard);
     }
 
-    /// The published set has changed, so the manifest describing it must.
+    /// One shard's published set has changed, so the manifest describing it
+    /// must.
+    ///
+    /// That shard's and no other's: a subscriber whose manifest sequence
+    /// advanced for an admission on a channel it is not bound to would re-check
+    /// its set, find it unchanged, and do so again on the next unrelated
+    /// admission anywhere in the process.
     ///
     /// Wraps to 1 rather than to 0, because 0 is the value a subscriber sees
     /// only alongside `Valid` at 0. Reaching it again in flight would make an
     /// established manifest indistinguishable from one that has never been
     /// established.
-    fn advance_manifest(&mut self) {
-        self.manifest_seq = self.manifest_seq.checked_add(1).unwrap_or(1);
+    fn advance_manifest(&mut self, shard: usize) {
+        let seq = &mut self.sets[shard].manifest_seq;
+        *seq = seq.checked_add(1).unwrap_or(1);
+    }
+
+    /// Which published set a shard name resolves to.
+    ///
+    /// A scan rather than a map: the shards are the enabled `[[feed]]` blocks
+    /// of one process, this is not on the datagram path, and an index is what
+    /// the published entries hold so that the hot path compares integers.
+    fn shard_index(&self, shard: &str) -> Option<usize> {
+        self.config
+            .shards
+            .iter()
+            .position(|configured| configured.name == shard)
+    }
+
+    /// Remember an unknown shard name, once, for the caller that logs it.
+    fn remember_unknown_shard(&mut self, shard: &str) {
+        if self.unknown_shards.len() >= MAX_REPORTED_UNKNOWN_SHARDS
+            || self.unknown_shards.iter().any(|seen| seen == shard)
+        {
+            return;
+        }
+        self.unknown_shards.push(shard.to_string());
     }
 
     fn count_refusal(&mut self, refusal: Refusal) {
         self.last_refusal = Some(refusal);
-        if refusal.is_ordinary() {
-            self.counts.declined_at_cap += 1;
-        } else {
-            self.counts.declined_unrepresentable += 1;
+        // Written out rather than split on `is_ordinary`, so that a refusal
+        // added later cannot land in a bucket by default and be reported as
+        // something it is not.
+        match refusal {
+            Refusal::Capped => self.counts.declined_at_cap += 1,
+            Refusal::UnknownShard => self.counts.declined_unknown_shard += 1,
+            Refusal::ShardRestated => self.counts.declined_shard_restated += 1,
+            Refusal::ContractSize
+            | Refusal::Field(_)
+            | Refusal::ScaleRestated
+            | Refusal::IdSpaceExhausted
+            | Refusal::Unpersistable
+            | Refusal::ShuttingDown => self.counts.declined_unrepresentable += 1,
         }
     }
 
@@ -612,6 +988,26 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         self.slots.get(index)?.is_some().then_some(index)
     }
 
+    /// Which shard's published set an instrument is in, as an index into the
+    /// configured shards.
+    ///
+    /// The one thing a caller cannot work out for itself: the shard is recorded
+    /// on the published entry, and the entry is this registry's. A caller that
+    /// tried to keep its own map would be keeping a second answer to *where
+    /// does this instrument publish*, and the two would disagree the first time
+    /// an instrument was withdrawn.
+    ///
+    /// `None` for a handle with no published entry — forged, or outliving its
+    /// instrument's withdrawal. That is the same set of handles
+    /// [`InstrumentTable::holds`] answers `false` for, because a withdrawal
+    /// clears both.
+    ///
+    /// [`InstrumentTable::holds`]: dz_publisher_lowering::InstrumentTable::holds
+    #[must_use]
+    pub fn shard_of(&self, instrument: InstrumentRef) -> Option<usize> {
+        self.slot(instrument).map(|published| published.shard)
+    }
+
     fn slot(&self, instrument: InstrumentRef) -> Option<&Published> {
         self.slots.get(instrument.index() as usize)?.as_ref()
     }
@@ -622,8 +1018,8 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
 }
 
 impl<S: StateStore, C: Clock> ListingSink for Registry<S, C> {
-    fn list(&mut self, spec: &InstrumentSpec<'_>) -> Option<InstrumentRef> {
-        self.offer(spec).ok()
+    fn list_on(&mut self, shard: &str, spec: &InstrumentSpec<'_>) -> Option<InstrumentRef> {
+        self.offer(shard, spec).ok()
     }
 
     fn delist(&mut self, instrument: InstrumentRef) {

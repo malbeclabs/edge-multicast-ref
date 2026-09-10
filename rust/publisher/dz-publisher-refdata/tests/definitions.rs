@@ -10,6 +10,7 @@
 
 use dz_adapter_core::{
     AssetClass, InstrumentSpec, ListingSink, MarketModel, PriceBound, Scalar, SettleType,
+    DEFAULT_SHARD,
 };
 use dz_edge_core::Fit;
 use dz_edge_refdata::{
@@ -20,7 +21,7 @@ use dz_edge_refdata::{
 use dz_publisher_lowering::{LoweringError, SourceId};
 use dz_publisher_refdata::{
     compose, CycleSchedule, ManualClock, MemoryStore, Refusal, Registry, RegistryConfig,
-    SelectionPolicy,
+    SelectionPolicy, ShardConfig,
 };
 
 fn source_id() -> SourceId {
@@ -71,7 +72,7 @@ fn nothing_optional() -> InstrumentSpec<'static> {
 fn config(selection: SelectionPolicy) -> RegistryConfig {
     RegistryConfig {
         source_id: source_id(),
-        channel_id: 3,
+        shards: vec![ShardConfig::default_shard(3)],
         selection,
         schedule: CycleSchedule::new(std::time::Duration::from_secs(30), 1232, 8),
     }
@@ -375,14 +376,16 @@ fn a_restated_tick_size_is_published_and_advances_the_manifest() {
     // same instrument, and the published set has changed.
     let mut registry = registry();
     let handle = registry.list(&nothing_optional()).expect("admitted");
-    let before = registry.manifest_seq();
+    let before = registry
+        .manifest_seq(DEFAULT_SHARD)
+        .expect("the default shard");
 
     let mut restated = nothing_optional();
     restated.tick_size = Scalar::fixed(5, 0);
 
     assert_eq!(registry.list(&restated), Some(handle));
     assert_eq!(registry.definition(handle).expect("published").tick_size, 5);
-    assert_eq!(registry.manifest_seq(), before + 1);
+    assert_eq!(registry.manifest_seq(DEFAULT_SHARD), Some(before + 1));
     assert_eq!(registry.published(), 1);
 }
 

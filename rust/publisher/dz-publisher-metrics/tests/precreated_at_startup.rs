@@ -12,6 +12,8 @@
 //! deliberate opposite: they must stay absent until first touched, so
 //! their absence keeps meaning something.
 
+use std::collections::BTreeMap;
+
 use dz_edge_core::PortRole;
 use dz_publisher_metrics::{PublisherMetrics, PublisherMetricsConfig};
 
@@ -365,7 +367,158 @@ fn declared_channel_ids_render_at_zero_from_startup() {
             "dz_publisher_refdata_manifest_valid",
             &[("channel_id", channel_id)],
         );
+        assert_zero(
+            &rendered,
+            "dz_publisher_refdata_instruments_current",
+            &[("channel_id", channel_id)],
+        );
     }
+}
+
+/// Every sample line carrying a `channel_id` label, counted per family.
+///
+/// Read off the exposition rather than worked out from the config, because a
+/// test that computes the number the same way the code does passes against
+/// both of them being wrong. It also names families rather than looking for
+/// the ones it expects, so a fifth family that starts carrying `channel_id`
+/// arrives here as a key nothing asserted.
+fn channel_keyed_series(rendered: &str) -> BTreeMap<&str, usize> {
+    let mut counts = BTreeMap::new();
+    for line in rendered.lines() {
+        if line.starts_with('#') || !line.contains("channel_id=\"") {
+            continue;
+        }
+        let Some((family, _)) = line.split_once('{') else {
+            continue;
+        };
+        *counts.entry(family).or_default() += 1;
+    }
+    counts
+}
+
+fn precreated_channel_keyed(channel_ids: &[u8]) -> BTreeMap<&'static str, usize> {
+    let metrics = PublisherMetrics::new(&PublisherMetricsConfig {
+        venue: "test-venue",
+        source_id: 1,
+        port_roles: &[PortRole::Mktdata, PortRole::Refdata, PortRole::Snapshot],
+        connections: &[],
+        channel_ids,
+        ingress_message_types: &[],
+    });
+    // The keys borrow the rendered exposition, which does not outlive this
+    // call, so each is re-borrowed as the static name it matches. The lookup
+    // is also the check: a family carrying `channel_id` that nobody sized
+    // panics here instead of quietly inflating a total.
+    channel_keyed_series(&metrics.render())
+        .into_iter()
+        .map(|(family, count)| {
+            let family = CHANNEL_KEYED_FAMILIES
+                .iter()
+                .find(|known| **known == family)
+                .unwrap_or_else(|| panic!("{family} carries channel_id and nothing sized it"));
+            (*family, count)
+        })
+        .collect()
+}
+
+/// The families a declared Channel ID pre-creates a series on. Adding one is a
+/// sizing decision, so it is written down rather than discovered.
+const CHANNEL_KEYED_FAMILIES: &[&str] = &[
+    "dz_publisher_egress_sequence_current",
+    "dz_publisher_egress_heartbeat_last_sent_timestamp_seconds",
+    "dz_publisher_refdata_manifest_seq",
+    "dz_publisher_refdata_manifest_valid",
+    "dz_publisher_refdata_instruments_current",
+];
+
+#[test]
+fn six_channel_keyed_series_and_one_instrument_count_are_precreated_per_channel_id() {
+    // The pre-created surface is sized rather than discovered: it is entirely
+    // built at startup, so a publisher that declares many channel instances
+    // pays all of it before its first datagram. The two sizes below are a
+    // publisher operating all three port roles, at two declared Channel IDs
+    // and at a worked 62 — 31 shards of two feed specifications. Both totals
+    // are counted off the gathered exposition; neither is arithmetic this test
+    // performs, because arithmetic here would agree with the same mistake in
+    // the code.
+    let at_two = precreated_channel_keyed(&[0, 1]);
+    assert_eq!(
+        at_two,
+        BTreeMap::from([
+            ("dz_publisher_egress_sequence_current", 6),
+            (
+                "dz_publisher_egress_heartbeat_last_sent_timestamp_seconds",
+                2
+            ),
+            ("dz_publisher_refdata_manifest_seq", 2),
+            ("dz_publisher_refdata_manifest_valid", 2),
+            ("dz_publisher_refdata_instruments_current", 2),
+        ]),
+        "12 channel-keyed series plus 2 for the instrument count"
+    );
+
+    let sixty_two: Vec<u8> = (0..62).collect();
+    let at_sixty_two = precreated_channel_keyed(&sixty_two);
+    assert_eq!(
+        at_sixty_two,
+        BTreeMap::from([
+            ("dz_publisher_egress_sequence_current", 186),
+            (
+                "dz_publisher_egress_heartbeat_last_sent_timestamp_seconds",
+                62
+            ),
+            ("dz_publisher_refdata_manifest_seq", 62),
+            ("dz_publisher_refdata_manifest_valid", 62),
+            ("dz_publisher_refdata_instruments_current", 62),
+        ]),
+        "372 channel-keyed series plus 62 for the instrument count"
+    );
+
+    // Stated as the two totals as well: the tables above are what a reader
+    // checks line by line, and the totals are what an operator sizes a scrape
+    // on.
+    const INSTRUMENT_COUNT: &str = "dz_publisher_refdata_instruments_current";
+    let four_families = |counts: &BTreeMap<&str, usize>| {
+        counts
+            .iter()
+            .filter(|(family, _)| **family != INSTRUMENT_COUNT)
+            .map(|(_, count)| *count)
+            .sum::<usize>()
+    };
+    assert_eq!(four_families(&at_two), 12);
+    assert_eq!(at_two[INSTRUMENT_COUNT], 2);
+    assert_eq!(four_families(&at_sixty_two), 372);
+    assert_eq!(at_sixty_two[INSTRUMENT_COUNT], 62);
+}
+
+#[test]
+fn the_instrument_count_is_per_channel_and_a_write_to_one_leaves_the_others_alone() {
+    // The gauge mirrors the wire's `Instrument Count`, which the specification
+    // counts per channel. A process-wide gauge would report the whole
+    // process's published set against every channel, and an operator reading
+    // it as the channel's would see a number no datagram carries.
+    let metrics = PublisherMetrics::new(&PublisherMetricsConfig {
+        venue: "test-venue",
+        source_id: 1,
+        port_roles: &[PortRole::Mktdata, PortRole::Refdata],
+        connections: &[],
+        channel_ids: &[4, 9],
+        ingress_message_types: &[],
+    });
+    metrics.refdata().set_instruments_current(4, 3);
+
+    let rendered = metrics.render();
+    let line = find_sample(
+        &rendered,
+        "dz_publisher_refdata_instruments_current",
+        &[("channel_id", "4")],
+    );
+    assert!(line.ends_with(" 3"), "channel 4 holds three: {line}");
+    assert_zero(
+        &rendered,
+        "dz_publisher_refdata_instruments_current",
+        &[("channel_id", "9")],
+    );
 }
 
 #[test]

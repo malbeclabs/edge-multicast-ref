@@ -89,6 +89,14 @@ pub struct UdsAdapter {
 #[derive(Debug, Clone)]
 pub struct UdsListing {
     pub symbol: String,
+    /// Which shard this instrument is admitted to, or `None` for the default.
+    ///
+    /// `Option` rather than a `String` defaulted to
+    /// [`DEFAULT_SHARD`](dz_adapter_core::DEFAULT_SHARD): a source process with
+    /// no partition to state says nothing here, and `poll_listings` then calls
+    /// `list` rather than naming the token itself. One spelling of the default,
+    /// and it stays in the crate that owns it.
+    pub shard: Option<String>,
     pub leg1: Option<String>,
     pub leg2: Option<String>,
     pub asset_class: dz_adapter_core::AssetClass,
@@ -149,11 +157,23 @@ impl Adapter for UdsAdapter {
         MESSAGE_TYPES
     }
 
+    /// Offer the configured set, each entry on the shard it names.
+    ///
+    /// A listing with no shard is offered through `list`, which is the default
+    /// shard: this adapter computes no partition of its own, and the one it
+    /// passes on is the one configuration stated. A `None` back is ordinary —
+    /// over the cap, or a shard this publisher was not configured with — and
+    /// costs that listing rather than the poll, so the symbol simply resolves to
+    /// no handle and its records are counted as unroutable.
     fn poll_listings(&mut self, out: &mut dyn ListingSink) {
         while self.offered < self.listings.len() {
             let listing = &self.listings[self.offered];
             self.offered += 1;
-            if let Some(handle) = out.list(&listing.spec()) {
+            let admitted = match &listing.shard {
+                Some(shard) => out.list_on(shard, &listing.spec()),
+                None => out.list(&listing.spec()),
+            };
+            if let Some(handle) = admitted {
                 self.admitted.insert(listing.symbol.clone(), handle);
             }
         }

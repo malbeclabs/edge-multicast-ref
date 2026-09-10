@@ -319,7 +319,15 @@ impl<'a> Admissions<'a> {
 }
 
 impl ListingSink for Admissions<'_> {
-    fn list(&mut self, spec: &InstrumentSpec<'_>) -> Option<InstrumentRef> {
+    /// The shard is read and discarded, which is the honest answer here.
+    ///
+    /// A shard says which channel instance an instrument would be *published*
+    /// on, and this sink publishes nothing: it resolves an offer against the
+    /// definitions the archive already carries. Which channel carried them is
+    /// the archive's own record, so honouring the adapter's opinion of it would
+    /// be re-deciding reference data the capture has already settled — which is
+    /// the one thing a re-lowering must not do.
+    fn list_on(&mut self, _shard: &str, spec: &InstrumentSpec<'_>) -> Option<InstrumentRef> {
         let (field, _fit) = dz_edge_core::pad_ascii::<SYMBOL_LEN>(spec.symbol);
 
         // Already admitted, and still admitted: the same handle, so an adapter

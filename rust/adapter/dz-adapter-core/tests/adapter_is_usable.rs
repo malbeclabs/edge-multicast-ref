@@ -12,7 +12,7 @@ use dz_adapter_core::{
     Adapter, AdapterError, AssetClass, ConnectionId, DepthBound, DisconnectReason, Event,
     EventSink, InstrumentRef, InstrumentSpec, ListingSink, MarketModel, ParseError, Payload,
     Presence, PriceBound, Scalar, SettleType, Side, SideUpdate, SnapshotSink, TradeFlags,
-    UpstreamSink, VenueTimestampKind,
+    UpstreamSink, VenueTimestampKind, DEFAULT_SHARD,
 };
 
 // ---------------------------------------------------------------- the runtime
@@ -22,14 +22,20 @@ use dz_adapter_core::{
 #[derive(Default)]
 struct Listings {
     admitted: Vec<String>,
+    /// The shard each admission named, so that what an adapter calling `list`
+    /// resolves to is asserted rather than assumed.
+    shards: Vec<String>,
     delisted: Vec<InstrumentRef>,
     /// Instruments beyond this are declined, standing in for the selection
     /// policy's published cap.
     cap: usize,
 }
 
+/// This sink implements `list_on` and not `list`, which is the whole point of
+/// the trait's direction: a sink written before shards existed does not compile
+/// against it, and the compile failure is asserted on `ListingSink` itself.
 impl ListingSink for Listings {
-    fn list(&mut self, spec: &InstrumentSpec<'_>) -> Option<InstrumentRef> {
+    fn list_on(&mut self, shard: &str, spec: &InstrumentSpec<'_>) -> Option<InstrumentRef> {
         if let Some(index) = self.admitted.iter().position(|s| s == spec.symbol) {
             // Re-offering is free and returns the handle already minted, which
             // is what lets an adapter offer its whole set on every poll.
@@ -39,6 +45,7 @@ impl ListingSink for Listings {
             return None;
         }
         self.admitted.push(spec.symbol.to_string());
+        self.shards.push(shard.to_string());
         Some(InstrumentRef::from_admission(
             (self.admitted.len() - 1) as u32,
         ))
@@ -299,6 +306,11 @@ fn an_adapter_is_object_safe_and_drives_end_to_end() {
     };
     adapter.poll_listings(&mut listings);
     assert_eq!(listings.admitted, vec!["EXAMPLE-1".to_string()]);
+    // This adapter names no shard, so it is offering on the default one. A
+    // venue that says nothing here must reach the shard the configuration
+    // resolves an absent key to, or an unshard-aware adapter and an
+    // unshard-aware document would describe two different channels.
+    assert_eq!(listings.shards, vec![DEFAULT_SHARD.to_string()]);
 
     let mut frames = Frames::default();
     adapter.on_connected(conn, &mut frames).expect("subscribe");

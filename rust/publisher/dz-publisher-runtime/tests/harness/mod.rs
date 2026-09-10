@@ -34,9 +34,12 @@ use dz_edge_tob::{TopOfBook, MAGIC_TOB};
 use dz_publisher_egress::{DatagramSink, EgressEndpoint, FailureScope, SinkError, Tee};
 use dz_publisher_lowering::SourceId;
 use dz_publisher_metrics::{PublisherMetrics, PublisherMetricsConfig};
-use dz_publisher_refdata::{CycleSchedule, MemoryStore, Registry, RegistryConfig, SelectionPolicy};
+use dz_publisher_refdata::{
+    CycleSchedule, MemoryStore, Registry, RegistryConfig, SelectionPolicy, ShardConfig,
+};
 use dz_publisher_runtime::{
     EmittedFeed, Feed, FeedPipeline, FeedSpec, Feeds, ManualClock, Port, Ports, Publisher,
+    ShardFeeds, ShardName,
 };
 
 /// The documentation-range source address every endpoint here sends from.
@@ -64,6 +67,26 @@ pub const TOB_ERA: u8 = 2;
 pub const MBP_ERA: u8 = 5;
 /// In the assigned production range, which is what `SourceId` admits.
 pub const SOURCE_ID: u16 = 41;
+
+/// The two shards a two-shard harness carries, named as a venue would name a
+/// partition of its instrument set rather than after a `Channel ID`.
+///
+/// Both are named, and neither is the default token: a shard that spells the
+/// default explicitly is refused at load, and two named shards is the shape
+/// that makes *the other shard's* assertions possible.
+pub const SHARD_A: &str = "alpha";
+pub const SHARD_B: &str = "beta";
+/// The second shard's `Channel ID`s and ports, distinct from the first's on
+/// every axis. Two shards are four channel instances, and a test that shared a
+/// port between two of them would be asserting against a configuration
+/// `Document::resolve` refuses.
+pub const SHARD_B_CHANNEL_ID: u8 = 5;
+pub const SHARD_B_MKTDATA_PORT: u16 = 30021;
+pub const SHARD_B_REFDATA_PORT: u16 = 30022;
+pub const SHARD_B_DEPTH_CHANNEL_ID: u8 = 6;
+pub const SHARD_B_DEPTH_MKTDATA_PORT: u16 = 30031;
+pub const SHARD_B_DEPTH_REFDATA_PORT: u16 = 30032;
+pub const SHARD_B_DEPTH_SNAPSHOT_PORT: u16 = 30033;
 
 /// What a recording sink kept.
 #[derive(Clone)]
@@ -211,13 +234,30 @@ pub struct Harness {
     pub publisher: Publisher<MemoryStore, ManualClock>,
     pub clock: ManualClock,
     pub metrics: Arc<PublisherMetrics>,
-    /// The top-of-book feed's recorders, when this publisher emits it.
+    /// The top-of-book feed's recorders on the **first** shard, when this
+    /// publisher emits it. A one-shard publisher has no other, which is what
+    /// every test that reads this is about.
     pub tob: Option<FeedRecorders>,
-    /// The market-by-price feed's recorders, when this publisher emits it.
+    /// The market-by-price feed's recorders on the first shard, when this
+    /// publisher emits it.
+    pub mbp: Option<FeedRecorders>,
+    /// Every shard's recorders, in the order the send paths are indexed.
+    ///
+    /// What a test asserting *and no other shard's* reads: an emptiness across
+    /// every sink in the harness is the only form that assertion can take, and
+    /// it needs every sink to be reachable from one place.
+    pub shards: Vec<ShardRecorders>,
+}
+
+/// One shard's recorders: one per specification it carries.
+#[derive(Clone)]
+pub struct ShardRecorders {
+    pub tob: Option<FeedRecorders>,
     pub mbp: Option<FeedRecorders>,
 }
 
 /// What one feed's port roles recorded, and the switches that break them.
+#[derive(Clone)]
 pub struct FeedRecorders {
     pub mktdata: Recorder,
     pub refdata: Recorder,
@@ -289,6 +329,7 @@ impl Harness {
 pub fn feed() -> Feed {
     Feed {
         spec: FeedSpec::TopOfBook,
+        shard: ShardName::default_shard(),
         channel_id: CHANNEL_ID,
         source_id: SourceId::new(SOURCE_ID).expect("in the assigned range"),
         group: GROUP,
@@ -309,6 +350,7 @@ pub fn feed() -> Feed {
 pub fn depth_feed() -> Feed {
     Feed {
         spec: FeedSpec::MarketByPrice,
+        shard: ShardName::default_shard(),
         channel_id: DEPTH_CHANNEL_ID,
         source_id: SourceId::new(SOURCE_ID).expect("in the assigned range"),
         group: GROUP,
@@ -357,6 +399,71 @@ pub fn harness_both() -> Harness {
     harness_inner(&[feed(), depth_feed()], false)
 }
 
+/// The four `[[feed]]` blocks of a publisher carrying two shards of both
+/// specifications: four channel instances over one published set.
+///
+/// Every block names a shard, and neither names the default one. The first
+/// shard keeps the one-shard harness's `Channel ID`s and ports so that a value
+/// a test transcribed by hand still reads the same; the second's are distinct
+/// on every axis.
+#[must_use]
+pub fn two_shard_feeds() -> Vec<Feed> {
+    let shard_a = ShardName::new(SHARD_A).expect("one lowercase path component");
+    let shard_b = ShardName::new(SHARD_B).expect("one lowercase path component");
+    vec![
+        Feed {
+            shard: shard_a.clone(),
+            ..feed()
+        },
+        Feed {
+            shard: shard_a,
+            ..depth_feed()
+        },
+        Feed {
+            shard: shard_b.clone(),
+            channel_id: SHARD_B_CHANNEL_ID,
+            mktdata_port: SHARD_B_MKTDATA_PORT,
+            refdata_port: SHARD_B_REFDATA_PORT,
+            ..feed()
+        },
+        Feed {
+            shard: shard_b,
+            channel_id: SHARD_B_DEPTH_CHANNEL_ID,
+            mktdata_port: SHARD_B_DEPTH_MKTDATA_PORT,
+            refdata_port: SHARD_B_DEPTH_REFDATA_PORT,
+            snapshot_port: Some(SHARD_B_DEPTH_SNAPSHOT_PORT),
+            ..depth_feed()
+        },
+    ]
+}
+
+/// A publisher carrying two shards of both specifications.
+///
+/// The blocks are stated as a slice rather than resolved from a document,
+/// because a document naming two blocks of one specification is still refused
+/// at load — that gate is the last change of this sequence, not the first, and
+/// what it gates is exactly the routing these tests are about.
+#[must_use]
+pub fn harness_two_shards() -> Harness {
+    harness_inner(&two_shard_feeds(), false)
+}
+
+/// The same, with a snapshot rotation on each shard's depth block.
+#[must_use]
+pub fn harness_two_shards_with_rotation(cycle: Duration) -> Harness {
+    let configured: Vec<Feed> = two_shard_feeds()
+        .into_iter()
+        .map(|feed| match feed.spec {
+            FeedSpec::MarketByPrice => Feed {
+                snapshot_cycle: Some(cycle),
+                ..feed
+            },
+            FeedSpec::TopOfBook => feed,
+        })
+        .collect();
+    harness_inner(&configured, false)
+}
+
 /// The same as [`harness`], over a state directory whose writes fail.
 ///
 /// Stated rather than arranged: a full or read-only directory is a behaviour a
@@ -374,7 +481,12 @@ pub fn harness_with_broken_writes(feed: Feed) -> Harness {
 /// reference stream, at `FailureScope::Channel`. The second one costs nothing
 /// when it is healthy and it is what makes the two scopes distinguishable in a
 /// test: one of them ends the process and the other must never be able to.
-fn ports(feed: &Feed, metrics: &Arc<PublisherMetrics>, magic: u16) -> (Ports, FeedRecorders) {
+/// Recording send paths for one feed, and the recorders that read them back.
+///
+/// Public because `composition.rs` builds a `PortOpener` out of it: the real
+/// composition has to be handed ports that are not sockets, and inventing a
+/// second way to build them would be a second thing to keep in step.
+pub fn ports(feed: &Feed, metrics: &Arc<PublisherMetrics>, magic: u16) -> (Ports, FeedRecorders) {
     let open = |name: &'static str, reference_name: &'static str, role: PortRole, port: u16| {
         let sink = RecordingSink::new(name, FailureScope::Process, magic);
         let recorder = sink.recorder();
@@ -451,6 +563,17 @@ fn pipeline<F: EmittedFeed>(
     )
 }
 
+/// A built send path and its recorders, taken apart: the pipeline goes into the
+/// shard's [`ShardFeeds`] and the recorders stay with the harness.
+fn split<F: EmittedFeed>(
+    built: Option<(FeedPipeline<F>, FeedRecorders)>,
+) -> (Option<FeedPipeline<F>>, Option<FeedRecorders>) {
+    match built {
+        Some((pipeline, recorders)) => (Some(pipeline), Some(recorders)),
+        None => (None, None),
+    }
+}
+
 fn harness_inner(configured: &[Feed], break_writes: bool) -> Harness {
     let clock = ManualClock::at_unix_ns(1_700_000_000_000_000_000);
     let identity = configured.first().expect("at least one feed");
@@ -474,23 +597,41 @@ fn harness_inner(configured: &[Feed], break_writes: bool) -> Harness {
         ingress_message_types: &["quote", "trade", "level"],
     }));
 
-    let mut feeds = Feeds::default();
-    let mut tob = None;
-    let mut mbp = None;
+    // Shard-outer and block-inner, in first-appearance order, because that
+    // order is the index the routing resolves against. A shard's two
+    // specifications go into one `ShardFeeds`, so a slice that interleaves them
+    // cannot land them under two different shards.
+    let mut shards: Vec<ShardName> = Vec::new();
     for feed in configured {
-        match feed.spec {
-            FeedSpec::TopOfBook => {
-                let (built, recorders) = pipeline::<TopOfBook>(feed, &metrics, TOB_ERA, MAGIC_TOB);
-                feeds.top_of_book = Some(built);
-                tob = Some(recorders);
-            }
-            FeedSpec::MarketByPrice => {
-                let (built, recorders) =
-                    pipeline::<MarketByPrice>(feed, &metrics, MBP_ERA, MAGIC_MBP);
-                feeds.market_by_price = Some(built);
-                mbp = Some(recorders);
+        if !shards.contains(&feed.shard) {
+            shards.push(feed.shard.clone());
+        }
+    }
+
+    let mut feeds = Feeds::default();
+    let mut recorded: Vec<ShardRecorders> = Vec::new();
+    for shard in &shards {
+        let mut top_of_book = None;
+        let mut market_by_price = None;
+        for feed in configured.iter().filter(|feed| &feed.shard == shard) {
+            match feed.spec {
+                FeedSpec::TopOfBook => {
+                    top_of_book = Some(pipeline::<TopOfBook>(feed, &metrics, TOB_ERA, MAGIC_TOB));
+                }
+                FeedSpec::MarketByPrice => {
+                    market_by_price = Some(pipeline::<MarketByPrice>(
+                        feed, &metrics, MBP_ERA, MAGIC_MBP,
+                    ));
+                }
             }
         }
+        let (top_of_book, tob) = split(top_of_book);
+        let (market_by_price, mbp) = split(market_by_price);
+        feeds.push(
+            ShardFeeds::new(top_of_book, market_by_price)
+                .expect("a shard in the list has at least one block"),
+        );
+        recorded.push(ShardRecorders { tob, mbp });
     }
 
     let store = MemoryStore::new();
@@ -500,7 +641,22 @@ fn harness_inner(configured: &[Feed], break_writes: bool) -> Harness {
     let registry = Registry::open(
         RegistryConfig {
             source_id: identity.source_id,
-            channel_id: identity.channel_id,
+            // In the same order the send paths were pushed in, because the
+            // index this registry answers with is the index those vectors are
+            // read at. Each shard's `Channel ID` is its first block's: the
+            // builder stamps the header's copy per datagram, so this one is
+            // only what a manifest composed without a builder would state.
+            shards: shards
+                .iter()
+                .map(|shard| ShardConfig {
+                    name: shard.as_str().to_owned(),
+                    channel_id: configured
+                        .iter()
+                        .find(|feed| &feed.shard == shard)
+                        .expect("a shard came from a feed")
+                        .channel_id,
+                })
+                .collect(),
             selection: SelectionPolicy::new(8, 16, 8).expect("a coherent policy"),
             schedule: CycleSchedule::new(identity.definition_cycle, 1232, 1),
         },
@@ -518,12 +674,17 @@ fn harness_inner(configured: &[Feed], break_writes: bool) -> Harness {
         identity.idle_guard,
     );
 
+    let (tob, mbp) = {
+        let first = recorded.first().expect("at least one shard");
+        (first.tob.clone(), first.mbp.clone())
+    };
     Harness {
         publisher,
         clock,
         metrics,
         tob,
         mbp,
+        shards: recorded,
     }
 }
 
@@ -561,6 +722,13 @@ pub fn spec(symbol: &str) -> InstrumentSpec<'_> {
 /// event *after* the boundary.
 pub struct FakeAdapter {
     symbols: Vec<String>,
+    /// Which shard each symbol is offered on, parallel to `symbols`.
+    ///
+    /// `None` offers through [`ListingSink::list`], which is the defaulted
+    /// method a venue that never names a shard calls — and keeping that path
+    /// exercised is the point of the default, because such a venue must go on
+    /// compiling and running unchanged.
+    shards: Vec<Option<String>>,
     handles: Vec<InstrumentRef>,
     declined: usize,
     withdrawing: Vec<InstrumentRef>,
@@ -579,11 +747,32 @@ impl FakeAdapter {
     pub fn new(symbols: &[&str]) -> Self {
         Self {
             symbols: symbols.iter().map(|s| (*s).to_owned()).collect(),
+            shards: symbols.iter().map(|_| None).collect(),
             handles: Vec::new(),
             declined: 0,
             withdrawing: Vec::new(),
             book: Vec::new(),
             depth: dz_adapter_core::DepthBound::Complete,
+        }
+    }
+
+    /// An adapter that names a shard for every symbol it offers.
+    ///
+    /// Stated as `(symbol, shard)` because that pairing is the whole of what a
+    /// venue decides here: it says which partition of its instrument set an
+    /// instrument belongs to and nothing about which channel carries it.
+    #[must_use]
+    pub fn on_shards(listings: &[(&str, &str)]) -> Self {
+        Self {
+            symbols: listings
+                .iter()
+                .map(|(symbol, _)| (*symbol).to_owned())
+                .collect(),
+            shards: listings
+                .iter()
+                .map(|(_, shard)| Some((*shard).to_owned()))
+                .collect(),
+            ..Self::new(&[])
         }
     }
 
@@ -639,8 +828,12 @@ impl Adapter for FakeAdapter {
         }
         self.handles.clear();
         self.declined = 0;
-        for symbol in &self.symbols {
-            match out.list(&spec(symbol)) {
+        for (symbol, shard) in self.symbols.iter().zip(&self.shards) {
+            let admitted = match shard {
+                Some(shard) => out.list_on(shard, &spec(symbol)),
+                None => out.list(&spec(symbol)),
+            };
+            match admitted {
                 Some(handle) => self.handles.push(handle),
                 None => self.declined += 1,
             }

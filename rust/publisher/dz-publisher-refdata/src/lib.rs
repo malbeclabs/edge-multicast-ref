@@ -7,9 +7,16 @@
 //! this side of that call the selection policy is applied, an `Instrument ID`
 //! is minted or recalled and persisted, an `InstrumentDefinition` is composed,
 //! the lowering's [`InstrumentTable`](dz_publisher_lowering::InstrumentTable) is
-//! populated, and `Manifest Seq` is advanced. None of that is expressible from
-//! the venue's side, which is the whole design: an adapter that could name an
-//! `Instrument ID` could name one that was never published.
+//! populated, and its shard's `Manifest Seq` is advanced. None of that is
+//! expressible from the venue's side, which is the whole design: an adapter
+//! that could name an `Instrument ID` could name one that was never published.
+//!
+//! The one thing a venue may say about where an instrument goes is the
+//! **shard** it names at admission — its own word for a partition it computes,
+//! which decides the published set the instrument joins and therefore the
+//! channel instance that carries it. Which `Channel ID` that is remains the
+//! configuration's. [`Registry`] is one per process; the published set it
+//! partitions is one per shard, and it says why.
 //!
 //! # The three things it exists to make unreachable
 //!
@@ -69,6 +76,6 @@ pub use file_store::FileStore;
 pub use pacer::{definitions_per_datagram, CycleSchedule, DefinitionPacer, LAP_PERCENT};
 pub use policy::{Phase, PolicyError, SelectionPolicy};
 pub use refusal::Refusal;
-pub use registry::{Counts, Registry, RegistryConfig};
+pub use registry::{Counts, Registry, RegistryConfig, ShardConfig};
 pub use state::{Entry, RecordError, StateRecord, FIRST_INSTRUMENT_ID};
 pub use store::{MemoryStore, StateError, StateStore};

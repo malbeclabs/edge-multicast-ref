@@ -276,14 +276,114 @@ pub enum StartupError {
     #[error("two enabled `[[feed]]` blocks name different source ids, {one} and {another}")]
     SeveralSourceIds { one: u16, another: u16 },
 
-    /// Two `[[feed]]` blocks name the same specification.
+    /// Two `[[feed]]` blocks name one specification **on one shard**.
     ///
-    /// Refused rather than merged: each block carries its own `Channel ID`,
-    /// ports and era, so two blocks for one feed are two channel instances of
-    /// the same feed — and a subscriber tracking either one sees the other's
-    /// numbering as its own gaps.
-    #[error("two `[[feed]]` blocks name `spec = \"{spec}\"`")]
-    DuplicateFeedSpec { spec: String },
+    /// Two blocks of one specification are now ordinary — that is the whole of
+    /// this change — but two on the same shard are not. Each block carries its
+    /// own `Channel ID`, ports and era, so two for one shard are two channel
+    /// instances publishing one partition of the instrument set, and a
+    /// subscriber tracking either one sees the other's numbering as its own
+    /// gaps.
+    ///
+    /// Keyed on the pair rather than on the specification: the specification
+    /// alone was the gate that held the rest of this design shut, and it is
+    /// the shard that carries the meaning now.
+    #[error(
+        "two `[[feed]]` blocks name `spec = \"{spec}\"` on shard `{shard}`. Two blocks of one \
+         specification are ordinary — on different shards. On one shard they are two channel \
+         instances publishing the same instruments, and a subscriber on either reads the other's \
+         numbering as its own gaps."
+    )]
+    DuplicateFeedShard { spec: String, shard: String },
+
+    /// A shard whose blocks do not cover the specifications the others do.
+    ///
+    /// **This is the check that makes `list_on` total.** An instrument admitted
+    /// to a shard with no top-of-book block has quotes that reach no wire and
+    /// are counted only as unroutable — a venue doing exactly what the
+    /// interface asked of it, and a feed silently missing for a third of the
+    /// instrument set. The publisher refuses rather than discovering it per
+    /// message.
+    #[error(
+        "shard `{shard}` has no `[[feed]]` block for `{spec}`, and another shard does. Every \
+         shard carries the same specifications or the instruments admitted to this one have a \
+         feed that reaches no wire."
+    )]
+    ShardSpecsDisagree { shard: String, spec: String },
+
+    /// A shard reached the composition with no send path of either
+    /// specification.
+    ///
+    /// **No document produces this.** The shard set is the distinct shards of
+    /// the *enabled* blocks, so a shard with neither specification is a shard
+    /// nothing named. It is an error rather than a skip because skipping is the
+    /// silent failure: `Feeds` is indexed by shard and so is the reference-data
+    /// registry's shard list, both built from one `Config::shards()`, and
+    /// dropping an entry from one of them shifts every later shard's index —
+    /// which publishes a shard's instruments under another channel instance's
+    /// sequence series, and no subscriber can tell.
+    #[error(
+        "shard `{shard}` composed no `[[feed]]` block of either specification. The shard set \
+         comes from the enabled blocks themselves, so this is a bug in the composition rather \
+         than something a document can state."
+    )]
+    ShardWithNoFeed { shard: String },
+
+    /// A `shard` name that cannot be a path component.
+    ///
+    /// The name reaches a path in two places — the era file and the reference
+    /// copy's socket — so it is checked once, where the value enters the
+    /// process, rather than at each use where the third use is the one that
+    /// forgets. A name with a slash in it writes somewhere nobody configured;
+    /// one that differs from another only past sixty-four bytes shares its era
+    /// file.
+    #[error(
+        "`shard = \"{shard}\"` in the `[[feed]]` block for `{spec}` cannot be a path component. \
+         A shard name is one to sixty-four bytes of lower-case letters, digits and hyphens, \
+         because it names the block's era file and its reference-copy socket."
+    )]
+    UnsafeShardName { spec: String, shard: String },
+
+    /// A block spelling the default shard's own token.
+    ///
+    /// Refused rather than accepted as a synonym: a document with one block
+    /// naming it and one leaving the key out would have two spellings of one
+    /// shard, which is two era files and two published sets for one channel.
+    /// Leaving the key out is how a block says it carries the default.
+    #[error(
+        "the `[[feed]]` block for `{spec}` names `shard = \"{shard}\"`, which is the default \
+         shard's own token. Leave the key out to say that — spelling it as well would make one \
+         shard into two, with an era file and a published set each."
+    )]
+    ReservedShardName { spec: String, shard: String },
+
+    /// Two enabled blocks claiming one `Channel ID`.
+    ///
+    /// New, and it closes a hole that exists rather than one this change opens:
+    /// `Config::channel_ids()` sorts and dedups, so two blocks sharing an ID
+    /// pre-create one set of series and both write to it — `sequence_current`,
+    /// `heartbeat_last_sent`, `manifest_seq` and `manifest_valid`, each of them
+    /// two channel instances deep with nothing saying so. One channel per
+    /// specification made it unlikely; many make it a matter of time.
+    /// **Each block is named by its specification *and* its shard**, because
+    /// the specification alone stopped identifying a block the moment two of
+    /// them could carry one. Two blocks of one specification on different
+    /// shards sharing a `Channel ID` is the likely shape of this mistake — and
+    /// naming only the specification would print the same word twice and leave
+    /// an operator looking for a duplicate that reads as one block.
+    #[error(
+        "the `[[feed]]` blocks for `{first_spec}` on shard `{first_shard}` and `{second_spec}` \
+         on shard `{second_shard}` both claim `channel_id = {channel_id}`. A `Channel ID` \
+         identifies a channel instance on the wire and in every series keyed on one, so two \
+         blocks sharing it publish two feeds into one set of numbers."
+    )]
+    DuplicateChannelId {
+        channel_id: u8,
+        first_spec: String,
+        first_shard: String,
+        second_spec: String,
+        second_shard: String,
+    },
 
     /// Every `[[feed]]` block is disabled, or there are none.
     #[error("no `[[feed]]` block is enabled: this publisher would emit nothing")]

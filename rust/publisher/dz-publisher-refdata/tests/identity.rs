@@ -8,11 +8,12 @@
 
 use dz_adapter_core::{
     AssetClass, InstrumentSpec, ListingSink, MarketModel, PriceBound, Scalar, SettleType,
+    DEFAULT_SHARD,
 };
 use dz_publisher_lowering::SourceId;
 use dz_publisher_refdata::{
     symbol_field, CycleSchedule, Entry, ManualClock, MemoryStore, RecordError, RefdataError,
-    Refusal, Registry, RegistryConfig, SelectionPolicy, StateError, StateRecord,
+    Refusal, Registry, RegistryConfig, SelectionPolicy, ShardConfig, StateError, StateRecord,
     FIRST_INSTRUMENT_ID,
 };
 
@@ -42,7 +43,7 @@ const SOURCE_ID: u16 = 7;
 fn config() -> RegistryConfig {
     RegistryConfig {
         source_id: SourceId::new(SOURCE_ID).expect("7 is an assigned production id"),
-        channel_id: 3,
+        shards: vec![ShardConfig::default_shard(3)],
         selection: SelectionPolicy::from_seed(8).expect("8 is a seed"),
         schedule: CycleSchedule::new(std::time::Duration::from_secs(30), 1232, 8),
     }
@@ -75,6 +76,44 @@ fn the_first_instrument_id_minted_is_one() {
             .instrument_id,
         1
     );
+}
+
+#[test]
+fn naming_the_default_shard_and_naming_no_shard_are_one_admission() {
+    // The upgrade path, and the reason `list` is the defaulted half of the
+    // boundary. An adapter that computes no partition offers through `list`,
+    // and a document that names no shard resolves to the same token, so the two
+    // must reach one published set. Two tokens for one shard would be two
+    // `Instrument ID`s for one symbol, each published on a channel the other's
+    // subscribers never see.
+    let store = MemoryStore::new();
+    let mut registry = opened(store.clone());
+
+    let through_list = registry.list(&spec("AAA")).expect("admitted");
+    let through_list_on = registry
+        .list_on(DEFAULT_SHARD, &spec("AAA"))
+        .expect("the same instrument");
+
+    assert_eq!(through_list, through_list_on);
+    assert_eq!(
+        registry
+            .definition(through_list)
+            .expect("published")
+            .instrument_id,
+        FIRST_INSTRUMENT_ID
+    );
+    assert_eq!(registry.published(), 1);
+    assert_eq!(registry.published_on(DEFAULT_SHARD), Some(1));
+    assert_eq!(
+        registry.last_refusal(),
+        None,
+        "the default shard is not a restatement of itself"
+    );
+
+    // One ID minted, not two: the second spelling took nothing from the space.
+    let record = StateRecord::decode(&store.record().expect("persisted")).expect("our own bytes");
+    assert_eq!(record.next_id, FIRST_INSTRUMENT_ID + 1);
+    assert_eq!(record.entries.len(), 1);
 }
 
 #[test]

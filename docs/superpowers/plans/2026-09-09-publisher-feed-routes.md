@@ -18,7 +18,7 @@ at all in `dz-adapter-core` — see *Global constraints*. No async below
 
 ## Scope
 
-One plan, thirteen tasks, all in this repository. No venue repository changes at
+One plan, sixteen tasks, all in this repository. No venue repository changes at
 any point: an adapter that never names a shard compiles unchanged against every
 task, and the last task is the one that lets a document ask for a second block
 of one specification.
@@ -162,18 +162,40 @@ unchanged, asserted by name so that a later task cannot delete it by accident.
 - [x] `fn list_on(&mut self, shard: &str, spec: &InstrumentSpec<'_>) -> Option<InstrumentRef>`
       on `ListingSink`, **required**; `list` becomes the defaulted method,
       forwarding with `DEFAULT_SHARD`.
-- [x] `dz-adapter-core` takes a major version. Recorded in its changelog as
-      breaking for implementors and additive for callers, with the one-line
-      reason: every implementor of `ListingSink` is in this workspace, and a
-      venue calls it.
+- [x] The break is signalled where `RELEASING.md` says a consumer looks: **the
+      tag message and the release notes**, in the shared-version bump. The
+      earlier wording here asked for two things this repository does not have —
+      a per-crate major version and a changelog. Every crate is
+      `version.workspace = true` at one shared version, which `RELEASING.md`
+      makes deliberate ("These crates are one workspace with one shared version
+      for exactly this reason"), pre-1.0 a minor release may break an
+      implementor, and its step 5 is *say what breaks* in the tag message. There
+      is no changelog in the tree.
+- [x] The reason that signal carries is corrected too. A venue *calls*
+      `ListingSink` and needs no change; an implementor of it does, and
+      **implementors outside this workspace exist** — `dz-adapter-core`'s own
+      `tests/adapter_is_usable.rs` calls exercising the trait end to end "the
+      property a venue's own mapping tests depend on", which is a venue's test
+      doubles implementing it. What makes the break worth asking for is where it
+      lands: a compile error in a test double is found by the next `cargo test`,
+      and a published set silently collapsed onto one channel is found by a
+      subscriber.
 - [x] `Registry` holds the configured shard set, handed to it through
       `RegistryConfig`.
 - [x] `Refusal::UnknownShard` and `Refusal::ShardRestated`, and their `Counts`
       entries. No new metric family — `dz-publisher-refdata` constructs none,
       and the alertable signal is task 10's
       `dz_publisher_refdata_instruments_current{channel_id}` sitting at 0.
-- [x] The unknown name is logged once per distinct value, not once per poll: an
-      adapter may re-offer its whole set every second.
+- [x] The unknown name is *remembered* once per distinct value, not once per
+      poll: an adapter may re-offer its whole set every second, and a line per
+      offer would bury the first one. `Registry::take_unknown_shards` hands a
+      caller each distinct name once and nothing twice.
+- [x] **The caller.** This crate writes no line — it constructs no metric and it
+      logs nothing — so the item above is only half of what this bullet
+      promised. It was checked off with the mechanism built and nothing calling
+      it, which is a venue's misnamed shard dropping instruments with neither a
+      line nor a series to show it. Task 14 wires it, and the checkbox above is
+      split in two so that the same claim cannot cover both halves again.
 
 **Test** (`dz-publisher-refdata/tests/identity.rs` and a new
 `tests/shards.rs`, `MemoryStore` and an injected clock): `list` and
@@ -304,6 +326,14 @@ rather than as a presence on one.
 - [x] `snapshot` and `capture_and_send` likewise, and `SnapshotError::NoDepthFeed`
       keeps its meaning per shard: an instrument on a shard whose blocks carry no
       snapshot port role.
+- [x] **The ceiling is a process ceiling, and dividing per shard stopped
+      detecting it.** The rotation's own doc comment states the ceiling as a
+      cycle divided by *one shard's* count falling below the runtime's tick.
+      That was the whole of it when there was one rotation; with N of them the
+      process still serves at most one snapshot per tick, so N shards owe N×
+      what one publisher can send and each one's arithmetic still reads as
+      comfortable. Task 16 restates the ceiling as the sum it actually is and
+      counts the ticks on which it is breached.
 
 **Test** (`rotation.rs`'s unit tests and `depth_end_to_end.rs`): the existing
 `the_tick_is_the_cycle_divided_by_the_published_set` gains a sibling asserting
@@ -471,6 +501,152 @@ Before this task the first of those failed **nothing at all**, in the suite or b
 
 ---
 
+## The three tasks a review added
+
+Tasks 14 to 16 were not in the plan as written. They are here because a review
+of everything above found three things, two of them blocking, and because a task
+added after the fact belongs in the plan rather than only in a commit message:
+the first is an item task 2 checked off without delivering, the second is this
+change reaching a tier the plan never mentioned, and the third is a stated
+ceiling that stopped being true when the divisor became per shard.
+
+---
+
+### 14. The unknown shard name reaches an operator
+
+- [x] The runtime drains `Registry::take_unknown_shards` on the tick that
+      polled, and writes one line per distinct name, beside the tick lines it
+      already writes for a dropped fan-out member and a refused snapshot.
+- [x] The line names the shard the venue asked for **and the shards this
+      publisher is configured with**, because that pair is what identifies a
+      misspelling and neither half alone does.
+- [x] The exit report carries `declined_unknown_shard` and
+      `declined_shard_restated`, beside the five numbers no series carries that
+      it already prints.
+
+**The two counts stay mapped to no metric family.** The normative
+`dz_publisher_*` set is closed by the playbook, this repository does not own it,
+and a series added here would be one nobody declared — the same reasoning that
+leaves `declined_at_cap` unmapped, and it is unchanged.
+
+What does change is the claim used to justify it. `Counts` and the design both
+say the alertable signal already exists, because
+`refdata_instruments_current{channel_id}` sits at 0 for a shard nothing was
+admitted to. That is true only of the total case. A venue that misnames *some*
+of its offers — one instrument, or every instrument of one product line — leaves
+the gauge non-zero and every one of those instruments unpublished, and no series
+in the closed set separates that from a channel that simply holds fewer
+instruments. So the line is not a convenience beside a gauge; for the partial
+case it is the only signal there is, which is exactly why promising it and not
+writing it was the defect rather than a missing nicety.
+
+**Test** (`shards_end_to_end.rs`): a venue offers one instrument on a shard the
+document does not name; the drain returns that name once, and a second poll
+re-offering the same instrument returns nothing. The property under test is that
+the runtime drains the registry at all, so the mutant is a runtime that does
+not.
+
+**And one part of this has no test that can fail**, said plainly rather than
+covered by a test that would look like a gate. The `eprintln!` in `tick_loop` is
+unreachable from the suite — no test in this workspace calls that function, and
+none captures stderr — so what is asserted is the drain the line is written from
+and not the writing. That is the same shape of gap `report` has had since it was
+written, and it is why the drain was put on `Publisher`, where a test reaches
+it, rather than inlined at the call site.
+
+---
+
+### 15. The recorder's completeness check becomes per channel
+
+This is the one that reaches another tier, and the plan had nothing about the
+recorder in it.
+
+`ManifestSummary`'s `Instrument Count` and `Manifest Seq` are per channel — that
+is the specification's own definition and it is the whole point of task 3 — but
+`dz-recorder-relower` keeps **one** manifest for a whole archive, picked by
+highest `Manifest Seq`, and `ArchivedRefdata::finalise` compares it against the
+union of every channel's definitions. Over an archive covering one channel that
+is correct. Over an archive covering two it compares a union against one
+channel's count, and it reports `ReferenceDataIncomplete` on complete reference
+data, or stays silent on incomplete data, depending on nothing but which channel
+happened to carry the higher `Manifest Seq`.
+
+- [x] `ArchivedRefdata` holds a manifest **per `Channel ID`**, and the symbols
+      each channel defined, and `finalise` compares each channel's declared
+      count against that channel's own definitions.
+- [x] `Caveat::ReferenceDataIncomplete` names the channel. Two caveats that
+      differ only in which channel was short are otherwise one line printed
+      twice, and `push_once` would collapse them into one.
+- [x] `observe_definition` and `observe_manifest` take the `Channel ID` the
+      message was carried on. Both call sites already hold the provenance, so
+      nothing new has to be threaded to reach them.
+- [x] `declared_instrument_count` takes a `Channel ID`. There is no process-wide
+      answer to compose from several channels' counts, and their sum is not one
+      either: it is the sum of disjoint published sets, which is a number no
+      manifest states and no subscriber sees.
+
+**Keyed on the channel and not on the channel instance**, which is the decision
+here worth arguing. `by_symbol` is already a union across the redundant paths of
+a channel, and it raises `ScaleRestated` when two paths disagree, so the
+reconstruction a completeness check guards resolves from that union. Keyed on
+the instance the check would report a caveat against a path whose refdata window
+was shorter even where the union covers the set and the re-lowering declines
+nothing — a caveat about capture coverage dressed as one about the archive.
+`Instrument Count` is defined per channel, `GLOSSARY.md` has an instrument
+unique *within a channel*, and `dz-recorder-events`' own accumulator keys on
+`(source IP address, Channel ID)` for a related reason it states at length. The
+channel is the scope the count is stated at and the scope the reconstruction
+resolves at, so it is the scope the comparison belongs at.
+
+**Not deferred, and here is why that was the choice.** The honest alternative
+was to call this its own piece of work and meanwhile make the current behaviour
+loud — refuse to run over an archive covering more than one channel rather than
+compare the wrong two numbers. That is a real option and it is the right one
+whenever the fix is large. This fix is not: both call sites hold the `Channel
+ID` already, the map is a `BTreeMap` keyed on a `u8`, and `finalise` becomes a
+loop over it. Refusing would have cost a public error variant, a runner that
+stops on captures it can read perfectly well, and the same work again later.
+
+**Test** (`dz-recorder-relower/tests/reference_data.rs`): one archive covering
+two channels, one complete and one short, yields exactly one
+`ReferenceDataIncomplete` naming the short channel. Reverted to one manifest per
+archive, the union of both channels' definitions is compared against the
+higher-`Manifest Seq` channel's count and the caveat is wrong in whichever
+direction the fixture is arranged.
+
+---
+
+### 16. The snapshot ceiling is a sum over shards
+
+- [x] `rotation.rs`'s module note states the ceiling as the sum it is: N
+      rotations against one process's serving rate of one snapshot per tick,
+      rather than each rotation against its own derived tick.
+- [x] The arithmetic is a function, so it can be asserted directly the way
+      `tick` is.
+- [x] The publisher counts the ticks on which the configured cycles ask for more
+      snapshots than one process can send. The tick loop names it on the decade
+      schedule `worth_a_line` already states — a document that asks for too much
+      asks for it on every tick thereafter, so an unfiltered line would be a
+      hundred a second — and the exit report names the total.
+
+**It counts, and it does not refuse.** A refusal would have to happen at load,
+and at load the number that decides it does not exist: the divisor is the
+published count, and nothing is published until the venue's first poll has
+returned. Deferring the refusal to the first tick that *can* compute it means
+darkening a publisher that is already sending — over a pacing shortfall, which
+degrades into a slower lap and never into a wrong answer, and whose remedy is a
+configuration edit an operator has to be told about rather than one the process
+can make. A count and a line say the thing; a refusal would trade a slow feed
+for no feed.
+
+**Test** (`rotation.rs`'s unit tests and `snapshot.rs`): the share arithmetic
+asserted directly, including the case the per-shard statement misses — several
+shards each of whose derived tick is comfortably above the process tick, whose
+sum is not — and a publisher over such a configuration counting the tick.
+Reverting the sum to the per-shard comparison leaves the count at 0.
+
+---
+
 ## It ran
 
 Everything above is tested against fakes — sockets behind traits, injected
@@ -573,7 +749,7 @@ written for has documented the tree rather than changed it.
 The rule found it — one revert short of the four it asks for — which is the
 argument for the rule rather than against it.
 
-**Each of those four reverts was run, and this is what died.**
+**Each of those reverts was run, and this is what died.**
 
 | Reverted | What was put back | Tests that failed |
 |---|---|---|
@@ -582,6 +758,26 @@ argument for the rule rather than against it.
 | Task 4 | the era file is `<spec>.era` for every shard | seven in `era_persistence.rs`, including `a_newly_named_shard_does_not_inherit_another_shards_era` and `adding_or_removing_a_shard_does_not_change_the_era_the_others_see_next` |
 | Task 7 | the rotation divides the cycle by the process's published count | `a_shards_snapshot_rotation_serves_its_own_instruments_at_its_own_cycle` |
 | Task 9 | the duplicate gate is keyed on the specification alone | `two_blocks_of_one_specification_on_different_shards_resolve`, `thirty_one_shards_of_both_specifications_resolve_as_sixty_two_channel_instances` |
+| Task 14 | `Publisher::take_unknown_shards` hands back nothing, which is the runtime as the review found it | `a_shard_the_document_has_no_channel_for_is_named_once_however_often_it_is_offered` |
+| Task 14 | the line drops the configured shard names and keeps the offered one | `the_unknown_shard_line_names_the_offer_and_the_configured_shards`, `a_publisher_with_no_named_shard_still_names_what_it_has` |
+| Task 15 | `finalise` compares each channel's count against the union of every channel's definitions | `each_channels_manifest_is_checked_against_its_own_definitions`, `a_channel_with_no_manifest_of_its_own_borrows_no_other_channels_count` |
+| Task 15 | one manifest for the archive, highest `Manifest Seq` across channels | the two above plus `the_reconstructed_table_matches_what_the_definitions_said` and `a_manifest_declaring_more_instruments_than_the_archive_carries_is_reported` |
+| Task 16 | the per-shard comparison the module note used to state, instead of the sum | `cycles_that_are_achievable_per_shard_and_not_together_are_counted` |
+| Task 16 | an empty published set is charged for the pass `tick`'s clamp implies | `a_shard_with_nothing_published_asks_for_nothing` |
+
+The two task-15 rows are worth reading together, because between them they show
+the shape of the defect rather than just its presence. Reverted to the union,
+the archive whose complete channel holds the higher `Manifest Seq` reports
+`ReferenceDataIncomplete { channel_id: 1, declared: 2, reconstructed: 3 }` — a
+caveat against the channel that is complete, carrying a count belonging to
+neither channel, with the channel that actually fell short unmentioned.
+
+**One part of task 14 has no revert, and it is named rather than covered.** The
+`eprintln!` in `tick_loop` is unreachable from the suite: no test calls that
+function and none captures stderr. What is killed is the drain it writes from
+and the line it writes; the call between them is not. That is the same gap
+`report` has always had, and the drain sits on `Publisher` precisely because
+that is the furthest along the path a test reaches.
 
 Task 5 was reverted twice, in both directions, because its two halves fail
 differently: always appending the shard fails the default's five literal

@@ -59,7 +59,7 @@ use dz_publisher_egress::{ChannelEgress, EgressEndpoint, EgressError, Tee};
 use dz_publisher_lowering::Snapshot;
 use dz_publisher_metrics::{EgressMessageType, PublisherMetrics};
 
-use crate::config::{EmittedFeed, Feed, FeedSpec};
+use crate::config::{EmittedFeed, Feed, FeedSpec, ShardName};
 
 /// One port role's fan-out and the identity it sends under.
 ///
@@ -128,6 +128,15 @@ pub struct Ports {
 /// sharing a composer would share one datagram under construction and one set
 /// of numbers.
 pub struct FeedPipeline<F: EmittedFeed> {
+    /// The shard this block carries, as the reference-data owner keys its
+    /// published sets on.
+    ///
+    /// Held on the send path rather than beside it, because the send paths are
+    /// what the routing indexes: a name held in a second list can fall out of
+    /// step with the position it names, and the shard whose reference data
+    /// reaches this port would then be one this channel instance never
+    /// published a message for.
+    shard: ShardName,
     channel_id: u8,
     mktdata: ChannelEgress<F, Tee>,
     refdata: ChannelEgress<F, Tee>,
@@ -195,6 +204,7 @@ impl<F: EmittedFeed> FeedPipeline<F> {
         let refdata = open(ports.refdata, Arc::clone(&metrics));
         let snapshot = ports.snapshot.map(|port| open(port, Arc::clone(&metrics)));
         Self {
+            shard: feed.shard.clone(),
             channel_id: feed.channel_id,
             mktdata,
             refdata,
@@ -215,6 +225,17 @@ impl<F: EmittedFeed> FeedPipeline<F> {
     #[must_use]
     pub const fn snapshot_cycle(&self) -> Option<Duration> {
         self.snapshot_cycle
+    }
+
+    /// The shard this send path carries, as the reference-data owner names it.
+    ///
+    /// The name is what the registry keys a published set on and the position
+    /// is what the routing indexes; this is the one place the two are held
+    /// together, so a caller asking the registry about the shard at an index
+    /// asks about the shard the index selects.
+    #[must_use]
+    pub fn shard(&self) -> &str {
+        self.shard.as_str()
     }
 
     /// The specification this send path composes, which is `F`'s and not a

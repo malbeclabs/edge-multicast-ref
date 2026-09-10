@@ -189,6 +189,7 @@ ttl = 1
 
 [[feed]]
 spec = "top-of-book"
+# shard = "alpha"           # optional; absent is the default shard
 channel_id = 0
 source_id = 1
 multicast_group = "233.252.0.10"
@@ -228,7 +229,33 @@ kind = "a-venue-tob"
   the symptom is silence that reads as a clean feed.
 - **`source_id` and `channel_id` are identity on the wire.** Two publishers
   sharing a `Source ID` on one group are indistinguishable to a subscriber's gap
-  detection.
+  detection. Two `[[feed]]` blocks in one document sharing a `channel_id` are
+  refused at load naming both, rather than started: the metric families keyed on
+  `channel_id` cannot tell two channel instances apart, so the pair would
+  pre-create one set of series and both would write to it with nothing saying
+  so.
+- **`shard` is optional, and an operator needs it only when one process carries
+  several channels of one specification.** Absent means the default shard, which
+  is what a publisher with one channel per specification has always been, so a
+  document that never names one keeps meaning what it always meant. Blocks
+  sharing a `shard` carry one published set — one `Instrument Count`, one
+  `Manifest Seq`, one definition cycle — while each block stays its own channel
+  instance, with its own sequence series, `Reset Count` and era. The venue's
+  adapter admits an instrument by shard name and still cannot name the
+  `Channel ID` that shard resolves to; the mapping between the two is this
+  document's. Every shard carries a block for every specification any shard
+  carries, and a document leaving one out is refused at load naming the shard
+  and the specification it has no block for: an instrument admitted to a shard
+  with no top-of-book block would have quotes that reach no wire.
+
+  A name is one lowercase path component of at most sixty-four bytes, because it
+  becomes one. Spelling the default shard's own token is refused rather than
+  taken as a synonym: two spellings of one shard would be two era files. And the
+  default shard keeps `<spec>.era` under `[refdata] state_dir` rather than
+  gaining a shard component, so adding the key to a document for the first time
+  renames no state a running deployment reads — a renamed era file reads as *no*
+  era file, and a publisher that has been on era 7 for months would restart on
+  era 1 and announce nothing.
 - **`definition_cycle` and `idle_guard` are one answer per publisher**, even
   though they are written per feed. One reference-data registry serves every
   feed, because `Instrument ID` identity can only be one thing, and the idle
@@ -585,7 +612,7 @@ infrastructure repositories, and each of those owns its own review.
 - [ ] for a venue with several upstreams: one `[[source]]` per connection, exactly one `primary` **publisher-wide** (not per feed), and one `Input` built per `cx.sources()` entry
 - [ ] for a venue with several upstreams: per-connection state in the adapter keyed by `conn`, and `on_payload` emitting from the connection it means to publish — the runtime cannot hold a `comparison` source's events back
 - [ ] an offline replay run publishes, and this repository's Go parser reads the values back
-- [ ] config reviewed for `pin`, `source_id`, `channel_id`, group and ports
+- [ ] config reviewed for `pin`, `source_id`, `channel_id`, group and ports — and `shard`, for a venue whose instrument set is sharded across channels
 - [ ] for a depth feed: `snapshot_cycle` set, and the adapter's `DepthBound` checked against what its book actually holds
 - [ ] a recorder is configured for the feed before the publisher is pointed at production
 - [ ] the recorder's arrangement is a decision, and the configuration states it: the two `[archive]` directories for a feed being recorded for evidence, `--inline-config` only where nobody was going to keep the bytes. `--check` prints which one on its first line, and refuses if the configuration states both or neither. In inline mode, the alert on the age of the oldest unposted window exists, and nothing on this host expects `event`, `instrument` or `book_top` rows

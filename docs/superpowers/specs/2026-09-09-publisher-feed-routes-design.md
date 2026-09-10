@@ -2,7 +2,7 @@
 
 **Status:** draft, pending review
 **Date:** 2026-09-09
-**Applies to:** `rust/publisher/`, `rust/adapter/dz-adapter-core`
+**Applies to:** `rust/publisher/`, `rust/adapter/dz-adapter-core`, and `rust/recorder/dz-recorder-relower` for the one consumer of `ManifestSummary` a per-shard manifest reaches
 **Authority:** [`edge-feed-spec`](https://github.com/malbeclabs/edge-feed-spec), its [`GLOSSARY.md`](https://github.com/malbeclabs/edge-feed-spec/blob/main/GLOSSARY.md) and [`VERSIONING.md`](https://github.com/malbeclabs/edge-feed-spec/blob/main/VERSIONING.md); `reference-data/spec.md` §Publisher Behavior
 **Builds on:** [2026-08-26-edge-publisher-crates-design.md](2026-08-26-edge-publisher-crates-design.md), [2026-09-02-venue-adapter-interface-design.md](2026-09-02-venue-adapter-interface-design.md)
 
@@ -402,10 +402,23 @@ for:
   as a working publisher. It joins `Refusal` alongside `Capped` and
   `ScaleRestated`, is counted in `Counts`, and is named by `last_refusal` —
   and it invents **no metric family**, because `dz-publisher-refdata`
-  "constructs no metric … a series is not this crate's to invent". The
-  alertable signal already exists and is already pre-created:
+  "constructs no metric … a series is not this crate's to invent". An alertable
+  signal exists and is already pre-created:
   `dz_publisher_refdata_instruments_current{channel_id}` sits at 0 for a shard
   nothing was ever admitted to, from startup, with no datagram required.
+
+  **That signal covers the total case only, and the difference is the whole
+  reason the log line is load-bearing.** A gauge at 0 says a channel is empty;
+  it cannot say the venue asked for a name this document does not have. And a
+  venue that misnames *some* of its offers — one instrument, or every instrument
+  of one product line, on an otherwise correct shard — leaves the gauge non-zero
+  and those instruments unpublished, which no series in the closed set separates
+  from a channel that holds fewer instruments. So the refusal is reported by a
+  line the runtime writes, naming the name offered and the names configured,
+  once per distinct value; and because that line is the only signal for the
+  partial case, it is a promise the runtime has to keep rather than an
+  afterthought beside the gauge. The first pass built the mechanism in the
+  registry and wired no caller, which is the shape a review found.
 - **The shard is pinned at admission.** A re-offer naming a different shard is
   `Refusal::ShardRestated`, exactly as a re-offer restating an instrument's
   scale is `Refusal::ScaleRestated` — the registry already refuses a re-offer
@@ -644,6 +657,53 @@ second, which is what it owed when it was the only shard. What multiplies is the
 process aggregate, linearly, which is the honest cost of publishing 31 channels
 from one process rather than 31.
 
+### The snapshot rate does not multiply, and that is the ceiling
+
+The refdata ceiling above multiplies harmlessly because each pacer owns its own
+budget. The snapshot rotation is the opposite case and it has to be stated
+separately, because the arithmetic that looks the same points the other way.
+
+There is one rotation per shard, each dividing its own `[[feed]] snapshot_cycle`
+by its own published count — that is what makes each channel's key mean what it
+says. But the *serving* rate is the process's: the tick body calls
+`periodic_snapshot` once and it returns at most one instrument, because a
+snapshot is a group of datagrams and the unit of progress is an instrument. So
+N shards draw their snapshots from one budget of one per 10 ms tick, and the
+demand adds up while the supply does not.
+
+`rotation.rs` states the ceiling as *a set so large that `cycle / instruments`
+falls below the runtime's own tick*. That was the whole of it when there was one
+rotation. Per shard it stops detecting the case that shards introduce:
+
+| | Derived tick per shard | Reads as | Actually |
+|---|---|---|---|
+| 1 shard, 1,000 instruments, 5 s cycle | 5 ms | breached — below the 10 ms tick | breached |
+| 31 shards, 100 instruments each, 5 s cycle | 50 ms | comfortable, five times the tick | 620 snapshots a second wanted, 100 available; every channel laps in 31 s, not 5 |
+
+The second row is the one that matters, and nothing in the per-shard statement
+sees it: each shard's arithmetic is comfortable and the sum is not. The true
+condition is over the sum,
+
+> Σ (published_i / cycle_i) ≤ 1 / tick
+
+equivalently Σ (tick / tick_i) ≤ 1 where `tick_i` is the shard's own derived
+per-instrument tick. Expressed as a share of one process's capacity it is one
+number per shard that has to add to no more than the whole, which is how it is
+computed: integer arithmetic, no float, and a function so the sum can be
+asserted the way `tick` is.
+
+**It is counted and reported, not refused**, and the reason is that it cannot
+honestly be refused at load. The divisor is the published count, and there is no
+published set until the venue's first poll has returned — so a load-time check
+would have nothing to divide, and a first-tick refusal would darken a publisher
+that is already sending over a shortfall that degrades into a slower lap and
+never into a wrong answer. The remedy is a configuration edit — a longer cycle,
+fewer instruments on a channel, or the level-budget scheduler the module note
+already names as the thing this design does not have — and every one of those is
+an operator's to make once told. So the publisher counts the ticks on which the
+configured cycles ask for more than it can send, and the exit report names the
+count beside the other numbers the closed metric set has nowhere for.
+
 ### `Channel ID` is a `u8`, so 256 is the ceiling
 
 The uniqueness check makes the ceiling explicit rather than implicit. 62 fits
@@ -676,6 +736,43 @@ healthy channels for one quiet one, and the series that shows a single quiet
 channel is `dz_publisher_egress_sequence_current{channel_id}`, which is
 pre-created from startup and therefore alertable without a single datagram
 having been sent.
+
+### The per-shard manifest reaches the recorder, and its check had to move with it
+
+A cost this document did not have, found by a review of the implementation and
+recorded here because it is the only place in the change that leaves
+`rust/publisher/`.
+
+`ManifestSummary` becomes per shard: `Instrument Count` and `Manifest Seq`
+describe the channel the datagram went out on, which is what the reference-data
+specification defines and what `GLOSSARY.md` means by an instrument being unique
+within a channel. Nothing on the wire changes — the fields were always the
+channel's, and a one-shard publisher stated the same numbers either way — so no
+subscriber is affected.
+
+One consumer had read them as the archive's rather than the channel's.
+`dz-recorder-relower`'s `ArchivedRefdata` kept a single manifest per archive,
+selected by highest `Manifest Seq`, and compared its `Instrument Count` against
+the union of every channel's reconstructed definitions. Over a capture of one
+channel that is the same comparison. Over a capture of two it is a union against
+one channel's count, and it is wrong in whichever direction the archive happens
+to be arranged: a caveat on complete reference data when the union exceeds the
+count, silence on incomplete data when it does not.
+
+The publisher side is not the thing to fix. A process-wide `Instrument Count`
+would be a false statement on every channel it went out on — 31× what any
+subscriber will ever receive a message for — which is fence 1. So the recorder's
+check becomes per channel: a manifest and a definition set per `Channel ID`,
+each count compared against its own channel's definitions, and
+`ReferenceDataIncomplete` naming the channel it is about.
+
+**Per channel rather than per channel instance.** `by_symbol` is already a union
+across the redundant paths of a channel and raises `ScaleRestated` where two
+paths disagree, so the reconstruction the check guards resolves from that union;
+keyed on the instance the check would raise a caveat against a path whose
+refdata window was shorter even where the union covers the set and nothing is
+declined. `Instrument Count` is stated per channel and the reconstruction
+resolves per channel, so the comparison belongs there.
 
 ---
 

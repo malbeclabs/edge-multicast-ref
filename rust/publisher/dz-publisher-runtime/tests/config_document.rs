@@ -12,8 +12,9 @@ mod harness;
 use std::time::Duration;
 
 use dz_edge_core::PortRole;
+use dz_publisher_runtime::config::ShardName;
 use dz_publisher_runtime::{Document, FeedSpec, StartupError, TeeConfig};
-use harness::{Doc, CHANNEL_ID, GROUP, MKTDATA_PORT, REFDATA_PORT, SOURCE_ID};
+use harness::{Doc, CHANNEL_ID, DEPTH_CHANNEL_ID, GROUP, MKTDATA_PORT, REFDATA_PORT, SOURCE_ID};
 
 // ---------------------------------------------------------------------------
 // `[adapter.tee]`
@@ -45,13 +46,13 @@ fn the_adapter_tee_parses_when_it_is_present() {
                    \n\
                    [adapter.tee]\n\
                    enabled = true\n\
-                   path = \"/run/a-publisher/tee.sock\"\n"
+                   path = \"/run/a-publisher/fan-out.sock\"\n"
         .to_owned();
     let document = Document::parse(&doc.render()).expect("valid");
     assert!(document.adapter.tee.enabled);
     assert_eq!(
         document.adapter.tee.path.as_deref(),
-        Some(std::path::Path::new("/run/a-publisher/tee.sock"))
+        Some(std::path::Path::new("/run/a-publisher/fan-out.sock"))
     );
 }
 
@@ -529,8 +530,187 @@ fn two_feed_blocks_naming_one_specification_are_refused() {
         .resolve()
         .unwrap_err();
     assert!(
-        matches!(error, StartupError::DuplicateFeedSpec { .. }),
+        matches!(error, StartupError::DuplicateFeedShard { .. }),
         "{error}"
+    );
+}
+
+/// Two blocks of one specification on **different** shards resolve.
+///
+/// The whole change, in one assertion. This was refused outright until the gate
+/// lifted, and everything before it was ordered so that lifting it would not
+/// produce a publisher that starts and is wrong on the wire.
+#[test]
+fn two_blocks_of_one_specification_on_different_shards_resolve() {
+    let mut doc = Doc::valid();
+    let second = doc
+        .feed
+        .replace(
+            &format!("channel_id = {CHANNEL_ID}"),
+            "channel_id = 9\nshard = \"beta\"",
+        )
+        .replace(
+            &format!("mktdata_port = {MKTDATA_PORT}"),
+            &format!("mktdata_port = {}", MKTDATA_PORT + 20),
+        )
+        .replace(
+            &format!("refdata_port = {REFDATA_PORT}"),
+            &format!("refdata_port = {}", REFDATA_PORT + 20),
+        );
+    doc.feed = format!("{}\n{second}", doc.feed);
+
+    let config = Document::parse(&doc.render())
+        .expect("parses")
+        .resolve()
+        .expect("two shards of one specification is what this change is for");
+    assert_eq!(config.feeds.len(), 2);
+    assert_eq!(config.shards().len(), 2, "two distinct shards");
+    assert_eq!(
+        config.feed_specs().len(),
+        1,
+        "and one specification, however many shards carry it"
+    );
+}
+
+/// The document at the scale this change exists for: 31 shards, both
+/// specifications, 62 channel instances, and it starts.
+///
+/// The acceptance criterion, as a test rather than as a hand-run. Everything
+/// else about shards is asserted on two of them, which is enough to make a
+/// partition falsifiable and not enough to say the document scales: `channel_id`
+/// is a `u8`, so 62 is well inside the ceiling but the *set* checks — one shard
+/// missing a specification, two blocks on one `(spec, shard)` pair, a repeated
+/// `Channel ID` — are the ones that would quietly turn quadratic or, worse,
+/// disagree with themselves at size.
+///
+/// One shard is the default, named by the absence of the key, because a
+/// deployment that grows into shards grows out of a document that had none and
+/// the block it already had keeps meaning what it meant.
+#[test]
+fn thirty_one_shards_of_both_specifications_resolve_as_sixty_two_channel_instances() {
+    const SHARDS: u8 = 31;
+
+    let mut blocks = String::new();
+    for index in 0..SHARDS {
+        // Index 0 states no shard: it is the default one, and the era file and
+        // the reference-copy socket it keeps are the upgrade this document
+        // shape has to survive.
+        let shard = if index == 0 {
+            String::new()
+        } else {
+            format!("shard = \"shard-{index:02}\"\n")
+        };
+        // Two blocks per shard, and every port distinct across the document.
+        // Distinct because an operator writing 62 blocks by hand is exactly who
+        // collides two, and a test that shared them would be asserting against
+        // a document nobody would deploy.
+        let base = 41_000 + u16::from(index) * 10;
+        blocks.push_str(&format!(
+            "[[feed]]\n\
+             spec = \"top-of-book\"\n\
+             {shard}\
+             channel_id = {tob}\n\
+             source_id = {SOURCE_ID}\n\
+             multicast_group = \"{GROUP}\"\n\
+             mktdata_port = {mktdata}\n\
+             refdata_port = {refdata}\n\
+             heartbeat_interval = \"1s\"\n\
+             definition_cycle = \"30s\"\n\
+             manifest_cadence = \"1s\"\n\
+             idle_guard = \"60s\"\n\
+             \n\
+             [[feed]]\n\
+             spec = \"market-by-price\"\n\
+             {shard}\
+             channel_id = {mbp}\n\
+             source_id = {SOURCE_ID}\n\
+             multicast_group = \"{GROUP}\"\n\
+             mktdata_port = {depth_mktdata}\n\
+             refdata_port = {depth_refdata}\n\
+             snapshot_port = {snapshot}\n\
+             heartbeat_interval = \"1s\"\n\
+             definition_cycle = \"30s\"\n\
+             manifest_cadence = \"1s\"\n\
+             idle_guard = \"60s\"\n\
+             \n",
+            tob = index * 2,
+            mbp = index * 2 + 1,
+            mktdata = base,
+            refdata = base + 1,
+            depth_mktdata = base + 2,
+            depth_refdata = base + 3,
+            snapshot = base + 4,
+        ));
+    }
+
+    let config = Document::parse(&Doc::valid().feed(blocks).render())
+        .expect("parses")
+        .resolve()
+        .expect("31 shards of both specifications is the deployment this is for");
+
+    assert_eq!(config.feeds.len(), 62, "62 channel instances");
+    assert_eq!(config.shards().len(), usize::from(SHARDS), "31 shards");
+    assert_eq!(
+        config.feed_specs().len(),
+        2,
+        "and two specifications, however many shards carry them"
+    );
+
+    // 62 distinct `Channel ID`s, counted rather than assumed. A document this
+    // long is one an operator writes with a generator, and the duplicate a
+    // generator produces is the one nothing on the wire can tell apart.
+    let mut ids: Vec<u8> = config.feeds.iter().map(|feed| feed.channel_id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), 62, "62 distinct channel ids");
+
+    // Every shard carries a block for every specification. That is the property
+    // making `list_on` total, asserted here across the whole set rather than on
+    // the pair a refusal test uses.
+    for shard in config.shards() {
+        let carried = config
+            .feeds
+            .iter()
+            .filter(|feed| feed.shard == shard)
+            .count();
+        assert_eq!(carried, 2, "shard `{shard}` carries {carried} blocks");
+    }
+}
+
+/// A shard with a block for one specification and not another is refused.
+///
+/// **This is the check that makes `list_on` total.** An instrument admitted to a
+/// shard with no block for a specification another shard has would have messages
+/// that reach no wire and are counted only as unroutable — the venue doing
+/// exactly what the interface asked, and a feed silently missing for part of the
+/// instrument set.
+#[test]
+fn a_shard_missing_a_specification_another_shard_has_is_refused_naming_both() {
+    let mut doc = Doc::valid();
+    // Shard beta carries market-by-price and nothing else; the default shard
+    // carries top-of-book. Neither covers what the other does.
+    let second = Doc::depth_feed_block().replace(
+        &format!("channel_id = {DEPTH_CHANNEL_ID}"),
+        "channel_id = 9\nshard = \"beta\"",
+    );
+    doc.feed = format!("{}\n{second}", doc.feed);
+
+    let error = Document::parse(&doc.render())
+        .expect("parses")
+        .resolve()
+        .unwrap_err();
+    let message = error.to_string();
+    assert!(
+        matches!(error, StartupError::ShardSpecsDisagree { .. }),
+        "a shard with no block for a specification another has was accepted: {message}"
+    );
+    assert!(
+        message.contains("beta") || message.contains("default"),
+        "{message}"
+    );
+    assert!(
+        message.contains("top-of-book") || message.contains("market-by-price"),
+        "{message}"
     );
 }
 
@@ -941,7 +1121,7 @@ fn a_snapshot_cycle_on_one_of_two_feeds_is_not_a_disagreement() {
 }
 
 #[test]
-fn a_tee_enabled_with_no_path_is_refused_at_load() {
+fn a_fan_out_enabled_with_no_path_is_refused_at_load() {
     // The same shape as `[adapter.replay]`: a section switched on and left
     // incomplete is an operator who believes copies are being archived. Refused
     // before a socket is opened, because nothing about it needs one.
@@ -958,12 +1138,12 @@ fn a_tee_enabled_with_no_path_is_refused_at_load() {
 }
 
 #[test]
-fn a_tee_with_a_path_resolves() {
+fn a_fan_out_with_a_path_resolves() {
     let config = Document::parse(
         &Doc::valid()
             .adapter(
                 "[adapter]\nkind = \"a-venue\"\n\n[adapter.tee]\nenabled = true\n\
-                 path = \"/run/a-publisher/tee\"\n",
+                 path = \"/run/a-publisher/fan-out\"\n",
             )
             .render(),
     )
@@ -976,46 +1156,55 @@ fn a_tee_with_a_path_resolves() {
     // appended per socket. See the test below.
     assert_eq!(
         config.adapter.tee.path.as_deref(),
-        Some(std::path::Path::new("/run/a-publisher/tee"))
+        Some(std::path::Path::new("/run/a-publisher/fan-out"))
     );
 }
 
 #[test]
-fn a_tee_socket_is_named_by_the_feed_as_well_as_the_port_role() {
+fn a_fan_out_socket_is_named_by_the_feed_as_well_as_the_port_role() {
     // **The feed is in the name because a publisher emits more than one.** A
     // Unix datagram carries neither a destination port nor a group, and the diff
-    // this stream exists for is keyed on both - so two feeds' mktdata copies
+    // this fan-out exists for is keyed on both - so two feeds' mktdata copies
     // arriving on one socket are datagrams a recorder cannot attribute without
     // decoding them, which is the one thing a record path does not do. Keyed on
     // the port role alone, that is exactly what a two-feed publisher produced,
     // and the per-role split was for this very problem.
-    let tee = TeeConfig {
+    let fan_out = TeeConfig {
         enabled: true,
-        path: Some(std::path::PathBuf::from("/run/a-publisher/tee")),
+        path: Some(std::path::PathBuf::from("/run/a-publisher/fan-out")),
     };
 
     let named = |spec: FeedSpec, role: PortRole| {
-        tee.destination(spec, role)
+        fan_out
+            .destination(spec, &ShardName::default_shard(), role)
             .expect("the path is stated")
             .display()
             .to_string()
     };
 
+    // The five sockets a publisher emitting both feeds of the default shard
+    // opens, in full. Stated as literals rather than composed, because the
+    // whole point of the name is that a recorder's configuration spells it the
+    // same way by hand.
     assert_eq!(
         named(FeedSpec::TopOfBook, PortRole::Mktdata),
-        "/run/a-publisher/tee.top-of-book.mktdata"
+        "/run/a-publisher/fan-out.top-of-book.mktdata"
     );
     assert_eq!(
         named(FeedSpec::TopOfBook, PortRole::Refdata),
-        "/run/a-publisher/tee.top-of-book.refdata"
+        "/run/a-publisher/fan-out.top-of-book.refdata"
     );
     assert_eq!(
         named(FeedSpec::MarketByPrice, PortRole::Mktdata),
-        "/run/a-publisher/tee.market-by-price.mktdata"
+        "/run/a-publisher/fan-out.market-by-price.mktdata"
+    );
+    assert_eq!(
+        named(FeedSpec::MarketByPrice, PortRole::Refdata),
+        "/run/a-publisher/fan-out.market-by-price.refdata"
     );
     assert_eq!(
         named(FeedSpec::MarketByPrice, PortRole::Snapshot),
-        "/run/a-publisher/tee.market-by-price.snapshot"
+        "/run/a-publisher/fan-out.market-by-price.snapshot"
     );
 
     // The property, stated as one: every socket a publisher emitting both feeds
@@ -1039,18 +1228,281 @@ fn a_tee_socket_is_named_by_the_feed_as_well_as_the_port_role() {
     );
 }
 
+/// And by the shard, because two channel instances of one specification are
+/// ordinary now.
+///
+/// The same argument one noun further along: a Unix datagram carries neither a
+/// destination port nor a group, so two shards' copies of one feed's one role
+/// arriving on one socket are datagrams a recorder cannot attribute without
+/// decoding them. Before this, four channel instances fanned out to five
+/// sockets.
 #[test]
-fn a_tee_that_is_on_with_no_path_names_no_socket() {
+fn a_fan_out_socket_is_named_by_the_shard_as_well_as_the_feed_and_the_role() {
+    let fan_out = TeeConfig {
+        enabled: true,
+        path: Some(std::path::PathBuf::from("/run/a-publisher/fan-out")),
+    };
+    let named = |spec: FeedSpec, shard: &ShardName, role: PortRole| {
+        fan_out
+            .destination(spec, shard, role)
+            .expect("the path is stated")
+            .display()
+            .to_string()
+    };
+    let alpha = ShardName::new("alpha").expect("one path component");
+    let beta = ShardName::new("beta").expect("one path component");
+
+    assert_eq!(
+        named(FeedSpec::TopOfBook, &alpha, PortRole::Mktdata),
+        "/run/a-publisher/fan-out.top-of-book.alpha.mktdata"
+    );
+    assert_eq!(
+        named(FeedSpec::MarketByPrice, &beta, PortRole::Snapshot),
+        "/run/a-publisher/fan-out.market-by-price.beta.snapshot"
+    );
+
+    // **The default shard is spelled by its absence**, as its era file is. A
+    // shard segment for it renames the socket every existing deployment's
+    // recorder is bound to, and the fan-out then writes to a path with nobody
+    // on it - which is the upgrade meant to be safe taking the fan-out down.
+    assert_eq!(
+        named(
+            FeedSpec::TopOfBook,
+            &ShardName::default_shard(),
+            PortRole::Mktdata
+        ),
+        "/run/a-publisher/fan-out.top-of-book.mktdata"
+    );
+
+    // Every socket two shards of both feeds open, distinct: two shards, two
+    // specifications, three port roles between them. A name missing the shard
+    // collapses these in half, which is the pair of channel instances writing
+    // to one socket.
+    let shards = [alpha, beta, ShardName::default_shard()];
+    let mut sockets: Vec<String> = shards
+        .iter()
+        .flat_map(|shard| {
+            FeedSpec::ALL.into_iter().flat_map(move |spec| {
+                spec.port_roles()
+                    .iter()
+                    .map(move |role| named(spec, shard, *role))
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect();
+    let opened = sockets.len();
+    assert_eq!(
+        opened, 15,
+        "three shards of both feeds open five sockets each"
+    );
+    sockets.sort();
+    sockets.dedup();
+    assert_eq!(
+        sockets.len(),
+        opened,
+        "two channel instances share a socket: {sockets:?}"
+    );
+
+    // The suffix lands on the last component rather than becoming a child
+    // directory, which is what the `OsString` construction exists for and what
+    // a `join` or a `set_extension` would each get wrong in its own way.
+    assert_eq!(
+        named(FeedSpec::TopOfBook, &shards[0], PortRole::Refdata),
+        "/run/a-publisher/fan-out.top-of-book.alpha.refdata"
+    );
+}
+
+#[test]
+fn a_fan_out_that_is_on_with_no_path_names_no_socket() {
     // The same refusal the load already produced, checked again where the
     // socket is named: a prefix is not something to default, and a fan-out
     // quietly writing to a relative path is an operator believing copies are
     // archived.
-    let tee = TeeConfig {
+    let fan_out = TeeConfig {
         enabled: true,
         path: None,
     };
-    let error = tee
-        .destination(FeedSpec::TopOfBook, PortRole::Mktdata)
+    let error = fan_out
+        .destination(
+            FeedSpec::TopOfBook,
+            &ShardName::default_shard(),
+            PortRole::Mktdata,
+        )
         .expect_err("no path was stated");
     assert!(matches!(error, StartupError::TeeWithoutPath), "{error}");
+}
+
+/// A shard name that cannot be a path component is refused at load.
+///
+/// The name reaches a path in two places — the block's era file and its
+/// reference-copy socket — so it is checked where the value enters the process
+/// rather than at each use, where the third use is the one that forgets. A
+/// slash writes somewhere nobody configured; a name differing from another only
+/// past the length bound shares its era file.
+#[test]
+fn a_shard_name_that_cannot_be_a_path_component_is_refused() {
+    for bad in [
+        "sports_events", // an underscore
+        "sports/events", // a path separator
+        "Sports",        // an upper-case letter
+        &"s".repeat(65), // one byte past the bound
+        "",              // and nothing at all
+    ] {
+        let mut doc = Doc::valid();
+        doc.feed = doc.feed.replace(
+            &format!("channel_id = {CHANNEL_ID}"),
+            &format!("channel_id = {CHANNEL_ID}\nshard = \"{bad}\""),
+        );
+        let error = Document::parse(&doc.render())
+            .expect("parses")
+            .resolve()
+            .unwrap_err();
+        assert!(
+            matches!(error, StartupError::UnsafeShardName { .. }),
+            "`{bad}` was accepted: {error}"
+        );
+        // The message has to say what would have been accepted, or an operator
+        // is left guessing which of four rules they broke.
+        let message = error.to_string();
+        assert!(
+            message.contains("lower-case letters, digits and hyphens"),
+            "the refusal does not say what a shard name may be: {message}"
+        );
+    }
+}
+
+/// A name at the bound is accepted, so the refusal is a bound and not a mood.
+#[test]
+fn a_shard_name_of_exactly_the_bound_is_accepted() {
+    let mut doc = Doc::valid();
+    let name = "s".repeat(64);
+    doc.feed = doc.feed.replace(
+        &format!("channel_id = {CHANNEL_ID}"),
+        &format!("channel_id = {CHANNEL_ID}\nshard = \"{name}\""),
+    );
+    let config = Document::parse(&doc.render())
+        .expect("parses")
+        .resolve()
+        .expect("sixty-four bytes is the bound, not one past it");
+    assert_eq!(config.feeds[0].shard.as_str(), name);
+}
+
+/// Spelling the default shard's own token is refused.
+///
+/// Two spellings of one shard are two era files and two published sets, for one
+/// channel. Leaving the key out is how a block says it carries the default.
+#[test]
+fn a_block_may_not_spell_the_default_shard() {
+    let mut doc = Doc::valid();
+    doc.feed = doc.feed.replace(
+        &format!("channel_id = {CHANNEL_ID}"),
+        &format!(
+            "channel_id = {CHANNEL_ID}\nshard = \"{}\"",
+            dz_adapter_core::DEFAULT_SHARD
+        ),
+    );
+    let error = Document::parse(&doc.render())
+        .expect("parses")
+        .resolve()
+        .unwrap_err();
+    assert!(
+        matches!(error, StartupError::ReservedShardName { .. }),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("Leave the key out"),
+        "the refusal has to say what to do instead: {error}"
+    );
+}
+
+/// A document naming no shard resolves every block to the default.
+///
+/// This is what a publisher with one channel per specification has always been,
+/// and it has to keep being it: the change is additive or it is a migration.
+#[test]
+fn a_document_with_no_shard_key_resolves_to_the_default_shard() {
+    let config = Document::parse(&Doc::valid().render())
+        .expect("parses")
+        .resolve()
+        .expect("the fixture is a document a publisher can start on");
+    for feed in &config.feeds {
+        assert_eq!(feed.shard.as_str(), dz_adapter_core::DEFAULT_SHARD);
+    }
+    assert_eq!(
+        config.shards().len(),
+        1,
+        "one shard, however many blocks carry it"
+    );
+}
+
+/// Two enabled blocks claiming one `Channel ID` are refused, naming both.
+///
+/// **The mutant to check on this one is the check itself.** `channel_ids()`
+/// sorts and dedups, so without it the document loads, one set of series is
+/// pre-created, two channel instances write to it, and nothing anywhere says
+/// so — not an error, not a counter, not a log line.
+#[test]
+fn two_blocks_claiming_one_channel_id_are_refused_naming_both() {
+    let mut doc = Doc::valid();
+    // The harness's own depth block, so this test is about the `Channel ID`
+    // collision rather than about a market-by-price block's snapshot port —
+    // which is refused first, and by a different check.
+    let second = Doc::depth_feed_block().replace(
+        &format!("channel_id = {DEPTH_CHANNEL_ID}"),
+        &format!("channel_id = {CHANNEL_ID}"),
+    );
+    doc.feed = format!("{}\n{second}", doc.feed);
+
+    let error = Document::parse(&doc.render())
+        .expect("parses")
+        .resolve()
+        .unwrap_err();
+    let message = error.to_string();
+    assert!(
+        matches!(error, StartupError::DuplicateChannelId { .. }),
+        "two blocks shared a Channel ID and it was accepted: {message}"
+    );
+    assert!(message.contains("top-of-book"), "{message}");
+    assert!(message.contains("market-by-price"), "{message}");
+}
+
+/// And the shard, because the specification alone stopped identifying a block.
+///
+/// **This is the likely shape of the mistake now.** Two blocks of one
+/// specification on different shards are ordinary, so a `Channel ID` collision
+/// between them is what an operator will actually produce — and a message
+/// naming only the specification prints the same word twice and sends them
+/// looking for a duplicate that reads as one block.
+#[test]
+fn two_shards_of_one_specification_sharing_a_channel_id_are_refused_naming_both_shards() {
+    let mut doc = Doc::valid();
+    let second = doc
+        .feed
+        .replace(
+            &format!("channel_id = {CHANNEL_ID}"),
+            &format!("channel_id = {CHANNEL_ID}\nshard = \"beta\""),
+        )
+        .replace(
+            &format!("mktdata_port = {MKTDATA_PORT}"),
+            &format!("mktdata_port = {}", MKTDATA_PORT + 20),
+        )
+        .replace(
+            &format!("refdata_port = {REFDATA_PORT}"),
+            &format!("refdata_port = {}", REFDATA_PORT + 20),
+        );
+    doc.feed = format!("{}\n{second}", doc.feed);
+
+    let error = Document::parse(&doc.render())
+        .expect("parses")
+        .resolve()
+        .unwrap_err();
+    let message = error.to_string();
+    assert!(
+        matches!(error, StartupError::DuplicateChannelId { .. }),
+        "{message}"
+    );
+    // Both shards named. Without them the message says `top-of-book` twice and
+    // identifies neither block.
+    assert!(message.contains("`default`"), "{message}");
+    assert!(message.contains("`beta`"), "{message}");
 }
