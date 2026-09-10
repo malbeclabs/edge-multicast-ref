@@ -673,11 +673,17 @@ fn now_unix_seconds() -> i64 {
         .unwrap_or(0)
 }
 
+/// The wall clock, as the rows and the ledger record it.
+///
+/// Saturating rather than truncating. `as u64` on the `u128` this returns wraps
+/// silently, and a wrapped stamp is a row dated inside the sequence space of
+/// every other row — an ordering error rather than an out-of-range one, which
+/// is the harder of the two to see. Zero for a clock before the epoch, for the
+/// same reason: it reads as unset, not as a plausible time.
 pub fn now_unix_nanos() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0)
+        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
 }
 
 #[cfg(test)]

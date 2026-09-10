@@ -51,11 +51,11 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use dz_recorder_archive::JoinedRole;
 use dz_recorder_core::{CaptureDropScope, RecorderIdentity};
-use dz_recorder_load::Ledger;
+use dz_recorder_load::{now_unix_nanos, Ledger};
 use dz_recorder_rows::{RowSink, SegmentTrailer};
 
 use crate::derivation::WindowDeriver;
@@ -129,7 +129,10 @@ pub struct DerivationConfig {
 /// shutdown in the order that keeps what is in hand.
 #[must_use = "a pipeline that is dropped without being stopped abandons its open window"]
 pub struct Pipeline {
-    stop: Arc<AtomicBool>,
+    /// One flag per stage, because the two are stopped at different moments and
+    /// a shared flag cannot express that. See [`Pipeline::stop`].
+    derivation_stop: Arc<AtomicBool>,
+    posting_stop: Arc<AtomicBool>,
     counters: Arc<InlineCounters>,
     spool: Arc<Mutex<Spool>>,
     derivation: Option<JoinHandle<()>>,
@@ -147,13 +150,14 @@ pub fn start<S: RowSink + Send + 'static>(
     sink: S,
     config: DerivationConfig,
 ) -> Pipeline {
-    let stop = Arc::new(AtomicBool::new(false));
+    let derivation_stop = Arc::new(AtomicBool::new(false));
+    let posting_stop = Arc::new(AtomicBool::new(false));
     let counters = Arc::new(InlineCounters::default());
     let spool = Arc::new(Mutex::new(spool));
 
     let derivation = spawn_stage(
         "dz-recorder-derive",
-        Arc::clone(&stop),
+        Arc::clone(&derivation_stop),
         Arc::clone(&counters),
         Deriving {
             receiver,
@@ -185,7 +189,7 @@ pub fn start<S: RowSink + Send + 'static>(
 
     let posting = spawn_stage(
         "dz-recorder-post",
-        Arc::clone(&stop),
+        Arc::clone(&posting_stop),
         Arc::clone(&counters),
         Posting {
             spool: Arc::clone(&spool),
@@ -197,7 +201,8 @@ pub fn start<S: RowSink + Send + 'static>(
     );
 
     Pipeline {
-        stop,
+        derivation_stop,
+        posting_stop,
         counters,
         spool,
         derivation: Some(derivation),
@@ -224,12 +229,24 @@ impl Pipeline {
     /// So: close the ring, let the derivation run out, then stop the posting
     /// stage — which makes one last pass, so a window the destination was ready
     /// to take does not sit on disk until the next start.
+    ///
+    /// **Each stage's flag is set before the join that waits on it**, which is
+    /// why there are two. `derivation_stage` never reads its flag — the ring
+    /// closing is its ending — so setting it here costs nothing on the ordinary
+    /// path. What it buys is the path where the derivation is inside
+    /// [`spawn_stage`]'s restart loop: that loop gives up only while the flag
+    /// is set, so a derivation panicking on every pass would be joined for ever
+    /// and the shutdown would never reach the posting stage at all. A single
+    /// flag could not do this, because setting it early would tell the posting
+    /// stage to make its last pass while the derivation was still spooling into
+    /// it — which is the ordering this method exists to get right.
     pub fn stop(mut self, capture: RingSender) -> Arc<InlineCounters> {
+        self.derivation_stop.store(true, Ordering::SeqCst);
         drop(capture);
         if let Some(handle) = self.derivation.take() {
             let _ = handle.join();
         }
-        self.stop.store(true, Ordering::SeqCst);
+        self.posting_stop.store(true, Ordering::SeqCst);
         if let Some(handle) = self.posting.take() {
             let _ = handle.join();
         }
@@ -243,6 +260,19 @@ impl Pipeline {
     }
 }
 
+/// How long a stage that has just panicked waits before it is begun again, and
+/// the ceiling that wait climbs to.
+///
+/// The wait doubles per consecutive panic, and a pass that ran for longer than
+/// the ceiling resets it — so a stage that panics once an hour is never slowed,
+/// and one that panics on the instruction it starts on is. The floor is short
+/// enough that a single panic costs the derivation nothing an operator could
+/// measure, and the ceiling low enough that a stage which recovers comes back
+/// inside one posting interval.
+const RESTART_DELAY: Duration = Duration::from_millis(50);
+/// The ceiling [`RESTART_DELAY`] climbs to.
+const RESTART_DELAY_MAX: Duration = Duration::from_secs(5);
+
 /// Runs a stage, restarting it if it panics.
 ///
 /// A panic in a stage is a bug, and the answer to a bug is not to stop
@@ -250,6 +280,11 @@ impl Pipeline {
 /// stopped means a ring nobody drains and a feed nobody is deriving, reported by
 /// a process that looks healthy. So it is counted and begun again. The counter
 /// is what makes it visible; a restart nobody can see is worse than a crash.
+///
+/// **Begun again is not begun again immediately.** A stage that panics on every
+/// pass would otherwise restart at the speed of the panic: a busy loop taking
+/// the CPU the capture needs, and a line on stderr per pass burying the first
+/// one — the only one that names the bug. See [`RESTART_DELAY`].
 fn spawn_stage<T, F>(
     name: &str,
     stop: Arc<AtomicBool>,
@@ -274,8 +309,10 @@ where
             // which is what the spool is for.
             const AFTER_STOP: u32 = 2;
             let mut remaining_after_stop = AFTER_STOP;
+            let mut delay = RESTART_DELAY;
 
             loop {
+                let began = Instant::now();
                 // The state outlives the attempt, so a restarted stage resumes
                 // where it was rather than from nothing: a derivation that
                 // began again with no preceding trailer would write an
@@ -298,7 +335,20 @@ where
                         break;
                     }
                     remaining_after_stop -= 1;
+                    // Not paced. A shutdown is bounded by the count above, and
+                    // sleeping between those attempts would spend a supervisor's
+                    // stop timeout on a stage that has already been given up on.
+                    continue;
                 }
+
+                // A pass that ran longer than the ceiling did work before it
+                // failed, so it is not the loop this paces: the next panic
+                // starts from the floor again.
+                if began.elapsed() >= RESTART_DELAY_MAX {
+                    delay = RESTART_DELAY;
+                }
+                std::thread::sleep(delay);
+                delay = (delay * 2).min(RESTART_DELAY_MAX);
             }
         })
         .expect("a thread can be spawned")
@@ -613,12 +663,127 @@ fn pass<S: RowSink>(
     }
 }
 
-/// The wall clock, as the rows and the ledger record it.
-fn now_unix_nanos() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
-}
-
 /// The capture half, for a caller wiring a record loop.
 pub type Capture = RingSender;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Waits for a stage to end, rather than joining and hanging if it does not.
+    ///
+    /// A `join` on a stage that never ends is a test that never fails — it times
+    /// the suite out, in a job whose log says nothing about which test it was.
+    fn ended_within(handle: &JoinHandle<()>, limit: Duration) -> bool {
+        let deadline = Instant::now() + limit;
+        while Instant::now() < deadline {
+            if handle.is_finished() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        false
+    }
+
+    /// A stage that panics as soon as it starts is paced, not spun.
+    ///
+    /// Three panics, so three waits: the floor, then twice it, then twice that.
+    /// The assertion is on the elapsed time rather than on a restart count,
+    /// because a count is the same under a loop that sleeps and one that does
+    /// not — which is the whole of what this is about. Remove the sleep and this
+    /// finishes in microseconds.
+    #[test]
+    fn a_stage_that_panics_immediately_is_paced_before_it_is_begun_again() {
+        let counters = Arc::new(InlineCounters::default());
+        let stop = Arc::new(AtomicBool::new(false));
+        let began = Instant::now();
+
+        let handle = spawn_stage(
+            "paced",
+            Arc::clone(&stop),
+            Arc::clone(&counters),
+            0_u32,
+            |attempts, _stop, _counters| {
+                *attempts += 1;
+                assert!(*attempts > 3, "the first three passes panic");
+            },
+        );
+        handle
+            .join()
+            .expect("the stage thread does not panic itself");
+
+        assert_eq!(
+            counters.stage_restarts(),
+            3,
+            "counted once per panic, whatever the pacing"
+        );
+        assert!(
+            began.elapsed() >= RESTART_DELAY * 7,
+            "three panics owe the floor, twice it and twice that — {:?} elapsed",
+            began.elapsed()
+        );
+    }
+
+    /// A stage that panics on every pass ends once its flag is set, and the
+    /// count is what bounds it.
+    ///
+    /// This is the loop [`Pipeline::stop`] sets the derivation's flag *before*
+    /// joining. With the flag never set, nothing here counts down and the join
+    /// waits for ever — a shutdown that never reaches the posting stage, on a
+    /// process that is otherwise fine.
+    #[test]
+    fn a_stage_that_panics_on_every_pass_ends_once_its_flag_is_set() {
+        let counters = Arc::new(InlineCounters::default());
+        let stop = Arc::new(AtomicBool::new(true));
+
+        let handle = spawn_stage(
+            "always",
+            Arc::clone(&stop),
+            Arc::clone(&counters),
+            (),
+            |(), _stop, _counters| panic!("this stage has a bug on every pass"),
+        );
+
+        assert!(
+            ended_within(&handle, Duration::from_secs(5)),
+            "a stage panicking under a set flag is given up on, not waited for"
+        );
+        handle
+            .join()
+            .expect("the stage thread does not panic itself");
+        assert_eq!(
+            counters.stage_restarts(),
+            3,
+            "the attempt that found the flag set, and the two it is allowed after it"
+        );
+    }
+
+    /// The shutdown path is not paced.
+    ///
+    /// Bounded by the count above instead, because sleeping between attempts a
+    /// stage has already been given up on spends a supervisor's stop timeout on
+    /// a stage that is not coming back.
+    #[test]
+    fn giving_up_on_a_stopping_stage_costs_no_delay() {
+        let counters = Arc::new(InlineCounters::default());
+        let stop = Arc::new(AtomicBool::new(true));
+        let began = Instant::now();
+
+        let handle = spawn_stage(
+            "stopping",
+            Arc::clone(&stop),
+            Arc::clone(&counters),
+            (),
+            |(), _stop, _counters| panic!("this stage has a bug on every pass"),
+        );
+        handle
+            .join()
+            .expect("the stage thread does not panic itself");
+
+        assert!(
+            began.elapsed() < RESTART_DELAY,
+            "three passes under a set flag waited on nothing — {:?} elapsed",
+            began.elapsed()
+        );
+    }
+}
