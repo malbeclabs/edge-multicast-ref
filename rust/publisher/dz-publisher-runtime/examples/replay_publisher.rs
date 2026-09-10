@@ -24,8 +24,10 @@
 //!
 //! A venue's own adapter and its own transport, which is what
 //! `AdapterRegistry::with` is for. Registering one here would mean writing a
-//! venue, and the shape of that call is in [`dz_publisher_runtime::registry`]'s
-//! own documentation where it can be read without a fixture directory.
+//! venue, and the shape of that call is written where the seam itself lives, in
+//! [`dz_venue_composition::registry`]'s own module documentation — reached
+//! through [`dz_publisher_runtime::registry`] from a publisher — where it can
+//! be read without a fixture directory.
 
 use std::process::ExitCode;
 

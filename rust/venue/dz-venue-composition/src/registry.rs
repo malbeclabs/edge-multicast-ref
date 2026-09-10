@@ -69,6 +69,36 @@
 //! the parameter buys is the third case: a venue can write
 //! `fn register<E>(AdapterRegistry<E>) -> AdapterRegistry<E>` once and hand the
 //! same adapters to two runtimes.
+//!
+//! # What the default does, and the one thing it is not
+//!
+//! It spares a caller with no error of its own from writing the parameter — in
+//! **type position**, which is the only position Rust applies a parameter
+//! default in:
+//!
+//! ```
+//! # use dz_venue_composition::AdapterRegistry;
+//! let registry: AdapterRegistry = AdapterRegistry::new();
+//! assert!(registry.is_empty());
+//! ```
+//!
+//! It does **not** make an unannotated `AdapterRegistry::new().open(&cx)`
+//! resolve. A value's type is never inferred from a parameter's default, so
+//! that spelling is `error[E0282]: type annotations needed`:
+//!
+//! ```compile_fail
+//! # use dz_venue_composition::{AdapterContext, AdapterRegistry};
+//! # fn cx() -> AdapterContext<'static> { unimplemented!() }
+//! let venue = AdapterRegistry::new().open(&cx());
+//! ```
+//!
+//! What makes that line compile in `dz-publisher-runtime`'s suite is that
+//! crate's *alias*, which names the error; the default is doing nothing there.
+//! Worth stating because it is the tempting reading of why the parameter has a
+//! default at all, and a reader who believed it would remove the alias.
+//!
+//! The default's own user, and both message strings the fallback below formats,
+//! are in `tests/reported_error.rs`.
 
 use std::collections::BTreeSet;
 use std::marker::PhantomData;
@@ -114,9 +144,21 @@ pub trait AdapterResolution {
 
 /// The fallback for a caller with no startup error of its own.
 ///
-/// It says the same two things in the same words. A runtime that refuses
-/// startups through an enumeration should implement the trait on that instead,
-/// so its refusals stay one type.
+/// It reports the same two failures, carrying the same values, in words of this
+/// crate's own — and not in any runtime's. `dz-publisher-runtime`'s
+/// `StartupError` spells an unregistered `kind` as `… this binary registered;
+/// registered in this binary: <list>` where this spells it
+/// `… this binary registered (<list>)`, and a constructor's refusal as *could
+/// not be constructed* where this says *could not be built*. What the trait
+/// fixes is the two failures and what each one names; the sentence around them
+/// belongs to whoever reports it, which is the reason a runtime that refuses
+/// startups through an enumeration should implement the trait on that instead
+/// and keep its refusals in one type and one voice.
+///
+/// Both strings are read back **whole** in `tests/reported_error.rs`, because
+/// [`AdapterResolution::unknown_kind`] takes the token and the registry as two
+/// positional `String`s: nothing short of the finished message can tell a
+/// transposition from the truth.
 impl AdapterResolution for AdapterInitError {
     fn unknown_kind(token: String, registered: String) -> Self {
         format!(

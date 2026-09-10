@@ -156,6 +156,7 @@ pub mod guard;
 pub mod observer;
 pub mod pipeline;
 pub mod publisher;
+pub mod registry;
 pub mod replay;
 pub mod rotation;
 pub mod run;
@@ -169,6 +170,13 @@ pub mod run;
 /// about that is visible from here: the three types are re-exported, the
 /// registry as an alias at this crate's own [`StartupError`], and a venue's
 /// `main` is the `main` it was.
+///
+/// **Both paths, not only the root ones.** A `main` that imported the three
+/// through [`registry`] rather than through the crate root is a `main` too, so
+/// that module is still here — as the three names and not as a re-export of
+/// the module, which would have resolved `registry::AdapterRegistry` to the
+/// defaulted type instead of to this crate's alias. See it for why the
+/// distinction is not cosmetic.
 pub use dz_venue_composition::{builtin, AdapterContext, AdapterSection, Venue};
 
 /// The adapters this binary contains, reporting a refusal as a [`StartupError`].
