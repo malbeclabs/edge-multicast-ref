@@ -251,7 +251,9 @@ dependencies = [
  "serde",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-rustls",
  "toml",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]

@@ -55,6 +55,50 @@
 //! not serve**, and [`SessionConfig`] says so at load rather than logging on
 //! and misbehaving. See [`SessionConfigError::SequenceContinuity`].
 //!
+//! # What the transport owns, and what it must not
+//!
+//! **Owns:** the socket and TLS; the framing, in both directions, including
+//! the refusal of a message whose declared length or checksum does not hold;
+//! the timestamp format; the session lifecycle — logon, the heartbeat cadence,
+//! the test request that answers a suspicion of silence, the logout and the
+//! orderly close; the outbound sequence; and the classification of every
+//! failure into an [`IngressError`](dz_ingress_core::IngressError), which is
+//! the load-bearing part because a disconnect reason is a metric label with
+//! four values and this is the only layer that can see a session-level reject.
+//!
+//! **Must not:** decide when to connect, how long to wait before retrying,
+//! what a payload means, or whether silence means anything. Those are
+//! [`Driver`](dz_ingress_core::Driver)'s, so that they are one implementation
+//! for every transport rather than one per publisher.
+//!
+//! **Does not build an order-entry path.** The protocol has one and this
+//! repository has no reason to reach it: what leaves this transport is what the
+//! adapter wrote plus the session layer's own messages, and the session layer
+//! composes nothing but session messages.
+//!
+//! # A session message is `Liveness` and never a payload
+//!
+//! The driver's idle guard counts time since the last *payload*, because a
+//! venue that has quietly dropped a subscription heartbeats perfectly. So a
+//! session that heartbeats forever and delivers nothing must still trip the
+//! guard, and every session message this transport receives is
+//! [`Received::Liveness`](dz_ingress_core::Received) or an error — never a
+//! payload.
+//!
+//! # The test surface, and why it needs no socket
+//!
+//! A session layer is a state machine over a byte stream, so the byte stream is
+//! behind [`ByteStream`], a trait this crate owns — the move `RouteLookup`
+//! makes for the routing table and [`Clock`](dz_ingress_core::Clock) makes for
+//! time. Every case that matters is then a test that runs unprivileged with no
+//! network: a logon answered, a logon rejected, a heartbeat due, a test request
+//! answered, a message whose checksum does not hold, a message split across two
+//! reads, two messages in one read, a logout from the venue, and a session that
+//! goes silent.
+//!
+//! TLS and the real socket are exercised against a loopback endpoint, which is
+//! the half no fake proves.
+//!
 //! # Vocabulary
 //!
 //! A unit on this transport is a *message*. The wire's unit is a datagram and
@@ -66,6 +110,7 @@
 
 pub mod config;
 pub mod framing;
+pub mod input;
 pub mod session;
 pub mod timestamp;
 
@@ -74,5 +119,6 @@ pub use framing::{
     checksum, frame, rendered, Body, BodyError, Decoder, Field, Fields, FramingError, Message,
     BEGIN_STRING,
 };
+pub use input::{Connector, FixInput, SocketConnector};
 pub use session::{ByteStream, Incoming, Session, SessionError, SessionState, StreamError};
 pub use timestamp::sending_time;

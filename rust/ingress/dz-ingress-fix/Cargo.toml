@@ -11,7 +11,12 @@ description = "A session transport for dz-ingress-core: tag-value framing, the s
 # The boundary's own `ConnectionId`, which is the `connection` metric label and
 # is handed to a session rather than invented by one.
 dz-adapter-core = { path = "../../adapter/dz-adapter-core" }
-dz-ingress-core = { path = "../dz-ingress-core" }
+# `fix` is the marker that makes `[ingress] kind = "fix"` resolve: it is on
+# exactly when this crate is in the link, which is what lets the core answer
+# "is that transport built into this binary?" without depending on the
+# transports. `tokio` brings the production `Clock`, which this crate can
+# afford because it already has the runtime.
+dz-ingress-core = { path = "../dz-ingress-core", features = ["fix", "tokio"] }
 
 # The framing's two refusals and the body's six are errors an operator reads,
 # and `thiserror` is what every other crate in this family spells them with.
@@ -23,12 +28,42 @@ thiserror = { workspace = true }
 # needs a parser.
 serde = { workspace = true }
 
+# The runtime. `net` for the socket, `time` for the read budget and the connect
+# budget, `io-util` for the read and write traits the byte stream is written
+# against. No `rt`: this crate spawns nothing and starts no runtime, so
+# whichever one the binary runs is the one it uses.
+tokio = { version = "1", default-features = false, features = ["net", "time", "io-util"] }
+
+# TLS over the socket. Pinned exactly, and to the version already in this
+# workspace's lockfile, so that there is one copy of rustls and one copy of the
+# trust-anchor types in the graph - two would not typecheck together.
+#
+# `default-features = false` and then only what is used, so that `aws-lc-rs`
+# cannot arrive by way of a default: it builds C and assembly through cmake at
+# build time, and a venue building this crate should not need a C toolchain to
+# reach a venue over TLS. `ring` is the provider instead. `native-tls` and
+# `openssl` are excluded by not being named at all - no feature here reaches
+# either, so there is no system TLS library in the tree and no build that
+# differs by host because a distribution shipped a different one. `fips` is
+# excluded deliberately: it pulls the validated aws-lc build, which is the C
+# toolchain again plus a much longer build, for a compliance requirement
+# nothing here has.
+tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring", "tls12", "logging"] }
+
+# The trust anchors, compiled in. `0.26`, which is the version
+# `dz-ingress-websocket` resolves, so a binary linking both transports has one
+# copy of them. A host with an empty or stale CA bundle then negotiates exactly
+# like every other host - a publisher that cannot verify a venue's certificate
+# on one machine out of a fleet is a failure that looks like the venue's.
+webpki-roots = "0.26"
 [dev-dependencies]
 # `toml`, so that the configuration tests parse the same text an operator
 # writes rather than constructing the struct they are about.
 toml = { workspace = true }
 
 # `macros` and `rt` for the session tests, which run their own current-thread
-# runtime over a scripted byte stream. Not in `[dependencies]`: a library that
-# starts a runtime takes a decision that belongs to the binary.
-tokio = { version = "1", default-features = false, features = ["macros", "rt"] }
+# runtime over a scripted byte stream, and `net`/`io-util`/`time` for the
+# loopback tests, which run a session against a listener on 127.0.0.1. Not in
+# `[dependencies]`: a library that starts a runtime takes a decision that
+# belongs to the binary.
+tokio = { version = "1", features = ["macros", "rt", "net", "time", "io-util"] }
