@@ -437,7 +437,22 @@ impl PollClient for HttpClient {
     }
 }
 
-/// What the client's own error says, in the five words this crate counts by.
+/// What the client's own error says, in the five network words this crate
+/// counts by.
+///
+/// Two functions and not one, because a `hyper_util` error cannot be
+/// constructed outside `hyper_util`: the reading is [`classify_rendered`], and
+/// a test states a string. The boundary — that a real failure renders a string
+/// the reading lands on the right value for — is what the tests driving actual
+/// requests at a closed port and an undelegated name are for. Without both
+/// halves this table can be collapsed to a catch-all with nothing failing, and
+/// a DNS failure, an expired certificate and a firewalled port then move one
+/// series between them.
+fn classify(error: &hyper_util::client::legacy::Error) -> RequestFailure {
+    classify_rendered(chain(error))
+}
+
+/// The reading itself, over the text the error and its causes rendered to.
 ///
 /// Loose where it has to be, and documented as such rather than tidied. A name
 /// that would not resolve has no stable `std::io::ErrorKind` — the candidates
@@ -445,8 +460,7 @@ impl PollClient for HttpClient {
 /// websocket transport's own connect classification. The alternative is
 /// counting every socket error as a refusal, which is the catch-all this
 /// function exists instead of.
-fn classify(error: &hyper_util::client::legacy::Error) -> RequestFailure {
-    let rendered = chain(error);
+fn classify_rendered(rendered: String) -> RequestFailure {
     let lowered = rendered.to_ascii_lowercase();
     if lowered.contains("dns")
         || lowered.contains("resolve")
@@ -629,6 +643,189 @@ mod tests {
             }),
             "{rendered}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // The classification, and the boundary a real failure crosses
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn each_of_the_five_network_failures_has_a_string_only_it_matches() {
+        // The table, stated as the values themselves: each case is the
+        // failure a string must produce, and the string is that failure's own
+        // detail - so one assertion says both that the variant is right and
+        // that the whole chain survives into it. The category alone tells an
+        // operator nothing.
+        //
+        // Written out rather than derived, for the reason the codec's
+        // vocabulary tests give: a table checked only against itself is a
+        // table that agrees with its own mistake. Every string here is one
+        // `hyper` and the platform actually render - see the tests below,
+        // which drive real requests and assert the same values.
+        let cases = [
+            RequestFailure::Unresolved(
+                "client error (Connect): dns error: failed to lookup address information: \
+                 Name or service not known"
+                    .to_string(),
+            ),
+            RequestFailure::Unresolved(
+                "client error (Connect): dns error: nodename nor servname provided".to_string(),
+            ),
+            RequestFailure::Tls(
+                "client error (Connect): invalid peer certificate: Expired".to_string(),
+            ),
+            RequestFailure::Tls("client error (Connect): tls handshake eof".to_string()),
+            RequestFailure::Refused(
+                "client error (Connect): tcp connect error: Connection refused (os error 111)"
+                    .to_string(),
+            ),
+            RequestFailure::Timeout(
+                "client error (Connect): tcp connect error: Connection timed out (os error 110)"
+                    .to_string(),
+            ),
+            RequestFailure::Transport(
+                "client error (Body): error reading a body from connection: connection reset \
+                 by peer"
+                    .to_string(),
+            ),
+            RequestFailure::Transport(
+                "client error (SendRequest): connection closed before message completed"
+                    .to_string(),
+            ),
+        ];
+
+        for expected in cases {
+            let rendered = expected.detail().to_string();
+            assert_eq!(
+                classify_rendered(rendered.clone()),
+                expected,
+                "`{rendered}` must be read as {expected:?}, keeping the whole chain"
+            );
+        }
+    }
+
+    #[test]
+    fn a_certificate_inside_a_connect_is_tls_and_not_a_refusal() {
+        // The one ordering in the table that is load-bearing, and the string
+        // has to name **both** for the test to be about the ordering at all:
+        // a chain carrying a certificate and a refusal together is read as
+        // the certificate, because an operator who reads `refused` goes and
+        // looks at a firewall rather than at an expiry. Reverse the two checks
+        // and this is the assertion that fails.
+        let failure = classify_rendered(
+            "client error (Connect): tls handshake error: connection refused by peer after \
+             invalid peer certificate: Expired"
+                .to_string(),
+        );
+        assert!(
+            matches!(failure, RequestFailure::Tls(_)),
+            "a chain naming a certificate is a certificate, whatever else it \
+             names: {failure:?}"
+        );
+
+        // And the plain refusal still is one, so the ordering cannot be
+        // satisfied by calling everything TLS.
+        let failure = classify_rendered(
+            "client error (Connect): tcp connect error: Connection refused (os error 111)"
+                .to_string(),
+        );
+        assert!(matches!(failure, RequestFailure::Refused(_)), "{failure:?}");
+    }
+
+    /// A port nothing is listening on, on this host.
+    ///
+    /// Bound and dropped rather than picked, so that the kernel is the one
+    /// saying the port is free and no other test can be using it.
+    fn a_closed_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port to bind");
+        listener.local_addr().expect("a bound address").port()
+    }
+
+    #[tokio::test]
+    async fn a_request_to_a_closed_port_is_refused_and_not_a_catch_all() {
+        // **The boundary.** Every other test of a failure in this crate builds
+        // a `RequestFailure` by hand, so this is the only path a production
+        // failure actually travels: a real `hyper` error, rendered, read by
+        // `classify`. Without it the whole table can be collapsed to one
+        // catch-all with nothing failing.
+        let port = a_closed_port();
+        let endpoint = format!("http://127.0.0.1:{port}/catalogue");
+        let failure = HttpClient::new()
+            .fetch(Request {
+                endpoint: &endpoint,
+                parameters: None,
+                validator: None,
+                budget: Duration::from_secs(5),
+            })
+            .await
+            .expect_err("nothing is listening on a port the kernel has just given back");
+
+        assert!(
+            matches!(failure, RequestFailure::Refused(_)),
+            "a closed port is a firewall or a port, which is `connect_failures_total\
+             {{reason=\"refused\"}}` and somebody's to go and look at: {failure:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_name_that_does_not_resolve_is_unresolved_and_not_a_refusal() {
+        // `.invalid` is reserved by RFC 2606 precisely so that it is never
+        // delegated, so this asks the host's own resolver and gets no answer -
+        // whether that is NXDOMAIN or a host with no resolver at all, both of
+        // which render as a dns error.
+        let failure = HttpClient::new()
+            .fetch(Request {
+                endpoint: "http://catalogue.this-name-is-not-delegated.invalid/catalogue",
+                parameters: None,
+                validator: None,
+                budget: Duration::from_secs(10),
+            })
+            .await
+            .expect_err("a reserved top-level domain is never delegated");
+
+        assert!(
+            matches!(failure, RequestFailure::Unresolved(_)),
+            "a name that would not resolve is DNS or a typo, and it must not \
+             share a series with a refused port: {failure:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_endpoint_that_accepts_and_never_answers_is_a_timeout() {
+        // The third of the three, and the one the transport raises itself
+        // rather than reading out of a string: the budget is the driver's, and
+        // `fetch` bounds the whole exchange by it. A listener nobody accepts
+        // on still completes the handshake out of the kernel's backlog, so the
+        // connection succeeds and no response ever comes - which is the shape
+        // of an endpoint that has stopped answering rather than gone away.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port to bind");
+        let port = listener.local_addr().expect("a bound address").port();
+        let endpoint = format!("http://127.0.0.1:{port}/catalogue");
+
+        let failure = HttpClient::new()
+            .fetch(Request {
+                endpoint: &endpoint,
+                parameters: None,
+                validator: None,
+                budget: Duration::from_millis(200),
+            })
+            .await
+            .expect_err("nobody accepts on this listener, so nothing answers");
+
+        assert!(
+            matches!(failure, RequestFailure::Timeout(_)),
+            "the budget is the driver's receive budget, and a request that \
+             outlives it is a timeout rather than anything about the wire: \
+             {failure:?}"
+        );
+        assert!(
+            failure.detail().contains("200ms"),
+            "and the detail names the bound that was exceeded: {}",
+            failure.detail()
+        );
+        // Held to here on purpose: dropped earlier, the port closes and the
+        // request is refused instead of timing out.
+        drop(listener);
     }
 
     #[cfg(feature = "tls")]
