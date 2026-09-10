@@ -2,6 +2,7 @@
 //! scope its admitted losses may be subtracted at.
 
 use dz_edge_core::PortRole;
+use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, SocketAddrV4};
 
 /// How [`RecordedDatagram::recv_ts_ns`] was obtained.
@@ -16,6 +17,79 @@ pub enum RecvTsKind {
     KernelSoftware,
     /// The control message was absent and we stamped it ourselves.
     ApplicationFallback,
+}
+
+/// [`RecvTsKind`] as everything outside this process spells it.
+///
+/// **One taxonomy of receive stamps, named in one place.** The byte an upstream
+/// object's header carries, the token its manifest spells, the token the
+/// `recv_ts_kind` column holds and the value a query filters on are all this
+/// enumeration, derived from [`RecvTsKind`]: a second one is how an archive
+/// comes to hold a kernel stamp under a name that means something else, and how
+/// a query filtering on the token across two archives silently returns the rows
+/// of one of them.
+///
+/// It lives here, beside the kind it names, because the two crates that write
+/// it — the archive shapes and the row types — are on either side of a
+/// dependency edge and neither can hold it for the other.
+///
+/// The tokens are hyphenated, as the design's DDL states them. The health
+/// tier's Prometheus label values for the same distinction are underscored,
+/// because a label value is read by a query language that treats a hyphen as an
+/// operator; they are the same fact in two notations, and this is the only place
+/// both are named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum RecvTsKindLabel {
+    #[serde(rename = "kernel-software")]
+    KernelSoftware,
+    #[serde(rename = "application-fallback")]
+    ApplicationFallback,
+}
+
+impl RecvTsKindLabel {
+    /// The label for a kind.
+    #[must_use]
+    pub const fn of(kind: RecvTsKind) -> Self {
+        match kind {
+            RecvTsKind::KernelSoftware => Self::KernelSoftware,
+            RecvTsKind::ApplicationFallback => Self::ApplicationFallback,
+        }
+    }
+
+    /// The kind this label names.
+    #[must_use]
+    pub const fn kind(self) -> RecvTsKind {
+        match self {
+            Self::KernelSoftware => RecvTsKind::KernelSoftware,
+            Self::ApplicationFallback => RecvTsKind::ApplicationFallback,
+        }
+    }
+
+    /// The byte an object header carries.
+    #[must_use]
+    pub const fn as_byte(self) -> u8 {
+        match self {
+            Self::KernelSoftware => 0,
+            Self::ApplicationFallback => 1,
+        }
+    }
+
+    /// The label a byte names, or `None` for a byte this version does not
+    /// define.
+    #[must_use]
+    pub const fn from_byte(byte: u8) -> Option<Self> {
+        match byte {
+            0 => Some(Self::KernelSoftware),
+            1 => Some(Self::ApplicationFallback),
+            _ => None,
+        }
+    }
+}
+
+impl From<RecvTsKind> for RecvTsKindLabel {
+    fn from(kind: RecvTsKind) -> Self {
+        Self::of(kind)
+    }
 }
 
 /// One received datagram and everything known about its arrival.

@@ -116,9 +116,14 @@ rather than once per message.
 stamps every payload the same way — the kernel does it, or the transport does —
 which is what `Payload` states in refusing to carry the distinction per payload.
 Repeating it per record would be a third copy of that taxonomy and a place for
-two of them to disagree inside one object. The byte is derived from
-`dz_recorder_core::RecvTsKind`, so there is no second taxonomy of receive
-stamps.
+two of them to disagree inside one object.
+
+The byte and the manifest's token are `dz_recorder_core::RecvTsKindLabel`, which
+is the same type the `recv_ts_kind` column holds on the publisher side and is
+derived from `dz_recorder_core::RecvTsKind`. One taxonomy of receive stamps, and
+one place it is spelled: a second enumeration with the same variants agrees with
+the first until one side is renamed, and a query filtering on the token across
+the two archives then returns the rows of one of them and says nothing.
 
 ### A record
 

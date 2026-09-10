@@ -134,58 +134,16 @@ impl UpstreamConnection {
     }
 }
 
-/// [`RecvTsKind`] as the object encodes it and the manifest spells it.
+/// [`RecvTsKind`] as the object encodes it and the manifest spells it, which is
+/// `dz-recorder-core`'s own enumeration and never a second one.
 ///
-/// A byte in the object and a token in the manifest, both derived from the one
-/// enum in `dz-recorder-core`: a second taxonomy of receive stamps is how an
-/// archive comes to hold a kernel stamp under a name that means something else.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RecvTsKindLabel {
-    #[serde(rename = "kernel-software")]
-    KernelSoftware,
-    #[serde(rename = "application-fallback")]
-    ApplicationFallback,
-}
-
-impl RecvTsKindLabel {
-    /// The label for a kind.
-    #[must_use]
-    pub const fn of(kind: RecvTsKind) -> Self {
-        match kind {
-            RecvTsKind::KernelSoftware => Self::KernelSoftware,
-            RecvTsKind::ApplicationFallback => Self::ApplicationFallback,
-        }
-    }
-
-    /// The kind this label names.
-    #[must_use]
-    pub const fn kind(self) -> RecvTsKind {
-        match self {
-            Self::KernelSoftware => RecvTsKind::KernelSoftware,
-            Self::ApplicationFallback => RecvTsKind::ApplicationFallback,
-        }
-    }
-
-    /// The byte the object header carries.
-    #[must_use]
-    pub const fn as_byte(self) -> u8 {
-        match self {
-            Self::KernelSoftware => 0,
-            Self::ApplicationFallback => 1,
-        }
-    }
-
-    /// The label a byte names, or `None` for a byte this version does not
-    /// define.
-    #[must_use]
-    pub const fn from_byte(byte: u8) -> Option<Self> {
-        match byte {
-            0 => Some(Self::KernelSoftware),
-            1 => Some(Self::ApplicationFallback),
-            _ => None,
-        }
-    }
-}
+/// A byte in the object header and a token in the manifest, both from
+/// [`dz_recorder_core::RecvTsKindLabel`] — the same type the `recv_ts_kind`
+/// column holds on the publisher side. Re-exported rather than restated: two
+/// enumerations with one meaning is how an archive comes to hold a kernel stamp
+/// under a name that means something else, and how a rename on one side leaves a
+/// query across the two archives silently returning the rows of one of them.
+pub use dz_recorder_core::RecvTsKindLabel;
 
 /// An upstream object could not be read as one.
 ///

@@ -159,6 +159,43 @@ fn a_venue_object_row_carries_exactly_the_venue_object_columns() {
     );
 }
 
+/// **The receive-stamp taxonomy is one type on both sides of the archive.**
+///
+/// This crate reads an upstream object through `dz-recorder-archive` and writes
+/// rows shaped by `dz-recorder-rows`, so it is a place that can hold the two
+/// together — and the two are on either side of a dependency edge, so neither
+/// can hold the other.
+///
+/// The assignment is the assertion: it compiles only while the label the object
+/// header and the venue manifest carry and the label the `recv_ts_kind` column
+/// holds are one type. Two enumerations with identical variants and identical
+/// tokens, each pinned against its own literals, agree until one side is
+/// renamed — and then a query filtering on the token across the two archives
+/// returns the rows of one of them and says nothing.
+#[test]
+fn the_receive_stamp_taxonomy_is_one_type_on_both_sides_of_the_archive() {
+    let from_the_object: dz_recorder_rows::RecvTsKindLabel =
+        dz_recorder_archive::upstream::RecvTsKindLabel::KernelSoftware;
+    assert_eq!(
+        as_json(&from_the_object),
+        json!("kernel-software"),
+        "the token a manifest spells and the token a column holds have parted"
+    );
+    let fallback: dz_recorder_rows::RecvTsKindLabel =
+        dz_recorder_archive::upstream::RecvTsKindLabel::ApplicationFallback;
+    assert_eq!(as_json(&fallback), json!("application-fallback"));
+
+    // And both are derived from the kind rather than spelled a third time.
+    assert_eq!(
+        dz_recorder_core::RecvTsKindLabel::of(dz_recorder_core::RecvTsKind::KernelSoftware),
+        from_the_object
+    );
+    assert_eq!(
+        dz_recorder_core::RecvTsKindLabel::of(dz_recorder_core::RecvTsKind::ApplicationFallback),
+        fallback
+    );
+}
+
 /// **Neither venue-side grain carries publisher provenance.**
 ///
 /// The plan's centre, as an absence held against column-name literals: the
