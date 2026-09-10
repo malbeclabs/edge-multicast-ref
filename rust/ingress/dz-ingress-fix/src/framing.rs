@@ -230,9 +230,25 @@ pub struct Field<'a> {
 /// Stops at the first field it cannot read, which is sound here because every
 /// caller has already had the whole message's framing checked: a decoded
 /// message reached [`Decoder::take`] and a body reached [`Body::parse`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Fields<'a> {
     rest: &'a [u8],
+}
+
+/// Prints how much is left to read, and not what is in it.
+///
+/// [`Message::fields`] hands one of these out over a whole message and
+/// [`Body::field`] runs one over a whole body, so a derived implementation
+/// prints every field a logon states — as a list of byte values, which is still
+/// a venue's signature in a log line. [`Field`] keeps its derived
+/// implementation, because one field the caller named by tag is the value a
+/// diagnostic is *about*; the iterator over all of them is not.
+impl fmt::Debug for Fields<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Fields")
+            .field("remaining_bytes", &self.rest.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'a> Iterator for Fields<'a> {
@@ -315,19 +331,48 @@ impl<'a> Message<'a> {
     }
 }
 
-/// Prints the message with its separators made visible, because a `\x01` in a
-/// log line is invisible and a message whose fields cannot be told apart is a
-/// message nobody can read.
+/// Prints the message type, the sequence and how many bytes there are — and
+/// none of them.
+///
+/// A logon's fields are the one place a credential appears, and a `Message` is
+/// held over one on both sides: the framed copy this crate wrote, and the
+/// venue's answer echoing what it was sent. A `{:?}` that rendered the bytes
+/// would therefore put a venue's signature in a log line, which is the standard
+/// [`Session`](crate::Session) and [`FixInput`](crate::FixInput) hand-write
+/// their own implementations to hold, and the reason a session error's detail is
+/// a stated list of tags rather than the message.
+///
+/// [`rendered`] is still public for whoever has decided to look at the bytes.
+/// Having to ask is the difference between reading them and logging them.
 impl fmt::Debug for Message<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Message({})", rendered(self.bytes))
+        f.debug_struct("Message")
+            .field("msg_type", &self.msg_type())
+            .field("sequence", &self.field_u64(TAG_MSG_SEQ_NUM))
+            .field("bytes", &self.bytes.len())
+            .finish_non_exhaustive()
     }
 }
 
-/// A message's bytes with the separator shown as `|`.
+/// A message's bytes with the separator shown as `|`, because a `\x01` in a log
+/// line is invisible.
 ///
-/// For an error detail and a log line. Not `Display` on [`Message`]: this is
-/// used on partial and refused bytes too, where there is no message to display.
+/// **For the fields this crate itself composes around a body, and never for a
+/// body's own.** The decoder's details use it on the three it reads — the
+/// checksum's digits, the declared length's digits, and the header prefix that
+/// failed to be `{TAG_BODY_LENGTH}=` — each of them a fixed-shape field written
+/// and parsed here, none of them able to hold a field somebody else wrote, and
+/// without them a garbled stream is undiagnosable.
+///
+/// A logon's fields are the one place a credential appears, so nothing that can
+/// see a body's fields renders them: [`Body::parse`] refuses by field index,
+/// offset and length, and [`Body`] and [`Message`] hand-write their
+/// [`Debug`](fmt::Debug) to say what they are and how much of them there is.
+/// This function stays public for whoever has decided to look at the bytes —
+/// having to ask is the difference between reading them and logging them.
+///
+/// A function rather than `Display` on [`Message`], because it is used on
+/// partial and refused bytes too, where there is no message to display.
 #[must_use]
 pub fn rendered(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).replace(SOH as char, "|")
@@ -338,10 +383,31 @@ pub fn rendered(bytes: &[u8]) -> String {
 /// What the adapter writes through the boundary's `UpstreamSink` — a logon's
 /// identity and signature, or a subscription's instruments — with the header
 /// this transport owns absent, because framing it is this transport's job.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Body<'a> {
     msg_type: &'a str,
     rest: &'a [u8],
+}
+
+/// Prints the message type and how many body bytes there are — and none of
+/// them.
+///
+/// This is the type a venue's identity and its signature arrive in: a derived
+/// implementation prints `rest` verbatim, so the first `{:?}` on a logon body
+/// puts both in a startup log. Written out for the reason
+/// [`Session`](crate::Session) and [`FixInput`](crate::FixInput) are, and saying
+/// the same two things they say — what it is, and how much of it there is.
+///
+/// The message type is stated because it is this crate's own field: a body's
+/// first field is the one thing about it that is not the caller's secret, and it
+/// is what a diagnostic is asking for.
+impl fmt::Debug for Body<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Body")
+            .field("msg_type", &self.msg_type)
+            .field("body_bytes", &self.rest.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'a> Body<'a> {
@@ -355,9 +421,21 @@ impl<'a> Body<'a> {
         if bytes.is_empty() {
             return Err(BodyError::Empty);
         }
+        // **Every detail below locates the fault and none of them carries the
+        // bytes.** This is the one type a venue's identity and its signature
+        // arrive in, and a malformed body is refused on the startup and the
+        // reconnect path, where an error's detail becomes a log line — so a
+        // missing separator or a tag that is not a number must not be the way a
+        // logon reaches one. What a detail says instead is which field, how far
+        // into the body it begins, how long it is, and what was expected there,
+        // which is everything the venue code that composed it needs. Fields are
+        // counted from one, the `MsgType` being the first.
         if bytes.last() != Some(&SOH) {
             return Err(BodyError::Malformed {
-                detail: format!("the last field is not terminated: `{}`", rendered(bytes)),
+                detail: format!(
+                    "the last of {} bytes is not a separator, so the last field never ends",
+                    bytes.len()
+                ),
             });
         }
         let first_end = bytes
@@ -370,13 +448,18 @@ impl<'a> Body<'a> {
                 .iter()
                 .position(|byte| *byte == b'=')
                 .ok_or_else(|| BodyError::Malformed {
-                    detail: format!("`{}` has no `=`", rendered(first)),
+                    detail: format!(
+                        "field 1 is {first_end} bytes with no `=`, so it states no tag"
+                    ),
                 })?;
         let tag: u32 = core::str::from_utf8(&first[..equals])
             .ok()
             .and_then(|text| text.parse().ok())
             .ok_or_else(|| BodyError::Malformed {
-                detail: format!("`{}` does not begin with a tag", rendered(first)),
+                detail: format!(
+                    "field 1 does not begin with a tag: the {equals} bytes before its `=` are \
+                     not a number"
+                ),
             })?;
         if tag != TAG_MSG_TYPE {
             return Err(BodyError::MsgTypeNotFirst { found: tag });
@@ -395,28 +478,46 @@ impl<'a> Body<'a> {
         // failure shape this crate must not have.
         let rest = &bytes[first_end + 1..];
         let mut cursor = rest;
+        let mut index = 2usize;
+        let mut offset = first_end + 1;
         while !cursor.is_empty() {
+            let remaining = cursor.len();
             let end = cursor.iter().position(|byte| *byte == SOH).ok_or_else(|| {
+                // Not reachable while the terminator check above stands: the
+                // last byte is a separator, so every tail of the body has one.
+                // Kept as a refusal rather than an `expect`, because what makes
+                // it unreachable is a check twenty lines away.
                 BodyError::Malformed {
-                    detail: format!("`{}` is not terminated", rendered(cursor)),
+                    detail: format!(
+                        "field {index}, at byte {offset}, is {remaining} bytes with no separator \
+                         to end it"
+                    ),
                 }
             })?;
             let field = &cursor[..end];
             let equals = field.iter().position(|byte| *byte == b'=').ok_or_else(|| {
                 BodyError::Malformed {
-                    detail: format!("`{}` has no `=`", rendered(field)),
+                    detail: format!(
+                        "field {index}, at byte {offset}, is {end} bytes with no `=`, so it \
+                         states no tag"
+                    ),
                 }
             })?;
             let tag: u32 = core::str::from_utf8(&field[..equals])
                 .ok()
                 .and_then(|text| text.parse().ok())
                 .ok_or_else(|| BodyError::Malformed {
-                    detail: format!("`{}` does not begin with a tag", rendered(field)),
+                    detail: format!(
+                        "field {index}, at byte {offset}, does not begin with a tag: the \
+                         {equals} bytes before its `=` are not a number"
+                    ),
                 })?;
             if let Some(why) = owned_tag_reason(tag) {
                 return Err(BodyError::OwnedTag { tag, why });
             }
             cursor = &cursor[end + 1..];
+            offset += end + 1;
+            index += 1;
         }
         Ok(Self { msg_type, rest })
     }

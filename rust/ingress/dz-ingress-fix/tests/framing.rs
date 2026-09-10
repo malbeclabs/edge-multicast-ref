@@ -245,6 +245,97 @@ fn a_body_reads_back_the_fields_it_was_given() {
 }
 
 // ---------------------------------------------------------------------------
+// What a logon body is allowed to print
+//
+// The three below are one assertion made three ways: a venue's identity and its
+// signature are in a `Body`, and the ways they reach a log line are a `{:?}` on
+// the body, a `{:?}` on the framed message, and a refusal whose detail quotes
+// the bytes. The literal below is the secret, and each test asserts it is
+// absent from what an operator would see.
+// ---------------------------------------------------------------------------
+
+/// The signature a venue's adapter would have written, as a value a test can
+/// look for in a rendered string.
+const SIGNATURE: &str = "not-a-real-signature";
+
+/// A logon body of the shape an adapter composes: its identity, its signature,
+/// and the cadence the session will run at.
+fn a_signed_logon() -> String {
+    format!("35=A|49=A-PUBLISHER|56=A-VENUE|554={SIGNATURE}|108=30|")
+}
+
+#[test]
+fn a_bodys_debug_states_what_it_is_and_not_what_is_in_it() {
+    // A derived implementation prints `rest` verbatim, so the first `{:?}` on a
+    // logon body puts a venue's signature in a startup log. The revert is
+    // `#[derive(Debug)]` on `Body`, and it fails here.
+    let printed = format!("{:?}", body(&a_signed_logon()));
+    assert!(
+        !printed.contains(SIGNATURE),
+        "a logon body printed its own signature: {printed}"
+    );
+    assert!(
+        !printed.contains("A-PUBLISHER") && !printed.contains("A-VENUE"),
+        "a logon body printed the identity it carries: {printed}"
+    );
+    // And it still says the two things a diagnostic is asking for.
+    let quoted = format!("\"{}\"", msg_type::LOGON);
+    assert!(printed.contains(&quoted), "{printed}");
+    assert!(printed.contains("body_bytes"), "{printed}");
+}
+
+#[test]
+fn a_messages_debug_states_what_it_is_and_not_what_is_in_it() {
+    // The framed copy of the same body, which is what `Message` is held over —
+    // on the way out, and again when the venue echoes it back.
+    let mut framed = Vec::new();
+    framing::frame(&mut framed, &body(&a_signed_logon()), 1, AT, true);
+    let printed = format!("{:?}", Message::new(&framed));
+    assert!(
+        !printed.contains(SIGNATURE),
+        "a framed logon printed its own signature: {printed}"
+    );
+    assert!(
+        !printed.contains("A-PUBLISHER") && !printed.contains("A-VENUE"),
+        "a framed logon printed the identity it carries: {printed}"
+    );
+    let quoted = format!("\"{}\"", msg_type::LOGON);
+    assert!(printed.contains(&quoted), "{printed}");
+    assert!(printed.contains("sequence"), "{printed}");
+    // The bytes are still reachable, by asking for them.
+    assert!(framing::rendered(&framed).contains(SIGNATURE));
+}
+
+#[test]
+fn a_malformed_body_is_refused_by_position_and_not_by_its_bytes() {
+    // Each of these is a mistake in venue code, refused on the startup or the
+    // reconnect path — which is where an error's detail becomes a log line. The
+    // revert is any one of `Body::parse`'s details going back to `rendered`,
+    // and it fails here.
+    for (composed, expected) in [
+        // The last field has no separator to end it.
+        (format!("35=A|554={SIGNATURE}"), "is not a separator"),
+        // A field with no `=`, so it states no tag.
+        (format!("35=A|554{SIGNATURE}|"), "field 2"),
+        // A field whose tag is not a number.
+        (format!("35=A|x554={SIGNATURE}|"), "field 2"),
+        // The first field has no `=` at all.
+        (format!("35A|554={SIGNATURE}|"), "field 1"),
+        // The first field's tag is not a number.
+        (format!("x35=A|554={SIGNATURE}|"), "field 1"),
+    ] {
+        let error = Body::parse(&wire(&composed)).expect_err(&composed);
+        let detail = error.to_string();
+        assert!(
+            !detail.contains(SIGNATURE),
+            "{composed} was refused with its own bytes: {detail}"
+        );
+        // Useful, and not merely quiet: which field, and what was expected.
+        assert!(detail.contains(expected), "{composed}: {detail}");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Decode
 // ---------------------------------------------------------------------------
 
