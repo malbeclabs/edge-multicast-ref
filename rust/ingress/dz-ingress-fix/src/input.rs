@@ -469,10 +469,6 @@ fn classify(error: SessionError) -> IngressError {
         | SessionError::UnusableHeartbeatInterval { .. }
         | SessionError::Body(_) => IngressError::fatal(detail),
 
-        // Not fatal, and not venue code's fault either: a receive on a session
-        // whose logon failed is a driver that ignored what its own send
-        // returned, which is the group `NotConnected` is in below and for the
-        // same reason.
         SessionError::LogonRejected { .. } => {
             IngressError::connect(ConnectFailureReason::Unauthorized, detail)
         }
@@ -481,6 +477,10 @@ fn classify(error: SessionError) -> IngressError {
         }
 
         SessionError::Silent { .. } => IngressError::ended(DisconnectReason::Timeout, detail),
+        // `LogonNotEstablished` is here and not with the fatal group: venue
+        // code did its job, and a receive on a session whose logon failed is a
+        // driver that ignored what its own send returned — which is the case
+        // `NotConnected` is, and it takes the same group for the same reason.
         SessionError::LoggedOut { .. }
         | SessionError::Rejected { .. }
         | SessionError::ResendRequested { .. }

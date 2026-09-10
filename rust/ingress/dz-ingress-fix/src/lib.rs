@@ -134,5 +134,7 @@ pub use framing::{
     BEGIN_STRING,
 };
 pub use input::{Connector, FixInput, SocketConnector};
-pub use session::{ByteStream, Incoming, Session, SessionError, SessionState, StreamError};
+pub use session::{
+    ByteStream, Composed, Incoming, Session, SessionError, SessionState, StreamError,
+};
 pub use timestamp::sending_time;
