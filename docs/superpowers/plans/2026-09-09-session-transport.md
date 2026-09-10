@@ -62,10 +62,12 @@ Tasks 1 to 3 are the protocol with no session and no socket: framing, timestamps
 
 ### 4. The socket, TLS, and the failure classification
 
-- [x] `Input` implemented over the state machine: `connect` opens the socket, performs TLS and drives the logon to *established*; `send` writes what the adapter queued, framed and numbered; `recv` returns a decoded application message as a payload and a session message as `Received::Liveness`; `shutdown` attempts an orderly logout and gives up quickly.
+- [x] `Input` implemented over the state machine: `connect` opens the socket and performs TLS; `send` writes what the adapter queued, framed and numbered, and the *first* `send` is what carries the session to *established*; `recv` returns a decoded application message as a payload and a session message as `Received::Liveness`; `shutdown` attempts an orderly logout and gives up quickly.
 - [x] Every failure classified: a refused connection, a failed negotiation, a rejected logon, a session-level reject, a silence. The disconnect reason is a metric label with four values and this is the only layer that can see which applies.
 - [x] TLS pinned as the websocket transport pins it, `default-features = false`, with the manifest saying which backends a default must not be able to pull in.
 - [x] A session message is `Liveness` and never a payload, for the reason that case exists: the idle guard counts time since the last *payload*, so a session that heartbeats forever and delivers nothing must still trip it.
+
+> **Corrected at execution.** The first line said `connect` "drives the logon to *established*". It does not, and task 5 below is the reason: the driver connects, *then* asks the adapter what to send, so there is no logon to drive at the moment `connect` runs and the first `send` is what establishes the session. That is a status fact this dated document got wrong about the code it went on to produce — and one this same plan contradicts three tasks later — rather than an argument made on the day and since lost, which is why it is corrected here and not left to stand with a note. What *was* argued in this task is unchanged and kept: `connect` owns the socket and the negotiation, the classification is this layer's because it is the only layer that can see which failure applies, and a session message is never a payload.
 
 **Test:** the classification, over the scripted byte stream; and one example against a loopback endpoint for TLS and the real socket, which is the half no fake proves.
 
