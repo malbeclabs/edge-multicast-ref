@@ -732,6 +732,12 @@ fn a_failed_request_ends_the_connection_with_the_reason_the_failure_had() {
         (Answered::Status(429), DisconnectReason::RateLimit),
         (Answered::Status(401), DisconnectReason::AuthExpired),
         (Answered::Status(503), DisconnectReason::RemoteClose),
+        // A `304` to a request that offered no validator. The probe's tag is
+        // discarded with its body, so the first poll is unconditional, and
+        // *not modified* is not an answer to a request that asked nothing
+        // about a version - the same reply the connect path refuses. See
+        // `an_unconditional_304_is_refused_on_the_poll_path_as_it_is_on_the_probe`.
+        (Answered::Status(304), DisconnectReason::RemoteClose),
         (
             Answered::Failed(RequestFailure::Refused("connection refused".into())),
             DisconnectReason::RemoteClose,
@@ -876,6 +882,88 @@ fn a_first_request_the_endpoint_refuses_names_the_credential_or_the_limit() {
             "status {status} on the first request must be counted as {expected:?}"
         );
     }
+}
+
+/// A `304` is liveness **only in answer to a validator**, and the two paths
+/// agree about that.
+///
+/// The connect path already refuses the unconditional one — the case above
+/// this. A receive that accepted it would be reading a malfunctioning endpoint
+/// as a quiet one: this transport offers a validator only for a body it has
+/// delivered, so *not modified* to a request that offered none says nothing
+/// about anything, and nothing is what the adapter gets while the connection
+/// is held up. With no `[ingress] idle_timeout` configured it is held up for
+/// ever; with one, the connection ends as `timeout` and blames a silent venue
+/// for a reply this transport had already been told was wrong.
+///
+/// **Both halves in one test**, because the property is the asymmetry being
+/// gone: an assertion on either half alone still passes on a transport that
+/// treats every `304` the same way.
+#[test]
+fn a_304_is_liveness_only_in_answer_to_a_validator() {
+    // The conditional half, which must stay liveness. The endpoint offers an
+    // entity tag, the first poll delivers the body, and the poll after that
+    // offers the tag back and is answered `304`.
+    let endpoint = ScriptedEndpoint::unchanging(Some(TAG));
+    let clock = TestClock::new();
+    let mut transport = input(CONNECTION, Duration::from_secs(30), &endpoint, &clock);
+
+    block_on(transport.connect(Duration::from_secs(5))).expect("the endpoint answered");
+    assert_eq!(
+        block_on(transport.recv(None)).expect("the first poll"),
+        Received::Payload {
+            bytes: CATALOGUE_BODY,
+            ts_ns: None
+        },
+        "the first poll delivers the catalogue, which is what gives this          connection a validator to offer"
+    );
+    let received = block_on(transport.recv(None)).expect("a 304 to a conditional request");
+    assert_eq!(
+        received,
+        Received::Liveness,
+        "an endpoint answering `304` to the tag it served is the well-behaved          case this transport asks for, and it is liveness"
+    );
+    let seen = endpoint.seen();
+    assert_eq!(
+        seen[2].validator,
+        Some(TAG.to_string()),
+        "the poll that was answered `304` offered the tag: {seen:?}"
+    );
+
+    // The unconditional half, which is the same status from a request that
+    // offered nothing. The probe's tag is discarded with its body, so the
+    // first poll is unconditional.
+    let endpoint = ScriptedEndpoint::new(
+        vec![Answered::Body(CATALOGUE_BODY, None), Answered::Status(304)],
+        Answered::Body(CATALOGUE_BODY, None),
+    );
+    let clock = TestClock::new();
+    let mut transport = input(CONNECTION, Duration::from_secs(30), &endpoint, &clock);
+
+    block_on(transport.connect(Duration::from_secs(5))).expect("the endpoint answered");
+    let error = block_on(transport.recv(None)).expect_err(
+        "a `304` to a request that offered no validator is not an unchanged          catalogue; it is a reply the endpoint should not have made",
+    );
+    let seen = endpoint.seen();
+    assert_eq!(
+        seen[1].validator, None,
+        "the poll that was answered `304` offered nothing: {seen:?}"
+    );
+    assert!(
+        !error.is_fatal(),
+        "a status is the endpoint's behaviour and not a request that cannot be          formed: the connection ends and the driver reconnects, so a venue that          fixes its endpoint is served again without a restart - {error}"
+    );
+    assert_eq!(
+        error.disconnect_reason(),
+        Some(DisconnectReason::RemoteClose),
+        "the same reason every other status the endpoint should not have          returned ends on - {error}"
+    );
+    // And the detail is held to the rule every other detail here is: the
+    // authority, never the query string a venue keeps its key on.
+    let rendered = format!("{error}");
+    assert!(rendered.contains("192.0.2.10"), "{rendered}");
+    assert!(rendered.contains("304"), "{rendered}");
+    assert!(rendered.contains("validator"), "{rendered}");
 }
 
 #[test]

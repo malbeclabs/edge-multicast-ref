@@ -23,7 +23,14 @@ use dz_ingress_core::BoxFuture;
 ///
 /// Borrowed throughout, because every field is something the transport already
 /// holds and a request is built once per poll.
-#[derive(Debug, Clone, Copy)]
+///
+/// # Its `Debug` prints no query string
+///
+/// See the implementation below. Two of its four fields are the two things in
+/// this crate that must not reach a log line — the endpoint, whose query
+/// string is where several venue APIs keep a key, and whatever the adapter
+/// last wrote, which nothing here can tell a cursor from a signed token.
+#[derive(Clone, Copy)]
 pub struct Request<'a> {
     /// The endpoint, exactly as configuration stated it.
     pub endpoint: &'a str,
@@ -47,6 +54,31 @@ pub struct Request<'a> {
     /// is the driver's own receive budget and not a timeout this transport
     /// holds a key for.
     pub budget: Duration,
+}
+
+/// Prints the scheme and host of the endpoint, whether the request carries
+/// parameters and whether it offers a validator — and **neither the endpoint
+/// nor the parameters**.
+///
+/// The same rule `PollConfig`'s own `Debug`, `PollInput`'s and every error
+/// detail in this crate keep, and this type is the one a venue writing its own
+/// [`PollClient`] is handed: a derived implementation here would put a key in a
+/// log line in somebody else's crate.
+///
+/// **Whether the request is conditional is printed**, and that one is not
+/// decoration: a `304` means *not modified* only in answer to a validator, so
+/// this is the field that separates a well-behaved endpoint from one whose
+/// answer says nothing — the reading
+/// [`PollInput::recv`](crate::PollInput) makes of the same status.
+impl core::fmt::Debug for Request<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Request")
+            .field("authority", &crate::config::authority_of(self.endpoint))
+            .field("parameterised", &self.parameters.is_some())
+            .field("conditional", &self.validator.is_some())
+            .field("budget", &self.budget)
+            .finish()
+    }
 }
 
 /// What the endpoint answered.
@@ -655,6 +687,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_requests_debug_names_the_host_and_neither_the_query_string_nor_the_parameters() {
+        // The type a venue writing its own client is handed, holding the two
+        // things in this crate that must not reach a log line: an endpoint
+        // whose query string is where several venue APIs keep a key, and
+        // whatever the adapter last wrote, which nothing here can tell a
+        // cursor from a signed token.
+        let rendered = format!(
+            "{:?}",
+            Request {
+                endpoint: "https://192.0.2.10:8443/catalogue?api_key=not-a-real-secret",
+                parameters: Some("cursor=not-a-real-token"),
+                validator: Some("\"catalogue-1\""),
+                budget: Duration::from_secs(30),
+            }
+        );
+        assert!(!rendered.contains("api_key"), "{rendered}");
+        assert!(!rendered.contains("not-a-real-secret"), "{rendered}");
+        assert!(!rendered.contains("not-a-real-token"), "{rendered}");
+        assert!(rendered.contains("https://192.0.2.10:8443"), "{rendered}");
+        assert!(rendered.contains("parameterised: true"), "{rendered}");
+        // The field the `304` reading turns on: *not modified* is an answer to
+        // a validator and nothing else, so whether one was offered is what a
+        // log line about a `304` has to be able to say.
+        assert!(rendered.contains("conditional: true"), "{rendered}");
+
+        let rendered = format!(
+            "{:?}",
+            Request {
+                endpoint: "http://192.0.2.10/catalogue",
+                parameters: None,
+                validator: None,
+                budget: Duration::from_secs(30),
+            }
+        );
+        assert!(rendered.contains("parameterised: false"), "{rendered}");
+        assert!(rendered.contains("conditional: false"), "{rendered}");
+    }
+
     // -----------------------------------------------------------------------
     // The classification, and the boundary a real failure crosses
     // -----------------------------------------------------------------------
@@ -759,11 +830,17 @@ mod tests {
         // `classify`. Without it the whole table can be collapsed to one
         // catch-all with nothing failing.
         let port = a_closed_port();
-        let endpoint = format!("http://127.0.0.1:{port}/catalogue");
+        // With a key on the query string, because this detail is the one
+        // rendered string in this crate whose text is somebody else's: every
+        // other one is a `format!` here, and this one is `hyper`'s error and
+        // its causes. The transport prefixes the authority and prints no URI,
+        // and the assertion below is what says the client hands it nothing to
+        // print.
+        let endpoint = format!("http://127.0.0.1:{port}/catalogue?api_key=not-a-real-secret");
         let failure = HttpClient::new()
             .fetch(Request {
                 endpoint: &endpoint,
-                parameters: None,
+                parameters: Some("cursor=not-a-real-token"),
                 validator: None,
                 budget: Duration::from_secs(5),
             })
@@ -775,6 +852,10 @@ mod tests {
             "a closed port is a firewall or a port, which is `connect_failures_total\
              {{reason=\"refused\"}}` and somebody's to go and look at: {failure:?}"
         );
+        let detail = failure.detail();
+        assert!(!detail.contains("api_key"), "{detail}");
+        assert!(!detail.contains("not-a-real-secret"), "{detail}");
+        assert!(!detail.contains("not-a-real-token"), "{detail}");
     }
 
     #[tokio::test]

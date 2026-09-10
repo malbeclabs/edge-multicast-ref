@@ -22,6 +22,17 @@ use serde::{Deserialize, Deserializer};
 /// Every variant names what *is* acceptable and not only what was wrong, which
 /// is the core's own standard for the same reason: an error that says a value
 /// is unacceptable and stops there invites the same guess a second time.
+///
+/// # The two that name the endpoint name only its authority
+///
+/// Both name `endpoint` as the key and the scheme and host as the value, and
+/// **neither renders the endpoint itself** — not through `Display` and not
+/// through `Debug`. A key on the query string is a shape this transport
+/// documents as supported, because several venue catalogue APIs keep one
+/// there, and a load failure is the most-logged line a publisher has: it is
+/// what a supervisor captures when the process will not start. It is the rule
+/// [`PollConfig`]'s own `Debug` keeps, and the one every error detail in
+/// `poll.rs` keeps.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ConfigError {
     /// The endpoint is `https` and this build carries no TLS stack.
@@ -34,15 +45,19 @@ pub enum ConfigError {
     /// the answer is a startup failure and not a publisher that comes up
     /// healthy and fails forever afterwards.
     #[error(
-        "`endpoint` is `{endpoint}`, and this build of dz-ingress-poll carries no TLS stack: \
+        "`endpoint` is `{authority}`, and this build of dz-ingress-poll carries no TLS stack: \
          build it with the `tls` feature, or point this at an `http` endpoint on a path where \
          that is defensible"
     )]
-    TlsUnsupported { endpoint: String },
+    TlsUnsupported { authority: String },
 
     /// The endpoint is not an HTTP URL at all.
-    #[error("`endpoint` is `{endpoint}`; a polled endpoint is http:// or https://")]
-    NotAnHttpEndpoint { endpoint: String },
+    ///
+    /// Which includes the endpoint that names no scheme, and `authority_of`
+    /// still answers for one of those: everything from the path onwards is
+    /// dropped whether or not what precedes it is a scheme.
+    #[error("`endpoint` is `{authority}`; a polled endpoint is http:// or https://")]
+    NotAnHttpEndpoint { authority: String },
 
     /// A cadence of zero.
     ///
@@ -101,7 +116,12 @@ pub enum ConfigError {
 /// is the one that means the time between two of them. A key spelled
 /// `poll_cycle` would be read as *divide this by something*, and there is
 /// nothing to divide it by.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// # Its `Debug` prints no query string
+///
+/// See the implementation below. A derived one would put a venue's key in the
+/// first line a publisher logs about its own configuration.
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PollConfig {
     /// The endpoint to poll, scheme included.
@@ -123,18 +143,80 @@ impl PollConfig {
         let endpoint = self.endpoint.trim();
         if endpoint.starts_with("https://") && !cfg!(feature = "tls") {
             return Err(ConfigError::TlsUnsupported {
-                endpoint: endpoint.to_string(),
+                authority: authority_of(endpoint),
             });
         }
         if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
             return Err(ConfigError::NotAnHttpEndpoint {
-                endpoint: endpoint.to_string(),
+                authority: authority_of(endpoint),
             });
         }
         if self.poll_interval.is_zero() {
             return Err(ConfigError::ZeroInterval);
         }
         Ok(())
+    }
+}
+
+/// Prints the scheme and host of the endpoint, whether it carries a query
+/// string, and the cadence — and **never the endpoint itself**.
+///
+/// **A key on the query string is a shape this transport documents as
+/// supported**, because that is where several venue catalogue APIs keep one,
+/// and a configuration a publisher logs at startup is the easiest place in the
+/// system for one to end up in a log file, a crash report or a support ticket.
+/// A derived implementation would put it in all three the first time a venue's
+/// `main` logged the table it resolved. The same standard `PollInput` and
+/// `HttpClient` hold their own `Debug` to, and the standard the fatal
+/// request-formation fault in `poll.rs` names the authority rather than the URI
+/// for.
+///
+/// Whether a query string is present is printed, because that is the question
+/// a `401` from an endpoint whose document looks right raises: a key that was
+/// meant to be there and is not looks identical, in every other field, to one
+/// that is.
+impl core::fmt::Debug for PollConfig {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let endpoint = self.endpoint.trim();
+        f.debug_struct("PollConfig")
+            .field("authority", &authority_of(endpoint))
+            .field("query", &endpoint.contains('?'))
+            .field("poll_interval", &self.poll_interval)
+            .finish()
+    }
+}
+
+/// The scheme, host and port of an endpoint, and nothing after them.
+///
+/// A string operation and not a URL parse, because what it is for is a log
+/// line, a `Debug` and a [`ConfigError`]: the part that must not be printed is
+/// everything from the path onwards, and dropping it is the same operation
+/// whether or not what follows parses — or whether, as in
+/// [`ConfigError::NotAnHttpEndpoint`], what precedes it is a scheme at all.
+///
+/// It lives beside the key it reads. `endpoint` is this table's, and one
+/// implementation of *what of an endpoint may be printed* is what keeps the
+/// transport's log lines and this module's refusals to the same rule.
+pub(crate) fn authority_of(endpoint: &str) -> String {
+    let (scheme, after_scheme) = match endpoint.split_once("://") {
+        Some((scheme, after_scheme)) => (Some(scheme), after_scheme),
+        // An endpoint that names no scheme is one of the two this module
+        // refuses, and it is refused by name — so the host is still worth
+        // printing and the query string still must not be.
+        None => (None, endpoint),
+    };
+    let host = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        // A userinfo section is a credential more often than not, and this
+        // string exists to be printed.
+        .rsplit('@')
+        .next()
+        .unwrap_or_default();
+    match scheme {
+        Some(scheme) => format!("{scheme}://{host}"),
+        None => host.to_string(),
     }
 }
 
@@ -285,5 +367,120 @@ mod tests {
     fn a_bare_number_is_refused_rather_than_guessed_at() {
         let error = parse_duration("30").expect_err("a bare number has no unit");
         assert!(error.contains("no unit"), "{error}");
+    }
+
+    /// An endpoint an operator would write with a key on it.
+    ///
+    /// Documentation-range host, and a secret that says in its own text that
+    /// it is not one: a value in a fixture is copied into production sooner or
+    /// later.
+    const ENDPOINT_WITH_A_KEY: &str = "https://192.0.2.10:8443/catalogue?api_key=not-a-real-secret";
+
+    /// The one substring that must not appear in anything rendered from a
+    /// table.
+    const SECRET: &str = "not-a-real-secret";
+
+    #[test]
+    fn the_debug_of_a_table_names_the_host_and_not_the_query_string() {
+        // A derived `Debug` prints the endpoint verbatim, and a publisher that
+        // logs its resolved configuration at startup is the easiest place in
+        // the system for a venue's key to reach a log file.
+        let mut config: PollConfig = toml::from_str(document()).expect("a valid table");
+        config.endpoint = ENDPOINT_WITH_A_KEY.to_string();
+        let rendered = format!("{config:?}");
+
+        assert!(!rendered.contains(SECRET), "{rendered}");
+        assert!(!rendered.contains("api_key"), "{rendered}");
+        assert!(!rendered.contains('?'), "{rendered}");
+        // And the half an operator needs is still there: which host, and
+        // whether the endpoint carried a query string at all - because a key
+        // that was meant to be there and is not looks identical, in every
+        // other field, to one that is.
+        assert!(rendered.contains("https://192.0.2.10:8443"), "{rendered}");
+        assert!(rendered.contains("query: true"), "{rendered}");
+        assert!(rendered.contains("30s"), "{rendered}");
+
+        config.endpoint = "http://192.0.2.10/catalogue".to_string();
+        let rendered = format!("{config:?}");
+        assert!(
+            rendered.contains("query: false"),
+            "an endpoint with no query string says so: {rendered}"
+        );
+    }
+
+    #[test]
+    fn an_endpoint_refused_at_load_is_named_without_its_query_string() {
+        // Both refusals render the endpoint, on the path a supervisor captures
+        // when the process will not start. Three shapes: the `https` endpoint
+        // a build with no TLS stack refuses, a scheme that is not HTTP at all,
+        // and the endpoint that names no scheme - which is the one where
+        // dropping everything from the path onwards is all there is to go on.
+        let mut config: PollConfig = toml::from_str(document()).expect("a valid table");
+        for endpoint in [
+            ENDPOINT_WITH_A_KEY,
+            "wss://192.0.2.10:8443/catalogue?api_key=not-a-real-secret",
+            "192.0.2.10:8443/catalogue?api_key=not-a-real-secret",
+        ] {
+            config.endpoint = endpoint.to_string();
+            let Err(error) = config.check() else {
+                // The `https` endpoint is accepted where this build carries a
+                // TLS stack, and then there is no message to read.
+                assert!(
+                    cfg!(feature = "tls") && endpoint == ENDPOINT_WITH_A_KEY,
+                    "`{endpoint}` is refused in this build"
+                );
+                continue;
+            };
+            // `Display` and `Debug`, because a `Result` a caller logged with
+            // `{:?}` renders the second and nothing else would have caught a
+            // variant that kept the endpoint in a field.
+            for rendered in [format!("{error}"), format!("{error:?}")] {
+                assert!(!rendered.contains(SECRET), "`{endpoint}`: {rendered}");
+                assert!(!rendered.contains("api_key"), "`{endpoint}`: {rendered}");
+                assert!(!rendered.contains("catalogue"), "`{endpoint}`: {rendered}");
+                assert!(
+                    rendered.contains("192.0.2.10:8443"),
+                    "the host is the half an operator needs: {rendered}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_authority_keeps_the_host_and_drops_the_query_string_and_the_userinfo() {
+        // Both halves matter: the host is what an operator needs, and a key in
+        // a query string or a password in a userinfo section is what this
+        // function exists to leave behind.
+        assert_eq!(authority_of(ENDPOINT_WITH_A_KEY), "https://192.0.2.10:8443");
+        assert_eq!(
+            authority_of("http://user:not-a-real-password@192.0.2.10/catalogue"),
+            "http://192.0.2.10"
+        );
+        // The endpoint that names no scheme is one this module refuses by
+        // name, so it is rendered too - and it is rendered under the same rule
+        // rather than whole.
+        assert_eq!(
+            authority_of("192.0.2.10:8443/catalogue?api_key=not-a-real-secret"),
+            "192.0.2.10:8443"
+        );
+        assert_eq!(authority_of("not-an-endpoint"), "not-an-endpoint");
+        // Each delimiter on its own, and this is the half a fixture with a
+        // path cannot say anything about: in
+        // `/catalogue?api_key=not-a-real-secret` the path is what the query
+        // hides behind, so dropping `?` from the set changes nothing and an
+        // endpoint whose key hangs straight off the authority is what proves
+        // the character is read.
+        assert_eq!(
+            authority_of("https://192.0.2.10:8443?api_key=not-a-real-secret"),
+            "https://192.0.2.10:8443"
+        );
+        assert_eq!(
+            authority_of("https://192.0.2.10:8443#not-a-real-secret"),
+            "https://192.0.2.10:8443"
+        );
+        assert_eq!(
+            authority_of("https://192.0.2.10:8443/catalogue"),
+            "https://192.0.2.10:8443"
+        );
     }
 }

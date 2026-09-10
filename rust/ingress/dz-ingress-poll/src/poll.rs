@@ -9,7 +9,7 @@ use dz_ingress_core::{
 };
 
 use crate::client::{Answer, PollClient, Request, RequestFailure, NOT_MODIFIED};
-use crate::config::{ConfigError, PollConfig};
+use crate::config::{authority_of, ConfigError, PollConfig};
 
 /// A polled [`Input`].
 ///
@@ -41,9 +41,11 @@ use crate::config::{ConfigError, PollConfig};
 pub struct PollInput {
     connection: ConnectionId,
     endpoint: String,
-    /// The scheme, host and port of `endpoint`, and nothing else. See the
-    /// `Debug` implementation for why the remainder is dropped, and note that every
-    /// error detail this type raises carries this and not the endpoint.
+    /// The scheme, host and port of `endpoint`, and nothing else, from
+    /// `authority_of` — which is this crate's one answer to *what of an
+    /// endpoint may be printed*, and lives beside the key it reads. See the
+    /// `Debug` implementation for why the remainder is dropped, and note that
+    /// every error detail this type raises carries this and not the endpoint.
     authority: String,
     poll_interval: Duration,
     client: Arc<dyn PollClient>,
@@ -140,28 +142,6 @@ impl PollInput {
             self.clock.sleep(Duration::from_nanos(nanos)).await;
         }
     }
-}
-
-/// The scheme, host and port of an endpoint, and nothing after them.
-///
-/// A string operation and not a URL parse, because what it is for is a log
-/// line and a `Debug`: the part that must not be printed is everything from the
-/// path onwards, and dropping it is the same operation whether or not what
-/// follows parses.
-fn authority_of(endpoint: &str) -> String {
-    let Some((scheme, after_scheme)) = endpoint.split_once("://") else {
-        return "?".to_string();
-    };
-    let host = after_scheme
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or_default()
-        // A userinfo section is a credential more often than not, and this
-        // string exists to be printed.
-        .rsplit('@')
-        .next()
-        .unwrap_or_default();
-    format!("{scheme}://{host}")
 }
 
 /// Prints the connection, the host and whether the endpoint is answering — and
@@ -307,8 +287,9 @@ impl Input for PollInput {
     ///   carries no receive time this transport knows better than the driver's
     ///   reading of its own clock.
     /// - **A response that says nothing changed is
-    ///   [`Received::Liveness`]** — a `304`, or a body identical to the last
-    ///   one delivered. See below, because this is load-bearing.
+    ///   [`Received::Liveness`]** — a `304` **to a request that offered a
+    ///   validator**, or a body identical to the last one delivered. See below,
+    ///   because this is load-bearing.
     /// - **The budget elapsing before the request falls due is
     ///   [`Received::Idle`]**, which is the driver's answer to give and not
     ///   this transport's.
@@ -325,6 +306,23 @@ impl Input for PollInput {
     /// that, and it asserts it as the guard still firing rather than as the
     /// value returned here — a `Liveness` that behaved like a payload would
     /// satisfy any test that only read the discriminant.
+    ///
+    /// # An unconditional `304` is not an unchanged response, on either path
+    ///
+    /// *Not modified* is an answer to a validator, and this transport offers
+    /// one only for a body it has already delivered — so a `304` to a request
+    /// that offered none says nothing about anything. The connect path refuses
+    /// exactly that reply (see [`connect_reason_for_status`]), and this one
+    /// refuses it too rather than reading a malfunctioning endpoint as a quiet
+    /// one: taken as liveness it is the failure the guard exists for arriving
+    /// where the guard cannot name it — nothing delivered, the connection held
+    /// up, and either a feed reporting health for ever where no `[ingress]
+    /// idle_timeout` is configured, or a `timeout` that blames a silent venue
+    /// for a reply this transport had already been told was wrong. It ends the
+    /// connection as [`disconnect_reason_for_status`] ends any other status the
+    /// endpoint should not have returned, and the driver reconnects: an
+    /// endpoint that does this on every request cannot deliver, and one that
+    /// did it once has a probe to answer before it is asked again.
     ///
     /// # An unchanged body is compared and not digested
     ///
@@ -393,6 +391,11 @@ impl Input for PollInput {
                 None => self.poll_interval,
             };
 
+            // Read before the answer can replace it: a `304` is *not modified*
+            // only in answer to a validator, and whether this request offered
+            // one is a property of the request rather than of the reply. See
+            // where it is used below.
+            let conditional = self.validator.is_some();
             let outcome = self.client.fetch(self.request(request_budget)).await;
 
             // Measured from the request going out rather than from its answer
@@ -419,6 +422,28 @@ impl Input for PollInput {
             })?;
 
             if status == NOT_MODIFIED {
+                if !conditional {
+                    // *Not modified* than what? This request asked nothing
+                    // about a version, so the answer is malformed rather than
+                    // quiet, and it is the same malformed answer the connect
+                    // path already refuses - see `connect_reason_for_status`.
+                    // Read as liveness it would be worse than a status the
+                    // endpoint should not have returned: the connection stays
+                    // up and nothing is ever delivered, which with no
+                    // `[ingress] idle_timeout` configured is a feed reporting
+                    // health for ever, and with one is a `timeout` blaming a
+                    // silent venue for a reply this transport had already been
+                    // told was wrong.
+                    return Err(IngressError::ended(
+                        disconnect_reason_for_status(status),
+                        format!(
+                            "{} answered status {status} to a request that offered no \
+                             validator, and there is nothing that answer can mean: this \
+                             transport offers one only for a body it has delivered",
+                            self.authority
+                        ),
+                    ));
+                }
                 // The endpoint proved it is alive and produced nothing for the
                 // adapter. Deliberately not a payload.
                 return Ok(Received::Liveness);
@@ -528,7 +553,10 @@ fn unusable(authority: &str, detail: &str) -> IngressError {
 /// `304` is here rather than being liveness, and that is not an oversight: the
 /// probe offers no validator, so an endpoint answering *not modified* to an
 /// unconditional request has answered something it should not have, and reading
-/// it as *alive with nothing new* would be reading a malfunction as health.
+/// it as *alive with nothing new* would be reading a malfunction as health. The
+/// receive path holds the same line for the same reply — see
+/// [`PollInput::recv`], where an unconditional `304` ends the connection rather
+/// than counting as liveness.
 const fn connect_reason_for_status(status: u16) -> ConnectFailureReason {
     match status {
         401 | 403 => ConnectFailureReason::Unauthorized,
@@ -572,6 +600,11 @@ const fn disconnect_reason(failure: &RequestFailure) -> Option<DisconnectReason>
 /// delay sequence, so a venue that has just told us to slow down is not
 /// reconnected against at the initial delay; and `auth_expired` is a credential
 /// to look at rather than an endpoint to look at.
+///
+/// `304` reaches this too, and only ever from a request that offered no
+/// validator — [`PollInput::recv`] answers the conditional one with liveness
+/// before it gets here. `remote_close` for it, which is what the four words
+/// have for an endpoint that answered something it should not have.
 const fn disconnect_reason_for_status(status: u16) -> DisconnectReason {
     match status {
         401 | 403 => DisconnectReason::AuthExpired,
@@ -720,7 +753,23 @@ mod tests {
             disconnect_reason_for_status(403),
             DisconnectReason::AuthExpired
         );
-        for status in [301, 302, 307, 308, 400, 404, 500, 502, 503] {
+        for status in [
+            301,
+            302,
+            307,
+            308,
+            400,
+            404,
+            500,
+            502,
+            503,
+            // The unconditional `304`, which reaches this function for the
+            // reason the connect side's list has it too: it is a reply an
+            // endpoint should not have made, and `remote_close` is what the
+            // four words have for one. The conditional `304` never gets here -
+            // `recv` answers that with liveness.
+            NOT_MODIFIED,
+        ] {
             assert_eq!(
                 disconnect_reason_for_status(status),
                 DisconnectReason::RemoteClose,
@@ -737,21 +786,5 @@ mod tests {
         for status in [100, 199, 300, 301, 302, NOT_MODIFIED, 400, 500] {
             assert!(!is_success(status), "{status}");
         }
-    }
-
-    #[test]
-    fn an_authority_keeps_the_host_and_drops_the_query_string_and_the_userinfo() {
-        // Both halves matter: the host is what an operator needs, and a key in
-        // a query string or a password in a userinfo section is what this
-        // function exists to leave behind.
-        assert_eq!(
-            authority_of("https://192.0.2.10:8443/catalogue?api_key=not-a-real-secret"),
-            "https://192.0.2.10:8443"
-        );
-        assert_eq!(
-            authority_of("http://user:not-a-real-password@192.0.2.10/catalogue"),
-            "http://192.0.2.10"
-        );
-        assert_eq!(authority_of("not-an-endpoint"), "?");
     }
 }
