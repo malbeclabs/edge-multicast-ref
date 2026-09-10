@@ -774,9 +774,29 @@ pub struct BookTop {
     /// because both read them off the same datagrams. An observer that has
     /// neither — one watching a venue's own upstream, where the channel is the
     /// operator's mapping and the `Instrument ID` is minted by the publisher's
-    /// registry — cannot compute this value at all, and joins on
-    /// `dz_recorder_events::book_key` instead, which is the two sides alone.
+    /// registry — cannot compute this value at all. It joins on [`Self::book_key`]
+    /// beside this column instead, which is the two sides alone and which this
+    /// row carries too, so that join has a right-hand side.
     pub state_key: u64,
+    /// The equivalence key **for two observers of one market**: a hash over the
+    /// two sides of this top and over nothing else.
+    ///
+    /// `dz_recorder_events::book_key` computes it, here and on the venue side of
+    /// the race, from that one function and never from a second implementation
+    /// in SQL or anywhere else — two hashes of one book state pair with nothing,
+    /// and the predicate that decides whether a side is absent is private in
+    /// that crate for exactly that reason.
+    ///
+    /// **Neither nullable nor provenance.** It says nothing about where the row
+    /// came from. It is a second hash of data the row already carries — the two
+    /// sides above — so every row can state it and no row is weakened to
+    /// accommodate a row of another kind.
+    ///
+    /// Zero on a row written before the column existed, which is the whole of
+    /// its cost: there is no honest value for a book nobody hashed, and no
+    /// DEFAULT that would be one. The cross-observer race therefore excludes
+    /// zero before it numbers anything, and `010` states why.
+    pub book_key: u64,
     /// 1 when this top came from applying a snapshot rather than from a
     /// message the market produced.
     ///

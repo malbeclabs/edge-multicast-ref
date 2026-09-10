@@ -77,22 +77,19 @@
 -- venue half of a pair and leave the publisher half as it is.
 --
 --
--- WHAT THIS FILE DOES NOT YET JOIN, AND WHY IT IS WRITTEN AS THOUGH IT WILL
+-- HOW THE PUBLISHER SIDE ENTERS THE PAIRING, WHICH IS NOT BY BEING NAMED IN IT
 --
--- The publisher side does **not** feed the pairing below yet, and that is a
--- statement about `book_top` rather than about this design. `book_top` stores
--- `state_key` and has no `book_key` column, and the two ways to bridge that are
--- both refused: a new column on `book_top` is what the design this file
--- implements declines to add, and a second fold written in SQL is the second
--- implementation `book_key`'s own comment forbids.
+-- Nothing below names an observation point. The pairing is an aggregate over the
+-- ordinal, exactly as `006`'s is, so two observations are a race, three of them
+-- are the same query, and a side enters by contributing rows rather than by this
+-- view learning its name — which is the one thing `observation` was declared an
+-- opaque string to avoid.
 --
--- What is written instead is the shape that admits the publisher side without
--- changing the answer. Nothing below names an observation point — the pairing is
--- an aggregate over the ordinal, exactly as `006`'s is — so two observations are
--- a race, three of them are the same query, and a publisher-side observation
--- enters it by contributing rows rather than by this view learning its name. The
--- day `book_top` carries a `book_key`, the change here is one branch of a union
--- and not a rewrite.
+-- So the pairing reads `recorder.feed_race_occurrence`, and that view is where a
+-- side is admitted. This file declares it with the venue branch alone, because
+-- the publisher side needs a `book_key` on `book_top` and this file does not add
+-- columns to that table. `010` adds the column and the second branch, which is
+-- one branch of a union and not a rewrite of anything here.
 --
 --
 -- THE ARGUMENTS THIS FILE CITES RATHER THAN RESTATES
@@ -554,7 +551,36 @@ SELECT
 FROM recorder.venue_book_top_settled;
 
 
--- 5. The race.
+-- 5. The occurrences the race reads, from every observation of a book.
+--
+-- One branch here, and the seam the pairing above is written against. A side
+-- enters the race by contributing rows to this view, so the pairing never learns
+-- a name and stays the same query for two observation points or ten.
+--
+-- The venue branch is the one this file can declare. The publisher branch needs
+-- `book_key` on `book_top`, which `010` adds along with the branch itself: the
+-- columns below are exactly what both sides hold, so that union's two halves
+-- line up by position and by type.
+--
+-- `env` IS CARRIED AND IS NOT GROUPED ON, the way it is a label on every table
+-- in `005` and in none of their keys: one database holds one environment, and a
+-- reader filtering by it wants the column rather than a key that restates it.
+CREATE OR REPLACE VIEW recorder.feed_race_occurrence AS
+SELECT
+    observation,
+    env,
+    feed,
+    symbol,
+    symbol_key,
+    book_key,
+    recv_ts,
+    price_exp,
+    qty_exp,
+    occurrence
+FROM recorder.venue_book_top_occurrence;
+
+
+-- 6. The race.
 --
 -- An aggregate over the ordinal and **not** a join between two named observation
 -- points, which is what keeps an unpaired occurrence visible and what keeps this
@@ -607,5 +633,5 @@ SELECT
     arraySort(groupUniqArray(symbol))      AS symbols,
     (uniqExact(symbol) = 1)                AS symbols_agree,
     (uniqExact(price_exp) = 1) AND (uniqExact(qty_exp) = 1) AS exponents_agree
-FROM recorder.venue_book_top_occurrence
+FROM recorder.feed_race_occurrence
 GROUP BY feed, symbol_key, book_key, occurrence;

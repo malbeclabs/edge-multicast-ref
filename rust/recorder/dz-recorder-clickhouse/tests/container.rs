@@ -15,15 +15,16 @@
 mod common;
 
 use common::{
-    batch, batch_on_role, cross_site_fixture, json_each_row, just_after_midnight_ns, midday_ns,
-    now_ns, race_fixture, venue_batched_record, venue_race_fixture, venue_rotation_boundary,
-    venue_rotation_collision, venue_top, ABSENT_BUT_A_SITE_OVERFLOWED, ABSENT_EVERYWHERE,
-    A_SITE_IS_UP_AND_SILENT, A_SITE_REUSED_THE_SEQUENCE, MISSING_FROM, MISSING_TO,
-    NOBODY_ELSE_HAS_LOADED, ONLY_A_CO_LOCATED_RECORDER, OUR_OWN_SCOPE_CANNOT_SUBTRACT,
-    PRESENT_AT_ANOTHER_SITE, REPEATED, VENUE_ACROSS_A_ROTATION, VENUE_BATCH_FIRST,
-    VENUE_BATCH_FIRST_SEQ, VENUE_BATCH_REPEATED, VENUE_BATCH_SECOND, VENUE_BATCH_SECOND_SEQ,
-    VENUE_EXPONENTS_DISAGREE, VENUE_INSIDE_ONE_ROTATION_TICK, VENUE_ONLY_ONE_SAW, VENUE_REPEATED,
-    VENUE_SYMBOLS_DISAGREE,
+    batch, batch_on_role, cross_observer_publisher_side, cross_observer_venue_side,
+    cross_site_fixture, json_each_row, just_after_midnight_ns, midday_ns, now_ns, race_fixture,
+    venue_batched_record, venue_race_fixture, venue_rotation_boundary, venue_rotation_collision,
+    venue_top, ABSENT_BUT_A_SITE_OVERFLOWED, ABSENT_EVERYWHERE, A_SITE_IS_UP_AND_SILENT,
+    A_SITE_REUSED_THE_SEQUENCE, BOTH_OBSERVERS_SAW, MISSING_FROM, MISSING_TO,
+    NOBODY_ELSE_HAS_LOADED, ONLY_A_CO_LOCATED_RECORDER, ONLY_THE_PUBLISHER_SAW,
+    OUR_OWN_SCOPE_CANNOT_SUBTRACT, PRESENT_AT_ANOTHER_SITE, REPEATED, VENUE_ACROSS_A_ROTATION,
+    VENUE_BATCH_FIRST, VENUE_BATCH_FIRST_SEQ, VENUE_BATCH_REPEATED, VENUE_BATCH_SECOND,
+    VENUE_BATCH_SECOND_SEQ, VENUE_EXPONENTS_DISAGREE, VENUE_INSIDE_ONE_ROTATION_TICK,
+    VENUE_ONLY_ONE_SAW, VENUE_REPEATED, VENUE_SYMBOLS_DISAGREE,
 };
 use dz_edge_core::PortRole;
 use dz_recorder_clickhouse::{migrations, schema, ClickHouseConfig, ClickHouseSink};
@@ -1757,5 +1758,184 @@ fn the_checked_in_venue_ddl_accepts_what_the_derivation_produces() {
         scratch.count("venue_book_top"),
         written,
         "a re-derivation of the book rows accumulated rather than replacing"
+    );
+}
+
+/// **A venue-side and a publisher-side observation of one book state pair.**
+///
+/// The assertion the whole column exists for, and the one nothing before `010`
+/// could make: `book_top` stored `state_key` only, and `state_key` folds the
+/// `Channel ID` and the `Instrument ID` into the accumulator before it folds a
+/// price — so the chain is one-way and the publisher side had nothing a venue
+/// side could join on. The race in `009` therefore paired venue-side rows
+/// against each other, which is a race between two recordings of one upstream
+/// and not a feed race at all.
+///
+/// The mutant this kills is the column not being written: with `book_key`
+/// absent from the publisher-side rows every one of them reads as zero, the
+/// exclusion drops them, and this pairing comes back with one observation
+/// instead of two — the venue's own, on its own. It also kills the union going
+/// missing, which is the same result by another route.
+#[test]
+fn a_venue_side_and_a_publisher_side_observation_of_one_book_pair() {
+    let mut scratch = Scratch::open("cross_observer_race");
+    let base = now_ns();
+
+    let venue = cross_observer_venue_side(base);
+    scratch.insert_venue_book_tops(&venue);
+    let publisher = cross_observer_publisher_side(base);
+    let tops = publisher.rows(Grain::BookTop) as u64;
+    scratch
+        .sink
+        .write_batch(publisher, NOW)
+        .expect("the publisher side loads");
+    assert_eq!(
+        scratch.count("book_top"),
+        tops,
+        "every fixture row is in the table, or nothing below is about the view"
+    );
+
+    // Two occurrences of the shared state, each seen by both sides. Not one,
+    // which is what an unwritten column or a missing union branch would give,
+    // and not four, which is what a `book_key` of zero letting every row into
+    // one equivalence class would.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT groupArray(observations) FROM (SELECT observations FROM \
+             {}.venue_book_top_race WHERE book_key = {BOTH_OBSERVERS_SAW} \
+             ORDER BY occurrence)",
+            scratch.database
+        )),
+        "[2,2]",
+        "one book state at two observation points is not a pair"
+    );
+
+    // And they are the two *kinds* of observation point, named. This is the
+    // assertion that cannot pass on two venue-side rows: a race that had paired
+    // the venue's own recordings would name one of them twice or neither.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT arrayStringConcat(any(observed_by), ',') FROM \
+             {}.venue_book_top_race WHERE book_key = {BOTH_OBSERVERS_SAW} \
+             AND occurrence = 1",
+            scratch.database
+        )),
+        "site-1/recorder-1,venue-a",
+        "the pair is not one venue-side point and one publisher-side point"
+    );
+
+    // The lead is the two milliseconds the fixture stated, so the ordinals
+    // lined up. A pairing that matched the wrong occurrences would produce
+    // twenty-two, which is a plausible number and a wrong one.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT groupUniqArray(round(lead_ms, 3)) FROM {}.venue_book_top_race \
+             WHERE book_key = {BOTH_OBSERVERS_SAW}",
+            scratch.database
+        )),
+        "[2]",
+        "the lead is not the one the fixture stated"
+    );
+
+    // The venue side led, every time. `first_observation` is what says which,
+    // and it is the reading a feed race exists to produce.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT groupUniqArray(first_observation) FROM {}.venue_book_top_race \
+             WHERE book_key = {BOTH_OBSERVERS_SAW}",
+            scratch.database
+        )),
+        "['venue-a']",
+        "the race does not say which side saw the state first"
+    );
+
+    // A state only the publisher side recorded is a row and not an absence.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT concat(toString(observations), ' ', toString(isNull(lead_ms)), ' ', \
+             arrayStringConcat(observed_by, ',')) FROM {}.venue_book_top_race \
+             WHERE book_key = {ONLY_THE_PUBLISHER_SAW}",
+            scratch.database
+        )),
+        "1 1 site-1/recorder-1",
+        "a state one side saw is a row with one observation and no lead"
+    );
+
+    // The row written before this column existed does not enter the race.
+    // Its key is a zero and no book hashes to a column nobody wrote, so it is
+    // excluded rather than reported as a state the venue never saw — which is
+    // the whole of the forward-only cost, and it is visible here.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT count() FROM {}.venue_book_top_race WHERE book_key = 0",
+            scratch.database
+        )),
+        "0",
+        "a row from before the column exists is racing"
+    );
+
+    // And the snapshot-anchored row consumed no ordinal, for `006`'s reason: a
+    // snapshot anchors a book and never times one. It is the third occurrence
+    // of the shared state at the publisher side, so had it entered, the pairing
+    // above would carry a third row with one observation.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT max(occurrence) FROM {}.publisher_book_top_occurrence \
+             WHERE book_key = {BOTH_OBSERVERS_SAW}",
+            scratch.database
+        )),
+        "2",
+        "three rows at this point, one of them an anchor, and two ordinals"
+    );
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT count() FROM {}.publisher_book_top_occurrence",
+            scratch.database
+        )),
+        "3",
+        "the anchored row and the unwritten key are excluded, and nothing else"
+    );
+}
+
+/// The pairing reads both branches of the union, and `006`'s pairing is untouched.
+///
+/// Two things one query each. A publisher-side occurrence now enters the
+/// cross-observer race, and the era-scoped pairing two recorders of one feed use
+/// still numbers on `state_key` within an era and still answers exactly as it
+/// did — because the second key is a second column and not a change to the
+/// first.
+#[test]
+fn the_cross_observer_race_did_not_move_the_pairing_two_recorders_use() {
+    let mut scratch = Scratch::open("cross_observer_untouched");
+    let base = now_ns();
+    scratch
+        .sink
+        .write_batch(race_fixture(base), NOW)
+        .expect("the load");
+
+    // `006`, unchanged: four occurrences of the repeated state, three of them
+    // seen by both observation points and the fourth by one.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT groupArray(observations) FROM (SELECT observations FROM \
+             {}.book_top_race WHERE state_key = {REPEATED} ORDER BY occurrence)",
+            scratch.database
+        )),
+        "[2,2,2,1]",
+        "the era-scoped pairing moved"
+    );
+
+    // And the collapsed view carries the new column, which is the statement
+    // `010` re-states it for: a view's `SELECT *` is expanded when the view is
+    // created, so on a deployment upgraded in file order `006` would have
+    // frozen the column list before the `ALTER` ran.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT count() FROM system.columns WHERE database = '{}' \
+             AND table = 'book_top_settled' AND name = 'book_key'",
+            scratch.database
+        )),
+        "1",
+        "the collapsed view does not carry the column the race reads from it"
     );
 }

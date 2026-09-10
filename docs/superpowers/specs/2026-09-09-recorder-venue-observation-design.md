@@ -92,7 +92,7 @@ That the join is a view and not a step in the derivation is the same decision th
 ## What this refuses
 
 - **No venue code in this repository**, in the recorder or anywhere else. The derivation takes an adapter; it does not contain one.
-- **No new column on `event` or `book_top`**, and no existing one made nullable. A nullable provenance column weakens every publisher-side row to accommodate a row of a different kind — and `UncertainReason::None` already states the rule: a column is not nullable when "a NULL invites a join that drops the row."
+- **No new column on `event` or `book_top`**, and no existing one made nullable. A nullable provenance column weakens every publisher-side row to accommodate a row of a different kind — and `UncertainReason::None` already states the rule: a column is not nullable when "a NULL invites a join that drops the row." *(Amended 2026-09-10 for one column that is neither nullable nor provenance. See [the amendment](#amendment-2026-09-10-book_key-on-book_top) below; this bullet is left as it was written, because what it argued is what it argued.)*
 - **No venue rows in the publisher-side tables.** The `observation` column stays what it is: which publisher-side observation point a row came from. Two recorders of one channel are two observations; a venue-side recording is a different table.
 - **No sentinel provenance.** Not `channel_id = 0`, not `dst_port = 0`, not `source_addr = 0.0.0.0`, not `sequence_number = 0`.
 - **No live `Input` in the capture path**, which is the request as stated.
@@ -105,6 +105,7 @@ That the join is a view and not a step in the derivation is the same decision th
 - **A venue's recorder binary is now a binary it assembles**, not one it runs. That is the same trade the publisher side already made, and the same argument answers it: a venue that must not be handed a `Channel ID` also must not be handed a row writer that fills one in.
 - **The comparison is coarser than the publisher-side race.** Keyed on the symbol rather than the `Instrument ID`, it cannot separate two instruments that shared a symbol across an era boundary, and it depends on the venue's symbol and the published symbol agreeing — which is a reference-data assertion, and worth being a column rather than an assumption, the way `exponents_agree` is.
 - **A venue-side observation cannot report loss.** It has no sequence space of its own that this repository defines, so a state the venue produced and nobody recorded is invisible on that side. The tier says what it does not know rather than filling it with a zero.
+- **The cross-observer race covers publisher-side rows written after the column that carries its key.** `book_key` on `book_top` is forward-only, for the reason the amendment below gives: there is no honest DEFAULT for a hash nobody computed.
 
 ## Decisions
 
@@ -114,9 +115,51 @@ That the join is a view and not a step in the derivation is the same decision th
 | The derivation is a library, driven by a venue's own binary | Decoding venue bytes needs the venue's adapter, and this repository links no venue — the publisher side's own arrangement |
 | Venue rows are their own grains | Eight non-nullable provenance columns on `event` and `book_top` are statements about a datagram, and a venue message is not one |
 | The race is a view on `(feed, symbol, book_key, occurrence)` | The only key both sides can compute. `state_key` is not it: that one hashes the `channel_id` and the `Instrument ID` before any price, and a venue side can name neither — the channel is the operator's mapping and the identifier is minted by the publisher's registry |
+| `book_top` carries `book_key` beside `state_key`, non-nullable | The join above has no right-hand side without it, and the chain from `state_key` is one-way. Neither nullable nor provenance, so the refusal above does not reach it — see the amendment |
 | Raw bytes, not the normalized-event record encoding, are what is archived | That encoding is downstream of the venue's decode; the evidence has to be what the venue sent |
 | The `observation` doc comments and the pairing migration header are corrected | They promise venue rows in a table whose columns and grouping key refuse them |
 
 ## Non-goals
 
 Attribution across sites. A second archive format for the publisher side. Any change to the four publisher-only grains. A venue-side conformance rule set — the rules are the feed spec's and a venue's upstream is not that feed.
+
+## Amendment, 2026-09-10: `book_key` on `book_top`
+
+This document decided the comparison as "a view joining venue-side occurrences to publisher-side occurrences on `(feed, symbol, book_key, occurrence)` — `book_key` and not `state_key`". Then, three sections later, it refused any new column on `book_top`.
+
+Those two decisions do not both hold. **`recorder.book_top` has no `book_key` column.** It stores `state_key`, and `state_key` is not convertible to `book_key`: it is `fold_top(eat(eat(KEY_OFFSET, &[channel_id]), &instrument_id.to_be_bytes()), top)`, so both identifiers go into the FNV-1a accumulator *before* the sides do and the chain is one-way. No arithmetic in SQL or anywhere else recovers one key from the other. So the publisher side had nothing to join on, and the headline deliverable could not be built.
+
+The venue half was built anyway, and it refused both workarounds correctly: a new column was what this document declined, and a second fold written in SQL is the second implementation `book_key`'s own comment forbids. Its race view therefore paired venue-side occurrences against each other — two recordings of one upstream, which is not a feed race.
+
+**The decision now taken is to add `book_key` to `book_top` as a non-nullable column, computed by the same `dz_recorder_events::book_key` function.**
+
+### Why the refusal does not reach it
+
+The refusal's letter covers this column. Its stated reason does not, and the reason is the part that was doing the work:
+
+> A nullable provenance column weakens every publisher-side row to accommodate a row of a different kind — and `UncertainReason::None` already states the rule: a column is not nullable when "a NULL invites a join that drops the row."
+
+That is an argument about a **nullable provenance** column, and `book_key` is neither.
+
+- **It is not nullable.** Every publisher-side row states it. No row is weakened, no NULL invites a join that drops a row, and nothing is made optional to accommodate a row of another kind.
+- **It is not provenance.** It says nothing about where the row came from — not the channel instance, not the site, not the sequence space, not the object. It is a second hash of data the row already carries: the two sides of the top it already stores, in the columns beside it. The eight columns this document defends are statements about a datagram; this one is a statement about a book.
+
+So the refusal stands as written, for what it was written about. What it was written about was inventing datagram provenance for a row that has none, and adding a hash of a row's own contents is not that. The bullet above is left as it was, with a pointer here, because a refusal quietly re-read to permit what it forbade is worse than a refusal amended in the open.
+
+The two things the refusal protects are both untouched. No column becomes nullable. And no venue-side row enters `book_top`: the venue side keeps its own grains and its own provenance, and what the column buys is a join key, not a place for a row of a different kind to sit.
+
+### What this costs, stated rather than implied
+
+**Rows written before the migration have no `book_key`, and there is no honest DEFAULT for them.** `derivation` could default to `archive` in an earlier migration because that was the truth about every row already written. There is no equivalent here: the value is a hash of a book, nobody computed it for those rows, and SQL may not compute it now — a second implementation of the fold would be a second key, and two hashes of one book state pair with nothing.
+
+So the column is forward-only. Those rows read as zero, and the cross-observer race excludes zero: a zero is a hash of no book, and left in, every pre-migration row of one feed and symbol would land in one equivalence class, pair with nothing on the venue side, and be reported as a state the venue never saw — evidence of loss manufactured rather than a count inflated. The exclusion costs one book in 2^64 per observation point, where a fold that really came out zero is indistinguishable from a column nobody wrote.
+
+**The cross-observer race therefore covers publisher-side rows written after the migration, not the whole window `book_top` keeps.** A forward-only column is normal. Implying otherwise is not, so this is in the migration header as well as here.
+
+### What else the amendment settles
+
+- **One function, never two.** The column is written by `dz_recorder_events::book_key` from the derivation, exactly as the venue side writes its own. The predicate that decides whether a side is absent stays private in that crate, and the migration set is checked to contain no hash of its own.
+- **`state_key` does not move.** It stays folded over the top as the wire stated it, zero source counts included, because rows carry that value. The two keys sit side by side and answer two questions: *the same state of this channel's instrument*, and *the same book*.
+- **The era-scoped pairing does not move either.** The publisher-side occurrences the cross-observer race reads are a second reading of the same rows under a second key, in their own view. What two recorders of one multicast feed pair on is unchanged, era, `state_key` and all.
+- **In no sort key.** A key carrying the fold would make one change in a top into two rows the moment a re-derivation computed the fold differently, which is the one thing a replacing engine must not be asked to tolerate.
+- **The doc comment that promised the join is corrected.** `BookTop::state_key` said a venue-side observer "joins on `dz_recorder_events::book_key` instead" — a join whose right-hand side did not exist. It can now say what is true, which is the fourth correction in the family this document already asked for.

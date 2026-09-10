@@ -626,14 +626,19 @@ pub fn book_key(top: &Top) -> u64 {
 /// multicast side reads a zero off the wire exactly where a venue-side observer
 /// holds `None`. Reading them alike here is what makes one book one key.
 ///
-/// **It is done for this key alone, because the two keys owe different things.**
-/// `state_key` has rows written under it: its value over given wire bytes may
-/// not move, and a `Quote` whose venue states no count is the commonest shape
-/// there is — normalising upstream of the derivation would move that value for
-/// every one of them. `book_key` is new and has no rows anywhere, so all it owes
-/// is that two observers of one book agree. Hence the fork: [`fold_top`] stays
-/// byte-for-byte the fold `state_key` has always been, and what changes is only
-/// the top this key hands it.
+/// **It is done for this key alone, because the two keys answer to different
+/// rows.** `state_key`'s value over given wire bytes may not move: rows loaded
+/// before this crate normalised anything carry it, and a `Quote` whose venue
+/// states no count is the commonest shape there is — normalising upstream of the
+/// derivation would move that value for every one of them. `book_key` answers to
+/// rows written on both sides of the race and to nothing older than itself, so
+/// what it owes is that two observers of one book agree. Hence the fork:
+/// [`fold_top`] is the fold `state_key` is defined as, byte for byte, and what
+/// changes is only the top this key hands it.
+///
+/// Both values are now written into rows — `book_top.book_key` beside
+/// `book_top.state_key`, and `venue_book_top.book_key` — so neither may move
+/// from here on, and a change to either fold is a change to a stored value.
 fn as_both_observers_state_it(top: &Top) -> Top {
     let as_stated = |side: Side| Side {
         source_count: side.source_count.filter(|count| *count != 0),

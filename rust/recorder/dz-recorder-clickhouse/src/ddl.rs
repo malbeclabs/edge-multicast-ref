@@ -24,6 +24,7 @@ const BOOK_TOP_PAIRING: &str = include_str!("../db/clickhouse/006_recorder_book_
 const CROSS_SITE: &str = include_str!("../db/clickhouse/007_recorder_cross_site.sql");
 const DERIVATION: &str = include_str!("../db/clickhouse/008_recorder_derivation.sql");
 const VENUE_OBSERVATION: &str = include_str!("../db/clickhouse/009_recorder_venue_observation.sql");
+const BOOK_KEY: &str = include_str!("../db/clickhouse/010_recorder_book_key.sql");
 
 /// Every migration, in the order they are applied.
 ///
@@ -32,7 +33,7 @@ const VENUE_OBSERVATION: &str = include_str!("../db/clickhouse/009_recorder_venu
 /// rather than by anything that loads rows. A loader that could grant itself
 /// privileges is the thing it exists to prevent.
 #[must_use]
-pub const fn migrations() -> [Migration; 9] {
+pub const fn migrations() -> [Migration; 10] {
     [
         Migration {
             name: "001_recorder_rows.sql",
@@ -69,6 +70,10 @@ pub const fn migrations() -> [Migration; 9] {
         Migration {
             name: "009_recorder_venue_observation.sql",
             sql: VENUE_OBSERVATION,
+        },
+        Migration {
+            name: "010_recorder_book_key.sql",
+            sql: BOOK_KEY,
         },
     ]
 }

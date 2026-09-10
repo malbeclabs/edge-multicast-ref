@@ -16,9 +16,9 @@
 use std::net::Ipv4Addr;
 
 use dz_recorder_rows::{
-    absent_if_sentinel, ConformanceFinding, Datagram, Derivation, DropScope, Era, Event,
+    absent_if_sentinel, BookTop, ConformanceFinding, Datagram, Derivation, DropScope, Era, Event,
     FindingVerdict, Grain, MessageTypeLabel, Nanos, PortRoleLabel, RecvTsKindLabel, RoleJoinRow,
-    SegmentCoverage, SequenceGap, Verdict,
+    SegmentCoverage, SequenceGap, UncertainReason, Verdict,
 };
 use serde_json::{json, Value};
 
@@ -321,6 +321,115 @@ fn what_is_not_known_is_null_and_never_zero() {
             "{column} must reach the column as null"
         );
     }
+}
+
+/// A top of book carries both keys, and the second one is not optional.
+///
+/// **`book_key` is the column this literal exists for.** It is the equivalence
+/// key an observer that never saw a datagram can compute, so it is the only
+/// thing a cross-observer race has to join on — and a row that reached the
+/// column store without it would leave that race pairing publisher-side
+/// occurrences against each other and reporting the result as a feed race.
+/// Renamed in the struct, it would serialise into a column that does not exist;
+/// dropped, it would be absent from the body and `JSONEachRow` would fill the
+/// column with the default of a hash, which is a value no book has.
+///
+/// `state_key` is beside it because the two answer two questions and both are
+/// stored: one is *the same state of this channel's instrument*, the other is
+/// *the same book*. A literal that held one would pass while the other was
+/// quietly gone.
+#[test]
+fn a_book_top_row_carries_exactly_the_book_top_columns() {
+    let row = BookTop {
+        recv_ts: Nanos(1_700_000_000_123_456_789),
+        send_ts: Nanos(1_700_000_000_000_000_001),
+        site: "site-1".to_owned(),
+        recorder: "recorder-1".to_owned(),
+        env: "test".to_owned(),
+        feed: "top-of-book".to_owned(),
+        observation: "site-1/recorder-1".to_owned(),
+        source_addr: SOURCE,
+        channel_id: 1,
+        dst_port: 40_000,
+        source_id: 1_000,
+        instrument_id: 11,
+        symbol: "AAA".to_owned(),
+        sequence_number: 42,
+        message_index: 0,
+        reset_count: 3,
+        segment_seq: 7,
+        bid_px_raw: Some(9_950),
+        bid_qty_raw: Some(12),
+        bid_source_count: Some(2),
+        ask_px_raw: Some(10_050),
+        ask_qty_raw: Some(7),
+        ask_source_count: None,
+        price_exp: -2,
+        qty_exp: 0,
+        state_key: 0x1fee_63ed_e3df_8b42,
+        book_key: 0xf7c2_e99f_a4f4_714d,
+        from_anchor: 0,
+        book_certain: 1,
+        uncertain_since: None,
+        uncertain_reason: UncertainReason::None,
+        object_key: KEY.to_owned(),
+        derivation: Derivation::Archive,
+    };
+
+    assert_eq!(
+        as_json(&row),
+        json!({
+            "recv_ts": 1_700_000_000_123_456_789u64,
+            "send_ts": 1_700_000_000_000_000_001u64,
+            "site": "site-1",
+            "recorder": "recorder-1",
+            "env": "test",
+            "feed": "top-of-book",
+            "observation": "site-1/recorder-1",
+            "source_addr": "192.0.2.10",
+            "channel_id": 1,
+            "dst_port": 40_000,
+            "source_id": 1_000,
+            "instrument_id": 11,
+            "symbol": "AAA",
+            "sequence_number": 42,
+            "message_index": 0,
+            "reset_count": 3,
+            "segment_seq": 7,
+            "bid_px_raw": 9_950,
+            "bid_qty_raw": 12,
+            "bid_source_count": 2,
+            "ask_px_raw": 10_050,
+            "ask_qty_raw": 7,
+            "ask_source_count": null,
+            "price_exp": -2,
+            "qty_exp": 0,
+            "state_key": 0x1fee_63ed_e3df_8b42u64,
+            "book_key": 0xf7c2_e99f_a4f4_714du64,
+            "from_anchor": 0,
+            "book_certain": 1,
+            "uncertain_since": null,
+            "uncertain_reason": "none",
+            "object_key": KEY,
+            "derivation": "archive",
+        })
+    );
+
+    // A bare integer and never a string: the column is a `UInt64`, and a hash
+    // quoted as text is refused by the server rather than coerced — which is the
+    // good case. The bad one is a reader that accepted it and compared a string
+    // to a number, finding no pair and reporting a quiet feed.
+    let json = as_json(&row);
+    assert!(
+        json.get("book_key").expect("the key is present").is_u64(),
+        "the book key reaches its column as a number"
+    );
+    assert_ne!(
+        json.get("book_key"),
+        json.get("state_key"),
+        "the two keys are two values, and a row that wrote one into both \
+         columns would pair a venue side against nothing"
+    );
 }
 
 #[test]

@@ -95,6 +95,12 @@ fn venue_sql() -> &'static str {
     sql_of("009_recorder_venue_observation.sql")
 }
 
+/// The book-only key on the publisher side, and the branch it feeds, which are
+/// `010`.
+fn book_key_sql() -> &'static str {
+    sql_of("010_recorder_book_key.sql")
+}
+
 /// One `CREATE OR REPLACE VIEW recorder.<name>` statement, up to the next one.
 fn view_body(sql: &'static str, name: &str) -> &'static str {
     let needle = format!("CREATE OR REPLACE VIEW recorder.{name} AS");
@@ -268,6 +274,13 @@ fn the_venue_race_is_keyed_on_the_book_and_never_on_the_state_key() {
         race.contains("GROUP BY feed, symbol_key, book_key, occurrence"),
         "the pairing does not group on the ordinal: {race}"
     );
+    // Over the seam a side is admitted at, and not over one side's own
+    // occurrences: the pairing never learns an observation point's name, so a
+    // side enters by contributing rows.
+    assert!(
+        race.contains("FROM recorder.feed_race_occurrence"),
+        "the pairing reads one side directly, so the other cannot enter: {race}"
+    );
     // An aggregate over the ordinal and not a join between two named points, so
     // that an occurrence one side saw survives as a row. `006` makes the
     // argument; this holds the shape.
@@ -326,6 +339,154 @@ fn the_venue_symbol_is_folded_once_and_the_fold_is_ascii_case() {
             "`{second_fold}` folds the symbol a second way, and two folds pair nothing"
         );
     }
+}
+
+/// **Both sides of the race reach the pairing, and by the same seam.**
+///
+/// The gap `010` closes: `book_top` stored `state_key` only, so the publisher
+/// side had nothing a venue side could join on and `009`'s race aggregated over
+/// venue-side occurrences alone — two recordings of one upstream raced against
+/// each other, which is not a feed race.
+///
+/// `009` declares the seam with one branch and `010` adds the other, so this
+/// holds both halves: the venue branch where it is declared, and the publisher
+/// branch where the column it reads is added.
+#[test]
+fn the_race_reads_a_seam_both_sides_of_the_race_reach() {
+    let venue = view_body(venue_sql(), "feed_race_occurrence");
+    assert!(
+        venue.contains("FROM recorder.venue_book_top_occurrence"),
+        "the venue side is not a branch of the seam: {venue}"
+    );
+
+    let seam = view_body(book_key_sql(), "feed_race_occurrence");
+    assert!(
+        seam.contains("FROM recorder.venue_book_top_occurrence"),
+        "the venue branch was dropped when the publisher branch arrived: {seam}"
+    );
+    assert!(
+        seam.contains("FROM recorder.publisher_book_top_occurrence"),
+        "the publisher side still does not enter the race: {seam}"
+    );
+    // `UNION ALL` and never `UNION`: a distinct-ing union collapses two
+    // observation points that saw one book at one instant into a single row,
+    // which is exactly the pair the race exists to report.
+    assert!(
+        seam.contains("UNION ALL"),
+        "the union de-duplicates, and a pair is what it would remove: {seam}"
+    );
+    assert!(
+        !seam.contains("SELECT *"),
+        "a union resolves its branches by position, so `*` would line one \
+         side's column up against the other's: {seam}"
+    );
+
+    // The publisher branch is numbered the way the venue branch is, on the
+    // book-only key and never on `state_key`: that one folds the `Channel ID`
+    // and the `Instrument ID` in before it folds a price, and a venue side can
+    // compute neither.
+    let occurrence = view_body(book_key_sql(), "publisher_book_top_occurrence");
+    assert!(
+        occurrence.contains("PARTITION BY observation, feed, upper(trimBoth(symbol)), book_key"),
+        "the ordinal is not numbered per observation on the book: {occurrence}"
+    );
+    assert!(
+        !occurrence
+            .lines()
+            .any(|line| line.contains("state_key") && !line.trim_start().starts_with("--")),
+        "the publisher branch keys on the observer-dependent key: {occurrence}"
+    );
+    // A snapshot anchors a book and never times one, and `WHERE` runs before a
+    // window — so the anchored row consumes no ordinal, which is `006`'s
+    // argument and applies here unchanged.
+    assert!(
+        occurrence.contains("WHERE from_anchor = 0"),
+        "a snapshot-anchored row takes an ordinal: {occurrence}"
+    );
+    // And a row written before the column existed carries a hash of no book.
+    // Left in, it would pair with nothing and be reported as a state the venue
+    // never saw, which manufactures evidence of loss rather than inflating a
+    // count.
+    assert!(
+        occurrence.contains("book_key != 0"),
+        "a row from before the column exists enters the race: {occurrence}"
+    );
+}
+
+/// **No migration folds a book state itself.**
+///
+/// `book_key` is written by `dz_recorder_events::book_key` and never by a second
+/// implementation, in SQL or anywhere else. The temptation is real and the file
+/// that adds the column is where it would land: the two sides are on the row, a
+/// hash function is one call away, and a fold written here would agree with the
+/// shared one on nothing — because the shared one reads a zero source count as
+/// the absence the top-of-book specification says it is, and the predicate that
+/// decides whether a side is absent is private in that crate for this reason.
+///
+/// Two hashes of one book state pair with nothing, and the failure is silent:
+/// the query runs, the rows are all there, and the race simply reports no pair,
+/// which is indistinguishable from a feed nobody was racing.
+#[test]
+fn no_migration_computes_a_book_key_of_its_own() {
+    for migration in migrations() {
+        for line in migration.sql.lines() {
+            if line.trim_start().starts_with("--") {
+                continue;
+            }
+            for fold in [
+                "cityHash64",
+                "sipHash64",
+                "sipHash128",
+                "farmHash64",
+                "farmFingerprint64",
+                "xxHash64",
+                "xxh3",
+                "murmurHash",
+                "MurmurHash",
+                "halfMD5",
+                "javaHash",
+                "metroHash64",
+                "wyHash64",
+            ] {
+                assert!(
+                    !line.contains(fold),
+                    "{}: a fold of its own, where the key is one function's: {line}",
+                    migration.name
+                );
+            }
+        }
+    }
+}
+
+/// The second key reaches no sort key, so deduplication does not move.
+///
+/// A `book_top` row is one change in one top of book. A key carrying the fold
+/// would make one change two rows the moment a re-derivation computed the fold
+/// differently — which is the one thing a replacing engine must not be asked to
+/// tolerate, and the rule `008` states for `derivation` in the same words.
+#[test]
+fn the_book_only_key_is_in_no_sort_key() {
+    for sql in [
+        market_data_sql(),
+        pairing_sql(),
+        venue_sql(),
+        book_key_sql(),
+    ] {
+        for clause in sort_key_clauses(sql) {
+            assert!(
+                !clause.contains("book_key") || clause.contains("PARTITION BY"),
+                "the book-only key reached a table's sort key: {clause}"
+            );
+        }
+    }
+    // And `005`'s key is the one it always was, stated as a literal so that a
+    // column appended to its tail fails here rather than being noticed when a
+    // dashboard starts double-counting.
+    assert_eq!(
+        sort_key(market_data_sql(), "book_top"),
+        "channel_id, instrument_id, recv_ts, sequence_number, message_index, observation",
+        "`book_top`'s sort key moved"
+    );
 }
 
 /// `symbols_agree` and `exponents_agree` are columns rather than assumptions.
@@ -799,6 +960,7 @@ fn provenance_is_on_every_grain_and_in_no_sort_key() {
         pairing_sql(),
         cross_site_sql(),
         venue_sql(),
+        book_key_sql(),
     ] {
         for clause in sort_key_clauses(sql) {
             clauses += 1;
@@ -811,12 +973,12 @@ fn provenance_is_on_every_grain_and_in_no_sort_key() {
     // The walker found something, and found all of it. A guard that reads more
     // than one line is a guard whose *reading* is now the thing that can
     // regress, and a walker that quietly went back to the first line would leave
-    // this green over exactly the hazard it was widened for. Twelve: the ten
-    // table sort keys, plus the bare `ORDER BY` in each of `006`'s and `009`'s
-    // window specifications, which are checked like any other because a column
-    // reaching a window's ordering is worth knowing about too. `003`'s is in a
-    // file this test does not read.
-    assert_eq!(clauses, 12, "the sort-key walker stopped finding clauses");
+    // this green over exactly the hazard it was widened for. Thirteen: the ten
+    // table sort keys, plus the bare `ORDER BY` in each of `006`'s, `009`'s and
+    // `010`'s window specifications, which are checked like any other because a
+    // column reaching a window's ordering is worth knowing about too. `003`'s is
+    // in a file this test does not read.
+    assert_eq!(clauses, 13, "the sort-key walker stopped finding clauses");
 }
 
 /// Every `ORDER BY` and `PRIMARY KEY` clause in one file, each as one string.
@@ -1389,17 +1551,47 @@ fn every_migration_splits_into_whole_statements() {
         );
     }
 
-    // The two tables, the TTL and the three views of `009`, and nothing split
+    // The two tables, the TTL and the four views of `009`, and nothing split
     // across two of them.
     let venue = migration("009_recorder_venue_observation.sql").statements();
-    assert_eq!(venue.len(), 6, "two tables, one TTL, three views");
+    assert_eq!(venue.len(), 7, "two tables, one TTL, four views");
     for view in [
         "venue_book_top_settled",
         "venue_book_top_occurrence",
+        "feed_race_occurrence",
         "venue_book_top_race",
     ] {
         assert_eq!(
             venue
+                .iter()
+                .filter(|s| s.contains(&format!("CREATE OR REPLACE VIEW recorder.{view} AS")))
+                .count(),
+            1,
+            "{view}"
+        );
+    }
+
+    // The `ALTER` and the three views of `010`, and nothing split across two of
+    // them. `book_top_settled` is among them deliberately: a view's `SELECT *`
+    // is expanded when the view is created, so on a deployment upgraded in file
+    // order `006` freezes that view's column list before the `ALTER` here runs.
+    let book_key = migration("010_recorder_book_key.sql").statements();
+    assert_eq!(book_key.len(), 4, "one ALTER, three views");
+    assert_eq!(
+        book_key
+            .iter()
+            .filter(|s| s.contains("ALTER TABLE recorder.book_top"))
+            .count(),
+        1,
+        "the column is added once"
+    );
+    for view in [
+        "book_top_settled",
+        "publisher_book_top_occurrence",
+        "feed_race_occurrence",
+    ] {
+        assert_eq!(
+            book_key
                 .iter()
                 .filter(|s| s.contains(&format!("CREATE OR REPLACE VIEW recorder.{view} AS")))
                 .count(),
@@ -1813,6 +2005,7 @@ mod fixtures {
             price_exp: 0,
             qty_exp: 0,
             state_key: 0,
+            book_key: 0,
             from_anchor: 0,
             book_certain: 1,
             uncertain_since: None,
