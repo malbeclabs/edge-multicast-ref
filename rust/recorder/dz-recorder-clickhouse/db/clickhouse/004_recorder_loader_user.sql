@@ -102,3 +102,13 @@ GRANT INSERT ON recorder.conformance_finding TO dz_loader;
 GRANT INSERT ON recorder.event TO dz_loader;
 GRANT INSERT ON recorder.instrument TO dz_loader;
 GRANT INSERT ON recorder.book_top TO dz_loader;
+-- The venue-side tables of `009`, granted here for the same reason.
+--
+-- The same account, deliberately. A venue-side derivation is a different process
+-- on a different host writing different tables, and a second account would be a
+-- second password to rotate for one bound nobody would set differently. The
+-- ceilings above are what matter and they are per user, so sharing the account
+-- shares the ceiling — which is the intent: two writers of one database should
+-- not be able to spend twice the day's reads between them.
+GRANT INSERT ON recorder.venue_book_top TO dz_loader;
+GRANT INSERT ON recorder.venue_object TO dz_loader;

@@ -380,6 +380,7 @@ dependencies = [
  "dz-recorder-core",
  "dz-recorder-replay",
  "dz-recorder-rows",
+ "dz-recorder-venue",
  "serde",
  "serde_json",
  "tempfile",

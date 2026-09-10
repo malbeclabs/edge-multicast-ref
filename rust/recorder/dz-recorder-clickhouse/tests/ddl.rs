@@ -14,6 +14,7 @@ use std::collections::BTreeSet;
 
 use dz_recorder_clickhouse::{migrations, schema, Migration};
 use dz_recorder_rows::Grain;
+use dz_recorder_venue::VenueGrain;
 
 /// The grains `001` declares: the envelope of a datagram, and what is derived
 /// from it.
@@ -27,6 +28,10 @@ const TRANSPORT_GRAINS: [Grain; 5] = [
 
 /// The grains `005` declares: what the messages said.
 const MARKET_DATA_GRAINS: [Grain; 3] = [Grain::Event, Grain::Instrument, Grain::BookTop];
+
+/// The grains `009` declares: what a venue's own upstream said, and the object
+/// it was read out of.
+const VENUE_GRAINS: [VenueGrain; 2] = [VenueGrain::BookTop, VenueGrain::Object];
 
 /// The columns one `CREATE TABLE recorder.<table>` block declares, in order.
 fn columns(sql: &str, table: &str) -> Vec<String> {
@@ -76,6 +81,11 @@ fn pairing_sql() -> &'static str {
 /// The cross-site views, which are `007`.
 fn cross_site_sql() -> &'static str {
     sql_of("007_recorder_cross_site.sql")
+}
+
+/// The venue-side tables and the race, which are `009`.
+fn venue_sql() -> &'static str {
+    sql_of("009_recorder_venue_observation.sql")
 }
 
 /// One `CREATE OR REPLACE VIEW recorder.<name>` statement, up to the next one.
@@ -148,6 +158,232 @@ fn every_column_has_a_field_and_every_field_has_a_column() {
         assert_eq!(
             declared, expected,
             "{grain}: the schema and the row type disagree about columns"
+        );
+    }
+
+    // The venue-side grains of `009`, held the same way and for the same
+    // reason. A separate loop because they are a different `Grain` enum in a
+    // different crate: the two sides of the race deliberately do not share a
+    // row vocabulary, which is the whole point of them being separate tables.
+    for (grain, fields) in [
+        (
+            VenueGrain::BookTop,
+            field_names(&fixtures::venue_book_top()),
+        ),
+        (VenueGrain::Object, field_names(&fixtures::venue_object())),
+    ] {
+        let declared: BTreeSet<String> = columns(venue_sql(), grain.table()).into_iter().collect();
+        assert_eq!(
+            declared, fields,
+            "{grain}: the schema and the row type disagree about columns"
+        );
+    }
+}
+
+/// **The venue-side tables declare no publisher provenance.**
+///
+/// The other half of `dz-recorder-venue`'s own column-name literal: that one
+/// holds the *row types*, and this holds the *DDL*, because a column can be
+/// added to a table without a field ever being added to a struct — and a column
+/// that exists reads as a column somebody may fill.
+///
+/// Each of these is a statement about a datagram on a channel instance, and a
+/// venue's upstream message is not one. The request this design answers asked
+/// for exactly them.
+#[test]
+fn the_venue_side_tables_declare_no_publisher_provenance() {
+    for grain in VENUE_GRAINS {
+        let declared = columns(venue_sql(), grain.table());
+        for column in [
+            "channel_id",
+            "instrument_id",
+            "sequence_number",
+            "reset_count",
+            "segment_seq",
+            "drop_delta",
+            "era",
+            "era_index",
+            // And the three the eight-column argument also names, which a
+            // reader reaching for "provenance" would add next.
+            "source_addr",
+            "dst_port",
+            "source_id",
+        ] {
+            assert!(
+                !declared.iter().any(|c| c == column),
+                "{grain} declares `{column}`: {declared:?}"
+            );
+        }
+    }
+
+    // The near miss, stated so that the absence above is not read as the venue's
+    // own numbering being thrown away. It is kept, under a name that says whose
+    // it is.
+    let book = columns(venue_sql(), VenueGrain::BookTop.table());
+    assert!(book.iter().any(|c| c == "upstream_seq"), "{book:?}");
+    assert!(book.iter().any(|c| c == "upstream_sid"), "{book:?}");
+}
+
+/// The race is keyed on `book_key`, and on `state_key` nowhere.
+///
+/// `state_key` folds the `Channel ID` and the `Instrument ID` into the
+/// accumulator before it folds a price, and a venue side can compute neither.
+/// Keyed on it this race would return zero pairs and read as each side missing
+/// every state the other saw.
+#[test]
+fn the_venue_race_is_keyed_on_the_book_and_never_on_the_state_key() {
+    let sql = venue_sql();
+    assert!(
+        !sql.lines()
+            .any(|line| line.contains("state_key") && !line.trim_start().starts_with("--")),
+        "a venue-side statement keys on `state_key`"
+    );
+
+    let occurrence = view_body(sql, "venue_book_top_occurrence");
+    assert!(
+        occurrence.contains("PARTITION BY observation, feed, upper(trimBoth(symbol)), book_key"),
+        "the ordinal is not numbered per observation on the book: {occurrence}"
+    );
+    assert!(
+        occurrence.contains("ORDER BY recv_ts"),
+        "the ordinal is not taken by arrival: {occurrence}"
+    );
+
+    let race = view_body(sql, "venue_book_top_race");
+    assert!(
+        race.contains("GROUP BY feed, symbol_key, book_key, occurrence"),
+        "the pairing does not group on the ordinal: {race}"
+    );
+    // An aggregate over the ordinal and not a join between two named points, so
+    // that an occurrence one side saw survives as a row. `006` makes the
+    // argument; this holds the shape.
+    assert!(
+        !race.contains("JOIN"),
+        "the pairing became a join, and an unpaired occurrence is now an absence: {race}"
+    );
+    assert!(
+        race.contains("uniqExact(observation)"),
+        "the observations are distinct points and not rows: {race}"
+    );
+}
+
+/// `symbols_agree` and `exponents_agree` are columns rather than assumptions.
+///
+/// The key covers the raw prices and leaves the exponents out, so a pair whose
+/// exponents disagree is two different prices wearing one key. And the key is on
+/// the symbol with its case folded, so a pair whose sides spell the instrument
+/// differently is a pair — which is only safe if the disagreement is visible.
+#[test]
+fn the_venue_race_carries_its_reference_data_assertions_as_columns() {
+    let race = view_body(venue_sql(), "venue_book_top_race");
+    assert!(
+        race.contains("(uniqExact(symbol) = 1)                AS symbols_agree"),
+        "the symbols are assumed rather than compared: {race}"
+    );
+    assert!(
+        race.contains("(uniqExact(price_exp) = 1) AND (uniqExact(qty_exp) = 1) AS exponents_agree"),
+        "the exponents are assumed rather than compared: {race}"
+    );
+    // The strings themselves, because "they disagree" without them is a finding
+    // nobody can act on.
+    assert!(
+        race.contains("arraySort(groupUniqArray(symbol))      AS symbols"),
+        "a disagreement is reported without the spellings: {race}"
+    );
+    // Null and never zero for a state one point saw: a zero would be a lead time
+    // nobody measured, entering every average as evidence that the paths tied.
+    assert!(
+        race.contains("if(uniqExact(observation) > 1,") && race.contains("NULL)"),
+        "an unpaired occurrence gets a measured lead: {race}"
+    );
+    // And no bound written here. It is a property of the two paths being
+    // compared, so it is the caller's predicate over `lead_ms`.
+    assert!(
+        !race.contains("abs(lead_ms)"),
+        "a bound on the difference was written into the view: {race}"
+    );
+}
+
+/// The collapse is applied once, beneath the numbering.
+///
+/// Numbering over an unmerged re-derivation counts one arrival as two
+/// occurrences, and the surplus copy then pairs with nothing — so a duplicate
+/// does not inflate a count here, it manufactures evidence of loss.
+#[test]
+fn the_venue_race_numbers_a_collapsed_table() {
+    let sql = venue_sql();
+    assert!(
+        view_body(sql, "venue_book_top_settled").contains("recorder.venue_book_top FINAL"),
+        "the collapse is not applied"
+    );
+    assert!(
+        view_body(sql, "venue_book_top_occurrence")
+            .contains("FROM recorder.venue_book_top_settled"),
+        "the ordinal is numbered over the raw table"
+    );
+    assert_eq!(
+        sql.matches("recorder.venue_book_top FINAL").count(),
+        1,
+        "written once, so nothing above pays for it twice"
+    );
+    assert!(
+        sql.contains("manufactures evidence of loss"),
+        "what a duplicate would do here is worse than a double count, and the \
+         file has to say so"
+    );
+}
+
+/// The venue-side retention keeps the same window the publisher side keeps.
+///
+/// A pair whose publisher half has expired is a state that reads as seen by one
+/// observation point only, which is the strongest thing this race says — so the
+/// two windows have to be the same one.
+#[test]
+fn the_venue_side_retention_matches_the_side_it_races() {
+    let sql = venue_sql();
+    assert!(
+        sql.contains("ALTER TABLE recorder.venue_book_top")
+            && sql.contains("MODIFY TTL toDateTime(recv_ts) + INTERVAL 30 DAY"),
+        "the venue side does not keep the window `book_top` keeps"
+    );
+    assert!(
+        market_data_sql().contains("MODIFY TTL toDateTime(recv_ts) + INTERVAL 30 DAY"),
+        "the two windows are no longer the same number"
+    );
+    // The object row is what says an object was derived at all, so expiring it
+    // turns a window nobody derived into one indistinguishable from a window
+    // that held nothing.
+    assert!(
+        !sql.contains("ALTER TABLE recorder.venue_object"),
+        "the row that says an object was derived must not expire"
+    );
+    assert!(
+        sql.contains("recorder.venue_object` has no TTL"),
+        "its absence of a TTL has to be stated, not inferred from the absence \
+         of a line"
+    );
+}
+
+/// This repository links no venue, and the schema names none.
+///
+/// The tables are the venue *side* of a race and are named for that, not for any
+/// venue: a table name carrying one would be a schema that has to change to
+/// record a second, and this repository would name the first.
+#[test]
+fn the_venue_side_tables_name_the_side_and_never_a_venue() {
+    for grain in VENUE_GRAINS {
+        assert!(
+            grain.table().starts_with("venue_"),
+            "{grain} does not say which side of the race it is"
+        );
+    }
+    // The loader account can write them, or the tables are unwritable and the
+    // grant would be found on the first insert of a deployment.
+    let user = migration("004_recorder_loader_user.sql").sql;
+    for grain in VENUE_GRAINS {
+        assert!(
+            user.contains(&format!("GRANT INSERT ON recorder.{}", grain.table())),
+            "{grain} cannot be written"
         );
     }
 }
@@ -426,6 +662,7 @@ fn provenance_is_on_every_grain_and_in_no_sort_key() {
         market_data_sql(),
         pairing_sql(),
         cross_site_sql(),
+        venue_sql(),
     ] {
         for clause in sort_key_clauses(sql) {
             clauses += 1;
@@ -438,12 +675,12 @@ fn provenance_is_on_every_grain_and_in_no_sort_key() {
     // The walker found something, and found all of it. A guard that reads more
     // than one line is a guard whose *reading* is now the thing that can
     // regress, and a walker that quietly went back to the first line would leave
-    // this green over exactly the hazard it was widened for. Nine: the eight
-    // table sort keys, plus the bare `ORDER BY` in `006`'s window specification,
-    // which is checked like any other because a column reaching a window's
-    // ordering is worth knowing about too. `003`'s is in a file this test does
-    // not read.
-    assert_eq!(clauses, 9, "the sort-key walker stopped finding clauses");
+    // this green over exactly the hazard it was widened for. Twelve: the ten
+    // table sort keys, plus the bare `ORDER BY` in each of `006`'s and `009`'s
+    // window specifications, which are checked like any other because a column
+    // reaching a window's ordering is worth knowing about too. `003`'s is in a
+    // file this test does not read.
+    assert_eq!(clauses, 12, "the sort-key walker stopped finding clauses");
 }
 
 /// Every `ORDER BY` and `PRIMARY KEY` clause in one file, each as one string.
@@ -567,6 +804,21 @@ fn every_table_is_partitioned_by_a_day() {
         market_data_sql().matches("PARTITION BY ").count(),
         MARKET_DATA_GRAINS.len(),
         "a table in 005 has no PARTITION BY, or one has two"
+    );
+
+    // `009`'s two, and the window specification's `PARTITION BY` which is not a
+    // table's — hence the count is taken over the `CREATE TABLE` half of the
+    // file alone rather than over the whole of it.
+    let tables = venue_sql()
+        .split("CREATE OR REPLACE VIEW")
+        .next()
+        .expect("the tables precede the views");
+    assert!(tables.contains("PARTITION BY toYYYYMMDD(recv_ts)"));
+    assert!(tables.contains("PARTITION BY toYYYYMMDD(recv_ts_start)"));
+    assert_eq!(
+        tables.matches("PARTITION BY ").count(),
+        VENUE_GRAINS.len(),
+        "a table in 009 has no PARTITION BY, or one has two"
     );
 }
 
@@ -1001,6 +1253,25 @@ fn every_migration_splits_into_whole_statements() {
         );
     }
 
+    // The two tables, the TTL and the three views of `009`, and nothing split
+    // across two of them.
+    let venue = migration("009_recorder_venue_observation.sql").statements();
+    assert_eq!(venue.len(), 6, "two tables, one TTL, three views");
+    for view in [
+        "venue_book_top_settled",
+        "venue_book_top_occurrence",
+        "venue_book_top_race",
+    ] {
+        assert_eq!(
+            venue
+                .iter()
+                .filter(|s| s.contains(&format!("CREATE OR REPLACE VIEW recorder.{view} AS")))
+                .count(),
+            1,
+            "{view}"
+        );
+    }
+
     // The five tables and the database, and nothing split across two of them.
     let statements = migration("001_recorder_rows.sql").statements();
     assert_eq!(statements.len(), 6, "one database and five tables");
@@ -1238,6 +1509,8 @@ fn field_names<T: serde::Serialize>(row: &T) -> BTreeSet<String> {
 mod fixtures {
     use std::net::Ipv4Addr;
 
+    use dz_recorder_venue::{RefusalCount, VenueBookTop, VenueObjectRow};
+
     use dz_recorder_rows::{
         BookTop, ConformanceFinding, Datagram, Derivation, DropScope, Era, Event, FindingVerdict,
         Instrument, MessageTypeLabel, Nanos, PortRoleLabel, RecvTsKindLabel, SegmentCoverage,
@@ -1245,6 +1518,53 @@ mod fixtures {
     };
 
     const ADDR: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 10);
+
+    pub fn venue_book_top() -> VenueBookTop {
+        VenueBookTop {
+            recv_ts: Nanos(1),
+            observation: "site-1/recorder-1".to_owned(),
+            env: "env".to_owned(),
+            feed: "feed".to_owned(),
+            connection: "mktdata".to_owned(),
+            upstream_sid: Some(1),
+            upstream_seq: Some(2),
+            symbol: "AAA".to_owned(),
+            price_exp: -2,
+            qty_exp: 0,
+            bid_px_raw: Some(1),
+            bid_qty_raw: Some(1),
+            bid_source_count: None,
+            ask_px_raw: Some(2),
+            ask_qty_raw: Some(1),
+            ask_source_count: None,
+            book_key: 3,
+            message_index: 4,
+            object_key: "object".to_owned(),
+            object_sha256: "sha".to_owned(),
+        }
+    }
+
+    pub fn venue_object() -> VenueObjectRow {
+        VenueObjectRow {
+            recv_ts_start: Nanos(1),
+            recv_ts_end: Nanos(2),
+            observation: "site-1/recorder-1".to_owned(),
+            env: "env".to_owned(),
+            feed: "feed".to_owned(),
+            object_key: "object".to_owned(),
+            object_sha256: "sha".to_owned(),
+            format_version: 1,
+            connections: vec!["mktdata".to_owned()],
+            message_count: 1,
+            refused_count: 1,
+            refusals: vec![RefusalCount("malformed".to_owned(), 1)],
+            event_count: 1,
+            unpriced_count: 0,
+            desync_count: 0,
+            book_top_count: 1,
+            instrument_count: 1,
+        }
+    }
 
     pub fn event() -> Event {
         Event {

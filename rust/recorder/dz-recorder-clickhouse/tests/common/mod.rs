@@ -22,6 +22,7 @@ use dz_recorder_rows::{
     derive_object, BookTop, Datagram, Derivation, DropScope, Era, Nanos, PortRoleLabel,
     RecvTsKindLabel, RoleJoinRow, RowBatch, SegmentCoverage, SequenceGap, UncertainReason, Verdict,
 };
+use dz_recorder_venue::VenueBookTop;
 
 /// One request, as the sink issued it.
 #[derive(Debug, Clone)]
@@ -935,4 +936,165 @@ pub fn cross_site_fixture(base: u64) -> Vec<RowBatch> {
     );
 
     batches
+}
+
+// ---------------------------------------------------------------------------
+// The venue side of the race, for `009`.
+// ---------------------------------------------------------------------------
+
+/// The book state that repeats, on the venue side.
+///
+/// `book_key` and not `state_key`: the venue side can compute neither the
+/// operator's channel mapping nor a publisher-minted `Instrument ID`, so the
+/// key is the two sides of the top and nothing else.
+pub const VENUE_REPEATED: u64 = 5_555_555_555_555_555_555;
+/// A state only one observation point saw.
+pub const VENUE_ONLY_ONE_SAW: u64 = 4_444_444_444_444_444_444;
+/// A state both saw, and whose exponents disagree between them.
+pub const VENUE_EXPONENTS_DISAGREE: u64 = 3_333_333_333_333_333_333;
+/// A state both saw, and whose symbol is spelled two ways.
+pub const VENUE_SYMBOLS_DISAGREE: u64 = 2_222_222_222_222_222_222;
+
+/// One venue-side top of book, as an observation point wrote it down.
+///
+/// The stamps are relative to *now*, for the reason [`top`] gives: `009` gives
+/// `venue_book_top` the same thirty-day TTL `book_top` has, and a row-level TTL
+/// is applied as the part is written — so a fixture stamped years in the past
+/// would be deleted in the step that inserted it, with the insert answered `200`
+/// and every count coming back zero.
+#[allow(clippy::too_many_arguments)]
+pub fn venue_top(
+    observation: &str,
+    symbol: &str,
+    price_exp: i8,
+    base: u64,
+    offset_ms: u64,
+    book_key: u64,
+    message_index: u64,
+) -> VenueBookTop {
+    VenueBookTop {
+        recv_ts: Nanos(base + offset_ms * 1_000_000),
+        observation: observation.to_owned(),
+        env: "test".to_owned(),
+        feed: "top-of-book".to_owned(),
+        connection: "mktdata".to_owned(),
+        upstream_sid: Some(1),
+        upstream_seq: Some(1_000 + message_index),
+        symbol: symbol.to_owned(),
+        price_exp,
+        qty_exp: 0,
+        bid_px_raw: Some(10_050),
+        bid_qty_raw: Some(3),
+        bid_source_count: None,
+        ask_px_raw: Some(10_060),
+        ask_qty_raw: Some(4),
+        ask_source_count: None,
+        book_key,
+        message_index,
+        object_key: format!("venue/{observation}/object-{message_index}.dzus"),
+        object_sha256: "b".repeat(64),
+    }
+}
+
+/// The venue-side race fixture.
+///
+/// Four cases in one load, each on its own `book_key` so that a failing
+/// assertion names its case rather than a row number:
+///
+/// - **a state that repeats**, three times at both observation points two
+///   milliseconds apart, and a fourth time at one of them only. What an `ASOF
+///   JOIN` gets wrong, and what the ordinal makes one-to-one.
+/// - **a state only one point saw**, which must survive as a row with
+///   `observations = 1` and a null `lead_ms` rather than being dropped.
+/// - **two points whose exponents disagree**, which is two different prices
+///   wearing one key.
+/// - **two points that spell the symbol differently**, which is the
+///   reference-data assertion the key folds and the pairing reports.
+pub fn venue_race_fixture(base: u64) -> Vec<VenueBookTop> {
+    let mut rows = Vec::new();
+    for (index, offset) in [10u64, 30, 50].iter().enumerate() {
+        let index = index as u64;
+        rows.push(venue_top(
+            "a",
+            "AAA",
+            -2,
+            base,
+            *offset,
+            VENUE_REPEATED,
+            index,
+        ));
+        // Two milliseconds behind, every time. A wrong pairing is then
+        // arithmetically visible rather than merely different: the lead comes
+        // out a multiple of twenty.
+        rows.push(venue_top(
+            "b",
+            "AAA",
+            -2,
+            base,
+            offset + 2,
+            VENUE_REPEATED,
+            index,
+        ));
+    }
+    // The fourth occurrence, at one point only.
+    rows.push(venue_top("a", "AAA", -2, base, 70, VENUE_REPEATED, 3));
+
+    // A state nobody at `b` ever saw.
+    rows.push(venue_top("a", "BBB", -2, base, 90, VENUE_ONLY_ONE_SAW, 4));
+
+    // The same book at both points, at two exponents.
+    rows.push(venue_top(
+        "a",
+        "CCC",
+        -2,
+        base,
+        110,
+        VENUE_EXPONENTS_DISAGREE,
+        5,
+    ));
+    rows.push(venue_top(
+        "b",
+        "CCC",
+        -4,
+        base,
+        112,
+        VENUE_EXPONENTS_DISAGREE,
+        5,
+    ));
+
+    // The same instrument, spelled two ways.
+    rows.push(venue_top(
+        "a",
+        "DDD",
+        -2,
+        base,
+        130,
+        VENUE_SYMBOLS_DISAGREE,
+        6,
+    ));
+    rows.push(venue_top(
+        "b",
+        "ddd",
+        -2,
+        base,
+        132,
+        VENUE_SYMBOLS_DISAGREE,
+        6,
+    ));
+    rows
+}
+
+/// The rows as a `JSONEachRow` body.
+///
+/// Written straight rather than through a `RowSink`, because there is no venue
+/// `RowSink` in this crate and there must not be one: this crate is one sink
+/// over the publisher side's grains, and a venue's own binary composes its
+/// writer. What is under test here is the *view*, and the rows are its input —
+/// so they go in the way the DDL declares them, from the row type whose field
+/// names `tests/ddl.rs` already holds against that DDL.
+pub fn json_each_row<T: serde::Serialize>(rows: &[T]) -> String {
+    rows.iter()
+        .map(|row| serde_json::to_string(row).expect("a row serialises"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }

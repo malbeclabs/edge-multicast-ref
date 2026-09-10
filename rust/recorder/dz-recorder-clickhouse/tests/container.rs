@@ -15,15 +15,18 @@
 mod common;
 
 use common::{
-    batch, batch_on_role, cross_site_fixture, just_after_midnight_ns, midday_ns, now_ns,
-    race_fixture, ABSENT_BUT_A_SITE_OVERFLOWED, ABSENT_EVERYWHERE, A_SITE_IS_UP_AND_SILENT,
-    A_SITE_REUSED_THE_SEQUENCE, MISSING_FROM, MISSING_TO, NOBODY_ELSE_HAS_LOADED,
-    ONLY_A_CO_LOCATED_RECORDER, OUR_OWN_SCOPE_CANNOT_SUBTRACT, PRESENT_AT_ANOTHER_SITE, REPEATED,
+    batch, batch_on_role, cross_site_fixture, json_each_row, just_after_midnight_ns, midday_ns,
+    now_ns, race_fixture, venue_race_fixture, venue_top, ABSENT_BUT_A_SITE_OVERFLOWED,
+    ABSENT_EVERYWHERE, A_SITE_IS_UP_AND_SILENT, A_SITE_REUSED_THE_SEQUENCE, MISSING_FROM,
+    MISSING_TO, NOBODY_ELSE_HAS_LOADED, ONLY_A_CO_LOCATED_RECORDER, OUR_OWN_SCOPE_CANNOT_SUBTRACT,
+    PRESENT_AT_ANOTHER_SITE, REPEATED, VENUE_EXPONENTS_DISAGREE, VENUE_ONLY_ONE_SAW,
+    VENUE_REPEATED, VENUE_SYMBOLS_DISAGREE,
 };
 use dz_edge_core::PortRole;
 use dz_recorder_clickhouse::{migrations, schema, ClickHouseConfig, ClickHouseSink};
 use dz_recorder_replay::Fault;
-use dz_recorder_rows::{Grain, RowSink};
+use dz_recorder_rows::{Grain, Nanos, RowSink};
+use dz_recorder_venue::{RefusalCount, VenueBookTop, VenueObjectRow};
 
 /// One instant for every sink call in this file.
 ///
@@ -167,6 +170,24 @@ impl Scratch {
              WHERE site = 'one' AND recorder = 'recorder-one' AND channel_id = {case}",
             self.database
         ))
+    }
+
+    /// The venue-side book rows, as the derivation's row type states them.
+    ///
+    /// Straight `JSONEachRow` and not through a `RowSink`, because there is no
+    /// venue sink in this crate and there must not be one: this crate is one
+    /// sink over the publisher side's grains, and a venue's own binary composes
+    /// its writer. What is under test here is the view, and these are its input
+    /// — inserted from the row type whose field names `tests/ddl.rs` already
+    /// holds against this file's `CREATE TABLE`.
+    fn insert_venue_book_tops(&self, rows: &[VenueBookTop]) {
+        self.sink
+            .statement(&format!(
+                "INSERT INTO {}.venue_book_top FORMAT JSONEachRow\n{}",
+                self.database,
+                json_each_row(rows)
+            ))
+            .expect("the venue rows land");
     }
 
     fn count(&self, table: &str) -> u64 {
@@ -1181,5 +1202,261 @@ fn the_cross_site_answer_outlives_the_base_rows_it_was_drawn_from() {
         scratch.cross_site(ABSENT_EVERYWHERE, "verdict"),
         "publisher",
         "while the finding is unchanged, because it never rested on them"
+    );
+}
+
+/// **A venue-side state that repeats pairs one to one.**
+///
+/// The venue half of `006`'s own test, and the mutant it kills is the same one:
+/// replace the ordinal with an `ASOF JOIN` and this fails with plausible, biased
+/// lead times. `ASOF` selects the nearest right-hand row independently for each
+/// left-hand row, with no notion of consuming a match, so when a state repeats
+/// quickly several occurrences at one observation point all pair with the same
+/// occurrence at the other. The numbers that come out are not wrong in a way
+/// anyone notices — they are derived from counting one arrival several times.
+///
+/// Keyed on `book_key` and not `state_key`. That one folds the `Channel ID` and
+/// the `Instrument ID` in before it folds a price, and a venue side can compute
+/// neither: keyed on it this query would return zero pairs and read as each side
+/// missing every state the other saw.
+#[test]
+fn a_venue_state_that_repeats_pairs_one_to_one() {
+    let scratch = Scratch::open("venue_pairing");
+    let base = now_ns();
+    let rows = venue_race_fixture(base);
+    let written = rows.len() as u64;
+    scratch.insert_venue_book_tops(&rows);
+    assert_eq!(
+        scratch.count("venue_book_top"),
+        written,
+        "every fixture row is in the table, or nothing below is about the view"
+    );
+
+    // Four occurrences of the repeated state, three seen by both observation
+    // points and the fourth by one. Not three, which is what dropping the
+    // unpaired row would give, and not six, which is what pairing by proximity
+    // would.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT groupArray(observations) FROM (SELECT observations FROM \
+             {}.venue_book_top_race WHERE book_key = {VENUE_REPEATED} ORDER BY occurrence)",
+            scratch.database
+        )),
+        "[2,2,2,1]",
+        "a repeating state pairs one-to-one, and the fourth occurrence is unpaired"
+    );
+
+    // Every pair is the two milliseconds the fixture stated. A pairing that
+    // matched the wrong occurrences would still produce numbers, and they would
+    // be multiples of twenty.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT groupUniqArray(round(lead_ms, 3)) FROM {}.venue_book_top_race \
+             WHERE book_key = {VENUE_REPEATED} AND observations = 2",
+            scratch.database
+        )),
+        "[2]",
+        "the lead is the one the fixture stated, so the ordinals lined up"
+    );
+
+    // Unpaired means visible and *unmeasured*. A zero lead would be a
+    // measurement nobody made, and it would enter every average over the column
+    // as evidence that the two paths tied.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT concat(toString(count()), ' ', arrayStringConcat(any(observed_by), ',')) \
+             FROM {}.venue_book_top_race WHERE book_key = {VENUE_REPEATED} \
+             AND observations = 1 AND isNull(lead_ms)",
+            scratch.database
+        )),
+        "1 a",
+        "the unpaired occurrence is a row that names the point that saw it"
+    );
+
+    // A state only one point ever saw is a row and not an absence: it usually
+    // means the other point missed a state, which is the fact worth seeing. A
+    // join would have dropped it.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT concat(toString(observations), ' ', toString(isNull(lead_ms))) FROM \
+             {}.venue_book_top_race WHERE book_key = {VENUE_ONLY_ONE_SAW}",
+            scratch.database
+        )),
+        "1 1",
+        "a state one side saw is a row with observations = 1 and no lead"
+    );
+
+    // The reference-data assertions, as columns. The key covers the raw prices
+    // and leaves the exponents out, so a pair whose exponents disagree is two
+    // different prices wearing one key — visible rather than averaged.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT concat(toString(observations), ' ', toString(exponents_agree), ' ', \
+             toString(symbols_agree)) FROM {}.venue_book_top_race \
+             WHERE book_key = {VENUE_EXPONENTS_DISAGREE}",
+            scratch.database
+        )),
+        "2 0 1",
+        "the exponents disagree and the pair does not say so"
+    );
+
+    // And the symbol, whose case the key folds so that a pair exists at all —
+    // which is only safe because the disagreement is a column carrying both
+    // spellings.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT concat(toString(observations), ' ', toString(symbols_agree), ' ', \
+             arrayStringConcat(symbols, ',')) FROM {}.venue_book_top_race \
+             WHERE book_key = {VENUE_SYMBOLS_DISAGREE}",
+            scratch.database
+        )),
+        "2 0 DDD,ddd",
+        "two spellings of one instrument did not pair, or did not report the \
+         disagreement"
+    );
+
+    // Every occurrence at each point is numbered, and nothing is excluded from
+    // the numbering: there is no anchored row on this side to exclude.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT count() FROM {}.venue_book_top_occurrence",
+            scratch.database
+        )),
+        written.to_string(),
+        "a row was dropped from the numbering"
+    );
+}
+
+/// Re-deriving the same object does not manufacture evidence of loss.
+///
+/// `venue_book_top` is a `ReplacingMergeTree` and a re-derivation after an
+/// adapter fix is a replace, so between the second load and the merge that
+/// follows it one arrival is in the table twice. Numbered without the collapse,
+/// the duplicate becomes a second occurrence — and the surplus at each point
+/// then pairs with the surplus at the other while the *last* one at each pairs
+/// with nothing. So a re-derivation would not merely inflate a count: it would
+/// report states both points saw as states one of them missed.
+#[test]
+fn a_venue_re_derivation_before_the_merge_does_not_invent_occurrences() {
+    let scratch = Scratch::open("venue_pairing_reload");
+    let base = now_ns();
+    scratch.insert_venue_book_tops(&venue_race_fixture(base));
+    scratch.insert_venue_book_tops(&venue_race_fixture(base));
+
+    // Deliberately no `OPTIMIZE`: the window between a re-load and the merge is
+    // exactly the window this is about, and a test that merged first would
+    // assert the engine's behaviour rather than the view's.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT groupArray(observations) FROM (SELECT observations FROM \
+             {}.venue_book_top_race WHERE book_key = {VENUE_REPEATED} ORDER BY occurrence)",
+            scratch.database
+        )),
+        "[2,2,2,1]",
+        "the collapse is applied at read time, so a re-derivation changes nothing"
+    );
+}
+
+/// The venue-side tables take what the derivation's row types state.
+///
+/// The thing no literal-based test can prove: a `JSONEachRow` body is accepted
+/// or refused by the server and by nobody else, so a column type that could not
+/// hold a value the row type admits is only found here.
+#[test]
+fn the_checked_in_venue_ddl_accepts_what_the_derivation_produces() {
+    let scratch = Scratch::open("venue_load");
+    let base = now_ns();
+
+    // The book rows, including the absences: a source count the venue did not
+    // state, and a top with one side gone.
+    let mut rows = venue_race_fixture(base);
+    rows.push(VenueBookTop {
+        bid_px_raw: None,
+        bid_qty_raw: None,
+        bid_source_count: None,
+        ask_source_count: Some(0),
+        upstream_sid: None,
+        upstream_seq: None,
+        ..venue_top("a", "EEE", -8, base, 150, 11, 7)
+    });
+    let written = rows.len() as u64;
+    scratch.insert_venue_book_tops(&rows);
+    assert_eq!(scratch.count("venue_book_top"), written);
+
+    // A NULL is a NULL and not a zero, which is the whole reason those columns
+    // are nullable: a zero source count is the top-of-book field's own spelling
+    // of *unavailable* on the other side of the race.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT countIf(isNull(bid_px_raw)) FROM {}.venue_book_top FINAL",
+            scratch.database
+        )),
+        "1"
+    );
+
+    // And the object row, with its refusals by reason.
+    let object = VenueObjectRow {
+        recv_ts_start: Nanos(base),
+        recv_ts_end: Nanos(base + 150_000_000),
+        observation: "a".to_owned(),
+        env: "test".to_owned(),
+        feed: "top-of-book".to_owned(),
+        object_key: "venue/a/object-0.dzus".to_owned(),
+        object_sha256: "b".repeat(64),
+        format_version: 1,
+        connections: vec!["mktdata".to_owned()],
+        message_count: 40,
+        refused_count: 3,
+        refusals: vec![
+            RefusalCount("malformed".to_owned(), 2),
+            RefusalCount("truncated".to_owned(), 1),
+        ],
+        event_count: 37,
+        unpriced_count: 1,
+        desync_count: 0,
+        book_top_count: 12,
+        instrument_count: 4,
+    };
+    scratch
+        .sink
+        .statement(&format!(
+            "INSERT INTO {}.venue_object FORMAT JSONEachRow\n{}",
+            scratch.database,
+            json_each_row(std::slice::from_ref(&object))
+        ))
+        .expect("the object row lands");
+    assert_eq!(scratch.count("venue_object"), 1);
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT arrayStringConcat(arrayMap(r -> concat(r.1, '=', toString(r.2)), refusals), ',') \
+             FROM {}.venue_object FINAL",
+            scratch.database
+        )),
+        "malformed=2,truncated=1",
+        "the refusals did not reach their column as (reason, count)"
+    );
+
+    // Re-deriving one object replaces its rows rather than doubling them, which
+    // is the acceptance criterion the whole archive shape exists for.
+    scratch
+        .sink
+        .statement(&format!(
+            "INSERT INTO {}.venue_object FORMAT JSONEachRow\n{}",
+            scratch.database,
+            json_each_row(std::slice::from_ref(&object))
+        ))
+        .expect("the second derivation lands");
+    scratch.merge("venue_object");
+    assert_eq!(
+        scratch.count("venue_object"),
+        1,
+        "a re-derivation accumulated rather than replacing"
+    );
+    scratch.insert_venue_book_tops(&rows);
+    scratch.merge("venue_book_top");
+    assert_eq!(
+        scratch.count("venue_book_top"),
+        written,
+        "a re-derivation of the book rows accumulated rather than replacing"
     );
 }
