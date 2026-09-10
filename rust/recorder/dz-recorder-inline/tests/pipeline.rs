@@ -260,14 +260,35 @@ fn a_quiet_window_spends_no_window_sequence_number() {
     // window both opens and closes inside the silence, and the assertion below
     // fails on a precondition the fixture never established rather than on the
     // property it is about.
-    let waited = Instant::now();
-    while pipeline.counters().windows_empty() == 0 {
-        assert!(
-            waited.elapsed() < Duration::from_secs(10),
-            "no window closed empty in 10s, which is this fixture failing to arrange \
-             itself rather than the property under test"
-        );
-        std::thread::sleep(Duration::from_millis(20));
+    //
+    // Two waits, in that order, because the window this fixture needs is one
+    // that closed empty *after* the burst. A wait on `windows_empty()` alone is
+    // also satisfied by the window that was open when `start` returned: that
+    // one closes on age an `interval` later whether or not the offers above have
+    // run yet, so the very slow host this wait exists for is the host that
+    // leaves it empty — and the wait would then fall through before the burst
+    // had a window of its own, both bursts landing in one window with no
+    // silence between them. `windows_derived()` rising is the burst's own window
+    // closed and derived; only from there does a rise in `windows_empty()`
+    // describe the silence rather than what preceded the burst.
+    {
+        let counters = pipeline.counters();
+        let wait_began = Instant::now();
+        let settle = |unmet: &str| {
+            assert!(
+                wait_began.elapsed() < Duration::from_secs(10),
+                "{unmet} in 10s, which is this fixture failing to arrange itself rather \
+                 than the property under test"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        while counters.windows_derived() == 0 {
+            settle("the burst's own window did not close and derive");
+        }
+        let empty_before_silence = counters.windows_empty();
+        while counters.windows_empty() == empty_before_silence {
+            settle("no window closed empty after the burst's own window");
+        }
     }
     for dg in &sent[10..] {
         assert_eq!(tx.offer(&dg.as_recorded()), Offered::Accepted);
