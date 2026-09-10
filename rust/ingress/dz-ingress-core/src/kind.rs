@@ -61,7 +61,8 @@ impl Kind {
     /// usable in a `thiserror` format string. A hand-written list can disagree
     /// with the match beside it, in both directions: a variant added without a
     /// token here, and a variant renamed without moving its token. Both are
-    /// caught by `the_token_list_in_the_error_message_is_the_token_set`, which
+    /// caught by this module's own
+    /// `tests::the_token_list_in_the_error_message_is_the_token_set`, which
     /// pins this against `ALL` including the order.
     pub const TOKEN_LIST: &'static str = "websocket, fix, multicast, poll, filetail, uds";
 
