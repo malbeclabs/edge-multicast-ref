@@ -49,7 +49,7 @@ use dz_ingress_core::{
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::time::timeout;
+use tokio::time::{timeout, timeout_at, Instant};
 use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 use tokio_rustls::TlsConnector;
@@ -71,6 +71,15 @@ const READ_CHUNK: usize = 4_096;
 /// that is what makes the classification below assertable without a network.
 pub trait Connector: Send {
     /// Open a stream, giving up after `budget`.
+    ///
+    /// **`budget` is the total for everything opening a stream takes**, which
+    /// for [`SocketConnector`] is the TCP connect and the TLS handshake
+    /// together. So `[ingress] connect_timeout = "5s"` buys five seconds from
+    /// the first packet to a stream a logon can be written on, and not five
+    /// seconds each: a budget applied twice is twice the number, which is the
+    /// reason the teardown's own halves share
+    /// [`LOGOUT_GRACE`](crate::LOGOUT_GRACE). An implementation that spends it
+    /// in stages carries one deadline and hands each stage what is left.
     ///
     /// # Errors
     ///
@@ -142,6 +151,55 @@ impl SocketConnector {
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         roots
     }
+
+    /// The negotiation, on a socket that is already open, against `deadline`.
+    ///
+    /// **`deadline` and not a budget of its own**, because a connect attempt is
+    /// one budget in two stages: the handshake is given what the socket left of
+    /// it, and nothing when the socket spent all of it. `budget` is here to be
+    /// named in the timeout's own detail — the number an operator configured is
+    /// the one they should read back.
+    ///
+    /// Its own function so that exactly that is a property a test can state,
+    /// which a single expression inside [`open`](Connector::open) is not: called
+    /// with a deadline that leaves a quarter of a second, this returns in a
+    /// quarter of a second, and a second full budget here would sit on a silent
+    /// socket for the whole of it.
+    async fn negotiate(
+        &self,
+        socket: TcpStream,
+        config: Arc<ClientConfig>,
+        budget: Duration,
+        deadline: Instant,
+    ) -> Result<Box<dyn ByteStream>, IngressError> {
+        let address = self.endpoint.address.clone();
+        let name = ServerName::try_from(self.endpoint.server_name.clone()).map_err(|_| {
+            // A name in the document is the same string on the next attempt, so
+            // retrying it under a backoff only hides it.
+            IngressError::fatal(format!(
+                "`server_name = \"{}\"` is not a name a certificate can be verified against",
+                self.endpoint.server_name
+            ))
+        })?;
+        let negotiated = TlsConnector::from(config).connect(name, socket);
+        match timeout_at(deadline, negotiated).await {
+            Err(_elapsed) => Err(IngressError::connect(
+                ConnectFailureReason::Timeout,
+                format!(
+                    "no negotiated session with {address} within the {budget:?} the connect and \
+                     the negotiation share"
+                ),
+            )),
+            // Every negotiation failure is `tls`: a certificate, a chain, a
+            // protocol version. The taxonomy has a value for exactly this
+            // because it is a different operator action from a refusal.
+            Ok(Err(error)) => Err(IngressError::connect(
+                ConnectFailureReason::Tls,
+                format!("{address}: {error}"),
+            )),
+            Ok(Ok(stream)) => Ok(Box::new(Socket::new(stream, address)) as Box<dyn ByteStream>),
+        }
+    }
 }
 
 impl Connector for SocketConnector {
@@ -151,11 +209,29 @@ impl Connector for SocketConnector {
     ) -> BoxFuture<'_, Result<Box<dyn ByteStream>, IngressError>> {
         Box::pin(async move {
             let address = self.endpoint.address.clone();
-            let socket = match timeout(budget, TcpStream::connect(&address)).await {
+            // **One deadline for the socket and the negotiation together.** What
+            // `connect_timeout` states is how long a connect attempt may take,
+            // and opening a negotiated stream is one attempt in two stages: a
+            // budget started again for the second stage is twice the number an
+            // operator wrote, so a slow connect that spends all five seconds
+            // could take five more and still not be late. The same reasoning
+            // gives the teardown's two halves one `LOGOUT_GRACE`, and it is the
+            // whole reason that constant is one and not two.
+            //
+            // A deadline rather than the remainder recomputed, because the
+            // remainder has to be measured somewhere and an `Instant` is that
+            // measurement. A second stage reached with nothing left elapses at
+            // once, which is the right answer: the attempt is already over
+            // budget.
+            let deadline = Instant::now() + budget;
+            let socket = match timeout_at(deadline, TcpStream::connect(&address)).await {
                 Err(_elapsed) => {
                     return Err(IngressError::connect(
                         ConnectFailureReason::Timeout,
-                        format!("no socket to {address} within {budget:?}"),
+                        format!(
+                            "no socket to {address} within the {budget:?} the connect and the \
+                             negotiation share"
+                        ),
                     ))
                 }
                 Ok(Err(error)) => return Err(classify_connect(&address, &error)),
@@ -173,29 +249,7 @@ impl Connector for SocketConnector {
             let Some(config) = self.tls.clone() else {
                 return Ok(Box::new(Socket::new(socket, address)) as Box<dyn ByteStream>);
             };
-            let name = ServerName::try_from(self.endpoint.server_name.clone()).map_err(|_| {
-                // A name in the document is the same string on the next
-                // attempt, so retrying it under a backoff only hides it.
-                IngressError::fatal(format!(
-                    "`server_name = \"{}\"` is not a name a certificate can be verified against",
-                    self.endpoint.server_name
-                ))
-            })?;
-            let negotiated = TlsConnector::from(config).connect(name, socket);
-            match timeout(budget, negotiated).await {
-                Err(_elapsed) => Err(IngressError::connect(
-                    ConnectFailureReason::Timeout,
-                    format!("no negotiated session with {address} within {budget:?}"),
-                )),
-                // Every negotiation failure is `tls`: a certificate, a chain, a
-                // protocol version. The taxonomy has a value for exactly this
-                // because it is a different operator action from a refusal.
-                Ok(Err(error)) => Err(IngressError::connect(
-                    ConnectFailureReason::Tls,
-                    format!("{address}: {error}"),
-                )),
-                Ok(Ok(stream)) => Ok(Box::new(Socket::new(stream, address)) as Box<dyn ByteStream>),
-            }
+            self.negotiate(socket, config, budget, deadline).await
         })
     }
 
@@ -554,6 +608,75 @@ mod tests {
             webpki_roots::TLS_SERVER_ROOTS.len(),
             "every compiled-in anchor reaches the store"
         );
+    }
+
+    #[tokio::test]
+    async fn the_handshake_is_given_what_the_socket_left_of_the_budget() {
+        // The revert this test exists for: `timeout(budget, negotiated)` in
+        // place of `timeout_at(deadline, negotiated)`. A connect attempt is one
+        // budget in two stages, and a budget applied twice is twice the number
+        // an operator configured — the same reasoning that makes the teardown's
+        // two halves share one `LOGOUT_GRACE`.
+        //
+        // A listener that accepts and then says nothing is a socket that opens
+        // and never negotiates, so what ends this call is the budget and
+        // nothing else. The deadline handed in leaves a quarter of a second of
+        // ten seconds: with the revert the handshake takes the ten.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback listener");
+        let address = listener
+            .local_addr()
+            .expect("the listener's own address")
+            .to_string();
+        let accepted = tokio::spawn(async move {
+            let socket = listener.accept().await.expect("a connection");
+            // Held, so the far side sees an open socket rather than a reset.
+            std::future::pending::<()>().await;
+            drop(socket);
+        });
+
+        let connector = SocketConnector::new(Endpoint {
+            address: address.clone(),
+            server_name: "session.example.com".to_owned(),
+            tls: true,
+        })
+        .expect("a connector");
+        let config = connector.tls.clone().expect("a client configuration");
+        let socket = TcpStream::connect(&address).await.expect("a socket");
+
+        let budget = Duration::from_secs(10);
+        let left = Duration::from_millis(250);
+        let started = std::time::Instant::now();
+        let Err(error) = connector
+            .negotiate(socket, config, budget, Instant::now() + left)
+            .await
+        else {
+            panic!("a silent socket never negotiates");
+        };
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "the handshake was given a budget of its own: {elapsed:?} of a {left:?} remainder"
+        );
+        assert!(
+            elapsed >= left,
+            "the handshake gave up before the deadline it was handed: {elapsed:?}"
+        );
+        assert!(
+            matches!(
+                error,
+                IngressError::Connect {
+                    reason: ConnectFailureReason::Timeout,
+                    ..
+                }
+            ),
+            "{error}"
+        );
+        // And the number an operator configured is the one they read back.
+        assert!(error.to_string().contains("10s"), "{error}");
+        accepted.abort();
     }
 
     #[test]
