@@ -955,6 +955,39 @@ pub const VENUE_EXPONENTS_DISAGREE: u64 = 3_333_333_333_333_333_333;
 /// A state both saw, and whose symbol is spelled two ways.
 pub const VENUE_SYMBOLS_DISAGREE: u64 = 2_222_222_222_222_222_222;
 
+/// The two states one batched payload produced, in the order it produced them.
+///
+/// Distinct keys, because they are two different books: the point of the pair is
+/// that they collapse into one row under a key that ends at `message_index`, and
+/// a fixture whose two states were the same book could not tell that from a
+/// duplicate.
+pub const VENUE_BATCH_FIRST: u64 = 1_111_111_111_111_111_111;
+pub const VENUE_BATCH_SECOND: u64 = 1_212_121_212_121_212_121;
+
+/// A state two objects of one observation point both recorded, at one stamp.
+///
+/// Its own key so that the rotation-boundary case and the batched-payload case
+/// can share a scratch database without either one's ordinals depending on the
+/// other's rows.
+pub const VENUE_ACROSS_A_ROTATION: u64 = 1_414_141_414_141_414_141;
+
+/// A state one batched payload produced **twice** — away and back inside one
+/// payload.
+///
+/// One `book_key` at one receive stamp, so both rows land in one window
+/// partition and the ordinal has to choose between them. That is where an order
+/// that is not total shows up: the two are then numbered either way.
+pub const VENUE_BATCH_REPEATED: u64 = 1_313_131_313_131_313_131;
+
+/// The venue's own numbers on those two rows, which are the witnesses.
+///
+/// `upstream_seq` reaches `venue_book_top_occurrence` and the ordinal does not,
+/// so this is how a test says *which* change was numbered first. Evidence and
+/// never a key, exactly as the column's own comment states — nothing below
+/// groups or orders on it.
+pub const VENUE_BATCH_FIRST_SEQ: u64 = 7_001;
+pub const VENUE_BATCH_SECOND_SEQ: u64 = 7_002;
+
 /// One venue-side top of book, as an observation point wrote it down.
 ///
 /// The stamps are relative to *now*, for the reason [`top`] gives: `009` gives
@@ -991,9 +1024,75 @@ pub fn venue_top(
         ask_source_count: None,
         book_key,
         message_index,
+        // The first change of the record. A fixture that needs a second one
+        // states it with `..venue_top(..)`, which is what the batched-payload
+        // cases below do — and keeping it out of this signature is what lets
+        // every other case say nothing about it.
+        change_index: 0,
         object_key: format!("venue/{observation}/object-{message_index}.dzus"),
         object_sha256: "b".repeat(64),
     }
+}
+
+/// The two rows one batched payload produced, in derivation order.
+///
+/// One archived record — one `recv_ts`, one `message_index`, one `object_key` —
+/// and two top changes inside it, which is what the sink contract permits and
+/// what `Fold::settle` produces. `keys` states the book each change left behind,
+/// so a caller can ask for two different books or for one book twice.
+pub fn venue_batched_record(observation: &str, base: u64, keys: (u64, u64)) -> Vec<VenueBookTop> {
+    let first = VenueBookTop {
+        upstream_seq: Some(VENUE_BATCH_FIRST_SEQ),
+        ..venue_top(observation, "AAA", -2, base, 10, keys.0, 0)
+    };
+    let second = VenueBookTop {
+        // The record's own stamp and the record's own index, because that is
+        // the only stamp the transport took. Only the change ordinal separates
+        // the two rows.
+        change_index: 1,
+        upstream_seq: Some(VENUE_BATCH_SECOND_SEQ),
+        book_key: keys.1,
+        ..first.clone()
+    };
+    vec![first, second]
+}
+
+/// The two rows a rotation boundary can put at one receive stamp.
+///
+/// One observation point, one book, one stamp — and **two objects**, because a
+/// rotation closes one object and opens the next, and a clock whose resolution
+/// is coarser than the gap between them stamps the last record of the first and
+/// the first record of the second alike. Equal receive stamps are ordinary in
+/// this archive rather than a coincidence, and this is the case where nothing
+/// else about the two rows agrees.
+///
+/// `message_index` restarts at zero in each object, so it orders nothing across
+/// two of them: the earlier row here is the one in the earlier object, and it
+/// carries the *higher* record index. What orders the two is `object_key`, whose
+/// leading component under this layout is the window's first receive stamp —
+/// nineteen digits for every stamp this century — so lexicographic order over
+/// the keys is the order the objects were written in.
+pub fn venue_rotation_boundary(observation: &str, base: u64) -> Vec<VenueBookTop> {
+    let key = |start_ns: u64, seq: u64| {
+        format!(
+            "feed=top-of-book/env=test/site=site-1/recorder=recorder-1/date=2026-09-09/hour=12/\
+             {start_ns}-{}-{seq}.dzus",
+            start_ns + 60_000_000_000
+        )
+    };
+    let earlier = VenueBookTop {
+        upstream_seq: Some(VENUE_BATCH_FIRST_SEQ),
+        object_key: key(base, 4),
+        // The last record of the object that was closing.
+        ..venue_top(observation, "AAA", -2, base, 10, VENUE_ACROSS_A_ROTATION, 5)
+    };
+    let later = VenueBookTop {
+        message_index: 0,
+        upstream_seq: Some(VENUE_BATCH_SECOND_SEQ),
+        object_key: key(base + 60_000_000_000, 5),
+        ..earlier.clone()
+    };
+    vec![earlier, later]
 }
 
 /// The venue-side race fixture.

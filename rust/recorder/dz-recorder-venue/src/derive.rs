@@ -271,6 +271,22 @@ struct Instrument {
     /// Whether anything has been applied. A book with both sides absent and
     /// nothing applied is the state before anything happened, not a change.
     established: bool,
+    /// Whether the adapter has withdrawn this listing.
+    ///
+    /// **What a delisting ends is this listing, and everything it held.** The
+    /// handle stays minted and keeps resolving to this symbol, because a row
+    /// already written under it must keep meaning what it meant — that is the
+    /// failure `delist` is documented as never causing. What stops is the book:
+    /// [`Fold::settle`] writes nothing for a withdrawn listing, so an event the
+    /// adapter reports on a handle it has already delisted is counted as the
+    /// event it was and produces no row.
+    ///
+    /// A relisting does not come back here. [`Fold::delist`] drops the symbol's
+    /// mapping, so the next `list_on` mints a **new** handle over the spec the
+    /// venue states then — its own exponents, its own empty book. Two listings
+    /// of one symbol are two instruments that happen to share a name, and this
+    /// is what keeps the second from inheriting the first's top.
+    delisted: bool,
 }
 
 /// The derivation's own state: the listing sink, the event sink, and the book.
@@ -294,6 +310,13 @@ struct Fold {
     rows: Vec<VenueBookTop>,
 
     message_index: u64,
+    /// Top changes written for the record being read, counted from zero.
+    ///
+    /// Reset at every record and **not** at every `upstream_message`, because
+    /// what it has to distinguish is a row: a batched payload settles once per
+    /// member, and one member settles once per event that moves the top. See
+    /// [`VenueBookTop::change_index`].
+    change_index: u64,
     connection: String,
     recv_ts_ns: u64,
     /// In force only until the next `upstream_message`, exactly as the sink's
@@ -327,6 +350,7 @@ impl Fold {
             by_symbol: BTreeMap::new(),
             rows: Vec::new(),
             message_index: 0,
+            change_index: 0,
             connection: String::new(),
             recv_ts_ns: 0,
             identity: None,
@@ -345,6 +369,12 @@ impl Fold {
 
     fn begin_message(&mut self, index: u64, connection: &str, recv_ts_ns: u64) {
         self.message_index = index;
+        // Back to zero at every record, so the ordinal is *within* the record
+        // the way the record's index is within the object. A counter that ran
+        // over the object would be a second numbering of the same rows and
+        // would still be in the sort key — the pair is what identifies a
+        // change, and each half says what it says.
+        self.change_index = 0;
         if self.connection != connection {
             self.connection.clear();
             self.connection.push_str(connection);
@@ -481,6 +511,14 @@ impl Fold {
         let Some(instrument) = self.instruments.get(handle as usize) else {
             return;
         };
+        // A withdrawn listing's book cannot change, and this is the one place
+        // that is enforced. An event the adapter reports on a handle it has
+        // already delisted re-fills the level maps above like any other, and
+        // stops here: it is counted as the event it was, and no row claims the
+        // venue moved a book it has withdrawn.
+        if instrument.delisted {
+            return;
+        }
         if instrument.top == was {
             return;
         }
@@ -509,10 +547,15 @@ impl Fold {
             ask_source_count: instrument.top.ask.source_count,
             book_key: book_key(&instrument.top),
             message_index: self.message_index,
+            change_index: self.change_index,
             object_key: self.object_key.clone(),
             object_sha256: self.object_sha256.clone(),
         };
         self.rows.push(row);
+        // Only for a change that produced a row. An ordinal that advanced on a
+        // settle that wrote nothing would leave holes a reader would read as
+        // rows that had been collapsed away.
+        self.change_index += 1;
     }
 }
 
@@ -528,6 +571,12 @@ impl ListingSink for Fold {
             // Re-offering an admitted instrument returns the handle already
             // minted, which is what lets an adapter offer its whole set on
             // every poll — and what makes a poll per message cheap.
+            //
+            // **A delisted symbol is not in this map**, so a venue that
+            // relists one arrives below and is admitted as a new instrument
+            // with the spec it states now. Returning the withdrawn handle
+            // would interpret the new listing's events at the old listing's
+            // exponents and over the old listing's book.
             return Some(InstrumentRef::from_admission(*handle));
         }
         let handle = u32::try_from(self.instruments.len()).ok()?;
@@ -539,20 +588,48 @@ impl ListingSink for Fold {
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
             established: false,
+            delisted: false,
         });
         self.by_symbol.insert(spec.symbol.to_owned(), handle);
         Some(InstrumentRef::from_admission(handle))
     }
 
     fn delist(&mut self, instrument: InstrumentRef) {
-        // The handle is not reused and the book is not removed: a row already
-        // written under this symbol must keep meaning what it meant, and a
-        // handle that came back pointing at something else is the failure
-        // `delist` is documented as never causing. What ends is the book's
-        // ability to change, which nothing after a delist would do anyway.
-        if let Some(held) = self.instruments.get_mut(instrument.index() as usize) {
-            held.bids.clear();
-            held.asks.clear();
+        let index = instrument.index();
+        // Silent for a handle this derivation never minted, and idempotent:
+        // withdrawing something already gone is the state the caller asked for,
+        // which is how `InstrumentTable::withdraw` answers the same question on
+        // the publisher side.
+        let Some(held) = self.instruments.get_mut(index as usize) else {
+            return;
+        };
+        // **The whole book, and not the level maps alone.** The top and the
+        // `established` flag are the same listing's state as the levels are, so
+        // clearing two of the four leaves the slot describing a live listing
+        // whose depth has gone: the next `top_of_levels` reads empty maps and
+        // is compared against a top that is still there. Emptied together, and
+        // then `delisted` is what `settle` reads.
+        held.bids.clear();
+        held.asks.clear();
+        held.top = Top::default();
+        held.established = false;
+        held.delisted = true;
+        // The exponents and the symbol **stay**, because they are this handle's
+        // own identity: a row already written under it names them, and the
+        // handle keeps resolving. What keeps them out of the next listing's way
+        // is the line below rather than a reset here.
+        let symbol = held.symbol.clone();
+        // The symbol stops resolving to this handle, so a relisting mints a new
+        // one over the spec the venue states then rather than inheriting this
+        // one's — the handle itself is **not** reused and is not removed from
+        // `instruments`, because a row already written under it must keep
+        // meaning what it meant.
+        //
+        // Guarded on the handle, because the mapping may already have moved on:
+        // an adapter that relists and only then delists the handle it was
+        // holding would otherwise unadmit the live listing.
+        if self.by_symbol.get(&symbol) == Some(&index) {
+            self.by_symbol.remove(&symbol);
         }
     }
 }

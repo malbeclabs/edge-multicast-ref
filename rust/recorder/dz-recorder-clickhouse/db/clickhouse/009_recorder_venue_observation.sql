@@ -70,8 +70,8 @@
 -- The consequence is stated rather than left to be found. Two environments
 -- writing one database at one observation point would interleave into a single
 -- ordinal sequence, and two rows equal on
--- `(observation, feed, symbol, recv_ts, message_index)` would collapse across
--- them under `ReplacingMergeTree`. That is the exposure `book_top` and `event`
+-- `(observation, feed, symbol, recv_ts, message_index, change_index)` would
+-- collapse across them under `ReplacingMergeTree`. That is the exposure `book_top` and `event`
 -- already have under the same arrangement, and it belongs wherever theirs is
 -- answered: adding `env` to these two tables alone would answer it for the
 -- venue half of a pair and leave the publisher half as it is.
@@ -155,15 +155,43 @@
 -- nothing else tells two feeds apart at one observation point, and leaving it
 -- out would collapse two feeds' rows into one under `ReplacingMergeTree`.
 --
--- `message_index` IS IN THE KEY FOR THE REASON `book_top` NEEDS IT. Two upstream
--- messages one instant apart move the book twice, and a key without the index
+-- `message_index` IS IN THE KEY FOR THE REASON `book_top` NEEDS IT. Two archived
+-- records one instant apart move the book twice, and a key without the index
 -- makes the second replace the first — a hole in the book's history that no
 -- count would show.
 --
+-- AND `change_index` IS THERE BECAUSE THE RECORD IS NOT A FINE ENOUGH GRAIN.
+-- `message_index` counts the records of the object, and one record is one
+-- payload the adapter is handed — which the sink contract allows to carry a
+-- batch, with `upstream_message` called once per member, and allows any one
+-- member to move a top more than once. Every row of one record carries that
+-- record's own receive stamp, because that is the only stamp the transport took,
+-- so a key ending at `message_index` is one key for all of them: two genuine
+-- book states from one payload collapse under `ReplacingMergeTree` and the loss
+-- is a row that was never written rather than a count that is wrong.
+--
+-- `change_index` is the ordinal of the top change within the record, counted
+-- from zero in the order the derivation read it — deterministic for one object,
+-- so a re-derivation writes the same ordinal for the same change and the replace
+-- above still replaces. Over the record and **not** over the member,
+-- deliberately: a per-member ordinal would leave two level updates on one
+-- instrument inside one member sharing a key, which answers the batch and not
+-- the collapse. Which member of a batch moved a top is what `upstream_sid` and
+-- `upstream_seq` say where the venue numbers its messages, and nothing on this
+-- side can state it where the venue does not.
+--
+-- `book_key` IS **NOT** IN THE KEY, and the ordinal above is why it does not
+-- need to be. Adding it would also separate two states from one payload, but it
+-- would separate them by *what the book was* rather than by *which change this
+-- is* — and two changes that happened to return the book to one state would
+-- collapse again while carrying a key that says they cannot have.
+--
 -- `object_key` IS **NOT** IN THE KEY. A re-derivation of one object produces the
--- same `(observation, feed, symbol, recv_ts, message_index)` for the same
--- message, so the second load replaces the first, which is the whole of
--- `(object key, sha256)` idempotence at this grain. Keying on the object would
+-- same `(observation, feed, symbol, recv_ts, message_index, change_index)` for
+-- the same change — the record's index and the change's are both the order the
+-- object is read in, and an object is read in recorded order — so the second
+-- load replaces the first, which is the whole of `(object key, sha256)`
+-- idempotence at this grain. Keying on the object would
 -- make a rebuilt object's rows sit beside the old ones and double every
 -- occurrence — and here a duplicate manufactures evidence of loss rather than
 -- inflating a count.
@@ -216,14 +244,21 @@ CREATE TABLE IF NOT EXISTS recorder.venue_book_top (
     -- else. Not `state_key`, which folds the `Channel ID` and the `Instrument ID`
     -- in first, and not a second implementation of either.
     book_key          UInt64,
-    -- Which upstream message in the object moved the top, counted from zero.
+    -- Which archived record in the object moved the top, counted from zero. One
+    -- record is one message the transport delivered — not a message's position
+    -- inside a datagram, which is what the column of this name means on the
+    -- publisher side and which there is no datagram here to have.
     message_index     UInt64,
+    -- Which change in the top this row is within that record, counted from zero.
+    -- What makes a row identifiable when one payload carried a batch, or when one
+    -- of its members moved a top twice; see the note above.
+    change_index      UInt64,
     object_key        String,
     object_sha256     String
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(recv_ts)
-ORDER BY (observation, feed, symbol, recv_ts, message_index);
+ORDER BY (observation, feed, symbol, recv_ts, message_index, change_index);
 
 
 -- 2. The object a derivation read.
@@ -380,6 +415,39 @@ FROM recorder.venue_book_top FINAL;
 -- here comes from an upstream message the venue produced, so there is no
 -- equivalent row to exclude — and therefore no way for a late exclusion to leave
 -- every later occurrence numbered one too high.
+--
+-- THE WINDOW'S ORDER IS TOTAL, AND IT IS `recv_ts` THAT IS NOT. Equal receive
+-- stamps are ordinary in this archive rather than a coincidence: every row a
+-- batched payload produced carries the record's own stamp, because that is the
+-- only stamp the transport took. Ordered on the stamp alone, `row_number()` is
+-- free to number two changes at one stamp either way — and it may answer
+-- differently after a merge, so the same rows numbered on two runs pair
+-- differently and `observations` and `lead_ms` are not reproducible.
+--
+-- So the tie is broken by what the rows already carry, in the order that says
+-- what it means: `object_key`, then `message_index`, then `change_index`. That
+-- triple is unique for every row of this table — a record belongs to one object,
+-- and a change to one record — so the order is total and there is nothing left
+-- for the database to choose.
+--
+-- THE OBJECT COMES BEFORE THE RECORD INDEX, and the rotation boundary is why.
+-- The index restarts at zero in each object, so it is a record's position
+-- *within* one and orders nothing across two: a clock coarser than the gap
+-- between a closing object and the one that opens stamps the last record of the
+-- first and the first record of the second alike, and comparing `5` against `0`
+-- there numbers the later object's row first. `object_key` is the only column a
+-- venue-side row carries that separates two objects — `segment_seq` numbers the
+-- objects of a capture and is one of the columns this file declares nothing of —
+-- and it orders them correctly rather than merely consistently: its last
+-- component begins with the window's first receive stamp, nineteen digits for
+-- every stamp this century, so lexicographic order over the keys of one
+-- observation point's feed is the order the objects were written in.
+--
+-- `recv_ts` STAYS FIRST, because it is the quantity the race measures. The
+-- tie-break decides between rows that arrived at one stamp and never reorders
+-- two that did not — a numbering that ordered by the object first would number a
+-- re-derived object's rows against a newer object's and produce lead times
+-- measured backwards.
 CREATE OR REPLACE VIEW recorder.venue_book_top_occurrence AS
 SELECT
     observation,
@@ -397,7 +465,7 @@ SELECT
     object_key,
     row_number() OVER (
         PARTITION BY observation, feed, upper(trimBoth(symbol)), book_key
-        ORDER BY recv_ts
+        ORDER BY recv_ts, object_key, message_index, change_index
     ) AS occurrence
 FROM recorder.venue_book_top_settled;
 

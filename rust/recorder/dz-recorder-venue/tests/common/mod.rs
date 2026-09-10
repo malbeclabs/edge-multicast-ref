@@ -13,6 +13,10 @@
 //! a tautology: the two values a venue-side row must not have were in the
 //! derivation's hand, in the bytes *and* in the object's own key, and the test
 //! is that neither reached a row.
+//!
+//! Shared by more than one test binary, so not every item is used by every one
+//! of them, which is what this allows.
+#![allow(dead_code)]
 
 use std::collections::BTreeMap;
 
@@ -71,7 +75,7 @@ impl Listing {
 
 /// An adapter over a line format, for driving a derivation.
 ///
-/// One line per upstream message:
+/// One line per **archived record**, which is one payload the adapter is handed:
 ///
 /// ```text
 /// chan=<u8> pubseq=<u64> seq=<u64> sid=<u64> <op> ...
@@ -80,9 +84,25 @@ impl Listing {
 ///   clear  <symbol> <both|bid|ask>
 ///   trade  <symbol> <px> <qty>
 ///   listing <symbol> <price_exp> <qty_exp>
+///   delist <symbol>    -- withdrawn on the next poll, where `delist` lives
 ///   refuse <schema|unknown_field|malformed|truncated>
 ///   unscoped <symbol>   -- closes the payload scope, then emits a quote
 /// ```
+///
+/// **One record may carry several of the venue's own messages, and one of those
+/// may report several events.** That is what the adapter boundary permits and
+/// what the fixture has to be able to produce, because it is the shape a row's
+/// identity depends on:
+///
+/// * `|` starts another **member** of the record. `upstream_message` and
+///   `upstream_identity` are called again, exactly as an adapter unpacking a
+///   batch calls them, and the header is stated once on the first member.
+/// * `;` reports another **event of the same member**, with no new boundary
+///   between them.
+///
+/// Every member and every event of one record is handed the record's own
+/// receive stamp, because that is the only stamp the transport took — which is
+/// the whole reason a row needs an ordinal of its own.
 #[derive(Debug, Default)]
 pub struct FixtureAdapter {
     /// Everything this adapter will offer on its next poll. Its whole set every
@@ -103,6 +123,12 @@ pub struct FixtureAdapter {
     pub publisher_sequences_read: Vec<u64>,
     /// The venue's own session sequence numbers the adapter read.
     pub sequences_read: Vec<u64>,
+    /// Symbols a `delist` line named, withdrawn on the next poll.
+    ///
+    /// Held rather than acted on immediately because `delist` is a
+    /// [`ListingSink`] method and a payload is handed an [`EventSink`] — which
+    /// is also how a venue's own adapter would have to do it.
+    to_delist: Vec<String>,
     pub polls: u64,
 }
 
@@ -124,6 +150,17 @@ impl Adapter for FixtureAdapter {
 
     fn poll_listings(&mut self, out: &mut dyn ListingSink) {
         self.polls += 1;
+        // The withdrawals first, so that a record that delisted a symbol and a
+        // later one that relisted it are two listings rather than one.
+        for symbol in std::mem::take(&mut self.to_delist) {
+            // **The handle is kept**, deliberately. An adapter that goes on
+            // reporting events on a handle it has delisted is a thing the sink
+            // contract permits it to do, and this is how a test gets one.
+            if let Some(handle) = self.handles.get(&symbol) {
+                out.delist(*handle);
+            }
+            self.listings.retain(|listing| listing.symbol != symbol);
+        }
         for listing in &self.listings {
             let spec = InstrumentSpec {
                 symbol: &listing.symbol,
@@ -162,54 +199,92 @@ impl Adapter for FixtureAdapter {
     ) -> Result<(), ParseError> {
         let text =
             std::str::from_utf8(payload.bytes).map_err(|_| ParseError::malformed("not utf-8"))?;
-        let mut fields = text.split_whitespace();
 
-        let channel = fields
-            .next()
-            .and_then(|f| f.strip_prefix("chan="))
-            .and_then(|v| v.parse::<u8>().ok())
-            .ok_or_else(|| ParseError::malformed("chan"))?;
-        let publisher_seq = fields
-            .next()
-            .and_then(|f| f.strip_prefix("pubseq="))
-            .and_then(|v| v.parse::<u64>().ok())
-            .ok_or_else(|| ParseError::malformed("pubseq"))?;
-        let seq = fields
-            .next()
-            .and_then(|f| f.strip_prefix("seq="))
-            .and_then(|v| v.parse::<u64>().ok())
-            .ok_or_else(|| ParseError::malformed("seq"))?;
-        let sid = fields
-            .next()
-            .and_then(|f| f.strip_prefix("sid="))
-            .and_then(|v| v.parse::<u64>().ok())
-            .ok_or_else(|| ParseError::malformed("sid"))?;
-        self.channels_read.push(channel);
-        self.publisher_sequences_read.push(publisher_seq);
-        self.sequences_read.push(seq);
+        let mut identity = None;
+        for member in text.split('|') {
+            let mut events = member.split(';');
+            let first = events
+                .next()
+                .ok_or_else(|| ParseError::truncated("member"))?;
+            let mut fields = first.split_whitespace();
 
-        let op = fields.next().ok_or_else(|| ParseError::truncated("op"))?;
-        if op == "refuse" {
-            let reason = fields.next().unwrap_or("malformed");
-            return Err(match reason {
-                "schema" => ParseError::schema("fixture"),
-                "unknown_field" => ParseError::unknown_field("fixture"),
-                "truncated" => ParseError::truncated("fixture"),
-                _ => ParseError::malformed("fixture"),
-            });
+            // The header is on the record and not on each member of it: a
+            // batch is one thing the transport delivered.
+            if identity.is_none() {
+                let channel = fields
+                    .next()
+                    .and_then(|f| f.strip_prefix("chan="))
+                    .and_then(|v| v.parse::<u8>().ok())
+                    .ok_or_else(|| ParseError::malformed("chan"))?;
+                let publisher_seq = fields
+                    .next()
+                    .and_then(|f| f.strip_prefix("pubseq="))
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .ok_or_else(|| ParseError::malformed("pubseq"))?;
+                let seq = fields
+                    .next()
+                    .and_then(|f| f.strip_prefix("seq="))
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .ok_or_else(|| ParseError::malformed("seq"))?;
+                let sid = fields
+                    .next()
+                    .and_then(|f| f.strip_prefix("sid="))
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .ok_or_else(|| ParseError::malformed("sid"))?;
+                self.channels_read.push(channel);
+                self.publisher_sequences_read.push(publisher_seq);
+                self.sequences_read.push(seq);
+                identity = Some((sid, seq));
+            }
+            let (sid, seq) = identity.expect("the header was read on the first member");
+
+            let op = fields.next().ok_or_else(|| ParseError::truncated("op"))?;
+            // Before the boundary is stated, because a refusal costs the whole
+            // record and states no message at all.
+            if op == "refuse" {
+                let reason = fields.next().unwrap_or("malformed");
+                return Err(match reason {
+                    "schema" => ParseError::schema("fixture"),
+                    "unknown_field" => ParseError::unknown_field("fixture"),
+                    "truncated" => ParseError::truncated("fixture"),
+                    _ => ParseError::malformed("fixture"),
+                });
+            }
+
+            // The boundary's own order: the kind, then the identity of the
+            // message the events belong to, then the events. Once per member,
+            // which is once per message the venue sent.
+            out.upstream_message(
+                MESSAGE_TYPES
+                    .iter()
+                    .find(|t| **t == op)
+                    .copied()
+                    .unwrap_or("other"),
+            );
+            out.upstream_identity(Some(sid), Some(seq));
+            self.emit(op, &mut fields, payload, out)?;
+
+            // The rest of this member's events, under the boundary already
+            // stated: one venue message that reported more than one event.
+            for event in events {
+                let mut fields = event.split_whitespace();
+                let op = fields.next().ok_or_else(|| ParseError::truncated("op"))?;
+                self.emit(op, &mut fields, payload, out)?;
+            }
         }
+        Ok(())
+    }
+}
 
-        // The boundary's own order: the kind, then the identity of the message
-        // the events belong to, then the events.
-        out.upstream_message(
-            MESSAGE_TYPES
-                .iter()
-                .find(|t| **t == op)
-                .copied()
-                .unwrap_or("other"),
-        );
-        out.upstream_identity(Some(sid), Some(seq));
-
+impl FixtureAdapter {
+    /// One event of one member, as its own op names it.
+    fn emit<'a>(
+        &mut self,
+        op: &str,
+        mut fields: &mut impl Iterator<Item = &'a str>,
+        payload: &Payload<'_>,
+        out: &mut dyn EventSink,
+    ) -> Result<(), ParseError> {
         match op {
             "listing" => {
                 let symbol = fields.next().ok_or_else(|| ParseError::truncated("sym"))?;
@@ -225,6 +300,13 @@ impl Adapter for FixtureAdapter {
                 // instrument mid-session holds it: nothing here mints a handle.
                 self.listings
                     .push(Listing::new(symbol, price_exponent, qty_exponent));
+            }
+            // Withdrawn on the next poll, where `delist` lives. A venue that
+            // relists the symbol afterwards is a second listing, and the
+            // exponents it states then are its own.
+            "delist" => {
+                let symbol = fields.next().ok_or_else(|| ParseError::truncated("sym"))?;
+                self.to_delist.push(symbol.to_owned());
             }
             "quote" => {
                 let symbol = fields.next().ok_or_else(|| ParseError::truncated("sym"))?;

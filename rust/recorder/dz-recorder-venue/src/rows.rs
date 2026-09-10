@@ -190,13 +190,54 @@ pub struct VenueBookTop {
     /// neither. Keyed on it, this race would return zero pairs and read as each
     /// side missing every state the other saw.
     pub book_key: u64,
-    /// Which upstream message in the object moved the top, counted from zero.
+    /// Which **archived record** in the object moved the top, counted from
+    /// zero.
     ///
-    /// In the sort key, and that is what it is for. Two messages one instant
+    /// One record is one message the transport delivered, which is the grain
+    /// the archive is a length-delimited sequence of. **Not the publisher
+    /// side's `message_index`**, which is a message's position inside its
+    /// datagram: there is no datagram here and no header to count within, and
+    /// the two are the same word for two grains only because both count
+    /// messages.
+    ///
+    /// In the sort key, and that is what it is for. Two records one instant
     /// apart on one connection are two observations of the market; without this
     /// the second replaces the first under `ReplacingMergeTree` and the book's
-    /// history has a hole in it that no count would show.
+    /// history has a hole in it that no count would show. It is **not** enough
+    /// on its own — see [`change_index`](Self::change_index).
     pub message_index: u64,
+    /// Which change in the top this row is **within that record**, counted from
+    /// zero.
+    ///
+    /// **The record is not a fine enough grain to identify a row, and this is
+    /// what closes that.** One archived record is one payload the adapter is
+    /// handed, and a payload may carry a batch — the sink contract has
+    /// `upstream_message` called once per member — while one member may itself
+    /// move a top more than once, because a derivation settles for every event
+    /// that changes the visible top. Every such row carries the record's own
+    /// receive stamp, because that is the only stamp the transport took, so a
+    /// sort key ending at `message_index` would be one key for all of them:
+    /// under `ReplacingMergeTree` the second book state replaces the first and
+    /// the loss is a row that was never there rather than a count that is
+    /// wrong.
+    ///
+    /// **Counted over the record and not over the member**, which is the choice
+    /// worth stating. A per-member ordinal leaves two level updates on one
+    /// instrument inside one member sharing a key, so it would answer the batch
+    /// and not the collapse. Which member of a batch a change came from is what
+    /// [`upstream_sid`](Self::upstream_sid) and
+    /// [`upstream_seq`](Self::upstream_seq) say where the venue numbers its
+    /// messages, and nothing on this side can state it where the venue does
+    /// not.
+    ///
+    /// Deterministic for one object, because it is the order the derivation
+    /// read it in and an object is read in recorded order — so a re-derivation
+    /// produces the same ordinal for the same change, which is what keeps
+    /// `(object key, sha256)` idempotence a replace. That also makes it the
+    /// tie-break the occurrence ordinal in `009` needs: equal receive stamps
+    /// are valid in the archive, and a window ordered on the stamp alone is
+    /// free to number two changes either way on two runs.
+    pub change_index: u64,
     pub object_key: String,
     pub object_sha256: String,
 }

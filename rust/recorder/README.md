@@ -598,6 +598,14 @@ record encoding the offline re-lowering uses: that one carries normalized
 events, which sit downstream of the venue's decode, and the evidence has to be
 what the venue sent.
 
+**A published object is opened under its own key.** `publish` compresses by
+default and the suffix goes on the key, so `ArchivedVenueObject::open_published`
+is what a caller reaches for and it decides from the name — one place decides
+what `.zst` means, in the archive tier, for both archive shapes.
+`ArchivedVenueObject::open` is the one that takes bytes already an upstream
+object, for a caller that has decoded and for a test over a segment it wrote
+itself.
+
 **The derivation reads objects, not a socket**, and that is what restores every
 guarantee a live input would have given up: `(object key, sha256)` idempotence,
 the object as the batch boundary, and the bytes still being there to re-derive
@@ -617,6 +625,18 @@ a statement about a datagram on a channel instance, and a venue's upstream
 message is not one. The absence is held against column-name literals in two
 places, the row types and the DDL, because a column that exists reads as a
 column somebody may fill.
+
+**What identifies a venue-side row is the record and the change within it.**
+`message_index` says which archived record moved the top; `change_index` says
+which change in the top that record produced. Both, because a record is one
+payload the adapter is handed and a payload may carry a batch — the sink contract
+has `upstream_message` called once per member — while one member may move a top
+more than once. Every such row carries the record's own receive stamp, because
+that is the only stamp the transport took, so a key ending at the record is one
+key for all of them and `ReplacingMergeTree` would keep whichever merged last.
+The pair is in the sort key and in the occurrence window's ordering, which is
+what makes the ordinal reproducible rather than the engine's choice among rows
+that arrived at one stamp.
 
 **The race is a view keyed on `book_key`**, the hash over the two sides of a top
 and nothing else, computed by `dz_recorder_events::book_key` and never by a copy

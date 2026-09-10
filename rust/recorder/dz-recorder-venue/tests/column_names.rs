@@ -72,6 +72,7 @@ fn a_venue_book_top_row_carries_exactly_the_venue_book_top_columns() {
         ask_source_count: Some(2),
         book_key: 0xdead_beef_dead_beef,
         message_index: 7,
+        change_index: 2,
         object_key: KEY.to_owned(),
         object_sha256: SHA.to_owned(),
     };
@@ -99,6 +100,9 @@ fn a_venue_book_top_row_carries_exactly_the_venue_book_top_columns() {
             "ask_source_count": 2,
             "book_key": 0xdead_beef_dead_beefu64,
             "message_index": 7,
+            // The third top change of that record, which is what a batched
+            // payload produces and what the record's own index cannot say.
+            "change_index": 2,
             "object_key": KEY,
             "object_sha256": SHA,
         })
@@ -332,6 +336,7 @@ fn book_top() -> VenueBookTop {
         ask_source_count: Some(2),
         book_key: 42,
         message_index: 7,
+        change_index: 0,
         object_key: KEY.to_owned(),
         object_sha256: SHA.to_owned(),
     }

@@ -14,6 +14,7 @@
 //! re-lowering.
 
 use dz_adapter_core::ConnectionId;
+use dz_recorder_archive::open_sealed;
 use dz_recorder_archive::upstream::{
     UpstreamFormatError, UpstreamMessage, UpstreamObjectReader, UPSTREAM_FORMAT_VERSION,
 };
@@ -52,6 +53,15 @@ pub struct VenueObjectId {
 
 impl VenueObjectId {
     /// The declared connection with this name, or `None`.
+    ///
+    /// **A name-only lookup, and it is unambiguous because the format makes the
+    /// name unique.** `UpstreamSegmentWriter::open` refuses to declare one name
+    /// twice and `UpstreamObjectReader::open` refuses to read a header that
+    /// does, so a recorded name resolves to at most one declared connection.
+    /// Without that, this would silently attribute the second entry's records
+    /// to the first connection — which is why the refusal is in the format and
+    /// not a check here: a caller that resolved a duplicate to *the first one*
+    /// would be producing rows, not an error.
     #[must_use]
     pub fn connection(&self, name: &str) -> Option<ConnectionId> {
         self.connections
@@ -98,7 +108,17 @@ pub struct ArchivedVenueObject<R: Read> {
 }
 
 impl<R: Read> ArchivedVenueObject<R> {
-    /// Opens an archived object under the identity its manifest states.
+    /// Opens an archived object over bytes that **are already** an upstream
+    /// object.
+    ///
+    /// The bytes are handed to the reader as they are, so this is the
+    /// constructor for a caller that has already decoded — and for a test over
+    /// a segment it wrote itself. A published object is compressed by default,
+    /// and reaching for this with the bytes of one produces
+    /// [`UpstreamFormatError::NotAnUpstreamObject`], because the first eight
+    /// bytes of a compressed object are a zstd frame magic and not `DZUPSTRM`.
+    /// [`open_published`](ArchivedVenueObject::open_published) is the one that
+    /// takes the object as it landed.
     ///
     /// # Errors
     ///
@@ -107,6 +127,38 @@ impl<R: Read> ArchivedVenueObject<R> {
     pub fn open(id: VenueObjectId, bytes: R) -> Result<Self, UpstreamFormatError> {
         let reader = UpstreamObjectReader::open(id.object_key.clone(), bytes)?;
         Ok(Self { id, reader })
+    }
+}
+
+impl<'a> ArchivedVenueObject<Box<dyn Read + 'a>> {
+    /// Opens the object **as it landed**, decoding it as its own key names it.
+    ///
+    /// The constructor for the ordinary path: `publish` compresses by default
+    /// and puts the suffix on the key, so an object fetched out of the store is
+    /// a `.dzus.zst` more often than a `.dzus` and a reader handed the raw bytes
+    /// of one refuses them as *not an upstream object*.
+    ///
+    /// **The key decides, and the archive tier answers.** The suffix is what
+    /// the compressor wrote, `dz_recorder_archive::open_sealed` is where that
+    /// is read, and the manifest's key is the thing a caller already holds — so
+    /// nothing here has a second opinion about what `.zst` means, exactly as
+    /// nothing here has one about how an object is compressed.
+    ///
+    /// # Errors
+    ///
+    /// [`UpstreamFormatError::Io`], naming the object, when the frame header
+    /// cannot be read; then [`UpstreamFormatError`] as
+    /// [`open`](ArchivedVenueObject::open) states it.
+    pub fn open_published<R: Read + 'a>(
+        id: VenueObjectId,
+        bytes: R,
+    ) -> Result<Self, UpstreamFormatError> {
+        let decoded =
+            open_sealed(&id.object_key, bytes).map_err(|source| UpstreamFormatError::Io {
+                object_key: id.object_key.clone(),
+                source,
+            })?;
+        Self::open(id, decoded)
     }
 }
 

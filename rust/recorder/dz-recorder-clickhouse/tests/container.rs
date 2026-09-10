@@ -16,10 +16,12 @@ mod common;
 
 use common::{
     batch, batch_on_role, cross_site_fixture, json_each_row, just_after_midnight_ns, midday_ns,
-    now_ns, race_fixture, venue_race_fixture, venue_top, ABSENT_BUT_A_SITE_OVERFLOWED,
-    ABSENT_EVERYWHERE, A_SITE_IS_UP_AND_SILENT, A_SITE_REUSED_THE_SEQUENCE, MISSING_FROM,
-    MISSING_TO, NOBODY_ELSE_HAS_LOADED, ONLY_A_CO_LOCATED_RECORDER, OUR_OWN_SCOPE_CANNOT_SUBTRACT,
-    PRESENT_AT_ANOTHER_SITE, REPEATED, VENUE_EXPONENTS_DISAGREE, VENUE_ONLY_ONE_SAW,
+    now_ns, race_fixture, venue_batched_record, venue_race_fixture, venue_rotation_boundary,
+    venue_top, ABSENT_BUT_A_SITE_OVERFLOWED, ABSENT_EVERYWHERE, A_SITE_IS_UP_AND_SILENT,
+    A_SITE_REUSED_THE_SEQUENCE, MISSING_FROM, MISSING_TO, NOBODY_ELSE_HAS_LOADED,
+    ONLY_A_CO_LOCATED_RECORDER, OUR_OWN_SCOPE_CANNOT_SUBTRACT, PRESENT_AT_ANOTHER_SITE, REPEATED,
+    VENUE_ACROSS_A_ROTATION, VENUE_BATCH_FIRST, VENUE_BATCH_FIRST_SEQ, VENUE_BATCH_REPEATED,
+    VENUE_BATCH_SECOND, VENUE_BATCH_SECOND_SEQ, VENUE_EXPONENTS_DISAGREE, VENUE_ONLY_ONE_SAW,
     VENUE_REPEATED, VENUE_SYMBOLS_DISAGREE,
 };
 use dz_edge_core::PortRole;
@@ -1324,6 +1326,161 @@ fn a_venue_state_that_repeats_pairs_one_to_one() {
         )),
         written.to_string(),
         "a row was dropped from the numbering"
+    );
+}
+
+/// **Every top change one batched payload produced survives the merge.**
+///
+/// One archived record is one payload the adapter is handed, and the sink
+/// contract lets that payload carry a batch — `upstream_message` once per
+/// member — and lets any one member report more than one event. Every row of the
+/// record carries the record's own receive stamp, because that is the only stamp
+/// the transport took, so a sort key ending at `message_index` is **one key for
+/// all of them**.
+///
+/// The mutant this kills is `change_index` out of the sort key, which is what
+/// its absence was: the two rows below then share every `ORDER BY` component,
+/// `ReplacingMergeTree` keeps whichever merged last, and the loss is a book
+/// state that was never in the table rather than a count anybody can check. The
+/// `OPTIMIZE` is the point — this is about what the engine collapses, so a test
+/// that read before the merge would pass over a key that cannot tell the two
+/// apart.
+#[test]
+fn a_batched_payloads_top_changes_all_survive_the_merge() {
+    let scratch = Scratch::open("venue_batch");
+    let base = now_ns();
+    let rows = venue_batched_record("a", base, (VENUE_BATCH_FIRST, VENUE_BATCH_SECOND));
+
+    // The fixture is one record: one stamp, one record index, one object.
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].recv_ts, rows[1].recv_ts);
+    assert_eq!(rows[0].message_index, rows[1].message_index);
+    assert_eq!(rows[0].object_key, rows[1].object_key);
+    assert_ne!(rows[0].change_index, rows[1].change_index);
+
+    scratch.insert_venue_book_tops(&rows);
+    scratch.merge("venue_book_top");
+    assert_eq!(
+        scratch.count("venue_book_top"),
+        2,
+        "a top change from a batched payload was collapsed into the change beside it"
+    );
+
+    // And both reach the race as their own occurrence, because two different
+    // books are two states and not one seen twice.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT groupArray(occurrence) FROM (SELECT occurrence FROM \
+             {}.venue_book_top_race WHERE book_key IN ({VENUE_BATCH_FIRST}, \
+             {VENUE_BATCH_SECOND}) ORDER BY book_key)",
+            scratch.database
+        )),
+        "[1,1]",
+        "the two states of one payload are not two occurrences of one state"
+    );
+}
+
+/// **Two rows at one stamp are numbered by the objects they came from, and the
+/// stamp alone cannot do it.**
+///
+/// This is the case the window's order has to be total for. A rotation closes
+/// one object and opens the next, and a clock coarser than the gap stamps the
+/// last record of the first and the first record of the second alike — so two
+/// rows of one book sit at one receive stamp with nothing else about them in
+/// agreement. `message_index` restarts at zero in each object, so the *earlier*
+/// row carries the higher record index and the table's own sort order puts it
+/// second.
+///
+/// The mutant this kills is the window ordered on `recv_ts` alone: the ordinal
+/// then comes out of whatever order the rows were read in, which is the sort
+/// key, which numbers the later object's row first. `object_key` before
+/// `message_index` is what makes it the objects' order instead — the key's
+/// leading component is the window's first receive stamp, so lexicographic
+/// order over the keys is the order the objects were written in.
+#[test]
+fn two_rows_at_one_stamp_are_numbered_by_the_objects_they_came_from() {
+    let scratch = Scratch::open("venue_rotation_order");
+    let base = now_ns();
+    let rows = venue_rotation_boundary("a", base);
+
+    // One book at one stamp, and the row that is *first* is the one whose
+    // record index is higher, because the index restarts in each object.
+    assert_eq!(rows[0].recv_ts, rows[1].recv_ts);
+    assert_eq!(rows[0].book_key, rows[1].book_key);
+    assert!(rows[0].message_index > rows[1].message_index);
+    assert!(rows[0].object_key < rows[1].object_key);
+
+    scratch.insert_venue_book_tops(&rows);
+    let numbered = format!(
+        "SELECT groupArray(upstream_seq) FROM (SELECT upstream_seq FROM \
+         {}.venue_book_top_occurrence WHERE book_key = {VENUE_ACROSS_A_ROTATION} \
+         ORDER BY occurrence)",
+        scratch.database
+    );
+    assert_eq!(
+        scratch.scalar(&numbered),
+        format!("[{VENUE_BATCH_FIRST_SEQ},{VENUE_BATCH_SECOND_SEQ}]"),
+        "the row from the later object was numbered first"
+    );
+
+    scratch.merge("venue_book_top");
+    assert_eq!(
+        scratch.scalar(&numbered),
+        format!("[{VENUE_BATCH_FIRST_SEQ},{VENUE_BATCH_SECOND_SEQ}]"),
+        "the ordinal moved when the parts did"
+    );
+}
+
+/// And the ordinal does not depend on the part layout either.
+///
+/// The other half of *decided by the rows*: two changes of one payload that
+/// left the book in the same state land in one window partition at one stamp,
+/// and they go in **backwards and in two parts** here. A numbering that came out
+/// of how the rows arrived would answer differently before and after the merge.
+#[test]
+fn the_occurrence_ordinal_does_not_depend_on_how_the_rows_arrived() {
+    let scratch = Scratch::open("venue_batch_order");
+    let base = now_ns();
+    let rows = venue_batched_record("a", base, (VENUE_BATCH_REPEATED, VENUE_BATCH_REPEATED));
+
+    // One book, twice, inside one record: the two rows differ in the change
+    // ordinal and in the venue's own number, and in nothing else.
+    assert_eq!(rows[0].book_key, rows[1].book_key);
+    scratch.insert_venue_book_tops(&rows[1..]);
+    scratch.insert_venue_book_tops(&rows[..1]);
+
+    let numbered = format!(
+        "SELECT groupArray(upstream_seq) FROM (SELECT upstream_seq FROM \
+         {}.venue_book_top_occurrence WHERE book_key = {VENUE_BATCH_REPEATED} \
+         ORDER BY occurrence)",
+        scratch.database
+    );
+    let expected = format!("[{VENUE_BATCH_FIRST_SEQ},{VENUE_BATCH_SECOND_SEQ}]");
+    assert_eq!(
+        scratch.scalar(&numbered),
+        expected,
+        "the first change of the record was not the first occurrence"
+    );
+
+    // And the same answer after the merge, which is the other half of *not the
+    // engine's*: a numbering that came out of the part layout would change here.
+    scratch.merge("venue_book_top");
+    assert_eq!(
+        scratch.scalar(&numbered),
+        expected,
+        "the ordinal moved when the parts did"
+    );
+
+    // Two occurrences of one state at one point, which is what the pairing then
+    // reads: one row per occurrence, each seen by one observation point.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT groupArray(observations) FROM (SELECT observations FROM \
+             {}.venue_book_top_race WHERE book_key = {VENUE_BATCH_REPEATED} \
+             ORDER BY occurrence)",
+            scratch.database
+        )),
+        "[1,1]"
     );
 }
 

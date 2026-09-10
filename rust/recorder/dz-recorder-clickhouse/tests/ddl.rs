@@ -1614,6 +1614,7 @@ mod fixtures {
             ask_source_count: None,
             book_key: 3,
             message_index: 4,
+            change_index: 5,
             object_key: "object".to_owned(),
             object_sha256: "sha".to_owned(),
         }

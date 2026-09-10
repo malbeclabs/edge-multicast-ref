@@ -775,3 +775,165 @@ fn two_observation_points_of_one_book_agree_on_the_key() {
     });
     assert_eq!(keys[0], expected);
 }
+
+/// **Two top changes from one archived record are two rows with two
+/// identities.**
+///
+/// The record is not a fine enough grain to identify a row. One record is one
+/// payload the adapter is handed, and the sink contract lets that payload carry
+/// a batch — `upstream_message` once per member — and lets any one member report
+/// more than one event. Every row of the record carries the record's own receive
+/// stamp, because that is the only stamp the transport took, so the whole of
+/// `venue_book_top`'s sort key up to `message_index` is one key for all of them.
+///
+/// The mutant this kills is `change_index` fixed at a constant — which is what
+/// the column's absence was. Every row below then shares
+/// `(observation, feed, symbol, recv_ts, message_index)` with the row beside it,
+/// `ReplacingMergeTree` collapses two genuine book states into one, and the loss
+/// is a row that was never there rather than a count that is wrong.
+/// `a_batched_payloads_top_changes_all_survive_the_merge`, over `009` against a
+/// real server, is the other half of it.
+#[test]
+fn every_top_change_in_one_record_is_numbered_within_that_record() {
+    let mut object = FixtureObject::of(
+        BASE,
+        &[
+            // Two members of one record — a batch — each moving the bid.
+            "chan=113 pubseq=990001 seq=5001 sid=7 level AAA bid 100.50 3 \
+             | level AAA bid 100.70 5",
+            // One member reporting two events, which is the case a per-member
+            // ordinal would not answer.
+            "chan=113 pubseq=990001 seq=5002 sid=7 level AAA ask 100.90 2 \
+             ; level AAA ask 100.80 1",
+        ],
+    );
+    let mut sink = CollectingSink::new();
+    let derived = derive_venue_object(&mut adapter(), &mut object, &mut sink).expect("the object");
+
+    let rows = sink.book_tops();
+    assert_eq!(derived.book_top_count, 4);
+    assert_eq!(
+        rows.iter()
+            .map(|row| (row.recv_ts.0, row.message_index, row.change_index))
+            .collect::<Vec<_>>(),
+        vec![
+            (BASE, 0, 0),
+            (BASE, 0, 1),
+            (BASE + 1_000_000, 1, 0),
+            (BASE + 1_000_000, 1, 1),
+        ],
+        "the ordinal restarts at each record and numbers every change within it"
+    );
+
+    // The four states are four different books, so a key that collapsed two of
+    // them would be losing a change and not a duplicate.
+    let books: std::collections::BTreeSet<u64> = rows.iter().map(|row| row.book_key).collect();
+    assert_eq!(books.len(), 4, "{books:?}");
+
+    // And the identity a batch's members share is the venue's own, which is
+    // evidence rather than the thing that tells two rows apart.
+    assert_eq!(
+        rows.iter()
+            .map(|row| (row.upstream_sid, row.upstream_seq))
+            .collect::<Vec<_>>(),
+        vec![
+            (Some(7), Some(5_001)),
+            (Some(7), Some(5_001)),
+            (Some(7), Some(5_002)),
+            (Some(7), Some(5_002)),
+        ]
+    );
+}
+
+/// **The ordinal advances only for a change that produced a row.**
+///
+/// A counter that moved on every `settle` would leave holes wherever the top
+/// did not move — and a hole in this column reads as a row that was collapsed
+/// away, which is the exact failure the column exists to make impossible.
+#[test]
+fn the_change_ordinal_counts_rows_and_not_settles() {
+    let mut object = FixtureObject::of(
+        BASE,
+        &[
+            // The middle event restates the level the first one set, so the top
+            // does not move and no row follows it.
+            "chan=113 pubseq=990001 seq=5001 sid=7 level AAA bid 100.50 3 \
+             ; level AAA bid 100.50 3 \
+             ; level AAA bid 100.70 5",
+        ],
+    );
+    let mut sink = CollectingSink::new();
+    let derived = derive_venue_object(&mut adapter(), &mut object, &mut sink).expect("the object");
+
+    assert_eq!(derived.event_count, 3);
+    assert_eq!(derived.book_top_count, 2);
+    assert_eq!(
+        sink.book_tops()
+            .iter()
+            .map(|row| row.change_index)
+            .collect::<Vec<_>>(),
+        vec![0, 1],
+        "the ordinal is contiguous over the rows the record produced"
+    );
+}
+
+/// **A relisting is a new instrument that happens to share a symbol.**
+///
+/// A delisting withdraws everything the listing held, and there are three
+/// mutants here because the fix has three parts.
+///
+/// Clear the level maps and leave the rest, which is what it was: the withdrawn
+/// handle goes on moving a book and writing rows, and the relisting resolves to
+/// that handle — so its quote is scaled at the old listing's exponents and
+/// three rows come out where two belong, one of them a state the venue had
+/// already withdrawn and one of them priced at an exponent it no longer states.
+///
+/// Keep the symbol resolving to the withdrawn handle and reset everything else,
+/// and the opposite happens: the relisting is handed a withdrawn listing whose
+/// book cannot change, so it writes nothing at all and one row comes out.
+///
+/// Let `settle` write for a withdrawn listing, and the quote on the stale handle
+/// becomes a row again.
+#[test]
+fn a_relisted_symbol_does_not_inherit_the_withdrawn_listings_book() {
+    let mut object = FixtureObject::of(
+        BASE,
+        &[
+            "chan=113 pubseq=990001 seq=5001 sid=7 quote AAA 100.50 3 100.60 4",
+            "chan=113 pubseq=990001 seq=5002 sid=7 delist AAA",
+            // On the handle the adapter is still holding, which the sink
+            // contract permits it to report on. A withdrawn listing's book
+            // cannot change, so this is counted as the event it was and no row
+            // claims the venue moved a book it had withdrawn.
+            "chan=113 pubseq=990001 seq=5003 sid=7 quote AAA 200.50 9 200.60 9",
+            // The venue lists it again, with its own exponents this time.
+            "chan=113 pubseq=990001 seq=5004 sid=7 listing AAA -4 0",
+            "chan=113 pubseq=990001 seq=5005 sid=7 quote AAA 100.50 3 100.60 4",
+        ],
+    );
+    let mut sink = CollectingSink::new();
+    let derived = derive_venue_object(&mut adapter(), &mut object, &mut sink).expect("the object");
+
+    let rows = sink.book_tops();
+    assert_eq!(
+        rows.len(),
+        2,
+        "the withdrawn listing wrote one row and the new one wrote its opening state"
+    );
+    // Two listings of one symbol, and the second is counted as its own.
+    assert_eq!(derived.instrument_count, 2);
+    assert_eq!(derived.event_count, 3);
+    assert_eq!(derived.unpriced_count, 0);
+
+    assert_eq!((rows[0].recv_ts.0, rows[0].price_exp), (BASE, -2));
+    assert_eq!(rows[0].bid_px_raw, Some(10_050));
+    // The exponents the venue stated at the relisting, over an empty book. The
+    // same decimal quote, at a different exponent, is a different raw price and
+    // a different `book_key`.
+    assert_eq!(
+        (rows[1].recv_ts.0, rows[1].price_exp),
+        (BASE + 4_000_000, -4)
+    );
+    assert_eq!(rows[1].bid_px_raw, Some(1_005_000));
+    assert_ne!(rows[0].book_key, rows[1].book_key);
+}
