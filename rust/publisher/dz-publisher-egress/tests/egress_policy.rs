@@ -29,7 +29,13 @@ fn the_source_address_comes_from_the_route_and_not_from_configuration() {
         doc_source()
     );
     assert_eq!(policy.ttl, DEFAULT_TTL);
-    assert_eq!(DEFAULT_TTL, 1, "one hop, as the configuration default says");
+    // Not a configuration default: `[egress] ttl` is stated or the publisher
+    // refuses to start. One hop is what `EgressPolicy::default` carries for a
+    // hand-composed publisher, and the value the refusal names.
+    assert_eq!(
+        DEFAULT_TTL, 1,
+        "one hop, as `EgressPolicy::default` carries it"
+    );
 }
 
 #[test]
