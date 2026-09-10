@@ -21,6 +21,8 @@ Names we do not own, or have not renamed, are left as written wherever they appe
 | [The venue adapter interface](superpowers/specs/2026-09-02-venue-adapter-interface-design.md) · [plan](superpowers/plans/2026-09-02-venue-adapter-interface.md) | The trait a venue repository implements to turn its own upstream source into our messages, and how the recorder re-lowers it to compare against multicast |
 | [Several channel instances of one feed specification](superpowers/specs/2026-09-09-publisher-feed-routes-design.md) · [plan](superpowers/plans/2026-09-09-publisher-feed-routes.md) | One process operating many channels of one feed spec: a `shard` on `[[feed]]`, reference data per channel, and the era keyed on the channel instance |
 | [An upstream write that is not a connect](superpowers/specs/2026-09-09-upstream-write-after-a-listing-change-design.md) · [plan](superpowers/plans/2026-09-09-upstream-write-after-a-listing-change.md) | Why an instrument admitted mid-session was never subscribed, and why the write has to name the connection it goes out on |
+| [A polled transport](superpowers/specs/2026-09-09-polled-transport-design.md) · [plan](superpowers/plans/2026-09-09-polled-transport.md) | `[ingress] kind = "poll"`: a catalogue that is a request rather than a subscription, why the token is not `rest`, and why an unchanged response is not a payload |
+| [A session transport](superpowers/specs/2026-09-09-session-transport-design.md) · [plan](superpowers/plans/2026-09-09-session-transport.md) | `[ingress] kind = "fix"`: what a session layer owns, why the logon body is the adapter's, and why the sequence resets |
 
 ## Feeds
 
@@ -44,6 +46,8 @@ Names we do not own, or have not renamed, are left as written wherever they appe
 | [Dual-version refdata](superpowers/specs/2026-08-08-refdata-v3-dual-version-design.md) · [plan](superpowers/plans/2026-08-08-refdata-v3-dual-version.md) | Decoding `InstrumentDefinition` at schema versions 1 and 3, and watching a cutover |
 | [Per-publisher sequence tracking](superpowers/specs/2026-08-10-per-channel-seq-tracking-design.md) · [plan](superpowers/plans/2026-08-10-per-publisher-seq-tracking.md) | Why gap detection keys on `(source IP address, Channel ID, destination port)` |
 | [Cross-feed latency normalization](superpowers/specs/2026-06-06-cross-feed-latency-normalization-design.md) · [plan](superpowers/plans/2026-06-06-cross-feed-latency-normalization.md) | Comparing latency across feeds that timestamp differently |
+| [A key a venue side can compute](superpowers/specs/2026-09-09-book-key-and-the-composition-seam-design.md) · [plan](superpowers/plans/2026-09-09-book-key-and-the-composition-seam.md) | `book_key` over a book alone, a venue's own message identity at the boundary, and the venue composition seam moved out of the publisher's crate |
+| [The venue half of a feed race](superpowers/specs/2026-09-09-recorder-venue-observation-design.md) · [plan](superpowers/plans/2026-09-09-recorder-venue-observation.md) | Recording a venue's own upstream and pairing it against a channel's datagrams — why the join is a view on the symbol and not a row in `book_top` |
 
 ## Shred receivers
 
