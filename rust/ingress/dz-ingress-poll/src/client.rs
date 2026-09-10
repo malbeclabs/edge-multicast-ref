@@ -332,28 +332,34 @@ impl PollClient for HttpClient {
                 .and_then(|value| value.to_str().ok())
                 .map(str::to_string);
 
-            // Bounded, and the bound is checked against what the body claims
-            // before any of it is read: a `Content-Length` past the ceiling is
-            // a body to refuse rather than to start assembling.
+            // Bounded **while it is read** and not by what it claims. A
+            // `Content-Length` is a number the endpoint chose, and a chunked
+            // response declares no length at all - so a ceiling checked against
+            // the claim is a ceiling an endpoint can walk straight past by
+            // omitting the header, which is the whole shape of the failure the
+            // bound exists for. `Limited` stops taking bytes at the ceiling
+            // instead.
             use http_body_util::BodyExt as _;
-            use hyper::body::Body as _;
-            let body = response.into_body();
-            if body.size_hint().lower() > MAX_BODY_BYTES {
-                return Err(RequestFailure::Transport(format!(
-                    "the response body is at least {} bytes, past the {MAX_BODY_BYTES}-byte ceiling",
-                    body.size_hint().lower()
-                )));
-            }
-            let collected = body
-                .collect()
-                .await
-                .map_err(|error| {
-                    // A body that started and stopped. `Transport` and not
-                    // `Refused`, which is the distinction that value exists
-                    // for: the connection was established.
-                    RequestFailure::Transport(format!("the response body did not arrive: {error}"))
-                })?
-                .to_bytes();
+            let collected = http_body_util::Limited::new(
+                response.into_body(),
+                usize::try_from(MAX_BODY_BYTES).unwrap_or(usize::MAX),
+            )
+            .collect()
+            .await
+            .map_err(|error| {
+                // Two failures with one answer: a body that started and
+                // stopped, and one that went past the ceiling. `Transport` and
+                // not `Refused`, which is the distinction that value exists
+                // for: the connection was established. The detail names the
+                // ceiling, because *the endpoint sent too much* and *the
+                // endpoint stopped sending* are not the same conversation to
+                // have with a venue.
+                RequestFailure::Transport(format!(
+                    "the response body did not arrive whole, within the \
+                     {MAX_BODY_BYTES}-byte ceiling: {error}"
+                ))
+            })?
+            .to_bytes();
 
             Ok(Answer {
                 status,
