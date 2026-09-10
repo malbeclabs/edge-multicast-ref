@@ -257,15 +257,22 @@ fn a_transport_this_binary_was_not_built_with_says_so_and_not_unknown() {
     );
 }
 
-#[cfg(not(feature = "fix"))]
+#[cfg(not(feature = "multicast"))]
 #[test]
 fn a_transport_the_family_names_but_nobody_has_built_is_not_unknown_either() {
-    // The family is fixed by the design and most of it is not written yet. A
+    // The family is fixed by the design and part of it is not written yet. A
     // configuration naming one of those must not read as a spelling mistake.
-    let config = parse(r#"kind = "fix""#).expect("the section parses");
+    //
+    // `multicast`, because no crate in this repository implements it — so this
+    // test runs in a whole-workspace build as well as in this crate's own.
+    // A token a member crate does implement is linked whenever that crate is in
+    // the build, which cargo's feature unification makes true of every
+    // whole-workspace run, and the guard above would then quietly take this
+    // test out of CI.
+    let config = parse(r#"kind = "multicast""#).expect("the section parses");
     let error = config.resolve().expect_err("nothing implements it yet");
     assert!(
-        matches!(error, ConfigError::KindNotLinked { token: "fix" }),
+        matches!(error, ConfigError::KindNotLinked { token: "multicast" }),
         "{error}"
     );
 }

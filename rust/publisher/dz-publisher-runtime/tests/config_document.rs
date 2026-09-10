@@ -840,10 +840,14 @@ fn a_transport_this_binary_was_not_built_with_is_a_different_error() {
     // them would send someone hunting for a spelling mistake in a value that is
     // spelled correctly.
     //
-    // Every transport is unlinked in this crate's own build; the test harness
-    // turns on the marker for `uds` alone, so `fix` is the honest example.
+    // `multicast`, because no crate in this repository implements it. A token a
+    // member crate does implement is linked whenever that crate is in the
+    // build, which cargo's feature unification makes true of every
+    // whole-workspace run — so a test asserting the unlinked case over
+    // `websocket` or `fix` would pass alone and fail in CI. This crate's own
+    // harness turns on the marker for `uds` and nothing else.
     let mut doc = Doc::valid();
-    doc.ingress = "[ingress]\nkind = \"fix\"\n".to_owned();
+    doc.ingress = "[ingress]\nkind = \"multicast\"\n".to_owned();
     let error = Document::parse(&doc.render())
         .expect("parses")
         .resolve()
