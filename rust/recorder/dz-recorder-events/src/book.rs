@@ -182,19 +182,31 @@ pub struct BookRefused {
     /// applying it would rebuild from a book the publisher had disowned, and mark
     /// it certain.
     pub stale_cycle: u64,
-    /// Cycles still open when the object ended, so they anchored nothing.
+    /// Cycles still open when the derivation ended, so they anchored nothing.
     ///
-    /// The book is rebuilt per object, and a cycle is `begin`, `total_levels`
-    /// levels and `end` on the runtime's cadence while objects rotate on time or
-    /// size. A cycle that straddles the boundary therefore anchors neither
-    /// object: the levels after the boundary land as `orphan_snapshot_level` and
-    /// the `end` finds no open cycle, while the part before it was simply
-    /// dropped with the book — counted nowhere at all until now.
+    /// A cycle is `begin`, `total_levels` levels and `end` on the runtime's
+    /// cadence. What it can straddle, and therefore how this number reads,
+    /// depends on who is deriving — and the two readings are different enough
+    /// that taking one for the other sends a reader looking for a race that is
+    /// not there.
     ///
-    /// This is the number to read before believing a delta feed that sits at
-    /// `book_certain = 0` with `no_anchor`. Non-zero and persistent says the
+    /// **On the archive path the book is rebuilt per object**, and objects
+    /// rotate on time or size. A cycle that straddles the boundary anchors
+    /// neither object: the levels after the boundary land as
+    /// `orphan_snapshot_level` and the `end` finds no open cycle, while the part
+    /// before it was simply dropped with the book — counted nowhere at all until
+    /// this number. This is what to read before believing a delta feed that sits
+    /// at `book_certain = 0` with `no_anchor`: non-zero and persistent says the
     /// anchoring is losing a race against object rotation rather than the
     /// publisher failing to send cycles.
+    ///
+    /// **A caller holding a [`DerivationState`](crate::DerivationState) across its windows
+    /// reads it the other way**, because the book and its open cycles cross the
+    /// cut and a cycle open at a window boundary is merely still open. Such a
+    /// caller ends the derivation once, so a rise here is a cycle the feed
+    /// stopped part-way through. A count that rises once per window instead says
+    /// the caller has been ending the derivation per window, which is the first
+    /// thing to check rather than the last.
     pub unclosed_cycle: u64,
 }
 
@@ -211,7 +223,13 @@ pub struct Change {
     pub from_anchor: bool,
 }
 
-/// Every instrument's book, for every channel instance in one object.
+/// Every instrument's book, for every channel instance a derivation has seen.
+///
+/// One object's worth on the archive path, where the fold builds this and ends
+/// it. A caller that keeps it across windows sees more than one object's worth,
+/// and that is the point: the open cycles and the per-instance sequence
+/// high-water marks in here are the state that makes a gap or a snapshot cycle
+/// straddling a window boundary visible at all.
 #[derive(Debug, Clone, Default)]
 pub struct Book {
     books: BTreeMap<(Channel, u32), InstrumentBook>,
@@ -373,11 +391,16 @@ impl Book {
         changed(was, book)
     }
 
-    /// Count the cycles that never saw their `end`, called once the object's
+    /// Count the cycles that never saw their `end`, called once the derivation's
     /// last message has been folded.
     ///
     /// Separate from `snapshot_begin` displacing an open cycle on a repeated
     /// `snapshot_id`: that is one publisher's mistake, and this is the boundary.
+    ///
+    /// The archive path calls this per object. A caller that keeps the book
+    /// across windows calls it at the end of the derivation and not per window —
+    /// see [`DerivationState::close_object`](crate::DerivationState::close_object), which
+    /// is the entry point that owns the distinction.
     pub fn close_object(&mut self) {
         self.refused.unclosed_cycle += self.cycles.len() as u64;
         self.cycles.clear();
