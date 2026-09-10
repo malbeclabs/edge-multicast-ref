@@ -61,11 +61,18 @@
 //! is lowered **once** and the same value is handed to both send paths, so the
 //! two feeds do not carry two things that agree; they carry one thing.
 //!
-//! One registry serves every feed. `Instrument ID` identity is the one thing
-//! there can only be one of, `Manifest Seq` describes the published set rather
-//! than a channel, and the manifest's own redundant `Channel ID` is stamped by
-//! the builder from the datagram that frames it — so one composed manifest is
-//! truthful on every feed's refdata port. See [`Publisher::new`].
+//! One registry serves every feed, and `Instrument ID` identity is the one
+//! thing there can only be one of: a symbol admitted for both specifications
+//! is one identifier out of one space, whichever feed publishes it.
+//!
+//! The **published set** is not one. `Manifest Seq` and `Instrument Count` are
+//! a shard's rather than the process's — `Registry::manifest_seq` and
+//! `Registry::published_on` each take the shard the channel carries — because
+//! summing them over shards states the size of a union of disjoint published
+//! sets, which no manifest declares and no subscriber sees. The manifest's own
+//! redundant `Channel ID` is stamped by the builder from the datagram that
+//! frames it, so a manifest is truthful on the refdata port it leaves by. See
+//! [`Publisher::new`].
 //!
 //! # What is still a hole
 //!
