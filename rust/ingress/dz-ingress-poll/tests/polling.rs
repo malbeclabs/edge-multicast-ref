@@ -673,6 +673,48 @@ fn a_budget_that_elapses_before_the_poll_is_due_is_idle_and_not_an_error() {
     );
 }
 
+#[test]
+fn the_requests_own_bound_is_the_drivers_budget_and_the_cadence_when_there_is_none() {
+    // There is no request-timeout key, and that is the decision: the request's
+    // bound is the receive budget the driver already hands over. The one case
+    // that needs an answer of its own is `None`, which is what a connection
+    // with no idle guard configured gets - and a request with no bound at all
+    // is a transport that never returns from a receive.
+    let endpoint = ScriptedEndpoint::unchanging(None);
+    let clock = TestClock::new();
+    let mut transport = input(CONNECTION, Duration::from_secs(30), &endpoint, &clock);
+
+    block_on(transport.connect(Duration::from_secs(5))).expect("the endpoint answered");
+    block_on(transport.recv(None)).expect("the first poll");
+    // A guard well clear of the cadence, so that "what is left of the budget"
+    // and "the cadence" are two different numbers rather than the same one.
+    block_on(transport.recv(Some(Duration::from_secs(100)))).expect("the next poll");
+
+    let budgets: Vec<Duration> = endpoint
+        .seen()
+        .into_iter()
+        .map(|seen| seen.budget)
+        .collect();
+    assert_eq!(
+        budgets,
+        vec![
+            // The probe gets `[ingress] connect_timeout`, which is the budget
+            // `Input::connect` is handed.
+            Duration::from_secs(5),
+            // No idle guard: the cadence is the bound, because there is nothing
+            // else to bound it by.
+            Duration::from_secs(30),
+            // A guard: what is left of it after waiting for the poll to fall
+            // due - 100 seconds less the 30 spent waiting. Not the whole
+            // budget, which would let one request outlive the window the driver
+            // gave the whole receive.
+            Duration::from_secs(70),
+        ],
+        "the request's bound is the driver's, and the cadence only where the \
+         driver has none to give"
+    );
+}
+
 /// A failed request ends the connection **with the reason it actually had**.
 ///
 /// Four outcomes rather than one catch-all, and each of them changes what
