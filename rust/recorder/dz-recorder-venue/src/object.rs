@@ -1,0 +1,136 @@
+//! The archived object a derivation reads, behind a trait.
+//!
+//! **Archived objects are where this starts, and that is deliberate.** A
+//! venue-side observation needs a receive path, and the two transports a venue
+//! would use for one — a session transport and a polled one — are each their own
+//! design. Deriving from objects rather than from a socket is what restores
+//! `(object key, sha256)` idempotence, makes the object the batch boundary, and
+//! keeps the bytes so that a mapping defect found next month can be
+//! re-examined with a corrected adapter. It also means nothing here waits on
+//! either transport.
+//!
+//! The trait is what keeps every test of this crate free of a filesystem, a
+//! privilege and a network, exactly as `PayloadArchive` does for the offline
+//! re-lowering.
+
+use dz_adapter_core::ConnectionId;
+use dz_recorder_archive::upstream::{
+    UpstreamFormatError, UpstreamMessage, UpstreamObjectReader, UPSTREAM_FORMAT_VERSION,
+};
+use std::io::Read;
+
+/// Everything a derivation needs to know about an object other than its bytes.
+///
+/// **The key and the digest are handed in and never computed here.** They are
+/// what a re-derivation is idempotent on, so they come from the manifest the
+/// publication wrote: a derivation that hashed the bytes it had just
+/// decompressed would be answering a different question, and a truncated object
+/// would still have a digest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VenueObjectId {
+    /// The Hive-partitioned key the object landed under.
+    pub object_key: String,
+    /// The digest of the object that landed, from its manifest.
+    pub object_sha256: String,
+    /// Which observation point this recording is.
+    pub observation: String,
+    pub env: String,
+    /// The feed specification whose instruments this recording covers.
+    pub feed: String,
+    /// The connections the caller's own transport declares, by the labels it
+    /// declared them under.
+    ///
+    /// **The caller's and not the object's**, and that is the whole reason this
+    /// field exists. `Payload::connection` is a `ConnectionId`, which is a
+    /// `&'static str` because it is declared at startup and used as a metric
+    /// label — so a name read out of a file cannot become one. The derivation
+    /// resolves each recorded name against this set, and a recorded name that
+    /// is not in it is a refusal naming the object rather than a payload
+    /// attributed to nothing.
+    pub connections: Vec<ConnectionId>,
+}
+
+impl VenueObjectId {
+    /// The declared connection with this name, or `None`.
+    #[must_use]
+    pub fn connection(&self, name: &str) -> Option<ConnectionId> {
+        self.connections
+            .iter()
+            .copied()
+            .find(|declared| declared.as_str() == name)
+    }
+}
+
+/// An archived object of upstream messages, in the order the transport yielded
+/// them.
+///
+/// **The ordering is a requirement and not a convenience.** An adapter keeps a
+/// book, so an object replayed out of order re-derives a different book and
+/// every row that comes out of it describes a market that never happened. An
+/// implementation that cannot guarantee receive order cannot be used here, and
+/// should say so rather than approximate it.
+pub trait VenueObject {
+    /// What the object is, as its manifest states it.
+    fn id(&self) -> &VenueObjectId;
+
+    /// The archive format the object is written in.
+    fn format_version(&self) -> u16;
+
+    /// The connections the object's own header declares, in the order its
+    /// records index them.
+    fn declared_connections(&self) -> Vec<String>;
+
+    /// The next message, or `Ok(None)` at a clean end of the object.
+    ///
+    /// # Errors
+    ///
+    /// [`UpstreamFormatError`], naming the object. A truncated object is a
+    /// refusal and never a short read: a silent stop turns a segment somebody
+    /// cut into a venue that went quiet.
+    fn next_message(&mut self) -> Result<Option<UpstreamMessage<'_>>, UpstreamFormatError>;
+}
+
+/// An object read out of the archive.
+#[derive(Debug)]
+pub struct ArchivedVenueObject<R: Read> {
+    id: VenueObjectId,
+    reader: UpstreamObjectReader<R>,
+}
+
+impl<R: Read> ArchivedVenueObject<R> {
+    /// Opens an archived object under the identity its manifest states.
+    ///
+    /// # Errors
+    ///
+    /// [`UpstreamFormatError`] when the bytes are not an upstream object of a
+    /// version this build reads.
+    pub fn open(id: VenueObjectId, bytes: R) -> Result<Self, UpstreamFormatError> {
+        let reader = UpstreamObjectReader::open(id.object_key.clone(), bytes)?;
+        Ok(Self { id, reader })
+    }
+}
+
+impl<R: Read> VenueObject for ArchivedVenueObject<R> {
+    fn id(&self) -> &VenueObjectId {
+        &self.id
+    }
+
+    fn format_version(&self) -> u16 {
+        // The reader refuses any other version at `open`, so this is the one
+        // version the messages below were read at rather than a value copied
+        // out of a manifest that could disagree with the bytes.
+        UPSTREAM_FORMAT_VERSION
+    }
+
+    fn declared_connections(&self) -> Vec<String> {
+        self.reader
+            .connections()
+            .iter()
+            .map(|c| c.name.clone())
+            .collect()
+    }
+
+    fn next_message(&mut self) -> Result<Option<UpstreamMessage<'_>>, UpstreamFormatError> {
+        self.reader.next_message()
+    }
+}
