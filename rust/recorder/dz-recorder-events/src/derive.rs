@@ -57,11 +57,12 @@ pub struct EventInput<'a> {
     /// are two observations, and a race is one `state_key` seen at more than
     /// one of them.
     ///
-    /// **Never a venue-side observation.** Every row this fold writes carries
-    /// eight non-nullable provenance columns that are statements about a
-    /// datagram, and a venue's upstream message is not one; the pairing then
-    /// groups on `channel_id` and `instrument_id`, which a venue side cannot
-    /// compute. A venue-side observation is its own grain, paired through
+    /// **Never a venue-side observation.** This value reaches `book_top` rows,
+    /// and each of those carries eight non-nullable provenance columns that are
+    /// statements about a datagram — a venue's upstream message is not one. The
+    /// pairing then groups on `channel_id`, `instrument_id` and `state_key`,
+    /// and a venue side can compute none of the three. A venue-side observation
+    /// is its own grain, paired on `(feed, symbol, book_key, occurrence)` with
     /// [`book_key`](crate::book_key) — see
     /// `docs/superpowers/specs/2026-09-09-recorder-venue-observation-design.md`.
     pub observation: &'a str,

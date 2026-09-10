@@ -8,12 +8,15 @@
 -- multicast feed are two observations.
 --
 -- THAT IS THE WHOLE OF WHAT PAIRS HERE. A venue-side observation is not one of
--- these and cannot become one: this query groups on `channel_id` and
--- `instrument_id`, the first being the operator's mapping and the second minted
--- by the publisher's registry, so a venue side can compute neither — and the
--- rows it would pair carry eight non-nullable columns that are statements about
--- a datagram. A venue-side race is its own view over its own grain, keyed on
--- `book_key`, which is the one key both sides can compute. Every argument below
+-- these and cannot become one: this query groups on `channel_id`,
+-- `instrument_id` and `state_key` — the first the operator's mapping, the
+-- second minted by the publisher's registry, the third eating both before any
+-- price — so a venue side can compute none of the three, and the last least of
+-- all. The rows it would pair also carry eight non-nullable columns that are
+-- statements about a datagram. A venue-side race is its own view over its own
+-- grain, keyed on `(feed, symbol, book_key, occurrence)`: `book_key` is the one
+-- hash both sides can compute, and it carries no instrument identity, so the
+-- symbol travels beside it. Every argument below
 -- about the ordinal, the unpaired occurrence, the anchored row and the caller's
 -- bound carries over to it unchanged.
 --

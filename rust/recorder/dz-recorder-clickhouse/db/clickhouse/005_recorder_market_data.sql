@@ -234,12 +234,20 @@ CREATE TABLE IF NOT EXISTS recorder.book_top (
     ask_source_count  Nullable(UInt16),
     price_exp         Int8,
     qty_exp           Int8,
-    -- The equivalence key: a hash over the instrument and both sides, and over
-    -- nothing else. No timestamp, because a timestamp is the quantity being
-    -- measured. No sequence number or Reset Count, because two observation points
-    -- on two transports do not share them. No bytes, because a hash over the
-    -- payload is a function of the schema version and the batching, so a
-    -- publisher upgrade repartitions the key space and the race reports nothing.
+    -- The equivalence key FOR TWO OBSERVERS OF ONE CHANNEL: a hash over the
+    -- `Channel ID`, the `Instrument ID` and both sides, and over nothing else.
+    -- The two identifiers are in it, which is what makes it observer-dependent
+    -- rather than merely transport-independent, and why a venue side — which
+    -- can name neither — pairs on `book_key` in its own table instead.
+    --
+    -- No timestamp, because a timestamp is the quantity being measured. No
+    -- sequence number or Reset Count: two recorders of one multicast feed do
+    -- share them, but they are a statement about a datagram rather than about
+    -- the book, and a key holding them would stop matching the moment one
+    -- observation point missed a datagram the other saw — which is the case
+    -- the race exists to measure. No bytes, because a hash over the payload is
+    -- a function of the schema version and the batching, so a publisher
+    -- upgrade repartitions the key space and the race reports nothing.
     state_key         UInt64,
     -- 1 when this top came from applying a snapshot rather than from a message
     -- the market produced. A starting state and never an observation in a race:

@@ -762,13 +762,18 @@ pub struct BookTop {
     /// **Not a venue-side observation, and this table cannot hold one.** Two
     /// things refuse it, and neither is a policy that could be relaxed. The
     /// eight provenance columns beside this one — `source_addr`, `channel_id`,
-    /// `dst_port`, `sequence_number`, `reset_count`, `segment_seq`,
-    /// `drop_delta`, `era` — are statements about a datagram, they are not
-    /// nullable, and a venue's upstream message is not a datagram. And the
-    /// pairing groups on `channel_id` and `instrument_id`: the first is the
-    /// operator's mapping and the second is minted by the publisher's
-    /// registry, so a venue side can compute neither. A venue-side observation
-    /// is its own grain in its own table, paired through `book_key` — see
+    /// `dst_port`, `source_id`, `sequence_number`, `message_index`,
+    /// `reset_count`, `segment_seq` — are statements about a datagram, they are
+    /// not nullable, and a venue's upstream message is not a datagram.
+    /// (`instrument_id` and `symbol` sit among them and are instrument identity
+    /// rather than provenance, which is what makes the cut eight and not ten.)
+    /// And the pairing groups on `channel_id`, `instrument_id` and `state_key`:
+    /// the first is the operator's mapping, the second is minted by the
+    /// publisher's registry, and the third eats both before any price — so a
+    /// venue side can compute none of the three, and the last least of all. A
+    /// venue-side observation is its own grain in its own table, paired on
+    /// `(feed, symbol, book_key, occurrence)` — `book_key` carries no
+    /// instrument identity, so the symbol travels beside it. See
     /// `docs/superpowers/specs/2026-09-09-recorder-venue-observation-design.md`.
     pub observation: String,
     pub source_addr: Ipv4Addr,
@@ -793,7 +798,7 @@ pub struct BookTop {
     /// `Channel ID`, the `Instrument ID` and both sides, and over nothing else.
     /// No timestamp, no sequence number, no bytes.
     ///
-    /// The two identifiers are in it, which this comment used to omit, and they
+    /// The two identifiers are in it, and they
     /// are what makes it observer-dependent rather than merely
     /// transport-independent: two recorders of one multicast feed pair on it
     /// because both read them off the same datagrams. An observer that has
