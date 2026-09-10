@@ -16,7 +16,10 @@
 //! the crate asserts the key against itself.
 #![forbid(unsafe_code)]
 
-use dz_recorder_events::{book_key, state_key, Side, Top};
+use std::net::Ipv4Addr;
+
+use dz_edge_tob::{Quote, QUOTE_ASK_UPDATED, QUOTE_BID_UPDATED};
+use dz_recorder_events::{book_key, state_key, Book, Channel, Side, Top};
 
 /// The channel and the instrument the pinned literals were computed under.
 const CHANNEL: u8 = 7;
@@ -194,5 +197,82 @@ fn one_book_under_two_channels_is_one_book_key_and_two_state_keys() {
         state_key(here, INSTRUMENT, &seen_here),
         state_key(there, INSTRUMENT, &seen_there),
         "and two states, which is why one key could not answer both questions"
+    );
+}
+
+/// The channel a `Quote` arrives on, which the book is keyed by and the key is
+/// not.
+fn channel() -> Channel {
+    Channel {
+        source_addr: Ipv4Addr::new(198, 51, 100, 7),
+        channel_id: CHANNEL,
+    }
+}
+
+/// One `Quote`, as the multicast side receives it.
+fn quote(bid_source_count: u16, ask_source_count: u16) -> Quote {
+    Quote {
+        instrument_id: INSTRUMENT,
+        source_id: 1_000,
+        update_flags: QUOTE_BID_UPDATED | QUOTE_ASK_UPDATED,
+        source_timestamp_ns: 1_000_000_001,
+        bid_price: 9_950,
+        bid_qty: 12,
+        ask_price: 10_050,
+        ask_qty: 7,
+        bid_source_count,
+        ask_source_count,
+    }
+}
+
+/// The top the multicast side derives from one `Quote`, through the real book.
+fn as_the_wire_states_it(bid_source_count: u16, ask_source_count: u16) -> Top {
+    Book::new()
+        .quote(channel(), &quote(bid_source_count, ask_source_count))
+        .expect("a quote is its own anchor and establishes a top")
+        .top
+}
+
+/// One book, observed on the wire and beside the venue, is one `book_key`.
+///
+/// **The count is the field the two observers had to agree about.** The
+/// top-of-book specification states `Bid Source Count` as *"Orders/sources at
+/// best bid. 0 if unavailable"*, so zero is that field's absence and not a
+/// count: a venue that exposes no number is lowered to zero, and a side that is
+/// quoted has something resting on it, so no `Quote` can mean *none*. A
+/// derivation reading the zero as `Some(0)` gave the multicast side a count for
+/// every quoted side, while an observer of the venue's own upstream states
+/// `None` — one book, two keys, and a race that pairs nothing while both paths
+/// read as clean.
+///
+/// Both halves are asserted, because either one alone is passed by a wrong
+/// answer: dropping the count from the key entirely passes the first, and taking
+/// the zero for a count passes the second.
+#[test]
+fn one_book_seen_beside_the_venue_and_on_the_wire_is_one_book_key() {
+    // A venue that states no count. `None` on the venue side because its
+    // adapter said so; `None` on the wire side because zero says so.
+    let unstated = Top {
+        bid: side(Some(9_950), Some(12), None),
+        ask: side(Some(10_050), Some(7), None),
+    };
+    assert_eq!(
+        book_key(&as_the_wire_states_it(0, 0)),
+        book_key(&unstated),
+        "a count the venue does not expose is an absence on both sides"
+    );
+
+    // A venue that does state one. The wire carries it, so both observers read
+    // the same number and the field still separates two books that differ by it.
+    let stated = two_sided();
+    assert_eq!(
+        book_key(&as_the_wire_states_it(2, 3)),
+        book_key(&stated),
+        "a count the venue does expose is the same count on both sides"
+    );
+    assert_ne!(
+        book_key(&unstated),
+        book_key(&stated),
+        "and the two readings are still two books"
     );
 }

@@ -23,6 +23,10 @@ pub trait EventSink {
     /// constructing a metric. Called once per upstream message, so a payload
     /// carrying a batch of them calls it once per member.
     ///
+    /// This call is the message boundary a sink sees, so it comes first: ahead
+    /// of that message's [`upstream_identity`](Self::upstream_identity), where
+    /// the upstream numbers its own, and ahead of its events.
+    ///
     /// The value must be one the adapter declared in
     /// [`Adapter::message_types`](crate::Adapter::message_types); anything else
     /// is counted under `other`. That bucket is not a failure — it is the guard
@@ -53,6 +57,45 @@ pub trait EventSink {
     /// meaning differ between transports would give one book state two hashes,
     /// and a race keyed on it would find no pair and read as a quiet feed. This
     /// is evidence a query reads, and nothing joins on it.
+    ///
+    /// # When to call it
+    ///
+    /// **After [`upstream_message`](Self::upstream_message) for the message this
+    /// identifies, and before any [`event`](Self::event) that message produced.**
+    /// That is the whole of the order, and it is required rather than
+    /// conventional: what a sink holds is the identity of the message whose
+    /// events *follow*.
+    ///
+    /// The kind states the message boundary, so the identity belongs inside it.
+    /// It is stated at most once per upstream message — a payload carrying a
+    /// batch states each member's after that member's kind — and it is **in
+    /// force only until the next `upstream_message`**. A sink must not carry it
+    /// across one, and an adapter whose upstream numbers some members and not
+    /// others simply does not call this for the others, which leaves those
+    /// events with no identity rather than the previous member's.
+    ///
+    /// An adapter that states the identity *after* the events it belongs to
+    /// attributes every one of them to the message before, and the first events
+    /// of a connection to nothing. Every row is still written and every row is
+    /// still plausible, so the misattribution has no symptom: it is off by one
+    /// message, uniformly, and the value it puts in the column is a real number
+    /// the upstream really sent.
+    ///
+    /// # Nothing can check this, which is why it is written down
+    ///
+    /// The order is unenforced and unenforceable from above. A runtime hands an
+    /// adapter a sink for one
+    /// [`Adapter::on_payload`](crate::Adapter::on_payload) and does not decode
+    /// the venue's bytes, so it cannot tell which call belongs to which upstream
+    /// message; the only layer that knows is the adapter. There is no return
+    /// value to refuse with, no compile error to fail with — a defaulted method
+    /// called in the wrong place still type-checks — and no counter that would
+    /// move, because the right number of calls is made in the wrong order.
+    ///
+    /// So this is what an adapter owes: the two calls in that order, around the
+    /// events of one message. A venue's own tests are where it is held, and the
+    /// shape that makes it easy to hold is stating both at the top of the branch
+    /// that decoded the message, before anything is emitted.
     ///
     /// # What each side does with it
     ///

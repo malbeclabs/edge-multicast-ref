@@ -71,6 +71,13 @@ pub struct Side {
     /// quantities and mapping one onto the other would put a number in a column
     /// that does not mean what the column says, so a delta-derived top leaves
     /// this absent.
+    ///
+    /// **`Some(0)` is not a value any derivation may state.** Zero is the
+    /// top-of-book field's own *unavailable*, so a derivation that reads the
+    /// wire maps it here to `None`, and a derivation reading a venue's own
+    /// upstream states `None` for a venue that does not expose the number. Both
+    /// have to agree, because [`book_key`] hashes this field and a pairing that
+    /// disagrees about it finds no pair — which reads as a quiet feed.
     pub source_count: Option<u16>,
 }
 
@@ -485,7 +492,24 @@ const fn side_of_quote(price_raw: i64, qty_raw: u64, source_count: u16) -> Side 
     Side {
         price_raw: Some(price_raw),
         qty_raw: Some(qty_raw),
-        source_count: Some(source_count),
+        // Zero is this field's *unavailable*, stated by the specification on the
+        // field itself — "Orders/sources at best bid. 0 if unavailable." — so a
+        // zero here is the absence of a reading and never a count of none. The
+        // lowering says the same from the other end: a side that is quoted has
+        // something resting on it, so a true zero cannot coexist with a quoted
+        // side, and a venue that states no count is published as this zero.
+        //
+        // Reading it as `Some(0)` would put the two observers of one book on
+        // opposite sides of a tag: the multicast side would carry a count for
+        // every quoted side while a venue-side observation with none carries
+        // `None`, and [`book_key`] separates those. Zero also has no honest
+        // reading as a
+        // number in a `Nullable(UInt16)` column — the rule `order_count`
+        // already carries, where the wire's absent value serialises as `NULL`.
+        source_count: match source_count {
+            0 => None,
+            count => Some(count),
+        },
     }
 }
 
@@ -588,6 +612,16 @@ const KEY_PRIME: u64 = 0x0000_0100_0000_01b3;
 /// tag is why the key is computed here and not copied out: `Side::is_absent`
 /// stays private, and a copy of it that drifted would be a race that stopped
 /// pairing with no symptom.
+///
+/// **Every field it hashes has to mean the same thing on both sides, which for
+/// `source_count` means reading the wire's sentinel as the absence it is.** The
+/// top-of-book
+/// specification states that field as "0 if unavailable", so a venue that does
+/// not expose the number is published as a zero and read back as
+/// [`None`](Option::None) — the same absence a venue-side observation states
+/// directly. A derivation that took the zero for a count would give one book two
+/// keys, and a race keyed on them would return no pairs and read as a quiet
+/// feed on both paths.
 #[must_use]
 pub fn book_key(top: &Top) -> u64 {
     fold_top(KEY_OFFSET, top)
@@ -621,8 +655,16 @@ fn fold_top(mut hash: u64, top: &Top) -> u64 {
         hash = eat(hash, &[1]);
         hash = eat(hash, &side.price_raw.unwrap_or(0).to_be_bytes());
         hash = eat(hash, &side.qty_raw.unwrap_or(0).to_be_bytes());
-        // Absent and zero are distinguished here too: a feed that carries no
-        // count and one that counts none are not the same reading.
+        // A count and no count are distinguished, because a delta-derived top
+        // carries none while a quote-derived one does, and those are two
+        // readings of the top rather than one.
+        //
+        // What is *not* distinguished is a count of zero, because no feed in
+        // this family can state one: on top of book zero is the field's own
+        // *unavailable* and the derivation maps it to `None` before it reaches
+        // here, and a depth feed's tag is `0xFFFF`. So the tag below separates
+        // "no reading" from a reading, and both observers of one book reach the
+        // same side of it.
         hash = match side.source_count {
             None => eat(hash, &[0]),
             Some(count) => eat(eat(hash, &[1]), &count.to_be_bytes()),
