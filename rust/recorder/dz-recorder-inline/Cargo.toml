@@ -15,10 +15,16 @@ description = "Inline mode: one process captures a feed, derives its rows and lo
 # depending on it for `OwnedDatagram` — which is why that type moved to
 # `dz-recorder-core` — would have pulled a pcapng parser and a decompressor into
 # a build that opens neither.
+#
+# `dz-recorder-capture` is absent for the same reason and a sharper one. This
+# crate captures nothing: it is handed datagrams and accounts for what it could
+# not take. The one type it needed was `PendingLoss`, which moved to
+# `dz-recorder-core` on that argument. Depending on the capture crate for it
+# pulled in `nix`, which does not compile off Linux — so this crate and its
+# tests could not be built or run on a developer's machine, for one `u32`.
 [dependencies]
 dz-edge-core = { path = "../../codec/dz-edge-core" }
 dz-recorder-core = { path = "../dz-recorder-core" }
-dz-recorder-capture = { path = "../dz-recorder-capture" }
 dz-recorder-archive = { path = "../dz-recorder-archive" }
 dz-recorder-rows = { path = "../dz-recorder-rows" }
 dz-recorder-load = { path = "../dz-recorder-load" }

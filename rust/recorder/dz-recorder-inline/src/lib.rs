@@ -54,7 +54,7 @@
 //! supplies is a `Source` over a live ring, a manifest for a window that has no
 //! object, and somewhere to put the rows.
 //!
-//! [`PendingLoss`]: dz_recorder_capture::PendingLoss
+//! [`PendingLoss`]: dz_recorder_core::PendingLoss
 //! [`derive`]: dz_recorder_rows::derive
 //! [`Source`]: dz_recorder_core::Source
 #![forbid(unsafe_code)]

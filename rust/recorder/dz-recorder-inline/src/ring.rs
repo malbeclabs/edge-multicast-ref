@@ -39,8 +39,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dz_edge_core::MAX_DATAGRAM_SIZE;
-use dz_recorder_capture::PendingLoss;
-use dz_recorder_core::{OwnedDatagram, RecordedDatagram, RecvTsKind};
+use dz_recorder_core::{OwnedDatagram, PendingLoss, RecordedDatagram, RecvTsKind};
 
 use std::net::SocketAddrV4;
 

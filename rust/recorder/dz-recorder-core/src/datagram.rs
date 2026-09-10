@@ -129,3 +129,48 @@ impl ChannelInstance {
         }
     }
 }
+
+/// Loss owed to the next datagram that actually reaches the record loop.
+///
+/// A datagram the record loop could not take is loss the recorder caused, and
+/// the delta that datagram was carrying goes back to the buffer pool with it.
+/// Both are datagrams lost between the one before and the one after, which is
+/// what [`RecordedDatagram::drop_delta`] and pcapng's `epb_dropcount` are
+/// defined as, so they are charged to whichever datagram gets through next.
+/// Unattributed, the archive shows a sequence gap with nothing admitted behind
+/// it, and the analysis tier charges the gap to the publisher.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PendingLoss {
+    owed: u32,
+}
+
+impl PendingLoss {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { owed: 0 }
+    }
+
+    /// Loss this accumulator carries from here on, whatever becomes of the
+    /// datagram it arrived with. Saturating, because a delta that wrapped would
+    /// report an outage as a clean stretch.
+    pub fn owe(&mut self, lost: u32) {
+        self.owed = self.owed.saturating_add(lost);
+    }
+
+    /// The delta the next datagram to reach the record loop must declare.
+    #[must_use]
+    pub const fn owed(&self) -> u32 {
+        self.owed
+    }
+
+    /// That datagram reached the record loop, so the debt travelled with it.
+    pub fn settled(&mut self) {
+        self.owed = 0;
+    }
+
+    /// It did not. It is itself one more datagram lost between the previous one
+    /// and the next, and everything it declared is still owed.
+    pub fn undelivered(&mut self) {
+        self.owe(1);
+    }
+}
