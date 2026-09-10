@@ -63,7 +63,7 @@ them again:
 
 | Question | Where it is answered |
 |---|---|
-| When does a segment rotate? | `rotate::RotationPolicy` — size or age, whichever comes first |
+| When does a segment rotate? | `rotate::RotationPolicy` — size or age, whichever comes first. `UpstreamSegmentWriter` does not rotate: it accounts for the bytes it has written and states the window it covers, and the venue's own binary reads that count against this policy |
 | How is an object compressed and digested? | `compress::seal` — zstd with its own per-frame checksum on, hashing the bytes that land |
 | Where does an object land? | `object_key::object_key` — the Hive-partitioned key, with the site and the recorder in it |
 | What is a re-derivation idempotent on? | `(object key, sha256)`, which the manifest states |

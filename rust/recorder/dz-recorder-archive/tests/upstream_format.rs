@@ -16,6 +16,16 @@ use dz_recorder_core::RecvTsKind;
 const KEY: &str = "feed=top-of-book/env=test/site=site-1/recorder=recorder-1/\
                    date=2026-09-09/hour=12/1-2-3.dzus";
 
+/// The digest of some bytes, in the manifest's own notation.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut out = String::with_capacity(64);
+    for byte in Sha256::digest(bytes) {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
 fn connections() -> Vec<UpstreamConnection> {
     vec![
         UpstreamConnection::new("mktdata", RecvTsKind::KernelSoftware),
@@ -73,8 +83,8 @@ fn an_object_round_trips_every_message_it_was_given() {
     let largest = vec![0xA5u8; MAX_UPSTREAM_MESSAGE_BYTES as usize];
     let object = write(&[
         (0, 1_700_000_000_000_000_001, b"{\"t\":\"quote\"}".to_vec()),
-        // A message of no bytes at all: an empty frame on a session, a
-        // keep-alive with no body.
+        // A message of no bytes at all: an empty upstream message on a session,
+        // a keep-alive with no body.
         (0, 1_700_000_000_000_000_002, Vec::new()),
         (1, 1_700_000_000_000_000_003, b"[]".to_vec()),
         (0, 1_700_000_000_000_000_004, largest.clone()),
@@ -325,13 +335,22 @@ fn the_object_extension_is_not_the_pcapng_one() {
     }
 }
 
-/// Rotation is the datagram archive's own rule, not a second one.
+/// Rotation is the datagram archive's own rule, and this writer keeps the number
+/// the rule reads.
 ///
-/// Size or age, whichever comes first. Held here because the two shapes sharing
-/// a policy is the property, and a copy of the rule in the upstream writer would
-/// pass every test written against itself.
+/// **The writer does not rotate.** It accounts for the bytes it has put on the
+/// disk and states the window it covers, and the decision is the venue's own
+/// binary's — which applies [`RotationPolicy`] rather than declaring a second
+/// rule. So there are two halves and this holds them meeting: the policy's own
+/// bounds, size or age whichever comes first, and the writer's accounting, which
+/// is the value the size bound is read against.
+///
+/// The mutant the second half kills is a count that has drifted from the bytes
+/// on the disk. The policy would then be exactly right about the wrong number:
+/// a segment rotating at a size nobody configured, and objects whose uniformity
+/// the analysis tier is entitled to assume.
 #[test]
-fn rotation_is_the_archive_tiers_own_policy() {
+fn rotation_is_the_archive_tiers_own_policy_over_this_writers_own_count() {
     let policy = RotationPolicy {
         rotate_bytes: 1_000,
         rotate_interval: std::time::Duration::from_secs(60),
@@ -339,15 +358,72 @@ fn rotation_is_the_archive_tiers_own_policy() {
     assert!(!policy.due(999, 0, 59_999_999_999));
     assert!(policy.due(1_000, 0, 0), "the size bound");
     assert!(policy.due(0, 0, 60_000_000_000), "the age bound");
+
+    let mut writer =
+        UpstreamSegmentWriter::open(Vec::new(), &connections()).expect("the header is writable");
+    // The header is bytes on the disk too, and a segment holding only its header
+    // is not due: an empty rotation is not published, so a policy that fired on
+    // one would publish a window nobody observed.
+    let header_only = writer.bytes_written();
+    assert!(header_only > 0, "the header was not accounted for");
+    assert!(!policy.due(header_only, 0, 0));
+
+    let mut written = 0u64;
+    while !policy.due(writer.bytes_written(), 0, 0) {
+        writer
+            .write_message(0, 1_700_000_000_000_000_000 + written, &[0x5Au8; 100])
+            .expect("the message is writable");
+        written += 1;
+        assert!(written < 1_000, "the writer's own count is not moving");
+    }
+    // The window the manifest states, from the same accounting.
+    assert_eq!(writer.start_ns(), Some(1_700_000_000_000_000_000));
+    assert_eq!(
+        writer.end_ns(),
+        Some(1_700_000_000_000_000_000 + written - 1)
+    );
+    assert_eq!(writer.message_count(), written);
+
+    let accounted = writer.bytes_written();
+    let object = writer.finish().expect("the segment flushes");
+    assert_eq!(
+        accounted,
+        object.len() as u64,
+        "the size bound is read against a number that is not the bytes on the disk"
+    );
+    // And the object the rule fired on is one the reader reads whole.
+    assert_eq!(
+        read_all(&object).expect("a whole object reads").len() as u64,
+        written
+    );
 }
 
 /// A published object carries the key and the digest a derivation is idempotent
 /// on, and the digest is of the bytes that landed.
+///
+/// **Both compressions, because the digest is of the object that lands.** Run
+/// uncompressed only, this passes over a `seal` that hashed the segment instead
+/// of the object: the two are the same bytes there, so a reader checking a
+/// fetched `.dzus.zst` against the manifest would be the first to find out. The
+/// zstd half is also where the frame checksum is, which is the difference
+/// between an archive that can tell it has been damaged and one that decodes to
+/// a different buffer with no error at all.
 #[test]
 fn a_published_object_carries_its_key_and_its_digest() {
+    for compression in [Compression::None, Compression::Zstd { level: 3 }] {
+        a_published_object_carries_its_key_and_its_digest_under(compression);
+    }
+}
+
+fn a_published_object_carries_its_key_and_its_digest_under(compression: Compression) {
     let dir = tempfile::tempdir().expect("a temporary directory");
     let segment = dir.path().join("open.dzus");
-    let object = write(&[(0, 1_700_000_000_000_000_000, b"one".to_vec())]);
+    // Compressible and not tiny, so that the zstd path is a real encode rather
+    // than a frame around three bytes.
+    let object = write(&[
+        (0, 1_700_000_000_000_000_000, b"one".to_vec()),
+        (1, 1_700_000_000_000_000_000, vec![0x5Au8; 64 << 10]),
+    ]);
     std::fs::write(&segment, &object).expect("the segment is writable");
 
     let completed = dir.path().join("completed");
@@ -365,23 +441,33 @@ fn a_published_object_carries_its_key_and_its_digest() {
             segment_seq: 3,
             start_ns: 1_700_000_000_000_000_000,
             end_ns: 1_700_000_000_000_000_000,
-            message_count: 1,
+            message_count: 2,
             object_key: String::new(),
             sha256: String::new(),
             byte_count: 0,
         },
-        Compression::None,
+        compression,
     )
     .expect("the object publishes");
 
     // The Hive-partitioned key the datagram archive already produces, with this
-    // shape's own extension on the end.
+    // shape's own extension on the end — and the compression suffix on that,
+    // because the key names the object that landed.
     assert_eq!(
         published.manifest.object_key,
-        "feed=top-of-book/env=test/site=site-1/recorder=recorder-1/\
-         date=2023-11-14/hour=22/1700000000000000000-1700000000000000000-3.dzus"
+        format!(
+            "feed=top-of-book/env=test/site=site-1/recorder=recorder-1/\
+             date=2023-11-14/hour=22/1700000000000000000-1700000000000000000-3.{}",
+            upstream_object_extension(compression)
+        )
     );
-    assert_eq!(published.manifest.byte_count, object.len() as u64);
+
+    let landed = std::fs::read(&published.path).expect("the object landed");
+    assert_eq!(
+        published.manifest.byte_count,
+        landed.len() as u64,
+        "the byte count is not of the object that landed"
+    );
     assert_eq!(published.manifest.sha256.len(), 64);
     assert!(
         published
@@ -392,11 +478,37 @@ fn a_published_object_carries_its_key_and_its_digest() {
         "{}",
         published.manifest.sha256
     );
-    // Of the bytes that landed, so a reader can check the object it fetched.
+    // Of the bytes that landed, so a reader can check the object it fetched
+    // without decompressing it first.
     assert_eq!(
-        std::fs::read(&published.path).expect("the object landed"),
-        object
+        published.manifest.sha256,
+        sha256_hex(&landed),
+        "the digest is not of the object that landed"
     );
+
+    match compression {
+        Compression::None => assert_eq!(landed, object),
+        Compression::Zstd { .. } => {
+            assert!(
+                landed.len() < object.len(),
+                "the object landed uncompressed under a compression that declares zstd"
+            );
+            // The frame checksum, which is what lets a damaged object be
+            // refused rather than decoded to a different buffer. Bit 2 of the
+            // frame header descriptor, which is the byte after the magic.
+            assert_eq!(&landed[..4], &[0x28, 0xB5, 0x2F, 0xFD], "a zstd frame");
+            assert_eq!(
+                landed[4] & 0x04,
+                0x04,
+                "the frame carries no content checksum"
+            );
+            // And it decompresses to the object the writer produced, message
+            // for message.
+            let decoded = zstd::stream::decode_all(&landed[..]).expect("the object decompresses");
+            assert_eq!(decoded, object);
+            assert_eq!(read_all(&decoded).expect("a whole object reads").len(), 2);
+        }
+    }
 
     // And the manifest is beside it, with the same key and digest, so a shipper
     // needs to know nothing about the layout.

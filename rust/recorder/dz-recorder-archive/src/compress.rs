@@ -551,7 +551,14 @@ pub fn seal(
     Ok((bytes, hasher.finalize().into()))
 }
 
-fn write_and_sync(path: &Path, bytes: &[u8]) -> Result<(), SinkError> {
+/// Writes a whole small file and returns only once it is on the disk.
+///
+/// **One of these, for the same reason there is one [`seal`].** Both archive
+/// shapes land a manifest beside an object and both must land it durably: a
+/// manifest that is a row pointing at nothing after a power cut is the failure
+/// the ordering of the two renames exists to prevent, and a second copy of this
+/// is a second place for the `sync_all` to be forgotten.
+pub(crate) fn write_and_sync(path: &Path, bytes: &[u8]) -> Result<(), SinkError> {
     let mut f = File::create(path).map_err(SinkError::Io)?;
     f.write_all(bytes).map_err(SinkError::Io)?;
     f.sync_all().map_err(SinkError::Io)

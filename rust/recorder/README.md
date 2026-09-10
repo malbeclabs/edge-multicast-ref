@@ -590,8 +590,10 @@ a socket that observes datagrams, counts what the handle dropped and records
 link headers. A venue-side recording is none of the three, so it has its own
 [archive shape](dz-recorder-archive/UPSTREAM-OBJECT-FORMAT.md) — length-delimited
 upstream messages, each with the connection that delivered it and a receive
-stamp — rotated, compressed, digested and keyed by the archive tier's own
-policy rather than a second one. That document also states why this is not the
+stamp — compressed, digested and keyed by the archive tier's own code rather
+than a second copy of it, and rotated under the archive tier's own policy: the
+segment writer accounts for the bytes it has written and states the window it
+covers, and the venue's binary reads that count against the one policy. That document also states why this is not the
 record encoding the offline re-lowering uses: that one carries normalized
 events, which sit downstream of the venue's decode, and the evidence has to be
 what the venue sent.

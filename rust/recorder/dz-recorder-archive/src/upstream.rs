@@ -44,6 +44,9 @@
 //! it is digested. A second set of answers to those four questions is how two
 //! archives in one repository come to disagree about retention, so this module
 //! declares none of them: what it adds is the record layout and nothing else.
+//! The manifest beside the object is written through the same
+//! `write_and_sync` the pcapng side publishes with, so there is one place the
+//! `sync_all` before the rename can be forgotten rather than two.
 //!
 //! The object key and its `sha256` are what a derivation is idempotent on, so
 //! they are produced by [`publish`] at publication and are **not** derived at
@@ -59,7 +62,7 @@ use dz_recorder_core::{RecvTsKind, SinkError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::compress::{seal, Compression};
+use crate::compress::{seal, write_and_sync, Compression};
 use crate::object_key::object_key;
 
 /// The eight bytes at the front of every upstream object.
@@ -747,12 +750,6 @@ pub fn publish(
     }
 
     Ok(PublishedUpstreamObject { path, manifest })
-}
-
-fn write_and_sync(path: &Path, bytes: &[u8]) -> Result<(), SinkError> {
-    let mut file = fs::File::create(path).map_err(SinkError::Io)?;
-    file.write_all(bytes).map_err(SinkError::Io)?;
-    file.sync_all().map_err(SinkError::Io)
 }
 
 /// Fills `buf` or says how much was there, without treating a short read as an
