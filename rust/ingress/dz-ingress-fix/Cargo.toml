@@ -17,7 +17,17 @@ dz-ingress-core = { path = "../dz-ingress-core" }
 # and `thiserror` is what every other crate in this family spells them with.
 thiserror = { workspace = true }
 
+# `serde` and no `toml`: this crate owns the shape of
+# `[source.upstream.session]` - which is the rule that stops a transport's keys
+# being spelled two ways - but the runtime owns the document, so nothing here
+# needs a parser.
+serde = { workspace = true }
+
 [dev-dependencies]
+# `toml`, so that the configuration tests parse the same text an operator
+# writes rather than constructing the struct they are about.
+toml = { workspace = true }
+
 # `macros` and `rt` for the session tests, which run their own current-thread
 # runtime over a scripted byte stream. Not in `[dependencies]`: a library that
 # starts a runtime takes a decision that belongs to the binary.

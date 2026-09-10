@@ -248,8 +248,10 @@ version = "0.1.1"
 dependencies = [
  "dz-adapter-core",
  "dz-ingress-core",
+ "serde",
  "thiserror 1.0.69",
  "tokio",
+ "toml",
 ]
 
 [[package]]
