@@ -79,7 +79,7 @@ pub use backoff::{Backoff, BackoffPolicy};
 pub use clock::TokioClock;
 pub use clock::{BoxFuture, Clock};
 pub use config::{IngressConfig, Policy};
-pub use driver::{Driver, UpstreamQueue};
+pub use driver::{Driver, UpstreamQueue, UPSTREAM_POLL};
 pub use error::{ConfigError, ConnectFailureReason, IngressError};
 pub use input::{Input, Received, StampSource, UpstreamMessage};
 pub use kind::Kind;

@@ -20,6 +20,7 @@ Names we do not own, or have not renamed, are left as written wherever they appe
 | [Codec crates: Top-of-Book path](superpowers/plans/2026-08-26-codec-crates-top-of-book.md) | Plan for the first three codec crates |
 | [The venue adapter interface](superpowers/specs/2026-09-02-venue-adapter-interface-design.md) · [plan](superpowers/plans/2026-09-02-venue-adapter-interface.md) | The trait a venue repository implements to turn its own upstream source into our messages, and how the recorder re-lowers it to compare against multicast |
 | [Several channel instances of one feed specification](superpowers/specs/2026-09-09-publisher-feed-routes-design.md) · [plan](superpowers/plans/2026-09-09-publisher-feed-routes.md) | One process operating many channels of one feed spec: a `shard` on `[[feed]]`, reference data per channel, and the era keyed on the channel instance |
+| [An upstream write that is not a connect](superpowers/specs/2026-09-09-upstream-write-after-a-listing-change-design.md) · [plan](superpowers/plans/2026-09-09-upstream-write-after-a-listing-change.md) | Why an instrument admitted mid-session was never subscribed, and why the write has to name the connection it goes out on |
 
 ## Feeds
 

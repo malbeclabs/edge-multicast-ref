@@ -170,6 +170,18 @@ pub trait Input: Send {
     /// That is the borrow checker enforcing the thing that makes the boundary's
     /// borrowed payloads sound.
     ///
+    /// # Liveness is an obligation
+    ///
+    /// A transport with nothing to deliver should still return
+    /// [`Received::Liveness`] on its own liveness cadence. A receive that
+    /// returns is what drives everything the driver does between payloads, and
+    /// [`UPSTREAM_POLL`](crate::UPSTREAM_POLL) most of all: with no idle guard
+    /// configured the `budget` is `None`, so a transport that neither delivers
+    /// nor says it is alive leaves the driver inside this call for the life of
+    /// the connection, and an instrument admitted mid-session is never
+    /// subscribed. `dz-ingress-websocket` meets the obligation by pinging on
+    /// its own clock and answering the pong with [`Received::Liveness`].
+    ///
     /// # Errors
     ///
     /// [`IngressError::Ended`] carrying the reason, when the connection is

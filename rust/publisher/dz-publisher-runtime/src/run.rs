@@ -1205,6 +1205,22 @@ impl Adapter for SharedAdapter {
         self.held().on_connected(conn, out)
     }
 
+    /// Forwarded rather than defaulted, and the default is why: it is a no-op
+    /// that answers `Ok(())`. A wrapper that inherited it would report every
+    /// venue as having nothing outstanding, on every cadence, for ever — and
+    /// the failure that reaches an operator is the one this method exists to
+    /// close: an instrument admitted mid-session gets an `Instrument ID`, a
+    /// definition on the reference-data port and a place in the manifest, and
+    /// never a subscription, with a healthy feed and a manifest saying it is
+    /// published. A refusal would at least be counted. This says nothing.
+    fn poll_upstream(
+        &mut self,
+        conn: ConnectionId,
+        out: &mut dyn UpstreamSink,
+    ) -> Result<(), AdapterError> {
+        self.held().poll_upstream(conn, out)
+    }
+
     fn on_disconnected(&mut self, conn: ConnectionId, reason: DisconnectReason) {
         self.held().on_disconnected(conn, reason);
     }
@@ -1345,6 +1361,88 @@ mod tests {
     use super::*;
     use dz_publisher_metrics::prometheus::core::Collector;
     use dz_publisher_metrics::prometheus::IntCounter;
+
+    /// An adapter that records what the wrapper forwarded to it.
+    ///
+    /// Only the methods under test are given bodies; the rest are the trait's
+    /// own defaults, which is the point — `SharedAdapter` is a hand-written
+    /// delegate, so what it forgets to write out is silently answered by a
+    /// default that belongs to no venue.
+    #[derive(Default)]
+    struct Recording {
+        polled: Vec<ConnectionId>,
+    }
+
+    impl Adapter for Recording {
+        fn message_types(&self) -> &[&'static str] {
+            &["A-B"]
+        }
+
+        fn poll_listings(&mut self, _out: &mut dyn ListingSink) {}
+
+        fn poll_upstream(
+            &mut self,
+            conn: ConnectionId,
+            out: &mut dyn UpstreamSink,
+        ) -> Result<(), AdapterError> {
+            self.polled.push(conn);
+            out.send_text("subscribe:A-B");
+            Ok(())
+        }
+
+        fn on_payload(
+            &mut self,
+            _payload: &Payload<'_>,
+            _out: &mut dyn EventSink,
+        ) -> Result<(), ParseError> {
+            Ok(())
+        }
+    }
+
+    /// Collects what an adapter wrote, so a forwarded call can be told from a
+    /// defaulted one by more than a counter.
+    #[derive(Default)]
+    struct Wrote(Vec<String>);
+
+    impl UpstreamSink for Wrote {
+        fn send_text(&mut self, text: &str) {
+            self.0.push(text.to_owned());
+        }
+
+        fn send_binary(&mut self, bytes: &[u8]) {
+            self.0.push(format!("{} bytes", bytes.len()));
+        }
+    }
+
+    /// The delegate asks the venue's adapter what is outstanding.
+    ///
+    /// `Adapter::poll_upstream` is defaulted to a silent `Ok(())`, so a
+    /// `SharedAdapter` that does not write it out compiles, runs, and answers
+    /// *nothing outstanding* for every venue on every cadence — with the driver
+    /// asking exactly as designed and no series anywhere going non-zero. The
+    /// same shape `SharedSink`'s own doc records having been found once
+    /// already, on `desynchronised`.
+    ///
+    /// Asserted through the sink as well as through the count, because an
+    /// implementation that forwarded the call and dropped the `out` it was
+    /// handed would satisfy a count alone.
+    #[test]
+    fn the_delegate_asks_the_venue_adapter_what_is_outstanding() {
+        let inner: Arc<Mutex<Box<dyn Adapter>>> =
+            Arc::new(Mutex::new(Box::new(Recording::default())));
+        let mut shared = SharedAdapter::new(Arc::clone(&inner), vec!["A-B"]);
+        let mut wrote = Wrote::default();
+
+        shared
+            .poll_upstream(ConnectionId::new("primary"), &mut wrote)
+            .expect("the adapter has something outstanding and no reason to refuse");
+
+        assert_eq!(
+            wrote.0,
+            vec!["subscribe:A-B".to_owned()],
+            "what the venue's adapter queued has to reach the queue the driver flushes"
+        );
+    }
 
     /// A metrics set shaped like the smallest publisher there is.
     fn metrics() -> PublisherMetrics {

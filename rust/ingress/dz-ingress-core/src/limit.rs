@@ -7,11 +7,12 @@ use std::time::Duration;
 /// # What this limits
 ///
 /// Outbound messages: the authentication and subscription messages an adapter
-/// writes from
-/// [`on_connected`](dz_adapter_core::Adapter::on_connected). That is the only
-/// traffic a publisher originates — it is a subscriber to its venue, not a
-/// participant — and a venue's published limit is what this exists to stay
-/// under. A publisher whose reconnect storms through a hundred subscription
+/// writes from [`on_connected`](dz_adapter_core::Adapter::on_connected), and
+/// whatever it queues from
+/// [`poll_upstream`](dz_adapter_core::Adapter::poll_upstream) on a connection
+/// that is already up. Between them that is the only traffic a publisher
+/// originates — it is a subscriber to its venue, not a participant — and a
+/// venue's published limit is what this exists to stay under. A publisher whose reconnect storms through a hundred subscription
 /// messages is one that gets itself rate-limited off, which then reconnects,
 /// which subscribes again.
 ///
