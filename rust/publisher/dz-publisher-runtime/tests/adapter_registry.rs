@@ -78,6 +78,20 @@ fn an_unknown_kind_fails_and_the_message_lists_every_registered_kind() {
         matches!(error, StartupError::UnknownAdapterKind { .. }),
         "an unregistered kind is its own error and not a fallback"
     );
+
+    // The whole message, once, because the two values above cannot be told
+    // apart by looking for them. `AdapterResolution::unknown_kind` takes the
+    // token and the registry as two positional `String`s, so passing them the
+    // wrong way round compiles — and every assertion in this file is a
+    // `contains` that is symmetric in the pair, so it would pass while the
+    // operator was told their whole registry was the misspelling and their
+    // misspelling was the registry. The sentence is the only thing that says
+    // which value went where.
+    assert_eq!(
+        message,
+        "`[adapter] kind = \"a-fourth\"` names no adapter this binary registered; \
+         registered in this binary: a-third, another, one-source (built in: uds)"
+    );
 }
 
 #[test]
@@ -119,6 +133,39 @@ fn an_empty_registry_says_so_rather_than_printing_an_empty_list() {
     assert!(
         message.contains("built in: uds"),
         "the built-in is part of what this binary answers to: {message}"
+    );
+}
+
+/// The `registry` module path, and the type it resolves to.
+///
+/// The types are in `dz-venue-composition` now and this path is what an
+/// out-of-tree `main` written before that may have imported them through, so
+/// it still has to name *this crate's* registry — the one whose `open` refuses
+/// with a [`StartupError`]. A module re-export of the seam's own `registry`
+/// would make the path resolve and the types wrong: `AdapterRegistry` there is
+/// generic over the reported error and defaults to the boxed
+/// `AdapterInitError`, so every annotation below would stop compiling and the
+/// `matches!` would have nothing to match.
+///
+/// Which is why the annotations are written out rather than inferred: in this
+/// test the annotation *is* the assertion.
+#[test]
+fn the_registry_module_path_resolves_to_this_crates_own_alias() {
+    use dz_publisher_runtime::registry;
+
+    let empty: registry::AdapterRegistry = registry::AdapterRegistry::new();
+    let registered: registry::AdapterRegistry = empty.with("another-venue", |_cx| {
+        Err::<registry::Venue, registry::AdapterInitError>("not reached".into())
+    });
+
+    let document = Document::parse(&Doc::valid().render()).expect("valid");
+    let cx: registry::AdapterContext<'_> = context(&document.adapter);
+    let error: StartupError = registered
+        .open(&cx)
+        .expect_err("`kind` names neither the entry nor the built-in");
+    assert!(
+        matches!(error, StartupError::UnknownAdapterKind { .. }),
+        "the path has to carry the alias, so a refusal through it is this          crate's enumeration and not a boxed error"
     );
 }
 

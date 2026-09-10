@@ -1,0 +1,56 @@
+[package]
+name = "dz-venue-composition"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "How a venue is composed: the adapter registry, the context a constructor is given, and the value it hands back"
+
+# The whole point of this crate is what is *not* here. `tests/dependencies.rs`
+# reads the resolved graph and fails if the egress, the reference-data registry
+# or the publisher's runtime appears in it, transitively or directly: a process
+# that composes a venue in order to record must not link the transmitters, the
+# era store and the reference-data registry in order to publish nothing.
+[dependencies]
+# The two boundary crates: the adapter a venue implements, and the transports it
+# reads from.
+dz-adapter-core = { path = "../../adapter/dz-adapter-core" }
+dz-ingress-core = { path = "../../ingress/dz-ingress-core" }
+
+# The built-in record adapter, so `[adapter] kind = "uds"` resolves without a
+# venue. It is `dz-adapter-core` and `thiserror` and nothing else.
+dz-adapter-uds = { path = "../../adapter/dz-adapter-uds" }
+
+# `FeedSpec`, whose tokens are the codec crates' own `Feed::NAME` constants and
+# whose port roles are the codec's own, rather than literals that could drift
+# from the crates that define the feeds. Each of the three is `thiserror` and,
+# for the two feeds, `dz-edge-core`.
+dz-edge-core = { path = "../../codec/dz-edge-core" }
+dz-edge-mbp = { path = "../../codec/dz-edge-mbp" }
+dz-edge-tob = { path = "../../codec/dz-edge-tob" }
+
+# The metrics *client* and not `dz-publisher-metrics`, which carries the
+# exposition server. `Venue::collectors` is a Prometheus type by construction -
+# a venue hands its own series up because the registry cannot travel down into
+# its constructor, and the runtime hands the same objects to a Prometheus
+# registry, so a trait object of our own could not be turned back into one. This
+# crate re-exports `prometheus` for the reason `dz-publisher-metrics` does: one
+# 0.14.x resolves for the whole graph, so a consumer that also depends on
+# prometheus links the same copy and the two cannot disagree about the type.
+prometheus = { workspace = true }
+
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+# `[adapter.upstream]` and `[adapter.credentials]` are free tables whose keys
+# only the adapter knows, so the type a venue's constructor is handed is a
+# `toml::Table`. The document is still somebody else's: this crate parses no
+# file and owns no section but the four `AdapterSection` names.
+toml = { workspace = true }
+
+[dev-dependencies]
+# Only for `tests/dependencies.rs`, which reads `cargo metadata --offline`.
+# Dev-dependencies are not inherited by a consumer, so the graph the test
+# asserts on is not the graph the test needs a parser for.
+serde_json = { workspace = true }

@@ -307,7 +307,6 @@ name = "dz-publisher-runtime"
 version = "0.1.1"
 dependencies = [
  "dz-adapter-core",
- "dz-adapter-uds",
  "dz-edge-core",
  "dz-edge-mbp",
  "dz-edge-refdata",
@@ -317,6 +316,7 @@ dependencies = [
  "dz-publisher-lowering",
  "dz-publisher-metrics",
  "dz-publisher-refdata",
+ "dz-venue-composition",
  "serde",
  "thiserror 1.0.69",
  "tokio",
@@ -555,6 +555,23 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "dz-venue-composition"
+version = "0.1.1"
+dependencies = [
+ "dz-adapter-core",
+ "dz-adapter-uds",
+ "dz-edge-core",
+ "dz-edge-mbp",
+ "dz-edge-tob",
+ "dz-ingress-core",
+ "prometheus",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "toml",
 ]
 
 [[package]]
