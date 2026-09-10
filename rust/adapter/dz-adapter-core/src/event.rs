@@ -128,12 +128,11 @@ pub enum SideUpdate<'a> {
         ///
         /// **`Some(0)` is `None` said in a way that does not survive.** The
         /// wire's own value for *unavailable* on this field is zero, so a zero
-        /// stated here is published as, and read back as, the absence — while a
-        /// recorder deriving this same side from the venue would keep the
-        /// `Some(0)` it was handed. That is one book with two `book_key`s, which
-        /// pairs with nothing and reads as a quiet feed. A side that is present
-        /// has something resting on it, so an adapter with no number to state
-        /// says `None`.
+        /// stated here is published as the absence and cannot be told from one
+        /// afterwards: a subscriber reads the specification's *unavailable*, and
+        /// a recorder writes a zero into a column whose honest value for "the
+        /// venue did not say" is `NULL`. A side that is present has something
+        /// resting on it, so an adapter with no number to state says `None`.
         source_count: Option<u16>,
     },
 }

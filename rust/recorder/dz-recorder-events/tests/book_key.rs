@@ -7,13 +7,21 @@
 //! is what two observers of one market pair on, and neither identifier is
 //! available to an observer that never saw a datagram: the channel is the
 //! operator's mapping from a shard to a channel, and the `Instrument ID` is
-//! minted by the reference-data registry and is unique only within an era.
+//! minted by the reference-data registry, which makes it a number in that
+//! publisher's own space — never re-used, and never held by a side that reads
+//! the venue instead of the wire.
 //!
 //! **`state_key`'s value may not move.** It is written into rows that exist and
 //! compared against rows loaded before this split, so the first test pins it to
 //! literals computed from the function as it stood beforehand. A refactor that
 //! changed it by a byte would not fail anything else here — every other test in
 //! the crate asserts the key against itself.
+//!
+//! That pin builds its tops by hand, so it holds the *hash* and not the
+//! derivation that feeds it. The second pin closes that: it takes a `Quote` off
+//! the wire, through the decode and the real book, and asserts the key over the
+//! top that comes out — because a change to what the derivation puts into the
+//! key moves a stored value just as surely as a change to the fold.
 #![forbid(unsafe_code)]
 
 use std::net::Ipv4Addr;
@@ -128,6 +136,99 @@ fn state_keys_value_did_not_move() {
     );
 }
 
+/// The channel and the instrument the wire-derived literals were computed
+/// under. The instrument is the one the bytes below carry, because the
+/// derivation reads it off them.
+const WIRE_CHANNEL: u8 = 1;
+const WIRE_INSTRUMENT: u32 = 11;
+
+/// One `Quote`, 60 bytes, exactly as a datagram carries it.
+///
+/// Little-endian per the codec, bid 9_950/12 and ask 10_050/7, both sides
+/// updated, and both source counts zero — which is the field's own *unavailable*
+/// and the commonest thing a venue states, since neither publisher exposes the
+/// number on top of book.
+const QUOTE_ON_THE_WIRE: [u8; 60] = [
+    0x03, 0x3c, 0x00, 0x00, // type 0x03, length 60, reserved
+    0x0b, 0x00, 0x00, 0x00, // Instrument ID 11
+    0xe8, 0x03, // Source ID 1_000
+    0x03, 0x00, // Update Flags: bid updated, ask updated; reserved
+    0x01, 0xca, 0x9a, 0x3b, 0x00, 0x00, 0x00, 0x00, // Source Timestamp 1_000_000_001 ns
+    0xde, 0x26, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Bid Price 9_950
+    0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Bid Qty 12
+    0x42, 0x27, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Ask Price 10_050
+    0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Ask Qty 7
+    0x00, 0x00, // Bid Source Count 0
+    0x00, 0x00, // Ask Source Count 0
+    0x00, 0x00, 0x00, 0x00, // reserved
+];
+
+/// Where the two counts sit in those bytes, so a variant states one.
+const BID_SOURCE_COUNT: usize = 52;
+const ASK_SOURCE_COUNT: usize = 54;
+
+/// The top the multicast side derives from those bytes: the real decode, and
+/// then the real book.
+fn as_the_wire_carries_it(bytes: &[u8; 60]) -> Top {
+    let quote = Quote::decode(bytes).expect("the bytes are a well-formed Quote");
+    Book::new()
+        .quote(
+            Channel {
+                source_addr: Ipv4Addr::new(198, 51, 100, 7),
+                channel_id: WIRE_CHANNEL,
+            },
+            &quote,
+        )
+        .expect("a quote is its own anchor and establishes a top")
+        .top
+}
+
+/// `state_key` returns what it returned before, over a `Quote` off the wire.
+///
+/// **The pin above cannot see this.** It builds every `Top` by hand, so it holds
+/// the fold against a given top and says nothing about which top the derivation
+/// produces from given bytes. A row's key is the composition of the two, so a
+/// change on either side of it moves a value that rows already carry — and a
+/// change to the derivation alone moves it with the fold untouched and every
+/// other assertion in this file still green, which is the shape a stored value
+/// moves in when nothing fails.
+///
+/// The literals were computed the same way as the first pin's, by an
+/// independent implementation of the fold over the top these bytes derive to,
+/// and validated against all seven of them.
+#[test]
+fn state_keys_value_did_not_move_over_a_quote_from_the_wire() {
+    assert_eq!(
+        state_key(
+            WIRE_CHANNEL,
+            WIRE_INSTRUMENT,
+            &as_the_wire_carries_it(&QUOTE_ON_THE_WIRE)
+        ),
+        0xf7c2_e99f_a4f4_714d,
+        "a venue that states no count, which the wire carries as a zero"
+    );
+
+    let mut stated = QUOTE_ON_THE_WIRE;
+    stated[BID_SOURCE_COUNT] = 2;
+    stated[ASK_SOURCE_COUNT] = 3;
+    assert_eq!(
+        state_key(
+            WIRE_CHANNEL,
+            WIRE_INSTRUMENT,
+            &as_the_wire_carries_it(&stated)
+        ),
+        0x1fee_63ed_e3df_8b42,
+        "and a venue that does state one"
+    );
+
+    assert_eq!(
+        as_the_wire_carries_it(&QUOTE_ON_THE_WIRE).bid.source_count,
+        Some(0),
+        "the derivation keeps the wire's number, zero included: reading the \
+         zero as an absence is `book_key`'s to do and not this path's"
+    );
+}
+
 /// A book that moved gets a new key, and a book that returned gets its old one.
 ///
 /// The second half is the property the whole equivalence key exists for: a top
@@ -238,12 +339,14 @@ fn as_the_wire_states_it(bid_source_count: u16, ask_source_count: u16) -> Top {
 /// **The count is the field the two observers had to agree about.** The
 /// top-of-book specification states `Bid Source Count` as *"Orders/sources at
 /// best bid. 0 if unavailable"*, so zero is that field's absence and not a
-/// count: a venue that exposes no number is lowered to zero, and a side that is
-/// quoted has something resting on it, so no `Quote` can mean *none*. A
-/// derivation reading the zero as `Some(0)` gave the multicast side a count for
-/// every quoted side, while an observer of the venue's own upstream states
-/// `None` — one book, two keys, and a race that pairs nothing while both paths
-/// read as clean.
+/// count: a venue that exposes no number is lowered to zero, and the multicast
+/// side reads that zero back where an observer of the venue's own upstream holds
+/// `None`. A key that told those apart gave one book two keys, and a race keyed
+/// on them pairs nothing while both paths read as clean.
+///
+/// `book_key` reads them alike, and it is the only thing that does: the
+/// derivation keeps the wire's zero, because `state_key` has rows written under
+/// it and its value over given bytes may not move.
 ///
 /// Both halves are asserted, because either one alone is passed by a wrong
 /// answer: dropping the count from the key entirely passes the first, and taking
