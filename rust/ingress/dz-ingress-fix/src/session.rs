@@ -317,9 +317,9 @@ pub enum SessionError {
     ///
     /// Both numbers, because `silence` is the one that reaches a log line and
     /// two cadences is not what it is: silence is questioned at one cadence
-    /// *plus the protocol's grace on it* and the session is dead at two of
-    /// those, so a thirty-second cadence is dead at seventy-two seconds and not
-    /// at sixty. See [`with_grace`].
+    /// *plus the protocol's grace on it* — a fifth — and the session is dead at
+    /// two of those, so a thirty-second cadence is dead at seventy-two seconds
+    /// and not at sixty.
     #[error(
         "nothing arrived for {silence:?} — two cadences of {interval:?} with the protocol's \
          grace on each — and a test request went unanswered: the session is gone whatever the \
@@ -344,11 +344,11 @@ pub enum SessionError {
 
 /// The message types the session layer composes, as a closed set.
 ///
-/// **[`Session::compose`] takes one of these and not a `&str`**, which is what
-/// makes *this transport composes no order entry* a property of the code rather
-/// than a statement about a list. A `compose("D", …)` on some future path does
-/// not compile; a list of tokens checked against itself would have agreed with
-/// it.
+/// **The session's own `compose` takes one of these and not a `&str`**, which is
+/// what makes *this transport composes no order entry* a property of the code
+/// rather than a statement about a list. A `compose("D", …)` on some future
+/// path does not compile; a list of tokens checked against itself would have
+/// agreed with it.
 ///
 /// Three, and the logon is not among them: a logon's body is the adapter's,
 /// composed in venue code and only framed here. See the crate documentation.
@@ -366,8 +366,7 @@ impl Composed {
     /// The three of them, for the assertion that none is order entry.
     pub const ALL: [Self; 3] = [Self::Heartbeat, Self::TestRequest, Self::Logout];
 
-    /// The `MsgType` this composes, which is one of
-    /// [`msg_type::SESSION`](crate::framing::msg_type::SESSION).
+    /// The `MsgType` this composes, which is one of [`msg_type::SESSION`].
     #[must_use]
     pub const fn as_msg_type(self) -> &'static str {
         match self {

@@ -105,8 +105,13 @@
 //! reads, two messages in one read, a logout from the venue, and a session that
 //! goes silent.
 //!
-//! TLS and the real socket are exercised against a loopback endpoint, which is
-//! the half no fake proves.
+//! The real socket is exercised against a loopback endpoint, which is the half
+//! no fake proves. So is the half of TLS a loopback endpoint can settle: a
+//! certificate no compiled-in anchor signed **is refused**, and the refusal is
+//! `tls` rather than a plain failure, which together is how this crate states
+//! that verification is on at all. Proving the accepting half would mean
+//! trusting a root of our own, which is a configuration this crate does not
+//! build — see [`input`] and the loopback suite's own note.
 //!
 //! # Vocabulary
 //!
