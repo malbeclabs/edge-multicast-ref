@@ -828,6 +828,136 @@ mod tests {
         drop(listener);
     }
 
+    // -----------------------------------------------------------------------
+    // The response body's ceiling
+    // -----------------------------------------------------------------------
+
+    /// Serves one chunked response of `body_bytes` bytes and no
+    /// `Content-Length`, then closes.
+    ///
+    /// **Chunked and lengthless on purpose.** A `Content-Length` is a number
+    /// the endpoint chose, so a ceiling checked against the claim is one an
+    /// endpoint walks past by omitting the header - which is the whole shape
+    /// of the failure the bound exists for, and the shape a `size_hint` check
+    /// let through. This server is the thing that tells those two apart.
+    ///
+    /// Hand-written rather than a server crate: the response is four lines and
+    /// a loop, and a dev-dependency a venue does not inherit is still a
+    /// dependency this suite would have to justify.
+    fn an_endpoint_serving_a_lengthless_body(
+        body_bytes: usize,
+    ) -> (u16, std::thread::JoinHandle<()>) {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port to bind");
+        let port = listener.local_addr().expect("a bound address").port();
+        let handle = std::thread::spawn(move || {
+            let Ok((mut socket, _)) = listener.accept() else {
+                return;
+            };
+            // Enough of the request to know it arrived. The client sends one
+            // GET with no body, so the headers end at the blank line.
+            let mut scratch = [0_u8; 1024];
+            let _ = socket.read(&mut scratch);
+            if socket
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+                .is_err()
+            {
+                return;
+            }
+            // 64 KiB at a time. Every write is allowed to fail: once the
+            // client has had its fill it drops the connection, and this thread
+            // meeting an EPIPE is the expected end rather than a fault.
+            let chunk = vec![b'x'; 64 * 1024];
+            let mut sent = 0;
+            while sent < body_bytes {
+                let take = chunk.len().min(body_bytes - sent);
+                if socket
+                    .write_all(format!("{take:x}\r\n").as_bytes())
+                    .and_then(|()| socket.write_all(&chunk[..take]))
+                    .and_then(|()| socket.write_all(b"\r\n"))
+                    .is_err()
+                {
+                    return;
+                }
+                sent += take;
+            }
+            let _ = socket.write_all(b"0\r\n\r\n");
+            let _ = socket.flush();
+        });
+        (port, handle)
+    }
+
+    #[tokio::test]
+    async fn a_lengthless_body_under_the_ceiling_arrives_whole() {
+        // One direction of the bound, and the one that says the ceiling is not
+        // simply refusing chunked responses: a catalogue with no
+        // `Content-Length` is ordinary, and every byte of it must arrive.
+        let size = 128 * 1024;
+        let (port, server) = an_endpoint_serving_a_lengthless_body(size);
+        let endpoint = format!("http://127.0.0.1:{port}/catalogue");
+
+        let answer = HttpClient::new()
+            .fetch(Request {
+                endpoint: &endpoint,
+                parameters: None,
+                validator: None,
+                budget: Duration::from_secs(30),
+            })
+            .await
+            .expect("a body under the ceiling");
+
+        assert_eq!(answer.status, 200);
+        assert_eq!(
+            answer.body.len(),
+            size,
+            "a chunked catalogue is assembled whole, not truncated at some \
+             convenient boundary"
+        );
+        server.join().expect("the endpoint thread");
+    }
+
+    #[tokio::test]
+    async fn a_lengthless_body_past_the_ceiling_stops_at_it_rather_than_filling_memory() {
+        // **The other direction, and the reason the bound exists.** The
+        // endpoint chooses the size and the buffer is ours, so a chunked
+        // response that never ends allocates until the publisher is
+        // OOM-killed. `Limited` stops taking bytes at the ceiling, and this is
+        // the assertion that removing it fails.
+        //
+        // A megabyte past the ceiling rather than an endless body, so that the
+        // test ends whether or not the bound holds - an endless one would hang
+        // in CI on the failure it is meant to report.
+        let (port, server) = an_endpoint_serving_a_lengthless_body(
+            usize::try_from(MAX_BODY_BYTES).unwrap() + 1024 * 1024,
+        );
+        let endpoint = format!("http://127.0.0.1:{port}/catalogue");
+
+        let failure = HttpClient::new()
+            .fetch(Request {
+                endpoint: &endpoint,
+                parameters: None,
+                validator: None,
+                budget: Duration::from_secs(30),
+            })
+            .await
+            .expect_err("a body past the ceiling is not an answer");
+
+        assert!(
+            matches!(failure, RequestFailure::Transport(_)),
+            "the connection was established, which is the distinction that \
+             value exists for: {failure:?}"
+        );
+        assert!(
+            failure.detail().contains(&MAX_BODY_BYTES.to_string()),
+            "and the detail names the ceiling, because *the endpoint sent too \
+             much* and *the endpoint stopped sending* are not the same \
+             conversation to have with a venue: {}",
+            failure.detail()
+        );
+        server.join().expect("the endpoint thread");
+    }
+
     #[cfg(feature = "tls")]
     #[test]
     fn the_tls_configuration_is_constructible_without_touching_a_network() {
