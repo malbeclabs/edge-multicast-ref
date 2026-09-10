@@ -736,7 +736,7 @@ impl Session {
     /// Ask the venue whether it is there.
     ///
     /// The `TestReqID` is the sequence this message goes out on, which makes it
-    /// unique per session without a source of randomness and makes the answer
+    /// unique per session without a random-number generator, and makes the answer
     /// readable against the request in a capture.
     async fn test_request(&mut self) -> Result<(), SessionError> {
         let id = format!("{}", self.next_sequence);

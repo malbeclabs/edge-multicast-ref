@@ -17,7 +17,7 @@
 //! server_name = "session.example.com"
 //!
 //! [source.upstream]
-//! # the venue's own keys for this source
+//! # the venue's own keys for this `[[source]]` block
 //! ```
 //!
 //! `deny_unknown_fields`, for the reason `[ingress]` has it: a misspelled key

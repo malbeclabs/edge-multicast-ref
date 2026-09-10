@@ -130,6 +130,8 @@ one, but the two lines that matter here:
 dz-adapter-core = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.1.0" }
 dz-publisher-runtime = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.1.0" }
 dz-ingress-core = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.1.0", features = ["websocket"] }
+# or, for a venue whose feed arrives over a session:
+dz-ingress-fix = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.1.0" }
 ```
 
 **Every crate from the same tag, pinned in one place.** Two tags in one graph
@@ -173,6 +175,42 @@ startup gives a publisher that connects and can then never reconnect. A
 transport whose crate is not linked is refused at startup, so the binary depends
 on `dz-ingress-core` with the marker feature for the transports it means to
 allow.
+
+**A venue on the session transport writes its logon where it writes its
+subscriptions.** `[ingress] kind = "fix"` resolves to `dz-ingress-fix`, which
+owns the framing, the outbound sequence, the heartbeat cadence, the logout and
+the close — everything except the one part that is genuinely the venue's, which
+is the logon's own fields. Those are composed in `on_connected`, beside the
+subscriptions, as a body of `tag=value` fields with no `8`, `9`, `34`, `52`,
+`141` or `10` in it: the transport frames it, numbers it 1, states the reset
+flag on it, and **reads the heartbeat interval out of it** rather than from any
+key. Write the logon first and the subscriptions after it — that order is the
+only way to express it, and a subscription written first is refused with nothing
+sent. A connect at which the adapter writes no logon is a startup failure
+naming `on_connected`, because a transport that logged on with a body it
+composed itself would be signing for the venue.
+
+An instrument admitted mid-session reaches a subscription through
+`poll_upstream`, which is what a session transport needs and a re-subscribing
+one hides: subscriptions live on the session, so without it the instrument
+waits for a reconnect while the feed looks healthy. Write only what is
+outstanding there — nothing on that path is deduplicated.
+
+The session's own keys are `[source.upstream.session]`, a subtable of the
+venue's own `upstream`:
+
+```toml
+[source.upstream.session]
+endpoint = "203.0.113.10:9443"        # host:port, no scheme
+server_name = "session.example.com"   # what the certificate is verified against
+```
+
+TLS is on and there is no key to turn it off anywhere but a loopback endpoint.
+The outbound sequence resets at every logon and nothing is persisted, because a
+resend delivers deltas whose value has expired while the publisher's own
+snapshot recovery is a sequence-correct repair; a document asking for
+continuity with `persist_sequence = true` is refused at load, naming the key. A
+venue that requires continuity is one this transport does not serve.
 
 ### 4. Prove it offline before you point it at anything
 
@@ -333,6 +371,21 @@ role = "comparison"         # connected, driven, counted — for the race
   that never came up is a series sitting at zero rather than no series at all. A
   name with leading or trailing whitespace is refused rather than trimmed —
   `"ws"` and `"ws "` would be two series a dashboard cannot tell apart.
+- **One session per source, and per nothing else.** One driver is opened per
+  enabled `[[source]]`, so a publisher carrying sixty-two channel instances of
+  one feed specification over one source opens **one** upstream connection: a
+  shard partitions the published set and says nothing about how many upstream
+  connections exist. That matters on a session transport, because a venue may
+  permit one session per credential and answer a second logon by evicting the
+  first.
+
+  So **two enabled sources whose `credentials` tables are equal are refused at
+  startup, naming both blocks.** That is the copy-paste failure: a second block
+  with a new endpoint and the credential nobody changed. What the check cannot
+  see is two *different* paths holding the same account — nothing here can know
+  that, and its symptom is both sources reconnecting in step, with
+  `dz_publisher_ingress_connection_state` alternating between them. The venue's
+  own logon refusal is the authority.
 - **Absent `[[source]]` is one source**, named by the transport the venue builds.
   Every document written before the array existed still means exactly that,
   including that its fatal errors end the process.
