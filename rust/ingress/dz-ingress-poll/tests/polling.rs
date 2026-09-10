@@ -775,6 +775,24 @@ fn a_failed_request_ends_the_connection_with_the_reason_the_failure_had() {
                  that says so is recorded"
             );
         }
+        // The operator-facing half: an endpoint that answered and then stopped
+        // is the gauge going up and back to 0. That is what pre-creating
+        // `dz_publisher_ingress_connection_state` at 0 buys, and it is only
+        // worth anything if a transport whose "connection" is a fiction moves
+        // it the same way every other transport does.
+        let states = run.observer.recorded().states.clone();
+        assert_eq!(
+            states.first(),
+            Some(&("catalogue", true)),
+            "{answered:?}: the endpoint answered the first request, so the gauge \
+             went up"
+        );
+        assert_eq!(
+            states.get(1),
+            Some(&("catalogue", false)),
+            "{answered:?}: and back to 0 when it stopped answering - which is \
+             the `== 0` alert an operator has for a catalogue that has gone away"
+        );
     }
 }
 
