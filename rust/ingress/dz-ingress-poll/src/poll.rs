@@ -219,11 +219,16 @@ impl Input for PollInput {
                 .client
                 .fetch(self.request(timeout))
                 .await
-                .map_err(|failure| {
-                    IngressError::connect(
-                        connect_reason(&failure),
+                .map_err(|failure| match connect_reason(&failure) {
+                    Some(reason) => IngressError::connect(
+                        reason,
                         format!("{}: {}", self.authority, failure.detail()),
-                    )
+                    ),
+                    // An endpoint that is not a URI at all. `PollConfig` can
+                    // check a scheme prefix and no more, so this is where that
+                    // document arrives - and it arrives on the probe, which
+                    // carries no parameters.
+                    None => unusable(&self.authority, failure.detail()),
                 })?;
             if !is_success(answer.status) {
                 return Err(IngressError::connect(
@@ -261,6 +266,18 @@ impl Input for PollInput {
     /// adapter would write the same bytes on the next connection, so retrying
     /// under a backoff only hides a mapping that has to be fixed — and of the
     /// two mistakes available, the loud one is the recoverable one.
+    ///
+    /// **Text is accepted here and may still be unusable.** A string that
+    /// makes no URI beside the endpoint — `symbols=BTC USD`, a `#`, a bare
+    /// `%` — is [`RequestFailure::Unusable`] on the request that carries it,
+    /// and the transport calls that fatal too. Both halves of the input space
+    /// therefore end the same way; only the moment differs. Why the moment is
+    /// the request rather than this write is that a [`PollClient`] owns URI
+    /// formation: a check here would be a second parser, able to disagree with
+    /// the one that matters and wrong outright for a client forming no `hyper`
+    /// URI — and the endpoint reaches the same failure on the connect probe,
+    /// which carries no parameters at all, so a refusal here would leave that
+    /// half looping.
     fn send<'a>(
         &'a mut self,
         message: UpstreamMessage<'a>,
@@ -392,11 +409,13 @@ impl Input for PollInput {
                 status,
                 body,
                 validator,
-            } = outcome.map_err(|failure| {
-                IngressError::ended(
-                    disconnect_reason(&failure),
-                    format!("{}: {}", self.authority, failure.detail()),
-                )
+            } = outcome.map_err(|failure| match disconnect_reason(&failure) {
+                Some(reason) => {
+                    IngressError::ended(reason, format!("{}: {}", self.authority, failure.detail()))
+                }
+                // The parameters the adapter wrote, which the driver must not
+                // retry: see `unusable`.
+                None => unusable(&self.authority, failure.detail()),
             })?;
 
             if status == NOT_MODIFIED {
@@ -450,21 +469,58 @@ const fn is_success(status: u16) -> bool {
 /// A failed **first** request, in the seven words
 /// `dz_publisher_ingress_connect_failures_total{reason}` counts by.
 ///
-/// Total, and every value distinct, because this is the one place in this
-/// transport where the distinctions survive: a refusal is a firewall or a port,
-/// a name that would not resolve is DNS or a typo, and a certificate that would
-/// not verify is a trust store or an expiry. Three different people's problem,
-/// and a string nobody groups by cannot tell them apart.
-const fn connect_reason(failure: &RequestFailure) -> ConnectFailureReason {
+/// Every value distinct, because this is the one place in this transport where
+/// the distinctions survive: a refusal is a firewall or a port, a name that
+/// would not resolve is DNS or a typo, and a certificate that would not verify
+/// is a trust store or an expiry. Three different people's problem, and a
+/// string nobody groups by cannot tell them apart.
+///
+/// `None` for [`RequestFailure::Unusable`], and that is not a gap in the
+/// taxonomy: nothing was connected to, so there is no connect failure to
+/// count. The caller raises [`unusable`]'s fault instead.
+const fn connect_reason(failure: &RequestFailure) -> Option<ConnectFailureReason> {
     match failure {
-        RequestFailure::Refused(_) => ConnectFailureReason::Refused,
-        RequestFailure::Unresolved(_) => ConnectFailureReason::Unresolved,
-        RequestFailure::Tls(_) => ConnectFailureReason::Tls,
-        RequestFailure::Timeout(_) => ConnectFailureReason::Timeout,
+        RequestFailure::Refused(_) => Some(ConnectFailureReason::Refused),
+        RequestFailure::Unresolved(_) => Some(ConnectFailureReason::Unresolved),
+        RequestFailure::Tls(_) => Some(ConnectFailureReason::Tls),
+        RequestFailure::Timeout(_) => Some(ConnectFailureReason::Timeout),
         // Established and then broken, which is not a refusal and has no
         // nearer value than the one that means *the far side said no*.
-        RequestFailure::Transport(_) => ConnectFailureReason::Rejected,
+        RequestFailure::Transport(_) => Some(ConnectFailureReason::Rejected),
+        RequestFailure::Unusable(_) => None,
     }
+}
+
+/// The fault a request that could not be formed raises, on either path.
+///
+/// [`IngressError::Fatal`] and not a connection that ended, because `Ended` is
+/// retried under the driver's delay sequence and the same request is formed on
+/// the next attempt. That is the same reasoning
+/// [`send`](PollInput::send) gives for refusing
+/// [`UpstreamMessage::Binary`], applied to the other half of the input space:
+/// of the two mistakes available, the loud one is the recoverable one.
+///
+/// # Why the transport and not `send`
+///
+/// A parameter string that is not URI-safe could be refused at the write, and
+/// symmetry with `Binary` argues for it. It is refused here instead, for two
+/// reasons. **A [`PollClient`] owns URI formation** — nothing above it parses
+/// either half of a request, deliberately, so a `send` judging text with
+/// `hyper`'s parser would be a second parser able to disagree with the one
+/// that matters, and wrong outright for a client that forms no `hyper` URI.
+/// And **the endpoint reaches the same failure**: a scheme prefix is all
+/// `PollConfig` can check, so an endpoint that is not a URI arrives on the
+/// connect probe, which carries no parameters at all. One value covers both;
+/// a refusal at the write would leave that half looping.
+///
+/// The detail names neither the URI nor the parameters, for the reason every
+/// other detail here names the authority instead: a venue endpoint's query
+/// string is where several venue APIs keep a key.
+fn unusable(authority: &str, detail: &str) -> IngressError {
+    IngressError::fatal(format!(
+        "{authority}: {detail}; the endpoint and the parameters the adapter last wrote do not \
+         form a request URI, and the next attempt forms the same one"
+    ))
 }
 
 /// A status on the **first** request, in the same seven words.
@@ -484,21 +540,27 @@ const fn connect_reason_for_status(status: u16) -> ConnectFailureReason {
 /// A failed request on an **established** connection, in the four words
 /// `dz_publisher_ingress_reconnects_total{reason}` counts by.
 ///
-/// Three of the five failures land on `remote_close`, and the flatness is the
-/// finding rather than laziness: the four reasons all describe a session that
-/// existed and then stopped, and *the endpoint stopped answering* is what a
+/// Three of the five network failures land on `remote_close`, and the flatness
+/// is the finding rather than laziness: the four reasons all describe a session
+/// that existed and then stopped, and *the endpoint stopped answering* is what a
 /// refusal, an unresolvable name and a broken body all are once a connection
 /// has been proven. The seven-value taxonomy that does separate them is
 /// [`connect_reason`]'s, and it is reached on the very next attempt, because a
 /// failed request ends the connection and the driver reconnects. Nothing is
 /// lost; it is counted under the series that has a word for it.
-const fn disconnect_reason(failure: &RequestFailure) -> DisconnectReason {
+///
+/// `None` for [`RequestFailure::Unusable`], which is the sixth and is not a
+/// session that stopped: **a reason here would be a reason the driver retries
+/// under**, and that request cannot succeed. The caller raises [`unusable`]'s
+/// fault instead.
+const fn disconnect_reason(failure: &RequestFailure) -> Option<DisconnectReason> {
     match failure {
-        RequestFailure::Timeout(_) => DisconnectReason::Timeout,
+        RequestFailure::Timeout(_) => Some(DisconnectReason::Timeout),
         RequestFailure::Refused(_)
         | RequestFailure::Unresolved(_)
         | RequestFailure::Tls(_)
-        | RequestFailure::Transport(_) => DisconnectReason::RemoteClose,
+        | RequestFailure::Transport(_) => Some(DisconnectReason::RemoteClose),
+        RequestFailure::Unusable(_) => None,
     }
 }
 
@@ -523,31 +585,80 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_five_request_failures_do_not_collapse_onto_one_connect_reason() {
+    fn the_five_network_failures_do_not_collapse_onto_one_connect_reason() {
         // Written out as pairs rather than derived, for the reason the codec's
         // vocabulary tests give: a table checked only against itself is a table
         // that agrees with its own mistake.
         let detail = || "detail".to_string();
         assert_eq!(
             connect_reason(&RequestFailure::Refused(detail())),
-            ConnectFailureReason::Refused
+            Some(ConnectFailureReason::Refused)
         );
         assert_eq!(
             connect_reason(&RequestFailure::Unresolved(detail())),
-            ConnectFailureReason::Unresolved
+            Some(ConnectFailureReason::Unresolved)
         );
         assert_eq!(
             connect_reason(&RequestFailure::Tls(detail())),
-            ConnectFailureReason::Tls
+            Some(ConnectFailureReason::Tls)
         );
         assert_eq!(
             connect_reason(&RequestFailure::Timeout(detail())),
-            ConnectFailureReason::Timeout
+            Some(ConnectFailureReason::Timeout)
         );
         assert_eq!(
             connect_reason(&RequestFailure::Transport(detail())),
-            ConnectFailureReason::Rejected
+            Some(ConnectFailureReason::Rejected)
         );
+    }
+
+    #[test]
+    fn a_request_that_could_not_be_formed_has_no_reason_in_either_taxonomy() {
+        // The sixth failure, and the assertion is that it reaches neither
+        // metric: a connect reason would be a connect that was attempted, and
+        // a disconnect reason is a reason the driver retries under - which is
+        // the loop this value exists to refuse.
+        let detail = || "the request URI is not usable: invalid uri character".to_string();
+        assert_eq!(connect_reason(&RequestFailure::Unusable(detail())), None);
+        assert_eq!(disconnect_reason(&RequestFailure::Unusable(detail())), None);
+    }
+
+    #[test]
+    fn the_five_network_failures_all_have_a_disconnect_reason_to_retry_under() {
+        // The other side of the test above: every value that *is* a network
+        // event must keep one, so that narrowing `disconnect_reason` to the
+        // fatal answer cannot pass.
+        let detail = || "detail".to_string();
+        for failure in [
+            RequestFailure::Refused(detail()),
+            RequestFailure::Unresolved(detail()),
+            RequestFailure::Tls(detail()),
+            RequestFailure::Timeout(detail()),
+            RequestFailure::Transport(detail()),
+        ] {
+            assert!(
+                disconnect_reason(&failure).is_some(),
+                "{failure:?} is a connection that stopped, and the reconnect \
+                 counter has a word for it"
+            );
+            assert!(connect_reason(&failure).is_some(), "{failure:?}");
+        }
+    }
+
+    #[test]
+    fn the_fault_a_request_that_could_not_be_formed_raises_carries_no_query_string() {
+        // Fatal, so that the driver stops instead of forming the same request
+        // for ever - and naming the authority rather than the URI, because a
+        // venue endpoint's query string is where several venue APIs keep a
+        // key.
+        let error = unusable(
+            "http://192.0.2.10",
+            "the request URI is not usable: invalid uri character",
+        );
+        assert!(error.is_fatal(), "{error}");
+        let rendered = format!("{error}");
+        assert!(rendered.contains("192.0.2.10"), "{rendered}");
+        assert!(!rendered.contains("api_key"), "{rendered}");
     }
 
     #[test]

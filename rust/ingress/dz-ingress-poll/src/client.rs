@@ -74,13 +74,17 @@ pub struct Answer {
 
 /// Why a request produced no answer at all.
 ///
-/// **Five values, and the split is what makes the classification worth having.**
+/// **Six values, and the split is what makes the classification worth having.**
 /// The transport maps each of them onto the taxonomy the layer it is in counts
 /// by: [`ConnectFailureReason`](dz_ingress_core::ConnectFailureReason) inside a
 /// connect, [`DisconnectReason`](dz_adapter_core::DisconnectReason) inside a
 /// receive. Collapsing them here would make both mappings a catch-all, and a
 /// refused connection, a name that would not resolve and a certificate that
 /// would not verify are three different people's problem.
+///
+/// **Five of the six are network events and the sixth is not**, which is the
+/// one distinction that changes what the driver does rather than only which
+/// series moves: see [`Unusable`](Self::Unusable).
 ///
 /// Each carries a detail string for the log line, and none of them is a status:
 /// a status means the endpoint answered, which is an [`Answer`].
@@ -101,6 +105,27 @@ pub enum RequestFailure {
     /// not a refusal, and an operator who reads *refused* goes and looks at a
     /// firewall.
     Transport(String),
+    /// The request could not be formed, so **nothing was asked of the
+    /// network**.
+    ///
+    /// The endpoint and the parameters the adapter last wrote cannot be
+    /// carried on a query string: a character a URI does not allow, such as
+    /// the space in `symbols=BTC USD`, or a `#`, which a URI does allow and
+    /// which would drop the rest of the parameters from the request. A bare
+    /// `%` is not one of these: it is a character a query string allows, so it
+    /// reaches the endpoint as written.
+    ///
+    /// **Its own value, and it is the only one the transport calls fatal.**
+    /// The other five say something about the wire and are worth retrying
+    /// under the driver's delay sequence. This one says the same request will
+    /// be formed again, so retrying it is a publisher looping at the backoff
+    /// ceiling for ever: the connect probe carries no parameters and therefore
+    /// succeeds, the first receive fails, the connection's state is forgotten,
+    /// the adapter writes the same text at the next logon, repeat — with
+    /// `reconnects_total{reason="remote_close"}` the only signal and nothing
+    /// naming the parameters. Folded into [`Transport`](Self::Transport) that
+    /// is exactly what it would be, which is why it is not folded in.
+    Unusable(String),
 }
 
 impl RequestFailure {
@@ -112,7 +137,8 @@ impl RequestFailure {
             | Self::Unresolved(detail)
             | Self::Tls(detail)
             | Self::Timeout(detail)
-            | Self::Transport(detail) => detail,
+            | Self::Transport(detail)
+            | Self::Unusable(detail) => detail,
         }
     }
 }
@@ -262,7 +288,36 @@ impl HttpClient {
     /// already carries a query string gets an `&`. Nothing here parses either
     /// side: what the adapter wrote is the venue's own syntax, and a transport
     /// that re-encoded it would be deciding what a cursor means.
+    ///
+    /// # Errors
+    ///
+    /// [`RequestFailure::Unusable`] when the parameters cannot be carried on a
+    /// query string: a character a URI does not allow, such as the space in
+    /// `symbols=BTC USD`, or a `#`. Not encoded around, for the reason above,
+    /// and not retried, for the reason that value gives.
+    ///
+    /// A `%` that starts no escape is **not** refused. It is a character a
+    /// query string allows, so it reaches the endpoint exactly as the adapter
+    /// wrote it, and what a venue makes of it is the venue's — the same rule
+    /// as every other byte here.
     fn uri(request: &Request<'_>) -> Result<hyper::Uri, RequestFailure> {
+        // Refused ahead of the parse, because the parse *accepts* it: a `#`
+        // opens a fragment, a fragment is not sent to a server, and a URI
+        // built from `cursor=a#b` requests `cursor=a`. So the one outcome this
+        // must not have is the quiet one - an adapter's parameters half
+        // delivered, no error anywhere, and a venue answering the wrong
+        // question. An adapter that wants a literal `#` in a value writes
+        // `%23`, which is what a query string means by one.
+        if let Some(parameters) = request.parameters {
+            if parameters.contains('#') {
+                return Err(RequestFailure::Unusable(
+                    "the request URI is not usable: the parameters carry a `#`, which opens a \
+                     fragment and would drop the rest of them from the request; a literal `#` \
+                     in a value is written `%23`"
+                        .to_string(),
+                ));
+            }
+        }
         let target = match request.parameters {
             None => request.endpoint.to_string(),
             Some(parameters) if request.endpoint.contains('?') => {
@@ -271,10 +326,15 @@ impl HttpClient {
             Some(parameters) => format!("{}?{parameters}", request.endpoint),
         };
         hyper::Uri::try_from(target).map_err(|error| {
-            // Not `Refused`: nothing was asked of the network. The transport
-            // turns this into a fault retrying cannot fix, because the same
+            // `Unusable` and not one of the five network values: nothing was
+            // asked of the network, and the transport turns this into a fault
+            // retrying cannot fix because the same endpoint and the same
             // parameters produce the same unusable URI on every attempt.
-            RequestFailure::Transport(format!("the request URI is not usable: {error}"))
+            //
+            // The detail names the failure and **not the URI**, for the reason
+            // every other detail here names the authority instead: a venue
+            // endpoint's query string is where several venue APIs keep a key.
+            RequestFailure::Unusable(format!("the request URI is not usable: {error}"))
         })
     }
 }
@@ -307,10 +367,17 @@ impl PollClient for HttpClient {
             if let Some(validator) = request.validator {
                 builder = builder.header(IF_NONE_MATCH, validator);
             }
+            // The second way a request can fail to be formed, and it gets the
+            // same answer as the first: the URI is already checked above, so
+            // what is left is the header, and a validator that came out of an
+            // endpoint's own `etag` through `to_str` is visible ASCII and
+            // therefore a value a header accepts. Unreachable in practice,
+            // classified honestly rather than left as a network failure it is
+            // not.
             let outgoing = builder
                 .body(http_body_util::Empty::<hyper::body::Bytes>::new())
                 .map_err(|error| {
-                    RequestFailure::Transport(format!("the request is not usable: {error}"))
+                    RequestFailure::Unusable(format!("the request is not usable: {error}"))
                 })?;
 
             let response =
@@ -468,6 +535,85 @@ mod tests {
         })
         .expect("a usable URI");
         assert_eq!(uri.to_string(), "http://192.0.2.10/catalogue");
+    }
+
+    #[test]
+    fn a_parameter_string_that_makes_no_uri_is_unusable_and_not_a_network_failure() {
+        // A space in a symbol list is the one an adapter reaches by accident,
+        // and the rest are the other characters a query string does not allow.
+        // Each is a request that cannot be formed, so nothing is asked of the
+        // network and the next attempt forms the same one - which is what
+        // makes `Unusable` the value rather than `Transport`, and fatal rather
+        // than a connection the driver retries.
+        for parameters in [
+            "symbols=BTC USD",
+            "cursor=a\nb",
+            "cursor=a\tb",
+            "cursor=a<b",
+            "cursor=\"a\"",
+        ] {
+            let failure = HttpClient::uri(&Request {
+                endpoint: "http://192.0.2.10/catalogue",
+                parameters: Some(parameters),
+                validator: None,
+                budget: Duration::from_secs(1),
+            })
+            .expect_err("a space, a fragment marker and a bare percent are not a query string");
+            assert!(
+                matches!(failure, RequestFailure::Unusable(_)),
+                "`{parameters}` produced {failure:?}, and any of the five network \
+                 values is a fault the driver retries for ever: the connect probe \
+                 carries no parameters and therefore succeeds, the first receive \
+                 fails, and the adapter writes the same text again"
+            );
+            assert!(
+                !failure.detail().contains(parameters),
+                "the detail names the failure and not what was written: {}",
+                failure.detail()
+            );
+        }
+    }
+
+    #[test]
+    fn a_fragment_marker_in_the_parameters_is_refused_rather_than_quietly_dropped() {
+        // A `#` is a character a URI *allows*, which is what makes it the
+        // dangerous one: `hyper` parses `?cursor=a#b` happily and the fragment
+        // is never sent, so the endpoint is asked `cursor=a` and nothing
+        // anywhere says so. Refused instead, because half an adapter's
+        // parameters answered by a venue is a wrong answer that looks like a
+        // right one.
+        let failure = HttpClient::uri(&Request {
+            endpoint: "http://192.0.2.10/catalogue",
+            parameters: Some("cursor=a#b"),
+            validator: None,
+            budget: Duration::from_secs(1),
+        })
+        .expect_err("a `#` cannot be carried on a query string");
+        assert!(
+            matches!(failure, RequestFailure::Unusable(_)),
+            "{failure:?}"
+        );
+        assert!(
+            failure.detail().contains("%23"),
+            "and the detail says how to write one, because an adapter author is \
+             who reads it: {}",
+            failure.detail()
+        );
+    }
+
+    #[test]
+    fn a_percent_that_starts_no_escape_reaches_the_endpoint_as_written() {
+        // Not refused, and deliberately: `%` is a character a query string
+        // allows, and this transport does not parse what the adapter wrote.
+        // What a venue makes of it is the venue's.
+        let uri = HttpClient::uri(&Request {
+            endpoint: "http://192.0.2.10/catalogue",
+            parameters: Some("cursor=%"),
+            validator: None,
+            budget: Duration::from_secs(1),
+        })
+        .expect("a bare percent is a character a query string allows");
+        assert_eq!(uri.to_string(), "http://192.0.2.10/catalogue?cursor=%");
     }
 
     #[test]

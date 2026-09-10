@@ -1087,6 +1087,112 @@ fn binary_written_to_a_polled_endpoint_is_a_fault_retrying_cannot_fix() {
     );
 }
 
+#[test]
+fn parameters_that_form_no_request_uri_are_a_fault_retrying_cannot_fix() {
+    // The other half of the input space the test above covers, and the one an
+    // adapter reaches by accident rather than by a type error: `send` accepts
+    // any text, and `symbols=BTC USD` is text that makes no URI.
+    //
+    // The assertion is that the driver **stops**. An ended connection here is
+    // a publisher looping at the backoff ceiling for ever - the probe carries
+    // no parameters and answers, the first receive fails, the connection's
+    // state is forgotten, the adapter writes the same text at the next logon -
+    // with the reconnect counter as the only signal.
+    let endpoint = ScriptedEndpoint::new(
+        vec![
+            // The probe answers, so this is a receive on an established
+            // connection and not a connect failure.
+            Answered::Body(CATALOGUE_BODY, None),
+            Answered::Failed(RequestFailure::Unusable(
+                "the request URI is not usable: invalid uri character".into(),
+            )),
+        ],
+        Answered::Body(CATALOGUE_BODY, None),
+    );
+    let run = run(
+        policy(None),
+        Duration::from_secs(30),
+        // Serving connections for ever, so that nothing but the transport's
+        // own answer can end this run: if the failure were `Ended`, the
+        // endpoint's own backstop is what would stop the suite.
+        ScriptedAdapter::new(usize::MAX, vec!["symbols=BTC USD"], Vec::new()),
+        endpoint,
+    );
+
+    assert!(
+        run.exit.is_fatal(),
+        "a request that cannot be formed must stop the driver rather than be \
+         retried under the delay sequence: {}",
+        run.exit
+    );
+    // **The assertion that separates fatal from ended.** A fatal fault on a
+    // live connection still ends it, so the driver still counts one
+    // `remote_close` and still pairs the adapter's disconnect - that is
+    // `Driver`'s own documented behaviour and not this transport's business.
+    // What differs is that there is no second attempt: two requests, the probe
+    // and the one that failed. An ended connection here would be the endpoint
+    // asked for ever at the backoff ceiling.
+    assert_eq!(
+        run.endpoint.answers(),
+        2,
+        "the probe and the poll that failed, and then nothing: a request that \
+         cannot be formed is formed the same way on every attempt, so a driver \
+         that retried would ask until this suite's own backstop stopped it"
+    );
+    assert!(
+        run.observer.recorded().connect_failures.is_empty(),
+        "and it is not a connect that failed - the connect answered: {:?}",
+        run.observer.recorded().connect_failures
+    );
+    let rendered = format!("{}", run.exit);
+    assert!(
+        !rendered.contains("BTC"),
+        "and the fault names the authority rather than what was written: {rendered}"
+    );
+    assert!(rendered.contains("192.0.2.10"), "{rendered}");
+}
+
+#[test]
+fn an_endpoint_that_forms_no_request_uri_is_fatal_on_the_probe_too() {
+    // The half a refusal at `send` would leave looping: the probe carries no
+    // parameters, so an endpoint that is not a URI is the transport's own
+    // input. `PollConfig` checks a scheme prefix and no more, so this document
+    // loads.
+    let endpoint = ScriptedEndpoint::new(
+        vec![Answered::Failed(RequestFailure::Unusable(
+            "the request URI is not usable: invalid uri character".into(),
+        ))],
+        Answered::Body(CATALOGUE_BODY, None),
+    );
+    let run = run(
+        policy(None),
+        Duration::from_secs(30),
+        // Serving connections for ever: only the transport's own answer can
+        // end this run, so a retried connect would reach the endpoint's own
+        // backstop instead of returning.
+        ScriptedAdapter::new(usize::MAX, vec!["cursor=0"], Vec::new()),
+        endpoint,
+    );
+
+    assert!(
+        run.exit.is_fatal(),
+        "a connect failure is retried under the delay sequence, and this one \
+         cannot ever succeed: {}",
+        run.exit
+    );
+    assert!(
+        run.observer.recorded().connect_failures.is_empty(),
+        "and it is not a connect failure in the seven-value taxonomy: nothing \
+         was connected to, so there is no reason to count it under: {:?}",
+        run.observer.recorded().connect_failures
+    );
+    assert_eq!(
+        run.endpoint.answers(),
+        1,
+        "asked exactly once - a fault the driver retried would ask again"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // What a log line may carry
 // ---------------------------------------------------------------------------
