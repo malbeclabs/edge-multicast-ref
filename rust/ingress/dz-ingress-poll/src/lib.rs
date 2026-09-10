@@ -48,8 +48,18 @@
 //!
 //! An async client rather than HTTP over `tokio` by hand, for the reason the
 //! websocket crate gives for its protocol: chunked transfer encoding,
-//! redirects, connection reuse, timeouts and certificate verification are a
+//! connection reuse, timeouts and certificate verification are a
 //! security-relevant surface with no upside in owning.
+//!
+//! **Redirects are not one of them, and are not followed.** `hyper` does not
+//! implement them — that belongs to a higher-level client, and this crate does
+//! not add one. So a `301` or a `302` is a status the endpoint should not have
+//! answered with: `Rejected` on the connect probe, `remote_close` on an
+//! established connection, and the connection ends. A venue that has moved its
+//! catalogue is therefore an endpoint to change in the document rather than one
+//! this transport quietly follows — which is the answer worth having, since
+//! following a redirect is how a request carrying a key in its query string
+//! reaches a host nobody configured.
 //!
 //! # TLS is a feature, not a default
 //!

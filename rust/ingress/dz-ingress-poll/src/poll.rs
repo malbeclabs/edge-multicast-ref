@@ -678,7 +678,25 @@ mod tests {
             connect_reason_for_status(429),
             ConnectFailureReason::RateLimit
         );
-        for status in [400, 404, 418, 500, 502, 503, NOT_MODIFIED] {
+        // The redirects are in this list rather than absent from it, and that
+        // is the assertion that says they are not followed: `hyper` implements
+        // no redirect handling, so a `301` is a status the endpoint should not
+        // have answered the probe with. A venue that has moved its catalogue
+        // is an endpoint to change in the document, not one this transport
+        // chases to a host nobody configured.
+        for status in [
+            301,
+            302,
+            307,
+            308,
+            400,
+            404,
+            418,
+            500,
+            502,
+            503,
+            NOT_MODIFIED,
+        ] {
             assert_eq!(
                 connect_reason_for_status(status),
                 ConnectFailureReason::Rejected,
@@ -702,7 +720,7 @@ mod tests {
             disconnect_reason_for_status(403),
             DisconnectReason::AuthExpired
         );
-        for status in [400, 404, 500, 502, 503] {
+        for status in [301, 302, 307, 308, 400, 404, 500, 502, 503] {
             assert_eq!(
                 disconnect_reason_for_status(status),
                 DisconnectReason::RemoteClose,
@@ -716,7 +734,7 @@ mod tests {
         for status in [200, 201, 204, 299] {
             assert!(is_success(status), "{status}");
         }
-        for status in [100, 199, 300, NOT_MODIFIED, 400, 500] {
+        for status in [100, 199, 300, 301, 302, NOT_MODIFIED, 400, 500] {
             assert!(!is_success(status), "{status}");
         }
     }

@@ -210,9 +210,19 @@ type Connector = hyper_util::client::legacy::connect::HttpConnector;
 ///
 /// # What it is not
 ///
-/// It holds no cadence, no retry and no failure count — see the crate docs.
-/// A `fetch` is one request, and what to do about the answer is the
-/// transport's.
+/// It holds no cadence and no failure count — see the crate docs. A `fetch` is
+/// one request, and what to do about the answer is the transport's.
+///
+/// **One qualification on "no retry".** `hyper_util`'s legacy client defaults
+/// `retry_canceled_requests` to true, which retries a request exactly once
+/// when it was cancelled on a **reused pooled connection** the far side had
+/// already closed — a connection this client established for an earlier poll
+/// and the endpoint has since dropped. Left at the default: it breaks none of
+/// the three bans, because it is not a cadence, not a delay sequence and not a
+/// count of consecutive failures, and what it prevents is a failure the
+/// transport would otherwise report for a connection that was already gone
+/// before the request. Named here because *no retry* is an absolute claim and
+/// this is not nothing.
 pub struct HttpClient {
     inner: hyper_util::client::legacy::Client<Connector, http_body_util::Empty<hyper::body::Bytes>>,
 }
