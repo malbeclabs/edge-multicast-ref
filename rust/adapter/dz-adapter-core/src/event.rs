@@ -122,10 +122,17 @@ pub enum SideUpdate<'a> {
     Present {
         px: Scalar<'a>,
         qty: Scalar<'a>,
-        /// How many distinct sources contribute to this side, for a venue that
-        /// aggregates several. `None` where the venue does not say, which the
-        /// wire's own sentinel for that field is zero — neither publisher
-        /// exposes it on top-of-book today.
+        /// How many distinct upstreams contribute to this side, for a venue that
+        /// aggregates several. `None` where the venue does not say — neither
+        /// publisher exposes it on top-of-book today.
+        ///
+        /// **`Some(0)` is `None` said in a way that does not survive.** The
+        /// wire's own value for *unavailable* on this field is zero, so a zero
+        /// stated here is published as the absence and cannot be told from one
+        /// afterwards: a subscriber reads the specification's *unavailable*, and
+        /// a recorder writes a zero into a column whose honest value for "the
+        /// venue did not say" is `NULL`. A side that is present has something
+        /// resting on it, so an adapter with no number to state says `None`.
         source_count: Option<u16>,
     },
 }

@@ -27,9 +27,13 @@ pub fn book_key(top: &Top) -> u64;
 pub fn state_key(channel_id: u8, instrument_id: u32, top: &Top) -> u64;
 ```
 
-The book-only key hashes the two sides and nothing else. `state_key` keeps its signature, keeps its value, keeps every caller, and is the channel and the instrument folded into `book_key`'s subject.
+The book-only key hashes the two sides and nothing else. `state_key` keeps its signature, keeps its value, keeps every caller, and is the channel and the instrument eaten ahead of that same fold over the two sides.
 
 **The two keys are different values, and that is what they are for.** `state_key` answers *is this the same state of this channel's instrument*. `book_key` answers *is this the same book*. The first is what two recorders of one feed pair on; the second is what two observers of one market pair on. A view joining across the two sides uses `book_key` and carries the symbol beside it, because the symbol is the only instrument identity both sides hold.
+
+**The two keys owe different things, and one field is where that becomes visible.** The top-of-book specification states `Bid Source Count` as *"Orders/sources at best bid. 0 if unavailable"*, so the multicast side reads a zero off the wire exactly where an observer of the venue's own upstream holds nothing at all. `book_key` has to read those alike or one book has two keys — and it can, because it is new, no row is keyed on it, and all it owes is that two observers of one book agree. `state_key` cannot: rows are written under it, so its value over given wire bytes must not move, and a `Quote` whose venue states no count is the commonest shape there is.
+
+So the reading belongs to `book_key`'s subject and not to the derivation that feeds both keys. The fold stays byte-for-byte the fold `state_key` has always been, the derivation keeps the wire's number, and the zero is read as the absence in the one place where no stored value depends on the answer. Normalising upstream of that — in the `Quote` derivation — moves `state_key` for every quote a venue states no count on.
 
 The venue-observation design's sentence is corrected with this change. The equivalence key was not designed for a cross-observer join, the column's doc comment overstates what the function does, and the race view that design proposes keys on `book_key`.
 
@@ -73,6 +77,7 @@ Defaulted, so no adapter and no sink changes. A publisher's sink ignores it and 
 | Decision | Why |
 |---|---|
 | `book_key(top)`, with `state_key` folding the channel and the instrument into it | A key joined on across two observers has to be computable from a book; the publisher-side value must not move |
+| A zero `source_count` is read as the absence in `book_key`'s subject alone | The two observers must agree on the field, and `state_key`'s value over given wire bytes may not move — so the fold and the derivation are both left as they are |
 | The venue-observation design is corrected in the same change | It states the opposite of what the function does, and a design that cannot be implemented is worse than one that is missing |
 | `Side::is_absent` stays private | `book_key` removes the reason to copy it out, and a copy that drifts is a race that stops pairing with no symptom |
 | `upstream_identity` is defaulted and both fields are `Option` | A publisher ignores it, a recorder keeps it, and a venue that publishes one identifier and not the other is ordinary |

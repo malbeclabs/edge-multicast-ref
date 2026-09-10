@@ -71,6 +71,14 @@ pub struct Side {
     /// quantities and mapping one onto the other would put a number in a column
     /// that does not mean what the column says, so a delta-derived top leaves
     /// this absent.
+    ///
+    /// **`Some(0)` is what a quoted side carries when the venue exposes no
+    /// number**, because zero is the top-of-book field's own *unavailable*. It
+    /// is kept exactly as the wire stated it: [`state_key`] hashes this field
+    /// and its value over given wire bytes may not move. The reading of that
+    /// zero belongs to [`book_key`], which treats it as the absence an observer
+    /// of the venue's own upstream states directly — a pairing that disagreed
+    /// about the field would find no pair, which reads as a quiet feed.
     pub source_count: Option<u16>,
 }
 
@@ -83,6 +91,9 @@ impl Side {
         }
     }
 
+    /// Private, and it stays that way: `book_key` is what anything outside this
+    /// crate needs, so nothing has a reason to carry its own copy of what
+    /// absent means.
     const fn is_absent(&self) -> bool {
         self.price_raw.is_none() && self.qty_raw.is_none()
     }
@@ -482,6 +493,15 @@ const fn side_of_quote(price_raw: i64, qty_raw: u64, source_count: u16) -> Side 
     Side {
         price_raw: Some(price_raw),
         qty_raw: Some(qty_raw),
+        // The wire's number as the wire states it, zero included. Zero is that
+        // field's own *unavailable* — the specification states `Bid Source
+        // Count` as "Orders/sources at best bid. 0 if unavailable" — but the
+        // reading of it is [`book_key`]'s and not this function's: [`state_key`]
+        // is written into rows that exist, and mapping the zero to `None` here
+        // moves that key's value for every `Quote` whose venue states no count,
+        // which is most of them. Two obligations, two places — the derivation
+        // keeps the bytes, and the key that has to agree across observers
+        // normalises them.
         source_count: Some(source_count),
     }
 }
@@ -561,8 +581,17 @@ fn changed(was: (Top, Option<Certainty>), book: &InstrumentBook) -> Option<Chang
     })
 }
 
-/// The equivalence key: a hash over the instrument and both sides, and nothing
-/// else.
+const KEY_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const KEY_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// **Is this the same book?**
+///
+/// A hash over the two sides and nothing else, so it is computable by anyone
+/// holding a top of book — including an observer that never saw a datagram and
+/// so can name neither the operator's channel nor a publisher-minted
+/// `Instrument ID`. That is what makes it the key two observers of one market
+/// pair on, carrying the symbol beside it because the symbol is the only
+/// instrument identity both sides hold.
 ///
 /// **FNV-1a rather than the standard library's hasher.** `DefaultHasher` is
 /// explicitly not stable across releases, and this value is compared between two
@@ -572,37 +601,99 @@ fn changed(was: (Top, Option<Certainty>), book: &InstrumentBook) -> Option<Chang
 ///
 /// An absent side is a distinguished tag rather than zeros: an empty side and a
 /// side priced at zero are different books, and the top-of-book convention of
-/// stating *unavailable* with a zero is exactly what would collapse them.
+/// stating *unavailable* with a zero is exactly what would collapse them. That
+/// tag is why the key is computed here and not copied out: `Side::is_absent`
+/// stays private, and a copy of it that drifted would be a race that stopped
+/// pairing with no symptom.
+///
+/// **Every field it hashes has to mean the same thing on both sides, which for
+/// `source_count` means reading the wire's sentinel as the absence it is.** The
+/// top-of-book specification states that field as "0 if unavailable", so a
+/// venue that does not expose the number is published as a zero, while an
+/// observer of that venue's own upstream holds [`None`] for the same book.
+/// Taking the zero for a count would give one book two keys, and a race keyed
+/// on them would return no pairs and read as a quiet feed on both paths — so
+/// this key reads the two alike, normalising its own subject before folding it.
+#[must_use]
+pub fn book_key(top: &Top) -> u64 {
+    fold_top(KEY_OFFSET, &as_both_observers_state_it(top))
+}
+
+/// One book as either of its two observers states it, which is [`book_key`]'s
+/// subject and **not** [`state_key`]'s.
+///
+/// A zero `source_count` is the top-of-book field's own *unavailable*, so the
+/// multicast side reads a zero off the wire exactly where a venue-side observer
+/// holds `None`. Reading them alike here is what makes one book one key.
+///
+/// **It is done for this key alone, because the two keys owe different things.**
+/// `state_key` has rows written under it: its value over given wire bytes may
+/// not move, and a `Quote` whose venue states no count is the commonest shape
+/// there is — normalising upstream of the derivation would move that value for
+/// every one of them. `book_key` is new and has no rows anywhere, so all it owes
+/// is that two observers of one book agree. Hence the fork: [`fold_top`] stays
+/// byte-for-byte the fold `state_key` has always been, and what changes is only
+/// the top this key hands it.
+fn as_both_observers_state_it(top: &Top) -> Top {
+    let as_stated = |side: Side| Side {
+        source_count: side.source_count.filter(|count| *count != 0),
+        ..side
+    };
+    Top {
+        bid: as_stated(top.bid),
+        ask: as_stated(top.ask),
+    }
+}
+
+/// **Is this the same state of this channel's instrument?**
+///
+/// The channel and the instrument folded into [`book_key`]'s subject: the same
+/// two sides hashed the same way, over an accumulator that has already eaten
+/// both identifiers. Hashing the same bytes in the same order means the value is
+/// the one this function has always returned, which every row already written
+/// and every pairing already computed depends on.
+///
+/// This is what two recorders of one multicast feed pair on, because both read
+/// the same identifiers off the same datagrams. It is transport-independent and
+/// **observer-dependent**, so a join across two observers uses [`book_key`]
+/// instead.
 #[must_use]
 pub fn state_key(channel_id: u8, instrument_id: u32, top: &Top) -> u64 {
-    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
-    let mut hash = OFFSET;
-    let mut eat = |bytes: &[u8]| {
-        for byte in bytes {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(PRIME);
-        }
-    };
-    eat(&[channel_id]);
-    eat(&instrument_id.to_be_bytes());
+    let subject = eat(eat(KEY_OFFSET, &[channel_id]), &instrument_id.to_be_bytes());
+    fold_top(subject, top)
+}
+
+/// Both sides into an accumulator, whatever has already been eaten into it.
+///
+/// **This is [`state_key`]'s fold and its value may not move**, so it hashes the
+/// top it is handed and reads nothing into it. [`book_key`] normalises its own
+/// subject before calling this, which leaves these bytes alone.
+fn fold_top(mut hash: u64, top: &Top) -> u64 {
     for side in [&top.bid, &top.ask] {
         if side.is_absent() {
-            eat(&[0]);
+            hash = eat(hash, &[0]);
             continue;
         }
-        eat(&[1]);
-        eat(&side.price_raw.unwrap_or(0).to_be_bytes());
-        eat(&side.qty_raw.unwrap_or(0).to_be_bytes());
-        // Absent and zero are distinguished here too: a feed that carries no
-        // count and one that counts none are not the same reading.
-        match side.source_count {
-            None => eat(&[0]),
-            Some(count) => {
-                eat(&[1]);
-                eat(&count.to_be_bytes());
-            }
-        }
+        hash = eat(hash, &[1]);
+        hash = eat(hash, &side.price_raw.unwrap_or(0).to_be_bytes());
+        hash = eat(hash, &side.qty_raw.unwrap_or(0).to_be_bytes());
+        // Absent and zero are distinguished here: a feed that carries no count
+        // and one that states a zero are not the same bytes, and the value of
+        // this fold is the one every row already written was keyed with. What
+        // the wire's zero *means* is read in `book_key`'s subject, above, where
+        // no row depends on the answer.
+        hash = match side.source_count {
+            None => eat(hash, &[0]),
+            Some(count) => eat(eat(hash, &[1]), &count.to_be_bytes()),
+        };
+    }
+    hash
+}
+
+fn eat(mut hash: u64, bytes: &[u8]) -> u64 {
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(KEY_PRIME);
     }
     hash
 }

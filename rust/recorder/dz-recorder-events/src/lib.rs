@@ -24,7 +24,7 @@ pub mod derive;
 pub mod instruments;
 pub mod sizing;
 
-pub use book::{state_key, Book, BookRefused, Certainty, Change, Side, Top};
+pub use book::{book_key, state_key, Book, BookRefused, Certainty, Change, Side, Top};
 pub use derive::{
     derive_events, derive_events_into, DerivationState, DerivedEvents, EventInput, Refused,
 };

@@ -779,8 +779,18 @@ pub struct BookTop {
     pub ask_source_count: Option<u16>,
     pub price_exp: i8,
     pub qty_exp: i8,
-    /// The equivalence key: a hash over the instrument and both sides, and over
-    /// nothing else. No timestamp, no sequence number, no bytes.
+    /// The equivalence key **for two observers of one channel**: a hash over the
+    /// `Channel ID`, the `Instrument ID` and both sides, and over nothing else.
+    /// No timestamp, no sequence number, no bytes.
+    ///
+    /// The two identifiers are in it, which this comment used to omit, and they
+    /// are what makes it observer-dependent rather than merely
+    /// transport-independent: two recorders of one multicast feed pair on it
+    /// because both read them off the same datagrams. An observer that has
+    /// neither — one watching a venue's own upstream, where the channel is the
+    /// operator's mapping and the `Instrument ID` is minted by the publisher's
+    /// registry — cannot compute this value at all, and joins on
+    /// `dz_recorder_events::book_key` instead, which is the two sides alone.
     pub state_key: u64,
     /// 1 when this top came from applying a snapshot rather than from a
     /// message the market produced.
