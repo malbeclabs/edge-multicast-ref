@@ -121,6 +121,12 @@ pub fn upstream_object_extension(compression: Compression) -> String {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpstreamConnection {
     /// The venue's own label for the connection, as its binary declared it.
+    ///
+    /// **Unique within one object's header**, which
+    /// [`UpstreamSegmentWriter::open`] refuses to break and
+    /// [`UpstreamObjectReader::open`] refuses to read past: the name is the
+    /// whole of a connection's identity here, so two entries sharing one make
+    /// every record on the second attributable to the first.
     pub name: String,
     /// How this connection's receive stamps were obtained.
     pub recv_ts_kind: RecvTsKindLabel,
@@ -217,6 +223,27 @@ pub enum UpstreamFormatError {
     #[error("{object_key} declares a connection name that is not UTF-8")]
     ConnectionNameNotUtf8 { object_key: String },
 
+    /// Two header entries share a name.
+    ///
+    /// **A record indexed to either one is attributable to neither.** A
+    /// derivation resolves a recorded connection back to the caller's declared
+    /// set by name — `VenueObjectId::connection` is a name lookup, because a
+    /// `ConnectionId` is a `&'static str` and a name read out of a file cannot
+    /// become one — so two entries with one name make that lookup ambiguous and
+    /// every record on the second entry is attributed to the first. The two
+    /// entries may even declare different receive-stamp kinds, and then the
+    /// `recv_ts_kind` a row is checked against is the wrong one.
+    ///
+    /// Both indices are named, because *the name is a duplicate* sends somebody
+    /// to read the header to find out which two entries it is.
+    #[error("{object_key} declares the connection name {name:?} at entries {first} and {second}")]
+    DuplicateConnectionName {
+        object_key: String,
+        name: String,
+        first: usize,
+        second: usize,
+    },
+
     #[error("reading {object_key}: {source}")]
     Io {
         object_key: String,
@@ -264,11 +291,23 @@ impl<W: Write> UpstreamSegmentWriter<W> {
     /// table in the header therefore costs nothing and spells each name once
     /// rather than once per message.
     ///
+    /// **The names have to be distinct**, and this is where that is fixed. The
+    /// name is the whole of a connection's identity in this format: a record
+    /// carries an index into the table below, and everything above the reader
+    /// resolves that index to a name and the name back to the caller's own
+    /// `ConnectionId`. Two entries with one name therefore produce records
+    /// nothing can attribute — the second entry's records are attributed to the
+    /// first connection, and the two entries may declare different
+    /// receive-stamp kinds while they do it. Refused here rather than in the
+    /// reader alone, because the object that lands is the only copy of the
+    /// window it holds and a header nobody can read it back through cannot be
+    /// repaired afterwards.
+    ///
     /// # Errors
     ///
     /// [`SinkError::Encode`] when more than [`MAX_UPSTREAM_CONNECTIONS`] are
-    /// declared, or a name is longer than a `u16` can state; [`SinkError::Io`]
-    /// when the header cannot be written.
+    /// declared, two of them share a name, or a name is longer than a `u16` can
+    /// state; [`SinkError::Io`] when the header cannot be written.
     pub fn open(mut inner: W, connections: &[UpstreamConnection]) -> Result<Self, SinkError> {
         let count = u16::try_from(connections.len()).map_err(|_| {
             SinkError::Encode(format!(
@@ -279,6 +318,12 @@ impl<W: Write> UpstreamSegmentWriter<W> {
         if count > MAX_UPSTREAM_CONNECTIONS {
             return Err(SinkError::Encode(format!(
                 "{count} connections declared, over the {MAX_UPSTREAM_CONNECTIONS} bound"
+            )));
+        }
+        if let Some((first, second)) = first_duplicate_name(connections) {
+            return Err(SinkError::Encode(format!(
+                "the connection name {:?} is declared at entries {first} and {second}",
+                connections[second].name
             )));
         }
 
@@ -412,6 +457,22 @@ impl<W: Write> UpstreamSegmentWriter<W> {
 /// `connection` + `recv_ts_ns` + `len`.
 const RECORD_HEADER_LEN: usize = 2 + 8 + 4;
 
+/// The first pair of entries that share a name, as `(first, second)`.
+///
+/// One function for the writer's refusal and the reader's, so that the two
+/// cannot come to disagree about what a duplicate is. Quadratic over a table
+/// the format bounds at [`MAX_UPSTREAM_CONNECTIONS`], which is a set a venue's
+/// own binary declares at startup — a hash map here would allocate to answer a
+/// question about at most 256 short strings, once per object.
+fn first_duplicate_name(connections: &[UpstreamConnection]) -> Option<(usize, usize)> {
+    connections.iter().enumerate().find_map(|(second, entry)| {
+        connections[..second]
+            .iter()
+            .position(|earlier| earlier.name == entry.name)
+            .map(|first| (first, second))
+    })
+}
+
 /// An upstream object read back, one message at a time.
 ///
 /// Holds the object key so that every refusal can name it. The key rather than
@@ -482,6 +543,19 @@ impl<R: Read> UpstreamObjectReader<R> {
                 return Err(UpstreamFormatError::ConnectionNameNotUtf8 { object_key });
             };
             connections.push(UpstreamConnection { name, recv_ts_kind });
+        }
+        // The invariant the writer above refuses to break, checked again on the
+        // way in: a derivation runs over objects a shipper moved, and the build
+        // that wrote one is not the build reading it. An index that resolves to
+        // an ambiguous name is worse than a refusal, because the rows it
+        // produces name a connection they did not arrive on.
+        if let Some((first, second)) = first_duplicate_name(&connections) {
+            return Err(UpstreamFormatError::DuplicateConnectionName {
+                name: connections[second].name.clone(),
+                object_key,
+                first,
+                second,
+            });
         }
 
         Ok(Self {

@@ -184,6 +184,13 @@ impl Custody {
     }
 }
 
+/// What compression adds to the name of a compressed object.
+///
+/// One constant, so that the suffix a writer appends and the suffix a reader
+/// tests for are the same four bytes. Two spellings of it is how an archive
+/// comes to land objects nothing opens.
+const ZSTD_SUFFIX: &str = ".zst";
+
 /// How a segment is stored. `zstd` is the default: the payloads are dense
 /// fixed-size binary structures with high inter-record redundancy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,8 +223,38 @@ impl Compression {
     pub const fn suffix(self) -> &'static str {
         match self {
             Self::None => "",
-            Self::Zstd { .. } => ".zst",
+            Self::Zstd { .. } => ZSTD_SUFFIX,
         }
+    }
+}
+
+/// A reader over the object that landed, `zstd`-decoding it when its name says
+/// so.
+///
+/// **The name is the signal**, exactly as it is for `ArchiveSource::open` on the
+/// datagram side: the suffix is what [`seal`] wrote and what the object key
+/// carries, so a reader holding the key already holds the answer. The level is
+/// absent from the decision because a decoder does not need one — it is a
+/// property of how the frame was produced and is recorded in the frame.
+///
+/// **Public and here rather than in either shape's own module**, for the reason
+/// [`seal`] is: there are two archive shapes and one answer to what `.zst`
+/// means. A shape that decided this for itself would be a second place for the
+/// suffix to be spelled, and the failure that produces is silent — a landed
+/// object whose reader refuses it as *not one of ours*, because the first bytes
+/// it sees are a zstd frame magic and not the shape's own.
+///
+/// # Errors
+///
+/// [`io::Error`] when the decoder cannot read the frame header.
+pub fn open_sealed<'a, R: io::Read + 'a>(
+    name: &str,
+    bytes: R,
+) -> io::Result<Box<dyn io::Read + 'a>> {
+    if name.ends_with(ZSTD_SUFFIX) {
+        Ok(Box::new(zstd::stream::Decoder::new(bytes)?))
+    } else {
+        Ok(Box::new(bytes))
     }
 }
 

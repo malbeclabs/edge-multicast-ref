@@ -11,7 +11,7 @@ use dz_recorder_archive::upstream::{
     UPSTREAM_FORMAT_VERSION, UPSTREAM_MAGIC, UPSTREAM_OBJECT_EXTENSION,
 };
 use dz_recorder_archive::{Compression, RotationPolicy};
-use dz_recorder_core::RecvTsKind;
+use dz_recorder_core::{RecvTsKind, SinkError};
 
 const KEY: &str = "feed=top-of-book/env=test/site=site-1/recorder=recorder-1/\
                    date=2026-09-09/hour=12/1-2-3.dzus";
@@ -545,4 +545,79 @@ fn the_receive_stamp_kind_is_the_recorders_own_taxonomy() {
         serde_json::json!("application-fallback")
     );
     assert_eq!(RecvTsKindLabel::from_byte(2), None);
+}
+
+/// **A connection name is declared once, and the writer is where that is
+/// fixed.**
+///
+/// The name is the whole of a connection's identity in this format. A record
+/// carries an index into the header's table, a reader resolves that index to a
+/// name, and everything above it resolves the name back to the caller's own
+/// `ConnectionId` — `VenueObjectId::connection` is a name lookup, because a
+/// `ConnectionId` is a `&'static str` and a name read out of a file cannot
+/// become one.
+///
+/// So two entries with one name make that lookup ambiguous: every record on the
+/// second entry is attributed to the first connection, and the two may declare
+/// different receive-stamp kinds while they do it. The mutant this kills is the
+/// check's absence — a writer that admitted the header would land an object
+/// whose records cannot be attributed at all, and the object is the only copy of
+/// the window it holds.
+#[test]
+fn a_connection_name_declared_twice_is_refused_by_the_writer() {
+    let duplicated = vec![
+        UpstreamConnection::new("mktdata", RecvTsKind::KernelSoftware),
+        UpstreamConnection::new("catalogue", RecvTsKind::ApplicationFallback),
+        // The same name again, and with the other stamp kind, which is what
+        // makes the ambiguity more than cosmetic.
+        UpstreamConnection::new("mktdata", RecvTsKind::ApplicationFallback),
+    ];
+    match UpstreamSegmentWriter::open(Vec::new(), &duplicated) {
+        Err(SinkError::Encode(detail)) => {
+            // Both entries, because *the name is a duplicate* sends somebody to
+            // read the header to find out which two it is.
+            assert!(
+                detail.contains("\"mktdata\"") && detail.contains("entries 0 and 2"),
+                "{detail}"
+            );
+        }
+        other => panic!("a duplicate connection name was not refused: {other:?}"),
+    }
+}
+
+/// And a header that already holds one is refused on the way in.
+///
+/// A derivation runs over objects a shipper moved, and the build that wrote one
+/// is not the build reading it. An index that resolves to an ambiguous name is
+/// worse than a refusal, because the rows it produces name a connection they did
+/// not arrive on — so the reader refuses rather than resolving to the first
+/// match. The bytes are composed here by hand, since the writer above will not
+/// produce them.
+#[test]
+fn a_header_that_declares_one_name_twice_is_refused_by_the_reader() {
+    let mut object = Vec::new();
+    object.extend_from_slice(&UPSTREAM_MAGIC);
+    object.extend_from_slice(&UPSTREAM_FORMAT_VERSION.to_le_bytes());
+    object.extend_from_slice(&2u16.to_le_bytes());
+    for kind in [
+        RecvTsKindLabel::KernelSoftware,
+        RecvTsKindLabel::ApplicationFallback,
+    ] {
+        object.extend_from_slice(&7u16.to_le_bytes());
+        object.push(kind.as_byte());
+        object.extend_from_slice(b"mktdata");
+    }
+    match UpstreamObjectReader::open(KEY, &object[..]) {
+        Err(UpstreamFormatError::DuplicateConnectionName {
+            object_key,
+            name,
+            first,
+            second,
+        }) => {
+            assert_eq!(object_key, KEY);
+            assert_eq!(name, "mktdata");
+            assert_eq!((first, second), (0, 1));
+        }
+        other => panic!("an ambiguous header was not refused: {other:?}"),
+    }
 }

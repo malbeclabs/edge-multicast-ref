@@ -18,7 +18,7 @@ pub mod staging;
 pub mod upstream;
 pub mod writer;
 
-pub use compress::{seal, Compression, Published};
+pub use compress::{open_sealed, seal, Compression, Published};
 pub use manifest::{CoverageTracker, InstanceCoverage, JoinedRole, SegmentManifest};
 pub use rotate::{ArchiveWriter, ArchiveWriterConfig, RotationPolicy};
 pub use staging::{SegmentObject, StagingWatermark};

@@ -112,6 +112,19 @@ transport's connections can be named at startup and pre-created as metric
 labels. A table in the header therefore costs nothing and spells each name once
 rather than once per message.
 
+**A name is declared once, and both ends refuse a header that breaks it.** The
+name is the whole of a connection's identity here: a record carries an index into
+the table, a reader resolves the index to a name, and a derivation resolves the
+name back to the caller's own `ConnectionId` — which is a `&'static str`, so a
+name read out of a file cannot become one. Two entries sharing a name therefore
+make that lookup ambiguous, every record on the second entry is attributed to the
+first connection, and the two may declare different receive-stamp kinds while
+they do it. The writer refuses to declare it and the reader refuses to read it,
+naming both entries: the object is the only copy of the window it holds, so a
+header nobody can read it back through cannot be repaired afterwards, and a
+reader that resolved the ambiguity to *the first match* would be producing rows
+rather than an error.
+
 **The receive-stamp kind is per connection and not per message.** A transport
 stamps every payload the same way — the kernel does it, or the transport does —
 which is what `Payload` states in refusing to carry the distinction per payload.
@@ -227,14 +240,28 @@ Named, so that nobody adds one of them by inferring it from an absence.
 
 ## Reading one
 
+`UpstreamObjectReader` reads an object; it does not decompress one. The bytes
+that land are compressed by default, so a caller holding an object out of the
+store decodes it first — and the object's own key is what says whether to,
+because the suffix is what the compressor wrote:
+
 ```rust
+use dz_recorder_archive::open_sealed;
 use dz_recorder_archive::upstream::UpstreamObjectReader;
 
+let bytes = open_sealed(&object_key, bytes)?;
 let mut reader = UpstreamObjectReader::open(object_key, bytes)?;
 while let Some(message) = reader.next_message()? {
     // message.connection, message.recv_ts_kind, message.recv_ts_ns, message.bytes
 }
 ```
+
+`open_sealed` is the archive tier's own — the same module that wrote the suffix —
+so the two archive shapes cannot come to disagree about what `.zst` means. Handed
+a compressed object without it, the reader refuses the bytes as *not an upstream
+object*, because the first eight bytes of one are a zstd frame magic and not
+`DZUPSTRM`. `dz-recorder-venue`'s `ArchivedVenueObject::open_published` is the
+same decision behind the constructor a derivation uses.
 
 `dz-recorder-venue` is what drives a venue's own `Adapter` over that and
 produces rows. Nothing in this repository links a venue: the adapter arrives as
