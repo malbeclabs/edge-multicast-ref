@@ -14,8 +14,8 @@
 mod common;
 
 use common::{
-    definition, identity, pack, DatagramLog, Msg, OwnedDatagram, ACTION_NEW, BOTH_UPDATED,
-    SIDE_BID, SOURCE_ID,
+    definition, identity, pack, DatagramLog, Msg, OwnedDatagram, AAA, ACTION_NEW, BBB,
+    BOTH_UPDATED, CHANNEL_ID, PRIMARY_SOURCE, SIDE_BID, SOURCE_ID,
 };
 use dz_edge_core::{Feed, PortRole};
 use dz_edge_mbp::{
@@ -23,12 +23,13 @@ use dz_edge_mbp::{
     U16_UNAVAILABLE,
 };
 use dz_edge_tob::{Quote, TopOfBook, MAGIC_TOB};
+use dz_recorder_core::{RecordedDatagram, Source, SourceError};
 use dz_recorder_events::{
-    derive_events, derive_events_into, BookRefused, Derivation, DerivedEvents, EventInput, Refused,
+    derive_events, derive_events_into, BookRefused, Channel, Derivation, DerivedEvents, EventInput,
+    Refused,
 };
 use dz_recorder_rows::{Instrument, UncertainReason};
 
-const AAA: u32 = 11;
 const SNAPSHOT: u32 = 7;
 const ANCHOR_SEQ: u64 = 4_242;
 
@@ -594,5 +595,330 @@ fn book_refused_does_not_re_report_an_earlier_windows_refusal() {
         state.close_object(),
         BookRefused::default(),
         "nor did the derivation strand anything when it ended"
+    );
+}
+
+/// A log that yields datagrams and then fails, so a tear can be asserted about.
+struct TornLog {
+    datagrams: Vec<OwnedDatagram>,
+    at: usize,
+    tear_after: usize,
+}
+
+impl Source for TornLog {
+    fn next(&mut self) -> Result<Option<RecordedDatagram<'_>>, SourceError> {
+        if self.at == self.tear_after {
+            return Err(SourceError::MalformedArchive(
+                "the fixture tears here".to_owned(),
+            ));
+        }
+        let Some(datagram) = self.datagrams.get(self.at) else {
+            return Ok(None);
+        };
+        self.at += 1;
+        Ok(Some(datagram.as_recorded()))
+    }
+}
+
+fn channel() -> Channel {
+    Channel {
+        source_addr: PRIMARY_SOURCE,
+        channel_id: CHANNEL_ID,
+    }
+}
+
+/// A window whose source tears folds nothing, and the state is still usable.
+///
+/// The absorb is the only fallible step and it completes before the fold
+/// begins, so a call that fails cannot have folded half a window into state
+/// that outlives it. That is worth an assertion rather than a comment, because
+/// the opposite belief — that a failed call left the state half-advanced — is
+/// the one that would have a caller discard it, pay the tear's datagrams *and*
+/// re-pay the first-window refusals this entry point exists to remove.
+#[test]
+fn a_source_that_tears_folds_nothing_and_leaves_the_state_usable() {
+    let all = build::<TopOfBook>(&[
+        Group(
+            &[Msg::Definition(definition(AAA, "AAA", -2))],
+            PortRole::Refdata,
+            10,
+        ),
+        Group(&[quote(9_950)], PortRole::Mktdata, 100),
+        Group(&[quote(9_951)], PortRole::Mktdata, 200),
+    ]);
+    let id = identity();
+    let mut state = Derivation::new();
+
+    // One clean window first, so the state holds something worth not losing.
+    let clean = derive_events_into(
+        &mut state,
+        &mut DatagramLog::new(all[..2].to_vec()),
+        &input(&id, MAGIC_TOB),
+    )
+    .expect("the log does not fail");
+    assert_eq!(clean.event.len(), 1, "the definition resolved the quote");
+    assert_eq!(
+        state.table().defined_count(channel()),
+        1,
+        "and the table a caller can now read says so"
+    );
+
+    // A window whose source tears after yielding one datagram.
+    let mut torn = TornLog {
+        datagrams: all[2..].to_vec(),
+        at: 0,
+        tear_after: 1,
+    };
+    derive_events_into(&mut state, &mut torn, &input(&id, MAGIC_TOB))
+        .expect_err("the source tore before it was exhausted");
+
+    assert_eq!(
+        state.table().defined_count(channel()),
+        1,
+        "the torn call folded nothing into the state"
+    );
+
+    // The next window folds as though the torn call had not happened: its quote
+    // still resolves against the first window's definition, and the datagram
+    // base did not advance over datagrams no row was derived from.
+    let after = derive_events_into(
+        &mut state,
+        &mut DatagramLog::new(all[2..].to_vec()),
+        &input(&id, MAGIC_TOB),
+    )
+    .expect("the log does not fail");
+    assert_eq!(
+        after.event.len(),
+        1,
+        "the state survived the tear and still resolves"
+    );
+    assert_eq!(
+        after.event[0].datagram_index, 2,
+        "numbered from the two datagrams that were actually folded"
+    );
+}
+
+/// The reference data is readable per window, which is what says the state is
+/// doing its job.
+///
+/// A window that refused nothing and a window that carried no prices look the
+/// same from the rows, so `defined_count` is the only thing that distinguishes
+/// *the table is populated* from *there was nothing to resolve*. It is also the
+/// measurement the phase hypothesis needs, and it has to be reachable before
+/// anyone can take it.
+#[test]
+fn the_reference_data_is_readable_per_window() {
+    let id = identity();
+    let mut state = Derivation::new();
+
+    assert_eq!(
+        state.table().defined_count(channel()),
+        0,
+        "nothing defined before anything is folded"
+    );
+    assert_eq!(state.table().era(channel()), None, "and no era either");
+
+    let first = build::<TopOfBook>(&[Group(
+        &[Msg::Definition(definition(AAA, "AAA", -2))],
+        PortRole::Refdata,
+        10,
+    )]);
+    derive_events_into(
+        &mut state,
+        &mut DatagramLog::new(first),
+        &input(&id, MAGIC_TOB),
+    )
+    .expect("the log does not fail");
+    assert_eq!(state.table().defined_count(channel()), 1);
+    assert_eq!(state.table().era(channel()), Some(0));
+
+    // A second instrument in a later window, and the count is the derivation's
+    // rather than the window's — which is the whole point of it crossing.
+    let second = build::<TopOfBook>(&[Group(
+        &[Msg::Definition(definition(BBB, "BBB", -2))],
+        PortRole::Refdata,
+        20,
+    )]);
+    derive_events_into(
+        &mut state,
+        &mut DatagramLog::new(second),
+        &input(&id, MAGIC_TOB),
+    )
+    .expect("the log does not fail");
+    assert_eq!(
+        state.table().defined_count(channel()),
+        2,
+        "the second window's definition joined the first window's"
+    );
+}
+
+/// A level whose cycle ended in an *earlier* window is an orphan.
+///
+/// The attribution map outlives the call now, and `Book::snapshot_end` removes
+/// from the book's own map on every end while nothing removed from this one. So
+/// the two would disagree: the book would ignore such a level, having forgotten
+/// the cycle, and the map would still attribute it and emit a row saying it
+/// belongs to a cycle that is over. Pruning at the end of the call is also what
+/// keeps the map to the cycles in flight rather than one entry per cycle for
+/// the life of the derivation.
+#[test]
+fn a_level_after_its_cycle_ended_in_an_earlier_window_is_an_orphan() {
+    let first = build::<MarketByPrice>(&[
+        Group(
+            &[Msg::Definition(definition(AAA, "AAA", -2))],
+            PortRole::Refdata,
+            10,
+        ),
+        Group(
+            &[
+                snapshot_begin(2),
+                snapshot_level(SIDE_BID, 9_950, 12),
+                snapshot_level(SIDE_ASK, 10_050, 7),
+                snapshot_end(),
+            ],
+            PortRole::Snapshot,
+            100,
+        ),
+    ]);
+    // A stray level in the next window, carrying the finished cycle's id.
+    let second = build::<MarketByPrice>(&[Group(
+        &[snapshot_level(SIDE_BID, 9_949, 3)],
+        PortRole::Snapshot,
+        200,
+    )]);
+
+    let id = identity();
+    let mut state = Derivation::new();
+    let a = derive_events_into(
+        &mut state,
+        &mut DatagramLog::new(first),
+        &input(&id, MAGIC_MBP),
+    )
+    .expect("the log does not fail");
+    assert_eq!(
+        a.refused.orphan_snapshot_level, 0,
+        "the first window's own levels belong to its open cycle"
+    );
+
+    let b = derive_events_into(
+        &mut state,
+        &mut DatagramLog::new(second),
+        &input(&id, MAGIC_MBP),
+    )
+    .expect("the log does not fail");
+    assert_eq!(
+        b.refused.orphan_snapshot_level, 1,
+        "the cycle ended a window ago, so nothing can attribute this level"
+    );
+    assert!(
+        b.event.is_empty(),
+        "and no row claims it belongs to a cycle that is over"
+    );
+}
+
+/// A level after its cycle's end *within one call* is still attributed.
+///
+/// This is the archive path's behaviour and this change does not touch it,
+/// which is why the map is pruned when the call ends rather than on the end
+/// itself. Asserted against both entry points, because the whole claim about
+/// the archive path is that they are one path.
+#[test]
+fn a_level_after_its_cycle_ended_in_the_same_call_is_still_attributed() {
+    let all = build::<MarketByPrice>(&[
+        Group(
+            &[Msg::Definition(definition(AAA, "AAA", -2))],
+            PortRole::Refdata,
+            10,
+        ),
+        Group(
+            &[
+                snapshot_begin(2),
+                snapshot_level(SIDE_BID, 9_950, 12),
+                snapshot_level(SIDE_ASK, 10_050, 7),
+                snapshot_end(),
+                // After its own end, in the same call.
+                snapshot_level(SIDE_BID, 9_949, 3),
+            ],
+            PortRole::Snapshot,
+            100,
+        ),
+    ]);
+
+    let archive = whole(&all, MAGIC_MBP);
+    assert_eq!(
+        archive.refused.orphan_snapshot_level, 0,
+        "the archive path attributes it, and this change must not alter that"
+    );
+
+    let id = identity();
+    let mut state = Derivation::new();
+    let once = derive_events_into(
+        &mut state,
+        &mut DatagramLog::new(all),
+        &input(&id, MAGIC_MBP),
+    )
+    .expect("the log does not fail");
+    let ended = merge(once, DerivedEvents::default(), state.close_object());
+    assert_eq!(ended.refused, archive.refused);
+    assert_eq!(ended.event, archive.event);
+}
+
+/// Ending the derivation clears the cycles still in flight, in both maps.
+///
+/// `Book::close_object` counts them as having anchored nothing and clears its
+/// own; the attribution map is the other half of that statement. Left behind, a
+/// level arriving after the derivation ended would be attributed to a cycle the
+/// book had already written off, and the row and the counter would disagree
+/// about the same cycle.
+#[test]
+fn ending_the_derivation_clears_the_cycles_still_in_flight() {
+    let first = build::<MarketByPrice>(&[
+        Group(
+            &[Msg::Definition(definition(AAA, "AAA", -2))],
+            PortRole::Refdata,
+            10,
+        ),
+        // A begin and one level, and no end: still in flight when the window
+        // closes, so it is kept -- and written off when the derivation ends.
+        Group(
+            &[snapshot_begin(2), snapshot_level(SIDE_BID, 9_950, 12)],
+            PortRole::Snapshot,
+            100,
+        ),
+    ]);
+    let after = build::<MarketByPrice>(&[Group(
+        &[snapshot_level(SIDE_ASK, 10_050, 7)],
+        PortRole::Snapshot,
+        200,
+    )]);
+
+    let id = identity();
+    let mut state = Derivation::new();
+    let a = derive_events_into(
+        &mut state,
+        &mut DatagramLog::new(first),
+        &input(&id, MAGIC_MBP),
+    )
+    .expect("the log does not fail");
+    assert_eq!(
+        a.refused.orphan_snapshot_level, 0,
+        "the cycle is in flight, so its level is attributed"
+    );
+
+    let closed = state.close_object();
+    assert_eq!(
+        closed.unclosed_cycle, 1,
+        "the cycle was still open when the derivation ended, so it anchored nothing"
+    );
+
+    let b = derive_events_into(
+        &mut state,
+        &mut DatagramLog::new(after),
+        &input(&id, MAGIC_MBP),
+    )
+    .expect("the log does not fail");
+    assert_eq!(
+        b.refused.orphan_snapshot_level, 1,
+        "and the cycle the book wrote off cannot still attribute a level"
     );
 }

@@ -109,6 +109,14 @@ struct OpenCycle {
     instrument_id: u32,
     upstream_ts: u64,
     levels: u32,
+    /// Whether this cycle's `SnapshotEnd` has been folded.
+    ///
+    /// The entry outlives the end within a call, because a level that arrives
+    /// after its own end is still attributed to it and still counts toward
+    /// `levels_seen` — the behaviour the archive path has and this does not
+    /// change. It is dropped when the call ends, which is what keeps the map to
+    /// the cycles actually in flight in a derivation that outlives one call.
+    ended: bool,
 }
 
 /// Everything one statement needs to become a row, plus when it was last seen.
@@ -183,19 +191,54 @@ impl Derivation {
     /// still open, and counting it there would make `unclosed_cycle` rise once
     /// per boundary per cycle as a matter of course, which is the failure
     /// keeping the state across the cut exists to remove.
+    ///
+    /// `#[must_use]` because the figure has nowhere else to go: the cycles are
+    /// cleared here, so a caller that drops it has lost what its last window
+    /// stranded rather than deferred reading it.
+    #[must_use]
     pub fn close_object(&mut self) -> BookRefused {
         self.book.close_object();
+        // The book's close clears its own cycles; the attribution map is the
+        // other half of the same statement and is cleared with it, or a level
+        // arriving after the derivation ended would be attributed to a cycle
+        // the book has already counted as having anchored nothing.
+        self.cycles.clear();
         refused_since(self.book.refused, &mut self.reported)
+    }
+
+    /// The reference data this derivation has accumulated so far.
+    ///
+    /// Everything this entry point buys depends on this table being populated,
+    /// so a live caller needs to be able to say whether it is, and nothing else
+    /// on the result answers that: a window that refused nothing and a window
+    /// with no prices in it look the same from the rows.
+    /// [`InstrumentTable::defined_count`] is the gauge, per channel, and
+    /// [`InstrumentTable::era`] says which era those statements belong to.
+    ///
+    /// It is also the measurement that settles whether a window's refusal share
+    /// tracks the cadence on which definitions are restated — a phase
+    /// relationship rather than a number to tune — which is worth settling
+    /// before a window length is chosen to match it by coincidence.
+    #[must_use]
+    pub const fn table(&self) -> &InstrumentTable {
+        &self.table
     }
 }
 
 /// The refusals one call is responsible for: the book's running total, less
 /// whatever earlier calls have already reported.
 fn refused_since(total: BookRefused, reported: &mut BookRefused) -> BookRefused {
+    // Saturating because the alternative to a nonsense count is a visible zero,
+    // not because it can trigger: `Book::refused` only ever rises, the book is
+    // private to the `Derivation`, and `reported` is only ever assigned from it.
+    // A plain subtraction would wrap in release and put a number near u64::MAX
+    // in a row, which is the one outcome worse than under-reporting.
     let delta = BookRefused {
-        incomplete_cycle: total.incomplete_cycle - reported.incomplete_cycle,
-        stale_cycle: total.stale_cycle - reported.stale_cycle,
-        unclosed_cycle: total.unclosed_cycle - reported.unclosed_cycle,
+        incomplete_cycle: total
+            .incomplete_cycle
+            .saturating_sub(reported.incomplete_cycle),
+        stale_cycle: total.stale_cycle.saturating_sub(reported.stale_cycle),
+        unclosed_cycle: total.unclosed_cycle.saturating_sub(reported.unclosed_cycle),
     };
     *reported = total;
     delta
@@ -257,9 +300,22 @@ pub fn derive_events<S: Source + ?Sized>(
 /// # Errors
 ///
 /// [`RelowerError::MulticastArchive`] if the source fails before it is
-/// exhausted, for the reason [`derive_events`] gives. Note that the state
-/// survives the error and holds everything folded before the tear, so a caller
-/// that retries the same input folds the surviving half into it twice.
+/// exhausted, for the reason [`derive_events`] gives.
+///
+/// **The state is untouched when that happens, and is the thing worth keeping
+/// rather than the thing to discard.** The absorb is the only fallible step
+/// here and it completes before anything is folded, so a call that fails folds
+/// nothing: no row is derived, no counter moves, and the datagram base does not
+/// advance. The next window folds into the state as though this call had not
+/// happened, and nothing can be folded twice.
+///
+/// What the failure costs is on the source's side. [`WireCapture::absorb`]
+/// consumes as it reads, so the datagrams it took before the tear go with the
+/// capture dropped here and a retry over the same source resumes after them
+/// rather than at them. The loss is a partial window's datagrams, which is the
+/// direction to fail in — a caller that discarded the state as well would pay
+/// that loss and then re-pay the first-window refusals this entry point exists
+/// to remove.
 pub fn derive_events_into<S: Source + ?Sized>(
     state: &mut Derivation,
     source: &mut S,
@@ -416,6 +472,15 @@ pub fn derive_events_into<S: Source + ?Sized>(
         }
     }
 
+    // Cycles that ended in this call are dropped, and the ones still in flight
+    // are kept for the next one. `Book::snapshot_end` removes from the book's
+    // own map on every end; nothing removed from this one, which cost nothing
+    // while it died with the call and would grow by one entry per cycle for the
+    // life of a derivation that outlives it. Pruning here rather than on the
+    // end itself is what keeps the archive path identical: one call, so an
+    // entry lives exactly as long as it did.
+    cycles.retain(|_, cycle| !cycle.ended);
+
     // This call's own refusals, not the book's running total. The cycles still
     // open are left open: they may yet be closed by the next call, and only the
     // end of the derivation can say they anchored nothing.
@@ -510,6 +575,7 @@ fn instrument_of_state(
                     instrument_id: begin.instrument_id,
                     upstream_ts: begin.timestamp_ns,
                     levels: 0,
+                    ended: false,
                 },
             );
             Some(begin.instrument_id)
@@ -522,7 +588,15 @@ fn instrument_of_state(
             cycle.levels += 1;
             Some(cycle.instrument_id)
         }
-        StateBody::SnapshotEnd(end) => Some(end.instrument_id),
+        StateBody::SnapshotEnd(end) => {
+            // Marked rather than removed: `state_row` still reads `levels` off
+            // this entry for the end row's `levels_seen`, and a level arriving
+            // after the end is still attributed within this call.
+            if let Some(cycle) = cycles.get_mut(&(instance, end.snapshot_id)) {
+                cycle.ended = true;
+            }
+            Some(end.instrument_id)
+        }
     }
 }
 
