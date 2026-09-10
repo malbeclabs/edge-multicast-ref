@@ -14,7 +14,7 @@ use dz_ingress_core::Kind;
 use dz_publisher_runtime::{
     AdapterContext, AdapterRegistry, Document, SourceRole, StartupError, Venue,
 };
-use harness::Doc;
+use harness::{Doc, GROUP, SOURCE_ID};
 
 /// A `[[source]]` block, with only the keys a test varies stated.
 fn source(name: &str, ingress: &str, role: &str) -> String {
@@ -454,15 +454,15 @@ fn a_transport_this_binary_was_not_built_with_is_refused_per_source() {
     // distinguishable failures: this one is a build to redo rather than a typo
     // to fix, which is why the message says which.
     //
-    // `fix` and not `websocket`, deliberately. Whether a marker feature is on
-    // depends on what else is in the build — cargo unifies features across a
-    // workspace, so `dz-ingress-websocket` being a member makes `websocket`
-    // linked in a whole-workspace test run and unlinked in a single-crate one.
-    // A test that asserted the unlinked case over that token would pass alone
-    // and fail in CI. No crate implements `fix` at all, so it is unlinked in
-    // every build — and it is the transport a shipped venue is actually waiting
-    // for.
-    let doc = with_sources(&source("ws", "fix", "primary"));
+    // `multicast`, and not `websocket` or `fix`, deliberately. Whether a
+    // marker feature is on depends on what else is in the build — cargo
+    // unifies features across a workspace, so a transport crate being a member
+    // makes its token linked in a whole-workspace test run and unlinked in a
+    // single-crate one. A test that asserted the unlinked case over
+    // `websocket` or `fix` would pass alone and fail in CI, because
+    // `dz-ingress-websocket` and `dz-ingress-fix` are both members. No crate
+    // implements `multicast`, so it is unlinked in every build.
+    let doc = with_sources(&source("ws", "multicast", "primary"));
     let error = Document::parse(&doc.render())
         .expect("parses")
         .resolve()
@@ -704,4 +704,215 @@ fn one_adapter_tells_its_sources_apart_by_the_connection_that_delivered_them() {
         ],
         "each payload is attributed to the connection that delivered it"
     );
+}
+
+// ---------------------------------------------------------------------------
+// One session per source, which is the operator's statement and not a
+// consequence
+// ---------------------------------------------------------------------------
+
+/// One driver is opened per enabled `[[source]]`, and per nothing else.
+///
+/// Asserted rather than left as a thing that happens to be true, because it is
+/// what matters when a venue permits one session per credential and answers a
+/// second logon by evicting the first. A publisher carrying sixty-two channel
+/// instances of one feed specification over one source opens **one** session: a
+/// shard is a partition of the published set and has nothing to do with how
+/// many upstream connections exist.
+///
+/// Sixty-two, and of one specification, because that is the shape the design
+/// names — a publisher this size is what makes the question worth asking, and
+/// it is the size at which a rule that had quietly become per-feed or per-shard
+/// would be caught by its own arithmetic rather than by a venue.
+#[test]
+fn sixty_two_channel_instances_over_one_source_open_one_session() {
+    const INSTANCES: u8 = 62;
+
+    let mut blocks = String::new();
+    for index in 0..INSTANCES {
+        // Index 0 states no shard: it is the default one, and a deployment that
+        // grows into shards grows out of a document that had none.
+        let shard = if index == 0 {
+            String::new()
+        } else {
+            format!("shard = \"shard-{index:02}\"\n")
+        };
+        // Every port and every `Channel ID` distinct across the document, which
+        // is what a document nobody would deploy would not have.
+        let base = 41_000 + u16::from(index) * 4;
+        blocks.push_str(&format!(
+            "[[feed]]\n\
+             spec = \"top-of-book\"\n\
+             {shard}\
+             channel_id = {index}\n\
+             source_id = {SOURCE_ID}\n\
+             multicast_group = \"{GROUP}\"\n\
+             mktdata_port = {mktdata}\n\
+             refdata_port = {refdata}\n\
+             heartbeat_interval = \"1s\"\n\
+             definition_cycle = \"30s\"\n\
+             manifest_cadence = \"1s\"\n\
+             idle_guard = \"60s\"\n\
+             \n",
+            mktdata = base,
+            refdata = base + 1,
+        ));
+    }
+
+    let doc = with_sources(&source("mktdata", "uds", "primary")).feed(blocks);
+    let config = Document::parse(&doc.render())
+        .expect("sixty-two channel instances of one specification")
+        .resolve()
+        .expect("resolvable");
+
+    assert_eq!(
+        config.feeds.len(),
+        usize::from(INSTANCES),
+        "the document really does carry sixty-two channel instances"
+    );
+    assert_eq!(
+        config.sources.len(),
+        1,
+        "one enabled `[[source]]` is one session, whatever the published set is \
+         partitioned into"
+    );
+    assert_eq!(config.sources[0].connection.as_str(), "mktdata");
+
+    // And the whole chain, not only the count: one declared source, one
+    // transport built, and `check_sources` holding the two to each other — so
+    // one driver, so one session. A venue that built one per channel instance
+    // is refused rather than opening sixty-two of them.
+    let venue = registry_building(&["mktdata"])
+        .open(&context(&config))
+        .expect("one source built");
+    assert_eq!(venue.sources.len(), 1);
+    dz_publisher_runtime::check_sources(&config, &venue).expect("one declared, one built");
+
+    let per_instance = registry_building(&["mktdata", "mktdata-shard-01"])
+        .open(&context(&config))
+        .expect("constructs");
+    let error = dz_publisher_runtime::check_sources(&config, &per_instance)
+        .expect_err("a session per channel instance is not what the document says");
+    assert!(
+        matches!(&error, StartupError::SourcesDisagree { built, .. } if built.contains("mktdata-shard-01")),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_disabled_source_opens_no_session() {
+    // The count is the *enabled* blocks, so a block kept and turned off is a
+    // decision an operator took on purpose and not a session.
+    let doc = with_sources(&format!(
+        "{}{}enabled = false\n",
+        source("ws", "uds", "primary"),
+        source("standby", "uds", "comparison")
+    ));
+    let config = Document::parse(&doc.render())
+        .expect("parses")
+        .resolve()
+        .expect("resolvable");
+
+    assert_eq!(config.sources.len(), 1);
+    assert_eq!(config.sources[0].connection.as_str(), "ws");
+}
+
+#[test]
+fn two_enabled_sources_with_the_same_credential_table_are_refused_naming_both() {
+    // The revert this test exists for: resolve the document and open both
+    // sessions. What that costs is the failure nobody diagnoses from one
+    // publisher's logs — a venue that permits one session per credential
+    // answers the second logon by evicting the first, and the two connections
+    // take turns knocking each other off while each looks, in isolation,
+    // exactly like a venue that keeps closing the connection.
+    //
+    // The copy-paste shape it catches: a second block with a new endpoint and
+    // the credential nobody changed.
+    let doc = with_sources(&format!(
+        "{}[source.credentials]\nkey = \"/etc/a-publisher/session.key\"\n\n\
+         {}[source.credentials]\nkey = \"/etc/a-publisher/session.key\"\n",
+        source("primary-session", "uds", "primary"),
+        source("second-session", "uds", "comparison")
+    ));
+    let error = Document::parse(&doc.render())
+        .expect("parses")
+        .resolve()
+        .expect_err("two logons with one credential");
+
+    match &error {
+        StartupError::SourceCredentialsShared { one, another } => {
+            // Both blocks, because being told that *a* credential is shared
+            // leaves an operator with the same search they started with.
+            assert_eq!(one, "primary-session");
+            assert_eq!(another, "second-session");
+        }
+        other => panic!("{other}"),
+    }
+    let message = error.to_string();
+    assert!(message.contains("primary-session"), "{message}");
+    assert!(message.contains("second-session"), "{message}");
+    // And the limit of the check is stated in the message rather than left for
+    // somebody to discover: two *different* paths holding one account is the
+    // case nothing here can see.
+    assert!(
+        message.contains("reconnecting in step"),
+        "the message must name the symptom of the case it cannot catch: {message}"
+    );
+}
+
+#[test]
+fn two_sources_with_their_own_credentials_are_two_sessions() {
+    // The document the refusal above exists to distinguish from: two blocks,
+    // two credentials, two logons a venue can hold at once.
+    let doc = with_sources(&format!(
+        "{}[source.credentials]\nkey = \"/etc/a-publisher/one.key\"\n\n\
+         {}[source.credentials]\nkey = \"/etc/a-publisher/another.key\"\n",
+        source("one", "uds", "primary"),
+        source("another", "uds", "comparison")
+    ));
+    let config = Document::parse(&doc.render())
+        .expect("parses")
+        .resolve()
+        .expect("two credentials are two sessions");
+
+    assert_eq!(config.sources.len(), 2);
+}
+
+#[test]
+fn several_sources_that_need_no_credential_are_not_two_logons_with_one() {
+    // An empty `credentials` table is not a shared credential. A venue reached
+    // over a path that needs none leaves the table unwritten, and refusing that
+    // document would refuse every publisher whose upstream authenticates
+    // elsewhere.
+    let doc = with_sources(&format!(
+        "{}\n{}",
+        source("one", "uds", "primary"),
+        source("another", "uds", "comparison")
+    ));
+    let config = Document::parse(&doc.render())
+        .expect("parses")
+        .resolve()
+        .expect("no credential is not a shared credential");
+
+    assert_eq!(config.sources.len(), 2);
+}
+
+#[test]
+fn a_credential_shared_with_a_disabled_block_is_not_two_logons() {
+    // A disabled block opens no session, so it cannot be one of two logons —
+    // unlike the name check, which reads every block because two blocks with
+    // one name are two descriptions of a single connection.
+    let doc = with_sources(&format!(
+        "{}[source.credentials]\nkey = \"/etc/a-publisher/session.key\"\n\n\
+         {}enabled = false\n[source.credentials]\nkey = \"/etc/a-publisher/session.key\"\n",
+        source("live", "uds", "primary"),
+        source("standby", "uds", "comparison")
+    ));
+    let config = Document::parse(&doc.render())
+        .expect("parses")
+        .resolve()
+        .expect("a disabled block is not a session");
+
+    assert_eq!(config.sources.len(), 1);
+    assert_eq!(config.sources[0].connection.as_str(), "live");
 }

@@ -266,6 +266,46 @@ pub enum StartupError {
     )]
     SourcePrimaries { primaries: String },
 
+    /// Two enabled `[[source]]` blocks whose `credentials` tables are equal.
+    ///
+    /// **The copy-paste failure**: a second `[[source]]` block with a new
+    /// endpoint and the credential nobody changed. A venue may permit one
+    /// session per credential and answer a second logon by evicting the first,
+    /// so two sources with one credential are two connections taking turns
+    /// knocking each other off — and each looks, in isolation, exactly like a
+    /// venue that keeps closing the connection.
+    ///
+    /// Checkable without understanding what a credential is: `[[source]]
+    /// credentials` is a free table of paths, checked but not interpreted, and
+    /// table equality is a comparison. So the refusal names both blocks and
+    /// starts nothing.
+    ///
+    /// # What this does not catch, stated rather than implied
+    ///
+    /// **Two different paths holding the same account.** Nothing here can know
+    /// that: the values are paths, they are not read at load, and whether two
+    /// files hold one identity is a question about their contents and about the
+    /// venue's own notion of an account.
+    ///
+    /// What can be said is what happens then. The eviction shows as both
+    /// sources reconnecting in step —
+    /// `dz_publisher_ingress_reconnects_total{connection}` climbing on two
+    /// connections together, with
+    /// `dz_publisher_ingress_connection_state{connection}` alternating between
+    /// them — which is at least a symptom an operator can see and tell from one
+    /// upstream being down. The venue's own logon refusal is the authority. A
+    /// check that pretended to cover the case would be worse than one that
+    /// names its limit.
+    #[error(
+        "two enabled `[[source]]` blocks, `{one}` and `{another}`, have the same `credentials` \
+         table: they are two logons with one credential, and a venue that permits one session \
+         per credential answers the second by evicting the first — which reads, on both \
+         connections, as a venue that keeps closing the connection. Give each source its own \
+         credential, or disable one of the blocks. Two *different* paths holding the same \
+         account is the case this cannot see: its symptom is both sources reconnecting in step"
+    )]
+    SourceCredentialsShared { one: String, another: String },
+
     /// Two enabled feeds naming different `source_id`s.
     ///
     /// A `Source ID` is the publisher's registered identity and is the same for

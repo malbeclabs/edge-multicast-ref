@@ -1495,6 +1495,23 @@ fn check_shards_carry_the_same_specifications(feeds: &[Feed]) -> Result<(), Star
 /// as written is the one the runtime upholds, and it is checkable from the
 /// document alone.
 ///
+/// # The rule that makes the session count the operator's statement
+///
+/// **One driver is opened per enabled `[[source]]`**, so on a session
+/// transport sessions are per source: not per `[[feed]]`, not per shard, not
+/// per channel instance. A publisher carrying sixty-two channel instances of
+/// one feed specification over one source opens one session, because a shard
+/// is a partition of the *published set* and has nothing to do with how many
+/// upstream connections exist.
+///
+/// That is worth stating because a venue may permit one session per credential
+/// and answer a second logon by evicting the first, which makes the count a
+/// thing an operator has to be able to read off the document. What this
+/// function refuses is the copy-paste failure — two enabled blocks whose
+/// `credentials` tables are equal — and
+/// [`StartupError::SourceCredentialsShared`](crate::StartupError) states both
+/// why and what it cannot see.
+///
 /// A `comparison` source is refused nothing else: several are fine, and one
 /// arriving beside the primary is the whole point of the role.
 fn resolve_sources(sections: Vec<SourceSection>) -> Result<Vec<Source>, StartupError> {
@@ -1550,6 +1567,30 @@ fn resolve_sources(sections: Vec<SourceSection>) -> Result<Vec<Source>, StartupE
     // one implicit source and nothing to disambiguate.
     if seen.is_empty() {
         return Ok(sources);
+    }
+
+    // Two enabled sources with one credential, refused naming both. See
+    // `StartupError::SourceCredentialsShared` for the failure it prevents and
+    // for the case it cannot see.
+    //
+    // Over the *enabled* sources only, unlike the name check: a disabled block
+    // opens no session, so it cannot be one of two logons. And an empty
+    // credentials table is not a shared credential — a venue that needs none
+    // leaves it unwritten, and several sources doing so is not two logons with
+    // one credential.
+    for (index, source) in sources.iter().enumerate() {
+        if source.credentials.is_empty() {
+            continue;
+        }
+        if let Some(other) = sources[..index]
+            .iter()
+            .find(|earlier| earlier.credentials == source.credentials)
+        {
+            return Err(StartupError::SourceCredentialsShared {
+                one: other.connection.as_str().to_owned(),
+                another: source.connection.as_str().to_owned(),
+            });
+        }
     }
 
     let primaries: Vec<&str> = sources

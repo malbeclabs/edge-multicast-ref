@@ -131,30 +131,45 @@ async fn serve(scripts: Vec<Vec<Act>>) -> (SocketAddr, ClientMessages) {
 
     tokio::spawn(async move {
         for script in scripts {
-            let Ok((mut socket, _peer)) = listener.accept().await else {
+            let Ok((socket, _peer)) = listener.accept().await else {
                 return;
             };
+            // The halves are split so that reading and sending are
+            // independent: a venue heartbeating on its own cadence still reads
+            // what the publisher writes, and a script that only sends does not
+            // stop recording.
+            let (mut reader, mut writer) = socket.into_split();
             let record = Arc::clone(&sink);
-            let mut decoder = Decoder::new();
-            let mut held = Vec::new();
+            let before = record.lock().expect("the recorder").len();
+            tokio::spawn(async move {
+                let mut decoder = Decoder::new();
+                let mut held = Vec::new();
+                let mut chunk = [0u8; 4_096];
+                loop {
+                    while decoder.take(&mut held).expect("the client's framing holds") {
+                        record
+                            .lock()
+                            .expect("the recorder")
+                            .push(framing::rendered(&held));
+                    }
+                    match reader.read(&mut chunk).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(read) => decoder.feed(&chunk[..read]),
+                    }
+                }
+            });
+
+            let mut expected = before;
             for act in script {
                 match act {
-                    Act::Expect => loop {
-                        if decoder.take(&mut held).expect("the client's framing holds") {
-                            record
-                                .lock()
-                                .expect("the recorder")
-                                .push(framing::rendered(&held));
-                            break;
+                    Act::Expect => {
+                        expected += 1;
+                        if !awaited(&sink, expected).await {
+                            return;
                         }
-                        let mut chunk = [0u8; 4_096];
-                        match socket.read(&mut chunk).await {
-                            Ok(0) | Err(_) => return,
-                            Ok(read) => decoder.feed(&chunk[..read]),
-                        }
-                    },
+                    }
                     Act::Send(bytes) => {
-                        if socket.write_all(&bytes).await.is_err() {
+                        if writer.write_all(&bytes).await.is_err() {
                             return;
                         }
                     }
@@ -162,7 +177,7 @@ async fn serve(scripts: Vec<Vec<Act>>) -> (SocketAddr, ClientMessages) {
                         let mut sequence = 2;
                         loop {
                             tokio::time::sleep(interval).await;
-                            if socket
+                            if writer
                                 .write_all(&from_venue("35=0|", sequence))
                                 .await
                                 .is_err()
@@ -179,6 +194,20 @@ async fn serve(scripts: Vec<Vec<Act>>) -> (SocketAddr, ClientMessages) {
     });
 
     (address, received)
+}
+
+/// Wait until the recorder holds `count` messages, or give up.
+///
+/// Polled rather than signalled: this is a test server, and a condition
+/// variable here would be more machinery than the thing it waits for.
+async fn awaited(received: &ClientMessages, count: usize) -> bool {
+    for _ in 0..600 {
+        if received.lock().expect("the recorder").len() >= count {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    false
 }
 
 /// A transport pointed at a loopback endpoint, negotiating nothing.
@@ -535,35 +564,40 @@ async fn a_driver_logs_on_and_re_subscribes_on_every_connect() {
     assert_eq!(adapter.connects, 2, "each connection was subscribed");
     assert_eq!(adapter.payloads, vec![first, second]);
 
-    // Two logons and two subscriptions, and each session numbers from one.
+    // Two logons and two subscriptions, in that order, each session numbering
+    // from one — and a logout on each teardown, which is the orderly close.
     let seen = received.lock().expect("the recorder").clone();
-    let types: Vec<String> = seen
+    let written: Vec<(String, String)> = seen
         .iter()
         .map(|message| {
-            message
-                .split('|')
-                .find_map(|field| field.strip_prefix("35="))
-                .expect("every message states a message type")
-                .to_owned()
+            let field = |prefix: &str| {
+                message
+                    .split('|')
+                    .find_map(|field| field.strip_prefix(prefix))
+                    .unwrap_or_else(|| panic!("`{message}` states no `{prefix}`"))
+                    .to_owned()
+            };
+            (field("35="), field("34="))
         })
         .collect();
     assert_eq!(
-        types,
+        written,
         vec![
-            msg_type::LOGON.to_owned(),
-            "V".to_owned(),
-            msg_type::LOGON.to_owned(),
-            "V".to_owned()
+            (msg_type::LOGON.to_owned(), "1".to_owned()),
+            ("V".to_owned(), "2".to_owned()),
+            (msg_type::LOGOUT.to_owned(), "3".to_owned()),
+            // And the second session numbers from one, which is what makes the
+            // reset a reset rather than a coincidence.
+            (msg_type::LOGON.to_owned(), "1".to_owned()),
+            ("V".to_owned(), "2".to_owned()),
+            (msg_type::LOGOUT.to_owned(), "3".to_owned()),
         ],
         "{seen:?}"
     );
     assert!(
-        seen[0].contains("34=1") && seen[1].contains("34=2"),
-        "{seen:?}"
-    );
-    assert!(
-        seen[2].contains("34=1") && seen[3].contains("34=2"),
-        "the second session numbers from one: {seen:?}"
+        seen[3].contains("141=Y"),
+        "the reset flag is on every logon and not only the first: {:?}",
+        seen[3]
     );
 }
 
@@ -660,4 +694,272 @@ async fn a_message_written_in_two_pieces_over_a_socket_is_one_message() {
         Ok(Received::Payload { bytes, .. }) => assert_eq!(bytes, payload),
         other => panic!("{other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// The boundary's half: the logon is the adapter's, and so is the mid-session
+// write
+// ---------------------------------------------------------------------------
+
+/// An adapter that writes nothing at all when a connection comes up.
+#[derive(Default)]
+struct SilentAdapter {
+    connects: usize,
+}
+
+impl Adapter for SilentAdapter {
+    fn message_types(&self) -> &[&'static str] {
+        &[]
+    }
+
+    fn poll_listings(&mut self, _out: &mut dyn ListingSink) {}
+
+    fn on_connected(
+        &mut self,
+        _conn: ConnectionId,
+        _out: &mut dyn UpstreamSink,
+    ) -> Result<(), AdapterError> {
+        // The default `on_connected` writes nothing, and an adapter reading a
+        // local directory is a shape one publisher already runs — so this is
+        // not a contrived mistake. On a session transport it is a session that
+        // cannot exist.
+        self.connects += 1;
+        Ok(())
+    }
+
+    fn on_payload(
+        &mut self,
+        _payload: &Payload<'_>,
+        _out: &mut dyn EventSink,
+    ) -> Result<(), ParseError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_connect_with_no_logon_from_the_adapter_is_refused() {
+    // The revert this test exists for: let the transport compose a logon when
+    // the adapter wrote none. The failure that revert produces is not a crash
+    // — it is this repository signing a logon on a venue's behalf, with an
+    // identity it invented, which is the one thing the whole boundary is
+    // arranged to prevent.
+    //
+    // The refusal is at the first *receive* and not at connect, because a
+    // transport cannot know at connect what the adapter is about to queue: the
+    // driver connects, then asks.
+    let (address, received) = serve(vec![vec![Act::Hold(Duration::from_millis(500))]]).await;
+
+    let mut input = input(address);
+    let mut adapter = SilentAdapter::default();
+    let observer = Reasons::default();
+    let clock = TokioClock::new();
+    let mut events = Discard;
+
+    let exit = {
+        let mut driver = Driver::new(&mut input, &mut adapter, &clock, &observer, policy(None));
+        tokio::time::timeout(Duration::from_secs(5), driver.run(&mut events))
+            .await
+            .expect("a session with no logon must be refused, not waited on")
+    };
+
+    assert!(
+        exit.is_fatal(),
+        "an adapter that writes no logon is a defect to fix and not a fault to retry: {exit}"
+    );
+    let message = exit.to_string();
+    assert!(
+        message.contains("on_connected"),
+        "the refusal must name the method the logon belongs in: {message}"
+    );
+    assert!(
+        message.contains("signature") || message.contains("identity"),
+        "and say why this transport will not compose one: {message}"
+    );
+    assert_eq!(adapter.connects, 1, "the adapter was asked, once");
+    assert!(
+        received.lock().expect("the recorder").is_empty(),
+        "nothing at all reached the venue: {:?}",
+        received.lock().expect("the recorder")
+    );
+}
+
+/// An adapter that subscribes at logon and once more, mid-session.
+struct AdmittingAdapter {
+    /// What `poll_upstream` still has to write, drained on the first ask.
+    ///
+    /// **Not re-queued**, which is the contract: the runtime cannot tell a
+    /// subscription it has already sent from a new one, so an adapter that
+    /// queued its whole set every time it was asked would send that set to the
+    /// venue on every cadence.
+    outstanding: Option<String>,
+}
+
+impl Adapter for AdmittingAdapter {
+    fn message_types(&self) -> &[&'static str] {
+        &["W"]
+    }
+
+    fn poll_listings(&mut self, _out: &mut dyn ListingSink) {}
+
+    fn on_connected(
+        &mut self,
+        _conn: ConnectionId,
+        out: &mut dyn UpstreamSink,
+    ) -> Result<(), AdapterError> {
+        out.send_text(&adapter_logon());
+        out.send_text(&adapter_subscription("at-logon"));
+        Ok(())
+    }
+
+    fn poll_upstream(
+        &mut self,
+        _conn: ConnectionId,
+        out: &mut dyn UpstreamSink,
+    ) -> Result<(), AdapterError> {
+        if let Some(outstanding) = self.outstanding.take() {
+            out.send_text(&outstanding);
+        }
+        Ok(())
+    }
+
+    fn on_payload(
+        &mut self,
+        _payload: &Payload<'_>,
+        _out: &mut dyn EventSink,
+    ) -> Result<(), ParseError> {
+        Ok(())
+    }
+}
+
+/// A clock that runs fast, so that a cadence measured in seconds costs a test
+/// milliseconds.
+///
+/// The driver asks an adapter what is outstanding every `UPSTREAM_POLL`, which
+/// is five seconds. This is the driver's clock and **not** the session's: the
+/// two are separate parameters, so the session below runs on this host's real
+/// clock while the driver's cadence arrives a hundred times sooner.
+struct Hurrying {
+    origin: std::time::Instant,
+    factor: u64,
+}
+
+impl dz_ingress_core::Clock for Hurrying {
+    fn wall_ns(&self) -> u64 {
+        u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("a clock set after 1970")
+                .as_nanos(),
+        )
+        .expect("a wall reading that fits")
+    }
+
+    fn steady_ns(&self) -> u64 {
+        u64::try_from(self.origin.elapsed().as_nanos())
+            .expect("a steady reading that fits")
+            .saturating_mul(self.factor)
+    }
+
+    fn sleep(&self, duration: Duration) -> BoxFuture<'_, ()> {
+        Box::pin(tokio::time::sleep(
+            duration / u32::try_from(self.factor).expect("a factor"),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn a_mid_session_write_is_framed_and_numbered_on_the_same_session() {
+    // What makes an instrument admitted mid-session reach a subscription
+    // without a reconnect. A session transport is the one that cannot
+    // re-subscribe for reasons of its own — its subscriptions live on the
+    // session — so without this the instrument is minted, defined, counted in
+    // the manifest, and never subscribed, with nothing reporting it.
+    let logon_accepted = from_venue(&format!("35=A|98=0|108={CADENCE_SECONDS}|"), 1);
+    let (address, received) = serve(vec![vec![
+        Act::Expect,
+        Act::Send(logon_accepted),
+        Act::Expect,
+        // The driver asks an adapter what is outstanding only after a receive
+        // returns, so the venue has to be saying something. Heartbeats are
+        // what a venue with nothing to deliver says.
+        Act::HeartbeatsForever {
+            interval: Duration::from_millis(10),
+        },
+    ]])
+    .await;
+
+    let mut input = StopAfter {
+        inner: input(address),
+        connects: AtomicUsize::new(0),
+        limit: 1,
+    };
+    let mut adapter = AdmittingAdapter {
+        outstanding: Some(adapter_subscription("admitted-mid-session")),
+    };
+    let observer = Reasons::default();
+    let clock = Hurrying {
+        origin: std::time::Instant::now(),
+        factor: 100,
+    };
+    let mut events = Discard;
+
+    let run = {
+        let mut driver = Driver::new(
+            &mut input,
+            &mut adapter,
+            &clock,
+            &observer,
+            // A guard long enough on the driver's own fast clock that it is the
+            // adapter's cadence which fires first, and short enough that the
+            // run ends.
+            policy(Some(Duration::from_secs(60))),
+        );
+        tokio::time::timeout(Duration::from_secs(10), driver.run(&mut events)).await
+    };
+    assert!(run.is_ok(), "the driver came back");
+    assert!(adapter.outstanding.is_none(), "the adapter was asked");
+
+    let seen = received.lock().expect("the recorder").clone();
+    let written: Vec<(String, String)> = seen
+        .iter()
+        .map(|message| {
+            let field = |prefix: &str| {
+                message
+                    .split('|')
+                    .find_map(|field| field.strip_prefix(prefix))
+                    .unwrap_or_else(|| panic!("`{message}` states no `{prefix}`"))
+                    .to_owned()
+            };
+            (field("35="), field("34="))
+        })
+        .collect();
+    // The logon, the subscription written at logon, and then the one written
+    // mid-session — on the same session, numbered where the last one left off
+    // and not from one.
+    assert_eq!(
+        written.first(),
+        Some(&(msg_type::LOGON.to_owned(), "1".to_owned())),
+        "{seen:?}"
+    );
+    assert_eq!(
+        written.get(1),
+        Some(&("V".to_owned(), "2".to_owned())),
+        "{seen:?}"
+    );
+    assert_eq!(
+        written.get(2),
+        Some(&("V".to_owned(), "3".to_owned())),
+        "the mid-session write is framed and numbered on the established \
+         session: {seen:?}"
+    );
+    assert!(
+        seen[2].contains("admitted-mid-session"),
+        "and it is the body the adapter wrote, not one composed here: {:?}",
+        seen[2]
+    );
+    assert!(
+        !seen[2].contains("141="),
+        "a mid-session write is not a logon and states no reset: {:?}",
+        seen[2]
+    );
 }
