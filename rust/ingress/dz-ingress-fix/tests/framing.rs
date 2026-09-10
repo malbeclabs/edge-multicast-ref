@@ -264,20 +264,44 @@ fn a_signed_logon() -> String {
     format!("35=A|49=A-PUBLISHER|56=A-VENUE|554={SIGNATURE}|108=30|")
 }
 
-#[test]
-fn a_bodys_debug_states_what_it_is_and_not_what_is_in_it() {
-    // A derived implementation prints `rest` verbatim, so the first `{:?}` on a
-    // logon body puts a venue's signature in a startup log. The revert is
-    // `#[derive(Debug)]` on `Body`, and it fails here.
-    let printed = format!("{:?}", body(&a_signed_logon()));
+/// Assert that a rendered string carries no part of the logon above, in either
+/// of the two ways a `Debug` implementation spells bytes.
+///
+/// Both, because they are the same disclosure and only one of them is
+/// searchable as text: a `String::from_utf8_lossy` prints the signature as
+/// itself, and a derived implementation over a `&[u8]` field prints it as a
+/// list of byte values. A test that looked only for the text would pass against
+/// `#[derive(Debug)]`, which is the exact implementation being ruled out.
+#[track_caller]
+fn carries_nothing_the_adapter_wrote(printed: &str) {
     assert!(
         !printed.contains(SIGNATURE),
-        "a logon body printed its own signature: {printed}"
+        "the signature reached a log line as text: {printed}"
     );
+    let as_byte_values = SIGNATURE
+        .bytes()
+        .map(|byte| byte.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
     assert!(
-        !printed.contains("A-PUBLISHER") && !printed.contains("A-VENUE"),
-        "a logon body printed the identity it carries: {printed}"
+        !printed.contains(&as_byte_values),
+        "the signature reached a log line as byte values: {printed}"
     );
+    for identity in ["A-PUBLISHER", "A-VENUE"] {
+        assert!(
+            !printed.contains(identity),
+            "the identity the logon carries reached a log line: {printed}"
+        );
+    }
+}
+
+#[test]
+fn a_bodys_debug_states_what_it_is_and_not_what_is_in_it() {
+    // A derived implementation prints `rest`, so the first `{:?}` on a logon
+    // body puts a venue's signature in a startup log. The revert is
+    // `#[derive(Debug)]` on `Body`, and it fails here.
+    let printed = format!("{:?}", body(&a_signed_logon()));
+    carries_nothing_the_adapter_wrote(&printed);
     // And it still says the two things a diagnostic is asking for.
     let quoted = format!("\"{}\"", msg_type::LOGON);
     assert!(printed.contains(&quoted), "{printed}");
@@ -287,23 +311,28 @@ fn a_bodys_debug_states_what_it_is_and_not_what_is_in_it() {
 #[test]
 fn a_messages_debug_states_what_it_is_and_not_what_is_in_it() {
     // The framed copy of the same body, which is what `Message` is held over —
-    // on the way out, and again when the venue echoes it back.
+    // on the way out, and again when the venue echoes it back. The revert is
+    // `write!(f, "Message({})", rendered(self.bytes))`.
     let mut framed = Vec::new();
     framing::frame(&mut framed, &body(&a_signed_logon()), 1, AT, true);
     let printed = format!("{:?}", Message::new(&framed));
-    assert!(
-        !printed.contains(SIGNATURE),
-        "a framed logon printed its own signature: {printed}"
-    );
-    assert!(
-        !printed.contains("A-PUBLISHER") && !printed.contains("A-VENUE"),
-        "a framed logon printed the identity it carries: {printed}"
-    );
+    carries_nothing_the_adapter_wrote(&printed);
     let quoted = format!("\"{}\"", msg_type::LOGON);
     assert!(printed.contains(&quoted), "{printed}");
     assert!(printed.contains("sequence"), "{printed}");
     // The bytes are still reachable, by asking for them.
     assert!(framing::rendered(&framed).contains(SIGNATURE));
+}
+
+#[test]
+fn a_fields_iterator_prints_what_is_left_and_not_what_is_in_it() {
+    // `Message::fields` hands one of these out over a whole message, so a
+    // derived implementation prints every field a logon states. The revert is
+    // `#[derive(Debug)]` on `Fields`.
+    let mut framed = Vec::new();
+    framing::frame(&mut framed, &body(&a_signed_logon()), 1, AT, true);
+    let message = Message::new(&framed);
+    carries_nothing_the_adapter_wrote(&format!("{:?}", message.fields()));
 }
 
 #[test]
