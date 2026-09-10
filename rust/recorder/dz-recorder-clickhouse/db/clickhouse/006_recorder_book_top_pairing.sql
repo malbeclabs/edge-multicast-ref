@@ -3,10 +3,19 @@
 --
 -- No new table, for the reason the cross-site loss comparison needed none: both
 -- sides' rows land in one table and the comparison is a query. `observation`
--- names where a view of the book came from, as `site` names a recorder — two
--- recorders of one multicast feed are two observations, and a multicast feed and
--- some other transport carrying the same instruments are two observations.
--- Nothing here knows which kind it is looking at, and nothing should.
+-- names which PUBLISHER-SIDE observation point a view of the book came from, as
+-- `site` names a recorder, and two recorders of one multicast feed are two
+-- observations.
+--
+-- THAT IS THE WHOLE OF WHAT PAIRS HERE. A venue-side observation is not one of
+-- these and cannot become one: this query groups on `channel_id` and
+-- `instrument_id`, the first being the operator's mapping and the second minted
+-- by the publisher's registry, so a venue side can compute neither -- and the
+-- rows it would pair carry eight non-nullable columns that are statements about
+-- a datagram. A venue-side race is its own view over its own grain, keyed on
+-- `book_key`, which is the one key both sides can compute. Every argument below
+-- about the ordinal, the unpaired occurrence, the anchored row and the caller's
+-- bound carries over to it unchanged.
 --
 --
 -- WHY THIS IS NOT AN `ASOF JOIN`, WHICH IS THE OBVIOUS MOVE

@@ -754,12 +754,22 @@ pub struct BookTop {
     pub recorder: String,
     pub env: String,
     pub feed: String,
-    /// Where this view of the book came from, as `site` names a recorder.
+    /// Which **publisher-side** observation point this view of the book came
+    /// from, as `site` names a recorder. Two recorders of one multicast feed
+    /// are two observations, and a race is one `state_key` seen at more than
+    /// one of them.
     ///
-    /// Two recorders of one multicast feed are two observations; a multicast
-    /// feed and some other transport carrying the same instruments are two
-    /// observations. Nothing in the schema knows which is which, and nothing
-    /// should — a race is one `state_key` seen at more than one of these.
+    /// **Not a venue-side observation, and this table cannot hold one.** Two
+    /// things refuse it, and neither is a policy that could be relaxed. The
+    /// eight provenance columns beside this one — `source_addr`, `channel_id`,
+    /// `dst_port`, `sequence_number`, `reset_count`, `segment_seq`,
+    /// `drop_delta`, `era` — are statements about a datagram, they are not
+    /// nullable, and a venue's upstream message is not a datagram. And the
+    /// pairing groups on `channel_id` and `instrument_id`: the first is the
+    /// operator's mapping and the second is minted by the publisher's
+    /// registry, so a venue side can compute neither. A venue-side observation
+    /// is its own grain in its own table, paired through `book_key` — see
+    /// `docs/superpowers/specs/2026-09-09-recorder-venue-observation-design.md`.
     pub observation: String,
     pub source_addr: Ipv4Addr,
     pub channel_id: u8,

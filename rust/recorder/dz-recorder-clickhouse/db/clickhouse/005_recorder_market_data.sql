@@ -207,10 +207,14 @@ CREATE TABLE IF NOT EXISTS recorder.book_top (
     recorder          LowCardinality(String),
     env               LowCardinality(String),
     feed              LowCardinality(String),
-    -- Where this view of the book came from, as `site` names a recorder. Two
-    -- recorders of one multicast feed are two observations; a multicast feed and
-    -- some other transport carrying the same instruments are two observations.
-    -- Nothing here knows which is which, and nothing should.
+    -- Which PUBLISHER-SIDE observation point this view of the book came from,
+    -- as `site` names a recorder. Two recorders of one multicast feed are two
+    -- observations, and a race is one `state_key` seen at more than one.
+    --
+    -- Not a venue-side observation: the eight provenance columns beside this
+    -- one are statements about a datagram and are not nullable, and the pairing
+    -- groups on `channel_id` and `instrument_id`, which a venue side cannot
+    -- compute. A venue-side observation is its own grain in its own table.
     observation       LowCardinality(String),
     source_addr       IPv4,
     channel_id        UInt8,

@@ -52,12 +52,18 @@ pub struct EventInput<'a> {
     /// misrouted from another feed in the family being parsed at the wrong
     /// layout.
     pub magic: u16,
-    /// Where this view of the book came from, as `site` names a recorder.
+    /// Which **publisher-side** observation point this view of the book came
+    /// from, as `site` names a recorder. Two recorders of one multicast feed
+    /// are two observations, and a race is one `state_key` seen at more than
+    /// one of them.
     ///
-    /// Two recorders of one multicast feed are two observations; a multicast
-    /// feed and some other transport carrying the same instruments are two
-    /// observations. Nothing downstream knows which is which, and nothing
-    /// should — a race is one `state_key` seen at more than one of these.
+    /// **Never a venue-side observation.** Every row this fold writes carries
+    /// eight non-nullable provenance columns that are statements about a
+    /// datagram, and a venue's upstream message is not one; the pairing then
+    /// groups on `channel_id` and `instrument_id`, which a venue side cannot
+    /// compute. A venue-side observation is its own grain, paired through
+    /// [`book_key`](crate::book_key) — see
+    /// `docs/superpowers/specs/2026-09-09-recorder-venue-observation-design.md`.
     pub observation: &'a str,
     /// Whether `SnapshotLevel` messages become rows.
     ///
