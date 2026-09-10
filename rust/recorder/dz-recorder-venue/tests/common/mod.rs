@@ -75,7 +75,7 @@ impl Listing {
 ///
 /// ```text
 /// chan=<u8> pubseq=<u64> seq=<u64> sid=<u64> <op> ...
-///   quote  <symbol> <bid_px|-> <bid_qty|-> <ask_px|-> <ask_qty|->
+///   quote  <symbol> <bid_px[@sources]|-> <bid_qty|-> <ask_px[@sources]|-> <ask_qty|->
 ///   level  <symbol> <bid|ask> <px> <qty>
 ///   clear  <symbol> <both|bid|ask>
 ///   trade  <symbol> <px> <qty>
@@ -320,10 +320,24 @@ fn side<'a, I: Iterator<Item = &'a str>>(fields: &mut I) -> Result<SideUpdate<'a
     if px == "-" || qty == "-" {
         return Ok(SideUpdate::Gone);
     }
+    // `<px>` or `<px>@<sources>`: how many upstreams contributed to this side of
+    // the top, which only a quote states. A `Level` has no way to say it, so the
+    // fixture's level lines have no equivalent.
+    let (px, source_count) = match px.split_once('@') {
+        Some((px, sources)) => (
+            px,
+            Some(
+                sources
+                    .parse::<u16>()
+                    .map_err(|_| ParseError::malformed("source_count"))?,
+            ),
+        ),
+        None => (px, None),
+    };
     Ok(SideUpdate::Present {
         px: Scalar::text(px),
         qty: Scalar::text(qty),
-        source_count: None,
+        source_count,
     })
 }
 

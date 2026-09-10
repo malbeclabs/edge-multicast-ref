@@ -217,6 +217,22 @@ pub fn derive_venue_object(
     Ok(derived)
 }
 
+/// What rests at one price, at the instrument's own exponents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Resting {
+    qty_raw: u64,
+    /// How many upstreams contributed to this side of the top, and `None` for a
+    /// level a `Level` stated.
+    ///
+    /// A level's `order_count` is orders at a price and a quote's
+    /// `source_count` is upstreams contributing to a top. Different quantities,
+    /// so mapping one onto the other would put a number in a column that does
+    /// not mean what the column says — and a level therefore rests with this
+    /// absent, while the level a `Quote` established keeps the number the quote
+    /// stated.
+    source_count: Option<u16>,
+}
+
 /// One instrument the adapter offered, and the book this derivation holds for
 /// it.
 #[derive(Debug)]
@@ -225,16 +241,31 @@ struct Instrument {
     price_exp: i8,
     qty_exp: i8,
     top: Top,
-    /// A delta book's resting quantities, price to quantity, both already at the
+    /// The book's resting levels, price to what rests there, both already at the
     /// instrument's exponents.
     ///
-    /// Only a `Level` or a `Clear` touches these. A `Quote` states a complete
-    /// two-sided top and establishes it directly, which is the same split
-    /// `dz-recorder-events`' own book makes: a quote is self-anchoring, and a
-    /// delta book is the shape that has to be accumulated. A venue's feed is one
-    /// or the other.
-    bids: BTreeMap<i64, u64>,
-    asks: BTreeMap<i64, u64>,
+    /// **[`Fold::top_of_levels`] over these is the top, whichever event moved
+    /// them.** A `Quote` states a complete two-sided top and replaces these with
+    /// the one level per side it states; a `Level` and a `Clear` move them. So
+    /// one connection carrying both shapes — a book snapshot and then the
+    /// increments over it, which is the commonest shape a venue publishes —
+    /// derives the book the venue published.
+    ///
+    /// **The two shapes have to compose, because nothing states them apart.** A
+    /// `Quote` that established the top and left these alone is discarded by the
+    /// very next `Level` on the instrument: the top is recomputed from these
+    /// maps, so the side that `Level` did not touch comes back absent and the row
+    /// says a side is gone that the venue never withdrew. `dz-recorder-events`'
+    /// own book keys a quote and a level on a `Channel` and can hold them apart
+    /// for that reason — a top-of-book feed and a depth feed are different
+    /// channels. One venue connection is not two, and `Event` is one enumeration
+    /// over it.
+    ///
+    /// A quote **replaces** rather than merges, because it is authoritative
+    /// about the top and silent about the depth beneath it: a level it superseded
+    /// would otherwise be computed as a top the venue has already replaced.
+    bids: BTreeMap<i64, Resting>,
+    asks: BTreeMap<i64, Resting>,
     /// Whether anything has been applied. A book with both sides absent and
     /// nothing applied is the state before anything happened, not a change.
     established: bool,
@@ -398,31 +429,48 @@ impl Fold {
         qty_at(value, exponent).ok()
     }
 
-    /// The top a delta book's levels state.
+    /// The top the book's levels state, whichever event established them.
+    ///
+    /// The one place a top is computed, so that a quote and a level compose
+    /// rather than answer the question twice.
     fn top_of_levels(instrument: &Instrument) -> Top {
         let bid = instrument
             .bids
             .iter()
             .next_back()
-            .map_or(Side::default(), |(px, qty)| Side {
+            .map_or(Side::default(), |(px, resting)| Side {
                 price_raw: Some(*px),
-                qty_raw: Some(*qty),
-                // A level's `order_count` is orders at a price and a quote's
-                // `source_count` is upstreams contributing to a top. Different
-                // quantities, so mapping one onto the other would put a number
-                // in a column that does not mean what the column says.
-                source_count: None,
+                qty_raw: Some(resting.qty_raw),
+                source_count: resting.source_count,
             });
         let ask = instrument
             .asks
             .iter()
             .next()
-            .map_or(Side::default(), |(px, qty)| Side {
+            .map_or(Side::default(), |(px, resting)| Side {
                 price_raw: Some(*px),
-                qty_raw: Some(*qty),
-                source_count: None,
+                qty_raw: Some(resting.qty_raw),
+                source_count: resting.source_count,
             });
         Top { bid, ask }
+    }
+
+    /// Replaces one side's levels with the single level a quote states.
+    ///
+    /// A side the quote states as gone leaves the side empty, which is the book
+    /// the quote stated: all three fields absent, the distinguished tag
+    /// `book_key` folds.
+    fn seed_side(levels: &mut BTreeMap<i64, Resting>, side: &Side) {
+        levels.clear();
+        if let (Some(price_raw), Some(qty_raw)) = (side.price_raw, side.qty_raw) {
+            levels.insert(
+                price_raw,
+                Resting {
+                    qty_raw,
+                    source_count: side.source_count,
+                },
+            );
+        }
     }
 
     /// Writes a row if the top moved.
@@ -567,8 +615,15 @@ impl EventSink for Fold {
                     return;
                 };
                 let held = &mut self.instruments[handle as usize];
-                held.top = Top { bid, ask };
+                // The quote's own two levels, and nothing the quote superseded.
+                // The top is then read back off the levels like any other, so a
+                // `Level` or a `Clear` that follows composes with the quote
+                // instead of discarding it.
+                Self::seed_side(&mut held.bids, &bid);
+                Self::seed_side(&mut held.asks, &ask);
                 held.established = true;
+                let now = Self::top_of_levels(&self.instruments[handle as usize]);
+                self.instruments[handle as usize].top = now;
                 self.settle(handle, was);
             }
 
@@ -603,7 +658,13 @@ impl EventSink for Fold {
                 if qty == 0 {
                     levels.remove(&px);
                 } else {
-                    levels.insert(px, qty);
+                    levels.insert(
+                        px,
+                        Resting {
+                            qty_raw: qty,
+                            source_count: None,
+                        },
+                    );
                 }
                 held.established = true;
                 let now = Self::top_of_levels(&self.instruments[handle as usize]);

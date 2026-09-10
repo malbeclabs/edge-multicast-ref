@@ -371,6 +371,151 @@ fn a_delta_book_is_accumulated_and_the_top_is_the_best_of_each_side() {
     }
 }
 
+/// **A snapshot and then the increments over it are one book.**
+///
+/// The commonest shape a venue publishes: the adapter maps a book snapshot to a
+/// `Quote` and the level updates that follow to `Level`s. Nothing at the adapter
+/// boundary promises a feed is one shape or the other — one connection carries
+/// what the venue sends — so the two compose here or the rows are wrong.
+///
+/// The mutant this kills is a `Quote` that establishes the top without seeding
+/// the levels. The next `Level` recomputes the top from the levels alone, so the
+/// side it did not touch comes back absent: a row that says the ask side is gone
+/// when the venue never withdrew it, a `book_key` over a book nobody quoted, and
+/// every row after it wrong until a `Level` lands on that side.
+#[test]
+fn a_quote_and_the_levels_over_it_are_one_book() {
+    let mut object = FixtureObject::of(
+        BASE,
+        &[
+            // The snapshot: a complete two-sided top.
+            "chan=113 pubseq=990001 seq=1 sid=7 quote AAA 100.50 3 100.60 4",
+            // One increment, on the bid. The ask is untouched and stays exactly
+            // where the quote put it.
+            "chan=113 pubseq=990001 seq=2 sid=7 level AAA bid 100.51 5",
+            // Beneath the quoted top: the visible top does not move, so no row.
+            "chan=113 pubseq=990001 seq=3 sid=7 level AAA bid 100.40 9",
+            // An increment on the ask, inside the quoted top.
+            "chan=113 pubseq=990001 seq=4 sid=7 level AAA ask 100.59 2",
+            // The improved bid withdrawn: the top falls back to the level
+            // beneath it, which is the one the quote established.
+            "chan=113 pubseq=990001 seq=5 sid=7 level AAA bid 100.51 0",
+        ],
+    );
+    let mut sink = CollectingSink::new();
+    let derived = derive_venue_object(&mut adapter(), &mut object, &mut sink).expect("the object");
+
+    assert_eq!(
+        tops(&sink),
+        vec![
+            (
+                BASE,
+                "AAA".to_owned(),
+                Some(10_050),
+                Some(3),
+                Some(10_060),
+                Some(4)
+            ),
+            (
+                BASE + 1_000_000,
+                "AAA".to_owned(),
+                Some(10_051),
+                Some(5),
+                Some(10_060),
+                Some(4)
+            ),
+            (
+                BASE + 3_000_000,
+                "AAA".to_owned(),
+                Some(10_051),
+                Some(5),
+                Some(10_059),
+                Some(2)
+            ),
+            (
+                BASE + 4_000_000,
+                "AAA".to_owned(),
+                Some(10_050),
+                Some(3),
+                Some(10_059),
+                Some(2)
+            ),
+        ],
+        "a level did not compose with the quote that anchored the book"
+    );
+    assert_eq!(derived.book_top_count, 4);
+    // The one thing no row here may say: the venue withdrew neither side.
+    assert!(
+        sink.book_tops()
+            .iter()
+            .all(|row| row.bid_px_raw.is_some() && row.ask_px_raw.is_some()),
+        "a row says a side is gone that the venue never withdrew: {:?}",
+        tops(&sink)
+    );
+}
+
+/// A quote's `source_count` survives a level that moved nothing above it.
+///
+/// A level has no way to state one — its `order_count` is orders at a price and
+/// a quote's `source_count` is upstreams contributing to a top — so the level a
+/// quote established is where the number lives. A recomputed top that dropped it
+/// would write a row whose only change is a number the venue never withdrew, and
+/// a `book_key` over a book nobody quoted.
+#[test]
+fn a_quoted_source_count_survives_a_level_beneath_it() {
+    let mut object = FixtureObject::of(
+        BASE,
+        &[
+            "chan=113 pubseq=990001 seq=1 sid=7 quote AAA 100.50@2 3 100.60@3 4",
+            // Beneath the quoted bid: nothing about the visible top changed,
+            // the counts included.
+            "chan=113 pubseq=990001 seq=2 sid=7 level AAA bid 100.40 9",
+        ],
+    );
+    let mut sink = CollectingSink::new();
+    let derived = derive_venue_object(&mut adapter(), &mut object, &mut sink).expect("the object");
+    assert_eq!(
+        derived.book_top_count, 1,
+        "a level beneath the top wrote a row, so something above it moved"
+    );
+    let row = sink.book_tops()[0];
+    assert_eq!(row.bid_source_count, Some(2));
+    assert_eq!(row.ask_source_count, Some(3));
+}
+
+/// A quote replaces the book it supersedes rather than merging into it.
+///
+/// A quote is authoritative about the top and silent about the depth beneath it,
+/// so a level it superseded must not come back as a top: a book accumulated
+/// across quotes would report the best price of every quote in the window as the
+/// current one, which is a market that never happened.
+#[test]
+fn a_quote_replaces_the_levels_it_supersedes() {
+    let mut object = FixtureObject::of(
+        BASE,
+        &[
+            "chan=113 pubseq=990001 seq=1 sid=7 level AAA bid 101.00 5",
+            "chan=113 pubseq=990001 seq=2 sid=7 level AAA ask 102.00 5",
+            // The venue restates the whole top, lower. The 101.00 bid is not
+            // the top any more and is not depth the quote restated.
+            "chan=113 pubseq=990001 seq=3 sid=7 quote AAA 100.50 3 100.60 4",
+        ],
+    );
+    let mut sink = CollectingSink::new();
+    derive_venue_object(&mut adapter(), &mut object, &mut sink).expect("the object");
+    let last = sink.book_tops().last().copied().expect("a row");
+    assert_eq!(
+        (
+            last.bid_px_raw,
+            last.bid_qty_raw,
+            last.ask_px_raw,
+            last.ask_qty_raw
+        ),
+        (Some(10_050), Some(3), Some(10_060), Some(4)),
+        "a level the quote superseded came back as the top"
+    );
+}
+
 /// An instrument the adapter discovers mid-object is admitted by the next poll.
 ///
 /// The listings are polled once per message, which is the only cadence that is a
