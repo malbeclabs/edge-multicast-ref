@@ -8,8 +8,17 @@ authors.workspace = true
 description = "A session transport for dz-ingress-core: tag-value framing, the session lifecycle, and the logon the adapter composes"
 
 [dependencies]
+# The boundary's own `ConnectionId`, which is the `connection` metric label and
+# is handed to a session rather than invented by one.
+dz-adapter-core = { path = "../../adapter/dz-adapter-core" }
 dz-ingress-core = { path = "../dz-ingress-core" }
 
-# The framing's two refusals and the body's five are errors an operator reads,
+# The framing's two refusals and the body's six are errors an operator reads,
 # and `thiserror` is what every other crate in this family spells them with.
 thiserror = { workspace = true }
+
+[dev-dependencies]
+# `macros` and `rt` for the session tests, which run their own current-thread
+# runtime over a scripted byte stream. Not in `[dependencies]`: a library that
+# starts a runtime takes a decision that belongs to the binary.
+tokio = { version = "1", default-features = false, features = ["macros", "rt"] }

@@ -45,10 +45,12 @@
 #![forbid(unsafe_code)]
 
 pub mod framing;
+pub mod session;
 pub mod timestamp;
 
 pub use framing::{
     checksum, frame, rendered, Body, BodyError, Decoder, Field, Fields, FramingError, Message,
     BEGIN_STRING,
 };
+pub use session::{ByteStream, Incoming, Session, SessionError, SessionState, StreamError};
 pub use timestamp::sending_time;
