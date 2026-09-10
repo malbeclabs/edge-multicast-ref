@@ -19,15 +19,37 @@ use std::path::PathBuf;
 
 use dz_publisher_egress::{EraError, OpenError, PrefixError};
 use dz_publisher_refdata::{PolicyError, RefdataError};
+use dz_venue_composition::AdapterResolution;
 
 /// What the constructor a venue registered may fail with.
 ///
-/// Boxed rather than a type of this crate's own, because the failure belongs to
-/// the venue: a credential file that is not there, an endpoint that does not
-/// parse, an upstream section missing a key only the adapter knows the name of.
-/// A closed enumeration here would have to anticipate all of them, and a venue
-/// whose failure did not fit would be pushed into whichever variant was nearest.
-pub type AdapterInitError = Box<dyn std::error::Error + Send + Sync + 'static>;
+/// Defined with the composition it belongs to and re-exported here, at the path
+/// it has always had. Boxed rather than a type of anybody's own, because the
+/// failure belongs to the venue: a credential file that is not there, an
+/// endpoint that does not parse, an upstream section missing a key only the
+/// adapter knows the name of. A closed enumeration would have to anticipate all
+/// of them, and a venue whose failure did not fit would be pushed into whichever
+/// variant was nearest.
+pub use dz_venue_composition::AdapterInitError;
+
+/// How this crate's refusals are reported by
+/// [`AdapterRegistry::open`](crate::AdapterRegistry::open).
+///
+/// The registry is generic over this so that resolving `[adapter] kind` does not
+/// oblige a caller to link an egress, an era store and a reference-data
+/// registry — the three things the variants below name and the reason the
+/// composition is not in this crate any more. A publisher does have all three
+/// and refuses startups through one enumeration, so this is where the choice is
+/// made, and the two variants are the ones this crate always produced.
+impl AdapterResolution for StartupError {
+    fn unknown_kind(token: String, registered: String) -> Self {
+        Self::UnknownAdapterKind { token, registered }
+    }
+
+    fn adapter_init(kind: &'static str, source: AdapterInitError) -> Self {
+        Self::AdapterInit { kind, source }
+    }
+}
 
 /// Why a publisher did not start.
 #[derive(Debug, thiserror::Error)]

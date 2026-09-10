@@ -58,7 +58,7 @@ use crate::guard::{Exit, Inconsistency};
 use crate::observer::MetricsObserver;
 use crate::pipeline::{FeedPipeline, Port, Ports};
 use crate::publisher::{Feeds, Publisher, ShardFeeds, SnapshotError};
-use crate::registry::{AdapterContext, AdapterRegistry};
+use crate::{AdapterContext, AdapterRegistry};
 
 /// How often the tick body runs.
 ///

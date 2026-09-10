@@ -9,8 +9,6 @@ description = "The publisher a venue links: config composition, the adapter regi
 
 [dependencies]
 dz-adapter-core = { path = "../../adapter/dz-adapter-core" }
-# The built-in adapter, so `[adapter] kind = "uds"` resolves without a venue.
-dz-adapter-uds = { path = "../../adapter/dz-adapter-uds" }
 dz-edge-core = { path = "../../codec/dz-edge-core" }
 dz-edge-mbp = { path = "../../codec/dz-edge-mbp" }
 dz-edge-refdata = { path = "../../codec/dz-edge-refdata" }
@@ -20,6 +18,11 @@ dz-publisher-egress = { path = "../dz-publisher-egress" }
 dz-publisher-lowering = { path = "../dz-publisher-lowering" }
 dz-publisher-metrics = { path = "../dz-publisher-metrics" }
 dz-publisher-refdata = { path = "../dz-publisher-refdata" }
+# The composition seam: `AdapterRegistry`, `AdapterContext` and `Venue`, and the
+# built-in record adapter the registry resolves. This crate re-exports all of it
+# — the registry as an alias at `StartupError` — so a venue's `main` names
+# `dz_publisher_runtime` for the same three types it always did.
+dz-venue-composition = { path = "../../venue/dz-venue-composition" }
 serde = { workspace = true }
 thiserror = { workspace = true }
 

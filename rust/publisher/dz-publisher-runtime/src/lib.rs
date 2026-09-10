@@ -148,7 +148,6 @@
 
 #![forbid(unsafe_code)]
 
-pub mod builtin;
 pub mod clock;
 pub mod config;
 mod duration;
@@ -161,6 +160,34 @@ pub mod registry;
 pub mod replay;
 pub mod rotation;
 pub mod run;
+
+/// The composition seam, at the paths it has always had here.
+///
+/// [`AdapterRegistry`], [`AdapterContext`], [`Venue`] and the built-in record
+/// adapter live in `dz-venue-composition` now, so that a process which composes
+/// a venue in order to record does not link this crate's egress, transmitters,
+/// era store and reference-data registry in order to publish nothing. Nothing
+/// about that is visible from here: the three types are re-exported, the
+/// registry as an alias at this crate's own [`StartupError`], and a venue's
+/// `main` is the `main` it was.
+///
+/// **Both paths, not only the root ones.** A `main` that imported the three
+/// through [`registry`] rather than through the crate root is a `main` too, so
+/// that module is still here — as the three names and not as a re-export of
+/// the module, which would have resolved `registry::AdapterRegistry` to the
+/// defaulted type instead of to this crate's alias. See it for why the
+/// distinction is not cosmetic.
+pub use dz_venue_composition::{builtin, AdapterContext, AdapterSection, Venue};
+
+/// The adapters this binary contains, reporting a refusal as a [`StartupError`].
+///
+/// [`dz_venue_composition::AdapterRegistry`] is generic over that error, because
+/// its two failures — *no adapter answers this `kind`* and *the adapter this
+/// `kind` names refused* — say nothing about an egress or an era store and must
+/// not oblige a caller to link one. A publisher does have both, and refuses
+/// startups through one enumeration, so this is where the parameter is chosen.
+/// A venue's `main` names this alias and never the parameter.
+pub type AdapterRegistry = dz_venue_composition::AdapterRegistry<StartupError>;
 
 pub use builtin::BUILTIN_KINDS;
 pub use clock::{Clock, ManualClock, SystemClock};
@@ -177,7 +204,6 @@ pub use publisher::{
     Feeds, Publisher, Refusals, ShardFeeds, SnapshotError, SnapshotRefusals, Teardown,
     TeardownStep, LISTING_POLL,
 };
-pub use registry::{AdapterContext, AdapterRegistry, Venue};
 pub use replay::ReplayInput;
 pub use rotation::SnapshotRotation;
 pub use run::{check_sources, compose_feeds, run, KernelPorts, PortOpener};

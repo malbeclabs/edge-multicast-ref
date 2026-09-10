@@ -15,6 +15,7 @@ members = [
     "ingress/dz-ingress-core",
     "ingress/dz-ingress-websocket",
     "ingress/dz-ingress-fix",
+    "venue/dz-venue-composition",
     "recorder/dz-recorder-core",
     "recorder/dz-recorder-archive",
     "recorder/dz-recorder-replay",
