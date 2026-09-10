@@ -202,6 +202,23 @@ impl Compression {
             Self::Zstd { .. } => "pcapng.zst",
         }
     }
+
+    /// What compression alone adds to a name, without the archive shape's own
+    /// extension.
+    ///
+    /// [`extension`](Self::extension) answers for the pcapng shape, which is
+    /// the one this module's own writer produces. The venue-side shape has a
+    /// different stem and the same suffix, so this is what
+    /// [`upstream_object_extension`](crate::upstream::upstream_object_extension)
+    /// composes with — rather than a second table of endings that could come to
+    /// disagree with this one about what `zstd` is called.
+    #[must_use]
+    pub const fn suffix(self) -> &'static str {
+        match self {
+            Self::None => "",
+            Self::Zstd { .. } => ".zst",
+        }
+    }
 }
 
 pub(crate) struct Job {
@@ -405,7 +422,7 @@ pub struct Published {
 
 fn assemble(job: &Job, names: &Names) -> Result<Published, SinkError> {
     let m = &job.manifest;
-    let (byte_count, sha256) = encode(&job.source, &names.object_tmp, job.compression)?;
+    let (byte_count, sha256) = seal(&job.source, &names.object_tmp, job.compression)?;
 
     let mut manifest = m.clone();
     // The partitioned key, from the manifest's own fields: a shipper reading it
@@ -473,7 +490,19 @@ fn clean_up(job: &Job, names: &Names) -> String {
 ///
 /// The hash is of the object that lands, because integrity and idempotent
 /// reprocessing key on `(object key, sha256)`.
-fn encode(
+///
+/// **Public because there are two archive shapes and there must be one answer
+/// to this question.** The venue-side objects of [`upstream`](crate::upstream)
+/// are compressed and digested by calling this, not by a second pass with its
+/// own encoder settings — the frame checksum below in particular is the
+/// difference between an archive that can tell it has been damaged and one that
+/// decodes to a different buffer with no error at all.
+///
+/// # Errors
+///
+/// [`SinkError`] when the source cannot be read, the destination cannot be
+/// written, or the encoder fails.
+pub fn seal(
     source: &Path,
     dest: &Path,
     compression: Compression,
@@ -528,7 +557,7 @@ fn write_and_sync(path: &Path, bytes: &[u8]) -> Result<(), SinkError> {
     f.sync_all().map_err(SinkError::Io)
 }
 
-fn hex(bytes: &[u8; 32]) -> String {
+pub(crate) fn hex(bytes: &[u8; 32]) -> String {
     let mut s = String::with_capacity(64);
     for b in bytes {
         s.push_str(&format!("{b:02x}"));
