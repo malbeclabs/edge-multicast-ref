@@ -50,7 +50,7 @@
 
 ### 4. `close_object` reports what it counted, and two doc comments stop being false
 
-`Book::close_object` returns the `BookRefused` it just closed over rather than nothing, and `Derivation::close_object` hands it up — a live caller has no other way to see what its last window stranded.
+**Corrected while the task was being written.** An earlier draft of this plan had `Book::close_object` return the `BookRefused` it closed over. What landed is `Derivation::close_object` returning the refusals the derivation is responsible for since its previous call, and `Book::close_object` keeping its signature — a live caller still has the number it needs, and the per-call currency stays in the one place that owns it. Returning a just-closed figure from the book as well would put two currencies on one counter, which is the confusion decision 1 exists to remove. The subtraction is a free function, `refused_since`, so the fold and the close share it rather than stating it twice.
 
 `BookRefused::unclosed_cycle`'s comment argues that non-zero and persistent means the anchoring is losing a race against object rotation. That holds for an archive object and is wrong for a window, where the counter rises once per boundary per open cycle as a matter of course. The comment states both, and says that a live caller calls `close_object` at the end of the derivation rather than per window. `Book`'s own comment says it is "for every channel instance in one object", which persisting it makes false.
 
@@ -67,6 +67,25 @@ The four cases: a definition in the first half with its quotes in the second; a 
 **Verification:** each case asserted through the new entry point, and each shown failing under today's `derive_events` over the same split bytes, with the failure recorded here per case.
 
 ---
+
+## What died under which revert
+
+The gates were run against each of these with everything else in place, and the
+test named is the one that failed. A revert that killed nothing would mean the
+task had documented the tree.
+
+| Revert | What failed |
+|---|---|
+| The state does not cross the call — `derive_events_into` resets it on entry | all four split cases, and `the_datagram_index_continues_across_a_call` |
+| The datagram base is not applied to provenance | `the_datagram_index_continues_across_a_call`, and all four split cases through row equality |
+| The base advances by the message count instead of `WireCapture::datagrams()` | the same five: a datagram carrying no message stops being counted, so the halves disagree |
+| `book_refused` reports `Book::refused` raw instead of the delta | `book_refused_does_not_re_report_an_earlier_windows_refusal` (1 where 0 is owed), `the_archive_path_is_the_new_entry_point_over_fresh_state` (2 where 1 is owed), and the existing `an_incomplete_cycle_is_refused_rather_than_applied` and `a_snapshot_in_flight_when_a_reset_was_published_is_refused` |
+| `derive_events` reports `close_object()` alone rather than composing it with the fold's delta | `the_archive_path_is_the_new_entry_point_over_fresh_state`, and the same two existing book tests — this one was a real bug during implementation, caught by the existing suite before the new tests existed |
+
+The last row is the reason task 1's verification compares the two entry points
+over a fixture that strands a cycle: with the delta subtracted in one place and
+the close added in another, a figure reported twice or not at all is invisible
+to a fixture whose counters are all zero.
 
 ## What is not in this plan
 
