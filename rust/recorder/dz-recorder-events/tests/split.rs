@@ -4,7 +4,7 @@
 //! sorts a whole input before folding any of it. The property that makes such a
 //! caller correct is this one: the same bytes, cut anywhere, derive the same
 //! rows. Every test here derives one input three ways — whole, split into one
-//! kept [`Derivation`], and split into two independent `derive_events` calls —
+//! kept [`DerivationState`], and split into two independent `derive_events` calls —
 //! and asserts the first two agree and that the third is the failure the kept
 //! state removes.
 //!
@@ -25,10 +25,10 @@ use dz_edge_mbp::{
 use dz_edge_tob::{Quote, TopOfBook, MAGIC_TOB};
 use dz_recorder_core::{RecordedDatagram, Source, SourceError};
 use dz_recorder_events::{
-    derive_events, derive_events_into, BookRefused, Channel, Derivation, DerivedEvents, EventInput,
-    Refused,
+    derive_events, derive_events_into, BookRefused, Channel, DerivationState, DerivedEvents,
+    EventInput, Refused,
 };
-use dz_recorder_rows::{Instrument, UncertainReason};
+use dz_recorder_rows::{Derivation, Instrument, UncertainReason};
 
 const SNAPSHOT: u32 = 7;
 const ANCHOR_SEQ: u64 = 4_242;
@@ -43,6 +43,12 @@ fn input<'a>(id: &'a dz_recorder_core::RecorderIdentity, magic: u16) -> EventInp
         magic,
         observation: "observation",
         persist_snapshot_levels: true,
+        // `Archive` on both sides of every comparison here, because the
+        // property under test is that splitting changes nothing and this field
+        // is the caller's statement rather than the fold's finding. A live
+        // caller sets `Live`, which is what stops one of its rows passing for a
+        // verified one.
+        derivation: Derivation::Archive,
     }
 }
 
@@ -91,11 +97,11 @@ fn whole(all: &[OwnedDatagram], magic: u16) -> DerivedEvents {
         .expect("the log does not fail")
 }
 
-/// Split, into one `Derivation` the caller keeps across the cut.
+/// Split, into one `DerivationState` the caller keeps across the cut.
 fn split_kept(all: &[OwnedDatagram], at: usize, magic: u16) -> DerivedEvents {
     let id = identity();
     let (first, second) = all.split_at(at);
-    let mut state = Derivation::new();
+    let mut state = DerivationState::new();
     let a = derive_events_into(
         &mut state,
         &mut DatagramLog::new(first.to_vec()),
@@ -465,7 +471,7 @@ fn the_archive_path_is_the_new_entry_point_over_fresh_state() {
     let archive = whole(&all, MAGIC_MBP);
 
     let id = identity();
-    let mut state = Derivation::new();
+    let mut state = DerivationState::new();
     let once = derive_events_into(
         &mut state,
         &mut DatagramLog::new(all.clone()),
@@ -568,7 +574,7 @@ fn book_refused_does_not_re_report_an_earlier_windows_refusal() {
     )]);
 
     let id = identity();
-    let mut state = Derivation::new();
+    let mut state = DerivationState::new();
     let a = derive_events_into(
         &mut state,
         &mut DatagramLog::new(first),
@@ -647,7 +653,7 @@ fn a_source_that_tears_folds_nothing_and_leaves_the_state_usable() {
         Group(&[quote(9_951)], PortRole::Mktdata, 200),
     ]);
     let id = identity();
-    let mut state = Derivation::new();
+    let mut state = DerivationState::new();
 
     // One clean window first, so the state holds something worth not losing.
     let clean = derive_events_into(
@@ -709,7 +715,7 @@ fn a_source_that_tears_folds_nothing_and_leaves_the_state_usable() {
 #[test]
 fn the_reference_data_is_readable_per_window() {
     let id = identity();
-    let mut state = Derivation::new();
+    let mut state = DerivationState::new();
 
     assert_eq!(
         state.table().defined_count(channel()),
@@ -788,7 +794,7 @@ fn a_level_after_its_cycle_ended_in_an_earlier_window_is_an_orphan() {
     )]);
 
     let id = identity();
-    let mut state = Derivation::new();
+    let mut state = DerivationState::new();
     let a = derive_events_into(
         &mut state,
         &mut DatagramLog::new(first),
@@ -851,7 +857,7 @@ fn a_level_after_its_cycle_ended_in_the_same_call_is_still_attributed() {
     );
 
     let id = identity();
-    let mut state = Derivation::new();
+    let mut state = DerivationState::new();
     let once = derive_events_into(
         &mut state,
         &mut DatagramLog::new(all),
@@ -893,7 +899,7 @@ fn ending_the_derivation_clears_the_cycles_still_in_flight() {
     )]);
 
     let id = identity();
-    let mut state = Derivation::new();
+    let mut state = DerivationState::new();
     let a = derive_events_into(
         &mut state,
         &mut DatagramLog::new(first),

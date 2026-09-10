@@ -12,7 +12,7 @@
 //!
 //! There are two entry points and the difference is only where the state lives.
 //! [`derive_events`] builds it, folds one object and ends it, which is what an
-//! object is. [`derive_events_into`] is handed a [`Derivation`] that outlives
+//! object is. [`derive_events_into`] is handed a [`DerivationState`] that outlives
 //! the call, which is what a caller cutting a live feed into windows needs: the
 //! reference data, the book and the snapshot attribution have to cross the cut
 //! or every window starts as a fresh recorder. See
@@ -26,7 +26,7 @@ pub mod sizing;
 
 pub use book::{state_key, Book, BookRefused, Certainty, Change, Side, Top};
 pub use derive::{
-    derive_events, derive_events_into, Derivation, DerivedEvents, EventInput, Refused,
+    derive_events, derive_events_into, DerivationState, DerivedEvents, EventInput, Refused,
 };
 pub use instruments::{At, Channel, InstrumentTable, Observed, Statement};
 pub use sizing::{FeedSizing, Incomplete, Sizing};

@@ -200,7 +200,7 @@ pub struct BookRefused {
     /// anchoring is losing a race against object rotation rather than the
     /// publisher failing to send cycles.
     ///
-    /// **A caller holding a [`Derivation`](crate::Derivation) across its windows
+    /// **A caller holding a [`DerivationState`](crate::DerivationState) across its windows
     /// reads it the other way**, because the book and its open cycles cross the
     /// cut and a cycle open at a window boundary is merely still open. Such a
     /// caller ends the derivation once, so a rise here is a cycle the feed
@@ -399,7 +399,7 @@ impl Book {
     ///
     /// The archive path calls this per object. A caller that keeps the book
     /// across windows calls it at the end of the derivation and not per window —
-    /// see [`Derivation::close_object`](crate::Derivation::close_object), which
+    /// see [`DerivationState::close_object`](crate::DerivationState::close_object), which
     /// is the entry point that owns the distinction.
     pub fn close_object(&mut self) {
         self.refused.unclosed_cycle += self.cycles.len() as u64;

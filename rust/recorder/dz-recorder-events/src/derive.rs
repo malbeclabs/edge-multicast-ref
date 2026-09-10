@@ -148,7 +148,7 @@ struct Seen {
 ///
 /// See `docs/superpowers/specs/2026-09-10-recorder-derivation-state-design.md`.
 #[derive(Debug, Default)]
-pub struct Derivation {
+pub struct DerivationState {
     table: InstrumentTable,
     /// Open snapshot cycles, keyed on the `snapshot_id` a level is attributed
     /// through.
@@ -175,7 +175,7 @@ pub struct Derivation {
     reported: BookRefused,
 }
 
-impl Derivation {
+impl DerivationState {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -230,7 +230,7 @@ impl Derivation {
 fn refused_since(total: BookRefused, reported: &mut BookRefused) -> BookRefused {
     // Saturating because the alternative to a nonsense count is a visible zero,
     // not because it can trigger: `Book::refused` only ever rises, the book is
-    // private to the `Derivation`, and `reported` is only ever assigned from it.
+    // private to the `DerivationState`, and `reported` is only ever assigned from it.
     // A plain subtraction would wrap in release and put a number near u64::MAX
     // in a row, which is the one outcome worse than under-reporting.
     let delta = BookRefused {
@@ -262,7 +262,7 @@ const fn plus(a: BookRefused, b: BookRefused) -> BookRefused {
 ///
 /// The state is built here and ended here, which is what an object is. A caller
 /// cutting a live feed into windows wants [`derive_events_into`] and a
-/// [`Derivation`] it keeps across the cut.
+/// [`DerivationState`] it keeps across the cut.
 ///
 /// # Errors
 ///
@@ -273,7 +273,7 @@ pub fn derive_events<S: Source + ?Sized>(
     source: &mut S,
     input: &EventInput<'_>,
 ) -> Result<DerivedEvents, RelowerError> {
-    let mut state = Derivation::new();
+    let mut state = DerivationState::new();
     let mut out = derive_events_into(&mut state, source, input)?;
     // The object ended, so the cycles it stranded are counted before the
     // counters are read. Both figures are per call and per call they compose by
@@ -294,7 +294,7 @@ pub fn derive_events<S: Source + ?Sized>(
 /// only establishing it.
 ///
 /// `book_refused` on the result is **this call's own** and not the book's
-/// running total. The end of the derivation is [`Derivation::close_object`] and
+/// running total. The end of the derivation is [`DerivationState::close_object`] and
 /// is not this.
 ///
 /// # Errors
@@ -317,7 +317,7 @@ pub fn derive_events<S: Source + ?Sized>(
 /// that loss and then re-pay the first-window refusals this entry point exists
 /// to remove.
 pub fn derive_events_into<S: Source + ?Sized>(
-    state: &mut Derivation,
+    state: &mut DerivationState,
     source: &mut S,
     input: &EventInput<'_>,
 ) -> Result<DerivedEvents, RelowerError> {
@@ -336,7 +336,7 @@ pub fn derive_events_into<S: Source + ?Sized>(
     // Borrowed out of the state rather than constructed, which is the whole of
     // the difference: the fold below is the fold it was, and these three now
     // outlive the call.
-    let Derivation {
+    let DerivationState {
         table,
         cycles,
         book,
