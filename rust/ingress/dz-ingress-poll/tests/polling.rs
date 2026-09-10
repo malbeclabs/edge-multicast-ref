@@ -413,6 +413,15 @@ struct TestObserver {
 }
 
 impl TestObserver {
+    /// What was recorded, behind a guard that lives to the end of the statement.
+    ///
+    /// **Never call this twice in one assertion.** The guard the left operand
+    /// takes is still held while the failure message is formatted, so a message
+    /// that reads this again deadlocks — and a revert that deadlocks is a revert
+    /// that hangs instead of failing, which is the one thing this suite is built
+    /// not to do. Read the values into locals first; see
+    /// `the_idle_guard_still_fires_on_an_endpoint_that_answers_forever`, which
+    /// is where that was found by running the revert rather than by reading it.
     fn recorded(&self) -> std::sync::MutexGuard<'_, Recorded> {
         self.recorded.lock().expect("observer")
     }
@@ -590,33 +599,37 @@ fn the_idle_guard_still_fires_on_an_endpoint_that_answers_forever() {
             ScriptedEndpoint::unchanging(tag),
         );
 
+        // Read out first, and that is not style: an assertion whose failure
+        // message locks the observer again would deadlock against the guard its
+        // own left operand is holding - which is a revert that hangs instead of
+        // failing, and this suite exists not to have one of those.
+        let reconnects = run.observer.recorded().reconnects.clone();
+        let answers = run.endpoint.answers();
+        let payloads = run.adapter.payloads.clone();
+
         // The guard fired: the connection ended for upstream silence, which is
         // what `dz_publisher_ingress_reconnects_total{reason="timeout"}` counts
         // and what an operator's alert reads.
         assert_eq!(
-            run.observer.recorded().reconnects,
+            reconnects,
             vec![DisconnectReason::Timeout],
             "with {how}, the connection must end for upstream silence; it ended \
-             {:?} after {} answers and {} payloads",
-            run.observer.recorded().reconnects,
-            run.endpoint.answers(),
-            run.adapter.payloads.len()
+             {reconnects:?} after {answers} answers and {} payloads",
+            payloads.len()
         );
         // And the catalogue arrived exactly once, which is the same property
         // from the other side: every later answer produced nothing for the
         // adapter.
         assert_eq!(
-            run.adapter.payloads,
+            payloads,
             vec![CATALOGUE_BODY.to_vec()],
             "with {how}, only the first answer is a payload; the endpoint was \
-             asked {} times",
-            run.endpoint.answers()
+             asked {answers} times"
         );
         assert!(
-            run.endpoint.answers() >= 5,
+            answers >= 5,
             "with {how}, the endpoint must have gone on answering - it answered \
-             {} times",
-            run.endpoint.answers()
+             {answers} times"
         );
         assert_eq!(
             // The first, because the run's own deliberate end is a second
