@@ -173,9 +173,9 @@ An added entry point that takes the state by reference.
 ```rust
 /// The state one derivation hands to the next.
 #[derive(Debug, Default)]
-pub struct Derivation { /* the table, the book, the attribution map, two counters */ }
+pub struct DerivationState { /* the table, the book, the attribution map, two counters */ }
 
-impl Derivation {
+impl DerivationState {
     pub fn new() -> Self { /* … */ }
     /// The derivation ended: close open cycles and report what they refused.
     pub fn close_object(&mut self) -> BookRefused { /* … */ }
@@ -184,13 +184,13 @@ impl Derivation {
 }
 
 pub fn derive_events_into<S: Source + ?Sized>(
-    state: &mut Derivation,
+    state: &mut DerivationState,
     source: &mut S,
     input: &EventInput<'_>,
 ) -> Result<DerivedEvents, RelowerError> { /* … */ }
 ```
 
-`derive_events` keeps its exact signature and becomes `Derivation::new()`, one
+`derive_events` keeps its exact signature and becomes `DerivationState::new()`, one
 call into the new entry point, and `close_object()`. The archive path's
 behaviour is then unchanged **by construction rather than by review**, which is
 the property worth having: nobody has to read the new fold to know the old one
@@ -228,7 +228,7 @@ Everything else on `DerivedEvents` is already per call — `refused` is a fresh
 `Refused` every time — so leaving one field cumulative and the rest per call is
 precisely the asymmetry that produces a silent wrong answer. **The new entry
 point reports the delta since the previous call.** `Book::refused` stays
-cumulative and unchanged, as the book's own running total; `Derivation`
+cumulative and unchanged, as the book's own running total; `DerivationState`
 remembers the previous total and subtracts.
 
 For `derive_events` the delta and the total are the same number, because the
@@ -253,12 +253,12 @@ there.
 
 ### 3. The reference data is readable, because it is now the condition everything depends on
 
-`InstrumentTable` and `Book` are public types, but a `Derivation` that held them
+`InstrumentTable` and `Book` are public types, but a `DerivationState` that held them
 privately with no accessor would leave a live caller unable to say whether its
 own state was working. Nothing on `DerivedEvents` answers that: a window that
 refused nothing and a window that carried no prices produce the same rows.
 
-So `Derivation::table()` returns it. `InstrumentTable::defined_count` per
+So `DerivationState::table()` returns it. `InstrumentTable::defined_count` per
 channel is the gauge an operator reads, and `InstrumentTable::era` says which
 era those statements belong to. It is also the measurement the phase hypothesis
 above needs — without it, the hypothesis is unfalsifiable from outside the
@@ -275,7 +275,7 @@ Stating it the other way round — that a failure leaves the state half-advanced
 would have a caller discard the state on any tear. It would then pay the tear's
 own cost twice, because `WireCapture::absorb` consumes as it reads: the
 datagrams taken before the tear go with the discarded capture and a retry over
-the same source resumes after them, and a discarded `Derivation` adds the
+the same source resumes after them, and a discarded `DerivationState` adds the
 first-window refusals this entry point exists to remove.
 
 ### 5. A cycle's attribution outlives its end for one call, and no longer
@@ -305,7 +305,7 @@ alone.
 
 Left there, the acceptance criterion below would need an exception clause for
 one column, and a caller comparing two window cuttings would find rows that
-differ for no reason it could see. So **`Derivation` carries the base** and the
+differ for no reason it could see. So **`DerivationState` carries the base** and the
 new entry point advances it by `WireCapture::datagrams()`, which counts exactly
 what `datagram_index` is an index into, including the foreign and undecodable
 datagrams that yield no message.
@@ -313,9 +313,31 @@ datagrams that yield no message.
 The field is safe to make run-relative rather than call-relative: in `005` it is
 a plain column, absent from the `recorder.event` sort key, so
 `ReplacingMergeTree` neither dedups nor joins on it. `derive_events` starts a
-fresh `Derivation`, so its base is 0 and archive rows are unchanged.
+fresh `DerivationState`, so its base is 0 and archive rows are unchanged.
 
 ---
+
+## Two things this inherited from a main that moved
+
+Both landed while this was in review, and each changes something a caller does.
+
+**The type is `DerivationState`, and `Derivation` is why.**
+`dz_recorder_rows::Derivation` is the row's provenance column — `Archive` or
+`Live` — and it is imported into the very file this adds its state type to, so
+two `Derivation` names in one module does not compile. The new type is renamed
+rather than the established one aliased: this one is new here, and the column is
+used across the workspace. CI found it rather than review did, because the merge
+ref for a pull request is built against the base branch already merged into
+main, so it compiled the tree this will land as while the branch alone still
+built clean.
+
+**A live caller sets `EventInput::derivation` to `Live`.** That field has no
+default, deliberately: a fold reads a `Source` and cannot see whether the bytes
+behind it were an object whose digest was checked or a capture that kept
+nothing, so a derivation states its provenance or does not compile. This entry
+point is what makes a live derivation possible at all, which makes it the one
+that must not be handed `Archive` — a row claiming a verified object behind
+bytes nobody kept is what that column exists to prevent.
 
 ## The acceptance criterion: splitting is a no-op
 

@@ -4,7 +4,7 @@
 
 **Goal:** Add an entry point to `dz-recorder-events` that takes the derivation's state by reference, so a caller cutting arrivals into windows keeps the reference data, the book and the snapshot-id attribution map across the cut instead of starting empty once per window.
 
-**Architecture:** The fold is unchanged. What changes is where its state is constructed: `derive_events` builds it, folds, and ends the object; `derive_events_into` is handed it and folds. `derive_events` becomes `Derivation::new()`, one call into the new entry point, and `close_object()` — so the archive path is unchanged by construction rather than by review.
+**Architecture:** The fold is unchanged. What changes is where its state is constructed: `derive_events` builds it, folds, and ends the object; `derive_events_into` is handed it and folds. `derive_events` becomes `DerivationState::new()`, one call into the new entry point, and `close_object()` — so the archive path is unchanged by construction rather than by review.
 
 **Tech Stack:** Rust 2021, no new dependency. `dz-recorder-core` (`Source`), `dz-recorder-relower` (the archive walk and `WireCapture::datagrams()`), `dz-recorder-rows` (the row types, untouched).
 
@@ -26,31 +26,31 @@
 
 ## Tasks
 
-### 1. `Derivation`, and `derive_events` rebuilt on top of it
+### 1. `DerivationState`, and `derive_events` rebuilt on top of it
 
-`Derivation` holds the three pieces that cross a call — the `InstrumentTable`, the `Book`, and the `(ChannelInstance, snapshot_id)` attribution map `instrument_of_state` maintains — plus the two counters tasks 2 and 3 add. `Default` and `new()`.
+`DerivationState` holds the three pieces that cross a call — the `InstrumentTable`, the `Book`, and the `(ChannelInstance, snapshot_id)` attribution map `instrument_of_state` maintains — plus the two counters tasks 2 and 3 add. `Default` and `new()`.
 
 `derive_events_into(state, source, input)` is today's fold body with the three constructions removed and the trailing `close_object()` removed. `derive_events` becomes exactly: construct, call, `close_object()`, return.
 
 `seen` and `at_datagram` stay local to the call, for the reasons the spec gives: the first is the instrument grain for definitions observed in this call, and the second must reset so that the first datagram of a window is tested against the previous window's high-water mark.
 
-**Verification:** `cargo test -p dz-recorder-events` green with no existing test touched. One new test asserts that `derive_events` over an input and `derive_events_into` over the same input with a fresh `Derivation` plus a `close_object()` produce equal `event`, `book_top` and `instrument` rows and equal counters — the two paths are one path, asserted rather than assumed.
+**Verification:** `cargo test -p dz-recorder-events` green with no existing test touched. One new test asserts that `derive_events` over an input and `derive_events_into` over the same input with a fresh `DerivationState` plus a `close_object()` produce equal `event`, `book_top` and `instrument` rows and equal counters — the two paths are one path, asserted rather than assumed.
 
 ### 2. The datagram base, so `datagram_index` continues
 
-`Derivation` carries `datagrams: u64`. `derive_events_into` adds it to `provenance.datagram_index` where rows are built, and advances it by `WireCapture::datagrams()` after the fold — that being the count of what the index indexes into, foreign and undecodable datagrams included.
+`DerivationState` carries `datagrams: u64`. `derive_events_into` adds it to `provenance.datagram_index` where rows are built, and advances it by `WireCapture::datagrams()` after the fold — that being the count of what the index indexes into, foreign and undecodable datagrams included.
 
 **Verification:** a test splits an input at a datagram boundary and asserts the second half's rows carry the indices they carried in the whole. Under the revert — the base dropped, or advanced by the message count instead of `datagrams()` — the second half's indices restart at 0 or skip the datagrams that yielded no message, and the test names which.
 
 ### 3. `book_refused` as the per-call delta
 
-`Derivation` remembers the previous `Book::refused`. `derive_events_into` reports the difference. `Book::refused` stays cumulative and public, unchanged.
+`DerivationState` remembers the previous `Book::refused`. `derive_events_into` reports the difference. `Book::refused` stays cumulative and public, unchanged.
 
-**Verification:** a test derives two windows into one `Derivation` where the first strands a cycle and asserts the second window's `book_refused` does not re-report the first's. A second asserts the deltas sum to the cumulative total on the book. Under the revert both windows report the running total and the sum double-counts, which is the caller bug the spec names.
+**Verification:** a test derives two windows into one `DerivationState` where the first strands a cycle and asserts the second window's `book_refused` does not re-report the first's. A second asserts the deltas sum to the cumulative total on the book. Under the revert both windows report the running total and the sum double-counts, which is the caller bug the spec names.
 
 ### 4. `close_object` reports what it counted, and two doc comments stop being false
 
-**Corrected while the task was being written.** An earlier draft of this plan had `Book::close_object` return the `BookRefused` it closed over. What landed is `Derivation::close_object` returning the refusals the derivation is responsible for since its previous call, and `Book::close_object` keeping its signature — a live caller still has the number it needs, and the per-call currency stays in the one place that owns it. Returning a just-closed figure from the book as well would put two currencies on one counter, which is the confusion decision 1 exists to remove. The subtraction is a free function, `refused_since`, so the fold and the close share it rather than stating it twice.
+**Corrected while the task was being written.** An earlier draft of this plan had `Book::close_object` return the `BookRefused` it closed over. What landed is `DerivationState::close_object` returning the refusals the derivation is responsible for since its previous call, and `Book::close_object` keeping its signature — a live caller still has the number it needs, and the per-call currency stays in the one place that owns it. Returning a just-closed figure from the book as well would put two currencies on one counter, which is the confusion decision 1 exists to remove. The subtraction is a free function, `refused_since`, so the fold and the close share it rather than stating it twice.
 
 `BookRefused::unclosed_cycle`'s comment argues that non-zero and persistent means the anchoring is losing a race against object rotation. That holds for an archive object and is wrong for a window, where the counter rises once per boundary per open cycle as a matter of course. The comment states both, and says that a live caller calls `close_object` at the end of the derivation rather than per window. `Book`'s own comment says it is "for every channel instance in one object", which persisting it makes false.
 
@@ -58,7 +58,7 @@
 
 ### 5. Splitting is a no-op: the harness and the four cases
 
-`tests/common/mod.rs`'s `DatagramLog` takes a `Vec<OwnedDatagram>`, so the harness is: build one log, derive it whole, then split the vector and derive the halves into one `Derivation`.
+`tests/common/mod.rs`'s `DatagramLog` takes a `Vec<OwnedDatagram>`, so the harness is: build one log, derive it whole, then split the vector and derive the halves into one `DerivationState`.
 
 A helper asserts the criterion — `event` and `book_top` equal and in order, counters summing, and `instrument` equal after the `ReplacingMergeTree(last_seen_ts)` reduction the spec states, because `seen` is per call by design and the store collapses on that version column.
 
