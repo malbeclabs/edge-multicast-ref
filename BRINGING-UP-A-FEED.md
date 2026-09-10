@@ -166,13 +166,25 @@ fallback: a `[adapter] kind` this binary did not register is a startup error
 naming every token it did, because *what is in this binary* is the question an
 operator cannot answer from the config file in front of them.
 
-The transport comes from [`rust/ingress`](rust/ingress/). A WebSocket venue that
-authenticates its upgrade passes a header provider, which runs on **every**
-connect attempt — a venue signing a fresh timestamp and headers computed once at
-startup gives a publisher that connects and can then never reconnect. A
-transport whose crate is not linked is refused at startup, so the binary depends
-on `dz-ingress-core` with the marker feature for the transports it means to
-allow.
+The transport comes from [`rust/ingress`](rust/ingress/). `[ingress] kind` names
+one of a closed set — `websocket`, `fix`, `multicast`, `poll`, `filetail`,
+`uds` — and two of them are built:
+
+- **`websocket`**, for a venue that carries its book on a subscription. A venue
+  that authenticates its upgrade passes a header provider, which runs on
+  **every** connect attempt — a venue signing a fresh timestamp and headers
+  computed once at startup gives a publisher that connects and can then never
+  reconnect.
+- **`poll`**, for a venue whose instrument catalogue is a request rather than a
+  subscription: the endpoint is asked on `poll_interval`, the body arrives as a
+  payload, and no code in the venue's binary holds a timer, a backoff or a
+  failure count. An unchanged response is liveness and not a payload, so the
+  idle guard still fires on a catalogue that has stopped changing. `https` needs
+  the crate's `tls` feature and is refused at load without it.
+
+A transport whose crate is not linked is refused at startup, so the binary
+depends on `dz-ingress-core` with the marker feature for the transports it means
+to allow.
 
 ### 4. Prove it offline before you point it at anything
 
@@ -338,6 +350,15 @@ role = "comparison"         # connected, driven, counted — for the race
   one source, or `[[source]] ingress` per source. Both is refused: a key read
   only when another is absent is a key an operator cannot reason about. A
   document that names it per source need not write `[ingress]` at all.
+- **A polled source states its own endpoint and cadence.** `dz-ingress-poll`
+  reads `endpoint` and `poll_interval` out of that source's own
+  `[source.upstream]` block — a transport's own keys are the transport crate's
+  to parse, the same rule that keeps `[ingress]` in one crate — so the venue's
+  `main` deserializes that block and builds the transport from it. It is an
+  *interval* and not a cycle: `definition_cycle` and `snapshot_cycle` are one
+  pass over a set divided by the set's size, and one tick here is one request
+  with no set to divide by. A polled source that omits it does not parse, because
+  a transport with no cadence polls in a loop or never.
 - **The name in the file is the metric label.** `dz_publisher_ingress_*` carries
   `connection`, pre-created at 0 for every declared source, so a second upstream
   that never came up is a series sitting at zero rather than no series at all. A
