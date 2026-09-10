@@ -179,6 +179,8 @@ impl Derivation {
     pub fn new() -> Self;
     /// The derivation ended: close open cycles and report what they refused.
     pub fn close_object(&mut self) -> BookRefused;
+    /// The reference data accumulated so far.
+    pub fn table(&self) -> &InstrumentTable;
 }
 
 pub fn derive_events_into<S: Source + ?Sized>(
@@ -213,7 +215,7 @@ Two locals stay per call, and stating why is the point:
 
 ---
 
-## Three semantics, decided here because silence on any of them is a caller's bug
+## Six semantics, decided here because silence on any of them is a caller's bug
 
 ### 1. `book_refused` reports the per-call delta
 
@@ -249,7 +251,50 @@ comment currently states only one. **The comment says both**, or a reader takes
 a per-window count as a rotation-rate fault and looks for a race that is not
 there.
 
-### 3. `datagram_index` continues across a call, so that splitting is a no-op in every column
+### 3. The reference data is readable, because it is now the condition everything depends on
+
+`InstrumentTable` and `Book` are public types, but a `Derivation` that held them
+privately with no accessor would leave a live caller unable to say whether its
+own state was working. Nothing on `DerivedEvents` answers that: a window that
+refused nothing and a window that carried no prices produce the same rows.
+
+So `Derivation::table()` returns it. `InstrumentTable::defined_count` per
+channel is the gauge an operator reads, and `InstrumentTable::era` says which
+era those statements belong to. It is also the measurement the phase hypothesis
+above needs — without it, the hypothesis is unfalsifiable from outside the
+crate and a window length gets tuned against a number nobody can see.
+
+### 4. A call that fails folds nothing, and the state is what to keep
+
+The absorb is the only fallible step in the entry point and it completes before
+the fold begins, so a call that returns `Err` has folded nothing: no row, no
+counter, and the datagram base does not advance. The state is usable and the
+next window folds into it as though the failed call had not happened.
+
+Stating it the other way round — that a failure leaves the state half-advanced —
+would have a caller discard the state on any tear. It would then pay the tear's
+own cost twice, because `WireCapture::absorb` consumes as it reads: the
+datagrams taken before the tear go with the discarded capture and a retry over
+the same source resumes after them, and a discarded `Derivation` adds the
+first-window refusals this entry point exists to remove.
+
+### 5. A cycle's attribution outlives its end for one call, and no longer
+
+`Book::snapshot_end` removes the cycle from the book's own map. The snapshot-id
+attribution map is removed from by nothing, which costs nothing while it dies
+with the call and grows by one entry per cycle once it outlives one — and lets
+the two maps disagree, so a level arriving in a later window under a finished
+cycle's id is attributed and written as a row while the book, having forgotten
+the cycle, ignores it.
+
+A cycle is therefore marked when its end is folded and dropped when the call
+ends. Pruning at the end of the call rather than on the end itself is what keeps
+the archive path identical: it is one call, so an entry lives exactly as long as
+it did, and a level arriving after its own end **within** a call is still
+attributed and still counts toward `levels_seen`. Across a call it is an
+`orphan_snapshot_level`, which is what it is. `close_object` clears what is left.
+
+### 6. `datagram_index` continues across a call, so that splitting is a no-op in every column
 
 `WireProvenance::datagram_index` is documented as position "counting from 0 over
 everything the source yielded", and `absorb` numbers from a private counter on a

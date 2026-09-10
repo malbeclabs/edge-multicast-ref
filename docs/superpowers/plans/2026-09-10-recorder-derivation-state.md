@@ -82,6 +82,20 @@ task had documented the tree.
 | `book_refused` reports `Book::refused` raw instead of the delta | `book_refused_does_not_re_report_an_earlier_windows_refusal` (1 where 0 is owed), `the_archive_path_is_the_new_entry_point_over_fresh_state` (2 where 1 is owed), and the existing `an_incomplete_cycle_is_refused_rather_than_applied` and `a_snapshot_in_flight_when_a_reset_was_published_is_refused` |
 | `derive_events` reports `close_object()` alone rather than composing it with the fold's delta | `the_archive_path_is_the_new_entry_point_over_fresh_state`, and the same two existing book tests — this one was a real bug during implementation, caught by the existing suite before the new tests existed |
 
+### The review's own reverts
+
+Four more, from reviewing the landed code rather than from writing it.
+
+| Revert | What failed |
+|---|---|
+| The attribution map is never pruned | `a_level_after_its_cycle_ended_in_an_earlier_window_is_an_orphan` |
+| The map is pruned on the `SnapshotEnd` itself rather than at the call's end | the **existing** `a_complete_cycle_states_what_it_promised_and_what_it_carried` — `state_row` reads `levels` off that entry for the end row's `levels_seen`, so marking rather than removing is required and not a preference |
+| `close_object` leaves the attribution map alone | `ending_the_derivation_clears_the_cycles_still_in_flight` |
+| `table()` reports an empty table rather than the derivation's | `the_reference_data_is_readable_per_window` and `a_source_that_tears_folds_nothing_and_leaves_the_state_usable` |
+
+The second row is the one worth keeping: the obvious fix for an unpruned map
+breaks a column the archive path already writes, and the existing suite says so.
+
 The last row is the reason task 1's verification compares the two entry points
 over a fixture that strands a cycle: with the delta subtracted in one place and
 the close added in another, a figure reported twice or not at all is invisible
