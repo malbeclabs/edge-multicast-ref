@@ -63,9 +63,16 @@ pub struct Document {
     /// path to a series without it.
     pub venue: String,
 
-    /// Absent means the default policy: discover the source address from the
-    /// route, assert no invariant on it, one hop. That is the policy of a host
-    /// whose route is right, which is the normal case — see [`EgressPolicy`].
+    /// **Defaultable, and absent is still refused.** Two of the three keys in
+    /// here are escape hatches a host whose route is right does not need; the
+    /// third, `ttl`, is stated or the publisher does not start. So the default
+    /// this attribute supplies is a section with no TTL in it, and no policy
+    /// stands behind it: a document with no `[egress]` at all reaches
+    /// [`StartupError::TtlUnstated`], which names the key and the line to
+    /// write, rather than serde's ``missing field `egress` `` at line 1, column
+    /// 1 — which is what a required field on an optional section produces, and
+    /// what `[ingress]` cost this repository once already. See
+    /// [`EgressSection::ttl`] and [`EgressPolicy`].
     #[serde(default)]
     pub egress: EgressSection,
 
@@ -289,17 +296,16 @@ pub struct EgressSection {
     /// The multicast TTL. **Stated or the publisher does not start**, which is
     /// what this key having no default buys.
     ///
-    /// One hop — the value a document omitting this key used to get — is the
-    /// right value for a host whose subscribers share its segment, and the
-    /// wrong one for a group that crosses a router. What made it worth
-    /// requiring is that being wrong is silent in every direction an operator
-    /// can look: a locally attached subscriber receives, so a smoke test on the
-    /// publisher's own host passes; every datagram is sent successfully, so the
-    /// egress series stay green, because the kernel accepted them and a router
-    /// discarded them; and a subscriber that never joined has nothing to
-    /// number, so gap detection reports nothing. The publisher is healthy and
-    /// the feed is empty, and nothing in the exposition tells that from a
-    /// market with no activity.
+    /// One hop is the right value for a host whose subscribers share its
+    /// segment, and the wrong one for a group that crosses a router. What makes
+    /// it worth requiring is that being wrong is silent in every direction an
+    /// operator can look: a locally attached subscriber receives, so a smoke
+    /// test on the publisher's own host passes; every datagram is sent
+    /// successfully, so the egress series stay green, because the kernel
+    /// accepted them and a router discarded them; and a subscriber that never
+    /// joined has nothing to number, so gap detection reports nothing. The
+    /// publisher is healthy and the feed is empty, and nothing in the
+    /// exposition tells that from a market with no activity.
     ///
     /// See [`StartupError::TtlUnstated`], whose message carries the line an
     /// operator has to write.
@@ -1253,9 +1259,8 @@ impl EgressSection {
         // costs: `[ingress]` required failed at parse with the serde message
         // "missing field `ingress`" at line 1, column 1 — an error pointing at
         // the whole file rather than at the section nobody wrote. One refusal
-        // covers both
-        // shapes of the same mistake: no `[egress]` at all, and an `[egress]`
-        // that states everything except this.
+        // covers both shapes of the same mistake: no `[egress]` at all, and an
+        // `[egress]` that states everything except this.
         let ttl = self.ttl.ok_or(StartupError::TtlUnstated)?;
         // Zero is not a smaller hop count, it is no hop at all — and it is the
         // value the refusal above invites, since that message teaches the key

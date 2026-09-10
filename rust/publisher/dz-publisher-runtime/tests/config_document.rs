@@ -12,6 +12,7 @@ mod harness;
 use std::time::Duration;
 
 use dz_edge_core::PortRole;
+use dz_publisher_egress::DEFAULT_TTL;
 use dz_publisher_runtime::config::ShardName;
 use dz_publisher_runtime::{Document, FeedSpec, StartupError, TeeConfig};
 use harness::{Doc, CHANNEL_ID, DEPTH_CHANNEL_ID, GROUP, MKTDATA_PORT, REFDATA_PORT, SOURCE_ID};
@@ -212,8 +213,8 @@ fn a_valid_document_resolves_end_to_end() {
     assert_eq!(feed.definition_cycle, Duration::from_secs(30));
     assert_eq!(feed.manifest_cadence, Duration::from_secs(1));
     assert_eq!(feed.idle_guard, Duration::from_secs(60));
-    // The TTL default: one hop, because the group is delivered on the attached
-    // segment and the network's own last mile carries it from there.
+    // The TTL this document states, not a default: `Doc::valid` writes
+    // `ttl = 1`, and a document that omitted the key would not resolve at all.
     assert_eq!(config.egress.ttl, 1);
     assert_eq!(config.egress.pin, None);
     assert_eq!(config.refdata.selection.bootstrap_top_n(), 8);
@@ -791,11 +792,20 @@ fn an_egress_section_without_a_ttl_is_refused_like_an_absent_one() {
 /// Asserted as substrings because the message **is** the remedy: an operator
 /// upgrading has one key to add, and a message that stopped naming the value
 /// would leave them to guess which number reproduces what they had.
+///
+/// The value is asserted through `DEFAULT_TTL` rather than as the literal in
+/// the message's own text, because that constant's documentation claims this
+/// refusal names its value. A message that retyped the number would let the two
+/// disagree — `EgressPolicy::default` sending one hop count while an operator
+/// is told to write another — with the suite still green.
 #[test]
 fn the_refusal_names_the_key_and_the_value_that_reproduces_one_hop() {
     let message = StartupError::TtlUnstated.to_string();
     assert!(message.contains("[egress] ttl"), "{message}");
-    assert!(message.contains("ttl = 1"), "{message}");
+    assert!(
+        message.contains(&format!("ttl = {DEFAULT_TTL}")),
+        "the line to write carries the constant's own value: {message}"
+    );
     assert!(
         message.contains("attached segment"),
         "the message says what one hop means: {message}"

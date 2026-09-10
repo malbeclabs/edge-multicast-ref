@@ -17,7 +17,7 @@ use std::io;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
-use dz_publisher_egress::{EraError, OpenError, PrefixError};
+use dz_publisher_egress::{EraError, OpenError, PrefixError, DEFAULT_TTL};
 use dz_publisher_refdata::{PolicyError, RefdataError};
 
 /// What the constructor a venue registered may fail with.
@@ -461,10 +461,17 @@ pub enum StartupError {
     /// that an upgrade costs one key rather than a search — and so that an
     /// operator who did not know they were publishing one hop finds out here
     /// rather than from a subscriber that never received anything.
+    ///
+    /// The number in it is [`DEFAULT_TTL`] formatted, not a literal retyped
+    /// beside it. That constant's own documentation claims this message names
+    /// its value; interpolating it is what makes the claim true, and what stops
+    /// a publisher composed from `EgressPolicy::default` sending one hop count
+    /// while the refusal tells operators to write another.
     #[error(
-        "`[egress] ttl` is not stated and has no default. `ttl = 1` publishes on the \
+        "`[egress] ttl` is not stated and has no default. `ttl = {DEFAULT_TTL}` publishes on the \
          attached segment only, which is the whole of what a subscriber on that segment \
-         needs; a group that crosses a router needs the hop count its network takes."
+         needs; a group that crosses a router needs the hop count its network takes.",
+        DEFAULT_TTL = DEFAULT_TTL
     )]
     TtlUnstated,
 
