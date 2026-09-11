@@ -973,6 +973,27 @@ mod tests {
     /// Hand-written rather than a server crate: the response is four lines and
     /// a loop, and a dev-dependency a venue does not inherit is still a
     /// dependency this suite would have to justify.
+    ///
+    /// # It lets go of a blocked write on a clock of its own
+    ///
+    /// **Without that guard the over-ceiling test hangs instead of failing**,
+    /// which is the one outcome a test asserting a bound must not have. Once
+    /// `Limited` trips, `collect` stops draining and the test blocks in
+    /// `join`; `#[tokio::test]` is a current-thread runtime, so that parks the
+    /// only thread the runtime has and `hyper`'s connection task is never
+    /// polled to close the socket. This thread then escapes only if what it
+    /// still has to write happens to fit in the socket buffers — true on a
+    /// typical Linux host and not a property of one, so a host with a smaller
+    /// `tcp_wmem` gets `write_all` blocking for ever and a suite that never
+    /// returns.
+    ///
+    /// A write timeout is what makes that a failure: the loop already treats
+    /// every write error as the expected end, so a blocked write becomes the
+    /// same EPIPE the client's own close produces. It is the guard
+    /// [`an_endpoint_that_answers_and_then_stops_sending`] has below for the
+    /// same deadlock, in the form this server's own blocking point takes.
+    /// Well past the time any body a test here serves takes to drain over
+    /// loopback, so it can only fire on the deadlock.
     fn an_endpoint_serving_a_lengthless_body(
         body_bytes: usize,
     ) -> (u16, std::thread::JoinHandle<()>) {
@@ -984,6 +1005,9 @@ mod tests {
             let Ok((mut socket, _)) = listener.accept() else {
                 return;
             };
+            // See this function's own note. The whole of what keeps the
+            // over-ceiling test a failure rather than a hang.
+            let _ = socket.set_write_timeout(Some(Duration::from_secs(2)));
             // Enough of the request to know it arrived. The client sends one
             // GET with no body, so the headers end at the blank line.
             let mut scratch = [0_u8; 1024];
@@ -996,7 +1020,9 @@ mod tests {
             }
             // 64 KiB at a time. Every write is allowed to fail: once the
             // client has had its fill it drops the connection, and this thread
-            // meeting an EPIPE is the expected end rather than a fault.
+            // meeting an EPIPE — or the write timeout above, where the client
+            // is still holding the runtime and has not got round to closing —
+            // is the expected end rather than a fault.
             let chunk = vec![b'x'; 64 * 1024];
             let mut sent = 0;
             while sent < body_bytes {
@@ -1057,6 +1083,12 @@ mod tests {
         // A megabyte past the ceiling rather than an endless body, so that the
         // test ends whether or not the bound holds - an endless one would hang
         // in CI on the failure it is meant to report.
+        //
+        // The megabyte is finite and that alone is not enough: `join` below
+        // parks the current-thread runtime, so the server thread has to be
+        // able to let go of a write nobody is draining. See
+        // `an_endpoint_serving_a_lengthless_body`'s own note for why, and for
+        // what the size of the socket buffers would otherwise decide.
         let (port, server) = an_endpoint_serving_a_lengthless_body(
             usize::try_from(MAX_BODY_BYTES).unwrap() + 1024 * 1024,
         );
