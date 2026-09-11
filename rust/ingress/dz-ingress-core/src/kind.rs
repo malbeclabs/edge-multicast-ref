@@ -59,11 +59,23 @@ impl Kind {
     ///
     /// Written out rather than built at runtime so that it is a `&'static str`
     /// usable in a `thiserror` format string. A hand-written list can disagree
-    /// with the match beside it, in both directions: a variant added without a
+    /// with [`ALL`](Self::ALL) in both directions: a variant in `ALL` with no
     /// token here, and a variant renamed without moving its token. Both are
     /// caught by this module's own
     /// `tests::the_token_list_in_the_error_message_is_the_token_set`, which
     /// pins this against `ALL` including the order.
+    ///
+    /// **What that does not reach is a variant missing from `ALL` itself.**
+    /// `ALL` is a hand-written `[Self; 6]`, so a variant added to the enum and
+    /// to [`as_token`](Self::as_token) but left out of `ALL` keeps the length
+    /// at six and compiles clean — and every test in this module reads the
+    /// family through `ALL`, so a variant absent from it is invisible to all of
+    /// them, this one included. The type's promise above holds for matches and
+    /// an array is not one: nothing pins `ALL` against the enum's variant set.
+    /// What an operator gets from such a build is
+    /// [`UnknownKind`](ConfigError::UnknownKind) — *names no transport in this
+    /// family* — because [`resolve`](Self::resolve) searches `ALL` as well, for
+    /// a transport the binary implements and links.
     pub const TOKEN_LIST: &'static str = "websocket, fix, multicast, poll, filetail, uds";
 
     /// The configuration token for this transport.
