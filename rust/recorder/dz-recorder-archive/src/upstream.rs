@@ -483,6 +483,19 @@ fn first_duplicate_name(connections: &[UpstreamConnection]) -> Option<(usize, us
 pub struct UpstreamObjectReader<R: Read> {
     inner: R,
     object_key: String,
+    /// The version the object's **own header** stated, and not this build's
+    /// constant.
+    ///
+    /// Kept because it is what the `format_version` column means: the column
+    /// exists to expose a disagreement between the reader that derived a window
+    /// and the object that window was written in, and a reader answering with
+    /// its own constant would write the build's version on every row and the
+    /// disagreement could never appear. Equal to
+    /// [`UPSTREAM_FORMAT_VERSION`] for every object *this* build admits — `open`
+    /// refuses any other — which is precisely why it has to be read out of the
+    /// header rather than restated: the day a build reads two versions, the
+    /// constant becomes the wrong answer with nothing to say so.
+    format_version: u16,
     connections: Vec<UpstreamConnection>,
     buffer: Vec<u8>,
     messages_read: u64,
@@ -561,11 +574,21 @@ impl<R: Read> UpstreamObjectReader<R> {
         Ok(Self {
             inner,
             object_key,
+            format_version: version,
             connections,
             buffer: Vec::new(),
             messages_read: 0,
             refused: false,
         })
+    }
+
+    /// The format version the object's own header states.
+    ///
+    /// What a row's `format_version` is filled from, and the reason the value is
+    /// kept rather than recomputed. See the field.
+    #[must_use]
+    pub const fn format_version(&self) -> u16 {
+        self.format_version
     }
 
     /// The object key every refusal names.
@@ -773,7 +796,8 @@ pub struct PublishedUpstreamObject {
 /// [`SinkError`] when the segment cannot be read, the object cannot be written,
 /// or the manifest cannot be serialised or moved. The segment is left where it
 /// is on failure: a partial publication that also removed the segment
-/// would destroy the only copy of the window.
+/// would destroy the only copy of the window. Everything the attempt itself
+/// created is removed, which is [`clean_up`]'s whole job.
 pub fn publish(
     source: &Path,
     completed_dir: &Path,
@@ -781,20 +805,63 @@ pub fn publish(
     compression: Compression,
 ) -> Result<PublishedUpstreamObject, SinkError> {
     fs::create_dir_all(completed_dir).map_err(SinkError::Io)?;
+    let names = Names::of(&draft, completed_dir, compression);
+    match assemble(source, completed_dir, draft, compression, &names) {
+        Ok(published) => Ok(published),
+        Err(e) => {
+            clean_up(completed_dir, &names);
+            Err(e)
+        }
+    }
+}
 
-    let file_name = format!(
-        "{}-{}-{}.{}",
-        draft.start_ns,
-        draft.end_ns,
-        draft.segment_seq,
-        upstream_object_extension(compression)
-    );
-    let manifest_name = format!("{file_name}.manifest.json");
+/// Every name one publication touches, built once so the failure path can reach
+/// the same files the success path made.
+///
+/// The pcapng side's arrangement, and for the reason it has one: a cleanup that
+/// spelled these a second time is a cleanup that can come to spell one of them
+/// differently, and the file it then fails to remove is a full-size object.
+struct Names {
+    /// The name the object carries inside `completed_dir`. The key it lands
+    /// under in object storage is the manifest's, and it is not this.
+    file_name: String,
+    manifest_name: String,
+    object_tmp: PathBuf,
+    manifest_tmp: PathBuf,
+}
 
-    let object_tmp = completed_dir.join(format!(".{file_name}.tmp"));
-    let manifest_tmp = completed_dir.join(format!(".{manifest_name}.tmp"));
+impl Names {
+    fn of(draft: &UpstreamManifest, completed_dir: &Path, compression: Compression) -> Self {
+        let file_name = format!(
+            "{}-{}-{}.{}",
+            draft.start_ns,
+            draft.end_ns,
+            draft.segment_seq,
+            upstream_object_extension(compression)
+        );
+        let manifest_name = format!("{file_name}.manifest.json");
+        Self {
+            object_tmp: completed_dir.join(format!(".{file_name}.tmp")),
+            manifest_tmp: completed_dir.join(format!(".{manifest_name}.tmp")),
+            file_name,
+            manifest_name,
+        }
+    }
+}
 
-    let (byte_count, sha256) = seal(source, &object_tmp, compression)?;
+/// Seals the object, writes the manifest, and publishes both by moving.
+///
+/// Split out so that [`publish`] has exactly one failure path and
+/// [`clean_up`] covers all of it. Inline, every `?` between the seal and the
+/// last move was an exit of its own that left the sealed object behind.
+fn assemble(
+    source: &Path,
+    completed_dir: &Path,
+    draft: UpstreamManifest,
+    compression: Compression,
+    names: &Names,
+) -> Result<PublishedUpstreamObject, SinkError> {
+    let (byte_count, sha256) = seal(source, &names.object_tmp, compression)?;
 
     let mut manifest = draft;
     manifest.object_key = object_key(
@@ -803,27 +870,49 @@ pub fn publish(
         &manifest.site,
         &manifest.recorder,
         manifest.start_ns,
-        &file_name,
+        &names.file_name,
     );
     manifest.byte_count = byte_count;
     manifest.sha256 = crate::compress::hex(&sha256);
 
     let json = manifest.to_json()?;
-    write_and_sync(&manifest_tmp, json.as_bytes())?;
+    write_and_sync(&names.manifest_tmp, json.as_bytes())?;
 
     // The manifest lands first and the object second, as the pcapng side does
     // it, so a manifest that survives a failed object move is cleaned up rather
     // than left as a row pointing at nothing.
-    let manifest_path = completed_dir.join(&manifest_name);
-    fs::rename(&manifest_tmp, &manifest_path).map_err(SinkError::Io)?;
-    let path = completed_dir.join(&file_name);
-    if let Err(e) = fs::rename(&object_tmp, &path) {
-        let _ = fs::remove_file(&manifest_path);
-        let _ = fs::remove_file(&object_tmp);
-        return Err(SinkError::Io(e));
-    }
+    fs::rename(
+        &names.manifest_tmp,
+        completed_dir.join(&names.manifest_name),
+    )
+    .map_err(SinkError::Io)?;
+    let path = completed_dir.join(&names.file_name);
+    fs::rename(&names.object_tmp, &path).map_err(SinkError::Io)?;
 
     Ok(PublishedUpstreamObject { path, manifest })
+}
+
+/// Removes what a publication that could not land would otherwise leave.
+///
+/// Without this, a `completed_dir` that cannot be written to leaks one **sealed
+/// full-size object** per rotation, and the temporary manifest beside it: files
+/// the watermark does not account for and eviction cannot reach, which is an
+/// unbounded disk out of a storage outage. That is the failure the pcapng
+/// side's own `clean_up` says it exists to prevent, and the way it was reached
+/// here is that every `?` between the seal and the final move was an exit of
+/// its own.
+///
+/// One thing the pcapng side does is deliberately absent here: it retains the
+/// segment under the name the budget accounts for, because its success path
+/// *removes* the segment and its failure path is the only place the window
+/// survives. This path never removes the segment at all — [`publish`] states as
+/// much — so there is nothing to retain and no second name to give it.
+fn clean_up(completed_dir: &Path, names: &Names) {
+    let _ = fs::remove_file(&names.object_tmp);
+    let _ = fs::remove_file(&names.manifest_tmp);
+    // A manifest lands before its object, so one that survives a failed object
+    // move is a row pointing at nothing.
+    let _ = fs::remove_file(completed_dir.join(&names.manifest_name));
 }
 
 /// Fills `buf` or says how much was there, without treating a short read as an

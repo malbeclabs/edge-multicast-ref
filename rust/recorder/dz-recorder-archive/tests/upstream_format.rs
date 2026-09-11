@@ -621,3 +621,108 @@ fn a_header_that_declares_one_name_twice_is_refused_by_the_reader() {
         other => panic!("an ambiguous header was not refused: {other:?}"),
     }
 }
+
+/// The reader answers with the version its **own header** states.
+///
+/// The same number as this build's constant today, and the wrong answer the
+/// moment a build reads a version it did not write: it would stamp its own
+/// version on every row derived from the older object, and `format_version` is
+/// the column that exists to expose exactly that disagreement.
+///
+/// One version is admitted, so this cannot yet be shown by reading two. What it
+/// holds is where the value comes from: the header's version field is read out
+/// of the object's bytes here and compared against what the reader answers, so
+/// a reader that stopped keeping it has nothing to answer with.
+#[test]
+fn a_reader_answers_with_the_format_version_its_header_states() {
+    let object = write(&[(0, 1_700_000_000_000_000_000, b"one".to_vec())]);
+    let stated = u16::from_le_bytes([object[8], object[9]]);
+    assert_eq!(
+        stated, UPSTREAM_FORMAT_VERSION,
+        "the fixture's own header is not this build's version"
+    );
+    let reader = UpstreamObjectReader::open(KEY, &object[..]).expect("the object opens");
+    assert_eq!(reader.format_version(), stated);
+}
+
+/// The draft a publication is handed, so a test that is about the failure path
+/// does not restate twelve fields to get there.
+fn draft() -> UpstreamManifest {
+    UpstreamManifest {
+        format_version: UPSTREAM_FORMAT_VERSION,
+        site: "site-1".to_owned(),
+        recorder: "recorder-1".to_owned(),
+        env: "test".to_owned(),
+        feed: "top-of-book".to_owned(),
+        observation: "site-1/recorder-1".to_owned(),
+        connections: connections(),
+        segment_seq: 3,
+        start_ns: 1_700_000_000_000_000_000,
+        end_ns: 1_700_000_000_000_000_000,
+        message_count: 1,
+        object_key: String::new(),
+        sha256: String::new(),
+        byte_count: 0,
+    }
+}
+
+/// **A publication that cannot land leaves nothing behind.**
+///
+/// The temporary object is a sealed, full-size copy of the segment, inside
+/// `completed_dir` itself and under a name no manifest points at. One failed
+/// rotation leaks one of them, so a storage outage leaks one per rotation for as
+/// long as it lasts: files the watermark does not account for and eviction
+/// cannot reach, which is an unbounded disk out of the outage the watermark
+/// exists to survive — the failure the pcapng side's own `clean_up` says it is
+/// there to prevent.
+///
+/// The fault is forced where a real one falls, between the seal and the moves,
+/// by putting a *directory* where the manifest has to land: the rename that
+/// publishes it then cannot succeed. The mutant this kills is any early return
+/// between those two points — each one left the sealed object and the temporary
+/// manifest in place, and the object rename was the only failure with a cleanup
+/// of its own.
+#[test]
+fn a_publication_that_cannot_land_leaves_no_sealed_object_behind() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let segment = dir.path().join("open.dzus");
+    // Not tiny, so that what a leak would cost is what a leak really costs.
+    let object = write(&[(0, 1_700_000_000_000_000_000, vec![0x5Au8; 64 << 10])]);
+    std::fs::write(&segment, &object).expect("the segment is writable");
+
+    let completed = dir.path().join("completed");
+    std::fs::create_dir_all(&completed).expect("the completed directory");
+    let blocked = format!(
+        "1700000000000000000-1700000000000000000-3.{}.manifest.json",
+        upstream_object_extension(Compression::None)
+    );
+    std::fs::create_dir(completed.join(&blocked)).expect("the blocking directory");
+
+    let error = publish(&segment, &completed, draft(), Compression::None)
+        .expect_err("the manifest cannot be moved onto a directory");
+    assert!(matches!(error, SinkError::Io(_)), "{error:?}");
+
+    let mut left: Vec<String> = std::fs::read_dir(&completed)
+        .expect("the completed directory reads")
+        .map(|entry| {
+            entry
+                .expect("an entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    left.sort();
+    assert_eq!(
+        left,
+        vec![blocked],
+        "a failed publication left files in completed_dir"
+    );
+
+    // And the segment is still where it was, which is the one thing the failure
+    // path must never take: it is the only copy of the window.
+    assert!(
+        segment.exists(),
+        "a failed publication removed the segment, which is the only copy of the window"
+    );
+}

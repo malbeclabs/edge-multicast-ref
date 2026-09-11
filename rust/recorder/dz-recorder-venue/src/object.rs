@@ -15,9 +15,7 @@
 
 use dz_adapter_core::ConnectionId;
 use dz_recorder_archive::open_sealed;
-use dz_recorder_archive::upstream::{
-    UpstreamFormatError, UpstreamMessage, UpstreamObjectReader, UPSTREAM_FORMAT_VERSION,
-};
+use dz_recorder_archive::upstream::{UpstreamFormatError, UpstreamMessage, UpstreamObjectReader};
 use std::io::Read;
 
 /// Everything a derivation needs to know about an object other than its bytes.
@@ -83,7 +81,15 @@ pub trait VenueObject {
     /// What the object is, as its manifest states it.
     fn id(&self) -> &VenueObjectId;
 
-    /// The archive format the object is written in.
+    /// The archive format the object is written in, **as the object itself
+    /// states it**.
+    ///
+    /// The value read out of the object's own header, never a reader's own
+    /// constant and never a manifest's claim. It is what the `format_version`
+    /// column holds, and that column exists to expose a reader that derived a
+    /// window at one version from an object written at another — which an
+    /// implementation answering with its build's constant makes impossible to
+    /// see.
     fn format_version(&self) -> u16;
 
     /// The connections the object's own header declares, in the order its
@@ -168,10 +174,17 @@ impl<R: Read> VenueObject for ArchivedVenueObject<R> {
     }
 
     fn format_version(&self) -> u16 {
-        // The reader refuses any other version at `open`, so this is the one
-        // version the messages below were read at rather than a value copied
-        // out of a manifest that could disagree with the bytes.
-        UPSTREAM_FORMAT_VERSION
+        // The object's **own header**, through the reader that read it — not
+        // this build's constant, and not a manifest beside the object that
+        // could disagree with the bytes.
+        //
+        // The two are equal for every object this build admits, because `open`
+        // refuses any other version. Answering with the constant anyway is the
+        // defect: the day a build reads a version it did not write, it would
+        // stamp its own number on every row of the older object and the one
+        // disagreement the `format_version` column exists to expose would be
+        // the one thing it could never show.
+        self.reader.format_version()
     }
 
     fn declared_connections(&self) -> Vec<String> {
