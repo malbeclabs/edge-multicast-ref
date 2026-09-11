@@ -166,13 +166,35 @@ fallback: a `[adapter] kind` this binary did not register is a startup error
 naming every token it did, because *what is in this binary* is the question an
 operator cannot answer from the config file in front of them.
 
-The transport comes from [`rust/ingress`](rust/ingress/). A WebSocket venue that
-authenticates its upgrade passes a header provider, which runs on **every**
-connect attempt — a venue signing a fresh timestamp and headers computed once at
-startup gives a publisher that connects and can then never reconnect. A
-transport whose crate is not linked is refused at startup, so the binary depends
-on `dz-ingress-core` with the marker feature for the transports it means to
-allow.
+The transport comes from [`rust/ingress`](rust/ingress/). `[ingress] kind` names
+one of a closed set — `websocket`, `fix`, `multicast`, `poll`, `filetail`,
+`uds` — and the ones that are built are:
+
+- **`websocket`**, for a venue that carries its book on a subscription. A venue
+  that authenticates its upgrade passes a header provider, which runs on
+  **every** connect attempt — a venue signing a fresh timestamp and headers
+  computed once at startup gives a publisher that connects and can then never
+  reconnect.
+- **`poll`**, for a venue whose instrument catalogue is a request rather than a
+  subscription: the endpoint is asked on `poll_interval`, the body arrives as a
+  payload, and no code in the venue's binary holds a timer, a backoff or a
+  failure count. An unchanged response is liveness and not a payload, so the
+  idle guard still fires on a catalogue that has stopped changing. `https` needs
+  the crate's `tls` feature and is refused at load without it, and a credential
+  goes on the query string rather than in a userinfo section — nothing sends
+  one, so `http://user:secret@host/catalogue` is refused at load instead of
+  going out unauthenticated and answering `401` to a document that looks right.
+
+The other four — `fix`, `multicast`, `filetail`, `uds` — are named by the set
+and have no crate behind them yet. They are listed because an operator who has
+misspelled a transport needs to be told the whole set rather than the part this
+build happens to carry, which is the difference between *no such transport* and
+*not built with it*; naming one in a document is the startup failure below and
+not a feed. [`rust/ingress`](rust/ingress/) is the list of what exists.
+
+A transport whose crate is not linked is refused at startup, so the binary
+depends on `dz-ingress-core` with the marker feature for the transports it means
+to allow.
 
 ### 4. Prove it offline before you point it at anything
 
@@ -196,7 +218,7 @@ venue = "a-venue"
 
 [egress]
 pin = "192.0.2.10"      # the source address to send from, not discovered
-ttl = 1
+ttl = 1                 # required; no default. 1 is the attached segment only
 
 [[feed]]
 spec = "top-of-book"
@@ -238,6 +260,16 @@ kind = "a-venue-tob"
   address off the default route sends from the wrong interface the moment the
   feed lives on a tunnel — and the IGMP report leaves by the wrong path too, so
   the symptom is silence that reads as a clean feed.
+- **`ttl` has no default, and a document that omits it is refused at load.**
+  State the hop count the group's path actually takes; if the subscribers are on
+  the attached segment, that value is `1`. It is required because a wrong hop
+  count is invisible from every direction an operator can look: a locally
+  attached subscriber receives, so a check on the publisher's own host passes;
+  every datagram is sent successfully, so nothing in the egress series moves,
+  because the kernel accepted each one and a router discarded it; and a
+  subscriber that never joined has nothing to number, so gap detection reports
+  nothing either. `ttl = 0` is refused as well: it is not a smaller hop count
+  than `1` but a datagram the kernel accepts and no interface ever carries.
 - **`source_id` and `channel_id` are identity on the wire.** Two publishers
   sharing a `Source ID` on one group are indistinguishable to a subscriber's gap
   detection. Two `[[feed]]` blocks in one document sharing a `channel_id` are
@@ -328,6 +360,32 @@ role = "comparison"         # connected, driven, counted — for the race
   one source, or `[[source]] ingress` per source. Both is refused: a key read
   only when another is absent is a key an operator cannot reason about. A
   document that names it per source need not write `[ingress]` at all.
+- **A polled source states its own endpoint and cadence.** `dz-ingress-poll`
+  reads `endpoint` and `poll_interval` out of that source's own
+  `[source.upstream]` block — a transport's own keys are the transport crate's
+  to parse, the same rule that keeps `[ingress]` in one crate — so the venue's
+  `main` deserializes that block and builds the transport from it. It is an
+  *interval* and not a cycle: `definition_cycle` and `snapshot_cycle` are one
+  pass over a set divided by the set's size, and one tick here is one request
+  with no set to divide by. A polled source that omits it does not parse, because
+  a transport with no cadence polls in a loop or never. There is no default and
+  there is a floor: `50ms` is the shortest cadence the transport runs, which
+  refuses the unit slip — `"1ms"` where `"1m"` was meant is one character, and a
+  catalogue asked a thousand times a second is how a publisher's address gets
+  blocked rather than merely being wrong.
+
+  **Keep `poll_interval` well under `[ingress] idle_timeout`.** The driver hands
+  a receive what is left of the idle guard, so a cadence longer than the guard
+  spends that budget and reports idle before the next request is due: the driver
+  ends the connection with `timeout`, reconnects, polls once, and does it again.
+  `poll_interval = "60s"` under `idle_timeout = "30s"` gives one payload per
+  window with `connection_state` flapping and
+  `reconnects_total{reason="timeout"}` climbing, on a document that reads as
+  correct. Nothing refuses it at load — the transport cannot see `[ingress]`,
+  and `[ingress]` does not know a source is polled — so this is the rule that
+  has to be read rather than enforced. An unchanged catalogue is liveness and
+  **does not reset the guard**, which is deliberate, so the guard has to be long
+  enough for a poll that answers.
 - **The name in the file is the metric label.** `dz_publisher_ingress_*` carries
   `connection`, pre-created at 0 for every declared source, so a second upstream
   that never came up is a series sitting at zero rather than no series at all. A

@@ -47,6 +47,23 @@ jobs:
       # is the one that has established it can deliver multicast to itself.
       - name: Build (loopback tests)
         run: cargo test -p dz-recorder-capture --features loopback-tests --no-run
+      # The polled transport's TLS build. Every step above enables no features,
+      # so without these lines `HttpClient::tls_config`, both
+      # `#[cfg(feature = "tls")]` connector definitions and two tests are never
+      # compiled at all — while `rustls` and `webpki-roots` are caret
+      # requirements, deliberately, so that there is one copy of each in the
+      # graph with the websocket crate. A patch release that moves
+      # `builder_with_provider` under us would therefore land green.
+      #
+      # In this job rather than a job of its own because the feature needs
+      # nothing of the host, which is exactly what this job is for: what the
+      # extra compile costs is the TLS stack and one crate, not a second pass
+      # over the workspace. The `afpacket` job makes the same choice for
+      # `dz-recorder --no-default-features` one feature over.
+      - name: Clippy (dz-ingress-poll, tls)
+        run: cargo clippy -p dz-ingress-poll --features tls --all-targets -- -D warnings
+      - name: Test (dz-ingress-poll, tls)
+        run: cargo test -p dz-ingress-poll --features tls
 
   # AF_PACKET mode is a separate job because it needs libpcap-dev at build
   # time, and the job above must stay the gate that needs no system package:

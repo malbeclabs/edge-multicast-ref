@@ -20,7 +20,7 @@ The variant exists as `Kind::Rest`, with the token `"rest"` and the doc comment 
 
 **`poll` is already this repository's word for asking on a cadence**, and it is used consistently: `poll_listings`, `poll_upstream`, the listing poll, the definition pacer's own laps. `GLOSSARY.md` neither defines nor bans it, and it collides with nothing here.
 
-**Renaming costs nothing now and is expensive later.** Nothing constructs the variant, so no document can name it usefully: `kind = "rest"` today resolves to a transport the binary does not link and is refused at startup with a message listing what it does. Once a venue ships a document naming it, the token is in configuration management and the rename is a coordinated change. So the rename lands *before* the transport, as its own task, and `Kind::ALL`, `TOKEN_LIST`, `as_token` and the `every_kind_has_a_token` test move with it.
+**Renaming costs nothing now and is expensive later.** Nothing constructs the variant, so no document can name it usefully: `kind = "rest"` today resolves to a transport the binary does not link and is refused at startup with a message listing what it does. Once a venue ships a document naming it, the token is in configuration management and the rename is a coordinated change. So the rename lands *before* the transport, as its own task, and `Kind::ALL`, `TOKEN_LIST`, `as_token` and the feature gate move with it, under `the_token_list_in_the_error_message_is_the_token_set` — which pins the list against the variant set including the order. (This document first named that test `every_kind_has_a_token`, which does not exist; the name was copied from `TOKEN_LIST`'s own doc comment and is corrected here and there.)
 
 ## The shape under `Input`
 

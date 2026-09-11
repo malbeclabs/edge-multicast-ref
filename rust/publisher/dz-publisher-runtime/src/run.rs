@@ -1873,7 +1873,7 @@ mod tests {
         let mut runs: Vec<(bool, Run)> = vec![
             (false, ready("fix")),
             (true, pending()),
-            (false, ready("rest")),
+            (false, ready("poll")),
         ];
         let mut reported: Vec<&'static str> = Vec::new();
         let waker = std::task::Waker::noop();
@@ -1883,7 +1883,7 @@ mod tests {
             reported.push(connection);
         });
         assert!(polled.is_pending(), "the primary has not given up");
-        assert_eq!(reported, vec!["fix", "rest"]);
+        assert_eq!(reported, vec!["fix", "poll"]);
         // Dropped from the set, because a future that returned `Ready` panics
         // if it is polled again — and because leaving it out is what leaves its
         // connection_state at 0.

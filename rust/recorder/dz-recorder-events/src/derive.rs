@@ -52,12 +52,25 @@ pub struct EventInput<'a> {
     /// misrouted from another feed in the family being parsed at the wrong
     /// layout.
     pub magic: u16,
-    /// Where this view of the book came from, as `site` names a recorder.
+    /// Which **publisher-side** observation point this view of the book came
+    /// from, as `site` names a recorder. Two recorders of one multicast feed
+    /// are two observations, and a race is one `state_key` seen at more than
+    /// one of them.
     ///
-    /// Two recorders of one multicast feed are two observations; a multicast
-    /// feed and some other transport carrying the same instruments are two
-    /// observations. Nothing downstream knows which is which, and nothing
-    /// should — a race is one `state_key` seen at more than one of these.
+    /// **Never a venue-side observation.** This value reaches `book_top` rows,
+    /// and each of those carries `source_addr`, `channel_id`, `dst_port`,
+    /// `sequence_number`, `message_index` and `reset_count`, none of them
+    /// nullable and every one a statement about a datagram — a venue's upstream
+    /// message is not one. (`book_top.observation`'s own comment names the
+    /// neighbours that are non-nullable for reasons of their own, so the
+    /// criterion can be checked against the DDL rather than counted.) The
+    /// pairing then groups on four expressions — `channel_id`,
+    /// `instrument_id`, `state_key` and the occurrence ordinal, which is the
+    /// query's own, numbered rather than supplied — and a venue side can
+    /// compute none of the three identifiers. A venue-side observation is its
+    /// own grain, paired on `(feed, symbol, book_key, occurrence)` with
+    /// [`book_key`](crate::book_key) — see
+    /// `docs/superpowers/specs/2026-09-09-recorder-venue-observation-design.md`.
     pub observation: &'a str,
     /// Whether `SnapshotLevel` messages become rows.
     ///

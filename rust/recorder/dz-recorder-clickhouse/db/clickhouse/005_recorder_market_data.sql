@@ -207,10 +207,26 @@ CREATE TABLE IF NOT EXISTS recorder.book_top (
     recorder          LowCardinality(String),
     env               LowCardinality(String),
     feed              LowCardinality(String),
-    -- Where this view of the book came from, as `site` names a recorder. Two
-    -- recorders of one multicast feed are two observations; a multicast feed and
-    -- some other transport carrying the same instruments are two observations.
-    -- Nothing here knows which is which, and nothing should.
+    -- Which PUBLISHER-SIDE observation point this view of the book came from,
+    -- as `site` names a recorder. Two recorders of one multicast feed are two
+    -- observations, and a race is one `state_key` seen at more than one.
+    --
+    -- Not a venue-side observation, and the criterion is what a column states
+    -- rather than how many there are: `source_addr`, `channel_id`, `dst_port`,
+    -- `sequence_number`, `message_index` and `reset_count` are statements about
+    -- a datagram, none of the six nullable, and a venue's upstream message is
+    -- not a datagram — so a venue-side row could not leave them out and could
+    -- only invent them. `source_id` and `segment_seq` sit beside them and fall
+    -- on the other side of that line: `source_id` names the matching engine
+    -- the message describes, and `segment_seq` places a row in the recording,
+    -- which a venue-side archive has its own notion of. Those two are
+    -- non-nullable as well, so they would have to be invented too — but what
+    -- neither of them is, is a statement about a datagram, and it is the
+    -- criterion and not the nullability that decides what this table holds.
+    -- The pairing then groups on `channel_id`, `instrument_id`, `state_key`
+    -- and the occurrence ordinal it numbers itself, and a venue side can
+    -- compute none of the three identifiers. A venue-side observation is its
+    -- own grain in its own table.
     observation       LowCardinality(String),
     source_addr       IPv4,
     channel_id        UInt8,
@@ -230,12 +246,20 @@ CREATE TABLE IF NOT EXISTS recorder.book_top (
     ask_source_count  Nullable(UInt16),
     price_exp         Int8,
     qty_exp           Int8,
-    -- The equivalence key: a hash over the instrument and both sides, and over
-    -- nothing else. No timestamp, because a timestamp is the quantity being
-    -- measured. No sequence number or Reset Count, because two observation points
-    -- on two transports do not share them. No bytes, because a hash over the
-    -- payload is a function of the schema version and the batching, so a
-    -- publisher upgrade repartitions the key space and the race reports nothing.
+    -- The equivalence key FOR TWO OBSERVERS OF ONE CHANNEL: a hash over the
+    -- `Channel ID`, the `Instrument ID` and both sides, and over nothing else.
+    -- The two identifiers are in it, which is what makes it observer-dependent
+    -- rather than merely transport-independent, and why a venue side — which
+    -- can name neither — pairs on `book_key` in its own table instead.
+    --
+    -- No timestamp, because a timestamp is the quantity being measured. No
+    -- sequence number or Reset Count: two recorders of one multicast feed do
+    -- share them, but they are a statement about a datagram rather than about
+    -- the book, and a key holding them would stop matching the moment one
+    -- observation point missed a datagram the other saw — which is the case
+    -- the race exists to measure. No bytes, because a hash over the payload is
+    -- a function of the schema version and the batching, so a publisher
+    -- upgrade repartitions the key space and the race reports nothing.
     state_key         UInt64,
     -- The equivalence key for two observers of one MARKET, which is a different
     -- question: a hash over the two sides above and over nothing else, so an

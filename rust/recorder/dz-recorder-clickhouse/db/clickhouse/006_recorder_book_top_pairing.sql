@@ -1,12 +1,36 @@
 -- The race, as a query over `book_top`: number the occurrences, then pair
 -- ordinal to ordinal.
 --
--- No new table, for the reason the cross-site loss comparison needed none: both
--- sides' rows land in one table and the comparison is a query. `observation`
--- names where a view of the book came from, as `site` names a recorder — two
--- recorders of one multicast feed are two observations, and a multicast feed and
--- some other transport carrying the same instruments are two observations.
--- Nothing here knows which kind it is looking at, and nothing should.
+-- No new table, for the reason the cross-site loss comparison needed none: the
+-- rows of both observation points land in one table and the comparison is a
+-- query. `observation` names which PUBLISHER-SIDE observation point a view of
+-- the book came from, as `site` names a recorder, and two recorders of one
+-- multicast feed are two observations.
+--
+-- THAT IS THE WHOLE OF WHAT PAIRS HERE. A venue-side observation is not one of
+-- these and cannot become one: the `GROUP BY` below is `channel_id`,
+-- `instrument_id`, `state_key` and the occurrence ordinal, and of the three
+-- identifiers the first is the operator's mapping, the second is minted by the
+-- publisher's registry and the third eats both before any price — so a venue
+-- side can compute none of the three, and the last least of all. (The ordinal
+-- is the query's own, numbered below rather than supplied, which is why it is
+-- not one of the three.) The rows it would pair also carry `source_addr`,
+-- `channel_id`, `dst_port`, `sequence_number`, `message_index` and
+-- `reset_count`, none of them nullable and every one a statement about a
+-- datagram; `book_top`'s own `observation` comment names the neighbours that
+-- are non-nullable for reasons of their own.
+--
+-- A venue-side race is its own view over its own grain, keyed on
+-- `(feed, symbol, book_key, occurrence)`: `book_key` is the one hash both sides
+-- can compute, and it carries no instrument identity, so the symbol travels
+-- beside it. The arguments below about the unpaired occurrence, the anchored
+-- row and the caller's bound carry over to it unchanged. **The ordinal's own
+-- does not**, and that is the one thing to port rather than copy: the window
+-- below partitions on `observation`, `channel_id`, `instrument_id`, the era
+-- anchor and `state_key`, and everything in that list but `observation` is
+-- publisher-side — so a venue-side view numbers within
+-- `(observation, feed, symbol, book_key)` instead. What carries over is the
+-- reason for numbering, not the partition it numbers within.
 --
 --
 -- WHY THIS IS NOT AN `ASOF JOIN`, WHICH IS THE OBVIOUS MOVE
