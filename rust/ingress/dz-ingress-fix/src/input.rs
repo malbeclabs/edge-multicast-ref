@@ -78,8 +78,9 @@ pub trait Connector: Send {
     /// the first packet to a stream a logon can be written on, and not five
     /// seconds each: a budget applied twice is twice the number, which is the
     /// reason the teardown's own halves share
-    /// [`LOGOUT_GRACE`](crate::LOGOUT_GRACE). An implementation that spends it
-    /// in stages carries one deadline and hands each stage what is left.
+    /// [`LOGOUT_GRACE`](crate::session::LOGOUT_GRACE). An implementation that
+    /// spends it in stages carries one deadline and hands each stage what is
+    /// left.
     ///
     /// # Errors
     ///

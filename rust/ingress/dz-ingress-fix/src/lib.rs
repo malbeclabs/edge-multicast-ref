@@ -44,6 +44,42 @@
 //! The signature therefore stays in venue code, in the method that already
 //! writes at logon, and this crate signs nothing on a venue's behalf.
 //!
+//! ## What that does not reach: a signature over tags this crate owns
+//!
+//! **The common FIX logon scheme signs a canonical string that includes
+//! `SendingTime` and `MsgSeqNum`, and an adapter here can state neither.**
+//! A body is refused both — tag `52` because the sending time is stamped when
+//! the message is framed, tag `34` because the outbound sequence belongs to
+//! the session — and the session takes both *after* `Adapter::on_connected`
+//! has returned. Nothing on the `UpstreamSink` path tells an adapter what
+//! either value will be, so an adapter whose scheme signs over them composes a
+//! signature the venue rejects, and the publisher loops on an authentication
+//! refusal with nothing in it that looks like a defect.
+//!
+//! So the seam above holds for a venue whose logon signature covers only what
+//! it writes itself — its identity, its target, a password — and not for one
+//! whose signature covers `52` or `34`. The second shape is the common one:
+//! `SendingTime | MsgType | MsgSeqNum | SenderCompID | TargetCompID` signed
+//! into `RawData` is what several venues ask for, and no test here would
+//! notice, because every logon fixture carries an opaque `554` and signs
+//! nothing.
+//!
+//! **This is a limitation and not a position.** What the paragraphs above
+//! decline is a *signer parameter*, and that argument stands. Handing the
+//! adapter the stamp and the sequence it is about to be framed under is a
+//! narrower change they do not cover, because the scheme, the key and the
+//! canonical form would all stay in venue code and this crate would still hold
+//! no credential. It is not made here because it is a change to the adapter
+//! seam every transport sits on, and it has ordering to settle rather than a
+//! parameter to add: the session would have to commit to both values before
+//! calling the adapter and then frame under exactly those, including when a
+//! delayed write leaves the stamp stale.
+//!
+//! The same argument is already conceded inbound, which is worth reading
+//! beside this: [`session::Incoming::Message`] is handed
+//! over entire, and says it is because a venue's own message identity may be
+//! computed over the sequence and the sending time.
+//!
 //! # Sequence numbers reset at logon, and that is a decision
 //!
 //! The outbound sequence starts at 1 on every logon, with the flag that says
