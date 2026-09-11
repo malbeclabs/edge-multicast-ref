@@ -532,6 +532,47 @@ fn a_declared_length_past_the_ceiling_is_refused_before_the_bytes_are_kept() {
 }
 
 #[test]
+fn a_declared_length_no_total_can_be_computed_from_is_refused_and_not_added_up() {
+    // The revert this test exists for: compare `declared` against the
+    // configured ceiling alone and then add it to `measured_at` and the
+    // checksum field's width. `Decoder::with_max_body_bytes` is public and
+    // takes any `usize`, and `declared` is a number the far side wrote — so a
+    // ceiling near `usize::MAX` leaves malformed wire input able to overflow
+    // that addition. A debug build panics, which is a decoder brought down by
+    // a peer's bad number; a release build is worse, because the total wraps to
+    // a few bytes, the "is all of it here?" check comes back true, and `take`
+    // reads a message out of a buffer holding nothing of the sort.
+    //
+    // The ceiling is chosen so that nothing *but* the arithmetic can refuse
+    // these: the configured value admits every one of them.
+    for declared in [usize::MAX, usize::MAX - 1] {
+        let mut decoder = Decoder::with_max_body_bytes(usize::MAX);
+        decoder.feed(&wire(&format!("8={BEGIN_STRING}|9={declared}|35=0|")));
+        let mut out = Vec::new();
+        let error = decoder
+            .take(&mut out)
+            .expect_err("a length no message length can be computed from");
+        match error {
+            FramingError::TooLarge {
+                declared: stated,
+                limit,
+            } => {
+                assert_eq!(stated, declared, "the refusal states what was declared");
+                // And the ceiling it names is the one that was applied, so an
+                // operator reading the line can compute it back: the configured
+                // value would not be smaller than the declared length, which is
+                // what makes the message true rather than merely present.
+                assert!(
+                    limit < declared,
+                    "the refusal states a ceiling the declared length does not exceed: {limit}"
+                );
+            }
+            other => panic!("{other}"),
+        }
+    }
+}
+
+#[test]
 fn bytes_with_no_separator_are_refused_rather_than_buffered_without_bound() {
     // The half of the ceiling a declared length cannot carry, and the case that
     // grows the buffer without any bound. A peer that writes `8=FIX.4.4` and

@@ -158,6 +158,16 @@ pub enum FramingError {
     ///
     /// The size is chosen by whoever is on the other end of the socket and the
     /// buffer is ours, so there is a ceiling and it is stated.
+    ///
+    /// **`limit` is the ceiling that was applied, which is the configured one
+    /// or what is left of a `usize` — whichever is smaller.**
+    /// [`Decoder::with_max_body_bytes`] accepts any value, so a ceiling near
+    /// `usize::MAX` would otherwise leave a declared length that large to be
+    /// added to the header already read and the checksum field, and a decoder
+    /// that panics on a number the far side chose is exactly the outcome this
+    /// variant exists to give instead. The applied value is what the message
+    /// states rather than the configured one, because an operator reading a
+    /// refusal has to be able to compute it back.
     #[error("a message declaring {declared} body bytes exceeds the {limit}-byte ceiling")]
     TooLarge { declared: usize, limit: usize },
 
@@ -707,6 +717,16 @@ impl Decoder {
     }
 
     /// A decoder with a stated ceiling on a declared body length.
+    ///
+    /// Any `usize` is accepted, `usize::MAX` included, and the refusal is where
+    /// that is reconciled: what bounds a declared length is this value or what
+    /// is left of a `usize` once the header already read and the checksum field
+    /// are added to it, whichever is smaller, and
+    /// [`FramingError::TooLarge`] states the one that was applied. Infallible
+    /// and `const` for that reason — a ceiling refused here would be a second
+    /// way to fail at construction over a number nothing on the wire has to
+    /// agree with, and a value silently clamped here would leave the decoder
+    /// bounded by something its caller never wrote.
     #[must_use]
     pub const fn with_max_body_bytes(max_body_bytes: usize) -> Self {
         Self {
@@ -817,13 +837,43 @@ impl Decoder {
                     rendered(&tail[length_prefix.len()..second_end])
                 ),
             })?;
-        if declared > self.max_body_bytes {
+        let measured_at = after_begin + second_end + 1;
+        // **The ceiling applied is the configured one or what is left of a
+        // `usize`, whichever is smaller — and the refusal states which.**
+        // [`Decoder::with_max_body_bytes`] is public and takes any value,
+        // `usize::MAX` included, while `declared` is a number the far side
+        // wrote: with a ceiling that admits one, the total below is
+        // `measured_at + declared + CHECKSUM_FIELD_LEN` over a `declared` near
+        // `usize::MAX` and it overflows. A debug build panics on malformed wire
+        // input, which is the one thing this decoder must not do; a release
+        // build is worse, because the total wraps to a few bytes, the "is all
+        // of it here?" check below comes back false, and `take` reads a message
+        // out of a buffer holding nothing of the sort.
+        //
+        // It leaves both stated bounds exactly as they are. `max_body_bytes`
+        // still bounds a declared length and nothing else, and
+        // [`MAX_HEADER_BYTES`] is still the whole ceiling on the header's own
+        // separator search rather than a margin on this one. What this adds is
+        // not a third bound on the protocol — it is the address space the total
+        // has to fit in, which is the only reason the arithmetic could fail at
+        // all, and it is subtracted rather than added so that no configured
+        // ceiling can be raised past it.
+        //
+        // Saturating, because an arithmetic with no panic in it is the point:
+        // `measured_at` is at most the buffer's own length and a `Vec` cannot
+        // be longer than `isize::MAX`, so the subtraction is unreachable, and
+        // saturation costs nothing for not having to say so.
+        let ceiling = self.max_body_bytes.min(
+            usize::MAX
+                .saturating_sub(measured_at)
+                .saturating_sub(CHECKSUM_FIELD_LEN),
+        );
+        if declared > ceiling {
             return Err(FramingError::TooLarge {
                 declared,
-                limit: self.max_body_bytes,
+                limit: ceiling,
             });
         }
-        let measured_at = after_begin + second_end + 1;
         let total = measured_at + declared + CHECKSUM_FIELD_LEN;
         if self.buf.len() < total {
             return Ok(None);
