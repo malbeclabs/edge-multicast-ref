@@ -35,10 +35,10 @@ A second revert, which this plan did not think to name: resolving `rest` to `Pol
 
 ### 2. The crate, and the client decision in its manifest
 
-- [ ] `dz-ingress-poll`, alongside `dz-ingress-websocket`, with the marker feature on `dz-ingress-core` that makes `kind = "poll"` resolve — the mechanism that lets the core answer *is that transport in this binary* without depending on the transports.
-- [ ] An async HTTP client, pinned exactly, `default-features = false`, with only the features used and TLS behind a feature of this crate's own. The manifest comment states what the websocket crate's states: which backends are deliberately excluded and why a default must not be able to pull one in.
-- [ ] The crate documentation names the cost the design names: this is the family's first HTTP client and the workspace's second, the other is blocking and belongs to a different process and tier, and neither should migrate toward the other because they look alike in a manifest.
-- [ ] An `https` endpoint in a build without the TLS feature is refused at configuration load, naming the scheme and the feature — the shape the column-store writer already uses.
+- [x] `dz-ingress-poll`, alongside `dz-ingress-websocket`, with the marker feature on `dz-ingress-core` that makes `kind = "poll"` resolve — the mechanism that lets the core answer *is that transport in this binary* without depending on the transports.
+- [x] An async HTTP client, pinned exactly, `default-features = false`, with only the features used and TLS behind a feature of this crate's own. The manifest comment states what the websocket crate's states: which backends are deliberately excluded and why a default must not be able to pull one in.
+- [x] The crate documentation names the cost the design names: this is the family's first HTTP client and the workspace's second, the other is blocking and belongs to a different process and tier, and neither should migrate toward the other because they look alike in a manifest.
+- [x] An `https` endpoint in a build without the TLS feature is refused at configuration load, naming the scheme and the feature — the shape the column-store writer already uses.
 
 **Test:** the refusal, which needs no network; and a crate that builds with and without the TLS feature, which is what says the feature is real rather than declared.
 
@@ -48,10 +48,10 @@ A second revert, which this plan did not think to name: resolving `rest` to `Pol
 
 ### 3. `recv`, and the three answers it has to tell apart
 
-- [ ] A poll due, a response with a body: `Received::Payload`, with no timestamp of its own — the driver stamps it, because a response body carries no receive time this transport knows better than the driver's.
-- [ ] A response that says nothing changed — `304`, or a body whose digest has not moved: `Received::Liveness`.
-- [ ] The budget elapsing before the poll is due: `Received::Idle`.
-- [ ] A failed request: `IngressError::Ended` with the reason, classified by what happened — a refused connection, a timeout, a status the endpoint should not have returned.
+- [x] A poll due, a response with a body: `Received::Payload`, with no timestamp of its own — the driver stamps it, because a response body carries no receive time this transport knows better than the driver's.
+- [x] A response that says nothing changed — `304`, or a body whose digest has not moved: `Received::Liveness`.
+- [x] The budget elapsing before the poll is due: `Received::Idle`.
+- [x] A failed request: `IngressError::Ended` with the reason, classified by what happened — a refused connection, a timeout, a status the endpoint should not have returned.
 
 **Test** (no network: the client is behind a trait this crate owns, the way `RouteLookup` puts the routing table behind one):
 - a changed body is a payload and reaches the driver;
@@ -65,8 +65,8 @@ A second revert, which this plan did not think to name: resolving `rest` to `Pol
 
 ### 4. What is polled is the adapter's to change
 
-- [ ] `send` holds what the adapter wrote as the next request's parameters. A cursor, a page token and a symbol list are all the venue's, and none of them is parsed here.
-- [ ] The parameters are per connection, for the reason `on_connected` gives: one adapter serves every source, and two polled sources are two cursors.
+- [x] `send` holds what the adapter wrote as the next request's parameters. A cursor, a page token and a symbol list are all the venue's, and none of them is parsed here.
+- [x] The parameters are per connection, for the reason `on_connected` gives: one adapter serves every source, and two polled sources are two cursors.
 
 **Test:** what the adapter writes at connect reaches the first request; what it writes through `poll_upstream` reaches the next one. The second half is what makes this transport and that method one mechanism rather than two.
 
@@ -76,9 +76,9 @@ A second revert, which this plan did not think to name: resolving `rest` to `Pol
 
 ### 5. `poll_interval`, and the documents
 
-- [ ] `poll_interval` on the transport's own configuration table, with the design's argument in its doc comment: an interval and not a cycle, because a cycle is one pass over a set divided by its size and one tick here is one request.
-- [ ] `BRINGING-UP-A-FEED.md` gains the transport in its list of what `[ingress] kind` can name, and one line on what a venue uses it for — a catalogue that is a request rather than a subscription.
-- [ ] `docs/README.md` carries the row for this pair.
+- [x] `poll_interval` on the transport's own configuration table, with the design's argument in its doc comment: an interval and not a cycle, because a cycle is one pass over a set divided by its size and one tick here is one request.
+- [x] `BRINGING-UP-A-FEED.md` gains the transport in its list of what `[ingress] kind` can name, and one line on what a venue uses it for — a catalogue that is a request rather than a subscription.
+- [x] `docs/README.md` carries the row for this pair.
 
 **Test:** `scripts/check-public-repo-rules.sh`, a document that states `poll_interval` resolving, and one that omits it refused — a transport with no cadence is a transport that polls in a loop or never, and both are worse than a refusal.
 

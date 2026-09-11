@@ -6,6 +6,7 @@ The transport half of the venue boundary: the half that waits.
 |---|---|
 | [`dz-ingress-core`](dz-ingress-core/) | The `Input` trait, the driver that runs an `Adapter` against it, reconnection and backoff |
 | [`dz-ingress-websocket`](dz-ingress-websocket/) | A WebSocket `Input` |
+| [`dz-ingress-poll`](dz-ingress-poll/) | A polled request/response `Input`, for a catalogue that is a request rather than a subscription |
 
 ## Why this is not in `adapter/`
 
@@ -38,5 +39,19 @@ publisher already does with two validator sources.
 It connects, lets the adapter write its subscriptions, sends them, hands every payload to `on_payload`, and reports every disconnect. `on_connected` runs on **every** successful connect, reconnects included, which is what makes a subscription that was silently lost come back.
 
 That driver is also what makes the adapter's synchronous purity possible: the adapter writes into a queue and the driver drains it afterwards.
+
+## Two HTTP clients in this workspace, and why they stay two
+
+`dz-ingress-poll` is the family's first HTTP client and the workspace's second.
+The other is `ureq`, in the column-store writer, and it is blocking — which is
+right there: a separate process doing batched writes, one at a time, with
+nothing else to get on with. `Input` is async, so calling that one from inside a
+transport would block the runtime every driver in a publisher shares.
+
+The cost is named rather than hidden: they belong to different processes,
+different failure models and different tiers, and neither should migrate toward
+the other because they look alike in a manifest. A change that makes the writer
+async to share this client, or this client blocking to share that one, has to
+answer for the runtime it blocks or the process it starts.
 
 Design: [the venue adapter interface](../../docs/superpowers/specs/2026-09-02-venue-adapter-interface-design.md) for the split, [the publisher crates design](../../docs/superpowers/specs/2026-08-26-edge-publisher-crates-design.md) for `[ingress] kind`.
