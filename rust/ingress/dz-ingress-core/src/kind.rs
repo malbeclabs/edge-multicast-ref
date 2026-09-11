@@ -29,11 +29,7 @@ pub enum Kind {
     /// leaves that transport is what the adapter wrote plus the session
     /// layer's own messages.
     ///
-    /// **Named for the protocol and not for one of its uses.** The earlier
-    /// wording called it an order-entry protocol, which invites a market-data
-    /// publisher to read the token as not being for it — and the transport
-    /// this repository builds on it reads market data and composes no order
-    /// entry at all.
+    /// **Named for the protocol and not for one of its uses.**
     Fix,
     /// A multicast receiver, for a venue that publishes one. Not yet built.
     Multicast,
