@@ -23,10 +23,10 @@ use serde::{Deserialize, Deserializer};
 /// is the core's own standard for the same reason: an error that says a value
 /// is unacceptable and stops there invites the same guess a second time.
 ///
-/// # The two that name the endpoint name only its authority
+/// # The three that name the endpoint name only its authority
 ///
-/// Both name `endpoint` as the key and the scheme and host as the value, and
-/// **neither renders the endpoint itself** — not through `Display` and not
+/// Each names `endpoint` as the key and the scheme and host as the value, and
+/// **none renders the endpoint itself** — not through `Display` and not
 /// through `Debug`. A key on the query string is a shape this transport
 /// documents as supported, because several venue catalogue APIs keep one
 /// there, and a load failure is the most-logged line a publisher has: it is
@@ -58,6 +58,29 @@ pub enum ConfigError {
     /// dropped whether or not what precedes it is a scheme.
     #[error("`endpoint` is `{authority}`; a polled endpoint is http:// or https://")]
     NotAnHttpEndpoint { authority: String },
+
+    /// The endpoint carries a `#`.
+    ///
+    /// **Refused at load, and this is the one check here that the connect
+    /// probe does not also reach.** A fragment is not sent to a server, so
+    /// `http://host/catalogue#overview` with `cursor=1` appended requests
+    /// `/catalogue` and nothing else: `hyper::Uri` parses it happily and
+    /// swallows the whole query string into the fragment. The probe succeeds,
+    /// every poll succeeds, and the adapter's parameters are dropped from
+    /// every request with no error anywhere — an endpoint answering the first
+    /// page for ever while the cursor it was given goes nowhere. That quiet
+    /// outcome is the one [`RequestFailure::Unusable`] refuses a `#` in the
+    /// parameters to avoid, and the endpoint is the other half of the same
+    /// input space.
+    ///
+    /// [`RequestFailure::Unusable`]: crate::RequestFailure::Unusable
+    #[error(
+        "`endpoint` is `{authority}` and carries a `#`: a fragment is not sent to a server, \
+         so the query string — the adapter's parameters included — would be swallowed by it \
+         and every request would go out without them; a literal `#` in a value is written \
+         `%23`"
+    )]
+    FragmentInEndpoint { authority: String },
 
     /// A cadence of zero.
     ///
@@ -141,13 +164,28 @@ impl PollConfig {
     /// [`ConfigError`], naming the key and what would have been accepted.
     pub fn check(&self) -> Result<(), ConfigError> {
         let endpoint = self.endpoint.trim();
-        if endpoint.starts_with("https://") && !cfg!(feature = "tls") {
+        // The scheme, case-insensitively, because a scheme *is*
+        // case-insensitive and `hyper::Uri` normalizes one: `HTTPS://host` is
+        // an https endpoint, and refusing it as *not http(s)* would be a
+        // refusal quoting the document's own value back at it as if it were
+        // something else. It would also refuse it as the wrong one of the two,
+        // sending an operator to look for a scheme they wrote.
+        let scheme = endpoint.to_ascii_lowercase();
+        if scheme.starts_with("https://") && !cfg!(feature = "tls") {
             return Err(ConfigError::TlsUnsupported {
                 authority: authority_of(endpoint),
             });
         }
-        if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+        if !scheme.starts_with("http://") && !scheme.starts_with("https://") {
             return Err(ConfigError::NotAnHttpEndpoint {
+                authority: authority_of(endpoint),
+            });
+        }
+        // After the scheme, so that an endpoint that is neither http nor https
+        // is named as that first, and before the cadence, because this is a
+        // fault in the same key.
+        if endpoint.contains('#') {
+            return Err(ConfigError::FragmentInEndpoint {
                 authority: authority_of(endpoint),
             });
         }
@@ -349,6 +387,62 @@ mod tests {
         let error = config.check().expect_err("not an endpoint");
         assert!(error.to_string().contains("http://"), "{error}");
         assert!(error.to_string().contains("https://"), "{error}");
+    }
+
+    #[test]
+    fn an_endpoint_carrying_a_fragment_is_refused_because_the_probe_would_not_fail_on_it() {
+        // **The quiet outcome, and the only one of these the connect probe
+        // does not also reach.** `http://host/catalogue#overview` with
+        // `cursor=1` appended is `.../catalogue#overview?cursor=1`, which
+        // `hyper::Uri` parses happily with the whole query string inside the
+        // fragment — and a fragment is not sent to a server, so the request
+        // goes out as `GET /catalogue`. The probe succeeds, every poll
+        // succeeds, and the adapter's cursor is dropped from every request
+        // with nothing failing anywhere. An operator reaches this by pasting a
+        // catalogue URL off a docs page anchor.
+        let mut config: PollConfig = toml::from_str(document()).expect("a valid table");
+        config.endpoint = "http://192.0.2.10/catalogue#overview".to_string();
+        let error = config.check().expect_err("a fragment in the endpoint");
+        assert_eq!(
+            error,
+            ConfigError::FragmentInEndpoint {
+                authority: "http://192.0.2.10".to_string(),
+            }
+        );
+        // What the operator does next, and not the endpoint they wrote: the
+        // rule every detail in this crate keeps.
+        let message = error.to_string();
+        assert!(message.contains('#'), "{message}");
+        assert!(message.contains("%23"), "{message}");
+        assert!(!message.contains("overview"), "{message}");
+    }
+
+    #[test]
+    fn an_uppercase_scheme_is_the_scheme_it_spells() {
+        // A scheme is case-insensitive and `hyper::Uri` normalizes one, so
+        // `HTTPS://` is an https endpoint. Refusing it as *not http(s)* would
+        // hand an operator a message quoting the two schemes back at a
+        // document that names one of them, and send them looking for a scheme
+        // they wrote.
+        let mut config: PollConfig = toml::from_str(document()).expect("a valid table");
+        config.endpoint = "HTTP://192.0.2.10/catalogue".to_string();
+        assert_eq!(config.check(), Ok(()));
+
+        // And the TLS refusal reads the same value the same way, which is the
+        // half that matters: an uppercase `HTTPS` falling past it would be an
+        // https endpoint in a build with no TLS stack.
+        config.endpoint = "HTTPS://192.0.2.10/catalogue".to_string();
+        let outcome = config.check();
+        if cfg!(feature = "tls") {
+            assert_eq!(outcome, Ok(()), "this build carries a TLS stack");
+        } else {
+            let error = outcome.expect_err("an https endpoint in a build with no TLS stack");
+            assert!(
+                matches!(error, ConfigError::TlsUnsupported { .. }),
+                "an uppercase scheme is the scheme it spells, and this build has no TLS \
+                 stack: {error:?}"
+            );
+        }
     }
 
     #[test]

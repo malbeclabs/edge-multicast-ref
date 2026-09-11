@@ -53,6 +53,13 @@ pub struct Request<'a> {
     /// [`PollInput::recv`](crate::PollInput) for where this comes from, which
     /// is the driver's own receive budget and not a timeout this transport
     /// holds a key for.
+    ///
+    /// **The whole exchange, head and body**, and that is a requirement on an
+    /// implementation of this trait rather than a detail of the one below. A
+    /// client that bounded only the head returns neither a payload nor a
+    /// failure for an endpoint that answers and then stops sending, which is
+    /// the one state the driver cannot even time out of: it never reaches the
+    /// top of its loop to notice the idle guard has gone.
     pub budget: Duration,
 }
 
@@ -422,8 +429,25 @@ impl PollClient for HttpClient {
                     RequestFailure::Unusable(format!("the request is not usable: {error}"))
                 })?;
 
+            // **One deadline for the whole exchange, and not a bound on the
+            // head alone.** The budget is the driver's receive budget, so what
+            // it has to bound is the time until there is a payload — and the
+            // body is where an endpoint stalls without going away: it writes
+            // `200 OK` and its headers, stops sending body bytes, and holds
+            // the socket open. A bound on the head only is then no bound at
+            // all: `collect` below waits for ever, `fetch` never returns,
+            // `recv` never returns, and the driver never gets back to the top
+            // of its loop to recompute the idle budget. `connection_state`
+            // stays at 1, no reconnect is counted, no payload arrives — the
+            // publisher is silently dead with nothing to look at, which is the
+            // one failure this transport exists to turn into a number.
+            //
+            // `Limited` does not close this: it bounds bytes, and a body that
+            // trickles or stops under the ceiling never reaches it.
+            let deadline = tokio::time::Instant::now() + request.budget;
+
             let response =
-                match tokio::time::timeout(request.budget, self.inner.request(outgoing)).await {
+                match tokio::time::timeout_at(deadline, self.inner.request(outgoing)).await {
                     Err(_elapsed) => {
                         return Err(RequestFailure::Timeout(format!(
                             "no response within {:?}",
@@ -449,25 +473,39 @@ impl PollClient for HttpClient {
             // bound exists for. `Limited` stops taking bytes at the ceiling
             // instead.
             use http_body_util::BodyExt as _;
-            let collected = http_body_util::Limited::new(
+            let body = http_body_util::Limited::new(
                 response.into_body(),
                 usize::try_from(MAX_BODY_BYTES).unwrap_or(usize::MAX),
             )
-            .collect()
-            .await
-            .map_err(|error| {
-                // Two failures with one answer: a body that started and
-                // stopped, and one that went past the ceiling. `Transport` and
-                // not `Refused`, which is the distinction that value exists
-                // for: the connection was established. The detail names the
-                // ceiling, because *the endpoint sent too much* and *the
-                // endpoint stopped sending* are not the same conversation to
-                // have with a venue.
-                RequestFailure::Transport(format!(
-                    "the response body did not arrive whole, within the \
-                     {MAX_BODY_BYTES}-byte ceiling: {error}"
-                ))
-            })?
+            .collect();
+            // The deadline the head was read against, and what is left of it.
+            // A body still arriving when the budget runs out is a timeout and
+            // not a transport failure: nothing about the wire went wrong, the
+            // request simply outlived what the driver gave it, and the detail
+            // names the bound so that the two are not read as one. The same
+            // reason `Timeout` is its own value at the head.
+            let collected = match tokio::time::timeout_at(deadline, body).await {
+                Err(_elapsed) => {
+                    return Err(RequestFailure::Timeout(format!(
+                        "the response head arrived and its body did not, within {:?}",
+                        request.budget
+                    )))
+                }
+                Ok(Ok(collected)) => collected,
+                Ok(Err(error)) => {
+                    // Two failures with one answer: a body that started and
+                    // stopped, and one that went past the ceiling. `Transport`
+                    // and not `Refused`, which is the distinction that value
+                    // exists for: the connection was established. The detail
+                    // names the ceiling, because *the endpoint sent too much*
+                    // and *the endpoint stopped sending* are not the same
+                    // conversation to have with a venue.
+                    return Err(RequestFailure::Transport(format!(
+                        "the response body did not arrive whole, within the \
+                         {MAX_BODY_BYTES}-byte ceiling: {error}"
+                    )));
+                }
+            }
             .to_bytes();
 
             Ok(Answer {
@@ -1044,6 +1082,92 @@ mod tests {
             "and the detail names the ceiling, because *the endpoint sent too \
              much* and *the endpoint stopped sending* are not the same \
              conversation to have with a venue: {}",
+            failure.detail()
+        );
+        server.join().expect("the endpoint thread");
+    }
+
+    /// Serves one response head and then no body bytes at all, holding the
+    /// socket open.
+    ///
+    /// **The head is the whole point.** An endpoint that never answers is a
+    /// different failure and already has a test; this one answers, promises a
+    /// body, and stops — which is what a stalled proxy between a publisher and
+    /// a venue looks like from here. Chunked, so that the client has no length
+    /// to decide from that the body it is holding is already whole.
+    fn an_endpoint_that_answers_and_then_stops_sending() -> (u16, std::thread::JoinHandle<()>) {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port to bind");
+        let port = listener.local_addr().expect("a bound address").port();
+        let handle = std::thread::spawn(move || {
+            let Ok((mut socket, _)) = listener.accept() else {
+                return;
+            };
+            let mut scratch = [0_u8; 1024];
+            let _ = socket.read(&mut scratch);
+            if socket
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+                .is_err()
+            {
+                return;
+            }
+            let _ = socket.flush();
+            // Held open, and then let go on a clock of its own. Open is what
+            // makes this a stall rather than a truncated body: a socket that
+            // closed would end `collect` with a transport error and the bound
+            // under test would never be reached. On a clock, because waiting
+            // for the client to close instead would deadlock the `join` below
+            // - a blocking join holds the test's worker thread, so the
+            // client's connection task never gets polled to notice its client
+            // is gone. Well past any budget a test here hands `fetch`.
+            std::thread::sleep(Duration::from_secs(2));
+        });
+        (port, handle)
+    }
+
+    #[tokio::test]
+    async fn a_body_that_stops_arriving_spends_the_budget_rather_than_never_returning() {
+        // **The bound is on the exchange and not on the head.** `Limited`
+        // bounds bytes, so a body that stops under the ceiling reaches no
+        // ceiling: without a time bound around the collection, `fetch` never
+        // returns, `recv` never returns, and the driver never recomputes the
+        // idle guard — `connection_state` at 1, no reconnect counted, no
+        // payload, and nothing anywhere to look at.
+        let (port, server) = an_endpoint_that_answers_and_then_stops_sending();
+        let endpoint = format!("http://127.0.0.1:{port}/catalogue");
+
+        // **How this discriminates:** the endpoint holds the socket open for
+        // two seconds and the budget is 300ms, so a bound on the exchange ends
+        // this at 300ms with a `Timeout`, while a bound on the head alone waits
+        // for the socket to close and reports the `Transport` failure of a body
+        // that stopped. Both numbers are load-bearing - a budget above the hold
+        // makes the two outcomes the same one.
+        //
+        // And an outer bound well above both, for the reason the ceiling test
+        // uses a finite body rather than an endless one: the failure this states
+        // must arrive as a failure and not as a suite that hangs in CI.
+        let failure = tokio::time::timeout(
+            Duration::from_secs(5),
+            HttpClient::new().fetch(Request {
+                endpoint: &endpoint,
+                parameters: None,
+                validator: None,
+                budget: Duration::from_millis(300),
+            }),
+        )
+        .await
+        .expect("`fetch` returns on its own budget, and a bound on the head alone never would")
+        .expect_err("a head with no body behind it is not an answer");
+
+        assert!(
+            matches!(failure, RequestFailure::Timeout(_)),
+            "the request outlived the driver's receive budget, which is a \
+             timeout and says nothing about the wire: {failure:?}"
+        );
+        assert!(
+            failure.detail().contains("300ms"),
+            "and the detail names the bound that was exceeded: {}",
             failure.detail()
         );
         server.join().expect("the endpoint thread");

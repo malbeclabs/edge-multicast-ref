@@ -257,7 +257,10 @@ impl Input for PollInput {
     /// the one that matters and wrong outright for a client forming no `hyper`
     /// URI — and the endpoint reaches the same failure on the connect probe,
     /// which carries no parameters at all, so a refusal here would leave that
-    /// half looping.
+    /// half looping. A `#` is the one exception in the other direction, and
+    /// [`PollConfig::check`](crate::PollConfig::check) refuses it in the
+    /// endpoint for exactly that reason: it is the character the probe does
+    /// *not* fail on.
     fn send<'a>(
         &'a mut self,
         message: UpstreamMessage<'a>,
@@ -533,10 +536,16 @@ const fn connect_reason(failure: &RequestFailure) -> Option<ConnectFailureReason
 /// either half of a request, deliberately, so a `send` judging text with
 /// `hyper`'s parser would be a second parser able to disagree with the one
 /// that matters, and wrong outright for a client that forms no `hyper` URI.
-/// And **the endpoint reaches the same failure**: a scheme prefix is all
-/// `PollConfig` can check, so an endpoint that is not a URI arrives on the
-/// connect probe, which carries no parameters at all. One value covers both;
-/// a refusal at the write would leave that half looping.
+/// And **the endpoint reaches the same failure**: the scheme and a `#` are all
+/// `PollConfig` can check, so an endpoint that is not a URI otherwise arrives
+/// on the connect probe, which carries no parameters at all. One value covers
+/// both; a refusal at the write would leave that half looping.
+///
+/// The `#` is checked at load rather than left to the probe because the probe
+/// does not fail on one. A fragment parses: the request goes out with its
+/// query string swallowed, the endpoint answers, and nothing fails anywhere —
+/// so for that character alone, *the endpoint reaches the same failure* would
+/// be false, and the check is what makes it true.
 ///
 /// The detail names neither the URI nor the parameters, for the reason every
 /// other detail here names the authority instead: a venue endpoint's query
