@@ -1021,6 +1021,71 @@ fn a_send_that_fails_reconnects_and_asks_the_adapter_to_subscribe_again() {
 }
 
 #[test]
+fn a_connect_failure_on_the_first_send_is_counted_as_one_and_not_as_a_disconnect() {
+    // The revert this test exists for: count a connect failure only in the
+    // `connect` branches. A transport whose connection is established by a
+    // the *adapter* composed — a session protocol's logon, which is written by
+    // the flush below and cannot be written in `connect`, because the adapter
+    // has not been asked yet at that point — then reports a refused credential
+    // into nothing at all: `Connect` carries no disconnect reason, so the
+    // fall back to `remote_close` goes to the adapter, `counted = false` keeps
+    // it out of `reconnects_total`, and the value itself is dropped. Every
+    // series then says only that the publisher is down, and the label that
+    // says *look at the credential* never moves.
+    let adapter = RecordingAdapter {
+        subscriptions: vec!["logon"],
+        ..RecordingAdapter::default()
+    };
+    let outcome = run(
+        policy(),
+        adapter,
+        vec![Connection {
+            connect: None,
+            send: Some(IngressError::connect(
+                ConnectFailureReason::Unauthorized,
+                "the venue refused the logon: 58=invalid credentials",
+            )),
+            reads: VecDeque::new(),
+        }],
+    );
+
+    assert_eq!(
+        outcome.observer.recorded().connect_failures,
+        vec![ConnectFailureReason::Unauthorized],
+        "the refusal reached the one series that carries a reason for a \
+         connection that never came up"
+    );
+    // And it is not also a reconnect: nothing was established for one of the
+    // four disconnect reasons to describe the ending of.
+    assert!(
+        outcome.observer.recorded().reconnects.is_empty(),
+        "{:?}",
+        outcome.observer.recorded().reconnects
+    );
+    // The connection was never announced up, so the gauge stays at 0 - which
+    // is the alert - and the adapter is still owed its pairing.
+    assert_eq!(
+        outcome.observer.recorded().states,
+        vec![("mktdata", false)],
+        "a connection subscribed to nothing must not read as connected"
+    );
+    assert_eq!(
+        outcome.adapter.disconnected,
+        vec![(CONNECTION, DisconnectReason::RemoteClose)],
+        "every on_connected is owed exactly one on_disconnected"
+    );
+    // And it is retried rather than fatal: a venue outside its session hours
+    // refuses a logon it will accept later, and this is the transport's own
+    // `Fatal` group's job rather than this one's.
+    assert_eq!(outcome.adapter.connected.len(), 1);
+    assert!(
+        outcome.exit.to_string().contains("no more connections"),
+        "the driver stopped on something other than the script running out: {}",
+        outcome.exit
+    );
+}
+
+#[test]
 fn the_outbound_rate_limit_defers_a_send_rather_than_dropping_it() {
     let adapter = RecordingAdapter {
         subscriptions: vec!["one", "two", "three"],
