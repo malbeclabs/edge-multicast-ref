@@ -184,6 +184,13 @@ impl Custody {
     }
 }
 
+/// What compression adds to the name of a compressed object.
+///
+/// One constant, so that the suffix a writer appends and the suffix a reader
+/// tests for are the same four bytes. Two spellings of it is how an archive
+/// comes to land objects nothing opens.
+const ZSTD_SUFFIX: &str = ".zst";
+
 /// How a segment is stored. `zstd` is the default: the payloads are dense
 /// fixed-size binary structures with high inter-record redundancy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -201,6 +208,53 @@ impl Compression {
             Self::None => "pcapng",
             Self::Zstd { .. } => "pcapng.zst",
         }
+    }
+
+    /// What compression alone adds to a name, without the archive shape's own
+    /// extension.
+    ///
+    /// [`extension`](Self::extension) answers for the pcapng shape, which is
+    /// the one this module's own writer produces. The venue-side shape has a
+    /// different stem and the same suffix, so this is what
+    /// [`upstream_object_extension`](crate::upstream::upstream_object_extension)
+    /// composes with — rather than a second table of endings that could come to
+    /// disagree with this one about what `zstd` is called.
+    #[must_use]
+    pub const fn suffix(self) -> &'static str {
+        match self {
+            Self::None => "",
+            Self::Zstd { .. } => ZSTD_SUFFIX,
+        }
+    }
+}
+
+/// A reader over the object that landed, `zstd`-decoding it when its name says
+/// so.
+///
+/// **The name is the signal**, exactly as it is for `ArchiveSource::open` on the
+/// datagram side: the suffix is what [`seal`] wrote and what the object key
+/// carries, so a reader holding the key already holds the answer. The level is
+/// absent from the decision because a decoder does not need one — it is a
+/// property of how the frame was produced and is recorded in the frame.
+///
+/// **Public and here rather than in either shape's own module**, for the reason
+/// [`seal`] is: there are two archive shapes and one answer to what `.zst`
+/// means. A shape that decided this for itself would be a second place for the
+/// suffix to be spelled, and the failure that produces is silent — a landed
+/// object whose reader refuses it as *not one of ours*, because the first bytes
+/// it sees are a zstd frame magic and not the shape's own.
+///
+/// # Errors
+///
+/// [`io::Error`] when the decoder cannot read the frame header.
+pub fn open_sealed<'a, R: io::Read + 'a>(
+    name: &str,
+    bytes: R,
+) -> io::Result<Box<dyn io::Read + 'a>> {
+    if name.ends_with(ZSTD_SUFFIX) {
+        Ok(Box::new(zstd::stream::Decoder::new(bytes)?))
+    } else {
+        Ok(Box::new(bytes))
     }
 }
 
@@ -405,7 +459,7 @@ pub struct Published {
 
 fn assemble(job: &Job, names: &Names) -> Result<Published, SinkError> {
     let m = &job.manifest;
-    let (byte_count, sha256) = encode(&job.source, &names.object_tmp, job.compression)?;
+    let (byte_count, sha256) = seal(&job.source, &names.object_tmp, job.compression)?;
 
     let mut manifest = m.clone();
     // The partitioned key, from the manifest's own fields: a shipper reading it
@@ -473,7 +527,19 @@ fn clean_up(job: &Job, names: &Names) -> String {
 ///
 /// The hash is of the object that lands, because integrity and idempotent
 /// reprocessing key on `(object key, sha256)`.
-fn encode(
+///
+/// **Public because there are two archive shapes and there must be one answer
+/// to this question.** The venue-side objects of [`upstream`](crate::upstream)
+/// are compressed and digested by calling this, not by a second pass with its
+/// own encoder settings — the frame checksum below in particular is the
+/// difference between an archive that can tell it has been damaged and one that
+/// decodes to a different buffer with no error at all.
+///
+/// # Errors
+///
+/// [`SinkError`] when the segment cannot be read, the destination cannot be
+/// written, or the encoder fails.
+pub fn seal(
     source: &Path,
     dest: &Path,
     compression: Compression,
@@ -522,13 +588,20 @@ fn encode(
     Ok((bytes, hasher.finalize().into()))
 }
 
-fn write_and_sync(path: &Path, bytes: &[u8]) -> Result<(), SinkError> {
+/// Writes a whole small file and returns only once it is on the disk.
+///
+/// **One of these, for the same reason there is one [`seal`].** Both archive
+/// shapes land a manifest beside an object and both must land it durably: a
+/// manifest that is a row pointing at nothing after a power cut is the failure
+/// the ordering of the two renames exists to prevent, and a second copy of this
+/// is a second place for the `sync_all` to be forgotten.
+pub(crate) fn write_and_sync(path: &Path, bytes: &[u8]) -> Result<(), SinkError> {
     let mut f = File::create(path).map_err(SinkError::Io)?;
     f.write_all(bytes).map_err(SinkError::Io)?;
     f.sync_all().map_err(SinkError::Io)
 }
 
-fn hex(bytes: &[u8; 32]) -> String {
+pub(crate) fn hex(bytes: &[u8; 32]) -> String {
     let mut s = String::with_capacity(64);
     for b in bytes {
         s.push_str(&format!("{b:02x}"));

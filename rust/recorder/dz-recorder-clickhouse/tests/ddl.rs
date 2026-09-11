@@ -14,6 +14,7 @@ use std::collections::BTreeSet;
 
 use dz_recorder_clickhouse::{migrations, schema, Migration};
 use dz_recorder_rows::Grain;
+use dz_recorder_venue::VenueGrain;
 
 /// The grains `001` declares: the envelope of a datagram, and what is derived
 /// from it.
@@ -27,6 +28,17 @@ const TRANSPORT_GRAINS: [Grain; 5] = [
 
 /// The grains `005` declares: what the messages said.
 const MARKET_DATA_GRAINS: [Grain; 3] = [Grain::Event, Grain::Instrument, Grain::BookTop];
+
+/// The grains `009` declares: what a venue's own upstream said, and the object
+/// it was read out of.
+///
+/// [`VenueGrain::ALL`] and never a second list of them, for the reason
+/// `dz-recorder-venue`'s own column-name test gives: a third grain added next
+/// year reaches every loop below by being added to the enumeration, and a
+/// hard-coded pair here would leave it out of the DDL check and out of the
+/// `GRANT INSERT` check — a table the loader cannot write, found on the first
+/// insert of a deployment rather than here.
+const VENUE_GRAINS: [VenueGrain; VenueGrain::COUNT] = VenueGrain::ALL;
 
 /// The body of one `CREATE TABLE recorder.<table> (...)` block.
 ///
@@ -111,6 +123,11 @@ fn cross_site_sql() -> &'static str {
     sql_of("007_recorder_cross_site.sql")
 }
 
+/// The venue-side tables and the race, which are `009`.
+fn venue_sql() -> &'static str {
+    sql_of("009_recorder_venue_observation.sql")
+}
+
 /// One `CREATE OR REPLACE VIEW recorder.<name>` statement, up to the next one.
 fn view_body(sql: &'static str, name: &str) -> &'static str {
     let needle = format!("CREATE OR REPLACE VIEW recorder.{name} AS");
@@ -183,6 +200,362 @@ fn every_column_has_a_field_and_every_field_has_a_column() {
             "{grain}: the schema and the row type disagree about columns"
         );
     }
+
+    // The venue-side grains of `009`, held the same way and for the same
+    // reason. A separate loop because they are a different `Grain` enum in a
+    // different crate: the two sides of the race deliberately do not share a
+    // row vocabulary, which is the whole point of them being separate tables.
+    //
+    // Sized by [`VenueGrain::COUNT`], because this is the one venue loop a
+    // grain cannot be added to by adding it to the enumeration: it pairs each
+    // grain with a fixture of its row type, and there is no fixture to derive.
+    // The width is what makes a third grain a compile error here rather than a
+    // table nobody held against its struct.
+    let held: [(VenueGrain, BTreeSet<String>); VenueGrain::COUNT] = [
+        (
+            VenueGrain::BookTop,
+            field_names(&fixtures::venue_book_top()),
+        ),
+        (VenueGrain::Object, field_names(&fixtures::venue_object())),
+    ];
+    for (grain, fields) in held {
+        let declared: BTreeSet<String> = columns(venue_sql(), grain.table()).into_iter().collect();
+        assert_eq!(
+            declared, fields,
+            "{grain}: the schema and the row type disagree about columns"
+        );
+    }
+}
+
+/// **The venue-side tables declare no publisher provenance.**
+///
+/// The other half of `dz-recorder-venue`'s own column-name literal: that one
+/// holds the *row types*, and this holds the *DDL*, because a column can be
+/// added to a table without a field ever being added to a struct — and a column
+/// that exists reads as a column somebody may fill.
+///
+/// Each of these is a statement about a datagram on a channel instance, and a
+/// venue's upstream message is not one. The request this design answers asked
+/// for exactly them.
+#[test]
+fn the_venue_side_tables_declare_no_publisher_provenance() {
+    for grain in VENUE_GRAINS {
+        let declared = columns(venue_sql(), grain.table());
+        for column in [
+            "channel_id",
+            "instrument_id",
+            "sequence_number",
+            "reset_count",
+            "segment_seq",
+            "drop_delta",
+            "era",
+            "era_index",
+            // And the three the eight-column argument also names, which a
+            // reader reaching for "provenance" would add next.
+            "source_addr",
+            "dst_port",
+            "source_id",
+        ] {
+            assert!(
+                !declared.iter().any(|c| c == column),
+                "{grain} declares `{column}`: {declared:?}"
+            );
+        }
+    }
+
+    // The near miss, stated so that the absence above is not read as the venue's
+    // own numbering being thrown away. It is kept, under a name that says whose
+    // it is.
+    let book = columns(venue_sql(), VenueGrain::BookTop.table());
+    assert!(book.iter().any(|c| c == "upstream_seq"), "{book:?}");
+    assert!(book.iter().any(|c| c == "upstream_sid"), "{book:?}");
+}
+
+/// The race is keyed on `book_key`, and on `state_key` nowhere.
+///
+/// `state_key` folds the `Channel ID` and the `Instrument ID` into the
+/// accumulator before it folds a price, and a venue side can compute neither.
+/// Keyed on it this race would return zero pairs and read as each side missing
+/// every state the other saw.
+#[test]
+fn the_venue_race_is_keyed_on_the_book_and_never_on_the_state_key() {
+    let sql = venue_sql();
+    assert!(
+        !sql.lines()
+            .any(|line| line.contains("state_key") && !line.trim_start().starts_with("--")),
+        "a venue-side statement keys on `state_key`"
+    );
+
+    let occurrence = view_body(sql, "venue_book_top_occurrence");
+    assert!(
+        occurrence.contains("PARTITION BY observation, feed, upper(trimBoth(symbol)), book_key"),
+        "the ordinal is not numbered per observation on the book: {occurrence}"
+    );
+    assert!(
+        occurrence.contains("ORDER BY recv_ts"),
+        "the ordinal is not taken by arrival: {occurrence}"
+    );
+
+    let race = view_body(sql, "venue_book_top_race");
+    assert!(
+        race.contains("GROUP BY feed, symbol_key, book_key, occurrence"),
+        "the pairing does not group on the ordinal: {race}"
+    );
+    // An aggregate over the ordinal and not a join between two named points, so
+    // that an occurrence one side saw survives as a row. `006` makes the
+    // argument; this holds the shape.
+    assert!(
+        !race.contains("JOIN"),
+        "the pairing became a join, and an unpaired occurrence is now an absence: {race}"
+    );
+    assert!(
+        race.contains("uniqExact(observation)"),
+        "the observations are distinct points and not rows: {race}"
+    );
+}
+
+/// **The symbol is folded once, and the fold says which case it folds.**
+///
+/// The fold appears twice in the ordinal — as the `symbol_key` a reader selects
+/// and as the partition the numbering runs over — and the pairing groups on the
+/// column. Two spellings of it are two folds: a `symbol_key` that folded one way
+/// beside a partition that folded another numbers a state's occurrences under a
+/// key nobody selected, and the pairing then groups the wrong rows together
+/// while every string on the row still looks right.
+///
+/// `upper` is ASCII case and `upperUTF8` is the Unicode one, so which is written
+/// is part of what the fold means. The file states it; this holds the code to
+/// it, and holds the fold to case and the padding around it — anything that
+/// stripped a separator or normalised a suffix would start merging instruments.
+#[test]
+fn the_venue_symbol_is_folded_once_and_the_fold_is_ascii_case() {
+    const FOLD: &str = "upper(trimBoth(symbol))";
+    let sql = venue_sql();
+    let occurrence = view_body(sql, "venue_book_top_occurrence");
+    assert_eq!(
+        occurrence.matches(FOLD).count(),
+        2,
+        "the `symbol_key` column and the numbering's partition are not one fold: \
+         {occurrence}"
+    );
+    assert!(
+        occurrence.contains(&format!("{FOLD} AS symbol_key")),
+        "the folded symbol is not the column a reader selects: {occurrence}"
+    );
+
+    let statements: Vec<&str> = sql
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("--"))
+        .collect();
+    for second_fold in [
+        "upperUTF8",
+        "lower(",
+        "lowerUTF8",
+        "replaceAll",
+        "replaceRegexpAll",
+    ] {
+        assert!(
+            !statements.iter().any(|line| line.contains(second_fold)),
+            "`{second_fold}` folds the symbol a second way, and two folds pair nothing"
+        );
+    }
+}
+
+/// `symbols_agree` and `exponents_agree` are columns rather than assumptions.
+///
+/// The key covers the raw prices and leaves the exponents out, so a pair whose
+/// exponents disagree is two different prices wearing one key. And the key is on
+/// the symbol with its case folded, so a pair whose sides spell the instrument
+/// differently is a pair — which is only safe if the disagreement is visible.
+#[test]
+fn the_venue_race_carries_its_reference_data_assertions_as_columns() {
+    let race = view_body(venue_sql(), "venue_book_top_race");
+    assert!(
+        race.contains("(uniqExact(symbol) = 1)                AS symbols_agree"),
+        "the symbols are assumed rather than compared: {race}"
+    );
+    assert!(
+        race.contains("(uniqExact(price_exp) = 1) AND (uniqExact(qty_exp) = 1) AS exponents_agree"),
+        "the exponents are assumed rather than compared: {race}"
+    );
+    // The strings themselves, because "they disagree" without them is a finding
+    // nobody can act on.
+    assert!(
+        race.contains("arraySort(groupUniqArray(symbol))      AS symbols"),
+        "a disagreement is reported without the spellings: {race}"
+    );
+    // Null and never zero for a state one point saw: a zero would be a lead time
+    // nobody measured, entering every average as evidence that the paths tied.
+    assert!(
+        race.contains("if(uniqExact(observation) > 1,") && race.contains("NULL)"),
+        "an unpaired occurrence gets a measured lead: {race}"
+    );
+    // And no bound written here. It is a property of the two paths being
+    // compared, so it is the caller's predicate over `lead_ms`.
+    assert!(
+        !race.contains("abs(lead_ms)"),
+        "a bound on the difference was written into the view: {race}"
+    );
+}
+
+/// The collapse is applied once, beneath the numbering.
+///
+/// Numbering over an unmerged re-derivation counts one arrival as two
+/// occurrences, and the surplus copy then pairs with nothing — so a duplicate
+/// does not inflate a count here, it manufactures evidence of loss.
+#[test]
+fn the_venue_race_numbers_a_collapsed_table() {
+    let sql = venue_sql();
+    assert!(
+        view_body(sql, "venue_book_top_settled").contains("recorder.venue_book_top FINAL"),
+        "the collapse is not applied"
+    );
+    assert!(
+        view_body(sql, "venue_book_top_occurrence")
+            .contains("FROM recorder.venue_book_top_settled"),
+        "the ordinal is numbered over the raw table"
+    );
+    assert_eq!(
+        sql.matches("recorder.venue_book_top FINAL").count(),
+        1,
+        "written once, so nothing above pays for it twice"
+    );
+    assert!(
+        sql.contains("manufactures evidence of loss"),
+        "what a duplicate would do here is worse than a double count, and the \
+         file has to say so"
+    );
+}
+
+/// The venue-side retention keeps the same window the publisher side keeps.
+///
+/// A pair whose publisher half has expired is a state that reads as seen by one
+/// observation point only, which is the strongest thing this race says — so the
+/// two windows have to be the same one.
+#[test]
+fn the_venue_side_retention_matches_the_side_it_races() {
+    let sql = venue_sql();
+    assert!(
+        sql.contains("ALTER TABLE recorder.venue_book_top")
+            && sql.contains("MODIFY TTL toDateTime(recv_ts) + INTERVAL 30 DAY"),
+        "the venue side does not keep the window `book_top` keeps"
+    );
+    assert!(
+        market_data_sql().contains("MODIFY TTL toDateTime(recv_ts) + INTERVAL 30 DAY"),
+        "the two windows are no longer the same number"
+    );
+    // The object row is what says an object was derived at all, so expiring it
+    // turns a window nobody derived into one indistinguishable from a window
+    // that held nothing.
+    assert!(
+        !sql.contains("ALTER TABLE recorder.venue_object"),
+        "the row that says an object was derived must not expire"
+    );
+    assert!(
+        sql.contains("recorder.venue_object` has no TTL"),
+        "its absence of a TTL has to be stated, not inferred from the absence \
+         of a line"
+    );
+}
+
+/// This repository links no venue, and the schema names none.
+///
+/// The tables are the venue *side* of a race and are named for that, not for any
+/// venue: a table name carrying one would be a schema that has to change to
+/// record a second, and this repository would name the first.
+#[test]
+fn the_venue_side_tables_name_the_side_and_never_a_venue() {
+    for grain in VENUE_GRAINS {
+        assert!(
+            grain.table().starts_with("venue_"),
+            "{grain} does not say which side of the race it is"
+        );
+    }
+    // The loader account can write them, or the tables are unwritable and the
+    // grant would be found on the first insert of a deployment.
+    let user = migration("004_recorder_loader_user.sql").sql;
+    for grain in VENUE_GRAINS {
+        assert!(
+            user.contains(&format!("GRANT INSERT ON recorder.{}", grain.table())),
+            "{grain} cannot be written"
+        );
+    }
+}
+
+/// **`009` tells an operator to re-apply `004`, because nothing else will.**
+///
+/// The two venue grants are the only statements in either file that no test
+/// runs against a server. `schema()` excludes `004` by name — it takes a
+/// password parameter and needs access-management rights — and `container.rs`
+/// iterates `schema()`, so the grants are asserted as substrings above and
+/// never executed. That is a deliberate cost, argued in `009`'s own header, and
+/// what makes it survivable is that the dependency is *written down at both
+/// ends* rather than inferred: the failure it prevents is an operator who
+/// applies the new file because the new file is the new thing, and then meets
+/// `Not enough privileges` on the venue derivation's first insert — a message
+/// naming a table and not the file that fixes it.
+///
+/// Pinned per grain and not as one sentence. A third venue grain added next
+/// year gets its `GRANT INSERT` in `004` because the test above walks
+/// [`VenueGrain::ALL`]; this one makes it get an instruction in `009` as well,
+/// so the pair cannot drift into a grant nobody is told to apply.
+#[test]
+fn the_venue_file_tells_an_operator_to_re_apply_the_account_file() {
+    let sql = venue_sql();
+    let user = migration("004_recorder_loader_user.sql").sql;
+
+    // The instruction is a heading and not a sentence inside a paragraph, which
+    // is the difference between an operator finding it while skimming the
+    // header and an operator reading the whole file first.
+    assert!(
+        sql.contains("RE-APPLY `004` AFTER THIS FILE"),
+        "the instruction is not a heading, so a reader skimming the header for \
+         what applying this file obliges them to do will not see it"
+    );
+    assert!(
+        sql.contains("004_recorder_loader_user.sql"),
+        "`009` does not name the file that grants its tables, so nothing points \
+         an operator at it"
+    );
+    assert!(
+        sql.contains("dz_loader"),
+        "the account whose grants are missing is not named"
+    );
+    assert!(
+        sql.contains("Not enough privileges"),
+        "the error an operator actually sees is what makes this findable by \
+         search, and it has to be the server's words"
+    );
+    // The grant each table needs, quoted in `009` in the words `004` writes it
+    // in: one literal, so a table renamed in one file and not the other is two
+    // failures rather than a silently unreachable instruction.
+    for grain in VENUE_GRAINS {
+        let statement = format!("GRANT INSERT ON recorder.{} TO dz_loader;", grain.table());
+        assert!(
+            sql.contains(&statement),
+            "{grain} has a grant in `004` and no instruction in `009`: {statement}"
+        );
+        assert!(
+            user.contains(&statement),
+            "`009` quotes a grant `004` does not write: {statement}"
+        );
+    }
+
+    // And the other end of it: `004` states the standing rule, so the next file
+    // that adds a table is told what it owes rather than having to notice.
+    assert!(
+        user.contains("RE-APPLIED WHENEVER A LATER FILE ADDS A TABLE"),
+        "the rule is stated in `009` only, which makes it a note about one file \
+         rather than the rule it is"
+    );
+    // And the header does not count the tables, because a count is the one
+    // claim that goes stale every time a file adds one — `005` made five into
+    // eight and `009` makes it ten, and neither edit touched the sentence.
+    assert!(
+        !user.contains("INSERT on the five tables"),
+        "`004` grants ten tables: a header that counts is a header that is \
+         wrong after the next migration"
+    );
 }
 
 /// The `ORDER BY (...)` of one table, as one line.
@@ -345,6 +718,184 @@ fn the_market_data_columns_that_can_be_unknown_are_nullable() {
     ] {
         assert!(sql.contains(column), "not nullable: {column}");
     }
+}
+
+/// **The venue sort keys carry what distinguishes two genuine rows, and the
+/// object is what separates two of them.**
+///
+/// `ReplacingMergeTree` deduplicates on the whole sort key, so a key missing an
+/// identity column does not sort badly — it deletes rows. `message_index`
+/// restarts at zero in every object, so it is a record's position *within* one
+/// and separates nothing across two: a rotation closes one object and opens the
+/// next, and a clock coarser than the gap between them stamps records either
+/// side of the boundary alike. Without `object_key` in the key, two genuine book
+/// states collapse into one, and the loss is a row that was never written rather
+/// than a count that is wrong.
+///
+/// The occurrence view's tie-break reads the object before the record index for
+/// exactly that case, and it cannot repair this one: a row a merge removed is not
+/// there to be numbered. So the key holds the object too, and in the same order
+/// — a key and a numbering that disagreed about which orders two records would
+/// be two orders over one set of rows.
+#[test]
+fn the_venue_sort_keys_carry_what_distinguishes_two_rows() {
+    let book = sort_key(venue_sql(), "venue_book_top");
+    assert_eq!(
+        book, "observation, feed, symbol, recv_ts, object_key, message_index, change_index",
+        "the venue book sort key changed"
+    );
+    let occurrence = view_body(venue_sql(), "venue_book_top_occurrence");
+    assert!(
+        occurrence.contains("ORDER BY recv_ts, object_key, message_index, change_index"),
+        "the sort key and the ordinal's tie-break disagree about the object: {occurrence}"
+    );
+
+    // The digest is deliberately not in it, and the reason is what each table is
+    // for. Two digests under one key are one window the archive re-published, so
+    // the rows of the object that is there now must replace the rows of the one
+    // that was.
+    assert!(
+        !book.contains("object_sha256"),
+        "a re-recorded window doubles instead of replacing: {book}"
+    );
+    // And the idempotence row is the other way round, because it is the ledger
+    // of what was read rather than the book.
+    assert_eq!(
+        sort_key(venue_sql(), "venue_object"),
+        "observation, feed, object_key, object_sha256",
+        "the venue object sort key changed"
+    );
+}
+
+/// **The object in the key widens the re-cut exposure, and `009` says so.**
+///
+/// This is the claim a reader reaching for the opposite conclusion can actually
+/// break, so it is the one worth pinning. For the records whose index moved a
+/// re-cut changes nothing — renumbering `message_index` puts them beside the old
+/// rows under any key holding a record index. The case that does change is the
+/// **identical prefix**: a re-cut that moved only the later boundary leaves the
+/// leading records with the same indexes and the same stamps, and those rows
+/// double instead of replacing, because `object_key` is in the key and the
+/// object name changed. An argument claiming the exposure is *unchanged* is
+/// therefore false, and false in the paragraph addressed to the reader most
+/// likely to check it.
+///
+/// The decision is not what is under test — the object stays in the key, and a
+/// rotation-boundary collapse is worse than a double by the margin the file
+/// argues. What is under test is that the file states the trade in the direction
+/// that survives the identical-prefix case, and names where the double is
+/// countable: `venue_object`, which holds a row per `(object_key,
+/// object_sha256)` and so carries the two cuts of one window as two rows.
+#[test]
+fn the_object_in_the_venue_key_states_the_exposure_it_widens() {
+    let sql = venue_sql();
+
+    assert!(
+        sql.contains("WIDER RE-CUT EXPOSURE"),
+        "the exposure this column widens has to be called wider, not \
+         unchanged: a reader can construct the identical-prefix case"
+    );
+    assert!(
+        !sql.contains("exposure is\n-- therefore unchanged"),
+        "the claim the identical-prefix case falsifies is back in the file"
+    );
+    assert!(
+        sql.contains("identical\n-- prefix"),
+        "the case is named concretely, or the paragraph is an assertion rather \
+         than an argument"
+    );
+    // The trade, both halves of it. A file that names only the cost reads as a
+    // file arguing against its own key.
+    assert!(
+        sql.contains("silent and unrecoverable"),
+        "the collapse this key closes is the half that makes the trade worth \
+         taking, and it is worse precisely because nothing can find it"
+    );
+    assert!(
+        sql.contains("visible\n-- and countable"),
+        "a double that can be found is what the trade buys, and it has to be \
+         said that way round"
+    );
+    assert!(
+        sql.contains("`venue_object` holds one row per `(object_key,"),
+        "where the double is countable is a table name, not `somewhere`"
+    );
+}
+
+/// **`object_sha256` is on `venue_book_top`, which is why the key claim is
+/// bounded rather than superlative.**
+///
+/// `009` may say that `object_key` is the only column that *can be* in the key.
+/// It may not say that it is the only column that tells two objects apart: the
+/// digest tells two objects apart as well, is on this very table, and is ruled
+/// out of the key by an argument the file makes a few paragraphs later — that
+/// two digests under one key are one window the archive re-published, and the
+/// rows of the object that is there now must replace the rows of the one that
+/// was. A superlative the same file contradicts is a reader's reason to stop
+/// trusting the rest of the paragraph.
+///
+/// Both halves are asserted, because the prose half alone would pass on a table
+/// that had dropped the digest — at which point the superlative would have
+/// become true and the test would be pinning a sentence nobody needed.
+#[test]
+fn the_venue_book_carries_the_digest_the_key_claim_must_not_overreach_about() {
+    let sql = venue_sql();
+
+    assert!(
+        columns(sql, "venue_book_top")
+            .iter()
+            .any(|c| c == "object_sha256"),
+        "the digest is what made the superlative false; without it on the table \
+         the paragraph needs re-reading rather than re-wording"
+    );
+    assert!(
+        !sql.contains("ONLY COLUMN THAT TELLS TWO OBJECTS"),
+        "`object_sha256` is on this table and tells two objects apart too, so \
+         the file contradicts itself a few paragraphs later"
+    );
+    assert!(
+        sql.contains("ONLY COLUMN THAT CAN BE"),
+        "the bounded claim carries the whole argument and is what the key \
+         actually rests on"
+    );
+}
+
+/// **The venue object's key order is not defended as pruning, because pruning
+/// is not what it does.**
+///
+/// `venue_object` is `PARTITION BY toYYYYMMDD(recv_ts_start)`, and that line
+/// alone decides which parts a predicate reads. No sort-key column order
+/// participates in partition pruning, so `observation, feed` ahead of
+/// `object_key` buys a narrower mark range inside the parts that survive — the
+/// two are the coarse filter a reader supplies — and buys no pruning at all.
+///
+/// Worth a test rather than only a correction. A key defended as a pruning
+/// device is a key nobody re-examines when the partitioning changes underneath
+/// it, and the two mechanisms are close enough to conflate that the wrong
+/// reason was written down once already.
+#[test]
+fn the_venue_object_key_order_is_not_justified_by_partition_pruning() {
+    let sql = venue_sql();
+
+    assert_eq!(
+        sort_key(sql, "venue_object"),
+        "observation, feed, object_key, object_sha256",
+        "the key this reasoning is about changed"
+    );
+    assert!(
+        sql.contains("PARTITION BY toYYYYMMDD(recv_ts_start)"),
+        "the line that actually prunes is not there, so the reason stated below \
+         is about a mechanism this table does not have"
+    );
+    assert!(
+        !sql.contains("so that the partition prunes before the key is read"),
+        "sort-key column order does not participate in partition pruning"
+    );
+    assert!(
+        sql.contains("mark range\n-- narrows"),
+        "the reason the order is right is the mark range, and it has to be the \
+         stated one"
+    );
 }
 
 /// The line `book_top.observation`'s comment draws through the table is where
@@ -521,6 +1072,17 @@ fn sql_declaring(grain: Grain) -> &'static str {
 /// sort-key check a later migration can quietly break deduplication. The grain
 /// enumeration is what makes a grain added next year fail here rather than ship
 /// rows nobody can attribute.
+///
+/// **The venue grains are attributed by their object and not by a mode, and the
+/// column half is `Grain`'s enumeration.** `derivation` distinguishes a row
+/// derived from an archived object from one derived live over the same
+/// datagrams, and the venue side has no live path to distinguish: a derivation
+/// takes an object, so `object_key` and `object_sha256` on every venue row are
+/// the whole of their provenance and are what a reader reads instead. Held
+/// below as an assertion rather than left as a reason, because "there is no
+/// live venue path" is a claim a later migration can falsify. The sort-key half
+/// still walks `009`, because a column reaching a venue sort key is worth
+/// knowing about whether or not it is this one.
 #[test]
 fn provenance_is_on_every_grain_and_in_no_sort_key() {
     for grain in Grain::ALL {
@@ -532,12 +1094,30 @@ fn provenance_is_on_every_grain_and_in_no_sort_key() {
         );
     }
 
+    // The venue grains, whose provenance is the object they were derived from.
+    for grain in VENUE_GRAINS {
+        let declared = columns(venue_sql(), grain.table());
+        for column in ["object_key", "object_sha256"] {
+            assert!(
+                declared.iter().any(|c| c == column),
+                "{grain} declares no `{column}`, so a venue-side row states no \
+                 provenance at all: {declared:?}"
+            );
+        }
+        assert!(
+            !declared.iter().any(|c| c == "derivation"),
+            "{grain} declares `derivation`, so there is a second venue derivation \
+             mode and the object is no longer the whole of the provenance"
+        );
+    }
+
     let mut clauses = 0;
     for sql in [
         rows_sql(),
         market_data_sql(),
         pairing_sql(),
         cross_site_sql(),
+        venue_sql(),
     ] {
         for clause in sort_key_clauses(sql) {
             clauses += 1;
@@ -550,17 +1130,17 @@ fn provenance_is_on_every_grain_and_in_no_sort_key() {
     // The walker found something, and found all of it. A guard that reads more
     // than one line is a guard whose *reading* is now the thing that can
     // regress, and a walker that quietly went back to the first line would leave
-    // this green over exactly the hazard it was widened for. Nine: the eight
-    // table sort keys, plus the bare `ORDER BY` in `006`'s window specification,
-    // which is checked like any other because a column reaching a window's
-    // ordering is worth knowing about too. `003`'s is in a file this test does
-    // not read.
-    assert_eq!(clauses, 9, "the sort-key walker stopped finding clauses");
+    // this green over exactly the hazard it was widened for. Twelve: the ten
+    // table sort keys, plus the bare `ORDER BY` in each of `006`'s and `009`'s
+    // window specifications, which are checked like any other because a column
+    // reaching a window's ordering is worth knowing about too. `003`'s is in a
+    // file this test does not read.
+    assert_eq!(clauses, 12, "the sort-key walker stopped finding clauses");
 }
 
 /// Every `ORDER BY` and `PRIMARY KEY` clause in one file, each as one string.
 ///
-/// **A clause is not a line.** Three of the eight sort keys wrap onto a
+/// **A clause is not a line.** Four of the ten table sort keys wrap onto a
 /// continuation line, so a guard reading only the line that begins `ORDER BY`
 /// reads two thirds of what it is guarding — and a column appended to the tail
 /// of a wrapped key passes it. The clause is accumulated from its first line
@@ -670,16 +1250,41 @@ fn every_table_is_partitioned_by_a_day() {
     }
     // One `PARTITION BY` per table, so a table added later without one fails
     // here rather than being noticed on a graph months afterwards.
+    //
+    // Counted as a clause and not as a mention: a table's `PARTITION BY` starts
+    // a line, a window specification's is indented inside a view, and a comment
+    // arguing about one is neither. Counting occurrences anywhere in the text
+    // makes this a test of the prose as well as of the DDL — `009`'s key order
+    // has to explain that pruning is the partition's doing and not the key's,
+    // and it cannot name the clause it is about without breaking a count that
+    // was never about prose.
     assert_eq!(
-        rows_sql().matches("PARTITION BY ").count(),
+        partition_clauses(rows_sql()),
         TRANSPORT_GRAINS.len(),
         "a table in 001 has no PARTITION BY, or one has two"
     );
     assert_eq!(
-        market_data_sql().matches("PARTITION BY ").count(),
+        partition_clauses(market_data_sql()),
         MARKET_DATA_GRAINS.len(),
         "a table in 005 has no PARTITION BY, or one has two"
     );
+    assert!(venue_sql().contains("\nPARTITION BY toYYYYMMDD(recv_ts)\n"));
+    assert!(venue_sql().contains("\nPARTITION BY toYYYYMMDD(recv_ts_start)\n"));
+    assert_eq!(
+        partition_clauses(venue_sql()),
+        VENUE_GRAINS.len(),
+        "a table in 009 has no PARTITION BY, or one has two"
+    );
+}
+
+/// The `PARTITION BY` clauses of one migration: the lines that are one.
+///
+/// At the start of a line, which is what separates a table's clause from a
+/// window specification's indented one and from a comment discussing either.
+fn partition_clauses(sql: &str) -> usize {
+    sql.lines()
+        .filter(|line| line.starts_with("PARTITION BY "))
+        .count()
 }
 
 /// `era`'s row rate is stated, with the arithmetic, because the rank over it is
@@ -1113,6 +1718,25 @@ fn every_migration_splits_into_whole_statements() {
         );
     }
 
+    // The two tables, the TTL and the three views of `009`, and nothing split
+    // across two of them.
+    let venue = migration("009_recorder_venue_observation.sql").statements();
+    assert_eq!(venue.len(), 6, "two tables, one TTL, three views");
+    for view in [
+        "venue_book_top_settled",
+        "venue_book_top_occurrence",
+        "venue_book_top_race",
+    ] {
+        assert_eq!(
+            venue
+                .iter()
+                .filter(|s| s.contains(&format!("CREATE OR REPLACE VIEW recorder.{view} AS")))
+                .count(),
+            1,
+            "{view}"
+        );
+    }
+
     // The five tables and the database, and nothing split across two of them.
     let statements = migration("001_recorder_rows.sql").statements();
     assert_eq!(statements.len(), 6, "one database and five tables");
@@ -1350,6 +1974,8 @@ fn field_names<T: serde::Serialize>(row: &T) -> BTreeSet<String> {
 mod fixtures {
     use std::net::Ipv4Addr;
 
+    use dz_recorder_venue::{RefusalCount, VenueBookTop, VenueObjectRow};
+
     use dz_recorder_rows::{
         BookTop, ConformanceFinding, Datagram, Derivation, DropScope, Era, Event, FindingVerdict,
         Instrument, MessageTypeLabel, Nanos, PortRoleLabel, RecvTsKindLabel, SegmentCoverage,
@@ -1357,6 +1983,56 @@ mod fixtures {
     };
 
     const ADDR: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 10);
+
+    pub fn venue_book_top() -> VenueBookTop {
+        VenueBookTop {
+            recv_ts: Nanos(1),
+            observation: "site-1/recorder-1".to_owned(),
+            env: "env".to_owned(),
+            feed: "feed".to_owned(),
+            connection: "mktdata".to_owned(),
+            upstream_sid: Some(1),
+            upstream_seq: Some(2),
+            symbol: "AAA".to_owned(),
+            price_exp: -2,
+            qty_exp: 0,
+            bid_px_raw: Some(1),
+            bid_qty_raw: Some(1),
+            bid_source_count: None,
+            ask_px_raw: Some(2),
+            ask_qty_raw: Some(1),
+            ask_source_count: None,
+            book_key: 3,
+            message_index: 4,
+            change_index: 5,
+            object_key: "object".to_owned(),
+            object_sha256: "sha".to_owned(),
+        }
+    }
+
+    pub fn venue_object() -> VenueObjectRow {
+        VenueObjectRow {
+            recv_ts_start: Nanos(1),
+            recv_ts_end: Nanos(2),
+            observation: "site-1/recorder-1".to_owned(),
+            env: "env".to_owned(),
+            feed: "feed".to_owned(),
+            object_key: "object".to_owned(),
+            object_sha256: "sha".to_owned(),
+            format_version: 1,
+            connections: vec!["mktdata".to_owned()],
+            message_count: 1,
+            refused_count: 1,
+            refusals: vec![RefusalCount("malformed".to_owned(), 1)],
+            event_count: 1,
+            unpriced_count: 0,
+            unknown_instrument_count: 0,
+            desync_count: 0,
+            unattributed_count: 0,
+            book_top_count: 1,
+            instrument_count: 1,
+        }
+    }
 
     pub fn event() -> Event {
         Event {

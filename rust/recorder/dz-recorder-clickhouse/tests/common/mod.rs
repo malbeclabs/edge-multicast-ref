@@ -22,6 +22,7 @@ use dz_recorder_rows::{
     derive_object, BookTop, Datagram, Derivation, DropScope, Era, Nanos, PortRoleLabel,
     RecvTsKindLabel, RoleJoinRow, RowBatch, SegmentCoverage, SequenceGap, UncertainReason, Verdict,
 };
+use dz_recorder_venue::VenueBookTop;
 
 /// One request, as the sink issued it.
 #[derive(Debug, Clone)]
@@ -935,4 +936,341 @@ pub fn cross_site_fixture(base: u64) -> Vec<RowBatch> {
     );
 
     batches
+}
+
+// ---------------------------------------------------------------------------
+// The venue side of the race, for `009`.
+// ---------------------------------------------------------------------------
+
+/// The book state that repeats, on the venue side.
+///
+/// `book_key` and not `state_key`: the venue side can compute neither the
+/// operator's channel mapping nor a publisher-minted `Instrument ID`, so the
+/// key is the two sides of the top and nothing else.
+pub const VENUE_REPEATED: u64 = 5_555_555_555_555_555_555;
+/// A state only one observation point saw.
+pub const VENUE_ONLY_ONE_SAW: u64 = 4_444_444_444_444_444_444;
+/// A state both saw, and whose exponents disagree between them.
+pub const VENUE_EXPONENTS_DISAGREE: u64 = 3_333_333_333_333_333_333;
+/// A state both saw, and whose symbol is spelled two ways.
+pub const VENUE_SYMBOLS_DISAGREE: u64 = 2_222_222_222_222_222_222;
+
+/// The two states one batched payload produced, in the order it produced them.
+///
+/// Distinct keys, because they are two different books: the point of the pair is
+/// that they collapse into one row under a key that ends at `message_index`, and
+/// a fixture whose two states were the same book could not tell that from a
+/// duplicate.
+pub const VENUE_BATCH_FIRST: u64 = 1_111_111_111_111_111_111;
+pub const VENUE_BATCH_SECOND: u64 = 1_212_121_212_121_212_121;
+
+/// A state two objects of one observation point both recorded, at one stamp.
+///
+/// Its own key so that the rotation-boundary case and the batched-payload case
+/// can share a scratch database without either one's ordinals depending on the
+/// other's rows.
+pub const VENUE_ACROSS_A_ROTATION: u64 = 1_414_141_414_141_414_141;
+
+/// A state two objects both hold at one stamp **and at one record index**.
+///
+/// The case the sort key has to see and could not. `message_index` restarts at
+/// zero in every object, so a rotation that closes an object inside one clock
+/// tick puts the first record of each object at index zero at one stamp:
+/// everything the key held before `object_key` joined it agrees — the
+/// observation, the feed, the symbol, the stamp, the record index and the change
+/// ordinal — and the two collapse into one under `ReplacingMergeTree`.
+///
+/// A rotation inside one tick is not exotic. One full book response over a
+/// polled transport is measured in hundreds of kilobytes, so a size-bounded
+/// object can hold a single record, and a transport that stamps at millisecond
+/// resolution puts that record and the next object's first at one stamp.
+pub const VENUE_INSIDE_ONE_ROTATION_TICK: u64 = 1_515_151_515_151_515_151;
+
+/// A state one batched payload produced **twice** — away and back inside one
+/// payload.
+///
+/// One `book_key` at one receive stamp, so both rows land in one window
+/// partition and the ordinal has to choose between them. That is where an order
+/// that is not total shows up: the two are then numbered either way.
+pub const VENUE_BATCH_REPEATED: u64 = 1_313_131_313_131_313_131;
+
+/// The venue's own numbers on those two rows, which are the witnesses.
+///
+/// `upstream_seq` reaches `venue_book_top_occurrence` and the ordinal does not,
+/// so this is how a test says *which* change was numbered first. Evidence and
+/// never a key, exactly as the column's own comment states — nothing below
+/// groups or orders on it.
+pub const VENUE_BATCH_FIRST_SEQ: u64 = 7_001;
+pub const VENUE_BATCH_SECOND_SEQ: u64 = 7_002;
+
+/// One venue-side top of book, as an observation point wrote it down.
+///
+/// The stamps are relative to *now*, for the reason [`top`] gives: `009` gives
+/// `venue_book_top` the same thirty-day TTL `book_top` has, and a row-level TTL
+/// is applied as the part is written — so a fixture stamped years in the past
+/// would be deleted in the step that inserted it, with the insert answered `200`
+/// and every count coming back zero.
+#[allow(clippy::too_many_arguments)]
+pub fn venue_top(
+    observation: &str,
+    symbol: &str,
+    price_exp: i8,
+    base: u64,
+    offset_ms: u64,
+    book_key: u64,
+    message_index: u64,
+) -> VenueBookTop {
+    VenueBookTop {
+        recv_ts: Nanos(base + offset_ms * 1_000_000),
+        observation: observation.to_owned(),
+        env: "test".to_owned(),
+        feed: "top-of-book".to_owned(),
+        connection: "mktdata".to_owned(),
+        upstream_sid: Some(1),
+        upstream_seq: Some(1_000 + message_index),
+        symbol: symbol.to_owned(),
+        price_exp,
+        qty_exp: 0,
+        bid_px_raw: Some(10_050),
+        bid_qty_raw: Some(3),
+        bid_source_count: None,
+        ask_px_raw: Some(10_060),
+        ask_qty_raw: Some(4),
+        ask_source_count: None,
+        book_key,
+        message_index,
+        // The first change of the record. A fixture that needs a second one
+        // states it with `..venue_top(..)`, which is what the batched-payload
+        // cases below do — and keeping it out of this signature is what lets
+        // every other case say nothing about it.
+        change_index: 0,
+        object_key: format!("venue/{observation}/object-{message_index}.dzus"),
+        object_sha256: "b".repeat(64),
+    }
+}
+
+/// The two rows one batched payload produced, in derivation order.
+///
+/// One archived record — one `recv_ts`, one `message_index`, one `object_key` —
+/// and two top changes inside it, which is what the sink contract permits and
+/// what `Fold::settle` produces. `keys` states the book each change left behind,
+/// so a caller can ask for two different books or for one book twice.
+pub fn venue_batched_record(observation: &str, base: u64, keys: (u64, u64)) -> Vec<VenueBookTop> {
+    let first = VenueBookTop {
+        upstream_seq: Some(VENUE_BATCH_FIRST_SEQ),
+        ..venue_top(observation, "AAA", -2, base, 10, keys.0, 0)
+    };
+    let second = VenueBookTop {
+        // The record's own stamp and the record's own index, because that is
+        // the only stamp the transport took. Only the change ordinal separates
+        // the two rows.
+        change_index: 1,
+        upstream_seq: Some(VENUE_BATCH_SECOND_SEQ),
+        book_key: keys.1,
+        ..first.clone()
+    };
+    vec![first, second]
+}
+
+/// The two rows a rotation boundary can put at one receive stamp.
+///
+/// One observation point, one book, one stamp — and **two objects**, because a
+/// rotation closes one object and opens the next, and a clock whose resolution
+/// is coarser than the gap between them stamps the last record of the first and
+/// the first record of the second alike. Equal receive stamps are ordinary in
+/// this archive rather than a coincidence, and this is the case where nothing
+/// else about the two rows agrees.
+///
+/// `message_index` restarts at zero in each object, so it orders nothing across
+/// two of them: the earlier row here is the one in the earlier object, and it
+/// carries the *higher* record index. What orders the two is `object_key`, and
+/// it does so here because the **two windows differ**: the stamps lead the name
+/// the archive mints and are nineteen digits for every stamp this century, so
+/// these two keys collate in the order the objects were written in. That is a
+/// property of this pair and not of the key — where two objects share a window
+/// the name's only remaining component is an unpadded `segment_seq`, which is
+/// [`venue_rotation_collision`]'s case.
+pub fn venue_rotation_boundary(observation: &str, base: u64) -> Vec<VenueBookTop> {
+    let key = |start_ns: u64, seq: u64| {
+        format!(
+            "feed=top-of-book/env=test/site=site-1/recorder=recorder-1/date=2026-09-09/hour=12/\
+             {start_ns}-{}-{seq}.dzus",
+            start_ns + 60_000_000_000
+        )
+    };
+    let earlier = VenueBookTop {
+        upstream_seq: Some(VENUE_BATCH_FIRST_SEQ),
+        object_key: key(base, 4),
+        // The last record of the object that was closing.
+        ..venue_top(observation, "AAA", -2, base, 10, VENUE_ACROSS_A_ROTATION, 5)
+    };
+    let later = VenueBookTop {
+        message_index: 0,
+        upstream_seq: Some(VENUE_BATCH_SECOND_SEQ),
+        object_key: key(base + 60_000_000_000, 5),
+        ..earlier.clone()
+    };
+    vec![earlier, later]
+}
+
+/// The two rows a rotation inside one clock tick can put under one key.
+///
+/// One observation point, one book, one stamp, one record index and one change
+/// ordinal — and **two objects**. See [`VENUE_INSIDE_ONE_ROTATION_TICK`] for how
+/// a rotation gets there; the only column that tells these two rows apart is the
+/// object each was derived from, so this is the fixture that says whether the
+/// sort key can see it.
+///
+/// **The two keys differ in their last component and in nothing else**, which is
+/// the only shape this case can produce. `start_ns` and `end_ns` are the
+/// smallest and the largest receive stamp the window saw, so an object holding
+/// one record states that record's stamp for both — and the object that opens
+/// inside the same tick states the same two, under the same date and hour
+/// partition. `segment_seq` is what is left, and the archive writes it without
+/// padding, so the pair is the caller's: `(9, 10)` is the boundary where the key
+/// collates the *later* object first, and `(8, 9)` is a pair either side of it
+/// that collates in the order the objects were written. `009`'s occurrence
+/// paragraph carries the argument for why the ordinal owes nothing to either.
+///
+/// The site partition is the observation point, because a key carries the site
+/// and the recorder — two points writing one key would be the collision
+/// `object_key` exists to rule out.
+pub fn venue_rotation_collision(
+    observation: &str,
+    base: u64,
+    segment_seqs: (u64, u64),
+) -> Vec<VenueBookTop> {
+    // The record's own stamp, which is `venue_top`'s ten-millisecond offset and
+    // therefore the whole of each object's window.
+    let at = base + 10_000_000;
+    let key = |seq: u64| {
+        format!(
+            "feed=top-of-book/env=test/site={observation}/recorder=recorder-1/\
+             date=2026-09-09/hour=12/{at}-{at}-{seq}.dzus"
+        )
+    };
+    let earlier = VenueBookTop {
+        upstream_seq: Some(VENUE_BATCH_FIRST_SEQ),
+        object_key: key(segment_seqs.0),
+        // The *first* record of the object that was closing, because an object
+        // whose whole window fits inside one clock tick holds one record.
+        ..venue_top(
+            observation,
+            "AAA",
+            -2,
+            base,
+            10,
+            VENUE_INSIDE_ONE_ROTATION_TICK,
+            0,
+        )
+    };
+    let later = VenueBookTop {
+        upstream_seq: Some(VENUE_BATCH_SECOND_SEQ),
+        object_key: key(segment_seqs.1),
+        ..earlier.clone()
+    };
+    vec![earlier, later]
+}
+
+/// The venue-side race fixture.
+///
+/// Four cases in one load, each on its own `book_key` so that a failing
+/// assertion names its case rather than a row number:
+///
+/// - **a state that repeats**, three times at both observation points two
+///   milliseconds apart, and a fourth time at one of them only. What an `ASOF
+///   JOIN` gets wrong, and what the ordinal makes one-to-one.
+/// - **a state only one point saw**, which must survive as a row with
+///   `observations = 1` and a null `lead_ms` rather than being dropped.
+/// - **two points whose exponents disagree**, which is two different prices
+///   wearing one key.
+/// - **two points that spell the symbol differently**, which is the
+///   reference-data assertion the key folds and the pairing reports.
+pub fn venue_race_fixture(base: u64) -> Vec<VenueBookTop> {
+    let mut rows = Vec::new();
+    for (index, offset) in [10u64, 30, 50].iter().enumerate() {
+        let index = index as u64;
+        rows.push(venue_top(
+            "a",
+            "AAA",
+            -2,
+            base,
+            *offset,
+            VENUE_REPEATED,
+            index,
+        ));
+        // Two milliseconds behind, every time. A wrong pairing is then
+        // arithmetically visible rather than merely different: the lead comes
+        // out a multiple of twenty.
+        rows.push(venue_top(
+            "b",
+            "AAA",
+            -2,
+            base,
+            offset + 2,
+            VENUE_REPEATED,
+            index,
+        ));
+    }
+    // The fourth occurrence, at one point only.
+    rows.push(venue_top("a", "AAA", -2, base, 70, VENUE_REPEATED, 3));
+
+    // A state nobody at `b` ever saw.
+    rows.push(venue_top("a", "BBB", -2, base, 90, VENUE_ONLY_ONE_SAW, 4));
+
+    // The same book at both points, at two exponents.
+    rows.push(venue_top(
+        "a",
+        "CCC",
+        -2,
+        base,
+        110,
+        VENUE_EXPONENTS_DISAGREE,
+        5,
+    ));
+    rows.push(venue_top(
+        "b",
+        "CCC",
+        -4,
+        base,
+        112,
+        VENUE_EXPONENTS_DISAGREE,
+        5,
+    ));
+
+    // The same instrument, spelled two ways.
+    rows.push(venue_top(
+        "a",
+        "DDD",
+        -2,
+        base,
+        130,
+        VENUE_SYMBOLS_DISAGREE,
+        6,
+    ));
+    rows.push(venue_top(
+        "b",
+        "ddd",
+        -2,
+        base,
+        132,
+        VENUE_SYMBOLS_DISAGREE,
+        6,
+    ));
+    rows
+}
+
+/// The rows as a `JSONEachRow` body.
+///
+/// Written straight rather than through a `RowSink`, because there is no venue
+/// `RowSink` in this crate and there must not be one: this crate is one sink
+/// over the publisher side's grains, and a venue's own binary composes its
+/// writer. What is under test here is the *view*, and the rows are its input —
+/// so they go in the way the DDL declares them, from the row type whose field
+/// names `tests/ddl.rs` already holds against that DDL.
+pub fn json_each_row<T: serde::Serialize>(rows: &[T]) -> String {
+    rows.iter()
+        .map(|row| serde_json::to_string(row).expect("a row serialises"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }

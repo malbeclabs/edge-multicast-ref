@@ -499,6 +499,7 @@ dependencies = [
  "dz-recorder-core",
  "dz-recorder-replay",
  "dz-recorder-rows",
+ "dz-recorder-venue",
  "serde",
  "serde_json",
  "tempfile",
@@ -672,6 +673,22 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "dz-recorder-venue"
+version = "0.1.1"
+dependencies = [
+ "dz-adapter-core",
+ "dz-publisher-lowering",
+ "dz-recorder-archive",
+ "dz-recorder-core",
+ "dz-recorder-events",
+ "dz-recorder-rows",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 1.0.69",
 ]

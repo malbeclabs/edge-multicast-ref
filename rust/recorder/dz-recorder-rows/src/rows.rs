@@ -41,7 +41,7 @@
 use std::net::Ipv4Addr;
 
 use dz_edge_core::PortRole;
-use dz_recorder_core::{CaptureDropScope, RecvTsKind};
+use dz_recorder_core::CaptureDropScope;
 use serde::{Deserialize, Serialize};
 
 /// A count of nanoseconds since the Unix epoch, as a `DateTime64(9)` reads one.
@@ -62,27 +62,12 @@ impl From<u64> for Nanos {
 /// the two kinds together is measuring neither. The column exists so a query can
 /// exclude one.
 ///
-/// The tokens are hyphenated, as the design's DDL states them. The health tier's
-/// Prometheus label values for the same distinction are underscored, because a
-/// label value is read by a query language that treats a hyphen as an operator;
-/// they are the same fact in two notations, and this is the only place both are
-/// named.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum RecvTsKindLabel {
-    #[serde(rename = "kernel-software")]
-    KernelSoftware,
-    #[serde(rename = "application-fallback")]
-    ApplicationFallback,
-}
-
-impl From<RecvTsKind> for RecvTsKindLabel {
-    fn from(kind: RecvTsKind) -> Self {
-        match kind {
-            RecvTsKind::KernelSoftware => Self::KernelSoftware,
-            RecvTsKind::ApplicationFallback => Self::ApplicationFallback,
-        }
-    }
-}
+/// [`dz_recorder_core::RecvTsKindLabel`], re-exported rather than restated. It
+/// is the same type the venue side's object header and manifest carry, so the
+/// token in this column and the token in that manifest cannot come to disagree
+/// — a rename that reached only one of them would leave a query filtering on it
+/// across the two archives silently returning the rows of one.
+pub use dz_recorder_core::RecvTsKindLabel;
 
 /// Whether the datagrams a row was derived from were kept and verified.
 ///

@@ -15,15 +15,21 @@
 mod common;
 
 use common::{
-    batch, batch_on_role, cross_site_fixture, just_after_midnight_ns, midday_ns, now_ns,
-    race_fixture, ABSENT_BUT_A_SITE_OVERFLOWED, ABSENT_EVERYWHERE, A_SITE_IS_UP_AND_SILENT,
-    A_SITE_REUSED_THE_SEQUENCE, MISSING_FROM, MISSING_TO, NOBODY_ELSE_HAS_LOADED,
-    ONLY_A_CO_LOCATED_RECORDER, OUR_OWN_SCOPE_CANNOT_SUBTRACT, PRESENT_AT_ANOTHER_SITE, REPEATED,
+    batch, batch_on_role, cross_site_fixture, json_each_row, just_after_midnight_ns, midday_ns,
+    now_ns, race_fixture, venue_batched_record, venue_race_fixture, venue_rotation_boundary,
+    venue_rotation_collision, venue_top, ABSENT_BUT_A_SITE_OVERFLOWED, ABSENT_EVERYWHERE,
+    A_SITE_IS_UP_AND_SILENT, A_SITE_REUSED_THE_SEQUENCE, MISSING_FROM, MISSING_TO,
+    NOBODY_ELSE_HAS_LOADED, ONLY_A_CO_LOCATED_RECORDER, OUR_OWN_SCOPE_CANNOT_SUBTRACT,
+    PRESENT_AT_ANOTHER_SITE, REPEATED, VENUE_ACROSS_A_ROTATION, VENUE_BATCH_FIRST,
+    VENUE_BATCH_FIRST_SEQ, VENUE_BATCH_REPEATED, VENUE_BATCH_SECOND, VENUE_BATCH_SECOND_SEQ,
+    VENUE_EXPONENTS_DISAGREE, VENUE_INSIDE_ONE_ROTATION_TICK, VENUE_ONLY_ONE_SAW, VENUE_REPEATED,
+    VENUE_SYMBOLS_DISAGREE,
 };
 use dz_edge_core::PortRole;
 use dz_recorder_clickhouse::{migrations, schema, ClickHouseConfig, ClickHouseSink};
 use dz_recorder_replay::Fault;
-use dz_recorder_rows::{Grain, RowSink};
+use dz_recorder_rows::{Grain, Nanos, RowSink};
+use dz_recorder_venue::{RefusalCount, VenueBookTop, VenueObjectRow};
 
 /// One instant for every sink call in this file.
 ///
@@ -167,6 +173,24 @@ impl Scratch {
              WHERE site = 'one' AND recorder = 'recorder-one' AND channel_id = {case}",
             self.database
         ))
+    }
+
+    /// The venue-side book rows, as the derivation's row type states them.
+    ///
+    /// Straight `JSONEachRow` and not through a `RowSink`, because there is no
+    /// venue sink in this crate and there must not be one: this crate is one
+    /// sink over the publisher side's grains, and a venue's own binary composes
+    /// its writer. What is under test here is the view, and these are its input
+    /// — inserted from the row type whose field names `tests/ddl.rs` already
+    /// holds against this file's `CREATE TABLE`.
+    fn insert_venue_book_tops(&self, rows: &[VenueBookTop]) {
+        self.sink
+            .statement(&format!(
+                "INSERT INTO {}.venue_book_top FORMAT JSONEachRow\n{}",
+                self.database,
+                json_each_row(rows)
+            ))
+            .expect("the venue rows land");
     }
 
     fn count(&self, table: &str) -> u64 {
@@ -1181,5 +1205,557 @@ fn the_cross_site_answer_outlives_the_base_rows_it_was_drawn_from() {
         scratch.cross_site(ABSENT_EVERYWHERE, "verdict"),
         "publisher",
         "while the finding is unchanged, because it never rested on them"
+    );
+}
+
+/// **A venue-side state that repeats pairs one to one.**
+///
+/// The venue half of `006`'s own test, and the mutant it kills is the same one:
+/// replace the ordinal with an `ASOF JOIN` and this fails with plausible, biased
+/// lead times. `ASOF` selects the nearest right-hand row independently for each
+/// left-hand row, with no notion of consuming a match, so when a state repeats
+/// quickly several occurrences at one observation point all pair with the same
+/// occurrence at the other. The numbers that come out are not wrong in a way
+/// anyone notices — they are derived from counting one arrival several times.
+///
+/// Keyed on `book_key` and not `state_key`. That one folds the `Channel ID` and
+/// the `Instrument ID` in before it folds a price, and a venue side can compute
+/// neither: keyed on it this query would return zero pairs and read as each side
+/// missing every state the other saw.
+#[test]
+fn a_venue_state_that_repeats_pairs_one_to_one() {
+    let scratch = Scratch::open("venue_pairing");
+    let base = now_ns();
+    let rows = venue_race_fixture(base);
+    let written = rows.len() as u64;
+    scratch.insert_venue_book_tops(&rows);
+    assert_eq!(
+        scratch.count("venue_book_top"),
+        written,
+        "every fixture row is in the table, or nothing below is about the view"
+    );
+
+    // Four occurrences of the repeated state, three seen by both observation
+    // points and the fourth by one. Not three, which is what dropping the
+    // unpaired row would give, and not six, which is what pairing by proximity
+    // would.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT groupArray(observations) FROM (SELECT observations FROM \
+             {}.venue_book_top_race WHERE book_key = {VENUE_REPEATED} ORDER BY occurrence)",
+            scratch.database
+        )),
+        "[2,2,2,1]",
+        "a repeating state pairs one-to-one, and the fourth occurrence is unpaired"
+    );
+
+    // Every pair is the two milliseconds the fixture stated. A pairing that
+    // matched the wrong occurrences would still produce numbers, and they would
+    // be multiples of twenty.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT groupUniqArray(round(lead_ms, 3)) FROM {}.venue_book_top_race \
+             WHERE book_key = {VENUE_REPEATED} AND observations = 2",
+            scratch.database
+        )),
+        "[2]",
+        "the lead is the one the fixture stated, so the ordinals lined up"
+    );
+
+    // Unpaired means visible and *unmeasured*. A zero lead would be a
+    // measurement nobody made, and it would enter every average over the column
+    // as evidence that the two paths tied.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT concat(toString(count()), ' ', arrayStringConcat(any(observed_by), ',')) \
+             FROM {}.venue_book_top_race WHERE book_key = {VENUE_REPEATED} \
+             AND observations = 1 AND isNull(lead_ms)",
+            scratch.database
+        )),
+        "1 a",
+        "the unpaired occurrence is a row that names the point that saw it"
+    );
+
+    // A state only one point ever saw is a row and not an absence: it usually
+    // means the other point missed a state, which is the fact worth seeing. A
+    // join would have dropped it.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT concat(toString(observations), ' ', toString(isNull(lead_ms))) FROM \
+             {}.venue_book_top_race WHERE book_key = {VENUE_ONLY_ONE_SAW}",
+            scratch.database
+        )),
+        "1 1",
+        "a state one side saw is a row with observations = 1 and no lead"
+    );
+
+    // The reference-data assertions, as columns. The key covers the raw prices
+    // and leaves the exponents out, so a pair whose exponents disagree is two
+    // different prices wearing one key — visible rather than averaged.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT concat(toString(observations), ' ', toString(exponents_agree), ' ', \
+             toString(symbols_agree)) FROM {}.venue_book_top_race \
+             WHERE book_key = {VENUE_EXPONENTS_DISAGREE}",
+            scratch.database
+        )),
+        "2 0 1",
+        "the exponents disagree and the pair does not say so"
+    );
+
+    // And the symbol, whose case the key folds so that a pair exists at all —
+    // which is only safe because the disagreement is a column carrying both
+    // spellings.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT concat(toString(observations), ' ', toString(symbols_agree), ' ', \
+             arrayStringConcat(symbols, ',')) FROM {}.venue_book_top_race \
+             WHERE book_key = {VENUE_SYMBOLS_DISAGREE}",
+            scratch.database
+        )),
+        "2 0 DDD,ddd",
+        "two spellings of one instrument did not pair, or did not report the \
+         disagreement"
+    );
+
+    // Every occurrence at each point is numbered, and nothing is excluded from
+    // the numbering: there is no anchored row on this side to exclude.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT count() FROM {}.venue_book_top_occurrence",
+            scratch.database
+        )),
+        written.to_string(),
+        "a row was dropped from the numbering"
+    );
+}
+
+/// **Every top change one batched payload produced survives the merge.**
+///
+/// One archived record is one payload the adapter is handed, and the sink
+/// contract lets that payload carry a batch — `upstream_message` once per
+/// member — and lets any one member report more than one event. Every row of the
+/// record carries the record's own receive stamp, because that is the only stamp
+/// the transport took, so a sort key ending at `message_index` is **one key for
+/// all of them**.
+///
+/// The mutant this kills is `change_index` out of the sort key, which is what
+/// its absence was: the two rows below then share every `ORDER BY` component,
+/// `ReplacingMergeTree` keeps whichever merged last, and the loss is a book
+/// state that was never in the table rather than a count anybody can check. The
+/// `OPTIMIZE` is the point — this is about what the engine collapses, so a test
+/// that read before the merge would pass over a key that cannot tell the two
+/// apart.
+#[test]
+fn a_batched_payloads_top_changes_all_survive_the_merge() {
+    let scratch = Scratch::open("venue_batch");
+    let base = now_ns();
+    let rows = venue_batched_record("a", base, (VENUE_BATCH_FIRST, VENUE_BATCH_SECOND));
+
+    // The fixture is one record: one stamp, one record index, one object.
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].recv_ts, rows[1].recv_ts);
+    assert_eq!(rows[0].message_index, rows[1].message_index);
+    assert_eq!(rows[0].object_key, rows[1].object_key);
+    assert_ne!(rows[0].change_index, rows[1].change_index);
+
+    scratch.insert_venue_book_tops(&rows);
+    scratch.merge("venue_book_top");
+    assert_eq!(
+        scratch.count("venue_book_top"),
+        2,
+        "a top change from a batched payload was collapsed into the change beside it"
+    );
+
+    // And both reach the race as their own occurrence, because two different
+    // books are two states and not one seen twice.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT groupArray(occurrence) FROM (SELECT occurrence FROM \
+             {}.venue_book_top_race WHERE book_key IN ({VENUE_BATCH_FIRST}, \
+             {VENUE_BATCH_SECOND}) ORDER BY book_key)",
+            scratch.database
+        )),
+        "[1,1]",
+        "the two states of one payload are not two occurrences of one state"
+    );
+}
+
+/// **Two rows at one stamp are numbered by the objects they came from, and the
+/// stamp alone cannot do it.**
+///
+/// This is the case the window's order has to be total for. A rotation closes
+/// one object and opens the next, and a clock coarser than the gap stamps the
+/// last record of the first and the first record of the second alike — so two
+/// rows of one book sit at one receive stamp with nothing else about them in
+/// agreement. `message_index` restarts at zero in each object, so the *earlier*
+/// row carries the higher record index and the table's own sort order puts it
+/// second.
+///
+/// The mutant this kills is the window ordered on `recv_ts` alone: the ordinal
+/// then comes out of whatever order the rows were read in, which is the sort
+/// key, which numbers the later object's row first. `object_key` before
+/// `message_index` is what makes it the objects' order instead — the key's
+/// leading component is the window's first receive stamp, so lexicographic
+/// order over the keys is the order the objects were written in.
+#[test]
+fn two_rows_at_one_stamp_are_numbered_by_the_objects_they_came_from() {
+    let scratch = Scratch::open("venue_rotation_order");
+    let base = now_ns();
+    let rows = venue_rotation_boundary("a", base);
+
+    // One book at one stamp, and the row that is *first* is the one whose
+    // record index is higher, because the index restarts in each object.
+    assert_eq!(rows[0].recv_ts, rows[1].recv_ts);
+    assert_eq!(rows[0].book_key, rows[1].book_key);
+    assert!(rows[0].message_index > rows[1].message_index);
+    assert!(rows[0].object_key < rows[1].object_key);
+
+    scratch.insert_venue_book_tops(&rows);
+    let numbered = format!(
+        "SELECT groupArray(upstream_seq) FROM (SELECT upstream_seq FROM \
+         {}.venue_book_top_occurrence WHERE book_key = {VENUE_ACROSS_A_ROTATION} \
+         ORDER BY occurrence)",
+        scratch.database
+    );
+    assert_eq!(
+        scratch.scalar(&numbered),
+        format!("[{VENUE_BATCH_FIRST_SEQ},{VENUE_BATCH_SECOND_SEQ}]"),
+        "the row from the later object was numbered first"
+    );
+
+    scratch.merge("venue_book_top");
+    assert_eq!(
+        scratch.scalar(&numbered),
+        format!("[{VENUE_BATCH_FIRST_SEQ},{VENUE_BATCH_SECOND_SEQ}]"),
+        "the ordinal moved when the parts did"
+    );
+}
+
+/// **Two objects at one stamp and one record index are two rows, and the object
+/// in the key is the only reason.**
+///
+/// The other half of the rotation boundary, and the half the ordinal cannot
+/// reach. Above, the two records carry different indexes and the window's order
+/// has to choose between them. Here the indexes are the same, because an object
+/// whose whole window fits inside one clock tick holds one record and its index
+/// is zero in both — so every column the key held before `object_key` joined it
+/// agrees, and `ReplacingMergeTree` collapses the pair.
+///
+/// The mutant this kills is the key without the object. One genuine book state
+/// is then deleted by a merge, which no count downstream can show: the ordinal
+/// numbers what is in the table, so the survivor is occurrence 1 and the state
+/// the other object recorded reads as never having happened.
+///
+/// And the second load is the argument against the fix, tested rather than
+/// asserted: a re-derivation reads the same objects, so it produces the same
+/// keys and still replaces. Adding the object to the key does not make a
+/// re-derivation double.
+///
+/// The two keys differ in their last component and in nothing else, because
+/// that is the only shape a rotation inside one tick can produce: both objects
+/// hold one record at one stamp, so both state that stamp as their window. The
+/// component is `segment_seq` and the archive writes it without padding, so
+/// `(9, 10)` is the boundary where the key collates the object written *second*
+/// first — which is what the ordinal below comes out in, and what `009`'s
+/// occurrence paragraph says the ordinal does not claim to be.
+#[test]
+fn two_objects_at_one_stamp_and_one_record_index_are_two_rows() {
+    let scratch = Scratch::open("venue_rotation_collision");
+    let base = now_ns();
+    let rows = venue_rotation_collision("a", base, (9, 10));
+
+    // Everything the key held before the object joined it agrees, which is what
+    // makes this a collapse rather than two ordinary rows.
+    assert_eq!(rows[0].recv_ts, rows[1].recv_ts);
+    assert_eq!(rows[0].message_index, rows[1].message_index);
+    assert_eq!(rows[0].change_index, rows[1].change_index);
+    assert_eq!(rows[0].symbol, rows[1].symbol);
+    assert_eq!(rows[0].book_key, rows[1].book_key);
+    assert_ne!(rows[0].object_key, rows[1].object_key);
+
+    scratch.insert_venue_book_tops(&rows);
+    let surviving = format!(
+        "SELECT count() FROM {}.venue_book_top FINAL WHERE book_key =          {VENUE_INSIDE_ONE_ROTATION_TICK}",
+        scratch.database
+    );
+    assert_eq!(
+        scratch.scalar(&surviving),
+        "2",
+        "the two objects' rows collapsed into one at read time"
+    );
+
+    // The merge is where the collapse would actually be applied, so it is where
+    // the row would really be gone.
+    scratch.merge("venue_book_top");
+    assert_eq!(
+        scratch.scalar(&surviving),
+        "2",
+        "a merge deleted a book state one of the two objects recorded"
+    );
+
+    // Both are numbered, and the order is the keys' and not the rotation's: the
+    // only component that differs is an unpadded `segment_seq`, so `10` sorts
+    // ahead of `9` and the object written second is occurrence 1. What the
+    // ordinal owes the race is the same answer twice, which is the next test.
+    let numbered = format!(
+        "SELECT groupArray(upstream_seq) FROM (SELECT upstream_seq FROM          {}.venue_book_top_occurrence WHERE book_key =          {VENUE_INSIDE_ONE_ROTATION_TICK} ORDER BY occurrence)",
+        scratch.database
+    );
+    assert_eq!(
+        scratch.scalar(&numbered),
+        format!("[{VENUE_BATCH_SECOND_SEQ},{VENUE_BATCH_FIRST_SEQ}]")
+    );
+
+    // And a re-derivation of both objects replaces rather than doubles, which is
+    // the property `object_key` in the key was supposed to cost.
+    scratch.insert_venue_book_tops(&rows);
+    scratch.merge("venue_book_top");
+    assert_eq!(
+        scratch.scalar(&surviving),
+        "2",
+        "a re-derivation doubled the rows instead of replacing them"
+    );
+}
+
+/// **The race pairs the same way and measures the same lead whichever object a
+/// point numbered first**, which is the claim `009`'s occurrence paragraph makes
+/// and the reason the tie-break needs no chronology it cannot have.
+///
+/// Two observation points, each of them a rotation inside one clock tick — so
+/// each holds two rows of one book at one stamp, and each point's ordinal has to
+/// choose between two objects sharing a window. The two points are given
+/// sequence pairs that collate in **opposite** directions: `(9, 10)` puts the
+/// object written second first, because the component is unpadded, and `(8, 9)`
+/// puts the object written first first. So `a`'s occurrence 1 and `b`'s
+/// occurrence 1 came from opposite ends of their rotations.
+///
+/// The race is unmoved, and that is the point. `lead_ms` is the spread of
+/// `recv_ts` across the points for one ordinal, the tie-break only ever decides
+/// between rows that already agree on `recv_ts`, and so both ordinals pair
+/// across both points and both report the five milliseconds between the two
+/// stamps. A numbering that came out of the objects' own order would report the
+/// same thing, which is exactly why the order is not worth a column.
+///
+/// The mutant this kills is `object_key` out of `venue_book_top`'s sort key:
+/// each point then keeps one of its two rows, occurrence 2 pairs with nothing,
+/// and a state both points recorded twice reads as one both saw once.
+#[test]
+fn the_race_does_not_depend_on_which_object_a_point_numbered_first() {
+    let scratch = Scratch::open("venue_rotation_lead");
+    let base = now_ns();
+    // Five milliseconds of lead between the points, and nothing else between
+    // them: one book, one stamp each, two objects each.
+    let ours = venue_rotation_collision("a", base, (9, 10));
+    let theirs = venue_rotation_collision("b", base + 5_000_000, (8, 9));
+
+    // The two points number their rotations from opposite ends, which is what
+    // makes this a test of the pairing rather than of one collation.
+    assert!(ours[1].object_key < ours[0].object_key);
+    assert!(theirs[0].object_key < theirs[1].object_key);
+
+    scratch.insert_venue_book_tops(&ours);
+    scratch.insert_venue_book_tops(&theirs);
+    scratch.merge("venue_book_top");
+
+    let raced = format!(
+        "SELECT groupArray((occurrence, observations, lead_ms)) FROM (SELECT \
+         occurrence, observations, lead_ms FROM {}.venue_book_top_race \
+         WHERE book_key = {VENUE_INSIDE_ONE_ROTATION_TICK} ORDER BY occurrence)",
+        scratch.database
+    );
+    assert_eq!(
+        scratch.scalar(&raced),
+        "[(1,2,5),(2,2,5)]",
+        "the pairing or the lead moved with the objects' order"
+    );
+}
+
+/// And the ordinal does not depend on the part layout either.
+///
+/// The other half of *decided by the rows*: two changes of one payload that
+/// left the book in the same state land in one window partition at one stamp,
+/// and they go in **backwards and in two parts** here. A numbering that came out
+/// of how the rows arrived would answer differently before and after the merge.
+#[test]
+fn the_occurrence_ordinal_does_not_depend_on_how_the_rows_arrived() {
+    let scratch = Scratch::open("venue_batch_order");
+    let base = now_ns();
+    let rows = venue_batched_record("a", base, (VENUE_BATCH_REPEATED, VENUE_BATCH_REPEATED));
+
+    // One book, twice, inside one record: the two rows differ in the change
+    // ordinal and in the venue's own number, and in nothing else.
+    assert_eq!(rows[0].book_key, rows[1].book_key);
+    scratch.insert_venue_book_tops(&rows[1..]);
+    scratch.insert_venue_book_tops(&rows[..1]);
+
+    let numbered = format!(
+        "SELECT groupArray(upstream_seq) FROM (SELECT upstream_seq FROM \
+         {}.venue_book_top_occurrence WHERE book_key = {VENUE_BATCH_REPEATED} \
+         ORDER BY occurrence)",
+        scratch.database
+    );
+    let expected = format!("[{VENUE_BATCH_FIRST_SEQ},{VENUE_BATCH_SECOND_SEQ}]");
+    assert_eq!(
+        scratch.scalar(&numbered),
+        expected,
+        "the first change of the record was not the first occurrence"
+    );
+
+    // And the same answer after the merge, which is the other half of *not the
+    // engine's*: a numbering that came out of the part layout would change here.
+    scratch.merge("venue_book_top");
+    assert_eq!(
+        scratch.scalar(&numbered),
+        expected,
+        "the ordinal moved when the parts did"
+    );
+
+    // Two occurrences of one state at one point, which is what the pairing then
+    // reads: one row per occurrence, each seen by one observation point.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT groupArray(observations) FROM (SELECT observations FROM \
+             {}.venue_book_top_race WHERE book_key = {VENUE_BATCH_REPEATED} \
+             ORDER BY occurrence)",
+            scratch.database
+        )),
+        "[1,1]"
+    );
+}
+
+/// Re-deriving the same object does not manufacture evidence of loss.
+///
+/// `venue_book_top` is a `ReplacingMergeTree` and a re-derivation after an
+/// adapter fix is a replace, so between the second load and the merge that
+/// follows it one arrival is in the table twice. Numbered without the collapse,
+/// the duplicate becomes a second occurrence — and the surplus at each point
+/// then pairs with the surplus at the other while the *last* one at each pairs
+/// with nothing. So a re-derivation would not merely inflate a count: it would
+/// report states both points saw as states one of them missed.
+#[test]
+fn a_venue_re_derivation_before_the_merge_does_not_invent_occurrences() {
+    let scratch = Scratch::open("venue_pairing_reload");
+    let base = now_ns();
+    scratch.insert_venue_book_tops(&venue_race_fixture(base));
+    scratch.insert_venue_book_tops(&venue_race_fixture(base));
+
+    // Deliberately no `OPTIMIZE`: the window between a re-load and the merge is
+    // exactly the window this is about, and a test that merged first would
+    // assert the engine's behaviour rather than the view's.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT groupArray(observations) FROM (SELECT observations FROM \
+             {}.venue_book_top_race WHERE book_key = {VENUE_REPEATED} ORDER BY occurrence)",
+            scratch.database
+        )),
+        "[2,2,2,1]",
+        "the collapse is applied at read time, so a re-derivation changes nothing"
+    );
+}
+
+/// The venue-side tables take what the derivation's row types state.
+///
+/// The thing no literal-based test can prove: a `JSONEachRow` body is accepted
+/// or refused by the server and by nobody else, so a column type that could not
+/// hold a value the row type admits is only found here.
+#[test]
+fn the_checked_in_venue_ddl_accepts_what_the_derivation_produces() {
+    let scratch = Scratch::open("venue_load");
+    let base = now_ns();
+
+    // The book rows, including the absences: a source count the venue did not
+    // state, and a top with one side gone.
+    let mut rows = venue_race_fixture(base);
+    rows.push(VenueBookTop {
+        bid_px_raw: None,
+        bid_qty_raw: None,
+        bid_source_count: None,
+        ask_source_count: Some(0),
+        upstream_sid: None,
+        upstream_seq: None,
+        ..venue_top("a", "EEE", -8, base, 150, 11, 7)
+    });
+    let written = rows.len() as u64;
+    scratch.insert_venue_book_tops(&rows);
+    assert_eq!(scratch.count("venue_book_top"), written);
+
+    // A NULL is a NULL and not a zero, which is the whole reason those columns
+    // are nullable: a zero source count is the top-of-book field's own spelling
+    // of *unavailable* on the other side of the race.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT countIf(isNull(bid_px_raw)) FROM {}.venue_book_top FINAL",
+            scratch.database
+        )),
+        "1"
+    );
+
+    // And the object row, with its refusals by reason.
+    let object = VenueObjectRow {
+        recv_ts_start: Nanos(base),
+        recv_ts_end: Nanos(base + 150_000_000),
+        observation: "a".to_owned(),
+        env: "test".to_owned(),
+        feed: "top-of-book".to_owned(),
+        object_key: "venue/a/object-0.dzus".to_owned(),
+        object_sha256: "b".repeat(64),
+        format_version: 1,
+        connections: vec!["mktdata".to_owned()],
+        message_count: 40,
+        refused_count: 3,
+        refusals: vec![
+            RefusalCount("malformed".to_owned(), 2),
+            RefusalCount("truncated".to_owned(), 1),
+        ],
+        event_count: 37,
+        unpriced_count: 1,
+        unknown_instrument_count: 1,
+        desync_count: 0,
+        unattributed_count: 0,
+        book_top_count: 12,
+        instrument_count: 4,
+    };
+    scratch
+        .sink
+        .statement(&format!(
+            "INSERT INTO {}.venue_object FORMAT JSONEachRow\n{}",
+            scratch.database,
+            json_each_row(std::slice::from_ref(&object))
+        ))
+        .expect("the object row lands");
+    assert_eq!(scratch.count("venue_object"), 1);
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT arrayStringConcat(arrayMap(r -> concat(r.1, '=', toString(r.2)), refusals), ',') \
+             FROM {}.venue_object FINAL",
+            scratch.database
+        )),
+        "malformed=2,truncated=1",
+        "the refusals did not reach their column as (reason, count)"
+    );
+
+    // Re-deriving one object replaces its rows rather than doubling them, which
+    // is the acceptance criterion the whole archive shape exists for.
+    scratch
+        .sink
+        .statement(&format!(
+            "INSERT INTO {}.venue_object FORMAT JSONEachRow\n{}",
+            scratch.database,
+            json_each_row(std::slice::from_ref(&object))
+        ))
+        .expect("the second derivation lands");
+    scratch.merge("venue_object");
+    assert_eq!(
+        scratch.count("venue_object"),
+        1,
+        "a re-derivation accumulated rather than replacing"
+    );
+    scratch.insert_venue_book_tops(&rows);
+    scratch.merge("venue_book_top");
+    assert_eq!(
+        scratch.count("venue_book_top"),
+        written,
+        "a re-derivation of the book rows accumulated rather than replacing"
     );
 }

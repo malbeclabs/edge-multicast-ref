@@ -26,7 +26,28 @@
 --
 -- WHAT IT MAY DO, AND WHY EACH GRANT IS THERE
 --
--- INSERT on the five tables, because that is the whole job.
+-- INSERT on every table the loader writes, because that is the whole job. Ten
+-- of them at the last count, and the count is not the point: the list below is
+-- grouped by the file that declares each table — `001`'s five transport grains,
+-- `005`'s three market data tables, `009`'s two venue-side ones — so that a
+-- reader checking the list against the schema reads it file by file.
+--
+-- THIS FILE IS RE-APPLIED WHENEVER A LATER FILE ADDS A TABLE, and that is a
+-- standing rule rather than a note about one file. The grants stay here, where
+-- an administrator holds a secret and access-management rights, and the schema
+-- files hold no privilege statement — so a file that adds a table adds its
+-- `GRANT INSERT` to this list and says in its own header that this file has to
+-- be applied again. `009` states it; a file that adds a table and does not is
+-- the one that ships a table the loader cannot write, found on the first insert
+-- of a deployment rather than in review. This file is idempotent by
+-- construction: every statement is guarded by `IF NOT EXISTS` or replays a
+-- grant the account already holds, so re-applying it is always safe and is
+-- never a schema change.
+--
+-- A grant naming a table that does not exist yet is fine, which is what makes a
+-- fresh install by the numbers work: ClickHouse stores a grant against the
+-- name, not against the object, so `009`'s two grants below are accepted here
+-- and take effect when `009` creates the tables.
 --
 -- **No SELECT on anything.** The adjacency check reads the preceding segment's
 -- trailer from the loader's own on-disk ledger and from the objects it is still
@@ -90,6 +111,7 @@ CREATE QUOTA IF NOT EXISTS dz_loader
     FOR INTERVAL 1 hour MAX queries = 100000, errors = 10000, read_rows = 100000000
     TO dz_loader;
 
+-- The transport grains of `001`.
 GRANT INSERT ON recorder.datagram TO dz_loader;
 GRANT INSERT ON recorder.era TO dz_loader;
 GRANT INSERT ON recorder.segment_coverage TO dz_loader;
@@ -102,3 +124,17 @@ GRANT INSERT ON recorder.conformance_finding TO dz_loader;
 GRANT INSERT ON recorder.event TO dz_loader;
 GRANT INSERT ON recorder.instrument TO dz_loader;
 GRANT INSERT ON recorder.book_top TO dz_loader;
+-- The venue-side tables of `009`, granted here for the same reason. `009`'s own
+-- header says to apply this file again after it, which is what an operator
+-- upgrading an existing cluster has to do: the alternative is a venue
+-- derivation that fails on its first insert with `Not enough privileges`, a
+-- message that names a table and not the file that fixes it.
+--
+-- The same account, deliberately. A venue-side derivation is a different process
+-- on a different host writing different tables, and a second account would be a
+-- second password to rotate for one bound nobody would set differently. The
+-- ceilings above are what matter and they are per user, so sharing the account
+-- shares the ceiling — which is the intent: two writers of one database should
+-- not be able to spend twice the day's reads between them.
+GRANT INSERT ON recorder.venue_book_top TO dz_loader;
+GRANT INSERT ON recorder.venue_object TO dz_loader;

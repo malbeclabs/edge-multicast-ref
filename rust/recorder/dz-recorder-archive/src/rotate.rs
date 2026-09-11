@@ -27,6 +27,36 @@ use crate::writer::{
 /// How much of one segment is buffered before it reaches the disk.
 const SEGMENT_BUFFER_BYTES: usize = 1 << 20;
 
+/// When an open segment stops being the open segment.
+///
+/// **Size or age, whichever comes first**: a size bound keeps objects uniform
+/// for the analysis tier, an age bound keeps a low-volume feed's data off a
+/// local disk for hours.
+///
+/// Extracted so that there is one of it. There are two archive shapes in this
+/// crate — pcapng datagrams and the venue-side upstream messages of
+/// [`upstream`](crate::upstream) — and the moment each decides for itself when
+/// to rotate is the moment their retention drifts apart while both files still
+/// read as though they agree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RotationPolicy {
+    pub rotate_bytes: u64,
+    pub rotate_interval: Duration,
+}
+
+impl RotationPolicy {
+    /// Whether a segment opened at `opened_ns` and holding `bytes_written` is
+    /// due to rotate at `now_ns`.
+    ///
+    /// The clock is a parameter and never read here, so a test states the
+    /// instant rather than sleeping — the same arrangement the row sinks use.
+    #[must_use]
+    pub fn due(self, bytes_written: u64, opened_ns: u64, now_ns: u64) -> bool {
+        let interval_ns = u64::try_from(self.rotate_interval.as_nanos()).unwrap_or(u64::MAX);
+        bytes_written >= self.rotate_bytes || now_ns.saturating_sub(opened_ns) >= interval_ns
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ArchiveWriterConfig {
     /// Where the open segment lives and where an object is assembled.
@@ -121,14 +151,23 @@ impl ArchiveWriter {
             .join(open_segment_name(self.segment_seq))
     }
 
-    /// Size or age, whichever comes first: a size bound keeps objects uniform
-    /// for the analysis tier, an age bound keeps a low-volume feed's data off a
-    /// local disk for hours.
+    /// Size or age, whichever comes first, as [`RotationPolicy`] states it.
+    ///
+    /// The decision itself is the policy's, so that the venue-side shape rotates
+    /// on the same rule rather than on a second copy of it.
     #[must_use]
     pub fn rotate_due(&self, now_ns: u64) -> bool {
         let bytes = self.open.as_ref().map_or(0, SegmentWriter::bytes_written);
-        let interval_ns = u64::try_from(self.cfg.rotate_interval.as_nanos()).unwrap_or(u64::MAX);
-        bytes >= self.cfg.rotate_bytes || now_ns.saturating_sub(self.opened_ns) >= interval_ns
+        self.rotation_policy().due(bytes, self.opened_ns, now_ns)
+    }
+
+    /// The rotation rule this writer was configured with.
+    #[must_use]
+    pub const fn rotation_policy(&self) -> RotationPolicy {
+        RotationPolicy {
+            rotate_bytes: self.cfg.rotate_bytes,
+            rotate_interval: self.cfg.rotate_interval,
+        }
     }
 
     /// Closes the open segment and hands it to the compressor.

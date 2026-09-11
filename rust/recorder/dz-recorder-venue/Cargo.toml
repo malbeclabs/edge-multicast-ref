@@ -1,0 +1,38 @@
+[package]
+name = "dz-recorder-venue"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The venue half of a feed race: a derivation driving a venue's own Adapter over archived upstream messages, and the rows it produces"
+
+# **No venue crate is here, and none may be added.** The adapter arrives as an
+# argument, from the venue's own binary, exactly as `run(AdapterRegistry)` takes
+# one on the publisher side. A dependency on a venue in this file would be a
+# recorder that had to be rebuilt to record a second one, and this repository
+# would name the first.
+#
+# `dz-publisher-lowering` is here for `price_at` and `qty_at` alone: converting
+# a venue's decimal to an integer at the instrument's exponent, exactly or
+# refused. `dz-recorder-relower` already links it for the same reason and with
+# the same absence of `dz-publisher-runtime` — a derivation that re-runs the
+# publisher's scaling must not also link its egress socket.
+#
+# `dz-recorder-events` is here for `book_key` and its `Top`. Not a second
+# implementation: two hashes of one book state pair with nothing, and the
+# predicate that decides an absent side stays private in that crate precisely so
+# that nothing carries a copy of it.
+[dependencies]
+dz-adapter-core = { path = "../../adapter/dz-adapter-core" }
+dz-publisher-lowering = { path = "../../publisher/dz-publisher-lowering" }
+dz-recorder-archive = { path = "../dz-recorder-archive" }
+dz-recorder-core = { path = "../dz-recorder-core" }
+dz-recorder-events = { path = "../dz-recorder-events" }
+dz-recorder-rows = { path = "../dz-recorder-rows" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -27,7 +27,9 @@ pub use config::{
     ArchiveConfig, CaptureConfig, CaptureMode, Compression, ConfigError, FeedConfig, HealthConfig,
     MetricsConfig, RecorderConfig, ETHERNET_IPV4_UDP_HEADER_SIZE, MAX_LINK_HEADER_SIZE,
 };
-pub use datagram::{CaptureDropScope, ChannelInstance, PendingLoss, RecordedDatagram, RecvTsKind};
+pub use datagram::{
+    CaptureDropScope, ChannelInstance, PendingLoss, RecordedDatagram, RecvTsKind, RecvTsKindLabel,
+};
 pub use error::{SinkError, SourceError};
 pub use identity::RecorderIdentity;
 pub use owned::OwnedDatagram;

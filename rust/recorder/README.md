@@ -96,13 +96,14 @@ One vantage point cannot tell those apart, which is why a `sequence_gap` row lan
 |---|---|
 | `dz-recorder-core` | The types every other crate speaks: `RecordedDatagram`, `ChannelInstance`, the `Source`/`Sink`/`Observer` traits, `RecorderIdentity`, and the configuration |
 | `dz-recorder-capture` | Live capture as a `Source`: membership, kernel receive timestamps, drop accounting, rejoin, source admission |
-| `dz-recorder-archive` | The pcapng writer: rotation, compression, hashing, the manifest, and the staging watermark |
+| `dz-recorder-archive` | Two archive shapes: the pcapng writer for datagrams, the [upstream-message object format](dz-recorder-archive/UPSTREAM-OBJECT-FORMAT.md) for a venue's own bytes, and the rotation, compression, hashing, manifest and staging watermark both share |
 | `dz-recorder-replay` | An archive read back as a `Source`, plus the synthetic publisher the tests are built on |
 | `dz-recorder-loss` | Which sequence values nobody delivered, per channel instance and per era, and whose they are |
 | `dz-recorder-relower` | An archive read back as decoded messages, and re-run against a venue's own mapping: *did the publisher publish what the venue said?* |
 | `dz-recorder-health` | Whether a recorder is recording, as the process itself can tell |
 | `dz-recorder-rows` | The rows an archive derives into, and the derivation: pure, sink-agnostic, and exercised with no server |
 | `dz-recorder-events` | Market data rows: reference data scoped to an era, the fold that joins the messages to it, and the book that says when its top cannot be believed |
+| `dz-recorder-venue` | The venue half of a feed race: a derivation that drives a venue's own `Adapter` over archived upstream messages, and the rows it produces |
 | `dz-recorder-clickhouse` | The column store as one `RowSink`, plus the checked-in DDL |
 | `dz-recorder-load` | The loader binary ([README](dz-recorder-load/README.md)) |
 | `dz-recorder-inline` | Inline mode as a library: the ring, the window and its synthesised manifest, and the spool that holds rows until the column store has taken them |
@@ -570,6 +571,123 @@ cargo run -p dz-recorder-events --example sizing -- \
   --feed market-by-price <object>.pcapng.zst   # the multiplier, before turning one on
 ```
 
+## The venue half of a feed race
+
+A feed race compares what a venue said with what a publisher sent. Everything
+above is the publisher half of it. `dz-recorder-venue` is the other half:
+archived upstream messages become rows by driving that venue's own `Adapter`
+over them. Designed in
+[`2026-09-09-recorder-venue-observation-design.md`](../../docs/superpowers/specs/2026-09-09-recorder-venue-observation-design.md)
+and planned in
+[`2026-09-09-recorder-venue-observation.md`](../../docs/superpowers/plans/2026-09-09-recorder-venue-observation.md).
+
+**A venue's recorder is a binary the venue assembles, as its publisher is.**
+`derive_venue_object` takes `&mut dyn Adapter`; no crate here links a venue and
+none may.
+
+**Three tiers, and none of them is a capture.** A capture is a receive path over
+a socket that observes datagrams, counts what the handle dropped and records
+link headers. A venue-side recording is none of the three, so it has its own
+[archive shape](dz-recorder-archive/UPSTREAM-OBJECT-FORMAT.md) — length-delimited
+upstream messages, each with the connection that delivered it and a receive
+stamp — compressed, digested and keyed by the archive tier's own code rather
+than a second copy of it, and rotated under the archive tier's own policy: the
+segment writer accounts for the bytes it has written and states the window it
+covers, and the venue's binary reads that count against the one policy. That document also states why this is not the
+record encoding the offline re-lowering uses: that one carries normalized
+events, which sit downstream of the venue's decode, and the evidence has to be
+what the venue sent.
+
+**A published object is opened under its own key.** `publish` compresses by
+default and the suffix goes on the key, so `ArchivedVenueObject::open_published`
+is what a caller reaches for and it decides from the name — one place decides
+what `.zst` means, in the archive tier, for both archive shapes.
+`ArchivedVenueObject::open` is the one that takes bytes already an upstream
+object, for a caller that has decoded and for a test over a segment it wrote
+itself.
+
+**The derivation reads objects, not a socket**, and that is what restores every
+guarantee a live input would have given up: `(object key, sha256)` idempotence,
+the object as the batch boundary, and the bytes still being there to re-derive
+with a corrected adapter. It also means this tier waits on neither of the two
+transports a venue's receive path needs. An adapter that refuses a message costs
+**that message** and is counted by the reason it gave: a derivation that stopped
+at the first message a venue's own adapter could not parse would report the
+venue's feed as having ended there, and those rows read exactly like a venue
+that went quiet.
+
+**The rows are their own two grains**, declared by `009`. `venue_book_top` is
+one row per change in the top of book as an observer of the venue's own upstream
+states it; `venue_object` is one row per object, carrying what was read, what was
+refused and by which reason. Neither carries `channel_id`, `instrument_id`,
+`sequence_number`, `reset_count`, `segment_seq`, `drop_delta` or an era — each is
+a statement about a datagram on a channel instance, and a venue's upstream
+message is not one. The absence is held against column-name literals in two
+places, the row types and the DDL, because a column that exists reads as a
+column somebody may fill.
+
+**What identifies a venue-side row is the object, the record and the change
+within it.** `message_index` says which archived record moved the top;
+`change_index` says
+which change in the top that record produced. Both, because a record is one
+payload the adapter is handed and a payload may carry a batch — the sink contract
+has `upstream_message` called once per member — while one member may move a top
+more than once. Every such row carries the record's own receive stamp, because
+that is the only stamp the transport took, so a key ending at the record is one
+key for all of them and `ReplacingMergeTree` would keep whichever merged last.
+The pair is in the sort key and in the occurrence window's ordering, which is
+what makes the ordinal reproducible rather than the engine's choice among rows
+that arrived at one stamp.
+
+And `object_key` ahead of both, because the record index restarts at zero in
+every object and so separates nothing across two of them. A rotation closes one
+object and opens the next, and a clock coarser than the gap stamps records
+either side of the boundary alike — so an object whose whole window fits inside
+one tick puts its only record and the next object's first at one stamp under one
+index, and the two book states collapse into one. The object is the only column
+a venue-side row carries that tells them apart. It costs no idempotence: a
+re-derivation reads the same object and so produces the same key, which is why
+`object_sha256` stays out — two digests under one key are one window the archive
+re-published, and the rows of the object that is there now replace the rows of
+the one that was.
+
+**Tells them apart, and not which of them came first.** A key ends in the name
+the archive mints, `<start_ns>-<end_ns>-<segment_seq>`, and the sequence is
+written without padding — so two objects that share a window, which is what a
+rotation inside one clock tick produces, collate segment 10 ahead of segment 9.
+The occurrence window asks the key for uniqueness and not for order:
+`(object_key, message_index, change_index)` is unique for every row, so the
+numbering is total and answers the same on two runs and either side of a merge,
+and the tie-break only ever separates rows that already agree on `recv_ts` —
+the quantity `lead_ms` is measured from. The race therefore pairs the same way
+and reports the same lead whichever of the two is numbered first, which is what
+the container suite asserts and why the objects' own order is not worth a column
+this table would have to be given.
+
+**The race is a view keyed on `book_key`**, the hash over the two sides of a top
+and nothing else, computed by `dz_recorder_events::book_key` and never by a copy
+of it. Not `state_key`: that one folds the `Channel ID` and the `Instrument ID`
+in before it folds a price, and a venue side can compute neither — the channel
+is the operator's mapping and the identifier is minted by the publisher's
+registry. Keyed on it the race would return zero pairs and read as each side
+missing every state the other saw. `009` numbers the occurrences per observation
+point and pairs ordinal to ordinal, exactly as `006` does, and carries
+`symbols_agree` and `exponents_agree` as columns rather than assumptions.
+
+**What a venue-side observation cannot say.** It cannot report loss: it has no
+sequence space of its own that this repository defines, so a state the venue
+produced and nobody recorded is invisible on that side. It has no
+`book_certain`, because certainty on the publisher side means a gap in the
+publisher's own sequence and on the venue side would mean the venue's own
+resynchronisation — one column, two meanings, and a `min()` over a pair mixes
+them. And it claims nothing about attribution: whose fault a missing state is
+stays the loss derivation's question and the cross-site views'.
+
+```bash
+cargo test -p dz-recorder-venue                      # the derivation and the grains
+cargo test -p dz-recorder-archive --test upstream_format
+```
+
 ## Not here yet
 
 The conformance runner over replay. `conformance_finding` exists as the table a
@@ -587,6 +705,20 @@ a panel already shows before anything is switched over.
 
 Any shipper. The loader is deliberately arranged so that not having one costs
 retention and not the join.
+
+A venue-side receive path. A venue-side observation needs an `Input`, and the
+two transports a venue would use for one — a session transport and a polled one
+— are each declared and unbuilt. `dz-recorder-venue` takes archived objects as
+its starting point precisely so that it does not depend on either, and a venue
+that wants to produce those objects today writes them with the archive's own
+upstream segment writer.
+
+The publisher side as a contributor to the venue race. `book_top` carries `state_key`
+and no `book_key`, and the two ways to bridge that are a new column on
+`book_top` and a second fold written in SQL — the first is a change to a
+publisher-side grain and the second is the copy `book_key` exists to remove.
+`009`'s pairing names no observation point, so the publisher side enters it by
+contributing rows rather than by that view learning its name.
 
 One check is deliberately deferred: the archive is an interface between two
 languages, and the golden-vector check that a pcapng segment written here reads
