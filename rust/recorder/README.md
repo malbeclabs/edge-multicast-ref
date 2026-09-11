@@ -651,6 +651,19 @@ re-derivation reads the same object and so produces the same key, which is why
 re-published, and the rows of the object that is there now replace the rows of
 the one that was.
 
+**Tells them apart, and not which of them came first.** A key ends in the name
+the archive mints, `<start_ns>-<end_ns>-<segment_seq>`, and the sequence is
+written without padding — so two objects that share a window, which is what a
+rotation inside one clock tick produces, collate segment 10 ahead of segment 9.
+The occurrence window asks the key for uniqueness and not for order:
+`(object_key, message_index, change_index)` is unique for every row, so the
+numbering is total and answers the same on two runs and either side of a merge,
+and the tie-break only ever separates rows that already agree on `recv_ts` —
+the quantity `lead_ms` is measured from. The race therefore pairs the same way
+and reports the same lead whichever of the two is numbered first, which is what
+the container suite asserts and why the objects' own order is not worth a column
+this table would have to be given.
+
 **The race is a view keyed on `book_key`**, the hash over the two sides of a top
 and nothing else, computed by `dz_recorder_events::book_key` and never by a copy
 of it. Not `state_key`: that one folds the `Channel ID` and the `Instrument ID`

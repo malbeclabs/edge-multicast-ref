@@ -1083,10 +1083,13 @@ pub fn venue_batched_record(observation: &str, base: u64, keys: (u64, u64)) -> V
 ///
 /// `message_index` restarts at zero in each object, so it orders nothing across
 /// two of them: the earlier row here is the one in the earlier object, and it
-/// carries the *higher* record index. What orders the two is `object_key`, whose
-/// leading component under this layout is the window's first receive stamp —
-/// nineteen digits for every stamp this century — so lexicographic order over
-/// the keys is the order the objects were written in.
+/// carries the *higher* record index. What orders the two is `object_key`, and
+/// it does so here because the **two windows differ**: the stamps lead the name
+/// the archive mints and are nineteen digits for every stamp this century, so
+/// these two keys collate in the order the objects were written in. That is a
+/// property of this pair and not of the key — where two objects share a window
+/// the name's only remaining component is an unpadded `segment_seq`, which is
+/// [`venue_rotation_collision`]'s case.
 pub fn venue_rotation_boundary(observation: &str, base: u64) -> Vec<VenueBookTop> {
     let key = |start_ns: u64, seq: u64| {
         format!(
@@ -1118,20 +1121,37 @@ pub fn venue_rotation_boundary(observation: &str, base: u64) -> Vec<VenueBookTop
 /// object each was derived from, so this is the fixture that says whether the
 /// sort key can see it.
 ///
-/// The keys are one millisecond apart in their leading component, which is the
-/// order the objects were written in — so a numbering over them is the objects'
-/// order and not the engine's.
-pub fn venue_rotation_collision(observation: &str, base: u64) -> Vec<VenueBookTop> {
-    let key = |start_ns: u64, seq: u64| {
+/// **The two keys differ in their last component and in nothing else**, which is
+/// the only shape this case can produce. `start_ns` and `end_ns` are the
+/// smallest and the largest receive stamp the window saw, so an object holding
+/// one record states that record's stamp for both — and the object that opens
+/// inside the same tick states the same two, under the same date and hour
+/// partition. `segment_seq` is what is left, and the archive writes it without
+/// padding, so the pair is the caller's: `(9, 10)` is the boundary where the key
+/// collates the *later* object first, and `(8, 9)` is a pair either side of it
+/// that collates in the order the objects were written. `009`'s occurrence
+/// paragraph carries the argument for why the ordinal owes nothing to either.
+///
+/// The site partition is the observation point, because a key carries the site
+/// and the recorder — two points writing one key would be the collision
+/// `object_key` exists to rule out.
+pub fn venue_rotation_collision(
+    observation: &str,
+    base: u64,
+    segment_seqs: (u64, u64),
+) -> Vec<VenueBookTop> {
+    // The record's own stamp, which is `venue_top`'s ten-millisecond offset and
+    // therefore the whole of each object's window.
+    let at = base + 10_000_000;
+    let key = |seq: u64| {
         format!(
-            "feed=top-of-book/env=test/site=site-1/recorder=recorder-1/date=2026-09-09/hour=12/\
-             {start_ns}-{}-{seq}.dzus",
-            start_ns + 1_000_000
+            "feed=top-of-book/env=test/site={observation}/recorder=recorder-1/\
+             date=2026-09-09/hour=12/{at}-{at}-{seq}.dzus"
         )
     };
     let earlier = VenueBookTop {
         upstream_seq: Some(VENUE_BATCH_FIRST_SEQ),
-        object_key: key(base, 6),
+        object_key: key(segment_seqs.0),
         // The *first* record of the object that was closing, because an object
         // whose whole window fits inside one clock tick holds one record.
         ..venue_top(
@@ -1146,7 +1166,7 @@ pub fn venue_rotation_collision(observation: &str, base: u64) -> Vec<VenueBookTo
     };
     let later = VenueBookTop {
         upstream_seq: Some(VENUE_BATCH_SECOND_SEQ),
-        object_key: key(base + 1_000_000, 7),
+        object_key: key(segment_seqs.1),
         ..earlier.clone()
     };
     vec![earlier, later]

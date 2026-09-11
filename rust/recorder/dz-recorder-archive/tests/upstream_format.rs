@@ -527,6 +527,87 @@ fn a_published_object_carries_its_key_and_its_digest_under(compression: Compress
     assert_eq!(beside, published.manifest);
 }
 
+/// **Two objects of one window are told apart by their keys and never ordered
+/// by them**, which is the property `009`'s occurrence window rests on and the
+/// one it must not overstate.
+///
+/// `009` breaks a tie on equal receive stamps with `object_key` ahead of
+/// `message_index`, because the record index restarts at zero in every object
+/// and so orders nothing across two of them. What the key buys there is a
+/// **total** order: it names one object and cannot collide, because the site
+/// and the recorder are in it. What it does not buy is the objects' own order,
+/// and this is the case that says so — the name's last component is
+/// `segment_seq` written without padding, so a pair that reaches it compares
+/// `1` against `9` and puts segment 10 ahead of segment 9.
+///
+/// The pair reaches it exactly where that tie-break is needed. `start_ns` and
+/// `end_ns` are the smallest and the largest receive stamp the window saw, so
+/// an object whose whole window fits inside one clock tick states one stamp for
+/// both — and a rotation inside that tick hands the next object the same two,
+/// leaving the sequence the only component that differs.
+///
+/// The mutant this kills is padding the component and leaving `009`'s paragraph
+/// as it stands. The keys would then collate in the objects' order for objects
+/// minted after the change and for no others, and the view would be resting on
+/// which commit wrote an object — which is the dependence that paragraph exists
+/// to refuse.
+#[test]
+fn two_objects_of_one_window_are_told_apart_by_their_keys_and_not_ordered_by_them() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let completed = dir.path().join("completed");
+    // One stamp for the whole window, which is what a clock coarser than the
+    // rotation produces and what makes both objects state the same two.
+    let at = 1_700_000_000_000_000_000;
+
+    let key_of = |segment_seq: u64| -> String {
+        let segment = dir.path().join(format!("open-{segment_seq}.dzus"));
+        std::fs::write(&segment, write(&[(0, at, b"one".to_vec())]))
+            .expect("the segment is writable");
+        publish(
+            &segment,
+            &completed,
+            UpstreamManifest {
+                format_version: UPSTREAM_FORMAT_VERSION,
+                site: "site-1".to_owned(),
+                recorder: "recorder-1".to_owned(),
+                env: "test".to_owned(),
+                feed: "top-of-book".to_owned(),
+                observation: "site-1/recorder-1".to_owned(),
+                connections: connections(),
+                segment_seq,
+                start_ns: at,
+                end_ns: at,
+                message_count: 1,
+                object_key: String::new(),
+                sha256: String::new(),
+                byte_count: 0,
+            },
+            Compression::None,
+        )
+        .expect("the object publishes")
+        .manifest
+        .object_key
+    };
+
+    // In the order the recorder wrote them.
+    let ninth = key_of(9);
+    let tenth = key_of(10);
+
+    // Everything ahead of the sequence agrees, because everything ahead of it
+    // is the partition prefix and the window — which is what leaves the
+    // comparison to the one unpadded component.
+    assert_eq!(
+        ninth.strip_suffix("-9.dzus"),
+        tenth.strip_suffix("-10.dzus"),
+        "the two keys differ in more than the sequence: {ninth} and {tenth}"
+    );
+    // And the object written second sorts first.
+    assert!(
+        tenth < ninth,
+        "the sequence collates numerically after all: {tenth} then {ninth}"
+    );
+}
+
 /// The stamp kind travels as a token, and it is `dz-recorder-core`'s own
 /// taxonomy rather than a second one.
 #[test]

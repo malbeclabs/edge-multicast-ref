@@ -1451,11 +1451,19 @@ fn two_rows_at_one_stamp_are_numbered_by_the_objects_they_came_from() {
 /// asserted: a re-derivation reads the same objects, so it produces the same
 /// keys and still replaces. Adding the object to the key does not make a
 /// re-derivation double.
+///
+/// The two keys differ in their last component and in nothing else, because
+/// that is the only shape a rotation inside one tick can produce: both objects
+/// hold one record at one stamp, so both state that stamp as their window. The
+/// component is `segment_seq` and the archive writes it without padding, so
+/// `(9, 10)` is the boundary where the key collates the object written *second*
+/// first — which is what the ordinal below comes out in, and what `009`'s
+/// occurrence paragraph says the ordinal does not claim to be.
 #[test]
 fn two_objects_at_one_stamp_and_one_record_index_are_two_rows() {
     let scratch = Scratch::open("venue_rotation_collision");
     let base = now_ns();
-    let rows = venue_rotation_collision("a", base);
+    let rows = venue_rotation_collision("a", base, (9, 10));
 
     // Everything the key held before the object joined it agrees, which is what
     // makes this a collapse rather than two ordinary rows.
@@ -1486,15 +1494,17 @@ fn two_objects_at_one_stamp_and_one_record_index_are_two_rows() {
         "a merge deleted a book state one of the two objects recorded"
     );
 
-    // Both are numbered, in the order the objects were written in, which is what
-    // a pairing downstream reads.
+    // Both are numbered, and the order is the keys' and not the rotation's: the
+    // only component that differs is an unpadded `segment_seq`, so `10` sorts
+    // ahead of `9` and the object written second is occurrence 1. What the
+    // ordinal owes the race is the same answer twice, which is the next test.
     let numbered = format!(
         "SELECT groupArray(upstream_seq) FROM (SELECT upstream_seq FROM          {}.venue_book_top_occurrence WHERE book_key =          {VENUE_INSIDE_ONE_ROTATION_TICK} ORDER BY occurrence)",
         scratch.database
     );
     assert_eq!(
         scratch.scalar(&numbered),
-        format!("[{VENUE_BATCH_FIRST_SEQ},{VENUE_BATCH_SECOND_SEQ}]")
+        format!("[{VENUE_BATCH_SECOND_SEQ},{VENUE_BATCH_FIRST_SEQ}]")
     );
 
     // And a re-derivation of both objects replaces rather than doubles, which is
@@ -1505,6 +1515,59 @@ fn two_objects_at_one_stamp_and_one_record_index_are_two_rows() {
         scratch.scalar(&surviving),
         "2",
         "a re-derivation doubled the rows instead of replacing them"
+    );
+}
+
+/// **The race pairs the same way and measures the same lead whichever object a
+/// point numbered first**, which is the claim `009`'s occurrence paragraph makes
+/// and the reason the tie-break needs no chronology it cannot have.
+///
+/// Two observation points, each of them a rotation inside one clock tick — so
+/// each holds two rows of one book at one stamp, and each point's ordinal has to
+/// choose between two objects sharing a window. The two points are given
+/// sequence pairs that collate in **opposite** directions: `(9, 10)` puts the
+/// object written second first, because the component is unpadded, and `(8, 9)`
+/// puts the object written first first. So `a`'s occurrence 1 and `b`'s
+/// occurrence 1 came from opposite ends of their rotations.
+///
+/// The race is unmoved, and that is the point. `lead_ms` is the spread of
+/// `recv_ts` across the points for one ordinal, the tie-break only ever decides
+/// between rows that already agree on `recv_ts`, and so both ordinals pair
+/// across both points and both report the five milliseconds between the two
+/// stamps. A numbering that came out of the objects' own order would report the
+/// same thing, which is exactly why the order is not worth a column.
+///
+/// The mutant this kills is `object_key` out of `venue_book_top`'s sort key:
+/// each point then keeps one of its two rows, occurrence 2 pairs with nothing,
+/// and a state both points recorded twice reads as one both saw once.
+#[test]
+fn the_race_does_not_depend_on_which_object_a_point_numbered_first() {
+    let scratch = Scratch::open("venue_rotation_lead");
+    let base = now_ns();
+    // Five milliseconds of lead between the points, and nothing else between
+    // them: one book, one stamp each, two objects each.
+    let ours = venue_rotation_collision("a", base, (9, 10));
+    let theirs = venue_rotation_collision("b", base + 5_000_000, (8, 9));
+
+    // The two points number their rotations from opposite ends, which is what
+    // makes this a test of the pairing rather than of one collation.
+    assert!(ours[1].object_key < ours[0].object_key);
+    assert!(theirs[0].object_key < theirs[1].object_key);
+
+    scratch.insert_venue_book_tops(&ours);
+    scratch.insert_venue_book_tops(&theirs);
+    scratch.merge("venue_book_top");
+
+    let raced = format!(
+        "SELECT groupArray((occurrence, observations, lead_ms)) FROM (SELECT \
+         occurrence, observations, lead_ms FROM {}.venue_book_top_race \
+         WHERE book_key = {VENUE_INSIDE_ONE_ROTATION_TICK} ORDER BY occurrence)",
+        scratch.database
+    );
+    assert_eq!(
+        scratch.scalar(&raced),
+        "[(1,2,5),(2,2,5)]",
+        "the pairing or the lead moved with the objects' order"
     );
 }
 

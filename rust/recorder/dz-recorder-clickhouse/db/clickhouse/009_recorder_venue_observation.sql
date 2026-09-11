@@ -217,10 +217,12 @@
 -- one window is the duplicate that manufactures evidence of loss.
 --
 -- THE OBJECT GOES BEFORE THE RECORD INDEX, in the order the occurrence view's
--- window already reads them: the object is what orders two records across a
+-- window already reads them: the object is what separates two records across a
 -- rotation and the index is what orders them within one object, so the table's
 -- own order and the numbering's are one order rather than two over the same
--- rows.
+-- rows. *Separates* and not *orders*, deliberately — see the view's own
+-- paragraph on what the key does and does not say about which object came
+-- first.
 CREATE TABLE IF NOT EXISTS recorder.venue_book_top (
     recv_ts           DateTime64(9),
     -- Which observation point this recording is, as `site` names a host. The
@@ -484,11 +486,46 @@ FROM recorder.venue_book_top FINAL;
 -- first and the first record of the second alike, and comparing `5` against `0`
 -- there numbers the later object's row first. `object_key` is the only column a
 -- venue-side row carries that separates two objects — `segment_seq` numbers the
--- objects of a capture and is one of the columns this file declares nothing of —
--- and it orders them correctly rather than merely consistently: its last
--- component begins with the window's first receive stamp, nineteen digits for
--- every stamp this century, so lexicographic order over the keys of one
--- observation point's feed is the order the objects were written in.
+-- objects of a capture and is one of the columns this file declares nothing
+-- of — so the object is what the tie-break has to be made of.
+--
+-- WHAT THE KEY GIVES IS A TOTAL ORDER AND NOT THE OBJECTS' OWN, AND THE
+-- DIFFERENCE IS WRITTEN DOWN HERE BECAUSE THE COLUMN DOES NOT SHOW IT. An
+-- object key ends in the name the archive tier mints for it,
+-- `<start_ns>-<end_ns>-<segment_seq>`, and the sequence is written without
+-- padding — so a pair that compares that far puts segment 10 ahead of segment
+-- 9, because `1` sorts before `9`. A pair gets that far exactly where this
+-- tie-break is needed: the two stamps are the smallest and the largest the
+-- window saw, so an object whose whole window fits inside one clock tick states
+-- one stamp for both, and a rotation inside that tick hands the next object the
+-- same two. Where two windows differ the keys do put the earlier object first,
+-- though on a second property nothing writes down either: the stamps lead the
+-- name, and they are of one width only for as long as a nanosecond stamp is
+-- nineteen digits.
+-- Where the windows agree, nothing this table holds orders the two objects at
+-- all — not a column carrying `segment_seq` either, had this file declared one,
+-- because a recorder's numbering restarts at zero on every run and two
+-- recorders at one observation point both begin there. The archive tier itself
+-- does not order objects by name: its eviction scan parses the three numbers
+-- out of the name and sorts on those. This view will not write that parser a
+-- second time in SQL, which would pin the archive's file naming into a
+-- migration — and `dz-recorder-archive`'s own publication test pins what the
+-- name does and does not give, so this paragraph and that naming cannot drift
+-- apart in silence.
+--
+-- SO WHAT THIS ORDER RESTS ON IS UNIQUENESS, WHICH IS STATED, AND NOT
+-- COLLATION, WHICH IS AN ACCIDENT OF A FILE NAME. The uniqueness is the one two
+-- paragraphs up, and it is the archive tier's own contract rather than an
+-- observation about a string: a key names one object and cannot collide,
+-- because the site and the recorder are in it. That is what the ordinal needs
+-- and the whole of it. The tie-break only ever decides between rows that
+-- already agree on `recv_ts`, which is the quantity `lead_ms` is measured from,
+-- and an `occurrence` is only ever compared against another observation point's
+-- `occurrence` for the same `book_key` — so two rows of one book at one stamp
+-- pair the same way and yield the same lead time whichever of them is numbered
+-- first. The container suite asserts that invariance over two objects whose
+-- keys differ only across the 9-to-10 boundary, rather than leaving it here as
+-- prose.
 --
 -- `recv_ts` STAYS FIRST, because it is the quantity the race measures. The
 -- tie-break decides between rows that arrived at one stamp and never reorders
