@@ -33,6 +33,21 @@
 //! quiet. So the loop continues, the refusal lands in `venue_object.refusals`
 //! under its own reason, and the rows either side of it are written.
 //!
+//! **What it costs is the rest of that message, and not what came before it.**
+//! One archived record may carry a batch, and an adapter may report the events
+//! of several members and then refuse a later one. Those events are already in
+//! the adapter's own book — an `on_payload` that returns an error unwinds
+//! nothing — so the rows they produced stand, and `refused_count` is the only
+//! thing that says the record was refused at all.
+//!
+//! Discarding them is the alternative, and it is worse in both of its forms.
+//! Discarding the rows alone takes a book state out of the history with nothing
+//! counting it, which is the hole `message_index` is in the sort key to
+//! prevent. Discarding the fold's own book changes with them puts this
+//! derivation and the adapter's book into disagreement, and every row after the
+//! refusal is then computed against a book the venue's own adapter is not
+//! holding.
+//!
 //! # The listings are polled per message, and that is what makes this
 //! idempotent
 //!
@@ -135,6 +150,30 @@ pub struct Derived {
 /// One batch is written, at the end, holding both grains. The object is the unit
 /// that either landed or did not — an object whose book rows landed while its
 /// object row did not is an object that reads as never having been derived.
+///
+/// # The handle space is this call's, and an adapter may not carry one out
+///
+/// A fold per object, so the handle space starts at zero again in every call.
+/// That is what `(object key, sha256)` idempotence requires: a fold carried
+/// across objects would make this object's rows a function of which objects
+/// were derived before it, and the same object derived twice — in a different
+/// order, or by a process that had derived nothing else — would produce two
+/// different sets of rows. The publisher's own `InstrumentTable` is long-lived
+/// for the opposite reason, and the asymmetry is deliberate: a publisher is one
+/// continuous session, and a handle it hands out has to keep meaning what it
+/// meant for the life of that session.
+///
+/// So an adapter driven over several objects takes its handles from the poll,
+/// every call. It gets one before every message, the first message of every
+/// object included, and the boundary states that re-offering an admitted
+/// instrument is free and returns the handle already minted — which is what
+/// makes a conforming adapter's whole set current again before any payload of
+/// the new object is mapped. An adapter that instead *kept* a handle across a
+/// call holds an index into a table that no longer exists: out of range it is
+/// refused and counted as `unknown_instrument_count`, and in range it names
+/// whatever instrument this object admitted at that index. Nothing above this
+/// boundary can tell those two apart, which is why the requirement is stated
+/// here rather than left to be found in a row.
 ///
 /// # Errors
 ///
@@ -276,9 +315,17 @@ struct Instrument {
     /// Whether the adapter has withdrawn this listing.
     ///
     /// **What a delisting ends is this listing, and everything it held.** The
-    /// handle stays minted and keeps resolving to this symbol, because a row
-    /// already written under it must keep meaning what it meant — that is the
-    /// failure `delist` is documented as never causing. What stops is the book:
+    /// handle stays minted and keeps resolving to this symbol, so an event the
+    /// adapter reports on it afterwards is attributed to the symbol it was
+    /// withdrawn under rather than to whichever listing came next — the
+    /// misattribution `delist` is documented as never causing, whose own
+    /// wording is about the wire `Instrument ID` and holds here for the handle
+    /// that stands in for one.
+    ///
+    /// **For the length of this object**, which is the whole of a handle's
+    /// life: the space starts again in the next call, and
+    /// [`derive_venue_object`] states why and what that asks of a caller.
+    /// What stops is the book:
     /// [`Fold::settle`] writes nothing for a withdrawn listing, so an event the
     /// adapter reports on a handle it has already delisted is counted as the
     /// event it was and produces no row.

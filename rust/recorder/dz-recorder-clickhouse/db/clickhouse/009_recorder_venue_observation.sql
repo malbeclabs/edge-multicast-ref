@@ -274,7 +274,15 @@ ORDER BY (observation, feed, symbol, recv_ts, message_index, change_index);
 -- having ended there, and those rows are indistinguishable from a venue that
 -- went quiet. So the refusal has to be visible somewhere, and the object is the
 -- grain it belongs to: it is a fact about a window rather than about a book
--- state, and there is by construction no row for the message it cost.
+-- state, and the message it cost has no row of its own to carry it.
+--
+-- WHAT A REFUSAL COSTS IS THE REST OF ITS MESSAGE, AND NOT WHAT CAME BEFORE IT.
+-- One archived record may carry a batch, and an adapter may report events for
+-- several members of one and then refuse a later one. Those events are already
+-- in the adapter's own book, so the rows they produced stand and this count is
+-- the only thing that says a refusal happened in that record at all. Dropping
+-- them instead would take a book state out of the history with nothing counting
+-- it, which is the hole `message_index` is in the key to prevent.
 --
 -- WHY `refusals` IS BY REASON AND NOT A BARE TOTAL. The four tokens are
 -- `ParseError`'s own — `schema`, `unknown_field`, `malformed`, `truncated` —
