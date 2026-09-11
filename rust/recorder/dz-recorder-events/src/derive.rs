@@ -61,9 +61,9 @@ pub struct EventInput<'a> {
     /// and each of those carries `source_addr`, `channel_id`, `dst_port`,
     /// `sequence_number`, `message_index` and `reset_count`, none of them
     /// nullable and every one a statement about a datagram — a venue's upstream
-    /// message is not one. (`book_top.observation`'s own comment names the two
-    /// neighbours that are non-nullable for other reasons, so the criterion can
-    /// be checked against the DDL rather than counted.) The
+    /// message is not one. (`book_top.observation`'s own comment names the
+    /// neighbours that are non-nullable for reasons of their own, so the
+    /// criterion can be checked against the DDL rather than counted.) The
     /// pairing then groups on `channel_id`, `instrument_id` and `state_key`,
     /// and a venue side can compute none of the three. A venue-side observation
     /// is its own grain, paired on `(feed, symbol, book_key, occurrence)` with

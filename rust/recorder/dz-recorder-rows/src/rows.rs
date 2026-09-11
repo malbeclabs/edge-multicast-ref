@@ -760,21 +760,25 @@ pub struct BookTop {
     /// one of them.
     ///
     /// **Not a venue-side observation, and this table cannot hold one.** Two
-    /// things refuse it, and neither is a policy that could be relaxed. The
-    /// columns beside this one are none of them nullable, so a venue-side row
-    /// would have to invent every one — and what refuses it is the criterion
-    /// rather than a count: `source_addr`, `channel_id`, `dst_port`,
-    /// `sequence_number`, `message_index` and `reset_count` are statements
-    /// about a datagram, and a venue's upstream message is not a datagram. Two
-    /// of their neighbours fall on the other side of that line, and are named
-    /// here so the criterion stays checkable against the DDL: `source_id` names
-    /// the matching engine the message describes — from the message where it
-    /// carries one and from era-qualified reference data where it does not —
-    /// and `segment_seq` places a row in the recording, which a
-    /// venue-side archive has its own notion of. Both are still non-nullable,
-    /// so a venue side fills neither; what neither is, is a statement about a
-    /// datagram. (`instrument_id` and `symbol` sit among them too and are
-    /// instrument identity rather than provenance.)
+    /// things refuse it, and neither is a policy that could be relaxed. What
+    /// refuses it is a criterion rather than a count: `source_addr`,
+    /// `channel_id`, `dst_port`, `sequence_number`, `message_index` and
+    /// `reset_count` are statements about a datagram, none of the six nullable,
+    /// and a venue's upstream message is not a datagram — so a venue-side row
+    /// could not leave them out and could only invent them.
+    ///
+    /// Two of their neighbours fall on the other side of that line, and are
+    /// named here so the criterion stays checkable against the DDL:
+    /// `source_id` names the matching engine the message describes, and
+    /// `segment_seq` places a row in the recording, which a venue-side archive
+    /// has its own notion of. Both are non-nullable too, so a venue-side row
+    /// would have to invent those as well — but what neither of them is, is a
+    /// statement about a datagram, and it is the criterion and not the
+    /// nullability that decides what this table can hold. (`instrument_id` and
+    /// `symbol` sit among them too and are instrument identity rather than
+    /// provenance. The nullable columns here are the two sides of the book and
+    /// the uncertainty stamp, which are not provenance at all.)
+    ///
     /// And the pairing groups on `channel_id`, `instrument_id` and `state_key`:
     /// the first is the operator's mapping, the second is minted by the
     /// publisher's registry, and the third eats both before any price — so a

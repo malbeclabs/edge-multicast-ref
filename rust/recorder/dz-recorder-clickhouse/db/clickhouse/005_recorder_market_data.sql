@@ -214,15 +214,19 @@ CREATE TABLE IF NOT EXISTS recorder.book_top (
     -- Not a venue-side observation, and the criterion is what a column states
     -- rather than how many there are: `source_addr`, `channel_id`, `dst_port`,
     -- `sequence_number`, `message_index` and `reset_count` are statements about
-    -- a datagram, none of them nullable, and a venue's upstream message is not
-    -- a datagram. `source_id` and `segment_seq` sit beside them and fall on the
-    -- other side of that line — `source_id` names the matching engine the
-    -- message describes, as its own column above says, and `segment_seq`
-    -- places a row in the recording, which a venue-side archive has its own
-    -- notion of. Both are non-nullable too, so a venue side fills neither. The
-    -- pairing then groups on `channel_id`, `instrument_id` and `state_key`, and
-    -- a venue side can compute none of the three. A venue-side observation is
-    -- its own grain in its own table.
+    -- a datagram, none of the six nullable, and a venue's upstream message is
+    -- not a datagram — so a venue-side row could not leave them out and could
+    -- only invent them. `source_id` and `segment_seq` sit beside them and fall
+    -- on the other side of that line: `source_id` names the matching engine
+    -- the message describes, and `segment_seq` places a row in the recording,
+    -- which a venue-side archive has its own notion of. Those two are
+    -- non-nullable as well, so they would have to be invented too — but what
+    -- neither of them is, is a statement about a datagram, and it is the
+    -- criterion and not the nullability that decides what this table holds.
+    -- The pairing then groups on `channel_id`, `instrument_id`, `state_key`
+    -- and the occurrence ordinal it numbers itself, and a venue side can
+    -- compute none of the three identifiers. A venue-side observation is its
+    -- own grain in its own table.
     observation       LowCardinality(String),
     source_addr       IPv4,
     channel_id        UInt8,
