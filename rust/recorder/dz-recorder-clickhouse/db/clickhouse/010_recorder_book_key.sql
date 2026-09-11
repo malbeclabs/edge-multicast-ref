@@ -2,10 +2,11 @@
 --
 -- `009` builds the venue half of a feed race and pairs occurrences on
 -- `book_key` — a hash over the two sides of a top and over nothing else,
--- computable by anyone holding a top of book. It then says, in its own header,
--- that the publisher side does not feed that pairing because `book_top` stores
--- `state_key` and has no `book_key` column. This file adds the column, and the
--- pairing's other branch with it.
+-- computable by anyone holding a top of book. It declares the seam a side
+-- enters the race by, `recorder.feed_race_occurrence`, with the venue branch
+-- alone, and says in its own header why the other branch is this file's: the
+-- publisher side needs a `book_key` on `book_top`, and `009` adds no column to
+-- that table. This file adds the column, and that branch with it.
 --
 --
 -- WHY NOT `state_key`, WHICH `book_top` ALREADY HAS
@@ -64,9 +65,12 @@
 -- them needs to be there. An anchored row shares its ordinal partition with the
 -- rows that follow it, so excluding *that* one late would renumber them; a zero
 -- key is its own partition and renumbers nothing whenever it goes. It is
--- written here because this is where a row that is not an occurrence of a book
--- is dropped, and because a window that never numbers it is cheaper than one
--- that numbers it and throws the numbers away.
+-- written here because this is where the rows that must take no ordinal are
+-- dropped, and because a window that never numbers one is cheaper than one that
+-- numbers it and throws the numbers away.
+--
+-- That `WHERE` is not the whole of the list, and the section below names the
+-- publisher-side rows it cannot reach: the ones whose top did not move.
 --
 -- The cost of the exclusion is one book in 2^64 per observation point: a fold
 -- that really came out zero is dropped, because nothing distinguishes it from a
@@ -75,16 +79,115 @@
 -- window `book_top` keeps, is the part that is not optional.
 --
 --
+-- APPLY THIS FILE BEFORE THE BINARY THAT WRITES THE COLUMN
+--
+-- The order matters in both directions and the section above states only one of
+-- them. A row written before the `ALTER` reads as zero, and the race excludes
+-- zero. A binary that writes `book_key` against a `book_top` this `ALTER` has
+-- not reached is the worse direction, because nothing fails.
+--
+-- The sink posts `INSERT INTO recorder.book_top FORMAT JSONEachRow` and the
+-- rows name their own fields, so a column is matched by name at the server.
+-- `input_format_skip_unknown_fields` defaults to 1 — checked against the 24.8
+-- the suite pins, where such an insert returns 200 and the field is discarded
+-- — so the insert succeeds, the batch is acknowledged, and every
+-- publisher-side row that binary writes lands with `book_key = 0`. The
+-- exclusion below then drops all of them and the cross-observer race reads as a
+-- venue-only race: no error, no refused batch, no metric, and a new observation
+-- point that looks like one nobody configured.
+--
+-- So the schema is applied before the binary is rolled. That is the rule the
+-- feed runbook already states for rolling subscribers before publishers, and it
+-- is stated there too for this one, because the symptom of the wrong order is
+-- the same: silence rather than errors.
+--
+--
+-- WHAT THE ORDINAL DOES NOT SEPARATE: A PUBLISHER-SIDE ROW THAT MOVED NO TOP
+--
+-- Ordinal *n* against ordinal *n* holds only while both sides number the same
+-- occurrences of a book state, and they do not. **A publisher-side row is
+-- written when the top moved or when the certainty of it moved; a venue-side
+-- row only when the top moved.** Three kinds of publisher-side row therefore
+-- carry `from_anchor = 0`, a written `book_key`, and the same top the row
+-- before them carried:
+--
+--   * A GAP. `Book::observe_sequence` pushes a change for every established
+--     book on the channel when a hole in the `mktdata` sequence is detected,
+--     each carrying that book's current top: the gap belongs to the channel
+--     instance, and nobody can say which instrument's deltas were in it.
+--   * THE RESTORE. A `Quote` that puts certainty back restates the top the book
+--     already had, and the row exists because a change is a change in the
+--     visible top **or** in the certainty of it.
+--   * AN UNANCHORED BOOK. `Book::level` on a book with no anchor writes one row
+--     with no prices, because absence cannot be told from a silent feed.
+--
+-- The venue derivation has neither concept. It returns on an unchanged top and
+-- on an empty book nothing was applied to, so it writes no counterpart to any
+-- of the three.
+--
+-- One sequence hole is therefore two publisher-side occurrences of book state K
+-- where the venue has one. Ordinal 1 still pairs. Ordinal 2 is the gap's row
+-- alone, reported as a state the venue never saw — and when the venue next
+-- reaches K that occurrence is *its* ordinal 2, so it pairs with the gap row,
+-- and `lead_ms` is measured between two arrivals of two different states. It
+-- comes out a plausible wrong number rather than a visible mistake, which is
+-- the failure this file's cost section names, reached from the other end.
+--
+-- WHY IT IS STATED HERE AND NOT FILTERED HERE. Nothing on the row says the top
+-- moved. The restore row is indistinguishable in SQL from a genuine repeat of a
+-- state — identical two sides, identical key, `book_certain` back to 1 — and
+-- what separates them is a fact the derivation had and no column carries.
+-- Comparing a row with its predecessor in SQL would reach the first two kinds
+-- and neither of the two exposures below, so it would close part of the drift
+-- and leave this file claiming a property it still did not have.
+--
+-- AND IT IS `006`'S EXPOSURE TOO, which is the argument for fixing it in one
+-- place rather than in this branch. `state_key` folds the same top, so a gap at
+-- one recorder gives that observation point an extra occurrence of a state the
+-- other saw once, and the publisher-side race has paired ordinals across that
+-- since it was written. The fix belongs where both views would read it — a
+-- derivation that states whether the top moved, or an occurrence grain of its
+-- own — and not in one branch of one union, where it would leave two readings
+-- of one table counting the occurrences of one row set differently.
+--
+-- TWO MORE THINGS THE TWO SIDES' ORDINALS DO NOT AGREE ON, named so that the
+-- list is the whole list. An anchored row takes no ordinal here, for `006`'s
+-- reason, and the venue side has no anchors at all — so a state the publisher
+-- reached by applying a snapshot is an occurrence the venue counted and this
+-- side did not. And two redundant paths recorded at one observation point are
+-- two books in the deriver and two rows at two receive stamps, where the venue
+-- holds one book and writes one row.
+--
+-- SO WHAT THIS RACE SAYS HONESTLY. A pair with `observations = 2` inside a
+-- caller's bound on |Δt| is two observations of one book state and a lead time
+-- between them. A run of `observations = 1` says the two sides' ordinals did
+-- not line up, in the same shape whether the cause is a state one side missed
+-- or a row the other side numbered that was never a move — so it is a question
+-- and not yet loss, and it stays that until the derivation says which
+-- publisher-side rows were moves.
+--
+--
 -- WHY `005` DECLARES THE COLUMN TOO
 --
 -- For the reason `008` gives at length: `005`'s `CREATE TABLE` is the
 -- authoritative definition of `book_top` — it is what the row type is held
 -- against, column for column, in `tests/ddl.rs` — so a deployment created from
--- scratch has this column before this file runs, and every statement here is
--- then a no-op. This file is for the deployments that applied `005` when it did
--- not: their table exists, `CREATE TABLE IF NOT EXISTS` will not alter it, and
--- an `ALTER` is the only thing that reaches it. `IF NOT EXISTS` throughout for
--- that reason.
+-- scratch has this column before this file runs, and **the `ALTER` below** is
+-- then a no-op. That `ALTER` is for the deployments that applied `005` when the
+-- column did not exist: their table exists, `CREATE TABLE IF NOT EXISTS` will
+-- not alter it, and an `ALTER` is the only thing that reaches it. `IF NOT
+-- EXISTS` on it for that reason.
+--
+-- THE REST OF THIS FILE IS NOT OPTIONAL ON ANY DEPLOYMENT, and reading "then a
+-- no-op" across the whole of it is how a deployment created from scratch ends
+-- up with a one-sided race. Only the `ALTER` is one.
+-- `publisher_book_top_occurrence` is declared here and nowhere else;
+-- `feed_race_occurrence` arrives from `009` with the venue branch alone and is
+-- replaced here by both; `book_top_settled` is re-stated for the reason that
+-- statement gives about a view's `SELECT *`; and the `DROP` at the end is the
+-- only other statement a fresh deployment has nothing to do. A deployment that
+-- applied `009` and skipped this file has a race that pairs the venue against
+-- itself.
 --
 -- Cheap for the reason `008` gives as well: adding a column to a MergeTree is a
 -- metadata change, existing parts are not rewritten, and a read of a part
@@ -154,6 +257,22 @@ FROM recorder.book_top FINAL;
 -- would find nothing across observers while both paths read as clean. What is
 -- left is what both sides hold — the feed, the symbol, the book, the arrival.
 --
+-- THE COARSENESS THAT HAS A COST, AND IT IS THE CHANNEL. A symbol is
+-- `char[64]` of venue-chosen text that is unique within a channel at an instant
+-- and not across eras, and the deriver's own reference data says what keying on
+-- it does: it silently merges two instruments. One observation point records
+-- every channel of a feed into one `book_top`, so during a re-shard overlap,
+-- where one symbol is published on two channels of one feed, both channels'
+-- occurrences of one book state are numbered in a single sequence — 2n
+-- publisher ordinals against the venue's n.
+--
+-- Numbering per channel would not repair that and would break the pairing
+-- outright: a venue side cannot name a channel, so two channels each numbering
+-- from 1 give one symbol two ordinal-1 rows and the venue's one pairs with
+-- whichever of them it is grouped with. The coarseness is the price of a key
+-- both sides can compute, as the era boundary is on the venue side of `009`,
+-- and it is stated rather than left to be found.
+--
 -- `book_certain` IS NOT CARRIED EITHER, AND THAT IS NOT AN OVERSIGHT. `006`
 -- carries it and takes `min` over a pair, because there certainty means one
 -- thing: a gap in the publisher's own sequence space. `009` gives its own reason
@@ -162,6 +281,33 @@ FROM recorder.book_top FINAL;
 -- way — and one column carrying both meanings, minimum-aggregated over a pair,
 -- mixes them silently. So the cross-observer race does not offer the verdict,
 -- and a caller that wants only believed publisher-side states asks `006`.
+--
+-- THE WINDOW'S ORDER IS TOTAL, AND IT IS `recv_ts` THAT IS NOT. `009` makes
+-- this argument for the venue branch and it holds here unchanged. Equal receive
+-- stamps are ordinary on this side too: one datagram carries many messages and
+-- every row it produced takes that datagram's stamp, which is what
+-- `message_index` exists for, and one sequence hole writes a row for every
+-- established book on the channel at one stamp. Ordered on the stamp alone,
+-- `row_number()` is free to number two rows at one stamp either way — and it
+-- may answer differently after a merge, so the same rows numbered on two runs
+-- pair differently and neither `observations` nor `lead_ms` is reproducible.
+--
+-- The tie is broken by what the rows already carry, and these five columns are
+-- total because they are `005`'s own sort key: `(channel_id, instrument_id,
+-- recv_ts, sequence_number, message_index, observation)` is what the replacing
+-- engine collapses on, so beneath `FINAL` no two rows share it — and the
+-- partition above already fixes `observation`. `source_addr` and `dst_port` are
+-- not in that key and are not wanted here: two paths' rows of one message at
+-- one stamp are one row beneath `FINAL` rather than a tie this order cannot
+-- break.
+--
+-- THE CHANNEL COMES BEFORE THE SEQUENCE, because the two count different
+-- things: a `Sequence Number` belongs to one channel instance and
+-- `message_index` restarts in each datagram, so comparing either across two
+-- channels compares readings from two counters. Being ordered by a column is
+-- not being grouped on one — the paragraphs above say why none of these is in
+-- the partition, and a tie-break costs nothing across observers because no
+-- other side has to agree about it.
 --
 -- `book_key != 0` IS THE FORWARD-ONLY EXCLUSION, argued in this file's header:
 -- a row written before the column existed carries a hash of no book, and left
@@ -184,7 +330,7 @@ SELECT
     qty_exp,
     row_number() OVER (
         PARTITION BY observation, feed, upper(trimBoth(symbol)), book_key
-        ORDER BY recv_ts
+        ORDER BY recv_ts, channel_id, instrument_id, sequence_number, message_index
     ) AS occurrence
 FROM recorder.book_top_settled
 WHERE from_anchor = 0 AND book_key != 0;
@@ -241,3 +387,27 @@ SELECT
     qty_exp,
     occurrence
 FROM recorder.publisher_book_top_occurrence;
+
+
+-- The name the union above made wrong, dropped where a deployment may hold it.
+--
+-- `009` declares the race as `recorder.feed_race`, which is what it is once
+-- both branches of the seam reach it: the pairing is an aggregate over the
+-- ordinal and names no observation point, so it is one query for one side or
+-- for ten and it takes the seam's own name. Before this file existed that view
+-- was `recorder.venue_book_top_race`, and the name was true of it — there was
+-- one branch and it was the venue's. It is not true of a view whose rows may be
+-- either side's: `observations = 1` there is as likely publisher-only as
+-- venue-only, and `observed_by` names publisher observation points, so anyone
+-- filtering it as the venue's own race gets the opposite of what they expect.
+--
+-- THE RENAME IS IN `009` AND NOT HERE, so that the query keeps one definition.
+-- A second copy of that aggregate under a second name would be two definitions
+-- to keep true, and the one that drifts is the one nobody reads. What is left
+-- for this file is the old name on a deployment that applied `009` before the
+-- rename: the view reads `feed_race_occurrence`, so the branch added above
+-- makes it the two-sided race under a name that says venue. A view holds no
+-- rows, so dropping it loses nothing that a re-application of `009` does not
+-- put back under the name it now has. `IF EXISTS` because on a deployment that
+-- never had it there is nothing there.
+DROP VIEW IF EXISTS recorder.venue_book_top_race;

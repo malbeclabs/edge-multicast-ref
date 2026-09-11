@@ -106,6 +106,7 @@ That the join is a view and not a step in the derivation is the same decision th
 - **The comparison is coarser than the publisher-side race.** Keyed on the symbol rather than the `Instrument ID`, it cannot separate two instruments that shared a symbol across an era boundary, and it depends on the venue's symbol and the published symbol agreeing — which is a reference-data assertion, and worth being a column rather than an assumption, the way `exponents_agree` is.
 - **A venue-side observation cannot report loss.** It has no sequence space of its own that this repository defines, so a state the venue produced and nobody recorded is invisible on that side. The tier says what it does not know rather than filling it with a zero.
 - **The cross-observer race covers publisher-side rows written after the column that carries its key.** `book_key` on `book_top` is forward-only, for the reason the amendment below gives: there is no honest DEFAULT for a hash nobody computed.
+- **The two sides do not number the same occurrences of a book state.** A publisher-side row is written when the top moved *or* when the certainty of it moved; a venue-side row only when the top moved. So a gap, a restore and an unanchored book each take a publisher-side ordinal with no counterpart, and the pairing for that book state is off by one from there on — first as an occurrence reported unpaired, then as a lead time between two arrivals of two different states. Stated rather than fixed, for the reasons the amendment gives: nothing on the row says the top moved, and the same drift is in the publisher-side race already.
 
 ## Decisions
 
@@ -118,6 +119,7 @@ That the join is a view and not a step in the derivation is the same decision th
 | `book_top` carries `book_key` beside `state_key`, non-nullable | The join above has no right-hand side without it, and the chain from `state_key` is one-way. Neither nullable nor provenance, so the refusal above does not reach it — see the amendment |
 | Raw bytes, not the normalized-event record encoding, are what is archived | That encoding is downstream of the venue's decode; the evidence has to be what the venue sent |
 | The `observation` doc comments and the pairing migration header are corrected | They promise venue rows in a table whose columns and grouping key refuse them |
+| The occurrence drift is stated here and fixed nowhere yet | Nothing on a `book_top` row says whether the top moved, so a filter in SQL closes part of it and leaves the claim false — and the same drift is in `006`'s race, so the fix belongs where both views would read it |
 
 ## Non-goals
 
@@ -155,6 +157,26 @@ The two things the refusal protects are both untouched. No column becomes nullab
 So the column is forward-only. Those rows read as zero, and the cross-observer race excludes zero: a zero is a hash of no book, and left in, every pre-migration row of one feed and symbol would land in one equivalence class, pair with nothing on the venue side, and be reported as a state the venue never saw — evidence of loss manufactured rather than a count inflated. The exclusion costs one book in 2^64 per observation point, where a fold that really came out zero is indistinguishable from a column nobody wrote.
 
 **The cross-observer race therefore covers publisher-side rows written after the migration, not the whole window `book_top` keeps.** A forward-only column is normal. Implying otherwise is not, so this is in the migration header as well as here.
+
+### What the ordinal does not separate
+
+The pairing is ordinal *n* against ordinal *n*, which holds only while both sides number the same occurrences of a book state. **They do not.** A publisher-side row is written when the top moved *or* when the certainty of it moved; a venue-side row only when the top moved. Three kinds of publisher-side row therefore carry `from_anchor = 0`, a written `book_key`, and the top the row before them already carried:
+
+- **A gap.** `Book::observe_sequence` pushes a change for every established book on the channel when a hole in the `mktdata` sequence is detected, each carrying that book's current top: the gap belongs to the channel instance, and nobody can say which instrument's deltas were in it.
+- **The restore.** A `Quote` that puts certainty back restates the top the book already had, and the row exists because a change is a change in the visible top *or* in the certainty of it.
+- **An unanchored book.** `Book::level` on a book with no anchor writes one row with no prices, because absence cannot be told from a silent feed.
+
+The venue derivation has neither concept — it returns on an unchanged top and on an empty book nothing was applied to — so it writes no counterpart to any of the three. One sequence hole is then two publisher-side occurrences of book state K where the venue has one: ordinal 1 still pairs, ordinal 2 is the gap's row alone and is reported as a state the venue never saw, and when the venue next reaches K that occurrence is *its* ordinal 2 and pairs with the gap row. The lead time that comes out is measured between two arrivals of two different states: plausible, wrong, and not visible as a mistake.
+
+**It is not filterable as the schema stands**, which is why this is stated rather than fixed. Nothing on the row says the top moved. The restore row is indistinguishable in SQL from a genuine repeat of a state — identical two sides, identical key, `book_certain` back to 1 — and what separates them is a fact the derivation had and no column carries. Comparing a row with its predecessor in SQL reaches the gap and the restore and neither of the two asymmetries below, so it would close part of the drift and leave the migration claiming a property it still did not have.
+
+**And it is the publisher-side race's exposure too.** `state_key` folds the same top, so a gap at one recorder gives that observation point an extra occurrence of a state the other saw once, and `006` has paired ordinals across that since it was written. The fix therefore belongs where both views would read it — a derivation that states whether the top moved, or an occurrence grain of its own — and not in one branch of one union, where it would leave two readings of one table counting the occurrences of one row set differently.
+
+Two further asymmetries, named so that the list is the whole list. An anchored row takes no ordinal, for `006`'s reason, and the venue side has no anchors at all: a state the publisher reached by applying a snapshot is an occurrence the venue counted and the publisher branch did not. And two redundant paths recorded at one observation point are two books in the deriver and two rows at two receive stamps, where the venue holds one book and writes one row.
+
+**The publisher-side partition is coarse in one more way, and it is the channel.** It is the feed and the folded symbol, because a venue side can name neither a channel nor an `Instrument ID`. A symbol is `char[64]` of venue-chosen text that is unique within a channel at an instant, so during a re-shard overlap, where one symbol is published on two channels of one feed, both channels' occurrences of one book state are numbered in a single sequence: 2n publisher ordinals against the venue's n. Numbering per channel would not repair it and would break the pairing outright — two channels each numbering from 1 give one symbol two ordinal-1 rows, and the venue's one pairs with whichever it is grouped with. The coarseness is the price of a key both sides can compute, exactly as the era boundary is on the venue side.
+
+So what the race says honestly: a pair with `observations = 2` inside a caller's bound on |Δt| is two observations of one book state and a lead time between them; a run of `observations = 1` says the two sides' ordinals did not line up, in the same shape whether the cause is a state one side missed or a row the other side numbered that was never a move. It is a question, and not yet loss, until the derivation says which publisher-side rows were moves.
 
 ### What else the amendment settles
 

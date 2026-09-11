@@ -582,6 +582,16 @@ FROM recorder.venue_book_top_occurrence;
 
 -- 6. The race.
 --
+-- NAMED FOR THE RACE AND NOT FOR A SIDE, the way the seam above is. Nothing
+-- below names an observation point, so this is one query whether one side
+-- contributes rows or both — and a name carrying `venue` would be read as the
+-- venue's own recordings raced against each other, which is what it would
+-- aggregate on a deployment where nothing else contributes and is not what it
+-- means. `010` adds the publisher branch to the seam, and on a deployment that
+-- has it a row here may be either side's: `observations = 1` is as likely
+-- publisher-only as venue-only, and `observed_by` names publisher observation
+-- points as readily as venue ones.
+--
 -- An aggregate over the ordinal and **not** a join between two named observation
 -- points, which is what keeps an unpaired occurrence visible and what keeps this
 -- generic: nothing below names an observation point, so two of them are a race
@@ -615,7 +625,7 @@ FROM recorder.venue_book_top_occurrence;
 -- sent is the publisher's fault: that stays the loss derivation's question and
 -- `007`'s. A venue-side observation adds one more thing that can be missing, not
 -- an answer about whose fault it is.
-CREATE OR REPLACE VIEW recorder.venue_book_top_race AS
+CREATE OR REPLACE VIEW recorder.feed_race AS
 SELECT
     feed,
     symbol_key,

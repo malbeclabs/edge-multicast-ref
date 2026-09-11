@@ -1243,7 +1243,7 @@ fn a_venue_state_that_repeats_pairs_one_to_one() {
     assert_eq!(
         scratch.scalar(&format!(
             "SELECT groupArray(observations) FROM (SELECT observations FROM \
-             {}.venue_book_top_race WHERE book_key = {VENUE_REPEATED} ORDER BY occurrence)",
+             {}.feed_race WHERE book_key = {VENUE_REPEATED} ORDER BY occurrence)",
             scratch.database
         )),
         "[2,2,2,1]",
@@ -1255,7 +1255,7 @@ fn a_venue_state_that_repeats_pairs_one_to_one() {
     // be multiples of twenty.
     assert_eq!(
         scratch.scalar(&format!(
-            "SELECT groupUniqArray(round(lead_ms, 3)) FROM {}.venue_book_top_race \
+            "SELECT groupUniqArray(round(lead_ms, 3)) FROM {}.feed_race \
              WHERE book_key = {VENUE_REPEATED} AND observations = 2",
             scratch.database
         )),
@@ -1269,7 +1269,7 @@ fn a_venue_state_that_repeats_pairs_one_to_one() {
     assert_eq!(
         scratch.scalar(&format!(
             "SELECT concat(toString(count()), ' ', arrayStringConcat(any(observed_by), ',')) \
-             FROM {}.venue_book_top_race WHERE book_key = {VENUE_REPEATED} \
+             FROM {}.feed_race WHERE book_key = {VENUE_REPEATED} \
              AND observations = 1 AND isNull(lead_ms)",
             scratch.database
         )),
@@ -1283,7 +1283,7 @@ fn a_venue_state_that_repeats_pairs_one_to_one() {
     assert_eq!(
         scratch.scalar(&format!(
             "SELECT concat(toString(observations), ' ', toString(isNull(lead_ms))) FROM \
-             {}.venue_book_top_race WHERE book_key = {VENUE_ONLY_ONE_SAW}",
+             {}.feed_race WHERE book_key = {VENUE_ONLY_ONE_SAW}",
             scratch.database
         )),
         "1 1",
@@ -1296,7 +1296,7 @@ fn a_venue_state_that_repeats_pairs_one_to_one() {
     assert_eq!(
         scratch.scalar(&format!(
             "SELECT concat(toString(observations), ' ', toString(exponents_agree), ' ', \
-             toString(symbols_agree)) FROM {}.venue_book_top_race \
+             toString(symbols_agree)) FROM {}.feed_race \
              WHERE book_key = {VENUE_EXPONENTS_DISAGREE}",
             scratch.database
         )),
@@ -1310,7 +1310,7 @@ fn a_venue_state_that_repeats_pairs_one_to_one() {
     assert_eq!(
         scratch.scalar(&format!(
             "SELECT concat(toString(observations), ' ', toString(symbols_agree), ' ', \
-             arrayStringConcat(symbols, ',')) FROM {}.venue_book_top_race \
+             arrayStringConcat(symbols, ',')) FROM {}.feed_race \
              WHERE book_key = {VENUE_SYMBOLS_DISAGREE}",
             scratch.database
         )),
@@ -1373,7 +1373,7 @@ fn a_batched_payloads_top_changes_all_survive_the_merge() {
     assert_eq!(
         scratch.scalar(&format!(
             "SELECT groupArray(occurrence) FROM (SELECT occurrence FROM \
-             {}.venue_book_top_race WHERE book_key IN ({VENUE_BATCH_FIRST}, \
+             {}.feed_race WHERE book_key IN ({VENUE_BATCH_FIRST}, \
              {VENUE_BATCH_SECOND}) ORDER BY book_key)",
             scratch.database
         )),
@@ -1617,7 +1617,7 @@ fn the_occurrence_ordinal_does_not_depend_on_how_the_rows_arrived() {
     assert_eq!(
         scratch.scalar(&format!(
             "SELECT groupArray(observations) FROM (SELECT observations FROM \
-             {}.venue_book_top_race WHERE book_key = {VENUE_BATCH_REPEATED} \
+             {}.feed_race WHERE book_key = {VENUE_BATCH_REPEATED} \
              ORDER BY occurrence)",
             scratch.database
         )),
@@ -1647,7 +1647,7 @@ fn a_venue_re_derivation_before_the_merge_does_not_invent_occurrences() {
     assert_eq!(
         scratch.scalar(&format!(
             "SELECT groupArray(observations) FROM (SELECT observations FROM \
-             {}.venue_book_top_race WHERE book_key = {VENUE_REPEATED} ORDER BY occurrence)",
+             {}.feed_race WHERE book_key = {VENUE_REPEATED} ORDER BY occurrence)",
             scratch.database
         )),
         "[2,2,2,1]",
@@ -1802,7 +1802,7 @@ fn a_venue_side_and_a_publisher_side_observation_of_one_book_pair() {
     assert_eq!(
         scratch.scalar(&format!(
             "SELECT groupArray(observations) FROM (SELECT observations FROM \
-             {}.venue_book_top_race WHERE book_key = {BOTH_OBSERVERS_SAW} \
+             {}.feed_race WHERE book_key = {BOTH_OBSERVERS_SAW} \
              ORDER BY occurrence)",
             scratch.database
         )),
@@ -1816,7 +1816,7 @@ fn a_venue_side_and_a_publisher_side_observation_of_one_book_pair() {
     assert_eq!(
         scratch.scalar(&format!(
             "SELECT arrayStringConcat(any(observed_by), ',') FROM \
-             {}.venue_book_top_race WHERE book_key = {BOTH_OBSERVERS_SAW} \
+             {}.feed_race WHERE book_key = {BOTH_OBSERVERS_SAW} \
              AND occurrence = 1",
             scratch.database
         )),
@@ -1829,7 +1829,7 @@ fn a_venue_side_and_a_publisher_side_observation_of_one_book_pair() {
     // twenty-two, which is a plausible number and a wrong one.
     assert_eq!(
         scratch.scalar(&format!(
-            "SELECT groupUniqArray(round(lead_ms, 3)) FROM {}.venue_book_top_race \
+            "SELECT groupUniqArray(round(lead_ms, 3)) FROM {}.feed_race \
              WHERE book_key = {BOTH_OBSERVERS_SAW}",
             scratch.database
         )),
@@ -1841,7 +1841,7 @@ fn a_venue_side_and_a_publisher_side_observation_of_one_book_pair() {
     // and it is the reading a feed race exists to produce.
     assert_eq!(
         scratch.scalar(&format!(
-            "SELECT groupUniqArray(first_observation) FROM {}.venue_book_top_race \
+            "SELECT groupUniqArray(first_observation) FROM {}.feed_race \
              WHERE book_key = {BOTH_OBSERVERS_SAW}",
             scratch.database
         )),
@@ -1853,7 +1853,7 @@ fn a_venue_side_and_a_publisher_side_observation_of_one_book_pair() {
     assert_eq!(
         scratch.scalar(&format!(
             "SELECT concat(toString(observations), ' ', toString(isNull(lead_ms)), ' ', \
-             arrayStringConcat(observed_by, ',')) FROM {}.venue_book_top_race \
+             arrayStringConcat(observed_by, ',')) FROM {}.feed_race \
              WHERE book_key = {ONLY_THE_PUBLISHER_SAW}",
             scratch.database
         )),
@@ -1867,7 +1867,7 @@ fn a_venue_side_and_a_publisher_side_observation_of_one_book_pair() {
     // the whole of the forward-only cost, and it is visible here.
     assert_eq!(
         scratch.scalar(&format!(
-            "SELECT count() FROM {}.venue_book_top_race WHERE book_key = 0",
+            "SELECT count() FROM {}.feed_race WHERE book_key = 0",
             scratch.database
         )),
         "0",
