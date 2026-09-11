@@ -43,6 +43,8 @@ const URL_ENV: &str = "DZ_LOADER_CLICKHOUSE_URL";
 const DEFAULT_URL: &str = "http://127.0.0.1:8123";
 /// Applied by the one test that is about retention. See [`Scratch::open`].
 const RETENTION: &str = "002_recorder_retention.sql";
+/// Applied a second time by the one test that is about the upgrade path.
+const BOOK_KEY: &str = "010_recorder_book_key.sql";
 
 /// A database of this test's own, so a run cannot disturb a live one.
 struct Scratch {
@@ -2005,6 +2007,108 @@ fn a_row_omitting_a_column_the_table_has_still_loads() {
         "0",
         "an omitted hash column read back as something other than the zero the \
          race excludes"
+    );
+}
+
+/// **A deployment that applied `009` as it was released comes out of this
+/// upgrade with the race, under the name `010` leaves it under.**
+///
+/// The upgrade `010`'s last two statements exist for, run end to end. That
+/// deployment applied `009` before the rename, so it has `venue_book_top_race`
+/// and has never had `feed_race` — the amended `009` is the only other thing
+/// that creates that name — and it has no `book_key` on `book_top`. `010` adds
+/// the column, declares the publisher branch, replaces the seam, drops the old
+/// name, and re-states the race. What is asserted here is what it leaves.
+///
+/// THE FIXTURE IS THE CURRENT SET WITH THE RENAME TAKEN BACK OUT, because the
+/// released `009` is not in the tree to apply and a second copy of it checked
+/// in beside the live one would be a file nobody maintains. The two views the
+/// rename introduced are dropped, the column the publisher branch reads is
+/// dropped, and the old name is put back. Its body is deliberately *not* the
+/// released aggregate: what this file does to that name is drop it, and a
+/// `DROP` reads no body.
+///
+/// THE MUTANT THIS KILLS IS THE RE-STATEMENT DELETED FROM `010`. The drop then
+/// takes the deployment's only race away and every query below answers
+/// `UNKNOWN_TABLE`. Nothing else in this suite notices, because every other
+/// test runs `Scratch::open`, which applies the current `009` — and that one
+/// creates `feed_race` a moment before `010` drops a name it never had. A
+/// one-sided race left standing is the second mutant, and the last assertion is
+/// the one that reports it.
+#[test]
+fn the_upgrade_from_the_released_ddl_leaves_the_race_under_the_new_name() {
+    let mut scratch = Scratch::open("released_ddl_upgrade");
+    let base = now_ns();
+
+    // The deployment as the released `009` left it.
+    for view in [
+        "feed_race",
+        "feed_race_occurrence",
+        "publisher_book_top_occurrence",
+    ] {
+        scratch.scalar(&format!("DROP VIEW {}.{view}", scratch.database));
+    }
+    scratch.scalar(&format!(
+        "ALTER TABLE {}.book_top DROP COLUMN book_key",
+        scratch.database
+    ));
+    scratch.scalar(&format!(
+        "CREATE VIEW {0}.venue_book_top_race AS \
+         SELECT * FROM {0}.venue_book_top_occurrence",
+        scratch.database
+    ));
+
+    // The upgrade, as an operator applying the one new file performs it.
+    scratch.apply(BOOK_KEY);
+
+    let venue = cross_observer_venue_side(base);
+    scratch.insert_venue_book_tops(&venue);
+    scratch
+        .sink
+        .write_batch(cross_observer_publisher_side(base), NOW)
+        .expect("the publisher side loads, so the `ALTER` reached the table");
+
+    // The race is there at all, which is the whole of the finding: a `DROP`
+    // with no replacement leaves this query answering `UNKNOWN_TABLE` on the
+    // one deployment the block around it is written for.
+    //
+    // And it is the two-sided one. A re-statement that read a single side, or
+    // one that landed before the seam was replaced, would answer here with one
+    // observation and no lead — a plausible number, and the number a deployment
+    // with no publisher side would give.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT arrayStringConcat(any(observed_by), ',') FROM \
+             {}.feed_race WHERE book_key = {BOTH_OBSERVERS_SAW} \
+             AND occurrence = 1",
+            scratch.database
+        )),
+        "site-1/recorder-1,venue-a",
+        "the upgraded deployment has no race, or a race with one side in it"
+    );
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT groupUniqArray(round(lead_ms, 3)) FROM {}.feed_race \
+             WHERE book_key = {BOTH_OBSERVERS_SAW}",
+            scratch.database
+        )),
+        "[2]",
+        "the lead is not the one the fixture stated, so the ordinals did not \
+         line up on the upgraded deployment"
+    );
+
+    // And the one-sided race under the old name is gone. Left standing it would
+    // go on answering with the venue side alone, under a name an operator has
+    // every reason to keep querying.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT count() FROM system.tables WHERE database = '{}' \
+             AND name = 'venue_book_top_race'",
+            scratch.database
+        )),
+        "0",
+        "the venue-only race survived the upgrade under a name that now reads \
+         as the feed race"
     );
 }
 

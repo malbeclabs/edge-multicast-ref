@@ -799,6 +799,45 @@ fn the_seam_in_two_files_names_both_orders_that_leave_it_one_sided() {
     }
 }
 
+/// **The race is one statement, written into two files.**
+///
+/// `010` re-states `feed_race` after dropping the old name, because the drop
+/// alone would leave the one deployment that block exists for with no race at
+/// all: it applied `009` as released, so it holds `venue_book_top_race` and has
+/// never held `feed_race`, which only the amended `009` creates. The
+/// re-statement is what makes the compatibility block whole — and it is also a
+/// second copy of a twenty-line aggregate.
+///
+/// This is the guard on that copy. Two definitions nobody compares are two
+/// definitions that diverge, and the one that drifts is the one nobody reads:
+/// here that is a fresh deployment and an upgraded one answering the same
+/// question two different ways, with nothing failing on either and no way to
+/// tell from a dashboard which of them the number came from.
+///
+/// Character for character, and not "both of them mention the seam". A column
+/// added to one copy, an aggregate changed in one copy, a `GROUP BY` widened in
+/// one copy — every one of those is the failure this is about, and every one of
+/// them passes a weaker comparison.
+#[test]
+fn the_race_is_one_statement_written_into_two_files() {
+    let in_nine = view_body(venue_sql(), "feed_race").trim();
+    let in_ten = view_body(book_key_sql(), "feed_race").trim();
+    // The comparison is over the aggregate, which a helper returning the same
+    // empty slice for both would also satisfy.
+    for (file, body) in [("009", in_nine), ("010", in_ten)] {
+        assert!(
+            body.contains("FROM recorder.feed_race_occurrence")
+                && body.contains("GROUP BY feed, symbol_key, book_key, occurrence"),
+            "what is being compared for `{file}` is not the race: {body}"
+        );
+    }
+    assert_eq!(
+        in_nine, in_ten,
+        "`009` and `010` state the race differently, so a deployment created \
+         from scratch and one upgraded to it answer the same question two ways"
+    );
+}
+
 /// **The race is named for the race, and the name it had is dropped.**
 ///
 /// `009` declared `venue_book_top_race`, and the name was true of it: one
@@ -808,11 +847,20 @@ fn the_seam_in_two_files_names_both_orders_that_leave_it_one_sided() {
 /// points — so anyone filtering it as the venue's own race gets the opposite of
 /// what they expect.
 ///
-/// The rename is in `009`, so the query keeps one definition rather than two to
-/// keep true. What is left for `010` is the old name on a deployment that
-/// applied `009` before the rename, where the view still reads
-/// `feed_race_occurrence` and silently becomes the two-sided race under a name
-/// that says venue.
+/// What is left for `010` is the old name on a deployment that applied `009`
+/// before the rename. That view reads `venue_book_top_occurrence` — the `009`
+/// that declared it had no seam to read — and this file touches neither, so it
+/// goes on answering with the venue side alone while a publisher side is
+/// contributing rows to the seam beside it: a race that omits half of what the
+/// deployment records, under a name an operator keeps querying.
+///
+/// AND A DROP WITHOUT A REPLACEMENT IS NOT A REPAIR. That deployment has never
+/// held `feed_race`, because the amended `009` is the only other statement that
+/// creates it — so dropping the old name and stopping there ends the upgrade
+/// with no race at all, on the one deployment the compatibility block is for.
+/// `010` re-states the race after the drop, and
+/// [`the_race_is_one_statement_written_into_two_files`] is what keeps the two
+/// copies one text.
 #[test]
 fn the_race_is_named_for_the_race_and_the_old_name_is_dropped() {
     assert!(
@@ -825,17 +873,33 @@ fn the_race_is_named_for_the_race_and_the_old_name_is_dropped() {
             "the race is still declared under a name that says one side"
         );
     }
-    assert!(
-        book_key_sql().contains("DROP VIEW IF EXISTS recorder.venue_book_top_race;"),
-        "a deployment that applied `009` before the rename keeps a view whose \
-         name says venue and whose rows are both sides'"
-    );
+    let drop = book_key_sql()
+        .find("DROP VIEW IF EXISTS recorder.venue_book_top_race;")
+        .expect(
+            "a deployment that applied `009` before the rename keeps a \
+             one-sided race under a name that reads as the feed race",
+        );
     // `IF EXISTS`, because on every other deployment there is nothing there and
     // a migration that failed on its own first application is a migration
     // nobody can re-run.
     assert!(
         book_key_sql().contains("DROP VIEW IF EXISTS"),
         "the drop fails on a deployment that never had the view"
+    );
+    // And the replacement is in the same file and after it, which is the half
+    // of the repair a reader of the drop alone would not know to look for: the
+    // deployment being dropped from has no `feed_race` to fall back on.
+    let restated = book_key_sql()
+        .find("CREATE OR REPLACE VIEW recorder.feed_race AS")
+        .expect(
+            "`010` drops the old race name and states no race under the new \
+             one, so the deployment it is written for ends the upgrade with \
+             none at all",
+        );
+    assert!(
+        restated > drop,
+        "the race is re-stated before the drop, which reads as a statement \
+         about something else"
     );
 }
 
@@ -2217,13 +2281,15 @@ fn every_migration_splits_into_whole_statements() {
         );
     }
 
-    // The `ALTER`, the three views and the `DROP` of `010`, and nothing split
+    // The `ALTER`, the four views and the `DROP` of `010`, and nothing split
     // across two of them. `book_top_settled` is among them deliberately: a
     // view's `SELECT *` is expanded when the view is created, so on a
     // deployment upgraded in file order `006` freezes that view's column list
-    // before the `ALTER` here runs.
+    // before the `ALTER` here runs. `feed_race` is among them for the other
+    // upgrade: the `DROP` below takes the old race name off a deployment that
+    // has no `feed_race` to fall back on.
     let book_key = migration("010_recorder_book_key.sql").statements();
-    assert_eq!(book_key.len(), 5, "one ALTER, three views, one DROP");
+    assert_eq!(book_key.len(), 6, "one ALTER, four views, one DROP");
     assert_eq!(
         book_key
             .iter()
@@ -2246,6 +2312,7 @@ fn every_migration_splits_into_whole_statements() {
         "book_top_settled",
         "publisher_book_top_occurrence",
         "feed_race_occurrence",
+        "feed_race",
     ] {
         assert_eq!(
             book_key

@@ -219,14 +219,20 @@
 --
 -- THE REST OF THIS FILE IS NOT OPTIONAL ON ANY DEPLOYMENT, and reading "then a
 -- no-op" across the whole of it is how a deployment created from scratch ends
--- up with a one-sided race. Only the `ALTER` is one.
--- `publisher_book_top_occurrence` is declared here and nowhere else;
--- `feed_race_occurrence` arrives from `009` with the venue branch alone and is
--- replaced here by both; `book_top_settled` is re-stated for the reason that
--- statement gives about a view's `SELECT *`; and the `DROP` at the end is the
--- only other statement a fresh deployment has nothing to do. A deployment that
--- applied `009` and skipped this file has a race that pairs the venue against
--- itself.
+-- up with a one-sided race. `publisher_book_top_occurrence` is declared here
+-- and nowhere else; `feed_race_occurrence` arrives from `009` with the venue
+-- branch alone and is replaced here by both; and `book_top_settled` is
+-- re-stated for the reason that statement gives about a view's `SELECT *`. A
+-- deployment that applied `009` and skipped this file has a race that pairs the
+-- venue against itself.
+--
+-- THREE STATEMENTS DO NOTHING ON A FRESH DEPLOYMENT AND ALL THREE ARE FOR ONE
+-- THAT IS BEING UPGRADED. The `ALTER`, for the reason above; the `DROP` at the
+-- end, which finds nothing to drop where `009` was always the amended one; and
+-- the re-statement of `feed_race` after it, which replaces that view with the
+-- text `009` just created it from. The last two are a pair and each section
+-- says so: a `DROP` that left no replacement would take the race away from the
+-- one deployment this file's compatibility block is written for.
 --
 -- Cheap for the reason `008` gives as well: adding a column to a MergeTree is a
 -- metadata change, existing parts are not rewritten, and a read of a part
@@ -435,18 +441,74 @@ FROM recorder.publisher_book_top_occurrence;
 -- ordinal and names no observation point, so it is one query for one side or
 -- for ten and it takes the seam's own name. Before this file existed that view
 -- was `recorder.venue_book_top_race`, and the name was true of it — there was
--- one branch and it was the venue's. It is not true of a view whose rows may be
--- either side's: `observations = 1` there is as likely publisher-only as
--- venue-only, and `observed_by` names publisher observation points, so anyone
--- filtering it as the venue's own race gets the opposite of what they expect.
+-- one branch and it was the venue's.
 --
--- THE RENAME IS IN `009` AND NOT HERE, so that the query keeps one definition.
--- A second copy of that aggregate under a second name would be two definitions
--- to keep true, and the one that drifts is the one nobody reads. What is left
--- for this file is the old name on a deployment that applied `009` before the
--- rename: the view reads `feed_race_occurrence`, so the branch added above
--- makes it the two-sided race under a name that says venue. A view holds no
--- rows, so dropping it loses nothing that a re-application of `009` does not
--- put back under the name it now has. `IF EXISTS` because on a deployment that
--- never had it there is nothing there.
+-- WHAT THAT VIEW DOES ON A DEPLOYMENT THAT STILL HOLDS IT, WHICH IS WORSE THAN
+-- WEARING A WRONG NAME. It reads `venue_book_top_occurrence` directly, because
+-- the `009` that declared it had no seam to read — and nothing in this file
+-- touches that view. So it keeps answering, and it keeps answering with the
+-- venue side alone, on a deployment where a publisher side is now contributing
+-- rows to the seam beside it. Nothing fails and nothing about it changes: it is
+-- a race that silently omits half of what the deployment records, under a name
+-- an operator has every reason to go on querying. A view holds no rows, so
+-- dropping it costs nothing, and dropping it is the only thing that stops it.
+-- `IF EXISTS` because on a deployment that never had it there is nothing there.
 DROP VIEW IF EXISTS recorder.venue_book_top_race;
+
+
+-- The race under the name it now has, for the deployment that has never had it.
+--
+-- THE `DROP` ABOVE NEEDS A REPLACEMENT AND THIS IS THE ONLY STATEMENT THAT IS
+-- ONE. The deployment that block is written for applied `009` as it was
+-- released, before the rename. It holds `venue_book_top_race`, and it has never
+-- held `feed_race`: that name is created by the amended `009` and by nothing
+-- else in the set. Applying this file to it adds the publisher branch, replaces
+-- the seam, and drops the old name — and without the statement below that
+-- sequence ends with the deployment holding no race at all. Every reader of the
+-- race then gets `UNKNOWN_TABLE`, which is at least loud, and the operator who
+-- upgraded has nothing to put back. That deployment is the only one this
+-- compatibility block exists for, so leaving it raceless is the block failing
+-- at the one thing it is for.
+--
+-- SO THE AGGREGATE IS WRITTEN TWICE AND THE TWO COPIES MUST NOT DRIFT. That is
+-- the cost of stating it here, and it is stated rather than hidden: the other
+-- copy is `009`'s, the one a fresh deployment gets, and the two are the same
+-- statement character for character. `tests/ddl.rs` holds them against each
+-- other, because a second definition nobody compares is a second definition
+-- that diverges, and the one that drifts is the one nobody reads.
+--
+-- THE ALTERNATIVE WAS A RULE IN PROSE, AND A RULE IS WORSE THAN A STATEMENT.
+-- Re-applying the current `009` before this file leaves `feed_race` too, and it
+-- is a thing an operator has to know and do — while the whole shape of this
+-- block is what to do for someone applying only the new file. It is also a rule
+-- with an order inside it: `009`'s own header states that re-applying that file
+-- after `010` replaces the two-sided seam with the venue branch alone, so the
+-- instruction would be "apply `009`, then this, and never the other way round".
+-- A statement that is simply idempotent is less to get right.
+--
+-- IDEMPOTENT ON EVERY OTHER DEPLOYMENT, which is what makes it safe to put
+-- here. A fresh one created this view from `009` a moment ago and this replaces
+-- it with the same text; one already upgraded does the same. `CREATE OR
+-- REPLACE` and not a conditional create, because what has to be true afterwards
+-- is that the view *is* this definition — not that something of that name
+-- exists.
+CREATE OR REPLACE VIEW recorder.feed_race AS
+SELECT
+    feed,
+    symbol_key,
+    book_key,
+    occurrence,
+    uniqExact(observation)                 AS observations,
+    arraySort(groupUniqArray(observation)) AS observed_by,
+    argMin(observation, recv_ts)           AS first_observation,
+    argMax(observation, recv_ts)           AS last_observation,
+    min(recv_ts)                           AS first_recv_ts,
+    max(recv_ts)                           AS last_recv_ts,
+    if(uniqExact(observation) > 1,
+       (toUnixTimestamp64Nano(max(recv_ts)) - toUnixTimestamp64Nano(min(recv_ts))) / 1e6,
+       NULL)                               AS lead_ms,
+    arraySort(groupUniqArray(symbol))      AS symbols,
+    (uniqExact(symbol) = 1)                AS symbols_agree,
+    (uniqExact(price_exp) = 1) AND (uniqExact(qty_exp) = 1) AS exponents_agree
+FROM recorder.feed_race_occurrence
+GROUP BY feed, symbol_key, book_key, occurrence;
