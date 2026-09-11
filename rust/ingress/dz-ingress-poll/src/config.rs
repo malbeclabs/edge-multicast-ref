@@ -235,6 +235,30 @@ impl core::fmt::Debug for PollConfig {
 /// It lives beside the key it reads. `endpoint` is this table's, and one
 /// implementation of *what of an endpoint may be printed* is what keeps the
 /// transport's log lines and this module's refusals to the same rule.
+///
+/// # The order the three delimiters come off in is the correctness
+///
+/// The query string and the fragment first, then the userinfo, then the path —
+/// and each boundary is where it is because of which of two wrong answers is
+/// dangerous.
+///
+/// A `?` and a `#` open the two regions this function exists to drop whole, so
+/// an `@` inside either is a character in somebody's value and never a userinfo
+/// delimiter: reading one as a delimiter would print the tail of a query
+/// string, which is where several venue APIs keep a key.
+///
+/// **The userinfo then comes off before the path, and not after it.** A
+/// credential is frequently base64 and base64 carries a `/` about half the
+/// time, so `http://poller:aBc/dEf@192.0.2.10/catalogue` is the ordinary shape
+/// rather than an odd one. Cutting at the first `/` first reads `poller:aBc` as
+/// the authority — there is no `@` left in it to strip — and prints the
+/// password's first characters with the host gone, in the one line a supervisor
+/// captures when a publisher will not start. Cutting at the last `@` first
+/// costs the opposite mistake, an `@` in a path taken for a delimiter and a
+/// path segment printed where a host was wanted, which is a wrong answer and
+/// not a disclosed secret. An authority containing a `/` before any `@` is not
+/// a host either way, so there is no correct endpoint whose rendering this
+/// order spoils.
 pub(crate) fn authority_of(endpoint: &str) -> String {
     let (scheme, after_scheme) = match endpoint.split_once("://") {
         Some((scheme, after_scheme)) => (Some(scheme), after_scheme),
@@ -243,15 +267,17 @@ pub(crate) fn authority_of(endpoint: &str) -> String {
         // printing and the query string still must not be.
         None => (None, endpoint),
     };
-    let host = after_scheme
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or_default()
-        // A userinfo section is a credential more often than not, and this
-        // string exists to be printed.
-        .rsplit('@')
-        .next()
-        .unwrap_or_default();
+    let before_query = after_scheme.split(['?', '#']).next().unwrap_or_default();
+    // A userinfo section is a credential more often than not, and this string
+    // exists to be printed. `rsplit_once` and not `split_once`, because the
+    // delimiter is the last `@`: a username that is an email address is
+    // ordinary, and cutting at the first one would leave the domain of it in
+    // front of the host.
+    let after_userinfo = match before_query.rsplit_once('@') {
+        Some((_userinfo, rest)) => rest,
+        None => before_query,
+    };
+    let host = after_userinfo.split('/').next().unwrap_or_default();
     match scheme {
         Some(scheme) => format!("{scheme}://{host}"),
         None => host.to_string(),
@@ -575,6 +601,48 @@ mod tests {
         assert_eq!(
             authority_of("https://192.0.2.10:8443/catalogue"),
             "https://192.0.2.10:8443"
+        );
+    }
+
+    #[test]
+    fn a_userinfo_section_carrying_a_slash_leaves_no_prefix_of_the_credential_behind() {
+        // **The order the delimiters come off in, stated as the failure it
+        // prevents.** A credential is frequently base64 and base64 carries a
+        // `/` about half the time, so this endpoint is the ordinary shape
+        // rather than an odd one. Cut the path off first and `poller:aBc` is
+        // what is left — no `@` in it to strip — so the function returns
+        // `http://poller:aBc`: the password's first characters printed and the
+        // host gone, in the value all three endpoint-naming `ConfigError`s
+        // carry, in `PollConfig`'s, `PollInput`'s and `Request`'s `Debug`, and
+        // in front of every error detail in `poll.rs` — which is the startup
+        // line a supervisor captures when the process will not start.
+        const CREDENTIAL: &str = "aBc/dEf-not-a-real-secret";
+        let rendered = authority_of(&format!("http://poller:{CREDENTIAL}@192.0.2.10/catalogue"));
+        assert_eq!(rendered, "http://192.0.2.10");
+
+        // Every prefix and not only the whole of it, because what the wrong
+        // order printed was a prefix: three characters of a password is not a
+        // disclosure to argue about, it is a disclosure.
+        for length in 1..=CREDENTIAL.len() {
+            let prefix = &CREDENTIAL[..length];
+            assert!(
+                !rendered.contains(prefix),
+                "`{prefix}` is the start of the credential and it survived into `{rendered}`"
+            );
+        }
+        // And the half an operator needs is still there, which is the other
+        // half of the same mistake: the wrong order lost the host entirely, so
+        // the refusal named neither the endpoint safely nor usefully.
+        assert!(rendered.contains("192.0.2.10"), "{rendered}");
+
+        // An `@` inside a query string is a character in somebody's value and
+        // not a userinfo delimiter, so the two boundaries have to be read in
+        // this order too: taking the last `@` in the whole endpoint would
+        // print the tail of the query string, which is where several venue
+        // APIs keep a key.
+        assert_eq!(
+            authority_of("http://192.0.2.10/catalogue?login=poller@not-a-real-secret"),
+            "http://192.0.2.10"
         );
     }
 }
