@@ -22,12 +22,14 @@ Turns [the design](../specs/2026-09-09-polled-transport-design.md) into ordered 
 
 ### 1. `Kind::Poll`, and the token `poll`
 
-- [ ] `Kind::Rest` becomes `Kind::Poll`; the token `"rest"` becomes `"poll"`; `ALL`, `TOKEN_LIST` and `as_token` move with it, and the doc comment keeps "polled request/response" and drops nothing else.
-- [ ] The variant's doc comment carries the reason for the name, in one line, so that the next reader does not restore the old one from familiarity: a book's *resting* quantity already owns that word here.
+- [x] `Kind::Rest` becomes `Kind::Poll`; the token `"rest"` becomes `"poll"`; `ALL`, `TOKEN_LIST` and `as_token` move with it, and the doc comment keeps "polled request/response" and drops nothing else.
+- [x] The variant's doc comment carries the reason for the name, in one line, so that the next reader does not restore the old one from familiarity: a book's *resting* quantity already owns that word here.
 
-**Test:** `dz-ingress-core/tests/config.rs::every_kind_has_a_token` already holds the set; it passes only if the token moved with the variant. A document naming `kind = "poll"` resolves to the variant, and one naming `kind = "rest"` is refused with a message listing the acceptable tokens — which is the test that says the old spelling is gone rather than aliased.
+**Test:** **corrected — `every_kind_has_a_token` does not exist and never did.** This plan and the design both named it, and so did `TOKEN_LIST`'s own doc comment, which is where all three got it. What does hold the set is `kind::tests::the_token_list_in_the_error_message_is_the_token_set`, in the crate's own `mod tests` rather than in `tests/config.rs`, and it is stricter: it pins `TOKEN_LIST` against `ALL` *including the order*, so it catches a variant added without a token and a variant renamed without moving its token. Writing a second test under the promised name would have been two tests for one property, so the doc comment was re-pointed at the real one instead. A document naming `kind = "poll"` resolves to the variant, and one naming `kind = "rest"` is refused with a message listing the acceptable tokens — which is the test that says the old spelling is gone rather than aliased.
 
-**The revert:** leave `TOKEN_LIST` saying `rest` while the variant is `Poll`. `every_kind_has_a_token` fails. That test exists because a variant added without a token is a value an operator can name and nothing can resolve, and a rename is the same defect arriving from the other direction.
+**The revert, run rather than predicted.** Leaving `TOKEN_LIST` saying `rest` while the variant is `Poll` kills **four** tests, not the one this plan predicted: `the_token_list_in_the_error_message_is_the_token_set`, `a_token_no_transport_answers_to_names_the_built_in_set` (the message interpolates the list, so an operator would be shown a token that resolves to nothing), `the_old_spelling_of_the_polled_transport_is_refused_and_not_aliased`, and the publisher runtime's `a_transport_this_binary_was_not_built_with_is_a_different_error`. The prediction named a test that does not exist; the property it described is covered from both directions.
+
+A second revert, which this plan did not think to name: resolving `rest` to `Poll` as an alias. `the_old_spelling_of_the_polled_transport_is_refused_and_not_aliased` fails, in the default build and under `--features poll`. Two spellings for one transport, with a configuration management system holding whichever was written first, is what the rename exists to avoid.
 
 ---
 
