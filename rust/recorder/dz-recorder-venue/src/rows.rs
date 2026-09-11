@@ -292,7 +292,27 @@ pub struct VenueObjectRow {
     /// written. A rounded price is a price the venue did not quote, and a
     /// conversion taken as zero is a real-looking quote at nothing — which is
     /// the shipped defect the adapter boundary was shaped around.
+    ///
+    /// **Exponent conversions and nothing else.** An event naming a handle the
+    /// derivation never minted is [`unknown_instrument_count`] and not this: a
+    /// single column over the two would report a venue quoting outside its own
+    /// declared scale when what happened is an adapter naming an instrument that
+    /// does not exist.
+    ///
+    /// [`unknown_instrument_count`]: Self::unknown_instrument_count
     pub unpriced_count: u64,
+    /// Events naming an instrument this derivation never admitted.
+    ///
+    /// **An adapter defect, and visible rather than folded into the one beside
+    /// it.** An `InstrumentRef` is a handle and not a capability — it carries no
+    /// proof of its own origin, because the runtime that mints one lives in a
+    /// different crate from the boundary that carries it — so a handle can be
+    /// forged, and it can be one minted over a different object. Either is
+    /// refused here, once, where the refusal can be counted, rather than
+    /// resolving to whatever instrument now sits at that index and writing a top
+    /// of book under its symbol. The event is dropped; the publisher side's
+    /// lowering refuses the same thing under its own `unknown_instrument` token.
+    pub unknown_instrument_count: u64,
     /// Times the adapter said it no longer trusts its own book for an
     /// instrument.
     ///

@@ -305,7 +305,19 @@ CREATE TABLE IF NOT EXISTS recorder.venue_object (
     -- instrument's own declared exponent. Counted rather than rounded, and the
     -- event is dropped: a rounded price is a price the venue did not quote, and
     -- a conversion taken as zero is a real-looking quote at nothing.
+    --
+    -- Exponent conversions and nothing else. An event naming an instrument the
+    -- derivation never admitted is the column below, because an operator checks
+    -- a venue's declared scale for one and an adapter for the other.
     unpriced_count    UInt64,
+    -- Events naming an instrument the derivation never admitted, which is a
+    -- defect in the adapter. A handle is not a capability — it carries no proof
+    -- of its own origin, so it can be forged and it can be one minted over a
+    -- different object — and either is refused here rather than resolved to
+    -- whatever instrument now sits at that index and written as a top of book
+    -- under its symbol. The event is dropped; the publisher side's lowering
+    -- refuses the same thing under its own `unknown_instrument` token.
+    unknown_instrument_count UInt64,
     -- Times the adapter said it no longer trusts its own book. Evidence and not
     -- a verdict; see the note on the absent `book_certain` above.
     desync_count      UInt64,

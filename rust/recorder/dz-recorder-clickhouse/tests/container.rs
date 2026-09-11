@@ -1570,6 +1570,7 @@ fn the_checked_in_venue_ddl_accepts_what_the_derivation_produces() {
         ],
         event_count: 37,
         unpriced_count: 1,
+        unknown_instrument_count: 1,
         desync_count: 0,
         unattributed_count: 0,
         book_top_count: 12,

@@ -31,6 +31,14 @@ use dz_recorder_archive::upstream::{
 use dz_recorder_core::RecvTsKind;
 use dz_recorder_venue::object::{VenueObject, VenueObjectId};
 
+/// The handle the `forged` op reports events on, which **no poll mints**.
+///
+/// Far past anything a fixture lists, so that it is out of range whatever the
+/// object offered: what is under test is a handle that resolves to no
+/// instrument, and one that happened to land inside the table would be a test
+/// of attribution instead.
+pub const FORGED_HANDLE: u32 = 9_999;
+
 /// The channel the fixture's messages state, and which no row may carry.
 ///
 /// Distinctive rather than small, so that a test can assert the value reached no
@@ -81,12 +89,13 @@ impl Listing {
 /// chan=<u8> pubseq=<u64> seq=<u64> sid=<u64> <op> ...
 ///   quote  <symbol> <bid_px[@sources]|-> <bid_qty|-> <ask_px[@sources]|-> <ask_qty|->
 ///   level  <symbol> <bid|ask> <px> <qty>
-///   clear  <symbol> <both|bid|ask>
+///   clear  <symbol> <both|bid|ask|from <bid|ask> <px>>
 ///   trade  <symbol> <px> <qty>
 ///   listing <symbol> <price_exp> <qty_exp>
 ///   delist <symbol>    -- withdrawn on the next poll, where `delist` lives
 ///   refuse <schema|unknown_field|malformed|truncated>
 ///   unscoped <symbol>   -- closes the payload scope, then emits a quote
+///   forged <quote|level|clear>  -- on a handle no poll ever minted
 /// ```
 ///
 /// **One record may carry several of the venue's own messages, and one of those
@@ -356,6 +365,24 @@ impl FixtureAdapter {
                     Some("both") => ClearScope::BothSides,
                     Some("bid") => ClearScope::EntireSide(Side::Bid),
                     Some("ask") => ClearScope::EntireSide(Side::Ask),
+                    // `from <bid|ask> <px>`: the bounded clear, which removes
+                    // one side outward from a price — the only scope with a
+                    // direction in it, and therefore the only one a test can
+                    // watch being inverted. Without a line format that can
+                    // state it, the fold's one piece of directional arithmetic
+                    // is unreachable from any test in the crate.
+                    Some("from") => {
+                        let side = match fields.next() {
+                            Some("bid") => Side::Bid,
+                            Some("ask") => Side::Ask,
+                            _ => return Err(ParseError::malformed("side")),
+                        };
+                        let px = fields.next().ok_or_else(|| ParseError::truncated("px"))?;
+                        ClearScope::FromPrice {
+                            side,
+                            px: Scalar::text(px),
+                        }
+                    }
                     _ => return Err(ParseError::malformed("scope")),
                 };
                 out.event(Event::Clear {
@@ -408,6 +435,54 @@ impl FixtureAdapter {
                         source_count: None,
                     },
                 });
+            }
+            // **A handle no poll minted**, which is the one thing this fixture
+            // has to forge. An `InstrumentRef` is a handle and not a capability
+            // — it carries no proof of its own origin — so an adapter can carry
+            // one this derivation never handed out: a wrong index, or one minted
+            // over a different object. `from_admission` inside a *venue's* own
+            // adapter is what a review rejects; a fixture whose job is to
+            // produce the case the derivation must refuse is where the call
+            // belongs.
+            //
+            // Every event shape that resolves a handle, because each resolves
+            // it in its own branch and one of them can be left counting the
+            // wrong thing.
+            "forged" => {
+                let kind = fields.next().ok_or_else(|| ParseError::truncated("kind"))?;
+                let instrument = InstrumentRef::from_admission(FORGED_HANDLE);
+                let source_ts_ns = payload.recv_ts_ns.saturating_sub(1_000);
+                match kind {
+                    "quote" => out.event(Event::Quote {
+                        instrument,
+                        source_ts_ns,
+                        bid: SideUpdate::Present {
+                            px: Scalar::text("1.00"),
+                            qty: Scalar::text("1"),
+                            source_count: None,
+                        },
+                        ask: SideUpdate::Present {
+                            px: Scalar::text("2.00"),
+                            qty: Scalar::text("1"),
+                            source_count: None,
+                        },
+                    }),
+                    "level" => out.event(Event::Level {
+                        instrument,
+                        source_ts_ns,
+                        side: Side::Bid,
+                        px: Scalar::text("1.00"),
+                        qty: Scalar::text("1"),
+                        order_count: None,
+                        presence: dz_adapter_core::Presence::Unknown,
+                    }),
+                    "clear" => out.event(Event::Clear {
+                        instrument,
+                        source_ts_ns,
+                        scope: ClearScope::BothSides,
+                    }),
+                    _ => return Err(ParseError::malformed("kind")),
+                }
             }
             "desync" => {
                 let symbol = fields.next().ok_or_else(|| ParseError::truncated("sym"))?;

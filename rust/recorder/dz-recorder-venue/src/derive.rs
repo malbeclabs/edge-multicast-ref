@@ -119,6 +119,7 @@ pub struct Derived {
     pub refusals: Vec<RefusalCount>,
     pub event_count: u64,
     pub unpriced_count: u64,
+    pub unknown_instrument_count: u64,
     pub desync_count: u64,
     pub unattributed_count: u64,
     pub book_top_count: u64,
@@ -209,6 +210,7 @@ pub fn derive_venue_object(
             refusals: derived.refusals.clone(),
             event_count: derived.event_count,
             unpriced_count: derived.unpriced_count,
+            unknown_instrument_count: derived.unknown_instrument_count,
             desync_count: derived.desync_count,
             unattributed_count: derived.unattributed_count,
             book_top_count: derived.book_top_count,
@@ -330,6 +332,16 @@ struct Fold {
     message_count: u64,
     event_count: u64,
     unpriced_count: u64,
+    /// Events naming a handle this derivation never minted.
+    ///
+    /// **Its own counter and not `unpriced_count`'s.** The two refusals share
+    /// three match branches and nothing else: one says the venue quoted a number
+    /// the instrument's declared exponent cannot state, and the other says the
+    /// adapter handed over a handle that resolves to no instrument at all. A
+    /// column documented as counting exponent conversions that also counted
+    /// these would send an operator to check a venue's tick size over an adapter
+    /// defect, and the reverse.
+    unknown_instrument_count: u64,
     desync_count: u64,
     unattributed_count: u64,
     refusals: BTreeMap<&'static str, u64>,
@@ -358,6 +370,7 @@ impl Fold {
             message_count: 0,
             event_count: 0,
             unpriced_count: 0,
+            unknown_instrument_count: 0,
             desync_count: 0,
             unattributed_count: 0,
             refusals: BTreeMap::new(),
@@ -412,6 +425,7 @@ impl Fold {
                 .collect(),
             event_count: self.event_count,
             unpriced_count: self.unpriced_count,
+            unknown_instrument_count: self.unknown_instrument_count,
             desync_count: self.desync_count,
             unattributed_count: self.unattributed_count,
             book_top_count: self.rows.len() as u64,
@@ -685,8 +699,17 @@ impl EventSink for Fold {
                 let Some(held) = self.instruments.get(handle as usize) else {
                     // A handle this derivation never minted. Reachable, because
                     // an `InstrumentRef` is a handle and not a capability — the
-                    // lowering refuses one for the same reason.
-                    self.unpriced_count += 1;
+                    // lowering refuses one for the same reason, under its own
+                    // `unknown_instrument` token.
+                    //
+                    // **Counted apart from `unpriced_count`**, which is the
+                    // exponent conversion below and nothing else. One column
+                    // over the two would say a venue quoted a price its own
+                    // declared exponent cannot state when what happened is that
+                    // an adapter named an instrument that does not exist — and
+                    // an operator checks a tick size for the first and an
+                    // adapter for the second.
+                    self.unknown_instrument_count += 1;
                     return;
                 };
                 let (price_exp, qty_exp) = (held.price_exp, held.qty_exp);
@@ -720,7 +743,9 @@ impl EventSink for Fold {
             } => {
                 let handle = instrument.index();
                 let Some(held) = self.instruments.get(handle as usize) else {
-                    self.unpriced_count += 1;
+                    // A handle this derivation never minted; see `Quote` above
+                    // for why it is not `unpriced_count`.
+                    self.unknown_instrument_count += 1;
                     return;
                 };
                 let (price_exp, qty_exp) = (held.price_exp, held.qty_exp);
@@ -761,7 +786,9 @@ impl EventSink for Fold {
             } => {
                 let handle = instrument.index();
                 let Some(held) = self.instruments.get(handle as usize) else {
-                    self.unpriced_count += 1;
+                    // A handle this derivation never minted; see `Quote` above
+                    // for why it is not `unpriced_count`.
+                    self.unknown_instrument_count += 1;
                     return;
                 };
                 let price_exp = held.price_exp;

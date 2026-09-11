@@ -633,6 +633,287 @@ fn an_event_outside_a_payload_scope_is_counted_and_never_written() {
     );
 }
 
+/// **An event on a handle nobody minted is counted as the refusal it is.**
+///
+/// `unpriced_count` is documented as counting a price or a quantity the
+/// instrument's own declared exponent cannot state exactly. A handle that
+/// resolves to no instrument is not one of those: it is an adapter naming an
+/// instrument that does not exist — a forged handle, or one minted over a
+/// different object — and an operator checks a venue's declared scale for the
+/// first and an adapter for the second.
+///
+/// The mutant this kills is the one column over both, which is what shipped:
+/// every branch that resolves a handle charged its refusal to `unpriced_count`,
+/// so a window would report a venue quoting outside its own scale when the
+/// venue had quoted nothing of the kind. Each of the three branches is exercised
+/// on its own, because each resolves the handle in its own branch and one of
+/// them can be left counting the wrong thing.
+#[test]
+fn an_event_on_a_handle_nobody_minted_is_not_an_exponent_refusal() {
+    let mut object = FixtureObject::of(
+        BASE,
+        &[
+            "chan=113 pubseq=990001 seq=1 sid=7 quote AAA 100.50 3 100.60 4",
+            "chan=113 pubseq=990001 seq=2 sid=7 forged quote",
+            "chan=113 pubseq=990001 seq=3 sid=7 forged level",
+            "chan=113 pubseq=990001 seq=4 sid=7 forged clear",
+            "chan=113 pubseq=990001 seq=5 sid=7 quote AAA 100.70 5 100.80 6",
+        ],
+    );
+    let mut sink = CollectingSink::new();
+    let derived = derive_venue_object(&mut adapter(), &mut object, &mut sink).expect("the object");
+
+    assert_eq!(
+        derived.unknown_instrument_count, 3,
+        "the refusal reached no column of its own"
+    );
+    assert_eq!(
+        derived.unpriced_count, 0,
+        "a handle that resolves to nothing was charged to the exponent column"
+    );
+    assert_eq!(
+        sink.objects()[0].unknown_instrument_count,
+        3,
+        "the count reached no column, so nothing downstream can see the refusal"
+    );
+    assert_eq!(sink.objects()[0].unpriced_count, 0);
+    // Counted as events, because the adapter emitted them, and no row follows
+    // from any of them.
+    assert_eq!(derived.event_count, 5);
+    assert_eq!(
+        derived.instrument_count, 1,
+        "a forged handle admitted an instrument"
+    );
+    assert_eq!(
+        tops(&sink),
+        vec![
+            (
+                BASE,
+                "AAA".to_owned(),
+                Some(10_050),
+                Some(3),
+                Some(10_060),
+                Some(4)
+            ),
+            (
+                BASE + 4_000_000,
+                "AAA".to_owned(),
+                Some(10_070),
+                Some(5),
+                Some(10_080),
+                Some(6)
+            ),
+        ],
+        "a forged handle wrote a row"
+    );
+}
+
+/// **A bounded clear removes one side outward from its price, and outward is
+/// away from the top.**
+///
+/// `ClearScope::FromPrice` is the fold's only piece of directional arithmetic:
+/// for bids outward is downward and for asks it is upward. Inverted, it keeps
+/// the depth and removes the top, and every row after it describes a book the
+/// venue never published.
+///
+/// The mutant this kills is either comparison turned around. Each clear here is
+/// bounded *beneath* the top of its side, so the correct answer is that the top
+/// did not move and no row was written at all — an inverted comparison writes
+/// one immediately, at the deeper price it kept. That the deeper levels really
+/// went is then shown by taking the top one away: what is left is an empty side
+/// rather than the level the bounded clear should already have removed.
+#[test]
+fn a_bounded_clear_removes_the_levels_outward_from_its_price() {
+    let mut object = FixtureObject::of(
+        BASE,
+        &[
+            "chan=113 pubseq=990001 seq=1 sid=7 level AAA bid 100.50 3",
+            "chan=113 pubseq=990001 seq=2 sid=7 level AAA bid 100.40 2",
+            "chan=113 pubseq=990001 seq=3 sid=7 level AAA bid 100.30 1",
+            "chan=113 pubseq=990001 seq=4 sid=7 level AAA ask 100.60 4",
+            "chan=113 pubseq=990001 seq=5 sid=7 level AAA ask 100.70 5",
+            // Beneath the top of the bid side: the two levels under it go and
+            // the top stays, so this writes nothing.
+            "chan=113 pubseq=990001 seq=6 sid=7 clear AAA from bid 100.40",
+            // And above the top of the ask side, which is the same thing on the
+            // side where outward is the other direction.
+            "chan=113 pubseq=990001 seq=7 sid=7 clear AAA from ask 100.70",
+            // Now take each top away. The side goes empty, which it can only do
+            // if the clears above removed what they were meant to.
+            "chan=113 pubseq=990001 seq=8 sid=7 level AAA bid 100.50 0",
+            "chan=113 pubseq=990001 seq=9 sid=7 level AAA ask 100.60 0",
+            // A bounded clear the instrument's exponent cannot state is the
+            // exponent refusal and not this one, and it moves nothing.
+            "chan=113 pubseq=990001 seq=10 sid=7 clear AAA from bid 100.405",
+        ],
+    );
+    let mut sink = CollectingSink::new();
+    let derived = derive_venue_object(&mut adapter(), &mut object, &mut sink).expect("the object");
+
+    assert_eq!(
+        tops(&sink),
+        vec![
+            // The bid appears.
+            (BASE, "AAA".to_owned(), Some(10_050), Some(3), None, None),
+            // And then the ask.
+            (
+                BASE + 3_000_000,
+                "AAA".to_owned(),
+                Some(10_050),
+                Some(3),
+                Some(10_060),
+                Some(4)
+            ),
+            // The top bid removed leaves **no** bid, and not the 100.40 a
+            // bounded clear in the wrong direction would have kept.
+            (
+                BASE + 7_000_000,
+                "AAA".to_owned(),
+                None,
+                None,
+                Some(10_060),
+                Some(4)
+            ),
+            // And the same on the ask side.
+            (BASE + 8_000_000, "AAA".to_owned(), None, None, None, None),
+        ],
+        "a bounded clear moved a top it was beneath"
+    );
+    assert_eq!(
+        derived.unpriced_count, 1,
+        "the bounded clear at a price the exponent cannot state"
+    );
+    assert_eq!(derived.unknown_instrument_count, 0);
+}
+
+/// **A refusal costs the rest of its message, and not what came before it.**
+///
+/// One archived record may carry a batch, and an adapter may report the events
+/// of several members and then refuse a later one. Those events are already in
+/// the adapter's own book — an `on_payload` that returns an error unwinds
+/// nothing — so the rows they produced stand, and `refused_count` is the only
+/// thing that says the record was refused at all.
+///
+/// The mutant this kills is the derivation that discards the rows of a refused
+/// record. Discarding the rows alone takes a book state out of the history with
+/// nothing counting it, which is the hole `message_index` is in the sort key to
+/// prevent; discarding the fold's book with them puts this derivation and the
+/// adapter's own book into disagreement, and every row after the refusal is then
+/// computed against a book the venue's adapter is not holding — which the second
+/// record here is what catches.
+#[test]
+fn a_refusal_keeps_the_rows_the_adapter_reported_before_it() {
+    let mut object = FixtureObject::of(
+        BASE,
+        &[
+            // One record, two members: the first moves the top, and the second
+            // is the one the adapter cannot parse.
+            "chan=113 pubseq=990001 seq=1 sid=7 quote AAA 100.50 3 100.60 4|refuse schema",
+            // The book this moves is the one the first member left.
+            "chan=113 pubseq=990001 seq=2 sid=7 level AAA bid 100.55 2",
+        ],
+    );
+    let mut sink = CollectingSink::new();
+    let derived = derive_venue_object(&mut adapter(), &mut object, &mut sink).expect("the object");
+
+    assert_eq!(derived.refused_count, 1);
+    assert_eq!(derived.refusals, vec![RefusalCount("schema".to_owned(), 1)]);
+    assert_eq!(derived.message_count, 2);
+    assert_eq!(
+        tops(&sink),
+        vec![
+            (
+                BASE,
+                "AAA".to_owned(),
+                Some(10_050),
+                Some(3),
+                Some(10_060),
+                Some(4)
+            ),
+            (
+                BASE + 1_000_000,
+                "AAA".to_owned(),
+                Some(10_055),
+                Some(2),
+                Some(10_060),
+                Some(4)
+            ),
+        ],
+        "the events reported before the refusal were discarded with it"
+    );
+    // The surviving row carries the refused record's own index, so the refusal
+    // is not invisible: the count and the row are both under record zero.
+    assert_eq!(sink.book_tops()[0].message_index, 0);
+    assert_eq!(sink.book_tops()[0].change_index, 0);
+}
+
+/// **The handle space is one call's, and the poll is what carries an adapter
+/// from one object to the next.**
+///
+/// A fold per object is what `(object key, sha256)` idempotence requires, so
+/// handle `0` in the second object need not be the instrument handle `0` named
+/// in the first — here it is not, because the first object withdrew the listing
+/// that held the index. What makes that safe is the poll before every message:
+/// the adapter re-offers its whole set, the fold answers with the handles it has
+/// minted for *this* object, and the adapter's own map is current before any
+/// payload of the new object is mapped.
+///
+/// The mutant this kills is the poll that does not run before the first message
+/// of an object. The adapter then reports `BBB` on the handle the previous
+/// object minted, which resolves to nothing here — so the event is refused as an
+/// unknown instrument and the row that should name `BBB` is never written.
+#[test]
+fn the_handle_space_is_one_objects_and_the_poll_carries_an_adapter_over() {
+    let mut adapter =
+        FixtureAdapter::new(vec![Listing::new("AAA", -2, 0), Listing::new("BBB", -2, 0)]);
+
+    let mut first = FixtureObject::of(
+        BASE,
+        &[
+            "chan=113 pubseq=990001 seq=1 sid=7 quote AAA 100.50 3 100.60 4",
+            "chan=113 pubseq=990001 seq=2 sid=7 quote BBB 200.50 3 200.60 4",
+            // `AAA` held handle 0 here, and goes on the next poll.
+            "chan=113 pubseq=990001 seq=3 sid=7 delist AAA",
+        ],
+    );
+    let mut sink = CollectingSink::new();
+    let earlier =
+        derive_venue_object(&mut adapter, &mut first, &mut sink).expect("the first object");
+    assert_eq!(earlier.instrument_count, 2);
+    assert_eq!(earlier.unknown_instrument_count, 0);
+
+    // The same long-lived adapter over the next object, where the only listing
+    // left is minted at the index the withdrawn one held.
+    let mut second = FixtureObject::of(
+        BASE + 60_000_000_000,
+        &["chan=113 pubseq=990001 seq=4 sid=7 quote BBB 200.70 5 200.80 6"],
+    );
+    let mut sink = CollectingSink::new();
+    let derived =
+        derive_venue_object(&mut adapter, &mut second, &mut sink).expect("the second object");
+
+    assert_eq!(
+        derived.unknown_instrument_count, 0,
+        "the adapter's handle from the first object was carried into the second"
+    );
+    assert_eq!(
+        derived.instrument_count, 1,
+        "the withdrawn listing was admitted again"
+    );
+    assert_eq!(
+        tops(&sink),
+        vec![(
+            BASE + 60_000_000_000,
+            "BBB".to_owned(),
+            Some(20_070),
+            Some(5),
+            Some(20_080),
+            Some(6)
+        )],
+        "the second object's row does not name the instrument the events did"
+    );
+}
+
 /// The same object derived twice produces the same rows.
 ///
 /// Acceptance: a venue-side object re-derived twice produces one set of rows,

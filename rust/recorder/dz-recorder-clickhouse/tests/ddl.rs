@@ -1636,6 +1636,7 @@ mod fixtures {
             refusals: vec![RefusalCount("malformed".to_owned(), 1)],
             event_count: 1,
             unpriced_count: 0,
+            unknown_instrument_count: 0,
             desync_count: 0,
             unattributed_count: 0,
             book_top_count: 1,
