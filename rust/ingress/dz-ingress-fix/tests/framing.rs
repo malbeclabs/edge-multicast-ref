@@ -713,6 +713,85 @@ fn a_decoded_message_reads_back_its_own_header() {
     );
 }
 
+/// A whole message whose measured span is written out as given, with the
+/// declared length and the checksum computed from the rule.
+///
+/// Hand-assembled because `framing::frame` cannot produce one: it writes `35=`
+/// as the third field by construction, and what is wanted here is a message
+/// that holds in every other respect and does not. A venue with a field order
+/// of its own, a truncated repeating group, and bytes chosen to be read a
+/// particular way all arrive looking like this.
+fn out_of_order(measured: &str) -> Vec<u8> {
+    let measured = wire(measured);
+    let mut out = wire(&format!("8={BEGIN_STRING}|9={}|", measured.len()));
+    out.extend_from_slice(&measured);
+    let sum = framing::checksum(&out);
+    out.extend_from_slice(&wire(&format!("10={sum:03}|")));
+    out
+}
+
+#[test]
+fn a_message_whose_third_field_is_not_the_message_type_states_none() {
+    // The revert this test exists for: search the whole message for the first
+    // `35=` instead of reading the third field. The protocol fixes `8`, `9` and
+    // `35` in that order, so a search past that position lets a message whose
+    // third field is something else be classified by a `35=` written further
+    // along it — and every value below is a session message type, which is the
+    // taxonomy that search hands over.
+    //
+    // `35=0` is the one that costs the most: a heartbeat is `Liveness` and
+    // therefore not a payload, so the message never reaches the adapter *and*
+    // never moves the driver's idle guard, which counts time since the last
+    // payload. A connection delivering nothing but these reads as alive for the
+    // life of the process. `35=5` ends the session as a logout and `35=A` is a
+    // second logon; all three are the session layer acting on a message the
+    // venue may not have meant as any of them.
+    for carried in [msg_type::HEARTBEAT, msg_type::LOGOUT, msg_type::LOGON] {
+        let message = out_of_order(&format!(
+            "55=A-SYMBOL|34=2|52={AT}|269=0|{TAG_MSG_TYPE}={carried}|"
+        ));
+        // The framing itself holds: this is a message the decoder locates, and
+        // the next one after it is exactly where the length says. That is why
+        // the refusal is not this decoder's — see `Message::msg_type`.
+        let mut decoder = Decoder::new();
+        decoder.feed(&message);
+        let mut out = Vec::new();
+        assert!(
+            decoder.take(&mut out).expect("the framing holds"),
+            "`{carried}`: the vector is a message the decoder can locate"
+        );
+
+        let message = Message::new(&out);
+        assert_eq!(
+            message.msg_type(),
+            None,
+            "a `{TAG_MSG_TYPE}={carried}` written past the third field is not this message's \
+             type"
+        );
+        assert!(
+            !message.is_session(),
+            "`{carried}`: and it is not the session layer's message either"
+        );
+        // The field is still readable by tag, which is what the accessor for
+        // one is for: what changed is that the *message type* is a position.
+        assert_eq!(
+            message.field(TAG_MSG_TYPE),
+            Some(carried.as_bytes()),
+            "`{carried}`"
+        );
+    }
+
+    // And the third field is read as the type when it is one, however many
+    // later fields repeat the tag — which is the same message a repeating group
+    // produces, the other way round.
+    let message = out_of_order(&format!("{TAG_MSG_TYPE}=W|34=2|52={AT}|{TAG_MSG_TYPE}=0|"));
+    let mut decoder = Decoder::new();
+    decoder.feed(&message);
+    let mut out = Vec::new();
+    assert!(decoder.take(&mut out).expect("the framing holds"));
+    assert_eq!(Message::new(&out).msg_type(), Some("W"));
+}
+
 #[test]
 fn the_session_layer_owns_exactly_the_seven_message_types() {
     for session in msg_type::SESSION {

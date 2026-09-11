@@ -330,10 +330,44 @@ impl<'a> Message<'a> {
             .map(|field| field.value)
     }
 
-    /// The `MsgType`, as text.
+    /// The `MsgType`, as text: the **third field, and only the third**.
+    ///
+    /// # Read by position, because searching for it is a way past every
+    /// refusal above it
+    ///
+    /// The protocol fixes `8`, `9` and `35` as the first three fields in that
+    /// order, and [`Body::parse`] already requires the same of a body it frames
+    /// — `35=` first, since this crate writes the two before it. A search for
+    /// the first `35=` anywhere in the message gives that up in the one
+    /// direction where the bytes are somebody else's: a message whose third
+    /// field is something else, whose declared length and checksum both hold,
+    /// and which states a `35=` further along — a repeating group's entry, a
+    /// venue field this crate does not read, or bytes chosen to be read this
+    /// way — would be classified by that later field.
+    ///
+    /// What that buys is the session layer's own taxonomy, applied to a message
+    /// that is not a session message at all. A later `35=0` makes it a
+    /// heartbeat, which is [`Incoming::Liveness`](crate::Incoming) and
+    /// therefore **not** a payload — so it never reaches the adapter and never
+    /// moves the driver's idle guard, which counts time since the last payload,
+    /// and a connection delivering nothing reads as alive. A later `35=5` ends
+    /// the session as a logout and a later `35=A` as a second logon, both on a
+    /// message the venue may not have meant as either.
+    ///
+    /// `None` for a message whose third field is not `35=`, and the refusal is
+    /// the session layer's rather than this decoder's: it refuses a message
+    /// with no message type already, and that is the same refusal for the same
+    /// reason. Not a [`FramingError`], because every one of those says the
+    /// decoder has lost its place in the stream and this decoder has not — the
+    /// declared length landed on the checksum field and the checksum held, so
+    /// the *next* message is exactly where the length says it is.
     #[must_use]
     pub fn msg_type(&self) -> Option<&'a str> {
-        core::str::from_utf8(self.field(TAG_MSG_TYPE)?).ok()
+        let third = self.fields().nth(2)?;
+        if third.tag != TAG_MSG_TYPE {
+            return None;
+        }
+        core::str::from_utf8(third.value).ok()
     }
 
     /// Whether the session layer owns this message.

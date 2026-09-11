@@ -1117,6 +1117,63 @@ async fn a_sequence_reset_is_nothing_to_act_on() {
     );
 }
 
+/// A whole message whose measured span is written out as given, with the
+/// declared length and the checksum computed from the rule.
+///
+/// Hand-assembled because `framing::frame` writes `35=` as the third field by
+/// construction, and what is wanted here is a message that holds in every other
+/// respect and does not.
+fn out_of_order(measured: &str) -> Vec<u8> {
+    let measured = wire(measured);
+    let mut out = wire(&format!("8=FIX.4.4|9={}|", measured.len()));
+    out.extend_from_slice(&measured);
+    let sum = framing::checksum(&out);
+    out.extend_from_slice(&wire(&format!("10={sum:03}|")));
+    out
+}
+
+#[tokio::test]
+async fn a_message_carrying_a_later_message_type_is_not_the_session_layers() {
+    // What reading the `MsgType` by position buys, stated where it is paid
+    // for. The revert is in `Message::msg_type`: search the message for the
+    // first `35=` rather than reading the third field, and a checksum-valid
+    // message whose third field is something else is classified by a `35=`
+    // written further along it.
+    //
+    // `35=0` is the one to assert, because a heartbeat is the answer that
+    // *loses* the message quietly: `Liveness` is not a payload, so the message
+    // never reaches the adapter and never moves the driver's idle guard, which
+    // counts time since the last payload. A venue delivering nothing but these
+    // would read as alive for the life of the process. The refusal is the
+    // session layer's own — a message this protocol does not define, ending the
+    // session the way one with no `35=` at all does — and not the decoder's,
+    // whose place in the stream this message does not disturb.
+    let clock = ManualClock::new();
+    let (mut session, _writes) = session(
+        &clock,
+        vec![
+            logon_accepted(30),
+            Serve::Bytes(out_of_order(
+                "55=A-SYMBOL|34=2|52=20260909-11:56:50.123|35=0|",
+            )),
+        ],
+    );
+    session.send(&adapter_logon(30)).await.expect("a logon");
+    let error = session
+        .receive(Some(Duration::from_secs(1)))
+        .await
+        .expect_err("a message whose third field is not the message type");
+    match error {
+        SessionError::Rejected { detail } => {
+            assert!(
+                detail.contains("no message type"),
+                "the refusal says what is wrong with the message: {detail}"
+            );
+        }
+        other => panic!("{other}"),
+    }
+}
+
 #[tokio::test]
 async fn a_stream_that_ends_ends_the_session() {
     let clock = ManualClock::new();
