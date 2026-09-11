@@ -31,7 +31,14 @@ const MARKET_DATA_GRAINS: [Grain; 3] = [Grain::Event, Grain::Instrument, Grain::
 
 /// The grains `009` declares: what a venue's own upstream said, and the object
 /// it was read out of.
-const VENUE_GRAINS: [VenueGrain; 2] = [VenueGrain::BookTop, VenueGrain::Object];
+///
+/// [`VenueGrain::ALL`] and never a second list of them, for the reason
+/// `dz-recorder-venue`'s own column-name test gives: a third grain added next
+/// year reaches every loop below by being added to the enumeration, and a
+/// hard-coded pair here would leave it out of the DDL check and out of the
+/// `GRANT INSERT` check — a table the loader cannot write, found on the first
+/// insert of a deployment rather than here.
+const VENUE_GRAINS: [VenueGrain; VenueGrain::COUNT] = VenueGrain::ALL;
 
 /// The columns one `CREATE TABLE recorder.<table>` block declares, in order.
 fn columns(sql: &str, table: &str) -> Vec<String> {
@@ -165,13 +172,20 @@ fn every_column_has_a_field_and_every_field_has_a_column() {
     // reason. A separate loop because they are a different `Grain` enum in a
     // different crate: the two sides of the race deliberately do not share a
     // row vocabulary, which is the whole point of them being separate tables.
-    for (grain, fields) in [
+    //
+    // Sized by [`VenueGrain::COUNT`], because this is the one venue loop a
+    // grain cannot be added to by adding it to the enumeration: it pairs each
+    // grain with a fixture of its row type, and there is no fixture to derive.
+    // The width is what makes a third grain a compile error here rather than a
+    // table nobody held against its struct.
+    let held: [(VenueGrain, BTreeSet<String>); VenueGrain::COUNT] = [
         (
             VenueGrain::BookTop,
             field_names(&fixtures::venue_book_top()),
         ),
         (VenueGrain::Object, field_names(&fixtures::venue_object())),
-    ] {
+    ];
+    for (grain, fields) in held {
         let declared: BTreeSet<String> = columns(venue_sql(), grain.table()).into_iter().collect();
         assert_eq!(
             declared, fields,
@@ -597,6 +611,53 @@ fn the_market_data_columns_that_can_be_unknown_are_nullable() {
     }
 }
 
+/// **The venue sort keys carry what distinguishes two genuine rows, and the
+/// object is what separates two of them.**
+///
+/// `ReplacingMergeTree` deduplicates on the whole sort key, so a key missing an
+/// identity column does not sort badly — it deletes rows. `message_index`
+/// restarts at zero in every object, so it is a record's position *within* one
+/// and separates nothing across two: a rotation closes one object and opens the
+/// next, and a clock coarser than the gap between them stamps records either
+/// side of the boundary alike. Without `object_key` in the key, two genuine book
+/// states collapse into one, and the loss is a row that was never written rather
+/// than a count that is wrong.
+///
+/// The occurrence view's tie-break reads the object before the record index for
+/// exactly that case, and it cannot repair this one: a row a merge removed is not
+/// there to be numbered. So the key holds the object too, and in the same order
+/// — a key and a numbering that disagreed about which orders two records would
+/// be two orders over one set of rows.
+#[test]
+fn the_venue_sort_keys_carry_what_distinguishes_two_rows() {
+    let book = sort_key(venue_sql(), "venue_book_top");
+    assert_eq!(
+        book, "observation, feed, symbol, recv_ts, object_key, message_index, change_index",
+        "the venue book sort key changed"
+    );
+    let occurrence = view_body(venue_sql(), "venue_book_top_occurrence");
+    assert!(
+        occurrence.contains("ORDER BY recv_ts, object_key, message_index, change_index"),
+        "the sort key and the ordinal's tie-break disagree about the object: {occurrence}"
+    );
+
+    // The digest is deliberately not in it, and the reason is what each table is
+    // for. Two digests under one key are one window the archive re-published, so
+    // the rows of the object that is there now must replace the rows of the one
+    // that was.
+    assert!(
+        !book.contains("object_sha256"),
+        "a re-recorded window doubles instead of replacing: {book}"
+    );
+    // And the idempotence row is the other way round, because it is the ledger
+    // of what was read rather than the book.
+    assert_eq!(
+        sort_key(venue_sql(), "venue_object"),
+        "observation, feed, object_key, object_sha256",
+        "the venue object sort key changed"
+    );
+}
+
 /// The DDL's sort keys are the ones the row types were shaped for.
 ///
 /// Each of these is a place where the design's own DDL gave a key that would
@@ -760,7 +821,7 @@ fn provenance_is_on_every_grain_and_in_no_sort_key() {
 
 /// Every `ORDER BY` and `PRIMARY KEY` clause in one file, each as one string.
 ///
-/// **A clause is not a line.** Three of the eight sort keys wrap onto a
+/// **A clause is not a line.** Four of the ten table sort keys wrap onto a
 /// continuation line, so a guard reading only the line that begins `ORDER BY`
 /// reads two thirds of what it is guarding — and a column appended to the tail
 /// of a wrapped key passes it. The clause is accumulated from its first line

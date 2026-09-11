@@ -17,12 +17,13 @@ mod common;
 use common::{
     batch, batch_on_role, cross_site_fixture, json_each_row, just_after_midnight_ns, midday_ns,
     now_ns, race_fixture, venue_batched_record, venue_race_fixture, venue_rotation_boundary,
-    venue_top, ABSENT_BUT_A_SITE_OVERFLOWED, ABSENT_EVERYWHERE, A_SITE_IS_UP_AND_SILENT,
-    A_SITE_REUSED_THE_SEQUENCE, MISSING_FROM, MISSING_TO, NOBODY_ELSE_HAS_LOADED,
-    ONLY_A_CO_LOCATED_RECORDER, OUR_OWN_SCOPE_CANNOT_SUBTRACT, PRESENT_AT_ANOTHER_SITE, REPEATED,
-    VENUE_ACROSS_A_ROTATION, VENUE_BATCH_FIRST, VENUE_BATCH_FIRST_SEQ, VENUE_BATCH_REPEATED,
-    VENUE_BATCH_SECOND, VENUE_BATCH_SECOND_SEQ, VENUE_EXPONENTS_DISAGREE, VENUE_ONLY_ONE_SAW,
-    VENUE_REPEATED, VENUE_SYMBOLS_DISAGREE,
+    venue_rotation_collision, venue_top, ABSENT_BUT_A_SITE_OVERFLOWED, ABSENT_EVERYWHERE,
+    A_SITE_IS_UP_AND_SILENT, A_SITE_REUSED_THE_SEQUENCE, MISSING_FROM, MISSING_TO,
+    NOBODY_ELSE_HAS_LOADED, ONLY_A_CO_LOCATED_RECORDER, OUR_OWN_SCOPE_CANNOT_SUBTRACT,
+    PRESENT_AT_ANOTHER_SITE, REPEATED, VENUE_ACROSS_A_ROTATION, VENUE_BATCH_FIRST,
+    VENUE_BATCH_FIRST_SEQ, VENUE_BATCH_REPEATED, VENUE_BATCH_SECOND, VENUE_BATCH_SECOND_SEQ,
+    VENUE_EXPONENTS_DISAGREE, VENUE_INSIDE_ONE_ROTATION_TICK, VENUE_ONLY_ONE_SAW, VENUE_REPEATED,
+    VENUE_SYMBOLS_DISAGREE,
 };
 use dz_edge_core::PortRole;
 use dz_recorder_clickhouse::{migrations, schema, ClickHouseConfig, ClickHouseSink};
@@ -1428,6 +1429,82 @@ fn two_rows_at_one_stamp_are_numbered_by_the_objects_they_came_from() {
         scratch.scalar(&numbered),
         format!("[{VENUE_BATCH_FIRST_SEQ},{VENUE_BATCH_SECOND_SEQ}]"),
         "the ordinal moved when the parts did"
+    );
+}
+
+/// **Two objects at one stamp and one record index are two rows, and the object
+/// in the key is the only reason.**
+///
+/// The other half of the rotation boundary, and the half the ordinal cannot
+/// reach. Above, the two records carry different indexes and the window's order
+/// has to choose between them. Here the indexes are the same, because an object
+/// whose whole window fits inside one clock tick holds one record and its index
+/// is zero in both — so every column the key held before `object_key` joined it
+/// agrees, and `ReplacingMergeTree` collapses the pair.
+///
+/// The mutant this kills is the key without the object. One genuine book state
+/// is then deleted by a merge, which no count downstream can show: the ordinal
+/// numbers what is in the table, so the survivor is occurrence 1 and the state
+/// the other object recorded reads as never having happened.
+///
+/// And the second load is the argument against the fix, tested rather than
+/// asserted: a re-derivation reads the same objects, so it produces the same
+/// keys and still replaces. Adding the object to the key does not make a
+/// re-derivation double.
+#[test]
+fn two_objects_at_one_stamp_and_one_record_index_are_two_rows() {
+    let scratch = Scratch::open("venue_rotation_collision");
+    let base = now_ns();
+    let rows = venue_rotation_collision("a", base);
+
+    // Everything the key held before the object joined it agrees, which is what
+    // makes this a collapse rather than two ordinary rows.
+    assert_eq!(rows[0].recv_ts, rows[1].recv_ts);
+    assert_eq!(rows[0].message_index, rows[1].message_index);
+    assert_eq!(rows[0].change_index, rows[1].change_index);
+    assert_eq!(rows[0].symbol, rows[1].symbol);
+    assert_eq!(rows[0].book_key, rows[1].book_key);
+    assert_ne!(rows[0].object_key, rows[1].object_key);
+
+    scratch.insert_venue_book_tops(&rows);
+    let surviving = format!(
+        "SELECT count() FROM {}.venue_book_top FINAL WHERE book_key =          {VENUE_INSIDE_ONE_ROTATION_TICK}",
+        scratch.database
+    );
+    assert_eq!(
+        scratch.scalar(&surviving),
+        "2",
+        "the two objects' rows collapsed into one at read time"
+    );
+
+    // The merge is where the collapse would actually be applied, so it is where
+    // the row would really be gone.
+    scratch.merge("venue_book_top");
+    assert_eq!(
+        scratch.scalar(&surviving),
+        "2",
+        "a merge deleted a book state one of the two objects recorded"
+    );
+
+    // Both are numbered, in the order the objects were written in, which is what
+    // a pairing downstream reads.
+    let numbered = format!(
+        "SELECT groupArray(upstream_seq) FROM (SELECT upstream_seq FROM          {}.venue_book_top_occurrence WHERE book_key =          {VENUE_INSIDE_ONE_ROTATION_TICK} ORDER BY occurrence)",
+        scratch.database
+    );
+    assert_eq!(
+        scratch.scalar(&numbered),
+        format!("[{VENUE_BATCH_FIRST_SEQ},{VENUE_BATCH_SECOND_SEQ}]")
+    );
+
+    // And a re-derivation of both objects replaces rather than doubles, which is
+    // the property `object_key` in the key was supposed to cost.
+    scratch.insert_venue_book_tops(&rows);
+    scratch.merge("venue_book_top");
+    assert_eq!(
+        scratch.scalar(&surviving),
+        "2",
+        "a re-derivation doubled the rows instead of replacing them"
     );
 }
 

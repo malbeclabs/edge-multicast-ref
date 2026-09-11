@@ -69,9 +69,9 @@
 --
 -- The consequence is stated rather than left to be found. Two environments
 -- writing one database at one observation point would interleave into a single
--- ordinal sequence, and two rows equal on
--- `(observation, feed, symbol, recv_ts, message_index, change_index)` would
--- collapse across them under `ReplacingMergeTree`. That is the exposure `book_top` and `event`
+-- ordinal sequence, and two rows equal on `(observation, feed, symbol,
+-- recv_ts, object_key, message_index, change_index)` would collapse across them
+-- under `ReplacingMergeTree`. That is the exposure `book_top` and `event`
 -- already have under the same arrangement, and it belongs wherever theirs is
 -- answered: adding `env` to these two tables alone would answer it for the
 -- venue half of a pair and leave the publisher half as it is.
@@ -186,15 +186,41 @@
 -- is* — and two changes that happened to return the book to one state would
 -- collapse again while carrying a key that says they cannot have.
 --
--- `object_key` IS **NOT** IN THE KEY. A re-derivation of one object produces the
--- same `(observation, feed, symbol, recv_ts, message_index, change_index)` for
--- the same change — the record's index and the change's are both the order the
--- object is read in, and an object is read in recorded order — so the second
--- load replaces the first, which is the whole of `(object key, sha256)`
--- idempotence at this grain. Keying on the object would
--- make a rebuilt object's rows sit beside the old ones and double every
--- occurrence — and here a duplicate manufactures evidence of loss rather than
--- inflating a count.
+-- `object_key` IS IN THE KEY, AND IT IS THE ONLY COLUMN THAT TELLS TWO OBJECTS
+-- APART. `message_index` restarts at zero in every object, so it is a record's
+-- position *within* one and separates nothing across two. A rotation closes one
+-- object and opens the next, and a clock coarser than the gap between them
+-- stamps records either side of the boundary alike — the case the occurrence
+-- view's tie-break below is written for — so a record of the closing object and
+-- a record of the opening one can agree on
+-- `(observation, feed, symbol, recv_ts, message_index, change_index)` to the
+-- last component. Without the object in the key those two genuine book states
+-- collapse into one, and the loss is a row that was never written rather than a
+-- count that is wrong. The view cannot repair it either: a row a merge removed
+-- is not there to be numbered.
+--
+-- AND IT COSTS NO IDEMPOTENCE, which is the claim a reader reaching for the
+-- opposite conclusion has to check. A re-derivation reads *the same object* —
+-- `(object key, sha256)` is the pair it replaces on — so the key it produces is
+-- the same key, this column included, and the second load still replaces the
+-- first. The case that would double rows is an object **re-cut**, its window
+-- boundaries moved, and this column does not create it: moving the boundaries
+-- renumbers `message_index` too, so a re-cut object's rows sit beside the old
+-- ones under any key that holds a record index at all. The re-cut exposure is
+-- therefore unchanged and the rotation-boundary collapse is closed.
+--
+-- `object_sha256` IS **NOT** IN THE KEY, and the difference from the row above
+-- is what each table is for. Two digests under one key are one window the
+-- archive re-published, and the rows of the object that is there now should
+-- replace the rows of the object that was. `venue_object` keeps both, because it
+-- is the ledger of what was read; this table holds the book, and two books for
+-- one window is the duplicate that manufactures evidence of loss.
+--
+-- THE OBJECT GOES BEFORE THE RECORD INDEX, in the order the occurrence view's
+-- window already reads them: the object is what orders two records across a
+-- rotation and the index is what orders them within one object, so the table's
+-- own order and the numbering's are one order rather than two over the same
+-- rows.
 CREATE TABLE IF NOT EXISTS recorder.venue_book_top (
     recv_ts           DateTime64(9),
     -- Which observation point this recording is, as `site` names a host. The
@@ -258,7 +284,8 @@ CREATE TABLE IF NOT EXISTS recorder.venue_book_top (
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(recv_ts)
-ORDER BY (observation, feed, symbol, recv_ts, message_index, change_index);
+ORDER BY (observation, feed, symbol, recv_ts, object_key,
+          message_index, change_index);
 
 
 -- 2. The object a derivation read.

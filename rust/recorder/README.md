@@ -626,8 +626,9 @@ message is not one. The absence is held against column-name literals in two
 places, the row types and the DDL, because a column that exists reads as a
 column somebody may fill.
 
-**What identifies a venue-side row is the record and the change within it.**
-`message_index` says which archived record moved the top; `change_index` says
+**What identifies a venue-side row is the object, the record and the change
+within it.** `message_index` says which archived record moved the top;
+`change_index` says
 which change in the top that record produced. Both, because a record is one
 payload the adapter is handed and a payload may carry a batch — the sink contract
 has `upstream_message` called once per member — while one member may move a top
@@ -637,6 +638,18 @@ key for all of them and `ReplacingMergeTree` would keep whichever merged last.
 The pair is in the sort key and in the occurrence window's ordering, which is
 what makes the ordinal reproducible rather than the engine's choice among rows
 that arrived at one stamp.
+
+And `object_key` ahead of both, because the record index restarts at zero in
+every object and so separates nothing across two of them. A rotation closes one
+object and opens the next, and a clock coarser than the gap stamps records
+either side of the boundary alike — so an object whose whole window fits inside
+one tick puts its only record and the next object's first at one stamp under one
+index, and the two book states collapse into one. The object is the only column
+a venue-side row carries that tells them apart. It costs no idempotence: a
+re-derivation reads the same object and so produces the same key, which is why
+`object_sha256` stays out — two digests under one key are one window the archive
+re-published, and the rows of the object that is there now replace the rows of
+the one that was.
 
 **The race is a view keyed on `book_key`**, the hash over the two sides of a top
 and nothing else, computed by `dz_recorder_events::book_key` and never by a copy

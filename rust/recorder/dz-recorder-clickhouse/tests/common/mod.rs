@@ -971,6 +971,21 @@ pub const VENUE_BATCH_SECOND: u64 = 1_212_121_212_121_212_121;
 /// other's rows.
 pub const VENUE_ACROSS_A_ROTATION: u64 = 1_414_141_414_141_414_141;
 
+/// A state two objects both hold at one stamp **and at one record index**.
+///
+/// The case the sort key has to see and could not. `message_index` restarts at
+/// zero in every object, so a rotation that closes an object inside one clock
+/// tick puts the first record of each object at index zero at one stamp:
+/// everything the key held before `object_key` joined it agrees — the
+/// observation, the feed, the symbol, the stamp, the record index and the change
+/// ordinal — and the two collapse into one under `ReplacingMergeTree`.
+///
+/// A rotation inside one tick is not exotic. One full book response over a
+/// polled transport is measured in hundreds of kilobytes, so a size-bounded
+/// object can hold a single record, and a transport that stamps at millisecond
+/// resolution puts that record and the next object's first at one stamp.
+pub const VENUE_INSIDE_ONE_ROTATION_TICK: u64 = 1_515_151_515_151_515_151;
+
 /// A state one batched payload produced **twice** — away and back inside one
 /// payload.
 ///
@@ -1090,6 +1105,48 @@ pub fn venue_rotation_boundary(observation: &str, base: u64) -> Vec<VenueBookTop
         message_index: 0,
         upstream_seq: Some(VENUE_BATCH_SECOND_SEQ),
         object_key: key(base + 60_000_000_000, 5),
+        ..earlier.clone()
+    };
+    vec![earlier, later]
+}
+
+/// The two rows a rotation inside one clock tick can put under one key.
+///
+/// One observation point, one book, one stamp, one record index and one change
+/// ordinal — and **two objects**. See [`VENUE_INSIDE_ONE_ROTATION_TICK`] for how
+/// a rotation gets there; the only column that tells these two rows apart is the
+/// object each was derived from, so this is the fixture that says whether the
+/// sort key can see it.
+///
+/// The keys are one millisecond apart in their leading component, which is the
+/// order the objects were written in — so a numbering over them is the objects'
+/// order and not the engine's.
+pub fn venue_rotation_collision(observation: &str, base: u64) -> Vec<VenueBookTop> {
+    let key = |start_ns: u64, seq: u64| {
+        format!(
+            "feed=top-of-book/env=test/site=site-1/recorder=recorder-1/date=2026-09-09/hour=12/\
+             {start_ns}-{}-{seq}.dzus",
+            start_ns + 1_000_000
+        )
+    };
+    let earlier = VenueBookTop {
+        upstream_seq: Some(VENUE_BATCH_FIRST_SEQ),
+        object_key: key(base, 6),
+        // The *first* record of the object that was closing, because an object
+        // whose whole window fits inside one clock tick holds one record.
+        ..venue_top(
+            observation,
+            "AAA",
+            -2,
+            base,
+            10,
+            VENUE_INSIDE_ONE_ROTATION_TICK,
+            0,
+        )
+    };
+    let later = VenueBookTop {
+        upstream_seq: Some(VENUE_BATCH_SECOND_SEQ),
+        object_key: key(base + 1_000_000, 7),
         ..earlier.clone()
     };
     vec![earlier, later]
