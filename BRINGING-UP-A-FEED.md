@@ -603,14 +603,21 @@ infrastructure repositories, and each of those owns its own review.
    publisher's side.
 6. **Apply the schema before rolling a recorder that writes a new column.**
    The loader posts `FORMAT JSONEachRow` with the field names, and ClickHouse's
-   `input_format_skip_unknown_fields` defaults to `1`: an insert naming a column
-   the table does not have is **accepted**, and the field is dropped. A binary
-   rolled ahead of its migration therefore loads rows whose new column holds a
-   value nobody wrote, and a view that excludes that value — which is what a
-   view over a hash column has to do, since there is no honest default for a
-   hash — reads every one of those rows as a row nobody recorded. Same symptom
-   as the rule above and for the same reason: **silence, not errors**. The
-   recorder's migrations are in
+   `input_format_skip_unknown_fields` defaults to `1`: at that default an insert
+   naming a column the table does not have is **accepted**, and the field is
+   dropped. A binary rolled ahead of its migration would load rows whose new
+   column holds a value nobody wrote, and a view that excludes that value —
+   which is what a view over a hash column has to do, since there is no honest
+   default for a hash — would read every one of those rows as a row nobody
+   recorded. The loader therefore posts every insert with that setting at `0`,
+   so the wrong order is a **refused batch and a loud error** naming the field
+   and the objects, rather than the silence the rule above warns about. The
+   objects stay unloaded and load by themselves once the migration is applied,
+   which is why the rule is still the rule: a load that stops is a feed with a
+   hole in it until somebody applies the file. Rolling a recorder *back* is
+   unaffected — an older binary omits a field rather than sending an unknown
+   one, which is a different setting the loader does not touch. The recorder's
+   migrations are in
    [`rust/recorder/dz-recorder-clickhouse/db/clickhouse`](rust/recorder/dz-recorder-clickhouse/db/clickhouse/),
    numbered and applied in order, and each says what it costs a deployment that
    applies it late.

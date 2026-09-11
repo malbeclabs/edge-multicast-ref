@@ -797,17 +797,21 @@ pub struct BookTop {
     /// hashed, and no DEFAULT that would be one. The cross-observer race
     /// therefore excludes zero before it numbers anything, and `010` states why.
     ///
-    /// **And zero on every row this binary writes if that migration has not
-    /// been applied**, which is the same value reached from the other end and
-    /// the direction with no symptom. The sink posts `FORMAT JSONEachRow` and
-    /// the rows name their fields, so a column is matched by name at the server
-    /// and `input_format_skip_unknown_fields` defaults to 1: a `book_top` the
-    /// `ALTER` has not reached takes the insert, discards this field and
-    /// acknowledges the batch. Every row that binary wrote is then excluded from
-    /// the race, which reads as a venue-only race with no error anywhere. So the
-    /// schema is applied before the binary is rolled — stated in `010`'s
-    /// header, and in the feed runbook beside the rule for rolling subscribers
-    /// before publishers.
+    /// **And a binary that writes this column against a table the migration has
+    /// not reached is refused rather than quietly emptied.** The sink posts
+    /// `FORMAT JSONEachRow` and the rows name their fields, so a column is
+    /// matched by name at the server and `input_format_skip_unknown_fields`
+    /// defaults to 1 — at which a `book_top` the `ALTER` has not reached takes
+    /// the insert, discards this field and acknowledges the batch, and every
+    /// row that binary wrote is excluded from the race, which then reads as a
+    /// venue-only race with no error anywhere. `ClickHouseConfig::insert_url`
+    /// carries that setting at 0 for exactly this reason: the server answers
+    /// the unknown field with a 400 nobody retries, the refusal names the
+    /// objects, and they stay unloaded until the migration is applied. The
+    /// schema is applied before the binary is rolled all the same — stated in
+    /// `010`'s header and in the feed runbook beside the rule for rolling
+    /// subscribers before publishers — because a load that stops is a feed with
+    /// a hole in it until somebody applies the file.
     ///
     /// `serde(default)` FOR THE SPOOL AND NOT FOR THE COLUMN STORE, which is
     /// the same reading `010` gives a row the `ALTER` found already there. The

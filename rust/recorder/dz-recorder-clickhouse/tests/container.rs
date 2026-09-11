@@ -29,7 +29,7 @@ use common::{
 use dz_edge_core::PortRole;
 use dz_recorder_clickhouse::{migrations, schema, ClickHouseConfig, ClickHouseSink};
 use dz_recorder_replay::Fault;
-use dz_recorder_rows::{Grain, Nanos, RowSink};
+use dz_recorder_rows::{Grain, Nanos, RowSink, RowSinkError};
 use dz_recorder_venue::{RefusalCount, VenueBookTop, VenueObjectRow};
 
 /// One instant for every sink call in this file.
@@ -1894,6 +1894,109 @@ fn a_venue_side_and_a_publisher_side_observation_of_one_book_pair() {
         )),
         "3",
         "the anchored row and the unwritten key are excluded, and nothing else"
+    );
+}
+
+/// **A loader rolled ahead of its migration is refused, and does not load a
+/// window of rows whose new column nobody wrote.**
+///
+/// The direction `010`'s header calls the worse one, closed. A `book_top` that
+/// `010`'s `ALTER` has not reached is this table with the column dropped, and
+/// the sink posts `FORMAT JSONEachRow` with the field names — so with
+/// `input_format_skip_unknown_fields` at its default `1` the server answers
+/// `200`, discards the field, and every row of that window lands with
+/// `book_key = 0` for the race to exclude. Nothing fails, nothing is metered,
+/// and a new observation point reads as one nobody configured.
+///
+/// `insert_url` sets that setting to `0`, and this is the assertion that the
+/// server then refuses the batch. Against a real server because that is the
+/// only thing that can establish it: what the setting does to a `JSONEachRow`
+/// insert is the server's behaviour and not the loader's, and a literal-based
+/// test could only hold the URL.
+///
+/// The mutant this kills is the setting dropped from `insert_url`: without it
+/// the write below succeeds, the rows are in the table, and nothing anywhere
+/// says a column went missing.
+#[test]
+fn a_row_naming_a_column_the_schema_has_not_reached_is_refused() {
+    let mut scratch = Scratch::open("insert_unknown_field");
+    // The table as an upgraded deployment holds it while the `ALTER` is still
+    // pending: `005`'s columns, and no `book_key`. Dropped rather than left out,
+    // because `Scratch::open` applies the whole set and a fresh deployment has
+    // the column from `005`.
+    scratch.scalar(&format!(
+        "ALTER TABLE {}.book_top DROP COLUMN book_key",
+        scratch.database
+    ));
+
+    let error = scratch
+        .sink
+        .write_batch(cross_observer_publisher_side(now_ns()), NOW)
+        .expect_err("a row naming a column the table does not have is not a load");
+    let RowSinkError::Rejected { last, .. } = &error else {
+        panic!("a refused insert is a rejection and not {error:?}");
+    };
+    // The server's own words, so a failure here names the field rather than a
+    // status code. `Code: 117` is `INCORRECT_DATA`.
+    assert!(
+        last.contains("Unknown field") && last.contains("book_key"),
+        "the refusal does not name the field the schema has not reached: {last}"
+    );
+    assert_eq!(
+        scratch.count("book_top"),
+        0,
+        "a refused batch left rows behind, so the loss is silent after all"
+    );
+}
+
+/// **A loader behind its schema still loads**, which is the direction the
+/// setting above must not reach.
+///
+/// A rollback is the reason this is asserted rather than reasoned about. A
+/// binary older than the schema sends no unknown field — it omits a known one —
+/// and an omitted field is `input_format_defaults_for_omitted_fields`, a
+/// different setting that `insert_url` does not touch. So the row is accepted
+/// and the column reads as the type's default, which is the zero the
+/// cross-observer race excludes and exactly what `010` says a row written
+/// before the column existed reads as.
+///
+/// Posted as a body rather than through the sink, because there is no way to
+/// ask this crate's row types to omit a field they all state: what is under test
+/// is the server's reading of a body an older binary would have produced. The
+/// setting is carried on the statement, so this is the same reading `insert_url`
+/// asks for and not the server's default.
+#[test]
+fn a_row_omitting_a_column_the_table_has_still_loads() {
+    let scratch = Scratch::open("insert_omitted_field");
+    let row = cross_observer_publisher_side(now_ns());
+    let one = serde_json::to_value(&row.book_top[0]).expect("a row serialises");
+    let mut fields = one.as_object().expect("a row is an object").clone();
+    // The body an older binary wrote: every field but this one.
+    assert!(
+        fields.remove("book_key").is_some(),
+        "the fixture row does not state `book_key`, so nothing is being omitted"
+    );
+    scratch.scalar(&format!(
+        "INSERT INTO {}.book_top SETTINGS input_format_skip_unknown_fields = 0 \
+         FORMAT JSONEachRow\n{}",
+        scratch.database,
+        serde_json::Value::Object(fields)
+    ));
+
+    assert_eq!(
+        scratch.count("book_top"),
+        1,
+        "a row from a binary older than the schema did not load, so a rollback \
+         loses the window it covers"
+    );
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT book_key FROM {}.book_top FINAL",
+            scratch.database
+        )),
+        "0",
+        "an omitted hash column read back as something other than the zero the \
+         race excludes"
     );
 }
 

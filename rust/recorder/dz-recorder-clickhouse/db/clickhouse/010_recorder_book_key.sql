@@ -82,24 +82,46 @@
 -- APPLY THIS FILE BEFORE THE BINARY THAT WRITES THE COLUMN
 --
 -- The order matters in both directions and the section above states only one of
--- them. A row written before the `ALTER` reads as zero, and the race excludes
--- zero. A binary that writes `book_key` against a `book_top` this `ALTER` has
--- not reached is the worse direction, because nothing fails.
+-- them. A row written before the `ALTER` reads as zero, and the publisher
+-- branch below excludes zero. The other direction is a binary that writes
+-- `book_key` against a `book_top` this `ALTER` has not reached, and at a
+-- server's own defaults nothing about it fails.
 --
 -- The sink posts `INSERT INTO recorder.book_top FORMAT JSONEachRow` and the
 -- rows name their own fields, so a column is matched by name at the server.
 -- `input_format_skip_unknown_fields` defaults to 1 — checked against the 24.8
--- the suite pins, where such an insert returns 200 and the field is discarded
--- — so the insert succeeds, the batch is acknowledged, and every
--- publisher-side row that binary writes lands with `book_key = 0`. The
--- exclusion below then drops all of them and the cross-observer race reads as a
--- venue-only race: no error, no refused batch, no metric, and a new observation
--- point that looks like one nobody configured.
+-- the suite pins, where such an insert returns 200 and the field is discarded.
+-- At that default the insert succeeds, the batch is acknowledged, and every
+-- publisher-side row that binary writes lands with `book_key = 0`; the
+-- exclusion below drops all of them and the cross-observer race reads as a
+-- venue-only race, with no error, no refused batch, no metric, and a new
+-- observation point that looks like one nobody configured.
 --
--- So the schema is applied before the binary is rolled. That is the rule the
--- feed runbook already states for rolling subscribers before publishers, and it
--- is stated there too for this one, because the symptom of the wrong order is
--- the same: silence rather than errors.
+-- SO THE LOADER DOES NOT LEAVE IT AT THE DEFAULT.
+-- `ClickHouseConfig::insert_url` carries `input_format_skip_unknown_fields=0`
+-- on every insert it posts, which makes that direction a refused batch: the
+-- server answers `Code: 117 ... Unknown field found while parsing JSONEachRow
+-- format: book_key` as a 400, a 400 is not worth retrying, the refusal names
+-- every object in the batch, and those objects stay unloaded until this file
+-- has been applied — after which they load by themselves. The price of the
+-- wrong order is a stalled load that names the column, which is the trade this
+-- file argues for in every other section: an error somebody reads beats a
+-- silence that looks like a clean feed.
+--
+-- IT REFUSES THAT DIRECTION AND NOT A ROLLBACK. A binary older than the schema
+-- sends no unknown field — it omits a known one — and an omitted field is
+-- `input_format_defaults_for_omitted_fields`, a different setting the loader
+-- does not touch. Measured against the same 24.8: a row omitting `book_key` is
+-- accepted and the column reads as the zero the exclusion drops, with that
+-- other setting at its default and at 0 alike. So a binary rolled back is still
+-- a binary that loads, and both of those readings are asserted against a real
+-- server in the container suite rather than argued here.
+--
+-- The schema is applied before the binary is rolled all the same, and the rule
+-- is not weaker for being enforced: a load that stops is a feed with a hole in
+-- it until somebody applies the file. That is the rule the feed runbook states
+-- for rolling subscribers before publishers, and it is stated there for this
+-- one too.
 --
 --
 -- WHAT THE ORDINAL DOES NOT SEPARATE: A PUBLISHER-SIDE ROW THAT MOVED NO TOP

@@ -629,18 +629,22 @@ fn the_publisher_branch_states_the_coarseness_of_a_symbol_without_a_channel() {
 /// **The schema is applied before the binary that writes the column.**
 ///
 /// The header covers the other direction thoroughly — a row written before the
-/// `ALTER` reads as zero, and the race excludes zero. This direction is the one
-/// with no symptom at all: the sink posts `FORMAT JSONEachRow` with the field
-/// names, `input_format_skip_unknown_fields` defaults to 1, so a binary carrying
-/// `book_key` against a table the `ALTER` has not reached has its insert
-/// accepted and the field dropped. Every publisher-side row lands with
-/// `book_key = 0`, the exclusion drops all of them, and the cross-observer race
-/// reads as a venue-only race with no error anywhere.
+/// `ALTER` reads as zero, and the publisher branch excludes zero. This direction
+/// is the one a server left at its defaults does not fail: the sink posts
+/// `FORMAT JSONEachRow` with the field names, `input_format_skip_unknown_fields`
+/// defaults to 1, so a binary carrying `book_key` against a table the `ALTER`
+/// has not reached has its insert accepted and the field dropped. Every
+/// publisher-side row lands with `book_key = 0`, the exclusion drops all of
+/// them, and the cross-observer race reads as a venue-only race with no error
+/// anywhere.
 ///
-/// There is no test that can catch the ordering itself — the column half of this
-/// module's own guard proves the field and the column agree *in the tree*, and
-/// says nothing about a server nobody migrated. So the statement is the guard,
-/// and this is what holds it.
+/// `ClickHouseConfig::insert_url` carries that setting at 0, so the loader turns
+/// that case into a refused batch, and the container suite asserts both
+/// directions against a real server: an unknown field is a 400 that loads
+/// nothing, and a row omitting a column the table has still loads. What no test
+/// can reach is the *decision* to apply the file first — a refused load is still
+/// a feed with a hole in it until somebody applies it — so the ordering rule is
+/// a statement, and this is what holds the statement in the file.
 #[test]
 fn the_schema_is_applied_before_the_binary_that_writes_the_column() {
     let sql = book_key_sql();
@@ -652,6 +656,16 @@ fn the_schema_is_applied_before_the_binary_that_writes_the_column() {
     assert!(
         sql.contains("input_format_skip_unknown_fields"),
         "the setting that turns a wrong order into silence is not named"
+    );
+    assert!(
+        sql.contains("SO THE LOADER DOES NOT LEAVE IT AT THE DEFAULT"),
+        "the file names the setting and not what the loader does with it, so a \
+         reader told the default is 1 is left asking why it is not 0"
+    );
+    assert!(
+        sql.contains("input_format_defaults_for_omitted_fields"),
+        "a setting that refuses one direction of a roll has to say which \
+         direction it leaves alone, or it reads as a refusal to roll back"
     );
     assert!(
         sql.contains("FORMAT JSONEachRow"),
