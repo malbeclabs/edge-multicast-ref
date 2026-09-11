@@ -128,6 +128,12 @@ fn venue_sql() -> &'static str {
     sql_of("009_recorder_venue_observation.sql")
 }
 
+/// The book-only key on the publisher side, and the branch it feeds, which are
+/// `010`.
+fn book_key_sql() -> &'static str {
+    sql_of("010_recorder_book_key.sql")
+}
+
 /// One `CREATE OR REPLACE VIEW recorder.<name>` statement, up to the next one.
 fn view_body(sql: &'static str, name: &str) -> &'static str {
     let needle = format!("CREATE OR REPLACE VIEW recorder.{name} AS");
@@ -278,7 +284,7 @@ fn the_venue_side_tables_declare_no_publisher_provenance() {
 /// Keyed on it this race would return zero pairs and read as each side missing
 /// every state the other saw.
 #[test]
-fn the_venue_race_is_keyed_on_the_book_and_never_on_the_state_key() {
+fn the_feed_race_is_keyed_on_the_book_and_never_on_the_state_key() {
     let sql = venue_sql();
     assert!(
         !sql.lines()
@@ -296,10 +302,17 @@ fn the_venue_race_is_keyed_on_the_book_and_never_on_the_state_key() {
         "the ordinal is not taken by arrival: {occurrence}"
     );
 
-    let race = view_body(sql, "venue_book_top_race");
+    let race = view_body(sql, "feed_race");
     assert!(
         race.contains("GROUP BY feed, symbol_key, book_key, occurrence"),
         "the pairing does not group on the ordinal: {race}"
+    );
+    // Over the seam a side is admitted at, and not over one side's own
+    // occurrences: the pairing never learns an observation point's name, so a
+    // side enters by contributing rows.
+    assert!(
+        race.contains("FROM recorder.feed_race_occurrence"),
+        "the pairing reads one side directly, so the other cannot enter: {race}"
     );
     // An aggregate over the ordinal and not a join between two named points, so
     // that an occurrence one side saw survives as a row. `006` makes the
@@ -361,6 +374,535 @@ fn the_venue_symbol_is_folded_once_and_the_fold_is_ascii_case() {
     }
 }
 
+/// **Both sides of the race reach the pairing, and by the same seam.**
+///
+/// The gap `010` closes: `book_top` stored `state_key` only, so the publisher
+/// side had nothing a venue side could join on and `009`'s race aggregated over
+/// venue-side occurrences alone — two recordings of one upstream raced against
+/// each other, which is not a feed race.
+///
+/// `009` declares the seam with one branch and `010` adds the other, so this
+/// holds both halves: the venue branch where it is declared, and the publisher
+/// branch where the column it reads is added.
+#[test]
+fn the_race_reads_a_seam_both_sides_of_the_race_reach() {
+    let venue = view_body(venue_sql(), "feed_race_occurrence");
+    assert!(
+        venue.contains("FROM recorder.venue_book_top_occurrence"),
+        "the venue side is not a branch of the seam: {venue}"
+    );
+
+    let seam = view_body(book_key_sql(), "feed_race_occurrence");
+    assert!(
+        seam.contains("FROM recorder.venue_book_top_occurrence"),
+        "the venue branch was dropped when the publisher branch arrived: {seam}"
+    );
+    assert!(
+        seam.contains("FROM recorder.publisher_book_top_occurrence"),
+        "the publisher side still does not enter the race: {seam}"
+    );
+    // `UNION ALL` and never `UNION`: a distinct-ing union collapses two
+    // observation points that saw one book at one instant into a single row,
+    // which is exactly the pair the race exists to report.
+    assert!(
+        seam.contains("UNION ALL"),
+        "the union de-duplicates, and a pair is what it would remove: {seam}"
+    );
+    assert!(
+        !seam.contains("SELECT *"),
+        "a union resolves its branches by position, so `*` would line one \
+         side's column up against the other's: {seam}"
+    );
+
+    // The publisher branch is numbered the way the venue branch is, on the
+    // book-only key and never on `state_key`: that one folds the `Channel ID`
+    // and the `Instrument ID` in before it folds a price, and a venue side can
+    // compute neither.
+    let occurrence = view_body(book_key_sql(), "publisher_book_top_occurrence");
+    assert!(
+        occurrence.contains("PARTITION BY observation, feed, upper(trimBoth(symbol)), book_key"),
+        "the ordinal is not numbered per observation on the book: {occurrence}"
+    );
+    assert!(
+        !occurrence
+            .lines()
+            .any(|line| line.contains("state_key") && !line.trim_start().starts_with("--")),
+        "the publisher branch keys on the observer-dependent key: {occurrence}"
+    );
+    // A snapshot anchors a book and never times one, and `WHERE` runs before a
+    // window — so the anchored row consumes no ordinal, which is `006`'s
+    // argument and applies here unchanged.
+    assert!(
+        occurrence.contains("WHERE from_anchor = 0"),
+        "a snapshot-anchored row takes an ordinal: {occurrence}"
+    );
+    // And a row written before the column existed carries a hash of no book.
+    // Left in, it would pair with nothing and be reported as a state the venue
+    // never saw, which manufactures evidence of loss rather than inflating a
+    // count.
+    assert!(
+        occurrence.contains("book_key != 0"),
+        "a row from before the column exists enters the race: {occurrence}"
+    );
+}
+
+/// **No migration folds a book state itself.**
+///
+/// `book_key` is written by `dz_recorder_events::book_key` and never by a second
+/// implementation, in SQL or anywhere else. The temptation is real and the file
+/// that adds the column is where it would land: the two sides are on the row, a
+/// hash function is one call away, and a fold written here would agree with the
+/// shared one on nothing — because the shared one reads a zero source count as
+/// the absence the top-of-book specification says it is, and the predicate that
+/// decides whether a side is absent is private in that crate for this reason.
+///
+/// Two hashes of one book state pair with nothing, and the failure is silent:
+/// the query runs, the rows are all there, and the race simply reports no pair,
+/// which is indistinguishable from a feed nobody was racing.
+#[test]
+fn no_migration_computes_a_book_key_of_its_own() {
+    for migration in migrations() {
+        for line in migration.sql.lines() {
+            if line.trim_start().starts_with("--") {
+                continue;
+            }
+            for fold in [
+                "cityHash64",
+                "sipHash64",
+                "sipHash128",
+                "farmHash64",
+                "farmFingerprint64",
+                "xxHash64",
+                "xxh3",
+                "murmurHash",
+                "MurmurHash",
+                "halfMD5",
+                "javaHash",
+                "metroHash64",
+                "wyHash64",
+            ] {
+                assert!(
+                    !line.contains(fold),
+                    "{}: a fold of its own, where the key is one function's: {line}",
+                    migration.name
+                );
+            }
+        }
+    }
+}
+
+/// The second key reaches no sort key, so deduplication does not move.
+///
+/// A `book_top` row is one change in one top of book. A key carrying the fold
+/// would make one change two rows the moment a re-derivation computed the fold
+/// differently — which is the one thing a replacing engine must not be asked to
+/// tolerate, and the rule `008` states for `derivation` in the same words.
+///
+/// **No escape hatch for a window's `PARTITION BY`.** The guard carried one, and
+/// it was unreachable: `sort_key_clauses` only starts capturing at a line
+/// beginning `ORDER BY` or `PRIMARY KEY`, and in every file here a
+/// `PARTITION BY` — a table's or a window's — is on a line of its own above one
+/// of those. So the words could only ever appear in a captured clause if a sort
+/// key wrapped onto a line carrying them, and in that one case the hatch would
+/// have swallowed exactly the hit this test exists to catch.
+#[test]
+fn the_book_only_key_is_in_no_sort_key() {
+    for sql in [
+        market_data_sql(),
+        pairing_sql(),
+        venue_sql(),
+        book_key_sql(),
+    ] {
+        for clause in sort_key_clauses(sql) {
+            assert!(
+                !clause.contains("book_key"),
+                "the book-only key reached a table's sort key: {clause}"
+            );
+        }
+    }
+    // And `005`'s key is the one it always was, stated as a literal so that a
+    // column appended to its tail fails here rather than being noticed when a
+    // dashboard starts double-counting.
+    assert_eq!(
+        sort_key(market_data_sql(), "book_top"),
+        "channel_id, instrument_id, recv_ts, sequence_number, message_index, observation",
+        "`book_top`'s sort key moved"
+    );
+}
+
+/// **The publisher ordinal is numbered in a total order, and not on the stamp
+/// alone.**
+///
+/// `009` makes the argument for the venue branch and it holds here: ordered on
+/// the receive stamp alone, `row_number()` is free to number two rows at one
+/// stamp either way and may answer differently after a merge, so the same rows
+/// pair differently on two runs and neither `observations` nor `lead_ms` is
+/// reproducible. Equal stamps are ordinary on this side too — one datagram
+/// carries many messages, which is what `message_index` exists for, and one
+/// sequence hole writes a row for every established book on the channel at that
+/// one stamp.
+///
+/// The tie-break is `005`'s own sort key without the `observation` the partition
+/// already fixes, and that is what makes the order total: beneath `FINAL` no two
+/// rows share that key. Held as a literal and against the key itself, because a
+/// tie-break with a column missing still parses and is wrong only sometimes.
+#[test]
+fn the_publisher_ordinal_is_numbered_in_a_total_order() {
+    let occurrence = view_body(book_key_sql(), "publisher_book_top_occurrence");
+    assert!(
+        occurrence.contains(
+            "ORDER BY recv_ts, channel_id, instrument_id, sequence_number, message_index"
+        ),
+        "the ordinal is taken on the receive stamp alone, so two rows at one \
+         stamp are numbered whichever way a merge left them: {occurrence}"
+    );
+    let key = sort_key(market_data_sql(), "book_top");
+    for column in [
+        "channel_id",
+        "instrument_id",
+        "sequence_number",
+        "message_index",
+    ] {
+        assert!(
+            key.contains(column),
+            "`{column}` breaks the tie above and is not in `book_top`'s sort \
+             key, so two rows may still share the whole order: {key}"
+        );
+    }
+    assert!(
+        book_key_sql().contains("THE WINDOW'S ORDER IS TOTAL"),
+        "why a stamp is not an order has to be stated where the window is"
+    );
+}
+
+/// **The file says which publisher-side rows are not moves of a top.**
+///
+/// A publisher-side row is written when the top moved *or* when the certainty of
+/// it moved; a venue-side row only when the top moved. So a gap, a restore and
+/// an unanchored book each write a row carrying the top the row before it
+/// carried, the venue side writes no counterpart to any of them, and one
+/// sequence hole leaves the two sides' ordinals for that book state off by one
+/// — after which the venue's next occurrence pairs with the gap's row and
+/// `lead_ms` is measured between two arrivals of two different states.
+///
+/// Nothing on the row says the top moved, so this file cannot filter them and
+/// the property has to be stated as absent rather than implied. That is what
+/// this holds: the exposure named where the branch is declared, each producer
+/// named by the code that writes it, and the drift named as `006`'s too — which
+/// is the argument for fixing it in the derivation rather than in one branch of
+/// one union.
+#[test]
+fn the_publisher_branch_says_which_rows_are_not_moves_of_a_top() {
+    let sql = book_key_sql();
+    assert!(
+        sql.contains("A PUBLISHER-SIDE ROW THAT MOVED NO TOP"),
+        "the exposure is not named where the branch is declared"
+    );
+    // Each producer by the name of what writes it, because "some rows repeat a
+    // top" is a warning nobody can check against the code.
+    for producer in [
+        "Book::observe_sequence",
+        "A `Quote` that puts certainty back",
+        "Book::level",
+    ] {
+        assert!(
+            sql.contains(producer),
+            "the row `{producer}` writes is not named, so the list cannot be \
+             checked against the derivation"
+        );
+    }
+    assert!(
+        sql.contains("plausible wrong number"),
+        "the drift is stated without the lead time it produces, which is the \
+         half nobody notices"
+    );
+    assert!(
+        sql.contains("`006`'S EXPOSURE TOO"),
+        "the publisher-side race has the same drift, and a fix in this branch \
+         alone would leave two readings of one table counting differently"
+    );
+    // And the `WHERE` below does not claim to be the whole of the list.
+    assert!(
+        sql.contains("That `WHERE` is not the whole of the list"),
+        "the exclusions read as dropping every row that is not an occurrence"
+    );
+}
+
+/// **The coarseness of a symbol without a channel, stated with its cost.**
+///
+/// The partition is the feed and the folded symbol and never the channel,
+/// because a venue side cannot name one. A symbol is `char[64]` of venue-chosen
+/// text that is unique within a channel at an instant, so during a re-shard
+/// overlap one symbol published on two channels of one feed has both channels'
+/// occurrences of a book state numbered in a single sequence: 2n publisher
+/// ordinals against the venue's n. `009` states the era-boundary coarseness on
+/// its own side, and this is the same kind of statement about this one.
+#[test]
+fn the_publisher_branch_states_the_coarseness_of_a_symbol_without_a_channel() {
+    let sql = book_key_sql();
+    let occurrence = view_body(sql, "publisher_book_top_occurrence");
+    let partition = occurrence
+        .lines()
+        .find(|line| line.contains("PARTITION BY"))
+        .expect("the ordinal has no partition at all");
+    assert!(
+        !partition.contains("channel_id"),
+        "the partition names the channel, which a venue side cannot: {partition}"
+    );
+    assert!(
+        sql.contains("AND IT IS THE CHANNEL"),
+        "the cost of the omission is not stated where the omission is"
+    );
+    assert!(
+        sql.contains("re-shard overlap"),
+        "the case that pays the cost has to be named, not implied"
+    );
+}
+
+/// **The schema is applied before the binary that writes the column.**
+///
+/// The header covers the other direction thoroughly — a row written before the
+/// `ALTER` reads as zero, and the publisher branch excludes zero. This direction
+/// is the one a server left at its defaults does not fail: the sink posts
+/// `FORMAT JSONEachRow` with the field names, `input_format_skip_unknown_fields`
+/// defaults to 1, so a binary carrying `book_key` against a table the `ALTER`
+/// has not reached has its insert accepted and the field dropped. Every
+/// publisher-side row lands with `book_key = 0`, the exclusion drops all of
+/// them, and the cross-observer race reads as a venue-only race with no error
+/// anywhere.
+///
+/// `ClickHouseConfig::insert_url` carries that setting at 0, so the loader turns
+/// that case into a refused batch, and the container suite asserts both
+/// directions against a real server: an unknown field is a 400 that loads
+/// nothing, and a row omitting a column the table has still loads. What no test
+/// can reach is the *decision* to apply the file first — a refused load is still
+/// a feed with a hole in it until somebody applies it — so the ordering rule is
+/// a statement, and this is what holds the statement in the file.
+#[test]
+fn the_schema_is_applied_before_the_binary_that_writes_the_column() {
+    let sql = book_key_sql();
+    assert!(
+        sql.contains("APPLY THIS FILE BEFORE THE BINARY THAT WRITES THE COLUMN"),
+        "the direction with no symptom is not stated where an operator applies \
+         the file"
+    );
+    assert!(
+        sql.contains("input_format_skip_unknown_fields"),
+        "the setting that turns a wrong order into silence is not named"
+    );
+    assert!(
+        sql.contains("SO THE LOADER DOES NOT LEAVE IT AT THE DEFAULT"),
+        "the file names the setting and not what the loader does with it, so a \
+         reader told the default is 1 is left asking why it is not 0"
+    );
+    assert!(
+        sql.contains("input_format_defaults_for_omitted_fields"),
+        "a setting that refuses one direction of a roll has to say which \
+         direction it leaves alone, or it reads as a refusal to roll back"
+    );
+    assert!(
+        sql.contains("FORMAT JSONEachRow"),
+        "how a column is matched at the server is what makes a field droppable"
+    );
+    assert!(
+        sql.contains("INSERT INTO recorder.book_top"),
+        "the insert the statement is about has to be the one the sink posts"
+    );
+}
+
+/// **Only the `ALTER` is a no-op on a deployment created from scratch.**
+///
+/// `005` declares the column, so a fresh table has it before this file runs —
+/// and the file used to say that every statement here was then a no-op, which is
+/// true of one of them. `publisher_book_top_occurrence` is declared nowhere
+/// else, `feed_race_occurrence` arrives from `009` with one branch, and a
+/// deployment that read this file as optional would have a race that pairs the
+/// venue against itself.
+#[test]
+fn only_the_alter_is_a_no_op_on_a_fresh_deployment() {
+    let sql = book_key_sql();
+    assert!(
+        sql.contains("THE REST OF THIS FILE IS NOT OPTIONAL ON ANY DEPLOYMENT"),
+        "the file reads as optional where `005` already declares the column"
+    );
+    // The two views that are not a re-statement of anything, held by name: a
+    // file describing itself as a no-op has to be wrong about these two before
+    // it is wrong about anything.
+    for view in ["publisher_book_top_occurrence", "feed_race_occurrence"] {
+        assert!(
+            sql.contains(&format!("CREATE OR REPLACE VIEW recorder.{view} AS")),
+            "{view} is not declared here, so the claim about it is stale"
+        );
+    }
+    assert!(
+        !view_body(venue_sql(), "feed_race_occurrence")
+            .contains("recorder.publisher_book_top_occurrence"),
+        "`009` already carries the publisher branch, and the statement about \
+         what this file adds is no longer true"
+    );
+}
+
+/// **The two files describe each other as they are.**
+///
+/// `010` said `009` "says, in its own header, that the publisher side does not
+/// feed that pairing" — which `009` did say, before this change gave it the seam
+/// and a branch to name. Two files in one tree disagreeing about what one of
+/// them says is worse than either being silent, and the quotation is the part
+/// that goes stale: it is a claim about another file that nothing else reads.
+#[test]
+fn the_two_files_describe_each_other_as_they_are() {
+    assert!(
+        venue_sql().contains("`010` adds the column and the second branch"),
+        "`009` no longer names the file that completes its seam"
+    );
+    assert!(
+        book_key_sql().contains("It declares the seam a side"),
+        "`010` does not say what `009` now does"
+    );
+    assert!(
+        !book_key_sql().contains("does not feed that pairing"),
+        "`010` still quotes a header `009` no longer has"
+    );
+}
+
+/// **The seam is declared in two files, and each names the order that leaves it
+/// one-sided.**
+///
+/// `feed_race_occurrence` is declared in `009` with the venue branch and in
+/// `010` with both, by design: `010` adds a branch to the seam rather than
+/// rewriting the pairing above it. The hazard the double definition carries is
+/// that either file applied on its own leaves a race that is quietly one-sided
+/// — a deployment that stopped at `009` pairs the venue against itself, and
+/// `009` re-applied by hand after `010` puts that back — and a view holds no
+/// rows, so nothing in the result says a branch went missing.
+///
+/// `010` states the first of those. The second is stated in `009`, because the
+/// direction that is not written down is the one an operator re-running a
+/// single file reaches.
+#[test]
+fn the_seam_in_two_files_names_both_orders_that_leave_it_one_sided() {
+    assert!(
+        book_key_sql().contains("applied `009` and skipped this file"),
+        "`010` does not say what a deployment that stopped at `009` holds"
+    );
+    assert!(
+        venue_sql().contains("SO THIS FILE IS NEVER APPLIED ON ITS OWN AFTER `010`"),
+        "`009` does not say that re-applying it alone takes the publisher \
+         branch back out of the seam"
+    );
+    for sql in [venue_sql(), book_key_sql()] {
+        assert!(
+            sql.contains("CREATE OR REPLACE VIEW recorder.feed_race_occurrence AS"),
+            "the seam is declared in one file only, so one of the two \
+             statements about applying them apart is about nothing"
+        );
+    }
+}
+
+/// **The race is one statement, written into two files.**
+///
+/// `010` re-states `feed_race` after dropping the old name, because the drop
+/// alone would leave the one deployment that block exists for with no race at
+/// all: it applied `009` as released, so it holds `venue_book_top_race` and has
+/// never held `feed_race`, which only the amended `009` creates. The
+/// re-statement is what makes the compatibility block whole — and it is also a
+/// second copy of a twenty-line aggregate.
+///
+/// This is the guard on that copy. Two definitions nobody compares are two
+/// definitions that diverge, and the one that drifts is the one nobody reads:
+/// here that is a fresh deployment and an upgraded one answering the same
+/// question two different ways, with nothing failing on either and no way to
+/// tell from a dashboard which of them the number came from.
+///
+/// Character for character, and not "both of them mention the seam". A column
+/// added to one copy, an aggregate changed in one copy, a `GROUP BY` widened in
+/// one copy — every one of those is the failure this is about, and every one of
+/// them passes a weaker comparison.
+#[test]
+fn the_race_is_one_statement_written_into_two_files() {
+    let in_nine = view_body(venue_sql(), "feed_race").trim();
+    let in_ten = view_body(book_key_sql(), "feed_race").trim();
+    // The comparison is over the aggregate, which a helper returning the same
+    // empty slice for both would also satisfy.
+    for (file, body) in [("009", in_nine), ("010", in_ten)] {
+        assert!(
+            body.contains("FROM recorder.feed_race_occurrence")
+                && body.contains("GROUP BY feed, symbol_key, book_key, occurrence"),
+            "what is being compared for `{file}` is not the race: {body}"
+        );
+    }
+    assert_eq!(
+        in_nine, in_ten,
+        "`009` and `010` state the race differently, so a deployment created \
+         from scratch and one upgraded to it answer the same question two ways"
+    );
+}
+
+/// **The race is named for the race, and the name it had is dropped.**
+///
+/// `009` declared `venue_book_top_race`, and the name was true of it: one
+/// branch, and the branch was the venue's. Once `010` adds the publisher branch
+/// to the seam it aggregates both sides — `observations = 1` is as likely
+/// publisher-only as venue-only and `observed_by` names publisher observation
+/// points — so anyone filtering it as the venue's own race gets the opposite of
+/// what they expect.
+///
+/// What is left for `010` is the old name on a deployment that applied `009`
+/// before the rename. That view reads `venue_book_top_occurrence` — the `009`
+/// that declared it had no seam to read — and this file touches neither, so it
+/// goes on answering with the venue side alone while a publisher side is
+/// contributing rows to the seam beside it: a race that omits half of what the
+/// deployment records, under a name an operator keeps querying.
+///
+/// AND A DROP WITHOUT A REPLACEMENT IS NOT A REPAIR. That deployment has never
+/// held `feed_race`, because the amended `009` is the only other statement that
+/// creates it — so dropping the old name and stopping there ends the upgrade
+/// with no race at all, on the one deployment the compatibility block is for.
+/// `010` re-states the race after the drop, and
+/// [`the_race_is_one_statement_written_into_two_files`] is what keeps the two
+/// copies one text.
+#[test]
+fn the_race_is_named_for_the_race_and_the_old_name_is_dropped() {
+    assert!(
+        venue_sql().contains("CREATE OR REPLACE VIEW recorder.feed_race AS"),
+        "the race is not declared under the name of the seam it reads"
+    );
+    for sql in [venue_sql(), book_key_sql()] {
+        assert!(
+            !sql.contains("CREATE OR REPLACE VIEW recorder.venue_book_top_race"),
+            "the race is still declared under a name that says one side"
+        );
+    }
+    let drop = book_key_sql()
+        .find("DROP VIEW IF EXISTS recorder.venue_book_top_race;")
+        .expect(
+            "a deployment that applied `009` before the rename keeps a \
+             one-sided race under a name that reads as the feed race",
+        );
+    // `IF EXISTS`, because on every other deployment there is nothing there and
+    // a migration that failed on its own first application is a migration
+    // nobody can re-run.
+    assert!(
+        book_key_sql().contains("DROP VIEW IF EXISTS"),
+        "the drop fails on a deployment that never had the view"
+    );
+    // And the replacement is in the same file and after it, which is the half
+    // of the repair a reader of the drop alone would not know to look for: the
+    // deployment being dropped from has no `feed_race` to fall back on.
+    let restated = book_key_sql()
+        .find("CREATE OR REPLACE VIEW recorder.feed_race AS")
+        .expect(
+            "`010` drops the old race name and states no race under the new \
+             one, so the deployment it is written for ends the upgrade with \
+             none at all",
+        );
+    assert!(
+        restated > drop,
+        "the race is re-stated before the drop, which reads as a statement \
+         about something else"
+    );
+}
+
 /// `symbols_agree` and `exponents_agree` are columns rather than assumptions.
 ///
 /// The key covers the raw prices and leaves the exponents out, so a pair whose
@@ -368,8 +910,8 @@ fn the_venue_symbol_is_folded_once_and_the_fold_is_ascii_case() {
 /// the symbol with its case folded, so a pair whose sides spell the instrument
 /// differently is a pair — which is only safe if the disagreement is visible.
 #[test]
-fn the_venue_race_carries_its_reference_data_assertions_as_columns() {
-    let race = view_body(venue_sql(), "venue_book_top_race");
+fn the_feed_race_carries_its_reference_data_assertions_as_columns() {
+    let race = view_body(venue_sql(), "feed_race");
     assert!(
         race.contains("(uniqExact(symbol) = 1)                AS symbols_agree"),
         "the symbols are assumed rather than compared: {race}"
@@ -1118,6 +1660,7 @@ fn provenance_is_on_every_grain_and_in_no_sort_key() {
         pairing_sql(),
         cross_site_sql(),
         venue_sql(),
+        book_key_sql(),
     ] {
         for clause in sort_key_clauses(sql) {
             clauses += 1;
@@ -1130,12 +1673,12 @@ fn provenance_is_on_every_grain_and_in_no_sort_key() {
     // The walker found something, and found all of it. A guard that reads more
     // than one line is a guard whose *reading* is now the thing that can
     // regress, and a walker that quietly went back to the first line would leave
-    // this green over exactly the hazard it was widened for. Twelve: the ten
-    // table sort keys, plus the bare `ORDER BY` in each of `006`'s and `009`'s
-    // window specifications, which are checked like any other because a column
-    // reaching a window's ordering is worth knowing about too. `003`'s is in a
-    // file this test does not read.
-    assert_eq!(clauses, 12, "the sort-key walker stopped finding clauses");
+    // this green over exactly the hazard it was widened for. Thirteen: the ten
+    // table sort keys, plus the bare `ORDER BY` in each of `006`'s, `009`'s and
+    // `010`'s window specifications, which are checked like any other because a
+    // column reaching a window's ordering is worth knowing about too. `003`'s is
+    // in a file this test does not read.
+    assert_eq!(clauses, 13, "the sort-key walker stopped finding clauses");
 }
 
 /// Every `ORDER BY` and `PRIMARY KEY` clause in one file, each as one string.
@@ -1718,17 +2261,61 @@ fn every_migration_splits_into_whole_statements() {
         );
     }
 
-    // The two tables, the TTL and the three views of `009`, and nothing split
+    // The two tables, the TTL and the four views of `009`, and nothing split
     // across two of them.
     let venue = migration("009_recorder_venue_observation.sql").statements();
-    assert_eq!(venue.len(), 6, "two tables, one TTL, three views");
+    assert_eq!(venue.len(), 7, "two tables, one TTL, four views");
     for view in [
         "venue_book_top_settled",
         "venue_book_top_occurrence",
-        "venue_book_top_race",
+        "feed_race_occurrence",
+        "feed_race",
     ] {
         assert_eq!(
             venue
+                .iter()
+                .filter(|s| s.contains(&format!("CREATE OR REPLACE VIEW recorder.{view} AS")))
+                .count(),
+            1,
+            "{view}"
+        );
+    }
+
+    // The `ALTER`, the four views and the `DROP` of `010`, and nothing split
+    // across two of them. `book_top_settled` is among them deliberately: a
+    // view's `SELECT *` is expanded when the view is created, so on a
+    // deployment upgraded in file order `006` freezes that view's column list
+    // before the `ALTER` here runs. `feed_race` is among them for the other
+    // upgrade: the `DROP` below takes the old race name off a deployment that
+    // has no `feed_race` to fall back on.
+    let book_key = migration("010_recorder_book_key.sql").statements();
+    assert_eq!(book_key.len(), 6, "one ALTER, four views, one DROP");
+    assert_eq!(
+        book_key
+            .iter()
+            .filter(|s| s.contains("ALTER TABLE recorder.book_top"))
+            .count(),
+        1,
+        "the column is added once"
+    );
+    // And the name the union made wrong is dropped once, where a deployment
+    // that applied `009` before the rename may still hold it.
+    assert_eq!(
+        book_key
+            .iter()
+            .filter(|s| s.contains("DROP VIEW IF EXISTS recorder.venue_book_top_race"))
+            .count(),
+        1,
+        "the old race name is dropped once"
+    );
+    for view in [
+        "book_top_settled",
+        "publisher_book_top_occurrence",
+        "feed_race_occurrence",
+        "feed_race",
+    ] {
+        assert_eq!(
+            book_key
                 .iter()
                 .filter(|s| s.contains(&format!("CREATE OR REPLACE VIEW recorder.{view} AS")))
                 .count(),
@@ -1750,6 +2337,452 @@ fn every_migration_splits_into_whole_statements() {
             "{grain}"
         );
     }
+}
+
+/// One statement of one migration: the code with the prose dropped, and the
+/// line its first word is on.
+///
+/// The line is the statement's own and not the line its comment block starts
+/// on. Every statement in these files carries a page of argument above it, so a
+/// failure citing the comment would send a reader hundreds of lines away from
+/// the thing it is about.
+#[derive(Debug, Clone)]
+struct Statement {
+    file: &'static str,
+    /// Position in [`schema`], which is the order a deploy applies the files in
+    /// — and what makes "a later file" something a test can decide.
+    order: usize,
+    /// One-based, as an editor counts.
+    line: usize,
+    /// The statement, one trimmed line per line, with every comment line gone.
+    code: String,
+}
+
+impl Statement {
+    /// Where a failure sends a reader.
+    fn at(&self) -> String {
+        format!("{}:{}", self.file, self.line)
+    }
+
+    /// The statement on one line, for a phrase that wraps across two of them.
+    fn flat(&self) -> String {
+        self.code.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// Apply order, which is what "later than" is decided on.
+    fn position(&self) -> (usize, usize) {
+        (self.order, self.line)
+    }
+}
+
+/// Every statement of every migration, in the order a deploy applies them.
+///
+/// Held against [`Migration::statements`] file by file, because that is the
+/// splitter the deploy and the container suite use: a walker that read a
+/// different set of statements than the one applied would check a schema
+/// nobody has.
+fn schema_statements() -> Vec<Statement> {
+    let mut out: Vec<Statement> = Vec::new();
+    for (order, migration) in schema().into_iter().enumerate() {
+        let mut code = String::new();
+        let mut first = 0usize;
+        for (index, raw) in migration.sql.lines().enumerate() {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() || trimmed.starts_with("--") {
+                continue;
+            }
+            if code.is_empty() {
+                first = index + 1;
+            }
+            code.push_str(trimmed);
+            code.push('\n');
+            if trimmed.ends_with(';') {
+                out.push(Statement {
+                    file: migration.name,
+                    order,
+                    line: first,
+                    code: std::mem::take(&mut code),
+                });
+            }
+        }
+        // A statement with no terminator is a file this walker stopped reading
+        // part way through, and dropping the tail silently is how a walker
+        // stops covering a file without failing.
+        assert!(
+            code.is_empty(),
+            "{}: the statement starting at line {first} is not terminated, so \
+             this walker stopped reading the file",
+            migration.name
+        );
+        assert_eq!(
+            out.iter().filter(|s| s.order == order).count(),
+            migration.statements().len(),
+            "{}: this walker and `Migration::statements` disagree about how \
+             many statements the file holds, so one of them is not reading the \
+             file a deploy applies",
+            migration.name
+        );
+    }
+    out
+}
+
+/// What a statement's `SELECT *` is a star over, resolved through whatever the
+/// `FROM` or the `JOIN` bound the alias to.
+///
+/// [`None`] for a projection that lists its columns, which is what most of
+/// these files' views do. An explicit list does not pick up a new column either
+/// — and that is the difference this test rests on: a list is a decision a
+/// reader can see in the file, and a star is a column list frozen at the
+/// instant the view was created.
+///
+/// The alias and not the first `FROM`: a join's right-hand side is a table too,
+/// and a walker that took the first table it saw would watch the columns of the
+/// wrong one.
+fn starred_object(code: &str) -> Option<String> {
+    let alias = code.lines().find_map(|line| {
+        let projected = line.trim();
+        // `SELECT *` on one line and a `d.*,` on a line of its own are both
+        // shapes these files use.
+        let projected = projected
+            .strip_prefix("SELECT")
+            .unwrap_or(projected)
+            .trim()
+            .trim_end_matches(',');
+        if projected == "*" {
+            Some(String::new())
+        } else {
+            projected.strip_suffix(".*").map(str::to_owned)
+        }
+    })?;
+
+    let mut tokens = code
+        .split_whitespace()
+        .map(|token| token.trim_end_matches([';', ',']));
+    let mut first_from: Option<String> = None;
+    let mut bound: Vec<(String, String)> = Vec::new();
+    while let Some(token) = tokens.next() {
+        if token != "FROM" && token != "JOIN" {
+            continue;
+        }
+        let Some(object) = tokens
+            .next()
+            .and_then(|next| next.strip_prefix("recorder."))
+            .map(str::to_owned)
+        else {
+            // A join over a subquery names no table here, and the subquery's
+            // own `FROM` is read on its own turn round this loop.
+            continue;
+        };
+        if first_from.is_none() {
+            first_from = Some(object.clone());
+        }
+        // `FROM recorder.t FINAL AS b` is the shape a collapse takes, so the
+        // alias may be one token further along.
+        let mut next = tokens.next();
+        if next == Some("FINAL") {
+            next = tokens.next();
+        }
+        if next == Some("AS") {
+            if let Some(name) = tokens.next() {
+                bound.push((name.to_owned(), object));
+            }
+        }
+    }
+
+    if alias.is_empty() {
+        return first_from;
+    }
+    bound
+        .into_iter()
+        .find(|(name, _)| *name == alias)
+        .map(|(_, object)| object)
+}
+
+/// Whether an `ALTER` moves the column *list* of its table.
+///
+/// `MODIFY COLUMN` is not one of these, deliberately. A view's `SELECT *` is
+/// expanded into a list of column *names* when the view is created and the
+/// types are resolved when it is read — so a view created earlier picks up a
+/// type change on its own and cannot pick up an added, dropped or renamed
+/// column, and only the second kind needs re-stating. `MODIFY TTL` is not one
+/// either,
+/// which is what the four `ALTER`s in `002`, `005` and `009` are: retention
+/// moves no column, and a test that treated it as a column change would demand
+/// a re-statement for every TTL decision.
+fn changes_a_column_list(flat: &str) -> bool {
+    ["ADD COLUMN", "DROP COLUMN", "RENAME COLUMN"]
+        .iter()
+        .any(|phrase| flat.contains(phrase))
+}
+
+/// The `SELECT *` views a released migration already froze, named here rather
+/// than hidden behind a weaker parse.
+///
+/// `008` adds `derivation` to `recorder.era` and to `recorder.datagram` and
+/// re-states no view — it contains no `CREATE OR REPLACE VIEW` at all — so
+/// `003`'s `era_opening` and `datagram_in_era` are expanded without that column
+/// on every deployment that was upgraded and with it on every deployment
+/// created since. Two column lists under one view name.
+///
+/// It is latent only because nothing reads `derivation` through either view
+/// yet: `006` takes three columns out of `era_opening` and the cross-site views
+/// take named columns out of `datagram_in_era`. The first query that reaches
+/// `era_opening.derivation` breaks on the deployments that have been running
+/// longest, which is the opposite of the order anybody tests in.
+///
+/// **Not repaired here.** The repair is a `CREATE OR REPLACE VIEW` for each in
+/// `008`, which changes a migration every deployment has already applied and
+/// wants its own argument about what a released file may be amended to say. It
+/// is tracked as a follow-up against `008_recorder_derivation.sql`.
+///
+/// Listed rather than allowed silently, and every entry is asserted below to
+/// still be a violation — so the day `008` re-states them, this list fails
+/// until the entry is deleted.
+const FROZEN_BY_A_RELEASED_MIGRATION: [(&str, &str); 2] = [
+    ("era_opening", "008_recorder_derivation.sql"),
+    ("datagram_in_era", "008_recorder_derivation.sql"),
+];
+
+/// **A `SELECT *` view is re-stated by the file that moves its table's column
+/// list.**
+///
+/// A view's `SELECT *` is expanded when the view is created, not when it is
+/// read. So a file that adds a column to a table over which an earlier file
+/// declared a star view leaves that view carrying the old column list on every
+/// deployment upgraded in file order, while a deployment created from scratch
+/// gets the new one — and nothing fails until a query reads the new column
+/// through the view, on the deployments that have been running longest.
+///
+/// This is what holds `010`'s re-statement of `book_top_settled` in place.
+/// Nothing else does: `Scratch::open` drops the database and applies `schema()`
+/// in order, and `005` declares `book_key` on `book_top` itself, so the column
+/// is already there when `006` expands its star, so the container suite returns
+/// the same answers with that statement deleted. A server-based test reaches
+/// this only with a second fixture that applies `005` without the column and
+/// then the rest of the set in order; this needs no server at all.
+///
+/// **The reading is the end state and not every intermediate one.** The rule is
+/// that a view's *last* declaration comes after the last `ALTER` that moves its
+/// table's column list, which is the question "does a deployment that applied
+/// every file in order hold the same view as one created from scratch". `008`
+/// adds `derivation` to `recorder.book_top` and re-states nothing, and `010`
+/// re-states `book_top_settled` afterwards — so the freeze `008` opened is
+/// closed by the time the set has been applied, and this test does not report
+/// it. Reported, it would be a finding that outlives its own repair; the two
+/// entries in [`FROZEN_BY_A_RELEASED_MIGRATION`] are the ones no later file
+/// closes.
+#[test]
+fn a_select_star_view_is_re_stated_after_a_column_reaches_its_table() {
+    let statements = schema_statements();
+
+    let mut declarations: Vec<(String, &Statement)> = Vec::new();
+    let mut column_alters: Vec<(String, &Statement)> = Vec::new();
+    for statement in &statements {
+        let flat = statement.flat();
+        if let Some(rest) = flat.strip_prefix("CREATE OR REPLACE VIEW recorder.") {
+            let name = rest.split_whitespace().next().expect("a view has a name");
+            declarations.push((name.to_owned(), statement));
+        } else if let Some(rest) = flat.strip_prefix("ALTER TABLE recorder.") {
+            if changes_a_column_list(&flat) {
+                let table = rest
+                    .split_whitespace()
+                    .next()
+                    .expect("an ALTER names a table");
+                column_alters.push((table.to_owned(), statement));
+            }
+        }
+    }
+
+    // A walker that found no star, or no `ALTER`, would pass over anything. The
+    // two named here are `003`'s star over `recorder.era` and `008`'s column on
+    // that table — the pair the exception list is about, and neither of them the
+    // statement this test exists to hold in place, so a failure below is the
+    // property and not the parse.
+    assert!(
+        declarations
+            .iter()
+            .any(|(name, statement)| name == "era_opening"
+                && statement.file == "003_recorder_era_rank.sql"),
+        "the walker read no `era_opening` in `003`, so it is reading no views"
+    );
+    assert!(
+        column_alters
+            .iter()
+            .any(|(table, statement)| table == "era"
+                && statement.file == "008_recorder_derivation.sql"),
+        "the walker read no column `ALTER` on `recorder.era` in `008`, so it is \
+         reading no column changes"
+    );
+
+    let names: BTreeSet<String> = declarations.iter().map(|(name, _)| name.clone()).collect();
+    let last_declaration = |name: &str| -> &Statement {
+        declarations
+            .iter()
+            .filter(|(declared, _)| declared == name)
+            .map(|(_, statement)| *statement)
+            .max_by_key(|statement| statement.position())
+            .expect("a name taken from the declarations is declared")
+    };
+    let last_column_alter = |table: &str| -> Option<&Statement> {
+        column_alters
+            .iter()
+            .filter(|(altered, _)| altered == table)
+            .map(|(_, statement)| *statement)
+            .max_by_key(|statement| statement.position())
+    };
+
+    let mut stars_read = 0usize;
+    let mut exceptions_taken: BTreeSet<(String, &str)> = BTreeSet::new();
+    for name in &names {
+        let declaration = last_declaration(name);
+        let Some(starred) = starred_object(&declaration.code) else {
+            continue;
+        };
+        stars_read += 1;
+
+        // What can move the column list the star was expanded from. A star over
+        // a view is chased through to the table underneath it, because
+        // re-stating an inner view does not refresh an outer view's `SELECT *`
+        // either: the outer list was expanded from the inner one at the instant
+        // the outer view was created. There is no such view in these files
+        // today, and one would be a worse freeze than the one this test is
+        // about rather than a case it may skip.
+        let mut hazards: Vec<(&Statement, String)> = Vec::new();
+        let mut object = starred.clone();
+        for _ in 0..=names.len() {
+            if let Some(alter) = last_column_alter(&object) {
+                hazards.push((
+                    alter,
+                    format!("adds, drops or renames a column on `recorder.{object}`"),
+                ));
+            }
+            if !names.contains(&object) {
+                break;
+            }
+            let inner = last_declaration(&object);
+            hazards.push((
+                inner,
+                format!(
+                    "re-states `recorder.{object}`, the view this star's column \
+                     list was expanded from"
+                ),
+            ));
+            match starred_object(&inner.code) {
+                Some(next) => object = next,
+                None => break,
+            }
+        }
+
+        for (hazard, what) in hazards {
+            if hazard.position() <= declaration.position() {
+                continue;
+            }
+            let excepted = FROZEN_BY_A_RELEASED_MIGRATION
+                .iter()
+                .any(|(view, file)| *view == name.as_str() && *file == hazard.file);
+            assert!(
+                excepted,
+                "`recorder.{name}` is declared `SELECT *` over \
+                 `recorder.{starred}` at {declared}, and {altered} {what} — with \
+                 no re-statement of `recorder.{name}` after it.\n\n\
+                 A view's `SELECT *` is expanded into a column list when the \
+                 view is created and never when it is read. So a deployment \
+                 upgraded in file order holds this view without the new column \
+                 while a deployment created from scratch holds it with, which \
+                 is two column lists under one view name. Nothing fails while \
+                 no query reads the new column through the view, and the first \
+                 one that does breaks on the deployments that have been \
+                 running longest.\n\n\
+                 Re-state the view in {file}, after the statement above: an \
+                 `ALTER` that moves a column list and a `CREATE OR REPLACE \
+                 VIEW` for every star over that table belong in one file, \
+                 which is the whole of the rule this test holds.",
+                declared = declaration.at(),
+                altered = hazard.at(),
+                file = hazard.file,
+            );
+            exceptions_taken.insert((name.clone(), hazard.file));
+        }
+    }
+
+    assert!(
+        stars_read >= 4,
+        "the walker read {stars_read} `SELECT *` views and these files declare \
+         four, so the parse is reading a projection it does not understand"
+    );
+
+    // Every exception is still a violation. An entry that has stopped being one
+    // is a repair nobody deleted the exception for, and a list that outlives
+    // what it excuses is how an allow-list becomes the rule.
+    for (view, file) in FROZEN_BY_A_RELEASED_MIGRATION {
+        assert!(
+            exceptions_taken.contains(&(view.to_owned(), file)),
+            "{file} does not freeze `recorder.{view}`, so delete that entry \
+             from `FROZEN_BY_A_RELEASED_MIGRATION` rather than leaving a list \
+             that excuses nothing"
+        );
+    }
+}
+
+/// The star walker reads the projections these files are written in, and the
+/// alias rather than the first table it sees.
+///
+/// Over literals rather than over the migrations, for the reason the sort key
+/// walker's own test gives: what the test above pins is that the files carry no
+/// frozen view, so the only way to hold the *reading* is to write the shapes out
+/// here. A walker that resolved no star would make that test pass over
+/// anything.
+#[test]
+fn the_star_walker_reads_a_bare_star_a_qualified_one_and_no_star_at_all() {
+    // `003`'s and `006`'s shape: a bare star on the `SELECT` line, over a
+    // collapsed table, with and without a `WHERE`.
+    assert_eq!(
+        starred_object("SELECT *\nFROM recorder.era FINAL\nWHERE continuation = 0;\n").as_deref(),
+        Some("era")
+    );
+    assert_eq!(
+        starred_object("SELECT *\nFROM recorder.book_top FINAL;\n").as_deref(),
+        Some("book_top")
+    );
+
+    // `003`'s other shape: a qualified star on its own line, resolved through
+    // the alias. Both orders are written out, because a walker that took the
+    // first `FROM` would pass the first of them and watch the wrong table in
+    // the second.
+    let left = "SELECT\nd.*,\ne.anchor_ts AS era_anchor_ts\nFROM recorder.datagram AS d\n\
+                ASOF LEFT JOIN recorder.era AS e\nON e.site = d.site;\n";
+    assert_eq!(starred_object(left).as_deref(), Some("datagram"));
+    let right = "SELECT\ne.*,\nd.site\nFROM recorder.datagram AS d\n\
+                 ASOF LEFT JOIN recorder.era AS e\nON e.site = d.site;\n";
+    assert_eq!(starred_object(right).as_deref(), Some("era"));
+
+    // `FINAL` between the table and its alias, which is where a collapse goes.
+    assert_eq!(
+        starred_object("SELECT b.*\nFROM recorder.book_top FINAL AS b;\n").as_deref(),
+        Some("book_top")
+    );
+
+    // A column list is not a star, and neither is a product.
+    assert_eq!(
+        starred_object("SELECT\nobservation,\nfeed\nFROM recorder.book_top;\n"),
+        None
+    );
+    assert_eq!(
+        starred_object("SELECT\nprice_exp * qty_exp AS scaled\nFROM recorder.book_top;\n"),
+        None
+    );
+
+    // And a column change is told from a retention decision, which is the
+    // other half of the reading: a `MODIFY TTL` freezes no view.
+    assert!(changes_a_column_list(
+        "ALTER TABLE recorder.book_top ADD COLUMN IF NOT EXISTS book_key UInt64 AFTER state_key;"
+    ));
+    assert!(!changes_a_column_list(
+        "ALTER TABLE recorder.datagram MODIFY TTL toDateTime(recv_ts) + INTERVAL 2 DAY;"
+    ));
+    assert!(!changes_a_column_list(
+        "ALTER TABLE recorder.book_top MODIFY COLUMN book_key UInt64;"
+    ));
 }
 
 /// This repository is public, so the schema names no venue and no real network.
@@ -2142,6 +3175,7 @@ mod fixtures {
             price_exp: 0,
             qty_exp: 0,
             state_key: 0,
+            book_key: 0,
             from_anchor: 0,
             book_certain: 1,
             uncertain_since: None,
@@ -2441,4 +3475,52 @@ fn the_account_file_creates_the_profile_before_the_user_that_names_it() {
     );
     assert!(user < quota, "the quota names the user in its TO clause");
     assert!(user < grant, "a grant names a user that has to exist");
+}
+
+/// **`009` states the `DELETE` a corrected-adapter re-derivation needs, and
+/// states its order.**
+///
+/// `venue_book_top` is a `ReplacingMergeTree`, and a replace is not a delete: a
+/// second load replaces the rows whose whole key tuple it re-writes and
+/// withdraws nothing it does not contain. A corrected adapter is the derivation
+/// that writes a different set — fewer top changes for a record, or renumbered
+/// ones — and it is the derivation this tier keeps raw bytes *for*, so the file
+/// cannot leave that case to a reader's inference.
+///
+/// `a_corrected_adapter_re_derivation_replaces_the_rows_it_supersedes` in
+/// `container.rs` measures the behaviour against a server. This pins the
+/// instruction, because the behaviour is the database's and the instruction is
+/// the only part of the repair this repository owns: an operator who re-loads a
+/// corrected derivation without it leaves the surplus rows behind, and the
+/// occurrence view numbers them beside the corrected ones with nothing failing.
+///
+/// The order is pinned with it. The statement matches on the object, so run
+/// after the load it removes the corrected rows too — an instruction that
+/// carries an order is one that has to say so where it is read.
+#[test]
+fn the_venue_file_states_the_delete_a_corrected_re_derivation_needs() {
+    let sql = venue_sql();
+
+    // A heading, for the reason the account-file instruction above is one.
+    assert!(
+        sql.contains("A `DELETE` AND THEN A LOAD, IN THAT ORDER"),
+        "the instruction is not a heading, so a reader skimming the header for \
+         what a re-derivation obliges them to do will not see it"
+    );
+    assert!(
+        sql.contains("DELETE FROM recorder.venue_book_top WHERE object_key ="),
+        "the statement an operator has to run is not written out, so the \
+         instruction is a rule without the thing that performs it"
+    );
+    assert!(
+        sql.contains("corrected adapter"),
+        "the case that needs the delete is not named in the words the venue \
+         crate and the object format use for it, so a search does not find it"
+    );
+    // The limit the instruction exists for, stated rather than left as the
+    // reader's own deduction from the engine's name.
+    assert!(
+        sql.contains("A REPLACE IS NOT A DELETE"),
+        "the file does not say why a re-load is not enough on its own"
+    );
 }

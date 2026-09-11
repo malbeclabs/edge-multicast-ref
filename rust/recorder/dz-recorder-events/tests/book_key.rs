@@ -24,10 +24,17 @@
 //! key moves a stored value just as surely as a change to the fold.
 #![forbid(unsafe_code)]
 
+mod common;
+
 use std::net::Ipv4Addr;
 
-use dz_edge_tob::{Quote, QUOTE_ASK_UPDATED, QUOTE_BID_UPDATED};
-use dz_recorder_events::{book_key, state_key, Book, Channel, Side, Top};
+use common::{definition, identity, pack, DatagramLog, Msg, AAA, SOURCE_ID};
+use dz_edge_core::PortRole;
+use dz_edge_tob::{Quote, TopOfBook, MAGIC_TOB, QUOTE_ASK_UPDATED, QUOTE_BID_UPDATED};
+use dz_recorder_events::{
+    book_key, derive_events, state_key, Book, Channel, EventInput, Side, Top,
+};
+use dz_recorder_rows::{BookTop, Derivation};
 
 /// The channel and the instrument the pinned literals were computed under.
 const CHANNEL: u8 = 7;
@@ -378,4 +385,170 @@ fn one_book_seen_beside_the_venue_and_on_the_wire_is_one_book_key() {
         book_key(&stated),
         "and the two readings are still two books"
     );
+}
+
+/// **The row carries the shared fold, and not a second one written beside it.**
+///
+/// The mutant this kills is the plausible one, and it is a two-line change:
+/// `book_row` computes the key itself over `change.top` as the derivation holds
+/// it, rather than calling [`book_key`]. That reads as tidier and it is a
+/// different key — because the shared function normalises its subject first,
+/// reading a zero source count as the absence the top-of-book specification
+/// says it is, and the derivation deliberately keeps the wire's zero so that
+/// `state_key`'s stored value does not move.
+///
+/// A zero source count is the commonest shape there is: a venue that exposes no
+/// number is published as a zero. So a second fold over the raw top would agree
+/// with the shared function on almost nothing, would still produce a stable,
+/// plausible-looking hash for every row, and would pair with the venue side
+/// **never** — a race reading as a quiet feed on both paths, which is the
+/// failure this whole key exists to avoid.
+///
+/// The expectation is therefore stated as the same function over the top *as
+/// either observer states it*, which is the one value that separates the shared
+/// fold from a fold of the row's own columns.
+#[test]
+fn a_derived_row_carries_the_shared_book_key_and_never_a_second_fold() {
+    let rows = derived_book_tops(0, 0);
+    assert_eq!(
+        rows.len(),
+        1,
+        "one quote states one complete top, so one row"
+    );
+    let row = &rows[0];
+
+    // What the row stores, which is the wire's zero: the derivation may not read
+    // it as an absence, because `state_key` is folded over this top and its
+    // value is in rows already.
+    assert_eq!(
+        (row.bid_source_count, row.ask_source_count),
+        (Some(0), Some(0)),
+        "the derivation kept the wire's zero, or this test is about nothing"
+    );
+
+    // And what the key is: the fold over the top as an observer of the venue's
+    // own upstream states it, where that zero is `None`.
+    let as_either_observer_states_it = Top {
+        bid: side(Some(9_950), Some(12), None),
+        ask: side(Some(10_050), Some(7), None),
+    };
+    assert_eq!(
+        row.book_key,
+        book_key(&as_either_observer_states_it),
+        "the row's key is not `dz_recorder_events::book_key`'s"
+    );
+
+    // And the two subjects really are two, or the assertion above holds nothing:
+    // a second fold would be over the top as the *row* spells it, zero and all.
+    // `state_key` is the fold exposed — it hashes the top it is handed and reads
+    // nothing into it — so it is what says the difference survives the hash.
+    let as_the_row_spells_it = Top {
+        bid: side(Some(9_950), Some(12), Some(0)),
+        ask: side(Some(10_050), Some(7), Some(0)),
+    };
+    assert_eq!(
+        row.state_key,
+        state_key(row.channel_id, row.instrument_id, &as_the_row_spells_it),
+        "`state_key` is folded over the top as the row spells it"
+    );
+    assert_ne!(
+        state_key(row.channel_id, row.instrument_id, &as_the_row_spells_it),
+        state_key(
+            row.channel_id,
+            row.instrument_id,
+            &as_either_observer_states_it
+        ),
+        "the fold cannot tell a stated zero from an absence, so this test \
+         could not tell a second fold over the row's own columns from the \
+         shared function either"
+    );
+
+    // Not `state_key` written into the column, which is the other way one row
+    // ends up with two copies of one answer and no answer to the other question.
+    assert_ne!(
+        row.book_key, row.state_key,
+        "the two keys are two values on one row"
+    );
+    assert_ne!(row.book_key, 0, "an unwritten key is a book nobody hashed");
+}
+
+/// One book, on the wire and beside the venue, is one key **through the rows**.
+///
+/// [`one_book_seen_beside_the_venue_and_on_the_wire_is_one_book_key`] asserts it
+/// of the function over a `Top` built by hand. This asserts it of the value a
+/// `book_top` row actually carries, which is the composition of the decode, the
+/// book and the fold — and a change to any of the three moves a stored value
+/// with the fold untouched.
+#[test]
+fn a_derived_row_pairs_with_a_venue_side_reading_of_one_book() {
+    // The venue side holds `None` because its adapter said so; the publisher
+    // side derives `Some(0)` from the wire because the specification states the
+    // field as "0 if unavailable".
+    let venue_side = Top {
+        bid: side(Some(9_950), Some(12), None),
+        ask: side(Some(10_050), Some(7), None),
+    };
+    assert_eq!(
+        derived_book_tops(0, 0)[0].book_key,
+        book_key(&venue_side),
+        "one book observed two ways is two keys, so the race finds no pair"
+    );
+
+    // A count the venue does expose reaches both sides as the same number, and
+    // still separates two books that differ by it.
+    let stated = Top {
+        bid: side(Some(9_950), Some(12), Some(2)),
+        ask: side(Some(10_050), Some(7), Some(3)),
+    };
+    assert_eq!(derived_book_tops(2, 3)[0].book_key, book_key(&stated));
+    assert_ne!(
+        derived_book_tops(0, 0)[0].book_key,
+        derived_book_tops(2, 3)[0].book_key,
+        "and the two readings are still two books"
+    );
+}
+
+/// The `book_top` rows one `Quote` becomes, through the decode and the book.
+///
+/// The real derivation and not a hand-built `Top`: what a row carries is the
+/// composition of the decode, the book and the fold, and only a test that runs
+/// all three holds the value a query will read.
+fn derived_book_tops(bid_source_count: u16, ask_source_count: u16) -> Vec<BookTop> {
+    let quote = Msg::Quote(Quote {
+        instrument_id: AAA,
+        source_id: SOURCE_ID,
+        update_flags: QUOTE_BID_UPDATED | QUOTE_ASK_UPDATED,
+        source_timestamp_ns: 1_000_000_001,
+        bid_price: 9_950,
+        bid_qty: 12,
+        ask_price: 10_050,
+        ask_qty: 7,
+        bid_source_count,
+        ask_source_count,
+    });
+    let mut datagrams = pack::<TopOfBook>(
+        &[Msg::Definition(definition(AAA, "AAA", -2))],
+        PortRole::Refdata,
+        1,
+    );
+    datagrams.extend(pack::<TopOfBook>(&[quote], PortRole::Mktdata, 100));
+
+    let mut log = DatagramLog::new(datagrams);
+    let id = identity();
+    derive_events(
+        &mut log,
+        &EventInput {
+            identity: &id,
+            feed: "feed",
+            object_key: "object",
+            object_sha256: "sha",
+            segment_seq: 3,
+            magic: MAGIC_TOB,
+            observation: "observation",
+            persist_snapshot_levels: false,
+            derivation: Derivation::Archive,
+        },
+    )
+    .expect("the log does not fail")
+    .book_top
 }

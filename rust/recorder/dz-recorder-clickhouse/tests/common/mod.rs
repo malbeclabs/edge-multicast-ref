@@ -233,6 +233,14 @@ pub fn no_wait(_: Duration) {}
 pub const REPEATED: u64 = 7_777_777_777_777_777_777;
 pub const ANOTHER: u64 = 1_234_567_890;
 
+/// The book-only key the same rows carry, which `006`'s pairing never reads and
+/// the cross-observer race in `010` reads instead.
+///
+/// Two values because a fixture where one key is a function of the other cannot
+/// fail the way a row that wrote `state_key` into both columns would.
+pub const REPEATED_BOOK: u64 = 6_111_111_111_111_111_111;
+pub const ANOTHER_BOOK: u64 = 9_876_543_210;
+
 /// One top of book, as an observation point wrote it down.
 ///
 /// The stamps are relative to *now* rather than to [`NOW`], which is the one
@@ -243,7 +251,14 @@ pub const ANOTHER: u64 = 1_234_567_890;
 /// answered `200` and every count below coming back zero. A race is about the
 /// difference between two arrivals, so the instant they are measured from is
 /// free.
-pub fn top(observation: &str, site: &str, base: u64, offset_ms: u64, state_key: u64) -> BookTop {
+pub fn top(
+    observation: &str,
+    site: &str,
+    base: u64,
+    offset_ms: u64,
+    state_key: u64,
+    book_key: u64,
+) -> BookTop {
     BookTop {
         recv_ts: Nanos(base + offset_ms * 1_000_000),
         send_ts: Nanos(base + offset_ms * 1_000_000 - 1_000_000),
@@ -271,6 +286,7 @@ pub fn top(observation: &str, site: &str, base: u64, offset_ms: u64, state_key: 
         price_exp: -2,
         qty_exp: 0,
         state_key,
+        book_key,
         from_anchor: 0,
         book_certain: 1,
         uncertain_since: None,
@@ -313,24 +329,24 @@ pub fn opening(site: &str, base: u64) -> Era {
 pub fn race_fixture(base: u64) -> RowBatch {
     let mut book_top = Vec::new();
     for offset in [10, 30, 50] {
-        book_top.push(top("a", "one", base, offset, REPEATED));
+        book_top.push(top("a", "one", base, offset, REPEATED, REPEATED_BOOK));
         // Two milliseconds behind, every time. The lead is what a race
         // measures, and a fixture where it is constant makes a wrong pairing
         // arithmetically visible rather than merely different.
-        book_top.push(top("b", "two", base, offset + 2, REPEATED));
+        book_top.push(top("b", "two", base, offset + 2, REPEATED, REPEATED_BOOK));
     }
     // The occurrence only one observation point saw.
-    book_top.push(top("a", "one", base, 70, REPEATED));
+    book_top.push(top("a", "one", base, 70, REPEATED, REPEATED_BOOK));
     // A snapshot-derived top, earlier than anything else at `b`. If it took an
     // ordinal it would take the *first* one, shifting every later occurrence at
     // `b` by one — and the unpaired row above would then pair with it and
     // disappear.
-    let mut anchored = top("b", "two", base, 5, REPEATED);
+    let mut anchored = top("b", "two", base, 5, REPEATED, REPEATED_BOOK);
     anchored.from_anchor = 1;
     book_top.push(anchored);
     // A different state, once at each point, so the fixture is not one key.
-    book_top.push(top("a", "one", base, 90, ANOTHER));
-    book_top.push(top("b", "two", base, 93, ANOTHER));
+    book_top.push(top("a", "one", base, 90, ANOTHER, ANOTHER_BOOK));
+    book_top.push(top("b", "two", base, 93, ANOTHER, ANOTHER_BOOK));
 
     RowBatch {
         object_key: "object".to_owned(),
@@ -1258,6 +1274,91 @@ pub fn venue_race_fixture(base: u64) -> Vec<VenueBookTop> {
         6,
     ));
     rows
+}
+
+// ---------------------------------------------------------------------------
+// The two sides of one race, for `010`.
+// ---------------------------------------------------------------------------
+
+/// The feed and the symbol both sides of the race name.
+///
+/// One token each, because that is the assertion: the pairing groups on `feed`
+/// and on the folded symbol, so a fixture whose two sides named either
+/// differently would produce no pair — and a test asserting *no pair* passes
+/// whether or not the column that makes a pair possible was ever written.
+pub const RACED_FEED: &str = "top-of-book";
+pub const RACED_SYMBOL: &str = "AAA";
+
+/// A book state a venue-side and a publisher-side observation point both saw.
+pub const BOTH_OBSERVERS_SAW: u64 = 6_666_666_666_666_666_666;
+/// A book state only the publisher side recorded.
+pub const ONLY_THE_PUBLISHER_SAW: u64 = 8_888_888_888_888_888_888;
+
+/// The venue side of the cross-observer race.
+///
+/// One book, twice, at one observation point. Deliberately not the four-case
+/// fixture above: what is under test here is that the *publisher* side enters
+/// the pairing at all, and a fixture carrying the venue side's own cases would
+/// let an assertion about a pair pass on two venue-side rows.
+pub fn cross_observer_venue_side(base: u64) -> Vec<VenueBookTop> {
+    vec![
+        venue_top("venue-a", RACED_SYMBOL, -2, base, 10, BOTH_OBSERVERS_SAW, 0),
+        venue_top("venue-a", RACED_SYMBOL, -2, base, 30, BOTH_OBSERVERS_SAW, 1),
+    ]
+}
+
+/// The publisher side of the same race, on the feed and symbol the venue names.
+///
+/// Two milliseconds behind the venue side, every time, so a pairing that lined
+/// up the wrong ordinals is arithmetically visible rather than merely different:
+/// the lead would come out twenty-two rather than two.
+///
+/// Three rows that must **not** reach the pairing, each for its own stated
+/// reason, and each one a thing the view would otherwise report as a state the
+/// venue never saw:
+///
+/// - a row written before `010` added the column, which carries a zero — no
+///   book hashes to a column nobody wrote, and there is no honest DEFAULT that
+///   would make one;
+/// - a snapshot-anchored row, which `006` excludes because a snapshot anchors a
+///   book and never times one;
+/// - a row of a state only this side saw, which is not excluded at all and must
+///   survive as a row with one observation and no lead.
+pub fn cross_observer_publisher_side(base: u64) -> RowBatch {
+    let raced = |offset: u64, book_key: u64| BookTop {
+        feed: RACED_FEED.to_owned(),
+        symbol: RACED_SYMBOL.to_owned(),
+        ..top(
+            "site-1/recorder-1",
+            "site-1",
+            base,
+            offset,
+            REPEATED,
+            book_key,
+        )
+    };
+
+    let mut anchored = raced(70, BOTH_OBSERVERS_SAW);
+    anchored.from_anchor = 1;
+
+    RowBatch {
+        object_key: "object".to_owned(),
+        object_sha256: "sha".to_owned(),
+        derivation: Derivation::Archive,
+        book_top: vec![
+            raced(12, BOTH_OBSERVERS_SAW),
+            raced(32, BOTH_OBSERVERS_SAW),
+            // A state the venue side never recorded, which is a row and not an
+            // absence: it usually means the other point missed a state.
+            raced(50, ONLY_THE_PUBLISHER_SAW),
+            // Written before the column existed, and stamped earlier than
+            // either paired row so that a view letting it in reports it as an
+            // occurrence the venue side missed rather than as a late arrival.
+            raced(5, 0),
+            anchored,
+        ],
+        ..RowBatch::default()
+    }
 }
 
 /// The rows as a `JSONEachRow` body.

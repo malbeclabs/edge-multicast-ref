@@ -191,10 +191,44 @@ impl ClickHouseConfig {
     /// The statement rather than the body carries the target table, because the
     /// body is the rows: a `JSONEachRow` insert whose query and body were mixed
     /// in one stream would have to be re-serialised to be retried.
+    ///
+    /// `input_format_skip_unknown_fields=0` IS THE WHOLE OF THE SETTINGS, AND IT
+    /// TURNS THE ONE SILENT LOSS IN A ROLLING DEPLOY INTO A REFUSED BATCH.
+    ///
+    /// The rows name their own fields, so the server matches a column by name —
+    /// and that setting defaults to `1`, which means an insert naming a column
+    /// the table does not have is **accepted** and the field is discarded.
+    /// Measured against the 24.8 the container suite pins: such an insert is
+    /// answered `200`, the row lands, and the column nobody wrote holds the
+    /// type's default. That is the direction of a rolling deploy with no
+    /// symptom. A binary rolled ahead of its migration writes a whole window of
+    /// rows whose new column is unwritten, every acknowledgement is a success,
+    /// and a view that has to exclude that value — which a hash column's does,
+    /// because there is no honest default for a hash — reads every one of those
+    /// rows as a row nobody recorded.
+    ///
+    /// At `0` the same insert is refused, `Code: 117 ... Unknown field found
+    /// while parsing JSONEachRow format: <name>`, as a `400`. A `400` is not
+    /// worth retrying, so it is one `RowSinkError::Rejected` naming every
+    /// object in the batch, those objects stay unloaded, and they load on their
+    /// own once the migration is applied. Loud and reversible rather than silent
+    /// and not.
+    ///
+    /// **It refuses the binary-ahead-of-schema direction and only that one,
+    /// which is what makes it safe to set.** A binary *behind* the schema sends
+    /// no unknown field — it omits a known one — and an omitted field is
+    /// `input_format_defaults_for_omitted_fields`, a different setting this one
+    /// does not touch. Measured too, against the same 24.8: a row omitting a
+    /// column the table has is accepted with this setting at `0` and reads back
+    /// as the type's default, with that other setting at its default `1` and at
+    /// `0` alike. So a rollback still loads, and what this enforces is the
+    /// ordering rule `010`'s header already states — the schema leads — rather
+    /// than a new one.
+    ///
     #[must_use]
     pub fn insert_url(&self, table: &str) -> String {
         format!(
-            "{}/?database={}&query={}",
+            "{}/?database={}&input_format_skip_unknown_fields=0&query={}",
             self.endpoint.trim_end_matches('/'),
             urlencode(self.database.trim()),
             urlencode(&format!(
@@ -513,14 +547,39 @@ mod tests {
     fn an_insert_url_carries_the_statement_and_the_database() {
         let url = valid().insert_url("sequence_gap");
         assert!(
-            url.starts_with("http://127.0.0.1:8123/?database=recorder&query="),
+            url.starts_with("http://127.0.0.1:8123/?database=recorder&"),
             "{url}"
         );
+        // The statement is last and is one parameter, so the settings between
+        // cannot run into it.
+        assert!(url.contains("&query=INSERT%20INTO"), "{url}");
         assert!(
             url.contains("INSERT%20INTO%20recorder.sequence_gap%20FORMAT%20JSONEachRow"),
             "{url}"
         );
         assert!(!url.contains(' '), "a URL with a raw space in it: {url}");
+    }
+
+    /// **A field the table has no column for is refused and never dropped.**
+    ///
+    /// `input_format_skip_unknown_fields` defaults to `1`, so a loader rolled
+    /// ahead of its migration posts rows naming a column the table does not
+    /// have, is answered `200`, and every one of those rows lands with that
+    /// column unwritten — the one direction of a rolling deploy whose symptom
+    /// is silence rather than an error. At `0` the batch is refused with a
+    /// `400` nobody retries, which the container suite asserts against a real
+    /// server.
+    ///
+    /// The value is held and not merely the key: `=1` is the default spelled
+    /// out, and a test that looked for the name alone would pass over it.
+    #[test]
+    fn an_insert_refuses_a_field_the_table_has_no_column_for() {
+        let url = valid().insert_url("book_top");
+        assert!(
+            url.contains("&input_format_skip_unknown_fields=0&"),
+            "an insert that lets the server drop a field the table has no \
+             column for: {url}"
+        );
     }
 
     #[test]

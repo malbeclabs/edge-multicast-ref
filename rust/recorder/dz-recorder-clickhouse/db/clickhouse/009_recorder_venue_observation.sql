@@ -77,22 +77,19 @@
 -- venue half of a pair and leave the publisher half as it is.
 --
 --
--- WHAT THIS FILE DOES NOT YET JOIN, AND WHY IT IS WRITTEN AS THOUGH IT WILL
+-- HOW THE PUBLISHER SIDE ENTERS THE PAIRING, WHICH IS NOT BY BEING NAMED IN IT
 --
--- The publisher side does **not** feed the pairing below yet, and that is a
--- statement about `book_top` rather than about this design. `book_top` stores
--- `state_key` and has no `book_key` column, and the two ways to bridge that are
--- both refused: a new column on `book_top` is what the design this file
--- implements declines to add, and a second fold written in SQL is the second
--- implementation `book_key`'s own comment forbids.
+-- Nothing below names an observation point. The pairing is an aggregate over the
+-- ordinal, exactly as `006`'s is, so two observations are a race, three of them
+-- are the same query, and a side enters by contributing rows rather than by this
+-- view learning its name — which is the one thing `observation` was declared an
+-- opaque string to avoid.
 --
--- What is written instead is the shape that admits the publisher side without
--- changing the answer. Nothing below names an observation point — the pairing is
--- an aggregate over the ordinal, exactly as `006`'s is — so two observations are
--- a race, three of them are the same query, and a publisher-side observation
--- enters it by contributing rows rather than by this view learning its name. The
--- day `book_top` carries a `book_key`, the change here is one branch of a union
--- and not a rewrite.
+-- So the pairing reads `recorder.feed_race_occurrence`, and that view is where a
+-- side is admitted. This file declares it with the venue branch alone, because
+-- the publisher side needs a `book_key` on `book_top` and this file does not add
+-- columns to that table. `010` adds the column and the second branch, which is
+-- one branch of a union and not a rewrite of anything here.
 --
 --
 -- THE ARGUMENTS THIS FILE CITES RATHER THAN RESTATES
@@ -249,7 +246,11 @@
 -- reader reaching for the opposite conclusion has to check. A re-derivation
 -- reads *the same object* — `(object key, sha256)` is the pair it replaces on —
 -- so the key it produces is the same key, this column included, and the second
--- load still replaces the first.
+-- load still replaces the first **where it writes the same row**. What no key
+-- makes it do is remove a row it no longer writes at all, which is a limit of
+-- the engine rather than of this column: see the corrected-adapter section
+-- below, which is where it is stated and where an operator is told what to do
+-- about it.
 --
 -- WHAT IT DOES COST IS A WIDER RE-CUT EXPOSURE, AND THAT IS THE SECOND CLAIM.
 -- An object **re-cut** is the same records read out of an archive whose window
@@ -284,6 +285,54 @@
 -- replace the rows of the object that was. `venue_object` keeps both, because it
 -- is the ledger of what was read; this table holds the book, and two books for
 -- one window is the duplicate that manufactures evidence of loss.
+--
+-- A REPLACE IS NOT A DELETE, AND THAT IS WHERE THE PARAGRAPH ABOVE STOPS BEING
+-- TRUE. `ReplacingMergeTree` replaces a row only where the whole `ORDER BY`
+-- tuple matches, and it removes nothing a later insert does not contain. So the
+-- rows of the object that is there now replace the rows of the object that was
+-- change for change only while both derivations write the same
+-- `(message_index, change_index)` set. Neither this key nor any other makes a
+-- second load withdraw a row the first load wrote and the second does not.
+--
+-- THE DERIVATION THAT WRITES A DIFFERENT SET IS THE ONE THIS TIER EXISTS FOR.
+-- `dz-recorder-venue` and the upstream object format both say why the bytes are
+-- kept verbatim: so that a finding can be re-examined next month with a
+-- corrected adapter. An adapter correction is exactly what changes the set — it
+-- emits *fewer* top changes for a record, because a level update was never a
+-- move of the top or a malformed member should have been refused and counted
+-- rather than folded, or it renumbers them. Every surplus row of the superseded
+-- derivation then stays in this table under a key the corrected one never
+-- writes. Nothing collapses them and nothing fails: the occurrence view numbers
+-- them beside the corrected rows, so `observations`, `lead_ms` and the ordinals
+-- are computed partly from evidence the corrected adapter withdrew. The
+-- re-derivation that was meant to repair a finding manufactures one instead,
+-- and it does it to the oldest rows in the deployment.
+--
+-- SO A CORRECTED-ADAPTER RE-DERIVATION IS TWO STATEMENTS AND NOT ONE:
+-- A `DELETE` AND THEN A LOAD, IN THAT ORDER. The order is the whole of the
+-- instruction: the statement matches on the object, so run second it removes
+-- the corrected rows it was supposed to make room for.
+--
+--     DELETE FROM recorder.venue_book_top WHERE object_key = '<the object>';
+--     -- and then load the corrected derivation of that object
+--
+-- Measured on the 24.8 the suite pins rather than assumed: the lightweight
+-- `DELETE` applies to this engine, and
+-- `a_corrected_adapter_re_derivation_replaces_the_rows_it_supersedes` in
+-- `tests/container.rs` performs both halves against a server — the surplus row
+-- left by the load on its own, and the corrected set the documented order
+-- leaves. `venue_object` needs no such statement: it is keyed on
+-- `(object_key, object_sha256)`, and a corrected adapter reading the same bytes
+-- writes the same pair, so its row replaces. This table is the one that holds a
+-- row per change, and a change is the thing a correction can take away.
+--
+-- NOT A VERSION COLUMN AND NOT A TOMBSTONE, though either would work. Both need
+-- something an adapter can state, and an adapter does not know it has been
+-- corrected: a `ReplacingMergeTree(version)` would have to be handed a version
+-- that rises with a code change, and `is_deleted` needs a row written for a
+-- change that no longer exists to say so. The `DELETE` is a statement an
+-- operator runs at the one moment the fact is actually known, which is when
+-- they decide that this derivation supersedes that one.
 --
 -- THE OBJECT GOES BEFORE THE RECORD INDEX, in the order the occurrence view's
 -- window already reads them: the object is what separates two records across a
@@ -630,7 +679,55 @@ SELECT
 FROM recorder.venue_book_top_settled;
 
 
--- 5. The race.
+-- 5. The occurrences the race reads, from every observation of a book.
+--
+-- One branch here, and the seam the pairing above is written against. A side
+-- enters the race by contributing rows to this view, so the pairing never learns
+-- a name and stays the same query for two observation points or ten.
+--
+-- The venue branch is the one this file can declare. The publisher branch needs
+-- `book_key` on `book_top`, which `010` adds along with the branch itself: the
+-- columns below are exactly what both sides hold, so that union's two halves
+-- line up by position and by type.
+--
+-- SO THIS FILE IS NEVER APPLIED ON ITS OWN AFTER `010`. `010` declares this
+-- same view with both branches, and the files are applied in order as a set —
+-- re-applying this one by itself would replace the two-sided seam with the
+-- venue branch alone, leaving a race that pairs the venue against itself and a
+-- `feed_race` whose `observed_by` silently stops naming a publisher
+-- observation point. `010` states the converse, which is a deployment that
+-- applied this file and skipped that one; this is the same hazard reached from
+-- the other end, and neither is a reason for the view to have two names.
+--
+-- `env` IS CARRIED AND IS NOT GROUPED ON, the way it is a label on every table
+-- in `005` and in none of their keys: one database holds one environment, and a
+-- reader filtering by it wants the column rather than a key that restates it.
+CREATE OR REPLACE VIEW recorder.feed_race_occurrence AS
+SELECT
+    observation,
+    env,
+    feed,
+    symbol,
+    symbol_key,
+    book_key,
+    recv_ts,
+    price_exp,
+    qty_exp,
+    occurrence
+FROM recorder.venue_book_top_occurrence;
+
+
+-- 6. The race.
+--
+-- NAMED FOR THE RACE AND NOT FOR A SIDE, the way the seam above is. Nothing
+-- below names an observation point, so this is one query whether one side
+-- contributes rows or both — and a name carrying `venue` would be read as the
+-- venue's own recordings raced against each other, which is what it would
+-- aggregate on a deployment where nothing else contributes and is not what it
+-- means. `010` adds the publisher branch to the seam, and on a deployment that
+-- has it a row here may be either side's: `observations = 1` is as likely
+-- publisher-only as venue-only, and `observed_by` names publisher observation
+-- points as readily as venue ones.
 --
 -- An aggregate over the ordinal and **not** a join between two named observation
 -- points, which is what keeps an unpaired occurrence visible and what keeps this
@@ -665,7 +762,7 @@ FROM recorder.venue_book_top_settled;
 -- sent is the publisher's fault: that stays the loss derivation's question and
 -- `007`'s. A venue-side observation adds one more thing that can be missing, not
 -- an answer about whose fault it is.
-CREATE OR REPLACE VIEW recorder.venue_book_top_race AS
+CREATE OR REPLACE VIEW recorder.feed_race AS
 SELECT
     feed,
     symbol_key,
@@ -683,5 +780,5 @@ SELECT
     arraySort(groupUniqArray(symbol))      AS symbols,
     (uniqExact(symbol) = 1)                AS symbols_agree,
     (uniqExact(price_exp) = 1) AND (uniqExact(qty_exp) = 1) AS exponents_agree
-FROM recorder.venue_book_top_occurrence
+FROM recorder.feed_race_occurrence
 GROUP BY feed, symbol_key, book_key, occurrence;

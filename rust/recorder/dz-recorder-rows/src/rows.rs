@@ -805,9 +805,63 @@ pub struct BookTop {
     /// the same datagrams. An observer that has neither — one watching a
     /// venue's own upstream, where the channel is the operator's mapping and
     /// the `Instrument ID` is minted by the publisher's registry — cannot
-    /// compute this value at all, and joins on `dz_recorder_events::book_key`
-    /// instead, which is the two sides alone.
+    /// compute this value at all. It joins on [`Self::book_key`] beside this
+    /// column instead, which is the two sides alone and which this row carries
+    /// too, so that join has a right-hand side.
     pub state_key: u64,
+    /// The equivalence key **for two observers of one market**: a hash over the
+    /// two sides of this top and over nothing else.
+    ///
+    /// `dz_recorder_events::book_key` computes it, here and on the venue side of
+    /// the race, from that one function and never from a second implementation
+    /// in SQL or anywhere else — two hashes of one book state pair with nothing,
+    /// and the predicate that decides whether a side is absent is private in
+    /// that crate for exactly that reason.
+    ///
+    /// **Neither nullable nor provenance.** It says nothing about where the row
+    /// came from. It is a second hash of data the row already carries — the two
+    /// sides above — so every row can state it and no row is weakened to
+    /// accommodate a row of another kind.
+    ///
+    /// Zero on a row written before the column existed, which is the cost the
+    /// migration argues at length: there is no honest value for a book nobody
+    /// hashed, and no DEFAULT that would be one. The **publisher branch** of
+    /// the cross-observer race therefore excludes zero before it numbers
+    /// anything, and `010` states why — and why the venue branch, whose table
+    /// declares the column from its first `CREATE TABLE`, does not.
+    ///
+    /// **And a binary that writes this column against a table the migration has
+    /// not reached is refused rather than quietly emptied.** The sink posts
+    /// `FORMAT JSONEachRow` and the rows name their fields, so a column is
+    /// matched by name at the server and `input_format_skip_unknown_fields`
+    /// defaults to 1 — at which a `book_top` the `ALTER` has not reached takes
+    /// the insert, discards this field and acknowledges the batch, and every
+    /// row that binary wrote is excluded from the race, which then reads as a
+    /// venue-only race with no error anywhere. `ClickHouseConfig::insert_url`
+    /// carries that setting at 0 for exactly this reason: the server answers
+    /// the unknown field with a 400 nobody retries, the refusal names the
+    /// objects, and they stay unloaded until the migration is applied. The
+    /// schema is applied before the binary is rolled all the same — stated in
+    /// `010`'s header and in the feed runbook beside the rule for rolling
+    /// subscribers before publishers — because a load that stops is a feed with
+    /// a hole in it until somebody applies the file.
+    ///
+    /// `serde(default)` FOR THE SPOOL AND NOT FOR THE COLUMN STORE, which is
+    /// the same reading `010` gives a row the `ALTER` found already there. The
+    /// inline spool writes this grain as JSON and replays it after a restart, so
+    /// a window held over an outage is read back by whichever binary comes up
+    /// next — and a window written before this column existed has every other
+    /// field and not this one. Without a default that line fails to parse, and a
+    /// grain file that will not parse does not wait to be retried: the window is
+    /// discarded and deleted, so rows an operator kept across an outage are lost
+    /// and the feed reads as clean over exactly the window they covered.
+    ///
+    /// It defaults on the way **in** and never on the way out. Serialisation is
+    /// untouched, so every row this binary writes states the key and the insert
+    /// carries the column; the default is only ever reached by a file an older
+    /// binary wrote.
+    #[serde(default)]
+    pub book_key: u64,
     /// 1 when this top came from applying a snapshot rather than from a
     /// message the market produced.
     ///

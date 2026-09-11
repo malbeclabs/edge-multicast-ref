@@ -770,11 +770,31 @@ infrastructure repositories, and each of those owns its own review.
    rather than misreading it, so the symptom of the wrong order is **silence,
    not errors** — and silence is what a healthy feed also looks like from the
    publisher's side.
-6. **Canary one publisher, then walk the rest.** Restarting an era is visible to
+6. **Apply the schema before rolling a recorder that writes a new column.**
+   The loader posts `FORMAT JSONEachRow` with the field names, and ClickHouse's
+   `input_format_skip_unknown_fields` defaults to `1`: at that default an insert
+   naming a column the table does not have is **accepted**, and the field is
+   dropped. A binary rolled ahead of its migration would load rows whose new
+   column holds a value nobody wrote, and a view that excludes that value —
+   which is what a view over a hash column has to do, since there is no honest
+   default for a hash — would read every one of those rows as a row nobody
+   recorded. The loader therefore posts every insert with that setting at `0`,
+   so the wrong order is a **refused batch and a loud error** naming the field
+   and the objects, rather than the silence the rule above warns about. The
+   objects stay unloaded and load by themselves once the migration is applied,
+   which is why the rule is still the rule: a load that stops is a feed with a
+   hole in it until somebody applies the file. Rolling a recorder *back* is
+   unaffected — an older binary omits a field rather than sending an unknown
+   one, which is a different setting the loader does not touch. The recorder's
+   migrations are in
+   [`rust/recorder/dz-recorder-clickhouse/db/clickhouse`](rust/recorder/dz-recorder-clickhouse/db/clickhouse/),
+   numbered and applied in order, and each says what it costs a deployment that
+   applies it late.
+7. **Canary one publisher, then walk the rest.** Restarting an era is visible to
    every subscriber of that feed: a `Reset Count` change is a reset, and a
    subscriber is expected to drop its book and re-bootstrap. Doing that to a
    whole fleet at once is a decision, not a side effect of a deploy.
-7. **Scrape the metrics before you need them.** The normative `dz_publisher_*`
+8. **Scrape the metrics before you need them.** The normative `dz_publisher_*`
    and `dz_recorder_*` sets are in
    [`rust/publisher/dz-publisher-metrics`](rust/publisher/dz-publisher-metrics/).
    The one series to alert on first is the connection-state gauge sitting at

@@ -806,13 +806,37 @@ pub fn publish(
 ) -> Result<PublishedUpstreamObject, SinkError> {
     fs::create_dir_all(completed_dir).map_err(SinkError::Io)?;
     let names = Names::of(&draft, completed_dir, compression);
-    match assemble(source, completed_dir, draft, compression, &names) {
+    // What the failure path is allowed to remove under the *final* manifest
+    // name, which is the one name a previous publication can also be holding.
+    let mut installed = Installed::default();
+    match assemble(
+        source,
+        completed_dir,
+        draft,
+        compression,
+        &names,
+        &mut installed,
+    ) {
         Ok(published) => Ok(published),
         Err(e) => {
-            clean_up(completed_dir, &names);
+            clean_up(completed_dir, &names, &installed);
             Err(e)
         }
     }
+}
+
+/// What one publication attempt has put under a name that outlives it.
+///
+/// Only the final manifest needs recording. The temporaries are this attempt's
+/// by construction — their names carry a leading dot and are rebuilt from the
+/// same draft — so no other publication can be holding them, and removing them
+/// is unconditional. The final manifest is the one name a *previous*
+/// publication of the same window can already be holding, and
+/// [`clean_up`] says what that costs.
+#[derive(Default)]
+struct Installed {
+    /// Set the moment the manifest rename returns, and never otherwise.
+    manifest: bool,
 }
 
 /// Every name one publication touches, built once so the failure path can reach
@@ -860,6 +884,7 @@ fn assemble(
     draft: UpstreamManifest,
     compression: Compression,
     names: &Names,
+    installed: &mut Installed,
 ) -> Result<PublishedUpstreamObject, SinkError> {
     let (byte_count, sha256) = seal(source, &names.object_tmp, compression)?;
 
@@ -886,6 +911,9 @@ fn assemble(
         completed_dir.join(&names.manifest_name),
     )
     .map_err(SinkError::Io)?;
+    // From here the final manifest is this attempt's, so the failure path may
+    // remove it. Before this line it belongs to whatever was already there.
+    installed.manifest = true;
     let path = completed_dir.join(&names.file_name);
     fs::rename(&names.object_tmp, &path).map_err(SinkError::Io)?;
 
@@ -907,12 +935,36 @@ fn assemble(
 /// *removes* the segment and its failure path is the only place the window
 /// survives. This path never removes the segment at all — [`publish`] states as
 /// much — so there is nothing to retain and no second name to give it.
-fn clean_up(completed_dir: &Path, names: &Names) {
+///
+/// # It removes only what this attempt created
+///
+/// THE FINAL MANIFEST IS REMOVED ONLY WHEN THIS ATTEMPT INSTALLED IT, and that
+/// condition is the whole of [`Installed`]. A publication's name is
+/// `(start_ns, end_ns, segment_seq, compression)` and nothing else, so a second
+/// publication of the same window — a retry after a transient failure, the
+/// thing this crate's own idempotent reprocessing is built around — computes
+/// the *same* final manifest name as the publication that already succeeded.
+///
+/// Unconditionally removing that name meant a retry that failed anywhere before
+/// its own manifest rename deleted the manifest of the publication that had
+/// landed, while leaving that publication's object in place. What is left is a
+/// full-size object with no manifest: to a reader the window never happened,
+/// and the bytes are unreachable and unaccounted, which is the same leak this
+/// function exists to prevent reached from the other direction. The failure was
+/// transient and the loss was not.
+///
+/// The temporaries need no such condition: their names carry a leading dot and
+/// are this attempt's by construction, so removing them is unconditional.
+fn clean_up(completed_dir: &Path, names: &Names, installed: &Installed) {
     let _ = fs::remove_file(&names.object_tmp);
     let _ = fs::remove_file(&names.manifest_tmp);
     // A manifest lands before its object, so one that survives a failed object
-    // move is a row pointing at nothing.
-    let _ = fs::remove_file(completed_dir.join(&names.manifest_name));
+    // move is a row pointing at nothing — but only this attempt's. One a
+    // previous publication installed is that publication's metadata, and its
+    // object is still beside it.
+    if installed.manifest {
+        let _ = fs::remove_file(completed_dir.join(&names.manifest_name));
+    }
 }
 
 /// Fills `buf` or says how much was there, without treating a short read as an

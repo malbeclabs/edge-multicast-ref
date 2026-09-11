@@ -15,20 +15,21 @@
 mod common;
 
 use common::{
-    batch, batch_on_role, cross_site_fixture, json_each_row, just_after_midnight_ns, midday_ns,
-    now_ns, race_fixture, venue_batched_record, venue_race_fixture, venue_rotation_boundary,
-    venue_rotation_collision, venue_top, ABSENT_BUT_A_SITE_OVERFLOWED, ABSENT_EVERYWHERE,
-    A_SITE_IS_UP_AND_SILENT, A_SITE_REUSED_THE_SEQUENCE, MISSING_FROM, MISSING_TO,
-    NOBODY_ELSE_HAS_LOADED, ONLY_A_CO_LOCATED_RECORDER, OUR_OWN_SCOPE_CANNOT_SUBTRACT,
-    PRESENT_AT_ANOTHER_SITE, REPEATED, VENUE_ACROSS_A_ROTATION, VENUE_BATCH_FIRST,
-    VENUE_BATCH_FIRST_SEQ, VENUE_BATCH_REPEATED, VENUE_BATCH_SECOND, VENUE_BATCH_SECOND_SEQ,
-    VENUE_EXPONENTS_DISAGREE, VENUE_INSIDE_ONE_ROTATION_TICK, VENUE_ONLY_ONE_SAW, VENUE_REPEATED,
-    VENUE_SYMBOLS_DISAGREE,
+    batch, batch_on_role, cross_observer_publisher_side, cross_observer_venue_side,
+    cross_site_fixture, json_each_row, just_after_midnight_ns, midday_ns, now_ns, race_fixture,
+    venue_batched_record, venue_race_fixture, venue_rotation_boundary, venue_rotation_collision,
+    venue_top, ABSENT_BUT_A_SITE_OVERFLOWED, ABSENT_EVERYWHERE, A_SITE_IS_UP_AND_SILENT,
+    A_SITE_REUSED_THE_SEQUENCE, BOTH_OBSERVERS_SAW, MISSING_FROM, MISSING_TO,
+    NOBODY_ELSE_HAS_LOADED, ONLY_A_CO_LOCATED_RECORDER, ONLY_THE_PUBLISHER_SAW,
+    OUR_OWN_SCOPE_CANNOT_SUBTRACT, PRESENT_AT_ANOTHER_SITE, REPEATED, VENUE_ACROSS_A_ROTATION,
+    VENUE_BATCH_FIRST, VENUE_BATCH_FIRST_SEQ, VENUE_BATCH_REPEATED, VENUE_BATCH_SECOND,
+    VENUE_BATCH_SECOND_SEQ, VENUE_EXPONENTS_DISAGREE, VENUE_INSIDE_ONE_ROTATION_TICK,
+    VENUE_ONLY_ONE_SAW, VENUE_REPEATED, VENUE_SYMBOLS_DISAGREE,
 };
 use dz_edge_core::PortRole;
 use dz_recorder_clickhouse::{migrations, schema, ClickHouseConfig, ClickHouseSink};
 use dz_recorder_replay::Fault;
-use dz_recorder_rows::{Grain, Nanos, RowSink};
+use dz_recorder_rows::{Grain, Nanos, RowSink, RowSinkError};
 use dz_recorder_venue::{RefusalCount, VenueBookTop, VenueObjectRow};
 
 /// One instant for every sink call in this file.
@@ -42,6 +43,8 @@ const URL_ENV: &str = "DZ_LOADER_CLICKHOUSE_URL";
 const DEFAULT_URL: &str = "http://127.0.0.1:8123";
 /// Applied by the one test that is about retention. See [`Scratch::open`].
 const RETENTION: &str = "002_recorder_retention.sql";
+/// Applied a second time by the one test that is about the upgrade path.
+const BOOK_KEY: &str = "010_recorder_book_key.sql";
 
 /// A database of this test's own, so a run cannot disturb a live one.
 struct Scratch {
@@ -1242,7 +1245,7 @@ fn a_venue_state_that_repeats_pairs_one_to_one() {
     assert_eq!(
         scratch.scalar(&format!(
             "SELECT groupArray(observations) FROM (SELECT observations FROM \
-             {}.venue_book_top_race WHERE book_key = {VENUE_REPEATED} ORDER BY occurrence)",
+             {}.feed_race WHERE book_key = {VENUE_REPEATED} ORDER BY occurrence)",
             scratch.database
         )),
         "[2,2,2,1]",
@@ -1254,7 +1257,7 @@ fn a_venue_state_that_repeats_pairs_one_to_one() {
     // be multiples of twenty.
     assert_eq!(
         scratch.scalar(&format!(
-            "SELECT groupUniqArray(round(lead_ms, 3)) FROM {}.venue_book_top_race \
+            "SELECT groupUniqArray(round(lead_ms, 3)) FROM {}.feed_race \
              WHERE book_key = {VENUE_REPEATED} AND observations = 2",
             scratch.database
         )),
@@ -1268,7 +1271,7 @@ fn a_venue_state_that_repeats_pairs_one_to_one() {
     assert_eq!(
         scratch.scalar(&format!(
             "SELECT concat(toString(count()), ' ', arrayStringConcat(any(observed_by), ',')) \
-             FROM {}.venue_book_top_race WHERE book_key = {VENUE_REPEATED} \
+             FROM {}.feed_race WHERE book_key = {VENUE_REPEATED} \
              AND observations = 1 AND isNull(lead_ms)",
             scratch.database
         )),
@@ -1282,7 +1285,7 @@ fn a_venue_state_that_repeats_pairs_one_to_one() {
     assert_eq!(
         scratch.scalar(&format!(
             "SELECT concat(toString(observations), ' ', toString(isNull(lead_ms))) FROM \
-             {}.venue_book_top_race WHERE book_key = {VENUE_ONLY_ONE_SAW}",
+             {}.feed_race WHERE book_key = {VENUE_ONLY_ONE_SAW}",
             scratch.database
         )),
         "1 1",
@@ -1295,7 +1298,7 @@ fn a_venue_state_that_repeats_pairs_one_to_one() {
     assert_eq!(
         scratch.scalar(&format!(
             "SELECT concat(toString(observations), ' ', toString(exponents_agree), ' ', \
-             toString(symbols_agree)) FROM {}.venue_book_top_race \
+             toString(symbols_agree)) FROM {}.feed_race \
              WHERE book_key = {VENUE_EXPONENTS_DISAGREE}",
             scratch.database
         )),
@@ -1309,7 +1312,7 @@ fn a_venue_state_that_repeats_pairs_one_to_one() {
     assert_eq!(
         scratch.scalar(&format!(
             "SELECT concat(toString(observations), ' ', toString(symbols_agree), ' ', \
-             arrayStringConcat(symbols, ',')) FROM {}.venue_book_top_race \
+             arrayStringConcat(symbols, ',')) FROM {}.feed_race \
              WHERE book_key = {VENUE_SYMBOLS_DISAGREE}",
             scratch.database
         )),
@@ -1372,7 +1375,7 @@ fn a_batched_payloads_top_changes_all_survive_the_merge() {
     assert_eq!(
         scratch.scalar(&format!(
             "SELECT groupArray(occurrence) FROM (SELECT occurrence FROM \
-             {}.venue_book_top_race WHERE book_key IN ({VENUE_BATCH_FIRST}, \
+             {}.feed_race WHERE book_key IN ({VENUE_BATCH_FIRST}, \
              {VENUE_BATCH_SECOND}) ORDER BY book_key)",
             scratch.database
         )),
@@ -1560,7 +1563,7 @@ fn the_race_does_not_depend_on_which_object_a_point_numbered_first() {
 
     let raced = format!(
         "SELECT groupArray((occurrence, observations, lead_ms)) FROM (SELECT \
-         occurrence, observations, lead_ms FROM {}.venue_book_top_race \
+         occurrence, observations, lead_ms FROM {}.feed_race \
          WHERE book_key = {VENUE_INSIDE_ONE_ROTATION_TICK} ORDER BY occurrence)",
         scratch.database
     );
@@ -1616,7 +1619,7 @@ fn the_occurrence_ordinal_does_not_depend_on_how_the_rows_arrived() {
     assert_eq!(
         scratch.scalar(&format!(
             "SELECT groupArray(observations) FROM (SELECT observations FROM \
-             {}.venue_book_top_race WHERE book_key = {VENUE_BATCH_REPEATED} \
+             {}.feed_race WHERE book_key = {VENUE_BATCH_REPEATED} \
              ORDER BY occurrence)",
             scratch.database
         )),
@@ -1646,7 +1649,7 @@ fn a_venue_re_derivation_before_the_merge_does_not_invent_occurrences() {
     assert_eq!(
         scratch.scalar(&format!(
             "SELECT groupArray(observations) FROM (SELECT observations FROM \
-             {}.venue_book_top_race WHERE book_key = {VENUE_REPEATED} ORDER BY occurrence)",
+             {}.feed_race WHERE book_key = {VENUE_REPEATED} ORDER BY occurrence)",
             scratch.database
         )),
         "[2,2,2,1]",
@@ -1757,5 +1760,491 @@ fn the_checked_in_venue_ddl_accepts_what_the_derivation_produces() {
         scratch.count("venue_book_top"),
         written,
         "a re-derivation of the book rows accumulated rather than replacing"
+    );
+}
+
+/// **A venue-side and a publisher-side observation of one book state pair.**
+///
+/// The assertion the whole column exists for, and the one nothing before `010`
+/// could make: `book_top` stored `state_key` only, and `state_key` folds the
+/// `Channel ID` and the `Instrument ID` into the accumulator before it folds a
+/// price — so the chain is one-way and the publisher side had nothing a venue
+/// side could join on. The race in `009` therefore paired venue-side rows
+/// against each other, which is a race between two recordings of one upstream
+/// and not a feed race at all.
+///
+/// The mutant this kills is the column not being written: with `book_key`
+/// absent from the publisher-side rows every one of them reads as zero, the
+/// exclusion drops them, and this pairing comes back with one observation
+/// instead of two — the venue's own, on its own. It also kills the union going
+/// missing, which is the same result by another route.
+#[test]
+fn a_venue_side_and_a_publisher_side_observation_of_one_book_pair() {
+    let mut scratch = Scratch::open("cross_observer_race");
+    let base = now_ns();
+
+    let venue = cross_observer_venue_side(base);
+    scratch.insert_venue_book_tops(&venue);
+    let publisher = cross_observer_publisher_side(base);
+    let tops = publisher.rows(Grain::BookTop) as u64;
+    scratch
+        .sink
+        .write_batch(publisher, NOW)
+        .expect("the publisher side loads");
+    assert_eq!(
+        scratch.count("book_top"),
+        tops,
+        "every fixture row is in the table, or nothing below is about the view"
+    );
+
+    // Two occurrences of the shared state, each seen by both sides. Not one,
+    // which is what an unwritten column or a missing union branch would give,
+    // and not four, which is what a `book_key` of zero letting every row into
+    // one equivalence class would.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT groupArray(observations) FROM (SELECT observations FROM \
+             {}.feed_race WHERE book_key = {BOTH_OBSERVERS_SAW} \
+             ORDER BY occurrence)",
+            scratch.database
+        )),
+        "[2,2]",
+        "one book state at two observation points is not a pair"
+    );
+
+    // And they are the two *kinds* of observation point, named. This is the
+    // assertion that cannot pass on two venue-side rows: a race that had paired
+    // the venue's own recordings would name one of them twice or neither.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT arrayStringConcat(any(observed_by), ',') FROM \
+             {}.feed_race WHERE book_key = {BOTH_OBSERVERS_SAW} \
+             AND occurrence = 1",
+            scratch.database
+        )),
+        "site-1/recorder-1,venue-a",
+        "the pair is not one venue-side point and one publisher-side point"
+    );
+
+    // The lead is the two milliseconds the fixture stated, so the ordinals
+    // lined up. A pairing that matched the wrong occurrences would produce
+    // twenty-two, which is a plausible number and a wrong one.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT groupUniqArray(round(lead_ms, 3)) FROM {}.feed_race \
+             WHERE book_key = {BOTH_OBSERVERS_SAW}",
+            scratch.database
+        )),
+        "[2]",
+        "the lead is not the one the fixture stated"
+    );
+
+    // The venue side led, every time. `first_observation` is what says which,
+    // and it is the reading a feed race exists to produce.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT groupUniqArray(first_observation) FROM {}.feed_race \
+             WHERE book_key = {BOTH_OBSERVERS_SAW}",
+            scratch.database
+        )),
+        "['venue-a']",
+        "the race does not say which side saw the state first"
+    );
+
+    // A state only the publisher side recorded is a row and not an absence.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT concat(toString(observations), ' ', toString(isNull(lead_ms)), ' ', \
+             arrayStringConcat(observed_by, ',')) FROM {}.feed_race \
+             WHERE book_key = {ONLY_THE_PUBLISHER_SAW}",
+            scratch.database
+        )),
+        "1 1 site-1/recorder-1",
+        "a state one side saw is a row with one observation and no lead"
+    );
+
+    // The row written before this column existed does not enter the race. Its
+    // key is a zero and no book hashes to a column nobody wrote, so the
+    // publisher branch excludes it rather than reporting it as a state the
+    // venue never saw — which is the whole of the forward-only cost.
+    //
+    // Asserted on the branch that filters and not on `feed_race`, because the
+    // venue branch carries no such filter and needs none: `009` declares
+    // `venue_book_top` with `book_key` in its first `CREATE TABLE`, so a zero
+    // there is a fold that came out zero rather than a column nobody wrote. A
+    // count of zero over the union would be a true answer for the wrong reason
+    // — this fixture's venue side has no zero-key row — and it would keep
+    // coming back zero if the filter left this branch.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT count() FROM {}.publisher_book_top_occurrence WHERE book_key = 0",
+            scratch.database
+        )),
+        "0",
+        "a row from before the column exists is racing"
+    );
+
+    // And the snapshot-anchored row consumed no ordinal, for `006`'s reason: a
+    // snapshot anchors a book and never times one. It is the third occurrence
+    // of the shared state at the publisher side, so had it entered, the pairing
+    // above would carry a third row with one observation.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT max(occurrence) FROM {}.publisher_book_top_occurrence \
+             WHERE book_key = {BOTH_OBSERVERS_SAW}",
+            scratch.database
+        )),
+        "2",
+        "three rows at this point, one of them an anchor, and two ordinals"
+    );
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT count() FROM {}.publisher_book_top_occurrence",
+            scratch.database
+        )),
+        "3",
+        "the anchored row and the unwritten key are excluded, and nothing else"
+    );
+}
+
+/// **A loader rolled ahead of its migration is refused, and does not load a
+/// window of rows whose new column nobody wrote.**
+///
+/// The direction `010`'s header calls the worse one, closed. A `book_top` that
+/// `010`'s `ALTER` has not reached is this table with the column dropped, and
+/// the sink posts `FORMAT JSONEachRow` with the field names — so with
+/// `input_format_skip_unknown_fields` at its default `1` the server answers
+/// `200`, discards the field, and every row of that window lands with
+/// `book_key = 0` for the race to exclude. Nothing fails, nothing is metered,
+/// and a new observation point reads as one nobody configured.
+///
+/// `insert_url` sets that setting to `0`, and this is the assertion that the
+/// server then refuses the batch. Against a real server because that is the
+/// only thing that can establish it: what the setting does to a `JSONEachRow`
+/// insert is the server's behaviour and not the loader's, and a literal-based
+/// test could only hold the URL.
+///
+/// The mutant this kills is the setting dropped from `insert_url`: without it
+/// the write below succeeds, the rows are in the table, and nothing anywhere
+/// says a column went missing.
+#[test]
+fn a_row_naming_a_column_the_schema_has_not_reached_is_refused() {
+    let mut scratch = Scratch::open("insert_unknown_field");
+    // The table as an upgraded deployment holds it while the `ALTER` is still
+    // pending: `005`'s columns, and no `book_key`. Dropped rather than left out,
+    // because `Scratch::open` applies the whole set and a fresh deployment has
+    // the column from `005`.
+    scratch.scalar(&format!(
+        "ALTER TABLE {}.book_top DROP COLUMN book_key",
+        scratch.database
+    ));
+
+    let error = scratch
+        .sink
+        .write_batch(cross_observer_publisher_side(now_ns()), NOW)
+        .expect_err("a row naming a column the table does not have is not a load");
+    let RowSinkError::Rejected { last, .. } = &error else {
+        panic!("a refused insert is a rejection and not {error:?}");
+    };
+    // The server's own words, so a failure here names the field rather than a
+    // status code. `Code: 117` is `INCORRECT_DATA`.
+    assert!(
+        last.contains("Unknown field") && last.contains("book_key"),
+        "the refusal does not name the field the schema has not reached: {last}"
+    );
+    assert_eq!(
+        scratch.count("book_top"),
+        0,
+        "a refused batch left rows behind, so the loss is silent after all"
+    );
+}
+
+/// **A loader behind its schema still loads**, which is the direction the
+/// setting above must not reach.
+///
+/// A rollback is the reason this is asserted rather than reasoned about. A
+/// binary older than the schema sends no unknown field — it omits a known one —
+/// and an omitted field is `input_format_defaults_for_omitted_fields`, a
+/// different setting that `insert_url` does not touch. So the row is accepted
+/// and the column reads as the type's default, which is the zero the
+/// cross-observer race excludes and exactly what `010` says a row written
+/// before the column existed reads as.
+///
+/// Posted as a body rather than through the sink, because there is no way to
+/// ask this crate's row types to omit a field they all state: what is under test
+/// is the server's reading of a body an older binary would have produced. The
+/// setting is carried on the statement, so this is the same reading `insert_url`
+/// asks for and not the server's default.
+#[test]
+fn a_row_omitting_a_column_the_table_has_still_loads() {
+    let scratch = Scratch::open("insert_omitted_field");
+    let row = cross_observer_publisher_side(now_ns());
+    let one = serde_json::to_value(&row.book_top[0]).expect("a row serialises");
+    let mut fields = one.as_object().expect("a row is an object").clone();
+    // The body an older binary wrote: every field but this one.
+    assert!(
+        fields.remove("book_key").is_some(),
+        "the fixture row does not state `book_key`, so nothing is being omitted"
+    );
+    scratch.scalar(&format!(
+        "INSERT INTO {}.book_top SETTINGS input_format_skip_unknown_fields = 0 \
+         FORMAT JSONEachRow\n{}",
+        scratch.database,
+        serde_json::Value::Object(fields)
+    ));
+
+    assert_eq!(
+        scratch.count("book_top"),
+        1,
+        "a row from a binary older than the schema did not load, so a rollback \
+         loses the window it covers"
+    );
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT book_key FROM {}.book_top FINAL",
+            scratch.database
+        )),
+        "0",
+        "an omitted hash column read back as something other than the zero the \
+         race excludes"
+    );
+}
+
+/// **A deployment that applied `009` as it was released comes out of this
+/// upgrade with the race, under the name `010` leaves it under.**
+///
+/// The upgrade `010`'s last two statements exist for, run end to end. That
+/// deployment applied `009` before the rename, so it has `venue_book_top_race`
+/// and has never had `feed_race` — the amended `009` is the only other thing
+/// that creates that name — and it has no `book_key` on `book_top`. `010` adds
+/// the column, declares the publisher branch, replaces the seam, drops the old
+/// name, and re-states the race. What is asserted here is what it leaves.
+///
+/// THE FIXTURE IS THE CURRENT SET WITH THE RENAME TAKEN BACK OUT, because the
+/// released `009` is not in the tree to apply and a second copy of it checked
+/// in beside the live one would be a file nobody maintains. The two views the
+/// rename introduced are dropped, the column the publisher branch reads is
+/// dropped, and the old name is put back. Its body is deliberately *not* the
+/// released aggregate: what this file does to that name is drop it, and a
+/// `DROP` reads no body.
+///
+/// THE MUTANT THIS KILLS IS THE RE-STATEMENT DELETED FROM `010`. The drop then
+/// takes the deployment's only race away and every query below answers
+/// `UNKNOWN_TABLE`. Nothing else in this suite notices, because every other
+/// test runs `Scratch::open`, which applies the current `009` — and that one
+/// creates `feed_race` a moment before `010` drops a name it never had. A
+/// one-sided race left standing is the second mutant, and the last assertion is
+/// the one that reports it.
+#[test]
+fn the_upgrade_from_the_released_ddl_leaves_the_race_under_the_new_name() {
+    let mut scratch = Scratch::open("released_ddl_upgrade");
+    let base = now_ns();
+
+    // The deployment as the released `009` left it.
+    for view in [
+        "feed_race",
+        "feed_race_occurrence",
+        "publisher_book_top_occurrence",
+    ] {
+        scratch.scalar(&format!("DROP VIEW {}.{view}", scratch.database));
+    }
+    scratch.scalar(&format!(
+        "ALTER TABLE {}.book_top DROP COLUMN book_key",
+        scratch.database
+    ));
+    scratch.scalar(&format!(
+        "CREATE VIEW {0}.venue_book_top_race AS \
+         SELECT * FROM {0}.venue_book_top_occurrence",
+        scratch.database
+    ));
+
+    // The upgrade, as an operator applying the one new file performs it.
+    scratch.apply(BOOK_KEY);
+
+    let venue = cross_observer_venue_side(base);
+    scratch.insert_venue_book_tops(&venue);
+    scratch
+        .sink
+        .write_batch(cross_observer_publisher_side(base), NOW)
+        .expect("the publisher side loads, so the `ALTER` reached the table");
+
+    // The race is there at all, which is the whole of the finding: a `DROP`
+    // with no replacement leaves this query answering `UNKNOWN_TABLE` on the
+    // one deployment the block around it is written for.
+    //
+    // And it is the two-sided one. A re-statement that read a single side, or
+    // one that landed before the seam was replaced, would answer here with one
+    // observation and no lead — a plausible number, and the number a deployment
+    // with no publisher side would give.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT arrayStringConcat(any(observed_by), ',') FROM \
+             {}.feed_race WHERE book_key = {BOTH_OBSERVERS_SAW} \
+             AND occurrence = 1",
+            scratch.database
+        )),
+        "site-1/recorder-1,venue-a",
+        "the upgraded deployment has no race, or a race with one side in it"
+    );
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT groupUniqArray(round(lead_ms, 3)) FROM {}.feed_race \
+             WHERE book_key = {BOTH_OBSERVERS_SAW}",
+            scratch.database
+        )),
+        "[2]",
+        "the lead is not the one the fixture stated, so the ordinals did not \
+         line up on the upgraded deployment"
+    );
+
+    // And the one-sided race under the old name is gone. Left standing it would
+    // go on answering with the venue side alone, under a name an operator has
+    // every reason to keep querying.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT count() FROM system.tables WHERE database = '{}' \
+             AND name = 'venue_book_top_race'",
+            scratch.database
+        )),
+        "0",
+        "the venue-only race survived the upgrade under a name that now reads \
+         as the feed race"
+    );
+}
+
+/// The pairing reads both branches of the union, and `006`'s pairing is untouched.
+///
+/// Two things one query each. A publisher-side occurrence now enters the
+/// cross-observer race, and the era-scoped pairing two recorders of one feed use
+/// still numbers on `state_key` within an era and still answers exactly as it
+/// did — because the second key is a second column and not a change to the
+/// first.
+#[test]
+fn the_cross_observer_race_did_not_move_the_pairing_two_recorders_use() {
+    let mut scratch = Scratch::open("cross_observer_untouched");
+    let base = now_ns();
+    scratch
+        .sink
+        .write_batch(race_fixture(base), NOW)
+        .expect("the load");
+
+    // `006`, unchanged: four occurrences of the repeated state, three of them
+    // seen by both observation points and the fourth by one.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT groupArray(observations) FROM (SELECT observations FROM \
+             {}.book_top_race WHERE state_key = {REPEATED} ORDER BY occurrence)",
+            scratch.database
+        )),
+        "[2,2,2,1]",
+        "the era-scoped pairing moved"
+    );
+
+    // And the collapsed view carries the new column, which is the statement
+    // `010` re-states it for: a view's `SELECT *` is expanded when the view is
+    // created, so on a deployment upgraded in file order `006` would have
+    // frozen the column list before the `ALTER` ran.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT count() FROM system.columns WHERE database = '{}' \
+             AND table = 'book_top_settled' AND name = 'book_key'",
+            scratch.database
+        )),
+        "1",
+        "the collapsed view does not carry the column the race reads from it"
+    );
+}
+
+/// **A corrected adapter's re-derivation does not withdraw the rows it
+/// supersedes, and the `DELETE` in `009` is what does.**
+///
+/// `venue_book_top` is a `ReplacingMergeTree` keyed through
+/// `(object_key, message_index, change_index)`, and a replace is not a delete:
+/// the engine replaces a row whose whole key tuple matches and removes nothing
+/// a later insert does not contain. So "the rows of the object that is there
+/// now replace the rows of the object that was" holds change for change only
+/// while both derivations write the same set of changes.
+///
+/// The derivation that writes a different set is the one the whole archive tier
+/// keeps raw bytes for. An adapter correction is exactly what changes it — a
+/// level update that was never a move of the top, a malformed member that
+/// should have been refused and counted — so the corrected derivation of one
+/// record can carry *fewer* changes than the one it supersedes. Every surplus
+/// row then stays under a key the corrected derivation never writes, and the
+/// occurrence view numbers it beside the corrected rows: `observations`,
+/// `lead_ms` and the ordinals are then computed partly from evidence the
+/// corrected adapter withdrew.
+///
+/// Both halves are asserted here, because the first is the finding and the
+/// second is the instruction `009` gives for it. THE MUTANT THE SECOND HALF
+/// KILLS is the `DELETE` dropped from that instruction, leaving a re-load that
+/// looks like a repair and leaves the surplus row in place.
+#[test]
+fn a_corrected_adapter_re_derivation_replaces_the_rows_it_supersedes() {
+    let scratch = Scratch::open("corrected_adapter");
+    let base = now_ns();
+    let object = "venue/a/one-object.dzus";
+
+    let derivation = |keys: &[u64]| -> Vec<VenueBookTop> {
+        keys.iter()
+            .enumerate()
+            .map(|(change, key)| VenueBookTop {
+                change_index: change as u64,
+                book_key: *key,
+                object_key: object.to_owned(),
+                // One record: one stamp and one index, so only the change
+                // ordinal separates these rows.
+                ..venue_top("a", "AAA", -2, base, 10, *key, 0)
+            })
+            .collect()
+    };
+
+    let book_keys = |scratch: &Scratch| -> String {
+        scratch.scalar(&format!(
+            "SELECT arrayStringConcat(arraySort(groupArray(toString(book_key))), ',') \
+             FROM {}.venue_book_top FINAL WHERE object_key = '{object}'",
+            scratch.database
+        ))
+    };
+
+    // The derivation that is superseded: one record, three top changes.
+    scratch.insert_venue_book_tops(&derivation(&[700, 701, 702]));
+    assert_eq!(book_keys(&scratch), "700,701,702");
+
+    // The corrected adapter reads the same bytes and finds two changes, not
+    // three, and states a different book for each.
+    scratch.insert_venue_book_tops(&derivation(&[800, 801]));
+    assert_eq!(
+        book_keys(&scratch),
+        "702,800,801",
+        "the surplus row of the superseded derivation is gone, so a re-load \
+         withdraws rows after all and `009` has an instruction it does not need"
+    );
+
+    // The instruction `009` gives: the `DELETE` and then the load, in that
+    // order.
+    scratch.scalar(&format!(
+        "DELETE FROM {}.venue_book_top WHERE object_key = '{object}'",
+        scratch.database
+    ));
+    scratch.insert_venue_book_tops(&derivation(&[800, 801]));
+    assert_eq!(
+        book_keys(&scratch),
+        "800,801",
+        "the documented delete-then-load left something other than the \
+         corrected derivation"
+    );
+
+    // And the order is the whole of the instruction: the statement matches on
+    // the object, so run second it takes the corrected rows with it.
+    scratch.scalar(&format!(
+        "DELETE FROM {}.venue_book_top WHERE object_key = '{object}'",
+        scratch.database
+    ));
+    assert_eq!(
+        book_keys(&scratch),
+        "",
+        "a `DELETE` on the object after the load left rows behind, so the \
+         order `009` states is not the reason it gives"
     );
 }

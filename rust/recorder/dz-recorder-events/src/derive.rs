@@ -36,7 +36,7 @@ use dz_recorder_rows::{
     PortRoleLabel, RecvTsKindLabel,
 };
 
-use crate::book::{state_key, Book, BookRefused, Change};
+use crate::book::{book_key, state_key, Book, BookRefused, Change};
 use crate::instruments::{At, Channel, InstrumentTable, Observed, Statement};
 
 /// What a derivation needs that the archive does not carry.
@@ -822,6 +822,12 @@ fn book_row(
         price_exp: statement.price_exponent,
         qty_exp: statement.qty_exponent,
         state_key: state_key(provenance.channel_id, statement.instrument_id, &change.top),
+        // The shared function and never a second fold written here. It is not
+        // `state_key`'s fold with the identifiers left out: `book_key` reads a
+        // zero source count as the absence the top-of-book specification says
+        // it is, which is what makes one book one key on both sides of the
+        // race, and `state_key` may not — its value is in rows already.
+        book_key: book_key(&change.top),
         from_anchor: u8::from(change.from_anchor),
         book_certain: u8::from(change.certainty.certain),
         uncertain_since: change.certainty.since,

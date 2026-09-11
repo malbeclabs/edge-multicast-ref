@@ -261,6 +261,22 @@ CREATE TABLE IF NOT EXISTS recorder.book_top (
     -- a function of the schema version and the batching, so a publisher
     -- upgrade repartitions the key space and the race reports nothing.
     state_key         UInt64,
+    -- The equivalence key for two observers of one MARKET, which is a different
+    -- question: a hash over the two sides above and over nothing else, so an
+    -- observer that never saw a datagram — and can therefore name neither the
+    -- operator's channel nor a publisher-minted `Instrument ID` — computes the
+    -- same value off the same book. `dz_recorder_events::book_key` writes it
+    -- here and on the venue side of `009`, from that one function and never from
+    -- a second implementation in SQL or anywhere else: two hashes of one book
+    -- state pair with nothing.
+    --
+    -- NEITHER NULLABLE NOR PROVENANCE, which is why it is on this table at all.
+    -- It says nothing about where the row came from; it is a second hash of data
+    -- the row already carries, so every row states it and none is weakened to
+    -- hold a row of another kind. See `010`, which adds it to a deployment that
+    -- applied this file before the column existed, and says what a row written
+    -- before that carries.
+    book_key          UInt64,
     -- 1 when this top came from applying a snapshot rather than from a message
     -- the market produced. A starting state and never an observation in a race:
     -- the runtime pulls a snapshot on its own cadence and the archive records
