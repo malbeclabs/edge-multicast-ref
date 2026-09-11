@@ -67,6 +67,11 @@ use crate::timestamp::sending_time;
 /// sends it. What this bounds is a venue that accepts a socket and then answers
 /// nothing, which without it would leave the driver inside one send for the
 /// life of the process.
+///
+/// **It does not bound the write of the logon**, which is [`WRITE_GRACE`]'s. A
+/// venue that never reads the logon and a venue that reads it and answers
+/// nothing are two different holds on one connect, and one number for both
+/// would be a number that is wrong for whichever half it was not chosen for.
 pub const LOGON_GRACE: Duration = Duration::from_secs(10);
 
 /// How long an orderly logout may take before the stream is simply dropped.
@@ -83,6 +88,39 @@ pub const LOGON_GRACE: Duration = Duration::from_secs(10);
 /// reporting it. One constant for both halves, because a second one would be
 /// two numbers to keep in agreement about one thing. See [`Session::close`].
 pub const LOGOUT_GRACE: Duration = Duration::from_millis(250);
+
+/// How long one write on a live session may take before the session is over.
+///
+/// **A venue that has stopped reading is a venue that is gone, and no layer
+/// above this one can see it.** The socket stays open and reports nothing, the
+/// send window fills, and an unbounded `write_all` then sits inside the
+/// kernel's retransmit timeout, which is minutes. A heartbeat that falls due
+/// inside [`Session::receive`] enters that write, so the driver is parked in
+/// `Input::recv` — which has no outer timeout of its own — the idle guard never
+/// runs, no disconnect is recorded, and `connection_state` stays at 1 on a
+/// session that is dead. That is the failure [`LOGOUT_GRACE`] bounds on the
+/// teardown path, and the teardown is not where it is most likely to happen:
+/// the hot path writes a heartbeat every cadence for the life of the session.
+///
+/// Not [`LOGOUT_GRACE`]'s 250ms, because the two paths pay differently for
+/// being wrong. There the session is already over and cutting early costs an
+/// unsent logout; here cutting early ends a session that is alive, and this
+/// transport's reconnect is a whole one — the sequence resets and every
+/// subscription is re-issued — so a send window that is briefly full during a
+/// burst must not buy that.
+///
+/// Ten seconds is [`LOGON_GRACE`]'s number and it is the same judgement: how
+/// long this transport lets a venue owe it one thing before treating the venue
+/// as gone. A write asks less of a venue than an answer does — no round trip,
+/// and no work but draining a socket — so ten seconds has room to spare in the
+/// direction that matters, and it leaves one order of magnitude in this file
+/// for "too long" rather than two.
+///
+/// Its own constant rather than a share of [`LOGON_GRACE`] for the reason
+/// stated there, so the worst case on a logon is the two of them in turn. That
+/// is the honest number and it is bounded, which is what the alternative was
+/// not.
+pub const WRITE_GRACE: Duration = Duration::from_secs(10);
 
 /// The heartbeat interval a logon may not state.
 ///
@@ -718,11 +756,7 @@ impl Session {
             &sending_time(now),
             reset_sequence,
         );
-        let stream = self.stream.as_mut().ok_or(SessionError::NotConnected)?;
-        stream.write(&self.outbound).await?;
-        self.next_sequence += 1;
-        self.last_write_ns = self.clock.steady_ns();
-        Ok(())
+        self.write_outbound().await
     }
 
     /// Read the venue's answer to the logon.
@@ -878,16 +912,62 @@ impl Session {
     async fn write_composed(&mut self) -> Result<(), SessionError> {
         let now = self.clock.wall_ns();
         let sending_time = sending_time(now);
-        let body = Body::parse(&self.composed)?;
-        framing::frame(
-            &mut self.outbound,
-            &body,
-            self.next_sequence,
-            &sending_time,
-            false,
-        );
+        // Scoped so the borrow of `composed` ends before the write: the bound
+        // on that write belongs to the session and not to one call site, so
+        // the write is a method on `self` rather than a line here.
+        {
+            let body = Body::parse(&self.composed)?;
+            framing::frame(
+                &mut self.outbound,
+                &body,
+                self.next_sequence,
+                &sending_time,
+                false,
+            );
+        }
+        self.write_outbound().await
+    }
+
+    /// Hand the framed message to the stream under [`WRITE_GRACE`], and move
+    /// the session past it.
+    ///
+    /// **One place, because a write that does not come through here is an
+    /// unbounded one.** Both paths that write on a live session end at this
+    /// method — the body an adapter wrote, including its logon, and the session
+    /// layer's own composed message — so the grace is applied by construction
+    /// rather than remembered at each call site. The teardown's write is the
+    /// exception and bounds itself: [`Session::close`] runs it and the stream's
+    /// own close together under [`LOGOUT_GRACE`], which is the shorter number
+    /// and the one a path that has already decided the session is over wants.
+    ///
+    /// A write the grace cut short is [`StreamError::Failed`] and not a case of
+    /// its own, for the reason that type states: the taxonomy is deliberately
+    /// coarser than the failure, because every transport above this one ends
+    /// the connection and lets the driver reconnect — which is the right answer
+    /// for a venue that has stopped reading too. The part an operator acts on
+    /// goes in the detail instead.
+    ///
+    /// The sequence advances only on a write that went out whole. That is what
+    /// abandoning one costs and it is why this ends the session rather than
+    /// being retried: what reached the wire may be half a message, and a
+    /// session cannot number the next one against a venue that may have read
+    /// half of this one.
+    async fn write_outbound(&mut self) -> Result<(), SessionError> {
         let stream = self.stream.as_mut().ok_or(SessionError::NotConnected)?;
-        stream.write(&self.outbound).await?;
+        match timeout(WRITE_GRACE, stream.write(&self.outbound)).await {
+            Ok(written) => written?,
+            Err(_elapsed) => {
+                return Err(StreamError::Failed {
+                    detail: format!(
+                        "{} bytes did not leave within {WRITE_GRACE:?}: the venue has stopped \
+                         reading and the send window is full, which a socket that is still \
+                         open reports as nothing at all",
+                        self.outbound.len()
+                    ),
+                }
+                .into())
+            }
+        }
         self.next_sequence += 1;
         self.last_write_ns = self.clock.steady_ns();
         Ok(())

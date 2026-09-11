@@ -32,7 +32,7 @@ use dz_ingress_core::{BoxFuture, Clock};
 use dz_ingress_fix::framing::{self, msg_type, Body, FramingError, Message, SOH};
 use dz_ingress_fix::session::{
     ByteStream, Incoming, Session, SessionError, SessionState, StreamError, LOGON_GRACE,
-    LOGOUT_GRACE,
+    LOGOUT_GRACE, WRITE_GRACE,
 };
 
 const CONNECTION: ConnectionId = ConnectionId::new("mktdata");
@@ -182,22 +182,28 @@ impl ByteStream for Script {
     }
 }
 
-/// A stream that carries the logon and then never completes another write.
+/// A stream that completes `carries` writes and then never completes another.
 ///
-/// What a venue that has stopped *reading* looks like from this side: the
-/// session establishes, the send window fills, and the next `write_all` sits
-/// inside the kernel's retransmit timeout for minutes. `Script`'s write is
-/// infallible and instantaneous, so no test built on it can see that — which is
-/// the whole reason this one exists.
-struct StallsAfterTheLogon {
+/// What a venue that has stopped *reading* looks like from this side: the send
+/// window fills and the next `write_all` sits inside the kernel's retransmit
+/// timeout for minutes. `Script`'s write is infallible and instantaneous, so no
+/// test built on it can see that — which is the whole reason this one exists.
+///
+/// `carries` is how many writes get through before the stall, because the
+/// venue can stop reading before the logon as easily as after it: `1` is the
+/// session established and then held on the hot path, and `0` is the logon's
+/// own write held, which is the one a grace on the logon's *answer* does not
+/// reach.
+struct StopsReading {
+    carries: usize,
     writes: usize,
     answer: Option<Vec<u8>>,
 }
 
-impl ByteStream for StallsAfterTheLogon {
+impl ByteStream for StopsReading {
     fn write<'a>(&'a mut self, _bytes: &'a [u8]) -> BoxFuture<'a, Result<(), StreamError>> {
         self.writes += 1;
-        let stalled = self.writes > 1;
+        let stalled = self.writes > self.carries;
         Box::pin(async move {
             if stalled {
                 // Never ready, and never an error either: a blocked write is
@@ -699,7 +705,8 @@ async fn a_logout_the_venue_has_stopped_reading_is_bounded_and_not_a_hang() {
     // the close applied and not a wait this suite paid for.
     let clock = ManualClock::new();
     let mut session = Session::new(CONNECTION, Arc::clone(&clock) as Arc<dyn Clock>);
-    session.open(Box::new(StallsAfterTheLogon {
+    session.open(Box::new(StopsReading {
+        carries: 1,
         writes: 0,
         answer: Some(from_venue("35=A|98=0|108=30|", 1)),
     }));
@@ -722,6 +729,108 @@ async fn a_logout_the_venue_has_stopped_reading_is_bounded_and_not_a_hang() {
         session.state(),
         SessionState::Closed,
         "a logout that could not be written still releases the session"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_heartbeat_the_venue_has_stopped_reading_is_bounded_and_not_a_hang() {
+    // The same failure the bounded logout above pins, on the path it is far
+    // more likely to happen on. The teardown writes one logout once; the hot
+    // path writes a heartbeat every cadence for the life of the session, and
+    // that write is inside `receive`.
+    //
+    // What an unbounded one costs is the whole of the liveness story: the
+    // driver is in `Input::recv`, which has no outer timeout, so the heartbeat
+    // parks in the kernel's retransmit timeout — minutes — the idle guard
+    // never runs, no disconnect is recorded, and `connection_state` reads 1 on
+    // a session that is dead. A venue that has stopped reading has to become a
+    // disconnect, and only a bound on the write makes it one.
+    //
+    // The clock is two clocks on purpose: the session's is the manual one, so
+    // the cadence falling due is a value this test sets rather than a wait, and
+    // the runtime's is paused, so the elapsed assertion below is the grace the
+    // write applied and not time this suite paid.
+    let clock = ManualClock::new();
+    let mut session = Session::new(CONNECTION, Arc::clone(&clock) as Arc<dyn Clock>);
+    session.open(Box::new(StopsReading {
+        carries: 1,
+        writes: 0,
+        answer: Some(from_venue("35=A|98=0|108=30|", 1)),
+    }));
+    session.send(&adapter_logon(30)).await.expect("a logon");
+    assert_eq!(session.state(), SessionState::Established);
+
+    // A cadence later, with nothing from the venue: the next thing `receive`
+    // does is write the heartbeat it owes.
+    clock.advance(Duration::from_secs(30));
+
+    let started = tokio::time::Instant::now();
+    // The outer bound is this suite's and not the transport's: with the
+    // transport's grace gone, it makes the fault a failure that names itself
+    // rather than a job that hangs.
+    let outcome = tokio::time::timeout(Duration::from_secs(60), session.receive(None))
+        .await
+        .expect(
+            "`receive` must return: an unbounded heartbeat write is a driver parked in \
+             `Input::recv` with `connection_state` reading 1 on a dead session",
+        );
+    let error = outcome.expect_err("a venue that has stopped reading ends the session");
+    assert_eq!(
+        started.elapsed(),
+        WRITE_GRACE,
+        "the write is bounded by the grace the constant states"
+    );
+    match error {
+        // `StreamError::Failed` and not a case of its own, because every
+        // transport above this one does the same thing about it: end the
+        // connection and reconnect. What the detail has to carry is why, so
+        // that the log line names a venue that stopped reading rather than a
+        // socket that reported nothing.
+        SessionError::Stream(StreamError::Failed { detail }) => {
+            assert!(detail.contains("did not leave"), "{detail}");
+            assert!(detail.contains("stopped reading"), "{detail}");
+        }
+        other => panic!(
+            "a write the grace cut short is a stream failure the driver reconnects on: {other}"
+        ),
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_logon_the_venue_never_reads_is_bounded_and_not_a_hang() {
+    // `LOGON_GRACE` bounds the venue's *answer*, and it starts being spent once
+    // the logon has been written. A venue that accepts the socket and reads
+    // nothing never gets that far: the logon's own write fills the send window,
+    // and with no bound on the write the connect never returns and no attempt
+    // is ever counted — a publisher stuck at startup rather than one retrying
+    // under its backoff.
+    let clock = ManualClock::new();
+    let mut session = Session::new(CONNECTION, Arc::clone(&clock) as Arc<dyn Clock>);
+    session.open(Box::new(StopsReading {
+        carries: 0,
+        writes: 0,
+        answer: None,
+    }));
+
+    let started = tokio::time::Instant::now();
+    let error = tokio::time::timeout(Duration::from_secs(60), session.send(&adapter_logon(30)))
+        .await
+        .expect("`send` must return: an unbounded logon write is a hung connect")
+        .expect_err("a venue that reads nothing does not get a session");
+    assert_eq!(
+        started.elapsed(),
+        WRITE_GRACE,
+        "the logon's write is bounded by the same grace every other write is"
+    );
+    assert!(
+        matches!(error, SessionError::Stream(StreamError::Failed { .. })),
+        "a logon that could not be written is a stream failure and not a refused \
+         credential: {error}"
+    );
+    assert_eq!(
+        session.state(),
+        SessionState::Connected,
+        "a logon whose write was abandoned is not one this session may claim to have sent"
     );
 }
 

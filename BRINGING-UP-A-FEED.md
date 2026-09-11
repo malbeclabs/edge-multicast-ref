@@ -186,9 +186,20 @@ subscriptions, as a body of `tag=value` fields with no `8`, `9`, `34`, `52`,
 flag on it, and **reads the heartbeat interval out of it** rather than from any
 key. Write the logon first and the subscriptions after it — that order is the
 only way to express it, and a subscription written first is refused with nothing
-sent. A connect at which the adapter writes no logon is a startup failure
-naming `on_connected`, because a transport that logged on with a body it
-composed itself would be signing for the venue.
+sent. A connect at which the adapter writes no logon is refused naming
+`on_connected`, because a transport that logged on with a body it composed
+itself would be signing for the venue.
+
+**That refusal is a fatal error, and a fatal error ends the process only on a
+`primary`.** On the single source most publishers run it is exactly the startup
+failure it reads as. On a `role = "comparison"` source it is that source's
+driver dropped and named on stderr, with its `connection_state` left at 0 and
+the publisher carrying on — so an adapter with a logon bug on a comparison
+source gives a process that looks healthy while one upstream never connects at
+all. Read [Several sources for one feed](#several-sources-for-one-feed) before
+relying on a startup failure to tell you, and watch
+`dz_publisher_ingress_connection_state` per `connection` rather than the
+process being up.
 
 An instrument admitted mid-session reaches a subscription through
 `poll_upstream`, which is what a session transport needs and a re-subscribing
