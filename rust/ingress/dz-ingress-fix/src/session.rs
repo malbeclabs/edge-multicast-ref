@@ -52,6 +52,7 @@ use std::time::Duration;
 use dz_adapter_core::ConnectionId;
 use dz_ingress_core::{BoxFuture, Clock};
 use tokio::time::timeout;
+use zeroize::Zeroize;
 
 use crate::framing::{
     self, msg_type, Body, BodyError, Decoder, FramingError, Message, TAG_HEART_BT_INT,
@@ -471,9 +472,51 @@ pub struct Session {
     /// What the last read appended, before it reached the decoder.
     scratch: Vec<u8>,
     /// The framed bytes of the message being written.
+    ///
+    /// **This is where a venue's credential sits.** The logon body is the
+    /// adapter's and the framing is this crate's, so from the moment
+    /// [`send`](Self::send) frames it until the next `frame` overwrites the
+    /// buffer, the signature and whatever password the venue's scheme carries
+    /// are in this allocation. On an idle session the next `frame` is the next
+    /// heartbeat; across a close and a reconnect it is whatever the next
+    /// connection writes, which is minutes later and a different session.
+    ///
+    /// Nothing reads it — the `Debug` below prints no bytes and [`detail`]
+    /// renders a whitelist of tags — so this is hygiene and not the closing of
+    /// a disclosure path. It is done because the standard this crate holds
+    /// itself to elsewhere is exactly that: four hand-written redacting
+    /// `Debug` impls and a `detail` that cannot grow a credential by accident.
+    ///
+    /// [`open`](Self::open) and [`close`](Self::close) therefore
+    /// [`zeroize`](Zeroize::zeroize) this buffer, which is the one thing
+    /// `Vec::clear` is not. `clear` moves the length to `0` and leaves every
+    /// byte where it was, so a core dump taken an hour later still has the
+    /// logon in it. What zeroizing guarantees is worth stating exactly,
+    /// because a `clear` documented as erasure would be worse than neither:
+    /// **the allocation this field currently holds carries no credential byte
+    /// once a session has been opened or closed**, which bounds the credential
+    /// to the session that used it.
+    ///
+    /// What it does not guarantee is that no copy of those bytes exists. A
+    /// `frame` that grows this buffer past its capacity copies it and frees
+    /// the old allocation unzeroed, and the same bytes also pass through the
+    /// adapter's own queue, rustls's write buffer and the kernel's socket
+    /// buffer — none of which this crate owns. Nor is the erasure something a
+    /// test in this crate can see: the spare capacity of a `Vec` is readable
+    /// only through `unsafe`, which the crate forbids, so
+    /// `tests::the_write_buffers_do_not_outlive_the_session_that_filled_them`
+    /// pins the length and says so.
     outbound: Vec<u8>,
     /// A body this session composed, so that a session message goes through the
     /// same [`Body::parse`] every adapter body does.
+    ///
+    /// **Never a credential**, which is why [`open`](Self::open) and
+    /// [`close`](Self::close) `clear` this one where they zeroize `outbound`:
+    /// what it can hold is a [`Composed`] — a heartbeat, a test request, a
+    /// logout — and the logon is deliberately not in that set. It is reset
+    /// because it is per-connection scratch and `open` states that it resets
+    /// those, not because of what it carries; zeroizing it would read as a
+    /// claim that it holds something.
     composed: Vec<u8>,
     last_write_ns: u64,
     last_read_ns: u64,
@@ -484,9 +527,10 @@ pub struct Session {
 /// Prints the connection, the state and the sequence — and no message bytes.
 ///
 /// A logon body carries a venue's signature, and the framed copy of it is in
-/// `outbound` until the next message overwrites it. A derived implementation
-/// would put that in a log line the first time somebody logged this struct,
-/// which is the standard `dz-ingress-websocket` holds its own endpoint to.
+/// `outbound` until the next message overwrites it or the session ends. A
+/// derived implementation would put that in a log line the first time somebody
+/// logged this struct, which is the standard `dz-ingress-websocket` holds its
+/// own endpoint to.
 impl core::fmt::Debug for Session {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Session")
@@ -539,6 +583,12 @@ impl Session {
         self.decoder.clear();
         self.held.clear();
         self.scratch.clear();
+        // The write buffers, which this reset had been leaving alone. The
+        // previous connection's framed logon was still in `outbound` — see
+        // that field for what zeroizing it does and does not guarantee, and
+        // why the buffer beside it gets a `clear` instead.
+        self.outbound.zeroize();
+        self.composed.clear();
         self.test_request_outstanding = false;
         let now = self.clock.steady_ns();
         self.last_write_ns = now;
@@ -732,6 +782,12 @@ impl Session {
         self.held.clear();
         self.scratch.clear();
         self.decoder.clear();
+        // Here rather than only in `open`, because the gap this closes is the
+        // one between the two: a publisher that logs on, runs for a day and
+        // then sits in backoff would otherwise hold the logon for the whole of
+        // the wait. See [`Self::outbound`].
+        self.outbound.zeroize();
+        self.composed.clear();
         self.test_request_outstanding = false;
     }
 
@@ -1210,6 +1266,90 @@ mod tests {
     fn the_grace_on_a_cadence_is_a_fifth_of_it() {
         assert_eq!(with_grace(Duration::from_secs(30)), Duration::from_secs(36));
         assert_eq!(with_grace(Duration::from_secs(10)), Duration::from_secs(12));
+    }
+
+    /// A stream `open` and `close` can be handed, which nothing here reads,
+    /// writes or asserts against. The scripted stream every behavioural test
+    /// uses lives in `tests/session.rs`; what this module needs is only a
+    /// value of the type.
+    struct Unused;
+
+    impl ByteStream for Unused {
+        fn write<'a>(&'a mut self, _bytes: &'a [u8]) -> BoxFuture<'a, Result<(), StreamError>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn read<'a>(
+            &'a mut self,
+            _out: &'a mut Vec<u8>,
+            _budget: Duration,
+        ) -> BoxFuture<'a, Result<usize, StreamError>> {
+            Box::pin(async { Ok(0) })
+        }
+
+        fn close(&mut self) -> BoxFuture<'_, ()> {
+            Box::pin(async {})
+        }
+    }
+
+    /// Neither write buffer survives an `open` or a `close`.
+    ///
+    /// The gap this is about: `open` and `close` reset the decoder and the read
+    /// buffers, and both left `outbound` and `composed` exactly as the last
+    /// message found them — so the framed logon, signature and password
+    /// included, stayed in the heap across the whole idle-and-reconnect window.
+    ///
+    /// **This pins the length and not the erasure, and the difference is the
+    /// whole point of the fix.** `outbound` is zeroized rather than cleared,
+    /// because `Vec::clear` leaves every byte in the allocation; swapping the
+    /// `zeroize` back for a `clear` keeps this test green, since a `Vec`'s
+    /// spare capacity is readable only through `unsafe` and this crate forbids
+    /// it. Nothing in this crate can tell the two apart, which is stated here
+    /// rather than left for a reader to assume the stronger claim. What the
+    /// test does catch is the reset being dropped altogether — a logon, or a
+    /// session message, still reachable through the buffer after the session
+    /// that wrote it is over — which is the state both buffers were in.
+    #[tokio::test]
+    async fn the_write_buffers_do_not_outlive_the_session_that_filled_them() {
+        let mut session = Session::new(
+            ConnectionId::new("mktdata"),
+            Arc::new(dz_ingress_core::TokioClock::new()),
+        );
+        // Framed the way `send` frames a logon, `554` standing in for the
+        // signature a venue's scheme puts there — the same value
+        // `an_error_detail_carries_the_reject_reason_and_not_the_message`
+        // looks for, because it is the same class of leak in a second place.
+        let logon = body("35=A|108=30|554=not-a-real-secret|");
+        let fill = |session: &mut Session| {
+            framing::frame(&mut session.outbound, &logon, 1, &sending_time(0), true);
+            session.compose(Composed::Heartbeat, &[]);
+        };
+
+        fill(&mut session);
+        assert!(!session.outbound.is_empty(), "the fixture framed nothing");
+        assert!(!session.composed.is_empty(), "the fixture composed nothing");
+        session.open(Box::new(Unused));
+        assert!(
+            session.outbound.is_empty(),
+            "`open` carried a framed logon into the next session"
+        );
+        assert!(
+            session.composed.is_empty(),
+            "`open` carried a composed session message into the next session"
+        );
+
+        // And the other end of the same session, which is the longer window:
+        // a publisher in backoff sits here, not in `open`.
+        fill(&mut session);
+        session.close().await;
+        assert!(
+            session.outbound.is_empty(),
+            "`close` left a framed logon in the outbound buffer"
+        );
+        assert!(
+            session.composed.is_empty(),
+            "`close` left a composed session message in the buffer"
+        );
     }
 
     #[test]

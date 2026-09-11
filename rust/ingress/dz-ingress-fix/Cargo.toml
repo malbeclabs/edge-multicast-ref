@@ -50,6 +50,18 @@ tokio = { version = "1", default-features = false, features = ["net", "time", "i
 # nothing here has.
 tokio-rustls = { version = "=0.26.4", default-features = false, features = ["ring", "tls12", "logging"] }
 
+# `zeroize`, for the one buffer in this crate that holds a venue's credential.
+# `Session::outbound` carries the framed logon, and `Vec::clear` moves a length
+# rather than erasing anything - so without this the choice is between leaving
+# the bytes there and documenting a `clear` as if it were erasure, and the
+# second is worse than the first.
+#
+# A new dependency a venue inherits has to be worth it, and this one is already
+# in this crate's own closure: `tokio-rustls` -> `rustls` -> `zeroize`, which is
+# how rustls erases its key material. So no crate, no second version and no
+# build time arrive with it - what is new is the call.
+zeroize = "1"
+
 # The trust anchors, compiled in. `0.26`, which is the version
 # `dz-ingress-websocket` resolves, so a binary linking both transports has one
 # copy of them. A host with an empty or stale CA bundle then negotiates exactly
