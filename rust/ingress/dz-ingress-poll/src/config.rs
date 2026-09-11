@@ -35,10 +35,19 @@ use serde::{Deserialize, Deserializer};
 /// What it catches is **the unit slip**, which is the mistake this grammar
 /// makes easy: `"1ms"` where `"1m"` was meant is one character and reads
 /// correctly at a glance, and `"30ms"` for `"30m"` reads better than that.
-/// Every value in `ns` and `us` is below the floor by construction, and every
-/// `ms` value that could be a deliberate choice — `"100ms"`, `"500ms"` — is
-/// above it, which is what makes fifty the boundary rather than a round
-/// number.
+/// Every `ms` value that could be a deliberate choice — `"100ms"`,
+/// `"500ms"` — is above the floor, and every number small enough to be a slip
+/// in `ns` or `us` is below it, which is what makes fifty the boundary rather
+/// than a round number.
+///
+/// **Not a rule about units, though.** The check is one comparison against a
+/// [`Duration`], so the two smaller units are not bounded by construction:
+/// `"50000us"` and `"50000000ns"` are both fifty milliseconds and both
+/// resolve, as does anything above them. That costs nothing — nobody states a
+/// plausible cadence in microseconds — but it is what a later change to this
+/// constant or to the comparison gets checked against, which is why
+/// `a_cadence_below_the_floor_is_the_unit_slip_the_zero_refusal_does_not_reach`
+/// pins a `us` value on each side of the boundary rather than only below it.
 pub const MIN_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Why a polled `[[source]]` cannot be run.
@@ -392,9 +401,18 @@ impl core::fmt::Debug for PollConfig {
 /// captures when a publisher will not start. Cutting at the last `@` first
 /// costs the opposite mistake, an `@` in a path taken for a delimiter and a
 /// path segment printed where a host was wanted, which is a wrong answer and
-/// not a disclosed secret. An authority containing a `/` before any `@` is not
-/// a host either way, so there is no correct endpoint whose rendering this
-/// order spoils.
+/// not a disclosed secret.
+///
+/// **That cost is paid on correct endpoints, and it is accepted.**
+/// `https://real.host/v1/a@b` carries no userinfo section at all — its
+/// authority ends at the first `/` and holds no `@`, which is why
+/// [`ConfigError::CredentialInEndpoint`] does not fire on it — and this order
+/// still renders it `https://b`, so a `TlsUnsupported` or a
+/// `FragmentInEndpoint` on that endpoint names a host the operator never
+/// wrote. A wrong host sends an operator back to a document they can read; a
+/// disclosed secret cannot be taken back. That is the trade, and
+/// `an_authority_keeps_the_host_and_drops_the_query_string_and_the_userinfo`
+/// asserts the `https://b` so the cost is pinned rather than described.
 pub(crate) fn authority_of(endpoint: &str) -> String {
     let (scheme, after_scheme) = match endpoint.split_once("://") {
         Some((scheme, after_scheme)) => (Some(scheme), after_scheme),
@@ -548,8 +566,9 @@ mod tests {
         config.poll_interval = Duration::from_secs(1);
         assert_eq!(config.check(), Ok(()));
 
-        // Every value in the two smaller units is the same mistake in a
-        // louder unit, and none of them can reach the floor.
+        // A slip in a louder unit is the same mistake and is refused the
+        // same way. These are the numbers a slip actually produces, and not
+        // every value the two smaller units can spell - see below.
         for raw in ["1ns", "999us", "49ms"] {
             config.poll_interval = parse_duration(raw).expect("a stated unit");
             assert!(
@@ -557,6 +576,19 @@ mod tests {
                 "`{raw}`: {:?}",
                 config.check()
             );
+        }
+
+        // And the floor is one comparison against a duration rather than a
+        // rule about units, which is the half the loop above cannot say: a
+        // `us` value reaches the floor and goes past it. `50000us` is fifty
+        // milliseconds spelled in the unit a slip arrives in and `60000us`
+        // is beyond it, and both resolve. Nobody states a cadence that way,
+        // so this is not a gap - it is the boundary asserted on the side
+        // that a claim about `ns` and `us` being below the floor *by
+        // construction* gets wrong.
+        for raw in ["50000us", "60000us"] {
+            config.poll_interval = parse_duration(raw).expect("a stated unit");
+            assert_eq!(config.check(), Ok(()), "`{raw}`");
         }
     }
 
@@ -840,6 +872,18 @@ mod tests {
             authority_of("https://192.0.2.10:8443/catalogue"),
             "https://192.0.2.10:8443"
         );
+
+        // **The cost of taking the userinfo off before the path, pinned.** An
+        // `@` past the authority is a character in a path and not a
+        // delimiter, but this function cuts at the last one while the path is
+        // still there, so a correct endpoint carrying one renders as the tail
+        // of its own path. `check` does not refuse this endpoint - its
+        // authority ends at the first `/` and holds no `@` - so the value
+        // below is what a `TlsUnsupported` or a `FragmentInEndpoint` on it
+        // names. It is the accepted half of the trade this function's own
+        // note argues, asserted rather than described because the other half
+        // is a prefix of a credential.
+        assert_eq!(authority_of("https://real.host/v1/a@b"), "https://b");
     }
 
     #[test]

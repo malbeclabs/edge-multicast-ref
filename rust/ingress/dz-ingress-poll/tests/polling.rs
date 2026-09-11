@@ -1244,8 +1244,8 @@ fn parameters_that_form_no_request_uri_are_a_fault_retrying_cannot_fix() {
 fn an_endpoint_that_forms_no_request_uri_is_fatal_on_the_probe_too() {
     // The half a refusal at `send` would leave looping: the probe carries no
     // parameters, so an endpoint that is not a URI is the transport's own
-    // input. `PollConfig` checks a scheme prefix and no more, so this document
-    // loads.
+    // input. `PollConfig::check` reads the endpoint as a string and never as a
+    // URI, so this document loads.
     let endpoint = ScriptedEndpoint::new(
         vec![Answered::Failed(RequestFailure::Unusable(
             "the request URI is not usable: invalid uri character".into(),

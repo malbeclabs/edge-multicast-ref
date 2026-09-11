@@ -86,11 +86,11 @@ impl PollInput {
     ///
     /// [`ConfigError`] for a table this build cannot run — an `https` endpoint
     /// with no TLS stack, something that is not an HTTP endpoint at all, an
-    /// endpoint carrying a `#` or a userinfo section, or a cadence at or below
-    /// the floor. Raised here rather than at the first request on
-    /// purpose — a publisher whose endpoint or cadence is unusable should fail
-    /// where it is diagnosable, and this is also the check a venue's `main`
-    /// runs whether or not it called [`PollConfig::check`] itself.
+    /// endpoint carrying a `#` or a userinfo section, or a cadence below the
+    /// floor. Raised here rather than at the first request on purpose — a
+    /// publisher whose endpoint or cadence is unusable should fail where it is
+    /// diagnosable, and this is also the check a venue's `main` runs whether
+    /// or not it called [`PollConfig::check`] itself.
     pub fn new(
         connection: ConnectionId,
         config: &PollConfig,
@@ -205,10 +205,11 @@ impl Input for PollInput {
                         reason,
                         format!("{}: {}", self.authority, failure.detail()),
                     ),
-                    // An endpoint that is not a URI at all. `PollConfig` can
-                    // check a scheme prefix and no more, so this is where that
-                    // document arrives - and it arrives on the probe, which
-                    // carries no parameters.
+                    // An endpoint that is not a URI at all.
+                    // `PollConfig::check` reads the endpoint as a string and
+                    // never as a URI, so this is where that document
+                    // arrives - and it arrives on the probe, which carries no
+                    // parameters.
                     None => unusable(&self.authority, failure.detail()),
                 })?;
             if !is_success(answer.status) {
@@ -537,10 +538,12 @@ const fn connect_reason(failure: &RequestFailure) -> Option<ConnectFailureReason
 /// either half of a request, deliberately, so a `send` judging text with
 /// `hyper`'s parser would be a second parser able to disagree with the one
 /// that matters, and wrong outright for a client that forms no `hyper` URI.
-/// And **the endpoint reaches the same failure**: the scheme and a `#` are all
-/// `PollConfig` can check, so an endpoint that is not a URI otherwise arrives
-/// on the connect probe, which carries no parameters at all. One value covers
-/// both; a refusal at the write would leave that half looping.
+/// And **the endpoint reaches the same failure**: [`PollConfig::check`] reads
+/// the endpoint as a string and never as a URI — a scheme prefix, a `#`, an
+/// `@` in the authority — so an endpoint that is not a URI for any other
+/// reason arrives on the connect probe, which carries no parameters at all.
+/// One value covers both; a refusal at the write would leave that half
+/// looping.
 ///
 /// The `#` is checked at load rather than left to the probe because the probe
 /// does not fail on one. A fragment parses: the request goes out with its
