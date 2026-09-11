@@ -368,7 +368,11 @@ role = "comparison"         # connected, driven, counted — for the race
   *interval* and not a cycle: `definition_cycle` and `snapshot_cycle` are one
   pass over a set divided by the set's size, and one tick here is one request
   with no set to divide by. A polled source that omits it does not parse, because
-  a transport with no cadence polls in a loop or never.
+  a transport with no cadence polls in a loop or never. There is no default and
+  there is a floor: `50ms` is the shortest cadence the transport runs, which
+  refuses the unit slip — `"1ms"` where `"1m"` was meant is one character, and a
+  catalogue asked a thousand times a second is how a publisher's address gets
+  blocked rather than merely being wrong.
 
   **Keep `poll_interval` well under `[ingress] idle_timeout`.** The driver hands
   a receive what is left of the idle guard, so a cadence longer than the guard

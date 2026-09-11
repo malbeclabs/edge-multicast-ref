@@ -17,6 +17,30 @@ use std::time::Duration;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer};
 
+/// The shortest cadence this transport will run.
+///
+/// **A floor, and it is not the default [`PollConfig`] deliberately does not
+/// have.** What an operator is willing to ask of an endpoint is a property of
+/// that endpoint, which is why there is no default cadence at all; this is the
+/// separate and much narrower question of which values cannot have been meant.
+///
+/// Fifty milliseconds is twenty requests a second at one catalogue endpoint,
+/// and nobody chooses that: a venue whose book has to be read that often is a
+/// subscription, and this family has a transport for one. It is also well
+/// clear of the fastest cadence this repository calls ordinary — a book polled
+/// once a second, which [`PollConfig`]'s own note names — so the floor cannot
+/// refuse a number an operator picked. A floor that did would be worse than
+/// the mistake it catches.
+///
+/// What it catches is **the unit slip**, which is the mistake this grammar
+/// makes easy: `"1ms"` where `"1m"` was meant is one character and reads
+/// correctly at a glance, and `"30ms"` for `"30m"` reads better than that.
+/// Every value in `ns` and `us` is below the floor by construction, and every
+/// `ms` value that could be a deliberate choice — `"100ms"`, `"500ms"` — is
+/// above it, which is what makes fifty the boundary rather than a round
+/// number.
+pub const MIN_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
 /// Why a polled `[[source]]` cannot be run.
 ///
 /// Every variant names what *is* acceptable and not only what was wrong, which
@@ -139,6 +163,35 @@ pub enum ConfigError {
     /// merely being wrong.
     #[error("`poll_interval` must be greater than zero: a cadence of zero is a request loop")]
     ZeroInterval,
+
+    /// A cadence above zero and below [`MIN_POLL_INTERVAL`].
+    ///
+    /// **The unit slip, which [`ZeroInterval`](Self::ZeroInterval) does not
+    /// reach.** `poll_interval = "1ms"` is one character away from `"1m"` and
+    /// reads correctly at a glance, and it is a thousand requests a second at
+    /// a venue's catalogue endpoint — which is exactly the outcome that
+    /// variant names, *how a publisher's address gets blocked rather than
+    /// merely being wrong*, arrived at through a value it accepts.
+    ///
+    /// Its own variant rather than a widening of the zero refusal, because the
+    /// two are different sentences to read. Zero says *no cadence*, and the
+    /// answer to it is the one that table's note gives: there is no defensible
+    /// default, go and read what the endpoint will bear. A cadence of `1ms`
+    /// says *this cadence*, and the operator who wrote it believes a number —
+    /// so what they need is the floor, which is the one thing that says which
+    /// of the two characters was wrong.
+    ///
+    /// See [`MIN_POLL_INTERVAL`] for why that number, and for why a floor is
+    /// not the default this table deliberately omits.
+    #[error(
+        "`poll_interval` is `{stated:?}`, and the shortest cadence this transport runs is \
+         50ms — twenty requests a second at one endpoint: below that a value is a unit slip \
+         rather than a choice, `1ms` where `1m` was meant, and a catalogue asked a thousand \
+         times a second is how a publisher's address gets blocked rather than merely being \
+         wrong. A venue whose book has to be read faster than that is a subscription, and \
+         `[ingress] kind = \"websocket\"` is the transport for one"
+    )]
+    IntervalBelowFloor { stated: Duration },
 }
 
 /// A polled endpoint and how often to ask it.
@@ -155,6 +208,11 @@ pub enum ConfigError {
 /// of an endpoint is a property of that endpoint. A transport with no cadence
 /// polls in a loop or never, and both are worse than a refusal — so a document
 /// that omits it does not parse.
+///
+/// There is still a **floor**, and it is not the same claim as a default: no
+/// number is defensible as *the* cadence, and a small enough number is not a
+/// cadence at all. See [`MIN_POLL_INTERVAL`], which sits where the values
+/// below it are unit slips rather than choices.
 ///
 /// # It has to be well under `[ingress] idle_timeout`, and nothing checks it
 ///
@@ -260,6 +318,15 @@ impl PollConfig {
         }
         if self.poll_interval.is_zero() {
             return Err(ConfigError::ZeroInterval);
+        }
+        // After zero rather than instead of it: the two are different
+        // sentences to read, and an operator who wrote `0s` needs the one
+        // about there being no defensible default rather than a number to
+        // clear.
+        if self.poll_interval < MIN_POLL_INTERVAL {
+            return Err(ConfigError::IntervalBelowFloor {
+                stated: self.poll_interval,
+            });
         }
         Ok(())
     }
@@ -444,6 +511,53 @@ mod tests {
         let mut config: PollConfig = toml::from_str(document()).expect("a valid table");
         config.poll_interval = Duration::ZERO;
         assert_eq!(config.check(), Err(ConfigError::ZeroInterval));
+    }
+
+    #[test]
+    fn a_cadence_below_the_floor_is_the_unit_slip_the_zero_refusal_does_not_reach() {
+        let mut config: PollConfig = toml::from_str(document()).expect("a valid table");
+        // `"1ms"` for `"1m"`: one character, reads correctly at a glance, and
+        // a thousand requests a second at a venue's catalogue endpoint -
+        // which is the outcome `ZeroInterval`'s own doc names, reached by a
+        // value it accepts.
+        config.poll_interval = parse_duration("1ms").expect("a stated unit");
+        assert_eq!(
+            config.check(),
+            Err(ConfigError::IntervalBelowFloor {
+                stated: Duration::from_millis(1),
+            })
+        );
+
+        // The message names what IS acceptable, which is this module's
+        // standard, and it names it as a literal because a `thiserror` format
+        // string takes one. This is what keeps the literal and the constant
+        // from drifting apart.
+        assert_eq!(format!("{MIN_POLL_INTERVAL:?}"), "50ms");
+        let message = config.check().expect_err("below the floor").to_string();
+        assert!(message.contains("50ms"), "{message}");
+
+        // The floor itself is acceptable. A floor that refused its own value
+        // is a floor nobody can state.
+        config.poll_interval = MIN_POLL_INTERVAL;
+        assert_eq!(config.check(), Ok(()));
+
+        // And a book polled once a second is the fastest cadence this
+        // repository calls ordinary - this type's own note says so - so the
+        // floor has to be well clear of it. A floor that refused a number an
+        // operator picked would be worse than the slip it catches.
+        config.poll_interval = Duration::from_secs(1);
+        assert_eq!(config.check(), Ok(()));
+
+        // Every value in the two smaller units is the same mistake in a
+        // louder unit, and none of them can reach the floor.
+        for raw in ["1ns", "999us", "49ms"] {
+            config.poll_interval = parse_duration(raw).expect("a stated unit");
+            assert!(
+                matches!(config.check(), Err(ConfigError::IntervalBelowFloor { .. })),
+                "`{raw}`: {:?}",
+                config.check()
+            );
+        }
     }
 
     /// An operator who wrote `https` asked for the wire to be encrypted, and a
