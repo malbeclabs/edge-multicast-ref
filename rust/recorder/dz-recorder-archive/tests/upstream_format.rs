@@ -807,3 +807,70 @@ fn a_publication_that_cannot_land_leaves_no_sealed_object_behind() {
         "a failed publication removed the segment, which is the only copy of the window"
     );
 }
+
+/// **A failed retry does not take the manifest of the publication that landed.**
+///
+/// A publication's name is `(start_ns, end_ns, segment_seq, compression)`, so a
+/// second publication of the same window computes the same final manifest name
+/// as the first. That is not a corner: re-publication of one window is what
+/// this crate's idempotent reprocessing is built around, and a retry after a
+/// transient failure reaches it directly.
+///
+/// The cleanup therefore cannot treat that name as its own. Removing it
+/// unconditionally deleted the manifest of the publication that had already
+/// succeeded, while leaving that publication's object where it was — a
+/// full-size object no manifest points at, which to a reader is a window that
+/// never happened and to the watermark is bytes it does not account for. The
+/// failure that triggered it was transient; the loss was not.
+///
+/// THE MUTANT THIS KILLS is the `installed.manifest` condition removed from
+/// `clean_up`, which is how the code read before: the assertions below then
+/// find the first publication's manifest gone and its object still there.
+/// `a_publication_that_cannot_land_leaves_no_sealed_object_behind` does not
+/// notice, because it publishes into an empty `completed_dir` where the name
+/// this one is about belongs to nobody.
+#[test]
+fn a_failed_retry_leaves_an_earlier_publications_manifest_alone() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let segment = dir.path().join("open.dzus");
+    let object = write(&[(0, 1_700_000_000_000_000_000, vec![0x5Au8; 4 << 10])]);
+    std::fs::write(&segment, &object).expect("the segment is writable");
+
+    let completed = dir.path().join("completed");
+
+    // The publication that lands, and the manifest a reader now depends on.
+    let published = publish(&segment, &completed, draft(), Compression::None)
+        .expect("the first publication lands");
+    let manifest_path = completed.join(format!(
+        "1700000000000000000-1700000000000000000-3.{}.manifest.json",
+        upstream_object_extension(Compression::None)
+    ));
+    let manifest_before =
+        std::fs::read(&manifest_path).expect("the first publication wrote its manifest");
+    assert!(
+        published.path.exists(),
+        "the first publication's object is the thing the manifest points at"
+    );
+
+    // The retry, failing before its own manifest could be written: the segment
+    // it is told to read is not there. Same draft, so the same names.
+    let error = publish(
+        &dir.path().join("gone.dzus"),
+        &completed,
+        draft(),
+        Compression::None,
+    )
+    .expect_err("a segment that is not there cannot be sealed");
+    assert!(matches!(error, SinkError::Io(_)), "{error:?}");
+
+    assert_eq!(
+        std::fs::read(&manifest_path).ok().as_deref(),
+        Some(manifest_before.as_slice()),
+        "a failed retry removed the manifest of the publication that had landed, \
+         leaving its object unreachable"
+    );
+    assert!(
+        published.path.exists(),
+        "a failed retry removed the object of the publication that had landed"
+    );
+}
