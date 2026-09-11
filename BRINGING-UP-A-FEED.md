@@ -177,6 +177,12 @@ one of a closed set — `websocket`, `fix`, `multicast`, `poll`, `filetail`,
   **every** connect attempt — a venue signing a fresh timestamp and headers
   computed once at startup gives a publisher that connects and can then never
   reconnect.
+- **`fix`**, for a venue whose feed arrives over a session: the transport owns
+  the framing, the outbound sequence, the heartbeat cadence, the logout and the
+  close, and the venue composes only the fields of its own logon. TLS is on
+  with no key anywhere to turn it off, and both halves of the endpoint are
+  checked at load rather than at the first connect. It is the rest of this
+  section.
 - **`poll`**, for a venue whose instrument catalogue is a request rather than a
   subscription: the endpoint is asked on `poll_interval`, the body arrives as a
   payload, and no code in the venue's binary holds a timer, a backoff or a
@@ -187,8 +193,8 @@ one of a closed set — `websocket`, `fix`, `multicast`, `poll`, `filetail`,
   one, so `http://user:secret@host/catalogue` is refused at load instead of
   going out unauthenticated and answering `401` to a document that looks right.
 
-The other four — `fix`, `multicast`, `filetail`, `uds` — are named by the set
-and have no crate behind them yet. They are listed because an operator who has
+The other three — `multicast`, `filetail`, `uds` — are named by the set and
+have no crate behind them yet. They are listed because an operator who has
 misspelled a transport needs to be told the whole set rather than the part this
 build happens to carry, which is the difference between *no such transport* and
 *not built with it*; naming one in a document is the startup failure below and
@@ -222,6 +228,28 @@ all. Read [Several sources for one feed](#several-sources-for-one-feed) before
 relying on a startup failure to tell you, and watch
 `dz_publisher_ingress_connection_state` per `connection` rather than the
 process being up.
+
+**A logon whose signature covers `34` or `52` cannot be composed here at all,
+and that is a limitation and not a position.** The list above refuses both
+tags, and what makes them unstatable is more than the refusal: the sending
+time is stamped when the transport frames the message, the sequence belongs to
+the session, and the transport takes both *after* `on_connected` has returned
+— so nothing on that path can tell an adapter what either value is about to
+be. A venue whose scheme signs a canonical string over `SendingTime` or
+`MsgSeqNum` — `SendingTime | MsgType | MsgSeqNum | SenderCompID |
+TargetCompID` into `RawData` is what several ask for — therefore composes a
+signature the venue refuses, however correct the key and the canonical form in
+the adapter are. What that looks like in production is the part worth knowing
+before you meet it: a publisher that connects, logs on, is refused and
+reconnects for the life of the process, with
+`dz_publisher_ingress_connect_failures_total{reason="unauthorized"}` climbing,
+`dz_publisher_ingress_connection_state` at 0, and nothing in any log line that
+looks like a defect — the transport is behaving exactly as written and the
+venue is behaving exactly as documented. So read what your venue's logon signs
+before porting a `build_logon` into `on_connected`. `dz-ingress-fix`'s own
+crate documentation holds the canonical statement of this, the seam it does
+and does not reach, and why the narrower change that would close it has
+ordering to settle rather than a parameter to add.
 
 An instrument admitted mid-session reaches a subscription through
 `poll_upstream`, which is what a session transport needs and a re-subscribing

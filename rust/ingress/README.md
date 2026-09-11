@@ -6,6 +6,7 @@ The transport half of the venue boundary: the half that waits.
 |---|---|
 | [`dz-ingress-core`](dz-ingress-core/) | The `Input` trait, the driver that runs an `Adapter` against it, reconnection and backoff |
 | [`dz-ingress-websocket`](dz-ingress-websocket/) | A WebSocket `Input` |
+| [`dz-ingress-fix`](dz-ingress-fix/) | A session `Input`: tag-value framing, the session lifecycle, and the logon the adapter composes |
 | [`dz-ingress-poll`](dz-ingress-poll/) | A polled request/response `Input`, for a catalogue that is a request rather than a subscription |
 
 ## Why this is not in `adapter/`
