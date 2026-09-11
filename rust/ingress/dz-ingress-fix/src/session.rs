@@ -430,6 +430,24 @@ enum Classified {
     TestRequest { id: String },
 }
 
+/// What a message arriving before the logon has been answered is.
+///
+/// The same separation [`Classified`] is for, and for a second reason here:
+/// the four answers are a closed set, so a message type that is none of them
+/// cannot quietly fall into the refusal that names a credential. See
+/// [`Session::await_logon`], which argues which type is which.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Answer {
+    /// The venue accepted it.
+    Established,
+    /// Neither the answer nor a refusal: keep waiting, within the same grace.
+    KeepWaiting,
+    /// The venue refused the credential, however it spelled it.
+    Refused(String),
+    /// Something that is not an answer to a logon at all.
+    Unrelated(String),
+}
+
 /// One session over one byte stream.
 ///
 /// One instance is one session, reused across reconnects: [`open`](Self::open)
@@ -760,6 +778,38 @@ impl Session {
     }
 
     /// Read the venue's answer to the logon.
+    ///
+    /// # Only a logout and a reject are a refused credential
+    ///
+    /// **`LogonRejected` is what sends an operator to look at a credential**,
+    /// because that is the action
+    /// `connect_failures_total{reason="unauthorized"}` names. So the first
+    /// message after the socket comes up must not be read as one when it is
+    /// an acceptor probes with a `TestRequest` before it answers anything, and
+    /// a `Heartbeat` can already be in flight on the acceptor's own cadence
+    /// when our logon arrives. Reporting either as a refusal sends somebody to
+    /// audit a credential that is fine while the session it was waiting for
+    /// would have come up on the next read.
+    ///
+    /// So `0`, `1` and `4` are **neither the answer nor a refusal**: they keep
+    /// the wait going, within the same [`LOGON_GRACE`], and a venue that only
+    /// ever sends those ends as [`SessionError::LogonNotAnswered`] — which is
+    /// the same distinction the crate docs draw between a session with no logon
+    /// and one whose logon was refused, held here at the one place the
+    /// difference can still be seen.
+    ///
+    /// Nothing is written back at this point, the venue's test request
+    /// included. Only the logon may go out before the session is established
+    /// (see [`Session::send`]), and answering a probe here would put a
+    /// heartbeat on sequence 2 on a session the venue has not accepted.
+    ///
+    /// Everything else — a resend request this transport does not serve, an
+    /// application message before there is a session to carry one, a message
+    /// with no type at all — is [`SessionError::Rejected`], carrying what
+    /// arrived. It ends the connection exactly as the same message would
+    /// mid-session, and it is deliberately not the credential's error: the one
+    /// thing an operator should not be told is to go and look at a credential
+    /// the venue never mentioned.
     async fn await_logon(&mut self) -> Result<(), SessionError> {
         let deadline = self.clock.steady_ns() + nanos(LOGON_GRACE);
         loop {
@@ -767,22 +817,44 @@ impl Session {
                 let answer = {
                     let message = Message::new(&self.held);
                     match message.msg_type() {
-                        Some(msg_type::LOGON) => None,
-                        _ => Some(detail(&message)),
+                        Some(msg_type::LOGON) => Answer::Established,
+                        // The acceptor's own cadence and its probes. See above:
+                        // not an answer, and not the credential either.
+                        Some(
+                            msg_type::HEARTBEAT | msg_type::TEST_REQUEST | msg_type::SEQUENCE_RESET,
+                        ) => Answer::KeepWaiting,
+                        // A logout or a reject answering a logon is the venue
+                        // refusing the credential, which is one thing however
+                        // it is spelled — and it is a connect failure rather
+                        // than a session that ended, because no session was
+                        // established.
+                        Some(msg_type::LOGOUT | msg_type::REJECT) => {
+                            Answer::Refused(detail(&message))
+                        }
+                        _ => Answer::Unrelated(detail(&message)),
                     }
                 };
-                return match answer {
-                    None => {
+                match answer {
+                    Answer::Established => {
                         self.state = SessionState::Established;
                         self.last_read_ns = self.clock.steady_ns();
-                        Ok(())
+                        return Ok(());
                     }
-                    // A logout or a reject answering a logon is the venue
-                    // refusing the credential, which is one thing however it is
-                    // spelled — and it is a connect failure rather than a
-                    // session that ended, because no session was established.
-                    Some(detail) => Err(SessionError::LogonRejected { detail }),
-                };
+                    // Back to the top, where the next whole message is taken
+                    // if one has already arrived and a read is waited for
+                    // otherwise — so the grace bounds the whole wait and not
+                    // each message in it.
+                    Answer::KeepWaiting => continue,
+                    Answer::Refused(detail) => return Err(SessionError::LogonRejected { detail }),
+                    Answer::Unrelated(detail) => {
+                        return Err(SessionError::Rejected {
+                            detail: format!(
+                                "the venue answered the logon with a message that is neither a \
+                                 logon nor a refusal: {detail}"
+                            ),
+                        })
+                    }
+                }
             }
             let now = self.clock.steady_ns();
             if now >= deadline {

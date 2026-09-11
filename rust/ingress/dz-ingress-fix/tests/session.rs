@@ -561,6 +561,67 @@ async fn a_logon_the_venue_answers_with_a_logout_is_a_rejected_logon() {
 }
 
 #[tokio::test]
+async fn an_acceptors_own_traffic_before_the_logon_answer_is_not_a_refused_credential() {
+    // The revert this test exists for: read every first message that is not a
+    // logon as a refusal. An acceptor probes with a test request before it
+    // answers anything, and a heartbeat can already be in flight on the
+    // acceptor's own cadence when our logon arrives — so that revert reports a
+    // session which is about to come up as
+    // `connect_failures_total{reason="unauthorized"}` and sends an operator to
+    // audit a credential the venue never mentioned.
+    let clock = ManualClock::new();
+    let (mut session, writes) = session(
+        &clock,
+        vec![
+            Serve::Bytes(from_venue("35=0|", 1)),
+            Serve::Bytes(from_venue("35=1|112=are-you-there|", 2)),
+            Serve::Bytes(from_venue("35=4|36=1|", 3)),
+            logon_accepted(30),
+        ],
+    );
+    session
+        .send(&adapter_logon(30))
+        .await
+        .expect("the venue answered the logon after its own traffic");
+    assert_eq!(
+        session.state(),
+        SessionState::Established,
+        "the wait continued to the answer"
+    );
+    // And nothing was written back while it continued, the venue's own test
+    // request included: only the logon may go out before the session exists,
+    // so an answer here would be a heartbeat on sequence 2 on a session the
+    // venue had not yet accepted.
+    assert_eq!(
+        written_types(&writes),
+        vec![msg_type::LOGON.to_owned()],
+        "something was written before the session was established"
+    );
+}
+
+#[tokio::test]
+async fn a_message_that_is_not_an_answer_to_the_logon_is_not_the_credentials_error() {
+    // A resend request this transport does not serve, and an application
+    // message before there is a session to carry one. Both end the connection,
+    // neither is `unauthorized`: the one thing an operator must not be told is
+    // to go and look at a credential the venue never mentioned.
+    for arriving in ["35=2|7=1|16=0|", "35=W|55=A-SYMBOL|"] {
+        let clock = ManualClock::new();
+        let (mut session, _writes) = session(&clock, vec![Serve::Bytes(from_venue(arriving, 1))]);
+        let error = session
+            .send(&adapter_logon(30))
+            .await
+            .expect_err("not an answer to a logon");
+        match &error {
+            SessionError::Rejected { detail } => {
+                assert!(detail.contains("neither a logon nor a refusal"), "{detail}")
+            }
+            other => panic!("{arriving}: {other}"),
+        }
+    }
+}
+
+#[tokio::test]
 async fn a_logon_the_venue_never_answers_gives_up_after_the_grace() {
     let clock = ManualClock::new();
     let (mut session, writes) = session(&clock, vec![]);
