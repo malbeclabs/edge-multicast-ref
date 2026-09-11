@@ -22,8 +22,8 @@ use std::path::{Path, PathBuf};
 use dz_recorder_inline::spool::{Recorded, Spool, SpoolError, CLOSED};
 use dz_recorder_load::ledger::Ledger;
 use dz_recorder_rows::{
-    Accepted, Derivation, Era, FileSink, Grain, Landed, Nanos, ObjectId, RowBatch, RowSink,
-    RowSinkError, SegmentTrailer, Written,
+    Accepted, BookTop, Derivation, Era, FileSink, Grain, Landed, Nanos, ObjectId, RowBatch,
+    RowSink, RowSinkError, SegmentTrailer, UncertainReason, Written,
 };
 
 const SECOND: u64 = 1_000_000_000;
@@ -54,6 +54,10 @@ struct FakeSink {
     /// Era rows handed over, so a test can say the rows came back whole and not
     /// merely that a window came back.
     era_rows: usize,
+    /// The top-of-book rows handed over, kept rather than counted: a replay of a
+    /// window an older binary wrote has to be asked what the rows *say*, not
+    /// only how many arrived.
+    book_top_rows: Vec<BookTop>,
     refuse: bool,
     /// How many more inserts take the rows without sending them, the way a
     /// coalescing sink does. The insert after the last of them carries
@@ -70,6 +74,7 @@ impl FakeSink {
             ledger_path: ledger_path.to_path_buf(),
             seen: Vec::new(),
             era_rows: 0,
+            book_top_rows: Vec::new(),
             refuse: false,
             hold_writes: 0,
             due: true,
@@ -102,6 +107,7 @@ impl RowSink for FakeSink {
             ledger_entries: ledger_entries(&self.ledger_path),
         });
         self.era_rows += rows.era.len();
+        self.book_top_rows.extend(rows.book_top.iter().cloned());
         let id = ObjectId::of(&rows);
         let accepted = Written::of(&rows, 0);
         if self.hold_writes > 0 {
@@ -218,6 +224,45 @@ fn batch(key: &str, count: usize) -> RowBatch {
         });
     }
     rows
+}
+
+/// One top-of-book row, so a window carries the grain whose columns changed.
+fn book_top(key: &str) -> BookTop {
+    BookTop {
+        recv_ts: Nanos(1),
+        send_ts: Nanos(1),
+        site: "site".to_owned(),
+        recorder: "recorder".to_owned(),
+        env: "env".to_owned(),
+        feed: "feed".to_owned(),
+        observation: "site/recorder".to_owned(),
+        source_addr: Ipv4Addr::new(192, 0, 2, 10),
+        channel_id: 1,
+        dst_port: 4000,
+        source_id: 7,
+        instrument_id: 42,
+        symbol: "BTC-USD".to_owned(),
+        sequence_number: 1000,
+        message_index: 0,
+        reset_count: 0,
+        segment_seq: 0,
+        bid_px_raw: Some(100),
+        bid_qty_raw: Some(5),
+        bid_source_count: Some(1),
+        ask_px_raw: Some(101),
+        ask_qty_raw: Some(6),
+        ask_source_count: Some(1),
+        price_exp: -2,
+        qty_exp: 0,
+        state_key: 999,
+        book_key: 125_641_225_327_992_341,
+        from_anchor: 0,
+        book_certain: 1,
+        uncertain_since: None,
+        uncertain_reason: UncertainReason::None,
+        object_key: key.to_owned(),
+        derivation: Derivation::Live,
+    }
 }
 
 fn trailer(segment_seq: u64) -> SegmentTrailer {
@@ -1036,4 +1081,129 @@ fn a_window_whose_ledger_entry_will_not_write_owes_an_entry_and_not_a_second_ins
         Some(0),
         "the trailer survived the ledger being unavailable"
     );
+}
+
+/// **A window an older binary spooled still replays once `book_top` gains a
+/// column.**
+///
+/// The upgrade path this grain actually has. A window sits on disk precisely
+/// because the destination was unreachable, the binary is then rolled, and the
+/// new one replays what the old one wrote. `book_key` is new in `010`, so those
+/// rows carry every other column and not that one — and a `book_top.jsonl` line
+/// without it must still parse.
+///
+/// What it costs to get this wrong is not a retry. A window whose grain file
+/// will not parse is discarded *and deleted*, as the torn-file test above
+/// asserts, so the rows an operator was keeping across an outage would be gone
+/// and the feed would read as clean over the window they covered.
+///
+/// The value such a row reads as is zero, which is the same answer `010` gives
+/// for a row already in the column store when the `ALTER` ran: there is no
+/// honest hash for a book nobody folded, and the cross-observer race excludes
+/// zero before it numbers anything. So a replayed row lands, states no book it
+/// cannot state, and enters no pair.
+#[test]
+fn a_window_spooled_before_book_top_carried_the_key_still_replays_and_reads_as_zero() {
+    let root = tempfile::tempdir().expect("a temporary directory");
+    let ledger_path = root.path().join("ledger.jsonl");
+    let spool_dir = root.path().join("spool");
+
+    {
+        let mut spool = Spool::open(&spool_dir, 1 << 20).expect("a spool");
+        let mut rows = batch("window-a", 2);
+        rows.book_top.push(book_top("window-a"));
+        spool
+            .store(10 * SECOND, rows, trailer(0))
+            .expect("the window reaches the disk");
+    }
+
+    // The window is rewritten as the older binary wrote it: every column the
+    // row type had before `010`, and no `book_key`. The sidecar's digest is
+    // recomputed over the new bytes, because a stale digest would fail the
+    // verification before anything was ever parsed — and the failure under test
+    // is the parse.
+    let names = window_dirs(&spool_dir);
+    assert_eq!(names.len(), 1);
+    let dir = spool_dir.join(&names[0]);
+    let path = FileSink::path_in(&dir, Grain::BookTop);
+    let text = std::fs::read_to_string(&path).expect("the grain file is there");
+    let older: Vec<String> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|line| {
+            let mut row: serde_json::Value =
+                serde_json::from_str(line).expect("the row the sink wrote is JSON");
+            let object = row.as_object_mut().expect("a row is an object");
+            assert!(
+                object.remove("book_key").is_some(),
+                "this test is about the column being absent, so it has to be there to remove"
+            );
+            serde_json::to_string(&row).expect("the older row re-serialises")
+        })
+        .collect();
+    let older = format!("{}\n", older.join("\n"));
+    std::fs::write(&path, older.as_bytes()).expect("the older rows are written");
+    reseal(&dir, Grain::BookTop, older.as_bytes());
+
+    let mut spool = Spool::open(&spool_dir, 1 << 20).expect("a spool");
+    let mut ledger = Ledger::open(&ledger_path).expect("a ledger");
+    let mut sink = FakeSink::new(&ledger_path);
+    let drained =
+        drain(&mut spool, &mut sink, &mut ledger, 100 * SECOND).expect("the pass does not fail");
+
+    assert_eq!(
+        spool.windows_discarded_total(),
+        0,
+        "a row missing a column added after it was written is not a corrupt row: {:?}",
+        spool.take_discarded()
+    );
+    assert_eq!(drained.recorded, 1, "the window landed");
+    assert_eq!(
+        sink.rows_written(),
+        vec!["window-a"],
+        "the window's rows reached the destination"
+    );
+    assert_eq!(sink.era_rows, 2, "the grains beside it came back whole");
+    assert_eq!(
+        sink.book_top_rows.len(),
+        1,
+        "the top-of-book row came back rather than being dropped on its own"
+    );
+    assert_eq!(
+        sink.book_top_rows[0].book_key, 0,
+        "a key nobody folded reads as zero, which the race excludes"
+    );
+    assert_eq!(
+        sink.book_top_rows[0].state_key, 999,
+        "every column the older binary did write came back as it wrote it"
+    );
+}
+
+/// Re-seals a window after a test rewrote one grain file, so that the digest the
+/// sidecar carries is the digest of the bytes on disk.
+///
+/// A test about parsing has to get past the verification first, and the
+/// verification is over the bytes: without this the window would be discarded
+/// for a mismatch and the parse under test would never run.
+fn reseal(dir: &Path, grain: Grain, bytes: &[u8]) {
+    let sidecar = dir.join(CLOSED);
+    let text = std::fs::read_to_string(&sidecar).expect("the sidecar is there");
+    let mut value: serde_json::Value =
+        serde_json::from_str(&text).expect("the sidecar the close wrote is JSON");
+    let digest = format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(bytes));
+    let digests = value
+        .get_mut("digests")
+        .and_then(serde_json::Value::as_array_mut)
+        .expect("the sidecar carries its digests");
+    let entry = digests
+        .iter_mut()
+        .find(|d| d.get("grain").and_then(serde_json::Value::as_str) == Some(grain.table()))
+        .expect("the grain the test rewrote has an entry");
+    entry["sha256"] = serde_json::Value::String(digest);
+    entry["bytes"] = serde_json::Value::Number(serde_json::Number::from(bytes.len() as u64));
+    std::fs::write(
+        &sidecar,
+        serde_json::to_vec(&value).expect("the sidecar re-serialises"),
+    )
+    .expect("the sidecar is rewritten");
 }

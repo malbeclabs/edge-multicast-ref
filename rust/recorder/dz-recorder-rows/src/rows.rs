@@ -796,6 +796,22 @@ pub struct BookTop {
     /// its cost: there is no honest value for a book nobody hashed, and no
     /// DEFAULT that would be one. The cross-observer race therefore excludes
     /// zero before it numbers anything, and `010` states why.
+    ///
+    /// `serde(default)` FOR THE SPOOL AND NOT FOR THE COLUMN STORE, which is
+    /// the same reading `010` gives a row the `ALTER` found already there. The
+    /// inline spool writes this grain as JSON and replays it after a restart, so
+    /// a window held over an outage is read back by whichever binary comes up
+    /// next — and a window written before this column existed has every other
+    /// field and not this one. Without a default that line fails to parse, and a
+    /// grain file that will not parse does not wait to be retried: the window is
+    /// discarded and deleted, so rows an operator kept across an outage are lost
+    /// and the feed reads as clean over exactly the window they covered.
+    ///
+    /// It defaults on the way **in** and never on the way out. Serialisation is
+    /// untouched, so every row this binary writes states the key and the insert
+    /// carries the column; the default is only ever reached by a file an older
+    /// binary wrote.
+    #[serde(default)]
     pub book_key: u64,
     /// 1 when this top came from applying a snapshot rather than from a
     /// message the market produced.
