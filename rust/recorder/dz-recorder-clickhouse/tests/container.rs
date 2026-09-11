@@ -1561,7 +1561,7 @@ fn the_race_does_not_depend_on_which_object_a_point_numbered_first() {
 
     let raced = format!(
         "SELECT groupArray((occurrence, observations, lead_ms)) FROM (SELECT \
-         occurrence, observations, lead_ms FROM {}.venue_book_top_race \
+         occurrence, observations, lead_ms FROM {}.feed_race \
          WHERE book_key = {VENUE_INSIDE_ONE_ROTATION_TICK} ORDER BY occurrence)",
         scratch.database
     );
