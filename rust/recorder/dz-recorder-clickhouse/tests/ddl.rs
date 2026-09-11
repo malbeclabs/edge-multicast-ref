@@ -3476,3 +3476,51 @@ fn the_account_file_creates_the_profile_before_the_user_that_names_it() {
     assert!(user < quota, "the quota names the user in its TO clause");
     assert!(user < grant, "a grant names a user that has to exist");
 }
+
+/// **`009` states the `DELETE` a corrected-adapter re-derivation needs, and
+/// states its order.**
+///
+/// `venue_book_top` is a `ReplacingMergeTree`, and a replace is not a delete: a
+/// second load replaces the rows whose whole key tuple it re-writes and
+/// withdraws nothing it does not contain. A corrected adapter is the derivation
+/// that writes a different set — fewer top changes for a record, or renumbered
+/// ones — and it is the derivation this tier keeps raw bytes *for*, so the file
+/// cannot leave that case to a reader's inference.
+///
+/// `a_corrected_adapter_re_derivation_replaces_the_rows_it_supersedes` in
+/// `container.rs` measures the behaviour against a server. This pins the
+/// instruction, because the behaviour is the database's and the instruction is
+/// the only part of the repair this repository owns: an operator who re-loads a
+/// corrected derivation without it leaves the surplus rows behind, and the
+/// occurrence view numbers them beside the corrected ones with nothing failing.
+///
+/// The order is pinned with it. The statement matches on the object, so run
+/// after the load it removes the corrected rows too — an instruction that
+/// carries an order is one that has to say so where it is read.
+#[test]
+fn the_venue_file_states_the_delete_a_corrected_re_derivation_needs() {
+    let sql = venue_sql();
+
+    // A heading, for the reason the account-file instruction above is one.
+    assert!(
+        sql.contains("A `DELETE` AND THEN A LOAD, IN THAT ORDER"),
+        "the instruction is not a heading, so a reader skimming the header for \
+         what a re-derivation obliges them to do will not see it"
+    );
+    assert!(
+        sql.contains("DELETE FROM recorder.venue_book_top WHERE object_key ="),
+        "the statement an operator has to run is not written out, so the \
+         instruction is a rule without the thing that performs it"
+    );
+    assert!(
+        sql.contains("corrected adapter"),
+        "the case that needs the delete is not named in the words the venue \
+         crate and the object format use for it, so a search does not find it"
+    );
+    // The limit the instruction exists for, stated rather than left as the
+    // reader's own deduction from the engine's name.
+    assert!(
+        sql.contains("A REPLACE IS NOT A DELETE"),
+        "the file does not say why a re-load is not enough on its own"
+    );
+}

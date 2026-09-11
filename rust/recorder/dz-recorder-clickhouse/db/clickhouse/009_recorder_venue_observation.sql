@@ -246,7 +246,11 @@
 -- reader reaching for the opposite conclusion has to check. A re-derivation
 -- reads *the same object* — `(object key, sha256)` is the pair it replaces on —
 -- so the key it produces is the same key, this column included, and the second
--- load still replaces the first.
+-- load still replaces the first **where it writes the same row**. What no key
+-- makes it do is remove a row it no longer writes at all, which is a limit of
+-- the engine rather than of this column: see the corrected-adapter section
+-- below, which is where it is stated and where an operator is told what to do
+-- about it.
 --
 -- WHAT IT DOES COST IS A WIDER RE-CUT EXPOSURE, AND THAT IS THE SECOND CLAIM.
 -- An object **re-cut** is the same records read out of an archive whose window
@@ -281,6 +285,54 @@
 -- replace the rows of the object that was. `venue_object` keeps both, because it
 -- is the ledger of what was read; this table holds the book, and two books for
 -- one window is the duplicate that manufactures evidence of loss.
+--
+-- A REPLACE IS NOT A DELETE, AND THAT IS WHERE THE PARAGRAPH ABOVE STOPS BEING
+-- TRUE. `ReplacingMergeTree` replaces a row only where the whole `ORDER BY`
+-- tuple matches, and it removes nothing a later insert does not contain. So the
+-- rows of the object that is there now replace the rows of the object that was
+-- change for change only while both derivations write the same
+-- `(message_index, change_index)` set. Neither this key nor any other makes a
+-- second load withdraw a row the first load wrote and the second does not.
+--
+-- THE DERIVATION THAT WRITES A DIFFERENT SET IS THE ONE THIS TIER EXISTS FOR.
+-- `dz-recorder-venue` and the upstream object format both say why the bytes are
+-- kept verbatim: so that a finding can be re-examined next month with a
+-- corrected adapter. An adapter correction is exactly what changes the set — it
+-- emits *fewer* top changes for a record, because a level update was never a
+-- move of the top or a malformed member should have been refused and counted
+-- rather than folded, or it renumbers them. Every surplus row of the superseded
+-- derivation then stays in this table under a key the corrected one never
+-- writes. Nothing collapses them and nothing fails: the occurrence view numbers
+-- them beside the corrected rows, so `observations`, `lead_ms` and the ordinals
+-- are computed partly from evidence the corrected adapter withdrew. The
+-- re-derivation that was meant to repair a finding manufactures one instead,
+-- and it does it to the oldest rows in the deployment.
+--
+-- SO A CORRECTED-ADAPTER RE-DERIVATION IS TWO STATEMENTS AND NOT ONE:
+-- A `DELETE` AND THEN A LOAD, IN THAT ORDER. The order is the whole of the
+-- instruction: the statement matches on the object, so run second it removes
+-- the corrected rows it was supposed to make room for.
+--
+--     DELETE FROM recorder.venue_book_top WHERE object_key = '<the object>';
+--     -- and then load the corrected derivation of that object
+--
+-- Measured on the 24.8 the suite pins rather than assumed: the lightweight
+-- `DELETE` applies to this engine, and
+-- `a_corrected_adapter_re_derivation_replaces_the_rows_it_supersedes` in
+-- `tests/container.rs` performs both halves against a server — the surplus row
+-- left by the load on its own, and the corrected set the documented order
+-- leaves. `venue_object` needs no such statement: it is keyed on
+-- `(object_key, object_sha256)`, and a corrected adapter reading the same bytes
+-- writes the same pair, so its row replaces. This table is the one that holds a
+-- row per change, and a change is the thing a correction can take away.
+--
+-- NOT A VERSION COLUMN AND NOT A TOMBSTONE, though either would work. Both need
+-- something an adapter can state, and an adapter does not know it has been
+-- corrected: a `ReplacingMergeTree(version)` would have to be handed a version
+-- that rises with a code change, and `is_deleted` needs a row written for a
+-- change that no longer exists to say so. The `DELETE` is a statement an
+-- operator runs at the one moment the fact is actually known, which is when
+-- they decide that this derivation supersedes that one.
 --
 -- THE OBJECT GOES BEFORE THE RECORD INDEX, in the order the occurrence view's
 -- window already reads them: the object is what separates two records across a

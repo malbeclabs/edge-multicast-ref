@@ -2154,3 +2154,97 @@ fn the_cross_observer_race_did_not_move_the_pairing_two_recorders_use() {
         "the collapsed view does not carry the column the race reads from it"
     );
 }
+
+/// **A corrected adapter's re-derivation does not withdraw the rows it
+/// supersedes, and the `DELETE` in `009` is what does.**
+///
+/// `venue_book_top` is a `ReplacingMergeTree` keyed through
+/// `(object_key, message_index, change_index)`, and a replace is not a delete:
+/// the engine replaces a row whose whole key tuple matches and removes nothing
+/// a later insert does not contain. So "the rows of the object that is there
+/// now replace the rows of the object that was" holds change for change only
+/// while both derivations write the same set of changes.
+///
+/// The derivation that writes a different set is the one the whole archive tier
+/// keeps raw bytes for. An adapter correction is exactly what changes it — a
+/// level update that was never a move of the top, a malformed member that
+/// should have been refused and counted — so the corrected derivation of one
+/// record can carry *fewer* changes than the one it supersedes. Every surplus
+/// row then stays under a key the corrected derivation never writes, and the
+/// occurrence view numbers it beside the corrected rows: `observations`,
+/// `lead_ms` and the ordinals are then computed partly from evidence the
+/// corrected adapter withdrew.
+///
+/// Both halves are asserted here, because the first is the finding and the
+/// second is the instruction `009` gives for it. THE MUTANT THE SECOND HALF
+/// KILLS is the `DELETE` dropped from that instruction, leaving a re-load that
+/// looks like a repair and leaves the surplus row in place.
+#[test]
+fn a_corrected_adapter_re_derivation_replaces_the_rows_it_supersedes() {
+    let scratch = Scratch::open("corrected_adapter");
+    let base = now_ns();
+    let object = "venue/a/one-object.dzus";
+
+    let derivation = |keys: &[u64]| -> Vec<VenueBookTop> {
+        keys.iter()
+            .enumerate()
+            .map(|(change, key)| VenueBookTop {
+                change_index: change as u64,
+                book_key: *key,
+                object_key: object.to_owned(),
+                // One record: one stamp and one index, so only the change
+                // ordinal separates these rows.
+                ..venue_top("a", "AAA", -2, base, 10, *key, 0)
+            })
+            .collect()
+    };
+
+    let book_keys = |scratch: &Scratch| -> String {
+        scratch.scalar(&format!(
+            "SELECT arrayStringConcat(arraySort(groupArray(toString(book_key))), ',') \
+             FROM {}.venue_book_top FINAL WHERE object_key = '{object}'",
+            scratch.database
+        ))
+    };
+
+    // The derivation that is superseded: one record, three top changes.
+    scratch.insert_venue_book_tops(&derivation(&[700, 701, 702]));
+    assert_eq!(book_keys(&scratch), "700,701,702");
+
+    // The corrected adapter reads the same bytes and finds two changes, not
+    // three, and states a different book for each.
+    scratch.insert_venue_book_tops(&derivation(&[800, 801]));
+    assert_eq!(
+        book_keys(&scratch),
+        "702,800,801",
+        "the surplus row of the superseded derivation is gone, so a re-load \
+         withdraws rows after all and `009` has an instruction it does not need"
+    );
+
+    // The instruction `009` gives: the `DELETE` and then the load, in that
+    // order.
+    scratch.scalar(&format!(
+        "DELETE FROM {}.venue_book_top WHERE object_key = '{object}'",
+        scratch.database
+    ));
+    scratch.insert_venue_book_tops(&derivation(&[800, 801]));
+    assert_eq!(
+        book_keys(&scratch),
+        "800,801",
+        "the documented delete-then-load left something other than the \
+         corrected derivation"
+    );
+
+    // And the order is the whole of the instruction: the statement matches on
+    // the object, so run second it takes the corrected rows with it.
+    scratch.scalar(&format!(
+        "DELETE FROM {}.venue_book_top WHERE object_key = '{object}'",
+        scratch.database
+    ));
+    assert_eq!(
+        book_keys(&scratch),
+        "",
+        "a `DELETE` on the object after the load left rows behind, so the \
+         order `009` states is not the reason it gives"
+    );
+}
