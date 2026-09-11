@@ -743,6 +743,84 @@ async fn a_refused_logon_is_counted_as_a_connect_failure_through_the_driver() {
     assert!(seen[0].contains("35=A"), "{:?}", seen[0]);
 }
 
+#[tokio::test]
+async fn a_socket_that_goes_away_before_the_logon_is_answered_is_a_connect_failure() {
+    // **The other half of the classification's boundary, and the one that looks
+    // like the test below.** A venue that reads the logon and then drops the
+    // socket fails the session layer with the same `Stream` error a venue that
+    // drops an established session fails it with — and classified by the
+    // variant alone the two are one thing: `remote_close`, handed to the
+    // adapter for a session that never came up, with
+    // `connect_failures_total` unmoved for a connect attempt that failed and
+    // nothing anywhere saying the logon was what did not land.
+    //
+    // Through a `Driver`, because the counter is what the fix is for and only
+    // the driver's first flush can move it: the logon is the adapter's, so it
+    // is written there and not in `connect`. The revert leaves the assertion
+    // below with an empty vector — which is exactly what the publisher's
+    // dashboard had.
+    let (address, received) = serve(vec![
+        // Read the logon, then let the script end: the task drops the socket
+        // and the client sees the stream end with no answer at all.
+        vec![Act::Expect],
+        // Somewhere for the driver to go afterwards; `StopAfter` ends the run
+        // there rather than letting it retry forever, which is what it would
+        // otherwise correctly do.
+        vec![Act::Hold(Duration::from_millis(50))],
+    ])
+    .await;
+
+    let mut input = StopAfter {
+        inner: input(address),
+        connects: AtomicUsize::new(0),
+        limit: 1,
+    };
+    let mut adapter = RecordingAdapter::default();
+    let observer = Reasons::default();
+    let clock = TokioClock::new();
+    let mut events = Discard;
+
+    let exit = {
+        let mut driver = Driver::new(&mut input, &mut adapter, &clock, &observer, policy(None));
+        tokio::time::timeout(Duration::from_secs(10), driver.run(&mut events))
+            .await
+            .expect("the driver came back")
+    };
+    assert!(exit.is_fatal(), "{exit}");
+
+    assert_eq!(
+        observer
+            .connect_failures
+            .lock()
+            .expect("the recorder")
+            .as_slice(),
+        [ConnectFailureReason::Rejected],
+        "a logon the venue dropped the socket on is a connect attempt that \
+         failed, and `rejected` is the reason it failed for: the socket opened, \
+         no budget of ours elapsed, and the venue never mentioned the credential"
+    );
+    assert!(
+        observer.reconnects.lock().expect("the recorder").is_empty(),
+        "nothing was established, so no reconnect reason describes it: {:?}",
+        observer.reconnects.lock().expect("the recorder")
+    );
+    // Never announced up, so the gauge an operator alerts on stays at 0.
+    assert_eq!(
+        observer.states.lock().expect("the recorder").as_slice(),
+        [false],
+        "a session whose logon went unanswered must not read as connected"
+    );
+    // And the adapter is still owed the pairing for the `on_connected` that
+    // composed the logon.
+    assert_eq!(adapter.connects, 1);
+    assert_eq!(adapter.disconnects, vec![DisconnectReason::RemoteClose]);
+
+    // The logon went out and the subscription did not.
+    let seen = received.lock().expect("the recorder").clone();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert!(seen[0].contains("35=A"), "{:?}", seen[0]);
+}
+
 /// A socket that goes away mid-session, which is the ordinary disconnect.
 #[tokio::test]
 async fn a_socket_that_goes_away_mid_session_is_a_remote_close() {

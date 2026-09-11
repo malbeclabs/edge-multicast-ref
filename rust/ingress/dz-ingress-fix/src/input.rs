@@ -55,7 +55,7 @@ use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 use tokio_rustls::TlsConnector;
 
 use crate::config::{Endpoint, SessionConfig};
-use crate::session::{ByteStream, Incoming, Session, SessionError, StreamError};
+use crate::session::{ByteStream, Incoming, Session, SessionError, SessionState, StreamError};
 
 /// How many bytes one read may take off the socket.
 ///
@@ -458,7 +458,20 @@ impl Input for FixInput {
                 UpstreamMessage::Text(text) => text.as_bytes(),
                 UpstreamMessage::Binary(bytes) => bytes,
             };
-            self.session.send(bytes).await.map_err(classify)
+            // **Read before the send, because what it decides is whether this
+            // send is the one that establishes the session.** That is the
+            // question [`Input::send`]'s own contract answers with `Connect`,
+            // and it is a fact about the state the call was dispatched in: in
+            // `Connected` the only body this session accepts is the logon, so a
+            // failure on this call is a session that never came up. Read
+            // afterwards it would be the state the failure left behind, which
+            // is a different question and one the session layer makes no
+            // promise about. See [`classify`].
+            let state = self.session.state();
+            self.session
+                .send(bytes)
+                .await
+                .map_err(|error| classify(state, error))
         })
     }
 
@@ -467,6 +480,13 @@ impl Input for FixInput {
         budget: Option<Duration>,
     ) -> BoxFuture<'a, Result<Received<'a>, IngressError>> {
         Box::pin(async move {
+            // Read for the reason `send` reads it, and it can only say
+            // *established* here: a receive before the logon has been answered
+            // is refused by the session layer without touching the stream, so
+            // no failure this call produces belongs to a session that was still
+            // coming up. Passed rather than hardcoded so that the one place
+            // which decides it is [`classify`].
+            let state = self.session.state();
             match self.session.receive(budget).await {
                 Ok(Incoming::Message(bytes)) => Ok(Received::Payload { bytes, ts_ns: None }),
                 // Never a payload. The driver's idle guard counts time since
@@ -474,7 +494,7 @@ impl Input for FixInput {
                 // delivers nothing must still trip it.
                 Ok(Incoming::Liveness) => Ok(Received::Liveness),
                 Ok(Incoming::Idle) => Ok(Received::Idle),
-                Err(error) => Err(classify(error)),
+                Err(error) => Err(classify(state, error)),
             }
         })
     }
@@ -502,11 +522,13 @@ impl Input for FixInput {
 /// same on the next attempt, so retrying it under a backoff only hides it —
 /// and a process that exits loudly at startup is diagnosable.
 ///
-/// **Connect** is the logon that was written and not accepted. Nothing was
-/// established, so none of the four disconnect reasons describes it: they all
-/// describe a session that existed and then stopped. A refused logon is
-/// `unauthorized`, which is the reason an operator acts on — *look at the
-/// credential* — and a logon nothing answered is `timeout`.
+/// **Connect** is the logon that was written and not accepted, and every other
+/// way a session can fail to come up. Nothing was established, so none of the
+/// four disconnect reasons describes it: they all describe a session that
+/// existed and then stopped. A refused logon is `unauthorized`, which is the
+/// reason an operator acts on — *look at the credential* — a logon nothing
+/// answered is `timeout`, and a logon the stream would not carry or whose
+/// answer was not one is `rejected`.
 ///
 /// **That group is returned from [`Input::send`] and not from
 /// [`Input::connect`], and the driver is where that has to hold.** The logon
@@ -527,6 +549,46 @@ impl Input for FixInput {
 /// **Ended** is a session that existed. `timeout` for a silence, and
 /// `remote_close` for everything the venue or the path did.
 ///
+/// # Why the state the call was dispatched in is a parameter
+///
+/// **The same session error means different things before and after the
+/// session is established, and only the caller's state says which.** A
+/// [`SessionError::Stream`] is the socket going away and a
+/// [`SessionError::Framing`] is bytes that are not this protocol; both arrive
+/// on an established session, and both arrive while the *logon* is being
+/// written or its answer awaited — which is the same `send` that a refused
+/// credential fails on, because the logon is the adapter's and the driver's
+/// ordering puts it in the first send. A [`SessionError::Rejected`] is the same
+/// shape: mid-session it is a session-level reject, and on the logon path it is
+/// the venue answering with something that is not an answer.
+///
+/// Mapped unconditionally to [`IngressError::ended`] those three label a peer
+/// that closes, or answers junk, *before establishment* as a live session's
+/// `remote_close`: the adapter is told a connection ended that never came up,
+/// `connect_failures_total` does not move for a connect attempt that failed,
+/// and `Ended`'s own contract — a session that existed — is broken by the one
+/// layer that can see it did not. `state` is therefore the state the failing
+/// call was dispatched in, read before it: in
+/// [`SessionState::Connected`] the only body the session accepts is the logon,
+/// so a failure there is a connect failure and the mechanism for reporting one
+/// from a send already exists. See [`Input::send`], whose contract states it,
+/// and the driver's own flush, which counts it.
+///
+/// The reason is [`ConnectFailureReason::Rejected`] and none of the other six.
+/// The socket opened and any negotiation held, so it is not `refused`,
+/// `unresolved` or `tls`; no budget of ours elapsed, so it is not `timeout`;
+/// and the venue never mentioned the credential, so it must not be
+/// `unauthorized` — that label is the one that sends somebody to audit a
+/// credential, and pointing it at a socket that dropped would spend an
+/// operator's afternoon on the wrong file. `rejected` is the taxonomy's *the
+/// handshake was rejected for anything else*, and a logon that could not be
+/// written, or whose answer could not be read, is anything else.
+///
+/// This stays a distinction in the *classification* and not in
+/// [`SessionError`], which is deliberate: that type says what the protocol did
+/// and this function says what the driver should do about it, so a framing
+/// failure is one variant either way and the state is what the action turns on.
+///
 /// # `auth_expired` is unreachable from here, and that is stated rather than
 /// papered over
 ///
@@ -538,8 +600,13 @@ impl Input for FixInput {
 /// gap `dz-ingress-websocket` states at its own end, and a gap in the closed
 /// family rather than something to fold into a label that would then mean two
 /// things.
-fn classify(error: SessionError) -> IngressError {
+fn classify(state: SessionState, error: SessionError) -> IngressError {
     let detail = error.to_string();
+    // Whether the failing call was the one carrying the logon. The session
+    // accepts nothing but a logon in this state, so a failure dispatched from
+    // it is a session that never came up — and `LogonSent` cannot appear here,
+    // because the send that wrote the logon is what reported why.
+    let establishing = state == SessionState::Connected;
     match error {
         SessionError::NoLogon
         | SessionError::SentBeforeEstablished { .. }
@@ -554,7 +621,28 @@ fn classify(error: SessionError) -> IngressError {
             IngressError::connect(ConnectFailureReason::Timeout, detail)
         }
 
+        // The same three failures as the group below, before there was a
+        // session for them to end: the stream going away or turning into
+        // something that is not this protocol while the logon was being written
+        // or its answer awaited, and the venue answering the logon with a
+        // message that is neither a logon nor a refusal. Nothing was
+        // established, so `Ended` would be a `remote_close` handed to the
+        // adapter for a session that never existed and a connect attempt that
+        // failed with nothing counting it. See this function's own docs for why
+        // the reason is `rejected` and not one of the other six.
+        SessionError::Framing(_) | SessionError::Stream(_) | SessionError::Rejected { .. }
+            if establishing =>
+        {
+            IngressError::connect(ConnectFailureReason::Rejected, detail)
+        }
+
         SessionError::Silent { .. } => IngressError::ended(DisconnectReason::Timeout, detail),
+        // A session that existed. The three the branch above also lists reach
+        // here having been dispatched from an established session, which is
+        // what makes `remote_close` true of them: the venue logged out, or
+        // rejected a session message, or the stream this session was running
+        // over stopped being one.
+        //
         // `LogonNotEstablished` is here and not with the fatal group: venue
         // code did its job, and a receive on a session whose logon failed is a
         // driver that ignored what its own send returned — which is the case
@@ -750,20 +838,31 @@ mod tests {
             SessionError::Body(crate::framing::BodyError::Empty),
         ];
         for error in fatal {
-            let classified = classify(error.clone());
-            assert!(classified.is_fatal(), "{error} must stop the driver");
-            assert_eq!(
-                classified.disconnect_reason(),
-                Some(DisconnectReason::RemoteClose),
-                "a fatal fault still ends a connection the adapter was told about"
-            );
+            // In both states, because a mistake in venue code is the same
+            // mistake before the session is established and after it — and the
+            // branch that reads the state must not have taken any of these.
+            for state in [SessionState::Connected, SessionState::Established] {
+                let classified = classify(state, error.clone());
+                assert!(
+                    classified.is_fatal(),
+                    "{error} must stop the driver, in {state:?}"
+                );
+                assert_eq!(
+                    classified.disconnect_reason(),
+                    Some(DisconnectReason::RemoteClose),
+                    "a fatal fault still ends a connection the adapter was told about"
+                );
+            }
         }
 
         // A logon written and not accepted. Nothing was established, so none of
         // the four disconnect reasons describes it.
-        let rejected = classify(SessionError::LogonRejected {
-            detail: "invalid credentials".to_owned(),
-        });
+        let rejected = classify(
+            SessionState::Connected,
+            SessionError::LogonRejected {
+                detail: "invalid credentials".to_owned(),
+            },
+        );
         assert!(matches!(
             rejected,
             IngressError::Connect {
@@ -773,7 +872,10 @@ mod tests {
         ));
         assert_eq!(rejected.disconnect_reason(), None);
 
-        let unanswered = classify(SessionError::LogonNotAnswered { grace: LOGON_GRACE });
+        let unanswered = classify(
+            SessionState::Connected,
+            SessionError::LogonNotAnswered { grace: LOGON_GRACE },
+        );
         assert!(matches!(
             unanswered,
             IngressError::Connect {
@@ -785,10 +887,13 @@ mod tests {
         // A silence is the one disconnect this layer can call a timeout: the
         // socket produced no error and no data, and a test request went
         // unanswered.
-        let silent = classify(SessionError::Silent {
-            interval: Duration::from_secs(30),
-            silence: Duration::from_secs(72),
-        });
+        let silent = classify(
+            SessionState::Established,
+            SessionError::Silent {
+                interval: Duration::from_secs(30),
+                silence: Duration::from_secs(72),
+            },
+        );
         assert_eq!(silent.disconnect_reason(), Some(DisconnectReason::Timeout));
         // Both numbers reach the log line, and the one an operator counts
         // against is the graced pair rather than two bare cadences.
@@ -812,12 +917,82 @@ mod tests {
             SessionError::LogonNotEstablished,
             SessionError::NotConnected,
         ] {
-            let classified = classify(ended.clone());
+            // On an established session, which is what `remote_close` claims.
+            // The three of these that also arise on the logon path are the
+            // other half of this boundary, asserted below.
+            let classified = classify(SessionState::Established, ended.clone());
             assert!(!classified.is_fatal(), "{ended}");
             assert_eq!(
                 classified.disconnect_reason(),
                 Some(DisconnectReason::RemoteClose),
                 "{ended}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_same_failure_before_the_session_is_established_is_a_connect_failure() {
+        // Both sides of the boundary, on the same three errors, because the
+        // revert this exists for is one word: classify them by the variant
+        // alone. A peer that closes the socket while the logon is going out, or
+        // answers it with bytes that are not this protocol, is then a live
+        // session's `remote_close` — handed to the adapter for a session that
+        // never came up, with `connect_failures_total` unmoved for a connect
+        // attempt that failed and nothing anywhere saying a logon was the thing
+        // that did not land.
+        //
+        // `Connected` is the state the establishing send is dispatched in: the
+        // logon is the adapter's, so the driver connects, asks, and sends, and
+        // the only body the session accepts at that point is the logon.
+        let before = [
+            SessionError::Stream(StreamError::Closed {
+                detail: "the stream ended".to_owned(),
+            }),
+            SessionError::Stream(StreamError::Failed {
+                detail: "the logon did not leave".to_owned(),
+            }),
+            SessionError::Framing(crate::framing::FramingError::NotAMessage),
+            SessionError::Rejected {
+                detail: "the venue answered the logon with something else".to_owned(),
+            },
+        ];
+        for error in before {
+            let establishing = classify(SessionState::Connected, error.clone());
+            assert!(
+                matches!(
+                    establishing,
+                    IngressError::Connect {
+                        reason: ConnectFailureReason::Rejected,
+                        ..
+                    }
+                ),
+                "{error} before establishment is a connect failure: {establishing}"
+            );
+            // And it carries no disconnect reason, because there is no session
+            // for one of the four to describe. That is also what keeps it out
+            // of `reconnects_total`.
+            assert_eq!(
+                establishing.disconnect_reason(),
+                None,
+                "{error} before establishment describes no session that ended"
+            );
+            // The venue's own words survive the relabelling, because the detail
+            // is the only place the reason a logon did not land is written
+            // down.
+            assert!(
+                establishing.to_string().contains(&error.to_string()),
+                "the detail is what an operator reads: {establishing}"
+            );
+            // Not retried out of existence either: a venue that drops a logon
+            // is an outage to reconnect against, not a document to correct.
+            assert!(!establishing.is_fatal(), "{error}");
+
+            // The same error on a session that existed stays what it was.
+            let established = classify(SessionState::Established, error.clone());
+            assert_eq!(
+                established.disconnect_reason(),
+                Some(DisconnectReason::RemoteClose),
+                "{error} on an established session is a disconnect: {established}"
             );
         }
     }
