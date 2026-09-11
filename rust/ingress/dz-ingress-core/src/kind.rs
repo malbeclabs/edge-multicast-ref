@@ -25,7 +25,7 @@ pub enum Kind {
     Fix,
     /// A multicast receiver, for a venue that publishes one. Not yet built.
     Multicast,
-    /// Polled request/response. Not yet built.
+    /// Polled request/response. `dz-ingress-poll`.
     ///
     /// `poll` and not `rest`: a book's *resting* quantity already owns that
     /// word here, and every other name in this set is a mechanism rather than

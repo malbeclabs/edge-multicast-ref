@@ -175,16 +175,19 @@ one of a closed set — `websocket`, `fix`, `multicast`, `poll`, `filetail`,
   **every** connect attempt — a venue signing a fresh timestamp and headers
   computed once at startup gives a publisher that connects and can then never
   reconnect.
-- **`fix`**, for a venue whose feed arrives over a session. The transport owns
-  the framing, the outbound sequence, the heartbeat cadence, the logout and the
-  close; the logon's own fields are the venue's and are composed in
-  `on_connected`, beside the subscriptions and before them.
 - **`poll`**, for a venue whose instrument catalogue is a request rather than a
   subscription: the endpoint is asked on `poll_interval`, the body arrives as a
   payload, and no code in the venue's binary holds a timer, a backoff or a
   failure count. An unchanged response is liveness and not a payload, so the
   idle guard still fires on a catalogue that has stopped changing. `https` needs
   the crate's `tls` feature and is refused at load without it.
+
+The other four — `fix`, `multicast`, `filetail`, `uds` — are named by the set
+and have no crate behind them yet. They are listed because an operator who has
+misspelled a transport needs to be told the whole set rather than the part this
+build happens to carry, which is the difference between *no such transport* and
+*not built with it*; naming one in a document is the startup failure below and
+not a feed. [`rust/ingress`](rust/ingress/) is the list of what exists.
 
 A transport whose crate is not linked is refused at startup, so the binary
 depends on `dz-ingress-core` with the marker feature for the transports it means
