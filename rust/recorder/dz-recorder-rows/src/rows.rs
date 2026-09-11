@@ -792,10 +792,22 @@ pub struct BookTop {
     /// sides above — so every row can state it and no row is weakened to
     /// accommodate a row of another kind.
     ///
-    /// Zero on a row written before the column existed, which is the whole of
-    /// its cost: there is no honest value for a book nobody hashed, and no
-    /// DEFAULT that would be one. The cross-observer race therefore excludes
-    /// zero before it numbers anything, and `010` states why.
+    /// Zero on a row written before the column existed, which is the cost the
+    /// migration argues at length: there is no honest value for a book nobody
+    /// hashed, and no DEFAULT that would be one. The cross-observer race
+    /// therefore excludes zero before it numbers anything, and `010` states why.
+    ///
+    /// **And zero on every row this binary writes if that migration has not
+    /// been applied**, which is the same value reached from the other end and
+    /// the direction with no symptom. The sink posts `FORMAT JSONEachRow` and
+    /// the rows name their fields, so a column is matched by name at the server
+    /// and `input_format_skip_unknown_fields` defaults to 1: a `book_top` the
+    /// `ALTER` has not reached takes the insert, discards this field and
+    /// acknowledges the batch. Every row that binary wrote is then excluded from
+    /// the race, which reads as a venue-only race with no error anywhere. So the
+    /// schema is applied before the binary is rolled — stated in `010`'s
+    /// header, and in the feed runbook beside the rule for rolling subscribers
+    /// before publishers.
     ///
     /// `serde(default)` FOR THE SPOOL AND NOT FOR THE COLUMN STORE, which is
     /// the same reading `010` gives a row the `ALTER` found already there. The
