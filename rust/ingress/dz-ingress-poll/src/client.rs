@@ -219,13 +219,21 @@ const IF_NONE_MATCH: &str = "if-none-match";
 /// The header an endpoint states a body's validator in.
 const ETAG: &str = "etag";
 
-/// The largest response body this client will assemble.
+/// The largest response body this client will assemble unless told otherwise.
 ///
 /// It exists because the endpoint chooses the size and the buffer is ours. A
 /// venue's whole instrument catalogue is the large one and eight megabytes is
 /// well past any of them — the same bound, for the same reason, as the
 /// websocket transport's largest message.
-const MAX_BODY_BYTES: u64 = 8 * 1024 * 1024;
+///
+/// **A default and not a ceiling in the code**, for the reason that transport
+/// makes its own adjustable: the number is a guess about somebody else's
+/// catalogue, and a venue whose catalogue is genuinely larger than the guess
+/// is unreachable for ever otherwise. Every poll ends `Limited`, which is
+/// `Transport`, which is `remote_close`; the driver reconnects, the next poll
+/// does the same, and the reconnect counter is the only thing that moves. See
+/// [`HttpClient::with_max_body_bytes`].
+pub const DEFAULT_MAX_BODY_BYTES: u64 = 8 * 1024 * 1024;
 
 /// The connector, which is the one thing the `tls` feature changes.
 ///
@@ -264,6 +272,9 @@ type Connector = hyper_util::client::legacy::connect::HttpConnector;
 /// this is not nothing.
 pub struct HttpClient {
     inner: hyper_util::client::legacy::Client<Connector, http_body_util::Empty<hyper::body::Bytes>>,
+    /// The largest body to assemble. See
+    /// [`with_max_body_bytes`](HttpClient::with_max_body_bytes).
+    max_body_bytes: u64,
 }
 
 impl HttpClient {
@@ -275,7 +286,34 @@ impl HttpClient {
             inner:
                 hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
                     .build(Self::connector()),
+            max_body_bytes: DEFAULT_MAX_BODY_BYTES,
         }
+    }
+
+    /// The largest response body to assemble. See
+    /// [`DEFAULT_MAX_BODY_BYTES`], which is what this starts at.
+    ///
+    /// The escape hatch the websocket transport's
+    /// `with_max_message_bytes` is, and it is here for the same reason: the
+    /// default is a guess about a catalogue on somebody else's host, and a
+    /// venue whose catalogue is genuinely larger than the guess has no way
+    /// past it otherwise. What such a publisher does instead is poll, end
+    /// `Limited` — which is `Transport`, which the transport ends the
+    /// connection as `remote_close` — reconnect, and do it again, with
+    /// `dz_publisher_ingress_reconnects_total{reason="remote_close"}` the only
+    /// series that moves and nothing anywhere naming a size. A bound whose
+    /// only remedy is a rebuild of the publisher is a bound that outlives
+    /// whoever chose it.
+    ///
+    /// **Raising it is a memory commitment made to the endpoint**, which is
+    /// what the bound exists to keep from being open-ended: one poll may hold
+    /// this many bytes per polled connection, and the endpoint decides when.
+    /// Lower it as readily as raise it — a venue whose catalogue is a hundred
+    /// kilobytes has a bound worth eighty times tighter than the default.
+    #[must_use]
+    pub const fn with_max_body_bytes(mut self, bytes: u64) -> Self {
+        self.max_body_bytes = bytes;
+        self
     }
 
     /// The TLS client configuration, with the provider named rather than
@@ -394,16 +432,22 @@ impl Default for HttpClient {
     }
 }
 
-/// Prints whether TLS is compiled in, and **not the endpoint of any request**.
+/// Prints whether TLS is compiled in and the body ceiling this client is
+/// holding, and **not the endpoint of any request**.
 ///
 /// A client holds no endpoint, so there is little to print — but a derived
 /// implementation would print the connection pool's contents, which is a list
 /// of hosts, and the same rule that keeps a venue endpoint's query string out
 /// of a log line applies to it.
+///
+/// The ceiling is printed because it is adjustable: a venue's `main` that
+/// raised it and a build that did not are otherwise the same line, and the
+/// failure that tells them apart arrives once, on the poll that exceeds it.
 impl core::fmt::Debug for HttpClient {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("HttpClient")
             .field("tls", &cfg!(feature = "tls"))
+            .field("max_body_bytes", &self.max_body_bytes)
             .finish()
     }
 }
@@ -475,7 +519,7 @@ impl PollClient for HttpClient {
             use http_body_util::BodyExt as _;
             let body = http_body_util::Limited::new(
                 response.into_body(),
-                usize::try_from(MAX_BODY_BYTES).unwrap_or(usize::MAX),
+                usize::try_from(self.max_body_bytes).unwrap_or(usize::MAX),
             )
             .collect();
             // The deadline the head was read against, and what is left of it.
@@ -501,8 +545,9 @@ impl PollClient for HttpClient {
                     // and *the endpoint stopped sending* are not the same
                     // conversation to have with a venue.
                     return Err(RequestFailure::Transport(format!(
-                        "the response body did not arrive whole, within the \
-                         {MAX_BODY_BYTES}-byte ceiling: {error}"
+                        "the response body did not arrive whole, within the {}-byte ceiling: \
+                         {error}",
+                        self.max_body_bytes
                     )));
                 }
             }
@@ -711,7 +756,7 @@ mod tests {
     }
 
     #[test]
-    fn a_debug_line_says_whether_tls_is_compiled_in() {
+    fn a_debug_line_says_whether_tls_is_compiled_in_and_which_ceiling_is_held() {
         // The one question a client's `Debug` can answer that an operator
         // reading a refused `https` endpoint actually has.
         let rendered = format!("{:?}", HttpClient::new());
@@ -723,6 +768,16 @@ mod tests {
             }),
             "{rendered}"
         );
+        // And the ceiling, because it is adjustable: a venue's `main` that
+        // raised it and a build that did not are otherwise the same line, and
+        // the failure that tells them apart arrives once, on the poll that
+        // exceeds it.
+        assert!(
+            rendered.contains(&format!("max_body_bytes: {DEFAULT_MAX_BODY_BYTES}")),
+            "{rendered}"
+        );
+        let rendered = format!("{:?}", HttpClient::new().with_max_body_bytes(64 * 1024));
+        assert!(rendered.contains("max_body_bytes: 65536"), "{rendered}");
     }
 
     #[test]
@@ -1090,7 +1145,7 @@ mod tests {
         // `an_endpoint_serving_a_lengthless_body`'s own note for why, and for
         // what the size of the socket buffers would otherwise decide.
         let (port, server) = an_endpoint_serving_a_lengthless_body(
-            usize::try_from(MAX_BODY_BYTES).unwrap() + 1024 * 1024,
+            usize::try_from(DEFAULT_MAX_BODY_BYTES).unwrap() + 1024 * 1024,
         );
         let endpoint = format!("http://127.0.0.1:{port}/catalogue");
 
@@ -1110,10 +1165,62 @@ mod tests {
              value exists for: {failure:?}"
         );
         assert!(
-            failure.detail().contains(&MAX_BODY_BYTES.to_string()),
+            failure
+                .detail()
+                .contains(&DEFAULT_MAX_BODY_BYTES.to_string()),
             "and the detail names the ceiling, because *the endpoint sent too \
              much* and *the endpoint stopped sending* are not the same \
              conversation to have with a venue: {}",
+            failure.detail()
+        );
+        server.join().expect("the endpoint thread");
+    }
+
+    #[tokio::test]
+    async fn a_ceiling_a_venue_stated_is_the_one_the_body_is_bounded_by() {
+        // **The escape hatch is real and not declared.** A venue whose
+        // catalogue is genuinely larger than the default has no way past it
+        // otherwise: every poll ends `Limited`, the connection ends
+        // `remote_close`, the driver reconnects, and the reconnect counter is
+        // the only thing that moves. A builder method nothing reads is that
+        // same publisher with an extra line in its `main`.
+        //
+        // Stated downwards, which is the direction a test can assert cheaply
+        // and is also a bound worth having: a venue whose catalogue is a
+        // hundred kilobytes wants one far tighter than eight megabytes.
+        let ceiling = 64 * 1024;
+        let (port, server) = an_endpoint_serving_a_lengthless_body(ceiling + 64 * 1024);
+        let endpoint = format!("http://127.0.0.1:{port}/catalogue");
+
+        let failure = HttpClient::new()
+            .with_max_body_bytes(u64::try_from(ceiling).unwrap())
+            .fetch(Request {
+                endpoint: &endpoint,
+                parameters: None,
+                validator: None,
+                budget: Duration::from_secs(30),
+            })
+            .await
+            .expect_err("a body past the ceiling this client was given is not an answer");
+
+        assert!(
+            matches!(failure, RequestFailure::Transport(_)),
+            "{failure:?}"
+        );
+        // The stated ceiling and not the default, which is the whole of what
+        // this asserts: a body of 128 KiB is well under the default, so a
+        // client that ignored the override would have answered with it.
+        assert!(
+            failure.detail().contains(&ceiling.to_string()),
+            "the detail names the ceiling that was actually applied: {}",
+            failure.detail()
+        );
+        assert!(
+            !failure
+                .detail()
+                .contains(&DEFAULT_MAX_BODY_BYTES.to_string()),
+            "and not the default, which is the number a client that dropped \
+             the override would print: {}",
             failure.detail()
         );
         server.join().expect("the endpoint thread");
