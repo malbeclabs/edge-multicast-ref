@@ -131,6 +131,50 @@
 --     cadence and times nothing. There is no such row here: every
 --     `venue_book_top` row comes from an upstream message the venue produced, so
 --     there is nothing to exclude and no ordinal to shift by excluding it late.
+--
+--
+-- RE-APPLY `004` AFTER THIS FILE, OR THE TWO TABLES BELOW ARE UNWRITABLE
+--
+-- `004_recorder_loader_user.sql` is where the grants for these two tables
+-- live, written there exactly as they are written here:
+--
+--   GRANT INSERT ON recorder.venue_book_top TO dz_loader;
+--   GRANT INSERT ON recorder.venue_object TO dz_loader;
+--
+-- and there is no migration framework here: the files are applied by hand or by
+-- the deploy, as `001`'s own header states. So the hazard is a *partial* apply,
+-- and it has one shape. An operator upgrading an existing cluster applies this
+-- file, because this file is the new thing, and the venue derivation then fails
+-- on its first insert with `Not enough privileges` — a message that names a
+-- table and not the file that would fix it. Re-apply `004`; it is idempotent by
+-- construction, every statement in it guarded by `IF NOT EXISTS` or replaying a
+-- grant the account already holds.
+--
+-- A fresh install by the numbers is **not** a hazard, and the reason is worth
+-- stating so that nobody reorders the files to fix a problem they do not have.
+-- `004` runs before this file and its two venue grants therefore name tables
+-- that do not exist yet. A grant in ClickHouse is stored against the name, not
+-- against the object, so it is accepted and it takes effect when this file
+-- creates them.
+--
+-- THE GRANTS ARE NOT MOVED HERE, and three things keep them in `004`. A `GRANT`
+-- names `dz_loader`, which only `004` creates, so a grant in this file would
+-- stop this file applying anywhere the account has not been made — which is
+-- every run of the container suite, since `004` takes a password parameter and
+-- `dz_recorder_clickhouse::schema` excludes it by name. That suite also
+-- rewrites `recorder.` to a scratch database per run, so a grant in an applied
+-- file would spend privileges on ephemeral databases under an account name that
+-- means something in production. And this file is in `schema`, which is what a
+-- schema deploy applies: by the argument `004`'s own header makes, whoever
+-- applies it holds neither access-management rights nor the secret, so a
+-- privilege statement here is one that actor cannot execute.
+--
+-- What that costs is that the two grants are the only statements in this pair
+-- of files no test runs against a server — `ddl.rs` asserts them as substrings
+-- of `004` instead. The dependency is stated in both directions rather than
+-- inferred, and `ddl.rs` pins that this paragraph names `004` for every venue
+-- grain, so a third grain added next year cannot get a grant in `004` and no
+-- instruction here.
 
 
 -- 1. The venue-side top of book.
@@ -186,8 +230,10 @@
 -- is* — and two changes that happened to return the book to one state would
 -- collapse again while carrying a key that says they cannot have.
 --
--- `object_key` IS IN THE KEY, AND IT IS THE ONLY COLUMN THAT TELLS TWO OBJECTS
--- APART. `message_index` restarts at zero in every object, so it is a record's
+-- `object_key` IS IN THE KEY, AND IT IS THE ONLY COLUMN THAT CAN BE. Not the
+-- only one that tells two objects apart — `object_sha256` does that too and is
+-- on this table, and its own paragraph below is why it is ruled out anyway.
+-- `message_index` restarts at zero in every object, so it is a record's
 -- position *within* one and separates nothing across two. A rotation closes one
 -- object and opens the next, and a clock coarser than the gap between them
 -- stamps records either side of the boundary alike — the case the occurrence
@@ -199,15 +245,38 @@
 -- count that is wrong. The view cannot repair it either: a row a merge removed
 -- is not there to be numbered.
 --
--- AND IT COSTS NO IDEMPOTENCE, which is the claim a reader reaching for the
--- opposite conclusion has to check. A re-derivation reads *the same object* —
--- `(object key, sha256)` is the pair it replaces on — so the key it produces is
--- the same key, this column included, and the second load still replaces the
--- first. The case that would double rows is an object **re-cut**, its window
--- boundaries moved, and this column does not create it: moving the boundaries
--- renumbers `message_index` too, so a re-cut object's rows sit beside the old
--- ones under any key that holds a record index at all. The re-cut exposure is
--- therefore unchanged and the rotation-boundary collapse is closed.
+-- AND IT COSTS NO IDEMPOTENCE FOR A RE-DERIVATION, which is the first claim a
+-- reader reaching for the opposite conclusion has to check. A re-derivation
+-- reads *the same object* — `(object key, sha256)` is the pair it replaces on —
+-- so the key it produces is the same key, this column included, and the second
+-- load still replaces the first.
+--
+-- WHAT IT DOES COST IS A WIDER RE-CUT EXPOSURE, AND THAT IS THE SECOND CLAIM.
+-- An object **re-cut** is the same records read out of an archive whose window
+-- boundaries were moved, and it lands under a new `object_key`, so its rows do
+-- not replace the rows of the cut it supersedes. For the records whose index
+-- actually moved this column changes nothing: the re-cut renumbers
+-- `message_index` too, so those rows sit beside the old ones under any key that
+-- holds a record index at all. The case this column adds is the **identical
+-- prefix** — a re-cut that moved only the *later* boundary, so the leading
+-- records are the same records with the same indexes and the same stamps.
+-- Under a key without the object those rows replace their predecessors; under
+-- this one they double them, because the object name changed and the object
+-- name is in the key. So the exposure this column carries is strictly wider
+-- than the exposure a key without it carries, not the same one, and a reader
+-- who constructs that case is right.
+--
+-- IT IS STILL THE TRADE TO TAKE, because the two failures are not comparable.
+-- A rotation-boundary collapse is silent and unrecoverable: the row is never
+-- written, nothing counts it, and no later query separates a book state that
+-- collapsed from one that never happened. An identical-prefix double is visible
+-- and countable: `venue_object` holds one row per `(object_key,
+-- object_sha256)`, so two cuts of one window are two rows there with
+-- overlapping `recv_ts_start`, and the doubled rows here are the ones that
+-- carry the superseded `object_key`. No merge collapses them — different keys,
+-- which is the whole point — so removing them is an operator's `DELETE` on that
+-- `object_key`. A duplicate a query can find and a statement can remove is
+-- worth taking over a loss no query can find at all.
 --
 -- `object_sha256` IS **NOT** IN THE KEY, and the difference from the row above
 -- is what each table is for. Two digests under one key are one window the
@@ -370,8 +439,15 @@ CREATE TABLE IF NOT EXISTS recorder.venue_object (
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(recv_ts_start)
--- The pair a re-derivation replaces on, and the observation and feed ahead of it
--- so that the partition prunes before the key is read.
+-- The pair a re-derivation replaces on, and the observation and feed ahead of
+-- it because those two are the coarse filter a reader supplies: the mark range
+-- narrows on them before `object_key` is compared.
+--
+-- Not for pruning, which `PARTITION BY toYYYYMMDD(recv_ts_start)` above
+-- decides on its own: no sort-key column order participates in it. The
+-- distinction is written down because the two are easy to conflate, and a key
+-- defended as a pruning device is a key nobody re-examines when the
+-- partitioning changes underneath it.
 ORDER BY (observation, feed, object_key, object_sha256);
 
 

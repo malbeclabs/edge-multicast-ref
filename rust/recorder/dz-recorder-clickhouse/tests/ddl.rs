@@ -482,6 +482,82 @@ fn the_venue_side_tables_name_the_side_and_never_a_venue() {
     }
 }
 
+/// **`009` tells an operator to re-apply `004`, because nothing else will.**
+///
+/// The two venue grants are the only statements in either file that no test
+/// runs against a server. `schema()` excludes `004` by name — it takes a
+/// password parameter and needs access-management rights — and `container.rs`
+/// iterates `schema()`, so the grants are asserted as substrings above and
+/// never executed. That is a deliberate cost, argued in `009`'s own header, and
+/// what makes it survivable is that the dependency is *written down at both
+/// ends* rather than inferred: the failure it prevents is an operator who
+/// applies the new file because the new file is the new thing, and then meets
+/// `Not enough privileges` on the venue derivation's first insert — a message
+/// naming a table and not the file that fixes it.
+///
+/// Pinned per grain and not as one sentence. A third venue grain added next
+/// year gets its `GRANT INSERT` in `004` because the test above walks
+/// [`VenueGrain::ALL`]; this one makes it get an instruction in `009` as well,
+/// so the pair cannot drift into a grant nobody is told to apply.
+#[test]
+fn the_venue_file_tells_an_operator_to_re_apply_the_account_file() {
+    let sql = venue_sql();
+    let user = migration("004_recorder_loader_user.sql").sql;
+
+    // The instruction is a heading and not a sentence inside a paragraph, which
+    // is the difference between an operator finding it while skimming the
+    // header and an operator reading the whole file first.
+    assert!(
+        sql.contains("RE-APPLY `004` AFTER THIS FILE"),
+        "the instruction is not a heading, so a reader skimming the header for \
+         what applying this file obliges them to do will not see it"
+    );
+    assert!(
+        sql.contains("004_recorder_loader_user.sql"),
+        "`009` does not name the file that grants its tables, so nothing points \
+         an operator at it"
+    );
+    assert!(
+        sql.contains("dz_loader"),
+        "the account whose grants are missing is not named"
+    );
+    assert!(
+        sql.contains("Not enough privileges"),
+        "the error an operator actually sees is what makes this findable by \
+         search, and it has to be the server's words"
+    );
+    // The grant each table needs, quoted in `009` in the words `004` writes it
+    // in: one literal, so a table renamed in one file and not the other is two
+    // failures rather than a silently unreachable instruction.
+    for grain in VENUE_GRAINS {
+        let statement = format!("GRANT INSERT ON recorder.{} TO dz_loader;", grain.table());
+        assert!(
+            sql.contains(&statement),
+            "{grain} has a grant in `004` and no instruction in `009`: {statement}"
+        );
+        assert!(
+            user.contains(&statement),
+            "`009` quotes a grant `004` does not write: {statement}"
+        );
+    }
+
+    // And the other end of it: `004` states the standing rule, so the next file
+    // that adds a table is told what it owes rather than having to notice.
+    assert!(
+        user.contains("RE-APPLIED WHENEVER A LATER FILE ADDS A TABLE"),
+        "the rule is stated in `009` only, which makes it a note about one file \
+         rather than the rule it is"
+    );
+    // And the header does not count the tables, because a count is the one
+    // claim that goes stale every time a file adds one — `005` made five into
+    // eight and `009` makes it ten, and neither edit touched the sentence.
+    assert!(
+        !user.contains("INSERT on the five tables"),
+        "`004` grants ten tables: a header that counts is a header that is \
+         wrong after the next migration"
+    );
+}
+
 /// The `ORDER BY (...)` of one table, as one line.
 ///
 /// The key may wrap, so this joins until the closing parenthesis rather than
@@ -688,6 +764,137 @@ fn the_venue_sort_keys_carry_what_distinguishes_two_rows() {
         sort_key(venue_sql(), "venue_object"),
         "observation, feed, object_key, object_sha256",
         "the venue object sort key changed"
+    );
+}
+
+/// **The object in the key widens the re-cut exposure, and `009` says so.**
+///
+/// This is the claim a reader reaching for the opposite conclusion can actually
+/// break, so it is the one worth pinning. For the records whose index moved a
+/// re-cut changes nothing — renumbering `message_index` puts them beside the old
+/// rows under any key holding a record index. The case that does change is the
+/// **identical prefix**: a re-cut that moved only the later boundary leaves the
+/// leading records with the same indexes and the same stamps, and those rows
+/// double instead of replacing, because `object_key` is in the key and the
+/// object name changed. An argument claiming the exposure is *unchanged* is
+/// therefore false, and false in the paragraph addressed to the reader most
+/// likely to check it.
+///
+/// The decision is not what is under test — the object stays in the key, and a
+/// rotation-boundary collapse is worse than a double by the margin the file
+/// argues. What is under test is that the file states the trade in the direction
+/// that survives the identical-prefix case, and names where the double is
+/// countable: `venue_object`, which holds a row per `(object_key,
+/// object_sha256)` and so carries the two cuts of one window as two rows.
+#[test]
+fn the_object_in_the_venue_key_states_the_exposure_it_widens() {
+    let sql = venue_sql();
+
+    assert!(
+        sql.contains("WIDER RE-CUT EXPOSURE"),
+        "the exposure this column widens has to be called wider, not \
+         unchanged: a reader can construct the identical-prefix case"
+    );
+    assert!(
+        !sql.contains("exposure is\n-- therefore unchanged"),
+        "the claim the identical-prefix case falsifies is back in the file"
+    );
+    assert!(
+        sql.contains("identical\n-- prefix"),
+        "the case is named concretely, or the paragraph is an assertion rather \
+         than an argument"
+    );
+    // The trade, both halves of it. A file that names only the cost reads as a
+    // file arguing against its own key.
+    assert!(
+        sql.contains("silent and unrecoverable"),
+        "the collapse this key closes is the half that makes the trade worth \
+         taking, and it is worse precisely because nothing can find it"
+    );
+    assert!(
+        sql.contains("visible\n-- and countable"),
+        "a double that can be found is what the trade buys, and it has to be \
+         said that way round"
+    );
+    assert!(
+        sql.contains("`venue_object` holds one row per `(object_key,"),
+        "where the double is countable is a table name, not `somewhere`"
+    );
+}
+
+/// **`object_sha256` is on `venue_book_top`, which is why the key claim is
+/// bounded rather than superlative.**
+///
+/// `009` may say that `object_key` is the only column that *can be* in the key.
+/// It may not say that it is the only column that tells two objects apart: the
+/// digest tells two objects apart as well, is on this very table, and is ruled
+/// out of the key by an argument the file makes a few paragraphs later — that
+/// two digests under one key are one window the archive re-published, and the
+/// rows of the object that is there now must replace the rows of the one that
+/// was. A superlative the same file contradicts is a reader's reason to stop
+/// trusting the rest of the paragraph.
+///
+/// Both halves are asserted, because the prose half alone would pass on a table
+/// that had dropped the digest — at which point the superlative would have
+/// become true and the test would be pinning a sentence nobody needed.
+#[test]
+fn the_venue_book_carries_the_digest_the_key_claim_must_not_overreach_about() {
+    let sql = venue_sql();
+
+    assert!(
+        columns(sql, "venue_book_top")
+            .iter()
+            .any(|c| c == "object_sha256"),
+        "the digest is what made the superlative false; without it on the table \
+         the paragraph needs re-reading rather than re-wording"
+    );
+    assert!(
+        !sql.contains("ONLY COLUMN THAT TELLS TWO OBJECTS"),
+        "`object_sha256` is on this table and tells two objects apart too, so \
+         the file contradicts itself a few paragraphs later"
+    );
+    assert!(
+        sql.contains("ONLY COLUMN THAT CAN BE"),
+        "the bounded claim carries the whole argument and is what the key \
+         actually rests on"
+    );
+}
+
+/// **The venue object's key order is not defended as pruning, because pruning
+/// is not what it does.**
+///
+/// `venue_object` is `PARTITION BY toYYYYMMDD(recv_ts_start)`, and that line
+/// alone decides which parts a predicate reads. No sort-key column order
+/// participates in partition pruning, so `observation, feed` ahead of
+/// `object_key` buys a narrower mark range inside the parts that survive — the
+/// two are the coarse filter a reader supplies — and buys no pruning at all.
+///
+/// Worth a test rather than only a correction. A key defended as a pruning
+/// device is a key nobody re-examines when the partitioning changes underneath
+/// it, and the two mechanisms are close enough to conflate that the wrong
+/// reason was written down once already.
+#[test]
+fn the_venue_object_key_order_is_not_justified_by_partition_pruning() {
+    let sql = venue_sql();
+
+    assert_eq!(
+        sort_key(sql, "venue_object"),
+        "observation, feed, object_key, object_sha256",
+        "the key this reasoning is about changed"
+    );
+    assert!(
+        sql.contains("PARTITION BY toYYYYMMDD(recv_ts_start)"),
+        "the line that actually prunes is not there, so the reason stated below \
+         is about a mechanism this table does not have"
+    );
+    assert!(
+        !sql.contains("so that the partition prunes before the key is read"),
+        "sort-key column order does not participate in partition pruning"
+    );
+    assert!(
+        sql.contains("mark range\n-- narrows"),
+        "the reason the order is right is the mark range, and it has to be the \
+         stated one"
     );
 }
 
@@ -1043,31 +1250,41 @@ fn every_table_is_partitioned_by_a_day() {
     }
     // One `PARTITION BY` per table, so a table added later without one fails
     // here rather than being noticed on a graph months afterwards.
+    //
+    // Counted as a clause and not as a mention: a table's `PARTITION BY` starts
+    // a line, a window specification's is indented inside a view, and a comment
+    // arguing about one is neither. Counting occurrences anywhere in the text
+    // makes this a test of the prose as well as of the DDL — `009`'s key order
+    // has to explain that pruning is the partition's doing and not the key's,
+    // and it cannot name the clause it is about without breaking a count that
+    // was never about prose.
     assert_eq!(
-        rows_sql().matches("PARTITION BY ").count(),
+        partition_clauses(rows_sql()),
         TRANSPORT_GRAINS.len(),
         "a table in 001 has no PARTITION BY, or one has two"
     );
     assert_eq!(
-        market_data_sql().matches("PARTITION BY ").count(),
+        partition_clauses(market_data_sql()),
         MARKET_DATA_GRAINS.len(),
         "a table in 005 has no PARTITION BY, or one has two"
     );
-
-    // `009`'s two, and the window specification's `PARTITION BY` which is not a
-    // table's — hence the count is taken over the `CREATE TABLE` half of the
-    // file alone rather than over the whole of it.
-    let tables = venue_sql()
-        .split("CREATE OR REPLACE VIEW")
-        .next()
-        .expect("the tables precede the views");
-    assert!(tables.contains("PARTITION BY toYYYYMMDD(recv_ts)"));
-    assert!(tables.contains("PARTITION BY toYYYYMMDD(recv_ts_start)"));
+    assert!(venue_sql().contains("\nPARTITION BY toYYYYMMDD(recv_ts)\n"));
+    assert!(venue_sql().contains("\nPARTITION BY toYYYYMMDD(recv_ts_start)\n"));
     assert_eq!(
-        tables.matches("PARTITION BY ").count(),
+        partition_clauses(venue_sql()),
         VENUE_GRAINS.len(),
         "a table in 009 has no PARTITION BY, or one has two"
     );
+}
+
+/// The `PARTITION BY` clauses of one migration: the lines that are one.
+///
+/// At the start of a line, which is what separates a table's clause from a
+/// window specification's indented one and from a comment discussing either.
+fn partition_clauses(sql: &str) -> usize {
+    sql.lines()
+        .filter(|line| line.starts_with("PARTITION BY "))
+        .count()
 }
 
 /// `era`'s row rate is stated, with the arithmetic, because the rank over it is
