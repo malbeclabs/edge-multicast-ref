@@ -464,6 +464,14 @@ fn no_migration_computes_a_book_key_of_its_own() {
 /// would make one change two rows the moment a re-derivation computed the fold
 /// differently — which is the one thing a replacing engine must not be asked to
 /// tolerate, and the rule `008` states for `derivation` in the same words.
+///
+/// **No escape hatch for a window's `PARTITION BY`.** The guard carried one, and
+/// it was unreachable: `sort_key_clauses` only starts capturing at a line
+/// beginning `ORDER BY` or `PRIMARY KEY`, and in every file here a
+/// `PARTITION BY` — a table's or a window's — is on a line of its own above one
+/// of those. So the words could only ever appear in a captured clause if a sort
+/// key wrapped onto a line carrying them, and in that one case the hatch would
+/// have swallowed exactly the hit this test exists to catch.
 #[test]
 fn the_book_only_key_is_in_no_sort_key() {
     for sql in [
@@ -474,7 +482,7 @@ fn the_book_only_key_is_in_no_sort_key() {
     ] {
         for clause in sort_key_clauses(sql) {
             assert!(
-                !clause.contains("book_key") || clause.contains("PARTITION BY"),
+                !clause.contains("book_key"),
                 "the book-only key reached a table's sort key: {clause}"
             );
         }
@@ -1885,6 +1893,452 @@ fn every_migration_splits_into_whole_statements() {
             "{grain}"
         );
     }
+}
+
+/// One statement of one migration: the code with the prose dropped, and the
+/// line its first word is on.
+///
+/// The line is the statement's own and not the line its comment block starts
+/// on. Every statement in these files carries a page of argument above it, so a
+/// failure citing the comment would send a reader hundreds of lines away from
+/// the thing it is about.
+#[derive(Debug, Clone)]
+struct Statement {
+    file: &'static str,
+    /// Position in [`schema`], which is the order a deploy applies the files in
+    /// — and what makes "a later file" something a test can decide.
+    order: usize,
+    /// One-based, as an editor counts.
+    line: usize,
+    /// The statement, one trimmed line per line, with every comment line gone.
+    code: String,
+}
+
+impl Statement {
+    /// Where a failure sends a reader.
+    fn at(&self) -> String {
+        format!("{}:{}", self.file, self.line)
+    }
+
+    /// The statement on one line, for a phrase that wraps across two of them.
+    fn flat(&self) -> String {
+        self.code.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// Apply order, which is what "later than" is decided on.
+    fn position(&self) -> (usize, usize) {
+        (self.order, self.line)
+    }
+}
+
+/// Every statement of every migration, in the order a deploy applies them.
+///
+/// Held against [`Migration::statements`] file by file, because that is the
+/// splitter the deploy and the container suite use: a walker that read a
+/// different set of statements than the one applied would check a schema
+/// nobody has.
+fn schema_statements() -> Vec<Statement> {
+    let mut out: Vec<Statement> = Vec::new();
+    for (order, migration) in schema().into_iter().enumerate() {
+        let mut code = String::new();
+        let mut first = 0usize;
+        for (index, raw) in migration.sql.lines().enumerate() {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() || trimmed.starts_with("--") {
+                continue;
+            }
+            if code.is_empty() {
+                first = index + 1;
+            }
+            code.push_str(trimmed);
+            code.push('\n');
+            if trimmed.ends_with(';') {
+                out.push(Statement {
+                    file: migration.name,
+                    order,
+                    line: first,
+                    code: std::mem::take(&mut code),
+                });
+            }
+        }
+        // A statement with no terminator is a file this walker stopped reading
+        // part way through, and dropping the tail silently is how a walker
+        // stops covering a file without failing.
+        assert!(
+            code.is_empty(),
+            "{}: the statement starting at line {first} is not terminated, so \
+             this walker stopped reading the file",
+            migration.name
+        );
+        assert_eq!(
+            out.iter().filter(|s| s.order == order).count(),
+            migration.statements().len(),
+            "{}: this walker and `Migration::statements` disagree about how \
+             many statements the file holds, so one of them is not reading the \
+             file a deploy applies",
+            migration.name
+        );
+    }
+    out
+}
+
+/// What a statement's `SELECT *` is a star over, resolved through whatever the
+/// `FROM` or the `JOIN` bound the alias to.
+///
+/// [`None`] for a projection that lists its columns, which is what most of
+/// these files' views do. An explicit list does not pick up a new column either
+/// — and that is the difference this test rests on: a list is a decision a
+/// reader can see in the file, and a star is a column list frozen at the
+/// instant the view was created.
+///
+/// The alias and not the first `FROM`: a join's right-hand side is a table too,
+/// and a walker that took the first table it saw would watch the columns of the
+/// wrong one.
+fn starred_object(code: &str) -> Option<String> {
+    let alias = code.lines().find_map(|line| {
+        let projected = line.trim();
+        // `SELECT *` on one line and a `d.*,` on a line of its own are both
+        // shapes these files use.
+        let projected = projected
+            .strip_prefix("SELECT")
+            .unwrap_or(projected)
+            .trim()
+            .trim_end_matches(',');
+        if projected == "*" {
+            Some(String::new())
+        } else {
+            projected.strip_suffix(".*").map(str::to_owned)
+        }
+    })?;
+
+    let mut tokens = code
+        .split_whitespace()
+        .map(|token| token.trim_end_matches([';', ',']));
+    let mut first_from: Option<String> = None;
+    let mut bound: Vec<(String, String)> = Vec::new();
+    while let Some(token) = tokens.next() {
+        if token != "FROM" && token != "JOIN" {
+            continue;
+        }
+        let Some(object) = tokens
+            .next()
+            .and_then(|next| next.strip_prefix("recorder."))
+            .map(str::to_owned)
+        else {
+            // A join over a subquery names no table here, and the subquery's
+            // own `FROM` is read on its own turn round this loop.
+            continue;
+        };
+        if first_from.is_none() {
+            first_from = Some(object.clone());
+        }
+        // `FROM recorder.t FINAL AS b` is the shape a collapse takes, so the
+        // alias may be one token further along.
+        let mut next = tokens.next();
+        if next == Some("FINAL") {
+            next = tokens.next();
+        }
+        if next == Some("AS") {
+            if let Some(name) = tokens.next() {
+                bound.push((name.to_owned(), object));
+            }
+        }
+    }
+
+    if alias.is_empty() {
+        return first_from;
+    }
+    bound
+        .into_iter()
+        .find(|(name, _)| *name == alias)
+        .map(|(_, object)| object)
+}
+
+/// Whether an `ALTER` moves the column *list* of its table.
+///
+/// `MODIFY COLUMN` is not one of these, deliberately. A view's `SELECT *` is
+/// expanded into a list of column *names* when the view is created and the
+/// types are resolved when it is read — so a view created earlier picks up a
+/// type change on its own and cannot pick up an added, dropped or renamed
+/// column, and only the second kind needs re-stating. `MODIFY TTL` is not one
+/// either,
+/// which is what the four `ALTER`s in `002`, `005` and `009` are: retention
+/// moves no column, and a test that treated it as a column change would demand
+/// a re-statement for every TTL decision.
+fn changes_a_column_list(flat: &str) -> bool {
+    ["ADD COLUMN", "DROP COLUMN", "RENAME COLUMN"]
+        .iter()
+        .any(|phrase| flat.contains(phrase))
+}
+
+/// The `SELECT *` views a released migration already froze, named here rather
+/// than hidden behind a weaker parse.
+///
+/// `008` adds `derivation` to `recorder.era` and to `recorder.datagram` and
+/// re-states no view — it contains no `CREATE OR REPLACE VIEW` at all — so
+/// `003`'s `era_opening` and `datagram_in_era` are expanded without that column
+/// on every deployment that was upgraded and with it on every deployment
+/// created since. Two column lists under one view name.
+///
+/// It is latent only because nothing reads `derivation` through either view
+/// yet: `006` takes three columns out of `era_opening` and the cross-site views
+/// take named columns out of `datagram_in_era`. The first query that reaches
+/// `era_opening.derivation` breaks on the deployments that have been running
+/// longest, which is the opposite of the order anybody tests in.
+///
+/// **Not repaired here.** The repair is a `CREATE OR REPLACE VIEW` for each in
+/// `008`, which changes a migration every deployment has already applied and
+/// wants its own argument about what a released file may be amended to say. It
+/// is tracked as a follow-up against `008_recorder_derivation.sql`.
+///
+/// Listed rather than allowed silently, and every entry is asserted below to
+/// still be a violation — so the day `008` re-states them, this list fails
+/// until the entry is deleted.
+const FROZEN_BY_A_RELEASED_MIGRATION: [(&str, &str); 2] = [
+    ("era_opening", "008_recorder_derivation.sql"),
+    ("datagram_in_era", "008_recorder_derivation.sql"),
+];
+
+/// **A `SELECT *` view is re-stated by the file that moves its table's column
+/// list.**
+///
+/// A view's `SELECT *` is expanded when the view is created, not when it is
+/// read. So a file that adds a column to a table over which an earlier file
+/// declared a star view leaves that view carrying the old column list on every
+/// deployment upgraded in file order, while a deployment created from scratch
+/// gets the new one — and nothing fails until a query reads the new column
+/// through the view, on the deployments that have been running longest.
+///
+/// This is what holds `010`'s re-statement of `book_top_settled` in place.
+/// Nothing else does: `Scratch::open` drops the database and applies `schema()`
+/// in order, and `005` declares `book_key` on `book_top` itself, so the column
+/// is already there when `006` expands its star, so the container suite returns
+/// the same answers with that statement deleted. A server-based test reaches
+/// this only with a second fixture that applies `005` without the column and
+/// then the rest of the set in order; this needs no server at all.
+///
+/// **The reading is the end state and not every intermediate one.** The rule is
+/// that a view's *last* declaration comes after the last `ALTER` that moves its
+/// table's column list, which is the question "does a deployment that applied
+/// every file in order hold the same view as one created from scratch". `008`
+/// adds `derivation` to `recorder.book_top` and re-states nothing, and `010`
+/// re-states `book_top_settled` afterwards — so the freeze `008` opened is
+/// closed by the time the set has been applied, and this test does not report
+/// it. Reported, it would be a finding that outlives its own repair; the two
+/// entries in [`FROZEN_BY_A_RELEASED_MIGRATION`] are the ones no later file
+/// closes.
+#[test]
+fn a_select_star_view_is_re_stated_after_a_column_reaches_its_table() {
+    let statements = schema_statements();
+
+    let mut declarations: Vec<(String, &Statement)> = Vec::new();
+    let mut column_alters: Vec<(String, &Statement)> = Vec::new();
+    for statement in &statements {
+        let flat = statement.flat();
+        if let Some(rest) = flat.strip_prefix("CREATE OR REPLACE VIEW recorder.") {
+            let name = rest.split_whitespace().next().expect("a view has a name");
+            declarations.push((name.to_owned(), statement));
+        } else if let Some(rest) = flat.strip_prefix("ALTER TABLE recorder.") {
+            if changes_a_column_list(&flat) {
+                let table = rest
+                    .split_whitespace()
+                    .next()
+                    .expect("an ALTER names a table");
+                column_alters.push((table.to_owned(), statement));
+            }
+        }
+    }
+
+    // A walker that found no star, or no `ALTER`, would pass over anything. The
+    // two named here are `003`'s star over `recorder.era` and `008`'s column on
+    // that table — the pair the exception list is about, and neither of them the
+    // statement this test exists to hold in place, so a failure below is the
+    // property and not the parse.
+    assert!(
+        declarations
+            .iter()
+            .any(|(name, statement)| name == "era_opening"
+                && statement.file == "003_recorder_era_rank.sql"),
+        "the walker read no `era_opening` in `003`, so it is reading no views"
+    );
+    assert!(
+        column_alters
+            .iter()
+            .any(|(table, statement)| table == "era"
+                && statement.file == "008_recorder_derivation.sql"),
+        "the walker read no column `ALTER` on `recorder.era` in `008`, so it is \
+         reading no column changes"
+    );
+
+    let names: BTreeSet<String> = declarations.iter().map(|(name, _)| name.clone()).collect();
+    let last_declaration = |name: &str| -> &Statement {
+        declarations
+            .iter()
+            .filter(|(declared, _)| declared == name)
+            .map(|(_, statement)| *statement)
+            .max_by_key(|statement| statement.position())
+            .expect("a name taken from the declarations is declared")
+    };
+    let last_column_alter = |table: &str| -> Option<&Statement> {
+        column_alters
+            .iter()
+            .filter(|(altered, _)| altered == table)
+            .map(|(_, statement)| *statement)
+            .max_by_key(|statement| statement.position())
+    };
+
+    let mut stars_read = 0usize;
+    let mut exceptions_taken: BTreeSet<(String, &str)> = BTreeSet::new();
+    for name in &names {
+        let declaration = last_declaration(name);
+        let Some(starred) = starred_object(&declaration.code) else {
+            continue;
+        };
+        stars_read += 1;
+
+        // What can move the column list the star was expanded from. A star over
+        // a view is chased through to the table underneath it, because
+        // re-stating an inner view does not refresh an outer view's `SELECT *`
+        // either: the outer list was expanded from the inner one at the instant
+        // the outer view was created. There is no such view in these files
+        // today, and one would be a worse freeze than the one this test is
+        // about rather than a case it may skip.
+        let mut hazards: Vec<(&Statement, String)> = Vec::new();
+        let mut object = starred.clone();
+        for _ in 0..=names.len() {
+            if let Some(alter) = last_column_alter(&object) {
+                hazards.push((
+                    alter,
+                    format!("adds, drops or renames a column on `recorder.{object}`"),
+                ));
+            }
+            if !names.contains(&object) {
+                break;
+            }
+            let inner = last_declaration(&object);
+            hazards.push((
+                inner,
+                format!(
+                    "re-states `recorder.{object}`, the view this star's column \
+                     list was expanded from"
+                ),
+            ));
+            match starred_object(&inner.code) {
+                Some(next) => object = next,
+                None => break,
+            }
+        }
+
+        for (hazard, what) in hazards {
+            if hazard.position() <= declaration.position() {
+                continue;
+            }
+            let excepted = FROZEN_BY_A_RELEASED_MIGRATION
+                .iter()
+                .any(|(view, file)| *view == name.as_str() && *file == hazard.file);
+            assert!(
+                excepted,
+                "`recorder.{name}` is declared `SELECT *` over \
+                 `recorder.{starred}` at {declared}, and {altered} {what} — with \
+                 no re-statement of `recorder.{name}` after it.\n\n\
+                 A view's `SELECT *` is expanded into a column list when the \
+                 view is created and never when it is read. So a deployment \
+                 upgraded in file order holds this view without the new column \
+                 while a deployment created from scratch holds it with, which \
+                 is two column lists under one view name. Nothing fails while \
+                 no query reads the new column through the view, and the first \
+                 one that does breaks on the deployments that have been \
+                 running longest.\n\n\
+                 Re-state the view in {file}, after the statement above: an \
+                 `ALTER` that moves a column list and a `CREATE OR REPLACE \
+                 VIEW` for every star over that table belong in one file, \
+                 which is the whole of the rule this test holds.",
+                declared = declaration.at(),
+                altered = hazard.at(),
+                file = hazard.file,
+            );
+            exceptions_taken.insert((name.clone(), hazard.file));
+        }
+    }
+
+    assert!(
+        stars_read >= 4,
+        "the walker read {stars_read} `SELECT *` views and these files declare \
+         four, so the parse is reading a projection it does not understand"
+    );
+
+    // Every exception is still a violation. An entry that has stopped being one
+    // is a repair nobody deleted the exception for, and a list that outlives
+    // what it excuses is how an allow-list becomes the rule.
+    for (view, file) in FROZEN_BY_A_RELEASED_MIGRATION {
+        assert!(
+            exceptions_taken.contains(&(view.to_owned(), file)),
+            "{file} does not freeze `recorder.{view}`, so delete that entry \
+             from `FROZEN_BY_A_RELEASED_MIGRATION` rather than leaving a list \
+             that excuses nothing"
+        );
+    }
+}
+
+/// The star walker reads the projections these files are written in, and the
+/// alias rather than the first table it sees.
+///
+/// Over literals rather than over the migrations, for the reason the sort key
+/// walker's own test gives: what the test above pins is that the files carry no
+/// frozen view, so the only way to hold the *reading* is to write the shapes out
+/// here. A walker that resolved no star would make that test pass over
+/// anything.
+#[test]
+fn the_star_walker_reads_a_bare_star_a_qualified_one_and_no_star_at_all() {
+    // `003`'s and `006`'s shape: a bare star on the `SELECT` line, over a
+    // collapsed table, with and without a `WHERE`.
+    assert_eq!(
+        starred_object("SELECT *\nFROM recorder.era FINAL\nWHERE continuation = 0;\n").as_deref(),
+        Some("era")
+    );
+    assert_eq!(
+        starred_object("SELECT *\nFROM recorder.book_top FINAL;\n").as_deref(),
+        Some("book_top")
+    );
+
+    // `003`'s other shape: a qualified star on its own line, resolved through
+    // the alias. Both orders are written out, because a walker that took the
+    // first `FROM` would pass the first of them and watch the wrong table in
+    // the second.
+    let left = "SELECT\nd.*,\ne.anchor_ts AS era_anchor_ts\nFROM recorder.datagram AS d\n\
+                ASOF LEFT JOIN recorder.era AS e\nON e.site = d.site;\n";
+    assert_eq!(starred_object(left).as_deref(), Some("datagram"));
+    let right = "SELECT\ne.*,\nd.site\nFROM recorder.datagram AS d\n\
+                 ASOF LEFT JOIN recorder.era AS e\nON e.site = d.site;\n";
+    assert_eq!(starred_object(right).as_deref(), Some("era"));
+
+    // `FINAL` between the table and its alias, which is where a collapse goes.
+    assert_eq!(
+        starred_object("SELECT b.*\nFROM recorder.book_top FINAL AS b;\n").as_deref(),
+        Some("book_top")
+    );
+
+    // A column list is not a star, and neither is a product.
+    assert_eq!(
+        starred_object("SELECT\nobservation,\nfeed\nFROM recorder.book_top;\n"),
+        None
+    );
+    assert_eq!(
+        starred_object("SELECT\nprice_exp * qty_exp AS scaled\nFROM recorder.book_top;\n"),
+        None
+    );
+
+    // And a column change is told from a retention decision, which is the
+    // other half of the reading: a `MODIFY TTL` freezes no view.
+    assert!(changes_a_column_list(
+        "ALTER TABLE recorder.book_top ADD COLUMN IF NOT EXISTS book_key UInt64 AFTER state_key;"
+    ));
+    assert!(!changes_a_column_list(
+        "ALTER TABLE recorder.datagram MODIFY TTL toDateTime(recv_ts) + INTERVAL 2 DAY;"
+    ));
+    assert!(!changes_a_column_list(
+        "ALTER TABLE recorder.book_top MODIFY COLUMN book_key UInt64;"
+    ));
 }
 
 /// This repository is public, so the schema names no venue and no real network.
