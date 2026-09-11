@@ -108,12 +108,26 @@ pub struct SocketConnector {
 impl SocketConnector {
     /// A connector for a checked endpoint.
     ///
+    /// **Checked is the whole of the argument.** An [`Endpoint`] exists only
+    /// because [`SessionConfig::resolve`](crate::SessionConfig::resolve) built
+    /// one, so there is no plaintext-to-a-venue case for this constructor to
+    /// refuse: `tls = false` off loopback never became an `Endpoint` and
+    /// therefore never reaches here. That is a property of the type rather
+    /// than a check repeated in a second place — see [`Endpoint`] for why its
+    /// fields are private, and for what a second copy of the rule would cost.
+    ///
+    /// A caller that wants a plaintext stream to somewhere else writes its own
+    /// [`Connector`] and hands it to
+    /// [`FixInput::with_connector`](crate::FixInput::with_connector), which is
+    /// a different statement and an honest one: it is that caller's transport,
+    /// not one this crate opened on a document's behalf.
+    ///
     /// # Errors
     ///
     /// [`IngressError::Fatal`] when the TLS provider in this build cannot offer
     /// a protocol version, which is not a fault a retry improves.
     pub fn new(endpoint: Endpoint) -> Result<Self, IngressError> {
-        let tls = if endpoint.tls {
+        let tls = if endpoint.tls() {
             Some(Self::tls_config()?)
         } else {
             None
@@ -173,19 +187,22 @@ impl SocketConnector {
         budget: Duration,
         deadline: Instant,
     ) -> Result<Box<dyn ByteStream>, IngressError> {
-        let address = self.endpoint.address.clone();
-        let name = ServerName::try_from(self.endpoint.server_name.clone()).map_err(|_| {
+        let address = self.endpoint.address().to_owned();
+        let name = ServerName::try_from(self.endpoint.server_name().to_owned()).map_err(|_| {
             // A name in the document is the same string on the next attempt, so
             // retrying it under a backoff only hides it — which is why
             // [`SessionConfig::resolve`](crate::SessionConfig::resolve) makes
             // this same check at load and a configured publisher never reaches
-            // here. Kept because [`Endpoint`] is a value anyone can build: the
-            // loopback exercise builds one, and a transport handed a name it
-            // cannot verify against must refuse rather than negotiate with
-            // whatever the string happens to be.
+            // here. Kept because the conversion is not ours to skip:
+            // `TlsConnector::connect` takes a `ServerName` and nothing else, so
+            // the fallible step happens here whatever was checked at load, and
+            // the choice is between a fatal an operator can read and an
+            // `expect` that aborts a publisher mid-connect. This is not a
+            // second copy of a rule — unlike the plaintext restriction, which
+            // has exactly one home for the reason [`Endpoint`] states.
             IngressError::fatal(format!(
                 "`server_name = \"{}\"` is not a name a certificate can be verified against",
-                self.endpoint.server_name
+                self.endpoint.server_name()
             ))
         })?;
         let negotiated = TlsConnector::from(config).connect(name, socket);
@@ -215,7 +232,7 @@ impl Connector for SocketConnector {
         budget: Duration,
     ) -> BoxFuture<'_, Result<Box<dyn ByteStream>, IngressError>> {
         Box::pin(async move {
-            let address = self.endpoint.address.clone();
+            let address = self.endpoint.address().to_owned();
             // **One deadline for the socket and the negotiation together.** What
             // `connect_timeout` states is how long a connect attempt may take,
             // and opening a negotiated stream is one attempt in two stages: a
@@ -261,7 +278,7 @@ impl Connector for SocketConnector {
     }
 
     fn authority(&self) -> &str {
-        &self.endpoint.address
+        self.endpoint.address()
     }
 }
 
@@ -688,18 +705,27 @@ mod tests {
         toml::from_str(document).expect("a document")
     }
 
+    /// A checked endpoint from the text an operator writes.
+    ///
+    /// Through `resolve`, because that is the only thing that builds one — and
+    /// deliberately not through a test-only constructor beside it. A struct
+    /// literal here would be this module holding the escape hatch the public
+    /// API no longer has, and the first test that wanted a `tls = false` venue
+    /// endpoint would take it.
+    fn endpoint(document: &str) -> Endpoint {
+        config(document)
+            .resolve()
+            .unwrap_or_else(|error| panic!("{document}: {error}"))
+    }
+
     #[test]
     fn the_tls_configuration_is_constructible_without_touching_a_network() {
         // The one part of the TLS setup checkable with no endpoint, and the
         // part most likely to be wrong: `rustls` panics when it has to choose a
         // crypto provider and cannot, and that panic would otherwise arrive on
         // a production connect, which no test that can run here reaches.
-        let connector = SocketConnector::new(Endpoint {
-            address: "session.example.com:9443".to_owned(),
-            server_name: "session.example.com".to_owned(),
-            tls: true,
-        })
-        .expect("a constructible client configuration");
+        let connector = SocketConnector::new(endpoint("endpoint = \"session.example.com:9443\"\n"))
+            .expect("a constructible client configuration");
         assert!(connector.tls.is_some());
     }
 
@@ -748,11 +774,9 @@ mod tests {
             drop(socket);
         });
 
-        let connector = SocketConnector::new(Endpoint {
-            address: address.clone(),
-            server_name: "session.example.com".to_owned(),
-            tls: true,
-        })
+        let connector = SocketConnector::new(endpoint(&format!(
+            "endpoint = \"{address}\"\nserver_name = \"session.example.com\"\n"
+        )))
         .expect("a connector");
         let config = connector.tls.clone().expect("a client configuration");
         let socket = TcpStream::connect(&address).await.expect("a socket");
@@ -793,12 +817,9 @@ mod tests {
 
     #[test]
     fn a_plaintext_connector_holds_no_tls_configuration() {
-        let connector = SocketConnector::new(Endpoint {
-            address: "127.0.0.1:9443".to_owned(),
-            server_name: "127.0.0.1".to_owned(),
-            tls: false,
-        })
-        .expect("a loopback endpoint");
+        let connector =
+            SocketConnector::new(endpoint("endpoint = \"127.0.0.1:9443\"\ntls = false\n"))
+                .expect("a loopback endpoint");
         assert!(connector.tls.is_none());
     }
 

@@ -30,7 +30,10 @@
 //! is where the provider-selection panic would land.
 //!
 //! Every other test here uses `tls = false` on a loopback endpoint, and that
-//! value is accepted nowhere else.
+//! value is accepted nowhere else —
+//! `a_plaintext_endpoint_off_loopback_reaches_no_connector_by_any_public_path`
+//! states that as a property of the public API rather than a convention of
+//! this file, from outside the crate, which is where a venue stands.
 //!
 //! # What each test proves
 //!
@@ -60,7 +63,7 @@ use dz_ingress_core::{
     Policy, Received, TokioClock, UpstreamMessage,
 };
 use dz_ingress_fix::framing::{self, msg_type, Body, Decoder, SOH};
-use dz_ingress_fix::{Connector, Endpoint, FixInput, SessionConfig, SocketConnector};
+use dz_ingress_fix::{Connector, FixInput, SessionConfig, SessionConfigError, SocketConnector};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -221,6 +224,17 @@ async fn awaited(received: &ClientMessages, count: usize) -> bool {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     false
+}
+
+/// What `[source.upstream.session]` resolves to, or the refusal it earned.
+///
+/// The one way a caller of this crate gets an [`dz_ingress_fix::Endpoint`]:
+/// its fields are private precisely so that a connector cannot be handed an
+/// endpoint nothing checked. This file is an external crate, so what it can
+/// reach is exactly what a venue can reach.
+fn checked(document: &str) -> Result<dz_ingress_fix::Endpoint, SessionConfigError> {
+    let config: SessionConfig = toml::from_str(document).expect("a document");
+    config.resolve()
 }
 
 /// A transport pointed at a loopback endpoint, negotiating nothing.
@@ -1213,11 +1227,16 @@ async fn a_certificate_no_compiled_in_anchor_signed_is_refused() {
     // accepts anything, or leave the root store empty. One line, and it passes
     // every other test in this workspace.
     let address = a_listener_no_anchor_vouches_for().await;
-    let mut connector = SocketConnector::new(Endpoint {
-        address: address.to_string(),
-        server_name: "localhost".to_owned(),
-        tls: true,
-    })
+    // Through `resolve`, because that is the only thing that builds an
+    // `Endpoint` — the certificate this test is about names `localhost` and
+    // the listener answers on `127.0.0.1`, which is what the `server_name` key
+    // is for.
+    let mut connector = SocketConnector::new(
+        checked(&format!(
+            "endpoint = \"{address}\"\nserver_name = \"localhost\"\n"
+        ))
+        .expect("a checked endpoint"),
+    )
     .expect("a constructible client configuration");
 
     let error = connector
@@ -1238,4 +1257,80 @@ async fn a_certificate_no_compiled_in_anchor_signed_is_refused() {
     // And the detail names the endpoint, because an operator reading a
     // negotiation failure wants to know which one failed.
     assert!(error.to_string().contains(&address.to_string()), "{error}");
+}
+
+// ---------------------------------------------------------------------------
+// Plaintext: the one endpoint it is accepted for
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_plaintext_endpoint_off_loopback_reaches_no_connector_by_any_public_path() {
+    // **The safeguard has to hold for a caller of the library and not only for
+    // a document.** `tls = false` exists to exercise the framing and the
+    // session lifecycle against a listener on this machine, and the refusal
+    // that keeps it there lives in `SessionConfig::resolve`. While
+    // `Endpoint`'s fields were public that refusal guarded one route of three:
+    // `Endpoint { address: "203.0.113.10:9443", tls: false, .. }` composed by
+    // hand and handed to `SocketConnector::new` opened an unnegotiated socket
+    // to a venue, carrying a logon and a signature in the clear, and nothing
+    // in this crate said no.
+    //
+    // This file is an external crate, so the routes it can take are the routes
+    // a venue can take, and there are three:
+    //
+    // 1. `SessionConfig::resolve`, which refuses — and which is now the only
+    //    thing that builds an `Endpoint`, so `SocketConnector::new` is never
+    //    reached with one.
+    // 2. `FixInput::new`, the transport a driver builds from the document,
+    //    which is fatal at construction rather than at the first connect.
+    // 3. A struct literal, which does not compile. That one cannot be
+    //    asserted from here and is pinned by the `compile_fail,E0451` doctest
+    //    on `Endpoint`: restore the `pub` on those fields and the doctest
+    //    fails, because the construction it refuses starts compiling.
+    //
+    // The reverts this test exists for are the plaintext check deleted from
+    // `resolve`, and a `tls = false` endpoint resolved with the `is_loopback`
+    // test inverted or dropped.
+    for off_loopback in ["203.0.113.10:9443", "session.example.com:9443"] {
+        let document = format!("endpoint = \"{off_loopback}\"\ntls = false\n");
+
+        assert_eq!(
+            checked(&document),
+            Err(SessionConfigError::PlaintextOffLoopback {
+                endpoint: off_loopback.to_owned(),
+            }),
+            "{off_loopback}"
+        );
+
+        let config: SessionConfig = toml::from_str(&document).expect("a document");
+        let error = FixInput::new(CONNECTION, &config)
+            .expect_err("a plaintext venue session is not one this transport opens");
+        assert!(error.is_fatal(), "{off_loopback}: {error}");
+        // Naming the key and what it is accepted for, because the thing to
+        // change is a document.
+        assert!(
+            error
+                .to_string()
+                .contains("accepted only for a loopback endpoint"),
+            "{off_loopback}: {error}"
+        );
+
+        // **And the restriction is about `tls = false`, not about the
+        // address.** Without this the assertions above are satisfied by a
+        // `resolve` that refuses every endpoint, which would pass while
+        // serving no venue at all.
+        let negotiated = checked(&format!("endpoint = \"{off_loopback}\"\n"))
+            .unwrap_or_else(|error| panic!("{off_loopback}: {error}"));
+        assert!(negotiated.tls(), "{off_loopback}");
+        assert!(SocketConnector::new(negotiated).is_ok(), "{off_loopback}");
+    }
+
+    // Nor is it about plaintext as such: the loopback endpoint every other
+    // test in this file runs over still reaches a connector, and that is the
+    // half `tls = false` was added for.
+    let loopback = checked("endpoint = \"127.0.0.1:9443\"\ntls = false\n")
+        .expect("plaintext on loopback is what the exercise runs over");
+    assert!(!loopback.tls());
+    assert_eq!(loopback.address(), "127.0.0.1:9443");
+    assert!(SocketConnector::new(loopback).is_ok());
 }

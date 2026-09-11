@@ -150,15 +150,106 @@ pub enum SessionConfigError {
 /// `IngressConfig`: what the transport takes is what has been checked, so a
 /// document asking for sequence continuity cannot reach one and the transport
 /// has no case for it.
+///
+/// # The fields are private, because that last sentence has to be true
+///
+/// [`SessionConfig::resolve`] is the only thing that builds one, and that is
+/// what makes "what the transport takes is what has been checked" a property
+/// of the type rather than a habit of this crate's own call sites. Public
+/// fields offered two things at once — reading a value that has been checked,
+/// and composing one that has not — and only the first was ever wanted.
+/// `Endpoint { address: "203.0.113.10:9443", tls: false, .. }` handed to
+/// [`SocketConnector::new`](crate::SocketConnector::new) is a plaintext
+/// session to a venue, which is the one thing
+/// [`SessionConfigError::PlaintextOffLoopback`] exists to refuse: the refusal
+/// was in `resolve` and the door beside it stood open, so the safeguard held
+/// for a document and not for a caller of this library.
+///
+/// Checking it a second time in the connector was the alternative, and this
+/// family argues against that in the crate next door. The rule is `host_of`
+/// and `is_loopback` together — both private to this module — so a connector
+/// that made it again would be a second home for it, and "a second copy of
+/// them is a second place for a rule to be forgotten" is
+/// [`IngressConfig::policy`](dz_ingress_core::IngressConfig::policy)'s own
+/// reasoning about its own checks. The forgetting is not hypothetical here: a
+/// rule split across two files diverges the first time one of them learns
+/// something the other does not about which addresses are this machine, and
+/// the copy that did not learn is the one a venue endpoint goes through. A
+/// private field cannot be forgotten, and what it costs is a constructor
+/// nothing outside this module was calling.
+///
+/// So there is no unchecked construction left to refuse, because there is no
+/// unchecked construction:
+///
+/// ```compile_fail,E0451
+/// // Plaintext to an address that is not this machine. The refusal is that
+/// // this does not compile — which is what pins it, because a check here
+/// // could only ever be a copy of `resolve`'s.
+/// let endpoint = dz_ingress_fix::Endpoint {
+///     address: "203.0.113.10:9443".to_owned(),
+///     server_name: "203.0.113.10".to_owned(),
+///     tls: false,
+/// };
+/// ```
+///
+/// The door is the check, and it refuses by name:
+///
+/// ```
+/// use dz_ingress_fix::{SessionConfig, SessionConfigError};
+///
+/// let document = SessionConfig {
+///     endpoint: "203.0.113.10:9443".to_owned(),
+///     server_name: None,
+///     tls: false,
+///     persist_sequence: false,
+/// };
+/// assert_eq!(
+///     document.resolve(),
+///     Err(SessionConfigError::PlaintextOffLoopback {
+///         endpoint: "203.0.113.10:9443".to_owned(),
+///     })
+/// );
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoint {
+    address: String,
+    server_name: String,
+    tls: bool,
+}
+
+impl Endpoint {
     /// `host:port`, as the document wrote it.
-    pub address: String,
-    /// The host part alone, which is what the certificate is verified against
+    ///
+    /// Readable because a failure has to name it: this is what
+    /// [`Connector::authority`](crate::Connector::authority) hands back, and
+    /// what every connect refusal, timeout and negotiation failure carries in
+    /// its detail. An operator reading one wants to know which endpoint it was
+    /// about.
+    #[must_use]
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+
+    /// The name the certificate is verified against — the endpoint's own host
     /// unless `server_name` said otherwise.
-    pub server_name: String,
+    ///
+    /// Resolved at load rather than left to the negotiation, so that the key's
+    /// absence and the key's presence are held to the same check. See
+    /// [`SessionConfigError::ServerName`].
+    #[must_use]
+    pub fn server_name(&self) -> &str {
+        &self.server_name
+    }
+
     /// Whether to negotiate TLS.
-    pub tls: bool,
+    ///
+    /// `false` only for a loopback endpoint, and that is the whole of what a
+    /// reader can do with it: asking is public and answering differently is
+    /// not.
+    #[must_use]
+    pub const fn tls(&self) -> bool {
+        self.tls
+    }
 }
 
 impl SessionConfig {
