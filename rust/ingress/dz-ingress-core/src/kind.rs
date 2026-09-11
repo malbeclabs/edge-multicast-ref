@@ -25,8 +25,12 @@ pub enum Kind {
     Fix,
     /// A multicast receiver, for a venue that publishes one. Not yet built.
     Multicast,
-    /// Polled request/response. Not yet built.
-    Rest,
+    /// Polled request/response. `dz-ingress-poll`.
+    ///
+    /// `poll` and not `rest`: a book's *resting* quantity already owns that
+    /// word here, and every other name in this set is a mechanism rather than
+    /// an architectural style.
+    Poll,
     /// A local file or directory the venue's own process writes. Not yet built.
     FileTail,
     /// A Unix socket carrying a framed stream from another process, which is
@@ -46,7 +50,7 @@ impl Kind {
         Self::WebSocket,
         Self::Fix,
         Self::Multicast,
-        Self::Rest,
+        Self::Poll,
         Self::FileTail,
         Self::Uds,
     ];
@@ -54,10 +58,25 @@ impl Kind {
     /// The tokens of [`ALL`](Self::ALL), for an error message.
     ///
     /// Written out rather than built at runtime so that it is a `&'static str`
-    /// usable in a `thiserror` format string, and so that a variant added
-    /// without a token here is caught by
-    /// `tests/config.rs::every_kind_has_a_token`.
-    pub const TOKEN_LIST: &'static str = "websocket, fix, multicast, rest, filetail, uds";
+    /// usable in a `thiserror` format string. A hand-written list can disagree
+    /// with [`ALL`](Self::ALL) in both directions: a variant in `ALL` with no
+    /// token here, and a variant renamed without moving its token. Both are
+    /// caught by this module's own
+    /// `tests::the_token_list_in_the_error_message_is_the_token_set`, which
+    /// pins this against `ALL` including the order.
+    ///
+    /// **What that does not reach is a variant missing from `ALL` itself.**
+    /// `ALL` is a hand-written `[Self; 6]`, so a variant added to the enum and
+    /// to [`as_token`](Self::as_token) but left out of `ALL` keeps the length
+    /// at six and compiles clean — and every test in this module reads the
+    /// family through `ALL`, so a variant absent from it is invisible to all of
+    /// them, this one included. The type's promise above holds for matches and
+    /// an array is not one: nothing pins `ALL` against the enum's variant set.
+    /// What an operator gets from such a build is
+    /// [`UnknownKind`](ConfigError::UnknownKind) — *names no transport in this
+    /// family* — because [`resolve`](Self::resolve) searches `ALL` as well, for
+    /// a transport the binary implements and links.
+    pub const TOKEN_LIST: &'static str = "websocket, fix, multicast, poll, filetail, uds";
 
     /// The configuration token for this transport.
     #[must_use]
@@ -66,7 +85,7 @@ impl Kind {
             Self::WebSocket => "websocket",
             Self::Fix => "fix",
             Self::Multicast => "multicast",
-            Self::Rest => "rest",
+            Self::Poll => "poll",
             Self::FileTail => "filetail",
             Self::Uds => "uds",
         }
@@ -89,7 +108,7 @@ impl Kind {
             Self::WebSocket => cfg!(feature = "websocket"),
             Self::Fix => cfg!(feature = "fix"),
             Self::Multicast => cfg!(feature = "multicast"),
-            Self::Rest => cfg!(feature = "rest"),
+            Self::Poll => cfg!(feature = "poll"),
             Self::FileTail => cfg!(feature = "filetail"),
             Self::Uds => cfg!(feature = "uds"),
         }

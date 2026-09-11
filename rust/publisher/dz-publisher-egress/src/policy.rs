@@ -36,8 +36,21 @@
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 
-/// The default multicast TTL. One hop: the group is delivered on the attached
-/// segment and the network's own last-mile carries it from there.
+/// One hop: the group is delivered on the attached segment and the network's own
+/// last-mile carries it from there.
+///
+/// **The configuration document has no default for `ttl`**, despite this
+/// constant's name: `[egress] ttl` is stated or the publisher refuses to start,
+/// because a wrong hop count is invisible from every direction an operator can
+/// look. A reader who adds a serde default here from the name has removed that
+/// refusal.
+///
+/// What this constant is: the value [`EgressPolicy::default`] carries for a
+/// hand-composed publisher, and the value the startup refusal names as the one
+/// line a document needs to publish on the attached segment only. That second
+/// half is a real link and not a coincidence of two literals: `TtlUnstated` in
+/// `dz-publisher-runtime` interpolates this constant into its message, so
+/// changing the number here changes the line operators are told to write.
 pub const DEFAULT_TTL: u8 = 1;
 
 /// An IPv4 prefix, for stating an invariant about a discovered address.
@@ -161,12 +174,32 @@ pub struct EgressPolicy {
     /// An invariant on the address, not a source of one. See the module docs.
     pub expected_prefix: Option<Ipv4Prefix>,
     /// The multicast TTL. See [`DEFAULT_TTL`].
+    ///
+    /// **Zero is not checked here.** `[egress] ttl = 0` is a refusal to start
+    /// in `dz-publisher-runtime`, because zero is no hop at all: the kernel
+    /// accepts every datagram, none reaches an interface, and even a subscriber
+    /// on this host's own segment — the one check that catches a hop count set
+    /// too low — receives nothing. A hand-composed policy gets no such refusal.
+    /// This is a plain `u8`, [`crate::KernelSocket::open`] passes it to
+    /// `set_multicast_ttl_v4` as given, and a composed zero reproduces that
+    /// silence exactly.
+    ///
+    /// Closing it means a checked constructor or a `NonZeroU8`, either of which
+    /// changes the literal every composing caller writes — so it is a change to
+    /// this struct's own shape, not a line in the runtime's document path.
     pub ttl: u8,
 }
 
 impl Default for EgressPolicy {
     /// Discovery, no invariant, one hop. A policy that states nothing is the
     /// policy of a host whose route is right, which is the normal case.
+    ///
+    /// **The configuration document has no such default for the TTL**, and the
+    /// asymmetry is deliberate rather than an oversight. The failure that made
+    /// the key required is an omission — a key nobody wrote, in a file nobody
+    /// diffed for it. This is a call, in a crate somebody authored, whose
+    /// meaning is written here at the definition and appears in a diff at the
+    /// call site. See `StartupError::TtlUnstated` in `dz-publisher-runtime`.
     fn default() -> Self {
         Self {
             pin: None,

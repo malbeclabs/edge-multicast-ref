@@ -42,7 +42,7 @@ use dz_edge_core::{Feed as WireFeed, PortRole};
 use dz_edge_mbp::MarketByPrice;
 use dz_edge_tob::TopOfBook;
 use dz_ingress_core::{IngressConfig, Kind, Policy};
-use dz_publisher_egress::{EgressPolicy, Ipv4Prefix, DEFAULT_TTL};
+use dz_publisher_egress::{EgressPolicy, Ipv4Prefix};
 use dz_publisher_lowering::SourceId;
 use dz_publisher_refdata::SelectionPolicy;
 use dz_venue_composition::AdapterSection;
@@ -79,9 +79,16 @@ pub struct Document {
     /// path to a series without it.
     pub venue: String,
 
-    /// Absent means the default policy: discover the source address from the
-    /// route, assert no invariant on it, one hop. That is the policy of a host
-    /// whose route is right, which is the normal case — see [`EgressPolicy`].
+    /// **Defaultable, and absent is still refused.** Two of the three keys in
+    /// here are escape hatches a host whose route is right does not need; the
+    /// third, `ttl`, is stated or the publisher does not start. So the default
+    /// this attribute supplies is a section with no TTL in it, and no policy
+    /// stands behind it: a document with no `[egress]` at all reaches
+    /// [`StartupError::TtlUnstated`], which names the key and the line to
+    /// write, rather than serde's ``missing field `egress` `` at line 1, column
+    /// 1 — which is what a required field on an optional section produces, and
+    /// what `[ingress]` cost this repository once already. See
+    /// [`EgressSection::ttl`] and [`EgressPolicy`].
     #[serde(default)]
     pub egress: EgressSection,
 
@@ -103,7 +110,7 @@ pub struct Document {
     /// **Defaultable, because every key in it has a default and `kind` is
     /// optional.** A publisher that names its transport once per `[[source]]`
     /// has nothing to state here, and required this failed at parse with
-    /// `missing field `ingress`` at line 1, column 1 — an error pointing at the
+    /// ``missing field `ingress` `` at line 1, column 1 — an error pointing at the
     /// whole file rather than at the section nobody wrote. A document that
     /// names a transport in *neither* place still reaches
     /// [`ConfigError::NoKind`], which names both ways of stating it, so the
@@ -243,12 +250,24 @@ pub struct EgressSection {
     #[serde(default)]
     pub pin: Option<String>,
 
-    #[serde(default = "default_ttl")]
-    pub ttl: u8,
-}
-
-const fn default_ttl() -> u8 {
-    DEFAULT_TTL
+    /// The multicast TTL. **Stated or the publisher does not start**, which is
+    /// what this key having no default buys.
+    ///
+    /// One hop is the right value for a host whose subscribers share its
+    /// segment, and the wrong one for a group that crosses a router. What makes
+    /// it worth requiring is that being wrong is silent in every direction an
+    /// operator can look: a locally attached subscriber receives, so a smoke
+    /// test on the publisher's own host passes; every datagram is sent
+    /// successfully, so the egress series stay green, because the kernel
+    /// accepted them and a router discarded them; and a subscriber that never
+    /// joined has nothing to number, so gap detection reports nothing. The
+    /// publisher is healthy and the feed is empty, and nothing in the
+    /// exposition tells that from a market with no activity.
+    ///
+    /// See [`StartupError::TtlUnstated`], whose message carries the line an
+    /// operator has to write.
+    #[serde(default)]
+    pub ttl: Option<u8>,
 }
 
 /// One `[[feed]]` block.
@@ -1063,10 +1082,25 @@ impl EgressSection {
                 value: text.clone(),
             })?),
         };
+        // Refused here rather than by serde, and the difference is the error an
+        // operator reads. A required *field* on an optional section makes the
+        // section required too, and this repository has already met what that
+        // costs: `[ingress]` required failed at parse with the serde message
+        // "missing field `ingress`" at line 1, column 1 — an error pointing at
+        // the whole file rather than at the section nobody wrote. One refusal
+        // covers both shapes of the same mistake: no `[egress]` at all, and an
+        // `[egress]` that states everything except this.
+        let ttl = self.ttl.ok_or(StartupError::TtlUnstated)?;
+        // Zero is not a smaller hop count, it is no hop at all — and it is the
+        // value the refusal above invites, since that message teaches the key
+        // is a hop count and names 1 as the attached segment.
+        if ttl == 0 {
+            return Err(StartupError::TtlZero);
+        }
         Ok(EgressPolicy {
             pin,
             expected_prefix,
-            ttl: self.ttl,
+            ttl,
         })
     }
 }

@@ -40,8 +40,13 @@ const MARKET_DATA_GRAINS: [Grain; 3] = [Grain::Event, Grain::Instrument, Grain::
 /// insert of a deployment rather than here.
 const VENUE_GRAINS: [VenueGrain; VenueGrain::COUNT] = VenueGrain::ALL;
 
-/// The columns one `CREATE TABLE recorder.<table>` block declares, in order.
-fn columns(sql: &str, table: &str) -> Vec<String> {
+/// The body of one `CREATE TABLE recorder.<table> (...)` block.
+///
+/// Every reader below goes through this rather than searching the file, because
+/// one migration declares several tables and they share column names: `event`,
+/// `instrument` and `book_top` all carry a `channel_id`, so a file-wide search
+/// for that definition answers about whichever table is written first.
+fn table_body<'a>(sql: &'a str, table: &str) -> &'a str {
     let needle = format!("CREATE TABLE IF NOT EXISTS recorder.{table} (");
     let start = sql
         .find(&needle)
@@ -50,24 +55,52 @@ fn columns(sql: &str, table: &str) -> Vec<String> {
     let end = body
         .find("\n)")
         .unwrap_or_else(|| panic!("`{table}` has no closing parenthesis"));
+    &body[..end]
+}
 
-    body[..end]
+/// A column definition line, split into the name and what follows it.
+fn definition(line: &str) -> Option<(&str, &str)> {
+    // Exactly four spaces, then an identifier: a column definition. A comment
+    // line and the continuation of a materialised expression are both excluded
+    // by that, the first by its `--` and the second by being indented further.
+    let rest = line.strip_prefix("    ")?;
+    if rest.starts_with(' ') || rest.starts_with("--") {
+        return None;
+    }
+    let (name, declared) = rest.split_once(char::is_whitespace)?;
+    // Digits included: `object_sha256` is a column name.
+    name.chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        .then(|| (name, declared.trim_start()))
+}
+
+/// The type one table declares for one column, as written.
+fn column_type(sql: &str, table: &str, column: &str) -> String {
+    table_body(sql, table)
+        .lines()
+        .find_map(|line| {
+            let (name, declared) = definition(line)?;
+            (name == column).then(|| declared.to_owned())
+        })
+        .unwrap_or_else(|| panic!("`{table}` declares no `{column}`"))
+}
+
+/// The columns of one table declared `Nullable`.
+fn nullable_columns(sql: &str, table: &str) -> BTreeSet<String> {
+    table_body(sql, table)
         .lines()
         .filter_map(|line| {
-            // Exactly four spaces, then an identifier: a column definition. A
-            // comment line and the continuation of a materialised expression are
-            // both excluded by that, the first by its `--` and the second by
-            // being indented further.
-            let rest = line.strip_prefix("    ")?;
-            if rest.starts_with(' ') || rest.starts_with("--") {
-                return None;
-            }
-            let name = rest.split_whitespace().next()?;
-            // Digits included: `object_sha256` is a column name.
-            name.chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-                .then(|| name.to_owned())
+            let (name, declared) = definition(line)?;
+            declared.starts_with("Nullable(").then(|| name.to_owned())
         })
+        .collect()
+}
+
+/// The columns one `CREATE TABLE recorder.<table>` block declares, in order.
+fn columns(sql: &str, table: &str) -> Vec<String> {
+    table_body(sql, table)
+        .lines()
+        .filter_map(|line| definition(line).map(|(name, _)| name.to_owned()))
         .collect()
 }
 
@@ -655,6 +688,85 @@ fn the_venue_sort_keys_carry_what_distinguishes_two_rows() {
         sort_key(venue_sql(), "venue_object"),
         "observation, feed, object_key, object_sha256",
         "the venue object sort key changed"
+    );
+}
+
+/// The line `book_top.observation`'s comment draws through the table is where
+/// the DDL puts it.
+///
+/// That comment refuses a venue-side row, and it refuses it by naming columns:
+/// six that state something about a datagram and are not nullable, so a
+/// venue-side row could not leave them out and could only invent them, and two
+/// neighbours — `source_id` and `segment_seq` — that are non-nullable as well
+/// and are *not* datagram statements, which is the whole reason the comment says
+/// the criterion and not the nullability decides. Every one of those claims is a
+/// claim about this DDL, and until now the only thing checking them was a reader
+/// counting columns in another file: three rounds of review each found a false
+/// one in that paragraph and nothing failed.
+///
+/// Both halves are asserted, because either alone is passed by a DDL that has
+/// moved. Naming the eight cannot see a *new* nullable provenance column, which
+/// would make "the nullable columns here are the two sides of the book and the
+/// uncertainty stamp" false without touching any of the eight; pinning the
+/// nullable set exhaustively cannot see a rename, which `column_type`'s panic
+/// catches instead.
+///
+/// What this deliberately does not check is the semantic half. Whether a column
+/// *is* a statement about a datagram is a judgement and not a string, so the
+/// comment argues that in prose and the test pins the part a rename or a type
+/// change can silently move underneath it.
+#[test]
+fn the_provenance_line_book_top_refuses_a_venue_row_on_is_in_the_ddl() {
+    let sql = market_data_sql();
+
+    for column in [
+        "source_addr",
+        "channel_id",
+        "dst_port",
+        "sequence_number",
+        "message_index",
+        "reset_count",
+    ] {
+        let declared = column_type(sql, "book_top", column);
+        assert!(
+            !declared.starts_with("Nullable("),
+            "`{column}` is one of the six the comment calls a statement about a \
+             datagram, none of them nullable: {declared}"
+        );
+    }
+
+    for column in ["source_id", "segment_seq"] {
+        let declared = column_type(sql, "book_top", column);
+        assert!(
+            !declared.starts_with("Nullable("),
+            "`{column}` is named as non-nullable *and* not a datagram \
+             statement, which is how the comment shows that the criterion and \
+             not the nullability decides: {declared}"
+        );
+    }
+
+    let nullable = nullable_columns(sql, "book_top");
+    let stated: BTreeSet<String> = [
+        // The two sides of the book: absent rather than zero, because a zero
+        // is a price somebody quoted.
+        "bid_px_raw",
+        "bid_qty_raw",
+        "bid_source_count",
+        "ask_px_raw",
+        "ask_qty_raw",
+        "ask_source_count",
+        // The uncertainty stamp: a certain row has no sequence number to point
+        // at.
+        "uncertain_since",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    assert_eq!(
+        nullable, stated,
+        "the comment says the nullable columns here are the two sides of the \
+         book and the uncertainty stamp and nothing else, so a column crossing \
+         that line makes the paragraph false while it still reads as true"
     );
 }
 

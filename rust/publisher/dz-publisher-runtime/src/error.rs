@@ -17,7 +17,7 @@ use std::io;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
-use dz_publisher_egress::{EraError, OpenError, PrefixError};
+use dz_publisher_egress::{EraError, OpenError, PrefixError, DEFAULT_TTL};
 use dz_publisher_refdata::{PolicyError, RefdataError};
 use dz_venue_composition::AdapterResolution;
 
@@ -461,6 +461,66 @@ pub enum StartupError {
     /// A duration key that is zero.
     #[error("`{key}` must be greater than zero")]
     ZeroDuration { key: &'static str },
+
+    /// `[egress] ttl` is not stated, and it has no default.
+    ///
+    /// # Why the key is stated rather than defaulted
+    ///
+    /// One hop is the right value for a host whose subscribers share its
+    /// segment. Being wrong about it is silent in every direction an operator
+    /// can look: a locally attached subscriber receives, so a smoke test on the
+    /// publisher's own host passes; every datagram is sent successfully, so
+    /// nothing in `dz_publisher_egress_*` moves, because the kernel accepted
+    /// each one and a router discarded it; and a subscriber that never joined
+    /// has nothing to number, so gap detection reports nothing either. A
+    /// publisher in production states 64 because its groups cross several hops,
+    /// so the operating value and the default are not the same number in a
+    /// deployment that exists.
+    ///
+    /// # The message is the remedy
+    ///
+    /// It names the line an operator has to write and what that line means, so
+    /// that an upgrade costs one key rather than a search — and so that an
+    /// operator who did not know they were publishing one hop finds out here
+    /// rather than from a subscriber that never received anything.
+    ///
+    /// The number in it is [`DEFAULT_TTL`] formatted, not a literal retyped
+    /// beside it. That constant's own documentation claims this message names
+    /// its value; interpolating it is what makes the claim true, and what stops
+    /// a publisher composed from `EgressPolicy::default` sending one hop count
+    /// while the refusal tells operators to write another.
+    #[error(
+        "`[egress] ttl` is not stated and has no default. `ttl = {DEFAULT_TTL}` publishes on the \
+         attached segment only, which is the whole of what a subscriber on that segment \
+         needs; a group that crosses a router needs the hop count its network takes.",
+        DEFAULT_TTL = DEFAULT_TTL
+    )]
+    TtlUnstated,
+
+    /// `[egress] ttl` is zero, which is not a smaller hop count.
+    ///
+    /// # Zero is worse than the value this key was made required for
+    ///
+    /// A wrong hop count is silent in every direction an operator can look, and
+    /// zero is silent in one more. The kernel accepts every datagram, so the
+    /// egress series stay green. Nothing joined, so gap detection reports
+    /// nothing. And the one check that catches a hop count set too low — a
+    /// subscriber on the publisher's own segment — fails too, because at zero
+    /// the datagram never leaves the host.
+    ///
+    /// It is also the value the refusal above invites. That message says
+    /// `ttl = 1` publishes on the attached segment only, so an operator who
+    /// wants exactly that learns the key is a hop count and has no reason to
+    /// read `0` as anything but *fewer hops than one*.
+    ///
+    /// Refused here rather than through a `NonZeroU8`, which would answer with
+    /// serde's own message and name no line to write.
+    #[error(
+        "`[egress] ttl = 0` keeps every datagram inside this host: the kernel accepts each one \
+         and none reaches an interface. It is not a smaller hop count than 1 — `ttl = 1` is the \
+         attached segment, and there is nothing below it."
+    )]
+    TtlZero,
 
     /// `[refdata.selection]` is not a coherent policy.
     #[error("`[refdata.selection]`: {source}")]
