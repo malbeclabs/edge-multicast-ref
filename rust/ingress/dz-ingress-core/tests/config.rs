@@ -300,3 +300,31 @@ fn a_transport_the_family_names_but_nobody_has_built_is_not_unknown_either() {
     // does.
     either_resolves_or_says_it_was_not_built_in(Kind::Multicast);
 }
+
+/// `rest` is gone rather than aliased.
+///
+/// The rename is only free while nothing names the old token. This asserts the
+/// old spelling resolves to nothing at all — not to `Poll` by an alias, which
+/// would leave two spellings for one transport and a configuration management
+/// system holding whichever it was written with first — and that the refusal
+/// names what an operator may write instead.
+#[test]
+fn the_old_spelling_of_the_polled_transport_is_refused_and_not_aliased() {
+    // Through the document, like every other refusal in this file: half of what
+    // this section is for is the spelling, and an old spelling is the case most
+    // at home in the parsed path.
+    let config = parse(r#"kind = "rest""#).expect("the section parses");
+    let error = config
+        .resolve()
+        .expect_err("`rest` names no transport in this family");
+    // The variant, not merely that it failed. `UnknownKind` is the claim this
+    // test makes -- resolving to nothing at all -- where `KindNotLinked` would
+    // mean the token still names a transport and this build simply lacks it.
+    assert!(matches!(error, ConfigError::UnknownKind { .. }), "{error}");
+    let message = error.to_string();
+    assert!(message.contains("rest"), "{message}");
+    assert!(message.contains("poll"), "{message}");
+    for kind in Kind::ALL {
+        assert!(message.contains(kind.as_token()), "{message}");
+    }
+}

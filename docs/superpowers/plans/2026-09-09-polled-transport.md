@@ -22,21 +22,23 @@ Turns [the design](../specs/2026-09-09-polled-transport-design.md) into ordered 
 
 ### 1. `Kind::Poll`, and the token `poll`
 
-- [ ] `Kind::Rest` becomes `Kind::Poll`; the token `"rest"` becomes `"poll"`; `ALL`, `TOKEN_LIST` and `as_token` move with it, and the doc comment keeps "polled request/response" and drops nothing else.
-- [ ] The variant's doc comment carries the reason for the name, in one line, so that the next reader does not restore the old one from familiarity: a book's *resting* quantity already owns that word here.
+- [x] `Kind::Rest` becomes `Kind::Poll`; the token `"rest"` becomes `"poll"`; `ALL`, `TOKEN_LIST` and `as_token` move with it, and the doc comment keeps "polled request/response" and drops nothing else.
+- [x] The variant's doc comment carries the reason for the name, in one line, so that the next reader does not restore the old one from familiarity: a book's *resting* quantity already owns that word here.
 
-**Test:** `dz-ingress-core/tests/config.rs::every_kind_has_a_token` already holds the set; it passes only if the token moved with the variant. A document naming `kind = "poll"` resolves to the variant, and one naming `kind = "rest"` is refused with a message listing the acceptable tokens — which is the test that says the old spelling is gone rather than aliased.
+**Test:** **corrected — `every_kind_has_a_token` does not exist and never did.** This plan and the design both named it, and so did `TOKEN_LIST`'s own doc comment, which is where all three got it. What does hold the set is `kind::tests::the_token_list_in_the_error_message_is_the_token_set`, in the crate's own `mod tests` rather than in `tests/config.rs`, and it is stricter: it pins `TOKEN_LIST` against `ALL` *including the order*, so it catches a variant added without a token and a variant renamed without moving its token. Writing a second test under the promised name would have been two tests for one property, so the doc comment was re-pointed at the real one instead. A document naming `kind = "poll"` resolves to the variant, and one naming `kind = "rest"` is refused with a message listing the acceptable tokens — which is the test that says the old spelling is gone rather than aliased.
 
-**The revert:** leave `TOKEN_LIST` saying `rest` while the variant is `Poll`. `every_kind_has_a_token` fails. That test exists because a variant added without a token is a value an operator can name and nothing can resolve, and a rename is the same defect arriving from the other direction.
+**The revert, run rather than predicted.** Leaving `TOKEN_LIST` saying `rest` while the variant is `Poll` kills **four** tests, not the one this plan predicted: `the_token_list_in_the_error_message_is_the_token_set`, `a_token_no_transport_answers_to_names_the_built_in_set` (the message interpolates the list, so an operator would be shown a token that resolves to nothing), `the_old_spelling_of_the_polled_transport_is_refused_and_not_aliased`, and the publisher runtime's `a_transport_this_binary_was_not_built_with_is_a_different_error`. The prediction named a test that does not exist; the property it described is covered from both directions.
+
+A second revert, which this plan did not think to name: resolving `rest` to `Poll` as an alias. `the_old_spelling_of_the_polled_transport_is_refused_and_not_aliased` fails, in the default build and under `--features poll`. Two spellings for one transport, with a configuration management system holding whichever was written first, is what the rename exists to avoid.
 
 ---
 
 ### 2. The crate, and the client decision in its manifest
 
-- [ ] `dz-ingress-poll`, alongside `dz-ingress-websocket`, with the marker feature on `dz-ingress-core` that makes `kind = "poll"` resolve — the mechanism that lets the core answer *is that transport in this binary* without depending on the transports.
-- [ ] An async HTTP client, pinned exactly, `default-features = false`, with only the features used and TLS behind a feature of this crate's own. The manifest comment states what the websocket crate's states: which backends are deliberately excluded and why a default must not be able to pull one in.
-- [ ] The crate documentation names the cost the design names: this is the family's first HTTP client and the workspace's second, the other is blocking and belongs to a different process and tier, and neither should migrate toward the other because they look alike in a manifest.
-- [ ] An `https` endpoint in a build without the TLS feature is refused at configuration load, naming the scheme and the feature — the shape the column-store writer already uses.
+- [x] `dz-ingress-poll`, alongside `dz-ingress-websocket`, with the marker feature on `dz-ingress-core` that makes `kind = "poll"` resolve — the mechanism that lets the core answer *is that transport in this binary* without depending on the transports.
+- [x] An async HTTP client, pinned exactly, `default-features = false`, with only the features used and TLS behind a feature of this crate's own. The manifest comment states what the websocket crate's states: which backends are deliberately excluded and why a default must not be able to pull one in.
+- [x] The crate documentation names the cost the design names: this is the family's first HTTP client and the workspace's second, the other is blocking and belongs to a different process and tier, and neither should migrate toward the other because they look alike in a manifest.
+- [x] An `https` endpoint in a build without the TLS feature is refused at configuration load, naming the scheme and the feature — the shape the column-store writer already uses.
 
 **Test:** the refusal, which needs no network; and a crate that builds with and without the TLS feature, which is what says the feature is real rather than declared.
 
@@ -46,10 +48,10 @@ Turns [the design](../specs/2026-09-09-polled-transport-design.md) into ordered 
 
 ### 3. `recv`, and the three answers it has to tell apart
 
-- [ ] A poll due, a response with a body: `Received::Payload`, with no timestamp of its own — the driver stamps it, because a response body carries no receive time this transport knows better than the driver's.
-- [ ] A response that says nothing changed — `304`, or a body whose digest has not moved: `Received::Liveness`.
-- [ ] The budget elapsing before the poll is due: `Received::Idle`.
-- [ ] A failed request: `IngressError::Ended` with the reason, classified by what happened — a refused connection, a timeout, a status the endpoint should not have returned.
+- [x] A poll due, a response with a body: `Received::Payload`, with no timestamp of its own — the driver stamps it, because a response body carries no receive time this transport knows better than the driver's.
+- [x] A response that says nothing changed — `304`, or a body whose digest has not moved: `Received::Liveness`.
+- [x] The budget elapsing before the poll is due: `Received::Idle`.
+- [x] A failed request: `IngressError::Ended` with the reason, classified by what happened — a refused connection, a timeout, a status the endpoint should not have returned.
 
 **Test** (no network: the client is behind a trait this crate owns, the way `RouteLookup` puts the routing table behind one):
 - a changed body is a payload and reaches the driver;
@@ -63,8 +65,8 @@ Turns [the design](../specs/2026-09-09-polled-transport-design.md) into ordered 
 
 ### 4. What is polled is the adapter's to change
 
-- [ ] `send` holds what the adapter wrote as the next request's parameters. A cursor, a page token and a symbol list are all the venue's, and none of them is parsed here.
-- [ ] The parameters are per connection, for the reason `on_connected` gives: one adapter serves every source, and two polled sources are two cursors.
+- [x] `send` holds what the adapter wrote as the next request's parameters. A cursor, a page token and a symbol list are all the venue's, and none of them is parsed here.
+- [x] The parameters are per connection, for the reason `on_connected` gives: one adapter serves every source, and two polled sources are two cursors.
 
 **Test:** what the adapter writes at connect reaches the first request; what it writes through `poll_upstream` reaches the next one. The second half is what makes this transport and that method one mechanism rather than two.
 
@@ -74,9 +76,9 @@ Turns [the design](../specs/2026-09-09-polled-transport-design.md) into ordered 
 
 ### 5. `poll_interval`, and the documents
 
-- [ ] `poll_interval` on the transport's own configuration table, with the design's argument in its doc comment: an interval and not a cycle, because a cycle is one pass over a set divided by its size and one tick here is one request.
-- [ ] `BRINGING-UP-A-FEED.md` gains the transport in its list of what `[ingress] kind` can name, and one line on what a venue uses it for — a catalogue that is a request rather than a subscription.
-- [ ] `docs/README.md` carries the row for this pair.
+- [x] `poll_interval` on the transport's own configuration table, with the design's argument in its doc comment: an interval and not a cycle, because a cycle is one pass over a set divided by its size and one tick here is one request.
+- [x] `BRINGING-UP-A-FEED.md` gains the transport in its list of what `[ingress] kind` can name, and one line on what a venue uses it for — a catalogue that is a request rather than a subscription.
+- [x] `docs/README.md` carries the row for this pair.
 
 **Test:** `scripts/check-public-repo-rules.sh`, a document that states `poll_interval` resolving, and one that omits it refused — a transport with no cadence is a transport that polls in a loop or never, and both are worse than a refusal.
 
