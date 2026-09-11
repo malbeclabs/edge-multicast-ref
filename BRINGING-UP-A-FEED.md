@@ -180,7 +180,10 @@ one of a closed set — `websocket`, `fix`, `multicast`, `poll`, `filetail`,
   payload, and no code in the venue's binary holds a timer, a backoff or a
   failure count. An unchanged response is liveness and not a payload, so the
   idle guard still fires on a catalogue that has stopped changing. `https` needs
-  the crate's `tls` feature and is refused at load without it.
+  the crate's `tls` feature and is refused at load without it, and a credential
+  goes on the query string rather than in a userinfo section — nothing sends
+  one, so `http://user:secret@host/catalogue` is refused at load instead of
+  going out unauthenticated and answering `401` to a document that looks right.
 
 The other four — `fix`, `multicast`, `filetail`, `uds` — are named by the set
 and have no crate behind them yet. They are listed because an operator who has

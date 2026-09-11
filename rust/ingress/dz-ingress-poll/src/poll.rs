@@ -84,9 +84,10 @@ impl PollInput {
     ///
     /// # Errors
     ///
-    /// [`ConfigError`] for a table this build cannot run: an `https` endpoint
-    /// with no TLS stack, something that is not an HTTP endpoint at all, or a
-    /// cadence of zero. Raised here rather than at the first request on
+    /// [`ConfigError`] for a table this build cannot run — an `https` endpoint
+    /// with no TLS stack, something that is not an HTTP endpoint at all, an
+    /// endpoint carrying a `#` or a userinfo section, or a cadence at or below
+    /// the floor. Raised here rather than at the first request on
     /// purpose — a publisher whose endpoint or cadence is unusable should fail
     /// where it is diagnosable, and this is also the check a venue's `main`
     /// runs whether or not it called [`PollConfig::check`] itself.

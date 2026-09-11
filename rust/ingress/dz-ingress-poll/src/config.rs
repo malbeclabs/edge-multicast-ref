@@ -23,7 +23,7 @@ use serde::{Deserialize, Deserializer};
 /// is the core's own standard for the same reason: an error that says a value
 /// is unacceptable and stops there invites the same guess a second time.
 ///
-/// # The three that name the endpoint name only its authority
+/// # The four that name the endpoint name only its authority
 ///
 /// Each names `endpoint` as the key and the scheme and host as the value, and
 /// **none renders the endpoint itself** — not through `Display` and not
@@ -61,8 +61,8 @@ pub enum ConfigError {
 
     /// The endpoint carries a `#`.
     ///
-    /// **Refused at load, and this is the one check here that the connect
-    /// probe does not also reach.** A fragment is not sent to a server, so
+    /// **Refused at load, and this is the one check here the connect probe
+    /// does not fail on at all.** A fragment is not sent to a server, so
     /// `http://host/catalogue#overview` with `cursor=1` appended requests
     /// `/catalogue` and nothing else: `hyper::Uri` parses it happily and
     /// swallows the whole query string into the fragment. The probe succeeds,
@@ -81,6 +81,55 @@ pub enum ConfigError {
          `%23`"
     )]
     FragmentInEndpoint { authority: String },
+
+    /// The endpoint carries a userinfo section.
+    ///
+    /// **Refused at load, because the connect probe fails on it and blames
+    /// the wrong thing.** Nothing here sends a userinfo section: `hyper`
+    /// derives `Host` from the URI's host, which excludes it, and synthesises
+    /// no `Authorization` header — that belongs to a higher-level client and
+    /// this crate does not add one, for the reason the crate docs give about
+    /// redirects. So `http://poller:secret@host/catalogue` goes out as `GET
+    /// /catalogue` with one `host` header and no credential anywhere on the
+    /// wire.
+    ///
+    /// What an operator sees then depends on the endpoint, and both answers
+    /// are bad ones. An endpoint that wanted the credential replies `401`,
+    /// which is `connect_failures_total{reason="unauthorized"}` and means
+    /// *look at the credential* — and the credential is right there in the
+    /// document, spelled correctly, having never left the process. The
+    /// publisher retries under the delay sequence for as long as it takes
+    /// somebody to work out that the client dropped the field rather than the
+    /// venue rejecting it, and the probe cannot say so, because from its side
+    /// a `401` is a `401`. An endpoint that wanted none answers `200`, the
+    /// feed runs, and a credential sits in a configuration document for
+    /// nothing — the half that makes this worth refusing even where it appears
+    /// to work.
+    ///
+    /// `authority_of` already assumes an operator writes these, because it
+    /// strips one before printing. This is the other half of that assumption:
+    /// a shape common enough to keep out of a log line is common enough to
+    /// refuse.
+    ///
+    /// # What it refuses is narrower than what `authority_of` strips
+    ///
+    /// A userinfo section here is an `@` in the **authority** — before the
+    /// first `/`, `?` or `#` — which is what a URI means by one and what
+    /// `hyper` drops. `authority_of` is deliberately looser, taking the last
+    /// `@` before the query string, because the two answer different
+    /// questions: this one asks whether an endpoint can work, and that one
+    /// asks what is safe to print, where over-stripping costs a host and
+    /// under-stripping costs a secret.
+    #[error(
+        "`endpoint` is `{authority}` and carries a userinfo section, which nothing sends: the \
+         `Host` header is derived from the host alone and no `Authorization` header is \
+         synthesised, so the request goes out with no credential at all and the endpoint \
+         answers `401` to a document that looks right. A polled endpoint is the scheme, the \
+         host and the path; a venue that authenticates a catalogue request takes its key on \
+         the query string, written either on `endpoint` itself or by the adapter through \
+         `send`"
+    )]
+    CredentialInEndpoint { authority: String },
 
     /// A cadence of zero.
     ///
@@ -186,6 +235,26 @@ impl PollConfig {
         // fault in the same key.
         if endpoint.contains('#') {
             return Err(ConfigError::FragmentInEndpoint {
+                authority: authority_of(endpoint),
+            });
+        }
+        // After the fragment, because a `#` before the `@` would make the
+        // reading below a reading of the fragment rather than of an authority,
+        // and because either is a fault in this same key. The authority is
+        // everything from the scheme to the first `/`, `?` or `#`, which is
+        // what a URI means by one and what `hyper` reads the host out of - so
+        // an `@` inside it is a userinfo section by the only definition that
+        // matters here, and an `@` further along is a character in a path.
+        let after_scheme = endpoint
+            .split_once("://")
+            .map_or(endpoint, |(_scheme, rest)| rest);
+        if after_scheme
+            .split(['/', '?', '#'])
+            .next()
+            .unwrap_or_default()
+            .contains('@')
+        {
+            return Err(ConfigError::CredentialInEndpoint {
                 authority: authority_of(endpoint),
             });
         }
@@ -441,6 +510,61 @@ mod tests {
         assert!(message.contains('#'), "{message}");
         assert!(message.contains("%23"), "{message}");
         assert!(!message.contains("overview"), "{message}");
+    }
+
+    #[test]
+    fn an_endpoint_carrying_a_credential_is_refused_because_the_probe_blames_the_venue() {
+        // Verified against `hyper` rather than assumed: an endpoint written
+        // this way goes out as `GET /catalogue` with one `host` header and no
+        // `Authorization` header at all, because the `Host` is derived from
+        // the host alone and nothing here synthesises the other. So the
+        // request is unauthenticated, the endpoint answers `401`, and
+        // `connect_failures_total{reason="unauthorized"}` sends an operator to
+        // look at a credential which is spelled correctly in the document and
+        // has never left the process.
+        let mut config: PollConfig = toml::from_str(document()).expect("a valid table");
+        config.endpoint = "http://poller:not-a-real-secret@192.0.2.10/catalogue".to_string();
+        let error = config
+            .check()
+            .expect_err("a userinfo section in the endpoint");
+        assert_eq!(
+            error,
+            ConfigError::CredentialInEndpoint {
+                authority: "http://192.0.2.10".to_string(),
+            }
+        );
+        // The rule every refusal in this module keeps, and the one that
+        // matters most for this variant: the value it names is the credential.
+        for rendered in [format!("{error}"), format!("{error:?}")] {
+            assert!(!rendered.contains("not-a-real-secret"), "{rendered}");
+            assert!(!rendered.contains("poller"), "{rendered}");
+            assert!(rendered.contains("192.0.2.10"), "{rendered}");
+        }
+        // What the operator does next, which is the standard the other
+        // variants hold: where the key goes instead.
+        let message = error.to_string();
+        assert!(message.contains("query string"), "{message}");
+
+        // A username with no password is the same fault and is refused the
+        // same way: nothing sends either half. `http` and not `https`,
+        // because this test has to mean the same thing in both builds and a
+        // build with no TLS stack refuses the scheme first.
+        config.endpoint = "http://poller@192.0.2.10:8443/catalogue".to_string();
+        assert!(
+            matches!(
+                config.check(),
+                Err(ConfigError::CredentialInEndpoint { .. })
+            ),
+            "{:?}",
+            config.check()
+        );
+
+        // And an `@` past the authority is a character in a path, not a
+        // credential. This is the narrower reading the variant's own doc
+        // states, and the reason it is narrower than what `authority_of`
+        // strips: refusing an endpoint that works is its own failure.
+        config.endpoint = "http://192.0.2.10/books/me@example.com/catalogue".to_string();
+        assert_eq!(config.check(), Ok(()));
     }
 
     #[test]
