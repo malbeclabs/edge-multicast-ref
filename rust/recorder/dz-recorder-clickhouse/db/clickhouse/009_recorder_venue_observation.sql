@@ -562,6 +562,15 @@ FROM recorder.venue_book_top_settled;
 -- columns below are exactly what both sides hold, so that union's two halves
 -- line up by position and by type.
 --
+-- SO THIS FILE IS NEVER APPLIED ON ITS OWN AFTER `010`. `010` declares this
+-- same view with both branches, and the files are applied in order as a set —
+-- re-applying this one by itself would replace the two-sided seam with the
+-- venue branch alone, leaving a race that pairs the venue against itself and a
+-- `feed_race` whose `observed_by` silently stops naming a publisher
+-- observation point. `010` states the converse, which is a deployment that
+-- applied this file and skipped that one; this is the same hazard reached from
+-- the other end, and neither is a reason for the view to have two names.
+--
 -- `env` IS CARRIED AND IS NOT GROUPED ON, the way it is a label on every table
 -- in `005` and in none of their keys: one database holds one environment, and a
 -- reader filtering by it wants the column rather than a key that restates it.

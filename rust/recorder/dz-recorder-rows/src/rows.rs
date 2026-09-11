@@ -794,8 +794,10 @@ pub struct BookTop {
     ///
     /// Zero on a row written before the column existed, which is the cost the
     /// migration argues at length: there is no honest value for a book nobody
-    /// hashed, and no DEFAULT that would be one. The cross-observer race
-    /// therefore excludes zero before it numbers anything, and `010` states why.
+    /// hashed, and no DEFAULT that would be one. The **publisher branch** of
+    /// the cross-observer race therefore excludes zero before it numbers
+    /// anything, and `010` states why — and why the venue branch, whose table
+    /// declares the column from its first `CREATE TABLE`, does not.
     ///
     /// **And a binary that writes this column against a table the migration has
     /// not reached is refused rather than quietly emptied.** The sink posts

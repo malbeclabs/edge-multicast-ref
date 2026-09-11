@@ -732,6 +732,40 @@ fn the_two_files_describe_each_other_as_they_are() {
     );
 }
 
+/// **The seam is declared in two files, and each names the order that leaves it
+/// one-sided.**
+///
+/// `feed_race_occurrence` is declared in `009` with the venue branch and in
+/// `010` with both, by design: `010` adds a branch to the seam rather than
+/// rewriting the pairing above it. The hazard the double definition carries is
+/// that either file applied on its own leaves a race that is quietly one-sided
+/// — a deployment that stopped at `009` pairs the venue against itself, and
+/// `009` re-applied by hand after `010` puts that back — and a view holds no
+/// rows, so nothing in the result says a branch went missing.
+///
+/// `010` states the first of those. The second is stated in `009`, because the
+/// direction that is not written down is the one an operator re-running a
+/// single file reaches.
+#[test]
+fn the_seam_in_two_files_names_both_orders_that_leave_it_one_sided() {
+    assert!(
+        book_key_sql().contains("applied `009` and skipped this file"),
+        "`010` does not say what a deployment that stopped at `009` holds"
+    );
+    assert!(
+        venue_sql().contains("SO THIS FILE IS NEVER APPLIED ON ITS OWN AFTER `010`"),
+        "`009` does not say that re-applying it alone takes the publisher \
+         branch back out of the seam"
+    );
+    for sql in [venue_sql(), book_key_sql()] {
+        assert!(
+            sql.contains("CREATE OR REPLACE VIEW recorder.feed_race_occurrence AS"),
+            "the seam is declared in one file only, so one of the two \
+             statements about applying them apart is about nothing"
+        );
+    }
+}
+
 /// **The race is named for the race, and the name it had is dropped.**
 ///
 /// `009` declared `venue_book_top_race`, and the name was true of it: one

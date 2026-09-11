@@ -54,12 +54,12 @@
 -- do — a second implementation of it would be a second key, and two hashes of
 -- one book state pair with nothing.
 --
--- So the column is forward-only: those rows read as zero, and the
--- cross-observer race below excludes zero. Left in, every pre-migration row of
--- one feed and symbol would land in one equivalence class, pair with nothing on
--- the venue side, and be reported as a state the venue never saw — which is not
--- a count inflated but evidence of loss manufactured, the failure `006` and
--- `009` both name.
+-- So the column is forward-only: those rows read as zero, and the publisher
+-- branch of the cross-observer race below excludes zero. Left in, every
+-- pre-migration row of one feed and symbol would land in one equivalence class,
+-- pair with nothing on the venue side, and be reported as a state the venue
+-- never saw — which is not a count inflated but evidence of loss manufactured,
+-- the failure `006` and `009` both name.
 --
 -- The exclusion is in the same `WHERE` as `from_anchor = 0` and only one of
 -- them needs to be there. An anchored row shares its ordinal partition with the
@@ -77,6 +77,23 @@
 -- column nobody wrote. A forward-only column is normal. Stating that the race
 -- covers rows written after this file, rather than implying it covers the
 -- window `book_top` keeps, is the part that is not optional.
+--
+-- THE EXCLUSION IS ON THIS BRANCH AND NOT ON THE VENUE'S, and that is an
+-- asymmetry to write down rather than a symmetry to restore. `009` declares
+-- `venue_book_top` with `book_key` in its `CREATE TABLE`, so no row on that
+-- side was written before the column existed and a zero there is never
+-- ambiguous: it is a fold that really came out zero. The filter here exists to
+-- resolve an ambiguity that side does not have, and a `book_key != 0` on the
+-- venue branch would tell a reader it does — which is the opposite of true,
+-- and worse documentation than the asymmetry.
+--
+-- What it leaves is one book in 2^64 per venue observation point that this side
+-- drops and that side keeps, so it reads as a state only the venue saw. That
+-- lands in a reading which already tolerates it: a single `observations = 1` is
+-- a question and not yet loss, in the words of this file's own section on what
+-- the race says honestly. Filtering it out on the venue side instead would take
+-- a real observation out of a view that says it carries every one, to make two
+-- `WHERE` clauses look alike.
 --
 --
 -- APPLY THIS FILE BEFORE THE BINARY THAT WRITES THE COLUMN

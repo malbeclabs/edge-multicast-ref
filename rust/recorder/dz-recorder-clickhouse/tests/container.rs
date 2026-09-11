@@ -1861,13 +1861,21 @@ fn a_venue_side_and_a_publisher_side_observation_of_one_book_pair() {
         "a state one side saw is a row with one observation and no lead"
     );
 
-    // The row written before this column existed does not enter the race.
-    // Its key is a zero and no book hashes to a column nobody wrote, so it is
-    // excluded rather than reported as a state the venue never saw — which is
-    // the whole of the forward-only cost, and it is visible here.
+    // The row written before this column existed does not enter the race. Its
+    // key is a zero and no book hashes to a column nobody wrote, so the
+    // publisher branch excludes it rather than reporting it as a state the
+    // venue never saw — which is the whole of the forward-only cost.
+    //
+    // Asserted on the branch that filters and not on `feed_race`, because the
+    // venue branch carries no such filter and needs none: `009` declares
+    // `venue_book_top` with `book_key` in its first `CREATE TABLE`, so a zero
+    // there is a fold that came out zero rather than a column nobody wrote. A
+    // count of zero over the union would be a true answer for the wrong reason
+    // — this fixture's venue side has no zero-key row — and it would keep
+    // coming back zero if the filter left this branch.
     assert_eq!(
         scratch.scalar(&format!(
-            "SELECT count() FROM {}.feed_race WHERE book_key = 0",
+            "SELECT count() FROM {}.publisher_book_top_occurrence WHERE book_key = 0",
             scratch.database
         )),
         "0",
