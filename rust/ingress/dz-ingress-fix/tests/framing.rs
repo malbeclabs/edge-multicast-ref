@@ -544,7 +544,11 @@ fn bytes_with_no_separator_are_refused_rather_than_buffered_without_bound() {
     //
     // Both separator searches, because a guard on one of them leaves the other
     // exactly as it was.
-    let limit = 64 + framing::MAX_HEADER_BYTES;
+    //
+    // `MAX_HEADER_BYTES` alone, and not the body ceiling plus it: the buffer at
+    // this point holds the header and nothing else. See the case below, which
+    // is the one a bound scaled off the body ceiling gets wrong in production.
+    let limit = framing::MAX_HEADER_BYTES;
     for prefix in [format!("8={BEGIN_STRING}"), format!("8={BEGIN_STRING}|9=")] {
         let mut decoder = Decoder::with_max_body_bytes(64);
         decoder.feed(&wire(&prefix));
@@ -577,6 +581,75 @@ fn bytes_with_no_separator_are_refused_rather_than_buffered_without_bound() {
                 assert!(buffered > limit, "`{prefix}`: {buffered}");
             }
             other => panic!("`{prefix}`: {other}"),
+        }
+    }
+}
+
+#[test]
+fn junk_with_no_separator_is_refused_at_the_header_bound_and_not_the_body_ceiling() {
+    // The bound on the header's own separator search is `MAX_HEADER_BYTES` and
+    // nothing derived from the body ceiling, because a buffer in that state
+    // holds only header bytes: everything before the first separator is inside
+    // `8=`'s value, everything after it is inside `9=`'s digits, and a `35=` or
+    // a body byte cannot be there, because those begin past the second
+    // separator — after which `declared` is parsed and bounds the wait by
+    // itself.
+    //
+    // What a bound of `max_body_bytes + MAX_HEADER_BYTES` costs: a peer that
+    // opens a connection and streams junk with no separator is held, in
+    // production, for eight megabytes before it is told anything, once per
+    // connection. The refusal is correct either way, which is why this asserts
+    // *where* it lands rather than that it lands.
+    const READ: usize = 16;
+    // The production ceiling first, because that is the decoder a bound read
+    // off `max_body_bytes` is wrong about by eight megabytes; the small one
+    // second, so a bound that had merely become a different multiple of the
+    // body ceiling cannot pass by being generous.
+    for max_body_bytes in [framing::DEFAULT_MAX_BODY_BYTES, 64] {
+        let mut decoder = Decoder::with_max_body_bytes(max_body_bytes);
+        decoder.feed(&wire(&format!("8={BEGIN_STRING}")));
+        let mut out = Vec::new();
+        let mut refusal = None;
+        // Far past `MAX_HEADER_BYTES` and far short of the production body
+        // ceiling, which is the gap this assertion lives in: a decoder bounded
+        // at the header runs out of junk to be given, and one bounded at the
+        // body ceiling runs out of reads.
+        for _ in 0..1024 {
+            decoder.feed(&[b'7'; READ]);
+            match decoder.take(&mut out) {
+                Ok(false) => {}
+                Ok(true) => {
+                    panic!("{max_body_bytes}: there is no message in bytes with no separator")
+                }
+                Err(error) => {
+                    refusal = Some(error);
+                    break;
+                }
+            }
+        }
+        let refusal = refusal.unwrap_or_else(|| {
+            panic!(
+                "{max_body_bytes}: {} bytes of junk with no separator are still held, so the \
+                 header search is bounded by the body ceiling rather than by the {}-byte header",
+                decoder.buffered(),
+                framing::MAX_HEADER_BYTES
+            )
+        });
+        match refusal {
+            FramingError::HeaderNotTerminated { buffered, limit } => {
+                assert_eq!(
+                    limit,
+                    framing::MAX_HEADER_BYTES,
+                    "{max_body_bytes}: the header search is bounded at `MAX_HEADER_BYTES`, not \
+                     at a value scaled off the body ceiling"
+                );
+                assert!(
+                    buffered <= framing::MAX_HEADER_BYTES + READ,
+                    "{max_body_bytes}: {buffered} bytes held for a header bounded at {}",
+                    framing::MAX_HEADER_BYTES
+                );
+            }
+            other => panic!("{max_body_bytes}: {other}"),
         }
     }
 }

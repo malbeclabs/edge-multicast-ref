@@ -163,7 +163,7 @@ pub enum FramingError {
 
     /// The bytes ran past the ceiling with no separator to end the header.
     ///
-    /// The other half of the same ceiling, and the case
+    /// The other half of the bound, and the case
     /// [`TooLarge`](Self::TooLarge) cannot cover: a peer that writes
     /// `8=FIX.4.4\x01` and then `9=` followed by megabytes with no separator
     /// has declared nothing, so there is no length to compare against a limit —
@@ -171,6 +171,14 @@ pub enum FramingError {
     /// coming. A venue bug, a truncated frame and a garbled stream all arrive
     /// this way, and the reason the ceiling exists is that the far side chooses
     /// the size and the buffer is ours.
+    ///
+    /// **Its ceiling is [`MAX_HEADER_BYTES`] and not the body ceiling.** A
+    /// buffer still short of the header's own two separators holds nothing but
+    /// header bytes — no `35=`, no body byte, because those begin past the
+    /// second separator and by then a declared length bounds the wait — so the
+    /// body ceiling has nothing to say about how much of this to hold, and
+    /// adding it would let a peer that connects and streams junk buffer
+    /// megabytes per connection for a header of some tens of bytes.
     ///
     /// Ends the session, for the reason
     /// [`LengthMismatch`](Self::LengthMismatch) does: nothing on this stream
@@ -649,20 +657,25 @@ pub fn checksum(bytes: &[u8]) -> u8 {
 /// any of them. It exists because the far side chooses the size and the buffer
 /// is ours.
 ///
-/// **It bounds what has arrived and not only what was declared.** A ceiling
-/// checked against a parsed length alone would leave the case that grows a
-/// buffer without any bound: a peer that writes `9=` and then megabytes with no
-/// separator has declared nothing to check. So the decoder refuses at this
-/// value plus [`MAX_HEADER_BYTES`] whenever the header's separators are still
-/// not there — see [`FramingError::HeaderNotTerminated`].
+/// **It bounds a declared length, and that is the whole of what it bounds.** A
+/// ceiling checked against a parsed length alone would leave the case that
+/// grows a buffer without any bound: a peer that writes `9=` and then megabytes
+/// with no separator has declared nothing to check. That case is refused too,
+/// and the value it is refused at is [`MAX_HEADER_BYTES`] rather than anything
+/// derived from this one — a buffer still hunting for the header's own
+/// separators holds only header bytes, so this ceiling is not a statement about
+/// it. See [`FramingError::HeaderNotTerminated`].
 pub const DEFAULT_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 /// How many bytes of header may precede the measured span.
 ///
 /// `8=` with its version and `9=` with its digits, which is some tens of bytes
 /// at most; stated with room, because what this bounds is the search for the
-/// header's two separators and not a field width to be exact about. The ceiling
-/// a decoder refuses at is its body ceiling plus this.
+/// header's two separators and not a field width to be exact about.
+///
+/// It is the whole ceiling for that search rather than a margin added to a body
+/// ceiling, because the buffer being searched holds nothing but these bytes.
+/// See [`FramingError::HeaderNotTerminated`].
 pub const MAX_HEADER_BYTES: usize = 128;
 
 /// A reader that turns a byte stream into whole messages.
@@ -842,12 +855,25 @@ impl Decoder {
     /// are the header's own, so bytes that do not contain them are not a
     /// message this decoder has lost its place in — they are a stream it never
     /// had one on.
+    ///
+    /// **Bounded at [`MAX_HEADER_BYTES`], and not at that plus the body
+    /// ceiling.** Both callers reach here with a buffer that is header and
+    /// nothing else, which is what makes the smaller bound the honest one. The
+    /// first is reached with no separator anywhere in the buffer, so every byte
+    /// held is inside `8=`'s value; the second with the first separator found
+    /// and none after it, so every byte held is `8=FIX.4.4\x01` plus what has
+    /// arrived of `9=`'s digits. Neither can be holding a `35=` or a body byte:
+    /// those begin past the second separator, and once it is there `declared`
+    /// is parsed, checked against the body ceiling, and bounds the wait by
+    /// itself. So the body ceiling adds nothing here except room — and in
+    /// production it is eight megabytes of it, which a peer that opens a
+    /// connection and streams junk with no `\x01` collects once per connection
+    /// before being told anything.
     fn awaiting_a_separator(&self) -> Result<Option<usize>, FramingError> {
-        let limit = self.max_body_bytes.saturating_add(MAX_HEADER_BYTES);
-        if self.buf.len() > limit {
+        if self.buf.len() > MAX_HEADER_BYTES {
             return Err(FramingError::HeaderNotTerminated {
                 buffered: self.buf.len(),
-                limit,
+                limit: MAX_HEADER_BYTES,
             });
         }
         Ok(None)
