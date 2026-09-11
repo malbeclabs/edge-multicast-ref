@@ -64,9 +64,11 @@ pub struct EventInput<'a> {
     /// message is not one. (`book_top.observation`'s own comment names the
     /// neighbours that are non-nullable for reasons of their own, so the
     /// criterion can be checked against the DDL rather than counted.) The
-    /// pairing then groups on `channel_id`, `instrument_id` and `state_key`,
-    /// and a venue side can compute none of the three. A venue-side observation
-    /// is its own grain, paired on `(feed, symbol, book_key, occurrence)` with
+    /// pairing then groups on four expressions — `channel_id`,
+    /// `instrument_id`, `state_key` and the occurrence ordinal, which is the
+    /// query's own, numbered rather than supplied — and a venue side can
+    /// compute none of the three identifiers. A venue-side observation is its
+    /// own grain, paired on `(feed, symbol, book_key, occurrence)` with
     /// [`book_key`](crate::book_key) — see
     /// `docs/superpowers/specs/2026-09-09-recorder-venue-observation-design.md`.
     pub observation: &'a str,

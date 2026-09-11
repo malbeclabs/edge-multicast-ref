@@ -767,23 +767,27 @@ pub struct BookTop {
     /// and a venue's upstream message is not a datagram — so a venue-side row
     /// could not leave them out and could only invent them.
     ///
-    /// Two of their neighbours fall on the other side of that line, and are
-    /// named here so the criterion stays checkable against the DDL:
-    /// `source_id` names the matching engine the message describes, and
-    /// `segment_seq` places a row in the recording, which a venue-side archive
-    /// has its own notion of. Both are non-nullable too, so a venue-side row
-    /// would have to invent those as well — but what neither of them is, is a
-    /// statement about a datagram, and it is the criterion and not the
-    /// nullability that decides what this table can hold. (`instrument_id` and
-    /// `symbol` sit among them too and are instrument identity rather than
-    /// provenance. The nullable columns here are the two sides of the book and
-    /// the uncertainty stamp, which are not provenance at all.)
+    /// Their neighbours that are provenance without being statements about a
+    /// datagram fall on the other side of that line, and are named here so the
+    /// criterion stays checkable against the DDL: `source_id` names the
+    /// matching engine the message describes, and `segment_seq` places a row in
+    /// the recording, which a venue-side archive has its own notion of. Both
+    /// are non-nullable too, so a venue-side row would have to invent those as
+    /// well — but what neither of them is, is a statement about a datagram, and
+    /// it is the criterion and not the nullability that decides what this table
+    /// can hold. (`instrument_id` and `symbol` sit among them too and are
+    /// instrument identity rather than provenance, as `price_exp` and `qty_exp`
+    /// are the scale of the prices. The nullable columns here are the two sides
+    /// of the book and the uncertainty stamp, which are not provenance at all.)
     ///
-    /// And the pairing groups on `channel_id`, `instrument_id` and `state_key`:
-    /// the first is the operator's mapping, the second is minted by the
-    /// publisher's registry, and the third eats both before any price — so a
-    /// venue side can compute none of the three, and the last least of all. A
-    /// venue-side observation is its own grain in its own table, paired on
+    /// And the pairing groups on four expressions — `channel_id`,
+    /// `instrument_id`, `state_key` and the occurrence ordinal — of which three
+    /// are identifiers: the first is the operator's mapping, the second is
+    /// minted by the publisher's registry, and the third eats both before any
+    /// price, so a venue side can compute none of the three, and the last least
+    /// of all. (The ordinal is the query's own, numbered rather than supplied,
+    /// which is why it is not one of the three.) A venue-side observation is
+    /// its own grain in its own table, paired on
     /// `(feed, symbol, book_key, occurrence)` — `book_key` carries no
     /// instrument identity, so the symbol travels beside it. See
     /// `docs/superpowers/specs/2026-09-09-recorder-venue-observation-design.md`.
@@ -816,8 +820,8 @@ pub struct BookTop {
     /// the same datagrams. An observer that has neither — one watching a
     /// venue's own upstream, where the channel is the operator's mapping and
     /// the `Instrument ID` is minted by the publisher's registry — cannot
-    /// compute this value at all, and joins on
-    /// `dz_recorder_events::book_key` instead, which is the two sides alone.
+    /// compute this value at all, and joins on `dz_recorder_events::book_key`
+    /// instead, which is the two sides alone.
     pub state_key: u64,
     /// 1 when this top came from applying a snapshot rather than from a
     /// message the market produced.
