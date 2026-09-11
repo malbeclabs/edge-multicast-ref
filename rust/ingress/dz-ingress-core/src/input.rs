@@ -154,6 +154,25 @@ pub trait Input: Send {
     /// adapter is not told about a send failure and has nothing to do about
     /// one: it owns no transport, and the driver's answer is to reconnect and
     /// ask it to write its subscriptions again.
+    ///
+    /// [`IngressError::Connect`] when *this message* is what establishes the
+    /// connection and the far side did not accept it. A session protocol
+    /// reaches that and a socket does not: the logon is the adapter's, so
+    /// [`Driver`](crate::Driver) connects, asks, and only then sends — and a
+    /// venue that refuses the credential refuses it on this call, having
+    /// accepted the socket in [`connect`](Self::connect). The driver counts it
+    /// under `connect_failures_total{reason}` exactly as it counts one from
+    /// `connect`, and records no reconnect for it, because nothing was
+    /// established for one of the four disconnect reasons to describe. This is
+    /// for establishing the connection only: a transport that returns it for a
+    /// mid-session write is telling the driver a connection it has already
+    /// announced as up never came up.
+    ///
+    /// [`IngressError::Fatal`] for a message this transport cannot carry at
+    /// all, which is the adapter or the document to correct rather than
+    /// anything a reconnect reaches: a body missing what the protocol requires
+    /// of it, or a message sent in an order the transport's own contract
+    /// refuses.
     fn send<'a>(
         &'a mut self,
         message: UpstreamMessage<'a>,

@@ -423,10 +423,18 @@ impl Input for StopAfter {
     }
 }
 
-/// An observer that records the reconnect reasons and discards the rest.
+/// An observer that records the reasons — both taxonomies — and discards the
+/// rest.
+///
+/// Both, because the whole of what this transport's classification decides is
+/// which of the two a failure belongs in: a refused logon that is counted as a
+/// reconnect, or a session that ended and is counted as a connect failure, is
+/// a series that says the wrong thing about the same event.
 #[derive(Default)]
 struct Reasons {
     reconnects: Mutex<Vec<DisconnectReason>>,
+    connect_failures: Mutex<Vec<ConnectFailureReason>>,
+    states: Mutex<Vec<bool>>,
 }
 
 impl IngressObserver for Reasons {
@@ -434,11 +442,18 @@ impl IngressObserver for Reasons {
     fn bytes(&self, _count: u64) {}
     fn duplicate(&self) {}
     fn parse_error(&self, _error: ParseError) {}
-    fn connection_state(&self, _connection: &'static str, _connected: bool) {}
+    fn connection_state(&self, _connection: &'static str, connected: bool) {
+        self.states.lock().expect("the recorder").push(connected);
+    }
     fn reconnect(&self, reason: DisconnectReason) {
         self.reconnects.lock().expect("the recorder").push(reason);
     }
-    fn connect_failure(&self, _reason: ConnectFailureReason) {}
+    fn connect_failure(&self, reason: ConnectFailureReason) {
+        self.connect_failures
+            .lock()
+            .expect("the recorder")
+            .push(reason);
+    }
     fn rate_limited(&self) {}
     fn adapter_error(&self, _error: AdapterError) {}
 }
@@ -647,6 +662,85 @@ async fn a_venue_that_refuses_the_logon_is_a_connect_failure_and_not_a_disconnec
         None,
         "there is no session for a disconnect reason to describe"
     );
+}
+
+#[tokio::test]
+async fn a_refused_logon_is_counted_as_a_connect_failure_through_the_driver() {
+    // **Through a `Driver`, which is the gap the test above leaves.** That one
+    // asserts what `FixInput::send` returns, and every part of that can be
+    // right while the publisher this crate is for still loops in silence: the
+    // logon is the adapter's, so it is written by the driver's first flush, and
+    // a `Connect` error surfaced there was dropped on the floor — no
+    // `connect_failures_total`, no `reconnects_total`, `remote_close` to the
+    // adapter for a session that never existed, and the venue's own words in a
+    // value nothing read.
+    //
+    // The revert this test exists for is either half of that: count a connect
+    // failure only in the driver's `connect` branches, or answer a refused
+    // here with `IngressError::ended`. Both leave the assertion below with
+    // nothing in it.
+    let (address, received) = serve(vec![
+        vec![
+            Act::Expect,
+            Act::Send(from_venue("35=5|58=invalid credentials|", 1)),
+            Act::Hold(Duration::from_millis(200)),
+        ],
+        // Somewhere for the driver to go after the refusal; `StopAfter` ends
+        // the run there rather than letting it retry forever, which is what it
+        // would otherwise correctly do.
+        vec![Act::Hold(Duration::from_millis(50))],
+    ])
+    .await;
+
+    let mut input = StopAfter {
+        inner: input(address),
+        connects: AtomicUsize::new(0),
+        limit: 1,
+    };
+    let mut adapter = RecordingAdapter::default();
+    let observer = Reasons::default();
+    let clock = TokioClock::new();
+    let mut events = Discard;
+
+    let exit = {
+        let mut driver = Driver::new(&mut input, &mut adapter, &clock, &observer, policy(None));
+        tokio::time::timeout(Duration::from_secs(10), driver.run(&mut events))
+            .await
+            .expect("the driver came back")
+    };
+    assert!(exit.is_fatal(), "{exit}");
+
+    assert_eq!(
+        observer
+            .connect_failures
+            .lock()
+            .expect("the recorder")
+            .as_slice(),
+        [ConnectFailureReason::Unauthorized],
+        "the refused credential reached the series whose label says what to do \
+         about it"
+    );
+    assert!(
+        observer.reconnects.lock().expect("the recorder").is_empty(),
+        "nothing was established, so no reconnect reason describes it: {:?}",
+        observer.reconnects.lock().expect("the recorder")
+    );
+    // Never announced up, so the gauge an operator alerts on stays at 0.
+    assert_eq!(
+        observer.states.lock().expect("the recorder").as_slice(),
+        [false],
+        "a session whose logon was refused must not read as connected"
+    );
+    // And the adapter is still owed the pairing for the `on_connected` that
+    // composed the logon.
+    assert_eq!(adapter.connects, 1);
+    assert_eq!(adapter.disconnects, vec![DisconnectReason::RemoteClose]);
+
+    // The logon went out and the subscription did not: what the venue refused
+    // is the one message that was written.
+    let seen = received.lock().expect("the recorder").clone();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert!(seen[0].contains("35=A"), "{:?}", seen[0]);
 }
 
 /// A socket that goes away mid-session, which is the ordinary disconnect.

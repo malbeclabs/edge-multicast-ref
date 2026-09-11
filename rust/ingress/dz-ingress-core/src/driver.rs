@@ -304,6 +304,14 @@ enum Stop {
 ///   ending.** A connect attempt that never succeeded has no reason in that
 ///   label set — see [`IngressError::Connect`], which carries a taxonomy of
 ///   its own that `connect_failures_total` counts by instead.
+/// - **`connect_failures_total` counts a connect failure wherever the
+///   transport surfaces it**, which is `connect` and the first flush of what
+///   the adapter wrote. Both are one connect attempt: the logon on a session
+///   transport is the adapter's, so it is written by that flush, and a venue
+///   that refuses a credential refuses it there. Counted only until the
+///   subscriptions have gone out, because after that the connection is
+///   established and a transport claiming otherwise is a transport with a bug
+///   rather than an outage to file under a reason.
 /// - **A parse error ends the payload and nothing else.** It is counted, the
 ///   payload is dropped, the connection stays up, and it is never retried. The
 ///   boundary's rustdoc states that contract; this is where it is kept. Retrying
@@ -430,10 +438,35 @@ impl<'a> Driver<'a> {
             return Cycle::Retry;
         }
         if let Err(error) = self.flush(&queue).await {
+            // **A `Connect` failure reaches this flush, and only this flush can
+            // count it.** The ordering above is what puts it here: `connect`
+            // opens the transport, `on_connected` asks the adapter what to
+            // send, and this is the send — so on a transport whose connection
+            // is established by a message the *adapter* composes, a far side
+            // that will not have us says so on this call and not in `connect`.
+            // See [`Input::send`], which states that as a contract.
+            //
+            // Left uncounted it is dropped on the floor, because `Connect`
+            // carries no `DisconnectReason`: the fall back to `remote_close`
+            // tells the adapter a session ended that never began, `counted =
+            // false` keeps it out of `reconnects_total` — correctly — and
+            // `connect_failures_total` never moves either. A publisher whose
+            // credential a venue refuses then loops at the backoff ceiling for
+            // the life of the process with every series saying only that it is
+            // down, which is the outage
+            // `connect_failures_total{reason="unauthorized"}` exists to name:
+            // *look at the credential*.
+            if let IngressError::Connect { reason, .. } = &error {
+                self.observer.connect_failure(*reason);
+            }
             let reason = error
                 .disconnect_reason()
                 .unwrap_or(DisconnectReason::RemoteClose);
             let fatal = error.is_fatal();
+            // `end` still runs, and still uncounted. The adapter is owed the
+            // `on_disconnected` for the `on_connected` it has already had —
+            // the first pairing this type guarantees — and nothing was
+            // established for `reconnects_total` to count the ending of.
             self.end(connection, reason, false).await;
             return if fatal {
                 Cycle::Fatal(error)

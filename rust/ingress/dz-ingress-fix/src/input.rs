@@ -501,6 +501,22 @@ impl Input for FixInput {
 /// `unauthorized`, which is the reason an operator acts on — *look at the
 /// credential* — and a logon nothing answered is `timeout`.
 ///
+/// **That group is returned from [`Input::send`] and not from
+/// [`Input::connect`], and the driver is where that has to hold.** The logon
+/// is the adapter's, so the driver's own ordering puts it in the first send
+/// (see the module docs), and a connect failure surfaced there is counted by
+/// `Driver` exactly as one from `connect` is —
+/// [`Input::send`]'s contract states it, and
+/// `a_refused_logon_is_counted_as_a_connect_failure_through_the_driver` pins
+/// it through a `Driver` rather than through this type's own `send`.
+/// Answering the same failure with [`IngressError::ended`] instead, to match a
+/// contract that predates a transport whose connection comes up on a message
+/// the adapter composed, loses the only label that says what to do about it:
+/// an `Ended` error from that same flush is not counted either — nothing was
+/// established, so `reconnects_total` must not move — and the venue's refusal
+/// becomes a `remote_close` handed to the adapter for a session that never
+/// existed.
+///
 /// **Ended** is a session that existed. `timeout` for a silence, and
 /// `remote_close` for everything the venue or the path did.
 ///
