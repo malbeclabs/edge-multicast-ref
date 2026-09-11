@@ -12,13 +12,15 @@
 -- `instrument_id` and `state_key` — the first the operator's mapping, the
 -- second minted by the publisher's registry, the third eating both before any
 -- price — so a venue side can compute none of the three, and the last least of
--- all. The rows it would pair also carry eight non-nullable columns that are
--- statements about a datagram. A venue-side race is its own view over its own
--- grain, keyed on `(feed, symbol, book_key, occurrence)`: `book_key` is the one
--- hash both sides can compute, and it carries no instrument identity, so the
--- symbol travels beside it. Every argument below
--- about the ordinal, the unpaired occurrence, the anchored row and the caller's
--- bound carries over to it unchanged.
+-- all. The rows it would pair also carry `source_addr`, `channel_id`,
+-- `dst_port`, `sequence_number`, `message_index` and `reset_count`, none of
+-- them nullable and every one a statement about a datagram; `book_top`'s own
+-- `observation` comment names the neighbours that are non-nullable for other
+-- reasons. A venue-side race is its own view over its own grain, keyed on
+-- `(feed, symbol, book_key, occurrence)`: `book_key` is the one hash both sides
+-- can compute, and it carries no instrument identity, so the symbol travels
+-- beside it. Every argument below about the ordinal, the unpaired occurrence,
+-- the anchored row and the caller's bound carries over to it unchanged.
 --
 --
 -- WHY THIS IS NOT AN `ASOF JOIN`, WHICH IS THE OBVIOUS MOVE

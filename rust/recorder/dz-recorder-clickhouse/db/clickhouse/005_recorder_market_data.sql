@@ -211,10 +211,18 @@ CREATE TABLE IF NOT EXISTS recorder.book_top (
     -- as `site` names a recorder. Two recorders of one multicast feed are two
     -- observations, and a race is one `state_key` seen at more than one.
     --
-    -- Not a venue-side observation: the eight provenance columns beside this
-    -- one are statements about a datagram and are not nullable, and the pairing
-    -- groups on `channel_id` and `instrument_id`, which a venue side cannot
-    -- compute. A venue-side observation is its own grain in its own table.
+    -- Not a venue-side observation, and the criterion is what a column states
+    -- rather than how many there are: `source_addr`, `channel_id`, `dst_port`,
+    -- `sequence_number`, `message_index` and `reset_count` are statements about
+    -- a datagram, none of them nullable, and a venue's upstream message is not
+    -- a datagram. `source_id` and `segment_seq` sit beside them and fall on the
+    -- other side of that line — `source_id` names the matching engine the
+    -- message describes, as its own column above says, and `segment_seq`
+    -- places a row in the recording, which a venue-side archive has its own
+    -- notion of. Both are non-nullable too, so a venue side fills neither. The
+    -- pairing then groups on `channel_id`, `instrument_id` and `state_key`, and
+    -- a venue side can compute none of the three. A venue-side observation is
+    -- its own grain in its own table.
     observation       LowCardinality(String),
     source_addr       IPv4,
     channel_id        UInt8,
