@@ -1343,10 +1343,26 @@ fn check_shards_carry_the_same_specifications(feeds: &[Feed]) -> Result<(), Star
 /// That is worth stating because a venue may permit one session per credential
 /// and answer a second logon by evicting the first, which makes the count a
 /// thing an operator has to be able to read off the document. What this
-/// function refuses is the copy-paste failure — two enabled blocks whose
-/// `credentials` tables are equal — and
+/// function refuses is the copy-paste failure: two enabled blocks where one's
+/// whole `credentials` table also appears in the other's, under the same keys
+/// with the same values. Equal tables are that case with nothing added, and
+/// `key_path` in one block beside the same `key_path` plus a `passphrase_path`
+/// in the next is that case with a key added afterwards — one credential
+/// either way, and the second spelling is at least as likely a copy-paste as
+/// the first.
+///
+/// **Containment, and not any value two blocks agree on, because the keys are
+/// the venue's.** `credentials` is a free table whose keys the adapter names,
+/// so nothing here can tell an identity path from a trust root. A rule that
+/// refused any key two blocks happened to agree on would refuse two genuinely
+/// separate accounts pointing at one CA bundle, and leave the operator no way
+/// to satisfy it but to duplicate the file. Containment asks the question that
+/// needs no key's meaning: *did the operator change anything?* A table that
+/// disagrees with another on a key they both write is one somebody edited. A
+/// table lying wholly inside another is one nobody finished editing.
+///
 /// [`StartupError::SourceCredentialsShared`](crate::StartupError) states both
-/// why and what it cannot see.
+/// why and what this still cannot see.
 ///
 /// A `comparison` source is refused nothing else: several are fine, and one
 /// arriving beside the primary is the whole point of the role.
@@ -1421,14 +1437,22 @@ fn resolve_sources(sections: Vec<SourceSection>) -> Result<Vec<Source>, StartupE
     // credentials table is not a shared credential — a venue that needs none
     // leaves it unwritten, and several sources doing so is not two logons with
     // one credential.
+    //
+    // Empty on *either* side, and not only on the later block's. Under table
+    // equality the one test did for both, because an empty table equals only
+    // an empty one. Containment is not symmetric that way: the empty table is
+    // inside every table, so a check that skipped the earlier side would make
+    // the first block that needs no credential share one with every block that
+    // writes any.
     for (index, source) in sources.iter().enumerate() {
         if source.credentials.is_empty() {
             continue;
         }
-        if let Some(other) = sources[..index]
-            .iter()
-            .find(|earlier| earlier.credentials == source.credentials)
-        {
+        if let Some(other) = sources[..index].iter().find(|earlier| {
+            !earlier.credentials.is_empty()
+                && (credential_within(&earlier.credentials, &source.credentials)
+                    || credential_within(&source.credentials, &earlier.credentials))
+        }) {
             return Err(StartupError::SourceCredentialsShared {
                 one: other.connection.as_str().to_owned(),
                 another: source.connection.as_str().to_owned(),
@@ -1452,6 +1476,24 @@ fn resolve_sources(sections: Vec<SourceSection>) -> Result<Vec<Source>, StartupE
     }
 
     Ok(sources)
+}
+
+/// Whether every entry of `inner` also appears in `outer`, under the same key
+/// and with the same value.
+///
+/// Equality is this holding both ways, which is why one predicate covers the
+/// exact duplicate and the block that copied it and then added a key. Values
+/// are compared as [`toml::Value`]s rather than as strings, because nothing
+/// here has yet established that they are strings — `check_credentials` runs
+/// after this, and a table of the wrong shape must be refused by its own error
+/// rather than slip through a comparison that could not see it.
+///
+/// Non-empty is the caller's to establish: the empty table is inside every
+/// table, and it is the one table that states no credential at all.
+fn credential_within(inner: &toml::Table, outer: &toml::Table) -> bool {
+    inner
+        .iter()
+        .all(|(key, value)| outer.get(key) == Some(value))
 }
 
 /// The checkable half of *paths only, never inline secrets*.

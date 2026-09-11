@@ -861,6 +861,102 @@ fn two_enabled_sources_with_the_same_credential_table_are_refused_naming_both() 
 }
 
 #[test]
+fn a_credential_a_second_block_added_a_key_to_is_still_one_credential() {
+    // The revert this test exists for: compare whole tables. Two blocks naming
+    // one `key_path`, where the second also writes the passphrase file for it,
+    // are unequal tables — so equality resolves the document and opens both
+    // sessions, for exactly the failure the exact-duplicate case above is
+    // refused to prevent. It is the likelier copy-paste of the two: the block
+    // was copied, one line was added to it, and the credential was the line
+    // nobody looked at.
+    //
+    // Both orders, because containment is directional: whichever block is the
+    // larger one, the pair states one credential, and a check written one way
+    // round accepts the other half of the documents it was meant to refuse.
+    let key = "key_path = \"/etc/a-publisher/session.key\"\n";
+    let passphrase = "passphrase_path = \"/etc/a-publisher/session.pass\"\n";
+    for (which, first, second) in [
+        ("the added key on the second block", "", passphrase),
+        ("the added key on the first block", passphrase, ""),
+    ] {
+        let doc = with_sources(&format!(
+            "{}[source.credentials]\n{key}{first}\n\
+             {}[source.credentials]\n{key}{second}",
+            source("primary-session", "uds", "primary"),
+            source("second-session", "uds", "comparison")
+        ));
+        let resolved = Document::parse(&doc.render()).expect("parses").resolve();
+        let error = match resolved {
+            Ok(_) => panic!(
+                "{which}: two blocks naming one `key_path`, one of which also writes the \
+                 passphrase file for it, resolved into two sessions — they are unequal tables \
+                 and one credential"
+            ),
+            Err(error) => error,
+        };
+
+        match &error {
+            StartupError::SourceCredentialsShared { one, another } => {
+                // Both blocks, in the order the document writes them, because
+                // being told that *a* credential is shared leaves an operator
+                // with the same search they started with.
+                assert_eq!(one, "primary-session", "{which}");
+                assert_eq!(another, "second-session", "{which}");
+            }
+            other => panic!("{which}: {other}"),
+        }
+    }
+}
+
+#[test]
+fn two_sources_that_disagree_on_a_key_they_both_write_are_two_credentials() {
+    // The boundary of the rule, stated as a document rather than left to the
+    // prose. The keys under `credentials` are the venue adapter's, so nothing
+    // in this runtime can tell an identity path from a trust root — which is
+    // why the rule is containment and not "any key two blocks agree on". These
+    // two accounts each hold their own key and both trust the same CA bundle,
+    // which is an ordinary deployment; refusing it would leave the operator no
+    // way to start but to duplicate the bundle.
+    //
+    // What separates it from the refusals above is not which key is shared but
+    // that somebody edited one: the two disagree on a key they both write.
+    let ca = "ca_path = \"/etc/ssl/a-venue.pem\"\n";
+    let doc = with_sources(&format!(
+        "{}[source.credentials]\nkey_path = \"/etc/a-publisher/one.key\"\n{ca}\n\
+         {}[source.credentials]\nkey_path = \"/etc/a-publisher/another.key\"\n{ca}",
+        source("one", "uds", "primary"),
+        source("another", "uds", "comparison")
+    ));
+    let config = Document::parse(&doc.render())
+        .expect("parses")
+        .resolve()
+        .expect("two accounts that share a trust root are two credentials");
+
+    assert_eq!(config.sources.len(), 2);
+}
+
+#[test]
+fn a_source_with_no_credential_shares_one_with_nobody() {
+    // The carve-out, under a rule that needs it stated on both sides. The empty
+    // table is contained in every table, so a containment check that skipped
+    // only the later block would read the first block writing no `credentials`
+    // as sharing a credential with every block that writes one — and refuse
+    // the ordinary document where one upstream authenticates elsewhere and
+    // another does not.
+    let doc = with_sources(&format!(
+        "{}\n{}[source.credentials]\nkey_path = \"/etc/a-publisher/session.key\"\n",
+        source("needs-none", "uds", "primary"),
+        source("needs-one", "uds", "comparison")
+    ));
+    let config = Document::parse(&doc.render())
+        .expect("parses")
+        .resolve()
+        .expect("no credential is not every other credential");
+
+    assert_eq!(config.sources.len(), 2);
+}
+
+#[test]
 fn two_sources_with_their_own_credentials_are_two_sessions() {
     // The document the refusal above exists to distinguish from: two blocks,
     // two credentials, two logons a venue can hold at once.

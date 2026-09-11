@@ -390,13 +390,26 @@ role = "comparison"         # connected, driven, counted — for the race
   permit one session per credential and answer a second logon by evicting the
   first.
 
-  So **two enabled sources whose `credentials` tables are equal are refused at
-  startup, naming both blocks.** That is the copy-paste failure: a second block
-  with a new endpoint and the credential nobody changed. What the check cannot
-  see is two *different* paths holding the same account — nothing here can know
-  that, and its symptom is both sources reconnecting in step, with
-  `dz_publisher_ingress_connection_state` alternating between them. The venue's
-  own logon refusal is the authority.
+  So **two enabled sources are refused at startup, naming both blocks, when one
+  block's whole `credentials` table also appears in the other's.** That is the
+  copy-paste failure: a second block with a new endpoint and the credential
+  nobody changed — equal tables where it was copied and left alone, and one
+  table inside the other where a `passphrase_path` was added afterwards and the
+  `key_path` beside it was not.
+
+  Containment, and not any key the two happen to agree on: the keys under
+  `credentials` are the venue adapter's, so nothing in the runtime can tell an
+  identity path from a trust root, and two accounts each holding their own
+  `key_path` while pointing one `ca_path` at the same bundle are an ordinary
+  deployment. The question the check can answer without reading a key's name is
+  whether anybody edited one — a table that disagrees with another on a key
+  they both write is one somebody edited, and a table lying wholly inside
+  another is one nobody finished editing.
+
+  What the check cannot see is two *different* paths holding the same account —
+  nothing here can know that, and its symptom is both sources reconnecting in
+  step, with `dz_publisher_ingress_connection_state` alternating between them.
+  The venue's own logon refusal is the authority.
 - **Absent `[[source]]` is one source**, named by the transport the venue builds.
   Every document written before the array existed still means exactly that,
   including that its fatal errors end the process.

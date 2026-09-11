@@ -288,7 +288,8 @@ pub enum StartupError {
     )]
     SourcePrimaries { primaries: String },
 
-    /// Two enabled `[[source]]` blocks whose `credentials` tables are equal.
+    /// Two enabled `[[source]]` blocks where one's whole `credentials` table
+    /// also appears in the other's.
     ///
     /// **The copy-paste failure**: a second `[[source]]` block with a new
     /// endpoint and the credential nobody changed. A venue may permit one
@@ -299,8 +300,20 @@ pub enum StartupError {
     ///
     /// Checkable without understanding what a credential is: `[[source]]
     /// credentials` is a free table of paths, checked but not interpreted, and
-    /// table equality is a comparison. So the refusal names both blocks and
-    /// starts nothing.
+    /// whether one table's entries all appear in another is a comparison. So
+    /// the refusal names both blocks and starts nothing.
+    ///
+    /// **Containment rather than equality, because the copy-paste does not stop
+    /// at an exact copy.** Equal tables are the case with nothing added; the
+    /// same `key_path` in two blocks, one of which also writes a
+    /// `passphrase_path`, is the case with a key added afterwards, and both are
+    /// one credential presented twice. Containment is also as far as this can
+    /// honestly go: the keys belong to the venue's adapter, so nothing here can
+    /// tell an identity path from a trust root, and refusing any key two blocks
+    /// agree on would refuse two separate accounts sharing one CA bundle. What
+    /// containment asks instead needs no key's meaning — a table that disagrees
+    /// with another on a key they both write is one somebody edited, and a
+    /// table lying wholly inside another is one nobody finished editing.
     ///
     /// # What this does not catch, stated rather than implied
     ///
@@ -308,6 +321,13 @@ pub enum StartupError {
     /// that: the values are paths, they are not read at load, and whether two
     /// files hold one identity is a question about their contents and about the
     /// venue's own notion of an account.
+    ///
+    /// **Two blocks that disagree on a key they both write.** `key_path = "/a"`
+    /// beside `key_path = "/b"` is accepted, and so is either of those beside a
+    /// third block that shares only a `ca_path` with it. That is the price of
+    /// not reading a key's name: a document where somebody edited a path to the
+    /// wrong file is indistinguishable, from here, from one where two accounts
+    /// legitimately share a trust root.
     ///
     /// What can be said is what happens then. The eviction shows as both
     /// sources reconnecting in step —
@@ -319,12 +339,15 @@ pub enum StartupError {
     /// check that pretended to cover the case would be worse than one that
     /// names its limit.
     #[error(
-        "two enabled `[[source]]` blocks, `{one}` and `{another}`, have the same `credentials` \
-         table: they are two logons with one credential, and a venue that permits one session \
-         per credential answers the second by evicting the first — which reads, on both \
-         connections, as a venue that keeps closing the connection. Give each source its own \
-         credential, or disable one of the blocks. Two *different* paths holding the same \
-         account is the case this cannot see: its symptom is both sources reconnecting in step"
+        "two enabled `[[source]]` blocks, `{one}` and `{another}`, state one credential: every \
+         path one of them writes under `credentials`, the other writes under the same key — \
+         equal tables, or one whose every entry is present in the other, which is the same \
+         copy-paste with a key added afterwards. They are two logons with one credential, and a \
+         venue that permits one session per credential answers the second by evicting the \
+         first — which reads, on both connections, as a venue that keeps closing the \
+         connection. Give each block its own credential, or disable one of them. Two \
+         *different* paths holding the same account is the case this cannot see: its symptom \
+         is both sources reconnecting in step"
     )]
     SourceCredentialsShared { one: String, another: String },
 
