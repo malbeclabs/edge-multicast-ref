@@ -217,6 +217,12 @@ server_name = "session.example.com"   # what the certificate is verified against
 ```
 
 TLS is on and there is no key to turn it off anywhere but a loopback endpoint.
+Both halves of that endpoint are checked at load: `endpoint` for being
+`host:port`, and the name the certificate is verified against — `server_name`,
+or the endpoint's own host where the key is absent — for being a name a
+certificate can name at all. A publisher that starts and then cannot connect is
+the shape worth avoiding, and on a `role = "comparison"` source it is a process
+that looks healthy with one upstream that never comes up.
 The outbound sequence resets at every logon and nothing is persisted, because a
 resend delivers deltas whose value has expired while the publisher's own
 snapshot recovery is a sequence-correct repair; a document asking for

@@ -176,7 +176,13 @@ impl SocketConnector {
         let address = self.endpoint.address.clone();
         let name = ServerName::try_from(self.endpoint.server_name.clone()).map_err(|_| {
             // A name in the document is the same string on the next attempt, so
-            // retrying it under a backoff only hides it.
+            // retrying it under a backoff only hides it — which is why
+            // [`SessionConfig::resolve`](crate::SessionConfig::resolve) makes
+            // this same check at load and a configured publisher never reaches
+            // here. Kept because [`Endpoint`] is a value anyone can build: the
+            // loopback exercise builds one, and a transport handed a name it
+            // cannot verify against must refuse rather than negotiate with
+            // whatever the string happens to be.
             IngressError::fatal(format!(
                 "`server_name = \"{}\"` is not a name a certificate can be verified against",
                 self.endpoint.server_name
@@ -357,10 +363,11 @@ impl FixInput {
     ///
     /// [`IngressError::Fatal`] for a document this transport cannot run: a
     /// sequence continuity it does not serve, an endpoint that is not
-    /// `host:port`, a plaintext endpoint that is not loopback. Raised here
-    /// rather than at the first connect on purpose — a publisher whose document
-    /// asks for something impossible should fail at startup, where it is
-    /// diagnosable, instead of retrying against it under a backoff.
+    /// `host:port`, a plaintext endpoint that is not loopback, a `server_name`
+    /// no certificate can be verified against. Raised here rather than at the
+    /// first connect on purpose — a publisher whose document asks for something
+    /// impossible should fail at startup, where it is diagnosable, instead of
+    /// retrying against it under a backoff.
     pub fn new(connection: ConnectionId, config: &SessionConfig) -> Result<Self, IngressError> {
         Self::with_clock(connection, config, Arc::new(TokioClock::new()))
     }

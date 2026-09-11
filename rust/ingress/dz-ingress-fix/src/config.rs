@@ -37,6 +37,7 @@
 use std::net::{IpAddr, Ipv6Addr};
 
 use serde::Deserialize;
+use tokio_rustls::rustls::pki_types::ServerName;
 
 /// The transport's own keys for one session.
 #[derive(Debug, Clone, Deserialize)]
@@ -57,6 +58,13 @@ pub struct SessionConfig {
     /// Needed where the endpoint is an address and the certificate names a
     /// host, which is the ordinary shape for a venue reached over a private
     /// path.
+    ///
+    /// Checked at load like the endpoint is, and against the same verifier the
+    /// negotiation would use — see
+    /// [`SessionConfigError::ServerName`]. A value no certificate can be
+    /// verified against is a document to correct, and correcting it at the
+    /// first connect is three layers and a backoff away from the key that
+    /// caused it.
     #[serde(default)]
     pub server_name: Option<String>,
 
@@ -118,6 +126,21 @@ pub enum SessionConfigError {
     /// The endpoint is not `host:port`.
     #[error("`endpoint = \"{endpoint}\"` is not `host:port`: {detail}")]
     Endpoint { endpoint: String, detail: String },
+
+    /// The name the certificate would be verified against is not a name.
+    ///
+    /// Refused at load rather than at the first connect, which is where the
+    /// negotiation's own `ServerName::try_from` would raise it — and where it
+    /// would be a fatal error under a backoff naming a socket, on a publisher
+    /// that started cleanly. On a `role = "comparison"` source that fatal kills
+    /// one driver and leaves a process that looks healthy with one upstream
+    /// that never connects, which is the shape this refusal exists to prevent.
+    #[error(
+        "`server_name = \"{server_name}\"` is not a name a certificate can be verified \
+         against: state a DNS name, or an IP address literal for a certificate that names \
+         an address, or remove the key to verify against the host in `endpoint`"
+    )]
+    ServerName { server_name: String },
 }
 
 /// A checked endpoint: what to connect to, and what to verify against.
@@ -159,9 +182,28 @@ impl SessionConfig {
                 endpoint: self.endpoint.clone(),
             });
         }
+        let server_name = self.server_name.clone().unwrap_or_else(|| host.to_owned());
+        // **The same check the negotiation would make, made here.** What comes
+        // out of this is what the transport takes, so a `server_name` that is
+        // not a name must not reach one: `ServerName::try_from` inside the
+        // negotiation is a fatal error at the *first connect*, which is a
+        // publisher that started cleanly and a document nobody is looking at
+        // any more. `server_name = "session example.com"` and `server_name =
+        // ""` are both that, and both are a key to correct.
+        //
+        // Checked whether or not `tls` is on, because a document is refused for
+        // what it says rather than for what today's other keys make of it: a
+        // name left unverifiable under `tls = false` is a document that breaks
+        // on the change that turns negotiation on, which is the change nobody
+        // re-reads this key for. And checked against the resolved name rather
+        // than the stated one, so that the endpoint's own host — which is what
+        // the key's absence means — is held to the same thing.
+        if ServerName::try_from(server_name.as_str()).is_err() {
+            return Err(SessionConfigError::ServerName { server_name });
+        }
         Ok(Endpoint {
             address: self.endpoint.clone(),
-            server_name: self.server_name.clone().unwrap_or_else(|| host.to_owned()),
+            server_name,
             tls: self.tls,
         })
     }
@@ -297,6 +339,61 @@ mod tests {
         let endpoint = config.resolve().expect("a usable endpoint");
         assert_eq!(endpoint.server_name, "session.example.com");
         assert_eq!(endpoint.address, "203.0.113.10:9443");
+    }
+
+    #[test]
+    fn a_server_name_no_certificate_can_be_verified_against_is_refused_at_load() {
+        // The revert this test exists for: pass the key through and let the
+        // negotiation's own `ServerName::try_from` raise it. The publisher then
+        // starts cleanly and the fault arrives at the first connect, three
+        // layers and a backoff from the key that caused it — and on a `role =
+        // "comparison"` source that fatal kills one driver and leaves a process
+        // that looks healthy with an upstream that never connects.
+        //
+        // A space is the plausible value: a name copied out of a sentence with
+        // the word before it. An empty string is the other, and it is what an
+        // operator writes to mean "the endpoint's own host" — which is what
+        // leaving the key out means, and what this message says.
+        for stated in ["session example.com", "", "https://session.example.com"] {
+            let config = from_document(&format!(
+                "endpoint = \"203.0.113.10:9443\"\nserver_name = \"{stated}\"\n"
+            ))
+            .expect("the key parses");
+            let error = config
+                .resolve()
+                .expect_err(&format!("`{stated}` is not a name"));
+            assert_eq!(
+                error,
+                SessionConfigError::ServerName {
+                    server_name: stated.to_owned()
+                },
+                "{stated}"
+            );
+            let message = error.to_string();
+            // The value it refused, and what would have been accepted instead.
+            assert!(message.contains("server_name"), "{message}");
+            assert!(message.contains("remove the key"), "{message}");
+        }
+    }
+
+    #[test]
+    fn the_endpoints_own_host_is_held_to_the_same_name_the_key_is() {
+        // The key's absence means the endpoint's host, so the check has to be
+        // on the resolved name: a host that reaches `ServerName` unchecked is
+        // the same first-connect fatal by a different route. `tls` is left at
+        // its default, because what is refused here is refused for the name and
+        // not for the negotiation it would be used in.
+        let config =
+            from_document("endpoint = \"session example.com:9443\"\n").expect("a document");
+        let error = config
+            .resolve()
+            .expect_err("not a name a certificate names");
+        assert_eq!(
+            error,
+            SessionConfigError::ServerName {
+                server_name: "session example.com".to_owned()
+            }
+        );
     }
 
     #[test]
