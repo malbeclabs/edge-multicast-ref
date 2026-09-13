@@ -1,0 +1,93 @@
+name: glossary-sync
+
+# Pulls the newest tagged GLOSSARY.md from the public malbeclabs/edge-feed-spec
+# into .github/skills/code-review/, so Copilot code review reads current
+# vocabulary. edge-feed-spec is public, so this needs no credential of its own.
+
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  UPSTREAM_REPO: malbeclabs/edge-feed-spec
+  VENDORED_PATH: .github/skills/code-review/GLOSSARY.md
+  SYNC_BRANCH: chore/glossary-sync
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve the newest glossary tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(curl -fsS \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${UPSTREAM_REPO}/git/matching-refs/tags/glossary/v" \
+            | jq -r '.[].ref' \
+            | sed 's#^refs/tags/glossary/v##' \
+            | sort -V \
+            | tail -1)
+          if [ -z "$version" ]; then
+            echo "No glossary/v* tag found in ${UPSTREAM_REPO}." >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Newest glossary tag is v${version}."
+
+      - name: Write the vendored copy
+        run: |
+          set -euo pipefail
+          version="${{ steps.tag.outputs.version }}"
+          curl -fsS -o /tmp/GLOSSARY.md \
+            "https://raw.githubusercontent.com/${UPSTREAM_REPO}/glossary/v${version}/GLOSSARY.md"
+          if [ ! -s /tmp/GLOSSARY.md ]; then
+            echo "Fetched an empty GLOSSARY.md at glossary/v${version}." >&2
+            exit 1
+          fi
+          mkdir -p "$(dirname "${VENDORED_PATH}")"
+          {
+            printf '%s\n' "<!-- Vendored from ${UPSTREAM_REPO} at glossary/v${version}. -->"
+            printf '%s\n\n' "<!-- Do not edit here. .github/workflows/glossary-sync.yml replaces this file. -->"
+            cat /tmp/GLOSSARY.md
+          } > "${VENDORED_PATH}"
+
+      - name: Open a pull request when the vendored copy changed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${{ steps.tag.outputs.version }}"
+          if git diff --quiet -- "${VENDORED_PATH}"; then
+            echo "Vendored glossary already at v${version}. Nothing to do."
+            exit 0
+          fi
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git checkout -B "${SYNC_BRANCH}"
+          git add "${VENDORED_PATH}"
+          git commit -m "glossary: vendor v${version} for copilot review"
+          git push --force-with-lease origin "${SYNC_BRANCH}"
+          if [ -n "$(gh pr list --head "${SYNC_BRANCH}" --state open --json number --jq '.[].number')" ]; then
+            echo "Refreshed the open pull request on ${SYNC_BRANCH}."
+            exit 0
+          fi
+          {
+            printf '%s\n\n' "Vendors \`GLOSSARY.md\` from \`${UPSTREAM_REPO}\` at \`glossary/v${version}\` into \`${VENDORED_PATH}\`."
+            printf '%s\n' "Opened by \`.github/workflows/glossary-sync.yml\`. The vendored file is a copy. Change vocabulary in \`${UPSTREAM_REPO}\` and let this workflow carry it here."
+          } > /tmp/pr-body.md
+          gh pr create \
+            --head "${SYNC_BRANCH}" \
+            --base "${{ github.event.repository.default_branch }}" \
+            --title "glossary: vendor v${version} for copilot review" \
+            --body-file /tmp/pr-body.md
