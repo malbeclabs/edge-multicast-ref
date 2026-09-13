@@ -55,7 +55,7 @@ use dz_edge_mbp::{
 };
 use dz_edge_tob::Quote;
 use dz_recorder_core::ChannelInstance;
-use dz_recorder_rows::UncertainReason;
+use dz_recorder_rows::{BookStatus, UncertainReason};
 
 use crate::instruments::Channel;
 
@@ -166,6 +166,43 @@ struct InstrumentBook {
     awaiting_anchor: Option<u64>,
     /// Whether the one `no_anchor` row has been emitted.
     said_no_anchor: bool,
+    /// How many snapshot cycles are open for this instrument.
+    ///
+    /// A count and not a flag, because `Book::cycles` is keyed on the
+    /// `snapshot_id`. Kept here rather than scanning that map per message on the
+    /// largest grain in the system.
+    open_cycles: u32,
+}
+
+impl InstrumentBook {
+    /// The state of this book, which is how the depth reported beside it is to
+    /// be read.
+    ///
+    /// **A state and not an applied flag**, and it could not be one: nothing
+    /// here is handed the message. The two cycle questions come first and both
+    /// mean the book is not established, so this is a chain rather than a
+    /// precedence to remember.
+    const fn status(&self) -> BookStatus {
+        if !self.established {
+            if self.awaiting_anchor.is_some() {
+                return BookStatus::AwaitingSnapshot;
+            }
+            if self.open_cycles > 0 {
+                return BookStatus::BuildingSnapshot;
+            }
+            return BookStatus::Unstated;
+        }
+        match self.certainty {
+            None | Some(Certainty { certain: true, .. }) => BookStatus::Ready,
+            Some(Certainty {
+                reason: UncertainReason::Gap,
+                ..
+            }) => BookStatus::Gap,
+            // Unreachable: the other two reasons only ever sit on a book that
+            // is not established. Stating nothing beats naming one of the four.
+            Some(_) => BookStatus::Unstated,
+        }
+    }
 }
 
 /// A snapshot cycle while it is open.
@@ -414,11 +451,19 @@ impl Book {
     /// is the entry point that owns the distinction.
     pub fn close_object(&mut self) {
         self.refused.unclosed_cycle += self.cycles.len() as u64;
+        let stranded: Vec<(Channel, u32)> = self
+            .cycles
+            .iter()
+            .map(|((channel, _), cycle)| (*channel, cycle.instrument_id))
+            .collect();
         self.cycles.clear();
+        for (channel, instrument_id) in stranded {
+            self.cycle_closed(channel, instrument_id);
+        }
     }
 
     pub fn snapshot_begin(&mut self, channel: Channel, begin: &SnapshotBegin) {
-        self.cycles.insert(
+        let displaced = self.cycles.insert(
             (channel, begin.snapshot_id),
             OpenCycle {
                 instrument_id: begin.instrument_id,
@@ -429,6 +474,11 @@ impl Book {
                 levels: 0,
             },
         );
+        // A repeated `snapshot_id` displaces a cycle, possibly another instrument's.
+        if let Some(displaced) = displaced {
+            self.cycle_closed(channel, displaced.instrument_id);
+        }
+        self.book(channel, begin.instrument_id).open_cycles += 1;
     }
 
     pub fn snapshot_level(&mut self, channel: Channel, level: &SnapshotLevel) {
@@ -449,6 +499,8 @@ impl Book {
     /// A `SnapshotEnd`: the only thing that anchors a delta book.
     pub fn snapshot_end(&mut self, channel: Channel, end: &SnapshotEnd) -> Option<Change> {
         let cycle = self.cycles.remove(&(channel, end.snapshot_id))?;
+        // Before every refusal below: a cycle that was refused is over too.
+        self.cycle_closed(channel, cycle.instrument_id);
         let key = (channel, cycle.instrument_id);
         if cycle.levels != cycle.total_levels {
             self.refused.incomplete_cycle += 1;
@@ -478,8 +530,37 @@ impl Book {
         })
     }
 
+    /// The depth and the state behind `event.book_levels_after` and
+    /// `event.status_after`, in one lookup because they are one reading.
+    ///
+    /// **Call it after the message has been applied, never before.** This
+    /// borrows immutably so that it cannot be reached mid-application. An
+    /// instrument this book has never seen reads `(0, Unstated)` and creates no
+    /// entry: a question about a book is not an observation of one.
+    #[must_use]
+    pub fn depth_and_status(&self, channel: Channel, instrument_id: u32) -> (u32, BookStatus) {
+        let Some(book) = self.books.get(&(channel, instrument_id)) else {
+            return (0, BookStatus::Unstated);
+        };
+        // Saturating: a visible ceiling beats a wrapped count reading as shallow.
+        let levels = u32::try_from(book.bids.len() + book.asks.len()).unwrap_or(u32::MAX);
+        (levels, book.status())
+    }
+
     fn book(&mut self, channel: Channel, instrument_id: u32) -> &mut InstrumentBook {
         self.books.entry((channel, instrument_id)).or_default()
+    }
+
+    /// One fewer cycle open for an instrument, however it stopped being open.
+    ///
+    /// Every removal from [`Self::cycles`] pairs with one of these. A cycle
+    /// whose end never arrives is not a removal: it stays in the map and the
+    /// count stays up with it, which is the two agreeing rather than drifting —
+    /// see [`BookStatus::BuildingSnapshot`] and `BookRefused::unclosed_cycle`.
+    fn cycle_closed(&mut self, channel: Channel, instrument_id: u32) {
+        if let Some(book) = self.books.get_mut(&(channel, instrument_id)) {
+            book.open_cycles = book.open_cycles.saturating_sub(1);
+        }
     }
 }
 

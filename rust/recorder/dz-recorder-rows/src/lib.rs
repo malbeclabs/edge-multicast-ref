@@ -57,8 +57,8 @@ pub use derive::{
 };
 pub use file::FileSink;
 pub use rows::{
-    absent_if_sentinel, BookTop, ConformanceFinding, Datagram, Derivation, DropScope, Era, Event,
-    FindingVerdict, Grain, Instrument, MessageTypeLabel, Nanos, PortRoleLabel, RecvTsKindLabel,
-    RoleJoinRow, RowBatch, SegmentCoverage, SequenceGap, UncertainReason, Verdict,
+    absent_if_sentinel, BookStatus, BookTop, ConformanceFinding, Datagram, Derivation, DropScope,
+    Era, Event, FindingVerdict, Grain, Instrument, MessageTypeLabel, Nanos, PortRoleLabel,
+    RecvTsKindLabel, RoleJoinRow, RowBatch, SegmentCoverage, SequenceGap, UncertainReason, Verdict,
 };
 pub use sink::{Accepted, Landed, ObjectId, RowSink, RowSinkError, Written};

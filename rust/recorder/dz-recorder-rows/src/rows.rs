@@ -560,6 +560,41 @@ pub fn absent_if_sentinel(value: u16) -> Option<u16> {
     (value != U16_UNAVAILABLE).then_some(value)
 }
 
+/// The state of the book as at this message, which is how
+/// [`Event::book_levels_after`] beside it is to be read.
+///
+/// **A state and not a per-message *applied* flag.** A `Trade`, a cycle's begin
+/// and levels, and a cycle refused over a book that was already good all read
+/// [`Self::Ready`], so a count of messages that applied is not
+/// `countIf(status_after = 'ready')`. Whether a cycle anchored is `total_levels`
+/// on its begin against `levels_seen` on its end. What this does decide is
+/// whether the depth on the row is a measurement or a leftover.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum BookStatus {
+    /// Nothing stated: no anchor and no recovery in flight, or a row written
+    /// before the columns existed. The depth beside it states nothing either.
+    #[default]
+    #[serde(rename = "")]
+    Unstated,
+    /// The publisher disowned the book and the cycle that would recover it has
+    /// not completed. A delta here is refused.
+    AwaitingSnapshot,
+    /// A cycle is in flight for a book that is not established — a cold start,
+    /// not the periodic re-snapshot of a good book, which stays [`Self::Ready`].
+    /// A cycle whose end never arrives keeps reading as this until the
+    /// derivation closes; `BookRefused::unclosed_cycle` is what resolves it.
+    BuildingSnapshot,
+    /// Established and believable, so the depth beside it is the book's own.
+    Ready,
+    /// Established, still applied, and known to have diverged: the deltas that
+    /// would have moved it are missing, so the depth is this deriver's book and
+    /// not the publisher's. [`BookTop::book_certain`] says the same elsewhere.
+    Gap,
+}
+
 /// One decoded message.
 ///
 /// The expensive table, and the only one whose row count is not a function of
@@ -669,6 +704,25 @@ pub struct Event {
     /// optional rather than the only way to ask.
     pub levels_seen: Option<u32>,
     pub depth_bound: Option<u32>,
+
+    /// Resting levels across both sides of this instrument's book **after** this
+    /// message was applied, and never before — a value read before the fold
+    /// applies it is the previous message's for every delta.
+    ///
+    /// **Read it with [`Self::status_after`] and never alone.** A message the
+    /// book refused leaves this at the depth as at its arrival. `0` on a quote
+    /// feed, which keeps no price maps; this is a depth-feed measurement.
+    ///
+    /// `serde(default)` FOR THE SPOOL AND NOT FOR THE COLUMN STORE, for the
+    /// reason [`BookTop::book_key`] states at length — and this is the largest
+    /// grain, so a window an older binary spooled failing to parse loses the
+    /// most.
+    #[serde(default)]
+    pub book_levels_after: u32,
+    /// The state of the book as at this message, which is how the depth beside
+    /// it is to be read. See [`BookStatus`], and its neighbour for the default.
+    #[serde(default)]
+    pub status_after: BookStatus,
 
     pub object_key: String,
     pub object_sha256: String,

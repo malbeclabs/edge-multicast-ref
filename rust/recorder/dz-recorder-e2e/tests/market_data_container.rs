@@ -193,6 +193,38 @@ fn the_checked_in_ddl_holds_what_the_deriver_produces() {
         "1"
     );
 
+    // The depth pair survives the round trip as its two types rather than as
+    // text. `status_after` is `LowCardinality(String)`, so a Rust variant name
+    // reaching the column is caught here and nowhere else in a real server.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT count() FROM {db}.event FINAL WHERE message_type = 'LevelUpdate' \
+             AND status_after = 'ready'"
+        )),
+        scratch.scalar(&format!(
+            "SELECT count() FROM {db}.event FINAL WHERE message_type = 'LevelUpdate'"
+        )),
+        "every delta of an anchored book is `ready`"
+    );
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT count() FROM {db}.event FINAL \
+             WHERE message_type IN ('SnapshotBegin', 'SnapshotLevel') \
+             AND status_after = 'building_snapshot'"
+        )),
+        (LEVELS.len() + 1).to_string(),
+        "the begin and each of its levels are stated under the cycle they belong to"
+    );
+    // And the depth is a number the server holds as one. A column nobody filled
+    // would read zero on every row.
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT max(book_levels_after) > 0 FROM {db}.event FINAL \
+             WHERE message_type = 'LevelUpdate'"
+        )),
+        "1"
+    );
+
     // The anchored state is in `book_top` at the prices the cycle carried, and
     // `from_anchor` is what excludes it from a pairing.
     assert_eq!(

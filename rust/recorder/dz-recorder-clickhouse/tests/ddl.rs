@@ -2324,6 +2324,26 @@ fn every_migration_splits_into_whole_statements() {
         );
     }
 
+    // Two `ALTER`s on one table and no view, because nothing selects from
+    // `recorder.event` — `010` had to re-state a view and there is no counterpart.
+    let book_depth = migration("011_recorder_event_book_depth.sql").statements();
+    assert_eq!(
+        book_depth.len(),
+        2,
+        "one ALTER per column, and nothing else"
+    );
+    for column in ["book_levels_after", "status_after"] {
+        assert_eq!(
+            book_depth
+                .iter()
+                .filter(|s| s.contains("ALTER TABLE recorder.event")
+                    && s.contains(&format!("ADD COLUMN IF NOT EXISTS {column}")))
+                .count(),
+            1,
+            "{column} is added once"
+        );
+    }
+
     // The five tables and the database, and nothing split across two of them.
     let statements = migration("001_recorder_rows.sql").statements();
     assert_eq!(statements.len(), 6, "one database and five tables");
@@ -3010,9 +3030,9 @@ mod fixtures {
     use dz_recorder_venue::{RefusalCount, VenueBookTop, VenueObjectRow};
 
     use dz_recorder_rows::{
-        BookTop, ConformanceFinding, Datagram, Derivation, DropScope, Era, Event, FindingVerdict,
-        Instrument, MessageTypeLabel, Nanos, PortRoleLabel, RecvTsKindLabel, SegmentCoverage,
-        SequenceGap, UncertainReason, Verdict,
+        BookStatus, BookTop, ConformanceFinding, Datagram, Derivation, DropScope, Era, Event,
+        FindingVerdict, Instrument, MessageTypeLabel, Nanos, PortRoleLabel, RecvTsKindLabel,
+        SegmentCoverage, SequenceGap, UncertainReason, Verdict,
     };
 
     const ADDR: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 10);
@@ -3113,6 +3133,8 @@ mod fixtures {
             total_levels: None,
             levels_seen: None,
             depth_bound: None,
+            book_levels_after: 0,
+            status_after: BookStatus::Unstated,
             object_key: String::new(),
             object_sha256: String::new(),
             derivation: Derivation::Archive,
