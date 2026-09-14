@@ -13,6 +13,12 @@ permissions:
   contents: write
   pull-requests: write
 
+# A scheduled run and a manual run both commit to the same branch, so let one
+# finish before the next starts.
+concurrency:
+  group: glossary-sync
+  cancel-in-progress: false
+
 env:
   UPSTREAM_REPO: malbeclabs/edge-feed-spec
   VENDORED_PATH: .github/skills/code-review/GLOSSARY.md
@@ -22,7 +28,12 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
+      # workflow_dispatch can run from any branch. Vendor onto the default
+      # branch regardless, so a manual run does not commit someone's feature
+      # branch back to the sync branch.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
 
       - name: Resolve the newest glossary tag
         id: tag
@@ -30,11 +41,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          version=$(curl -fsS \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${UPSTREAM_REPO}/git/matching-refs/tags/glossary/v" \
-            | jq -r '.[].ref' \
+          version=$(gh api --paginate \
+            "repos/${UPSTREAM_REPO}/git/matching-refs/tags/glossary/v" \
+            --jq '.[].ref' \
             | sed 's#^refs/tags/glossary/v##' \
             | sort -V \
             | tail -1)
@@ -46,18 +55,25 @@ jobs:
           echo "Newest glossary tag is v${version}."
 
       - name: Write the vendored copy
+        env:
+          # Read through the environment. The tag name comes from an external
+          # API, so it must not be expanded into the script text.
+          VERSION: ${{ steps.tag.outputs.version }}
         run: |
           set -euo pipefail
-          version="${{ steps.tag.outputs.version }}"
           curl -fsS -o /tmp/GLOSSARY.md \
-            "https://raw.githubusercontent.com/${UPSTREAM_REPO}/glossary/v${version}/GLOSSARY.md"
+            "https://raw.githubusercontent.com/${UPSTREAM_REPO}/glossary/v${VERSION}/GLOSSARY.md"
           if [ ! -s /tmp/GLOSSARY.md ]; then
-            echo "Fetched an empty GLOSSARY.md at glossary/v${version}." >&2
+            echo "Fetched an empty GLOSSARY.md at glossary/v${VERSION}." >&2
             exit 1
           fi
+          # The policy file sits beside GLOSSARY.md upstream and is not vendored,
+          # so the relative link would dangle here. Point it at the tag.
+          sed -i "s#(\./VERSIONING\.md)#(https://github.com/${UPSTREAM_REPO}/blob/glossary/v${VERSION}/VERSIONING.md)#g" \
+            /tmp/GLOSSARY.md
           mkdir -p "$(dirname "${VENDORED_PATH}")"
           {
-            printf '%s\n' "<!-- Vendored from ${UPSTREAM_REPO} at glossary/v${version}. -->"
+            printf '%s\n' "<!-- Vendored from ${UPSTREAM_REPO} at glossary/v${VERSION}. -->"
             printf '%s\n\n' "<!-- Do not edit here. .github/workflows/glossary-sync.yml replaces this file. -->"
             cat /tmp/GLOSSARY.md
           } > "${VENDORED_PATH}"
@@ -65,29 +81,35 @@ jobs:
       - name: Open a pull request when the vendored copy changed
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.tag.outputs.version }}
         run: |
           set -euo pipefail
-          version="${{ steps.tag.outputs.version }}"
-          if git diff --quiet -- "${VENDORED_PATH}"; then
-            echo "Vendored glossary already at v${version}. Nothing to do."
-            exit 0
-          fi
           git config user.name  'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
-          git checkout -B "${SYNC_BRANCH}"
+          # Stage first. git diff alone reports no change for a path that is not
+          # yet tracked, which is exactly the first-run case.
           git add "${VENDORED_PATH}"
-          git commit -m "glossary: vendor v${version} for copilot review"
+          if git diff --cached --quiet -- "${VENDORED_PATH}"; then
+            echo "Vendored glossary already at v${VERSION}. Nothing to do."
+            exit 0
+          fi
+          git checkout -B "${SYNC_BRANCH}"
+          git commit -q -m "docs: vendor glossary v${VERSION} for copilot review"
           git push --force-with-lease origin "${SYNC_BRANCH}"
           if [ -n "$(gh pr list --head "${SYNC_BRANCH}" --state open --json number --jq '.[].number')" ]; then
             echo "Refreshed the open pull request on ${SYNC_BRANCH}."
             exit 0
           fi
           {
-            printf '%s\n\n' "Vendors \`GLOSSARY.md\` from \`${UPSTREAM_REPO}\` at \`glossary/v${version}\` into \`${VENDORED_PATH}\`."
-            printf '%s\n' "Opened by \`.github/workflows/glossary-sync.yml\`. The vendored file is a copy. Change vocabulary in \`${UPSTREAM_REPO}\` and let this workflow carry it here."
+            printf '%s\n\n' "## Summary of Changes"
+            printf '%s\n\n' "Vendors \`GLOSSARY.md\` from \`${UPSTREAM_REPO}\` at \`glossary/v${VERSION}\` into \`${VENDORED_PATH}\`, so Copilot code review reads the current vocabulary."
+            printf '%s\n\n' "The vendored file is a copy and is not edited here. Change vocabulary in \`${UPSTREAM_REPO}\` and let this workflow carry it over."
+            printf '%s\n\n' "## Testing Verification"
+            printf '%s\n\n' "Opened by \`.github/workflows/glossary-sync.yml\`, which resolved \`glossary/v${VERSION}\` as the newest tag and fetched that revision. The vendored copy differs from the previous one, which is why this pull request exists at all."
+            printf '%s\n' "This pull request is created with \`GITHUB_TOKEN\`, so GitHub suppresses \`pull_request\` workflow runs on it. Re-run the required checks by hand if this repository gates merges on them."
           } > /tmp/pr-body.md
           gh pr create \
             --head "${SYNC_BRANCH}" \
             --base "${{ github.event.repository.default_branch }}" \
-            --title "glossary: vendor v${version} for copilot review" \
+            --title "docs: vendor glossary v${VERSION} for copilot review" \
             --body-file /tmp/pr-body.md
