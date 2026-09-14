@@ -60,7 +60,11 @@ Do not flag these:
 - A documented exception. `ARM64`, the `ARM` vendor, `Unix epoch`,
   `source of truth`, `snapshot stream`, `delta stream`, and `Trade Flags` bit 1
   all stay as written.
-- A name an external party owns. A venue API field keeps the venue spelling.
+- An external name that is not itself a banned word. A venue API field keeps the
+  venue spelling. A new external name that is a banned word is still a finding:
+  the glossary exempts the two `ARM` proper nouns by name, not every name an
+  outside party happens to own, so a field called `arm` does not inherit that
+  exception.
 
 ## Finding shape
 

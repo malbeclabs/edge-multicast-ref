@@ -26,11 +26,15 @@ env:
 
 jobs:
   sync:
+    # workflow_dispatch runs the workflow definition from the ref it was started
+    # on, and checking out the default branch changes only the worktree, not the
+    # script. Without this guard anyone who can dispatch could run modified
+    # privileged code with the write permissions above.
+    if: >-
+      github.event_name == 'schedule' ||
+      github.ref_name == github.event.repository.default_branch
     runs-on: ubuntu-latest
     steps:
-      # workflow_dispatch can run from any branch. Vendor onto the default
-      # branch regardless, so a manual run does not commit someone's feature
-      # branch back to the sync branch.
       # Pinned by commit SHA, not a tag. This job holds `contents: write` and
       # `pull-requests: write`, so a moved tag in a third-party action would be
       # a live path to writing this repository.
@@ -38,7 +42,7 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
 
-      - name: Resolve the newest glossary tag
+      - name: Resolve the newest glossary tag to a commit
         id: tag
         env:
           GH_TOKEN: ${{ github.token }}
@@ -60,29 +64,39 @@ jobs:
             echo "Refusing tag suffix '${version}': not a semantic version." >&2
             exit 1
           fi
+          # A tag can be force-moved between this resolution and the download, so
+          # carry the commit it points at and fetch by that instead. This also
+          # dereferences an annotated tag to its commit.
+          sha=$(gh api "repos/${UPSTREAM_REPO}/commits/glossary/v${version}" --jq '.sha')
+          if ! printf '%s' "$sha" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "Refusing resolved commit '${sha}': not a commit SHA." >&2
+            exit 1
+          fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "Newest glossary tag is v${version}."
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          echo "glossary/v${version} resolves to ${sha}."
 
       - name: Write the vendored copy
         env:
-          # Read through the environment. The tag name comes from an external
-          # API, so it must not be expanded into the script text.
+          # Read through the environment. These come from an external API, so
+          # they must not be expanded into the script text.
           VERSION: ${{ steps.tag.outputs.version }}
+          SHA: ${{ steps.tag.outputs.sha }}
         run: |
           set -euo pipefail
           curl -fsS -o /tmp/GLOSSARY.md \
-            "https://raw.githubusercontent.com/${UPSTREAM_REPO}/glossary/v${VERSION}/GLOSSARY.md"
+            "https://raw.githubusercontent.com/${UPSTREAM_REPO}/${SHA}/GLOSSARY.md"
           if [ ! -s /tmp/GLOSSARY.md ]; then
-            echo "Fetched an empty GLOSSARY.md at glossary/v${VERSION}." >&2
+            echo "Fetched an empty GLOSSARY.md at ${SHA}." >&2
             exit 1
           fi
           # The policy file sits beside GLOSSARY.md upstream and is not vendored,
-          # so the relative link would dangle here. Point it at the tag.
-          sed -i "s#(\./VERSIONING\.md)#(https://github.com/${UPSTREAM_REPO}/blob/glossary/v${VERSION}/VERSIONING.md)#g" \
+          # so the relative link would dangle here. Point it at the commit.
+          sed -i "s#(\./VERSIONING\.md)#(https://github.com/${UPSTREAM_REPO}/blob/${SHA}/VERSIONING.md)#g" \
             /tmp/GLOSSARY.md
           mkdir -p "$(dirname "${VENDORED_PATH}")"
           {
-            printf '%s\n' "<!-- Vendored from ${UPSTREAM_REPO} at glossary/v${VERSION}. -->"
+            printf '%s\n' "<!-- Vendored from ${UPSTREAM_REPO} at glossary/v${VERSION} (${SHA}). -->"
             printf '%s\n\n' "<!-- Do not edit here. .github/workflows/glossary-sync.yml replaces this file. -->"
             cat /tmp/GLOSSARY.md
           } > "${VENDORED_PATH}"
@@ -91,6 +105,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.tag.outputs.version }}
+          SHA: ${{ steps.tag.outputs.sha }}
+          # A branch name can hold shell syntax, so this is data too.
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
           git config user.name  'github-actions[bot]'
@@ -115,14 +132,15 @@ jobs:
           fi
           {
             printf '%s\n\n' "## Summary of Changes"
-            printf '%s\n\n' "Vendors \`GLOSSARY.md\` from \`${UPSTREAM_REPO}\` at \`glossary/v${VERSION}\` into \`${VENDORED_PATH}\`, so Copilot code review reads the current vocabulary."
+            printf '%s\n\n' "Vendors \`GLOSSARY.md\` from \`${UPSTREAM_REPO}\` into \`${VENDORED_PATH}\`, so Copilot code review reads the current vocabulary."
+            printf '%s\n\n' "Taken from \`glossary/v${VERSION}\`, fetched by commit \`${SHA}\` rather than by the tag name, so a moved tag cannot change what landed here."
             printf '%s\n\n' "The vendored file is a copy and is not edited here. Change vocabulary in \`${UPSTREAM_REPO}\` and let this workflow carry it over."
             printf '%s\n\n' "## Testing Verification"
-            printf '%s\n\n' "Opened by \`.github/workflows/glossary-sync.yml\`, which resolved \`glossary/v${VERSION}\` as the newest tag and fetched that revision. The vendored copy differs from the previous one, which is why this pull request exists at all."
-            printf '%s\n' "This pull request is created with \`GITHUB_TOKEN\`, so GitHub suppresses \`pull_request\` workflow runs on it. Re-run the required checks by hand if this repository gates merges on them."
+            printf '%s\n\n' "Opened by \`.github/workflows/glossary-sync.yml\`, which resolved \`glossary/v${VERSION}\` to \`${SHA}\` and fetched that commit. The vendored copy differs from the previous one, which is why this pull request exists at all."
+            printf '%s\n' "This pull request is created with \`GITHUB_TOKEN\`, so GitHub raises no \`pull_request\` event for it and the repository's required checks never start. There is no run to re-run: close and reopen this pull request to start them, or push an empty commit to the branch."
           } > /tmp/pr-body.md
           gh pr create \
             --head "${SYNC_BRANCH}" \
-            --base "${{ github.event.repository.default_branch }}" \
+            --base "${BASE_BRANCH}" \
             --title "docs: vendor glossary v${VERSION} for copilot review" \
             --body-file /tmp/pr-body.md
