@@ -1,8 +1,12 @@
 //! The fold: an archive of bytes, as rows about instruments.
 //!
-//! One pass, in archive order, over everything the walk decoded. No book here —
-//! `book_top` needs state that spans objects and is task 6 — so this is a pure
-//! function of one object and its reference data.
+//! One pass, in archive order, over everything the walk decoded, against
+//! reference data and a book that both outlive the message being folded.
+//!
+//! **The book is read on both grains.** It is what `book_top` is, and it is also
+//! where `event.book_levels_after` and `event.status_after` come from — so the
+//! order inside each arm is load-bearing: the message reaches the book, and only
+//! then does the row state what the book became, in `after_the_book`.
 //!
 //! # Why the three outputs are merged rather than read in turn
 //!
@@ -32,8 +36,8 @@ use dz_recorder_relower::{
     MessageBody, ReferenceBody, RelowerError, StateBody, WireCapture, WireProvenance,
 };
 use dz_recorder_rows::{
-    absent_if_sentinel, BookTop, Derivation, Event, Instrument, MessageTypeLabel, Nanos,
-    PortRoleLabel, RecvTsKindLabel,
+    absent_if_sentinel, BookStatus, BookTop, Derivation, Event, Instrument, MessageTypeLabel,
+    Nanos, PortRoleLabel, RecvTsKindLabel,
 };
 
 use crate::book::{book_key, state_key, Book, BookRefused, Change};
@@ -424,8 +428,7 @@ pub fn derive_events_into<S: Source + ?Sized>(
                     continue;
                 };
                 let statement = statement.clone();
-                out.event
-                    .push(market_row(input, &provenance, &statement, &message.body));
+                let row = market_row(input, &provenance, &statement, &message.body);
                 let change = match &message.body {
                     MessageBody::Quote(quote) => book.quote(channel, quote),
                     MessageBody::Level(level) => book.level(channel, level),
@@ -433,6 +436,11 @@ pub fn derive_events_into<S: Source + ?Sized>(
                     // A trade moves no book. It is an event, not a state.
                     MessageBody::Trade(_) => None,
                 };
+                // Built above, pushed here, with the book read in between:
+                // `book_levels_after` is the depth *after* the `match` applied
+                // the message. See [`after_the_book`].
+                out.event
+                    .push(after_the_book(row, book, channel, instrument_id));
                 if let Some(change) = change {
                     out.book_top
                         .push(book_row(input, &provenance, &statement, &change));
@@ -453,18 +461,23 @@ pub fn derive_events_into<S: Source + ?Sized>(
                 // optional.** Skipping the level before the book sees it leaves
                 // a cycle that never completes, so nothing ever anchors — which
                 // is the one thing consuming them is for.
-                if !matches!(message.body, StateBody::SnapshotLevel(_))
-                    || input.persist_snapshot_levels
-                {
-                    out.event.push(state_row(
-                        input,
-                        &provenance,
-                        &statement,
-                        &message.body,
-                        instrument_id,
-                        cycles,
-                    ));
-                }
+                //
+                // Built here and pushed after the `match`, for the reason the
+                // market branch gives. Conditionally, because whether it becomes
+                // a row is `persist_snapshot_levels`' decision and whether the
+                // book sees it is not.
+                let row = (!matches!(message.body, StateBody::SnapshotLevel(_))
+                    || input.persist_snapshot_levels)
+                    .then(|| {
+                        state_row(
+                            input,
+                            &provenance,
+                            &statement,
+                            &message.body,
+                            instrument_id,
+                            cycles,
+                        )
+                    });
                 let change = match &message.body {
                     StateBody::Reset(reset) => book.reset(channel, reset),
                     StateBody::SnapshotBegin(begin) => {
@@ -477,6 +490,10 @@ pub fn derive_events_into<S: Source + ?Sized>(
                     }
                     StateBody::SnapshotEnd(end) => book.snapshot_end(channel, end),
                 };
+                if let Some(row) = row {
+                    out.event
+                        .push(after_the_book(row, book, channel, instrument_id));
+                }
                 if let Some(change) = change {
                     out.book_top
                         .push(book_row(input, &provenance, &statement, &change));
@@ -611,6 +628,20 @@ fn instrument_of_state(
             Some(end.instrument_id)
         }
     }
+}
+
+/// The two columns only the book can fill, stamped on after the message reached
+/// it.
+///
+/// Read the other way round they state the previous message's depth under the
+/// previous message's status — a plausible number in a column nobody can audit.
+/// Shared so the two call sites cannot drift into reading the book at two
+/// different moments.
+fn after_the_book(mut row: Event, book: &Book, channel: Channel, instrument_id: u32) -> Event {
+    let (levels, status) = book.depth_and_status(channel, instrument_id);
+    row.book_levels_after = levels;
+    row.status_after = status;
+    row
 }
 
 fn market_row(
@@ -773,6 +804,9 @@ fn base_row(input: &EventInput<'_>, provenance: &WireProvenance, statement: &Sta
         total_levels: None,
         levels_seen: None,
         depth_bound: None,
+        // Filled by `after_the_book` once the message has reached the book.
+        book_levels_after: 0,
+        status_after: BookStatus::Unstated,
         object_key: input.object_key.to_owned(),
         object_sha256: input.object_sha256.to_owned(),
         derivation: input.derivation,

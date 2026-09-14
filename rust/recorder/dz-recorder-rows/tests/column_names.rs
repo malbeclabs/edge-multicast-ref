@@ -16,9 +16,9 @@
 use std::net::Ipv4Addr;
 
 use dz_recorder_rows::{
-    absent_if_sentinel, BookTop, ConformanceFinding, Datagram, Derivation, DropScope, Era, Event,
-    FindingVerdict, Grain, MessageTypeLabel, Nanos, PortRoleLabel, RecvTsKindLabel, RoleJoinRow,
-    SegmentCoverage, SequenceGap, UncertainReason, Verdict,
+    absent_if_sentinel, BookStatus, BookTop, ConformanceFinding, Datagram, Derivation, DropScope,
+    Era, Event, FindingVerdict, Grain, MessageTypeLabel, Nanos, PortRoleLabel, RecvTsKindLabel,
+    RoleJoinRow, SegmentCoverage, SequenceGap, UncertainReason, Verdict,
 };
 use serde_json::{json, Value};
 
@@ -523,6 +523,18 @@ fn every_label_token_is_spelled_as_the_specification_states_it() {
     ] {
         assert_eq!(of(as_json(&verdict)), token);
     }
+    // The five `005` declares for `event.status_after`, as a set: `rename_all`
+    // makes four and an attribute overrides one, so a renamed variant reaches the
+    // column as a sixth value matching no query and raising no error.
+    for (status, token) in [
+        (BookStatus::Unstated, ""),
+        (BookStatus::AwaitingSnapshot, "awaiting_snapshot"),
+        (BookStatus::BuildingSnapshot, "building_snapshot"),
+        (BookStatus::Ready, "ready"),
+        (BookStatus::Gap, "gap"),
+    ] {
+        assert_eq!(of(as_json(&status)), token);
+    }
 }
 
 /// The table name is the metric label and the file name, so one spelling has to
@@ -659,6 +671,67 @@ fn a_market_data_row_reads_back_as_itself() {
         .get("order_count")
         .expect("the key is present")
         .is_null());
+
+    // A bare integer for a `UInt32`, and never null.
+    assert_eq!(json["book_levels_after"], json!(12));
+    // The label the column holds, not the Rust variant name.
+    assert_eq!(json["status_after"], json!("ready"));
+}
+
+/// **Every status label reads back as the variant that wrote it.**
+///
+/// The spellings are held above. This is the direction the spool depends on: a
+/// grain file that will not parse is discarded and deleted, not retried.
+#[test]
+fn every_status_label_reads_back_as_its_variant() {
+    for status in [
+        BookStatus::Unstated,
+        BookStatus::AwaitingSnapshot,
+        BookStatus::BuildingSnapshot,
+        BookStatus::Ready,
+        BookStatus::Gap,
+    ] {
+        let row = Event {
+            status_after: status,
+            ..event_fixture()
+        };
+        let round: Event =
+            serde_json::from_value(as_json(&row)).expect("the label reads back as its variant");
+        assert_eq!(round.status_after, status);
+    }
+}
+
+/// **`''` is a value, and an event row an older binary spooled still reads
+/// back.**
+///
+/// The deriver writes `''` for a book it can say nothing about and the column
+/// store materialises `''` for a row `011`'s `ALTER` found already there, so the
+/// two read alike only if the variant serialises to the empty string.
+#[test]
+fn an_unstated_book_is_the_empty_string_and_an_older_event_row_still_parses() {
+    let unstated = Event {
+        book_levels_after: 0,
+        status_after: BookStatus::Unstated,
+        ..event_fixture()
+    };
+    assert_eq!(as_json(&unstated)["status_after"], json!(""));
+
+    let mut json = as_json(&event_fixture());
+    let object = json.as_object_mut().expect("a row is an object");
+    for column in ["book_levels_after", "status_after"] {
+        assert!(
+            object.remove(column).is_some(),
+            "this is about the column being absent, so it has to be there to remove"
+        );
+    }
+    let older: Event =
+        serde_json::from_value(json).expect("a row written before the columns reads");
+    assert_eq!(older.book_levels_after, 0);
+    assert_eq!(older.status_after, BookStatus::Unstated);
+    assert_eq!(
+        older.datagram_index, 5,
+        "every column the older binary did write came back as it wrote it"
+    );
 }
 
 fn event_fixture() -> Event {
@@ -707,6 +780,8 @@ fn event_fixture() -> Event {
         total_levels: None,
         levels_seen: None,
         depth_bound: None,
+        book_levels_after: 12,
+        status_after: BookStatus::Ready,
         object_key: "object".to_owned(),
         object_sha256: "sha".to_owned(),
         derivation: Derivation::Archive,

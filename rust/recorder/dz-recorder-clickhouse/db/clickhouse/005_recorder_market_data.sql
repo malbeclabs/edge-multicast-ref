@@ -125,6 +125,29 @@ CREATE TABLE IF NOT EXISTS recorder.event (
     levels_seen        Nullable(UInt32),
     depth_bound        Nullable(UInt32),
 
+    -- Resting levels across both sides AFTER this message was applied. What a
+    -- snapshot-cycle budget is computed from, and not recoverable by a reader:
+    -- counting live prices out of the delta stream is re-deriving the book.
+    --
+    -- READ WITH `status_after` OR NOT AT ALL. A message the book refused leaves
+    -- this at the depth as at its ARRIVAL, which is indistinguishable from a
+    -- depth the message produced. 0 on a quote feed, which keeps no price maps.
+    book_levels_after  UInt32,
+    -- The state of the book as at this message, which is how the depth beside it
+    -- is to be read:
+    -- 'awaiting_snapshot' | 'building_snapshot' | 'ready' | 'gap' | ''.
+    --
+    -- A STATE, NOT A PER-MESSAGE *APPLIED* FLAG. A Trade, a SnapshotBegin and
+    -- its levels, and a cycle refused over an established book all read 'ready',
+    -- so a count of messages that applied is not
+    -- `countIf(status_after = 'ready')`; whether a cycle anchored is
+    -- `total_levels` on its begin against `levels_seen` on its end.
+    --
+    -- IN NO SORT KEY, neither of them: both are read off the book rather than
+    -- the wire, so a re-derivation computing either differently would make one
+    -- message two rows.
+    status_after       LowCardinality(String),
+
     object_key         String,
     object_sha256      String,
     -- `archive` when the datagrams behind the row were kept and their object's
