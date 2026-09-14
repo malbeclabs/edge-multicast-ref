@@ -37,9 +37,10 @@ and explains each one, so checking it reports the vocabulary back as a wall of
 findings. A pull request that only updates it is the sync workflow doing its
 job.
 
-Skip a quoted definition anywhere else, for the same reason. Naming a banned
-word to explain that it is banned is correct use, and the glossary does this
-itself.
+Outside that file, a banned word survives only where the sentence is about the
+word itself: naming it to say it is banned, or quoting a glossary row to explain
+a replacement. A definition quoted as cover for ordinary use is still a finding,
+and so is a quoted identifier, config key or metric name.
 
 ## What to flag
 
