@@ -1,4 +1,4 @@
-<!-- Vendored from malbeclabs/edge-feed-spec at glossary/v1.3.0. -->
+<!-- Vendored from malbeclabs/edge-feed-spec at glossary/v1.3.0 (a5f5cdf0ac234ebc3ef4a1af07950d4b5205b1f4). -->
 <!-- Do not edit here. .github/workflows/glossary-sync.yml replaces this file. -->
 
 # Glossary
@@ -123,7 +123,7 @@ These mean unrelated things and several share a prefix, which is why the qualifi
 
 ## Versioning
 
-This glossary is versioned so that a spec, a repository, or a conformance pass can name the vocabulary it was written against. It has no wire format and no `Schema Version`; its version tracks the vocabulary itself. Releases are tagged `glossary/vMAJOR.MINOR.PATCH`, following the repository-wide scheme in the [Versioning Policy](https://github.com/malbeclabs/edge-feed-spec/blob/glossary/v1.3.0/VERSIONING.md) with this document's own name as the prefix, because it is not in a directory of its own.
+This glossary is versioned so that a spec, a repository, or a conformance pass can name the vocabulary it was written against. It has no wire format and no `Schema Version`; its version tracks the vocabulary itself. Releases are tagged `glossary/vMAJOR.MINOR.PATCH`, following the repository-wide scheme in the [Versioning Policy](https://github.com/malbeclabs/edge-feed-spec/blob/a5f5cdf0ac234ebc3ef4a1af07950d4b5205b1f4/VERSIONING.md) with this document's own name as the prefix, because it is not in a directory of its own.
 
 | Class | Example | Level |
 |---|---|---|
