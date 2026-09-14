@@ -114,17 +114,28 @@ jobs:
           git config user.email 'github-actions[bot]@users.noreply.github.com'
           # Stage first. git diff alone reports no change for a path that is not
           # yet tracked, which is exactly the first-run case.
-          git add "${VENDORED_PATH}"
-          if git diff --cached --quiet -- "${VENDORED_PATH}"; then
-            echo "Vendored glossary already at v${VERSION}. Nothing to do."
+          # Fetch the sync branch first. It gives --force-with-lease a ref to
+          # compare against, and it is the right thing to diff against: while a
+          # sync pull request is open, comparing with the default branch would
+          # report a change every week and force-push the same content, resetting
+          # the pull request's checks and review state each time.
+          git fetch -q origin \
+            "${SYNC_BRANCH}:refs/remotes/origin/${SYNC_BRANCH}" 2>/dev/null || true
+          if git rev-parse --verify -q "refs/remotes/origin/${SYNC_BRANCH}" >/dev/null; then
+            compare_ref="refs/remotes/origin/${SYNC_BRANCH}"
+          else
+            compare_ref="HEAD"
+          fi
+          # git show fails when the path is absent there, which is the first-run
+          # case, and the non-zero status then correctly reads as "changed".
+          if git show "${compare_ref}:${VENDORED_PATH}" 2>/dev/null \
+               | diff -q - "${VENDORED_PATH}" >/dev/null 2>&1; then
+            echo "Vendored glossary at ${compare_ref} already matches v${VERSION}. Nothing to do."
             exit 0
           fi
           git checkout -B "${SYNC_BRANCH}"
+          git add "${VENDORED_PATH}"
           git commit -q -m "docs: vendor glossary v${VERSION} for copilot review"
-          # checkout fetched only the default branch, so the lease has nothing to
-          # compare against on a later run and the push would be rejected.
-          git fetch -q origin \
-            "${SYNC_BRANCH}:refs/remotes/origin/${SYNC_BRANCH}" 2>/dev/null || true
           git push --force-with-lease origin "${SYNC_BRANCH}"
           if [ -n "$(gh pr list --head "${SYNC_BRANCH}" --state open --json number --jq '.[].number')" ]; then
             echo "Refreshed the open pull request on ${SYNC_BRANCH}."
