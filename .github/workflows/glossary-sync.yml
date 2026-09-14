@@ -31,7 +31,10 @@ jobs:
       # workflow_dispatch can run from any branch. Vendor onto the default
       # branch regardless, so a manual run does not commit someone's feature
       # branch back to the sync branch.
-      - uses: actions/checkout@v4
+      # Pinned by commit SHA, not a tag. This job holds `contents: write` and
+      # `pull-requests: write`, so a moved tag in a third-party action would be
+      # a live path to writing this repository.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.event.repository.default_branch }}
 
@@ -49,6 +52,12 @@ jobs:
             | tail -1)
           if [ -z "$version" ]; then
             echo "No glossary/v* tag found in ${UPSTREAM_REPO}." >&2
+            exit 1
+          fi
+          # A ref name may hold shell metacharacters. Only a plain semantic
+          # version leaves this step.
+          if ! printf '%s' "$version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Refusing tag suffix '${version}': not a semantic version." >&2
             exit 1
           fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
@@ -95,6 +104,10 @@ jobs:
           fi
           git checkout -B "${SYNC_BRANCH}"
           git commit -q -m "docs: vendor glossary v${VERSION} for copilot review"
+          # checkout fetched only the default branch, so the lease has nothing to
+          # compare against on a later run and the push would be rejected.
+          git fetch -q origin \
+            "${SYNC_BRANCH}:refs/remotes/origin/${SYNC_BRANCH}" 2>/dev/null || true
           git push --force-with-lease origin "${SYNC_BRANCH}"
           if [ -n "$(gh pr list --head "${SYNC_BRANCH}" --state open --json number --jq '.[].number')" ]; then
             echo "Refreshed the open pull request on ${SYNC_BRANCH}."
