@@ -1,0 +1,66 @@
+name: glossary-verify
+
+# The review skill treats the vendored GLOSSARY.md as its authority and does not
+# judge it, so a pull request could otherwise weaken the vocabulary and be
+# reviewed under the weakened rules. This proves the vendored copy is exactly
+# what the named upstream tag holds.
+
+on:
+  pull_request:
+    paths:
+      - '.github/skills/code-review/GLOSSARY.md'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      UPSTREAM_REPO: malbeclabs/edge-feed-spec
+      VENDORED_PATH: .github/skills/code-review/GLOSSARY.md
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Prove the vendored glossary matches its upstream tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          header=$(head -1 "${VENDORED_PATH}")
+          version=$(printf '%s' "$header" | sed -n 's#.*at glossary/v\([0-9][0-9.]*\) (\([0-9a-f]\{40\}\)).*#\1#p')
+          claimed_sha=$(printf '%s' "$header" | sed -n 's#.*at glossary/v\([0-9][0-9.]*\) (\([0-9a-f]\{40\}\)).*#\2#p')
+          if [ -z "$version" ] || [ -z "$claimed_sha" ]; then
+            echo "The first line does not name a glossary version and commit." >&2
+            echo "Found: ${header}" >&2
+            echo "Expected: <!-- Vendored from ${UPSTREAM_REPO} at glossary/vX.Y.Z (<40 hex>). -->" >&2
+            exit 1
+          fi
+
+          # The tag must actually point at the commit the header claims. Without
+          # this, a pull request could name a real tag and carry another commit's
+          # text.
+          actual_sha=$(gh api "repos/${UPSTREAM_REPO}/commits/glossary/v${version}" --jq '.sha')
+          if [ "$actual_sha" != "$claimed_sha" ]; then
+            echo "glossary/v${version} points at ${actual_sha}, but the header claims ${claimed_sha}." >&2
+            exit 1
+          fi
+
+          curl -fsS -o /tmp/upstream.md \
+            "https://raw.githubusercontent.com/${UPSTREAM_REPO}/${claimed_sha}/GLOSSARY.md"
+          sed -i "s#(\./VERSIONING\.md)#(https://github.com/${UPSTREAM_REPO}/blob/${claimed_sha}/VERSIONING.md)#g" \
+            /tmp/upstream.md
+          {
+            printf '%s\n' "<!-- Vendored from ${UPSTREAM_REPO} at glossary/v${version} (${claimed_sha}). -->"
+            printf '%s\n\n' "<!-- Do not edit here. .github/workflows/glossary-sync.yml replaces this file. -->"
+            cat /tmp/upstream.md
+          } > /tmp/expected.md
+
+          if ! diff -u /tmp/expected.md "${VENDORED_PATH}"; then
+            echo "" >&2
+            echo "The vendored glossary does not match ${UPSTREAM_REPO} at glossary/v${version}." >&2
+            echo "Change vocabulary upstream and let glossary-sync.yml carry it here." >&2
+            exit 1
+          fi
+          echo "Vendored glossary matches ${UPSTREAM_REPO} at glossary/v${version} (${claimed_sha})."

@@ -1,0 +1,155 @@
+name: glossary-sync
+
+# Pulls the newest tagged GLOSSARY.md from the public malbeclabs/edge-feed-spec
+# into .github/skills/code-review/, so Copilot code review reads current
+# vocabulary. edge-feed-spec is public, so this needs no credential of its own.
+
+# Cron only, deliberately. workflow_dispatch runs the workflow definition from
+# the ref it is started on, so with `contents: write` here it would let anyone
+# holding write access run unreviewed privileged code off a scratch branch. A
+# job-level `if` cannot fix that, because the condition sits in the same file
+# such a branch would be editing. A scheduled run always uses the default
+# branch's definition. To force a sync, push an empty commit to the default
+# branch.
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# Overlapping runs would commit to the same branch, so let one finish first.
+concurrency:
+  group: glossary-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: malbeclabs/edge-feed-spec
+  VENDORED_PATH: .github/skills/code-review/GLOSSARY.md
+  SYNC_BRANCH: chore/glossary-sync
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      # Pinned by commit SHA, not a tag. This job holds `contents: write` and
+      # `pull-requests: write`, so a moved tag in a third-party action would be
+      # a live path to writing this repository.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Resolve the newest glossary tag to a commit
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(gh api --paginate \
+            "repos/${UPSTREAM_REPO}/git/matching-refs/tags/glossary/v" \
+            --jq '.[].ref' \
+            | sed 's#^refs/tags/glossary/v##' \
+            | sort -V \
+            | tail -1)
+          if [ -z "$version" ]; then
+            echo "No glossary/v* tag found in ${UPSTREAM_REPO}." >&2
+            exit 1
+          fi
+          # A ref name may hold shell metacharacters. Only a plain semantic
+          # version leaves this step.
+          if ! printf '%s' "$version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Refusing tag suffix '${version}': not a semantic version." >&2
+            exit 1
+          fi
+          # A tag can be force-moved between this resolution and the download, so
+          # carry the commit it points at and fetch by that instead. This also
+          # dereferences an annotated tag to its commit.
+          sha=$(gh api "repos/${UPSTREAM_REPO}/commits/glossary/v${version}" --jq '.sha')
+          if ! printf '%s' "$sha" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "Refusing resolved commit '${sha}': not a commit SHA." >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          echo "glossary/v${version} resolves to ${sha}."
+
+      - name: Write the vendored copy
+        env:
+          # Read through the environment. These come from an external API, so
+          # they must not be expanded into the script text.
+          VERSION: ${{ steps.tag.outputs.version }}
+          SHA: ${{ steps.tag.outputs.sha }}
+        run: |
+          set -euo pipefail
+          curl -fsS -o /tmp/GLOSSARY.md \
+            "https://raw.githubusercontent.com/${UPSTREAM_REPO}/${SHA}/GLOSSARY.md"
+          if [ ! -s /tmp/GLOSSARY.md ]; then
+            echo "Fetched an empty GLOSSARY.md at ${SHA}." >&2
+            exit 1
+          fi
+          # The policy file sits beside GLOSSARY.md upstream and is not vendored,
+          # so the relative link would dangle here. Point it at the commit.
+          sed -i "s#(\./VERSIONING\.md)#(https://github.com/${UPSTREAM_REPO}/blob/${SHA}/VERSIONING.md)#g" \
+            /tmp/GLOSSARY.md
+          mkdir -p "$(dirname "${VENDORED_PATH}")"
+          {
+            printf '%s\n' "<!-- Vendored from ${UPSTREAM_REPO} at glossary/v${VERSION} (${SHA}). -->"
+            printf '%s\n\n' "<!-- Do not edit here. .github/workflows/glossary-sync.yml replaces this file. -->"
+            cat /tmp/GLOSSARY.md
+          } > "${VENDORED_PATH}"
+
+      - name: Open a pull request when the vendored copy changed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.tag.outputs.version }}
+          SHA: ${{ steps.tag.outputs.sha }}
+          # A branch name can hold shell syntax, so this is data too.
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          # Stage first. git diff alone reports no change for a path that is not
+          # yet tracked, which is exactly the first-run case.
+          # Fetch the sync branch first. It gives --force-with-lease a ref to
+          # compare against, and it is the right thing to diff against: while a
+          # sync pull request is open, comparing with the default branch would
+          # report a change every week and force-push the same content, resetting
+          # the pull request's checks and review state each time.
+          git fetch -q origin \
+            "${SYNC_BRANCH}:refs/remotes/origin/${SYNC_BRANCH}" 2>/dev/null || true
+          if git rev-parse --verify -q "refs/remotes/origin/${SYNC_BRANCH}" >/dev/null; then
+            compare_ref="refs/remotes/origin/${SYNC_BRANCH}"
+          else
+            compare_ref="HEAD"
+          fi
+          # git show fails when the path is absent there, which is the first-run
+          # case, and the non-zero status then correctly reads as "changed".
+          if git show "${compare_ref}:${VENDORED_PATH}" 2>/dev/null \
+               | diff -q - "${VENDORED_PATH}" >/dev/null 2>&1; then
+            echo "Vendored glossary at ${compare_ref} already matches v${VERSION}. Nothing to do."
+            exit 0
+          fi
+          git checkout -B "${SYNC_BRANCH}"
+          git add "${VENDORED_PATH}"
+          git commit -q -m "docs: vendor glossary v${VERSION} for copilot review"
+          git push --force-with-lease origin "${SYNC_BRANCH}"
+          if [ -n "$(gh pr list --head "${SYNC_BRANCH}" --state open --json number --jq '.[].number')" ]; then
+            echo "Refreshed the open pull request on ${SYNC_BRANCH}."
+            exit 0
+          fi
+          {
+            printf '%s\n\n' "## Summary of Changes"
+            printf '%s\n\n' "Vendors \`GLOSSARY.md\` from \`${UPSTREAM_REPO}\` into \`${VENDORED_PATH}\`, so Copilot code review reads the current vocabulary."
+            printf '%s\n\n' "Taken from \`glossary/v${VERSION}\`, fetched by commit \`${SHA}\` rather than by the tag name, so a moved tag cannot change what landed here."
+            printf '%s\n\n' "The vendored file is a copy and is not edited here. Change vocabulary in \`${UPSTREAM_REPO}\` and let this workflow carry it over."
+            printf '%s\n\n' "## Testing Verification"
+            printf '%s\n\n' "Opened by \`.github/workflows/glossary-sync.yml\`, which resolved \`glossary/v${VERSION}\` to \`${SHA}\` and fetched that commit. The vendored copy differs from the previous one, which is why this pull request exists at all."
+            printf '%s\n' "This pull request is created with \`GITHUB_TOKEN\`, so GitHub raises no \`pull_request\` event for it and the repository's required checks never start. There is no run to re-run: close and reopen this pull request to start them, or push an empty commit to the branch."
+          } > /tmp/pr-body.md
+          gh pr create \
+            --head "${SYNC_BRANCH}" \
+            --base "${BASE_BRANCH}" \
+            --title "docs: vendor glossary v${VERSION} for copilot review" \
+            --body-file /tmp/pr-body.md
