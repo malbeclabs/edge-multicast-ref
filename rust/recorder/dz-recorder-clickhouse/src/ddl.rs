@@ -26,6 +26,7 @@ const DERIVATION: &str = include_str!("../db/clickhouse/008_recorder_derivation.
 const VENUE_OBSERVATION: &str = include_str!("../db/clickhouse/009_recorder_venue_observation.sql");
 const BOOK_KEY: &str = include_str!("../db/clickhouse/010_recorder_book_key.sql");
 const EVENT_BOOK_DEPTH: &str = include_str!("../db/clickhouse/011_recorder_event_book_depth.sql");
+const READER_GRANTS: &str = include_str!("../db/clickhouse/012_recorder_reader_grants.sql");
 
 /// Every migration, in the order they are applied.
 ///
@@ -34,7 +35,7 @@ const EVENT_BOOK_DEPTH: &str = include_str!("../db/clickhouse/011_recorder_event
 /// rather than by anything that loads rows. A loader that could grant itself
 /// privileges is the thing it exists to prevent.
 #[must_use]
-pub const fn migrations() -> [Migration; 11] {
+pub const fn migrations() -> [Migration; 12] {
     [
         Migration {
             name: "001_recorder_rows.sql",
@@ -80,21 +81,39 @@ pub const fn migrations() -> [Migration; 11] {
             name: "011_recorder_event_book_depth.sql",
             sql: EVENT_BOOK_DEPTH,
         },
+        Migration {
+            name: "012_recorder_reader_grants.sql",
+            sql: READER_GRANTS,
+        },
     ]
 }
 
-/// The migrations that define the schema, without the account.
+/// The migrations that define the schema, without the access-management files.
 ///
-/// What a test applies and what a schema deploy applies: `004` needs a password
-/// parameter and access-management rights, and neither belongs to anything that
-/// writes rows.
+/// What a test applies and what a schema deploy applies. Two files are held
+/// back and for the same reason: granting needs access-management rights, which
+/// nothing that writes rows may hold. `004` also needs a password parameter.
+///
+/// The filter names them rather than counting them. A count is the same
+/// assertion until the day a third file is added, at which point it is silently
+/// the wrong one — and the failure would be a privilege statement applied by a
+/// row writer, which is exactly what this split exists to prevent.
 #[must_use]
 pub fn schema() -> Vec<Migration> {
     migrations()
         .into_iter()
-        .filter(|m| m.name != "004_recorder_loader_user.sql")
+        .filter(|m| !ACCESS_MANAGEMENT.contains(&m.name))
         .collect()
 }
+
+/// The migrations an administrator applies by hand, out of [`schema`].
+///
+/// `004` creates the loader and bounds it; `012` lets the dashboards' reader
+/// see the venue tables. Neither is applied by anything in this repository.
+pub const ACCESS_MANAGEMENT: [&str; 2] = [
+    "004_recorder_loader_user.sql",
+    "012_recorder_reader_grants.sql",
+];
 
 impl Migration {
     /// The statements in this file, split on `;` at the end of a line.

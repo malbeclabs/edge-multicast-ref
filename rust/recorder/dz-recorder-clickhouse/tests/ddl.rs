@@ -12,7 +12,7 @@
 
 use std::collections::BTreeSet;
 
-use dz_recorder_clickhouse::{migrations, schema, Migration};
+use dz_recorder_clickhouse::{migrations, schema, Migration, ACCESS_MANAGEMENT};
 use dz_recorder_rows::Grain;
 use dz_recorder_venue::VenueGrain;
 
@@ -3450,7 +3450,102 @@ fn the_loader_account_is_bounded_and_kept_out_of_the_schema() {
         !schema().iter().any(|m| m.name.contains("loader_user")),
         "the account is applied by an administrator, not by the row writer"
     );
-    assert_eq!(schema().len(), migrations().len() - 1);
+    assert_eq!(schema().len(), migrations().len() - ACCESS_MANAGEMENT.len());
+}
+
+/// The reader's grants are recorded, are not applied by a row writer, and do
+/// not create the account they name.
+///
+/// The last clause is the one worth a test. `012` deliberately does NOT create
+/// `grafana`: the reader spans databases this repository does not define and
+/// its password lives elsewhere, so a `CREATE USER IF NOT EXISTS` would be a
+/// no-op on the cluster that matters and, on a fresh one, would manufacture an
+/// account with a password nobody holds. That is worse than failing, because it
+/// succeeds. A later edit that "fixes" the file by adding the create is the
+/// regression this asserts against.
+#[test]
+fn the_reader_file_grants_without_creating_the_reader() {
+    // Statements without the prose above them, the same way `004`'s order test
+    // reads its file: this header argues about `CREATE USER` at length, so a
+    // check over the raw text would fail on the sentence explaining why the
+    // statement is absent.
+    let grants = migration("012_recorder_reader_grants.sql")
+        .statements()
+        .iter()
+        .map(|s| {
+            s.lines()
+                .filter(|l| !l.trim_start().starts_with("--"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Every venue table `009` declares, and nothing wider: a wildcard would
+    // quietly make the transport and market-data grains readable too.
+    for table in ["venue_book_top", "venue_object"] {
+        assert!(
+            grants.contains(&format!("GRANT SELECT ON recorder.{table} TO grafana;")),
+            "{table} is not granted to the reader: {grants}"
+        );
+    }
+    assert!(
+        !grants.contains("recorder.* TO grafana"),
+        "a wildcard grant widens this beyond the venue tables: {grants}"
+    );
+
+    // It creates nothing and it carries no credential.
+    assert!(
+        !grants.contains("CREATE USER"),
+        "012 must not create the reader; the failure on a cluster without it is \
+         the point: {grants}"
+    );
+    for leak in ["IDENTIFIED BY '", "sha256_hash BY '", "IDENTIFIED WITH"] {
+        assert!(!grants.contains(leak), "a literal credential: {grants}");
+    }
+
+    // And it is not in what a test or a schema deploy applies, for `004`'s
+    // reason: granting needs access-management rights.
+    assert!(
+        !schema().iter().any(|m| m.name.contains("reader_grants")),
+        "the reader's grants are applied by an administrator, not by the row writer"
+    );
+}
+
+/// Every file named as access-management is a real migration, and every file
+/// holding a privilege statement is named.
+///
+/// The filter in `schema()` matches on a string. A rename that misses it leaves
+/// the list naming a file that no longer exists, the filter silently matching
+/// nothing, and a privilege statement applied by whatever runs a schema
+/// deploy — the one outcome the split exists to prevent, and one that no test
+/// keyed on the old name would notice.
+#[test]
+fn the_access_management_list_matches_the_files_that_grant() {
+    for name in ACCESS_MANAGEMENT {
+        assert!(
+            migrations().iter().any(|m| m.name == name),
+            "{name} is listed as access-management and is not a migration"
+        );
+    }
+    for m in migrations() {
+        let grants = m.sql.lines().any(|l| {
+            let l = l.trim_start();
+            !l.starts_with("--") && (l.starts_with("GRANT ") || l.starts_with("CREATE USER"))
+        });
+        assert_eq!(
+            grants,
+            ACCESS_MANAGEMENT.contains(&m.name),
+            "{} {} a privilege statement but is {}in ACCESS_MANAGEMENT",
+            m.name,
+            if grants { "holds" } else { "holds no" },
+            if ACCESS_MANAGEMENT.contains(&m.name) {
+                ""
+            } else {
+                "not "
+            }
+        );
+    }
 }
 
 /// The account file can be applied in the order it is written.
