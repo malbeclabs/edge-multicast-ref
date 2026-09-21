@@ -3519,6 +3519,74 @@ fn the_reader_file_grants_without_creating_the_reader() {
     );
 }
 
+/// `012` grants nothing to either of Lake's accounts, and argues why.
+///
+/// The grant was written and reverted, so the absence is a decision and the
+/// paragraph beside it is the decision's record. Two halves, and each fails
+/// differently if it goes missing. `lake_api` is the connection Lake's own Go
+/// handlers use and none of them reads a venue grain, so granting it leaves an
+/// account holding a privilege it never uses — `004`'s objection, aimed at a
+/// reader. `lake_public_query` is the account that would reach the SQL editor
+/// and the MCP server, and it backs endpoints that serve a request arriving
+/// with no bearer token, so granting it publishes these rows rather than
+/// configuring a consumer.
+///
+/// `the_reader_file_grants_without_creating_the_reader` already fails on an
+/// added statement, as drift from a set. This one refuses the two accounts by
+/// name and asserts the reasoning next to them, because the way the grant
+/// arrives is somebody meeting a `497`, grepping for a grantee, finding none,
+/// and reading the absence as an omission. The prose half is the load-bearing
+/// one: an edit that adds the grant has to delete the paragraph saying it is
+/// not ours to add.
+#[test]
+fn the_reader_file_grants_nothing_to_lake_and_says_why() {
+    let reader = migration("012_recorder_reader_grants.sql").sql;
+
+    // The header unwrapped, because the argument has to survive a reflow: a
+    // sentence that wraps between two words is the same sentence, and an
+    // assertion that reads lines would call it a deletion.
+    let prose = reader
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("--"))
+        .map(|l| l.trim_start_matches('-').trim())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let granted: Vec<&str> = reader
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("GRANT"))
+        .collect();
+    for account in ["lake_api", "lake_public_query"] {
+        assert!(
+            !granted.iter().any(|l| l.contains(account)),
+            "`012` grants to `{account}`, which its own header argues against"
+        );
+        // And it names the account, so the grep that goes looking for a
+        // grantee lands on the reason rather than on nothing.
+        assert!(
+            prose.contains(account),
+            "`012` is silent about `{account}`, so an absent grant reads as an \
+             account nobody considered"
+        );
+    }
+
+    // The half that is about exposure rather than least privilege. Without it
+    // the file argues only that `lake_api` was the wrong name, which invites
+    // the fix of swapping in the right one.
+    assert!(
+        prose.contains("DISCLOSURE DECISION"),
+        "`012` does not say that granting Lake's query account decides who may \
+         read these rows, so the next edit reads it as a naming mistake"
+    );
+    assert!(
+        prose.contains("OptionalAuth"),
+        "`012` asserts the exposure without naming what an operator can go and \
+         read to check it"
+    );
+}
+
 /// `009` tells an operator to re-apply the READER's grants too.
 ///
 /// The sibling of `the_venue_file_tells_an_operator_to_re_apply_the_account_file`,

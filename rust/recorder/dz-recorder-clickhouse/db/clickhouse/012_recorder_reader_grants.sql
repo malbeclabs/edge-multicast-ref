@@ -81,37 +81,41 @@
 
 -- LAKE IS NOT GRANTED, AND THIS IS THE RECORD OF WHY RATHER THAN AN OMISSION.
 --
--- An earlier revision of this file granted these tables to `lake_api`, on the reasoning
--- that Lake's SQL editor and its MCP server would then reach them. That was wrong twice,
--- and review caught both:
+-- An earlier revision of this file granted these tables to `lake_api`, on the
+-- reasoning that Lake's SQL editor and its MCP server would then reach them.
+-- That was wrong twice, and review caught both:
 --
--- 1. **WRONG ACCOUNT.** Lake's prod deployment configures TWO ClickHouse users, and
---    `lake_api` is not the one those consumers use. `api/handlers/query.go` and
---    `mcp.go`'s `execute_sql` both select `a.PublicQueryDB`, which prod sets from
---    `CLICKHOUSE_PUBLIC_QUERY_USERNAME=lake_public_query`;
---    `CLICKHOUSE_USERNAME=lake_api` is the connection Lake's own Go handlers use, and no
---    handler reads a venue grain. So the grant bought nothing, while this file — whose job
---    is to be the durable record — asserted that both consumers worked. A record that is
---    confidently wrong is worse than an absent one.
+-- 1. **WRONG ACCOUNT.** Lake's prod deployment configures TWO ClickHouse users,
+--    and `lake_api` is not the one those consumers use. `api/handlers/query.go`
+--    and `mcp.go`'s `execute_sql` both select `a.PublicQueryDB`, which prod
+--    sets from `CLICKHOUSE_PUBLIC_QUERY_USERNAME=lake_public_query`;
+--    `CLICKHOUSE_USERNAME=lake_api` is the connection Lake's own Go handlers
+--    use, and no handler reads a venue grain. So the grant bought nothing,
+--    while this file — whose job is to be the durable record — asserted that
+--    both consumers worked. A record that is confidently wrong is worse than an
+--    absent one.
 --
--- 2. **AND THE OBVIOUS FIX IS A DISCLOSURE DECISION, NOT A CONFIGURATION ONE.** Swapping
---    the grantee to `lake_public_query` would publish these tables to unauthenticated
---    callers on the public internet. `POST /api/sql/query`, `/api/query` and `/api/mcp`
---    carry only `OptionalAuth` — which, in its own words, "attaches user to context if
---    authenticated, allows anonymous" — behind a 100/min per-IP rate limit.
---    `RequireInternalDomain` guards a different route group, and `lake-api`'s load
---    balancer is `internet-facing`. Grafana's audience is its own login behind fixed
---    panels, which is why `grafana` below is a different question from this one.
+-- 2. **AND THE OBVIOUS FIX IS A DISCLOSURE DECISION, NOT A CONFIGURATION ONE.**
+--    Swapping the grantee to `lake_public_query` would publish these tables to
+--    unauthenticated callers on the public internet. `POST /api/sql/query`,
+--    `/api/query` and `/api/mcp` carry only `OptionalAuth` — which, in its own
+--    words, "attaches user to context if authenticated, allows anonymous" —
+--    behind a 100/min per-IP rate limit. `RequireInternalDomain` guards a
+--    different route group, and `lake-api`'s load balancer is
+--    `internet-facing`. Grafana's audience is its own login behind fixed
+--    panels, which is why `grafana` below is a different question from this
+--    one.
 --
--- So nothing is granted to Lake here. Making these tables reachable from Lake is a change
--- to Lake's exposure — authentication on those routes, or a surface built for public
--- reading — and it belongs to whoever owns that decision. This file records the finding so
--- that the next person to ask "why can Lake not see this?" is not told to add a grant.
+-- So nothing is granted to Lake here. Making these tables reachable from Lake
+-- is a change to Lake's exposure — authentication on those routes, or a surface
+-- built for public reading — and it belongs to whoever owns that decision. This
+-- file records the finding so that the next person to ask "why can Lake not see
+-- this?" is not told to add a grant.
 --
--- `lake_admin` and the indexer are not granted either, for the plainer reason: they write
--- and reconcile Lake's own schema, nothing in them reads a venue grain, and an account
--- that does not need a privilege should not hold one -- `004`'s argument about the loader,
--- applied to a reader.
+-- `lake_admin` and the indexer are not granted either, for the plainer reason:
+-- they write and reconcile Lake's own schema, nothing in them reads a venue
+-- grain, and an account that does not need a privilege should not hold one —
+-- `004`'s argument about the loader, applied to a reader.
 
 -- The venue-side tables of `009`, read by the Grafana data source that backs
 -- the `phoenix-venue-recorder` dashboard in `malbeclabs/infra`.
