@@ -168,6 +168,28 @@ fallback: a `[adapter] kind` this binary did not register is a startup error
 naming every token it did, because *what is in this binary* is the question an
 operator cannot answer from the config file in front of them.
 
+The command line is the configuration path — bare, or after `--config` — plus
+`--version`/`-V` and `--help`/`-h`. An option the parser does not know is
+refused by name rather than opened as a file, so a misspelled flag fails as the
+flag it is.
+
+**`--version` writes one line to stdout and exits 0: the version, alone.** That
+is the string a deployment compares against the version it pinned, and the tag
+with the `v` removed, so the comparison is an equality rather than a parse.
+`run()` answers with the runtime's own version. A venue that releases on its own
+stream answers with its own — the whole of the change is which function `main`
+calls:
+
+```rust
+fn main() -> std::process::ExitCode {
+    dz_publisher_runtime::run_with_version(env!("CARGO_PKG_VERSION"), registry())
+}
+```
+
+The same string reaches `dz_publisher_build_info{version}`, so what a scrape
+reports and what the binary answers cannot disagree about which build is
+deployed.
+
 The transport comes from [`rust/ingress`](rust/ingress/). `[ingress] kind` names
 one of a closed set — `websocket`, `fix`, `multicast`, `poll`, `filetail`,
 `uds` — and the ones that are built are:

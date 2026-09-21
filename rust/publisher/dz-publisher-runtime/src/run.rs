@@ -28,6 +28,7 @@
 //! confined to this module.
 
 use std::cell::RefCell;
+use std::ffi::OsString;
 use std::net::SocketAddrV4;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -87,10 +88,26 @@ pub const TICK: Duration = Duration::from_millis(10);
 /// [`CycleSchedule`](dz_publisher_refdata::CycleSchedule) is built to do.
 const MAX_DEFINITION_DATAGRAMS_PER_TICK: usize = 1;
 
-/// What `--help` says.
-const USAGE: &str = "usage: <publisher> <config.toml>";
+/// What `--help` says, and what every refusal from the argument parser names.
+///
+/// Every accepted form, including both spellings of the two flags that publish
+/// nothing: a parser that refuses an option by name is only half an answer if
+/// the message does not also say what it would have taken.
+const USAGE: &str = "usage: <publisher> [--config] <config.toml> | --version|-V | --help|-h";
 
-/// Run a publisher.
+/// The version [`run`] reports: this crate's own.
+///
+/// **The only compile-time version read in this module, and a test holds it at
+/// one.** `CARGO_PKG_VERSION` expands to the version of the crate being
+/// compiled, which here is the runtime and never the venue binary that links
+/// it — so a venue that wants its own number reports it through
+/// [`run_with_version`], and whatever is reported reaches stdout and
+/// `dz_publisher_build_info` as one argument. Two reads of a version in this
+/// file would be two answers to one question, and the one an operator compares
+/// against a pin would be whichever they happened to ask.
+const RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Run a publisher, reporting this crate's version as the build's.
 ///
 /// The whole of a venue's `main`:
 ///
@@ -107,9 +124,59 @@ const USAGE: &str = "usage: <publisher> <config.toml>";
 /// returns only when a guard fires, a signal arrives, or the upstream turns out
 /// to be unusable. A startup failure is printed and returns
 /// [`ExitCode::FAILURE`]; every one of them names what would have been accepted.
+///
+/// `--version` answers with this crate's own version, which is the runtime's
+/// number and not the linking binary's. A venue whose deployment pins its own
+/// version passes it: see [`run_with_version`].
 #[must_use]
 pub fn run(registry: AdapterRegistry) -> ExitCode {
-    match start(&registry) {
+    run_with_version(RUNTIME_VERSION, registry)
+}
+
+/// Run a publisher that answers `--version` with `version`.
+///
+/// The whole of a venue's `main`, where the version a deployment pins is the
+/// venue binary's:
+///
+/// ```no_run
+/// # use dz_publisher_runtime::{AdapterRegistry, Venue};
+/// fn main() -> std::process::ExitCode {
+///     dz_publisher_runtime::run_with_version(
+///         env!("CARGO_PKG_VERSION"),
+///         AdapterRegistry::new().with("a-venue", |_cx| {
+///             unimplemented!("the venue's adapter and its transport")
+///         }),
+///     )
+/// }
+/// ```
+///
+/// Everything [`run`] does, and `version` is the one string two consumers read
+/// the build's identity from:
+///
+/// - `--version` and `-V` write it to **stdout**, alone, on one line, and exit
+///   0. Exactly the pinned version and nothing else, because both consumers
+///   compare rather than parse: a configuration-management role runs the binary
+///   to decide whether it already has the build it wants, and a release
+///   workflow checks that the asset it is about to publish is the tag it is
+///   naming. That comparison is against `vMAJOR.MINOR.PATCH` with the `v`
+///   removed — the string `RELEASING.md` calls the tag — so a decorated line
+///   would oblige both of them to pick a field out of it, and a field position
+///   is a format that drifts.
+/// - `dz_publisher_build_info{version}` carries the same argument, so the
+///   number a scrape reports and the number the binary answers with cannot
+///   disagree. The commit and the toolchain on that gauge stay compile-time
+///   environment reads, which is where a build stamps them.
+#[must_use]
+pub fn run_with_version(version: &str, registry: AdapterRegistry) -> ExitCode {
+    let path = match invocation(std::env::args_os().skip(1)) {
+        Ok(Invocation::Version) => {
+            print!("{}", version_stdout(version));
+            return ExitCode::SUCCESS;
+        }
+        Ok(Invocation::Config(path)) => path,
+        Err(error) => return report_refusal(&error),
+    };
+    match start(version, path, &registry) {
         Ok(exit) => {
             eprintln!("dz-publisher-runtime: exiting because of {exit}");
             match exit {
@@ -120,41 +187,92 @@ pub fn run(registry: AdapterRegistry) -> ExitCode {
                 Exit::IdleGuard | Exit::ConsistencyGuard(_) => ExitCode::FAILURE,
             }
         }
-        Err(error) => {
-            eprintln!("dz-publisher-runtime: {error}");
-            let mut source = std::error::Error::source(&error);
-            while let Some(cause) = source {
-                eprintln!("  caused by: {cause}");
-                source = cause.source();
-            }
-            ExitCode::FAILURE
-        }
+        Err(error) => report_refusal(&error),
     }
 }
 
-/// Everything `run` does, with the failure typed.
-fn start(registry: &AdapterRegistry) -> Result<Exit, StartupError> {
-    let path = config_path()?;
-    let config = Config::load(path)?;
-    compose_and_run(registry, config)
+/// Print a refusal, with its causes, and fail.
+fn report_refusal(error: &StartupError) -> ExitCode {
+    eprintln!("dz-publisher-runtime: {error}");
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        eprintln!("  caused by: {cause}");
+        source = cause.source();
+    }
+    ExitCode::FAILURE
 }
 
-fn config_path() -> Result<PathBuf, StartupError> {
-    let mut args = std::env::args_os().skip(1);
-    match args.next() {
-        Some(first) if first == "--help" || first == "-h" => {
-            Err(StartupError::NoConfigPath { usage: USAGE })
-        }
-        Some(first) if first == "--config" => args
+/// Exactly what `--version` writes to stdout.
+///
+/// The version and a newline, and nothing else. A function rather than a
+/// `println!` at the call site because the format *is* the contract here — a
+/// consumer's whole use of this flag is comparing the output against a pinned
+/// string — so it is a value a test reads back rather than a literal inside a
+/// branch no test enters.
+fn version_stdout(version: &str) -> String {
+    format!("{version}\n")
+}
+
+/// What the command line asked for.
+#[derive(Debug, PartialEq, Eq)]
+enum Invocation {
+    /// Report the version and exit. Publishes nothing, binds nothing, and reads
+    /// no configuration file: it is asked of a binary that is not running.
+    Version,
+    /// Load this configuration and publish.
+    Config(PathBuf),
+}
+
+/// Read the invocation out of the arguments after the program name.
+///
+/// **An option this parser does not know is refused by name.** Anything left to
+/// fall through to the bare-path arm becomes a filename, so a misspelled flag —
+/// or a flag this parser has not been taught — fails as a configuration file
+/// that could not be opened, named `--whatever-it-was`. That is a true
+/// statement about a file nobody meant and it says nothing about the command
+/// line, which is the one thing wrong with it.
+///
+/// A leading `-` is what makes an argument an option here, so a real file is
+/// still named bare: only a path that begins with a dash has to be written
+/// `--config -weird-name` or `./-weird-name`, and neither is a path anybody has.
+fn invocation<I: IntoIterator<Item = OsString>>(args: I) -> Result<Invocation, StartupError> {
+    let mut args = args.into_iter();
+    let Some(first) = args.next() else {
+        return Err(StartupError::NoConfigPath { usage: USAGE });
+    };
+    if first == "--help" || first == "-h" {
+        return Err(StartupError::NoConfigPath { usage: USAGE });
+    }
+    if first == "--version" || first == "-V" {
+        return Ok(Invocation::Version);
+    }
+    if first == "--config" {
+        return args
             .next()
-            .map(PathBuf::from)
-            .ok_or(StartupError::NoConfigPath { usage: USAGE }),
-        Some(first) => Ok(PathBuf::from(first)),
-        None => Err(StartupError::NoConfigPath { usage: USAGE }),
+            .map(|path| Invocation::Config(PathBuf::from(path)))
+            .ok_or(StartupError::NoConfigPath { usage: USAGE });
     }
+    if first.as_os_str().as_encoded_bytes().starts_with(b"-") {
+        return Err(StartupError::UnknownOption {
+            option: first.to_string_lossy().into_owned(),
+            usage: USAGE,
+        });
+    }
+    Ok(Invocation::Config(PathBuf::from(first)))
 }
 
-fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, StartupError> {
+/// Everything `run_with_version` does once the command line is understood, with
+/// the failure typed.
+fn start(version: &str, path: PathBuf, registry: &AdapterRegistry) -> Result<Exit, StartupError> {
+    let config = Config::load(path)?;
+    compose_and_run(version, registry, config)
+}
+
+fn compose_and_run(
+    version: &str,
+    registry: &AdapterRegistry,
+    config: Config,
+) -> Result<Exit, StartupError> {
     // Every enabled feed's identity is the same, which `Document::resolve`
     // has already checked: a `Source ID` is the publisher's registered
     // identity and the lowering takes it once.
@@ -321,7 +439,11 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
         identity.idle_guard,
     ));
     publisher.borrow().record_build_info(
-        env!("CARGO_PKG_VERSION"),
+        // The same string `--version` answers with, because it is the same
+        // argument: a gauge and a stdout line that read a version separately are
+        // two answers waiting to disagree, and the pin an operator compares
+        // would be whichever of them they asked.
+        version,
         // Compile-time environment variables a build sets, not configuration
         // keys. Absent is `unknown`, which is honest: a build that did not stamp
         // its commit cannot be asked what it was.
@@ -1362,6 +1484,147 @@ mod tests {
     use dz_publisher_metrics::prometheus::core::Collector;
     use dz_publisher_metrics::prometheus::IntCounter;
 
+    /// Parse a command line written the way a shell hands it over: the
+    /// arguments after the program name, and nothing else.
+    fn invocation_of(args: &[&str]) -> Result<Invocation, StartupError> {
+        invocation(args.iter().map(OsString::from))
+    }
+
+    /// A real file is still named bare, and still named after `--config`.
+    ///
+    /// The arm every other case here falls *past*, so a refusal that reached
+    /// too far would take this with it: the whole cost of refusing an unknown
+    /// option is that this must keep working.
+    #[test]
+    fn a_configuration_file_is_named_bare_or_after_the_option() {
+        assert_eq!(
+            invocation_of(&["/etc/dz/publisher.toml"]).expect("a bare path is a path"),
+            Invocation::Config(PathBuf::from("/etc/dz/publisher.toml"))
+        );
+        assert_eq!(
+            invocation_of(&["--config", "/etc/dz/publisher.toml"]).expect("and so is this one"),
+            Invocation::Config(PathBuf::from("/etc/dz/publisher.toml"))
+        );
+        // A relative path, and one whose first character is not a letter: a
+        // dash is what makes an argument an option, and `.` is not a dash.
+        assert_eq!(
+            invocation_of(&["./publisher.toml"]).expect("a relative path is a path"),
+            Invocation::Config(PathBuf::from("./publisher.toml"))
+        );
+    }
+
+    /// Both spellings, because deployment tooling writes whichever it writes.
+    #[test]
+    fn the_version_is_asked_for_by_either_spelling() {
+        assert_eq!(
+            invocation_of(&["--version"]).expect("--version is an option"),
+            Invocation::Version
+        );
+        assert_eq!(
+            invocation_of(&["-V"]).expect("-V is the same option"),
+            Invocation::Version
+        );
+    }
+
+    /// `-V` and `-v` are not the same argument, and neither is a path.
+    ///
+    /// The lower-case spelling is nothing here, so it has to be refused by name
+    /// rather than opened as a file — which is the defect this refusal exists
+    /// for, met by the nearest possible typo.
+    #[test]
+    fn an_option_this_parser_does_not_know_is_refused_by_name() {
+        for option in ["--verison", "--nope", "-v", "-"] {
+            match invocation_of(&[option]) {
+                Err(StartupError::UnknownOption {
+                    option: named,
+                    usage,
+                }) => {
+                    assert_eq!(named, option);
+                    assert_eq!(usage, USAGE);
+                }
+                other => panic!("`{option}` was not refused by name: {other:?}"),
+            }
+        }
+    }
+
+    /// The forms that publish nothing are in the text an operator is shown.
+    #[test]
+    fn the_usage_names_every_accepted_form() {
+        for form in ["--config", "--version", "-V", "--help", "-h"] {
+            assert!(USAGE.contains(form), "{form} is not in the usage: {USAGE}");
+        }
+    }
+
+    /// An option that needs a value, and an empty command line, are both the
+    /// refusal that names the usage.
+    #[test]
+    fn a_command_line_with_no_configuration_file_names_the_usage() {
+        for args in [vec![], vec!["--config"], vec!["--help"], vec!["-h"]] {
+            match invocation_of(&args) {
+                Err(StartupError::NoConfigPath { usage }) => assert_eq!(usage, USAGE),
+                other => panic!("{args:?} did not ask for a configuration file: {other:?}"),
+            }
+        }
+    }
+
+    /// The format is the contract: exactly the version, on one line, alone.
+    ///
+    /// Both consumers compare this against a string they already hold — a
+    /// configuration-management role against the version it pins, a release
+    /// workflow against the tag it is cutting with the `v` removed — so a
+    /// prefix, a suffix or a second line would oblige each of them to pick a
+    /// field out of the output instead.
+    #[test]
+    fn the_version_is_written_alone_on_one_line() {
+        assert_eq!(version_stdout("0.2.0"), "0.2.0\n");
+        assert_eq!(version_stdout("1.2.3-rc.1"), "1.2.3-rc.1\n");
+        let out = version_stdout("0.2.0");
+        assert_eq!(out.lines().count(), 1, "{out:?}");
+        assert!(out.ends_with('\n'), "{out:?}");
+    }
+
+    /// `--version` and `dz_publisher_build_info{version}` answer from one
+    /// argument, and this holds the file to one compile-time version read.
+    ///
+    /// **A second read is how the two answers come apart.** `CARGO_PKG_VERSION`
+    /// expands to the version of the crate being compiled, so a read at the
+    /// gauge reports this runtime while the flag reports the venue binary that
+    /// linked it — two numbers, one question, and no failure anywhere: the
+    /// scrape and the binary simply disagree about which build is deployed.
+    /// Nothing else can catch that, because reaching the gauge means composing
+    /// a publisher, which means opening sockets.
+    ///
+    /// Comments are skipped, which is the rule the public-repository check
+    /// applies for the same reason: naming the macro in order to explain it is
+    /// not a second read of it. The scan stops at this module, so the literal
+    /// above is not itself a match.
+    #[test]
+    fn one_compile_time_version_read_serves_both_answers() {
+        const READ: &str = "env!(\"CARGO_PKG_VERSION\")";
+        let source = include_str!("run.rs");
+        let above_this_module = source
+            .split("\n#[cfg(test)]\n")
+            .next()
+            .expect("a split yields a first part");
+        assert!(
+            above_this_module.len() < source.len(),
+            "the test module was not found, so this scan covers itself"
+        );
+        let reads: Vec<&str> = above_this_module
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .filter(|line| line.contains(READ))
+            .collect();
+        assert_eq!(
+            reads.len(),
+            1,
+            "`{READ}` is read {} times in run.rs: the version `--version` prints \
+             and the version `dz_publisher_build_info` carries must be one \
+             argument, threaded from `run_with_version`. Found: {reads:?}",
+            reads.len()
+        );
+    }
+
     /// An adapter that records what the wrapper forwarded to it.
     ///
     /// Only the methods under test are given bodies; the rest are the trait's
@@ -1692,7 +1955,7 @@ mod tests {
             .expect("the document is valid")
             .resolve()
             .expect("and it resolves");
-        compose_and_run(registry, config).expect_err("this document cannot be run")
+        compose_and_run(RUNTIME_VERSION, registry, config).expect_err("this document cannot be run")
     }
 
     /// A venue's collectors reach that registry through the composition, and
