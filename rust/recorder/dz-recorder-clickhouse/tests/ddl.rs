@@ -3481,18 +3481,43 @@ fn the_reader_file_grants_without_creating_the_reader() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    // Every venue table `009` declares, and nothing wider: a wildcard would
-    // quietly make the transport and market-data grains readable too.
-    for table in ["venue_book_top", "venue_object"] {
-        assert!(
-            grants.contains(&format!("GRANT SELECT ON recorder.{table} TO grafana;")),
-            "{table} is not granted to the reader: {grants}"
-        );
-    }
+    // EXACTLY these objects, which is a stronger claim than "these are present"
+    // and is the one the file's own argument makes. Asserting presence lets a
+    // later edit add `GRANT SELECT ON recorder.datagram TO grafana` and stay
+    // green, and a reader that can see the transport grains is the widening
+    // this file says it is avoiding. Collected as a set and compared, so the
+    // failure names what drifted rather than just failing.
+    let granted: BTreeSet<&str> = grants
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("GRANT SELECT ON "))
+        .filter_map(|l| l.strip_suffix(" TO grafana;"))
+        .collect();
+    let intended: BTreeSet<&str> = [
+        // The two tables `009` declares...
+        "recorder.venue_book_top",
+        "recorder.venue_object",
+        // ...and its collapsed view over the first, which a COUNT must read and
+        // which the table's own grant does not reach.
+        "recorder.venue_book_top_settled",
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        granted, intended,
+        "the reader's grants drifted from the venue tables this file is scoped to"
+    );
+
+    // And nothing granted to anyone else, or at database scope.
     assert!(
-        !grants.contains("recorder.* TO grafana"),
+        !grants.contains("recorder.* TO"),
         "a wildcard grant widens this beyond the venue tables: {grants}"
     );
+    for line in grants.lines().filter(|l| l.trim().starts_with("GRANT")) {
+        assert!(
+            line.contains(" TO grafana;"),
+            "this file grants to the dashboards' reader and to nobody else: {line}"
+        );
+    }
 
     // It creates nothing and it carries no credential.
     assert!(

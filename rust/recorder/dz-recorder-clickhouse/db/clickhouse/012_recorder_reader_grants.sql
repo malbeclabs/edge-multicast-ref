@@ -64,7 +64,24 @@
 -- and `005` — which nothing reads through this account today — do not quietly
 -- become readable because a wildcard was easier to write.
 
+-- A VIEW NEEDS ITS OWN GRANT, WHICH IS NOT OBVIOUS FROM THE TABLE'S. A grant on
+-- `venue_book_top` does not reach `venue_book_top_settled`, and the server says
+-- so exactly: `code: 497 ... necessary to have the grant SELECT for at least
+-- one column on recorder.venue_book_top_settled`. Found when the dashboard's
+-- counting panels were moved onto the settled view and returned nothing.
+--
+-- The settled view is what a COUNT must read. `venue_book_top` is a
+-- `ReplacingMergeTree` and a re-derivation is a replace, so between it and the
+-- merge that follows one top of book is in the table twice — and `009` is
+-- explicit that the surplus copy does not inflate a count so much as
+-- manufacture evidence of loss, because it pairs with nothing and reads as a
+-- state the other observation point missed. A reader granted the table and not
+-- the view gets the wrong number rather than an error, which is the outcome
+-- worth spending a line to prevent.
+
 -- The venue-side tables of `009`, read by the Grafana data source that backs
 -- the `phoenix-venue-recorder` dashboard in `malbeclabs/infra`.
 GRANT SELECT ON recorder.venue_book_top TO grafana;
 GRANT SELECT ON recorder.venue_object TO grafana;
+-- And `009`'s collapsed view over the first of them, for counts.
+GRANT SELECT ON recorder.venue_book_top_settled TO grafana;
