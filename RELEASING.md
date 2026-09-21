@@ -8,11 +8,11 @@ repository is the release, and a consumer pins the tag.
 
 ```toml
 [dependencies]
-dz-adapter-core = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.1.0" }
+dz-adapter-core = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.2.0" }
 
 # Everything from the same tag. See below — this is the one rule that matters.
-dz-publisher-runtime = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.1.0" }
-dz-ingress-core = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.1.0", features = ["uds"] }
+dz-publisher-runtime = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.2.0" }
+dz-ingress-core = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.2.0", features = ["uds"] }
 ```
 
 The workspace manifest lives in [`rust/`](rust/) rather than at the repository
@@ -37,8 +37,8 @@ Pin the tag once, in one place:
 
 ```toml
 [workspace.dependencies]
-dz-adapter-core = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.1.0" }
-dz-publisher-lowering = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.1.0" }
+dz-adapter-core = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.2.0" }
+dz-publisher-lowering = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.2.0" }
 ```
 
 and let each crate write `dz-adapter-core = { workspace = true }`.
@@ -77,22 +77,21 @@ answer. So a binary released on its own stream states its own `version` in its
 own manifest, and its tag names which binary it is rather than sharing the `v*`
 tags a consumer pins.
 
-**The current library tag is `v0.1.0`, and `[workspace.package]` says 0.1.1.**
-Every example below pins `v0.1.0` deliberately; a reader who opens
-[`rust/Cargo.toml`](rust/Cargo.toml) and sees a higher number is not looking at
-a tag they can pin. The gap is this rule being learned the expensive way:
-`dz-recorder/v0.1.1` was released by bumping the workspace version, which moved
-every library crate for a change to a binary and produced a number with no
-library tag behind it. Under the rule above a binary released on its own stream
-carries its own `version`, so the next library release closes the gap and
-nothing reopens it.
+**The current library tag is `v0.2.0`, and `[workspace.package]` says 0.2.0 —
+the gap is closed.** It was open because `dz-recorder/v0.1.1` was released by
+bumping the workspace version, which moved every library crate for a change to a
+binary and produced a number with no library tag behind it. Under the rule above
+a binary released on its own stream carries its own `version`, which is what
+keeps it closed. A reader who opens [`rust/Cargo.toml`](rust/Cargo.toml) and sees
+a number higher than the newest tag is looking at an unreleased tree, and the
+examples below pin what exists.
 
 ## What a version promises
 
 **Pre-1.0, so a minor release may break you.** `0.x` is what these crates are,
 and it is honest: the boundary is young and has already gained methods twice
 while being implemented for its first two venues. What a tag promises is that
-*it* does not change — a tag is immutable and a build against `v0.1.0` resolves
+*it* does not change — a tag is immutable and a build against `v0.2.0` resolves
 the same bytes forever.
 
 Read the release notes before moving a pin. A change that adds an `Event`
