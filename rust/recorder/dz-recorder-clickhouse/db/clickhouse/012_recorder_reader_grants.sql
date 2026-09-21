@@ -79,6 +79,75 @@
 -- the view gets the wrong number rather than an error, which is the outcome
 -- worth spending a line to prevent.
 
+-- LAKE IS NOT GRANTED, AND THIS IS THE RECORD OF WHY RATHER THAN AN OMISSION.
+--
+-- An earlier revision of this file granted these tables to `lake_api`, on the
+-- reasoning that Lake's SQL editor and its MCP server would then reach them.
+-- That was wrong twice, and review caught both:
+--
+-- 1. **WRONG ACCOUNT.** Lake's prod deployment configures TWO ClickHouse users,
+--    and `lake_api` is not the one those consumers use. `api/handlers/query.go`
+--    and `mcp.go`'s `execute_sql` both select `a.PublicQueryDB`, which prod
+--    sets from `CLICKHOUSE_PUBLIC_QUERY_USERNAME=lake_public_query`;
+--    `CLICKHOUSE_USERNAME=lake_api` is the connection Lake's own Go handlers
+--    use, and no handler reads a venue grain. So the grant bought nothing,
+--    while this file — whose job is to be the durable record — asserted that
+--    both consumers worked. A record that is confidently wrong is worse than an
+--    absent one.
+--
+-- 2. **AND THE OBVIOUS FIX IS A DISCLOSURE DECISION, NOT A CONFIGURATION ONE.**
+--    Swapping the grantee to `lake_public_query` would publish these tables to
+--    unauthenticated callers on the public internet. `POST /api/sql/query`,
+--    `/api/query` and `/api/mcp` carry only `OptionalAuth` — which, in its own
+--    words, "attaches user to context if authenticated, allows anonymous" —
+--    behind a 100/min per-IP rate limit. `RequireInternalDomain` guards a
+--    different route group, and `lake-api`'s load balancer is
+--    `internet-facing`. Grafana's audience is its own login behind fixed
+--    panels, which is why `grafana` below is a different question from this
+--    one.
+--
+-- So nothing is granted to Lake here. Making these tables reachable from Lake
+-- is a change to Lake's exposure — authentication on those routes, or a surface
+-- built for public reading — and it belongs to whoever owns that decision. This
+-- file records the finding so that the next person to ask "why can Lake not see
+-- this?" is not told to add a grant.
+--
+-- `lake_admin` and the indexer are not granted either, for the plainer reason:
+-- they write and reconcile Lake's own schema, nothing in them reads a venue
+-- grain, and an account that does not need a privilege should not hold one —
+-- `004`'s argument about the loader, applied to a reader.
+
+-- THE LIVE CLUSTER HOLDS THREE GRANTS THE BLOCK BELOW DOES NOT, AND THIS IS
+-- THEM. They were applied by hand to the shared ClickHouse on 2026-09-21, while
+-- the reasoning was still that Lake's SQL editor read through `lake_api`:
+--
+--   GRANT SELECT ON recorder.venue_book_top TO lake_api;
+--   GRANT SELECT ON recorder.venue_object TO lake_api;
+--   GRANT SELECT ON recorder.venue_book_top_settled TO lake_api;
+--
+-- They reach no consumer, because no Lake handler reads a venue grain, and they
+-- want revoking:
+--
+--   REVOKE SELECT ON recorder.venue_book_top FROM lake_api;
+--   REVOKE SELECT ON recorder.venue_object FROM lake_api;
+--   REVOKE SELECT ON recorder.venue_book_top_settled FROM lake_api;
+--
+-- RECORDED HERE AND NOT APPLIED HERE, WHICH IS THE OPPOSITE DECISION FROM THE
+-- GRANTS AND SO WANTS ITS REASON. Re-applying this file replays a grant and
+-- revokes nothing, so without these lines an operator reads the block below as
+-- the state of Lake's access while the cluster holds three more. A `REVOKE`
+-- statement would close that for whoever re-applies the file, at two costs. It
+-- names `lake_api` for good, so every cluster built afterwards revokes a
+-- privilege it was never granted — this file asserting the absence of a grant
+-- instead of declaring a reader, which is a claim it could not keep for every
+-- account that is not a reader. And by this file's own rule a privilege
+-- statement names a user that has to exist when it is stored, so a cluster with
+-- no Lake deployed would fail the file and lose the `grafana` grants that do
+-- apply there. Whether ClickHouse errors that way on a revoke is untested here
+-- and wants checking before anyone promotes these three lines. The cleanup is
+-- one-time work on one cluster either way, which is why it is recorded and
+-- dated rather than declared.
+
 -- The venue-side tables of `009`, read by the Grafana data source that backs
 -- the `phoenix-venue-recorder` dashboard in `malbeclabs/infra`.
 GRANT SELECT ON recorder.venue_book_top TO grafana;

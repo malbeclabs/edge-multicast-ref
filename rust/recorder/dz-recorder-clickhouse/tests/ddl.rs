@@ -3495,12 +3495,14 @@ fn the_reader_file_grants_without_creating_the_reader() {
         .filter(|l| l.starts_with("GRANT"))
         .collect();
     let intended: BTreeSet<&str> = [
-        // The two tables `009` declares...
+        // The two tables `009` declares, plus its collapsed view over the
+        // first — which a COUNT must read and which the table's own grant does
+        // not reach...
         "GRANT SELECT ON recorder.venue_book_top TO grafana;",
         "GRANT SELECT ON recorder.venue_object TO grafana;",
-        // ...and its collapsed view over the first, which a COUNT must read and
-        // which the table's own grant does not reach.
         "GRANT SELECT ON recorder.venue_book_top_settled TO grafana;",
+        // Lake is deliberately absent; `012`'s header carries the reasoning, and
+        // the exactness of this set is what would refuse a grant added without it.
     ]
     .into_iter()
     .collect();
@@ -3514,6 +3516,135 @@ fn the_reader_file_grants_without_creating_the_reader() {
     assert!(
         !schema().iter().any(|m| m.name.contains("reader_grants")),
         "the reader's grants are applied by an administrator, not by the row writer"
+    );
+}
+
+/// `012` grants nothing to either of Lake's accounts, and argues why.
+///
+/// The grant was written and reverted, so the absence is a decision and the
+/// paragraph beside it is the decision's record. Two halves, and each fails
+/// differently if it goes missing. `lake_api` is the connection Lake's own Go
+/// handlers use and none of them reads a venue grain, so granting it leaves an
+/// account holding a privilege it never uses — `004`'s objection, aimed at a
+/// reader. `lake_public_query` is the account that would reach the SQL editor
+/// and the MCP server, and it backs endpoints that serve a request arriving
+/// with no bearer token, so granting it publishes these rows rather than
+/// configuring a consumer.
+///
+/// `the_reader_file_grants_without_creating_the_reader` already fails on an
+/// added statement, as drift from a set. This one refuses the two accounts by
+/// name and asserts the reasoning next to them, because the way the grant
+/// arrives is somebody meeting a `497`, grepping for a grantee, finding none,
+/// and reading the absence as an omission. The prose half is the load-bearing
+/// one: an edit that adds the grant has to delete the paragraph saying it is
+/// not ours to add.
+#[test]
+fn the_reader_file_grants_nothing_to_lake_and_says_why() {
+    let reader = migration("012_recorder_reader_grants.sql").sql;
+
+    // The header unwrapped, because the argument has to survive a reflow: a
+    // sentence that wraps between two words is the same sentence, and an
+    // assertion that reads lines would call it a deletion.
+    let prose = reader
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("--"))
+        .map(|l| l.trim_start_matches('-').trim())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let granted: Vec<&str> = reader
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("GRANT"))
+        .collect();
+    for account in ["lake_api", "lake_public_query"] {
+        assert!(
+            !granted.iter().any(|l| l.contains(account)),
+            "`012` grants to `{account}`, which its own header argues against"
+        );
+        // And it names the account, so the grep that goes looking for a
+        // grantee lands on the reason rather than on nothing.
+        assert!(
+            prose.contains(account),
+            "`012` is silent about `{account}`, so an absent grant reads as an \
+             account nobody considered"
+        );
+    }
+
+    // The half that is about exposure rather than least privilege. Without it
+    // the file argues only that `lake_api` was the wrong name, which invites
+    // the fix of swapping in the right one.
+    assert!(
+        prose.contains("DISCLOSURE DECISION"),
+        "`012` does not say that granting Lake's query account decides who may \
+         read these rows, so the next edit reads it as a naming mistake"
+    );
+    assert!(
+        prose.contains("OptionalAuth"),
+        "`012` asserts the exposure without naming what an operator can go and \
+         read to check it"
+    );
+}
+
+/// `012` records the three grants the live cluster holds and the statements
+/// that remove them.
+///
+/// Re-applying this file replays a grant and revokes nothing, so the block of
+/// `GRANT`s is not the state of Lake's access on the cluster where the reverted
+/// grants were applied by hand. Review asked for a `REVOKE` statement or the
+/// outstanding grants named, and the file names them, which is the half that
+/// cannot be checked from here: no test can see a cluster, and the paragraph
+/// goes on reading true after the cleanup has happened. So what is pinned is
+/// that the record is whole — both the grants and the statements that undo
+/// them, and the date that lets a reader decide whether it still applies —
+/// because a record that is missing the revoke leaves the next operator to
+/// compose it, and one missing the date cannot be retired.
+#[test]
+fn the_reader_file_records_the_grants_the_cluster_still_holds() {
+    let reader = migration("012_recorder_reader_grants.sql").sql;
+    let prose = reader
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("--"))
+        .map(|l| l.trim_start_matches('-').trim())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    for object in ["venue_book_top", "venue_object", "venue_book_top_settled"] {
+        assert!(
+            prose.contains(&format!("GRANT SELECT ON recorder.{object} TO lake_api;")),
+            "`012` does not record the outstanding grant on `{object}`, so the \
+             block below reads as the whole of Lake's access"
+        );
+        assert!(
+            prose.contains(&format!(
+                "REVOKE SELECT ON recorder.{object} FROM lake_api;"
+            )),
+            "`012` names the outstanding grant on `{object}` without the \
+             statement that removes it, leaving an administrator to compose it"
+        );
+    }
+
+    // The date is what lets a reader retire the paragraph. Without it the
+    // record cannot be told from a description of the current state, and it
+    // will outlive the cleanup either way.
+    assert!(
+        prose.contains("2026-09-21"),
+        "the outstanding grants are recorded with no date, so nothing says \
+         whether they are still outstanding"
+    );
+
+    // And none of it is applied by this file, which grants and does not
+    // revoke: the splitter ignores a `;` inside a comment, so these six lines
+    // are prose and stay prose.
+    assert!(
+        !reader
+            .lines()
+            .map(str::trim)
+            .any(|l| l.starts_with("REVOKE")),
+        "`012` revokes as a statement, which names `lake_api` on every cluster \
+         built afterwards and fails where Lake is not deployed"
     );
 }
 
