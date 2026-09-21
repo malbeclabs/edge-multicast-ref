@@ -27,8 +27,16 @@ type Coordinator struct {
 	snapshotRoute map[snapKey]int
 }
 
-// snapKey is defined in shard.go (Task 3). Do NOT redeclare it here — a second
-// declaration in the same package is a compile error.
+// snapKey keys snapshot routing by (channel, snapshot_id). The route only has to
+// survive from a SnapshotBegin to its own SnapshotEnd, and publishers MUST NOT
+// interleave snapshot groups, so the group that claimed an id last is the group
+// whose orders follow. Snapshot ID is monotonic per (channel_id, instrument_id)
+// rather than per channel, so it is not an instrument identity: the shard
+// resolves that from the open group its SnapshotBegin established.
+type snapKey struct {
+	ch   uint8
+	snap uint32
+}
 
 // NewCoordinator builds a Coordinator. ctx is used solely to break barrier and
 // fence ack-waits on shutdown so the coordinator cannot wedge when shards or

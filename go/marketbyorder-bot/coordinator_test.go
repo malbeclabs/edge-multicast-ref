@@ -389,8 +389,10 @@ func TestDispatch_ResetOnOneChannelSparesTheOther(t *testing.T) {
 	s.instruments[wipe] = NewInstrument(2, "WIPE", -2, -8)
 	s.refdata[keep] = InstrumentDef{Symbol: "KEEP"}
 	s.refdata[wipe] = InstrumentDef{Symbol: "WIPE"}
-	s.snapCtx[snapKey{ch: 110, snap: 1}] = SnapshotContext{}
-	s.snapCtx[snapKey{ch: 10, snap: 1}] = SnapshotContext{}
+	s.snapCtx[keep] = SnapshotContext{}
+	s.snapCtx[wipe] = SnapshotContext{}
+	s.openGroup[110] = keep
+	s.openGroup[10] = wipe
 
 	steady := Record{Type: "trade", Port: "mktdata", ChannelID: 10, InstrumentID: 2,
 		ResetCount: 200, Fields: map[string]any{}}
@@ -406,13 +408,81 @@ func TestDispatch_ResetOnOneChannelSparesTheOther(t *testing.T) {
 	if _, ok := s.refdata[keep]; !ok {
 		t.Error("channel 110 refdata was wiped by a channel 10 reset")
 	}
-	if _, ok := s.snapCtx[snapKey{ch: 110, snap: 1}]; !ok {
+	if _, ok := s.snapCtx[keep]; !ok {
 		t.Error("channel 110 snapshot context was wiped by a channel 10 reset")
+	}
+	if _, ok := s.openGroup[110]; !ok {
+		t.Error("channel 110 open snapshot group was wiped by a channel 10 reset")
 	}
 	if _, ok := s.instruments[wipe]; ok {
 		t.Error("channel 10 instrument survived its own channel's reset")
 	}
-	if _, ok := s.snapCtx[snapKey{ch: 10, snap: 1}]; ok {
+	if _, ok := s.snapCtx[wipe]; ok {
 		t.Error("channel 10 snapshot context survived its own channel's reset")
+	}
+	if _, ok := s.openGroup[10]; ok {
+		t.Error("channel 10 open snapshot group survived its own channel's reset")
+	}
+}
+
+// Two sequential, complete snapshot groups sharing a Snapshot ID — the ordinary
+// case, since the id advances once per instrument per cycle — reach the shards
+// that own them, and each instrument commits its own book from its own orders.
+//
+// The route stays keyed (channel, snapshot_id) because it only has to survive
+// from a SnapshotBegin to its own SnapshotEnd: publishers MUST NOT interleave
+// groups, so the group that claimed an id last is the group whose orders follow,
+// and an order with no route is dropped and counted rather than guessed at. The
+// instrument identity comes from the open group, in the shard.
+func TestDispatch_SequentialGroupsSharingSnapshotIDEachCommitsItsOwnBook(t *testing.T) {
+	c, shards := newCoordWithShards(2)
+	const snapID = 7
+
+	for _, rec := range []Record{
+		snapshotBeginRec(0, 4, snapID, 1, 1000, 10),
+		snapshotOrderRec(0, snapID, 41, 0, 100, 5),
+		snapshotEndRec(0, 4, snapID, 1000),
+		snapshotBeginRec(0, 5, snapID, 1, 2000, 20),
+		snapshotOrderRec(0, snapID, 51, 0, 200, 6),
+		snapshotEndRec(0, 5, snapID, 2000),
+	} {
+		c.Dispatch(rec)
+	}
+
+	drain := func(s *Shard) {
+		for {
+			select {
+			case m := <-s.inbox:
+				s.handle(*m.rec)
+			default:
+				return
+			}
+		}
+	}
+	for _, s := range shards {
+		drain(s)
+	}
+
+	// 4 % 2 == 0, 5 % 2 == 1.
+	for shardIdx, instID := range []uint32{4, 5} {
+		inst, ok := shards[shardIdx].instruments[instKey{0, instID}]
+		if !ok {
+			t.Fatalf("shard %d does not hold instrument %d", shardIdx, instID)
+		}
+		if inst.Status != StatusReady {
+			t.Errorf("instrument %d status %v, want ready", instID, inst.Status)
+		}
+		if len(inst.Bids) != 1 {
+			t.Errorf("instrument %d committed %d bids, want its own group's 1", instID, len(inst.Bids))
+		}
+	}
+	if got := shards[0].instruments[instKey{0, 4}].Bids[41]; got == nil {
+		t.Error("instrument 4 committed an order that is not its own")
+	}
+	if got := shards[1].instruments[instKey{0, 5}].Bids[51]; got == nil {
+		t.Error("instrument 5 committed an order that is not its own")
+	}
+	if got := testCounter(t, c.metrics.SnapshotOrderDroppedTotal); got != 0 {
+		t.Errorf("snapshot_order_dropped_total = %v for two complete groups, want 0", got)
 	}
 }

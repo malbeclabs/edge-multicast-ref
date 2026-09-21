@@ -24,7 +24,19 @@ snapshot writer.
 - `end_of_session` / `batch_boundary` use an all-shard drain fence so their
   rows land after preceding instrument rows; `reset_count` changes use an
   in-band barrier that wipes all shard state before the new era.
-- New metric: `dz_mbo_bot_snapshot_order_dropped_total` (snapshot_order with
-  no registered route, e.g. begin missed or arrived post-end).
+- `snapshot_order` carries no `instrument_id` — its `snapshot_begin` implies it —
+  so a shard files it into the currently-open snapshot group for the channel,
+  which that `snapshot_begin` established for one `(channel_id, instrument_id)`.
+  `Snapshot ID` is monotonic per instrument rather than per channel, so two
+  instruments routinely sit at the same value within one cycle: it validates
+  membership and is never the key. The same pointer stamps the `wire_snapshots`
+  row, so the row and the shadow that received the order always name one
+  instrument.
+- `dz_mbo_bot_snapshot_order_dropped_total` counts a `snapshot_order` the
+  association cannot place: no route at the coordinator, no open group in the
+  owning shard (an order ahead of its `snapshot_begin` or trailing its
+  `snapshot_end`), or a `snapshot_id` that disagrees with the open group's. The
+  orders of a group a ready instrument declined are not drops — they have no
+  shadow to join, and that is the steady state.
 
 Design doc: `docs/2026-05-19-marketbyorder-bot-shard-dispatcher-design.md`.
