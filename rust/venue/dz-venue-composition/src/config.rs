@@ -32,6 +32,19 @@ use serde::Deserialize;
 ///
 /// A closed set of tokens, so a value outside it is a load error naming what
 /// would have been accepted rather than a role nothing implements.
+///
+/// # What a role decides
+///
+/// **Whether a fatal error from that source ends the process** — see
+/// [`fatal_error_ends_the_process`](Self::fatal_error_ends_the_process). That is
+/// the whole of what a role decides about a live run, and a replay run reads it
+/// once more, to choose the connection it publishes under: the primary's.
+///
+/// What no role can decide is **where a source's data goes**. The adapter emits
+/// events and no event carries the source it came from, so nothing can hold one
+/// source's data back from a feed or route it to one. A role is otherwise a
+/// declaration an operator reads and an analysis tier groups by, plus the one
+/// startup check that counts primaries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum SourceRole {
     /// The source this publisher publishes from.
@@ -52,23 +65,94 @@ pub enum SourceRole {
     /// one venue do not deliver identical streams, so what is comparable is
     /// state at aligned instants plus the distributions of first observation.
     Comparison,
+    /// One connection of an upstream that carries its instruments on several,
+    /// no two of them carrying the same ones.
+    ///
+    /// **Not the primary, and its fatal error ends the process.** Those two
+    /// facts are the whole of the role. The primaries the one-primary rule
+    /// counts are [`Primary`](Self::Primary) blocks and nothing else, so a
+    /// partitioned upstream is one primary and one of these per further
+    /// connection, and the rule reads the same as it does for a single source.
+    ///
+    /// The fatality is what the role exists for. Each connection of a
+    /// partitioned upstream carries instruments no other connection carries, so
+    /// dropping its driver loses that subset entirely: those instruments stop
+    /// updating, their last published values stay on the wire, and every other
+    /// signal says the publisher is well — the surviving connections keep the
+    /// `connection_state` of their own series at 1 and keep the aggregate busy
+    /// under the idle guard. A [`Comparison`](Self::Comparison) source has
+    /// none of that exposure, because everything it carries arrives on the
+    /// primary too.
+    ///
+    /// **It declares nothing about which instruments arrive where**, and cannot:
+    /// every payload reaches one adapter, the adapter emits events, and no
+    /// event carries the source it came from. So there is no routing here, no
+    /// instrument set, and no change to how an event reaches a feed — only
+    /// which failures are fatal. `[[source]]` has no `carries` key for that
+    /// same reason, and this role is not one: `carries` named the feeds a
+    /// source's data reached, which is a claim about routing, and this names
+    /// only what the runtime does when a connection is lost.
+    UpstreamPartition,
 }
 
 impl SourceRole {
     /// Every role, in the order the tokens below are listed.
-    pub const ALL: [Self; 2] = [Self::Primary, Self::Comparison];
+    pub const ALL: [Self; 3] = [Self::Primary, Self::Comparison, Self::UpstreamPartition];
 
-    /// The token a document states, and the metric label value.
+    /// The token a document states, which [`TOKEN_LIST`](Self::TOKEN_LIST) is
+    /// held to and which [`Source`]'s `Debug` prints.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Primary => "primary",
             Self::Comparison => "comparison",
+            // `upstream-partition` rather than `partition`, because a partition
+            // in this repository is a partition of the *published* set: a shard
+            // names one, `Channel ID` carries it, and the glossary reserves the
+            // word for it. This one is a partition of the upstream, which
+            // `upstream source` is the glossary's qualified form for, and the
+            // two are unrelated — a publisher may carry sixty-two shards over
+            // one upstream connection or one shard over four of them.
+            Self::UpstreamPartition => "upstream-partition",
         }
     }
 
     /// The tokens, for an error message.
-    pub const TOKEN_LIST: &'static str = "primary, comparison";
+    ///
+    /// A literal so that it is a `&'static str` usable in a `thiserror` format
+    /// string; held to [`ALL`](Self::ALL) by `dz-publisher-runtime`'s
+    /// `tests/sources.rs::the_token_list_is_the_role_set`, because a role this
+    /// build accepts and the refusal does not name is a role an operator cannot
+    /// discover from the message.
+    pub const TOKEN_LIST: &'static str = "primary, comparison, upstream-partition";
+
+    /// Whether a fatal error from a source in this role ends the process.
+    ///
+    /// **The whole of what a role decides about a live run.** `Driver::run`
+    /// returns only on
+    /// [`IngressError::Fatal`](dz_ingress_core::IngressError::Fatal),
+    /// whose documented causes are the per-source configuration faults found at
+    /// connect — an invalid endpoint, a missing credential path, an unsupported
+    /// scheme — so this is the answer to *does one connection's configuration
+    /// fault take the publisher down with it?*
+    ///
+    /// `true` for a [`Primary`](Self::Primary), because the wire is fed from it,
+    /// and for an [`UpstreamPartition`](Self::UpstreamPartition), because the
+    /// instruments it carries arrive nowhere else and nothing else reports their
+    /// loss. `false` for a [`Comparison`](Self::Comparison): everything it
+    /// carries arrives on the primary too, so what its loss costs is the
+    /// comparison, and `dz_publisher_ingress_connection_state` at 0 for that
+    /// `connection` is the signal that says so.
+    ///
+    /// A total match rather than a `matches!`, so a role added to this set
+    /// cannot take a default answer to this question.
+    #[must_use]
+    pub const fn fatal_error_ends_the_process(self) -> bool {
+        match self {
+            Self::Primary | Self::UpstreamPartition => true,
+            Self::Comparison => false,
+        }
+    }
 
     /// Resolve a token.
     ///
@@ -242,8 +326,9 @@ pub struct Source {
     pub connection: ConnectionId,
     /// Which transport carries it.
     pub kind: Kind,
-    /// What this publisher does with it. Consumed at runtime: only a
-    /// `primary`'s fatal error ends the process. See the runtime's
+    /// What this publisher does with it. Consumed at runtime for one decision:
+    /// whether a fatal error from this source ends the process. See
+    /// [`SourceRole::fatal_error_ends_the_process`] and the runtime's
     /// `SourceSection`.
     pub role: SourceRole,
     /// The venue's own endpoint keys.
@@ -263,10 +348,15 @@ impl std::fmt::Debug for Source {
 }
 
 impl Source {
-    /// Whether a fatal error from this source ends the process.
+    /// Whether this is a `primary`, which is the one thing the one-primary rule
+    /// counts.
     ///
-    /// Only a primary's does. Everything else is dropped, named and left with
-    /// its `connection_state` at 0.
+    /// Exactly the role and nothing else, so no role added to the set can
+    /// satisfy or violate that rule: a partitioned upstream declares one
+    /// `primary` and an `upstream-partition` per further connection, and the
+    /// rule sees one primary as it does on a publisher with a single source.
+    /// Which failures are fatal is a separate question, asked of
+    /// [`SourceRole::fatal_error_ends_the_process`].
     #[must_use]
     pub const fn is_primary(&self) -> bool {
         matches!(self.role, SourceRole::Primary)

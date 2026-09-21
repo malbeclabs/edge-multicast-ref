@@ -280,6 +280,11 @@ pub enum StartupError {
     /// Two primaries are therefore two publishers' worth of events wherever
     /// they land. None is a publisher whose data has no path to the wire at all,
     /// heartbeating channels it never fills.
+    ///
+    /// **Only a `primary` block is counted.** A `comparison` block and an
+    /// `upstream-partition` block are not primaries, so neither can satisfy this
+    /// rule nor break it: a partitioned upstream declares one `primary` and one
+    /// `upstream-partition` per further connection, and the count is one.
     #[error(
         "exactly one enabled `[[source]]` must have `role = \"primary\"`; there {} {primaries}. \
          Every source's payloads reach one adapter and no event carries the source it came \
