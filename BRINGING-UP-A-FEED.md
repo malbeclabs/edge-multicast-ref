@@ -291,6 +291,43 @@ and read the other end with this repository's own Go parser — asserting
 *values*, not datagram counts. Every end-to-end exercise here does exactly
 that, and each one has found bugs that no unit test did.
 
+**A replay drives one connection, however many `[[source]]` blocks the document
+declares.** A fixture directory is one recording and nothing in it says which
+connection a payload arrived on, so one replaying input replaces every declared
+block and takes the primary's name. Replaying the directory once per block would
+publish every payload as many times as there are blocks, and a race between two
+copies of one recording is not a race. So a replay is a single-upstream exercise
+by construction, and a publisher that declares several blocks has to plan its
+offline proof around that:
+
+- **Every payload reaches the adapter on the primary's connection**, so nothing
+  the adapter keys on the connection that delivered it runs offline: a mapping
+  from a connection to the part of the upstream subscribed there, a
+  first-copy-wins discard across redundant paths — the second copy never
+  arrives, so the discard never runs — or `on_connected` and `on_disconnected`
+  for any block but the primary's. The per-`conn` state failure in
+  [Several sources for one feed](#several-sources-for-one-feed) is exactly the
+  failure a replay cannot reproduce.
+- **Metric pre-creation reads the input list after the substitution**, so the
+  two families labelled by `connection` —
+  `dz_publisher_ingress_connection_state` and
+  `dz_publisher_ingress_messages_total` — come up with one connection value in a
+  replay run rather than one per declared block. This is the quiet one: the run
+  succeeds and publishes, and a venue checking that every series renders at
+  startup gets a pass covering one connection out of however many it declared.
+  That check belongs against a live run.
+- **What a replay does settle for several blocks is the document and the
+  composition**: the roles resolve, the venue's `main` builds one `Input` per
+  declared block, and the declared set and the built set are held equal — so a
+  block the binary does not build is a startup failure offline too. Those
+  transports are then dropped unused, and a line on stderr names how many
+  payloads are being replayed, from where, and under which connection.
+
+For the single upstream source the mechanism was built for, that bounds nothing:
+the recorded bytes drive the whole of `run()` — the config document, the
+registry, the adapter, the lowering, the sockets and the teardown — which is the
+strongest offline proof this runtime offers.
+
 ### 5. Configuration
 
 One document, checked at startup, with unknown keys refused — so a misspelled
@@ -473,7 +510,10 @@ role = "comparison"         # connected, driven, counted — for the race
   `connection`, pre-created at 0 for every declared source, so a second upstream
   that never came up is a series sitting at zero rather than no series at all. A
   name with leading or trailing whitespace is refused rather than trimmed —
-  `"ws"` and `"ws "` would be two series a dashboard cannot tell apart.
+  `"ws"` and `"ws "` would be two series a dashboard cannot tell apart. Under
+  `[adapter.replay]` that pre-creation follows the one replaying input instead,
+  which is one series whatever the document declares: see
+  [Prove it offline before you point it at anything](#4-prove-it-offline-before-you-point-it-at-anything).
 - **One session per source, and per nothing else.** One driver is opened per
   enabled `[[source]]`, so a publisher carrying sixty-two channel instances of
   one feed specification over one source opens **one** upstream connection: a
@@ -545,7 +585,9 @@ discontinuity — which an adapter that answers discontinuities with a reset tur
 into an `InstrumentReset` and a recovery snapshot on the live wire, from a
 connection that publishes nothing. Migration is one config block and one line in
 the venue's `main` with the adapter untouched, which is exactly why this is
-worth reading first.
+worth reading first — and an offline run is not what catches it, because a
+replay drives one connection and the second block's `on_connected` never runs.
+See [Prove it offline before you point it at anything](#4-prove-it-offline-before-you-point-it-at-anything).
 
 ## The recorder
 
