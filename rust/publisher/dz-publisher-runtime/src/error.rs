@@ -576,8 +576,12 @@ pub enum StartupError {
     /// wants exactly that learns the key is a hop count and has no reason to
     /// read `0` as anything but *fewer hops than one*.
     ///
-    /// Refused here rather than through a `NonZeroU8`, which would answer with
-    /// serde's own message and name no line to write.
+    /// Refused here, with this message, rather than by deserializing the key
+    /// into a `NonZeroU8`: serde would answer with its own message and name no
+    /// line to write. The policy this section resolves into carries a
+    /// `NonZeroU8` — see `EgressPolicy::ttl` — so this is the refusal an
+    /// operator reads, and a hand-composed zero is a compile error rather than
+    /// a second copy of this check.
     #[error(
         "`[egress] ttl = 0` keeps every datagram inside this host: the kernel accepts each one \
          and none reaches an interface. It is not a smaller hop count than 1 — `ttl = 1` is the \

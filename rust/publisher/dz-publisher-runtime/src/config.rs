@@ -34,6 +34,7 @@
 
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::num::NonZeroU8;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -1093,10 +1094,10 @@ impl EgressSection {
         let ttl = self.ttl.ok_or(StartupError::TtlUnstated)?;
         // Zero is not a smaller hop count, it is no hop at all — and it is the
         // value the refusal above invites, since that message teaches the key
-        // is a hop count and names 1 as the attached segment.
-        if ttl == 0 {
-            return Err(StartupError::TtlZero);
-        }
+        // is a hop count and names 1 as the attached segment. The refusal is
+        // stated here, with its own message, and the `NonZeroU8` is what the
+        // policy carries from here on: see `EgressPolicy::ttl`.
+        let ttl = NonZeroU8::new(ttl).ok_or(StartupError::TtlZero)?;
         Ok(EgressPolicy {
             pin,
             expected_prefix,

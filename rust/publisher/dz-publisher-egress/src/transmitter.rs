@@ -3,6 +3,7 @@
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
+use std::num::NonZeroU8;
 
 use dz_edge_core::{PortRole, MAX_DATAGRAM_SIZE};
 
@@ -59,9 +60,13 @@ impl KernelSocket {
     /// reported here rather than survived: the address is re-derived by opening
     /// a new socket, which is a decision for whatever supervises this
     /// publisher.
-    pub fn open(source: Ipv4Addr, destination: SocketAddrV4, ttl: u8) -> io::Result<Self> {
+    ///
+    /// `ttl` is a [`NonZeroU8`] because a hop count of zero is accepted by
+    /// `set_multicast_ttl_v4` and carried by no interface. See
+    /// [`EgressPolicy::ttl`].
+    pub fn open(source: Ipv4Addr, destination: SocketAddrV4, ttl: NonZeroU8) -> io::Result<Self> {
         let socket = UdpSocket::bind(SocketAddrV4::new(source, 0))?;
-        socket.set_multicast_ttl_v4(u32::from(ttl))?;
+        socket.set_multicast_ttl_v4(u32::from(ttl.get()))?;
         // Left at the kernel default, which is on. A subscriber co-located
         // with the publisher — a health checker, a local parser — receives the
         // group through it, and disabling it would make a publisher that is
@@ -208,4 +213,46 @@ pub enum OpenError {
         #[source]
         source: io::Error,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::policy::DEFAULT_TTL;
+
+    /// The hop count a policy carries is the hop count the socket holds.
+    ///
+    /// Read back off the kernel rather than inferred from a datagram arriving:
+    /// what a lost `set_multicast_ttl_v4` costs is a publisher sending one hop
+    /// while its document states 64, and a subscriber on this host's own
+    /// segment receives either way. Two values, so that a socket holding a
+    /// hard-coded hop count fails here.
+    ///
+    /// Both of them are `NonZeroU8`, because that is the only thing this
+    /// signature accepts — a zero reaching `set_multicast_ttl_v4` from a
+    /// hand-composed policy is a compile error, and the compile-failure
+    /// assertion for it is on [`EgressPolicy::ttl`].
+    ///
+    /// A real socket: it binds the loopback address and connects to a group in
+    /// MCAST-TEST-NET. Nothing is sent, no group is joined, and no privilege is
+    /// needed.
+    #[test]
+    fn the_hop_count_a_policy_carries_is_the_one_the_socket_holds() {
+        let destination = SocketAddrV4::new(Ipv4Addr::new(233, 252, 0, 9), 41_003);
+
+        for ttl in [DEFAULT_TTL, NonZeroU8::new(64).expect("a routed hop count")] {
+            let opened = KernelSocket::open(Ipv4Addr::LOCALHOST, destination, ttl)
+                .expect("a loopback source and a documentation group");
+
+            assert_eq!(
+                opened
+                    .socket
+                    .multicast_ttl_v4()
+                    .expect("the kernel reports the option it was set"),
+                u32::from(ttl.get()),
+                "the socket holds the hop count the policy stated"
+            );
+        }
+    }
 }
