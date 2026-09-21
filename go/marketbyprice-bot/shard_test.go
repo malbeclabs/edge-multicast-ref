@@ -1058,7 +1058,36 @@ func TestApplyDelta_MalformedBookClearDrainedFromPendingGaps(t *testing.T) {
 		t.Errorf("the drain must stop at the malformed record: tracker %d want 6", inst.LastAppliedInstrumentSeq)
 	}
 	if inst.Pending != nil {
-		t.Error("Pending must be dropped on the demotion")
+		t.Error("Pending must not keep consuming the reorder window against a sequence that will never be reached")
+	}
+	// 8 is a valid, unapplied delta. It moves to the delta buffer rather than
+	// being dropped: a recovery snapshot captured at seq 7 commits a book that 8
+	// still has to be applied on top of, and dropping it would leave replay
+	// staring at a hole and declare a gap this engine created itself.
+	buf := s.deltaBuf[k]
+	if len(buf) != 1 || toUint32(buf[0].Record.Fields["per_instrument_seq"]) != 8 {
+		t.Fatalf("the held valid delta must be buffered for replay, got %+v", buf)
+	}
+	if s.bufferedN != 1 {
+		t.Errorf("bufferedN %d must match the buffered records", s.bufferedN)
+	}
+
+	// Prove it: a snapshot captured at seq 7 recovers without a gap, because 8 is
+	// still there to replay.
+	inst.BeginSnapshot(1, 899, 0, 7, 0)
+	if err := inst.EndSnapshot(1, 899); err != nil {
+		t.Fatalf("snapshot commit: %v", err)
+	}
+	s.replayBuffer(k, inst)
+
+	if inst.Status != StatusReady {
+		t.Errorf("replaying the buffered delta must recover the instrument, got %v", inst.Status)
+	}
+	if inst.LastAppliedInstrumentSeq != 8 {
+		t.Errorf("the buffered delta must replay: tracker %d want 8", inst.LastAppliedInstrumentSeq)
+	}
+	if got := counterValue(m.PerInstrumentGapsTotal); got != 0 {
+		t.Errorf("recovery must not declare a gap: per_instrument_gaps_total = %v want 0", got)
 	}
 }
 

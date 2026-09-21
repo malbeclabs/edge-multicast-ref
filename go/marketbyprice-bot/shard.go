@@ -271,7 +271,7 @@ func (s *Shard) applyDeltaToReady(k instKey, inst *Instrument, rec Record) []Cha
 	ev, malformed := s.applyOne(inst, rec)
 	evs := []ChannelEvent{ev}
 	if malformed != nil {
-		s.demoteMalformed(inst, malformed)
+		s.demoteMalformed(k, inst, malformed)
 		return evs
 	}
 	for inst.Pending != nil {
@@ -284,7 +284,7 @@ func (s *Shard) applyDeltaToReady(k instKey, inst *Instrument, rec Record) []Cha
 		pev, pMalformed := s.applyOne(inst, pr)
 		evs = append(evs, pev)
 		if pMalformed != nil {
-			s.demoteMalformed(inst, pMalformed)
+			s.demoteMalformed(k, inst, pMalformed)
 			return evs
 		}
 		if len(inst.Pending) == 0 {
@@ -312,17 +312,34 @@ func (s *Shard) applyDeltaToReady(k instKey, inst *Instrument, rec Record) []Cha
 // is an operator's measure of mktdata loss, and a publisher defect landing in it
 // sends them looking for packet loss that never happened.
 //
-// Pending is dropped, matching the sequence-gap path: every entry is keyed to a
-// sequence the recovery snapshot will jump past, and left behind they would still
-// count toward the reorder-window bound. The malformed record itself is NOT
-// buffered — unlike the gap path, where the delta that revealed the gap is a
-// valid message worth replaying, this one can never contribute anything, and
-// replaying it would only demote the instrument a second time.
-func (s *Shard) demoteMalformed(inst *Instrument, err error) {
+// Pending moves to the delta buffer rather than being dropped. Its entries are
+// valid, unapplied deltas that arrived ahead of a hole, and the recovery snapshot
+// is not guaranteed to cover them: a publisher that captured this instrument at
+// the sequence just before the malformed message commits a book those deltas
+// still have to be applied on top of. Dropping them would leave replay staring at
+// a hole and declare a per-instrument gap this engine created itself. They cannot
+// stay in Pending either, where they would keep consuming the reorder-window
+// bound against a sequence that will never be reached.
+//
+// The malformed record itself is NOT buffered. Unlike the sequence-gap path,
+// where the delta that revealed the gap is a valid message worth replaying, this
+// one can never contribute anything, and replaying it would only demote the
+// instrument a second time.
+func (s *Shard) demoteMalformed(k instKey, inst *Instrument, err error) {
 	reason := malformedReason(err)
 	log.Printf("shard %d instrument %d: %v, demoting to gap reason=%s", s.idx, inst.ID, err, reason)
 	inst.Status = StatusGap
+	// Collected before buffering: bufferDelta can evict this instrument's buffer
+	// under the shard budget, and that eviction clears Pending out from under a
+	// range over it.
+	held := make([]Record, 0, len(inst.Pending))
+	for _, pr := range inst.Pending {
+		held = append(held, pr)
+	}
 	inst.Pending = nil
+	for _, pr := range held {
+		s.bufferDelta(k, pr)
+	}
 	if s.metrics != nil {
 		s.metrics.MalformedDeltasTotal.WithLabelValues(reason).Inc()
 	}
