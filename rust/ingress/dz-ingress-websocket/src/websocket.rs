@@ -257,6 +257,14 @@ impl WebSocketInput {
     /// payload the venue sent, while the stream is being polled, so a venue
     /// that only wants its own pings echoed is already served.
     ///
+    /// **A pong's body is not matched against the ping that asked for it.** The
+    /// grace this transport keeps is satisfied by any pong, because what it
+    /// detects is a socket that has stopped carrying anything at all, and a
+    /// venue that answers the previous ping late still proves that much. So a
+    /// provider that puts a sequence value in the body gets the venue to accept
+    /// the keepalive; it does not get this transport to check which ping came
+    /// back.
+    ///
     /// **At most [`MAX_PING_PAYLOAD_BYTES`] bytes**, which is the protocol's
     /// limit and not this crate's. A provider that overruns it stops the driver
     /// rather than having its body truncated or sent: a truncated token is not
@@ -350,8 +358,16 @@ impl WebSocketInput {
     /// Truncating hands the venue a token that is not the token and lets it
     /// decide the keepalive was not satisfied. Sending it anyway puts a control
     /// message the protocol forbids on the wire, and the venue answers that
-    /// with a close — counted against the venue, in a series that says
-    /// `remote_close`, explaining nothing.
+    /// with a close.
+    ///
+    /// **What separates the two is the driver and not the metric.** A fatal
+    /// fault on a live connection is still counted as one reconnect under
+    /// `remote_close` — see [`IngressError::disconnect_reason`], which gives
+    /// `Fatal` the least specific of the four reasons rather than inventing a
+    /// fifth — so both roads pass through the same series once. Then they part:
+    /// refusing stops the driver, where a restart policy acts on it, and
+    /// sending it reconnects into the same refusal for as long as nobody is
+    /// reading the series.
     fn ping_message(&self) -> Result<Message, IngressError> {
         let Some(provider) = self.ping_payload.as_ref() else {
             // Byte for byte what this transport sends with no provider set,
@@ -866,6 +882,14 @@ mod tests {
             .ping_message()
             .expect_err("126 bytes is not sendable");
         assert!(error.is_fatal(), "{error}");
-        assert!(error.to_string().contains("126"), "{error}");
+        // The whole phrase, because the two numbers on their own are digits an
+        // endpoint's port can supply: what has to be reported is the length
+        // that was refused *and* the limit it was measured against.
+        assert!(
+            error
+                .to_string()
+                .contains("is 126 bytes and a ping carries at most 125"),
+            "{error}"
+        );
     }
 }

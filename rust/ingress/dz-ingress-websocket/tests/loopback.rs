@@ -49,6 +49,14 @@ const CONNECTION: ConnectionId = ConnectionId::new("mktdata");
 /// handshake.
 const FAST_PING: Duration = Duration::from_millis(60);
 
+/// A ping cadence for a test that needs more than one ping round trip.
+///
+/// The grace a pong is given is one interval, so each exchange has to complete
+/// inside one, and a test wanting two of them takes that risk twice — on a host
+/// running the rest of this suite beside it. Long enough that a contended
+/// runtime does not read as a half-open socket, short enough to stay a test.
+const PATIENT_PING: Duration = Duration::from_millis(200);
+
 // ---------------------------------------------------------------------------
 // A websocket server on loopback
 // ---------------------------------------------------------------------------
@@ -193,14 +201,19 @@ async fn serve_recording_all(
                             .await;
                     }
                     Serve::ExpectPing => {
-                        // Reading past anything else on the way: a client is
+                        // Reading past anything else on the way - a client is
                         // free to send its subscriptions before its first ping
-                        // falls due, and the ping is what this waits for.
+                        // falls due - and recording it, so that a script mixing
+                        // this with `Expect` does not lose the message that
+                        // arrived first.
                         while let Some(Ok(message)) = stream.next().await {
                             if let Message::Ping(body) = message {
                                 pinged.lock().expect("the recorder").push(body.to_vec());
                                 break;
                             }
+                            sink.lock()
+                                .expect("the recorder")
+                                .push(message.to_text().unwrap_or("<binary>").to_string());
                         }
                     }
                     Serve::Hold(duration) => tokio::time::sleep(duration).await,
@@ -561,7 +574,7 @@ async fn the_provider_runs_again_for_every_ping_and_the_second_body_is_the_new_o
     let counted = Arc::clone(&calls);
     let mut input = WebSocketInput::new(CONNECTION, endpoint(address))
         .expect("an endpoint")
-        .with_ping_interval(FAST_PING)
+        .with_ping_interval(PATIENT_PING)
         // An atomic in the capture, which is what the `Fn` bound asks of a
         // venue and what the header provider's own test does with a timestamp.
         .with_ping_payload(move || {
@@ -584,13 +597,22 @@ async fn the_provider_runs_again_for_every_ping_and_the_second_body_is_the_new_o
 }
 
 #[tokio::test]
-async fn a_ping_body_over_the_protocol_limit_stops_the_driver_and_never_reaches_the_venue() {
+async fn a_ping_body_over_the_protocol_limit_stops_the_driver_rather_than_going_out() {
     // The protocol allows a control message 125 bytes of application data and
-    // the library does not check that on the way out, so an over-long body
-    // would go out and be answered with a close - which is `remote_close`,
-    // counted against the venue, explaining nothing. Stopped instead, for the
-    // reason an invalid header value stops the driver.
-    let (address, pings) = serve_recording_pings(vec![vec![Serve::ExpectPing]]).await;
+    // the library checks that on the way in and not on the way out, so an
+    // over-long body would go out and be answered by a peer failing the
+    // connection - which is a reconnect loop against a fault a reconnect cannot
+    // reach. Stopped instead, for the reason an invalid header value stops the
+    // driver.
+    //
+    // **That the ping did not go out is read off the error and not off the
+    // recorder.** The server here is this same library, which refuses an
+    // over-long control message before any of its own code sees one, so an
+    // empty ping recorder says only that nothing was recorded. The fatal below
+    // is the discriminator: with the length guard removed this call returns
+    // `Ended` instead - "Connection reset without closing handshake", the
+    // server having failed the connection over the ping it was sent.
+    let (address, _pings) = serve_recording_pings(vec![vec![Serve::ExpectPing]]).await;
 
     let token = "not-a-real-keepalive-token";
     let mut input = WebSocketInput::new(CONNECTION, endpoint(address))
@@ -614,8 +636,12 @@ async fn a_ping_body_over_the_protocol_limit_stops_the_driver_and_never_reaches_
         error.is_fatal(),
         "a body that overruns the limit is not something a retry fixes: {error}"
     );
+    // The whole phrase, because either number on its own is digits the
+    // endpoint's ephemeral port can supply.
     assert!(
-        error.to_string().contains("126") && error.to_string().contains("125"),
+        error
+            .to_string()
+            .contains("is 126 bytes and a ping carries at most 125"),
         "the length that was refused and the limit are what identify it: {error}"
     );
     // A ping body is where a venue wants its token, so it is held to the
@@ -623,10 +649,6 @@ async fn a_ping_body_over_the_protocol_limit_stops_the_driver_and_never_reaches_
     assert!(
         !error.to_string().contains(token),
         "a ping body reached a log line: {error}"
-    );
-    assert!(
-        pings.lock().expect("the recorder").is_empty(),
-        "the over-long ping went out anyway"
     );
 }
 
