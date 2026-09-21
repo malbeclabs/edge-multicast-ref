@@ -184,5 +184,9 @@ go build -ldflags "-X main.version=0.1.0 -X main.commit=$(git rev-parse --short 
 ## Testing
 
 ```bash
-go test -v .
+go test -v ./...
 ```
+
+`./...` rather than `.`: the wire format and the parser state machine live in
+the `tob` package, and the golden-vector suite that binds this decoder to
+[`testdata/golden/`](../../testdata/golden/) is there with them.

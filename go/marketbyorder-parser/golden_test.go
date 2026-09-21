@@ -7,11 +7,10 @@ import (
 	"testing"
 )
 
-// The golden vectors are the cross-language contract. The Rust codec crate
-// writes the five depth files and asserts the same field values against them;
-// the four below them — Trade, both InstrumentDefinition generations and
-// ManifestSummary — were transcribed by hand from the field tables in
-// edge-feed-spec. This side reads all nine with this parser's own decoder.
+// The golden vectors are the cross-language contract. These four were
+// transcribed by hand from the field tables in edge-feed-spec rather than
+// captured from an encoder; the Rust codec crates assert the same field values
+// against them, and this side reads them with this parser's own decoder.
 //
 // That is what makes them worth having. Two implementations tested only against
 // themselves agree with themselves — including when both are wrong in the same
@@ -24,10 +23,12 @@ import (
 // settle_type and price_bound all as 0, so a decoder exchanging either pair
 // passes. Separating them means changing a vector, which is a wire change.
 //
-// Trade, InstrumentDefinition and ManifestSummary are byte-identical across the
-// family and this parser decodes its own copy of each, so the vectors bind them
-// here as well as in the top-of-book and market-by-order parsers. The depth
-// vectors are this feed's alone.
+// Four of the vectors belong to this feed. Trade, InstrumentDefinition and
+// ManifestSummary are byte-identical across the family, so this decoder has to
+// read the same bytes the top-of-book one does. The depth vectors are not among
+// them: SnapshotBegin carries Total Orders and a 32-byte body here against
+// market-by-price's Total Levels, Depth Bound and 36, and the manifest tags
+// those vectors `"feed": "market-by-price"` for that reason.
 //
 // The expected values are the `fields` block of testdata/golden/manifest.json,
 // which is where an implementation in any language reads them from, and the
@@ -47,7 +48,7 @@ import (
 // time.Time is compared as the nanoseconds the manifest states.
 //
 // The files carry the application message including its 4-byte header; the
-// Parse* functions below take the body, so each case slices past it.
+// Parse* functions take the body, so each case slices past it.
 const goldenDir = "../../testdata/golden"
 
 func goldenBytes(t *testing.T, name string) []byte {
@@ -64,10 +65,12 @@ func goldenBytes(t *testing.T, name string) []byte {
 
 // header asserts the 4-byte application message header and returns the body.
 //
-// wantFlags is the on-wire Flags field, which is not decoration: bit 0 is set on
-// every message travelling the snapshot port, and a message carrying the wrong
-// value is one this parser counts as a SnapshotFlagMismatch defect. The vectors
-// have to state it or an implementation transcribing them inherits the bug.
+// wantFlags is the on-wire Flags field, recorded as flags_on_wire in the
+// manifest. It is 0 on all four of these: bit 0 marks a message travelling the
+// `snapshot` port, and a Trade arrives on `mktdata` while an
+// InstrumentDefinition and a ManifestSummary arrive on `refdata`. The value is
+// asserted rather than assumed because it is the one part of these bytes the
+// encoder does not decide — the builder stamps it at push, from the port.
 func header(t *testing.T, buf []byte, wantType uint8, wantSize int, wantFlags uint16) []byte {
 	t.Helper()
 	if len(buf) != wantSize {
@@ -120,92 +123,6 @@ func checkText(t *testing.T, fields []goldenText) {
 	}
 }
 
-func TestGoldenLevelUpdate(t *testing.T) {
-	body := header(t, goldenBytes(t, "level-update-v3.bin"), msgTypeLevelUpdate, 48, 0)
-	b, err := ParseLevelUpdate(body)
-	if err != nil {
-		t.Fatalf("ParseLevelUpdate: %v", err)
-	}
-	checkFields(t, []goldenField{
-		{"instrument_id", int64(b.InstrumentID), 1},
-		{"source_id", int64(b.SourceID), 2},
-		{"side", int64(b.Side), 1},
-		{"action", int64(b.Action), 1},
-		{"per_instrument_seq", int64(b.PerInstrumentSeq), 4242},
-		{"price_raw", b.PriceRaw, 10000500},
-		{"qty_raw", int64(b.QtyRaw), 7250},
-		{"timestamp_ns", b.Timestamp.UnixNano(), 1700000000000000003},
-		{"order_count", int64(b.OrderCount), 5},
-		{"level_index", int64(b.LevelIndex), 6},
-		{"update_reason", int64(b.UpdateReason), 2},
-		{"level_flags", int64(b.LevelFlags), 8},
-	})
-}
-
-func TestGoldenBookClear(t *testing.T) {
-	body := header(t, goldenBytes(t, "book-clear-v3.bin"), msgTypeBookClear, 36, 0)
-	b, err := ParseBookClear(body)
-	if err != nil {
-		t.Fatalf("ParseBookClear: %v", err)
-	}
-	checkFields(t, []goldenField{
-		{"instrument_id", int64(b.InstrumentID), 1},
-		{"source_id", int64(b.SourceID), 2},
-		{"clear_side", int64(b.ClearSide), 1},
-		{"scope", int64(b.Scope), 1},
-		{"per_instrument_seq", int64(b.PerInstrumentSeq), 4243},
-		{"from_price_raw", b.FromPriceRaw, 10000500},
-		{"timestamp_ns", b.Timestamp.UnixNano(), 1700000000000000004},
-		{"clear_reason", int64(b.ClearReason), 3},
-	})
-}
-
-func TestGoldenSnapshotBegin(t *testing.T) {
-	body := header(t, goldenBytes(t, "snapshot-begin-v3.bin"), msgTypeSnapshotBegin, 40, flagSnapshot)
-	b, err := ParseSnapshotBegin(body)
-	if err != nil {
-		t.Fatalf("ParseSnapshotBegin: %v", err)
-	}
-	checkFields(t, []goldenField{
-		{"instrument_id", int64(b.InstrumentID), 1},
-		{"anchor_seq", int64(b.AnchorSeq), 918273645},
-		{"total_levels", int64(b.TotalLevels), 2},
-		{"snapshot_id", int64(b.SnapshotID), 77},
-		{"last_instrument_seq", int64(b.LastInstrumentSeq), 4241},
-		{"timestamp_ns", b.Timestamp.UnixNano(), 1700000000000000005},
-		{"depth_bound", int64(b.DepthBound), 50},
-	})
-}
-
-func TestGoldenSnapshotLevel(t *testing.T) {
-	body := header(t, goldenBytes(t, "snapshot-level-v3.bin"), msgTypeSnapshotLevel, 32, flagSnapshot)
-	b, err := ParseSnapshotLevel(body)
-	if err != nil {
-		t.Fatalf("ParseSnapshotLevel: %v", err)
-	}
-	checkFields(t, []goldenField{
-		{"snapshot_id", int64(b.SnapshotID), 77},
-		{"price_raw", b.PriceRaw, 9999500},
-		{"qty_raw", int64(b.QtyRaw), 12500},
-		{"order_count", int64(b.OrderCount), 3},
-		{"side", int64(b.Side), 0},
-		{"level_flags", int64(b.LevelFlags), 4},
-	})
-}
-
-func TestGoldenSnapshotEnd(t *testing.T) {
-	body := header(t, goldenBytes(t, "snapshot-end-v3.bin"), msgTypeSnapshotEnd, 20, flagSnapshot)
-	b, err := ParseSnapshotEnd(body)
-	if err != nil {
-		t.Fatalf("ParseSnapshotEnd: %v", err)
-	}
-	checkFields(t, []goldenField{
-		{"instrument_id", int64(b.InstrumentID), 1},
-		{"anchor_seq", int64(b.AnchorSeq), 918273645},
-		{"snapshot_id", int64(b.SnapshotID), 77},
-	})
-}
-
 func TestGoldenTrade(t *testing.T) {
 	body := header(t, goldenBytes(t, "trade-v3.bin"), msgTypeTrade, 52, 0)
 	tr, err := ParseTrade(body)
@@ -256,7 +173,7 @@ func instDefText(d InstrumentDefinitionBody) []goldenText {
 
 func TestGoldenInstrumentDefinitionV3(t *testing.T) {
 	body := header(t, goldenBytes(t, "instrument-definition-v3.bin"), msgTypeInstrumentDefinition, 130, 0)
-	d, err := ParseInstrumentDefinition(body, mbpSchemaVersionV3)
+	d, err := ParseInstrumentDefinition(body, mboSchemaVersionV3)
 	if err != nil {
 		t.Fatalf("ParseInstrumentDefinition: %v", err)
 	}
@@ -269,7 +186,7 @@ func TestGoldenInstrumentDefinitionV3(t *testing.T) {
 // between schema generations, so it is the one most likely to drift.
 func TestGoldenInstrumentDefinitionV1(t *testing.T) {
 	body := header(t, goldenBytes(t, "instrument-definition-v1.bin"), msgTypeInstrumentDefinition, 80, 0)
-	d, err := ParseInstrumentDefinition(body, mbpSchemaVersionV1)
+	d, err := ParseInstrumentDefinition(body, mboSchemaVersionV1)
 	if err != nil {
 		t.Fatalf("ParseInstrumentDefinition: %v", err)
 	}
