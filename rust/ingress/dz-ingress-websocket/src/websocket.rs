@@ -238,10 +238,10 @@ impl WebSocketInput {
 
     /// The body of each outbound ping, computed again for **every** ping.
     ///
-    /// Optional, and unset is what this transport sends with nothing
-    /// configured: an empty ping, which is what the protocol asks for and what
-    /// a venue that does not read the body accepts. Setting this is for the
-    /// venue that reads it.
+    /// Optional. Unset, this transport pings with an empty body — which the
+    /// protocol permits rather than requires, a ping being free to carry
+    /// application data or none, and which a venue that does not read the body
+    /// accepts. Setting this is for the venue that reads it.
     ///
     /// A closure and not a fixed value for the reason
     /// [`with_headers`](Self::with_headers) is one: a venue that reads the body
