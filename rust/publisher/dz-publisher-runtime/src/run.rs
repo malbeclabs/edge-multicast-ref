@@ -173,6 +173,12 @@ pub fn run_with_version(version: &str, registry: AdapterRegistry) -> ExitCode {
             print!("{}", version_stdout(version));
             return ExitCode::SUCCESS;
         }
+        // Asking what the accepted forms are is not a failure to name one, and
+        // the answer goes where an answer goes.
+        Ok(Invocation::Help) => {
+            println!("{USAGE}");
+            return ExitCode::SUCCESS;
+        }
         Ok(Invocation::Config(path)) => path,
         Err(error) => return report_refusal(&error),
     };
@@ -219,46 +225,80 @@ enum Invocation {
     /// Report the version and exit. Publishes nothing, binds nothing, and reads
     /// no configuration file: it is asked of a binary that is not running.
     Version,
+    /// Print [`USAGE`] and exit. Publishes nothing, for the same reason.
+    Help,
     /// Load this configuration and publish.
     Config(PathBuf),
 }
 
 /// Read the invocation out of the arguments after the program name.
 ///
+/// **Every argument is examined, and the two that publish nothing win wherever
+/// they appear.** A parser that read only the first would start a publisher for
+/// `<publisher> --config publisher.toml --version` — binding transmitters and
+/// putting datagrams on a group in answer to a question about a string — and
+/// that ordering is the one a unit file writes, because the recorder beside
+/// this takes it.
+///
 /// **An option this parser does not know is refused by name.** Anything left to
-/// fall through to the bare-path arm becomes a filename, so a misspelled flag —
-/// or a flag this parser has not been taught — fails as a configuration file
-/// that could not be opened, named `--whatever-it-was`. That is a true
-/// statement about a file nobody meant and it says nothing about the command
-/// line, which is the one thing wrong with it.
+/// fall through to the path arm becomes a filename, so a misspelled flag — or a
+/// flag this parser has not been taught — fails as a configuration file that
+/// could not be opened, named `--whatever-it-was`. That is a true statement
+/// about a file nobody meant and it says nothing about the command line, which
+/// is the one thing wrong with it.
 ///
 /// A leading `-` is what makes an argument an option here, so a real file is
 /// still named bare: only a path that begins with a dash has to be written
-/// `--config -weird-name` or `./-weird-name`, and neither is a path anybody has.
+/// `--config -weird-name` or `./-weird-name`. The value after `--config` is
+/// taken as written, dash or no dash, because naming it after the option is
+/// what says it is a path.
 fn invocation<I: IntoIterator<Item = OsString>>(args: I) -> Result<Invocation, StartupError> {
+    let mut path: Option<PathBuf> = None;
     let mut args = args.into_iter();
-    let Some(first) = args.next() else {
-        return Err(StartupError::NoConfigPath { usage: USAGE });
-    };
-    if first == "--help" || first == "-h" {
-        return Err(StartupError::NoConfigPath { usage: USAGE });
+    while let Some(arg) = args.next() {
+        if arg == "--help" || arg == "-h" {
+            return Ok(Invocation::Help);
+        }
+        if arg == "--version" || arg == "-V" {
+            return Ok(Invocation::Version);
+        }
+        if arg == "--config" {
+            let named = args
+                .next()
+                .ok_or(StartupError::NoConfigPath { usage: USAGE })?;
+            name_config_path(&mut path, named)?;
+            continue;
+        }
+        if arg.as_os_str().as_encoded_bytes().starts_with(b"-") {
+            return Err(StartupError::UnknownOption {
+                option: arg.to_string_lossy().into_owned(),
+                usage: USAGE,
+            });
+        }
+        name_config_path(&mut path, arg)?;
     }
-    if first == "--version" || first == "-V" {
-        return Ok(Invocation::Version);
+    path.map(Invocation::Config)
+        .ok_or(StartupError::NoConfigPath { usage: USAGE })
+}
+
+/// Record the configuration file, refusing a second one.
+///
+/// A publisher reads one document, so two named on one command line is a
+/// question about which — and dropping either of them answers it silently. A
+/// unit file edited to point at a new document while the old argument stayed
+/// behind is how both get named, and the reading that keeps running is the one
+/// nobody meant to keep.
+fn name_config_path(path: &mut Option<PathBuf>, named: OsString) -> Result<(), StartupError> {
+    match path {
+        Some(first) => Err(StartupError::TwoConfigPaths {
+            first: first.display().to_string(),
+            second: named.to_string_lossy().into_owned(),
+        }),
+        None => {
+            *path = Some(PathBuf::from(named));
+            Ok(())
+        }
     }
-    if first == "--config" {
-        return args
-            .next()
-            .map(|path| Invocation::Config(PathBuf::from(path)))
-            .ok_or(StartupError::NoConfigPath { usage: USAGE });
-    }
-    if first.as_os_str().as_encoded_bytes().starts_with(b"-") {
-        return Err(StartupError::UnknownOption {
-            option: first.to_string_lossy().into_owned(),
-            usage: USAGE,
-        });
-    }
-    Ok(Invocation::Config(PathBuf::from(first)))
 }
 
 /// Everything `run_with_version` does once the command line is understood, with
@@ -1534,15 +1574,20 @@ mod tests {
     #[test]
     fn an_option_this_parser_does_not_know_is_refused_by_name() {
         for option in ["--verison", "--nope", "-v", "-"] {
-            match invocation_of(&[option]) {
-                Err(StartupError::UnknownOption {
-                    option: named,
-                    usage,
-                }) => {
-                    assert_eq!(named, option);
-                    assert_eq!(usage, USAGE);
+            // First, and after a configuration file that is perfectly good: an
+            // option nobody reads is not a command line anybody meant, whichever
+            // end of it the typo is at.
+            for args in [vec![option], vec!["publisher.toml", option]] {
+                match invocation_of(&args) {
+                    Err(StartupError::UnknownOption {
+                        option: named,
+                        usage,
+                    }) => {
+                        assert_eq!(named, option);
+                        assert_eq!(usage, USAGE);
+                    }
+                    other => panic!("{args:?} was not refused by name: {other:?}"),
                 }
-                other => panic!("`{option}` was not refused by name: {other:?}"),
             }
         }
     }
@@ -1559,10 +1604,67 @@ mod tests {
     /// refusal that names the usage.
     #[test]
     fn a_command_line_with_no_configuration_file_names_the_usage() {
-        for args in [vec![], vec!["--config"], vec!["--help"], vec!["-h"]] {
+        for args in [vec![], vec!["--config"]] {
             match invocation_of(&args) {
                 Err(StartupError::NoConfigPath { usage }) => assert_eq!(usage, USAGE),
                 other => panic!("{args:?} did not ask for a configuration file: {other:?}"),
+            }
+        }
+    }
+
+    /// The two forms that publish nothing win wherever they are written.
+    ///
+    /// **This is the one that costs a live publisher when it is wrong.** A
+    /// parser that read only the first argument answers
+    /// `--config publisher.toml --version` by composing everything and putting
+    /// datagrams on a group — and that ordering is not exotic: the recorder
+    /// beside this one takes it, and a unit file that runs a binary to ask what
+    /// it is writes the configuration first.
+    #[test]
+    fn the_flags_that_publish_nothing_win_wherever_they_appear() {
+        for args in [
+            vec!["--config", "publisher.toml", "--version"],
+            vec!["publisher.toml", "--version"],
+            vec!["publisher.toml", "-V"],
+        ] {
+            assert_eq!(
+                invocation_of(&args).expect("a version is still asked for"),
+                Invocation::Version,
+                "{args:?}"
+            );
+        }
+        for args in [
+            vec!["--help"],
+            vec!["-h"],
+            vec!["publisher.toml", "--help"],
+            vec!["--config", "publisher.toml", "-h"],
+        ] {
+            assert_eq!(
+                invocation_of(&args).expect("help is still asked for"),
+                Invocation::Help,
+                "{args:?}"
+            );
+        }
+    }
+
+    /// Two documents is a question about which, and there is no rule for it.
+    ///
+    /// Dropping either would answer it silently, and the answer that keeps
+    /// running is the one nobody meant to keep.
+    #[test]
+    fn two_configuration_files_are_refused_rather_than_one_being_dropped() {
+        for args in [
+            vec!["a.toml", "b.toml"],
+            vec!["--config", "a.toml", "--config", "b.toml"],
+            vec!["a.toml", "--config", "b.toml"],
+            vec!["--config", "a.toml", "b.toml"],
+        ] {
+            match invocation_of(&args) {
+                Err(StartupError::TwoConfigPaths { first, second }) => {
+                    assert_eq!(first, "a.toml", "{args:?}");
+                    assert_eq!(second, "b.toml", "{args:?}");
+                }
+                other => panic!("{args:?} did not refuse the second file: {other:?}"),
             }
         }
     }
@@ -1600,7 +1702,32 @@ mod tests {
     /// above is not itself a match.
     #[test]
     fn one_compile_time_version_read_serves_both_answers() {
-        const READ: &str = "env!(\"CARGO_PKG_VERSION\")";
+        // The macro, and the constant it is bound to: a second use of either is
+        // a second answer. `RUNTIME_VERSION` is allowed twice — where it is
+        // defined, and where `run` hands it over as the default.
+        for (read, allowed) in [("env!(\"CARGO_PKG_VERSION\")", 1), ("RUNTIME_VERSION", 2)] {
+            let uses = version_reads_in_run_rs(read);
+            assert_eq!(
+                uses.len(),
+                allowed,
+                "`{read}` is used {} times outside comments in run.rs, expected \
+                 {allowed}: the version `--version` prints and the version \
+                 `dz_publisher_build_info` carries are one argument, threaded \
+                 from `run_with_version`, and anything that reads the build's \
+                 own number again is a second answer to one question. Found: \
+                 {uses:?}",
+                uses.len()
+            );
+        }
+    }
+
+    /// The lines of `run.rs` above this module that use `read`, comments aside.
+    ///
+    /// Comments are skipped, which is the rule the public-repository check
+    /// applies for the same reason: naming the macro in order to explain it is
+    /// not a use of it. The scan stops at this module, so the needles above are
+    /// not themselves matches.
+    fn version_reads_in_run_rs(read: &str) -> Vec<&'static str> {
         let source = include_str!("run.rs");
         let above_this_module = source
             .split("\n#[cfg(test)]\n")
@@ -1610,19 +1737,11 @@ mod tests {
             above_this_module.len() < source.len(),
             "the test module was not found, so this scan covers itself"
         );
-        let reads: Vec<&str> = above_this_module
+        above_this_module
             .lines()
             .filter(|line| !line.trim_start().starts_with("//"))
-            .filter(|line| line.contains(READ))
-            .collect();
-        assert_eq!(
-            reads.len(),
-            1,
-            "`{READ}` is read {} times in run.rs: the version `--version` prints \
-             and the version `dz_publisher_build_info` carries must be one \
-             argument, threaded from `run_with_version`. Found: {reads:?}",
-            reads.len()
-        );
+            .filter(|line| line.contains(read))
+            .collect()
     }
 
     /// An adapter that records what the wrapper forwarded to it.

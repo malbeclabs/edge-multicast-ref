@@ -669,6 +669,16 @@ pub enum StartupError {
     #[error("`{option}` is not an option this publisher knows: {usage}")]
     UnknownOption { option: String, usage: &'static str },
 
+    /// Two configuration files on one command line.
+    ///
+    /// Both named, because the refusal is that there is a choice here and no
+    /// rule for making it: a publisher reads one document, and taking the first
+    /// or the last would decide which of an operator's two answers counts
+    /// without saying so. The likely way in is a unit file pointed at a new
+    /// document while the old argument stayed behind.
+    #[error("two configuration files were named, `{first}` and `{second}`: a publisher reads one")]
+    TwoConfigPaths { first: String, second: String },
+
     /// `[adapter.tee] enabled = true` with no `path`.
     ///
     /// The same shape as [`Self::ReplayWithoutPath`]: a section switched on and

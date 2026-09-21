@@ -169,9 +169,11 @@ naming every token it did, because *what is in this binary* is the question an
 operator cannot answer from the config file in front of them.
 
 The command line is the configuration path — bare, or after `--config` — plus
-`--version`/`-V` and `--help`/`-h`. An option the parser does not know is
+`--version`/`-V` and `--help`/`-h`, which are answered wherever on the line they
+are written. Every argument is read: an option the parser does not know is
 refused by name rather than opened as a file, so a misspelled flag fails as the
-flag it is.
+flag it is, and two configuration files are refused naming both rather than one
+of them being dropped. `--help` prints the accepted forms on stdout and exits 0.
 
 **`--version` writes one line to stdout and exits 0: the version, alone.** That
 is the string a deployment compares against the version it pinned, and the tag
