@@ -53,9 +53,9 @@
 --
 -- THE STANDING RULE FROM `004` APPLIES HERE TOO: a later file that adds a venue
 -- table the dashboards read adds its `GRANT SELECT` to this list and says in
--- its own header that this file has to be applied again. A file that does not
--- ships a table the reader cannot see, found when somebody opens a panel rather
--- than in review.
+-- its own header that this file has to be applied again. A file that does not do
+-- so ships a table the reader cannot see, found when somebody opens a panel
+-- rather than in review.
 --
 -- SCOPED TO THE VENUE TABLES AND NOT TO `recorder.*`, matching `004`'s
 -- table-level grants and matching what was actually applied. The cost is the
