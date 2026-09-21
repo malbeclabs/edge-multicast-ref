@@ -3587,6 +3587,67 @@ fn the_reader_file_grants_nothing_to_lake_and_says_why() {
     );
 }
 
+/// `012` records the three grants the live cluster holds and the statements
+/// that remove them.
+///
+/// Re-applying this file replays a grant and revokes nothing, so the block of
+/// `GRANT`s is not the state of Lake's access on the cluster where the reverted
+/// grants were applied by hand. Review asked for a `REVOKE` statement or the
+/// outstanding grants named, and the file names them, which is the half that
+/// cannot be checked from here: no test can see a cluster, and the paragraph
+/// goes on reading true after the cleanup has happened. So what is pinned is
+/// that the record is whole — both the grants and the statements that undo
+/// them, and the date that lets a reader decide whether it still applies —
+/// because a record that is missing the revoke leaves the next operator to
+/// compose it, and one missing the date cannot be retired.
+#[test]
+fn the_reader_file_records_the_grants_the_cluster_still_holds() {
+    let reader = migration("012_recorder_reader_grants.sql").sql;
+    let prose = reader
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("--"))
+        .map(|l| l.trim_start_matches('-').trim())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    for object in ["venue_book_top", "venue_object", "venue_book_top_settled"] {
+        assert!(
+            prose.contains(&format!("GRANT SELECT ON recorder.{object} TO lake_api;")),
+            "`012` does not record the outstanding grant on `{object}`, so the \
+             block below reads as the whole of Lake's access"
+        );
+        assert!(
+            prose.contains(&format!(
+                "REVOKE SELECT ON recorder.{object} FROM lake_api;"
+            )),
+            "`012` names the outstanding grant on `{object}` without the \
+             statement that removes it, leaving an administrator to compose it"
+        );
+    }
+
+    // The date is what lets a reader retire the paragraph. Without it the
+    // record cannot be told from a description of the current state, and it
+    // will outlive the cleanup either way.
+    assert!(
+        prose.contains("2026-09-21"),
+        "the outstanding grants are recorded with no date, so nothing says \
+         whether they are still outstanding"
+    );
+
+    // And none of it is applied by this file, which grants and does not
+    // revoke: the splitter ignores a `;` inside a comment, so these six lines
+    // are prose and stay prose.
+    assert!(
+        !reader
+            .lines()
+            .map(str::trim)
+            .any(|l| l.starts_with("REVOKE")),
+        "`012` revokes as a statement, which names `lake_api` on every cluster \
+         built afterwards and fails where Lake is not deployed"
+    );
+}
+
 /// `009` tells an operator to re-apply the READER's grants too.
 ///
 /// The sibling of `the_venue_file_tells_an_operator_to_re_apply_the_account_file`,

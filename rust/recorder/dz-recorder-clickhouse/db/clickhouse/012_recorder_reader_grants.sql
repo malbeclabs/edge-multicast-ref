@@ -117,6 +117,37 @@
 -- grain, and an account that does not need a privilege should not hold one —
 -- `004`'s argument about the loader, applied to a reader.
 
+-- THE LIVE CLUSTER HOLDS THREE GRANTS THE BLOCK BELOW DOES NOT, AND THIS IS
+-- THEM. They were applied by hand to the shared ClickHouse on 2026-09-21, while
+-- the reasoning was still that Lake's SQL editor read through `lake_api`:
+--
+--   GRANT SELECT ON recorder.venue_book_top TO lake_api;
+--   GRANT SELECT ON recorder.venue_object TO lake_api;
+--   GRANT SELECT ON recorder.venue_book_top_settled TO lake_api;
+--
+-- They reach no consumer, because no Lake handler reads a venue grain, and they
+-- want revoking:
+--
+--   REVOKE SELECT ON recorder.venue_book_top FROM lake_api;
+--   REVOKE SELECT ON recorder.venue_object FROM lake_api;
+--   REVOKE SELECT ON recorder.venue_book_top_settled FROM lake_api;
+--
+-- RECORDED HERE AND NOT APPLIED HERE, WHICH IS THE OPPOSITE DECISION FROM THE
+-- GRANTS AND SO WANTS ITS REASON. Re-applying this file replays a grant and
+-- revokes nothing, so without these lines an operator reads the block below as
+-- the state of Lake's access while the cluster holds three more. A `REVOKE`
+-- statement would close that for whoever re-applies the file, at two costs. It
+-- names `lake_api` for good, so every cluster built afterwards revokes a
+-- privilege it was never granted — this file asserting the absence of a grant
+-- instead of declaring a reader, which is a claim it could not keep for every
+-- account that is not a reader. And by this file's own rule a privilege
+-- statement names a user that has to exist when it is stored, so a cluster with
+-- no Lake deployed would fail the file and lose the `grafana` grants that do
+-- apply there. Whether ClickHouse errors that way on a revoke is untested here
+-- and wants checking before anyone promotes these three lines. The cleanup is
+-- one-time work on one cluster either way, which is why it is recorded and
+-- dated rather than declared.
+
 -- The venue-side tables of `009`, read by the Grafana data source that backs
 -- the `phoenix-venue-recorder` dashboard in `malbeclabs/infra`.
 GRANT SELECT ON recorder.venue_book_top TO grafana;
