@@ -188,8 +188,9 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
     // registry, the venue's own adapter, the lowering, the sockets — with
     // recorded upstream bytes in place of a live venue. The adapter cannot tell
     // the difference, which is the property that makes the exercise worth
-    // anything; the transport the venue built is dropped unused, and a line
-    // says so rather than leaving an operator to wonder why nothing connected.
+    // anything; the transport the venue built is never connected — it is held,
+    // unused, for the length of the run — and a line says so rather than
+    // leaving an operator to wonder why nothing connected.
     //
     // **One replaying input replaces every source**, named after the primary. A
     // fixture directory is one recording, so replaying it once per source would
