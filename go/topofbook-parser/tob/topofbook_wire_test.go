@@ -343,3 +343,91 @@ func buildInstrumentDefMsgV3(instID uint32, symbol, leg1, leg2 string) []byte {
 	msg[1] = uint8(4 + len(body))
 	return append(msg, body...)
 }
+
+// buildManifestSummaryMsg constructs a full 24-byte ManifestSummary message
+// (4-byte header + 20-byte body). Both reserved runs carry a distinctive
+// non-zero pattern, so a decode that reads Valid from the wrong offset, or
+// skips the wrong number of reserved bytes, yields a wrong value here instead
+// of passing on zero-filled padding.
+func buildManifestSummaryMsg(channelID, valid uint8, manifestSeq uint16, instrumentCount uint32, ts uint64) []byte {
+	buf := make([]byte, 24)
+	buf[0] = msgManifestSummary
+	buf[1] = 24
+	binary.LittleEndian.PutUint16(buf[2:4], 0) // flags
+	buf[4] = channelID
+	buf[5] = valid
+	buf[6], buf[7] = 0xAA, 0xBB // reserved
+	binary.LittleEndian.PutUint16(buf[8:10], manifestSeq)
+	buf[10], buf[11] = 0xCC, 0xDD // reserved
+	binary.LittleEndian.PutUint32(buf[12:16], instrumentCount)
+	binary.LittleEndian.PutUint64(buf[16:24], ts)
+	return buf
+}
+
+// Valid sits at ManifestSummary offset 5, between Channel ID and the two
+// reserved bytes. It is the only signal distinguishing an established
+// instrument set from an uninitialized or shutting-down channel, so it must
+// decode in both states; asserting the fields after it pins the reserved run
+// at two bytes, since a wider skip shifts Manifest Seq onward.
+func TestDecodeManifestSummary_DecodesValid(t *testing.T) {
+	const ts = uint64(1700000000000000000)
+
+	for _, valid := range []uint8{0, 1} {
+		msg := buildManifestSummaryMsg(3, valid, 9, 41, ts)
+		body, err := decodeTopOfBookBody(msgManifestSummary, msg[4:], 1)
+		if err != nil {
+			t.Fatalf("valid=%d: %v", valid, err)
+		}
+		got, ok := body.(*topOfBookManifestSummary)
+		if !ok {
+			t.Fatalf("wrong body type %T", body)
+		}
+		if got.Valid != valid {
+			t.Errorf("valid=%d: got %d", valid, got.Valid)
+		}
+		if got.ChannelID != 3 {
+			t.Errorf("valid=%d channel id: got %d want 3", valid, got.ChannelID)
+		}
+		if got.ManifestSeq != 9 {
+			t.Errorf("valid=%d manifest seq: got %d want 9", valid, got.ManifestSeq)
+		}
+		if got.InstrumentCount != 41 {
+			t.Errorf("valid=%d instrument count: got %d want 41", valid, got.InstrumentCount)
+		}
+		if got.Timestamp != ts {
+			t.Errorf("valid=%d timestamp: got %d want %d", valid, got.Timestamp, ts)
+		}
+	}
+}
+
+// Valid must reach the record's Fields map as a uint8 under the key "valid",
+// matching the marketbyprice and marketbyorder parsers, because that map is
+// where a book-builder reads it.
+func TestParse_ManifestSummaryCarriesValid(t *testing.T) {
+	const ts = uint64(1700000000000000000)
+
+	for _, valid := range []uint8{0, 1} {
+		p := NewTopOfBookParser()
+		datagram := buildDatagram(3, 100, ts, buildManifestSummaryMsg(3, valid, 9, 41, ts))
+
+		recs, err := p.Parse(datagram, PacketMeta{})
+		if err != nil {
+			t.Fatalf("valid=%d: %v", valid, err)
+		}
+		if len(recs) != 1 {
+			t.Fatalf("valid=%d: expected 1 record, got %d", valid, len(recs))
+		}
+		if recs[0].Type != "manifest_summary" {
+			t.Fatalf("valid=%d record type: got %q want manifest_summary", valid, recs[0].Type)
+		}
+		if got := recs[0].Fields["valid"]; got != valid {
+			t.Errorf("valid: got %v (%T) want uint8(%d)", got, got, valid)
+		}
+		if got := recs[0].Fields["manifest_seq"]; got != uint16(9) {
+			t.Errorf("valid=%d manifest_seq: got %v (%T) want uint16(9)", valid, got, got)
+		}
+		if got := recs[0].Fields["instrument_count"]; got != uint32(41) {
+			t.Errorf("valid=%d instrument_count: got %v (%T) want uint32(41)", valid, got, got)
+		}
+	}
+}

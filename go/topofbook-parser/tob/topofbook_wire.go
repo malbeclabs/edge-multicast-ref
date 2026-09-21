@@ -149,7 +149,10 @@ type topOfBookEndOfSession struct {
 }
 
 type topOfBookManifestSummary struct {
-	ChannelID       uint8
+	ChannelID uint8
+	// Valid is 1 once the channel has an established instrument set, and 0
+	// while the publisher is uninitialized or the channel is inactive.
+	Valid           uint8
 	ManifestSeq     uint16
 	InstrumentCount uint32
 	Timestamp       uint64
@@ -417,7 +420,8 @@ func decodeTopOfBookBody(msgType uint8, buf []byte, schemaVersion uint8) (any, e
 	case msgManifestSummary:
 		var b topOfBookManifestSummary
 		b.ChannelID = br.u8()
-		br.skip(3) // reserved
+		b.Valid = br.u8()
+		br.skip(2) // reserved
 		b.ManifestSeq = br.u16()
 		br.skip(2) // reserved
 		b.InstrumentCount = br.u32()
