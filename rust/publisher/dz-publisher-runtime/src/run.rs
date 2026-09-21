@@ -169,7 +169,7 @@ pub fn run(registry: AdapterRegistry) -> ExitCode {
 #[must_use]
 pub fn run_with_version(version: &str, registry: AdapterRegistry) -> ExitCode {
     // Once, for both answers: what stdout says and what the gauge carries are
-    // the same string, so they are the same normalization too.
+    // the same string, so it is read and trimmed once rather than twice.
     let version = reported_version(version);
     let path = match invocation(std::env::args_os().skip(1)) {
         Ok(Invocation::Version) => {
@@ -203,10 +203,10 @@ pub fn run_with_version(version: &str, registry: AdapterRegistry) -> ExitCode {
 /// Print a refusal, with its causes, and fail.
 fn report_refusal(error: &StartupError) -> ExitCode {
     eprintln!("dz-publisher-runtime: {error}");
-    let mut source = std::error::Error::source(error);
-    while let Some(cause) = source {
+    let mut next = std::error::Error::source(error);
+    while let Some(cause) = next {
         eprintln!("  caused by: {cause}");
-        source = cause.source();
+        next = cause.source();
     }
     ExitCode::FAILURE
 }
@@ -275,7 +275,7 @@ enum Invocation {
 /// answering the part of it that parsed would leave the rest unsaid.
 ///
 /// **An option this parser does not know is refused by name.** Anything left to
-/// fall through to the path arm becomes a filename, so a misspelled flag — or a
+/// fall through to the path branch becomes a filename, so a misspelled flag — or a
 /// flag this parser has not been taught — fails as a configuration file that
 /// could not be opened, named `--whatever-it-was`. That is a true statement
 /// about a file nobody meant and it says nothing about the command line, which
@@ -1568,7 +1568,7 @@ mod tests {
 
     /// A real file is still named bare, and still named after `--config`.
     ///
-    /// The arm every other case here falls *past*, so a refusal that reached
+    /// The branch every other case here falls *past*, so a refusal that reached
     /// too far would take this with it: the whole cost of refusing an unknown
     /// option is that this must keep working.
     #[test]
@@ -1759,7 +1759,7 @@ mod tests {
     }
 
     /// `--version` and `dz_publisher_build_info{version}` answer from one
-    /// argument, and this holds the file to one channel for it.
+    /// argument, and this holds the file to one route for it.
     ///
     /// **A second read is how the two answers come apart.** `CARGO_PKG_VERSION`
     /// expands to the version of the crate being compiled, so a read at the
@@ -1769,7 +1769,7 @@ mod tests {
     /// Nothing else can catch that, because reaching the gauge means composing
     /// a publisher, which means opening sockets — and reaching the print means
     /// a process with real arguments. What a text scan cannot see is a value
-    /// spelled differently, so it holds the shape of the channel and the tests
+    /// spelled differently, so it holds the shape of the route and the tests
     /// above hold what travels down it.
     ///
     /// Comments are skipped, which is the rule the public-repository check
@@ -1777,9 +1777,9 @@ mod tests {
     /// not a second read of it. The scan stops at this module, so the literal
     /// above is not itself a match.
     #[test]
-    fn one_version_channel_serves_both_answers() {
-        // The macro, the constant it is bound to, and the normalization the two
-        // answers share. `RUNTIME_VERSION` is allowed twice — where it is
+    fn one_version_route_serves_both_answers() {
+        // The macro, the constant it is bound to, and the trim the two answers
+        // share. `RUNTIME_VERSION` is allowed twice — where it is
         // defined, and where `run` hands it over as the default — and
         // `reported_version` twice for the same reason: its definition, and the
         // one call that both `--version` and the gauge are downstream of.
@@ -1810,13 +1810,13 @@ mod tests {
     /// not a use of it. The scan stops at this module, so the needles above are
     /// not themselves matches.
     fn version_reads_in_run_rs(read: &str) -> Vec<&'static str> {
-        let source = include_str!("run.rs");
-        let above_this_module = source
+        let text = include_str!("run.rs");
+        let above_this_module = text
             .split("\n#[cfg(test)]\n")
             .next()
             .expect("a split yields a first part");
         assert!(
-            above_this_module.len() < source.len(),
+            above_this_module.len() < text.len(),
             "the test module was not found, so this scan covers itself"
         );
         above_this_module
