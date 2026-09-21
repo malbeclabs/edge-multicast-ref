@@ -1759,7 +1759,7 @@ mod tests {
     }
 
     /// `--version` and `dz_publisher_build_info{version}` answer from one
-    /// argument, and this holds the file to one compile-time version read.
+    /// argument, and this holds the file to one channel for it.
     ///
     /// **A second read is how the two answers come apart.** `CARGO_PKG_VERSION`
     /// expands to the version of the crate being compiled, so a read at the
@@ -1767,18 +1767,27 @@ mod tests {
     /// linked it — two numbers, one question, and no failure anywhere: the
     /// scrape and the binary simply disagree about which build is deployed.
     /// Nothing else can catch that, because reaching the gauge means composing
-    /// a publisher, which means opening sockets.
+    /// a publisher, which means opening sockets — and reaching the print means
+    /// a process with real arguments. What a text scan cannot see is a value
+    /// spelled differently, so it holds the shape of the channel and the tests
+    /// above hold what travels down it.
     ///
     /// Comments are skipped, which is the rule the public-repository check
     /// applies for the same reason: naming the macro in order to explain it is
     /// not a second read of it. The scan stops at this module, so the literal
     /// above is not itself a match.
     #[test]
-    fn one_compile_time_version_read_serves_both_answers() {
-        // The macro, and the constant it is bound to: a second use of either is
-        // a second answer. `RUNTIME_VERSION` is allowed twice — where it is
-        // defined, and where `run` hands it over as the default.
-        for (read, allowed) in [("env!(\"CARGO_PKG_VERSION\")", 1), ("RUNTIME_VERSION", 2)] {
+    fn one_version_channel_serves_both_answers() {
+        // The macro, the constant it is bound to, and the normalization the two
+        // answers share. `RUNTIME_VERSION` is allowed twice — where it is
+        // defined, and where `run` hands it over as the default — and
+        // `reported_version` twice for the same reason: its definition, and the
+        // one call that both `--version` and the gauge are downstream of.
+        for (read, allowed) in [
+            ("env!(\"CARGO_PKG_VERSION\")", 1),
+            ("RUNTIME_VERSION", 2),
+            ("reported_version", 2),
+        ] {
             let uses = version_reads_in_run_rs(read);
             assert_eq!(
                 uses.len(),
