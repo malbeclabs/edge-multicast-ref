@@ -1,6 +1,7 @@
 package main
 
 import (
+	"sync"
 	"testing"
 	"time"
 )
@@ -16,7 +17,7 @@ func TestBuildEventRow_HasSourceSendRecvColumns(t *testing.T) {
 		RecvTSNS:   uint64(recv.UnixNano()),
 		RecvTSKind: "kernel_udp_software",
 	}
-	row := buildEventRow(rec, 1, "TEST")
+	row := buildEventRow(rec, 1, "TEST", time.Now().UTC())
 	if row["publisher_send_ts"] != chTime(send) {
 		t.Errorf("publisher_send_ts = %v, want %v", row["publisher_send_ts"], chTime(send))
 	}
@@ -33,9 +34,22 @@ func TestBuildEventRow_HasSourceSendRecvColumns(t *testing.T) {
 
 func TestBuildEventRow_OmitsSourceTsWhenAbsent(t *testing.T) {
 	rec := Record{Type: "heartbeat", SendTSNS: uint64(time.Unix(1717689600, 0).UnixNano()), RecvTSNS: uint64(time.Unix(1717689600, 0).UnixNano())}
-	row := buildEventRow(rec, 1, "")
+	row := buildEventRow(rec, 1, "", time.Now().UTC())
 	if _, ok := row["source_ts"]; ok {
 		t.Errorf("source_ts should be omitted when SourceTSNS==0")
+	}
+}
+
+// A record with no RecvTSNS falls back to the clock read Write already took,
+// not to a fresh one taken inside the row builder. One Write call can produce
+// two rows from one record, and a second read would let them disagree on
+// recv_ts by however long the call took — and pin nothing in a test.
+func TestBuildEventRow_RecvTsFallsBackToTheSuppliedNow(t *testing.T) {
+	now := time.Unix(1717689600, 0).UTC()
+	rec := Record{Type: "order_add", SendTSNS: uint64(now.UnixNano())}
+	row := buildEventRow(rec, 1, "TEST", now)
+	if row["recv_ts"] != chTime(now) {
+		t.Errorf("recv_ts = %v, want the supplied now %v", row["recv_ts"], chTime(now))
 	}
 }
 
@@ -67,7 +81,10 @@ func TestEventsWriter_InstrumentDefinitionCarriesSourceID(t *testing.T) {
 
 // tableStub records rows per table, which captureWriter cannot do — it is
 // table-blind, and asserting which table a kind lands in is the point here.
+// Locked like captureWriter, so a shard test that writes from the shard
+// goroutine can reuse it.
 type tableStub struct {
+	mu   sync.Mutex
 	rows map[string][]map[string]any
 }
 
@@ -76,12 +93,22 @@ func newTableStub() *tableStub {
 }
 
 func (s *tableStub) Enqueue(table string, row map[string]any) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.rows[table] = append(s.rows[table], row)
 	return true
 }
 
+func (s *tableStub) count(table string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.rows[table])
+}
+
 func (s *tableStub) only(t *testing.T, table string) map[string]any {
 	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	got := s.rows[table]
 	if len(got) != 1 {
 		t.Fatalf("expected exactly one %s row, got %d", table, len(got))
@@ -111,7 +138,7 @@ func TestEventsWriter_BatchBoundaryCarriesNoInstrumentIdentity(t *testing.T) {
 		},
 	}, 2, "BTC-USDT", -2, -8)
 
-	if n := len(st.rows["channel_health"]); n != 0 {
+	if n := st.count("channel_health"); n != 0 {
 		t.Errorf("a boundary carries batch_id and batch_ts, which channel_health has no columns for; got %d rows there", n)
 	}
 	row := st.only(t, "events")

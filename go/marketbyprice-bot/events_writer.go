@@ -81,10 +81,8 @@ func (w *EventsWriter) Write(ev ChannelEvent, channelID uint8, symbol string, pr
 		// A boundary is a consistency point for the whole channel. The wire
 		// carries no Instrument ID, so rec.InstrumentID is 0 and there is no
 		// symbol to resolve — hence buildChannelScopedEventRow, which stamps
-		// neither column. Passing through buildEventRow would assert instrument
-		// 0 and whatever symbol the caller supplied for a row that belongs to no
-		// instrument; ClickHouse fills instrument_id and symbol from their
-		// column defaults instead.
+		// neither column. Through buildEventRow the row would instead assert
+		// instrument 0 and whatever symbol the caller supplied for it.
 		row := buildChannelScopedEventRow(rec, channelID, now)
 		row["batch_id"] = getUint32(rec.Fields, "batch_id")
 		row["batch_ts"] = clickhouse.ChTime(getTime(rec.Fields, "batch_ts"))
@@ -174,10 +172,15 @@ func buildEventRow(rec Record, channelID uint8, symbol string, now time.Time) ma
 // every `events` row carries, and no instrument identity.
 //
 // A channel-scoped kind has none to carry: its InstrumentID is 0 because the
-// wire never supplied one, and no symbol answers to it. Omitting the two
-// columns lets ClickHouse fill them from their defaults, so the row states
-// nothing about an instrument rather than claiming instrument 0 and the symbol
-// whose refdata happens to sit at that key.
+// wire never supplied one, and no symbol answers to it.
+//
+// `events.instrument_id` and `events.symbol` are not Nullable, so ClickHouse
+// stores the type's zero value — 0 and the empty string — for the two omitted
+// columns, and that pair is what a consumer reads as "this row names no
+// instrument". What the omission buys is that the stored value no longer
+// depends on the symbol the caller resolved: the writer cannot stamp one
+// instrument's symbol, whichever one sits at refdata key 0, onto a row that
+// belongs to no instrument.
 func buildChannelScopedEventRow(rec Record, channelID uint8, now time.Time) map[string]any {
 	row := map[string]any{
 		"recv_ts":           clickhouse.ChTime(rec.recvTime(now)),
