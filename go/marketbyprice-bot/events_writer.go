@@ -177,10 +177,10 @@ func buildEventRow(rec Record, channelID uint8, symbol string, now time.Time) ma
 // `events.instrument_id` and `events.symbol` are not Nullable, so ClickHouse
 // stores the type's zero value — 0 and the empty string — for the two omitted
 // columns, and that pair is what a consumer reads as "this row names no
-// instrument". What the omission buys is that the stored value no longer
-// depends on the symbol the caller resolved: the writer cannot stamp one
-// instrument's symbol, whichever one sits at refdata key 0, onto a row that
-// belongs to no instrument.
+// instrument". What the omission buys is that the stored value does not depend
+// on the symbol the caller resolved: the writer cannot stamp one instrument's
+// symbol, whichever one sits at refdata key 0, onto a row that belongs to no
+// instrument.
 func buildChannelScopedEventRow(rec Record, channelID uint8, now time.Time) map[string]any {
 	row := map[string]any{
 		"recv_ts":           clickhouse.ChTime(rec.recvTime(now)),

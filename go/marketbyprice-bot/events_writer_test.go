@@ -257,8 +257,8 @@ func TestEventsWriter_WireLevelOmittedOrderCountIsNull(t *testing.T) {
 // A batch_boundary belongs to the channel, not to an instrument: the wire
 // carries no Instrument ID, so rec.InstrumentID is 0 and no symbol answers to
 // it. The row must therefore carry NEITHER column, whatever the caller passes
-// for symbol — writing them made every boundary row claim instrument 0 and
-// whichever symbol the refdata map happened to hold at key 0.
+// for symbol — stamping them makes every boundary row claim instrument 0 and
+// whichever symbol the refdata map holds at key 0.
 //
 // The symbol argument here is deliberately non-empty. Today's two call sites
 // both pass "", so the wrong symbol is not reachable through them; that is the
