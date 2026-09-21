@@ -52,14 +52,21 @@
 -- two are the authoritative definitions of these tables — their `CREATE TABLE`
 -- blocks are what the row types are held against, column for column, in
 -- `tests/ddl.rs` — so the column is declared there and a deployment created from
--- scratch has it before this file runs. This file is for the deployments that applied 001 when it did
--- not: their tables exist, `CREATE TABLE IF NOT EXISTS` will not alter them, and
--- an `ALTER` is the only thing that reaches them. On a fresh deployment every
--- statement below is a no-op, which is why it is safe to apply unconditionally
--- and in order.
+-- scratch has it before this file runs. The `ALTER`s are for the deployments
+-- that applied 001 when it did not: their tables exist, `CREATE TABLE IF NOT
+-- EXISTS` will not alter them, and an `ALTER` is the only thing that reaches
+-- them. On a fresh deployment every `ALTER` below is a no-op, which is why they
+-- are safe to apply unconditionally and in order, and `IF NOT EXISTS` on every
+-- one of them for that reason, as `CREATE TABLE IF NOT EXISTS` makes 001
+-- re-appliable.
 --
--- `IF NOT EXISTS` throughout for that reason, as `CREATE TABLE IF NOT EXISTS`
--- makes 001 re-appliable.
+-- THE TWO `CREATE OR REPLACE VIEW` STATEMENTS AT THE END ARE NOT IN THAT CLASS,
+-- and reading "then a no-op" across the whole of this file is how a deployment
+-- ends up holding a view under one name and another deployment holding a
+-- different one. Those two run on every deployment, fresh and upgraded, and they
+-- carry no `IF NOT EXISTS`: a view is replaced rather than skipped, which is
+-- exactly what makes the one statement correct on both. The block above them
+-- states why they are here.
 
 ALTER TABLE recorder.datagram
     ADD COLUMN IF NOT EXISTS derivation LowCardinality(String) DEFAULT 'archive'

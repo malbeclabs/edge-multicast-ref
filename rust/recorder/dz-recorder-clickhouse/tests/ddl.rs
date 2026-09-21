@@ -113,9 +113,19 @@ fn market_data_sql() -> &'static str {
     sql_of("005_recorder_market_data.sql")
 }
 
+/// The era views and the rank, which are `003`.
+fn era_rank_sql() -> &'static str {
+    sql_of("003_recorder_era_rank.sql")
+}
+
 /// The pairing views, which are `006`.
 fn pairing_sql() -> &'static str {
     sql_of("006_recorder_book_top_pairing.sql")
+}
+
+/// The provenance column, and the views it re-states, which are `008`.
+fn derivation_sql() -> &'static str {
+    sql_of("008_recorder_derivation.sql")
 }
 
 /// The cross-site views, which are `007`.
@@ -143,6 +153,36 @@ fn view_body(sql: &'static str, name: &str) -> &'static str {
     let body = &sql[start..];
     body.find("\nCREATE OR REPLACE VIEW")
         .map_or(body, |end| &body[..end])
+}
+
+/// One `CREATE OR REPLACE VIEW recorder.<name>` statement and nothing after it.
+///
+/// [`view_body`] runs to the next declaration, so it carries the prose between
+/// them — and two files state their reasons in their own words even where the
+/// statement between them is one statement. This is the statement alone, which
+/// is what a re-statement has to match character for character.
+fn view_statement(sql: &'static str, name: &str) -> &'static str {
+    let needle = format!("CREATE OR REPLACE VIEW recorder.{name} AS");
+    let start = sql
+        .find(&needle)
+        .unwrap_or_else(|| panic!("the schema declares no view `{name}`"));
+    let body = &sql[start..];
+    // A statement in these files carries no interior `;`, so the first one ends
+    // it. Terminated on the last line of a file, the search finds nothing and
+    // the whole of what is left is the statement — asserted, because a
+    // declaration this walker read to the end of the file without finding a
+    // terminator is a declaration it read wrongly.
+    match body.find(";\n") {
+        Some(at) => &body[..=at],
+        None => {
+            assert!(
+                body.trim_end().ends_with(';'),
+                "the declaration of `{name}` is not terminated, so this is not \
+                 one statement"
+            );
+            body.trim_end()
+        }
+    }
 }
 
 fn sql_of(name: &str) -> &'static str {
@@ -836,6 +876,73 @@ fn the_race_is_one_statement_written_into_two_files() {
         "`009` and `010` state the race differently, so a deployment created \
          from scratch and one upgraded to it answer the same question two ways"
     );
+}
+
+/// **A star view re-stated by a later file is that file's copy of the earlier
+/// file's text.**
+///
+/// [`a_select_star_view_is_re_stated_after_a_column_reaches_its_table`] is why
+/// these re-statements exist: a file that moves a table's column list re-states
+/// every `SELECT *` view over that table, or an upgraded deployment holds the
+/// old column list for ever. The re-statement is a second copy of a statement
+/// the earlier file declares, and this is the guard on the copy — the same guard
+/// [`the_race_is_one_statement_written_into_two_files`] puts on `feed_race`, and
+/// for the same reason: two definitions nobody compares are two definitions that
+/// diverge.
+///
+/// The drift here runs the wrong way round, which is what makes it worth a test
+/// of its own. The later file wins on every deployment, fresh and upgraded — so
+/// an amendment made to the earlier declaration alone is not a change that takes
+/// effect on some deployments and not others. It is a change that takes effect
+/// nowhere, silently overwritten by a copy further down the set, with the
+/// earlier file left reading as though it decided something.
+///
+/// Character for character, and the marker on each copy is there because a
+/// helper that returned the same empty slice for both would satisfy an equality
+/// on its own.
+#[test]
+fn a_re_stated_star_view_is_the_text_the_earlier_file_declares() {
+    for (name, first, again, marker) in [
+        (
+            "era_opening",
+            ("003", era_rank_sql()),
+            ("008", derivation_sql()),
+            "FROM recorder.era FINAL",
+        ),
+        (
+            "datagram_in_era",
+            ("003", era_rank_sql()),
+            ("008", derivation_sql()),
+            "ASOF LEFT JOIN recorder.era_opening AS e",
+        ),
+        (
+            "book_top_settled",
+            ("006", pairing_sql()),
+            ("010", book_key_sql()),
+            "FROM recorder.book_top FINAL",
+        ),
+    ] {
+        let (earlier_file, earlier_sql) = first;
+        let (later_file, later_sql) = again;
+        let earlier = view_statement(earlier_sql, name);
+        let later = view_statement(later_sql, name);
+        for (file, statement) in [(earlier_file, earlier), (later_file, later)] {
+            assert!(
+                statement.contains(marker),
+                "what is being compared for `{file}`'s `{name}` is not the \
+                 view: {statement}"
+            );
+        }
+        assert_eq!(
+            earlier, later,
+            "`{earlier_file}` and `{later_file}` state `recorder.{name}` \
+             differently. `{later_file}` is applied second, so it is the \
+             declaration every deployment ends up holding and \
+             `{earlier_file}`'s is the one that reaches nobody — a decision \
+             recorded in the file a reader looks in and in force on no \
+             deployment at all."
+        );
+    }
 }
 
 /// **The race is named for the race, and the name it had is dropped.**
@@ -2568,14 +2675,73 @@ fn changes_a_column_list(flat: &str) -> bool {
 /// leaves a star over that table frozen fails this test, and the repair is the
 /// `CREATE OR REPLACE VIEW` the message asks for rather than an entry excusing
 /// it. `008` re-states `era_opening` and `datagram_in_era` after its own
-/// `ALTER`s for that reason, in the shape `010` uses for `book_top_settled`.
+/// `ALTER`s for that reason, in the shape `010` uses for `book_top_settled`, and
+/// [`a_re_stated_star_view_is_the_text_the_earlier_file_declares`] holds the
+/// copies that repair makes to one text.
 #[test]
 fn a_select_star_view_is_re_stated_after_a_column_reaches_its_table() {
     let statements = schema_statements();
 
+    // A walk that read no star, or no `ALTER`, would pass over anything. The two
+    // named here are `003`'s star over `recorder.era` and `008`'s column on that
+    // table, so a report below is the property and not the parse. Named in the
+    // files they are first declared in, because the walk resolves each view to
+    // its *last* declaration and both of these are re-stated in `008`.
+    assert!(
+        statements.iter().any(|statement| {
+            statement.file == "003_recorder_era_rank.sql"
+                && statement
+                    .flat()
+                    .starts_with("CREATE OR REPLACE VIEW recorder.era_opening ")
+        }),
+        "the walk reads no `era_opening` in `003`, so it is reading no views"
+    );
+    assert!(
+        statements.iter().any(|statement| {
+            let flat = statement.flat();
+            statement.file == "008_recorder_derivation.sql"
+                && flat.starts_with("ALTER TABLE recorder.era ")
+                && changes_a_column_list(&flat)
+        }),
+        "the walk reads no column `ALTER` on `recorder.era` in `008`, so it is \
+         reading no column changes"
+    );
+
+    let reading = star_reading(&statements);
+    assert!(
+        reading.frozen.is_empty(),
+        "{}",
+        reading.frozen.join("\n\n----\n\n")
+    );
+    assert!(
+        reading.stars >= 4,
+        "the walk read {} `SELECT *` views and these files declare four, so the \
+         parse is reading a projection it does not understand",
+        reading.stars
+    );
+}
+
+/// What one walk over a set of statements found.
+struct StarReading {
+    /// One report per frozen view, in the words a failure needs.
+    frozen: Vec<String>,
+    /// How many `SELECT *` projections the walk resolved to an object.
+    stars: usize,
+}
+
+/// Every star view whose last declaration comes before something that moves the
+/// column list it was expanded from.
+///
+/// Reported rather than asserted, because the assertion over the migrations is
+/// that nothing comes back — and a walk that found nothing whatever it was
+/// handed would satisfy that over anything.
+/// [`the_star_walk_reports_a_frozen_view_and_passes_one_re_stated_after_it`]
+/// runs this same walk over two statements that do freeze a view, which is the
+/// only way to hold the comparison the rule rests on.
+fn star_reading(statements: &[Statement]) -> StarReading {
     let mut declarations: Vec<(String, &Statement)> = Vec::new();
     let mut column_alters: Vec<(String, &Statement)> = Vec::new();
-    for statement in &statements {
+    for statement in statements {
         let flat = statement.flat();
         if let Some(rest) = flat.strip_prefix("CREATE OR REPLACE VIEW recorder.") {
             let name = rest.split_whitespace().next().expect("a view has a name");
@@ -2590,27 +2756,6 @@ fn a_select_star_view_is_re_stated_after_a_column_reaches_its_table() {
             }
         }
     }
-
-    // A walker that found no star, or no `ALTER`, would pass over anything. The
-    // two named here are `003`'s star over `recorder.era` and `008`'s column on
-    // that table — the pair the exception list is about, and neither of them the
-    // statement this test exists to hold in place, so a failure below is the
-    // property and not the parse.
-    assert!(
-        declarations
-            .iter()
-            .any(|(name, statement)| name == "era_opening"
-                && statement.file == "003_recorder_era_rank.sql"),
-        "the walker read no `era_opening` in `003`, so it is reading no views"
-    );
-    assert!(
-        column_alters
-            .iter()
-            .any(|(table, statement)| table == "era"
-                && statement.file == "008_recorder_derivation.sql"),
-        "the walker read no column `ALTER` on `recorder.era` in `008`, so it is \
-         reading no column changes"
-    );
 
     let names: BTreeSet<String> = declarations.iter().map(|(name, _)| name.clone()).collect();
     let last_declaration = |name: &str| -> &Statement {
@@ -2629,13 +2774,16 @@ fn a_select_star_view_is_re_stated_after_a_column_reaches_its_table() {
             .max_by_key(|statement| statement.position())
     };
 
-    let mut stars_read = 0usize;
+    let mut reading = StarReading {
+        frozen: Vec::new(),
+        stars: 0,
+    };
     for name in &names {
         let declaration = last_declaration(name);
         let Some(starred) = starred_object(&declaration.code) else {
             continue;
         };
-        stars_read += 1;
+        reading.stars += 1;
 
         // What can move the column list the star was expanded from. A star over
         // a view is chased through to the table underneath it, because
@@ -2674,7 +2822,7 @@ fn a_select_star_view_is_re_stated_after_a_column_reaches_its_table() {
             if hazard.position() <= declaration.position() {
                 continue;
             }
-            panic!(
+            reading.frozen.push(format!(
                 "`recorder.{name}` is declared `SELECT *` over \
                  `recorder.{starred}` at {declared}, and {altered} {what} — with \
                  no re-statement of `recorder.{name}` after it.\n\n\
@@ -2693,14 +2841,84 @@ fn a_select_star_view_is_re_stated_after_a_column_reaches_its_table() {
                 declared = declaration.at(),
                 altered = hazard.at(),
                 file = hazard.file,
-            );
+            ));
         }
     }
 
+    reading
+}
+
+/// The walk reports a view a later column change froze, and passes one re-stated
+/// after that change.
+///
+/// Over two literal statements rather than over the migrations, for the reason
+/// the star walker's own test gives: what
+/// [`a_select_star_view_is_re_stated_after_a_column_reaches_its_table`] pins is
+/// that these files hold no frozen view, so a walk that reported none whatever
+/// it was handed would make that assertion pass over anything. The two cases
+/// below are the *same* two statements with one declaration added at the end, so
+/// nothing but which statement comes last can decide them — which is the whole
+/// of the rule.
+#[test]
+fn the_star_walk_reports_a_frozen_view_and_passes_one_re_stated_after_it() {
+    let view = "CREATE OR REPLACE VIEW recorder.t_settled AS\nSELECT *\nFROM recorder.t FINAL;\n";
+    let column = "ALTER TABLE recorder.t\nADD COLUMN IF NOT EXISTS c String;\n";
+    let statement = |file: &'static str, order: usize, line: usize, code: &str| Statement {
+        file,
+        order,
+        line,
+        code: code.to_owned(),
+    };
+
+    // The declaration first and the column second: the freeze.
+    let frozen = star_reading(&[
+        statement("first.sql", 0, 5, view),
+        statement("second.sql", 1, 10, column),
+    ]);
+    assert_eq!(
+        frozen.stars, 1,
+        "the walk resolved no star over `recorder.t`, so it read nothing and \
+         the report below is about nothing either"
+    );
+    assert_eq!(
+        frozen.frozen.len(),
+        1,
+        "the walk does not report a star frozen by a column change after it: \
+         {:?}",
+        frozen.frozen
+    );
+    for expected in [
+        "`recorder.t_settled`",
+        "`recorder.t`",
+        "first.sql:5",
+        "second.sql:10",
+    ] {
+        assert!(
+            frozen.frozen[0].contains(expected),
+            "the report names no {expected}, so it does not send a reader to \
+             the statements: {}",
+            frozen.frozen[0]
+        );
+    }
+
+    // The same two, and the declaration re-stated after the column: the repair
+    // `008` and `010` make.
+    let repaired = star_reading(&[
+        statement("first.sql", 0, 5, view),
+        statement("second.sql", 1, 10, column),
+        statement("second.sql", 1, 40, view),
+    ]);
+    assert_eq!(
+        repaired.stars, 1,
+        "a view declared twice is one star, and the walk read {} — so it is \
+         reading a re-statement as a second view",
+        repaired.stars
+    );
     assert!(
-        stars_read >= 4,
-        "the walker read {stars_read} `SELECT *` views and these files declare \
-         four, so the parse is reading a projection it does not understand"
+        repaired.frozen.is_empty(),
+        "a view re-stated after the column that moved its table's column list \
+         is reported frozen: {:?}",
+        repaired.frozen
     );
 }
 
