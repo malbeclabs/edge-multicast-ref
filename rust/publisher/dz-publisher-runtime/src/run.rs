@@ -261,18 +261,20 @@ enum Invocation {
 
 /// Read the invocation out of the arguments after the program name.
 ///
-/// **Every argument is examined, and the two that publish nothing win wherever
-/// they appear on a command line this can read.** A parser that read only the
-/// first would start a publisher for
+/// **The arguments are read in order, and the first decisive one answers.** A
+/// parser that read only the first would start a publisher for
 /// `<publisher> --config publisher.toml --version` — binding transmitters and
 /// putting datagrams on a group in answer to a question about a string — and
 /// that ordering is the one a unit file writes, because the recorder beside
 /// this takes it.
 ///
-/// A refusal earlier on the line still wins, so `<publisher> --verison
-/// --version` reports the misspelling rather than the version: a command line
-/// with something unreadable in it is not a question about this build, and
-/// answering the part of it that parsed would leave the rest unsaid.
+/// Decisive cuts both ways, and deliberately. `--version` and `--help` are
+/// answered from the flag itself, so what follows one is not read:
+/// `<publisher> --version --verison` prints the version, because a deployment
+/// asking a binary what it is needs an answer and not a verdict on the rest of
+/// the line — the same choice the recorder makes. A refusal reached first wins
+/// for the same reason: `<publisher> --verison --version` reports the
+/// misspelling, because by then the misspelling is what has been read.
 ///
 /// **An option this parser does not know is refused by name.** Anything left to
 /// fall through to the path branch becomes a filename, so a misspelled flag — or a
@@ -1678,6 +1680,28 @@ mod tests {
                 Invocation::Help,
                 "{args:?}"
             );
+        }
+    }
+
+    /// The first decisive argument answers, whichever kind it is.
+    ///
+    /// Both orders are here because both are decisions and neither is an
+    /// exception: a version query is answered from the flag rather than from
+    /// the rest of the line, and a line whose misspelling comes first is
+    /// refused because that is what was read by then.
+    #[test]
+    fn the_first_decisive_argument_is_the_one_answered() {
+        assert_eq!(
+            invocation_of(&["--version", "--verison"]).expect("the flag was reached first"),
+            Invocation::Version
+        );
+        assert_eq!(
+            invocation_of(&["--help", "--verison"]).expect("and so was this one"),
+            Invocation::Help
+        );
+        match invocation_of(&["--verison", "--version"]) {
+            Err(StartupError::UnknownOption { option, .. }) => assert_eq!(option, "--verison"),
+            other => panic!("the misspelling was reached first: {other:?}"),
         }
     }
 

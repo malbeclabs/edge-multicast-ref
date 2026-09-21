@@ -170,13 +170,15 @@ operator cannot answer from the config file in front of them.
 
 The command line is the configuration path — bare, or after `--config` — plus
 `--version`/`-V` and `--help`/`-h`, which are answered wherever on the line they
-are written. Every argument is read: an option the parser does not know is
+are written rather than in first position only. The arguments are read in order
+and the first decisive one answers: an option the parser does not know is
 refused by name rather than opened as a file, so a misspelled flag fails as the
 flag it is; two configuration files are refused naming both rather than one of
-them being dropped; and an option left without its value is named as the option.
-A command line carrying one of those refusals is refused rather than answered in
-part, so `--version` after a misspelling reports the misspelling. `--help`
-prints the accepted forms on stdout and exits 0.
+them being dropped; an option left without its value is named as the option; and
+a flag that publishes nothing is answered from the flag itself, so `--version`
+reached before a misspelling prints the version and `--version` reached after
+one reports the misspelling. `--help` prints the accepted forms on stdout and
+exits 0.
 
 **`--version` writes one line to stdout and exits 0: the version, alone.** That
 is the string a deployment compares against the version it pinned, and the tag
