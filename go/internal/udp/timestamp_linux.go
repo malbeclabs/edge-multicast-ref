@@ -1,6 +1,6 @@
 //go:build linux
 
-package main
+package udp
 
 import (
 	"encoding/binary"
@@ -11,17 +11,19 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// Receive-timestamp kinds reported by ReadDatagram.
 const (
-	recvTimestampKindKernelSoftware = "kernel_udp_software"
-	recvTimestampKindAppFallback    = "app_udp_fallback"
+	RecvTimestampKindKernelSoftware = "kernel_udp_software"
+	RecvTimestampKindAppFallback    = "app_udp_fallback"
 )
 
-func enableTimestamping(conn *net.UDPConn) error {
+// EnableTimestamping asks the kernel to attach an SO_TIMESTAMPNS control
+// message to every datagram read from conn.
+func EnableTimestamping(conn *net.UDPConn) error {
 	rawConn, err := conn.SyscallConn()
 	if err != nil {
 		return err
 	}
-
 	var setsockoptErr error
 	err = rawConn.Control(func(fd uintptr) {
 		setsockoptErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_TIMESTAMPNS, 1)
@@ -32,10 +34,10 @@ func enableTimestamping(conn *net.UDPConn) error {
 	return setsockoptErr
 }
 
-// readDatagram reads one datagram and returns the sender address plus the
+// ReadDatagram reads one datagram and returns the sender address plus the
 // kernel receive timestamp when available, otherwise an application-time
 // fallback.
-func readDatagram(conn *net.UDPConn, buf []byte) (int, netip.Addr, time.Time, string, error) {
+func ReadDatagram(conn *net.UDPConn, buf []byte) (int, netip.Addr, time.Time, string, error) {
 	oob := make([]byte, unix.CmsgSpace(16))
 	n, oobn, _, addr, err := conn.ReadMsgUDP(buf, oob)
 	if err != nil {
@@ -43,21 +45,19 @@ func readDatagram(conn *net.UDPConn, buf []byte) (int, netip.Addr, time.Time, st
 	}
 	src := srcAddr(addr)
 	if recvTime, ok := extractKernelTimestamp(oob[:oobn]); ok {
-		return n, src, recvTime.UTC(), recvTimestampKindKernelSoftware, nil
+		return n, src, recvTime.UTC(), RecvTimestampKindKernelSoftware, nil
 	}
-	return n, src, time.Now().UTC(), recvTimestampKindAppFallback, nil
+	return n, src, time.Now().UTC(), RecvTimestampKindAppFallback, nil
 }
 
 func extractKernelTimestamp(oob []byte) (time.Time, bool) {
 	if len(oob) == 0 {
 		return time.Time{}, false
 	}
-
 	cmsgs, err := unix.ParseSocketControlMessage(oob)
 	if err != nil {
 		return time.Time{}, false
 	}
-
 	for _, cmsg := range cmsgs {
 		if cmsg.Header.Level != unix.SOL_SOCKET || cmsg.Header.Type != unix.SCM_TIMESTAMPNS {
 			continue
@@ -69,6 +69,5 @@ func extractKernelTimestamp(oob []byte) (time.Time, bool) {
 		nsec := int64(binary.LittleEndian.Uint64(cmsg.Data[8:16]))
 		return time.Unix(sec, nsec).UTC(), true
 	}
-
 	return time.Time{}, false
 }

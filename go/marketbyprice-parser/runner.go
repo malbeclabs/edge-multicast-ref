@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/malbeclabs/edge-multicast-ref/go/internal/udp"
 )
 
 const maxUDPPacket = 65536
@@ -69,15 +71,6 @@ func (s *seqTracker) observe(src netip.Addr, ch uint8, seq uint64) (gaps, missin
 		s.last[k] = seq
 	}
 	return gaps, missing
-}
-
-// srcAddr normalises a datagram's sender address so one publisher always
-// produces one map key. Shared by both build-tagged readDatagram variants.
-func srcAddr(addr *net.UDPAddr) netip.Addr {
-	if addr == nil {
-		return netip.Addr{}
-	}
-	return addr.AddrPort().Addr().Unmap()
 }
 
 // portConfig binds a label to a UDP listening address.
@@ -167,8 +160,8 @@ func (r *Runner) openMulticast(port int) (*net.UDPConn, error) {
 	if err := conn.SetReadBuffer(64 * 1024 * 1024); err != nil {
 		log.Printf("warning: SetReadBuffer: %v", err)
 	}
-	if err := enableTimestamping(conn); err != nil {
-		log.Printf("warning: enableTimestamping: %v", err)
+	if err := udp.EnableTimestamping(conn); err != nil {
+		log.Printf("warning: udp.EnableTimestamping: %v", err)
 	}
 	return conn, nil
 }
@@ -185,7 +178,7 @@ func (r *Runner) receive(ctx context.Context, port string, conn *net.UDPConn, er
 		}
 
 		_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-		n, src, recvTime, recvKind, err := readDatagram(conn, buf)
+		n, src, recvTime, recvKind, err := udp.ReadDatagram(conn, buf)
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				continue
@@ -245,7 +238,8 @@ func (r *Runner) receive(ctx context.Context, port string, conn *net.UDPConn, er
 		}
 
 		// An all-skipped or all-malformed datagram yields no records. Writing the
-		// empty batch would still consume a per-client queue slot in SocketSink.
+		// empty batch would still consume a per-client queue slot in the socket
+		// sink.
 		if len(records) > 0 {
 			if err := r.sink.Write(records); err != nil {
 				r.metrics.SinkWriteErrors.Inc()

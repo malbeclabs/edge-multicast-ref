@@ -9,6 +9,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/malbeclabs/edge-multicast-ref/go/internal/sink"
 )
 
 const metricsNamespace = "dz_mbp_parser"
@@ -160,6 +162,50 @@ func NewMetrics(version, commit string) *Metrics {
 	m.BuildInfo.WithLabelValues(version, commit).Set(1)
 
 	return m
+}
+
+// Metrics carries the socket sink's counters for the shared transport in
+// go/internal/sink, which reports through this interface rather than holding a
+// metrics backend of its own.
+var _ sink.SocketMetrics = (*Metrics)(nil)
+
+// socketMetrics hands these counters to the shared socket sink, and hands it
+// an untyped nil when there are none. That is the difference between the sink
+// skipping the counting outright and it calling methods on a nil pointer
+// wrapped in a non-nil interface, which only the nil-receiver guards below
+// would then save.
+func (m *Metrics) socketMetrics() sink.SocketMetrics {
+	if m == nil {
+		return nil
+	}
+	return m
+}
+
+// SetSocketClients reports the number of currently connected socket clients.
+//
+// A nil receiver counts nothing: SinkConfig.Metrics is optional and reaches the
+// sink as it stands, so all three of these tolerate one.
+func (m *Metrics) SetSocketClients(n int) {
+	if m == nil {
+		return
+	}
+	m.SocketClients.Set(float64(n))
+}
+
+// AddSocketClientDrops counts n socket clients dropped for reason.
+func (m *Metrics) AddSocketClientDrops(reason string, n int) {
+	if m == nil {
+		return
+	}
+	m.SocketClientDrops.WithLabelValues(reason).Add(float64(n))
+}
+
+// AddSocketRecordsSent counts n records written to at least one socket client.
+func (m *Metrics) AddSocketRecordsSent(n int) {
+	if m == nil {
+		return
+	}
+	m.SocketRecordsSent.Add(float64(n))
 }
 
 // ServeHTTP starts a /metrics HTTP server on addr. Returns immediately.
