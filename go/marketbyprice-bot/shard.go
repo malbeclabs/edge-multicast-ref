@@ -265,7 +265,15 @@ func (s *Shard) applyDeltaToReady(k instKey, inst *Instrument, rec Record) []Cha
 	}
 
 	// Contiguous: apply, then drain any contiguous run held in Pending.
-	evs := []ChannelEvent{s.applyOne(inst, rec)}
+	//
+	// A malformed book-affecting message ends both the apply and the drain: the
+	// instrument is gapped on the spot, so nothing further may touch its book.
+	ev, malformed := s.applyOne(inst, rec)
+	evs := []ChannelEvent{ev}
+	if malformed != nil {
+		s.demoteMalformed(inst, malformed)
+		return evs
+	}
 	for inst.Pending != nil {
 		next := inst.LastAppliedInstrumentSeq + 1
 		pr, ok := inst.Pending[next]
@@ -273,7 +281,12 @@ func (s *Shard) applyDeltaToReady(k instKey, inst *Instrument, rec Record) []Cha
 			break
 		}
 		delete(inst.Pending, next)
-		evs = append(evs, s.applyOne(inst, pr))
+		pev, pMalformed := s.applyOne(inst, pr)
+		evs = append(evs, pev)
+		if pMalformed != nil {
+			s.demoteMalformed(inst, pMalformed)
+			return evs
+		}
 		if len(inst.Pending) == 0 {
 			inst.Pending = nil
 		}
@@ -281,8 +294,48 @@ func (s *Shard) applyDeltaToReady(k instKey, inst *Instrument, rec Record) []Cha
 	return evs
 }
 
+// demoteMalformed marks an instrument gap because a book-affecting message it
+// received was malformed, so the mutation that message carried is lost.
+//
+// This is the right end state for the same reason a sequence gap is: a message
+// that would have changed the book did not, so the book may be stale until a
+// snapshot rebuilds it. What it must not do is get there by waiting. The
+// publisher consumed a Per-Instrument Seq for the discarded message — LevelUpdate
+// and BookClear share one series precisely because both mutate the book — so
+// every later delta reads as a forward gap. Left to the reorder window, the
+// instrument holds and discards ~reorderWindow deltas waiting for a hole that
+// can never fill, and then declares the same gap it could have declared here.
+// The loss is known, not possibly-reordered, so there is nothing to wait for.
+//
+// It is counted as malformed_deltas_total rather than per_instrument_gaps_total
+// because the two say different things about where the fault is: the gap counter
+// is an operator's measure of mktdata loss, and a publisher defect landing in it
+// sends them looking for packet loss that never happened.
+//
+// Pending is dropped, matching the sequence-gap path: every entry is keyed to a
+// sequence the recovery snapshot will jump past, and left behind they would still
+// count toward the reorder-window bound. The malformed record itself is NOT
+// buffered — unlike the gap path, where the delta that revealed the gap is a
+// valid message worth replaying, this one can never contribute anything, and
+// replaying it would only demote the instrument a second time.
+func (s *Shard) demoteMalformed(inst *Instrument, err error) {
+	reason := malformedReason(err)
+	log.Printf("shard %d instrument %d: %v, demoting to gap reason=%s", s.idx, inst.ID, err, reason)
+	inst.Status = StatusGap
+	inst.Pending = nil
+	if s.metrics != nil {
+		s.metrics.MalformedDeltasTotal.WithLabelValues(reason).Inc()
+	}
+}
+
 // applyOne mutates the book for one already-sequenced record.
-func (s *Shard) applyOne(inst *Instrument, rec Record) ChannelEvent {
+//
+// The second return value is non-nil when the record is a book-affecting message
+// the spec declares malformed. Nothing was applied in that case, and the caller
+// MUST demote the instrument: the reason travels out rather than being handled
+// here so that the demotion sits at the same altitude as the sequence-gap
+// demotion, where it is one decision per classification outcome.
+func (s *Shard) applyOne(inst *Instrument, rec Record) (ChannelEvent, error) {
 	switch rec.Type {
 	case "level_update":
 		div := inst.ApplyLevelUpdate(
@@ -307,18 +360,19 @@ func (s *Shard) applyOne(inst *Instrument, rec Record) ChannelEvent {
 		if err != nil {
 			// Malformed: discard without advancing the trackers, because nothing
 			// was applied. Returning early leaves last_applied where it was, so
-			// the next delta is classified against the correct expected seq.
+			// the next delta is classified against the correct expected seq — and
+			// the caller's demoteMalformed keeps that classification from mattering,
+			// since the instrument is gapped and buffering from here.
 			//
 			// The event Kind must NOT be "applied_delta" — no book change happened,
 			// and a consumer that persists this as applied records a mutation the
 			// book never saw.
 			//
-			// Defense in depth: unreachable from live traffic, because the parser
-			// already rejects Scope=1 with ClearSide=2 at decode and never emits
+			// Defense in depth: unreachable from the reference pipeline, because
+			// the parser rejects Scope=1 with ClearSide=2 at decode and never emits
 			// such a record. This guards a hand-fed socket or a future parser that
 			// relaxes that check.
-			log.Printf("shard %d instrument %d: %v", s.idx, inst.ID, err)
-			return ChannelEvent{Kind: KindMalformedDelta, InstrumentID: inst.ID, Symbol: inst.Symbol, Record: rec}
+			return ChannelEvent{Kind: KindMalformedDelta, InstrumentID: inst.ID, Symbol: inst.Symbol, Record: rec}, err
 		}
 	}
 	inst.LastAppliedMktdataSeq = rec.SequenceNumber
@@ -327,7 +381,7 @@ func (s *Shard) applyOne(inst *Instrument, rec Record) ChannelEvent {
 	// records that genuinely changed the book — the same rule as the two sequence
 	// trackers. level_snapshots.publisher_send_ts reads it.
 	inst.LastAppliedSendTS = rec.sendTime()
-	return ChannelEvent{Kind: KindAppliedDelta, InstrumentID: inst.ID, Symbol: inst.Symbol, Record: rec}
+	return ChannelEvent{Kind: KindAppliedDelta, InstrumentID: inst.ID, Symbol: inst.Symbol, Record: rec}, nil
 }
 
 // bufferDelta appends to the per-instrument buffer, keeping it ordered by

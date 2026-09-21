@@ -44,8 +44,14 @@ type Metrics struct {
 	SnapshotLevelDroppedTotal prometheus.Counter
 	DeltasDiscardedTotal      *prometheus.CounterVec // label: reason
 	PerInstrumentGapsTotal    prometheus.Counter
-	InstrumentResetsTotal     *prometheus.CounterVec // label: reason
-	ChannelResetsTotal        prometheus.Counter
+	// MalformedDeltasTotal counts book-affecting messages the spec declares
+	// malformed. It is deliberately NOT PerInstrumentGapsTotal even though both
+	// end in a gap: a sequence gap is data lost between the publisher and here,
+	// while a malformed delta arrived intact and is a publisher defect. An
+	// operator who cannot tell them apart chases packet loss that never happened.
+	MalformedDeltasTotal  *prometheus.CounterVec // label: reason
+	InstrumentResetsTotal *prometheus.CounterVec // label: reason
+	ChannelResetsTotal    prometheus.Counter
 
 	// ClickHouse persistence. Populated through metricsObserver, which adapts
 	// the shared internal/clickhouse client's Observer interface onto these.
@@ -94,7 +100,14 @@ func NewMetrics(version, commit string) *Metrics {
 	m.SnapshotDiscardedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "snapshot_discarded_total"}, []string{"reason"})
 	m.SnapshotLevelDroppedTotal = prometheus.NewCounter(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "snapshot_level_dropped_total"})
 	m.DeltasDiscardedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "deltas_discarded_total"}, []string{"reason"})
-	m.PerInstrumentGapsTotal = prometheus.NewCounter(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "per_instrument_gaps_total"})
+	m.PerInstrumentGapsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: metricsNamespace, Name: "per_instrument_gaps_total",
+		Help: "Per-instrument sequence gaps confirmed after the reorder window: deltas that never arrived. A malformed delta is counted in malformed_deltas_total.",
+	})
+	m.MalformedDeltasTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricsNamespace, Name: "malformed_deltas_total",
+		Help: "Book-affecting mktdata messages the spec declares malformed, each demoting its instrument to gap immediately. A publisher defect, not loss in transit.",
+	}, []string{"reason"})
 	m.InstrumentResetsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "instrument_resets_total"}, []string{"reason"})
 	m.ChannelResetsTotal = prometheus.NewCounter(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "channel_resets_total"})
 
@@ -124,7 +137,7 @@ func NewMetrics(version, commit string) *Metrics {
 		m.CrossedBookEventsTotal, m.CrossedInstruments, m.BookDivergenceTotal,
 		m.DeltaBufferOverflowTotal, m.DeltaBufferedRecords,
 		m.SnapshotDiscardedTotal, m.SnapshotLevelDroppedTotal, m.DeltasDiscardedTotal,
-		m.PerInstrumentGapsTotal, m.InstrumentResetsTotal, m.ChannelResetsTotal,
+		m.PerInstrumentGapsTotal, m.MalformedDeltasTotal, m.InstrumentResetsTotal, m.ChannelResetsTotal,
 		m.ClickhouseRowsWritten, m.ClickhouseRowsDropped, m.ClickhouseWriteErrors,
 		m.ClickhouseBatchDuration, m.ClickhouseBufferedRows,
 		m.SnapshotWritesTotal, m.SnapshotCoalescesTotal, m.SnapshotLagMs,

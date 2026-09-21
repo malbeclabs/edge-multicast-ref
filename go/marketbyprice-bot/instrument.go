@@ -187,6 +187,27 @@ func (i *Instrument) ApplyLevelUpdate(sideByte uint8, priceRaw int64, qtyRaw uin
 
 var errBookClearScopeSide = errors.New("book_clear scope=1 with clear_side=both")
 
+// Reason labels for malformed_deltas_total. The values match the parser's
+// dz_mbp_parser_malformed_total{reason} for the same wire conditions, so the
+// decode-side and book-side counters line up on one dashboard.
+const (
+	reasonBookClearScopeSide = "bookclear_scope_side"
+	// reasonMalformedOther labels a book-affecting message rejected by a rule
+	// other than BookClear's scope/side rule. Unreachable today, because that is
+	// the only such rule the spec states, but it keeps the next one from demoting
+	// an instrument under no label at all.
+	reasonMalformedOther = "other"
+)
+
+// malformedReason names the rule a book-affecting message broke, for the metric
+// label and the log line.
+func malformedReason(err error) string {
+	if errors.Is(err, errBookClearScopeSide) {
+		return reasonBookClearScopeSide
+	}
+	return reasonMalformedOther
+}
+
 // ApplyBookClear removes levels in bulk. clearSide 0=bid, 1=ask, 2=both.
 // scope 0 clears the whole side(s); scope 1 clears from fromPriceRaw outward —
 // for bids every level at or below it, for asks every level at or above it.

@@ -949,3 +949,152 @@ func TestSymbolFilter_KeepsChannelScopedRecords(t *testing.T) {
 		t.Errorf("channel health must not be symbol-filtered, got %d rows", got)
 	}
 }
+
+// malformedCount reads malformed_deltas_total for one reason.
+func malformedCount(m *Metrics, reason string) float64 {
+	return counterValue(m.MalformedDeltasTotal.WithLabelValues(reason))
+}
+
+// A malformed BookClear must gap its instrument ON THE MALFORMED MESSAGE, not
+// after the reorder window, and must count as a publisher defect rather than as
+// mktdata loss.
+//
+// The publisher consumed a Per-Instrument Seq for the message this engine
+// discards, so every later delta reads as a forward gap. Waiting the window out
+// holds and discards ~reorderWindow deltas for a hole that can never fill and
+// then reaches the same gap, and it lands the event in per_instrument_gaps_total
+// — the counter an operator reads to judge feed loss.
+func TestApplyDelta_MalformedBookClearGapsImmediately(t *testing.T) {
+	m := NewMetrics("test", "test")
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
+	k := instKey{0, 11}
+	inst := readyInstrumentInShard(t, s, k, 5)
+	inst.Bids[900] = &LevelState{QtyRaw: 7}
+
+	evs := s.applyDelta(k, bookClearRec(11, 900, 6, "both", "from_price", 1000))
+
+	if len(evs) != 1 || evs[0].Kind != KindMalformedDelta {
+		t.Fatalf("events: %+v", evs)
+	}
+	if inst.Status != StatusGap {
+		t.Fatalf("the malformed message itself must gap the instrument, got %v", inst.Status)
+	}
+	if got := malformedCount(m, reasonBookClearScopeSide); got != 1 {
+		t.Errorf("malformed_deltas_total{bookclear_scope_side}: got %v want 1", got)
+	}
+	if got := counterValue(m.PerInstrumentGapsTotal); got != 0 {
+		t.Errorf("a publisher defect must not read as mktdata loss: per_instrument_gaps_total = %v want 0", got)
+	}
+	if inst.Pending != nil {
+		t.Error("Pending must be dropped on the demotion")
+	}
+	// The malformed record itself is worthless: buffering it would only re-demote
+	// the instrument when the buffer replays.
+	if len(s.deltaBuf[k]) != 0 || s.bufferedN != 0 {
+		t.Errorf("the malformed record must not be buffered: %d records, bufferedN=%d", len(s.deltaBuf[k]), s.bufferedN)
+	}
+	// Nothing was applied, so the trackers stay where they were.
+	if inst.LastAppliedInstrumentSeq != 5 {
+		t.Errorf("trackers must not advance: got %d want 5", inst.LastAppliedInstrumentSeq)
+	}
+
+	// Everything that follows is buffered for the recovery snapshot rather than
+	// held in the reorder window. Feed more than a full window to prove the
+	// instrument does not travel through it: no further gap is ever declared, and
+	// nothing accumulates in Pending.
+	for i := 0; i <= reorderWindow; i++ {
+		s.applyDelta(k, levelUpdateRec(11, uint64(901+i), uint32(7+i), "bid", int64(3000+i), 5))
+	}
+	if inst.Pending != nil {
+		t.Errorf("a gapped instrument must buffer, not hold in the reorder window: Pending=%v", inst.Pending)
+	}
+	if got := len(s.deltaBuf[k]); got != reorderWindow+1 {
+		t.Errorf("post-demotion deltas must be buffered for replay: got %d want %d", got, reorderWindow+1)
+	}
+	if got := counterValue(m.PerInstrumentGapsTotal); got != 0 {
+		t.Errorf("no sequence gap may be declared after the demotion: got %v want 0", got)
+	}
+	if got := malformedCount(m, reasonBookClearScopeSide); got != 1 {
+		t.Errorf("exactly one malformed delta: got %v want 1", got)
+	}
+}
+
+// The same demotion must happen when the malformed BookClear is reached by
+// draining Pending rather than on arrival. A record held for reordering is
+// applied through the same path, so the drain loop must stop at it — continuing
+// would apply later deltas on top of a book that lost a mutation.
+func TestApplyDelta_MalformedBookClearDrainedFromPendingGaps(t *testing.T) {
+	m := NewMetrics("test", "test")
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
+	k := instKey{0, 11}
+	inst := readyInstrumentInShard(t, s, k, 5)
+
+	// 7 arrives before 6 and is held: malformed, but not yet looked at.
+	s.applyDelta(k, bookClearRec(11, 901, 7, "both", "from_price", 1000))
+	// 8 is a valid delta behind it, also held.
+	s.applyDelta(k, levelUpdateRec(11, 902, 8, "bid", 2000, 5))
+	if inst.Status != StatusReady || len(inst.Pending) != 2 {
+		t.Fatalf("setup: want ready with 2 held, got %v with %d", inst.Status, len(inst.Pending))
+	}
+
+	// 6 fills the hole, applies, and the drain reaches the malformed 7.
+	evs := s.applyDelta(k, levelUpdateRec(11, 900, 6, "bid", 1000, 5))
+
+	if len(evs) != 2 || evs[0].Kind != KindAppliedDelta || evs[1].Kind != KindMalformedDelta {
+		t.Fatalf("want applied_delta then malformed_delta, got %+v", evs)
+	}
+	if inst.Status != StatusGap {
+		t.Fatalf("a malformed record drained from Pending must gap the instrument, got %v", inst.Status)
+	}
+	if got := malformedCount(m, reasonBookClearScopeSide); got != 1 {
+		t.Errorf("malformed_deltas_total{bookclear_scope_side}: got %v want 1", got)
+	}
+	if got := counterValue(m.PerInstrumentGapsTotal); got != 0 {
+		t.Errorf("per_instrument_gaps_total: got %v want 0", got)
+	}
+	// The drain stopped at the malformed record: 8 was never applied on top of a
+	// book that lost 7's mutation.
+	if inst.LastAppliedInstrumentSeq != 6 {
+		t.Errorf("the drain must stop at the malformed record: tracker %d want 6", inst.LastAppliedInstrumentSeq)
+	}
+	if inst.Pending != nil {
+		t.Error("Pending must be dropped on the demotion")
+	}
+}
+
+// The demotion is for messages that LOSE A BOOK MUTATION, not for every
+// publisher defect. A LevelUpdate whose Action disagrees with this engine's book
+// still states the level's complete resulting state, so the absolute-apply rule
+// produces the correct book: it is counted as divergence and the instrument stays
+// ready. Demoting here would turn a decode nit into a resynchronization cycle.
+func TestApplyDelta_LevelUpdateDivergenceDoesNotDemote(t *testing.T) {
+	m := NewMetrics("test", "test")
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
+	k := instKey{0, 11}
+	inst := readyInstrumentInShard(t, s, k, 5)
+	inst.Bids[1000] = &LevelState{QtyRaw: 7}
+
+	// Action=new on a level already present, and a zero quantity carried with an
+	// Action the publisher rule forbids for it: two divergences at once.
+	evs := s.applyDelta(k, levelUpdateRec(11, 900, 6, "bid", 1000, 0))
+
+	if len(evs) != 1 || evs[0].Kind != KindAppliedDelta {
+		t.Fatalf("a divergent LevelUpdate still applies: %+v", evs)
+	}
+	if inst.Status != StatusReady {
+		t.Fatalf("a divergence must not demote the instrument, got %v", inst.Status)
+	}
+	if got := malformedCount(m, reasonBookClearScopeSide) + malformedCount(m, reasonMalformedOther); got != 0 {
+		t.Errorf("a divergence is not a malformed delta: malformed_deltas_total = %v want 0", got)
+	}
+	if got := counterValue(m.BookDivergenceTotal.WithLabelValues(string(DivergenceNewOnPresent))); got != 1 {
+		t.Errorf("book_divergence_total{new_on_present}: got %v want 1", got)
+	}
+	if got := counterValue(m.BookDivergenceTotal.WithLabelValues(string(DivergenceZeroQtyBadAction))); got != 1 {
+		t.Errorf("book_divergence_total{zero_qty_wrong_action}: got %v want 1", got)
+	}
+	// The apply happened, so the trackers advanced.
+	if inst.LastAppliedInstrumentSeq != 6 {
+		t.Errorf("trackers must advance on an applied delta: got %d want 6", inst.LastAppliedInstrumentSeq)
+	}
+}
