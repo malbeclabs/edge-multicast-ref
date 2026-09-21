@@ -61,6 +61,17 @@ enum Serve {
     Text(&'static str),
     /// Send a binary message.
     Binary(&'static [u8]),
+    /// Read until a ping arrives from the client and record its body.
+    ///
+    /// Its own action rather than [`Serve::Expect`] taking whatever came,
+    /// because a ping's body is what is under test here and `Expect` records a
+    /// message's text: an empty text message and an empty ping would be the
+    /// same entry.
+    ///
+    /// Reading a ping is also what queues the library's pong, and the pong is
+    /// flushed by the next read or write on this side — so a script that wants
+    /// the client's receive to return follows this with something to send.
+    ExpectPing,
     /// Close, with a code.
     Close(CloseCode),
     /// Hold the connection open and read nothing, which is what a half-open
@@ -75,6 +86,13 @@ enum Serve {
 /// first.
 type Upgrades = Arc<Mutex<Vec<Vec<(String, String)>>>>;
 
+/// The body of each ping the client sent, in the order they arrived.
+///
+/// Bytes and not text: a venue that reads a ping body may want a sequence
+/// value in it, and a recorder that could only hold UTF-8 would be one this
+/// transport's callers could outgrow.
+type Pings = Arc<Mutex<Vec<Vec<u8>>>>;
+
 /// Binds loopback and serves each script on one accepted connection, in order.
 ///
 /// Returns the address and the messages the client sent, so a test can assert
@@ -82,7 +100,7 @@ type Upgrades = Arc<Mutex<Vec<Vec<(String, String)>>>>;
 /// run out the listener is dropped, so the next connect is refused rather than
 /// hanging in a backlog — which is what lets a test say "and then no more".
 async fn serve(scripts: Vec<Vec<Serve>>) -> (SocketAddr, Arc<Mutex<Vec<String>>>) {
-    let (address, received, _upgrades) = serve_recording_upgrades(scripts).await;
+    let (address, received, _upgrades, _pings) = serve_recording_all(scripts).await;
     (address, received)
 }
 
@@ -94,6 +112,24 @@ async fn serve(scripts: Vec<Vec<Serve>>) -> (SocketAddr, Arc<Mutex<Vec<String>>>
 async fn serve_recording_upgrades(
     scripts: Vec<Vec<Serve>>,
 ) -> (SocketAddr, Arc<Mutex<Vec<String>>>, Upgrades) {
+    let (address, received, upgrades, _pings) = serve_recording_all(scripts).await;
+    (address, received, upgrades)
+}
+
+/// [`serve`], and also the body of every ping the client sent.
+///
+/// A ping's body is only visible from this side: the client's own ping never
+/// comes back to it, and the pong the library answers with carries whatever the
+/// peer chose to echo rather than what went out.
+async fn serve_recording_pings(scripts: Vec<Vec<Serve>>) -> (SocketAddr, Pings) {
+    let (address, _received, _upgrades, pings) = serve_recording_all(scripts).await;
+    (address, pings)
+}
+
+/// The server each wrapper above is one view of.
+async fn serve_recording_all(
+    scripts: Vec<Vec<Serve>>,
+) -> (SocketAddr, Arc<Mutex<Vec<String>>>, Upgrades, Pings) {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("loopback is bindable without a privilege");
@@ -102,6 +138,8 @@ async fn serve_recording_upgrades(
     let sink = Arc::clone(&received);
     let upgrades: Upgrades = Arc::new(Mutex::new(Vec::new()));
     let seen = Arc::clone(&upgrades);
+    let pings: Pings = Arc::new(Mutex::new(Vec::new()));
+    let pinged = Arc::clone(&pings);
 
     tokio::spawn(async move {
         for script in scripts {
@@ -154,6 +192,17 @@ async fn serve_recording_upgrades(
                             }))
                             .await;
                     }
+                    Serve::ExpectPing => {
+                        // Reading past anything else on the way: a client is
+                        // free to send its subscriptions before its first ping
+                        // falls due, and the ping is what this waits for.
+                        while let Some(Ok(message)) = stream.next().await {
+                            if let Message::Ping(body) = message {
+                                pinged.lock().expect("the recorder").push(body.to_vec());
+                                break;
+                            }
+                        }
+                    }
                     Serve::Hold(duration) => tokio::time::sleep(duration).await,
                 }
             }
@@ -161,7 +210,7 @@ async fn serve_recording_upgrades(
         drop(listener);
     });
 
-    (address, received, upgrades)
+    (address, received, upgrades, pings)
 }
 
 /// What the server saw for one header on the nth handshake, if anything.
@@ -204,6 +253,23 @@ async fn payload(input: &mut WebSocketInput) -> Vec<u8> {
         Ok(other) => panic!("expected a payload, got {other:?}"),
         Err(error) => panic!("expected a payload, got {error}"),
     }
+}
+
+/// The next payload, letting the liveness on the way past.
+///
+/// The ping tests need this where [`payload`] would not do: a ping falls due
+/// inside the receive, and the pong that answers it is a liveness that an
+/// assertion on the next payload would trip over.
+async fn payload_past_liveness(input: &mut WebSocketInput) -> Vec<u8> {
+    for _ in 0..8 {
+        match input.recv(None).await {
+            Ok(Received::Payload { bytes, .. }) => return bytes.to_vec(),
+            Ok(Received::Liveness) => {}
+            Ok(other) => panic!("expected a payload, got {other:?}"),
+            Err(error) => panic!("expected a payload, got {error}"),
+        }
+    }
+    panic!("no payload arrived, and the liveness kept coming")
 }
 
 // ---------------------------------------------------------------------------
@@ -404,6 +470,164 @@ async fn a_handshake_the_far_side_answers_with_http_is_a_retryable_connect_error
         .expect_err("the upgrade was refused");
     assert!(!error.is_fatal(), "{error}");
     assert!(error.to_string().contains("401"), "{error}");
+}
+
+// ---------------------------------------------------------------------------
+// The outbound ping
+// ---------------------------------------------------------------------------
+//
+// Inbound pings are the library's business: it answers them with the body the
+// venue sent while the stream is polled. These are about the ping this
+// transport initiates, whose body a venue may require, may require to change,
+// and may reject for being empty.
+
+#[tokio::test]
+async fn the_ping_body_the_provider_computed_reaches_the_venue() {
+    let (address, pings) = serve_recording_pings(vec![vec![
+        Serve::ExpectPing,
+        // Sent after the ping was read, which is what flushes the library's
+        // pong and so what lets the client's receive return at all.
+        Serve::Text("after the ping"),
+    ]])
+    .await;
+
+    let mut input = WebSocketInput::new(CONNECTION, endpoint(address))
+        .expect("an endpoint")
+        .with_ping_interval(FAST_PING)
+        .with_ping_payload(|| b"not-a-real-keepalive-token".to_vec());
+    input
+        .connect(Duration::from_secs(5))
+        .await
+        .expect("loopback accepts");
+
+    assert_eq!(
+        payload_past_liveness(&mut input).await,
+        b"after the ping".to_vec(),
+        "the connection did not survive the ping"
+    );
+    // Asserted from the server's side of the socket, because that is the only
+    // place that says the body was sent rather than merely stored.
+    assert_eq!(
+        pings.lock().expect("the recorder").as_slice(),
+        [b"not-a-real-keepalive-token".to_vec()],
+        "the venue did not see the body the provider computed"
+    );
+}
+
+#[tokio::test]
+async fn a_transport_with_no_ping_body_configured_pings_with_an_empty_one() {
+    // The compatibility guarantee, and asserted where it is observable rather
+    // than on the absence of a provider: a venue that reads nothing out of a
+    // ping must see the same empty ping whether or not this hook exists.
+    let (address, pings) =
+        serve_recording_pings(vec![vec![Serve::ExpectPing, Serve::Text("after the ping")]]).await;
+
+    let mut input = WebSocketInput::new(CONNECTION, endpoint(address))
+        .expect("an endpoint")
+        .with_ping_interval(FAST_PING);
+    input
+        .connect(Duration::from_secs(5))
+        .await
+        .expect("loopback accepts");
+
+    assert_eq!(
+        payload_past_liveness(&mut input).await,
+        b"after the ping".to_vec()
+    );
+    assert_eq!(
+        pings.lock().expect("the recorder").as_slice(),
+        [Vec::<u8>::new()],
+        "an unconfigured ping carries nothing"
+    );
+}
+
+#[tokio::test]
+async fn the_provider_runs_again_for_every_ping_and_the_second_body_is_the_new_one() {
+    // The reason this is a closure and not a body. A venue that reads the body
+    // wants a token that rotates or a sequence value that advances, so a body
+    // computed once is a keepalive that satisfies the venue exactly once - and
+    // the failure is the quiet one, because the connection stays up until the
+    // venue decides it has waited long enough. The counter here stands in for
+    // that value: a body computed once would arrive twice as `1`.
+    let (address, pings) = serve_recording_pings(vec![vec![
+        Serve::ExpectPing,
+        Serve::Text("one"),
+        Serve::ExpectPing,
+        Serve::Text("two"),
+    ]])
+    .await;
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&calls);
+    let mut input = WebSocketInput::new(CONNECTION, endpoint(address))
+        .expect("an endpoint")
+        .with_ping_interval(FAST_PING)
+        // An atomic in the capture, which is what the `Fn` bound asks of a
+        // venue and what the header provider's own test does with a timestamp.
+        .with_ping_payload(move || {
+            let nth = counted.fetch_add(1, Ordering::SeqCst) + 1;
+            nth.to_string().into_bytes()
+        });
+    input
+        .connect(Duration::from_secs(5))
+        .await
+        .expect("loopback accepts");
+
+    assert_eq!(payload_past_liveness(&mut input).await, b"one".to_vec());
+    assert_eq!(payload_past_liveness(&mut input).await, b"two".to_vec());
+    assert_eq!(
+        pings.lock().expect("the recorder").as_slice(),
+        [b"1".to_vec(), b"2".to_vec()],
+        "the venue saw one body twice"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn a_ping_body_over_the_protocol_limit_stops_the_driver_and_never_reaches_the_venue() {
+    // The protocol allows a control message 125 bytes of application data and
+    // the library does not check that on the way out, so an over-long body
+    // would go out and be answered with a close - which is `remote_close`,
+    // counted against the venue, explaining nothing. Stopped instead, for the
+    // reason an invalid header value stops the driver.
+    let (address, pings) = serve_recording_pings(vec![vec![Serve::ExpectPing]]).await;
+
+    let token = "not-a-real-keepalive-token";
+    let mut input = WebSocketInput::new(CONNECTION, endpoint(address))
+        .expect("an endpoint")
+        .with_ping_interval(FAST_PING)
+        .with_ping_payload(move || {
+            let mut oversized = token.as_bytes().to_vec();
+            oversized.resize(126, b'.');
+            oversized
+        });
+    input
+        .connect(Duration::from_secs(5))
+        .await
+        .expect("loopback accepts");
+
+    let error = input
+        .recv(None)
+        .await
+        .expect_err("that body is not sendable");
+    assert!(
+        error.is_fatal(),
+        "a body that overruns the limit is not something a retry fixes: {error}"
+    );
+    assert!(
+        error.to_string().contains("126") && error.to_string().contains("125"),
+        "the length that was refused and the limit are what identify it: {error}"
+    );
+    // A ping body is where a venue wants its token, so it is held to the
+    // standard a header value is held to.
+    assert!(
+        !error.to_string().contains(token),
+        "a ping body reached a log line: {error}"
+    );
+    assert!(
+        pings.lock().expect("the recorder").is_empty(),
+        "the over-long ping went out anyway"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -29,6 +29,15 @@ type Stream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 /// signing routine that is not `Send` is a design to fix there.
 type HeaderProvider = Box<dyn Fn() -> Result<Vec<(String, String)>, String> + Send>;
 
+/// What computes the body of one outbound ping.
+///
+/// `Send` for the reason [`HeaderProvider`] is `Send`, and `Fn` for the reason
+/// [`HeaderProvider`] is `Fn`: the two hooks on this transport have one shape,
+/// so a venue learns it once. A body that has to differ between pings carries
+/// its state the way a signed timestamp does — in an `AtomicU64` or a `Mutex`
+/// the closure captured.
+type PingPayloadProvider = Box<dyn Fn() -> Vec<u8> + Send>;
+
 /// How often to ping when nothing has arrived, and therefore also how long a
 /// ping may go unanswered.
 ///
@@ -38,6 +47,16 @@ type HeaderProvider = Box<dyn Fn() -> Result<Vec<(String, String)>, String> + Se
 /// in payloads, because a venue that has quietly dropped a subscription answers
 /// pings perfectly.
 const DEFAULT_PING_INTERVAL: Duration = Duration::from_secs(15);
+
+/// The most one ping may carry.
+///
+/// RFC 6455 caps a control message's application data at 125 bytes, so that it
+/// is always one unfragmented unit with a one-byte length. The library checks
+/// that on the way **in** and not on the way out, so a longer one would go out
+/// and be answered by whatever the peer does with a protocol violation — which
+/// is a close, and a close is the failure a configurable ping body exists to
+/// stop happening for no visible reason.
+const MAX_PING_PAYLOAD_BYTES: usize = 125;
 
 /// The largest message this transport will assemble.
 ///
@@ -70,6 +89,10 @@ pub struct WebSocketInput {
     /// this is a closure and not a list of headers.
     headers: Option<HeaderProvider>,
     ping_interval: Duration,
+    /// Computes the body of each outbound ping, when the venue reads one. See
+    /// [`WebSocketInput::with_ping_payload`] for why this is a closure and not
+    /// a fixed value, and for what unset means.
+    ping_payload: Option<PingPayloadProvider>,
     max_message_bytes: usize,
     stream: Option<Stream>,
     /// The message the last [`Input::recv`] handed out, kept alive because the
@@ -123,6 +146,7 @@ impl WebSocketInput {
             authority,
             headers: None,
             ping_interval: DEFAULT_PING_INTERVAL,
+            ping_payload: None,
             max_message_bytes: DEFAULT_MAX_MESSAGE_BYTES,
             stream: None,
             held: None,
@@ -212,6 +236,63 @@ impl WebSocketInput {
         self
     }
 
+    /// The body of each outbound ping, computed again for **every** ping.
+    ///
+    /// Optional, and unset is what this transport sends with nothing
+    /// configured: an empty ping, which is what the protocol asks for and what
+    /// a venue that does not read the body accepts. Setting this is for the
+    /// venue that reads it.
+    ///
+    /// A closure and not a fixed value for the reason
+    /// [`with_headers`](Self::with_headers) is one: a venue that reads the body
+    /// at all tends to want a body that changes. The shapes that ask for this
+    /// are a rotating token, a sequence value, and the venue's own last ping
+    /// echoed back at it, and none of the three is a constant. A counter or a
+    /// last-seen value lives in an `AtomicU64` or a `Mutex` the closure
+    /// captured, which is what `Fn` rather than `FnMut` asks of a venue here —
+    /// the same bound as `with_headers`, so that there is one shape to learn
+    /// and not two.
+    ///
+    /// Inbound pings need nothing of this. The library answers those with the
+    /// payload the venue sent, while the stream is being polled, so a venue
+    /// that only wants its own pings echoed is already served.
+    ///
+    /// **At most [`MAX_PING_PAYLOAD_BYTES`] bytes**, which is the protocol's
+    /// limit and not this crate's. A provider that overruns it stops the driver
+    /// rather than having its body truncated or sent: a truncated token is not
+    /// the token, and a ping over the limit is a violation the venue answers
+    /// with a close that says nothing about the cause.
+    ///
+    /// **The provider must not put anything in the body it would not put in a
+    /// log line**, on the understanding that the body reaches the venue and the
+    /// venue's own logs. Nothing in this crate prints it: the length is what an
+    /// over-long payload is reported by, and [`Debug`] says only whether a body
+    /// is computed at all.
+    ///
+    /// # Why the provider neither fails nor declines
+    ///
+    /// `with_headers` returns a `Result` because an upgrade that cannot be
+    /// signed has an answer: the handshake does not go out, the driver is told
+    /// [`ConnectFailureReason::Unauthorized`], and it tries again in a moment.
+    /// A ping has neither half of that. There is no error to report it as —
+    /// nothing has ended, so [`DisconnectReason`] and its four values would be
+    /// a lie, and a connect failure describes a connection that never started.
+    /// And the other reading of a failure, skipping this ping, switches the
+    /// keepalive off for as long as the provider keeps failing, which is the
+    /// unexplained silent disconnect this hook exists to prevent.
+    ///
+    /// So a provider whose token is momentarily unavailable sends its best
+    /// effort. A venue that closes the connection over it is a path this crate
+    /// already classifies, and the reconnect runs the header provider, which is
+    /// where a credential that is not there yet is reported as retryable and
+    /// where an operator is already looking. A fallible form stays available:
+    /// it would be another method, and this one forecloses nothing.
+    #[must_use]
+    pub fn with_ping_payload(mut self, provider: impl Fn() -> Vec<u8> + Send + 'static) -> Self {
+        self.ping_payload = Some(Box::new(provider));
+        self
+    }
+
     /// The provider's headers, on the request the handshake is about to send.
     ///
     /// Takes the request by value and hands it back, so that there is no
@@ -244,6 +325,53 @@ impl WebSocketInput {
             request.headers_mut().insert(name, value);
         }
         Ok(request)
+    }
+
+    /// The ping the keepalive timer is about to send.
+    ///
+    /// Its own function rather than a line inside [`Input::recv`] because the
+    /// two ways to be wrong about a ping body — not sending the one that was
+    /// configured, and sending one the protocol does not allow — are both
+    /// decided here.
+    ///
+    /// # Errors
+    ///
+    /// [`IngressError::Fatal`] when the provider returned more than
+    /// [`MAX_PING_PAYLOAD_BYTES`] bytes, and the ping is not sent.
+    ///
+    /// Fatal on the reasoning [`WebSocketInput::with_headers`] gives for a
+    /// header value, which is recomputed per attempt and still fatal: a
+    /// provider that overruns the limit once has no length discipline, the next
+    /// ping is no likelier to fit, and of the two mistakes available the loud
+    /// one is the recoverable one — a runtime's restart policy acts on a
+    /// stopped driver, and a reconnect loop nobody reads does not.
+    ///
+    /// The alternatives are worse in the way this whole hook exists to fix.
+    /// Truncating hands the venue a token that is not the token and lets it
+    /// decide the keepalive was not satisfied. Sending it anyway puts a control
+    /// message the protocol forbids on the wire, and the venue answers that
+    /// with a close — counted against the venue, in a series that says
+    /// `remote_close`, explaining nothing.
+    fn ping_message(&self) -> Result<Message, IngressError> {
+        let Some(provider) = self.ping_payload.as_ref() else {
+            // Byte for byte what this transport sends with no provider set,
+            // which is the compatibility guarantee: an empty ping.
+            return Ok(Message::Ping(Default::default()));
+        };
+        let payload = provider();
+        if payload.len() > MAX_PING_PAYLOAD_BYTES {
+            // The length and never the bytes. A venue that reads a ping body
+            // reads a token out of it, and that is held to the standard the
+            // header provider's values are held to.
+            return Err(IngressError::fatal(format!(
+                "{}: the ping payload is {} bytes and a ping carries at most \
+                 {MAX_PING_PAYLOAD_BYTES} (its content is withheld: see \
+                 `with_ping_payload`)",
+                self.authority,
+                payload.len()
+            )));
+        }
+        Ok(Message::Ping(payload.into()))
     }
 
     /// The TLS connector, with the provider named rather than discovered.
@@ -293,7 +421,9 @@ impl WebSocketInput {
 /// The same standard covers [`WebSocketInput::with_headers`], where a signature
 /// is one of the values: whether the upgrade is signed is printed, because that
 /// is what an operator reading a 401 wants to know, and what it is signed with
-/// is not.
+/// is not. And it covers [`WebSocketInput::with_ping_payload`], whose body is
+/// where a venue that reads one wants a token: whether the ping carries a body
+/// is printed, and the body is not.
 impl core::fmt::Debug for WebSocketInput {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("WebSocketInput")
@@ -304,6 +434,10 @@ impl core::fmt::Debug for WebSocketInput {
             // venue answers with a 401 - and the only part of a credential
             // that is safe to print.
             .field("authenticated", &self.headers.is_some())
+            // Whether the ping carries a body, which is the first question an
+            // unexplained `timeout` disconnect raises against a venue that
+            // reads one - and, like a signature, not a thing to print.
+            .field("ping_carries_payload", &self.ping_payload.is_some())
             .finish()
     }
 }
@@ -468,15 +602,17 @@ impl Input for WebSocketInput {
                                 format!("no pong within {:?}", self.ping_interval),
                             ));
                         }
-                        self.stream()?
-                            .send(Message::Ping(Default::default()))
-                            .await
-                            .map_err(|error| {
-                                IngressError::ended(
-                                    DisconnectReason::RemoteClose,
-                                    format!("ping failed: {error}"),
-                                )
-                            })?;
+                        // Computed before the borrow of the stream, and
+                        // before `awaiting_pong` is set: a ping that is not
+                        // sent must not leave the grace running against a
+                        // pong that was never asked for.
+                        let ping = self.ping_message()?;
+                        self.stream()?.send(ping).await.map_err(|error| {
+                            IngressError::ended(
+                                DisconnectReason::RemoteClose,
+                                format!("ping failed: {error}"),
+                            )
+                        })?;
                         self.awaiting_pong = true;
                         self.next_ping_at = Some(Instant::now() + self.ping_interval);
                     }
@@ -684,5 +820,52 @@ mod tests {
         let rendered = format!("{input:?}");
         assert!(!rendered.contains("not-a-real-signature"), "{rendered}");
         assert!(rendered.contains("authenticated: true"), "{rendered}");
+    }
+
+    #[test]
+    fn a_debug_line_says_that_the_ping_carries_a_body_and_not_what_is_in_it() {
+        // A venue that reads a ping body reads a token out of it, so the rule
+        // that keeps a signature out of a log line covers this too. Whether
+        // there is a body is worth printing: it is the first question an
+        // unexplained `timeout` disconnect raises.
+        let input = WebSocketInput::new(ConnectionId::new("mktdata"), "wss://example.com/stream")
+            .expect("a well-formed endpoint")
+            .with_ping_payload(|| b"not-a-real-keepalive-token".to_vec());
+        let rendered = format!("{input:?}");
+        assert!(
+            !rendered.contains("not-a-real-keepalive-token"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("ping_carries_payload: true"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn a_ping_body_of_exactly_the_protocol_limit_is_sendable_and_one_byte_more_is_not() {
+        // The boundary, checked here rather than over a socket because it is
+        // the comparison that is easy to write one off: the loopback suite
+        // proves that what this returns is what the venue sees, and this proves
+        // which side of the limit each length falls on.
+        let at_limit =
+            WebSocketInput::new(ConnectionId::new("mktdata"), "wss://example.com/stream")
+                .expect("a well-formed endpoint")
+                .with_ping_payload(|| vec![b'.'; MAX_PING_PAYLOAD_BYTES]);
+        assert_eq!(
+            at_limit.ping_message().expect("125 bytes is sendable"),
+            Message::Ping(vec![b'.'; MAX_PING_PAYLOAD_BYTES].into()),
+            "a body of exactly the limit is the whole body, unaltered"
+        );
+
+        let over_limit =
+            WebSocketInput::new(ConnectionId::new("mktdata"), "wss://example.com/stream")
+                .expect("a well-formed endpoint")
+                .with_ping_payload(|| vec![b'.'; MAX_PING_PAYLOAD_BYTES + 1]);
+        let error = over_limit
+            .ping_message()
+            .expect_err("126 bytes is not sendable");
+        assert!(error.is_fatal(), "{error}");
+        assert!(error.to_string().contains("126"), "{error}");
     }
 }
