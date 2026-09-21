@@ -172,8 +172,11 @@ The command line is the configuration path — bare, or after `--config` — plu
 `--version`/`-V` and `--help`/`-h`, which are answered wherever on the line they
 are written. Every argument is read: an option the parser does not know is
 refused by name rather than opened as a file, so a misspelled flag fails as the
-flag it is, and two configuration files are refused naming both rather than one
-of them being dropped. `--help` prints the accepted forms on stdout and exits 0.
+flag it is; two configuration files are refused naming both rather than one of
+them being dropped; and an option left without its value is named as the option.
+A command line carrying one of those refusals is refused rather than answered in
+part, so `--version` after a misspelling reports the misspelling. `--help`
+prints the accepted forms on stdout and exits 0.
 
 **`--version` writes one line to stdout and exits 0: the version, alone.** That
 is the string a deployment compares against the version it pinned, and the tag
@@ -190,7 +193,10 @@ fn main() -> std::process::ExitCode {
 
 The same string reaches `dz_publisher_build_info{version}`, so what a scrape
 reports and what the binary answers cannot disagree about which build is
-deployed.
+deployed. The commit and the toolchain are on that gauge and deliberately not on
+the line: a consumer of `--version` compares one string against one pin, and a
+second field on the line is a field position for it to parse. A build handed no
+version reports `unknown`, which compares equal to no pin anybody holds.
 
 The transport comes from [`rust/ingress`](rust/ingress/). `[ingress] kind` names
 one of a closed set — `websocket`, `fix`, `multicast`, `poll`, `filetail`,

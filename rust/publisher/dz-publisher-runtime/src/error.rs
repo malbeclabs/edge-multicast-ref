@@ -676,8 +676,28 @@ pub enum StartupError {
     /// or the last would decide which of an operator's two answers counts
     /// without saying so. The likely way in is a unit file pointed at a new
     /// document while the old argument stayed behind.
-    #[error("two configuration files were named, `{first}` and `{second}`: a publisher reads one")]
-    TwoConfigPaths { first: String, second: String },
+    #[error(
+        "two configuration files were named, `{first}` and `{second}`: a publisher reads one — \
+         {usage}"
+    )]
+    TwoConfigPaths {
+        first: String,
+        second: String,
+        usage: &'static str,
+    },
+
+    /// An option given without the value it takes.
+    ///
+    /// Named as the option it is, because the file the command line *does*
+    /// carry is not the fault: `<publisher> publisher.toml --config` names a
+    /// perfectly good document and then asks for a second one and stops
+    /// talking, and a refusal that said *no configuration file* would be
+    /// pointing at the half of the line that is right.
+    #[error("`{option}` needs a value: {usage}")]
+    OptionNeedsValue {
+        option: &'static str,
+        usage: &'static str,
+    },
 
     /// `[adapter.tee] enabled = true` with no `path`.
     ///

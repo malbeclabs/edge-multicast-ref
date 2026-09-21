@@ -168,6 +168,9 @@ pub fn run(registry: AdapterRegistry) -> ExitCode {
 ///   environment reads, which is where a build stamps them.
 #[must_use]
 pub fn run_with_version(version: &str, registry: AdapterRegistry) -> ExitCode {
+    // Once, for both answers: what stdout says and what the gauge carries are
+    // the same string, so they are the same normalization too.
+    let version = reported_version(version);
     let path = match invocation(std::env::args_os().skip(1)) {
         Ok(Invocation::Version) => {
             print!("{}", version_stdout(version));
@@ -208,6 +211,31 @@ fn report_refusal(error: &StartupError) -> ExitCode {
     ExitCode::FAILURE
 }
 
+/// What a build reports when it was handed no version.
+///
+/// A literal, and never an empty string — the rule the recorder's identity
+/// module states about an unstamped commit, for the same reason: an empty line
+/// on stdout reads as a flag that half works, while this one reads as an answer
+/// and fails a comparison against any pin.
+const UNKNOWN_VERSION: &str = "unknown";
+
+/// The version this process reports, out of what the caller handed over.
+///
+/// Trimmed, because the string is written into stdout as given and surrounding
+/// whitespace is a difference no pin carries. Empty is
+/// [`UNKNOWN_VERSION`]: the argument is a caller's value, so a venue that
+/// assembles it from an environment its build did not set passes nothing at
+/// all, and nothing at all must not print as a blank line and reach the gauge
+/// as a blank label.
+fn reported_version(version: &str) -> &str {
+    let named = version.trim();
+    if named.is_empty() {
+        UNKNOWN_VERSION
+    } else {
+        named
+    }
+}
+
 /// Exactly what `--version` writes to stdout.
 ///
 /// The version and a newline, and nothing else. A function rather than a
@@ -234,11 +262,17 @@ enum Invocation {
 /// Read the invocation out of the arguments after the program name.
 ///
 /// **Every argument is examined, and the two that publish nothing win wherever
-/// they appear.** A parser that read only the first would start a publisher for
+/// they appear on a command line this can read.** A parser that read only the
+/// first would start a publisher for
 /// `<publisher> --config publisher.toml --version` — binding transmitters and
 /// putting datagrams on a group in answer to a question about a string — and
 /// that ordering is the one a unit file writes, because the recorder beside
 /// this takes it.
+///
+/// A refusal earlier on the line still wins, so `<publisher> --verison
+/// --version` reports the misspelling rather than the version: a command line
+/// with something unreadable in it is not a question about this build, and
+/// answering the part of it that parsed would leave the rest unsaid.
 ///
 /// **An option this parser does not know is refused by name.** Anything left to
 /// fall through to the path arm becomes a filename, so a misspelled flag — or a
@@ -263,9 +297,10 @@ fn invocation<I: IntoIterator<Item = OsString>>(args: I) -> Result<Invocation, S
             return Ok(Invocation::Version);
         }
         if arg == "--config" {
-            let named = args
-                .next()
-                .ok_or(StartupError::NoConfigPath { usage: USAGE })?;
+            let named = args.next().ok_or(StartupError::OptionNeedsValue {
+                option: "--config",
+                usage: USAGE,
+            })?;
             name_config_path(&mut path, named)?;
             continue;
         }
@@ -293,6 +328,7 @@ fn name_config_path(path: &mut Option<PathBuf>, named: OsString) -> Result<(), S
         Some(first) => Err(StartupError::TwoConfigPaths {
             first: first.display().to_string(),
             second: named.to_string_lossy().into_owned(),
+            usage: USAGE,
         }),
         None => {
             *path = Some(PathBuf::from(named));
@@ -1600,15 +1636,13 @@ mod tests {
         }
     }
 
-    /// An option that needs a value, and an empty command line, are both the
-    /// refusal that names the usage.
+    /// A publisher asked for nothing at all asks for a document, and names the
+    /// forms it would take one in.
     #[test]
     fn a_command_line_with_no_configuration_file_names_the_usage() {
-        for args in [vec![], vec!["--config"]] {
-            match invocation_of(&args) {
-                Err(StartupError::NoConfigPath { usage }) => assert_eq!(usage, USAGE),
-                other => panic!("{args:?} did not ask for a configuration file: {other:?}"),
-            }
+        match invocation_of(&[]) {
+            Err(StartupError::NoConfigPath { usage }) => assert_eq!(usage, USAGE),
+            other => panic!("an empty command line did not ask for a document: {other:?}"),
         }
     }
 
@@ -1660,13 +1694,52 @@ mod tests {
             vec!["--config", "a.toml", "b.toml"],
         ] {
             match invocation_of(&args) {
-                Err(StartupError::TwoConfigPaths { first, second }) => {
+                Err(StartupError::TwoConfigPaths {
+                    first,
+                    second,
+                    usage,
+                }) => {
                     assert_eq!(first, "a.toml", "{args:?}");
                     assert_eq!(second, "b.toml", "{args:?}");
+                    assert_eq!(usage, USAGE, "{args:?}");
                 }
                 other => panic!("{args:?} did not refuse the second file: {other:?}"),
             }
         }
+    }
+
+    /// An option with no value is refused as the option, not as the file.
+    ///
+    /// The second case is the one a wrong refusal reads badly on: a perfectly
+    /// good document is on the line, so *no configuration file* would be
+    /// pointing at the half of it that is right.
+    #[test]
+    fn an_option_with_no_value_is_named_rather_than_the_file() {
+        for args in [vec!["--config"], vec!["publisher.toml", "--config"]] {
+            match invocation_of(&args) {
+                Err(StartupError::OptionNeedsValue { option, usage }) => {
+                    assert_eq!(option, "--config", "{args:?}");
+                    assert_eq!(usage, USAGE, "{args:?}");
+                }
+                other => panic!("{args:?} did not name the option: {other:?}"),
+            }
+        }
+    }
+
+    /// A version nobody set prints as an answer rather than as a blank line.
+    ///
+    /// Both halves matter to a consumer that compares: the trim, because
+    /// surrounding whitespace is a difference no pin carries and stdout is
+    /// written as given; and `unknown`, because an empty line reads as a flag
+    /// that half works and would compare equal to nothing an operator holds.
+    #[test]
+    fn a_version_nobody_set_is_reported_as_unknown() {
+        assert_eq!(reported_version(""), UNKNOWN_VERSION);
+        assert_eq!(reported_version("   "), UNKNOWN_VERSION);
+        assert_eq!(reported_version("\n"), UNKNOWN_VERSION);
+        assert_eq!(version_stdout(reported_version("")), "unknown\n");
+        assert_eq!(reported_version(" 1.2.3\n"), "1.2.3");
+        assert_eq!(reported_version("0.2.0"), "0.2.0");
     }
 
     /// The format is the contract: exactly the version, on one line, alone.
