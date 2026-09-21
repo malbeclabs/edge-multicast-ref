@@ -1,7 +1,7 @@
 //! An `Input` that reads payloads from a directory instead of a connection.
 //!
 //! `[adapter.replay]` was a configuration key with nothing behind it: it
-//! parsed, and [`run`](crate::run) did not read it. This is what it now
+//! parsed, and [`run`](crate::run()) did not read it. This is what it now
 //! selects, and it exists so that the one path a venue's `main` actually calls
 //! can be exercised end to end without a network — the real config, the real
 //! registry, the real adapter, the real lowering, the real sockets, and

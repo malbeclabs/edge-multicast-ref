@@ -320,7 +320,7 @@ offline proof around that:
   composition**: the roles resolve, the venue's `main` builds one `Input` per
   declared block, and the declared set and the built set are held equal — so a
   block the binary does not build is a startup failure offline too. Those
-  transports are then dropped unused, and a line on stderr names how many
+  transports are built and never connected, and a line on stderr names how many
   payloads are being replayed, from where, and under which connection.
 
 For the single upstream source the mechanism was built for, that bounds nothing:
