@@ -130,6 +130,31 @@
 --     there is nothing to exclude and no ordinal to shift by excluding it late.
 --
 --
+-- RE-APPLY `012` TOO, OR THE TWO TABLES BELOW ARE UNREADABLE BY THE DASHBOARDS
+--
+-- `012_recorder_reader_grants.sql` is the same arrangement for the other
+-- direction: it holds the `GRANT SELECT`s that let the `grafana` reader see
+-- these tables, and the collapsed view declared further down, written there
+-- exactly as they would be written here:
+--
+--   GRANT SELECT ON recorder.venue_book_top TO grafana;
+--   GRANT SELECT ON recorder.venue_object TO grafana;
+--   GRANT SELECT ON recorder.venue_book_top_settled TO grafana;
+--
+-- The hazard has the same shape as `004`'s and a quieter symptom. A partial
+-- apply leaves the tables readable by nothing, and what an operator meets is
+-- not an insert failing but a Grafana panel rendering nothing — which looks
+-- like a recorder that captured nothing rather than a grant that was never
+-- applied. **A VIEW NEEDS ITS OWN GRANT**: the grant on `venue_book_top` does
+-- not reach `venue_book_top_settled`, and a reader given the table and not the
+-- view counts an unmerged re-derivation twice, which this file argues at length
+-- is not an inflated count so much as manufactured evidence of loss. That one
+-- is a wrong number rather than an error.
+--
+-- Idempotent for the same reason `004` is: a grant the account already holds is
+-- replayed, never doubled.
+--
+--
 -- RE-APPLY `004` AFTER THIS FILE, OR THE TWO TABLES BELOW ARE UNWRITABLE
 --
 -- `004_recorder_loader_user.sql` is where the grants for these two tables
