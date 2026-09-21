@@ -60,7 +60,20 @@ func (w *EventsWriter) Write(ev ChannelEvent, channelID uint8, instSymbol string
 		}
 		w.ch.Enqueue("channel_health", row)
 
-	case "order_add", "order_cancel", "order_execute", "trade", "instrument_reset", "batch_boundary":
+	case "batch_boundary":
+		// A boundary is a consistency point for the whole channel. The wire
+		// carries no Instrument ID, so rec.InstrumentID is 0 and there is no
+		// symbol to resolve — hence buildChannelScopedEventRow, which stamps
+		// neither column. Passing through buildEventRow would assert instrument
+		// 0 and whatever symbol the caller supplied for a row that belongs to no
+		// instrument; ClickHouse fills instrument_id and symbol from their
+		// column defaults instead.
+		row := buildChannelScopedEventRow(rec, channelID)
+		row["batch_id"] = getUint32(rec.Fields, "batch_id")
+		row["batch_ts"] = chTime(getTime(rec.Fields, "batch_ts"))
+		w.ch.Enqueue("events", row)
+
+	case "order_add", "order_cancel", "order_execute", "trade", "instrument_reset":
 		row := buildEventRow(rec, channelID, instSymbol)
 		switch rec.Type {
 		case "order_add":
@@ -96,16 +109,29 @@ func (w *EventsWriter) Write(ev ChannelEvent, channelID uint8, instSymbol string
 		case "instrument_reset":
 			row["reset_reason"] = getString(rec.Fields, "reason")
 			row["new_anchor_seq"] = getUint64(rec.Fields, "new_anchor_seq")
-		case "batch_boundary":
-			row["batch_id"] = getUint32(rec.Fields, "batch_id")
-			row["batch_ts"] = chTime(getTime(rec.Fields, "batch_ts"))
 		}
 		w.ch.Enqueue("events", row)
 	}
 }
 
-// buildEventRow constructs the common timestamp and identity columns for an events row.
+// buildEventRow constructs the columns shared by every instrument-tied kind:
+// the channel-scoped ones plus the instrument identity the record names.
 func buildEventRow(rec Record, channelID uint8, instSymbol string) map[string]any {
+	row := buildChannelScopedEventRow(rec, channelID)
+	row["instrument_id"] = rec.InstrumentID
+	row["symbol"] = instSymbol
+	return row
+}
+
+// buildChannelScopedEventRow constructs the timestamp, sequence and kind
+// columns every `events` row carries, and no instrument identity.
+//
+// A channel-scoped kind has none to carry: its InstrumentID is 0 because the
+// wire never supplied one, and no symbol answers to it. Omitting the two
+// columns lets ClickHouse fill them from their defaults, so the row states
+// nothing about an instrument rather than claiming instrument 0 and the symbol
+// whose refdata happens to sit at that key.
+func buildChannelScopedEventRow(rec Record, channelID uint8) map[string]any {
 	row := map[string]any{
 		"recv_ts":           chTime(rec.recvTime(time.Now().UTC())),
 		"publisher_send_ts": chTime(rec.sendTime()),
@@ -114,8 +140,6 @@ func buildEventRow(rec Record, channelID uint8, instSymbol string) map[string]an
 		"mktdata_seq":       rec.SequenceNumber,
 		"reset_count":       rec.ResetCount,
 		"kind":              rec.Type,
-		"instrument_id":     rec.InstrumentID,
-		"symbol":            instSymbol,
 	}
 	if src, ok := rec.sourceTime(); ok {
 		row["source_ts"] = chTime(src)
