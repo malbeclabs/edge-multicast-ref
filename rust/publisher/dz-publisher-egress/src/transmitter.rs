@@ -221,32 +221,59 @@ mod tests {
 
     use crate::policy::DEFAULT_TTL;
 
+    /// A route that resolves the loopback address, so that the host's own
+    /// routing table decides nothing here. See [`RouteLookup`].
+    struct LoopbackRoute;
+
+    impl RouteLookup for LoopbackRoute {
+        fn source_for(&self, _destination: SocketAddrV4) -> io::Result<Ipv4Addr> {
+            Ok(Ipv4Addr::LOCALHOST)
+        }
+    }
+
     /// The hop count a policy carries is the hop count the socket holds.
     ///
-    /// Read back off the kernel rather than inferred from a datagram arriving:
-    /// what a lost `set_multicast_ttl_v4` costs is a publisher sending one hop
-    /// while its document states 64, and a subscriber on this host's own
-    /// segment receives either way. Two values, so that a socket holding a
-    /// hard-coded hop count fails here.
+    /// Opened through [`MulticastTransmitter::open`], which is the whole path
+    /// the runtime takes: the policy's value reaches `set_multicast_ttl_v4`
+    /// through one argument, and a transmitter that passed a constant instead
+    /// would send one hop while its document states 64. Read back off the
+    /// kernel rather than inferred from a datagram arriving, because a
+    /// subscriber on this host's own segment receives either way. Two values,
+    /// so that a hop count hard-coded anywhere on that path fails here.
     ///
-    /// Both of them are `NonZeroU8`, because that is the only thing this
+    /// Both of them are `NonZeroU8`, because that is the only thing the
     /// signature accepts — a zero reaching `set_multicast_ttl_v4` from a
     /// hand-composed policy is a compile error, and the compile-failure
     /// assertion for it is on [`EgressPolicy::ttl`].
     ///
-    /// A real socket: it binds the loopback address and connects to a group in
-    /// MCAST-TEST-NET. Nothing is sent, no group is joined, and no privilege is
+    /// A real socket, and hermetic: the source address is the loopback one and
+    /// the destination is a group in MCAST-TEST-NET, which the kernel resolves
+    /// over `lo`. Nothing is sent, no group is joined, and no privilege is
     /// needed.
     #[test]
     fn the_hop_count_a_policy_carries_is_the_one_the_socket_holds() {
         let destination = SocketAddrV4::new(Ipv4Addr::new(233, 252, 0, 9), 41_003);
 
         for ttl in [DEFAULT_TTL, NonZeroU8::new(64).expect("a routed hop count")] {
-            let opened = KernelSocket::open(Ipv4Addr::LOCALHOST, destination, ttl)
-                .expect("a loopback source and a documentation group");
+            let policy = EgressPolicy {
+                pin: None,
+                expected_prefix: None,
+                ttl,
+            };
+
+            let transmitter = MulticastTransmitter::open(
+                "mktdata",
+                &policy,
+                destination,
+                PortRole::Mktdata,
+                FailureScope::Process,
+                &LoopbackRoute,
+            )
+            .expect("a loopback source and a documentation group");
 
             assert_eq!(
-                opened
+                transmitter
+                    .socket
                     .socket
                     .multicast_ttl_v4()
                     .expect("the kernel reports the option it was set"),
