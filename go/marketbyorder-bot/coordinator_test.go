@@ -391,8 +391,8 @@ func TestDispatch_ResetOnOneChannelSparesTheOther(t *testing.T) {
 	s.refdata[wipe] = InstrumentDef{Symbol: "WIPE"}
 	s.snapCtx[keep] = SnapshotContext{}
 	s.snapCtx[wipe] = SnapshotContext{}
-	s.openGroup[110] = keep
-	s.openGroup[10] = wipe
+	s.open[110] = openGroup{inst: keep, snapID: 1}
+	s.open[10] = openGroup{inst: wipe, snapID: 1}
 
 	steady := Record{Type: "trade", Port: "mktdata", ChannelID: 10, InstrumentID: 2,
 		ResetCount: 200, Fields: map[string]any{}}
@@ -411,7 +411,7 @@ func TestDispatch_ResetOnOneChannelSparesTheOther(t *testing.T) {
 	if _, ok := s.snapCtx[keep]; !ok {
 		t.Error("channel 110 snapshot context was wiped by a channel 10 reset")
 	}
-	if _, ok := s.openGroup[110]; !ok {
+	if _, ok := s.open[110]; !ok {
 		t.Error("channel 110 open snapshot group was wiped by a channel 10 reset")
 	}
 	if _, ok := s.instruments[wipe]; ok {
@@ -420,7 +420,7 @@ func TestDispatch_ResetOnOneChannelSparesTheOther(t *testing.T) {
 	if _, ok := s.snapCtx[wipe]; ok {
 		t.Error("channel 10 snapshot context survived its own channel's reset")
 	}
-	if _, ok := s.openGroup[10]; ok {
+	if _, ok := s.open[10]; ok {
 		t.Error("channel 10 open snapshot group survived its own channel's reset")
 	}
 }
@@ -429,11 +429,14 @@ func TestDispatch_ResetOnOneChannelSparesTheOther(t *testing.T) {
 // case, since the id advances once per instrument per cycle — reach the shards
 // that own them, and each instrument commits its own book from its own orders.
 //
-// The route stays keyed (channel, snapshot_id) because it only has to survive
-// from a SnapshotBegin to its own SnapshotEnd: publishers MUST NOT interleave
-// groups, so the group that claimed an id last is the group whose orders follow,
-// and an order with no route is dropped and counted rather than guessed at. The
-// instrument identity comes from the open group, in the shard.
+// This guards the route, not the association: the two groups land on different
+// shards and each shard holds only its own instrument, so it passes however the
+// shard picks the instrument. The association is guarded in shard_test.go. What
+// this pins down is that the route stays keyed (channel, snapshot_id) because it
+// only has to survive from a SnapshotBegin to its own SnapshotEnd: publishers
+// MUST NOT interleave groups, so the group that claimed an id last is the group
+// whose orders follow, and an order with no route is dropped and counted rather
+// than guessed at.
 func TestDispatch_SequentialGroupsSharingSnapshotIDEachCommitsItsOwnBook(t *testing.T) {
 	c, shards := newCoordWithShards(2)
 	const snapID = 7

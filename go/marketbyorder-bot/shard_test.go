@@ -638,7 +638,7 @@ func TestSnapshotOrderAfterEndIsDroppedAndCounted(t *testing.T) {
 	before := testCounter(t, s.metrics.SnapshotOrderDroppedTotal)
 	s.handle(snapshotOrderRec(0, 7, 801, 0, 101, 6))
 
-	if _, ok := s.openGroup[0]; ok {
+	if _, ok := s.open[0]; ok {
 		t.Error("SnapshotEnd left the group open")
 	}
 	if got := testCounter(t, s.metrics.SnapshotOrderDroppedTotal) - before; got != 1 {
@@ -649,5 +649,67 @@ func TestSnapshotOrderAfterEndIsDroppedAndCounted(t *testing.T) {
 	}
 	if rows := wireSnapshotRows(cw); len(rows) != 1 {
 		t.Errorf("wire_snapshots rows = %d, want 1 (the in-group order only)", len(rows))
+	}
+}
+
+// A SnapshotEnd delayed behind the next SnapshotBegin names a group that is
+// already finished. It must leave the live group open, or the rest of that
+// group's orders are dropped as belonging to nothing and persist no rows.
+func TestDelayedSnapshotEndDoesNotCloseTheLiveGroup(t *testing.T) {
+	s, cw := snapshotShardWithCapture(t)
+	s.handle(sr("instrument_definition", "refdata", 1, 55, map[string]any{"symbol": "SYM-55"}))
+
+	// One cycle at id 7 whose SnapshotEnd is lost, then the next at id 8.
+	s.handle(snapshotBeginRec(0, 55, 7, 1, 1000, 10))
+	s.handle(snapshotBeginRec(0, 55, 8, 2, 2000, 20))
+	s.handle(snapshotOrderRec(0, 8, 801, 0, 100, 5))
+	// The id-7 end arrives now, behind the id-8 begin.
+	s.handle(snapshotEndRec(0, 55, 7, 1000))
+
+	g, ok := s.open[0]
+	if !ok || g.snapID != 8 || g.inst != (instKey{0, 55}) {
+		t.Fatalf("open group = %+v (present %v), want instrument 55 at the live id 8", g, ok)
+	}
+
+	before := testCounter(t, s.metrics.SnapshotOrderDroppedTotal)
+	s.handle(snapshotOrderRec(0, 8, 802, 0, 101, 6))
+	if got := testCounter(t, s.metrics.SnapshotOrderDroppedTotal) - before; got != 0 {
+		t.Errorf("snapshot_order_dropped_total += %v for an order of the live group, want 0", got)
+	}
+	if rows := wireSnapshotRows(cw); len(rows) != 2 {
+		t.Errorf("wire_snapshots rows = %d, want 2 (both orders of the live group)", len(rows))
+	}
+}
+
+// Snapshot ID validates membership whether or not the open group's instrument
+// accepted the snapshot. A ready instrument declines its group and builds no
+// shadow, and the drop counter must still tell that group's own orders — the
+// steady state — apart from an order belonging to no open group at all.
+func TestMismatchedSnapshotIDIsCountedEvenWhenTheGroupWasDeclined(t *testing.T) {
+	s, cw := snapshotShardWithCapture(t)
+	s.handle(sr("instrument_definition", "refdata", 1, 42, map[string]any{"symbol": "READY-42"}))
+	s.instruments[instKey{0, 42}].Status = StatusReady
+	s.handle(snapshotBeginRec(0, 42, 7, 2, 4000, 40))
+	if s.instruments[instKey{0, 42}].OpenSnapshot != nil {
+		t.Fatal("a Ready instrument must decline the group and build no shadow")
+	}
+
+	before := testCounter(t, s.metrics.SnapshotOrderDroppedTotal)
+	s.handle(snapshotOrderRec(0, 7, 901, 0, 101, 6))
+	if got := testCounter(t, s.metrics.SnapshotOrderDroppedTotal) - before; got != 0 {
+		t.Errorf("snapshot_order_dropped_total += %v for the declined group's own order, want 0", got)
+	}
+
+	s.handle(snapshotOrderRec(0, 999, 902, 0, 102, 7))
+	if got := testCounter(t, s.metrics.SnapshotOrderDroppedTotal) - before; got != 1 {
+		t.Errorf("snapshot_order_dropped_total += %v for an id matching no open group, want 1", got)
+	}
+
+	rows := wireSnapshotRows(cw)
+	if len(rows) != 1 {
+		t.Fatalf("wire_snapshots rows = %d, want 1 (the declined group's own order only)", len(rows))
+	}
+	if rows[0]["instrument_id"] != uint32(42) || rows[0]["snapshot_id"] != uint32(7) {
+		t.Errorf("row = instrument %v id %v, want 42 at id 7", rows[0]["instrument_id"], rows[0]["snapshot_id"])
 	}
 }

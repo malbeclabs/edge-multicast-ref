@@ -43,6 +43,28 @@ type ChannelEvent struct {
 	Record       Record
 }
 
+// openGroup identifies the currently-open snapshot group on one channel: the
+// group this shard's last SnapshotBegin opened, whose SnapshotEnd has not yet
+// arrived.
+//
+// SnapshotOrder records carry no instrument_id — the containing SnapshotBegin
+// implies it — and Snapshot ID is monotonic per (channel_id, instrument_id)
+// rather than per channel, so two instruments routinely sit at the same value
+// within one cycle. The instrument therefore comes from the open group, and
+// Snapshot ID only validates membership (spec 0x20: discard any SnapshotOrder
+// whose Snapshot ID does not match the currently-open SnapshotBegin).
+//
+// The id is held here rather than read from the instrument's shadow because a
+// ready instrument declines its snapshot and builds no shadow, and that group's
+// orders still have to be recognized as its own.
+//
+// Publishers MUST NOT interleave snapshot groups, so one open group per channel
+// is sufficient state.
+type openGroup struct {
+	inst   instKey
+	snapID uint32
+}
+
 // Shard owns a disjoint subset of instruments (by instrument_id % N) and all
 // their state. Its goroutine is the only writer of that state; mu guards book
 // mutation only so the per-shard SnapshotWriter goroutine can read levels.
@@ -55,22 +77,7 @@ type Shard struct {
 	refdata     map[instKey]InstrumentDef
 	deltaBuf    map[instKey][]BufferedDelta // per instrument, ordered by MktdataSeq
 	snapCtx     map[instKey]SnapshotContext // keyed by (channel, instrument)
-
-	// openGroup names the currently-open snapshot group per channel: the
-	// instrument whose SnapshotBegin this shard saw last and whose SnapshotEnd
-	// has not yet arrived.
-	//
-	// SnapshotOrder records carry no instrument_id — the containing
-	// SnapshotBegin implies it — and Snapshot ID is monotonic per
-	// (channel_id, instrument_id) rather than per channel, so two instruments
-	// routinely sit at the same value within one cycle. The association is
-	// therefore the open group, with Snapshot ID validating membership only
-	// (spec 0x20: discard any SnapshotOrder whose Snapshot ID does not match the
-	// currently-open SnapshotBegin).
-	//
-	// Publishers MUST NOT interleave snapshot groups, so one open group per
-	// channel is sufficient state.
-	openGroup map[uint8]instKey
+	open        map[uint8]openGroup         // currently-open snapshot group, per channel
 
 	inbox   chan shardMsg
 	sw      *SnapshotWriter
@@ -86,7 +93,7 @@ func NewShard(idx, n int, eventsW *EventsWriter, sw *SnapshotWriter, metrics *Me
 		refdata:     map[instKey]InstrumentDef{},
 		deltaBuf:    map[instKey][]BufferedDelta{},
 		snapCtx:     map[instKey]SnapshotContext{},
-		openGroup:   map[uint8]instKey{},
+		open:        map[uint8]openGroup{},
 		inbox:       make(chan shardMsg, 4096),
 		sw:          sw,
 		eventsW:     eventsW,
@@ -121,7 +128,7 @@ func (s *Shard) resetChannel(ch uint8) {
 			delete(s.snapCtx, k)
 		}
 	}
-	delete(s.openGroup, ch)
+	delete(s.open, ch)
 }
 
 // apply mutates book state for one record and returns the resulting events.
@@ -177,10 +184,11 @@ func (s *Shard) applySnapshotBegin(k instKey, rec Record) []ChannelEvent {
 		inst = NewInstrument(k.id, "", 0, 0)
 		s.instruments[k] = inst
 	}
+	snapID := toUint32(rec.Fields["snapshot_id"])
 	// Record the group identity before the accept/decline decision below.
 	// Declining is the steady-state case and this group's orders still arrive:
 	// they belong to this instrument and must not be offered to another.
-	s.openGroup[k.ch] = k
+	s.open[k.ch] = openGroup{inst: k, snapID: snapID}
 	// A Ready instrument is maintained by contiguous deltas; snapshots are
 	// gap-recovery only, so ignore them while Ready.
 	if inst.Status == StatusReady {
@@ -188,7 +196,6 @@ func (s *Shard) applySnapshotBegin(k instKey, rec Record) []ChannelEvent {
 	}
 	anchor := toUint64(rec.Fields["anchor_seq"])
 	total := toUint32(rec.Fields["total_orders"])
-	snapID := toUint32(rec.Fields["snapshot_id"])
 	lastInstr := toUint32(rec.Fields["last_instrument_seq"])
 	inst.BeginSnapshot(snapID, anchor, total, lastInstr)
 	return nil
@@ -202,22 +209,24 @@ func (s *Shard) applySnapshotBegin(k instKey, rec Record) []ChannelEvent {
 // the next instrument's cycle uses, and choosing by id alone chooses arbitrarily
 // under Go's randomized map order.
 func (s *Shard) applySnapshotOrder(rec Record) []ChannelEvent {
-	k, open := s.openGroup[rec.ChannelID]
-	if !open {
-		// No group open on this channel: an order ahead of its own
-		// SnapshotBegin, or trailing its SnapshotEnd. Never guess an instrument.
+	g, isOpen := s.open[rec.ChannelID]
+	snapID := toUint32(rec.Fields["snapshot_id"])
+	if !isOpen || g.snapID != snapID {
+		// No group open on this channel — an order ahead of its own
+		// SnapshotBegin or trailing its SnapshotEnd — or an id that disagrees
+		// with the open group. Never guess an instrument.
 		s.countSnapshotOrderDropped()
 		return nil
 	}
-	inst, ok := s.instruments[k]
+	inst, ok := s.instruments[g.inst]
 	if !ok || inst.OpenSnapshot == nil {
-		// No shadow to build, which is the healthy steady state: a Ready
-		// instrument declined this group at SnapshotBegin and the publisher
-		// still sends every order in it. Counting those would swamp the drop
-		// signal with ordinary traffic.
+		// The order belongs to this group and there is no shadow to build it
+		// into: a Ready instrument declined the group at SnapshotBegin while the
+		// publisher still sends every order in it, or an InstrumentReset has
+		// since invalidated the shadow. The first is the steady state, so
+		// counting these would swamp the drop signal with ordinary traffic.
 		return nil
 	}
-	snapID := toUint32(rec.Fields["snapshot_id"])
 	orderID := toUint64(rec.Fields["order_id"])
 	side := sideFromString(toString(rec.Fields["side"]))
 	flags := toUint8(rec.Fields["order_flags"])
@@ -225,8 +234,9 @@ func (s *Shard) applySnapshotOrder(rec Record) []ChannelEvent {
 	price := toInt64(rec.Fields["price_raw"])
 	qty := toUint64(rec.Fields["qty_raw"])
 	if !inst.AddSnapshotOrder(snapID, orderID, side, flags, enter, price, qty) {
-		// The id disagrees with the open group's — validation, the only job
-		// Snapshot ID has in the association.
+		// The shadow re-checks the id it was opened with. Reaching here means it
+		// disagrees with the group the pointer names, so the order belongs to
+		// neither.
 		s.countSnapshotOrderDropped()
 	}
 	return nil
@@ -239,11 +249,15 @@ func (s *Shard) countSnapshotOrderDropped() {
 }
 
 func (s *Shard) applySnapshotEnd(k instKey, rec Record) []ChannelEvent {
-	// The group closes whatever the outcome below, including for an instrument
-	// this shard holds no state for. An end naming a different instrument leaves
-	// the pointer alone: the open group is still the one it names.
-	if cur, open := s.openGroup[k.ch]; open && cur == k {
-		delete(s.openGroup, k.ch)
+	snapID := toUint32(rec.Fields["snapshot_id"])
+	// The end closes the group it names, whatever the outcome below and even for
+	// an instrument this shard holds no state for. It has to name both the
+	// instrument and the id: an end delayed behind the next SnapshotBegin — this
+	// instrument's own next cycle, or another instrument's — would otherwise
+	// close a group that is still live, and the rest of that group's orders
+	// would be dropped as belonging to nothing.
+	if g, isOpen := s.open[k.ch]; isOpen && g.inst == k && g.snapID == snapID {
+		delete(s.open, k.ch)
 	}
 	inst, ok := s.instruments[k]
 	if !ok {
@@ -252,7 +266,6 @@ func (s *Shard) applySnapshotEnd(k instKey, rec Record) []ChannelEvent {
 	if inst.OpenSnapshot == nil {
 		return nil // no shadow in progress; ignore (never demote)
 	}
-	snapID := toUint32(rec.Fields["snapshot_id"])
 	anchor := toUint64(rec.Fields["anchor_seq"])
 	if _, _, err := inst.EndSnapshot(snapID, anchor); err != nil {
 		if s.metrics != nil {
@@ -488,7 +501,6 @@ func (s *Shard) handle(rec Record) {
 	case "snapshot_begin":
 		s.mu.Lock()
 		def := s.refdata[k]
-		s.mu.Unlock()
 		s.snapCtx[k] = SnapshotContext{
 			InstrumentID:      rec.InstrumentID,
 			Symbol:            def.Symbol,
@@ -499,6 +511,7 @@ func (s *Shard) handle(rec Record) {
 			PriceExponent:     def.PriceExponent,
 			QtyExponent:       def.QtyExponent,
 		}
+		s.mu.Unlock()
 	case "snapshot_order":
 		// The same association as the book path, read from the same pointer, so
 		// the wire_snapshots row and the shadow that received the order always
@@ -506,16 +519,26 @@ func (s *Shard) handle(rec Record) {
 		// instead both grows the map once per lost SnapshotEnd — the id advances
 		// every cycle, so the entry is never overwritten — and lets one
 		// instrument's context answer for another's orders.
+		//
+		// Snapshot bookkeeping is read and written under s.mu throughout, as
+		// resetChannel deletes from these same maps under it.
 		s.mu.Lock()
-		gk, open := s.openGroup[rec.ChannelID]
+		g, isOpen := s.open[rec.ChannelID]
+		sctx, haveCtx := s.snapCtx[g.inst]
 		s.mu.Unlock()
-		if open {
-			if sctx, ok := s.snapCtx[gk]; ok && sctx.SnapshotID == getUint32(rec.Fields, "snapshot_id") {
-				s.eventsW.WriteSnapshotOrder(rec, rec.ChannelID, sctx)
-			}
+		if isOpen && haveCtx && g.snapID == getUint32(rec.Fields, "snapshot_id") {
+			s.eventsW.WriteSnapshotOrder(rec, rec.ChannelID, sctx)
 		}
 	case "snapshot_end":
-		delete(s.snapCtx, k)
+		// Only the named group's context goes, on the same grounds as
+		// applySnapshotEnd: an end delayed behind this instrument's next
+		// SnapshotBegin would otherwise take the live group's context with it,
+		// and the rest of that group would persist no wire_snapshots rows.
+		s.mu.Lock()
+		if sctx, ok := s.snapCtx[k]; ok && sctx.SnapshotID == getUint32(rec.Fields, "snapshot_id") {
+			delete(s.snapCtx, k)
+		}
+		s.mu.Unlock()
 	}
 
 	for _, ev := range evs {
