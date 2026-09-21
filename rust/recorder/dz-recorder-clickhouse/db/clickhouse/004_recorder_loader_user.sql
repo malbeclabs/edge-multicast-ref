@@ -57,6 +57,11 @@
 -- the most expensive query on the cluster; an account that cannot read anything
 -- cannot become one at all.
 --
+-- **That is a statement about this account, not about the database.** Readers
+-- exist and their grants live in `012_recorder_reader_grants.sql`, kept out of
+-- this file so that the argument above stays about the loader. A reader of this
+-- paragraph looking for "who may SELECT `recorder`?" should go there.
+--
 -- No DDL at all. A loader that could create or alter a table is a loader that
 -- can apply a schema change nobody reviewed, and the schema here is checked in
 -- precisely so that it is reviewed.

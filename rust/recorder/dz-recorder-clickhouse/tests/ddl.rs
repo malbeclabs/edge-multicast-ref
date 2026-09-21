@@ -12,7 +12,7 @@
 
 use std::collections::BTreeSet;
 
-use dz_recorder_clickhouse::{migrations, schema, Migration};
+use dz_recorder_clickhouse::{migrations, schema, Migration, ACCESS_MANAGEMENT};
 use dz_recorder_rows::Grain;
 use dz_recorder_venue::VenueGrain;
 
@@ -3450,7 +3450,172 @@ fn the_loader_account_is_bounded_and_kept_out_of_the_schema() {
         !schema().iter().any(|m| m.name.contains("loader_user")),
         "the account is applied by an administrator, not by the row writer"
     );
-    assert_eq!(schema().len(), migrations().len() - 1);
+    assert_eq!(schema().len(), migrations().len() - ACCESS_MANAGEMENT.len());
+}
+
+/// The reader's grants are recorded, are not applied by a row writer, and do
+/// not create the account they name.
+///
+/// The last clause is the one worth a test. `012` deliberately does NOT create
+/// `grafana`: the reader spans databases this repository does not define and
+/// its password lives elsewhere, so a `CREATE USER IF NOT EXISTS` would be a
+/// no-op on the cluster that matters and, on a fresh one, would manufacture an
+/// account with a password nobody holds. That is worse than failing, because it
+/// succeeds. A later edit that "fixes" the file by adding the create is the
+/// regression this asserts against.
+#[test]
+fn the_reader_file_grants_without_creating_the_reader() {
+    // Statements without the prose above them, the same way `004`'s order test
+    // reads its file: this header argues about `CREATE USER` at length, so a
+    // check over the raw text would fail on the sentence explaining why the
+    // statement is absent.
+    let grants = migration("012_recorder_reader_grants.sql")
+        .statements()
+        .iter()
+        .map(|s| {
+            s.lines()
+                .filter(|l| !l.trim_start().starts_with("--"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // EXACTLY these three statements, compared whole. An earlier version of
+    // this test built the set with `strip_prefix("GRANT SELECT ON ")` and so
+    // pinned the OBJECT without pinning the PRIVILEGE: any other verb dropped
+    // out of the compared set silently, and the only remaining gate asked that
+    // the line contain " TO grafana;". `GRANT ALL ON *.* TO grafana;` passed
+    // every assertion. Comparing whole lines closes the verb, the object and
+    // the grantee in one comparison, which is also why the wildcard and
+    // grantee assertions that stood here are gone rather than kept beside it.
+    let granted: BTreeSet<&str> = grants
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("GRANT"))
+        .collect();
+    let intended: BTreeSet<&str> = [
+        // The two tables `009` declares...
+        "GRANT SELECT ON recorder.venue_book_top TO grafana;",
+        "GRANT SELECT ON recorder.venue_object TO grafana;",
+        // ...and its collapsed view over the first, which a COUNT must read and
+        // which the table's own grant does not reach.
+        "GRANT SELECT ON recorder.venue_book_top_settled TO grafana;",
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        granted, intended,
+        "the reader's grants drifted from the three this file is scoped to"
+    );
+
+    // And it is not in what a test or a schema deploy applies, for `004`'s
+    // reason: granting needs access-management rights.
+    assert!(
+        !schema().iter().any(|m| m.name.contains("reader_grants")),
+        "the reader's grants are applied by an administrator, not by the row writer"
+    );
+}
+
+/// `009` tells an operator to re-apply the READER's grants too.
+///
+/// The sibling of `the_venue_file_tells_an_operator_to_re_apply_the_account_file`,
+/// and it exists because review pointed out that `012`'s own "standing rule"
+/// paragraph was the only half of the pair that nothing enforced: it held for
+/// exactly as long as somebody kept re-reading that header. `004`'s identical
+/// rule is pinned by that test plus a heading in `009`; this is the same
+/// arrangement for the reader.
+///
+/// The symptom it prevents is quieter than `004`'s, which is why the
+/// instruction has to be findable rather than merely true. A missing INSERT
+/// grant fails an insert and names a table. A missing SELECT grant renders an
+/// empty panel, which reads as a recorder that captured nothing.
+#[test]
+fn the_venue_file_tells_an_operator_to_re_apply_the_reader_file() {
+    let sql = venue_sql();
+    let reader = migration("012_recorder_reader_grants.sql").sql;
+
+    // A heading, for the reason the account file's version gives: the
+    // difference between an operator finding it while skimming and an operator
+    // reading the whole header first.
+    assert!(
+        sql.contains("RE-APPLY `012` TOO"),
+        "the instruction is not a heading, so a reader skimming `009` for what \
+         applying it obliges them to do will not see it"
+    );
+    assert!(
+        sql.contains("012_recorder_reader_grants.sql"),
+        "`009` does not name the file that grants its tables to the reader"
+    );
+    assert!(
+        sql.contains("grafana"),
+        "the account whose grants are missing is not named"
+    );
+
+    // And every grant the reader file holds is written in `009` too, so the
+    // pair cannot drift into a grant nobody is told to apply. Per statement and
+    // not as one sentence, which is what makes a fourth grant added next year
+    // get its instruction as well.
+    for line in reader
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("GRANT"))
+    {
+        assert!(
+            sql.contains(line),
+            "`012` grants `{line}` and `009` does not tell an operator to apply it"
+        );
+    }
+}
+
+/// Every file named as access-management is a real migration, and every file
+/// holding a privilege statement is named.
+///
+/// The filter in `schema()` matches on a string. A rename that misses it leaves
+/// the list naming a file that no longer exists, the filter silently matching
+/// nothing, and a privilege statement applied by whatever runs a schema
+/// deploy — the one outcome the split exists to prevent, and one that no test
+/// keyed on the old name would notice.
+#[test]
+fn the_access_management_list_matches_the_files_that_grant() {
+    for name in ACCESS_MANAGEMENT {
+        assert!(
+            migrations().iter().any(|m| m.name == name),
+            "{name} is listed as access-management and is not a migration"
+        );
+    }
+    for m in migrations() {
+        // Every verb that needs access-management rights, not just the two
+        // this file happens to use: `004` is built from `CREATE SETTINGS
+        // PROFILE` and `CREATE QUOTA` as well, so a future file using only
+        // those would have been classified as schema and applied by a row
+        // writer. The CI ClickHouse job would fail on it, loudly and far from
+        // the cause.
+        const PRIVILEGE_VERBS: [&str; 6] = [
+            "GRANT ",
+            "REVOKE ",
+            "CREATE USER",
+            "CREATE ROLE",
+            "CREATE SETTINGS PROFILE",
+            "CREATE QUOTA",
+        ];
+        let grants = m.sql.lines().any(|l| {
+            let l = l.trim_start();
+            !l.starts_with("--") && PRIVILEGE_VERBS.iter().any(|v| l.starts_with(v))
+        });
+        assert_eq!(
+            grants,
+            ACCESS_MANAGEMENT.contains(&m.name),
+            "{} {} a privilege statement but is {}in ACCESS_MANAGEMENT",
+            m.name,
+            if grants { "holds" } else { "holds no" },
+            if ACCESS_MANAGEMENT.contains(&m.name) {
+                ""
+            } else {
+                "not "
+            }
+        );
+    }
 }
 
 /// The account file can be applied in the order it is written.

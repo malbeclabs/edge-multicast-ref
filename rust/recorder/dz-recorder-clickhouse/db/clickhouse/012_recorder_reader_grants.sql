@@ -1,0 +1,87 @@
+-- What may READ the venue tables, recorded where it can be re-applied.
+--
+-- Separate from `004` deliberately, and not because grants belong in two
+-- places. `004` is the loader's ACCOUNT: it creates the user, sets the profile
+-- and the quota that bound it, and its thesis is **no SELECT on anything** —
+-- an account that cannot read cannot become the most expensive query on the
+-- cluster. A reader granted inside that file would read as an exception to the
+-- argument the file is making. This one holds the opposite kind of grant and
+-- says so in its name.
+--
+-- WHY IT EXISTS AT ALL: these two grants were applied by hand on 2026-09-19,
+-- against the shared ClickHouse, so that a Grafana dashboard could show the
+-- venue rows — the datasource user could not read them, and the panels were
+-- not empty so much as impossible. Nothing recorded that. A search of every
+-- repository found no `GRANT` to this reader anywhere in SQL: its other
+-- fifteen grants, across `feeds`, `lake`, `telemetry_*` and the rest, were all
+-- applied the same way and are written down nowhere. So a rebuilt service comes
+-- back with the tables and without the reader, and the symptom is half a
+-- dashboard rendering nothing with no artefact that explains why.
+--
+-- THE READER IS NOT CREATED HERE, AND THAT IS THE DECISION MOST WORTH
+-- DISAGREEING WITH. `grafana` is not this repository's account the way
+-- `dz_loader` is. This repository defines the loader end to end — creates it,
+-- bounds it, grants it, and rotates one secret for it. The reader spans
+-- databases this repository has never heard of, and its password lives with
+-- whoever provisioned the Grafana data source. A `CREATE USER IF NOT EXISTS`
+-- here would be a no-op on the cluster that matters and, on a fresh one, would
+-- manufacture an account with a password nobody holds — which is worse than
+-- the failure below, because it succeeds.
+--
+-- SO THIS FILE FAILS ON A CLUSTER WHERE THE READER DOES NOT EXIST, BY DESIGN.
+-- A grant names a user that has to exist when it is stored; `004`'s own
+-- ordering rule is the same fact, asserted by
+-- `the_account_file_creates_the_profile_before_the_user_that_names_it`. The
+-- failure is the correct outcome: it says the reader is provisioned elsewhere
+-- and that step has not run, which is a sentence an operator can act on. A file
+-- that quietly created the account would say nothing and leave a login nobody
+-- can use.
+--
+-- A grant naming a TABLE that does not exist yet is fine — ClickHouse stores a
+-- grant against the name, not the object — so the ordering that matters here is
+-- the reader's, never the schema's.
+--
+-- APPLIED BY AN ADMINISTRATOR, NOT BY ANYTHING THAT WRITES ROWS, which is why
+-- `schema()` filters this file out alongside `004`. Granting needs
+-- access-management rights, and the loader holding them is the thing `004`
+-- exists to prevent.
+--
+--   clickhouse-client --queries-file 012_recorder_reader_grants.sql
+--
+-- Idempotent by construction: a grant the account already holds is replayed,
+-- never doubled, so re-applying is always safe and is never a schema change.
+--
+-- THE STANDING RULE FROM `004` APPLIES HERE TOO: a later file that adds a venue
+-- table the dashboards read adds its `GRANT SELECT` to this list and says in
+-- its own header that this file has to be applied again. A file that does not do
+-- so ships a table the reader cannot see, found when somebody opens a panel
+-- rather than in review.
+--
+-- SCOPED TO THE VENUE TABLES AND NOT TO `recorder.*`, matching `004`'s
+-- table-level grants and matching what was actually applied. The cost is the
+-- one `009` already documents for the loader: a new venue grain needs its own
+-- line here. The benefit is that the transport and market-data grains of `001`
+-- and `005` — which nothing reads through this account today — do not quietly
+-- become readable because a wildcard was easier to write.
+
+-- A VIEW NEEDS ITS OWN GRANT, WHICH IS NOT OBVIOUS FROM THE TABLE'S. A grant on
+-- `venue_book_top` does not reach `venue_book_top_settled`, and the server says
+-- so exactly: `code: 497 ... necessary to have the grant SELECT for at least
+-- one column on recorder.venue_book_top_settled`. Found when the dashboard's
+-- counting panels were moved onto the settled view and returned nothing.
+--
+-- The settled view is what a COUNT must read. `venue_book_top` is a
+-- `ReplacingMergeTree` and a re-derivation is a replace, so between it and the
+-- merge that follows one top of book is in the table twice — and `009` is
+-- explicit that the surplus copy does not inflate a count so much as
+-- manufacture evidence of loss, because it pairs with nothing and reads as a
+-- state the other observation point missed. A reader granted the table and not
+-- the view gets the wrong number rather than an error, which is the outcome
+-- worth spending a line to prevent.
+
+-- The venue-side tables of `009`, read by the Grafana data source that backs
+-- the `phoenix-venue-recorder` dashboard in `malbeclabs/infra`.
+GRANT SELECT ON recorder.venue_book_top TO grafana;
+GRANT SELECT ON recorder.venue_object TO grafana;
+-- And `009`'s collapsed view over the first of them, for counts.
+GRANT SELECT ON recorder.venue_book_top_settled TO grafana;
