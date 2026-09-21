@@ -67,6 +67,30 @@
 -- carry no `IF NOT EXISTS`: a view is replaced rather than skipped, which is
 -- exactly what makes the one statement correct on both. The block above them
 -- states why they are here.
+--
+--
+-- APPLY THIS FILE AGAIN ON EVERY DEPLOYMENT THAT HAS ALREADY APPLIED IT
+--
+-- There is no migration framework here: the files are applied by hand or by the
+-- deploy, as 001's own header states, and nothing re-reads a file a deployment
+-- has been given. So a deployment that has applied this file and holds
+-- `era_opening` and `datagram_in_era` with no `derivation` column reaches the
+-- two statements at the end only when an operator applies this file again — and
+-- that deployment is precisely the one those two statements are for. Applied
+-- nowhere else, the repair reaches nowhere.
+--
+-- Safe to apply any number of times, which is why the instruction is simply to
+-- apply it. Every `ALTER` is `ADD COLUMN IF NOT EXISTS` and finds the column
+-- already there. `CREATE OR REPLACE VIEW` replaces a view rather than failing on
+-- one that exists, and a view holds no rows — so an apply that changes anything
+-- at all changes one thing: the stored column list of a view expanded before the
+-- column reached its table, which is the repair.
+--
+-- NOTHING ELSE HAS TO BE RE-APPLIED WITH IT, unlike 009, which says to re-apply
+-- 004 and 012 after itself. This file creates no table and no account, and 004
+-- grants `INSERT` at table level rather than per column, as the section above
+-- says — so the loader and the dashboards' reader keep exactly the access they
+-- hold.
 
 ALTER TABLE recorder.datagram
     ADD COLUMN IF NOT EXISTS derivation LowCardinality(String) DEFAULT 'archive'
@@ -121,8 +145,13 @@ ALTER TABLE recorder.book_top
 -- long it has been running.
 --
 -- Nothing fails while no query reads `derivation` through either view, and
--- `006` and `007` both take named columns out of them. The first query, panel
--- or migration that reaches `era_opening.derivation` or
+-- every reader of them in this set takes a named column list: `006` takes
+-- `anchor_ts`, `anchor_seq` and `anchor_certain` out of `era_opening`, and
+-- `003`'s own `era_ranked` lists every column it selects from it. Nothing in
+-- this set reads `datagram_in_era` at all — it is declared for the time-ranged
+-- panel `003` points at it, which is written outside these files and is
+-- therefore the reader least likely to be checked against them. The first
+-- query, panel or migration that reaches `era_opening.derivation` or
 -- `datagram_in_era.derivation` fails with `UNKNOWN_IDENTIFIER` on the
 -- deployments that have been running longest and passes everywhere it was
 -- written and tested — the failure landing on the oldest and least disposable

@@ -10,7 +10,7 @@
 //! it makes the files consistently formatted as well as consistently named.
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use dz_recorder_clickhouse::{migrations, schema, Migration, ACCESS_MANAGEMENT};
 use dz_recorder_rows::Grain;
@@ -111,11 +111,6 @@ fn rows_sql() -> &'static str {
 /// The market data tables, which are `005` rather than `001`.
 fn market_data_sql() -> &'static str {
     sql_of("005_recorder_market_data.sql")
-}
-
-/// The era views and the rank, which are `003`.
-fn era_rank_sql() -> &'static str {
-    sql_of("003_recorder_era_rank.sql")
 }
 
 /// The pairing views, which are `006`.
@@ -878,6 +873,48 @@ fn the_race_is_one_statement_written_into_two_files() {
     );
 }
 
+/// **`008` tells an operator to apply it again.**
+///
+/// A view re-statement in a file every deployment has applied is a repair that
+/// reaches nothing on its own. There is no migration framework here — the files
+/// are applied by hand or by the deploy, as `001`'s header states — so a
+/// deployment holds what it was given, and the deployments `008`'s view block is
+/// written for are exactly the ones that have already applied `008`. Without an
+/// instruction in the file, the repair is in the repository and on no cluster.
+///
+/// A heading, for the reason
+/// [`the_venue_file_tells_an_operator_to_re_apply_the_reader_file`] gives about
+/// `009`'s: an operator skimming a file for what applying it obliges them to do
+/// reads the headings, and a true sentence in the middle of a paragraph is a
+/// sentence nobody is obliged to reach.
+///
+/// And it says the apply is safe, because an instruction to apply a file again
+/// that leaves an operator to work out whether it is idempotent is an
+/// instruction they are right to hesitate over.
+#[test]
+fn the_derivation_file_tells_an_operator_to_apply_it_again() {
+    let sql = derivation_sql();
+
+    assert!(
+        sql.contains("APPLY THIS FILE AGAIN ON EVERY DEPLOYMENT THAT HAS ALREADY APPLIED IT"),
+        "`008` does not tell an operator, in a heading, to apply it again — so \
+         the re-statements below reach only a deployment created afterwards, \
+         which is the one that never needed them"
+    );
+    assert!(
+        sql.contains("Safe to apply any number of times"),
+        "`008` asks for a second apply without saying it is idempotent"
+    );
+
+    // The instruction is about something. A file with the heading and no
+    // re-statement would be telling an operator to apply a no-op.
+    assert!(
+        sql.contains("CREATE OR REPLACE VIEW recorder."),
+        "`008` asks to be applied again and re-states no view, so there is \
+         nothing a second apply would do"
+    );
+}
+
 /// **A star view re-stated by a later file is that file's copy of the earlier
 /// file's text.**
 ///
@@ -897,52 +934,91 @@ fn the_race_is_one_statement_written_into_two_files() {
 /// nowhere, silently overwritten by a copy further down the set, with the
 /// earlier file left reading as though it decided something.
 ///
-/// Character for character, and the marker on each copy is there because a
-/// helper that returned the same empty slice for both would satisfy an equality
-/// on its own.
+/// Character for character. The pairs are read out of the set rather than
+/// listed here, because a listed pair is a pair somebody has to remember to add:
+/// the next file that moves one of these tables' column lists will be *required*
+/// by the test above to re-state its stars, and that copy would land with no
+/// equality on it.
+///
+/// Stars only, and that is the line. A star is re-stated to refresh a column
+/// list, so the re-statement can only be the same text; a re-statement that
+/// lists its columns is free to say something else, which is what `010` does to
+/// `009`'s `feed_race_occurrence` by adding the publisher branch to it.
 #[test]
 fn a_re_stated_star_view_is_the_text_the_earlier_file_declares() {
-    for (name, first, again, marker) in [
-        (
-            "era_opening",
-            ("003", era_rank_sql()),
-            ("008", derivation_sql()),
-            "FROM recorder.era FINAL",
-        ),
-        (
-            "datagram_in_era",
-            ("003", era_rank_sql()),
-            ("008", derivation_sql()),
-            "ASOF LEFT JOIN recorder.era_opening AS e",
-        ),
-        (
-            "book_top_settled",
-            ("006", pairing_sql()),
-            ("010", book_key_sql()),
-            "FROM recorder.book_top FINAL",
-        ),
-    ] {
-        let (earlier_file, earlier_sql) = first;
-        let (later_file, later_sql) = again;
-        let earlier = view_statement(earlier_sql, name);
-        let later = view_statement(later_sql, name);
-        for (file, statement) in [(earlier_file, earlier), (later_file, later)] {
+    let statements = schema_statements();
+
+    let mut declared: BTreeMap<String, Vec<&Statement>> = BTreeMap::new();
+    for statement in &statements {
+        if let Some(rest) = statement
+            .flat()
+            .strip_prefix("CREATE OR REPLACE VIEW recorder.")
+        {
+            let name = rest.split_whitespace().next().expect("a view has a name");
+            declared.entry(name.to_owned()).or_default().push(statement);
+        }
+    }
+
+    let mut compared = 0usize;
+    for (name, declarations) in &declared {
+        let last = declarations
+            .iter()
+            .max_by_key(|statement| statement.position())
+            .expect("a name in this map has a declaration");
+        if declarations.len() < 2 || starred_object(&last.code).is_none() {
+            continue;
+        }
+
+        let mut copies: Vec<(&str, &str)> = Vec::new();
+        for declaration in declarations {
+            // `view_statement` reads the first declaration in the file, so a
+            // file that declared one view twice would be compared on a
+            // statement no deployment holds. No file does, and this is what
+            // says so rather than assuming it.
+            assert_eq!(
+                declarations
+                    .iter()
+                    .filter(|other| other.file == declaration.file)
+                    .count(),
+                1,
+                "{} declares `recorder.{name}` more than once",
+                declaration.file
+            );
+            let copy = view_statement(sql_of(declaration.file), name);
+            // A helper that returned the same empty slice every time would
+            // satisfy the equality below on its own.
             assert!(
-                statement.contains(marker),
-                "what is being compared for `{file}`'s `{name}` is not the \
-                 view: {statement}"
+                starred_object(copy).is_some() && copy.trim_end().ends_with(';'),
+                "what is being compared for {}'s `{name}` is not a whole star \
+                 declaration: {copy}",
+                declaration.file
+            );
+            copies.push((declaration.file, copy));
+        }
+
+        let (earlier_file, earlier) = copies[0];
+        for (later_file, later) in &copies[1..] {
+            compared += 1;
+            assert_eq!(
+                earlier, *later,
+                "{earlier_file} and {later_file} state `recorder.{name}` \
+                 differently. {later_file} is applied second, so it is the \
+                 declaration every deployment ends up holding and \
+                 {earlier_file}'s is the one that reaches nobody — a decision \
+                 recorded in the file a reader looks in and in force on no \
+                 deployment at all."
             );
         }
-        assert_eq!(
-            earlier, later,
-            "`{earlier_file}` and `{later_file}` state `recorder.{name}` \
-             differently. `{later_file}` is applied second, so it is the \
-             declaration every deployment ends up holding and \
-             `{earlier_file}`'s is the one that reaches nobody — a decision \
-             recorded in the file a reader looks in and in force on no \
-             deployment at all."
-        );
     }
+
+    // `era_opening` and `datagram_in_era` across `003` and `008`, and
+    // `book_top_settled` across `006` and `010`. A walk that resolved no star,
+    // or read a re-statement as a separate view, would compare nothing and pass.
+    assert!(
+        compared >= 3,
+        "{compared} re-stated stars were compared and the set holds three, so \
+         this is reading declarations it does not understand"
+    );
 }
 
 /// **The race is named for the race, and the name it had is dropped.**
@@ -2090,12 +2166,17 @@ fn the_era_opening_is_collapsed_by_final_over_a_partitioned_table() {
         sql.contains("affordable because the table underneath it is partitioned"),
         "why `FINAL` is acceptable has to be stated beside it"
     );
-    // Exactly one view reads the base table, so the collapse and the filter are
-    // written once and the other two views build on it.
+    // In this file, exactly one view reads the base table, so the collapse and
+    // the filter are stated once here and the other two views build on them.
+    // `008` re-states this view over the table as it now is, so the set holds a
+    // second copy of the collapse —
+    // [`a_re_stated_star_view_is_the_text_the_earlier_file_declares`] is what
+    // holds that copy to this text.
     assert_eq!(
         sql.matches("recorder.era FINAL").count(),
         1,
-        "the collapse is written once"
+        "`003` states the collapse more than once, so a reader has two places \
+         to look and two places to amend"
     );
     // Once as a join and once as a scan, which is the two views a caller uses.
     assert_eq!(
@@ -2143,8 +2224,8 @@ fn resolving_a_datagram_to_its_era_needs_no_window_and_no_final() {
     );
     assert!(
         datagram_in_era.contains("recorder.era_opening"),
-        "the collapse and the `continuation = 0` filter are written once, in \
-         the view this builds on"
+        "the collapse and the `continuation = 0` filter are not restated here: \
+         this builds on the view that holds them"
     );
 }
 
@@ -2855,10 +2936,16 @@ fn star_reading(statements: &[Statement]) -> StarReading {
 /// the star walker's own test gives: what
 /// [`a_select_star_view_is_re_stated_after_a_column_reaches_its_table`] pins is
 /// that these files hold no frozen view, so a walk that reported none whatever
-/// it was handed would make that assertion pass over anything. The two cases
-/// below are the *same* two statements with one declaration added at the end, so
-/// nothing but which statement comes last can decide them — which is the whole
-/// of the rule.
+/// it was handed would make that assertion pass over anything. The cases below
+/// are the *same* two statements rearranged, so nothing but which statement
+/// comes last can decide them — which is the whole of the rule.
+///
+/// **Two of them put both statements in one file**, and that is the case `008`
+/// and `010` are. A file is one `order`, so within it only the line number
+/// separates the `ALTER` from the re-statement after it — and a walk that
+/// compared files and not lines would pass `008` with its two
+/// `CREATE OR REPLACE VIEW` statements moved above its `ALTER`s, which is the
+/// regression this whole rule exists to catch.
 #[test]
 fn the_star_walk_reports_a_frozen_view_and_passes_one_re_stated_after_it() {
     let view = "CREATE OR REPLACE VIEW recorder.t_settled AS\nSELECT *\nFROM recorder.t FINAL;\n";
@@ -2919,6 +3006,36 @@ fn the_star_walk_reports_a_frozen_view_and_passes_one_re_stated_after_it() {
         "a view re-stated after the column that moved its table's column list \
          is reported frozen: {:?}",
         repaired.frozen
+    );
+
+    // Both statements in one file, the declaration above the `ALTER`: `008`
+    // with its two re-statements moved to the top, which is the one
+    // rearrangement of this file that puts the freeze back. One `order`, so
+    // only the line separates them.
+    let one_file = star_reading(&[
+        statement("only.sql", 0, 5, view),
+        statement("only.sql", 0, 40, column),
+    ]);
+    assert_eq!(
+        one_file.frozen.len(),
+        1,
+        "a declaration above an `ALTER` in the same file is not reported \
+         frozen, so the walk is comparing files and not statements: {:?}",
+        one_file.frozen
+    );
+
+    // And the same file the other way up, which is the shape `008` and `010`
+    // are written in.
+    let one_file_repaired = star_reading(&[
+        statement("only.sql", 0, 5, column),
+        statement("only.sql", 0, 40, view),
+    ]);
+    assert!(
+        one_file_repaired.frozen.is_empty(),
+        "a declaration below the `ALTER` in the same file is reported frozen, \
+         so no file could both move a column list and repair its own stars: \
+         {:?}",
+        one_file_repaired.frozen
     );
 }
 
