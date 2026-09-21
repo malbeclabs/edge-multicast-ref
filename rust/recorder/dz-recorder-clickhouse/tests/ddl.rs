@@ -3495,18 +3495,23 @@ fn the_reader_file_grants_without_creating_the_reader() {
         .filter(|l| l.starts_with("GRANT"))
         .collect();
     let intended: BTreeSet<&str> = [
-        // The two tables `009` declares...
+        // The two tables `009` declares, plus its collapsed view over the
+        // first — which a COUNT must read and which the table's own grant does
+        // not reach...
         "GRANT SELECT ON recorder.venue_book_top TO grafana;",
         "GRANT SELECT ON recorder.venue_object TO grafana;",
-        // ...and its collapsed view over the first, which a COUNT must read and
-        // which the table's own grant does not reach.
         "GRANT SELECT ON recorder.venue_book_top_settled TO grafana;",
+        // ...to each reader separately, because the consumers authenticate
+        // separately and granting one does nothing for the other.
+        "GRANT SELECT ON recorder.venue_book_top TO lake_api;",
+        "GRANT SELECT ON recorder.venue_object TO lake_api;",
+        "GRANT SELECT ON recorder.venue_book_top_settled TO lake_api;",
     ]
     .into_iter()
     .collect();
     assert_eq!(
         granted, intended,
-        "the reader's grants drifted from the three this file is scoped to"
+        "the readers' grants drifted from the six this file is scoped to"
     );
 
     // And it is not in what a test or a schema deploy applies, for `004`'s

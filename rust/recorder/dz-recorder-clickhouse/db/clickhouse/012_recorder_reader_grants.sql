@@ -79,9 +79,34 @@
 -- the view gets the wrong number rather than an error, which is the outcome
 -- worth spending a line to prevent.
 
+-- TWO READERS AND NOT ONE, BECAUSE THE CONSUMERS AUTHENTICATE SEPARATELY. The
+-- Grafana data source connects as `grafana`; Lake's API — which serves its SQL
+-- editor and its MCP server — connects as `lake_api`
+-- (`malbeclabs/infra:k8s/lake/prod/kustomization.yaml`). Granting one does
+-- nothing for the other, and the symptom is per-consumer: the dashboards render
+-- while every Lake query answers `497`, which reads as Lake being broken rather
+-- than as a privilege never applied.
+--
+-- Lake needs no code change to use these. Its query endpoint has no database
+-- allowlist — `api/handlers/query.go` admits any read-only statement — so the
+-- grant alone makes the venue tables reachable from the SQL editor and over
+-- MCP. What it does NOT buy is a venue page: Lake's scoreboards are per-venue
+-- Go handlers with hand-written SQL against `feeds`, so a Phoenix one is
+-- development rather than configuration, and it is not what this file is for.
+--
+-- `lake_admin` and the indexer are deliberately NOT granted. They write and
+-- reconcile Lake's own schema; nothing in them reads a venue grain, and an
+-- account that does not need a privilege is an account that should not hold one
+-- — which is `004`'s argument about the loader, applied to a reader.
+
 -- The venue-side tables of `009`, read by the Grafana data source that backs
 -- the `phoenix-venue-recorder` dashboard in `malbeclabs/infra`.
 GRANT SELECT ON recorder.venue_book_top TO grafana;
 GRANT SELECT ON recorder.venue_object TO grafana;
 -- And `009`'s collapsed view over the first of them, for counts.
 GRANT SELECT ON recorder.venue_book_top_settled TO grafana;
+
+-- The same three to Lake's API, for its SQL editor and its MCP server.
+GRANT SELECT ON recorder.venue_book_top TO lake_api;
+GRANT SELECT ON recorder.venue_object TO lake_api;
+GRANT SELECT ON recorder.venue_book_top_settled TO lake_api;
