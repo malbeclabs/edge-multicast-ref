@@ -97,3 +97,84 @@ ALTER TABLE recorder.instrument
 ALTER TABLE recorder.book_top
     ADD COLUMN IF NOT EXISTS derivation LowCardinality(String) DEFAULT 'archive'
     AFTER object_key;
+
+
+-- THE TWO `SELECT *` VIEWS OVER THE TABLES ABOVE, RE-STATED OVER THEM AS THEY
+-- NOW ARE.
+--
+-- **A view's `SELECT *` is expanded when the view is created, not when it is
+-- read.** `003` declares `era_opening` as `SELECT * FROM recorder.era FINAL`
+-- and `datagram_in_era` as a `d.*` over `recorder.datagram` — a qualified star
+-- freezes exactly as a bare one does — and a deployment being upgraded applies
+-- these files in order, so `003` expands both stars over tables that do not
+-- carry `derivation` and the `ALTER`s above run afterwards. Without the two
+-- statements below, one view name stands for two column lists: no `derivation`
+-- on every deployment upgraded in file order, `derivation` on every deployment
+-- created since, and which one a deployment holds settled by nothing but how
+-- long it has been running.
+--
+-- Nothing fails while no query reads `derivation` through either view, and
+-- `006` and `007` both take named columns out of them. The first query, panel
+-- or migration that reaches `era_opening.derivation` or
+-- `datagram_in_era.derivation` fails with `UNKNOWN_IDENTIFIER` on the
+-- deployments that have been running longest and passes everywhere it was
+-- written and tested — the failure landing on the oldest and least disposable
+-- deployments, and at query time rather than at deploy time. A later
+-- `CREATE OR REPLACE VIEW` that itself read the column through one of these
+-- views would fail to create, which is the same defect turned into a failed
+-- schema apply. `derivation` is provenance, so the query most likely to reach
+-- it is a query about whether a finding may be trusted.
+--
+-- A view holds no rows, so re-creating it loses nothing. This is a metadata
+-- change on both deployments — a no-op on a fresh one, the repair on an
+-- upgraded one — and the text is `003`'s text unchanged, so that one view name
+-- means one view on every deployment. `003` is still where the argument for
+-- each of them lives: the partitioned collapse under `era_opening`, and the
+-- `ASOF LEFT JOIN` on the anchor that resolves a datagram to its era. This is
+-- the hazard `010` states at length above its own re-statement of
+-- `book_top_settled`, reached earlier and closed here.
+--
+-- TWO, AND THE OTHER SIX TABLES ABOVE ARE NOT AN OVERSIGHT. Three of the eight
+-- carry a star view over them. `recorder.era` and `recorder.datagram` are
+-- below. `recorder.book_top`'s is `006`'s `book_top_settled`, and `010`
+-- re-states that view after its own `ALTER` — so the freeze this file opens on
+-- it is closed by the time the set has been applied, and a second re-statement
+-- here would duplicate a repair rather than make one. `segment_coverage`,
+-- `sequence_gap`, `conformance_finding`, `event` and `instrument` have no star
+-- view over them anywhere in the set, so for those five there is nothing to
+-- re-state.
+--
+-- WHY `datagram_in_era` KEEPS ITS `d.*`. A star over the largest table in the
+-- schema is what this whole class of defect rests on, and naming `datagram`'s
+-- columns here would stop the class recurring on this one view. It is left a
+-- star deliberately. A named list buys that safety by requiring a second edit
+-- before a column added to `datagram` reaches the view a panel reads, and
+-- nothing fails when that edit is forgotten — the column is simply absent, for
+-- a reader who cannot tell the omission from a decision. The star has the
+-- opposite failure: it is loud, it is caught in the file that moves the column
+-- list, and the rule that such a file re-states every star over that table is
+-- asserted over these files in `tests/ddl.rs`. Between a safety that depends on
+-- nobody forgetting and a hazard a test refuses to let past, this file takes
+-- the second.
+
+CREATE OR REPLACE VIEW recorder.era_opening AS
+SELECT *
+FROM recorder.era FINAL
+WHERE continuation = 0;
+
+
+CREATE OR REPLACE VIEW recorder.datagram_in_era AS
+SELECT
+    d.*,
+    e.anchor_ts      AS era_anchor_ts,
+    e.anchor_seq     AS era_anchor_seq,
+    e.reset_count    AS era_reset_count,
+    e.anchor_certain AS anchor_certain
+FROM recorder.datagram AS d
+ASOF LEFT JOIN recorder.era_opening AS e
+    ON  d.site        = e.site
+    AND d.recorder    = e.recorder
+    AND d.source_addr = e.source_addr
+    AND d.channel_id  = e.channel_id
+    AND d.dst_port    = e.dst_port
+    AND e.anchor_ts  <= d.recv_ts;

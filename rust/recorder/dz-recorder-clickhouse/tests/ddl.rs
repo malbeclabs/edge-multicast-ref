@@ -2535,34 +2535,6 @@ fn changes_a_column_list(flat: &str) -> bool {
         .any(|phrase| flat.contains(phrase))
 }
 
-/// The `SELECT *` views a released migration already froze, named here rather
-/// than hidden behind a weaker parse.
-///
-/// `008` adds `derivation` to `recorder.era` and to `recorder.datagram` and
-/// re-states no view — it contains no `CREATE OR REPLACE VIEW` at all — so
-/// `003`'s `era_opening` and `datagram_in_era` are expanded without that column
-/// on every deployment that was upgraded and with it on every deployment
-/// created since. Two column lists under one view name.
-///
-/// It is latent only because nothing reads `derivation` through either view
-/// yet: `006` takes three columns out of `era_opening` and the cross-site views
-/// take named columns out of `datagram_in_era`. The first query that reaches
-/// `era_opening.derivation` breaks on the deployments that have been running
-/// longest, which is the opposite of the order anybody tests in.
-///
-/// **Not repaired here.** The repair is a `CREATE OR REPLACE VIEW` for each in
-/// `008`, which changes a migration every deployment has already applied and
-/// wants its own argument about what a released file may be amended to say. It
-/// is tracked as a follow-up against `008_recorder_derivation.sql`.
-///
-/// Listed rather than allowed silently, and every entry is asserted below to
-/// still be a violation — so the day `008` re-states them, this list fails
-/// until the entry is deleted.
-const FROZEN_BY_A_RELEASED_MIGRATION: [(&str, &str); 2] = [
-    ("era_opening", "008_recorder_derivation.sql"),
-    ("datagram_in_era", "008_recorder_derivation.sql"),
-];
-
 /// **A `SELECT *` view is re-stated by the file that moves its table's column
 /// list.**
 ///
@@ -2585,12 +2557,18 @@ const FROZEN_BY_A_RELEASED_MIGRATION: [(&str, &str); 2] = [
 /// that a view's *last* declaration comes after the last `ALTER` that moves its
 /// table's column list, which is the question "does a deployment that applied
 /// every file in order hold the same view as one created from scratch". `008`
-/// adds `derivation` to `recorder.book_top` and re-states nothing, and `010`
-/// re-states `book_top_settled` afterwards — so the freeze `008` opened is
-/// closed by the time the set has been applied, and this test does not report
-/// it. Reported, it would be a finding that outlives its own repair; the two
-/// entries in [`FROZEN_BY_A_RELEASED_MIGRATION`] are the ones no later file
-/// closes.
+/// adds `derivation` to `recorder.book_top` and re-states no view over that
+/// table, and `010` re-states `book_top_settled` afterwards — so the freeze
+/// `008` opens there is closed by the time the set has been applied, and this
+/// test does not report it. Reported, it would be a finding that outlives its
+/// own repair.
+///
+/// **Every star these files declare satisfies the rule, and the assertion is
+/// unconditional.** There is no allow-list: a file that moves a column list and
+/// leaves a star over that table frozen fails this test, and the repair is the
+/// `CREATE OR REPLACE VIEW` the message asks for rather than an entry excusing
+/// it. `008` re-states `era_opening` and `datagram_in_era` after its own
+/// `ALTER`s for that reason, in the shape `010` uses for `book_top_settled`.
 #[test]
 fn a_select_star_view_is_re_stated_after_a_column_reaches_its_table() {
     let statements = schema_statements();
@@ -2652,7 +2630,6 @@ fn a_select_star_view_is_re_stated_after_a_column_reaches_its_table() {
     };
 
     let mut stars_read = 0usize;
-    let mut exceptions_taken: BTreeSet<(String, &str)> = BTreeSet::new();
     for name in &names {
         let declaration = last_declaration(name);
         let Some(starred) = starred_object(&declaration.code) else {
@@ -2697,11 +2674,7 @@ fn a_select_star_view_is_re_stated_after_a_column_reaches_its_table() {
             if hazard.position() <= declaration.position() {
                 continue;
             }
-            let excepted = FROZEN_BY_A_RELEASED_MIGRATION
-                .iter()
-                .any(|(view, file)| *view == name.as_str() && *file == hazard.file);
-            assert!(
-                excepted,
+            panic!(
                 "`recorder.{name}` is declared `SELECT *` over \
                  `recorder.{starred}` at {declared}, and {altered} {what} — with \
                  no re-statement of `recorder.{name}` after it.\n\n\
@@ -2721,7 +2694,6 @@ fn a_select_star_view_is_re_stated_after_a_column_reaches_its_table() {
                 altered = hazard.at(),
                 file = hazard.file,
             );
-            exceptions_taken.insert((name.clone(), hazard.file));
         }
     }
 
@@ -2730,18 +2702,6 @@ fn a_select_star_view_is_re_stated_after_a_column_reaches_its_table() {
         "the walker read {stars_read} `SELECT *` views and these files declare \
          four, so the parse is reading a projection it does not understand"
     );
-
-    // Every exception is still a violation. An entry that has stopped being one
-    // is a repair nobody deleted the exception for, and a list that outlives
-    // what it excuses is how an allow-list becomes the rule.
-    for (view, file) in FROZEN_BY_A_RELEASED_MIGRATION {
-        assert!(
-            exceptions_taken.contains(&(view.to_owned(), file)),
-            "{file} does not freeze `recorder.{view}`, so delete that entry \
-             from `FROZEN_BY_A_RELEASED_MIGRATION` rather than leaving a list \
-             that excuses nothing"
-        );
-    }
 }
 
 /// The star walker reads the projections these files are written in, and the
