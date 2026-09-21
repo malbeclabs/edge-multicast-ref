@@ -182,6 +182,10 @@ impl Connection {
 
 /// A transport that answers from a script.
 struct ScriptedInput {
+    /// The name this transport answers with, which is half of what seeds its
+    /// driver's delay sequence. A parameter rather than the constant, so that
+    /// two connections of one publisher can be run against one script.
+    connection: ConnectionId,
     connections: VecDeque<Connection>,
     current: Option<Connection>,
     clock: Arc<TestClock>,
@@ -195,8 +199,9 @@ struct ScriptedInput {
 }
 
 impl ScriptedInput {
-    fn new(clock: Arc<TestClock>, connections: Vec<Connection>) -> Self {
+    fn new(connection: ConnectionId, clock: Arc<TestClock>, connections: Vec<Connection>) -> Self {
         Self {
+            connection,
             connections: connections.into(),
             current: None,
             clock,
@@ -210,7 +215,7 @@ impl ScriptedInput {
 
 impl Input for ScriptedInput {
     fn connection(&self) -> ConnectionId {
-        CONNECTION
+        self.connection
     }
 
     fn connect(&mut self, _timeout: Duration) -> BoxFuture<'_, Result<(), IngressError>> {
@@ -560,13 +565,47 @@ impl IngressObserver for TestObserver {
 // Running one
 // ---------------------------------------------------------------------------
 
+/// The floor of every reconnect delay, and the first one exactly.
+const INITIAL_DELAY: Duration = Duration::from_millis(500);
+
 fn policy() -> Policy {
     Policy {
         connect_timeout: Duration::from_secs(5),
-        backoff: BackoffPolicy::new(Duration::from_millis(500), Duration::from_secs(30))
+        backoff: BackoffPolicy::new(INITIAL_DELAY, Duration::from_secs(30))
             .expect("a valid policy"),
         rate_limit_per_second: 0,
         idle_timeout: None,
+    }
+}
+
+/// Checks every delay the driver waited against the window its step draws
+/// from, given that step's ceiling: half the ceiling - or the configured
+/// initial delay, whichever is longer - up to the ceiling itself.
+///
+/// The tests below assert the delays exactly as well, which they can because
+/// the sequence is seeded from the test clock's reading and the connection's
+/// name rather than from ambient randomness. That equality is what catches a
+/// change in the arithmetic; this is what says which bounds the numbers are
+/// supposed to sit inside, so that a reader can check the list rather than take
+/// it.
+fn within_the_windows(slept: &[Duration], ceilings: &[Duration]) {
+    assert_eq!(
+        slept.len(),
+        ceilings.len(),
+        "{} delays against {} windows",
+        slept.len(),
+        ceilings.len()
+    );
+    for (step, (delay, ceiling)) in slept.iter().zip(ceilings).enumerate() {
+        let floor = (*ceiling - *ceiling / 2).max(INITIAL_DELAY);
+        assert!(
+            *delay >= floor,
+            "delay {step} was {delay:?}, below its window's floor of {floor:?}"
+        );
+        assert!(
+            *delay <= *ceiling,
+            "delay {step} was {delay:?}, above its ceiling of {ceiling:?}"
+        );
     }
 }
 
@@ -585,9 +624,21 @@ struct Run {
 
 /// Drives one script to its fatal end and hands back what happened.
 fn run(policy: Policy, adapter: RecordingAdapter, connections: Vec<Connection>) -> Run {
+    run_as(CONNECTION, policy, adapter, connections)
+}
+
+/// The same, for a named connection: what separates two drivers' delay
+/// sequences is the name they answer with, so a test about two connections has
+/// to be able to state them.
+fn run_as(
+    connection: ConnectionId,
+    policy: Policy,
+    adapter: RecordingAdapter,
+    connections: Vec<Connection>,
+) -> Run {
     let clock = TestClock::new();
     let observer = Arc::new(TestObserver::default());
-    let mut input = ScriptedInput::new(Arc::clone(&clock), connections);
+    let mut input = ScriptedInput::new(connection, Arc::clone(&clock), connections);
     let mut adapter = adapter;
     let mut events = RecordingEvents::default();
 
@@ -880,15 +931,24 @@ fn an_adapter_error_on_connect_is_counted_and_retried_under_the_backoff() {
         .map(|(_, connected)| *connected)
         .collect();
     assert_eq!(announced, vec![false, false]);
-    // Retried, and each retry further along the sequence rather than at the
-    // same delay: an adapter that cannot compose its subscription usually
-    // cannot yet read a credential, and hammering does not make it readable.
+    // Retried, and each retry drawn under a ceiling twice the last one's
+    // rather than at the same delay: an adapter that cannot compose its
+    // subscription usually cannot yet read a credential, and hammering does not
+    // make it readable.
+    within_the_windows(
+        &outcome.clock.slept(),
+        &[
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+            Duration::from_secs(4),
+        ],
+    );
     assert_eq!(
         outcome.clock.slept(),
         vec![
-            Duration::from_millis(500),
-            Duration::from_secs(1),
-            Duration::from_secs(2),
+            Duration::from_nanos(704_608_578),
+            Duration::from_nanos(1_539_881_408),
+            Duration::from_nanos(3_075_253_670),
         ]
     );
     drop(recorded);
@@ -896,7 +956,7 @@ fn an_adapter_error_on_connect_is_counted_and_retried_under_the_backoff() {
 }
 
 #[test]
-fn the_delay_sequence_doubles_across_failures_and_resets_for_a_proven_connection() {
+fn the_ceiling_doubles_across_failures_and_resets_for_a_proven_connection() {
     let outcome = run(
         policy(),
         RecordingAdapter::default(),
@@ -917,18 +977,33 @@ fn the_delay_sequence_doubles_across_failures_and_resets_for_a_proven_connection
         ],
     );
 
-    assert_eq!(
-        outcome.clock.slept(),
-        vec![
-            Duration::from_millis(500),
+    within_the_windows(
+        &outcome.clock.slept(),
+        &[
             Duration::from_secs(1),
             Duration::from_secs(2),
             Duration::from_secs(4),
-            // The reset: back to the initial delay, not to zero. A venue that
-            // closes a healthy connection on purpose - a session boundary, a
-            // maintenance window - must not be reconnected against instantly.
-            Duration::from_millis(500),
+            Duration::from_secs(8),
+            // The reset: the ceiling back at the one a sequence opens with, so
+            // this delay is drawn between the configured initial delay and
+            // twice it rather than near the ceiling - and never zero. A venue
+            // that closes a healthy connection on purpose - a session
+            // boundary, a maintenance window - must not be reconnected against
+            // instantly.
             Duration::from_secs(1),
+            Duration::from_secs(2),
+        ],
+    );
+    assert_eq!(
+        outcome.clock.slept(),
+        vec![
+            Duration::from_nanos(704_608_578),
+            Duration::from_nanos(1_539_881_408),
+            Duration::from_nanos(3_075_253_670),
+            Duration::from_nanos(7_047_270_727),
+            // The reset, drawn from the opening window.
+            Duration::from_nanos(956_535_681),
+            Duration::from_nanos(1_120_891_876),
         ]
     );
 }
@@ -954,14 +1029,79 @@ fn a_connection_that_delivered_and_was_then_rate_limited_does_not_reset_the_sequ
         ],
     );
 
+    // The ceiling went on doubling through both rate-limited connections: a
+    // reset would have put the third delay back in the empty opening window
+    // and made it the initial delay exactly.
+    within_the_windows(
+        &outcome.clock.slept(),
+        &[
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+            Duration::from_secs(4),
+        ],
+    );
     assert_eq!(
         outcome.clock.slept(),
         vec![
-            Duration::from_millis(500),
-            Duration::from_secs(1),
-            Duration::from_secs(2),
+            Duration::from_nanos(704_608_578),
+            Duration::from_nanos(1_539_881_408),
+            Duration::from_nanos(3_075_253_670),
         ]
     );
+}
+
+#[test]
+fn two_connections_of_one_publisher_do_not_retry_in_step() {
+    // The burst a venue's connection-attempt budget is spent by. Both drivers
+    // are built off one clock reading, which is what a publisher starting its
+    // connections in a loop produces, and both fail on the same script - so an
+    // unjittered sequence has them attempt at the same instants for as long as
+    // the outage lasts, which is what a per-address limit counted over a short
+    // window sees as one burst of two rather than two attempts.
+    let script = || {
+        vec![
+            Connection::refused(),
+            Connection::refused(),
+            Connection::refused(),
+            Connection::refused(),
+        ]
+    };
+    let primary = run_as(
+        ConnectionId::new("mktdata"),
+        policy(),
+        RecordingAdapter::default(),
+        script(),
+    );
+    let comparison = run_as(
+        ConnectionId::new("mktdata-comparison"),
+        policy(),
+        RecordingAdapter::default(),
+        script(),
+    );
+
+    let ceilings = [
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+        Duration::from_secs(4),
+        Duration::from_secs(8),
+    ];
+    within_the_windows(&primary.clock.slept(), &ceilings);
+    within_the_windows(&comparison.clock.slept(), &ceilings);
+    // Every delay, the first one included: two connections that agreed on one
+    // of them are two connections that attempted together that time, and the
+    // first attempt after a drop is the one a per-address burst limit counts.
+    for (step, (one, other)) in primary
+        .clock
+        .slept()
+        .iter()
+        .zip(comparison.clock.slept())
+        .enumerate()
+    {
+        assert_ne!(
+            *one, other,
+            "both connections waited {one:?} before attempt {step}"
+        );
+    }
 }
 
 #[test]
@@ -1113,8 +1253,9 @@ fn the_outbound_rate_limit_defers_a_send_rather_than_dropping_it() {
         vec![
             Duration::from_millis(200),
             Duration::from_millis(200),
-            // The reconnect delay after the scripted close.
-            Duration::from_millis(500),
+            // The reconnect delay after the scripted close, drawn between the
+            // configured initial delay and twice it.
+            Duration::from_nanos(704_608_578),
         ]
     );
     // And our own pacing is not the venue rate-limiting us: that series must

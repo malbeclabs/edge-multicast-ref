@@ -52,7 +52,15 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// `Send + Sync` because the driver holds it by shared reference and the
 /// runtime holds one clock for however many connections it drives.
 pub trait Clock: Send + Sync {
-    /// Nanoseconds since 1970-01-01 UTC. Stamps a payload's arrival.
+    /// Nanoseconds since 1970-01-01 UTC. Stamps a payload's arrival, and seeds
+    /// one connection's reconnect delay sequence.
+    ///
+    /// The second use is not a measurement, which is why it is not
+    /// [`steady_ns`](Self::steady_ns)'s: what the driver wants from a reading
+    /// at construction is a number that differs between two processes, and a
+    /// steady reading is near its own origin in every one of them. See
+    /// [`Backoff::seed`](crate::Backoff::seed) for what the reading does and
+    /// does not separate.
     fn wall_ns(&self) -> u64;
 
     /// Nanoseconds since an arbitrary origin, never decreasing. Measures the

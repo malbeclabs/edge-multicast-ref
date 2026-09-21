@@ -350,6 +350,12 @@ impl<'a> Driver<'a> {
     /// driving several connections holds one of each: a publisher taking
     /// first-copy-wins from two upstreams has two drivers, two `Input`s, and one
     /// registry.
+    ///
+    /// **The delay sequence is seeded here, from the clock and the
+    /// connection's name.** Two drivers in one publisher are built in the same
+    /// loop off the same clock, so it is the name that separates their retries
+    /// — see [`Backoff::seed`], and [`Backoff`] for why two connections
+    /// retrying in step is the failure being avoided.
     pub fn new(
         input: &'a mut dyn Input,
         adapter: &'a mut dyn Adapter,
@@ -357,13 +363,14 @@ impl<'a> Driver<'a> {
         observer: &'a dyn IngressObserver,
         policy: Policy,
     ) -> Self {
+        let seed = Backoff::seed(clock.wall_ns(), input.connection().as_str());
         Self {
             input,
             adapter,
             clock,
             observer,
             policy,
-            backoff: Backoff::new(policy.backoff),
+            backoff: Backoff::new(policy.backoff, seed),
             limiter: RateLimiter::new(policy.rate_limit_per_second),
         }
     }
@@ -377,6 +384,13 @@ impl<'a> Driver<'a> {
     /// `dz_publisher_ingress_connection_state`, which is pre-created at 0 for
     /// exactly that case. A driver that gave up would turn a recoverable
     /// outage into an operator action.
+    ///
+    /// What that leaves unbounded is the *total* number of attempts against a
+    /// venue that publishes a connection-attempt budget. They are spread, not
+    /// capped: each delay is drawn inside its window per connection, so
+    /// several connections dropped by one event do not attempt at the same
+    /// instant — see [`Backoff`] — and each settles at about four attempts per
+    /// three ceilings rather than a burst of all of them at every ceiling.
     pub async fn run(&mut self, events: &mut dyn EventSink) -> IngressError {
         loop {
             match self.cycle(events).await {
@@ -390,7 +404,7 @@ impl<'a> Driver<'a> {
         }
     }
 
-    /// The delay before the next attempt, taken from the sequence.
+    /// The delay before the next attempt, drawn from the sequence.
     async fn wait(&mut self) {
         let delay = self.backoff.next_delay();
         self.clock.sleep(delay).await;
