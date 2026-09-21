@@ -150,8 +150,10 @@ type topOfBookEndOfSession struct {
 
 type topOfBookManifestSummary struct {
 	ChannelID uint8
-	// Valid is 1 once the channel has an established instrument set, and 0
-	// while the publisher is uninitialized or the channel is inactive.
+	// Valid is 1 once the published set is established, and 0 while the
+	// publisher is uninitialized or shutting down. It is not a liveness
+	// signal: a channel whose instruments are all dormant is silent and
+	// valid.
 	Valid           uint8
 	ManifestSeq     uint16
 	InstrumentCount uint32

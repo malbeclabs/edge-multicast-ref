@@ -64,7 +64,7 @@ flags          u16   (0x0001 = snapshot)
 | 0x04 | Trade | 52 | marketdata | Single trade |
 | 0x05 | ChannelReset | 12 | either | Publisher startup — drop cached state |
 | 0x06 | EndOfSession | 12 | either | Publisher shutdown |
-| 0x07 | ManifestSummary | variable | refdata | Periodic instrument count |
+| 0x07 | ManifestSummary | 24 | refdata | Periodic summary of the published set: valid, manifest_seq, instrument_count |
 
 ### Price/quantity encoding
 
