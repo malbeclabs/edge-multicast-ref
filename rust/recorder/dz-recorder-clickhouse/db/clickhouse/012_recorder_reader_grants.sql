@@ -79,25 +79,39 @@
 -- the view gets the wrong number rather than an error, which is the outcome
 -- worth spending a line to prevent.
 
--- TWO READERS AND NOT ONE, BECAUSE THE CONSUMERS AUTHENTICATE SEPARATELY. The
--- Grafana data source connects as `grafana`; Lake's API — which serves its SQL
--- editor and its MCP server — connects as `lake_api`
--- (`malbeclabs/infra:k8s/lake/prod/kustomization.yaml`). Granting one does
--- nothing for the other, and the symptom is per-consumer: the dashboards render
--- while every Lake query answers `497`, which reads as Lake being broken rather
--- than as a privilege never applied.
+-- LAKE IS NOT GRANTED, AND THIS IS THE RECORD OF WHY RATHER THAN AN OMISSION.
 --
--- Lake needs no code change to use these. Its query endpoint has no database
--- allowlist — `api/handlers/query.go` admits any read-only statement — so the
--- grant alone makes the venue tables reachable from the SQL editor and over
--- MCP. What it does NOT buy is a venue page: Lake's scoreboards are per-venue
--- Go handlers with hand-written SQL against `feeds`, so a Phoenix one is
--- development rather than configuration, and it is not what this file is for.
+-- An earlier revision of this file granted these tables to `lake_api`, on the reasoning
+-- that Lake's SQL editor and its MCP server would then reach them. That was wrong twice,
+-- and review caught both:
 --
--- `lake_admin` and the indexer are deliberately NOT granted. They write and
--- reconcile Lake's own schema; nothing in them reads a venue grain, and an
--- account that does not need a privilege is an account that should not hold one
--- — which is `004`'s argument about the loader, applied to a reader.
+-- 1. **WRONG ACCOUNT.** Lake's prod deployment configures TWO ClickHouse users, and
+--    `lake_api` is not the one those consumers use. `api/handlers/query.go` and
+--    `mcp.go`'s `execute_sql` both select `a.PublicQueryDB`, which prod sets from
+--    `CLICKHOUSE_PUBLIC_QUERY_USERNAME=lake_public_query`;
+--    `CLICKHOUSE_USERNAME=lake_api` is the connection Lake's own Go handlers use, and no
+--    handler reads a venue grain. So the grant bought nothing, while this file — whose job
+--    is to be the durable record — asserted that both consumers worked. A record that is
+--    confidently wrong is worse than an absent one.
+--
+-- 2. **AND THE OBVIOUS FIX IS A DISCLOSURE DECISION, NOT A CONFIGURATION ONE.** Swapping
+--    the grantee to `lake_public_query` would publish these tables to unauthenticated
+--    callers on the public internet. `POST /api/sql/query`, `/api/query` and `/api/mcp`
+--    carry only `OptionalAuth` — which, in its own words, "attaches user to context if
+--    authenticated, allows anonymous" — behind a 100/min per-IP rate limit.
+--    `RequireInternalDomain` guards a different route group, and `lake-api`'s load
+--    balancer is `internet-facing`. Grafana's audience is its own login behind fixed
+--    panels, which is why `grafana` below is a different question from this one.
+--
+-- So nothing is granted to Lake here. Making these tables reachable from Lake is a change
+-- to Lake's exposure — authentication on those routes, or a surface built for public
+-- reading — and it belongs to whoever owns that decision. This file records the finding so
+-- that the next person to ask "why can Lake not see this?" is not told to add a grant.
+--
+-- `lake_admin` and the indexer are not granted either, for the plainer reason: they write
+-- and reconcile Lake's own schema, nothing in them reads a venue grain, and an account
+-- that does not need a privilege should not hold one -- `004`'s argument about the loader,
+-- applied to a reader.
 
 -- The venue-side tables of `009`, read by the Grafana data source that backs
 -- the `phoenix-venue-recorder` dashboard in `malbeclabs/infra`.
@@ -105,8 +119,3 @@ GRANT SELECT ON recorder.venue_book_top TO grafana;
 GRANT SELECT ON recorder.venue_object TO grafana;
 -- And `009`'s collapsed view over the first of them, for counts.
 GRANT SELECT ON recorder.venue_book_top_settled TO grafana;
-
--- The same three to Lake's API, for its SQL editor and its MCP server.
-GRANT SELECT ON recorder.venue_book_top TO lake_api;
-GRANT SELECT ON recorder.venue_object TO lake_api;
-GRANT SELECT ON recorder.venue_book_top_settled TO lake_api;

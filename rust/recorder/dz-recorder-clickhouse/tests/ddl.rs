@@ -3501,17 +3501,14 @@ fn the_reader_file_grants_without_creating_the_reader() {
         "GRANT SELECT ON recorder.venue_book_top TO grafana;",
         "GRANT SELECT ON recorder.venue_object TO grafana;",
         "GRANT SELECT ON recorder.venue_book_top_settled TO grafana;",
-        // ...to each reader separately, because the consumers authenticate
-        // separately and granting one does nothing for the other.
-        "GRANT SELECT ON recorder.venue_book_top TO lake_api;",
-        "GRANT SELECT ON recorder.venue_object TO lake_api;",
-        "GRANT SELECT ON recorder.venue_book_top_settled TO lake_api;",
+        // Lake is deliberately absent; `012`'s header carries the reasoning, and
+        // the exactness of this set is what would refuse a grant added without it.
     ]
     .into_iter()
     .collect();
     assert_eq!(
         granted, intended,
-        "the readers' grants drifted from the six this file is scoped to"
+        "the reader's grants drifted from the three this file is scoped to"
     );
 
     // And it is not in what a test or a schema deploy applies, for `004`'s
