@@ -167,7 +167,11 @@ func (m *Metrics) SetSocketClients(n int) {
 	m.SocketClients.Set(float64(n))
 }
 
-// AddSocketClientDrops counts n socket clients dropped for reason.
+// AddSocketClientDrops counts n drops for reason, and what one drop is depends
+// on the reason: sink.DropReasonQueueFull counts one batch dropped for a client
+// whose outbound queue was full, which stays connected, while
+// sink.DropReasonWriteError counts one client disconnected after a failed
+// write.
 func (m *Metrics) AddSocketClientDrops(reason string, n int) {
 	if m == nil {
 		return
@@ -175,7 +179,9 @@ func (m *Metrics) AddSocketClientDrops(reason string, n int) {
 	m.SocketClientDrops.WithLabelValues(reason).Add(float64(n))
 }
 
-// AddSocketRecordsSent counts n records written to at least one socket client.
+// AddSocketRecordsSent counts n records queued to at least one socket client.
+// Queued, not delivered: a batch a client's queue accepted and its writer then
+// failed to write counts here, and again as a write-error drop.
 func (m *Metrics) AddSocketRecordsSent(n int) {
 	if m == nil {
 		return

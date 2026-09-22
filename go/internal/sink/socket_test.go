@@ -191,8 +191,9 @@ func TestSocket_DropsDisconnectedClient(t *testing.T) {
 // a client's queue is full, that the queue_full drop counter is incremented,
 // and that a healthy second client continues to receive records.
 //
-// We inject a clientWriter whose Go channel is pre-filled (capacity 0 — i.e.
-// unbuffered and already consumed by no one) alongside a real connected client.
+// We inject a clientWriter whose outbound queue is pre-filled (capacity 0 —
+// i.e. unbuffered and already consumed by no one) alongside a real connected
+// client.
 // This isolates the non-blocking select in Write() from OS socket buffer sizes.
 func TestSocket_BackPressure(t *testing.T) {
 	sockPath := shortTempSock(t)
@@ -214,8 +215,8 @@ func TestSocket_BackPressure(t *testing.T) {
 	// Give the accept loop time to register the good client.
 	time.Sleep(50 * time.Millisecond)
 
-	// Inject a fake clientWriter with a zero-capacity (unbuffered) Go channel.
-	// Write's non-blocking select will immediately take the default branch,
+	// Inject a fake clientWriter with a zero-capacity (unbuffered) outbound
+	// queue. Write's non-blocking select will immediately take the default branch,
 	// recording a queue_full drop — without involving any OS socket buffer.
 	fakeConn, fakeServer := net.Pipe()
 	defer fakeConn.Close()
@@ -236,8 +237,9 @@ func TestSocket_BackPressure(t *testing.T) {
 
 	batch := []testRecord{{Type: "quote", Seq: 1}}
 
-	// A single Write is enough: the fake client's unbuffered Go channel causes an
-	// immediate queue_full drop. Multiple writes confirm Write never blocks.
+	// A single Write is enough: the fake client's unbuffered outbound queue
+	// causes an immediate queue_full drop. Multiple writes confirm Write never
+	// blocks.
 	const writes = 5
 	done := make(chan struct{})
 	go func() {
@@ -282,7 +284,7 @@ func TestSocket_BackPressure(t *testing.T) {
 }
 
 // TestSocket_ConcurrentWriteClose verifies that concurrent Write() calls
-// racing against Close() never panic (e.g. send on a closed Go channel) and that
+// racing against Close() never panic (e.g. send on a closed outbound queue) and that
 // the sink shuts down cleanly with no goroutine leaks. Run under -race to
 // detect data races.
 func TestSocket_ConcurrentWriteClose(t *testing.T) {
@@ -293,7 +295,7 @@ func TestSocket_ConcurrentWriteClose(t *testing.T) {
 		t.Fatalf("creating socket sink: %v", err)
 	}
 
-	// Connect a client so Write has real Go channels to send on.
+	// Connect a client so Write has a real outbound queue to send on.
 	conn, err := net.Dial("unix", sockPath)
 	if err != nil {
 		t.Fatalf("connecting client: %v", err)
@@ -392,7 +394,8 @@ func TestSocket_NilMetricsTolerated(t *testing.T) {
 // from the registration side, which is the only side it can be driven
 // deterministically from: a connection that arrives once Close has run must not
 // join the client set Close has already taken away, because nothing would ever
-// close its Go channel, wait on its serve goroutine, or close its connection.
+// close its outbound queue, wait on its serve goroutine, or close its
+// connection.
 func TestSocket_RegisterAfterCloseIsRefused(t *testing.T) {
 	sockPath := shortTempSock(t)
 
@@ -442,7 +445,7 @@ func TestSocket_RegisterAfterCloseIsRefused(t *testing.T) {
 }
 
 // TestSocket_WriteAfterCloseIsANoOp pins that a record arriving after shutdown
-// is discarded rather than panicking on a closed Go channel.
+// is discarded rather than panicking on a closed outbound queue.
 func TestSocket_WriteAfterCloseIsANoOp(t *testing.T) {
 	sockPath := shortTempSock(t)
 
@@ -475,5 +478,91 @@ func TestSocket_WriteAfterCloseIsANoOp(t *testing.T) {
 	// The socket file is removed by Close.
 	if _, statErr := os.Stat(sockPath); statErr == nil {
 		t.Error("expected the socket file to be removed by Close")
+	}
+}
+
+// clientWriterOf returns the one registered client's writer, waiting for the
+// accept goroutine to put it in the client set.
+func clientWriterOf(t *testing.T, s *Socket[testRecord]) *clientWriter[testRecord] {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		var found *clientWriter[testRecord]
+		s.mu.Lock()
+		n := len(s.clients)
+		for _, cw := range s.clients {
+			found = cw
+		}
+		s.mu.Unlock()
+		if n == 1 {
+			return found
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("no client was registered")
+	return nil
+}
+
+// TestSocket_DroppedClientLeavesNoGoroutine pins what a client dropped for a
+// write error leaves behind: nothing. Its serve goroutine has to return, and
+// its done marker is the only signal that it did, because the outbound queue it
+// was reading is never closed once the client is out of the set.
+func TestSocket_DroppedClientLeavesNoGoroutine(t *testing.T) {
+	sockPath := shortTempSock(t)
+
+	s, err := NewSocket(sockPath, NewJSONConnWriter[testRecord], nil)
+	if err != nil {
+		t.Fatalf("error creating socket sink: %v", err)
+	}
+	defer s.Close()
+
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("error connecting: %v", err)
+	}
+	cw := clientWriterOf(t, s)
+
+	// Close the client so the writer's flush fails and the client is dropped.
+	conn.Close()
+	if err := s.Write([]testRecord{{Type: "quote", Seq: 1}}); err != nil {
+		t.Fatalf("error writing: %v", err)
+	}
+
+	select {
+	case <-cw.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the dropped client's serve goroutine did not return")
+	}
+}
+
+// TestSocket_CloseReportsZeroClients pins the level the connected-client gauge
+// reports after shutdown. A client connected at Close is disconnected by it, so
+// the gauge has to read zero rather than the count the sink held while running.
+func TestSocket_CloseReportsZeroClients(t *testing.T) {
+	sockPath := shortTempSock(t)
+
+	m := newCountingMetrics()
+	s, err := NewSocket(sockPath, NewJSONConnWriter[testRecord], m)
+	if err != nil {
+		t.Fatalf("error creating socket sink: %v", err)
+	}
+
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("error connecting: %v", err)
+	}
+	defer conn.Close()
+
+	clientWriterOf(t, s)
+	if clients, _, _ := m.snapshot(); clients != 1 {
+		t.Fatalf("expected the gauge at 1 with one client connected, got %d", clients)
+	}
+
+	if err := s.Close(); err != nil {
+		t.Fatalf("error closing sink: %v", err)
+	}
+
+	if clients, _, _ := m.snapshot(); clients != 0 {
+		t.Errorf("connected-client gauge left at %d after Close", clients)
 	}
 }

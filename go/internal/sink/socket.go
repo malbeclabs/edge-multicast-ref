@@ -115,9 +115,9 @@ func (s *Socket[R]) acceptLoop() {
 //
 // The closed check is what keeps a connection accepted during Close from being
 // registered into the client map Close has already taken away: that client
-// would get a serve goroutine nobody ever closes a Go channel for or waits on,
-// leaving the goroutine and the connection behind and the connected-client
-// gauge reading one after shutdown.
+// would get a serve goroutine nobody ever closes an outbound queue for or
+// waits on, leaving the goroutine and the connection behind and the
+// connected-client gauge reading one after shutdown.
 func (s *Socket[R]) register(conn net.Conn) (*clientWriter[R], bool) {
 	cw := &clientWriter[R]{
 		conn: conn,
@@ -167,9 +167,12 @@ func (s *Socket[R]) dropClient(cw *clientWriter[R], err error) {
 	}
 	s.mu.Unlock()
 	cw.conn.Close()
-	// Drain remaining queue so any pending Write senders don't block.
-	for range cw.ch {
-	}
+	// Nothing is drained here, and that is what lets this goroutine return.
+	// Write sends under mu with a non-blocking select, so no sender is ever
+	// parked on cw.ch waiting for this receiver; ranging over the queue would
+	// park the serve goroutine instead, because the only close of cw.ch is in
+	// Close and Close does not hold a client this function has already removed
+	// from the set.
 }
 
 func (s *Socket[R]) Write(records []R) error {
@@ -207,16 +210,17 @@ func (s *Socket[R]) Write(records []R) error {
 func (s *Socket[R]) Close() error {
 	s.mu.Lock()
 	if s.closed {
-		// Idempotent: second Close() is a no-op (the Go channels are already closed).
+		// Idempotent: second Close() is a no-op (the outbound queues are
+		// already closed).
 		s.mu.Unlock()
 		return nil
 	}
 	s.closed = true
 	clients := s.clients
 	s.clients = make(map[net.Conn]*clientWriter[R])
-	// Close every client Go channel while holding mu. This is safe because Write() also
-	// holds mu during its sends, so we can never close a Go channel that Write
-	// is currently sending on.
+	// Close every client's outbound queue while holding mu. This is safe
+	// because Write() also holds mu during its sends, so we can never close a
+	// queue that Write is currently sending on.
 	for _, cw := range clients {
 		close(cw.ch)
 		cw.conn.Close()
@@ -227,6 +231,14 @@ func (s *Socket[R]) Close() error {
 	// takes mu; waiting here while holding mu would deadlock.
 	for _, cw := range clients {
 		<-cw.done
+	}
+
+	// The connected-client gauge is a level, so shutdown has to state it.
+	// dropClient skips a client Close has already taken out of the set, so
+	// without this the gauge keeps publishing the last count the sink held
+	// while it was running.
+	if s.metrics != nil {
+		s.metrics.SetSocketClients(0)
 	}
 
 	err := s.listener.Close()
