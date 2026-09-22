@@ -446,8 +446,8 @@ role = "comparison"         # connected, driven, counted — for the race
   whose connections each carry instruments no other connection carries — a
   venue that splits its subscriptions across sessions, or admits only so many
   instruments per connection. Losing one of those loses that subset entirely,
-  so `role = "upstream-partition"` says one thing: **its fatal error ends the
-  process**, exactly as the primary's does.
+  so `role = "upstream-partition"` says one thing about a live run: **its fatal
+  error ends the process**, exactly as the primary's does.
 
   ```toml
   [[source]]
@@ -475,7 +475,8 @@ role = "comparison"         # connected, driven, counted — for the race
   from it reaches the one adapter exactly as the primary's does, and the
   adapter is what knows which instruments arrive where. It is not a `carries`
   key under another name, and what makes it statable is that it describes
-  nothing but which failures are fatal.
+  nothing but which failures are fatal and, at load, whether two of these
+  blocks may state one credential.
 
   **What it covers is a fatal error, and that is narrower than "the partition
   stopped working".** A driver returns only on `IngressError::Fatal`, which is
@@ -492,16 +493,31 @@ role = "comparison"         # connected, driven, counted — for the race
   partition's gauge at 0 the same way you would on a single-connection
   publisher's.
 
-  **Two partitions of one account meet the shared-credential refusal below.**
-  The rule refuses two enabled blocks when one's whole `credentials` table
-  appears in the other's, and it applies to every role — a partitioned upstream
-  is several connections of one venue, so writing the same `key_path` in each
-  block is refused naming both. That rule is about a venue that permits one
-  session per credential and answers the second logon by evicting the first,
-  which is the failure it cannot tell apart from this one, so the venue's own
-  answer about how many sessions one credential may hold is the authority. A
-  venue whose connections need no credential writes none, and several blocks
-  with no `credentials` table are not two logons with one credential.
+  **One venue account across the partitions is statable**, which is the shape
+  most of them arrive in. The shared-credential rule below refuses two enabled
+  blocks when one's whole `credentials` table appears in the other's, and this
+  is the one pair of roles it is not asked about: a `primary` beside an
+  `upstream-partition`, or two `upstream-partition` blocks, may write the same
+  `key_path` and the document loads. A venue that permits several sessions per
+  credential and hands out one credential leaves no other way to write it, and
+  the refusal's advice — give each block its own credential, or disable one of
+  them — would have left you copying one key file to as many paths as you have
+  connections.
+
+  What the exemption does not do is promise the venue agrees. Whether one
+  credential may hold several sessions is the venue's answer, not this file's:
+  if it permits one and you write one, the second logon evicts the first, and
+  the symptom is `dz_publisher_ingress_reconnects_total` climbing on two
+  connections together with `dz_publisher_ingress_connection_state` alternating
+  between them. Give each connection its own credential when the venue issues
+  them, and read the exemption as the file getting out of your way rather than
+  as a statement about the venue.
+
+  **A `comparison` block is not exempt**, in either direction, and neither is a
+  second `primary`. A block in either of those roles carries the whole book, so
+  a second logon of it on one credential is the copy-paste the rule exists to
+  refuse. A venue whose connections need no credential writes none, and several
+  blocks with no `credentials` table are not two logons with one credential.
 - **The transport is named once.** Either `[ingress] kind` for a publisher with
   one source, or `[[source]] ingress` per source. Both is refused: a key read
   only when another is absent is a key an operator cannot reason about. A
@@ -565,6 +581,15 @@ role = "comparison"         # connected, driven, counted — for the race
   nothing here can know that, and its symptom is both sources reconnecting in
   step, with `dz_publisher_ingress_connection_state` alternating between them.
   The venue's own logon refusal is the authority.
+
+  **The one pair of roles this is not asked about** is a `primary` beside an
+  `upstream-partition`, or two `upstream-partition` blocks: those are several
+  sessions of one venue account by definition, and one credential between them
+  loads. Every pair involving a `comparison` is refused as above, and a second
+  `primary` is refused by the one-primary rule, so the copy-paste is intact — a
+  block duplicated and left alone carries the role it was copied from, and
+  reaching the exemption costs you the one line copy-paste is defined by not
+  editing. See the `upstream-partition` bullet above for the limit of it.
 - **Absent `[[source]]` is one source**, named by the transport the venue builds.
   Every document written before the array existed still means exactly that,
   including that its fatal errors end the process.
@@ -876,7 +901,7 @@ infrastructure repositories, and each of those owns its own review.
 - [ ] `on_connected` composes the subscription, and is idempotent across reconnects
 - [ ] the binary registers the adapter under a `kind` token, and links the transports it allows
 - [ ] for a venue with several upstreams: one `[[source]]` per connection, exactly one `primary` **publisher-wide** (not per feed), and one `Input` built per `cx.sources()` entry
-- [ ] for a venue whose upstream arrives partitioned — each connection carrying instruments no other carries: every connection but the nominated `primary` is `role = "upstream-partition"`, so that a **fatal** error on one ends the process rather than dropping that connection and serving its instruments stale. A partition that reconnects for ever, or that stays connected and stops sending, is not a fatal error and ends nothing — watch `dz_publisher_ingress_connection_state` and `reconnects_total` per `connection`
+- [ ] for a venue whose upstream arrives partitioned — each connection carrying instruments no other carries: every connection but the nominated `primary` is `role = "upstream-partition"`, so that a **fatal** error on one ends the process rather than dropping that connection and serving its instruments stale. A partition that reconnects for ever, or that stays connected and stops sending, is not a fatal error and ends nothing — watch `dz_publisher_ingress_connection_state` and `reconnects_total` per `connection`. One venue account across those blocks needs nothing said: the shared-credential refusal is not asked about this pair of roles, so the same `key_path` in each block loads
 - [ ] for a venue with several upstreams: per-connection state in the adapter keyed by `conn`, and `on_payload` emitting from the connection it means to publish — the runtime cannot hold a `comparison` source's events back
 - [ ] an offline replay run publishes, and this repository's Go parser reads the values back
 - [ ] config reviewed for `pin`, `source_id`, `channel_id`, group and ports — and `shard`, for a venue whose instrument set is sharded across channels

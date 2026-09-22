@@ -40,11 +40,17 @@ use serde::Deserialize;
 /// the whole of what a role decides about a live run, and a replay run reads it
 /// once more, to choose the connection it publishes under: the primary's.
 ///
+/// **Whether two enabled blocks may state one credential** — see
+/// [`credential_may_be_shared_with`](Self::credential_may_be_shared_with). That
+/// is a load-time question and not a live one: it decides whether a document
+/// resolves, and a process that started reads it never again.
+///
 /// What no role can decide is **where one connection's data goes**. The adapter
 /// emits events and no event carries the connection it arrived on, so nothing
 /// can hold one connection's data back from a feed or route it to one. A role is
 /// otherwise a declaration an operator reads and an analysis tier groups by,
-/// plus the one startup check that counts primaries.
+/// plus the two startup checks that read it: the one that counts primaries and
+/// the credential rule above.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum SourceRole {
     /// The source this publisher publishes from.
@@ -69,11 +75,17 @@ pub enum SourceRole {
     /// no two of them carrying the same ones.
     ///
     /// **Not the primary, and a fatal error on it ends the process.** Those two
-    /// facts are the whole of the role. The primaries the one-primary rule
-    /// counts are [`Primary`](Self::Primary) blocks and nothing else, so a
-    /// partitioned upstream is one primary and one of these per further
-    /// connection, and the rule reads the same as it does for a
+    /// facts are the whole of what the role does to a live run. The primaries
+    /// the one-primary rule counts are [`Primary`](Self::Primary) blocks and
+    /// nothing else, so a partitioned upstream is one primary and one of these
+    /// per further connection, and the rule reads the same as it does for a
     /// single-connection publisher.
+    ///
+    /// At load it does one more thing: a `primary` beside one of these, or two
+    /// of these, may state one credential, because several sessions of one venue
+    /// account is what a partitioned upstream source is. See
+    /// [`credential_may_be_shared_with`](Self::credential_may_be_shared_with),
+    /// which is where the reasoning and the limit of it are.
     ///
     /// The fatality is what the role exists for. Each connection of a
     /// partitioned upstream carries instruments no other connection carries, so
@@ -155,6 +167,71 @@ impl SourceRole {
         match self {
             Self::Primary | Self::UpstreamPartition => true,
             Self::Comparison => false,
+        }
+    }
+
+    /// Whether two enabled `[[source]]` blocks in these roles may state one
+    /// credential.
+    ///
+    /// The credential rule lives in `dz_publisher_runtime::config` and refuses
+    /// two enabled blocks when one's whole `credentials` table also appears in
+    /// the other's — the copy-paste failure, a second block with a new endpoint
+    /// and the credential nobody changed. This is the one pair of roles that
+    /// says the second block is not that.
+    ///
+    /// `true` for a [`Primary`](Self::Primary) beside an
+    /// [`UpstreamPartition`](Self::UpstreamPartition), either way round, and for
+    /// two `UpstreamPartition`s. That is the shape a partitioned upstream source
+    /// arrives in: several sessions of one venue account, the same `key_path` in
+    /// every block, which is the only shape available to a venue that permits
+    /// several sessions per credential and hands out one credential. Refusing it
+    /// left that operator no way to start but to copy one key file to as many
+    /// paths as there are connections, and the refusal's own advice — give each
+    /// block its own credential, or disable one — was unactionable for them.
+    ///
+    /// **What makes the token trustworthy here is the edit it costs.** The
+    /// copy-paste this exempts nothing from is a block duplicated and left
+    /// alone, so it carries the role it was copied from: a duplicated
+    /// `comparison` is still refused by the credential rule, and a duplicated
+    /// `primary` by the one-primary count. To reach `true` an operator must
+    /// change the one line whose only meaning is *this is a further deliberate
+    /// connection to one upstream source, carrying instruments no other
+    /// connection carries* — a statement about the deployment, and not a line
+    /// nobody finished editing.
+    ///
+    /// `false` whenever either block is a [`Comparison`](Self::Comparison), and
+    /// for two [`Primary`](Self::Primary) blocks. A block in either of those
+    /// roles states that it carries the whole book, so a second one of them on
+    /// one credential is exactly the copy-paste, and an operator who meant it
+    /// has somewhere else to go: two accounts, or one block disabled. Two
+    /// primaries never resolve anyway, and answering `false` keeps the
+    /// credential refusal ahead of the primaries count for the block that was
+    /// copied and left alone, which is the more specific of the two answers.
+    ///
+    /// **This claims nothing about the venue.** Whether one credential may hold
+    /// several sessions is the venue's answer and is not in the document. A
+    /// venue that permits one answers the second logon by evicting the first,
+    /// and the symptom is `dz_publisher_ingress_reconnects_total{connection}`
+    /// climbing on two connections together with
+    /// `dz_publisher_ingress_connection_state{connection}` alternating between
+    /// them. What this does is hand that one unknowable question to the venue,
+    /// for the pair of roles whose document states that an operator already
+    /// asked it, and keep at load every question the document itself answers.
+    ///
+    /// Symmetric, and a total match on the pair rather than a `matches!`, so a
+    /// role added to this set cannot take a default answer to this question.
+    #[must_use]
+    pub const fn credential_may_be_shared_with(self, other: Self) -> bool {
+        match (self, other) {
+            (Self::Primary, Self::UpstreamPartition)
+            | (Self::UpstreamPartition, Self::Primary)
+            | (Self::UpstreamPartition, Self::UpstreamPartition) => true,
+            (Self::Primary, Self::Primary)
+            | (Self::Primary, Self::Comparison)
+            | (Self::Comparison, Self::Primary)
+            | (Self::Comparison, Self::Comparison)
+            | (Self::Comparison, Self::UpstreamPartition)
+            | (Self::UpstreamPartition, Self::Comparison) => false,
         }
     }
 

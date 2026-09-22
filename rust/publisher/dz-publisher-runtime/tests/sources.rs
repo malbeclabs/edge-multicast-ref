@@ -1133,38 +1133,174 @@ fn several_sources_that_need_no_credential_are_not_two_logons_with_one() {
     assert_eq!(config.sources.len(), 2);
 }
 
-/// The credential rule is role-blind, and an `upstream-partition` is not
-/// exempt.
+/// One venue account, several sessions, and the document loads.
 ///
-/// This is the shape a partitioned upstream is most likely to arrive in: several
-/// sessions of **one** venue account, with the same `key_path` copied into each
-/// block. The rule cannot tell that from the copy-paste it exists to refuse — a
-/// venue that permits one session per credential answers the second logon by
-/// evicting the first, and the two connections take turns knocking each other
-/// off. So the document is refused naming both blocks, and the venue's own
-/// answer about how many sessions one credential may hold is the authority.
-/// `BRINGING-UP-A-FEED.md` says so where it describes the role, because a
-/// refusal that reads as a copy-paste mistake is the wrong place to learn it.
+/// This is the shape a partitioned upstream source is most likely to arrive in:
+/// several sessions of **one** account, with the same `key_path` copied into
+/// every block, which for a venue that permits several sessions per credential
+/// and hands out one credential is the only shape available. It used to be
+/// refused, and the refusal's advice — give each block its own credential, or
+/// disable one of them — left that operator nothing to do but copy one key file
+/// to as many paths as there were connections. So the credential rule asks
+/// `SourceRole::credential_may_be_shared_with` first, and this pair of roles
+/// answers yes.
+///
+/// Three blocks and not two, because the exemption has to cover the pair of
+/// partitions as well as the primary beside each of them: a four-connection
+/// upstream source is one `primary` and three `upstream-partition` blocks, and
+/// a rule that read only the primary pair would refuse the third block against
+/// the second.
 #[test]
-fn an_upstream_partition_sharing_a_credential_is_refused_like_any_other_block() {
+fn a_partitioned_upstream_stating_one_credential_in_every_block_resolves() {
+    let key = "key_path = \"/etc/a-publisher/venue-account.key\"\n";
     let doc = with_sources(&format!(
-        "{}[source.credentials]\nkey_path = \"/etc/a-publisher/session.key\"\n\n\
-         {}[source.credentials]\nkey_path = \"/etc/a-publisher/session.key\"\n",
+        "{}[source.credentials]\n{key}\n\
+         {}[source.credentials]\n{key}\n\
+         {}[source.credentials]\n{key}",
         source("ws-a", "uds", "primary"),
-        source("ws-b", "uds", "upstream-partition")
+        source("ws-b", "uds", "upstream-partition"),
+        source("ws-c", "uds", "upstream-partition")
     ));
-    let error = Document::parse(&doc.render())
+    let config = Document::parse(&doc.render())
         .expect("parses")
         .resolve()
-        .expect_err("two logons with one credential, whatever the second block's role");
+        .expect("one venue account, several sessions, and the role says so");
 
-    match &error {
-        StartupError::SourceCredentialsShared { one, another } => {
-            assert_eq!(one, "ws-a");
-            assert_eq!(another, "ws-b");
-        }
-        other => panic!("expected a shared-credential error, got {other}"),
+    assert_eq!(config.sources.len(), 3);
+    assert!(
+        config
+            .sources
+            .iter()
+            .all(|declared| declared.credentials.len() == 1),
+        "every block keeps the one credential it stated"
+    );
+    // And the exemption is the credential rule's alone: the one-primary count
+    // still reads this document as one primary, and the partitions are still
+    // the connections whose loss ends the process.
+    assert_eq!(
+        config
+            .sources
+            .iter()
+            .filter(|declared| declared.is_primary())
+            .count(),
+        1
+    );
+    assert!(
+        config.sources[1..]
+            .iter()
+            .all(|declared| declared.role.fatal_error_ends_the_process()),
+        "a partition that shares a credential is still a partition"
+    );
+}
+
+/// The exemption follows containment, not equality, because the shape it exists
+/// for does.
+///
+/// One account's key in both blocks and the passphrase file for it written in
+/// one of them is one credential presented twice — the case the rule catches by
+/// containment rather than by equality. For a partitioned upstream source it is
+/// still that one account, so an exemption that let only equal tables through
+/// would refuse the second block for having spelled the account out more fully.
+#[test]
+fn a_partition_that_writes_one_more_path_for_the_same_account_resolves() {
+    let key = "key_path = \"/etc/a-publisher/venue-account.key\"\n";
+    let passphrase = "passphrase_path = \"/etc/a-publisher/venue-account.pass\"\n";
+    for (which, first, second) in [
+        ("the added path on the partition", "", passphrase),
+        ("the added path on the primary", passphrase, ""),
+    ] {
+        let doc = with_sources(&format!(
+            "{}[source.credentials]\n{key}{first}\n\
+             {}[source.credentials]\n{key}{second}",
+            source("ws-a", "uds", "primary"),
+            source("ws-b", "uds", "upstream-partition")
+        ));
+        let config = Document::parse(&doc.render())
+            .expect("parses")
+            .resolve()
+            .unwrap_or_else(|error| panic!("{which}: {error}"));
+
+        assert_eq!(config.sources.len(), 2, "{which}");
     }
+}
+
+/// The copy-paste guard, on the edge of the exemption.
+///
+/// A `comparison` block states that everything it carries arrives on the
+/// primary too, so a second logon on one credential is the copy-paste the rule
+/// was written for, whatever the other block's role is. Both orders, because
+/// the exemption is a question about a pair and a pair has two spellings.
+#[test]
+fn a_comparison_sharing_a_credential_with_an_upstream_partition_is_refused() {
+    let key = "key_path = \"/etc/a-publisher/venue-account.key\"\n";
+    for (which, second, third) in [
+        ("the comparison last", "upstream-partition", "comparison"),
+        ("the comparison first", "comparison", "upstream-partition"),
+    ] {
+        let doc = with_sources(&format!(
+            "{}[source.credentials]\n{key}\n\
+             {}[source.credentials]\n{key}\n\
+             {}[source.credentials]\n{key}",
+            source("ws-a", "uds", "primary"),
+            source("ws-b", "uds", second),
+            source("ws-c", "uds", third)
+        ));
+        let error = Document::parse(&doc.render())
+            .expect("parses")
+            .resolve()
+            .expect_err("a block that carries the whole book is not a partition");
+
+        match &error {
+            StartupError::SourceCredentialsShared { one, another } => {
+                // The refused pair and not the exempt one: the primary beside
+                // the partition is let through, so the two blocks named are the
+                // pair the comparison is half of.
+                let named = [one.as_str(), another.as_str()];
+                let comparison = if third == "comparison" {
+                    "ws-c"
+                } else {
+                    "ws-b"
+                };
+                assert!(named.contains(&comparison), "{which}: {named:?}");
+            }
+            other => panic!("{which}: {other}"),
+        }
+    }
+}
+
+/// Every pair of roles states whether one credential may hold both, and the
+/// answer does not depend on which block the document writes first.
+#[test]
+fn every_pair_of_roles_states_whether_one_credential_may_hold_both() {
+    for one in SourceRole::ALL {
+        for another in SourceRole::ALL {
+            assert_eq!(
+                one.credential_may_be_shared_with(another),
+                another.credential_may_be_shared_with(one),
+                "{} beside {} answers one way round and not the other",
+                one.as_str(),
+                another.as_str()
+            );
+        }
+    }
+
+    // The partitioned upstream source, which is what the exemption is for.
+    assert!(SourceRole::Primary.credential_may_be_shared_with(SourceRole::UpstreamPartition));
+    assert!(
+        SourceRole::UpstreamPartition.credential_may_be_shared_with(SourceRole::UpstreamPartition)
+    );
+    // And the copy-paste, which it is not for: a block that carries the whole
+    // book is refused a second logon on one credential, and two primaries never
+    // resolve anyway.
+    assert!(!SourceRole::Primary.credential_may_be_shared_with(SourceRole::Comparison));
+    assert!(!SourceRole::Comparison.credential_may_be_shared_with(SourceRole::Comparison));
+    assert!(!SourceRole::Comparison.credential_may_be_shared_with(SourceRole::UpstreamPartition));
+    assert!(!SourceRole::Primary.credential_may_be_shared_with(SourceRole::Primary));
+    assert_eq!(
+        SourceRole::ALL.len(),
+        3,
+        "a role was added: state here whether one credential may hold it beside each of the others"
+    );
 }
 
 #[test]

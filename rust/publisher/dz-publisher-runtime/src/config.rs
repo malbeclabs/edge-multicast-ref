@@ -193,6 +193,12 @@ pub struct Document {
 /// once more: `[adapter.replay]` publishes under the primary's connection,
 /// because that is the connection the offline comparison is defined against.
 ///
+/// At load the role is read once more still, by the credential rule in
+/// `resolve_sources`: a `primary` beside an `upstream-partition`, or two
+/// `upstream-partition` blocks, may state one credential, because several
+/// sessions of one venue account is what a partitioned upstream source is. See
+/// [`SourceRole::credential_may_be_shared_with`].
+///
 /// # There is no `carries`, and `upstream-partition` is not it
 ///
 /// There was, and it declared which feeds a source's data reached. It could not
@@ -1402,7 +1408,8 @@ fn check_shards_carry_the_same_specifications(feeds: &[Feed]) -> Result<(), Star
 /// thing an operator has to be able to read off the document. What this
 /// function refuses is the copy-paste failure: two enabled blocks where one's
 /// whole `credentials` table also appears in the other's, under the same keys
-/// with the same values. Equal tables are that case with nothing added, and
+/// with the same values — save for the one pair of roles that states the second
+/// session is deliberate, which the section below is about. Equal tables are that case with nothing added, and
 /// `key_path` in one block beside the same `key_path` plus a `passphrase_path`
 /// in the next is that case with a key added afterwards — one credential
 /// either way, and the second spelling is at least as likely a copy-paste as
@@ -1427,13 +1434,33 @@ fn check_shards_carry_the_same_specifications(feeds: &[Feed]) -> Result<(), Star
 /// upstream declares one `primary` and one `upstream-partition` per further
 /// connection and the count reads as it does on a single-connection publisher.
 ///
-/// The credential rule is role-blind and still applies to them, which a
-/// partitioned upstream meets sooner than a redundant one: its connections are
-/// several sessions of one venue, so the same `key_path` in each block is two
-/// enabled blocks sharing a credential and is refused naming both. That rule
-/// cannot tell a venue that permits one session per credential from a venue
-/// that partitions across several, and the venue's own logon refusal is the
-/// authority on which it is.
+/// # The one pair of roles that may state one credential
+///
+/// A partitioned upstream source is several sessions of **one** venue account,
+/// so the same `key_path` in every block is the shape it arrives in — and for a
+/// venue that permits several sessions per credential and hands out one
+/// credential, the only shape available. So the credential rule asks
+/// [`SourceRole::credential_may_be_shared_with`] about each pair before it
+/// compares their tables, and a `primary` beside an `upstream-partition`, or two
+/// `upstream-partition` blocks, are let through with one credential between
+/// them.
+///
+/// **Every pair involving a `comparison` is still refused**, which is the
+/// copy-paste the rule was written for: a block duplicated and left alone
+/// carries the role it was copied from, so a second `comparison` on one
+/// credential is refused as before, and a second `primary` is refused by the
+/// count above. Reaching the exemption costs the one edit that copy-paste is
+/// defined by not making — the line that says this connection carries
+/// instruments no other connection carries.
+///
+/// What the exemption does not claim is that the venue permits it. That is not
+/// in the document and the venue's own logon refusal is the authority; the
+/// symptom of getting it wrong is both connections reconnecting in step, which
+/// [`StartupError::SourceCredentialsShared`](crate::StartupError) describes.
+/// Before this, the refusal's advice — give each block its own credential, or
+/// disable one of them — was unactionable for such a venue, whose operator
+/// could satisfy it only by copying one key file to as many paths as there
+/// were connections.
 fn resolve_sources(sections: Vec<SourceSection>) -> Result<Vec<Source>, StartupError> {
     let mut sources: Vec<Source> = Vec::new();
     let mut seen: BTreeMap<String, ()> = BTreeMap::new();
@@ -1500,6 +1527,13 @@ fn resolve_sources(sections: Vec<SourceSection>) -> Result<Vec<Source>, StartupE
     // `StartupError::SourceCredentialsShared` for the failure it prevents and
     // for the case it cannot see.
     //
+    // Except for the one pair of roles that states the second connection is
+    // deliberate: `SourceRole::credential_may_be_shared_with` is asked about
+    // every pair before their tables are compared, and a `primary` beside an
+    // `upstream-partition`, or two `upstream-partition` blocks, are several
+    // sessions of one venue account and are let through. Every pair that
+    // involves a `comparison` is compared exactly as before.
+    //
     // Over the *enabled* sources only, unlike the name check: a disabled block
     // opens no session, so it cannot be one of two logons. And an empty
     // credentials table is not a shared credential — a venue that needs none
@@ -1518,6 +1552,7 @@ fn resolve_sources(sections: Vec<SourceSection>) -> Result<Vec<Source>, StartupE
         }
         if let Some(other) = sources[..index].iter().find(|earlier| {
             !earlier.credentials.is_empty()
+                && !earlier.role.credential_may_be_shared_with(source.role)
                 && (credential_within(&earlier.credentials, &source.credentials)
                     || credential_within(&source.credentials, &earlier.credentials))
         }) {

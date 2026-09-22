@@ -399,7 +399,8 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
         //
         // This connection's role decides it, and that is the whole of what a
         // role decides about a live run — `primary_connection` reads it too,
-        // but only on the replay path above.
+        // but only on the replay path above, and the credential rule reads it
+        // at load, where nothing is running yet.
         // `Driver::run` returns only on `IngressError::Fatal`, which any
         // non-retryable connect, send or receive operation can report: a
         // per-connection configuration fault found at connect most of all, an
@@ -1268,8 +1269,11 @@ impl Adapter for SharedAdapter {
 ///
 /// **That connection's role decides it, and that is the whole of what a role
 /// decides about a live run** — see
-/// [`SourceRole::fatal_error_ends_the_process`]. The one other thing a role is
-/// read for is [`primary_connection`], on the replay path.
+/// [`SourceRole::fatal_error_ends_the_process`]. A role is read in two other
+/// places, neither of them here: [`primary_connection`], on the replay path,
+/// and the credential rule in [`crate::config`] at load, which asks
+/// [`SourceRole::credential_may_be_shared_with`] whether a pair of blocks may
+/// state one credential.
 /// `Driver::run` returns only on
 /// [`IngressError::Fatal`](dz_ingress_core::IngressError::Fatal), which any
 /// non-retryable connect, send or receive operation can report: a
