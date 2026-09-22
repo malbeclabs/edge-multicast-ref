@@ -3796,6 +3796,17 @@ fn the_reader_file_grants_without_creating_the_reader() {
         "GRANT SELECT ON recorder.venue_book_top TO grafana;",
         "GRANT SELECT ON recorder.venue_object TO grafana;",
         "GRANT SELECT ON recorder.venue_book_top_settled TO grafana;",
+        // ...and the six the race needs, which is that same rule applied to a
+        // chain rather than to one pair. A panel names `feed_race` and reads
+        // everything beneath it, both branches, down to the two tables — so
+        // the list is the transitive closure of `FROM` in `009` and `010`, and
+        // not what the panel mentions. `012`'s header draws it.
+        "GRANT SELECT ON recorder.venue_book_top_occurrence TO grafana;",
+        "GRANT SELECT ON recorder.book_top TO grafana;",
+        "GRANT SELECT ON recorder.book_top_settled TO grafana;",
+        "GRANT SELECT ON recorder.publisher_book_top_occurrence TO grafana;",
+        "GRANT SELECT ON recorder.feed_race_occurrence TO grafana;",
+        "GRANT SELECT ON recorder.feed_race TO grafana;",
         // Lake is deliberately absent; `012`'s header carries the reasoning, and
         // the exactness of this set is what would refuse a grant added without it.
     ]
@@ -3803,7 +3814,7 @@ fn the_reader_file_grants_without_creating_the_reader() {
     .collect();
     assert_eq!(
         granted, intended,
-        "the reader's grants drifted from the three this file is scoped to"
+        "the reader's grants drifted from the nine this file is scoped to"
     );
 
     // And it is not in what a test or a schema deploy applies, for `004`'s
@@ -3812,6 +3823,121 @@ fn the_reader_file_grants_without_creating_the_reader() {
         !schema().iter().any(|m| m.name.contains("reader_grants")),
         "the reader's grants are applied by an administrator, not by the row writer"
     );
+}
+
+/// Everything a granted view reads is granted too, derived from the schema
+/// rather than from a list somebody keeps.
+///
+/// A VIEW HERE IS A NORMAL VIEW: it stores no rows, it is expanded into the
+/// query that reads it, and at `SQL SECURITY INVOKER` — the default for a view
+/// that is not materialised — every object the expansion touches is read with
+/// the privileges of whoever asked. So a grant on the object a panel NAMES buys
+/// nothing on its own, and the server says which link is missing one `497` at a
+/// time: `feed_race` first, then `feed_race_occurrence`, then the branch under
+/// it. That is a chain of four on the publisher side, and the way it goes wrong
+/// is an author granting the two views a dashboard mentions.
+///
+/// WHY IT IS DERIVED AND NOT LISTED. `the_reader_file_grants_without_creating_the_reader`
+/// pins the set, which is what refuses a grant nobody argued for. This asks the
+/// opposite question — whether the set is CLOSED — and a second hand-written
+/// list would answer it with the same reasoning that produced the first. The
+/// closure is read out of the view definitions, so a view given a new branch
+/// next year fails here without anyone remembering to extend anything.
+///
+/// THE LAST DEFINITION WINS, which is not a detail. `010` replaces `009`'s seam
+/// and `006`'s collapse, and a closure taken over the first definition of each
+/// name walks the venue branch alone — the exact shape the grants had while the
+/// publisher side of the race was unreadable.
+#[test]
+fn the_reader_can_read_everything_under_the_views_it_is_granted() {
+    let granted: BTreeSet<String> = migration("012_recorder_reader_grants.sql")
+        .sql
+        .lines()
+        .map(str::trim)
+        .filter_map(|l| l.strip_prefix("GRANT SELECT ON recorder."))
+        .filter_map(|l| l.strip_suffix(" TO grafana;"))
+        .map(str::to_owned)
+        .collect();
+    assert!(
+        !granted.is_empty(),
+        "no grant parsed: the shape of the file changed"
+    );
+
+    // The definition a deployment ends up with, which is the last one in the
+    // order the files are applied.
+    let definition = |name: &str| -> Option<&'static str> {
+        migrations().into_iter().rev().find_map(|m| {
+            m.sql
+                .contains(&format!("CREATE OR REPLACE VIEW recorder.{name} AS"))
+                .then(|| view_body(m.sql, name))
+        })
+    };
+
+    let mut pending: Vec<String> = granted.iter().cloned().collect();
+    let mut walked = BTreeSet::new();
+    let mut reads = BTreeSet::new();
+    while let Some(object) = pending.pop() {
+        if !walked.insert(object.clone()) {
+            continue;
+        }
+        // A table is where the walk stops: nothing is expanded beneath it.
+        let Some(body) = definition(&object) else {
+            continue;
+        };
+        // Prose is skipped. A header that quotes another view's `SELECT` is an
+        // argument about it and not a read of it, and `view_body` runs to the
+        // next statement so it carries the comment block of whatever follows.
+        for read in body
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.starts_with("--"))
+            .flat_map(|l| {
+                l.match_indices("FROM recorder.")
+                    .map(move |(at, needle)| &l[at + needle.len()..])
+            })
+            .map(|rest| {
+                rest.split(|c: char| !c.is_alphanumeric() && c != '_')
+                    .next()
+                    .unwrap_or_default()
+            })
+            .filter(|name| !name.is_empty())
+        {
+            assert!(
+                granted.contains(read),
+                "the reader is granted `{object}`, which reads `recorder.{read}`, \
+                 which it is not granted: a panel over `{object}` answers `497` \
+                 naming `recorder.{read}`"
+            );
+            reads.insert((object.clone(), read.to_owned()));
+            pending.push(read.to_owned());
+        }
+    }
+
+    // A WALK THAT FOUND NO EDGES PASSES EVERY ASSERTION ABOVE, which is the
+    // usual way a derived check stops deriving anything: the parse goes stale,
+    // the closure is the granted set itself, and the test reports success for
+    // whatever the file says. So the edges the race is made of are named, and
+    // they are named as edges rather than as objects — every object below is
+    // granted, so asserting the walk *visited* them would hold even if it
+    // never read a definition.
+    for (object, read) in [
+        ("feed_race", "feed_race_occurrence"),
+        ("feed_race_occurrence", "venue_book_top_occurrence"),
+        // The one that is `010`'s, and the one a closure over the FIRST
+        // definition of each name would miss: `009` declares this seam with
+        // the venue branch alone.
+        ("feed_race_occurrence", "publisher_book_top_occurrence"),
+        ("publisher_book_top_occurrence", "book_top_settled"),
+        ("book_top_settled", "book_top"),
+        ("venue_book_top_occurrence", "venue_book_top_settled"),
+        ("venue_book_top_settled", "venue_book_top"),
+    ] {
+        assert!(
+            reads.contains(&(object.to_owned(), read.to_owned())),
+            "the walk never read `recorder.{read}` beneath `{object}`, so the \
+             closure it checked is not the one a race panel reads"
+        );
+    }
 }
 
 /// `012` grants nothing to either of Lake's accounts, and argues why.
@@ -3943,7 +4069,7 @@ fn the_reader_file_records_the_grants_the_cluster_still_holds() {
     );
 }
 
-/// `009` tells an operator to re-apply the READER's grants too.
+/// `009` and `010` tell an operator to re-apply the READER's grants too.
 ///
 /// The sibling of `the_venue_file_tells_an_operator_to_re_apply_the_account_file`,
 /// and it exists because review pointed out that `012`'s own "standing rule"
@@ -3956,9 +4082,21 @@ fn the_reader_file_records_the_grants_the_cluster_still_holds() {
 /// instruction has to be findable rather than merely true. A missing INSERT
 /// grant fails an insert and names a table. A missing SELECT grant renders an
 /// empty panel, which reads as a recorder that captured nothing.
+///
+/// TWO FILES AND NOT ONE, BECAUSE THE RULE WAS ALREADY MISSED ONCE. `010` added
+/// the publisher branch of the race — a view of its own, a re-stated collapse,
+/// and both sides of the seam — with no grant and no instruction, and the miss
+/// surfaced as a `497` on a race panel rather than in review
+/// (`malbeclabs/phoenix#290`). A test that read only `009` could not have
+/// caught it: every grant in `012` was a venue grant, so the pairing held
+/// while the file that needed it said nothing. So the loop below asks which
+/// file DECLARES each grant's object and fails when neither names it, which is
+/// what makes a `011` — or a `013` — inherit the rule by being checked rather
+/// than by somebody re-reading a header.
 #[test]
 fn the_venue_file_tells_an_operator_to_re_apply_the_reader_file() {
     let sql = venue_sql();
+    let book_key = book_key_sql();
     let reader = migration("012_recorder_reader_grants.sql").sql;
 
     // A heading, for the reason the account file's version gives: the
@@ -3978,18 +4116,32 @@ fn the_venue_file_tells_an_operator_to_re_apply_the_reader_file() {
         "the account whose grants are missing is not named"
     );
 
-    // And every grant the reader file holds is written in `009` too, so the
-    // pair cannot drift into a grant nobody is told to apply. Per statement and
-    // not as one sentence, which is what makes a fourth grant added next year
-    // get its instruction as well.
+    // The same heading in `010`, because that is where the publisher branch of
+    // the race is declared and the operator applying it is a different
+    // operator on a different day.
+    assert!(
+        book_key.contains("RE-APPLY `012` TOO"),
+        "`010` declares the publisher side of the race and does not tell a \
+         reader skimming it that the grants are somewhere else"
+    );
+    assert!(
+        book_key.contains("012_recorder_reader_grants.sql") && book_key.contains("grafana"),
+        "`010`'s instruction names neither the file nor the account"
+    );
+
+    // And every grant the reader file holds is written in the file that
+    // declares its object, so the set cannot drift into a grant nobody is told
+    // to apply. Per statement and not as one sentence, which is what makes a
+    // tenth grant added next year get its instruction as well.
     for line in reader
         .lines()
         .map(str::trim)
         .filter(|l| l.starts_with("GRANT"))
     {
         assert!(
-            sql.contains(line),
-            "`012` grants `{line}` and `009` does not tell an operator to apply it"
+            sql.contains(line) || book_key.contains(line),
+            "`012` grants `{line}` and neither `009` nor `010` tells an \
+             operator to apply it"
         );
     }
 }
