@@ -53,6 +53,14 @@ pub struct IngressConfig {
     pub reconnect_backoff_initial: Duration,
 
     /// The ceiling on that delay.
+    ///
+    /// Equal to `reconnect_backoff_initial` is a fixed delay rather than a
+    /// refusal: the window is a single point, so every retry waits that one
+    /// value and the connections of one publisher retry in lockstep. It is
+    /// stated at startup rather than left to be inferred from the delays — see
+    /// [`BackoffPolicy::lockstep_line`](crate::BackoffPolicy::lockstep_line) —
+    /// because it is a configuration to mean and not one to arrive at by
+    /// accident.
     #[serde(default = "default_backoff_max", deserialize_with = "de_duration")]
     pub reconnect_backoff_max: Duration,
 

@@ -343,6 +343,19 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
         None => {}
     }
 
+    // The same argument one section over. A `reconnect_backoff_max` equal to
+    // `reconnect_backoff_initial` is a fixed reconnect delay: the jitter's
+    // window is a single point, so every connection this publisher holds
+    // against one address retries at the same instants - and the delays are
+    // inside their configured pair either way, so no series and no error can
+    // show it. Legitimate, not a default anybody should get by accident, and
+    // therefore stated at startup. The line is composed and asserted in
+    // `dz-ingress-core`, where the two keys are spelled; see
+    // `BackoffPolicy::lockstep_line`.
+    if let Some(line) = config.ingress.backoff.lockstep_line() {
+        eprintln!("dz-publisher-runtime: {line}");
+    }
+
     let server = if config.metrics.enabled {
         Some(
             dz_publisher_metrics::serve(Arc::clone(&metrics), config.metrics.listen_addr).map_err(

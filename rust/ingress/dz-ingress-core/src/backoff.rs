@@ -50,6 +50,57 @@ impl BackoffPolicy {
     pub const fn max(self) -> Duration {
         self.max
     }
+
+    /// The line a policy with no window in it earns an operator, and `None` for
+    /// a policy that has one to draw in.
+    ///
+    /// A maximum equal to the initial delay is a fixed delay: the window is a
+    /// single point, every draw is that one value, and the connections a
+    /// publisher holds against one address retry at the same instants — the
+    /// lockstep [`Backoff`] exists to end. It loads, because a fixed retry
+    /// cadence is a configuration somebody may mean; the operator who did not
+    /// mean it is who this line is for, since nothing else in a running
+    /// publisher names the cause. The delays themselves are correct either
+    /// way, so there is nothing here to repair and nothing to count: what was
+    /// missing was a sentence.
+    ///
+    /// # Why a line and not a [`ConfigError`]
+    ///
+    /// Two reasons, and the second is the one that decides it:
+    ///
+    /// - A refusal would stop a document that loads today and states exactly
+    ///   what it says, at the moment a publisher is restarted onto a newer
+    ///   build. Nothing on the wire depends on the jitter, and the refusals
+    ///   this enum does make are for pairs that *cannot* be obeyed as written —
+    ///   a transposed pair, a zero that doubles to zero forever, a rate finer
+    ///   than the clock pacing it. A fixed delay is obeyed exactly as written.
+    /// - **A refusal would bound the spelling and not the lockstep.** The
+    ///   window's width is continuous in the pair: a maximum one nanosecond
+    ///   above the initial delay draws over a window one nanosecond wide, which
+    ///   is the same lockstep and loads under any refusal that keys on
+    ///   equality. There is no width at which retries stop being in step, so
+    ///   the value cannot be the thing this guards — only whether an operator
+    ///   is told.
+    ///
+    /// Composed here, where the two keys are spelled and where every other
+    /// sentence about them lives, and stated by whoever runs a policy:
+    /// `dz-publisher-runtime` writes it at startup beside the other
+    /// configurations that are legitimate and are not defaults. Separate from
+    /// that call site so a test can assert it, which is the only part of the
+    /// path a test can reach — nothing in this workspace captures stderr.
+    #[must_use]
+    pub fn lockstep_line(self) -> Option<String> {
+        if self.max != self.initial {
+            return None;
+        }
+        Some(format!(
+            "reconnect jitter is off: `[ingress] reconnect_backoff_max` is the same as \
+             `reconnect_backoff_initial` ({:?}), so every retry waits that one value and the \
+             connections this publisher holds against one address retry in lockstep. State a \
+             maximum above the initial delay to have them drawn apart.",
+            self.initial
+        ))
+    }
 }
 
 /// The delay sequence: a window that doubles towards the configured maximum,
@@ -106,7 +157,9 @@ impl BackoffPolicy {
 ///   that one value, and the connections this exists to separate stay in step.
 ///   [`BackoffPolicy::new`] refuses only a maximum *below* the initial delay,
 ///   so a fixed-delay configuration opts out of the jitter rather than failing
-///   to load.
+///   to load — and [`BackoffPolicy::lockstep_line`] is what says so at startup,
+///   for the operator who did not mean to opt out and would otherwise have
+///   nothing anywhere naming the cause.
 /// - **The ceiling sequence is `2 × initial`, `4 × initial`, … capped at
 ///   `max`, exactly.** It is a value [`ceiling`](Self::ceiling) reports and a
 ///   test asserts as a list, so a cap applied one step late is caught by a
@@ -563,6 +616,56 @@ mod tests {
         assert!(
             matches!(error, ConfigError::BackoffInverted { .. }),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn a_maximum_equal_to_the_initial_delay_states_the_lockstep_it_leaves() {
+        // The one configuration the draw cannot help: the window is a point, so
+        // every connection of a publisher waits the same second and retries
+        // together, which is what this whole type exists to end. It loads,
+        // because a fixed retry cadence is something to mean - so the line is
+        // what the operator who did not mean it gets, and until it existed a
+        // publisher in exact lockstep looked from the outside like one that had
+        // been given a window.
+        let line = policy(1_000, 1_000)
+            .lockstep_line()
+            .expect("a policy with no window in it must say so");
+        // Both keys, the value, and the consequence: an operator handed the
+        // consequence alone has to go and find which pair produced it, and one
+        // handed the pair alone has no reason to act.
+        for named in [
+            "reconnect_backoff_initial",
+            "reconnect_backoff_max",
+            "1s",
+            "lockstep",
+        ] {
+            assert!(
+                line.contains(named),
+                "the line does not name {named}: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_policy_with_a_window_to_draw_in_says_nothing() {
+        // The other direction, because a line stated for every policy is a line
+        // nobody reads. The documented pair, then a maximum below twice the
+        // initial delay - whose window is narrow and real - and then the
+        // narrowest a configuration can express short of none, which is also
+        // the case that says why this is not a refusal: one nanosecond of
+        // window is the same lockstep and no refusal keyed on equality would
+        // have caught it either.
+        assert!(policy(500, 30_000).lockstep_line().is_none());
+        assert!(policy(500, 600).lockstep_line().is_none());
+        let narrowest = BackoffPolicy::new(
+            Duration::from_millis(500),
+            Duration::from_millis(500) + Duration::from_nanos(1),
+        )
+        .expect("a valid policy");
+        assert!(
+            narrowest.lockstep_line().is_none(),
+            "a window one nanosecond wide is a window"
         );
     }
 }
