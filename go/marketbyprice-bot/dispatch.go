@@ -86,11 +86,13 @@ func (s *Shard) applySnapshotBegin(k instKey, rec Record) []ChannelEvent {
 
 	ok, err := inst.SnapshotAcceptable(anchor, lastInstr)
 	if err != nil {
-		// Stale anchor: a snapshot captured before an InstrumentReset but
-		// delivered after it. Accepting it would leave the instrument ready
-		// holding exactly the diverged book the reset existed to discard.
-		if s.metrics != nil && errors.Is(err, errStaleAnchor) {
-			s.metrics.SnapshotDiscardedTotal.WithLabelValues("stale_anchor").Inc()
+		// Refused, not merely declined. Two cases, and both would leave the
+		// instrument ready over a book it already knows is wrong: a snapshot
+		// captured before an InstrumentReset but delivered after it holds exactly
+		// the diverged book the reset existed to discard, and one captured before
+		// the hole that gapped this instrument holds the book from before the loss.
+		if s.metrics != nil {
+			s.metrics.SnapshotDiscardedTotal.WithLabelValues(discardReason(err)).Inc()
 		}
 		return nil
 	}
@@ -176,7 +178,11 @@ func (s *Shard) applySnapshotEnd(k instKey, rec Record) []ChannelEvent {
 	return evs
 }
 
-// discardReason labels a snapshot discard.
+// discardReason labels a snapshot discard, whether it was refused at the begin
+// or rejected at the end. One function for both, because two of the reasons
+// reach here from either side: an InstrumentReset or a demotion that lands while
+// a shadow is already open is only caught by EndSnapshot, which SnapshotBegin
+// ran too early to see.
 //
 // There is deliberately no "no_open_snapshot" reason. applySnapshotEnd returns
 // before calling EndSnapshot when no shadow is open, so errNoOpenSnapshot cannot
@@ -190,6 +196,10 @@ func discardReason(err error) string {
 		return "short"
 	case errors.Is(err, errSnapshotMismatch):
 		return "mismatch"
+	case errors.Is(err, errStaleAnchor):
+		return "stale_anchor"
+	case errors.Is(err, errStaleInstrumentSeq):
+		return "stale_instrument_seq"
 	default:
 		return "other"
 	}

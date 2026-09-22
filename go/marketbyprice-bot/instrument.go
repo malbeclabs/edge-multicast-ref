@@ -110,6 +110,24 @@ type Instrument struct {
 	// SnapshotBegin with an older Anchor Seq MUST be discarded.
 	RequiredAnchorSeq *uint64
 
+	// RequiredInstrumentSeq is the Per-Instrument Seq a recovery snapshot MUST
+	// cover, set on every demotion to gap. While non-nil, a snapshot whose Last
+	// Instrument Seq is below it is discarded.
+	//
+	// It is the Last Instrument Seq counterpart of RequiredAnchorSeq, and it is a
+	// separate field rather than a reuse of it because the two answer different
+	// questions from different series. A reset invalidates everything captured
+	// before a channel-wide Anchor Seq; a demotion invalidates everything captured
+	// before one instrument's own hole, and the hole is only expressible in that
+	// instrument's series.
+	//
+	// nil is what distinguishes "never had a book" from "lost a known mutation".
+	// A cold-start instrument must accept the first snapshot it is offered,
+	// whatever its Last Instrument Seq — including 0, for an instrument with no
+	// deltas yet — so the requirement cannot be derived from the trackers, which
+	// read 0 in both cases.
+	RequiredInstrumentSeq *uint32
+
 	OpenSnapshot *PendingSnapshot
 	Pending      map[uint32]Record // out-of-order deltas keyed by per_instrument_seq
 
@@ -338,6 +356,10 @@ var (
 	errSnapshotShort    = errors.New("snapshot level count mismatch")
 	errNoOpenSnapshot   = errors.New("snapshot end with no open snapshot")
 	errStaleAnchor      = errors.New("snapshot anchor older than required anchor")
+	// errStaleInstrumentSeq: the snapshot was captured before the hole that
+	// demoted this instrument, so committing it would restore ready over a book
+	// still missing the mutation the demotion was declared for.
+	errStaleInstrumentSeq = errors.New("snapshot last instrument seq older than the hole")
 )
 
 // EndSnapshot validates and commits the shadow. On ANY failure only the shadow
@@ -360,6 +382,17 @@ func (i *Instrument) EndSnapshot(snapID uint32, anchorSeq uint64) error {
 		i.OpenSnapshot = nil
 		return fmt.Errorf("%w: got %d expected %d", errSnapshotShort, got, want)
 	}
+	// Re-checked here and not only at the begin, because the requirement can be
+	// set while the shadow is already open: a ready instrument that was behind
+	// opens a shadow, a delta then gaps it, and the shadow it opened while healthy
+	// was captured before that hole. SnapshotAcceptable never saw the hole, so
+	// only this check stands between the commit and a ready status over a book
+	// missing the mutation the demotion was declared for.
+	if i.RequiredInstrumentSeq != nil && i.OpenSnapshot.LastInstrumentSeq < *i.RequiredInstrumentSeq {
+		got, want := i.OpenSnapshot.LastInstrumentSeq, *i.RequiredInstrumentSeq
+		i.OpenSnapshot = nil
+		return fmt.Errorf("%w: last_instrument_seq=%d required=%d", errStaleInstrumentSeq, got, want)
+	}
 
 	depth := i.OpenSnapshot.DepthBound
 	i.Bids = i.OpenSnapshot.Bids
@@ -380,6 +413,10 @@ func (i *Instrument) EndSnapshot(snapID uint32, anchorSeq uint64) error {
 	if i.RequiredAnchorSeq != nil && i.OpenSnapshot.AnchorSeq >= *i.RequiredAnchorSeq {
 		i.RequiredAnchorSeq = nil
 	}
+	// The guard above returned for every shadow below the requirement, so
+	// reaching here means this snapshot covers the hole: the demotion is repaired
+	// and the requirement is spent.
+	i.RequiredInstrumentSeq = nil
 	i.OpenSnapshot = nil
 	// Free Pending too. Its entries are keyed to the pre-snapshot per-instrument
 	// sequence, and LastAppliedInstrumentSeq has just jumped to the snapshot's
@@ -404,12 +441,41 @@ func (i *Instrument) SnapshotAcceptable(anchorSeq uint64, lastInstrSeq uint32) (
 	if i.RequiredAnchorSeq != nil && anchorSeq < *i.RequiredAnchorSeq {
 		return false, errStaleAnchor
 	}
+	// A gap instrument is NOT indiscriminately hungry for a book. It reaches gap
+	// by losing a specific Per-Instrument Seq, and a snapshot captured before that
+	// seq is a copy of the publisher's book from before the loss: committing it
+	// restores ready over a book this book engine already knows is missing a
+	// mutation, and every delta behind the hole then piles up in the reorder
+	// window until it declares a second gap — landing a publisher defect, or an
+	// eviction this process chose, in per_instrument_gaps_total.
+	if i.RequiredInstrumentSeq != nil && lastInstrSeq < *i.RequiredInstrumentSeq {
+		return false, errStaleInstrumentSeq
+	}
 	if i.Status != StatusReady {
 		return true, nil
 	}
 	// Ready: only re-bootstrap when the snapshot was captured after deltas this
 	// subscriber never applied.
 	return lastInstrSeq > i.LastAppliedInstrumentSeq, nil
+}
+
+// RequireSnapshotAtLeast records that recovery needs a snapshot captured at or
+// after Per-Instrument Seq instrSeq. Every demotion to gap calls it with the seq
+// whose mutation was lost, so the three demotion paths — sequence gap, delta
+// buffer eviction, malformed record — all state the same requirement in the same
+// series.
+//
+// It never lowers the requirement. A gapped instrument can be demoted again
+// before it recovers — an eviction on a book a malformed record already gapped —
+// and a snapshot has to cover every seq that was lost, so what it must reach is
+// the newest of them. Taking the latest demotion's seq unconditionally would let
+// a second demotion behind the first waive the first one's hole.
+func (i *Instrument) RequireSnapshotAtLeast(instrSeq uint32) {
+	if i.RequiredInstrumentSeq != nil && *i.RequiredInstrumentSeq >= instrSeq {
+		return
+	}
+	seq := instrSeq
+	i.RequiredInstrumentSeq = &seq
 }
 
 // Crossed reports whether the inside market is crossed. Strict >, so a locked
@@ -450,6 +516,12 @@ func (i *Instrument) Reset(requiredAnchor *uint64) {
 	i.LostInstrumentSeq = nil
 	i.DepthBound = nil // back to unknown, never 0
 	i.RequiredAnchorSeq = requiredAnchor
+	// The reset restarts the Per-Instrument Seq series, so a requirement recorded
+	// against the old one names a seq that will not come round again for a whole
+	// wrap. Left set it would refuse every post-reset snapshot and wedge the
+	// instrument in awaiting-snapshot; RequiredAnchorSeq is what guards recovery
+	// from here.
+	i.RequiredInstrumentSeq = nil
 }
 
 // NextExpectedInstrumentSeq is the Per-Instrument Seq this instrument is
