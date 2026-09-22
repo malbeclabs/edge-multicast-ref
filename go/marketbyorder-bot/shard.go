@@ -266,6 +266,17 @@ func (s *Shard) applySnapshotEnd(k instKey, rec Record) []ChannelEvent {
 	if inst.OpenSnapshot == nil {
 		return nil // no shadow in progress; ignore (never demote)
 	}
+	if inst.OpenSnapshot.SnapshotID != snapID {
+		// The shadow in progress is a later group's: this instrument's own next
+		// SnapshotBegin replaced the one the end names. EndSnapshot discards the
+		// shadow on an id it disagrees with, so offering this end to it would
+		// throw away a group whose orders are still arriving and cost the
+		// instrument the recovery cycle it is in the middle of. The end names a
+		// group that is already finished, so there is nothing left to commit.
+		log.Printf("shard %d instrument %d: snapshot end for id %d behind the open id %d; ignored",
+			s.idx, k.id, snapID, inst.OpenSnapshot.SnapshotID)
+		return nil
+	}
 	anchor := toUint64(rec.Fields["anchor_seq"])
 	if _, _, err := inst.EndSnapshot(snapID, anchor); err != nil {
 		if s.metrics != nil {
