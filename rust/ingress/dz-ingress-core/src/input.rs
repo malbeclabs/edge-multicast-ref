@@ -205,6 +205,12 @@ pub trait Input: Send {
     ///
     /// [`IngressError::Ended`] carrying the reason, when the connection is
     /// gone.
+    ///
+    /// [`IngressError::Fatal`] for what this transport reads and another
+    /// attempt cannot get past, which the driver stops on rather than
+    /// reconnecting into. A transport with nothing of that kind to report never
+    /// returns it, and the driver treats a read it reports exactly as it treats
+    /// one from [`connect`](Self::connect).
     fn recv<'a>(
         &'a mut self,
         budget: Option<Duration>,

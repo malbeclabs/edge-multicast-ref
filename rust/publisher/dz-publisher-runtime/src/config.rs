@@ -168,21 +168,25 @@ pub struct Document {
 /// routing the runtime does not do.
 ///
 /// What it does decide, and the reason it is not decoration: **whether a fatal
-/// error from that source ends the process.** `Driver::run` returns only on
-/// [`IngressError::Fatal`](dz_ingress_core::IngressError::Fatal), whose
-/// documented causes are the per-source configuration faults found at connect —
-/// an invalid endpoint, a missing credential path, an unsupported scheme.
+/// error on that connection ends the process.** `Driver::run` returns only on
+/// [`IngressError::Fatal`](dz_ingress_core::IngressError::Fatal), which any
+/// non-retryable connect, send or receive operation can report — a
+/// per-connection configuration fault found at connect most of all, an invalid
+/// endpoint, a missing credential path or an unsupported scheme, and equally a
+/// message the transport cannot carry at all.
 ///
-/// - A `primary`'s ends it, because the wire is fed from that upstream source.
-/// - A `comparison`'s does not. Everything it carries arrives on the primary
-///   too, so a mistyped URL on a source that by design must not reach the wire
-///   leaves that driver dropped and named with its `connection_state` at 0 —
-///   the alert for exactly this case — and the primary carrying on.
-/// - An `upstream-partition`'s ends it. What that connection carries arrives on
-///   no other, so carrying on without it serves that subset of instruments
-///   stale while every other signal says the publisher is well: the surviving
-///   connections hold their own `connection_state` at 1 and keep the aggregate
-///   busy under the idle guard.
+/// - A fatal error on the `primary` ends the process, because the wire is fed
+///   from that upstream source.
+/// - A fatal error on a `comparison` does not end it. Everything that
+///   connection carries arrives on the primary too, so a mistyped URL on a
+///   connection that by design must not reach the wire leaves that driver
+///   dropped and named with its `connection_state` at 0 — the alert for exactly
+///   this case — and the primary carrying on.
+/// - A fatal error on an `upstream-partition` ends the process. What that
+///   connection carries arrives on no other, so carrying on without it serves
+///   that subset of instruments stale while every other signal says the
+///   publisher is well: the surviving connections hold their own
+///   `connection_state` at 1 and keep the aggregate busy under the idle guard.
 ///
 /// [`SourceRole::fatal_error_ends_the_process`] is that answer, and it is the
 /// whole of what a role decides about a live run. A replay run reads the role
@@ -201,8 +205,8 @@ pub struct Document {
 ///
 /// `role = "upstream-partition"` states no routing either, and that is what
 /// makes it statable at all: it names no instruments, no feeds and no shards,
-/// and every payload from such a source reaches the one adapter exactly as a
-/// primary's does. What it states is which failures are fatal, which is a
+/// and every payload from such a connection reaches the one adapter exactly as
+/// the primary's does. What it states is which failures are fatal, which is a
 /// question about this runtime's own behaviour and one the runtime answers.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1421,8 +1425,7 @@ fn check_shards_carry_the_same_specifications(feeds: &[Feed]) -> Result<(), Star
 /// either are fine, and one arriving beside the primary is the whole point of
 /// each role. Only a `primary` is counted by the rule above, so a partitioned
 /// upstream declares one `primary` and one `upstream-partition` per further
-/// connection and the count reads as it does on a publisher with a single
-/// source.
+/// connection and the count reads as it does on a single-connection publisher.
 ///
 /// The credential rule is role-blind and still applies to them, which a
 /// partitioned upstream meets sooner than a redundant one: its connections are
@@ -1527,11 +1530,12 @@ fn resolve_sources(sections: Vec<SourceSection>) -> Result<Vec<Source>, StartupE
 
     // `is_primary` and not "whatever the published set depends on": an
     // `upstream-partition` is depended on exactly as the primary is, and it is
-    // still not a primary. What this rule refuses is two sources each declared
-    // to carry the whole book, whose events interleave on one channel instance
-    // under one `Sequence Number` series — so counting a partition here would
-    // refuse the one configuration the role exists to express, and would report
-    // two blocks that are not in conflict as though they were.
+    // still not a primary. What this rule refuses is two upstream connections
+    // each declared to carry the whole book, whose events interleave on one
+    // channel instance under one `Sequence Number` series — so counting a
+    // partition here would refuse the one configuration the role exists to
+    // express, and would report two blocks that are not in conflict as though
+    // they were.
     let primaries: Vec<&str> = sources
         .iter()
         .filter(|source| source.is_primary())

@@ -397,27 +397,30 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
             inputs.iter().map(|_| SharedSink(&publisher)).collect();
         // Whether a fatal error from this connection ends the process.
         //
-        // The source's role decides it, and that is the whole of what a role
-        // decides about a live run — `primary_connection` reads it too, but
-        // only on the replay path above.
-        // `Driver::run` returns only on `IngressError::Fatal`, whose documented
-        // causes are the per-source configuration faults found at connect: an
-        // invalid endpoint, a missing credential path, an unsupported scheme. A
-        // `comparison` source answers `false`, because everything it carries
-        // arrives on the primary too — so a mistyped URL on a source that by
-        // design must not reach the wire cannot take the healthy primary down,
-        // and cannot keep it down across restarts with a fault that lives in
-        // the file. A `primary` and an `upstream-partition` answer `true`: the
-        // instruments an upstream partition carries arrive on no other
-        // connection, so carrying on without it would serve that subset stale.
+        // This connection's role decides it, and that is the whole of what a
+        // role decides about a live run — `primary_connection` reads it too,
+        // but only on the replay path above.
+        // `Driver::run` returns only on `IngressError::Fatal`, which any
+        // non-retryable connect, send or receive operation can report: a
+        // per-connection configuration fault found at connect most of all, an
+        // invalid endpoint, a missing credential path or an unsupported scheme,
+        // and equally a message the transport cannot carry at all. A
+        // `comparison` connection answers `false`, because everything it
+        // carries arrives on the primary too — so a mistyped URL on a
+        // connection that by design must not reach the wire cannot take the
+        // healthy primary down, and cannot keep it down across restarts with a
+        // fault that lives in the file. A `primary` and an `upstream-partition`
+        // answer `true`: the instruments an upstream partition carries arrive
+        // on no other connection, so carrying on without it would serve that
+        // subset stale.
         //
-        // A document with no `[[source]]` array has one implicit source and no
-        // role to read, so every input ends the process and the behaviour is
-        // exactly what a single-source publisher has always had. An input the
-        // document does not name cannot happen — `check_sources` holds the two
-        // sets equal before this — and if it ever did, ending the process is
-        // the answer that does not silently keep a publisher running past a
-        // fault.
+        // A document that declares no upstream connections has one implicit
+        // connection and no role to read, so every input ends the process and
+        // the behaviour is exactly what a single-connection publisher has
+        // always had. An input the document does not name cannot happen —
+        // `check_sources` holds the two sets equal before this — and if it ever
+        // did, ending the process is the answer that does not silently keep a
+        // publisher running past a fault.
         let mut drivers: Vec<(&'static str, bool, Driver<'_>)> = inputs
             .iter_mut()
             .zip(shared_adapters.iter_mut())
@@ -450,13 +453,13 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
 
         // The first driver **whose failure is fatal** to give up ends the
         // process, and it is named. There is no `select!` over a count decided
-        // at runtime, and no task per source either: the composed publisher is
-        // deliberately not `Send`, so polling them in turn from one future is
-        // what keeps every borrow in this task. Each returns `Pending` having
-        // registered its own waker, so this parks rather than spins.
+        // at runtime, and no task per connection either: the composed publisher
+        // is deliberately not `Send`, so polling them in turn from one future
+        // is what keeps every borrow in this task. Each returns `Pending`
+        // having registered its own waker, so this parks rather than spins.
         //
-        // A driver whose failure is not fatal — a `comparison` source's — is
-        // **dropped from the set and named**, and the publisher carries on.
+        // A driver whose failure is not fatal — a `comparison` connection's —
+        // is **dropped from the set and named**, and the publisher carries on.
         // `Driver::run` returns only on a fatal error, so such a driver is
         // permanently done and polling it again would panic; leaving it out is
         // also what leaves its `connection_state` at 0, which is the alert for
@@ -1261,34 +1264,36 @@ impl Adapter for SharedAdapter {
     }
 }
 
-/// Whether a fatal error from `connection` ends the process.
+/// Whether a fatal error on `connection` ends the process.
 ///
-/// **The source's role decides it, and that is the whole of what a role decides
-/// about a live run** — see [`SourceRole::fatal_error_ends_the_process`]. The
-/// one other thing a role is read for is [`primary_connection`], on the replay
-/// path.
+/// **That connection's role decides it, and that is the whole of what a role
+/// decides about a live run** — see
+/// [`SourceRole::fatal_error_ends_the_process`]. The one other thing a role is
+/// read for is [`primary_connection`], on the replay path.
 /// `Driver::run` returns only on
-/// [`IngressError::Fatal`](dz_ingress_core::IngressError::Fatal), whose
-/// documented causes are the per-source configuration faults found at connect:
-/// an invalid endpoint, a missing credential path, an unsupported scheme. A
-/// `comparison` source answers `false`, so a mistyped URL on a source that by
-/// design must not reach the wire cannot take the healthy primary down — nor
-/// keep it down across restarts, with a fault that lives in the file a
-/// supervisor hands back. A `primary` and an `upstream-partition` answer
-/// `true`: what an upstream partition carries arrives on no other connection,
-/// so a publisher that carried on without it would serve that subset stale
-/// while every other signal said it was well.
+/// [`IngressError::Fatal`](dz_ingress_core::IngressError::Fatal), which any
+/// non-retryable connect, send or receive operation can report: a
+/// per-connection configuration fault found at connect most of all, an invalid
+/// endpoint, a missing credential path or an unsupported scheme, and equally a
+/// message the transport cannot carry at all. A `comparison` connection answers
+/// `false`, so a mistyped URL on a connection that by design must not reach the
+/// wire cannot take the healthy primary down — nor keep it down across
+/// restarts, with a fault that lives in the file a supervisor hands back. A
+/// `primary` and an `upstream-partition` answer `true`: what an upstream
+/// partition carries arrives on no other connection, so a publisher that
+/// carried on without it would serve that subset stale while every other signal
+/// said it was well.
 ///
-/// A document with no `[[source]]` array has one implicit source and no role to
-/// read, so every input ends the process and the behaviour is exactly what a
-/// single-source publisher has always had. An input the document does not name
-/// cannot happen — `check_sources` holds the two sets equal before this — and if
-/// it ever did, ending the process is the answer that does not silently keep a
-/// publisher running past a fault.
+/// A document that declares no upstream connections has one implicit
+/// connection and no role to read, so every input ends the process and the
+/// behaviour is exactly what a single-connection publisher has always had. An
+/// input the document does not name cannot happen — `check_sources` holds the
+/// two sets equal before this — and if it ever did, ending the process is the
+/// answer that does not silently keep a publisher running past a fault.
 ///
 /// The cost of answering `false` is stated on
-/// [`poll_first_fatal_run_to_give_up`]: that source is then down until somebody
-/// restarts the process, because nothing else retries a fatal error.
+/// [`poll_first_fatal_run_to_give_up`]: that connection is then down until
+/// somebody restarts the process, because nothing else retries a fatal error.
 fn fatal_ends_the_process(sources: &[Source], connection: ConnectionId) -> bool {
     sources.is_empty()
         || sources
@@ -1323,10 +1328,10 @@ fn fatal_ends_the_process(sources: &[Source], connection: ConnectionId) -> bool 
 /// upstreams.
 ///
 /// The `bool` beside each run is
-/// [`SourceRole::fatal_error_ends_the_process`] for the source that run drives,
-/// answered by [`fatal_ends_the_process`]. Nothing here reads a role: what this
-/// needs is that one answer per run, and taking it as a `bool` is what lets the
-/// mechanism be exercised without a transport.
+/// [`SourceRole::fatal_error_ends_the_process`] for the connection that run
+/// drives, answered by [`fatal_ends_the_process`]. Nothing here reads a role:
+/// what this needs is that one answer per run, and taking it as a `bool` is
+/// what lets the mechanism be exercised without a transport.
 fn poll_first_fatal_run_to_give_up<F, E>(
     runs: &mut Vec<(bool, F)>,
     cx: &mut std::task::Context<'_>,
@@ -1837,7 +1842,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Which source's fatal error ends the process
+    // Which upstream source's fatal error ends the process
     // -----------------------------------------------------------------------
 
     fn declared(name: &'static str, role: SourceRole) -> Source {
@@ -1850,16 +1855,17 @@ mod tests {
         }
     }
 
-    /// A source that by design must not reach the wire must not be able to take
-    /// the wire down.
+    /// A connection that by design must not reach the wire must not be able to
+    /// take the wire down.
     ///
-    /// `Driver::run` returns only on `IngressError::Fatal`, and its documented
-    /// causes are the per-source configuration faults found at connect — so a
-    /// mistyped URL on a comparison source would otherwise end the process, and
-    /// keep ending it across restarts, because the fault is in the file a
+    /// `Driver::run` returns only on `IngressError::Fatal`, which any
+    /// non-retryable connect, send or receive operation can report, a
+    /// per-connection configuration fault found at connect most of all — so a
+    /// mistyped URL on a comparison connection would otherwise end the process,
+    /// and keep ending it across restarts, because the fault is in the file a
     /// supervisor hands back.
     #[test]
-    fn a_comparisons_fatal_error_does_not_end_the_process() {
+    fn a_comparison_fatal_error_does_not_end_the_process() {
         let sources = [
             declared("ws", SourceRole::Primary),
             declared("fix", SourceRole::Comparison),
@@ -1868,8 +1874,8 @@ mod tests {
         assert!(!fatal_ends_the_process(&sources, ConnectionId::new("fix")));
     }
 
-    /// And an upstream partition's does, which is the whole of the difference
-    /// between that role and a comparison.
+    /// And a fatal error on an upstream partition does end the process, which
+    /// is the whole of the difference between that role and a comparison.
     ///
     /// What the partition carries arrives on no other connection, so dropping
     /// its driver and carrying on serves that subset of instruments stale:
@@ -1877,7 +1883,7 @@ mod tests {
     /// hold their own `connection_state` at 1, and the process reports itself
     /// healthy.
     #[test]
-    fn an_upstream_partitions_fatal_error_ends_the_process() {
+    fn an_upstream_partition_fatal_error_ends_the_process() {
         let sources = [
             declared("ws", SourceRole::Primary),
             declared("ws-2", SourceRole::UpstreamPartition),
@@ -1901,7 +1907,7 @@ mod tests {
     /// holds the two sets equal first — and if it ever did, the answer must not
     /// be the one that keeps a publisher running past a fault.
     #[test]
-    fn an_undeclared_connections_fatal_error_ends_the_process() {
+    fn an_undeclared_connection_fatal_error_ends_the_process() {
         let sources = [declared("ws", SourceRole::Primary)];
         assert!(fatal_ends_the_process(
             &sources,

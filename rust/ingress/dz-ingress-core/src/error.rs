@@ -128,21 +128,30 @@ pub enum IngressError {
     /// startup is diagnosable, and a driver that hides the same fault behind a
     /// backoff is not.
     ///
+    /// **Any operation on the connection may report it, and not connect
+    /// alone.** [`Input::send`](crate::Input::send) states it for a message
+    /// this transport cannot carry at all, at logon and mid-session alike, and
+    /// [`Input::recv`](crate::Input::recv) for what a read cannot get past by
+    /// trying again. [`Driver`](crate::Driver) stops on all three, because the
+    /// one thing it acts on is what they have in common: another attempt
+    /// fetches the same answer.
+    ///
     /// # What happens next is the caller's answer, and it is per connection
     ///
     /// This crate drives one connection and does not know what else a process
     /// is doing, so it reports the fault and returns. Whether that ends the
-    /// process is the caller's: `dz-publisher-runtime` asks the `[[source]]`
-    /// block's `role`, and `dz_venue_composition::SourceRole`'s
+    /// process is the caller's: `dz-publisher-runtime` asks the `role` that
+    /// connection is declared under, and `dz_venue_composition::SourceRole`'s
     /// `fatal_error_ends_the_process` is the whole of that answer.
     ///
     /// **Where the answer is yes** — a `primary`, an `upstream-partition`, and
-    /// every connection of a publisher whose document declares no `[[source]]`
-    /// array — the process ends and the supervisor's restart policy applies.
-    /// That is the right layer, and it is also what retries the fault: several
-    /// of the causes above are only fatal *for this attempt*, and a credential
-    /// path that does not exist yet is the plain example, because under late
-    /// secret injection the same configuration succeeds on the next start.
+    /// every connection of a publisher whose document declares no upstream
+    /// connections — the process ends and the supervisor's restart policy
+    /// applies. That is the right layer, and it is also what retries the fault:
+    /// several of the causes above are only fatal *for this attempt*, and a
+    /// credential path that does not exist yet is the plain example, because
+    /// under late secret injection the same configuration succeeds on the next
+    /// start.
     ///
     /// **Where it is no** — a `comparison`, whose data arrives on the primary
     /// too — the driver is dropped, the publisher carries on, and that

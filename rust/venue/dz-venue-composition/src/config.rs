@@ -35,16 +35,16 @@ use serde::Deserialize;
 ///
 /// # What a role decides
 ///
-/// **Whether a fatal error from that source ends the process** — see
+/// **Whether a fatal error on that connection ends the process** — see
 /// [`fatal_error_ends_the_process`](Self::fatal_error_ends_the_process). That is
 /// the whole of what a role decides about a live run, and a replay run reads it
 /// once more, to choose the connection it publishes under: the primary's.
 ///
-/// What no role can decide is **where a source's data goes**. The adapter emits
-/// events and no event carries the source it came from, so nothing can hold one
-/// source's data back from a feed or route it to one. A role is otherwise a
-/// declaration an operator reads and an analysis tier groups by, plus the one
-/// startup check that counts primaries.
+/// What no role can decide is **where one connection's data goes**. The adapter
+/// emits events and no event carries the connection it arrived on, so nothing
+/// can hold one connection's data back from a feed or route it to one. A role is
+/// otherwise a declaration an operator reads and an analysis tier groups by,
+/// plus the one startup check that counts primaries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum SourceRole {
     /// The source this publisher publishes from.
@@ -68,11 +68,12 @@ pub enum SourceRole {
     /// One connection of an upstream that carries its instruments on several,
     /// no two of them carrying the same ones.
     ///
-    /// **Not the primary, and its fatal error ends the process.** Those two
+    /// **Not the primary, and a fatal error on it ends the process.** Those two
     /// facts are the whole of the role. The primaries the one-primary rule
     /// counts are [`Primary`](Self::Primary) blocks and nothing else, so a
     /// partitioned upstream is one primary and one of these per further
-    /// connection, and the rule reads the same as it does for a single source.
+    /// connection, and the rule reads the same as it does for a
+    /// single-connection publisher.
     ///
     /// The fatality is what the role exists for. Each connection of a
     /// partitioned upstream carries instruments no other connection carries, so
@@ -80,17 +81,17 @@ pub enum SourceRole {
     /// updating, their last published values stay on the wire, and every other
     /// signal says the publisher is well — the surviving connections keep the
     /// `connection_state` of their own series at 1 and keep the aggregate busy
-    /// under the idle guard. A [`Comparison`](Self::Comparison) source has
+    /// under the idle guard. A [`Comparison`](Self::Comparison) connection has
     /// none of that exposure, because everything it carries arrives on the
     /// primary too.
     ///
     /// **It declares nothing about which instruments arrive where**, and cannot:
     /// every payload reaches one adapter, the adapter emits events, and no
-    /// event carries the source it came from. So there is no routing here, no
-    /// instrument set, and no change to how an event reaches a feed — only
-    /// which failures are fatal. `[[source]]` has no `carries` key for that
-    /// same reason, and this role is not one: `carries` named the feeds a
-    /// source's data reached, which is a claim about routing, and this names
+    /// event carries the connection it arrived on. So there is no routing here,
+    /// no instrument set, and no change to how an event reaches a feed — only
+    /// which failures are fatal. A connection block has no `carries` key for
+    /// that same reason, and this role is not one: `carries` named the feeds one
+    /// connection's data reached, which is a claim about routing, and this names
     /// only what the runtime does when a connection is lost.
     UpstreamPartition,
 }
@@ -126,15 +127,18 @@ impl SourceRole {
     /// discover from the message.
     pub const TOKEN_LIST: &'static str = "primary, comparison, upstream-partition";
 
-    /// Whether a fatal error from a source in this role ends the process.
+    /// Whether a fatal error on an upstream connection in this role ends the
+    /// process.
     ///
     /// **The whole of what a role decides about a live run.** `Driver::run`
     /// returns only on
-    /// [`IngressError::Fatal`](dz_ingress_core::IngressError::Fatal),
-    /// whose documented causes are the per-source configuration faults found at
-    /// connect — an invalid endpoint, a missing credential path, an unsupported
-    /// scheme — so this is the answer to *does one connection's configuration
-    /// fault take the publisher down with it?*
+    /// [`IngressError::Fatal`](dz_ingress_core::IngressError::Fatal), which any
+    /// non-retryable connect, send or receive operation on that connection can
+    /// report — a per-connection configuration fault found at connect most of
+    /// all, an invalid endpoint, a missing credential path or an unsupported
+    /// scheme, and equally a message the transport cannot carry at all. So this
+    /// is the answer to *does one connection's non-retryable fault take the
+    /// publisher down with it?*
     ///
     /// `true` for a [`Primary`](Self::Primary), because the wire is fed from it,
     /// and for an [`UpstreamPartition`](Self::UpstreamPartition), because the
@@ -327,7 +331,7 @@ pub struct Source {
     /// Which transport carries it.
     pub kind: Kind,
     /// What this publisher does with it. Consumed at runtime for one decision:
-    /// whether a fatal error from this source ends the process. See
+    /// whether a fatal error on this connection ends the process. See
     /// [`SourceRole::fatal_error_ends_the_process`] and the runtime's
     /// `SourceSection`.
     pub role: SourceRole,
@@ -354,7 +358,7 @@ impl Source {
     /// Exactly the role and nothing else, so no role added to the set can
     /// satisfy or violate that rule: a partitioned upstream declares one
     /// `primary` and an `upstream-partition` per further connection, and the
-    /// rule sees one primary as it does on a publisher with a single source.
+    /// rule sees one primary as it does on a single-connection publisher.
     /// Which failures are fatal is a separate question, asked of
     /// [`SourceRole::fatal_error_ends_the_process`].
     #[must_use]

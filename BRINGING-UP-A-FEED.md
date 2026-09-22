@@ -219,13 +219,13 @@ sent. A connect at which the adapter writes no logon is refused naming
 itself would be signing for the venue.
 
 **That refusal is a fatal error, and whether a fatal error ends the process is
-the source's `role`.** On the single source most publishers run it is exactly
-the startup failure it reads as, and the same on a `role = "primary"` or
-`role = "upstream-partition"` source. On a `role = "comparison"` source it is
-that source's driver dropped and named on stderr, with its `connection_state`
-left at 0 and the publisher carrying on — so an adapter with a logon bug on a
-comparison source gives a process that looks healthy while one upstream never
-connects at all. Read
+that connection's `role`.** On the one connection most publishers run it is
+exactly the startup failure it reads as, and the same on a `role = "primary"`
+or `role = "upstream-partition"` connection. On a `role = "comparison"`
+connection it is that connection's driver dropped and named on stderr, with its
+`connection_state` left at 0 and the publisher carrying on — so an adapter with
+a logon bug on a comparison connection gives a process that looks healthy while
+one upstream never connects at all. Read
 [Several sources for one feed](#several-sources-for-one-feed) before relying on
 a startup failure to tell you, and watch
 `dz_publisher_ingress_connection_state` per `connection` rather than the
@@ -479,15 +479,18 @@ role = "comparison"         # connected, driven, counted — for the race
 
   **What it covers is a fatal error, and that is narrower than "the partition
   stopped working".** A driver returns only on `IngressError::Fatal`, which is
-  the connect-time configuration faults; `Connect` and `Ended` are retried for
-  ever, with no attempt limit. So a partition whose session the venue stops
-  accepting mid-run, or whose host stops resolving after start, reconnects at
-  the backoff ceiling and the process does **not** end: its instruments go
+  any non-retryable connect, send or receive operation on that connection — a
+  configuration fault found at connect most of all, and equally a message the
+  transport cannot carry at all; `Connect` and `Ended` are the retryable cases,
+  retried for ever with no attempt limit. So a partition whose session the venue
+  stops accepting mid-run, or whose host stops resolving after start, reconnects
+  at the backoff ceiling and the process does **not** end: its instruments go
   stale, its `connection_state` flaps or sits at 0, and the venue-wide idle
   guard stays quiet because the other connections keep the aggregate busy.
   Watch `dz_publisher_ingress_connection_state` and
   `dz_publisher_ingress_reconnects_total` per `connection`, and alert on a
-  partition's gauge at 0 the same way you would on a single-source publisher's.
+  partition's gauge at 0 the same way you would on a single-connection
+  publisher's.
 
   **Two partitions of one account meet the shared-credential refusal below.**
   The rule refuses two enabled blocks when one's whole `credentials` table
@@ -576,17 +579,18 @@ validator streams this way with a reorder window and a grace fallback.
 Two consequences an operator has to know before configuring a second source.
 
 **`role` is not a gate on what reaches the wire.** The runtime cannot keep a
-`comparison` source off it, because the adapter emits events and no event
-carries the source it came from. What it buys is the name in the file, the
+`comparison` connection off it, because the adapter emits events and no event
+carries the connection it arrived on. What it buys is the name in the file, the
 startup check above, what an analysis tier reads to know which side of a race is
-which — and one runtime behaviour: **whether a fatal error from that source ends
-the process.** A driver returns only on a fatal error, and those are the
-per-source configuration faults found at connect: an invalid endpoint, a missing
-credential path, an unsupported scheme. A `primary`'s ends the process and an
-`upstream-partition`'s ends it, because what either carries the published set
-depends on. A `comparison`'s does not: a mistyped URL on one is that source's
-driver dropped and named, with its `connection_state` left at 0 — the alert for
-exactly this case — and the primary carrying on.
+which — and one runtime behaviour: **whether a fatal error on that connection
+ends the process.** A driver returns only on a fatal error, and those are the
+non-retryable connect, send and receive operations: an invalid endpoint, a
+missing credential path, an unsupported scheme, a message the transport cannot
+carry at all. A fatal error on the `primary` ends the process, and so does one
+on an `upstream-partition`, because what either carries the published set
+depends on. A fatal error on a `comparison` does not: a mistyped URL on one is
+that connection's driver dropped and named, with its `connection_state` left at
+0 — the alert for exactly this case — and the primary carrying on.
 
 **Nothing retries that source, and a restart is what does.** Some of those
 causes are only fatal for one attempt — a credential path that does not exist
