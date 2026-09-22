@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -110,5 +111,74 @@ func TestServe_IdlePortsRunUntilTheCallerCancels(t *testing.T) {
 		}
 	case <-time.After(serveTimeout):
 		t.Fatalf("serve still running %s after the caller cancelled", serveTimeout)
+	}
+}
+
+// testMulticastGroup is the group the Run test joins. Nothing is ever
+// published to it: the only thing the test does with a socket Run opens is
+// watch for it to be closed again.
+const testMulticastGroup = "239.10.10.10"
+
+// reserveUDPPort binds a UDP socket on a kernel-chosen port and returns both,
+// so a test can name a port it knows is free.
+//
+// It also decides what holding a reservation means to openMulticast. A plain
+// listen leaves SO_REUSEADDR unset, the multicast listen inside openMulticast
+// sets it, and a bind is refused unless every socket already on the address
+// has it too. So a reservation left in place makes openMulticast fail on that
+// port, and a plain bind that succeeds afterwards proves no socket of
+// openMulticast's is still holding the port. The test below uses it both ways
+// round.
+func reserveUDPPort(t *testing.T) (*net.UDPConn, int) {
+	t.Helper()
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{Port: 0})
+	if err != nil {
+		t.Fatalf("reserve a UDP port: %v", err)
+	}
+	return conn, conn.LocalAddr().(*net.UDPAddr).Port
+}
+
+// TestRun_PartialOpenClosesTheSocketsAlreadyOpen pins what Run promises when
+// opening the ports fails part-way through: the sockets it has already opened
+// are closed before it returns, and closed while nothing is reading them,
+// since Run opens every port before serve starts any receive loop. Leave them
+// open and a process that is about to exit non-zero still holds two of the
+// feed's three ports, so the restart behind it fails to open them.
+func TestRun_PartialOpenClosesTheSocketsAlreadyOpen(t *testing.T) {
+	// Three ports the kernel says are free. The reservation on the snapshot
+	// port stays, which is what makes Run fail there; the refdata and mktdata
+	// ports are handed straight back for Run to open.
+	refdataRes, refdata := reserveUDPPort(t)
+	mktdataRes, mktdata := reserveUDPPort(t)
+	snapshotRes, snapshot := reserveUDPPort(t)
+	t.Cleanup(func() { snapshotRes.Close() })
+	refdataRes.Close()
+	mktdataRes.Close()
+
+	r, err := NewRunner(nil, nil, NewMetrics("test", "test"), testMulticastGroup, "", refdata, mktdata, snapshot)
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+
+	// Run returns from its open loop, so no receive loop ever starts and the
+	// nil parser and sink are never reached.
+	err = r.Run(context.Background())
+	if err == nil {
+		t.Fatalf("Run returned nil, want the failure to open the snapshot port %d", snapshot)
+	}
+	if want := fmt.Sprintf("open snapshot port %d", snapshot); !strings.Contains(err.Error(), want) {
+		t.Fatalf("Run returned %q, want an error naming %q; one naming refdata or mktdata means the open failed before it reached the snapshot port, leaving the partial-open path untested", err, want)
+	}
+
+	for _, pc := range []struct {
+		label string
+		port  int
+	}{{"refdata", refdata}, {"mktdata", mktdata}} {
+		conn, err := net.ListenUDP("udp4", &net.UDPAddr{Port: pc.port})
+		if err != nil {
+			t.Errorf("binding the %s port %d after Run failed part-way: %v; want the port free, Run having closed the socket it opened there", pc.label, pc.port, err)
+			continue
+		}
+		conn.Close()
 	}
 }
