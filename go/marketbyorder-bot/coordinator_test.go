@@ -489,3 +489,76 @@ func TestDispatch_SequentialGroupsSharingSnapshotIDEachCommitsItsOwnBook(t *test
 		t.Errorf("snapshot_order_dropped_total = %v for two complete groups, want 0", got)
 	}
 }
+
+// A SnapshotEnd delayed behind the next group's SnapshotBegin at the same
+// Snapshot ID must not release that group's route. Ids are monotonic per
+// instrument, so the group that claims an id after another instrument used it
+// belongs to a different instrument, and the late end names the instrument it
+// closes: the route it would delete is no longer its own. Deleting it anyway
+// leaves the live group's remaining orders with no route, so every one of them
+// is dropped and the instrument loses the recovery cycle it is in the middle of.
+func TestDispatch_DelayedSnapshotEndLeavesTheLiveGroupsRoute(t *testing.T) {
+	c, shards := newCoordWithShards(2)
+	const snapID = 7
+
+	for _, rec := range []Record{
+		// Instrument 4 opens id 7 and its one order arrives.
+		snapshotBeginRec(0, 4, snapID, 1, 1000, 10),
+		snapshotOrderRec(0, snapID, 41, 0, 100, 5),
+		// Instrument 5 opens id 7 next, claiming the same route key.
+		snapshotBeginRec(0, 5, snapID, 2, 2000, 20),
+		// Instrument 4's end arrives now, behind instrument 5's begin.
+		snapshotEndRec(0, 4, snapID, 1000),
+		// Instrument 5's orders still have to reach instrument 5.
+		snapshotOrderRec(0, snapID, 51, 0, 200, 6),
+		snapshotOrderRec(0, snapID, 52, 1, 201, 7),
+		snapshotEndRec(0, 5, snapID, 2000),
+	} {
+		c.Dispatch(rec)
+	}
+
+	for _, s := range shards {
+		for drained := false; !drained; {
+			select {
+			case m := <-s.inbox:
+				s.handle(*m.rec)
+			default:
+				drained = true
+			}
+		}
+	}
+
+	// 5 % 2 == 1.
+	inst, ok := shards[1].instruments[instKey{0, 5}]
+	if !ok {
+		t.Fatal("shard 1 does not hold instrument 5")
+	}
+	if inst.Status != StatusReady {
+		t.Fatalf("instrument 5 status %v, want ready: the delayed end took its route", inst.Status)
+	}
+	if len(inst.Bids) != 1 || len(inst.Asks) != 1 {
+		t.Fatalf("instrument 5 committed %d bids / %d asks, want its own group's 1 and 1",
+			len(inst.Bids), len(inst.Asks))
+	}
+	if inst.Bids[51] == nil || inst.Asks[52] == nil {
+		t.Error("instrument 5 committed a book that is not its own group's orders")
+	}
+
+	// The group whose end was delayed still commits its own book.
+	if a, ok := shards[0].instruments[instKey{0, 4}]; !ok {
+		t.Error("shard 0 does not hold instrument 4")
+	} else if a.Status != StatusReady || len(a.Bids) != 1 || a.Bids[41] == nil {
+		t.Errorf("instrument 4 = status %v, %d bids, want ready with its own order 41",
+			a.Status, len(a.Bids))
+	}
+
+	if got := testCounter(t, c.metrics.SnapshotOrderDroppedTotal); got != 0 {
+		t.Errorf("snapshot_order_dropped_total = %v, want 0: the live group's orders lost their route", got)
+	}
+	if got := testCounterVec(t, c.metrics.SnapshotDiscardedTotal, "mismatch"); got != 0 {
+		t.Errorf("snapshot_discarded_total{reason=\"mismatch\"} = %v, want 0", got)
+	}
+	if _, ok := c.snapshotRoute[snapKey{0, snapID}]; ok {
+		t.Error("the live group's own end left its route in place")
+	}
+}

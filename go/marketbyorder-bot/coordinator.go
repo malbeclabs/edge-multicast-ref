@@ -24,7 +24,7 @@ type Coordinator struct {
 	resetCount    map[uint8]uint8 // per channel_id
 	manifest      ManifestState   // parity bookkeeping; not read for logic
 	seqLast       map[string]uint64
-	snapshotRoute map[snapKey]int
+	snapshotRoute map[snapKey]snapRoute
 }
 
 // snapKey keys snapshot routing by (channel, snapshot_id). The route only has to
@@ -38,6 +38,18 @@ type snapKey struct {
 	snap uint32
 }
 
+// snapRoute is where one snapshot group's orders go, and which instrument's
+// SnapshotBegin claimed the key. The instrument is held so that only that
+// group's own end releases the route: ids are per-instrument, so the next group
+// to claim an id belongs to another instrument, and an end delayed behind that
+// begin names an instrument the route no longer carries. Deleting on such an end
+// would take the route away from a group whose orders are still arriving, and
+// every one of them would be dropped for having none.
+type snapRoute struct {
+	shard int
+	inst  uint32
+}
+
 // NewCoordinator builds a Coordinator. ctx is used solely to break barrier and
 // fence ack-waits on shutdown so the coordinator cannot wedge when shards or
 // SnapshotWriters have exited.
@@ -49,7 +61,7 @@ func NewCoordinator(ctx context.Context, shards []*Shard, eventsW *EventsWriter,
 		eventsW:       eventsW,
 		metrics:       metrics,
 		seqLast:       map[string]uint64{},
-		snapshotRoute: map[snapKey]int{},
+		snapshotRoute: map[snapKey]snapRoute{},
 
 		resetCount: map[uint8]uint8{},
 	}
@@ -73,24 +85,30 @@ func (c *Coordinator) Dispatch(rec Record) {
 
 	case "snapshot_begin":
 		idx := int(rec.InstrumentID) % c.n
-		c.snapshotRoute[snapKey{rec.ChannelID, getUint32(rec.Fields, "snapshot_id")}] = idx
+		c.snapshotRoute[snapKey{rec.ChannelID, getUint32(rec.Fields, "snapshot_id")}] = snapRoute{shard: idx, inst: rec.InstrumentID}
 		c.shards[idx].inbox <- shardMsg{kind: msgRecord, rec: recPtr(rec)}
 
 	case "snapshot_order":
 		key := snapKey{rec.ChannelID, getUint32(rec.Fields, "snapshot_id")}
-		idx, ok := c.snapshotRoute[key]
+		route, ok := c.snapshotRoute[key]
 		if !ok {
 			if c.metrics != nil {
 				c.metrics.SnapshotOrderDroppedTotal.Inc()
 			}
 			return
 		}
-		c.shards[idx].inbox <- shardMsg{kind: msgRecord, rec: recPtr(rec)}
+		c.shards[route.shard].inbox <- shardMsg{kind: msgRecord, rec: recPtr(rec)}
 
 	case "snapshot_end":
 		idx := int(rec.InstrumentID) % c.n
 		c.shards[idx].inbox <- shardMsg{kind: msgRecord, rec: recPtr(rec)}
-		delete(c.snapshotRoute, snapKey{rec.ChannelID, getUint32(rec.Fields, "snapshot_id")})
+		// Release the route only while it is still this group's. SnapshotEnd
+		// names its instrument, so an end delayed behind the next group's begin
+		// at the same id is recognisable here and leaves that live route alone.
+		endKey := snapKey{rec.ChannelID, getUint32(rec.Fields, "snapshot_id")}
+		if route, ok := c.snapshotRoute[endKey]; ok && route.inst == rec.InstrumentID {
+			delete(c.snapshotRoute, endKey)
+		}
 
 	case "heartbeat", "manifest_summary":
 		c.writeChannelHealth(rec) // implemented in Task 8
