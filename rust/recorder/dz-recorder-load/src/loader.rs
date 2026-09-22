@@ -171,6 +171,25 @@ impl Failed {
     }
 }
 
+/// Whether a pass saw the whole objects directory, or only part of it.
+///
+/// **A named outcome and not a `bool`, because the call site spends it on the
+/// ledger.** `run_once` compacts the ledger against the set of objects the pass
+/// found, so "found nothing under this feed" and "could not look under this
+/// feed" have opposite consequences: the first is a feed whose objects are
+/// genuinely gone and whose entries should be dropped, the second is a feed
+/// whose entries must be kept or it re-derives and re-inserts every object when
+/// the directory recovers. A `bool` at that call site reads correctly either
+/// way round, which is how the distinction gets lost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Enumeration {
+    /// Every directory the pass needed to read, it read.
+    Complete,
+    /// At least one directory could not be read or classified, so the object
+    /// set is a subset of what is on disk and may not be compacted against.
+    Incomplete,
+}
+
 impl<S: RowSink> Loader<'_, S> {
     /// Walks the directory once.
     ///
@@ -184,7 +203,7 @@ impl<S: RowSink> Loader<'_, S> {
         let now_ns = now_unix_nanos();
         let mut pass = Pass::default();
         let mut errors = Vec::new();
-        let candidates = self.candidates(&mut errors);
+        let (candidates, enumeration) = self.candidates(&mut errors);
         let mut present: HashSet<(String, String)> = HashSet::new();
         // Every object the pass saw that had no ledger entry when it was
         // scanned, with the end of its receive window. Filtered against the
@@ -356,11 +375,41 @@ impl<S: RowSink> Loader<'_, S> {
         pass.market_data_oldest_unloaded_age_seconds =
             oldest_age(derived_unloaded.map(|(end, _)| *end), now_seconds);
 
-        if let Err(e) = self.ledger.compact(&present) {
-            // Not a failed load: the ledger is still correct, only longer than
-            // it needs to be.
-            self.metrics.error(ErrorKind::Ledger, now_unix_seconds());
-            errors.push(e.to_string());
+        // **COMPACT ONLY AGAINST A COMPLETE ENUMERATION.** `present` is what the
+        // pass found, and compaction drops every ledger entry outside it -- so a
+        // feed whose subdirectory could not be read this pass would have its
+        // entries removed and every one of its objects re-derived and
+        // re-inserted when the directory recovers. A transient I/O error would
+        // buy duplicate rows. Skipping costs nothing that matters: the ledger
+        // stays correct and merely longer than it needs to be, which is the
+        // same price the error branch below already accepts.
+        match enumeration {
+            Enumeration::Complete => {
+                if let Err(e) = self.ledger.compact(&present) {
+                    // Not a failed load: the ledger is still correct, only
+                    // longer than it needs to be.
+                    self.metrics.error(ErrorKind::Ledger, now_unix_seconds());
+                    errors.push(e.to_string());
+                }
+            }
+            Enumeration::Incomplete if candidates.is_empty() => {
+                // Nothing was enumerated at all, so the I/O error already
+                // pushed above is the whole story and there is no wrong
+                // inference left to correct. Saying it twice would double the
+                // output of every pass on a host whose recorder has not created
+                // the directory yet, which is an expected state.
+            }
+            Enumeration::Incomplete => {
+                // Here the pass DID load objects, so a reader would otherwise
+                // reasonably take the ledger to have been compacted against a
+                // complete set. That is the inference worth refusing.
+                errors.push(
+                    "the objects directory was enumerated incompletely, so the ledger was not \
+                     compacted: compacting against a partial object set would drop the entries \
+                     of any feed that could not be read and re-insert its rows later"
+                        .to_owned(),
+                );
+            }
         }
         self.metrics.pass_finished(
             pass.unloaded as i64,
@@ -508,16 +557,19 @@ impl<S: RowSink> Loader<'_, S> {
     /// A subdirectory that cannot be read is an error and not a skip: it is a
     /// feed whose objects would go unloaded for as long as it lasts, which is
     /// exactly what went unnoticed here.
-    fn candidates(&self, errors: &mut Vec<String>) -> Vec<Candidate> {
+    fn candidates(&self, errors: &mut Vec<String>) -> (Vec<Candidate>, Enumeration) {
         let mut manifests: Vec<PathBuf> = Vec::new();
         let mut subdirs: Vec<PathBuf> = Vec::new();
+        let mut enumeration = Enumeration::Complete;
 
         let entries = match std::fs::read_dir(self.objects_dir) {
             Ok(entries) => entries,
             Err(e) => {
                 self.metrics.error(ErrorKind::Io, now_unix_seconds());
                 errors.push(format!("{}: {e}", self.objects_dir.display()));
-                return Vec::new();
+                // The top level unreadable is the strongest case for not
+                // compacting: nothing at all was enumerated.
+                return (Vec::new(), Enumeration::Incomplete);
             }
         };
         for entry in entries.filter_map(Result::ok) {
@@ -525,8 +577,20 @@ impl<S: RowSink> Loader<'_, S> {
             let name = name.to_string_lossy();
             if name.ends_with(MANIFEST_SUFFIX) {
                 manifests.push(entry.path());
-            } else if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                subdirs.push(entry.path());
+            } else {
+                // `file_type` CAN FAIL, and `unwrap_or(false)` would read that
+                // failure as "not a directory" -- omitting a feed silently,
+                // which is the contract this function exists to stop breaking.
+                match entry.file_type() {
+                    Ok(t) if t.is_dir() => subdirs.push(entry.path()),
+                    Ok(_) => {}
+                    Err(e) => {
+                        self.metrics.error(ErrorKind::Io, now_unix_seconds());
+                        errors.push(format!("{}: {e}", entry.path().display()));
+                        // Unknown, so assume it was a directory that mattered.
+                        enumeration = Enumeration::Incomplete;
+                    }
+                }
             }
         }
 
@@ -536,6 +600,7 @@ impl<S: RowSink> Loader<'_, S> {
                 Err(e) => {
                     self.metrics.error(ErrorKind::Io, now_unix_seconds());
                     errors.push(format!("{}: {e}", dir.display()));
+                    enumeration = Enumeration::Incomplete;
                     continue;
                 }
             };
@@ -589,7 +654,7 @@ impl<S: RowSink> Loader<'_, S> {
         // Oldest first: the oldest object is the one closest to eviction, and
         // in-order loading is what makes an era boundary certain.
         out.sort_by_key(|c| (c.start_ns, c.object.clone()));
-        out
+        (out, enumeration)
     }
 }
 
@@ -1082,6 +1147,116 @@ mod pass_tests {
         assert_eq!(pass.unloaded, 3);
     }
 
+    /// An unreadable subdirectory makes the enumeration incomplete, and an
+    /// incomplete enumeration does not compact the ledger.
+    ///
+    /// This is the defect review caught in the subdirectory walk. `present` is
+    /// what the pass found, and `compact` drops every entry outside it -- so a
+    /// feed whose directory could not be read for one pass would have its
+    /// entries removed and every one of its objects re-derived and re-inserted
+    /// when the directory came back. A transient I/O error would buy duplicate
+    /// rows, silently, because nothing about the pass would look wrong.
+    ///
+    /// Asserted on the ledger's own contents rather than on the outcome value,
+    /// because the outcome is only interesting for what it spends itself on.
+    #[test]
+    fn an_unreadable_subdirectory_does_not_compact_the_ledger() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let archive = archive(3, 1);
+        let spec = archive.completed.join("top-of-book");
+        std::fs::create_dir_all(&spec).expect("the subdirectory is creatable");
+        for entry in std::fs::read_dir(&archive.completed).expect("completed exists") {
+            let path = entry.expect("an entry").path();
+            if path.is_file() {
+                let name = path.file_name().expect("a file name").to_owned();
+                std::fs::rename(&path, spec.join(name)).expect("the move succeeds");
+            }
+        }
+
+        // A ledger entry the pass must not lose, standing for an object of a
+        // feed this pass cannot see -- exactly what compacting against a partial
+        // set would drop.
+        //
+        // **AND IT MUST NOT BE THE TRAILER'S OWN ENTRY**, or the test proves
+        // nothing: `compact` keeps a line whose `trailer.segment_seq` matches the
+        // ledger's current trailer whatever became of its object, so an orphan
+        // recorded last survives compaction on that path alone. The first
+        // version of this test did exactly that and passed with the fix removed.
+        // So a second entry is recorded after it, taking the trailer with it.
+        const ORPHAN_KEY: &str = "a-feed-this-pass-cannot-see/object-1";
+        let orphan_sha = "0".repeat(64);
+        let mut ledger = Ledger::open(&archive.ledger).expect("a new ledger");
+        ledger
+            .record(Entry {
+                object_key: ORPHAN_KEY.to_owned(),
+                object_sha256: orphan_sha.clone(),
+                loaded_at_ns: now_unix_nanos(),
+                trailer: SegmentTrailer {
+                    segment_seq: 1,
+                    ..SegmentTrailer::default()
+                },
+            })
+            .expect("the ledger is writable");
+        ledger
+            .record(Entry {
+                object_key: "a-later-object".to_owned(),
+                object_sha256: "1".repeat(64),
+                loaded_at_ns: now_unix_nanos(),
+                trailer: SegmentTrailer {
+                    segment_seq: 2,
+                    ..SegmentTrailer::default()
+                },
+            })
+            .expect("the ledger is writable");
+        assert!(
+            ledger.is_loaded(ORPHAN_KEY, &orphan_sha),
+            "the fixture must start with an entry to lose"
+        );
+
+        // Now make the feed's directory unreadable, so the objects inside it
+        // cannot be enumerated.
+        let mut perms = std::fs::metadata(&spec)
+            .expect("the subdirectory exists")
+            .permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&spec, perms).expect("the mode is settable");
+
+        let metrics = LoaderMetrics::new(SITE, RECORDER);
+        let mut sink = FileSink::create(&archive.rows).expect("the directory is writable");
+        let stop = never();
+        let (_pass, errors) = Loader {
+            objects_dir: &archive.completed,
+            site: SITE,
+            recorder: RECORDER,
+            max_objects: 0,
+            ledger: &mut ledger,
+            sink: &mut sink,
+            metrics: &metrics,
+            market_data: &[],
+            pending: &mut Vec::new(),
+        }
+        .run_once(&stop);
+
+        // Restore before asserting, so a failure does not leave an unreadable
+        // directory behind for the tempdir's own cleanup.
+        let mut perms = std::fs::metadata(&spec)
+            .expect("the subdirectory exists")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&spec, perms).expect("the mode is settable");
+
+        assert!(
+            errors.iter().any(|e| e.contains("top-of-book")),
+            "the unreadable subdirectory was not reported: {errors:?}"
+        );
+        assert!(
+            ledger.is_loaded(ORPHAN_KEY, &orphan_sha),
+            "the ledger was compacted against a partial object set, so an \
+             unseen feed's entry was dropped and its rows would be re-inserted"
+        );
+    }
+
     /// A directory that is not there is one counted error and an empty pass,
     /// not a crash: the recorder may not have created it yet.
     #[test]
@@ -1130,7 +1305,7 @@ mod pass_tests {
             pending: &mut Vec::new(),
         };
         let mut errors = Vec::new();
-        let candidates = loader.candidates(&mut errors);
+        let (candidates, _) = loader.candidates(&mut errors);
         assert!(errors.is_empty());
         assert_eq!(candidates.len(), 3);
         assert!(
@@ -1192,7 +1367,7 @@ mod pass_tests {
             pending: &mut Vec::new(),
         };
         let mut errors = Vec::new();
-        let candidates = loader.candidates(&mut errors);
+        let (candidates, _) = loader.candidates(&mut errors);
 
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(
