@@ -77,7 +77,7 @@ func TestReadDatagram_Loopback(t *testing.T) {
 		t.Fatalf("setting the read deadline: %v", err)
 	}
 	buf := make([]byte, 2048)
-	n, src, recvTime, kind, err := ReadDatagram(conn, buf)
+	n, src, recvTime, kind, err := NewReader().ReadDatagram(conn, buf)
 	if err != nil {
 		t.Fatalf("ReadDatagram: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestReadDatagram_ReportsReadError(t *testing.T) {
 	}
 
 	buf := make([]byte, 2048)
-	n, src, recvTime, kind, err := ReadDatagram(conn, buf)
+	n, src, recvTime, kind, err := NewReader().ReadDatagram(conn, buf)
 	if err == nil {
 		t.Fatal("expected a read error, got nil")
 	}

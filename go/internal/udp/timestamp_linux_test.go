@@ -15,8 +15,8 @@ import (
 func TestExtractKernelTimestamp_ParsesScmTimestampns(t *testing.T) {
 	want := time.Unix(1717689600, 123456789).UTC()
 	data := make([]byte, 16)
-	binary.LittleEndian.PutUint64(data[0:8], uint64(want.Unix()))
-	binary.LittleEndian.PutUint64(data[8:16], uint64(want.Nanosecond()))
+	binary.NativeEndian.PutUint64(data[0:8], uint64(want.Unix()))
+	binary.NativeEndian.PutUint64(data[8:16], uint64(want.Nanosecond()))
 
 	oob := buildCmsg(unix.SOL_SOCKET, unix.SCM_TIMESTAMPNS, data)
 
@@ -40,7 +40,7 @@ func TestExtractKernelTimestamp_EmptyReturnsFalse(t *testing.T) {
 // carries fewer than the 16 bytes the two u64s need.
 func TestExtractKernelTimestamp_IgnoresOtherControlMessages(t *testing.T) {
 	data := make([]byte, 16)
-	binary.LittleEndian.PutUint64(data[0:8], 1717689600)
+	binary.NativeEndian.PutUint64(data[0:8], 1717689600)
 
 	tests := []struct {
 		name  string
@@ -62,16 +62,38 @@ func TestExtractKernelTimestamp_IgnoresOtherControlMessages(t *testing.T) {
 	}
 }
 
-// TestReadDatagram_ReportsKernelTimestamp asserts the Linux path returns the
-// kernel's own receive timestamp: EnableTimestamping has succeeded, so the
-// control message must arrive and the fallback must not be reported.
-func TestReadDatagram_ReportsKernelTimestamp(t *testing.T) {
+// enablePktinfo turns on the second control message a parser asks for.
+// topofbook-parser asks for it as ipv4.FlagDst, which x/net resolves on Linux
+// to exactly this setsockopt; setting it directly keeps the udp package's
+// tests free of a dependency on x/net.
+func enablePktinfo(t *testing.T, conn *net.UDPConn) {
+	t.Helper()
+	rawConn, err := conn.SyscallConn()
+	if err != nil {
+		t.Fatalf("SyscallConn: %v", err)
+	}
+	var setsockoptErr error
+	if err := rawConn.Control(func(fd uintptr) {
+		setsockoptErr = unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_PKTINFO, 1)
+	}); err != nil {
+		t.Fatalf("Control: %v", err)
+	}
+	if setsockoptErr != nil {
+		t.Fatalf("setting IP_PKTINFO: %v", setsockoptErr)
+	}
+}
+
+// loopbackPair returns a listening socket with every control message the
+// parsers ask for enabled, and a sender connected to it.
+func loopbackPair(t *testing.T) (*net.UDPConn, *net.UDPConn) {
+	t.Helper()
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatalf("listening: %v", err)
 	}
-	defer conn.Close()
+	t.Cleanup(func() { conn.Close() })
 
+	enablePktinfo(t, conn)
 	if err := EnableTimestamping(conn); err != nil {
 		t.Fatalf("EnableTimestamping: %v", err)
 	}
@@ -80,25 +102,106 @@ func TestReadDatagram_ReportsKernelTimestamp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dialling: %v", err)
 	}
-	defer sender.Close()
+	t.Cleanup(func() { sender.Close() })
+
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("setting the read deadline: %v", err)
+	}
+	return conn, sender
+}
+
+// TestControlBuffer_HoldsEveryRequestedControlMessage asks the kernel itself
+// whether a Reader's control buffer was big enough. It enables both control
+// messages the parsers enable on a real socket, sends a datagram, and reads it
+// into the very buffer a Reader carries.
+//
+// When that buffer is too small the kernel writes what fits, discards the rest
+// and raises MSG_CTRUNC — and ReadMsgUDP still returns a nil error, which is
+// why ReadDatagram cannot see the loss and the receive timestamp can degrade
+// to the userspace fallback for a whole parser with nothing reported. Which
+// control message loses depends on the order the kernel emits them in, so the
+// assertion is that none was discarded, not that one of them survived.
+func TestControlBuffer_HoldsEveryRequestedControlMessage(t *testing.T) {
+	conn, sender := loopbackPair(t)
 
 	if _, err := sender.Write([]byte("kernel please stamp this")); err != nil {
 		t.Fatalf("sending: %v", err)
 	}
 
-	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
-		t.Fatalf("setting the read deadline: %v", err)
-	}
+	// The buffer under test is the one a Reader carries, so the sizing is taken
+	// off the production path rather than restated here.
+	oob := NewReader().oob
 	buf := make([]byte, 2048)
-	_, _, recvTime, kind, err := ReadDatagram(conn, buf)
+	_, oobn, flags, _, err := conn.ReadMsgUDP(buf, oob)
 	if err != nil {
-		t.Fatalf("ReadDatagram: %v", err)
+		t.Fatalf("ReadMsgUDP: %v", err)
 	}
-	if kind != RecvTimestampKindKernelSoftware {
-		t.Errorf("receive-timestamp kind %q, want %q", kind, RecvTimestampKindKernelSoftware)
+	if flags&unix.MSG_CTRUNC != 0 {
+		t.Errorf("the kernel raised MSG_CTRUNC: the %d-byte control buffer could not hold every "+
+			"control message the socket asked for, so one was discarded with no error", len(oob))
 	}
-	if recvTime.IsZero() {
-		t.Error("receive timestamp is zero")
+
+	cmsgs, err := unix.ParseSocketControlMessage(oob[:oobn])
+	if err != nil {
+		t.Fatalf("parsing the control messages: %v", err)
+	}
+	var timestampns, pktinfo bool
+	for _, cmsg := range cmsgs {
+		switch {
+		case cmsg.Header.Level == unix.SOL_SOCKET && cmsg.Header.Type == unix.SCM_TIMESTAMPNS:
+			if len(cmsg.Data) < scmTimestampnsLen {
+				t.Errorf("SCM_TIMESTAMPNS carries %d bytes, want at least %d: its payload was truncated",
+					len(cmsg.Data), scmTimestampnsLen)
+			}
+			timestampns = true
+		case cmsg.Header.Level == unix.SOL_IP && cmsg.Header.Type == unix.IP_PKTINFO:
+			if len(cmsg.Data) < unix.SizeofInet4Pktinfo {
+				t.Errorf("IP_PKTINFO carries %d bytes, want at least %d: its payload was truncated",
+					len(cmsg.Data), unix.SizeofInet4Pktinfo)
+			}
+			pktinfo = true
+		}
+	}
+	if !timestampns {
+		t.Error("SCM_TIMESTAMPNS did not arrive, so ReadDatagram would report the userspace fallback")
+	}
+	if !pktinfo {
+		t.Error("IP_PKTINFO did not arrive although the socket asked for it")
+	}
+}
+
+// TestReadDatagram_ReportsKernelTimestamp pins the timestamp quality the
+// parsers label their metrics with, on a socket configured the way
+// topofbook-parser configures its own: the kernel's own value, never the
+// userspace fallback.
+//
+// On a kernel that emits SCM_TIMESTAMPNS ahead of the IP control messages this
+// still passes with a one-message control buffer, because the message
+// discarded there is IP_PKTINFO. It guards the reverse order, where the
+// timestamp is the one lost; the sizing itself is held by
+// TestControlBuffer_HoldsEveryRequestedControlMessage.
+func TestReadDatagram_ReportsKernelTimestamp(t *testing.T) {
+	conn, sender := loopbackPair(t)
+
+	// One Reader across several datagrams, the way a receive goroutine uses it,
+	// so a control buffer left in a bad state by the previous read shows up.
+	reader := NewReader()
+	buf := make([]byte, 2048)
+	for i := range 3 {
+		if _, err := sender.Write([]byte("kernel please stamp this")); err != nil {
+			t.Fatalf("sending datagram %d: %v", i, err)
+		}
+		_, _, recvTime, kind, err := reader.ReadDatagram(conn, buf)
+		if err != nil {
+			t.Fatalf("ReadDatagram %d: %v", i, err)
+		}
+		if kind != RecvTimestampKindKernelSoftware {
+			t.Errorf("datagram %d: receive-timestamp kind %q, want %q",
+				i, kind, RecvTimestampKindKernelSoftware)
+		}
+		if recvTime.IsZero() {
+			t.Errorf("datagram %d: receive timestamp is zero", i)
+		}
 	}
 }
 

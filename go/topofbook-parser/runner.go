@@ -175,6 +175,9 @@ func (r *Runner) listenPort(ctx context.Context, port int, label string) error {
 		"interface", r.cfg.Interface)
 
 	buf := make([]byte, maxDatagramSize)
+	// One Reader per receive goroutine, like buf: it holds the control-message
+	// buffer that every read overwrites.
+	reader := udp.NewReader()
 	var tracker seqTracker
 	for {
 		select {
@@ -183,7 +186,7 @@ func (r *Runner) listenPort(ctx context.Context, port int, label string) error {
 		default:
 		}
 
-		n, src, recvTime, recvKind, err := udp.ReadDatagram(conn, buf)
+		n, src, recvTime, recvKind, err := reader.ReadDatagram(conn, buf)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
