@@ -35,9 +35,11 @@ impl BackoffPolicy {
         Ok(Self { initial, max })
     }
 
-    /// The shortest any delay is, the base the ceiling doubles from, and the
-    /// value a proven connection resets that ceiling to. The first delay is
-    /// drawn between this and twice it.
+    /// The shortest any delay is, and the base the ceiling doubles from. A
+    /// proven connection resets that ceiling to one doubling up from this
+    /// rather than to this, so the delay it waits next is drawn from the
+    /// opening window: this to twice this, or this to [`max`](Self::max)
+    /// wherever the maximum is the lower of the two.
     #[must_use]
     pub const fn initial(self) -> Duration {
         self.initial
@@ -88,9 +90,10 @@ impl BackoffPolicy {
 /// random(initial, ceiling * 3)`):
 ///
 /// - **Every delay is jittered, the first one included.** The window a sequence
-///   opens with is `initial` to `2 × initial`, not a point, so connections
-///   dropped by one event are separated on their first retry and not only once
-///   they have failed twice. It matters most where it would be easiest to miss:
+///   opens with is `initial` to `2 × initial` — or to `max`, wherever the
+///   maximum is lower than that — rather than a point, so connections dropped
+///   by one event are separated on their first retry and not only once they
+///   have failed twice. It matters most where it would be easiest to miss:
 ///   [`reset`](Self::reset) returns to that opening window, and a venue that
 ///   accepts a connection, delivers, and closes — a session boundary, or a
 ///   throttle that lets one payload through — is a venue every connection
@@ -98,7 +101,12 @@ impl BackoffPolicy {
 /// - **No delay is below `initial` or above `max`.** The floor keeps
 ///   [`ConfigError::ZeroDuration`] meaning what it says, since drawing from
 ///   zero would hand a venue a retry with no pause at all; the ceiling keeps
-///   `reconnect_backoff_max` meaning a maximum.
+///   `reconnect_backoff_max` meaning a maximum. A maximum equal to the initial
+///   delay is therefore a policy with no window anywhere in it: every draw is
+///   that one value, and the connections this exists to separate stay in step.
+///   [`BackoffPolicy::new`] refuses only a maximum *below* the initial delay,
+///   so a fixed-delay configuration opts out of the jitter rather than failing
+///   to load.
 /// - **The ceiling sequence is `2 × initial`, `4 × initial`, … capped at
 ///   `max`, exactly.** It is a value [`ceiling`](Self::ceiling) reports and a
 ///   test asserts as a list, so a cap applied one step late is caught by a
@@ -197,7 +205,10 @@ impl Backoff {
 
     /// The ceiling a sequence opens with, and the one a reset returns to: one
     /// doubling up from the initial delay, so that the opening window is
-    /// `initial` to `2 x initial` rather than a point.
+    /// `initial` to `2 x initial` rather than a point. Capped at the
+    /// configured maximum like every other ceiling, which narrows that window
+    /// to `initial` to `max` under a maximum below twice the initial delay,
+    /// and closes it to a point again at a maximum equal to the initial delay.
     fn opening_ceiling(policy: BackoffPolicy) -> Duration {
         Self::doubled(policy.initial, policy)
     }

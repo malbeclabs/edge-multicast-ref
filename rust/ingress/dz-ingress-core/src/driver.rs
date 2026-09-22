@@ -321,7 +321,7 @@ enum Stop {
 /// - **The delay sequence resets only for a connection that delivered a
 ///   payload.** A venue that accepts a socket and closes it — the usual shape of
 ///   being throttled, or of an expired credential — would otherwise be
-///   reconnected against at the initial delay indefinitely. And a connection
+///   reconnected against in the opening window indefinitely. And a connection
 ///   that ended in `rate_limit` never resets, however much it delivered: the
 ///   venue has just said we are going too fast, and starting the sequence over
 ///   is how that becomes a ban.

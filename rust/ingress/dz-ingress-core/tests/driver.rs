@@ -565,7 +565,9 @@ impl IngressObserver for TestObserver {
 // Running one
 // ---------------------------------------------------------------------------
 
-/// The floor of every reconnect delay, and the first one exactly.
+/// The floor of every reconnect delay, and the bottom of the window the first
+/// one is drawn from: under the 30s maximum below, that window is this to twice
+/// this, so the first delay is drawn inside it rather than being this value.
 const INITIAL_DELAY: Duration = Duration::from_millis(500);
 
 fn policy() -> Policy {
@@ -1030,8 +1032,8 @@ fn a_connection_that_delivered_and_was_then_rate_limited_does_not_reset_the_sequ
     );
 
     // The ceiling went on doubling through both rate-limited connections: a
-    // reset would have put the third delay back in the empty opening window
-    // and made it the initial delay exactly.
+    // reset would have put the third delay back in the opening window, 500ms
+    // to 1s, rather than in the 2s to 4s window it is drawn from here.
     within_the_windows(
         &outcome.clock.slept(),
         &[
