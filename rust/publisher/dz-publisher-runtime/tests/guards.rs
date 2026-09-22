@@ -393,6 +393,17 @@ fn traffic_this_publisher_paces_itself_refreshes_no_channel() {
             > 0,
         "no snapshot was sent, so this test is not asserting anything about one"
     );
+    assert!(
+        h.tob.as_ref().expect("a top-of-book feed").refdata.len() > 0
+            && h.mbp
+                .as_ref()
+                .expect("a market-by-price feed")
+                .refdata
+                .len()
+                > 0,
+        "no definition and no manifest reached a refdata port role, so this test is \
+         asserting nothing about the two kinds that go there"
+    );
 
     let exposition = h.metrics.render();
     for channel_id in [CHANNEL_ID, DEPTH_CHANNEL_ID] {
@@ -458,4 +469,56 @@ fn a_trade_reports_both_of_the_channels_it_reached() {
             "Channel ID {channel_id} carried the trade and is not reporting it:\n{exposition}"
         );
     }
+}
+
+#[test]
+fn a_trade_one_feed_refused_refreshes_only_the_channel_that_took_it() {
+    // Why the send paths are asked *which* of them took the trade rather than
+    // whether either did. One lowered value, two channel instances, and one of
+    // them cannot put it on the wire: a runtime that recorded the trade instead
+    // of the sends would report a channel whose every datagram is being refused
+    // as freshly published, which is the reading this series exists to end.
+    //
+    // Both members of top-of-book's mktdata fan-out refuse, because that is the
+    // only shape in which a send fails: `Tee::send` absorbs a member's failure
+    // and reports `NotRegistered` only once no live member is left. So the first
+    // trade is the send that collapses the fan-out and the second is the one
+    // refused.
+    let mut h = harness::harness_both();
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+
+    let tob = h.tob.as_ref().expect("a top-of-book feed");
+    tob.mktdata_refusal.set(true);
+    tob.reference_refusal.set(true);
+
+    h.publisher.upstream_message("trade");
+    h.publisher.event(harness::trade(instrument, 1));
+
+    h.clock.advance(Duration::from_secs(5));
+    h.publisher.upstream_message("trade");
+    h.publisher.event(harness::trade(instrument, 2));
+
+    let exposition = h.metrics.render();
+    assert_eq!(
+        last_published(&exposition, DEPTH_CHANNEL_ID),
+        START_UNIX_SECONDS + 5.0,
+        "the depth channel took the second trade and is not reporting it:\n{exposition}"
+    );
+    assert_eq!(
+        last_published(&exposition, CHANNEL_ID),
+        START_UNIX_SECONDS,
+        "the top-of-book channel refused the second trade and is reporting it as \
+         published:\n{exposition}"
+    );
+    assert!(
+        h.mbp
+            .as_ref()
+            .expect("a market-by-price feed")
+            .mktdata
+            .len()
+            > 0,
+        "nothing reached the depth feed's wire, so this test is asserting nothing"
+    );
 }

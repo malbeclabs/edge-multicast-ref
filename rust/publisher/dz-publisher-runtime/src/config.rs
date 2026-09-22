@@ -1004,9 +1004,9 @@ impl Config {
         Document::parse(&text)?.resolve()
     }
 
-    /// Every `Channel ID` this publisher sends on, so the sequence, heartbeat
-    /// and manifest gauges exist from startup rather than appearing once
-    /// something has already gone wrong.
+    /// Every `Channel ID` this publisher sends on, so the sequence, heartbeat,
+    /// last-published and manifest gauges exist from startup rather than
+    /// appearing once something has already gone wrong.
     #[must_use]
     pub fn channel_ids(&self) -> Vec<u8> {
         let mut ids: Vec<u8> = self.feeds.iter().map(|feed| feed.channel_id).collect();
