@@ -986,7 +986,7 @@ func TestApplyDelta_MalformedBookClearGapsImmediately(t *testing.T) {
 		t.Errorf("a publisher defect must not read as mktdata loss: per_instrument_gaps_total = %v want 0", got)
 	}
 	if inst.Pending != nil {
-		t.Error("Pending must be dropped on the demotion")
+		t.Error("Pending must be cleared on the demotion")
 	}
 	// The malformed record itself is worthless: buffering it would only re-demote
 	// the instrument when the buffer replays.
@@ -1016,6 +1016,55 @@ func TestApplyDelta_MalformedBookClearGapsImmediately(t *testing.T) {
 	}
 	if got := malformedCount(m, reasonBookClearScopeSide); got != 1 {
 		t.Errorf("exactly one malformed delta: got %v want 1", got)
+	}
+}
+
+// The arrival path must hand Pending to the delta buffer exactly as the drain
+// path does. A held record is a valid, unapplied delta, and the recovery snapshot
+// is not guaranteed to cover it: dropping it would leave replay staring at a hole
+// and declare a per-instrument gap this engine created itself. The map is cleared,
+// not discarded — its records move.
+//
+// demoteMalformed ranges over a map, so the order it offers the records in is
+// unspecified; the buffer must still come out ordered by mktdata seq, because
+// replayBuffer's anchor filter reads it that way.
+func TestApplyDelta_MalformedBookClearOnArrivalBuffersPending(t *testing.T) {
+	m := NewMetrics("test", "test")
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
+	k := instKey{0, 11}
+	inst := readyInstrumentInShard(t, s, k, 5)
+
+	// 7, 8 and 9 arrive ahead of the hole at 6 and are held for reordering.
+	for i := uint32(7); i <= 9; i++ {
+		s.applyDelta(k, levelUpdateRec(11, uint64(900+i), i, "bid", int64(2000+i), 5))
+	}
+	if inst.Status != StatusReady || len(inst.Pending) != 3 {
+		t.Fatalf("setup: want ready with 3 held, got %v with %d", inst.Status, len(inst.Pending))
+	}
+	if s.bufferedN != 0 {
+		t.Fatalf("setup: held records belong in Pending, not the buffer: bufferedN=%d", s.bufferedN)
+	}
+
+	// 6 is malformed, so the demotion happens on arrival, before any drain.
+	s.applyDelta(k, bookClearRec(11, 900, 6, "both", "from_price", 1000))
+
+	if inst.Status != StatusGap {
+		t.Fatalf("status: got %v want gap", inst.Status)
+	}
+	if inst.Pending != nil {
+		t.Error("Pending must be cleared on the demotion")
+	}
+	buf := s.deltaBuf[k]
+	if len(buf) != 3 || s.bufferedN != 3 {
+		t.Fatalf("the held valid deltas must move to the buffer, got %d records bufferedN=%d", len(buf), s.bufferedN)
+	}
+	for i, b := range buf {
+		if got := toUint32(b.Record.Fields["per_instrument_seq"]); got != uint32(7+i) {
+			t.Errorf("buffer must stay ordered by mktdata seq: index %d per_instrument_seq %d want %d", i, got, 7+i)
+		}
+		if b.Record.Type == "book_clear" {
+			t.Errorf("the malformed record must not be buffered: index %d", i)
+		}
 	}
 }
 

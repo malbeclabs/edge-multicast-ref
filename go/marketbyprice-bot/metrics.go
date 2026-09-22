@@ -44,11 +44,19 @@ type Metrics struct {
 	SnapshotLevelDroppedTotal prometheus.Counter
 	DeltasDiscardedTotal      *prometheus.CounterVec // label: reason
 	PerInstrumentGapsTotal    prometheus.Counter
-	// MalformedDeltasTotal counts book-affecting messages the spec declares
-	// malformed. It is deliberately NOT PerInstrumentGapsTotal even though both
-	// end in a gap: a sequence gap is data lost between the publisher and here,
-	// while a malformed delta arrived intact and is a publisher defect. An
-	// operator who cannot tell them apart chases packet loss that never happened.
+	// MalformedDeltasTotal counts book-affecting records this book-builder
+	// RECEIVED and the spec declares malformed. It is deliberately NOT
+	// PerInstrumentGapsTotal even though both end in a gap: a sequence gap is
+	// data that never reached this process, while a malformed record arrived
+	// intact and is a publisher defect. An operator who cannot tell them apart
+	// chases packet loss that never happened.
+	//
+	// The received-here scope is the whole of it. marketbyprice-parser refuses
+	// Scope=1 with ClearSide=2 at decode and emits no record for it, counting
+	// dz_mbp_parser_malformed_total{reason="bookclear_scope_side"} instead, so on
+	// the reference pipeline this counter stays at zero and the Per-Instrument
+	// Seq the publisher consumed reads here as an ordinary hole. The two counters
+	// split one publisher defect by which process saw the bytes.
 	MalformedDeltasTotal  *prometheus.CounterVec // label: reason
 	InstrumentResetsTotal *prometheus.CounterVec // label: reason
 	ChannelResetsTotal    prometheus.Counter
@@ -102,11 +110,11 @@ func NewMetrics(version, commit string) *Metrics {
 	m.DeltasDiscardedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "deltas_discarded_total"}, []string{"reason"})
 	m.PerInstrumentGapsTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: metricsNamespace, Name: "per_instrument_gaps_total",
-		Help: "Per-instrument sequence gaps confirmed after the reorder window: deltas that never arrived. A malformed delta is counted in malformed_deltas_total.",
+		Help: "Per-instrument sequence gaps confirmed after the reorder window: a Per-Instrument Seq this process never received. A malformed record it did receive is counted in malformed_deltas_total instead.",
 	})
 	m.MalformedDeltasTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricsNamespace, Name: "malformed_deltas_total",
-		Help: "Book-affecting mktdata messages the spec declares malformed, each demoting its instrument to gap immediately. A publisher defect, not loss in transit.",
+		Help: "Book-affecting mktdata records this book-builder received and the spec declares malformed, each demoting its instrument to gap immediately. A publisher defect, not loss in transit. Zero on the reference pipeline, where the parser refuses them at decode and counts dz_mbp_parser_malformed_total instead.",
 	}, []string{"reason"})
 	m.InstrumentResetsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "instrument_resets_total"}, []string{"reason"})
 	m.ChannelResetsTotal = prometheus.NewCounter(prometheus.CounterOpts{Namespace: metricsNamespace, Name: "channel_resets_total"})
