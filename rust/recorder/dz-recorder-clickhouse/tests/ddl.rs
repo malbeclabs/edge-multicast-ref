@@ -4253,6 +4253,15 @@ fn the_venue_file_tells_an_operator_to_re_apply_the_reader_file() {
 /// nothing, and a privilege statement applied by whatever runs a schema
 /// deploy — the one outcome the split exists to prevent, and one that no test
 /// keyed on the old name would notice.
+///
+/// A RENAME IS NOT THE ONLY WAY IN, WHICH IS WHY THE MATCH BELOW IS CASE
+/// FOLDED. This test is the whole argument that a schema file holds no
+/// privilege statement, and it used to make that argument by looking for
+/// UPPERCASE verbs at the start of a line. The house style is uppercase, so
+/// the check agreed with every file while asserting nothing about the one way
+/// a file leaves that style: ClickHouse accepts `grant select on recorder.x
+/// to grafana;` exactly as it accepts the shouted form, and a lowercase line
+/// appended to `009` stayed in `schema()` for a row writer to apply.
 #[test]
 fn the_access_management_list_matches_the_files_that_grant() {
     for name in ACCESS_MANAGEMENT {
@@ -4276,9 +4285,18 @@ fn the_access_management_list_matches_the_files_that_grant() {
             "CREATE SETTINGS PROFILE",
             "CREATE QUOTA",
         ];
+        // Case folded, and read up to any trailing comment. ClickHouse does
+        // not care about the case of a keyword, so a lowercase `grant select
+        // on recorder.x to grafana;` appended to a schema file is a privilege
+        // statement that an uppercase-only match leaves in `schema()` for a
+        // row writer to apply — the outcome above, reached by a house-style
+        // slip rather than a rename. The verb is looked for anywhere in the
+        // statement for the same reason: a `;` and a second statement on one
+        // line is not a shape this schema writes, and a test that trusts it
+        // not to is a test that believes the formatting.
         let grants = m.sql.lines().any(|l| {
-            let l = l.trim_start();
-            !l.starts_with("--") && PRIVILEGE_VERBS.iter().any(|v| l.starts_with(v))
+            let code = l.split("--").next().unwrap_or_default().to_uppercase();
+            PRIVILEGE_VERBS.iter().any(|v| code.contains(v))
         });
         assert_eq!(
             grants,
