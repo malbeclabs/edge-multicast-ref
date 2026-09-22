@@ -512,7 +512,9 @@ role = "comparison"         # connected, driven, counted — for the race
   name with leading or trailing whitespace is refused rather than trimmed —
   `"ws"` and `"ws "` would be two series a dashboard cannot tell apart. Under
   `[adapter.replay]` that pre-creation follows the one replaying input instead,
-  which is one series whatever the document declares: see
+  so `connection` takes one value whatever the document declares — a narrower
+  label, not a single series, since `dz_publisher_ingress_messages_total` keeps
+  a child per `message_type` under it: see
   [Prove it offline before you point it at anything](#4-prove-it-offline-before-you-point-it-at-anything).
 - **One session per source, and per nothing else.** One driver is opened per
   enabled `[[source]]`, so a publisher carrying sixty-two channel instances of
@@ -586,8 +588,9 @@ into an `InstrumentReset` and a recovery snapshot on the live wire, from a
 connection that publishes nothing. Migration is one config block and one line in
 the venue's `main` with the adapter untouched, which is exactly why this is
 worth reading first — and an offline run is not what catches it, because a
-replay drives one connection and the second block's `on_connected` never runs.
-See [Prove it offline before you point it at anything](#4-prove-it-offline-before-you-point-it-at-anything).
+replay drives one connection, the `primary`'s, and no other block's
+`on_connected` ever runs. See
+[Prove it offline before you point it at anything](#4-prove-it-offline-before-you-point-it-at-anything).
 
 ## The recorder
 

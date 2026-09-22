@@ -230,11 +230,11 @@ fn compose_and_run(registry: &AdapterRegistry, config: Config) -> Result<Exit, S
     // first success would not carry it.
     //
     // **The list this reads is the substituted one**, so a replay run
-    // pre-creates one child and not one per declared `[[source]]` — every
-    // family labelled by `connection` comes up as narrow as the run is. That is
-    // the one consequence of the substitution above a venue is likely to plan
-    // against without noticing, so `BRINGING-UP-A-FEED.md` states it beside the
-    // offline proof.
+    // pre-creates one `connection` value and not one per declared `[[source]]`
+    // — every family labelled by `connection` comes up as narrow as the run is.
+    // That is the one consequence of the substitution above a venue is likely
+    // to plan against without noticing, so `BRINGING-UP-A-FEED.md` states it
+    // beside the offline proof.
     let connections: Vec<&'static str> = inputs
         .iter()
         .map(|input| input.connection().as_str())
