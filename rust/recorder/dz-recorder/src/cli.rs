@@ -60,6 +60,15 @@ Options:
   --config <path>       The TOML configuration. Required. Its `[archive]`
                         directories are what select archive mode.
 
+                        Named twice, nothing starts and the refusal names both
+                        files: a recorder records on one configuration, and
+                        dropping either of two answers decides which of them
+                        counts without saying so. A unit file pointed at a new
+                        file while the old argument stayed behind is how both
+                        get named, and the reading that keeps running is the one
+                        nobody meant to keep. `--inline-config` is refused the
+                        same way, for the same reason.
+
   --inline-config <path>
                         Inline mode's own file, and what selects inline mode:
                         the window bound, the ring, the spool and its budget,
@@ -141,11 +150,16 @@ Options:
                         Durations carry a unit, as the configuration's do:
                         `500ms`, `30s`, `5m`, `1h`.
 
-  --version             The build version and the build commit. A build that
+  --version, -V         The build version and the build commit. A build that
                         was not given DZ_RECORDER_BUILD_COMMIT at compile time
                         reports `unknown` rather than claiming a commit, and
                         that string is what every archive it writes carries.
-  --help                This.
+
+                        Both spellings, because the publisher beside this takes
+                        both and a habit an operator or a deployment role
+                        carries between them should not depend on which binary
+                        it is asking.
+  --help, -h            This.
 
 Exit codes:
   0  the run finished, or the configuration checked out
@@ -170,6 +184,19 @@ pub enum CliError {
     MissingValue(&'static str),
     #[error("--config is required: a recorder has nothing to record without one")]
     NoConfig,
+    /// One file-naming option given twice.
+    ///
+    /// Both files are named, because the refusal is that there is a choice here
+    /// and no rule for making it: a recorder records on one configuration, and
+    /// keeping the first or the last would decide which of an operator's two
+    /// answers counts without saying so. The likely way in is a unit file
+    /// pointed at a new file while the old argument stayed behind.
+    #[error("`{option}` was given twice, naming `{first}` and `{second}`: a recorder reads one")]
+    TwoConfigPaths {
+        option: &'static str,
+        first: String,
+        second: String,
+    },
     #[error("--run-for: {0}")]
     BadDuration(String),
     #[error("--check and --run-for cannot both be asked for: one records nothing and one records")]
@@ -215,18 +242,17 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Invocation, CliE
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" | "-h" => return Ok(Invocation::Help),
-            "--version" => return Ok(Invocation::Version),
+            "--version" | "-V" => return Ok(Invocation::Version),
             "--check" => check = true,
             "--config" => {
-                config = Some(PathBuf::from(
-                    args.next().ok_or(CliError::MissingValue("--config"))?,
-                ));
+                let named = args.next().ok_or(CliError::MissingValue("--config"))?;
+                name_once("--config", &mut config, named)?;
             }
             "--inline-config" => {
-                inline_config = Some(PathBuf::from(
-                    args.next()
-                        .ok_or(CliError::MissingValue("--inline-config"))?,
-                ));
+                let named = args
+                    .next()
+                    .ok_or(CliError::MissingValue("--inline-config"))?;
+                name_once("--inline-config", &mut inline_config, named)?;
             }
             "--run-for" => {
                 let raw = args.next().ok_or(CliError::MissingValue("--run-for"))?;
@@ -250,6 +276,38 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Invocation, CliE
         check,
         run_for,
     }))
+}
+
+/// Record a file an option named, refusing a second one.
+///
+/// Assignment was the whole defect: `--config a.toml --config b.toml` ran
+/// `b.toml` and said nothing, so a command line naming two configurations was
+/// answered with one of them chosen by position. There is no reading of two
+/// that is what somebody meant — the same argument the two refusals for a
+/// configuration stating both arrangements or neither are made on — and the
+/// publisher's parser beside this refuses it too, so an operator does not learn
+/// one rule per binary.
+///
+/// One helper for both options rather than one refusal for `--config`: the
+/// mistake is the same mistake, and a parser that refused a second
+/// configuration while quietly overwriting a second inline file would be two
+/// rules for one slip inside one command line.
+fn name_once(
+    option: &'static str,
+    held: &mut Option<PathBuf>,
+    named: String,
+) -> Result<(), CliError> {
+    match held {
+        Some(first) => Err(CliError::TwoConfigPaths {
+            option,
+            first: first.display().to_string(),
+            second: named,
+        }),
+        None => {
+            *held = Some(PathBuf::from(named));
+            Ok(())
+        }
+    }
 }
 
 #[must_use]
@@ -439,6 +497,85 @@ mod tests {
         );
     }
 
+    /// Two configuration files are refused, and neither is dropped.
+    ///
+    /// Both orders, because the defect was assignment: the second path
+    /// overwrote the first, so the recorder ran the last file named and said
+    /// nothing about the other one. Asserting both says the refusal is the rule
+    /// rather than a preference for whichever file happens to come first.
+    #[test]
+    fn two_configuration_files_are_refused_rather_than_one_overwriting_the_other() {
+        assert_eq!(
+            parse_of(&["--config", "a.toml", "--config", "b.toml"]),
+            Err(CliError::TwoConfigPaths {
+                option: "--config",
+                first: "a.toml".to_owned(),
+                second: "b.toml".to_owned(),
+            })
+        );
+        assert_eq!(
+            parse_of(&["--config", "b.toml", "--config", "a.toml"]),
+            Err(CliError::TwoConfigPaths {
+                option: "--config",
+                first: "b.toml".to_owned(),
+                second: "a.toml".to_owned(),
+            })
+        );
+
+        // And one is still an invocation, which is the whole of what a host
+        // recording a feed passes.
+        let Ok(Invocation::Run(args)) = parse_of(&["--config", "a.toml"]) else {
+            panic!("one configuration file is what a recorder runs on");
+        };
+        assert_eq!(args.config, PathBuf::from("a.toml"));
+    }
+
+    /// The same slip on the other file-naming option, refused the same way.
+    ///
+    /// One rule for one mistake: a parser that refused a second configuration
+    /// and quietly kept the last inline file would have two answers for one
+    /// operator error inside one command line.
+    #[test]
+    fn two_inline_configuration_files_are_refused_the_same_way() {
+        assert_eq!(
+            parse_of(&[
+                "--config",
+                "r.toml",
+                "--inline-config",
+                "a.toml",
+                "--inline-config",
+                "b.toml",
+            ]),
+            Err(CliError::TwoConfigPaths {
+                option: "--inline-config",
+                first: "a.toml".to_owned(),
+                second: "b.toml".to_owned(),
+            })
+        );
+
+        let Ok(Invocation::Run(args)) =
+            parse_of(&["--config", "r.toml", "--inline-config", "a.toml"])
+        else {
+            panic!("one inline file is what inline mode runs on");
+        };
+        assert_eq!(args.inline_config, Some(PathBuf::from("a.toml")));
+    }
+
+    /// The message names both files, because either one of them may be the one
+    /// the operator meant and this refusal cannot tell which.
+    #[test]
+    fn the_refusal_for_two_files_names_both_of_them() {
+        let message = parse_of(&["--config", "a.toml", "--config", "b.toml"])
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains("`a.toml`"), "{message}");
+        assert!(message.contains("`b.toml`"), "{message}");
+        assert!(message.contains("--config"), "{message}");
+        // And the usage says so before an operator has to find out, beside the
+        // option it is a property of.
+        assert!(USAGE.contains("Named twice"), "{USAGE}");
+    }
+
     #[test]
     fn an_unknown_option_is_refused_rather_than_ignored() {
         assert_eq!(
@@ -454,6 +591,39 @@ mod tests {
         assert_eq!(
             parse_of(&["--config", "r.toml", "--version"]),
             Ok(Invocation::Version)
+        );
+    }
+
+    /// The version is asked for by either spelling.
+    ///
+    /// `-V` was a refusal here and an answer on the publisher, which is one
+    /// question with two answers depending on which binary a deployment role
+    /// was pointed at. `-h` was already accepted and only the usage did not say
+    /// so, so both short spellings are asserted where the long ones are.
+    #[test]
+    fn the_version_is_asked_for_by_either_spelling() {
+        assert_eq!(parse_of(&["-V"]), Ok(Invocation::Version));
+        assert_eq!(
+            parse_of(&["--config", "r.toml", "-V"]),
+            Ok(Invocation::Version)
+        );
+        assert_eq!(parse_of(&["-h"]), Ok(Invocation::Help));
+        // And the usage teaches both, rather than advertising one spelling of
+        // an option that takes two.
+        assert!(USAGE.contains("--version, -V"), "{USAGE}");
+        assert!(USAGE.contains("--help, -h"), "{USAGE}");
+    }
+
+    /// A short spelling this parser has not been taught is still refused.
+    ///
+    /// `-V` is one option's second name and not a licence for every letter:
+    /// `-v` is not `-V`, and a refusal naming it is what sends an operator to
+    /// the usage rather than to a recorder that started on a flag it ignored.
+    #[test]
+    fn a_short_option_this_binary_does_not_have_is_still_refused() {
+        assert_eq!(
+            parse_of(&["--config", "r.toml", "-v"]),
+            Err(CliError::Unknown("-v".to_owned()))
         );
     }
 
