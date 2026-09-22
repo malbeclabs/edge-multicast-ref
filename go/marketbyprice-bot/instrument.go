@@ -208,6 +208,21 @@ func malformedReason(err error) string {
 	return reasonMalformedOther
 }
 
+// bookClearMalformed reports the rule a BookClear breaks, or nil when it is
+// well-formed.
+//
+// It reads the message's own fields and nothing else, which is what lets a record
+// be classified the moment it arrives — before its Per-Instrument Seq says
+// whether it is ready to apply, and therefore before the reorder window can hold
+// it. Shard.applyDeltaToReady classifies on receipt for exactly that reason.
+func bookClearMalformed(clearSide, scope uint8) error {
+	if scope == 1 && clearSide == 2 {
+		// One price cannot bound both sides.
+		return fmt.Errorf("%w", errBookClearScopeSide)
+	}
+	return nil
+}
+
 // ApplyBookClear removes levels in bulk. clearSide 0=bid, 1=ask, 2=both.
 // scope 0 clears the whole side(s); scope 1 clears from fromPriceRaw outward —
 // for bids every level at or below it, for asks every level at or above it.
@@ -215,9 +230,8 @@ func malformedReason(err error) string {
 // A BookClear is not a resynchronisation signal: an instrument that applies one
 // stays ready.
 func (i *Instrument) ApplyBookClear(clearSide, scope uint8, fromPriceRaw int64) error {
-	if scope == 1 && clearSide == 2 {
-		// One price cannot bound both sides.
-		return fmt.Errorf("%w", errBookClearScopeSide)
+	if err := bookClearMalformed(clearSide, scope); err != nil {
+		return err
 	}
 	clear := func(book map[int64]*LevelState, isBid bool) {
 		if scope == 0 {

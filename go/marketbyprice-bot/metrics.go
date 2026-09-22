@@ -49,7 +49,7 @@ type Metrics struct {
 	// PerInstrumentGapsTotal even though both end in a gap: a sequence gap is
 	// data that never reached this process, while a malformed record arrived
 	// intact and is a publisher defect. An operator who cannot tell them apart
-	// chases packet loss that never happened.
+	// chases datagram loss that never happened.
 	//
 	// The received-here scope is the whole of it. marketbyprice-parser refuses
 	// Scope=1 with ClearSide=2 at decode and emits no record for it, counting

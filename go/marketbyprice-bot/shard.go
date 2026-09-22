@@ -244,6 +244,29 @@ func (s *Shard) applyDeltaToReady(k instKey, inst *Instrument, rec Record) []Cha
 		}
 		return nil
 	}
+
+	// Classified on RECEIPT, ahead of the sequencing decision below, because a
+	// malformed book-affecting record is a known, permanent loss whichever side of
+	// expected it arrives on. The publisher consumed a Per-Instrument Seq for it
+	// and the mutation it carried is gone, and no later arrival can turn that into
+	// anything else, so there is nothing for the reorder window to resolve.
+	//
+	// Classifying at the apply instead would put the counter contract at the mercy
+	// of arrival order: a malformed record ahead of expected enters Pending
+	// unlooked-at, and if its predecessor never arrives, the window's gap branch
+	// clears Pending and takes the record with it. The publisher defect would go
+	// uncounted and the demotion would read as per_instrument_gaps_total — the
+	// counter that says mktdata never reached this process, which is the one
+	// reading this demotion exists to prevent.
+	//
+	// Every route to the book passes here, replayBuffer included, so a record
+	// buffered while the instrument was not ready is classified when it replays.
+	if err := malformedRecord(rec); err != nil {
+		ev := ChannelEvent{Kind: KindMalformedDelta, InstrumentID: inst.ID, Symbol: inst.Symbol, Record: rec}
+		s.demoteMalformed(k, inst, err)
+		return []ChannelEvent{ev}
+	}
+
 	if piSeq > expected {
 		if inst.Pending == nil {
 			inst.Pending = map[uint32]Record{}
@@ -266,8 +289,14 @@ func (s *Shard) applyDeltaToReady(k instKey, inst *Instrument, rec Record) []Cha
 
 	// Contiguous: apply, then drain any contiguous run held in Pending.
 	//
-	// A malformed book-affecting message ends both the apply and the drain: the
-	// instrument is gapped on the spot, so nothing further may touch its book.
+	// Both applyOne calls below are gated by the receipt classification above —
+	// this record passed it, and so did every record in Pending, which is filled
+	// only from the branch that follows it. Their malformed returns are the
+	// backstop for that invariant, kept because applyOne is the sole writer of the
+	// sequence trackers: a record that reached it unclassified must gap its
+	// instrument rather than advance them for a mutation the book never took. A
+	// malformed record ends both the apply and the drain, since nothing further
+	// may touch the book of an instrument that has lost one.
 	ev, malformed := s.applyOne(inst, rec)
 	evs := []ChannelEvent{ev}
 	if malformed != nil {
@@ -294,6 +323,23 @@ func (s *Shard) applyDeltaToReady(k instKey, inst *Instrument, rec Record) []Cha
 	return evs
 }
 
+// malformedRecord reports the rule a book-affecting record breaks, or nil for a
+// well-formed one and for every record that cannot lose a book mutation.
+//
+// It reads the record's fields only, never the instrument, so the verdict does
+// not depend on where the record sits in the per-instrument sequence. That is
+// what makes classification on receipt possible. The rule itself lives with the
+// apply it guards, in bookClearMalformed, so the two cannot drift apart.
+func malformedRecord(rec Record) error {
+	if rec.Type != "book_clear" {
+		return nil
+	}
+	return bookClearMalformed(
+		clearSideFromString(toString(rec.Fields["clear_side"])),
+		scopeFromString(toString(rec.Fields["scope"])),
+	)
+}
+
 // demoteMalformed marks an instrument gap because a book-affecting message it
 // received was malformed, so the mutation that message carried is lost.
 //
@@ -310,16 +356,16 @@ func (s *Shard) applyDeltaToReady(k instKey, inst *Instrument, rec Record) []Cha
 // It is counted as malformed_deltas_total rather than per_instrument_gaps_total
 // because the two say different things about where the fault is: the gap counter
 // is an operator's measure of mktdata loss, and a publisher defect landing in it
-// sends them looking for packet loss that never happened.
+// sends them looking for datagram loss that never happened.
 //
 // Pending moves to the delta buffer rather than being dropped. Its entries are
 // valid, unapplied deltas that arrived ahead of a hole, and the recovery snapshot
 // is not guaranteed to cover them: a publisher that captured this instrument at
 // the sequence just before the malformed message commits a book those deltas
 // still have to be applied on top of. Dropping them would leave replay staring at
-// a hole and declare a per-instrument gap this engine created itself. They cannot
-// stay in Pending either, where they would keep consuming the reorder-window
-// bound against a sequence that will never be reached.
+// a hole and declare a per-instrument gap this book engine created itself. They
+// cannot stay in Pending either, where they would keep consuming the
+// reorder-window bound against a sequence that will never be reached.
 //
 // The malformed record itself is NOT buffered. Unlike the sequence-gap path,
 // where the delta that revealed the gap is a valid message worth replaying, this
@@ -345,13 +391,19 @@ func (s *Shard) demoteMalformed(k instKey, inst *Instrument, err error) {
 	}
 }
 
-// applyOne mutates the book for one already-sequenced record.
+// applyOne mutates the book for one already-classified, already-sequenced record.
 //
 // The second return value is non-nil when the record is a book-affecting message
 // the spec declares malformed. Nothing was applied in that case, and the caller
 // MUST demote the instrument: the reason travels out rather than being handled
 // here so that the demotion sits at the same altitude as the sequence-gap
 // demotion, where it is one decision per classification outcome.
+//
+// applyDeltaToReady runs the same rule on receipt and demotes there, so this
+// return is the backstop for that gate rather than the classifier. It matters
+// because this function is the sole writer of the sequence trackers: a malformed
+// record that reached it anyway must not advance them for a mutation the book
+// never took.
 func (s *Shard) applyOne(inst *Instrument, rec Record) (ChannelEvent, error) {
 	switch rec.Type {
 	case "level_update":
