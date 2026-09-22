@@ -369,8 +369,8 @@ func TestRequireSnapshotAtLeast_NeverLowersTheBar(t *testing.T) {
 	i.RequireSnapshotAtLeast(40)
 	i.RequireSnapshotAtLeast(7)
 
-	if i.RequiredInstrumentSeq == nil || *i.RequiredInstrumentSeq != 40 {
-		t.Fatalf("required instrument seq: %v want 40", i.RequiredInstrumentSeq)
+	if got := requiredSeq(i.RequiredInstrumentSeq); got != "40" {
+		t.Fatalf("required instrument seq: got %s want 40", got)
 	}
 	i.RequireSnapshotAtLeast(41)
 	if *i.RequiredInstrumentSeq != 41 {
@@ -406,8 +406,8 @@ func TestEndSnapshot_RefusesAShadowCapturedBeforeAHoleFoundMidBuild(t *testing.T
 	if i.Bids[900] == nil || i.Bids[1000] != nil {
 		t.Error("only the shadow is discarded; the live book is untouched")
 	}
-	if i.RequiredInstrumentSeq == nil || *i.RequiredInstrumentSeq != 7 {
-		t.Errorf("the requirement must survive the refusal: %v", i.RequiredInstrumentSeq)
+	if got := requiredSeq(i.RequiredInstrumentSeq); got != "7" {
+		t.Errorf("the requirement must survive the refusal: got %s want 7", got)
 	}
 
 	// A shadow that does cover the hole commits and spends the requirement.
@@ -419,8 +419,8 @@ func TestEndSnapshot_RefusesAShadowCapturedBeforeAHoleFoundMidBuild(t *testing.T
 	if i.Status != StatusReady {
 		t.Errorf("status: %v want ready", i.Status)
 	}
-	if i.RequiredInstrumentSeq != nil {
-		t.Errorf("a covering snapshot must clear the requirement: %v", i.RequiredInstrumentSeq)
+	if got := requiredSeq(i.RequiredInstrumentSeq); got != "<none>" {
+		t.Errorf("a covering snapshot must clear the requirement: got %s", got)
 	}
 }
 
@@ -436,8 +436,8 @@ func TestReset_ClearsTheRequiredInstrumentSeq(t *testing.T) {
 	anchor := uint64(9000)
 	i.Reset(&anchor)
 
-	if i.RequiredInstrumentSeq != nil {
-		t.Fatalf("the reset must clear the requirement: %v", i.RequiredInstrumentSeq)
+	if got := requiredSeq(i.RequiredInstrumentSeq); got != "<none>" {
+		t.Fatalf("the reset must clear the requirement: got %s", got)
 	}
 	if ok, err := i.SnapshotAcceptable(9000, 1); !ok || err != nil {
 		t.Errorf("a post-reset snapshot must be acceptable: ok=%v err=%v", ok, err)
