@@ -412,6 +412,7 @@ impl<S: RowSink> Loader<'_, S> {
             }
         }
         self.metrics.pass_finished(
+            candidates.len() as i64,
             pass.unloaded as i64,
             pass.held as i64,
             pass.oldest_unloaded_age_seconds,
@@ -572,7 +573,22 @@ impl<S: RowSink> Loader<'_, S> {
                 return (Vec::new(), Enumeration::Incomplete);
             }
         };
-        for entry in entries.filter_map(Result::ok) {
+        for entry in entries {
+            // **A DROPPED ENTRY IS AN OMISSION, NOT A NON-ENTRY.** `filter_map
+            // (Result::ok)` stood here and discarded an iteration failure while
+            // leaving the enumeration Complete -- so the ledger would be
+            // compacted against a set missing whatever was dropped, and at THIS
+            // level a dropped entry is a whole feed's subdirectory. The same
+            // silent omission the `file_type` arm below refuses.
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    self.metrics.error(ErrorKind::Io, now_unix_seconds());
+                    errors.push(format!("{}: {e}", self.objects_dir.display()));
+                    enumeration = Enumeration::Incomplete;
+                    continue;
+                }
+            };
             let name = entry.file_name();
             let name = name.to_string_lossy();
             if name.ends_with(MANIFEST_SUFFIX) {
@@ -604,7 +620,19 @@ impl<S: RowSink> Loader<'_, S> {
                     continue;
                 }
             };
-            for entry in entries.filter_map(Result::ok) {
+            for entry in entries {
+                // Same reasoning as the top level: a dropped entry here is one
+                // object of this feed, and compacting without it would drop its
+                // ledger line and re-insert its rows.
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(e) => {
+                        self.metrics.error(ErrorKind::Io, now_unix_seconds());
+                        errors.push(format!("{}: {e}", dir.display()));
+                        enumeration = Enumeration::Incomplete;
+                        continue;
+                    }
+                };
                 let name = entry.file_name();
                 let name = name.to_string_lossy();
                 if name.ends_with(MANIFEST_SUFFIX) {

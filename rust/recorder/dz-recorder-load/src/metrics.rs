@@ -151,6 +151,8 @@ pub struct LoaderMetrics {
     last_error_timestamp_seconds: IntGauge,
     passes_total: IntCounter,
     last_pass_timestamp_seconds: IntGauge,
+    /// Objects the last pass FOUND, before anything about loading them.
+    objects_present: IntGauge,
     unloaded_objects: IntGauge,
     held_objects: IntGauge,
     oldest_unloaded_age_seconds: IntGauge,
@@ -247,6 +249,17 @@ impl LoaderMetrics {
                 "dz_loader_last_pass_timestamp_seconds",
                 "When the last walk finished. A loader whose pass count has stopped moving \
                  is stuck, and that is invisible in every other series here.",
+                &labels,
+            ),
+            objects_present: gauge(
+                &registry,
+                "dz_loader_objects_present",
+                "Objects the last pass found in the objects directory with a manifest beside \
+                 them, before any question of whether they loaded. THIS IS THE ONE THAT TELLS \
+                 'nothing to load' FROM 'looking in the wrong place': both leave every other \
+                 gauge here at zero with no error, because an empty directory is not one. Read \
+                 it beside dz_loader_objects_loaded_total -- present high and loaded flat is a \
+                 refusal, present zero is a path.",
                 &labels,
             ),
             unloaded_objects: gauge(
@@ -383,12 +396,14 @@ impl LoaderMetrics {
     /// Both halves of lag, published together at the end of every pass.
     pub fn pass_finished(
         &self,
+        present: i64,
         unloaded: i64,
         held: i64,
         oldest_unloaded_age_seconds: i64,
         ledger_entries: i64,
         now_unix_seconds: i64,
     ) {
+        self.objects_present.set(present);
         self.unloaded_objects.set(unloaded);
         self.held_objects.set(held);
         self.oldest_unloaded_age_seconds
@@ -565,7 +580,7 @@ mod tests {
     #[test]
     fn a_pass_publishes_the_backlog_and_the_age_of_its_oldest() {
         let metrics = LoaderMetrics::new("s", "r");
-        metrics.pass_finished(7, 3, 4_000, 12, 1_700_000_000);
+        metrics.pass_finished(9, 7, 3, 4_000, 12, 1_700_000_000);
         let text = metrics.render();
         assert!(
             text.contains("dz_loader_unloaded_objects{recorder=\"r\",site=\"s\"} 7"),
@@ -593,7 +608,7 @@ mod tests {
     #[test]
     fn the_derivations_lag_is_its_own_series_and_not_the_loads() {
         let metrics = LoaderMetrics::new("s", "r");
-        metrics.pass_finished(7, 3, 4_000, 12, 1_700_000_000);
+        metrics.pass_finished(9, 7, 3, 4_000, 12, 1_700_000_000);
         metrics.market_data_pass_finished(2, 900);
         let text = metrics.render();
 
