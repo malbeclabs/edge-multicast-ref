@@ -484,8 +484,34 @@ impl<S: RowSink> Loader<'_, S> {
         errors.push(message);
     }
 
-    /// Every object in the directory with a manifest beside it, oldest first.
+    /// Every object with a manifest beside it, oldest first, from the objects
+    /// directory AND from one level of subdirectory under it.
+    ///
+    /// **The subdirectory level is the whole point, and its absence was silent.**
+    /// `dz-recorder` writes `completed/<feed spec>/` — `startup.rs`'s
+    /// `config.archive.completed_dir.join(&spec)` — while this read only the top
+    /// level and matched on a file NAME ending in the manifest suffix. A
+    /// directory does not end in `.manifest.json`, so every object a recorder
+    /// had ever written under a spec was skipped, the pass found zero
+    /// candidates, and it reported `derived 0` with no error, because an empty
+    /// directory is not one. Measured on a host archiving two feeds
+    /// continuously: 2,088 objects on disk, `rows_written_total` zero for every
+    /// grain, and no skip counter moving either — the objects were not being
+    /// refused, they were not being seen.
+    ///
+    /// ONE LEVEL AND NOT A FULL WALK. The layout is `completed/<spec>/<object>`
+    /// and nothing writes deeper, so a recursive walk would only widen what a
+    /// stray directory could feed this. The top level is still read, because a
+    /// recorder configured without a spec writes there and those deployments
+    /// worked.
+    ///
+    /// A subdirectory that cannot be read is an error and not a skip: it is a
+    /// feed whose objects would go unloaded for as long as it lasts, which is
+    /// exactly what went unnoticed here.
     fn candidates(&self, errors: &mut Vec<String>) -> Vec<Candidate> {
+        let mut manifests: Vec<PathBuf> = Vec::new();
+        let mut subdirs: Vec<PathBuf> = Vec::new();
+
         let entries = match std::fs::read_dir(self.objects_dir) {
             Ok(entries) => entries,
             Err(e) => {
@@ -494,13 +520,31 @@ impl<S: RowSink> Loader<'_, S> {
                 return Vec::new();
             }
         };
-
-        let mut manifests: Vec<PathBuf> = Vec::new();
         for entry in entries.filter_map(Result::ok) {
             let name = entry.file_name();
             let name = name.to_string_lossy();
             if name.ends_with(MANIFEST_SUFFIX) {
                 manifests.push(entry.path());
+            } else if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                subdirs.push(entry.path());
+            }
+        }
+
+        for dir in subdirs {
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(e) => {
+                    self.metrics.error(ErrorKind::Io, now_unix_seconds());
+                    errors.push(format!("{}: {e}", dir.display()));
+                    continue;
+                }
+            };
+            for entry in entries.filter_map(Result::ok) {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.ends_with(MANIFEST_SUFFIX) {
+                    manifests.push(entry.path());
+                }
             }
         }
 
@@ -514,9 +558,16 @@ impl<S: RowSink> Loader<'_, S> {
             // The compressor names an object `{start}-{end}-{seq}.pcapng.zst`
             // and its manifest `{start}-{end}-{seq}.manifest.json`, so the
             // object is the same stem with either archive suffix.
+            // Beside the MANIFEST and not beside `objects_dir`: with the
+            // subdirectory level admitted above, an object under
+            // `completed/<spec>/` would otherwise be looked for at the top and
+            // every one of them would count as unpaired.
+            let beside = manifest_path
+                .parent()
+                .map_or_else(|| self.objects_dir.to_path_buf(), Path::to_path_buf);
             let object = ["pcapng.zst", "pcapng"]
                 .into_iter()
-                .map(|suffix| self.objects_dir.join(format!("{stem}.{suffix}")))
+                .map(|suffix| beside.join(format!("{stem}.{suffix}")))
                 .find(|p| p.is_file());
             let Some(object) = object else {
                 // A manifest lands before its object, so a pass that ran during
@@ -1088,6 +1139,79 @@ mod pass_tests {
                 .all(|w| w[0].start_ns <= w[1].start_ns),
             "{candidates:?}"
         );
+    }
+
+    /// Objects under a per-feed subdirectory are found, which is the layout the
+    /// recorder actually writes.
+    ///
+    /// `dz-recorder` puts every object under `completed/<feed spec>/`
+    /// (`startup.rs`: `config.archive.completed_dir.join(&spec)`), and
+    /// `candidates` read only the top level and matched on a file NAME ending in
+    /// the manifest suffix. A directory does not, so every object was skipped,
+    /// the pass reported `derived 0`, and nothing errored — an empty directory
+    /// is not an error. On a host archiving two feeds continuously that was
+    /// 2,088 objects on disk against `rows_written_total` of zero for every
+    /// grain, with no skip counter moving either.
+    ///
+    /// The test moves a flat archive into a subdirectory rather than asserting
+    /// on a hand-built tree, so it fails for the reason the deployment did: the
+    /// objects and manifests are the writer's own, and only their location
+    /// changes.
+    #[test]
+    fn candidates_are_found_under_a_per_feed_subdirectory() {
+        let archive = archive(3, 1);
+        let spec = archive.completed.join("top-of-book");
+        std::fs::create_dir_all(&spec).expect("the subdirectory is creatable");
+        for entry in std::fs::read_dir(&archive.completed).expect("completed exists") {
+            let path = entry.expect("an entry").path();
+            if path.is_file() {
+                let name = path.file_name().expect("a file name").to_owned();
+                std::fs::rename(&path, spec.join(name)).expect("the move succeeds");
+            }
+        }
+        assert!(
+            std::fs::read_dir(&archive.completed)
+                .expect("completed exists")
+                .filter_map(Result::ok)
+                .all(|e| e.path().is_dir()),
+            "the top level must hold only the subdirectory, or this proves nothing"
+        );
+
+        let metrics = LoaderMetrics::new(SITE, RECORDER);
+        let mut ledger = Ledger::open(&archive.ledger).expect("a new ledger");
+        let mut sink = FileSink::create(&archive.rows).expect("the directory is writable");
+        let loader = Loader {
+            objects_dir: &archive.completed,
+            site: SITE,
+            recorder: RECORDER,
+            max_objects: 0,
+            ledger: &mut ledger,
+            sink: &mut sink,
+            metrics: &metrics,
+            market_data: &[],
+            pending: &mut Vec::new(),
+        };
+        let mut errors = Vec::new();
+        let candidates = loader.candidates(&mut errors);
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(
+            candidates.len(),
+            3,
+            "objects under the subdirectory were not seen"
+        );
+        // And each object resolved BESIDE ITS MANIFEST rather than at the top
+        // level: looking beside `objects_dir` would have counted all three as
+        // unpaired, which is a skip rather than an error and so would have read
+        // as "nothing to do" all over again.
+        for candidate in &candidates {
+            assert_eq!(
+                candidate.object.parent(),
+                candidate.manifest_path.parent(),
+                "the object was not resolved beside its manifest"
+            );
+            assert!(candidate.object.is_file(), "{:?}", candidate.object);
+        }
     }
 
     pub(super) fn sorted_objects(archive: &Archive) -> Vec<PathBuf> {
