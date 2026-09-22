@@ -1244,11 +1244,13 @@ fn a_fatal_transport_fault_stops_the_driver_rather_than_retrying_it_forever() {
 fn a_fatal_read_stops_the_driver_rather_than_reconnecting_into_it() {
     // The same rule on the other operation, and this is the one that had no
     // test: `Input::recv` states `IngressError::Fatal` for what a read cannot
-    // get past by trying again, and the pump stops on it exactly as `connect`
-    // does. A driver that reconnected into it instead would reopen the session
-    // for as long as nobody looks at a dashboard, with the connection gauge
-    // flapping at 1 and `reconnects_total` climbing on a fault no reconnect
-    // reaches.
+    // get past by trying again, and the pump stops on it rather than
+    // reconnecting, which is the one thing it shares with a fatal `connect`:
+    // the teardown asserted below is this path's own, because the connection
+    // was established. A driver that reconnected into it would reopen the
+    // session for as long as nobody looks at a dashboard, with the connection
+    // gauge flapping at 1 and `reconnects_total` climbing on a fault no
+    // reconnect reaches.
     let outcome = run(
         policy(),
         RecordingAdapter::default(),
