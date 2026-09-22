@@ -12,3 +12,8 @@ dz-edge-core = { path = "../dz-edge-core" }
 
 [dev-dependencies]
 dz-edge-tob = { path = "../dz-edge-tob" }
+# `tests/golden.rs` reads testdata/golden/manifest.json and holds its `fields`
+# block to the canonical values this crate asserts, so the file the corpus names
+# as its source of truth is one a drift fails against rather than a document
+# nothing reads.
+serde_json = { workspace = true }

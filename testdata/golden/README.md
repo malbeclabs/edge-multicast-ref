@@ -30,8 +30,8 @@ same type id, and its `golden_test.go` binds that decoder to the same bytes.
 Hand-transcribing them from the spec tables would settle the remainder, and is
 worth doing when the spec text is next open.
 
-**A vector is the message on the wire, not the encoder's output.** The three
-snapshot vectors carry `Flags` bit 0, which the builder stamps at push time —
+**A codec vector is the message on the wire, not the encoder's output.** The
+three snapshot vectors carry `Flags` bit 0, which the builder stamps at push —
 after the body is encoded — because every message travelling the snapshot port
 must set it. A vector taken from the encoder alone would carry zero, and an
 implementation transcribing it would ship a message every subscriber counts as a
@@ -40,6 +40,26 @@ so this is a stated value rather than a byte someone has to notice.
 
 `manifest.json` carries each vector's field values, so an implementation in any
 language can check both directions without re-reading the specs.
+
+And it is load-bearing rather than descriptive. Every suite that asserts a
+vector also compares its own expectations with the manifest's `fields` block,
+by the manifest's name for each field and in both directions: a value the
+manifest states differently fails, and so does a field named on one side and
+not the other. In Go that is `TestGoldenManifestStatesWhatTheseCasesAssert` in
+each of the three parsers; in Rust it is `the_manifest_states_*` in
+`dz-edge-tob`, `dz-edge-refdata`, `dz-edge-mbp` and `dz-publisher-lowering`.
+Each also checks the `size`, `type_id`, `flags_on_wire` and `schema_version` the
+manifest records. So the manifest cannot drift from the bytes, and an assertion
+cannot drift from the manifest, in either language and either direction.
+
+Who reads what is worth stating exactly, because a vector no suite reads and no
+document mentions is invisible rather than merely unbound — which is how the
+five `-from-event-` vectors below stayed bound in one language only. Every
+vector in the two tables is read by `go/marketbyprice-parser` except
+`quote-v3.bin`, which that feed has no message type for and which
+`go/topofbook-parser` reads. `TestGoldenManifestHasNoVectorNobodyReads` holds
+the corpus to that, so a vector added here and asserted nowhere fails rather
+than sitting unnoticed.
 
 ## Vectors
 
@@ -90,6 +110,26 @@ lowering that turns what a venue knows into what the wire carries.
 
 `manifest.json` records the event beside the bytes, in a `lowered_from` block,
 so another language can reproduce them the way it reproduces the codec's.
+
+| File | Message | Type ID | Size | Flags on wire |
+| --- | --- | --- | --- | --- |
+| `level-update-from-event-v3.bin` | LevelUpdate | `0x40` | 48 | 0 |
+| `book-clear-from-event-v3.bin` | BookClear | `0x41` | 36 | 0 |
+| `snapshot-begin-from-event-v3.bin` | SnapshotBegin | `0x20` | 40 | 0 |
+| `snapshot-level-from-event-v3.bin` | SnapshotLevel | `0x42` | 32 | 0 |
+| `snapshot-end-from-event-v3.bin` | SnapshotEnd | `0x22` | 20 | 0 |
+
+`rust/publisher/dz-publisher-lowering` asserts all five from the event, and
+`go/marketbyprice-parser` reads all five with its own decoder — the same
+cross-language statement the codec's vectors make, rather than one language
+checking its own output.
+
+**These five carry `Flags` 0, including the three snapshot messages, and that
+is what they are.** They are what the lowering encodes, not what leaves the
+publisher: bit 0 is stamped at `push`, from the port, after the body is
+encoded. The codec's own snapshot vectors are taken after that stamp and carry
+1. An implementation reproducing these bytes has the flag still to do, and the
+`flags_on_wire` these state is what says so.
 
 They exist separately from the codec's own vectors rather than replacing them,
 and the reason is worth stating: those vectors set every field to a distinct

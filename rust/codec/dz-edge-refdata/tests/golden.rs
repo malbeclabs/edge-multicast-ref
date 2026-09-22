@@ -6,7 +6,7 @@
 //! match code that started failing.
 
 use dz_edge_core::{AppMessage, SCHEMA_VERSION, SCHEMA_VERSION_V1};
-use dz_edge_refdata::{InstrumentDefinition, ManifestSummary, LEG_LEN, SYMBOL_LEN};
+use dz_edge_refdata::{InstrumentDefinition, ManifestSummary, LEG_LEN, SIZE_V1, SYMBOL_LEN};
 use std::path::PathBuf;
 
 fn golden(name: &str) -> Vec<u8> {
@@ -118,5 +118,226 @@ fn manifest_summary_golden_vector_decodes_to_canonical_values() {
     assert_eq!(
         ManifestSummary::decode(&golden("manifest-summary-v3.bin")).unwrap(),
         canonical_manifest_summary()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The manifest, made load-bearing
+// ---------------------------------------------------------------------------
+//
+// `testdata/golden/README.md` names `manifest.json` as where an implementation
+// in any language reads a vector's field values from. The canonical values above
+// are struct literals, as Go's assertions are, and a suite that only compares
+// them with the bytes leaves that sentence a claim rather than a binding: the
+// manifest could then drift from the bytes and from both sets of literals, in
+// either direction, with every suite green.
+//
+// The tests below close it. Each canonical value is turned into the rows the
+// manifest names, and those rows are compared with the manifest's own `fields`
+// block in both directions: a value the manifest states differently fails, and
+// so does a field named on one side and not the other. The reverse drift needs
+// no new test — a literal edited above stops reproducing the bytes and fails
+// the cases there. Between the two, the only arrangement that passes is one
+// where the manifest, the bytes and these values all say the same thing.
+
+use dz_edge_core::{PortRole, FLAG_SNAPSHOT};
+use serde_json::Value;
+
+/// One vector's entry in `testdata/golden/manifest.json`.
+///
+/// A missing entry panics rather than passing quietly, for the reason the
+/// vectors themselves are read with `unwrap_or_else`: a check that asserts
+/// nothing because it found nothing reports the same success as one that
+/// compared every row.
+fn manifest_entry(file: &str) -> Value {
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../testdata/golden/manifest.json");
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let doc: Value = serde_json::from_str(&text).expect("manifest.json is JSON");
+    doc["vectors"]
+        .as_array()
+        .expect("manifest.json has a `vectors` array")
+        .iter()
+        .find(|v| v["file"] == file)
+        .unwrap_or_else(|| panic!("manifest.json carries no entry for {file}"))
+        .clone()
+}
+
+/// The `Flags` a message of this type carries once it is on the wire, which is
+/// what the manifest records as `flags_on_wire`. Derived from the message's port
+/// roles rather than stated, so a message moved to another port has one place
+/// to disagree with the manifest.
+fn flags_on_wire<M: AppMessage>() -> u16 {
+    assert_eq!(
+        M::PORT_ROLES.len(),
+        1,
+        "a vector for a message carried on several roles would need one per role"
+    );
+    if M::PORT_ROLES[0] == PortRole::Snapshot {
+        FLAG_SNAPSHOT
+    } else {
+        0
+    }
+}
+
+/// Asserts that the manifest states exactly what this suite asserts about one
+/// vector: the same header values, and the same `fields` block down to the set
+/// of names.
+///
+/// `size` is a parameter rather than `M::SIZE` because
+/// `instrument-definition-v1.bin` is a decode-only layout of the same type at
+/// 80 bytes against schema 3's 130, so the constant cannot state both.
+fn manifest_states<M: AppMessage>(
+    file: &str,
+    size: usize,
+    schema_version: u8,
+    rows: &[(&str, i64)],
+    text: &[(&str, &str)],
+) {
+    let entry = manifest_entry(file);
+    assert_eq!(entry["size"].as_u64(), Some(size as u64), "{file}: size");
+    assert_eq!(
+        entry["type_id"].as_str(),
+        Some(format!("{:#04x}", M::TYPE_ID).as_str()),
+        "{file}: type_id"
+    );
+    assert_eq!(
+        entry["flags_on_wire"].as_u64(),
+        Some(u64::from(flags_on_wire::<M>())),
+        "{file}: flags_on_wire"
+    );
+    assert_eq!(
+        entry["schema_version"].as_u64(),
+        Some(u64::from(schema_version)),
+        "{file}: schema_version"
+    );
+
+    let fields = entry["fields"]
+        .as_object()
+        .unwrap_or_else(|| panic!("{file}: the manifest entry has no `fields` block"));
+    for (name, want) in rows {
+        let stated = fields.get(*name).unwrap_or_else(|| {
+            panic!("{file}: the manifest states no `{name}`, which this suite asserts as {want}")
+        });
+        assert_eq!(
+            stated.as_i64(),
+            Some(*want),
+            "{file}: fields.{name} is {stated}, but this suite asserts {want}"
+        );
+    }
+    for (name, want) in text {
+        let stated = fields.get(*name).unwrap_or_else(|| {
+            panic!("{file}: the manifest states no `{name}`, which this suite asserts as {want:?}")
+        });
+        assert_eq!(
+            stated.as_str(),
+            Some(*want),
+            "{file}: fields.{name} is {stated}, but this suite asserts {want:?}"
+        );
+    }
+
+    // The other direction. A field added to the manifest and asserted nowhere
+    // is a value nothing holds the codec to, which is exactly what this
+    // test refuses to let the manifest carry.
+    let mut asserted: Vec<&str> = rows
+        .iter()
+        .map(|(n, _)| *n)
+        .chain(text.iter().map(|(n, _)| *n))
+        .collect();
+    asserted.sort_unstable();
+    let mut stated: Vec<&str> = fields.keys().map(String::as_str).collect();
+    stated.sort_unstable();
+    assert_eq!(
+        stated, asserted,
+        "{file}: the manifest's `fields` block and this suite's rows must name the same fields"
+    );
+}
+
+/// A fixed-width ASCII field as the manifest writes it: left-justified, the
+/// null padding dropped.
+fn ascii(field: &[u8]) -> &str {
+    let end = field.iter().position(|b| *b == 0).unwrap_or(field.len());
+    std::str::from_utf8(&field[..end]).expect("the canonical values are ASCII")
+}
+
+/// The canonical InstrumentDefinition as the rows the manifest names for it.
+/// Built from the value rather than restated, so the two cannot hold different
+/// numbers.
+fn definition_rows(d: &InstrumentDefinition) -> Vec<(&'static str, i64)> {
+    vec![
+        ("instrument_id", i64::from(d.instrument_id)),
+        ("source_id", i64::from(d.source_id)),
+        ("asset_class", i64::from(d.asset_class)),
+        ("price_exponent", i64::from(d.price_exponent)),
+        ("qty_exponent", i64::from(d.qty_exponent)),
+        ("market_model", i64::from(d.market_model)),
+        ("tick_size", d.tick_size),
+        ("lot_size", d.lot_size as i64),
+        ("contract_value", d.contract_value as i64),
+        ("expiry_ns", d.expiry_ns as i64),
+        ("settle_type", i64::from(d.settle_type)),
+        ("price_bound", i64::from(d.price_bound)),
+        ("manifest_seq", i64::from(d.manifest_seq)),
+    ]
+}
+
+fn definition_text(d: &InstrumentDefinition) -> Vec<(&'static str, &str)> {
+    vec![
+        ("symbol", ascii(&d.symbol)),
+        ("leg1", ascii(&d.leg1)),
+        ("leg2", ascii(&d.leg2)),
+    ]
+}
+
+fn manifest_summary_rows(m: &ManifestSummary) -> Vec<(&'static str, i64)> {
+    vec![
+        ("channel_id", i64::from(m.channel_id)),
+        ("valid", i64::from(m.valid)),
+        ("manifest_seq", i64::from(m.manifest_seq)),
+        ("instrument_count", i64::from(m.instrument_count)),
+        ("timestamp_ns", m.timestamp_ns as i64),
+    ]
+}
+
+#[test]
+fn the_manifest_states_the_canonical_definition_at_schema_3() {
+    let d = canonical_definition_v3();
+    manifest_states::<InstrumentDefinition>(
+        "instrument-definition-v3.bin",
+        InstrumentDefinition::SIZE,
+        SCHEMA_VERSION,
+        &definition_rows(&d),
+        &definition_text(&d),
+    );
+}
+
+#[test]
+fn the_manifest_states_the_canonical_definition_at_schema_1() {
+    // The same logical values apart from `source_id`, which schema 1 has no
+    // field for and which the manifest states decodes as 0. Written as an
+    // override of the schema 3 value rather than a second literal, so the pair
+    // cannot drift apart in anything else.
+    let d = InstrumentDefinition {
+        source_id: 0,
+        ..canonical_definition_v3()
+    };
+    manifest_states::<InstrumentDefinition>(
+        "instrument-definition-v1.bin",
+        SIZE_V1,
+        SCHEMA_VERSION_V1,
+        &definition_rows(&d),
+        &definition_text(&d),
+    );
+}
+
+#[test]
+fn the_manifest_states_the_canonical_manifest_summary() {
+    manifest_states::<ManifestSummary>(
+        "manifest-summary-v3.bin",
+        ManifestSummary::SIZE,
+        SCHEMA_VERSION,
+        &manifest_summary_rows(&canonical_manifest_summary()),
+        &[],
     );
 }
