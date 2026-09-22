@@ -1502,6 +1502,49 @@ listen_addr = "127.0.0.1:0"
         );
     }
 
+    /// The archive sits EXACTLY ONE component under the configured
+    /// `completed_dir`, and the loader depends on that.
+    ///
+    /// `dz-recorder-load` walks `objects_dir` and one level beneath it, so this
+    /// layout is the contract between the two binaries and not an internal
+    /// detail. It has already been broken once from the other side: the loader
+    /// read only the top level, found nothing under `completed/<spec>/`, and
+    /// reported it as an idle pass with no error and no skip counter — 2,088
+    /// objects on disk against zero rows for every grain.
+    ///
+    /// Asserted HERE rather than only in the loader's tests, which is the point
+    /// of it. The loader's tests build their own tree by renaming files into a
+    /// subdirectory, so they would keep passing if this side ever added a
+    /// level; the loader would silently return to loading nothing, with CI
+    /// green on both repositories.
+    #[test]
+    fn the_archive_is_exactly_one_component_under_the_completed_directory() {
+        let plan = plan_of(VALID).expect("a valid configuration");
+        let configured = Path::new("/var/lib/dz-recorder/completed");
+
+        for index in 0..plan.feeds.len() {
+            let completed = archive_of(&plan, index).completed_dir.as_path();
+            let under = completed
+                .strip_prefix(configured)
+                .expect("the archive is under the configured completed_dir");
+            assert_eq!(
+                under.components().count(),
+                1,
+                "the archive is {} components under completed_dir, and dz-recorder-load walks                  exactly one: {}",
+                under.components().count(),
+                completed.display()
+            );
+            // And that one component is the feed's spec, not something derived
+            // another way: the loader matches a manifest's `feed` against its
+            // own configuration, so the two have to be the same token.
+            assert_eq!(
+                under.as_os_str(),
+                std::ffi::OsStr::new(&archive_of(&plan, index).feed),
+                "the component is not the feed spec"
+            );
+        }
+    }
+
     #[test]
     fn the_summary_states_the_mode_the_scope_and_the_provenance() {
         let plan = plan_of(VALID).expect("a valid configuration");

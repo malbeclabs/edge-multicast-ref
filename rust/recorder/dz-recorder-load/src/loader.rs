@@ -126,6 +126,10 @@ pub struct Pending {
     /// object *n+1* is derived — and without it every boundary after the first
     /// in a pass would be written uncertain.
     pub trailer: SegmentTrailer,
+    /// The feed this object belongs to. Held for the same reason the ledger
+    /// holds it: `segment_seq` restarts per feed, so a pending trailer is only
+    /// evidence about its own.
+    pub feed: String,
     pub written: Written,
     pub bytes_read: u64,
 }
@@ -448,7 +452,7 @@ impl<S: RowSink> Loader<'_, S> {
         // pass the previous object is still pending when this one is derived,
         // and consulting only the ledger would write an uncertain boundary for
         // every object after the first.
-        let trailer = self.trailer();
+        let trailer = self.trailer(&manifest.feed);
         // Before the sink is touched, which is what makes this failure one the
         // held rows survive.
         let mut derived = derive_object(&candidate.object, manifest, trailer.as_ref())
@@ -486,6 +490,7 @@ impl<S: RowSink> Loader<'_, S> {
                 sha256: manifest.sha256.clone(),
             },
             trailer: derived.trailer,
+            feed: manifest.feed.clone(),
             written: rows,
             bytes_read,
         });
@@ -501,13 +506,14 @@ impl<S: RowSink> Loader<'_, S> {
     /// tie of nothing: a pending trailer is evidence about an object on disk,
     /// which is what the check is about — whether its rows have landed yet is a
     /// different question.
-    fn trailer(&self) -> Option<SegmentTrailer> {
+    fn trailer(&self, feed: &str) -> Option<SegmentTrailer> {
         let pending = self
             .pending
             .iter()
+            .filter(|p| p.feed == feed)
             .map(|p| &p.trailer)
             .max_by_key(|t| t.segment_seq);
-        match (pending, self.ledger.trailer()) {
+        match (pending, self.ledger.trailer(feed)) {
             (Some(p), Some(l)) if l.segment_seq > p.segment_seq => Some(l.clone()),
             (Some(p), _) => Some(p.clone()),
             (None, l) => l.cloned(),
@@ -747,6 +753,7 @@ pub fn record_landed(
             object_sha256: done.id.sha256.clone(),
             loaded_at_ns: now_unix_nanos(),
             trailer: done.trailer,
+            feed: done.feed.clone(),
         }) {
             Ok(()) => {
                 metrics.object_loaded(&done.written, done.bytes_read);
@@ -1028,7 +1035,10 @@ mod pass_tests {
         // And the trailer that settled them is in the ledger, so a restart
         // settles the next one too rather than starting uncertain again.
         assert_eq!(
-            ledger.trailer().expect("a trailer").segment_seq,
+            ledger
+                .trailer("top-of-book")
+                .expect("a trailer")
+                .segment_seq,
             2,
             "the highest segment, not the last line written"
         );
@@ -1175,6 +1185,67 @@ mod pass_tests {
         assert_eq!(pass.unloaded, 3);
     }
 
+    /// Two feeds keep two trailers, because `segment_seq` restarts per feed.
+    ///
+    /// **This is what walking `completed/<spec>/` made reachable.** Before it a
+    /// loader saw one feed, so one global trailer and a `seq + 1` adjacency
+    /// check agreed with each other. With two, each feed's `segment_seq` starts
+    /// at 0 independently, and a global trailer answers about whichever feed
+    /// last counted highest: the second feed's era rows come out
+    /// `anchor_certain = 0`, or — where the sequences happen to line up —
+    /// `anchor_certain = 1, continuation = 0`, a reset that did not happen,
+    /// which `ReplacingMergeTree(anchor_certain)` then keeps.
+    ///
+    /// The fixture interleaves deliberately: the high sequence belongs to the
+    /// feed that is NOT being asked about, so a global trailer would answer
+    /// with it and the assertion would catch that rather than an ordering
+    /// accident.
+    #[test]
+    fn each_feed_keeps_its_own_trailer() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let mut ledger = Ledger::open(dir.path().join("ledger.jsonl")).expect("a new ledger");
+
+        let entry = |key: &str, feed: &str, seq: u64| Entry {
+            object_key: key.to_owned(),
+            object_sha256: format!("{seq:064}"),
+            loaded_at_ns: now_unix_nanos(),
+            trailer: SegmentTrailer {
+                segment_seq: seq,
+                ..SegmentTrailer::default()
+            },
+            feed: feed.to_owned(),
+        };
+
+        // `slow` reaches 2; `fast` reaches 90 and is written last, so a global
+        // trailer would be 90 for both.
+        ledger.record(entry("slow/1", "slow", 1)).expect("writable");
+        ledger
+            .record(entry("fast/88", "fast", 88))
+            .expect("writable");
+        ledger.record(entry("slow/2", "slow", 2)).expect("writable");
+        ledger
+            .record(entry("fast/90", "fast", 90))
+            .expect("writable");
+
+        assert_eq!(
+            ledger.trailer("slow").map(|t| t.segment_seq),
+            Some(2),
+            "the slow feed's next object would consult the fast feed's segment"
+        );
+        assert_eq!(
+            ledger.trailer("fast").map(|t| t.segment_seq),
+            Some(90),
+            "the fast feed lost its own trailer"
+        );
+        assert_eq!(
+            ledger
+                .trailer("a-feed-with-no-entries")
+                .map(|t| t.segment_seq),
+            None,
+            "a feed this ledger has never seen must have no trailer, not somebody else's"
+        );
+    }
+
     /// An unreadable subdirectory makes the enumeration incomplete, and an
     /// incomplete enumeration does not compact the ledger.
     ///
@@ -1224,6 +1295,7 @@ mod pass_tests {
                     segment_seq: 1,
                     ..SegmentTrailer::default()
                 },
+                feed: "a-feed-this-pass-cannot-see".to_owned(),
             })
             .expect("the ledger is writable");
         ledger
@@ -1235,6 +1307,7 @@ mod pass_tests {
                     segment_seq: 2,
                     ..SegmentTrailer::default()
                 },
+                feed: "a-feed-this-pass-cannot-see".to_owned(),
             })
             .expect("the ledger is writable");
         assert!(
