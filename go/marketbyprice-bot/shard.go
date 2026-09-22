@@ -536,30 +536,25 @@ func (s *Shard) evictLargestBuffer() {
 	if best <= 0 {
 		return
 	}
-	// The highest Per-Instrument Seq being discarded, read before the buffer goes.
-	// Recovery must reach it, and nothing else on this path knows it: unlike the
-	// other two demotions, the eviction is not triggered by a record of the
-	// victim's own, so the instrument's expected seq describes only the oldest of
-	// the mutations about to be lost.
-	var highestEvicted uint32
-	for _, b := range s.deltaBuf[victim] {
-		if seq := toUint32(b.Record.Fields["per_instrument_seq"]); seq > highestEvicted {
-			highestEvicted = seq
-		}
-	}
-	s.bufferedN -= best
-	delete(s.deltaBuf, victim)
 	if inst, ok := s.instruments[victim]; ok {
 		inst.Status = StatusGap
 		inst.Pending = nil
-		// Floored at the expected seq, so an eviction that carried no readable
-		// per_instrument_seq still demands a snapshot newer than the book.
+		// Recovery must reach the highest Per-Instrument Seq being discarded, read
+		// here while the buffer is still around. Nothing else on this path knows
+		// it: unlike the other two demotions, the eviction is not triggered by a
+		// record of the victim's own, so the expected seq names only the oldest of
+		// the mutations about to be lost. It is the floor, so an entry with no
+		// readable per_instrument_seq still demands a snapshot newer than the book.
 		required := inst.LastAppliedInstrumentSeq + 1
-		if highestEvicted > required {
-			required = highestEvicted
+		for _, b := range s.deltaBuf[victim] {
+			if seq := toUint32(b.Record.Fields["per_instrument_seq"]); seq > required {
+				required = seq
+			}
 		}
 		inst.RequireSnapshotAtLeast(required)
 	}
+	s.bufferedN -= best
+	delete(s.deltaBuf, victim)
 	if s.metrics != nil {
 		s.metrics.DeltaBufferOverflowTotal.Inc()
 	}
