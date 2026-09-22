@@ -431,3 +431,85 @@ func TestParse_ManifestSummaryCarriesValid(t *testing.T) {
 		}
 	}
 }
+
+// An over-long ManifestSummary must be refused, not decoded with its tail
+// ignored. wireReader reports a body that ran short but says nothing about one
+// that ran long, so a message declaring msg_length 30 decoded as a well-formed
+// summary with six trailing bytes silently dropped. The golden vector cannot
+// catch this: it is exactly 24 bytes.
+func TestDecodeManifestSummary_RejectsOverLongBody(t *testing.T) {
+	const ts = uint64(1700000000000000000)
+
+	msg := buildManifestSummaryMsg(3, 1, 9, 41, ts)
+	over := append(append([]byte{}, msg...), 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE)
+	over[1] = uint8(len(over)) // msg_length 30, i.e. a 26-byte body
+
+	got, err := decodeTopOfBookBody(msgManifestSummary, over[4:], 1)
+	if err == nil {
+		t.Fatalf("a 26-byte manifest_summary body must be refused, got body %+v", got)
+	}
+	// Same reason as marketbyorder and marketbyprice, which refuse any
+	// manifest_summary body that is not exactly 20 bytes. The runner's
+	// classifyParseErr buckets on substrings, so this must read as "truncated"
+	// and must not mention "schema", which is the bucket for an unsupported
+	// Schema Version.
+	if !strings.Contains(err.Error(), "truncat") {
+		t.Errorf("error must contain \"truncat\": %q", err.Error())
+	}
+	if strings.Contains(err.Error(), "schema") {
+		t.Errorf("error must not contain \"schema\" (would misclassify as schema_version): %q", err.Error())
+	}
+	if want := "expected 20 bytes, got 26"; !strings.Contains(err.Error(), want) {
+		t.Errorf("error must state the expected and the actual body length (%q): %q", want, err.Error())
+	}
+
+	// And the datagram carrying it is rejected whole, not delivered in part.
+	recs, err := NewTopOfBookParser().Parse(buildDatagram(3, 100, ts, over), PacketMeta{})
+	if err == nil {
+		t.Fatalf("Parse must reject the datagram, got %d records", len(recs))
+	}
+	if len(recs) != 0 {
+		t.Errorf("a rejected datagram must yield no records, got %d", len(recs))
+	}
+}
+
+// Every fixed-size body in decodeTopOfBookBody is pinned to an exact length,
+// not only InstrumentDefinition and ManifestSummary. Each case reads its
+// fields positionally through the sticky wireReader, which reports a body that
+// ran short but never one that ran long, so an unpinned case decodes an
+// over-long message and drops the tail. marketbyorder and marketbyprice pin
+// every body length, and the Rust codec rejects a declared msg_length that
+// disagrees with the type's size.
+func TestDecodeBody_LengthIsExactForEveryFixedSizeType(t *testing.T) {
+	tests := []struct {
+		name    string
+		msgType uint8
+		want    int
+	}{
+		{"heartbeat", msgHeartbeat, heartbeatBodyLen},
+		{"quote", msgQuote, quoteBodyLen},
+		{"trade", msgTrade, tradeBodyLen},
+		{"channel_reset", msgChannelReset, channelResetBodyLen},
+		{"end_of_session", msgEndOfSession, endOfSessionBodyLen},
+		{"manifest_summary", msgManifestSummary, manifestSummaryBodyLen},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := decodeTopOfBookBody(tc.msgType, make([]byte, tc.want), 1); err != nil {
+				t.Fatalf("a %d-byte body must decode: %v", tc.want, err)
+			}
+
+			for _, n := range []int{tc.want - 1, tc.want + 1, tc.want + 8} {
+				_, err := decodeTopOfBookBody(tc.msgType, make([]byte, n), 1)
+				if err == nil {
+					t.Errorf("a %d-byte body must be refused (want exactly %d)", n, tc.want)
+					continue
+				}
+				if !strings.Contains(err.Error(), "truncat") {
+					t.Errorf("%d-byte body: error must contain \"truncat\": %q", n, err.Error())
+				}
+			}
+		})
+	}
+}

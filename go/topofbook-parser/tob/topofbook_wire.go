@@ -54,6 +54,20 @@ const (
 	instDefBodyLenV3 = 126
 )
 
+// Body lengths for the fixed-size message types, excluding the 4-byte message
+// header. Each is the message size in the wire spec minus that header:
+// Heartbeat 16, Quote 60, Trade 52, ChannelReset 12, EndOfSession 12,
+// ManifestSummary 24. InstrumentDefinition is the one type whose body length
+// varies, and its lengths are the constants above.
+const (
+	heartbeatBodyLen       = 12
+	quoteBodyLen           = 56
+	tradeBodyLen           = 48
+	channelResetBodyLen    = 8
+	endOfSessionBodyLen    = 8
+	manifestSummaryBodyLen = 20
+)
+
 const (
 	msgHeartbeat            uint8 = 0x01
 	msgInstrumentDefinition uint8 = 0x02
@@ -295,6 +309,27 @@ func decodeTopOfBookDatagram(data []byte) (*topOfBookDatagram, error) {
 	return &f, nil
 }
 
+// checkBodyLen refuses a body that is not exactly want bytes long.
+//
+// wireReader reports a body that ran short (io.ErrUnexpectedEOF) but says
+// nothing about one that ran long, so without this check a message declaring a
+// larger msg_length decodes and its trailing bytes are silently dropped.
+// marketbyorder and marketbyprice refuse both directions per message type, and
+// the Rust codec rejects a declared msg_length that disagrees with the type's
+// size, so this decoder refuses both directions too.
+//
+// The word "truncated" is deliberate for an over-long body as well:
+// classifyParseErr in runner.go buckets on substrings, and this fault must land
+// in the same "truncated" bucket as the identical fault on marketbyorder and
+// marketbyprice. The message name is carried by the prefix rather than repeated
+// inside the reason, as in the instrument_definition error below.
+func checkBodyLen(name string, buf []byte, want int) error {
+	if len(buf) != want {
+		return fmt.Errorf("%s: truncated: expected %d bytes, got %d", name, want, len(buf))
+	}
+	return nil
+}
+
 // decodeTopOfBookBody dispatches on msg type to decode a message body.
 // Returns (nil, nil) for unknown types so the parser skips them.
 func decodeTopOfBookBody(msgType uint8, buf []byte, schemaVersion uint8) (any, error) {
@@ -302,6 +337,9 @@ func decodeTopOfBookBody(msgType uint8, buf []byte, schemaVersion uint8) (any, e
 
 	switch msgType {
 	case msgHeartbeat:
+		if err := checkBodyLen("heartbeat", buf, heartbeatBodyLen); err != nil {
+			return nil, err
+		}
 		var b topOfBookHeartbeat
 		b.ChannelID = br.u8()
 		br.skip(3) // reserved
@@ -369,6 +407,9 @@ func decodeTopOfBookBody(msgType uint8, buf []byte, schemaVersion uint8) (any, e
 		return &b, nil
 
 	case msgQuote:
+		if err := checkBodyLen("quote", buf, quoteBodyLen); err != nil {
+			return nil, err
+		}
 		var b topOfBookQuote
 		b.InstrumentID = br.u32()
 		b.SourceID = br.u16()
@@ -388,6 +429,9 @@ func decodeTopOfBookBody(msgType uint8, buf []byte, schemaVersion uint8) (any, e
 		return &b, nil
 
 	case msgTrade:
+		if err := checkBodyLen("trade", buf, tradeBodyLen); err != nil {
+			return nil, err
+		}
 		var b topOfBookTrade
 		b.InstrumentID = br.u32()
 		b.SourceID = br.u16()
@@ -404,6 +448,9 @@ func decodeTopOfBookBody(msgType uint8, buf []byte, schemaVersion uint8) (any, e
 		return &b, nil
 
 	case msgChannelReset:
+		if err := checkBodyLen("channel_reset", buf, channelResetBodyLen); err != nil {
+			return nil, err
+		}
 		var b topOfBookChannelReset
 		b.Timestamp = br.u64()
 		if br.err != nil {
@@ -412,6 +459,9 @@ func decodeTopOfBookBody(msgType uint8, buf []byte, schemaVersion uint8) (any, e
 		return &b, nil
 
 	case msgEndOfSession:
+		if err := checkBodyLen("end_of_session", buf, endOfSessionBodyLen); err != nil {
+			return nil, err
+		}
 		var b topOfBookEndOfSession
 		b.Timestamp = br.u64()
 		if br.err != nil {
@@ -420,6 +470,9 @@ func decodeTopOfBookBody(msgType uint8, buf []byte, schemaVersion uint8) (any, e
 		return &b, nil
 
 	case msgManifestSummary:
+		if err := checkBodyLen("manifest_summary", buf, manifestSummaryBodyLen); err != nil {
+			return nil, err
+		}
 		var b topOfBookManifestSummary
 		b.ChannelID = br.u8()
 		b.Valid = br.u8()

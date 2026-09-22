@@ -56,15 +56,22 @@ flags          u16   (0x0001 = snapshot)
 
 ### Message types
 
-| ID | Name | Body bytes | Channel | Notes |
+| ID | Name | Message bytes | Channel | Notes |
 |---:|---|---:|---|---|
 | 0x01 | Heartbeat | 16 | either | Idle liveness |
 | 0x02 | InstrumentDefinition | 80 (v1) / 130 (v3) | refdata | instrument_id → source_id, symbol, price/qty exponents. Both lengths are exact, matching the Schema Version in the datagram header — a datagram whose declared version disagrees with the message length it actually carries is rejected, not guessed at. There is no version 2 |
 | 0x03 | Quote (BBO) | 60 | marketdata | Best bid/ask per instrument |
-| 0x04 | Trade | 52 | marketdata | Single trade |
+| 0x04 | Trade | 52 | mktdata | Single trade |
 | 0x05 | ChannelReset | 12 | either | Publisher startup — drop cached state |
 | 0x06 | EndOfSession | 12 | either | Publisher shutdown |
 | 0x07 | ManifestSummary | 24 | refdata | Periodic summary of the published set: valid, manifest_seq, instrument_count |
+
+Every length in the table above is a whole message, `msg_length` included, and
+every one of them is exact. A known message type whose `msg_length` disagrees
+with its size is refused and counted as `parse_errors_total{reason="truncated"}`,
+whether it came up short or ran long; an over-long body is never decoded with
+its tail ignored. Subtract the 4-byte message header for the body length a
+decoder reads (ManifestSummary: 24 on the wire, 20 of body).
 
 ### Price/quantity encoding
 
