@@ -133,12 +133,16 @@ func (s *Socket[R]) register(conn net.Conn) (*clientWriter[R], bool) {
 		return nil, false
 	}
 	s.clients[conn] = cw
-	clientCount := len(s.clients)
+	// Reported while mu is still held, the way dropClient reports it. The
+	// connected-client gauge is a level, so the newest report wins: reported
+	// after the unlock, this accept goroutine's count can land after a
+	// concurrent drop's newer one and leave socket_clients one client high
+	// until the next connect or drop.
+	if s.metrics != nil {
+		s.metrics.SetSocketClients(len(s.clients))
+	}
 	s.mu.Unlock()
 
-	if s.metrics != nil {
-		s.metrics.SetSocketClients(clientCount)
-	}
 	return cw, true
 }
 

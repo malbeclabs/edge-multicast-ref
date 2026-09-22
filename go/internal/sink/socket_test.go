@@ -566,3 +566,99 @@ func TestSocket_CloseReportsZeroClients(t *testing.T) {
 		t.Errorf("connected-client gauge left at %d after Close", clients)
 	}
 }
+
+// lockProbeMetrics records, for every client-count report, whether the sink's
+// mutex was free at the moment of the call. It stands in for a parser's
+// counters only well enough to observe that one thing.
+type lockProbeMetrics struct {
+	probeMu sync.Mutex
+	sinkMu  *sync.Mutex
+	freeAt  []bool
+}
+
+// watch tells the probe which mutex to test. Called before any client can
+// connect, and read back under the probe's own lock, so the accept goroutine
+// races nothing for it.
+func (p *lockProbeMetrics) watch(mu *sync.Mutex) {
+	p.probeMu.Lock()
+	defer p.probeMu.Unlock()
+	p.sinkMu = mu
+}
+
+func (p *lockProbeMetrics) SetSocketClients(int) {
+	p.probeMu.Lock()
+	mu := p.sinkMu
+	p.probeMu.Unlock()
+	if mu == nil {
+		return
+	}
+
+	// TryLock never blocks, so probing from inside the critical section is
+	// safe: it simply reports the lock as taken.
+	free := mu.TryLock()
+	if free {
+		mu.Unlock()
+	}
+
+	p.probeMu.Lock()
+	defer p.probeMu.Unlock()
+	p.freeAt = append(p.freeAt, free)
+}
+
+func (p *lockProbeMetrics) AddSocketClientDrops(string, int) {}
+
+func (p *lockProbeMetrics) AddSocketRecordsSent(int) {}
+
+func (p *lockProbeMetrics) reports() []bool {
+	p.probeMu.Lock()
+	defer p.probeMu.Unlock()
+	return append([]bool(nil), p.freeAt...)
+}
+
+// TestSocket_RegisterReportsTheClientCountUnderTheLock pins where register
+// reports the connected-client gauge: inside the critical section, where
+// dropClient reports it. The gauge is a level and the newest report wins, so a
+// count reported after the unlock can land after a concurrent drop's newer
+// count and leave socket_clients one client high until the next connect or
+// drop. Nothing else takes mu while this test's single client connects, so the
+// lock being free during the report means only that the report left the
+// critical section.
+func TestSocket_RegisterReportsTheClientCountUnderTheLock(t *testing.T) {
+	sockPath := shortTempSock(t)
+
+	p := &lockProbeMetrics{}
+	s, err := NewSocket(sockPath, NewJSONConnWriter[testRecord], p)
+	if err != nil {
+		t.Fatalf("error creating socket sink: %v", err)
+	}
+	// Close's own report is deliberately outside mu — by then no client can
+	// change the set — so this test reads register's report before shutdown.
+	defer s.Close()
+	p.watch(&s.mu)
+
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("error connecting: %v", err)
+	}
+	defer conn.Close()
+
+	// The report is made by the accept goroutine, so wait for it rather than
+	// for the client: reaching into s.clients here would take mu and could
+	// mask the very thing being asserted.
+	var reports []bool
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		reports = p.reports()
+		if len(reports) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(reports) == 0 {
+		t.Fatal("register reported no client count")
+	}
+
+	if reports[0] {
+		t.Error("register reported the client count with the sink mutex free; a concurrent drop's newer count can be overtaken by it")
+	}
+}
