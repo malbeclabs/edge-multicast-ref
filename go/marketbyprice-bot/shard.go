@@ -279,13 +279,29 @@ func (s *Shard) applyDeltaToReady(k instKey, inst *Instrument, rec Record) []Cha
 		log.Printf("shard %d instrument %d: per-instrument gap, expected %d got %d",
 			s.idx, inst.ID, expected, piSeq)
 		inst.Status = StatusGap
+		// Recovery needs a snapshot captured at or after everything this branch
+		// is about to lose, which is not the same as the hole.
+		//
+		// `expected` names only the OLDEST missing delta. Pending holds every
+		// record that arrived ahead of it, and clearing it below discards them
+		// without buffering — so a snapshot at `expected` predates all of them,
+		// commits, and returns the instrument to ready holding a book they were
+		// never applied to. The next live delta then walks the reorder window to
+		// a second gap, and one loss is counted twice.
+		//
+		// Read while Pending is still around, the way evictLargestBuffer reads
+		// its buffer. `piSeq` is a key here too but is buffered below and
+		// replays, so it is excluded: requiring it would refuse a snapshot that
+		// is perfectly good with that record on top. A key can exceed `piSeq`,
+		// so this is a scan rather than a comparison against it.
+		required := expected
+		for seq := range inst.Pending {
+			if seq != piSeq && seq > required {
+				required = seq
+			}
+		}
 		inst.Pending = nil
-		// Recovery needs a snapshot captured at or after the hole. A snapshot
-		// carrying a Last Instrument Seq below `expected` predates the missing
-		// delta, so committing it would return the instrument to ready holding
-		// exactly the book that is missing it, and every delta behind the hole
-		// would then walk the reorder window to a second gap.
-		inst.RequireSnapshotAtLeast(expected)
+		inst.RequireSnapshotAtLeast(required)
 		s.bufferDelta(k, rec)
 		if s.metrics != nil {
 			s.metrics.PerInstrumentGapsTotal.Inc()
@@ -536,7 +552,15 @@ func (s *Shard) evictLargestBuffer() {
 	if best <= 0 {
 		return
 	}
-	if inst, ok := s.instruments[victim]; ok {
+	{
+		// instrumentFor, not an early return on absence, matching
+		// applyInstrumentReset. applyDelta buffers awaiting-refdata deltas under
+		// a key with no instrument, and at cold start those buffers are the
+		// largest — so they are the likeliest victims, and skipping them left the
+		// eviction recording no hole at all. The definition then lands, the fresh
+		// instrument has no requirement, and it takes a snapshot from inside the
+		// range this shard chose to discard.
+		inst := s.instrumentFor(victim)
 		inst.Status = StatusGap
 		inst.Pending = nil
 		// Recovery must reach the highest Per-Instrument Seq being discarded, read
