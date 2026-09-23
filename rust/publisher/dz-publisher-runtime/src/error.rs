@@ -685,6 +685,46 @@ pub enum StartupError {
     #[error("no configuration file: {usage}")]
     NoConfigPath { usage: &'static str },
 
+    /// An option the command-line reader does not know.
+    ///
+    /// Named, and never read as a path. An option that fell through to the
+    /// configuration path would be opened as a file, so the refusal an operator
+    /// saw would be about a file called `--verison` rather than about the flag
+    /// they misspelled — true, unhelpful, and a diagnosis away from the one
+    /// thing that was wrong.
+    #[error("`{option}` is not an option this publisher knows: {usage}")]
+    UnknownOption { option: String, usage: &'static str },
+
+    /// Two configuration files on one command line.
+    ///
+    /// Both named, because the refusal is that there is a choice here and no
+    /// rule for making it: a publisher reads one document, and taking the first
+    /// or the last would decide which of an operator's two answers counts
+    /// without saying so. The likely way in is a unit file pointed at a new
+    /// document while the old argument stayed behind.
+    #[error(
+        "two configuration files were named, `{first}` and `{second}`: a publisher reads one — \
+         {usage}"
+    )]
+    TwoConfigPaths {
+        first: String,
+        second: String,
+        usage: &'static str,
+    },
+
+    /// An option given without the value it takes.
+    ///
+    /// Named as the option it is, because the file the command line *does*
+    /// carry is not the fault: `<publisher> publisher.toml --config` names a
+    /// perfectly good document and then asks for a second one and stops
+    /// talking, and a refusal that said *no configuration file* would be
+    /// pointing at the half of the line that is right.
+    #[error("`{option}` needs a value: {usage}")]
+    OptionNeedsValue {
+        option: &'static str,
+        usage: &'static str,
+    },
+
     /// `[adapter.tee] enabled = true` with no `path`.
     ///
     /// The same shape as [`Self::ReplayWithoutPath`]: a section switched on and
