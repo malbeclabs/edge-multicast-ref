@@ -13,6 +13,13 @@ go build -o dz-topofbook-parser .
 go test -v ./...
 ```
 
+`tob/golden_test.go` decodes the five top-of-book and reference-data vectors in
+`testdata/golden` — Quote, Trade, ManifestSummary, and InstrumentDefinition in
+both schema generations — and asserts every field against the values
+`manifest.json` records. Those vectors were transcribed by hand from the
+`edge-feed-spec` field tables, so they bind this decoder to the wire rather than
+to a fixture written from the same reading of the spec the decoder was.
+
 One Go module in the `go/` workspace. External deps are `golang.org/x/net/ipv4` for multicast control messages and `prometheus/client_golang` for `/metrics`; the sink transport and the UDP receive path come from the `go/internal` workspace member. The module root is `package main`; the wire decoder and the parser it drives are `package tob` under `tob/`, and the root `parser.go` re-exports `tob.Record`, `tob.PacketMeta` and `tob.Parser` so the rest of `main` names them unqualified.
 
 ## How to run
@@ -147,4 +154,4 @@ Per-venue runbooks and the end-to-end POC writeup live in the `malbeclabs/double
 
 - Go. No codegen, no third-party frameworks. `encoding/binary` for wire decode, `log/slog` for structured logging, `flag` for CLI.
 - `package main` — flat directory, single binary. If it ever needs to be importable as a library, split into a sub-package + `cmd/` directory.
-- Tests use the standard `testing` package. No testify. Synthetic wire-format bytes are built by test helpers, not fixtures.
+- Tests use the standard `testing` package. No testify. Synthetic wire-format bytes are built by test helpers rather than fixtures checked in beside them, with one deliberate exception: `tob/golden_test.go` reads the shared vectors in `testdata/golden`, which are the cross-language contract and carry their force precisely because this package did not write them.

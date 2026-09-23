@@ -403,6 +403,13 @@ func TestDecodeManifestSummary_DecodesValid(t *testing.T) {
 // Valid must reach the record's Fields map as a uint8 under the key "valid",
 // matching the marketbyprice and marketbyorder parsers, because that map is
 // where a book-builder reads it.
+//
+// This covers the plumbing from the decoded body to that map, for both values
+// of the byte. It does not pin the byte's offset on the wire: the body here is
+// built by buildManifestSummaryMsg from the same reading of the spec the
+// decoder was written from, so the two agree even when the reading is wrong.
+// TestGoldenManifestSummary in golden_test.go is what pins the offset, against
+// a vector transcribed from the spec tables independently of this package.
 func TestParse_ManifestSummaryCarriesValid(t *testing.T) {
 	const ts = uint64(1700000000000000000)
 
@@ -434,9 +441,12 @@ func TestParse_ManifestSummaryCarriesValid(t *testing.T) {
 
 // An over-long ManifestSummary must be refused, not decoded with its tail
 // ignored. wireReader reports a body that ran short but says nothing about one
-// that ran long, so a message declaring msg_length 30 decoded as a well-formed
-// summary with six trailing bytes silently dropped. The golden vector cannot
-// catch this: it is exactly 24 bytes.
+// that ran long, so a message declaring msg_length 30 decodes as a well-formed
+// summary with six trailing bytes silently dropped.
+//
+// A hand-built body is the only way to state this one: manifest-summary-v3.bin
+// is exactly 24 bytes, so TestGoldenManifestSummary exercises the length that
+// is correct and can say nothing about the lengths that are not.
 func TestDecodeManifestSummary_RejectsOverLongBody(t *testing.T) {
 	const ts = uint64(1700000000000000000)
 

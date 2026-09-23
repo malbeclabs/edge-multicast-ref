@@ -31,6 +31,11 @@ import (
 const (
 	datagramHeaderBytes = 24
 
+	// Every application message carries a 4-byte header: Msg Type (u8),
+	// Msg Length (u8) and Flags (u16). Named as in the marketbyprice and
+	// marketbyorder siblings, whose header is the same four bytes.
+	messageHeaderSize = 4
+
 	// Magic bytes at the start of every datagram: "DZ".
 	datagramMagic0 = 0x5A
 	datagramMagic1 = 0x44
@@ -289,10 +294,10 @@ func decodeTopOfBookDatagram(data []byte) (*topOfBookDatagram, error) {
 			return nil, fmt.Errorf("decoding message %d header: %w", i, r.err)
 		}
 
-		if msg.MsgLength < 4 {
-			return nil, fmt.Errorf("message %d: msg_length %d too small (min 4)", i, msg.MsgLength)
+		if int(msg.MsgLength) < messageHeaderSize {
+			return nil, fmt.Errorf("message %d: msg_length %d too small (min %d)", i, msg.MsgLength, messageHeaderSize)
 		}
-		bodyLen := int(msg.MsgLength) - 4
+		bodyLen := int(msg.MsgLength) - messageHeaderSize
 		bodyBuf := r.bytes(bodyLen)
 		if r.err != nil {
 			return nil, fmt.Errorf("decoding message %d body (len=%d): %w", i, bodyLen, r.err)
