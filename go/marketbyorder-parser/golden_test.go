@@ -7,10 +7,11 @@ import (
 	"testing"
 )
 
-// The golden vectors are the cross-language contract. These four were
-// transcribed by hand from the field tables in edge-feed-spec rather than
-// captured from an encoder; the Rust codec crates assert the same field values
-// against them, and this side reads them with this parser's own decoder.
+// The golden vectors are the cross-language contract. Four of the five below
+// were transcribed by hand from the field tables in edge-feed-spec rather than
+// captured from an encoder, and the fifth, snapshot-end-v3.bin, is written by
+// the Rust market-by-price codec. The Rust crates assert the same field values
+// against all of them, and this side reads them with this parser's own decoder.
 //
 // That is what makes them worth having. Two implementations tested only against
 // themselves agree with themselves — including when both are wrong in the same
@@ -23,12 +24,18 @@ import (
 // settle_type and price_bound all as 0, so a decoder exchanging either pair
 // passes. Separating them means changing a vector, which is a wire change.
 //
-// Four of the vectors belong to this feed. Trade, InstrumentDefinition and
+// Five of the vectors bind this parser. Trade, InstrumentDefinition and
 // ManifestSummary are byte-identical across the family, so this decoder has to
-// read the same bytes the top-of-book one does. The depth vectors are not among
-// them: SnapshotBegin carries Total Orders and a 32-byte body here against
-// market-by-price's Total Levels, Depth Bound and 36, and the manifest tags
-// those vectors `"feed": "market-by-price"` for that reason.
+// read the same bytes the top-of-book one does, and SnapshotEnd is too: the
+// same 16-byte body under type id 0x22 here and in market-by-price. The
+// manifest tags it `"feed": "market-by-price"` because that is the feed whose
+// encoder wrote the bytes, not because this parser may read them differently.
+//
+// The remaining depth vectors are outside that set, each for its own reason.
+// SnapshotBegin carries Total Orders and a 32-byte body here against
+// market-by-price's Total Levels, Depth Bound and 36. SnapshotLevel is 0x42,
+// where this feed sends SnapshotOrder at 0x21. LevelUpdate and BookClear have
+// no market-by-order message at all.
 //
 // The expected values are the `fields` block of testdata/golden/manifest.json,
 // which is where an implementation in any language reads them from, and the
@@ -66,11 +73,12 @@ func goldenBytes(t *testing.T, name string) []byte {
 // header asserts the 4-byte application message header and returns the body.
 //
 // wantFlags is the on-wire Flags field, recorded as flags_on_wire in the
-// manifest. It is 0 on all four of these: bit 0 marks a message travelling the
-// `snapshot` port, and a Trade arrives on `mktdata` while an
-// InstrumentDefinition and a ManifestSummary arrive on `refdata`. The value is
-// asserted rather than assumed because it is the one part of these bytes the
-// encoder does not decide — the builder stamps it at push, from the port.
+// manifest. Bit 0 marks a message travelling the `snapshot` port, so it is 0 on
+// the Trade, which arrives on `mktdata`, and on the InstrumentDefinition and
+// ManifestSummary, which arrive on `refdata`, and set on the SnapshotEnd. The
+// value is asserted rather than assumed because it is the one part of these
+// bytes the encoder does not decide — the builder stamps it at push, from the
+// port.
 func header(t *testing.T, buf []byte, wantType uint8, wantSize int, wantFlags uint16) []byte {
 	t.Helper()
 	if len(buf) != wantSize {
@@ -144,7 +152,7 @@ func TestGoldenTrade(t *testing.T) {
 
 // instDefFields is the InstrumentDefinition expectation both schema generations
 // share. Only source_id differs: schema 1 has no field for it and the manifest
-// states it decodes as 0, which the instrument registry reads as Unknown.
+// states it decodes as 0, which is the Source ID Registry's Unknown value.
 func instDefFields(d InstrumentDefinitionBody, wantSourceID int64) []goldenField {
 	return []goldenField{
 		{"instrument_id", int64(d.InstrumentID), 1},
@@ -206,5 +214,23 @@ func TestGoldenManifestSummary(t *testing.T) {
 		{"manifest_seq", int64(m.ManifestSeq), 9},
 		{"instrument_count", int64(m.InstrumentCount), 1234},
 		{"timestamp_ns", m.Timestamp.UnixNano(), 1700000000000000002},
+	})
+}
+
+// SnapshotEnd is the one depth message whose bytes this feed and market-by-price
+// share: the same three fields in the same 16-byte body under type id 0x22. The
+// vector was captured from the market-by-price encoder, so binding it here is
+// what keeps the two decoders from drifting apart over a message neither owns
+// alone.
+func TestGoldenSnapshotEnd(t *testing.T) {
+	body := header(t, goldenBytes(t, "snapshot-end-v3.bin"), msgTypeSnapshotEnd, 20, flagSnapshot)
+	e, err := ParseSnapshotEnd(body)
+	if err != nil {
+		t.Fatalf("ParseSnapshotEnd: %v", err)
+	}
+	checkFields(t, []goldenField{
+		{"instrument_id", int64(e.InstrumentID), 1},
+		{"anchor_seq", int64(e.AnchorSeq), 918273645},
+		{"snapshot_id", int64(e.SnapshotID), 77},
 	})
 }

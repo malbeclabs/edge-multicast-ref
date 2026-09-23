@@ -23,7 +23,9 @@ guarantee than hand transcription and a stronger one than a round trip: it
 cannot catch a rule both implementations read the same wrong way, and it does
 catch anything either one gets wrong alone. `go/marketbyprice-parser`'s
 `golden_test.go` reads all five files and asserts every field, so a layout
-change made on one side fails on the other.
+change made on one side fails on the other. `snapshot-end-v3.bin` is read a
+third time: `go/marketbyorder-parser` decodes the same 16-byte body under the
+same type id, and its `golden_test.go` binds that decoder to the same bytes.
 
 Hand-transcribing them from the spec tables would settle the remainder, and is
 worth doing when the spec text is next open.
@@ -54,9 +56,12 @@ language can check both directions without re-reading the specs.
 | `snapshot-level-v3.bin` | SnapshotLevel | `0x42` | 32 | 3 |
 | `snapshot-end-v3.bin` | SnapshotEnd | `0x22` | 20 | 3 |
 
-The five market-by-price vectors are the depth-grain messages — the ones only
-that feed has. Its `Heartbeat`, `Trade` and `InstrumentDefinition` are
-byte-identical to the vectors above them and are not duplicated here.
+The five market-by-price vectors are the depth-grain messages — the ones the
+top-of-book feed does not have. Its `Heartbeat`, `Trade` and
+`InstrumentDefinition` are byte-identical to the vectors above them and are not
+duplicated here. `SnapshotEnd` is shared in the other direction: market-by-order
+sends the same 16-byte body under `0x22`, so `snapshot-end-v3.bin` is the
+market-by-order parser's vector as much as this feed's.
 
 `instrument-definition-v1.bin` and `instrument-definition-v3.bin` carry the
 same logical field values apart from `source_id`, which schema 1 has no field

@@ -27,7 +27,9 @@ import (
 // Trade, InstrumentDefinition and ManifestSummary are byte-identical across the
 // family and this parser decodes its own copy of each, so the vectors bind them
 // here as well as in the top-of-book and market-by-order parsers. The depth
-// vectors are this feed's alone.
+// vectors are this feed's, with one exception in the other direction:
+// SnapshotEnd is the same 16-byte body under type id 0x22 in market-by-order,
+// and that parser binds snapshot-end-v3.bin too.
 //
 // The expected values are the `fields` block of testdata/golden/manifest.json,
 // which is where an implementation in any language reads them from, and the
@@ -227,7 +229,7 @@ func TestGoldenTrade(t *testing.T) {
 
 // instDefFields is the InstrumentDefinition expectation both schema generations
 // share. Only source_id differs: schema 1 has no field for it and the manifest
-// states it decodes as 0, which the instrument registry reads as Unknown.
+// states it decodes as 0, which is the Source ID Registry's Unknown value.
 func instDefFields(d InstrumentDefinitionBody, wantSourceID int64) []goldenField {
 	return []goldenField{
 		{"instrument_id", int64(d.InstrumentID), 1},
