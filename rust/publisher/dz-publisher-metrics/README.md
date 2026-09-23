@@ -66,6 +66,8 @@ It reads *this channel is fifteen minutes staler than the freshest channel of th
 
 **The fifteen minutes is the operator's number and the rule is a heuristic.** What separates a dead channel from a dormant one is whether its instruments would have traded, and no series a publisher emits knows that: a genuinely quiet instrument set on a busy venue meets this rule too, and the only thing the comparison buys is that it is not defeated by the venue being closed — when every channel goes quiet together, none of them is stale relative to the others. Set the threshold from the venue's calendar, at longer than the quietest channel's longest legitimate gap between prints, and read a firing as *go and look* rather than as proof.
 
+**It is blind in the other direction too, and for a reason specific to this pair of feeds.** A trade is the one message both specifications carry: it is lowered once and handed to both send paths, so where a Top-of-Book channel and a Market-by-Price channel cover the same instruments, one trade refreshes both gauges. A venue whose level stream dies while its trades go on printing therefore keeps the two channels equally fresh and never makes this rule fire. Only the per-message-type egress rate separates them — `dz_publisher_egress_messages_total` carries it — so on a publisher with a depth feed, alert on that alongside this.
+
 Two details of the expression are load-bearing. `ignoring(channel_id)` rather than `on(venue, source_id)` on both joins, because two redundant paths of one channel carry the same `venue` and `source_id`: what tells them apart is the scrape's own target labels, and ignoring one label keeps them. And `> 0` on both sides, because the pre-created 0 is the whole Unix epoch away from a real timestamp — a rule that included it would page for every channel that had not yet published, at any uptime, which is why no `dz_publisher_uptime_seconds` guard appears here.
 
 A channel that has published nothing at all is the other half of the condition and is its own rule, because only an operator knows how long their venue's calendar makes that normal:
@@ -76,5 +78,7 @@ and ignoring(channel_id) dz_publisher_uptime_seconds > 3600
 ```
 
 `dz_publisher_uptime_seconds` is maintained here and refreshed on every scrape, so the `and on() dz_publisher_uptime_seconds > 60` guard several `HELP` strings recommend cannot be forgotten.
+
+That guard is also the whole of this rule's coverage, and it buys the silence at startup at a price worth saying out loud: uptime resets with the process, so a channel that has published nothing is invisible for the first hour of every process life, and on a publisher restarting more often than hourly it is invisible always. Pick the hour against how often this publisher actually restarts as well as against the venue's calendar, and treat a restart loop as hiding this rule rather than as a separate incident.
 
 Use `LATENCY_BUCKETS` and `REFDATA_LOAD_DURATION_BUCKETS` rather than local buckets, or two venues' percentiles will not compare.
