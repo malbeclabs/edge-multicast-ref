@@ -279,10 +279,12 @@ func TestSnapshotAcceptable_ReadyDiscriminator(t *testing.T) {
 	if ok, _ := i.SnapshotAcceptable(999999, 100); ok {
 		t.Error("anchor seq must not drive the decision")
 	}
-	// Not ready: always acceptable.
+	// Not ready with no recorded hole: the tracker comparison does not apply, so
+	// any snapshot is acceptable. This is the cold-start instrument, which must
+	// take the first snapshot it is offered whatever its Last Instrument Seq.
 	i.Status = StatusGap
 	if ok, _ := i.SnapshotAcceptable(1, 1); !ok {
-		t.Error("a gap instrument must accept any snapshot")
+		t.Error("an instrument with no recorded hole must accept any snapshot")
 	}
 }
 
@@ -332,5 +334,112 @@ func TestCrossed(t *testing.T) {
 	i.ApplyLevelUpdate(0, 1200, 5, 1, 0, 1)
 	if !i.Crossed() {
 		t.Error("bid 1200 > ask 1000 is crossed")
+	}
+}
+
+// A gap instrument is not indiscriminately hungry for a book. Recovery needs a
+// snapshot captured at or after the hole that demoted it: one captured before
+// the hole is a copy of the publisher's book from before the loss, and
+// committing it restores ready over a book this book engine already knows is
+// missing a mutation.
+func TestRequiredInstrumentSeq_RefusesASnapshotCapturedBeforeTheHole(t *testing.T) {
+	i := ready(t)
+	i.LastAppliedInstrumentSeq = 6
+	i.Status = StatusGap
+	i.RequireSnapshotAtLeast(7)
+
+	if ok, err := i.SnapshotAcceptable(5000, 6); ok || !errors.Is(err, errStaleInstrumentSeq) {
+		t.Fatalf("a snapshot from before the hole must be refused: ok=%v err=%v", ok, err)
+	}
+	if ok, err := i.SnapshotAcceptable(5000, 7); !ok || err != nil {
+		t.Fatalf("a snapshot at the hole must be accepted: ok=%v err=%v", ok, err)
+	}
+	// Anything newer recovers too: the snapshot at the hole's own seq can itself
+	// be lost, and the next cycle carries a later Last Instrument Seq.
+	if ok, err := i.SnapshotAcceptable(5000, 40); !ok || err != nil {
+		t.Fatalf("a newer snapshot must be accepted: ok=%v err=%v", ok, err)
+	}
+}
+
+// The requirement only ever moves forward. A gapped instrument can be demoted
+// again before it recovers, and the second demotion must not waive the first
+// one's hole.
+func TestRequireSnapshotAtLeast_NeverLowersTheBar(t *testing.T) {
+	i := ready(t)
+	i.RequireSnapshotAtLeast(40)
+	i.RequireSnapshotAtLeast(7)
+
+	if got := requiredSeq(i.RequiredInstrumentSeq); got != "40" {
+		t.Fatalf("required instrument seq: got %s want 40", got)
+	}
+	i.RequireSnapshotAtLeast(41)
+	if *i.RequiredInstrumentSeq != 41 {
+		t.Errorf("a newer hole must raise the bar: got %d want 41", *i.RequiredInstrumentSeq)
+	}
+}
+
+// The requirement can be recorded while a shadow is already open: a ready
+// instrument that was behind opens one, and a delta then gaps it. SnapshotBegin
+// ran before the hole existed, so the commit is the only place left to refuse a
+// shadow captured before it.
+func TestEndSnapshot_RefusesAShadowCapturedBeforeAHoleFoundMidBuild(t *testing.T) {
+	i := ready(t)
+	i.LastAppliedInstrumentSeq = 6
+	i.Bids[900] = &LevelState{QtyRaw: 7}
+
+	i.BeginSnapshot(3, 5000, 1, 6, 0) // captured at seq 6, accepted while ready
+	i.AddSnapshotLevel(3, 0, 1000, 5, 1, 0)
+	// The hole lands mid-build.
+	i.Status = StatusGap
+	i.RequireSnapshotAtLeast(7)
+
+	err := i.EndSnapshot(3, 5000)
+	if !errors.Is(err, errStaleInstrumentSeq) {
+		t.Fatalf("commit must be refused: %v", err)
+	}
+	if i.Status != StatusGap {
+		t.Errorf("status must stay gap: %v", i.Status)
+	}
+	if i.OpenSnapshot != nil {
+		t.Error("the shadow must be discarded")
+	}
+	if i.Bids[900] == nil || i.Bids[1000] != nil {
+		t.Error("only the shadow is discarded; the live book is untouched")
+	}
+	if got := requiredSeq(i.RequiredInstrumentSeq); got != "7" {
+		t.Errorf("the requirement must survive the refusal: got %s want 7", got)
+	}
+
+	// A shadow that does cover the hole commits and spends the requirement.
+	i.BeginSnapshot(4, 5100, 1, 7, 0)
+	i.AddSnapshotLevel(4, 0, 1000, 5, 1, 0)
+	if err := i.EndSnapshot(4, 5100); err != nil {
+		t.Fatalf("a covering snapshot must commit: %v", err)
+	}
+	if i.Status != StatusReady {
+		t.Errorf("status: %v want ready", i.Status)
+	}
+	if got := requiredSeq(i.RequiredInstrumentSeq); got != "<none>" {
+		t.Errorf("a covering snapshot must clear the requirement: got %s", got)
+	}
+}
+
+// An InstrumentReset restarts the Per-Instrument Seq series, so a requirement
+// recorded against the old one names a seq that will not come round again for a
+// whole wrap. Left set it would refuse every post-reset snapshot and wedge the
+// instrument in awaiting-snapshot; RequiredAnchorSeq guards recovery from here.
+func TestReset_ClearsTheRequiredInstrumentSeq(t *testing.T) {
+	i := ready(t)
+	i.LastAppliedInstrumentSeq = 900
+	i.RequireSnapshotAtLeast(901)
+
+	anchor := uint64(9000)
+	i.Reset(&anchor)
+
+	if got := requiredSeq(i.RequiredInstrumentSeq); got != "<none>" {
+		t.Fatalf("the reset must clear the requirement: got %s", got)
+	}
+	if ok, err := i.SnapshotAcceptable(9000, 1); !ok || err != nil {
+		t.Errorf("a post-reset snapshot must be acceptable: ok=%v err=%v", ok, err)
 	}
 }

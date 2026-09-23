@@ -669,3 +669,298 @@ func TestApply_ReplayedDeltasAreReported(t *testing.T) {
 		t.Errorf("per_instrument_seq: got %v want 6", got)
 	}
 }
+
+// requiredSeq renders an Instrument's recovery requirement for a failure
+// message. %v on the pointer itself prints an address, which says nothing about
+// which seq was required.
+func requiredSeq(p *uint32) string {
+	if p == nil {
+		return "<none>"
+	}
+	return strconv.FormatUint(uint64(*p), 10)
+}
+
+// A gap instrument must refuse a snapshot captured BEFORE the hole that demoted
+// it. This is the malformed demotion taken on receipt: seq 7 is malformed while
+// 8 is already held, so the requirement is the malformed record's own seq.
+//
+// Accepting a snapshot at seq 6 is the failure this pins. It returns the
+// instrument to ready over a book missing seq 7's mutation and sets the tracker
+// to 6, so seq 8 and everything behind it park in the reorder window and walk it
+// to a gap — landing one publisher defect in per_instrument_gaps_total, the
+// counter that says mktdata never reached this process.
+func TestApply_MalformedGapRefusesSnapshotFromBeforeTheHole(t *testing.T) {
+	m := NewMetrics("test", "test")
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
+	s.apply(instDefRec(11, "SYM", 1))
+	k := instKey{0, 11}
+	inst := s.instruments[k]
+	inst.Status = StatusReady
+	inst.LastAppliedInstrumentSeq = 6
+	inst.Bids[900] = &LevelState{QtyRaw: 7}
+
+	// 8 arrives ahead of the hole at 7 and is held; 7 is malformed, so the
+	// demotion is taken on receipt and 8 moves to the delta buffer.
+	s.apply(levelUpdateRec(11, 902, 8, "bid", 2000, 5))
+	s.apply(bookClearRec(11, 901, 7, "both", "from_price", 1000))
+	if inst.Status != StatusGap {
+		t.Fatalf("fixture: status %v want gap", inst.Status)
+	}
+	if got := malformedCount(m, reasonBookClearScopeSide); got != 1 {
+		t.Fatalf("fixture: malformed_deltas_total = %v want 1", got)
+	}
+
+	// The publisher's next snapshot was captured at seq 6, before the malformed
+	// record consumed seq 7.
+	s.apply(snapBeginRec(11, 5, 1, 6, 0, 899))
+	if inst.OpenSnapshot != nil {
+		t.Fatal("a snapshot from before the hole must not open a shadow")
+	}
+	s.apply(snapLevelRec(11, 5, "bid", 3000, 9))
+	s.apply(snapEndRec(11, 5, 899))
+
+	if inst.Status != StatusGap {
+		t.Errorf("status must stay gap: %v", inst.Status)
+	}
+	if inst.LastAppliedInstrumentSeq != 6 {
+		t.Errorf("a refused snapshot must not move the tracker: got %d want 6", inst.LastAppliedInstrumentSeq)
+	}
+	if inst.Bids[3000] != nil || inst.Bids[900] == nil {
+		t.Error("a refused snapshot must not touch the book")
+	}
+	if got := counterValue(m.SnapshotDiscardedTotal.WithLabelValues("stale_instrument_seq")); got != 1 {
+		t.Errorf("snapshot_discarded_total{stale_instrument_seq}: got %v want 1", got)
+	}
+
+	// Everything that follows buffers for replay. More than a full reorder
+	// window, because the window is exactly where the accepted stale snapshot
+	// would have parked these.
+	lastPi := uint32(8)
+	for i := 0; i <= reorderWindow; i++ {
+		lastPi = uint32(9 + i)
+		s.apply(levelUpdateRec(11, uint64(903+i), lastPi, "bid", int64(4000+i), 5))
+	}
+	if inst.Pending != nil {
+		t.Errorf("a gapped instrument must buffer, not hold in the reorder window: Pending=%v", inst.Pending)
+	}
+	if got := counterValue(m.PerInstrumentGapsTotal); got != 0 {
+		t.Fatalf("a publisher defect must not read as mktdata loss: per_instrument_gaps_total = %v want 0", got)
+	}
+
+	// A snapshot captured at the hole recovers the instrument in one step, and
+	// the buffer replays contiguously on top of it.
+	s.apply(snapBeginRec(11, 6, 1, 7, 0, 900))
+	if inst.OpenSnapshot == nil {
+		t.Fatal("a snapshot at the hole must open a shadow")
+	}
+	s.apply(snapLevelRec(11, 6, "bid", 5000, 9))
+	s.apply(snapEndRec(11, 6, 900))
+
+	if inst.Status != StatusReady {
+		t.Fatalf("a covering snapshot must restore ready: %v", inst.Status)
+	}
+	if got := requiredSeq(inst.RequiredInstrumentSeq); got != "<none>" {
+		t.Errorf("a covering snapshot must spend the requirement: got %s", got)
+	}
+	if inst.LastAppliedInstrumentSeq != lastPi {
+		t.Errorf("the buffer must replay contiguously: tracker %d want %d", inst.LastAppliedInstrumentSeq, lastPi)
+	}
+	if got := counterValue(m.PerInstrumentGapsTotal); got != 0 {
+		t.Errorf("recovery must declare no gap of its own: per_instrument_gaps_total = %v want 0", got)
+	}
+}
+
+// A malformed record that arrives AHEAD of the expected seq requires its OWN
+// seq, not the expected one. The two differ exactly then, and only one of them
+// is lost: the seqs between the expected one and the malformed record are valid
+// deltas that buffer and replay, while the seq the publisher consumed for the
+// discarded message is gone. Requiring the expected seq accepts a snapshot that
+// still misses the malformed record's mutation.
+func TestApply_MalformedGapAheadOfExpectedRequiresItsOwnSeq(t *testing.T) {
+	m := NewMetrics("test", "test")
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
+	s.apply(instDefRec(11, "SYM", 1))
+	k := instKey{0, 11}
+	inst := s.instruments[k]
+	inst.Status = StatusReady
+	inst.LastAppliedInstrumentSeq = 5
+
+	// 7 is malformed and arrives while 6 is still missing, so the expected seq is
+	// 6 and the seq that was lost is 7.
+	s.apply(bookClearRec(11, 901, 7, "both", "from_price", 1000))
+	if inst.Status != StatusGap {
+		t.Fatalf("fixture: status %v want gap", inst.Status)
+	}
+	if got := requiredSeq(inst.RequiredInstrumentSeq); got != "7" {
+		t.Fatalf("the requirement must be the malformed record's own seq: got %s want 7", got)
+	}
+	// 6 was only late. It arrives and buffers, so recovery does not need the
+	// snapshot to cover it.
+	s.apply(levelUpdateRec(11, 900, 6, "bid", 1000, 5))
+
+	// A snapshot captured at 6 includes the delta that was merely late and
+	// excludes the one that is gone, so it is still from before the hole.
+	s.apply(snapBeginRec(11, 5, 1, 6, 0, 899))
+	if inst.OpenSnapshot != nil {
+		t.Fatal("a snapshot at the expected seq is still before the hole")
+	}
+	if got := counterValue(m.SnapshotDiscardedTotal.WithLabelValues("stale_instrument_seq")); got != 1 {
+		t.Errorf("snapshot_discarded_total{stale_instrument_seq}: got %v want 1", got)
+	}
+
+	s.apply(snapBeginRec(11, 6, 1, 7, 0, 899))
+	if inst.OpenSnapshot == nil {
+		t.Fatal("a snapshot at the malformed record's own seq must open a shadow")
+	}
+	if got := counterValue(m.PerInstrumentGapsTotal); got != 0 {
+		t.Errorf("a publisher defect must not read as mktdata loss: per_instrument_gaps_total = %v want 0", got)
+	}
+}
+
+// The same refusal on the DRAIN path. A malformed record reaching applyOne is
+// the backstop for the receipt classifier — applyOne is the sole writer of the
+// sequence trackers, so it refuses one its caller let through — and that
+// demotion has to record the hole exactly as the receipt one does.
+func TestApply_MalformedGapOnDrainRefusesSnapshotFromBeforeTheHole(t *testing.T) {
+	m := NewMetrics("test", "test")
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
+	s.apply(instDefRec(11, "SYM", 1))
+	k := instKey{0, 11}
+	inst := s.instruments[k]
+	inst.Status = StatusReady
+	inst.LastAppliedInstrumentSeq = 5
+	// Injected straight into Pending, past the receipt classifier, which is the
+	// only way the drain reaches a malformed record.
+	inst.Pending = map[uint32]Record{7: bookClearRec(11, 902, 7, "both", "from_price", 1000)}
+
+	// 6 applies, then the drain reaches 7 and demotes.
+	s.apply(levelUpdateRec(11, 901, 6, "bid", 1000, 5))
+
+	if inst.Status != StatusGap {
+		t.Fatalf("the drain must demote: %v", inst.Status)
+	}
+	if got := malformedCount(m, reasonBookClearScopeSide); got != 1 {
+		t.Fatalf("malformed_deltas_total: got %v want 1", got)
+	}
+	if got := requiredSeq(inst.RequiredInstrumentSeq); got != "7" {
+		t.Fatalf("the drain path must record the hole too: got %s want 7", got)
+	}
+
+	s.apply(snapBeginRec(11, 5, 1, 6, 0, 903))
+	if inst.OpenSnapshot != nil {
+		t.Error("a snapshot from before the hole must not open a shadow")
+	}
+	if got := counterValue(m.SnapshotDiscardedTotal.WithLabelValues("stale_instrument_seq")); got != 1 {
+		t.Errorf("snapshot_discarded_total{stale_instrument_seq}: got %v want 1", got)
+	}
+	if got := counterValue(m.PerInstrumentGapsTotal); got != 0 {
+		t.Errorf("a publisher defect must not read as mktdata loss: per_instrument_gaps_total = %v want 0", got)
+	}
+}
+
+// The sequence-gap demotion states the same requirement. The hole is at the
+// expected seq, so a snapshot carrying a lower Last Instrument Seq predates the
+// delta that never arrived and cannot repair it.
+func TestApply_SequenceGapRefusesSnapshotFromBeforeTheHole(t *testing.T) {
+	m := NewMetrics("test", "test")
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
+	s.apply(instDefRec(11, "SYM", 1))
+	k := instKey{0, 11}
+	inst := s.instruments[k]
+	inst.Status = StatusReady
+	inst.LastAppliedInstrumentSeq = 5
+
+	// Far beyond the reorder window: a confirmed gap, with the hole at seq 6.
+	s.apply(levelUpdateRec(11, 900, 5+reorderWindow+2, "bid", 1000, 50))
+	if inst.Status != StatusGap {
+		t.Fatalf("fixture: status %v want gap", inst.Status)
+	}
+	if got := counterValue(m.PerInstrumentGapsTotal); got != 1 {
+		t.Fatalf("fixture: per_instrument_gaps_total = %v want 1", got)
+	}
+	// The requirement is the seq before the record that will replay, not the
+	// hole. This branch tripped on DISTANCE: 6..22 never arrived at all, and
+	// only 23 is held and buffered. A snapshot at the hole would commit and
+	// leave 7..22 missing, so the replay of 23 would find a second hole and
+	// declare a second gap for the same loss.
+	const held = 5 + reorderWindow + 2
+	if got, want := requiredSeq(inst.RequiredInstrumentSeq), strconv.Itoa(held-1); got != want {
+		t.Fatalf("the gap must record the seq before the record that replays: got %s want %s", got, want)
+	}
+
+	s.apply(snapBeginRec(11, 5, 1, 5, 0, 899))
+	if inst.OpenSnapshot != nil {
+		t.Fatal("a snapshot from before the hole must not open a shadow")
+	}
+	if inst.Status != StatusGap {
+		t.Errorf("status must stay gap: %v", inst.Status)
+	}
+	if got := counterValue(m.SnapshotDiscardedTotal.WithLabelValues("stale_instrument_seq")); got != 1 {
+		t.Errorf("snapshot_discarded_total{stale_instrument_seq}: got %v want 1", got)
+	}
+
+	// A snapshot at the hole is refused too, for the reason above: it predates
+	// everything between the hole and the held record.
+	s.apply(snapBeginRec(11, 6, 1, 6, 0, 901))
+	if inst.OpenSnapshot != nil {
+		t.Error("a snapshot at the hole must not open a shadow while later deltas are missing")
+	}
+
+	// The one that covers the whole missing run does open, so the refusal costs
+	// a snapshot cycle rather than wedging the instrument.
+	s.apply(snapBeginRec(11, 7, 1, held-1, 0, 902))
+	if inst.OpenSnapshot == nil {
+		t.Error("a snapshot covering the missing run must open a shadow")
+	}
+}
+
+// A delta-buffer eviction discards a RANGE of deltas rather than one, and it is
+// not triggered by a record of the victim's own, so the expected seq describes
+// only the oldest of them. The requirement is the highest Per-Instrument Seq
+// evicted, or a snapshot from inside the discarded range restores ready over a
+// book missing the rest of it.
+func TestApply_BufferEvictionRefusesSnapshotFromInsideTheEvictedRange(t *testing.T) {
+	m := NewMetrics("test", "test")
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
+	s.maxBuffered = 2
+	s.apply(instDefRec(11, "SYM", 1))
+	k := instKey{0, 11}
+	inst := s.instruments[k] // awaiting-snapshot, so its deltas buffer
+
+	for i, pi := range []uint32{10, 11, 12} {
+		s.apply(levelUpdateRec(11, uint64(900+i), pi, "bid", 1000, 5))
+	}
+	if inst.Status != StatusGap {
+		t.Fatalf("fixture: the overflow must gap the victim, got %v", inst.Status)
+	}
+	if got := counterValue(m.DeltaBufferOverflowTotal); got != 1 {
+		t.Fatalf("fixture: delta_buffer_overflow_total = %v want 1", got)
+	}
+	// This process chose the eviction; nothing was lost in transit.
+	if got := counterValue(m.PerInstrumentGapsTotal); got != 0 {
+		t.Errorf("an eviction must not read as mktdata loss: per_instrument_gaps_total = %v want 0", got)
+	}
+
+	s.apply(snapBeginRec(11, 5, 1, 11, 0, 899))
+	if inst.OpenSnapshot != nil {
+		t.Fatal("a snapshot from inside the evicted range must not open a shadow")
+	}
+	if got := counterValue(m.SnapshotDiscardedTotal.WithLabelValues("stale_instrument_seq")); got != 1 {
+		t.Errorf("snapshot_discarded_total{stale_instrument_seq}: got %v want 1", got)
+	}
+
+	// A snapshot past the whole range recovers it.
+	s.apply(snapBeginRec(11, 6, 1, 12, 0, 901))
+	if inst.OpenSnapshot == nil {
+		t.Fatal("a snapshot covering the evicted range must open a shadow")
+	}
+	s.apply(snapLevelRec(11, 6, "bid", 1000, 5))
+	s.apply(snapEndRec(11, 6, 901))
+
+	if inst.Status != StatusReady {
+		t.Errorf("status: %v want ready", inst.Status)
+	}
+	if got := requiredSeq(inst.RequiredInstrumentSeq); got != "<none>" {
+		t.Errorf("a covering snapshot must spend the requirement: got %s", got)
+	}
+}
