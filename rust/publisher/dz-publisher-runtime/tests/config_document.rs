@@ -215,7 +215,7 @@ fn a_valid_document_resolves_end_to_end() {
     assert_eq!(feed.idle_guard, Duration::from_secs(60));
     // The TTL this document states, not a default: `Doc::valid` writes
     // `ttl = 1`, and a document that omitted the key would not resolve at all.
-    assert_eq!(config.egress.ttl, 1);
+    assert_eq!(config.egress.ttl.get(), 1);
     assert_eq!(config.egress.pin, None);
     assert_eq!(config.refdata.selection.bootstrap_top_n(), 8);
     assert_eq!(config.refdata.selection.max_published(), 16);
@@ -850,7 +850,7 @@ fn a_stated_ttl_of_one_resolves_to_one_hop() {
         .expect("parses")
         .resolve()
         .expect("one hop is a value, not a default");
-    assert_eq!(config.egress.ttl, 1);
+    assert_eq!(config.egress.ttl.get(), 1);
 }
 
 /// And the value a deployment that exists uses.
@@ -866,7 +866,7 @@ fn a_stated_ttl_of_sixty_four_reaches_the_policy() {
         .expect("parses")
         .resolve()
         .expect("a routed group is the case this key exists for");
-    assert_eq!(config.egress.ttl, 64);
+    assert_eq!(config.egress.ttl.get(), 64);
 }
 
 #[test]
