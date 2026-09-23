@@ -209,21 +209,22 @@
 
 -- THE SIX RACE GRANTS ARE WRITTEN HERE BEFORE THEY ARE APPLIED, WHICH IS THE
 -- OPPOSITE ORDER FROM THE FIRST THREE AND IS THE ORDER THIS FILE ARGUES FOR.
--- The first three were applied by hand on 2026-09-19 and written down on
--- 2026-09-21, and the paragraph at the top of this file is what those two days
--- cost. The interval is not the point and a short one is not a defence: for as
--- long as it lasted, the cluster held a grant no file named, and a rebuild in
--- that window would have come back without it. These are written down
--- first: an administrator applies the file, and the record and the cluster
--- agree from the beginning rather than after somebody reconciles them.
+-- The first three were applied by hand and written down afterwards, and the
+-- paragraph at the top of this file is what that order cost. How long it
+-- lasted is not the point and a short gap is no defence: for as long as it
+-- lasted, the cluster held a grant no file named, and a rebuild in that window
+-- would have come back without it. These are written down first: an
+-- administrator applies the file, and the record and the cluster agree from
+-- the beginning rather than after somebody reconciles them.
 --
 -- SO THE READER DOES NOT HOLD THEM AS OF 2026-09-22, AND WHAT SAYS SO IS A
 -- SYMPTOM RATHER THAN THE CLUSTER. `malbeclabs/phoenix#290` reports a panel
 -- over `recorder.feed_race` answering `497`, which is the same evidence the
 -- first three grants were written from. `grafana` has no privilege on
--- `system.grants` — `SHOW ACCESS` answers `497` through the data source's own
--- credential — so the state is read with `SHOW GRANTS FOR grafana;` from an
--- administrator's session, which is the session that applies this file anyway.
+-- `system.grants` — `SHOW ACCESS` answers `497` through the Grafana data
+-- source's own credential — so the state is read with
+-- `SHOW GRANTS FOR grafana;` from an administrator's session, which is the
+-- session that applies this file anyway.
 -- The dashboard the six are for is `malbeclabs/phoenix#291`; until they are
 -- applied it renders the venue counts and nothing about the race.
 

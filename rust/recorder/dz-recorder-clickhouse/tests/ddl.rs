@@ -3813,7 +3813,7 @@ fn the_reader_file_grants_without_creating_the_reader() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    // EXACTLY these three statements, compared whole. An earlier version of
+    // EXACTLY these nine statements, compared whole. An earlier version of
     // this test built the set with `strip_prefix("GRANT SELECT ON ")` and so
     // pinned the OBJECT without pinning the PRIVILEGE: any other verb dropped
     // out of the compared set silently, and the only remaining gate asked that
@@ -4149,6 +4149,91 @@ fn the_reader_file_records_the_grants_the_cluster_still_holds() {
     );
 }
 
+/// `012` dates its operational history and never narrates the gap between two
+/// dates.
+///
+/// The paragraph arguing that a grant is written down before it is applied made
+/// its case by naming how long the first three went unrecorded for. Review
+/// checked that duration against the file's own dates and it did not survive
+/// the subtraction. The duration was never the argument — the ORDER is, and the
+/// order is what the paragraph states now — but a number of days or months
+/// invites exactly that check, cannot be settled from the sentence it lives in,
+/// and stops being true as soon as either end of it moves.
+///
+/// So the history is carried by dates, each stated once where a reader can
+/// subtract them if the distance ever matters: `2026-09-19` for the hand
+/// application, `2026-09-21` for the record that followed it. What this refuses
+/// is the distance written out as prose beside them.
+///
+/// WHAT IS SCANNED FOR IS A COUNT IMMEDIATELY FOLLOWED BY A UNIT OF TIME, which
+/// is narrower than it sounds and deliberately so. "a later file", "three
+/// grants" and "the six race grants" are all untouched, because neither half is
+/// the trigger on its own. `a month` and `two days` are, and `a month` is the
+/// sentence review rejected.
+#[test]
+fn the_reader_file_dates_its_history_and_never_narrates_the_gap() {
+    let reader = migration("012_recorder_reader_grants.sql").sql;
+
+    // Unwrapped, for the reason the Lake test gives: an interval that wraps
+    // between its count and its unit is the same interval.
+    let prose = reader
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("--"))
+        .map(|l| l.trim_start_matches('-').trim())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    // The two ends of the interval this file no longer states, so that dropping
+    // the duration cannot be satisfied by dropping the history with it.
+    assert!(
+        prose.contains("2026-09-19"),
+        "`012` does not date the hand application, so its opening paragraph \
+         describes a state rather than recording an event"
+    );
+    assert!(
+        prose.contains("2026-09-21"),
+        "`012` does not date the record itself, so nothing says when this file \
+         and the cluster were first reconciled"
+    );
+
+    const UNITS: [&str; 10] = [
+        "day",
+        "days",
+        "week",
+        "weeks",
+        "fortnight",
+        "month",
+        "months",
+        "year",
+        "years",
+        "decade",
+    ];
+    const COUNTS: [&str; 14] = [
+        "a", "an", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        "several", "few",
+    ];
+
+    let words: Vec<String> = prose
+        .split_whitespace()
+        .map(|w| {
+            w.trim_matches(|c: char| !c.is_ascii_alphanumeric())
+                .to_ascii_lowercase()
+        })
+        .collect();
+    for pair in words.windows(2) {
+        let (count, unit) = (pair[0].as_str(), pair[1].as_str());
+        let counted = COUNTS.contains(&count)
+            || (!count.is_empty() && count.chars().all(|c| c.is_ascii_digit()));
+        assert!(
+            !(counted && UNITS.contains(&unit)),
+            "`012` narrates `{count} {unit}`: an elapsed interval a reader \
+             cannot settle against the dates beside it, and one that stops \
+             being true as soon as either end of it moves"
+        );
+    }
+}
+
 /// `009` and `010` tell an operator to re-apply the READER's grants too.
 ///
 /// The sibling of `the_venue_file_tells_an_operator_to_re_apply_the_account_file`,
@@ -4193,7 +4278,7 @@ fn the_reader_file_records_the_grants_the_cluster_still_holds() {
 /// beneath a view the reader ALREADY holds fails
 /// `the_reader_can_read_everything_under_the_views_it_is_granted`.
 #[test]
-fn the_venue_file_tells_an_operator_to_re_apply_the_reader_file() {
+fn the_venue_and_book_key_files_tell_an_operator_to_re_apply_the_reader_file() {
     let sql = venue_sql();
     let book_key = book_key_sql();
     let reader = migration("012_recorder_reader_grants.sql").sql;
