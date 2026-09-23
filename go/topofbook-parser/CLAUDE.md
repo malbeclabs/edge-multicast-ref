@@ -153,5 +153,5 @@ Per-venue runbooks and the end-to-end POC writeup live in the `malbeclabs/double
 ## Style
 
 - Go. No codegen, no third-party frameworks. `encoding/binary` for wire decode, `log/slog` for structured logging, `flag` for CLI.
-- `package main` — flat directory, single binary. If it ever needs to be importable as a library, split into a sub-package + `cmd/` directory.
+- Single binary. The module root is `package main`; the wire format and the parser state machine are the `tob` sub-package, and a new shared type belongs with the layer it serves.
 - Tests use the standard `testing` package. No testify. Synthetic wire-format bytes are built by test helpers rather than fixtures checked in beside them, with one deliberate exception: `tob/golden_test.go` reads the shared vectors in `testdata/golden`, which are the cross-language contract and carry their force precisely because this package did not write them.

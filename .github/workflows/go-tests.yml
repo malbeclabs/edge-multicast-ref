@@ -1,5 +1,13 @@
 name: go tests
 
+# Unfiltered, and deliberately, for the reason rust-codec.yml states at length:
+# a paths-filtered workflow reports nothing on a pull request that touches none
+# of its paths, and a *required* check that never reports blocks that pull
+# request for ever. These checks are required.
+#
+# Adding `testdata/golden/**` to a filter would not make one safe. It would be
+# necessary — these suites assert against those vectors, so a commit touching
+# only a vector has to run them — and it would not be sufficient.
 on:
   pull_request:
   push:
