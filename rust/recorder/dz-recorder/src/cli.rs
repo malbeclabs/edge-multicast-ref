@@ -155,10 +155,9 @@ Options:
                         reports `unknown` rather than claiming a commit, and
                         that string is what every archive it writes carries.
 
-                        Both spellings, because the publisher beside this takes
-                        both and a habit an operator or a deployment role
-                        carries between them should not depend on which binary
-                        it is asking.
+                        Both spellings, because `-V` is the conventional
+                        short one and a deployment role that reaches for it is
+                        asking what this binary is, not asking it wrongly.
   --help, -h            This.
 
 Exit codes:
@@ -284,9 +283,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Invocation, CliE
 /// `b.toml` and said nothing, so a command line naming two configurations was
 /// answered with one of them chosen by position. There is no reading of two
 /// that is what somebody meant — the same argument the two refusals for a
-/// configuration stating both arrangements or neither are made on — and the
-/// publisher's parser beside this refuses it too, so an operator does not learn
-/// one rule per binary.
+/// configuration stating both arrangements or neither are made on.
 ///
 /// One helper for both options rather than one refusal for `--config`: the
 /// mistake is the same mistake, and a parser that refused a second
@@ -596,10 +593,10 @@ mod tests {
 
     /// The version is asked for by either spelling.
     ///
-    /// `-V` was a refusal here and an answer on the publisher, which is one
-    /// question with two answers depending on which binary a deployment role
-    /// was pointed at. `-h` was already accepted and only the usage did not say
-    /// so, so both short spellings are asserted where the long ones are.
+    /// `-V` is the conventional short spelling and it asks what `--version`
+    /// asks, so a deployment role that reaches for it gets the version rather
+    /// than a usage error. `-h` is accepted beside `--help`, and the usage
+    /// names both short spellings where it names the long ones.
     #[test]
     fn the_version_is_asked_for_by_either_spelling() {
         assert_eq!(parse_of(&["-V"]), Ok(Invocation::Version));

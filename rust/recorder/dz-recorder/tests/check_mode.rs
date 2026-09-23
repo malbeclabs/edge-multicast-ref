@@ -328,9 +328,9 @@ fn the_version_names_the_build_and_admits_an_unknown_commit() {
     // field somebody forgot rather than as an answer.
     assert!(!ran.stdout.contains("()"), "{}", ran.stdout);
 
-    // The short spelling is the same answer. `-V` was a usage error here while
-    // the publisher answered it, and a deployment role asking a binary what it
-    // is should not have to know which binary it is asking.
+    // The short spelling is the same answer. `-V` is the conventional short
+    // spelling of `--version`, and a deployment role that reaches for it is
+    // asking what this binary is, not asking it wrongly.
     let short = run(&["-V"]);
     assert_eq!(short.code(), 0, "{}", short.stderr);
     assert_eq!(short.stdout, ran.stdout);
