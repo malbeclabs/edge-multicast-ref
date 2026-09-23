@@ -47,9 +47,13 @@ key it from cannot carry anything else.
 | `Shard.snapCtx` | `go/marketbyorder-bot/shard.go:66` | `map[snapKey]SnapshotContext` | channel instance |
 | `Coordinator.open` | `go/marketbyprice-bot/coordinator.go:55` | `map[uint8]openGroup` per `Channel ID` | channel instance |
 | `Coordinator.seqLast` | `go/marketbyorder-bot/coordinator.go:26` | `map[string]uint64` keyed on the port role token | channel instance — and it is never read |
+| `Coordinator.manifest` | `go/marketbyprice-bot/coordinator.go:54` | one `ManifestState` for the process | channel instance |
+| `SnapshotWriter.dirty`, `lastWrittenAt` | `go/marketbyprice-bot/snapshot_writer.go:42`, `:49` | `map[instKey]…` | channel instance + `Instrument ID` |
+| `SnapshotWriter.dirty` | `go/marketbyorder-bot/snapshot_writer.go:24` | `map[uint32]*dirtyEntry`, beside a constructor-fixed `channel` (`:26`) | channel instance + `Instrument ID` |
+| `SnapshotWriter.generation` | `go/marketbyorder-bot/snapshot_writer.go:27`, `go/marketbyprice-bot/snapshot_writer.go:52` | one counter per shard | channel instance |
 | `seqTracker.last` | `go/marketbyorder-parser/runner.go:39`, `go/marketbyprice-parser/runner.go:39` | `map[pubKey]uint64`, `pubKey{src, ch}` | correct in effect, see below |
 
-Two consequences, both silent.
+Four consequences, all silent.
 
 **The snapshot cycle collapses.** `marketbyprice-bot` holds one open snapshot
 group per `Channel ID` (`coordinator.go:55`), and stamps each `snapshot_level`
@@ -66,6 +70,28 @@ is keyed `(Channel ID, Snapshot ID)`, and `Shard.applySnapshotOrder`
 instance, so two instances hold two independent, differing, steady values. Held
 per `Channel ID`, the alternation between two instances of one channel reads as a
 reset on every datagram.
+
+**A reset wipes work that never reset.** A shard handles `msgReset` by wiping the
+channel's share of its maps and then calling `SnapshotWriter.Reset(ctx)`
+(`go/marketbyorder-bot/shard.go:505-511`, `go/marketbyprice-bot/dispatch.go:468-475`).
+That call takes no key: `doReset` replaces `dirty` and `lastWrittenAt` whole and
+bumps one `generation`
+(`go/marketbyorder-bot/snapshot_writer.go:92-96`,
+`go/marketbyprice-bot/snapshot_writer.go:134-142`), and `flushDue` abandons any
+batch it had already extracted when the generation moves. One shard serves every
+channel for its id-modulo, so this already discards another channel's pending
+`level_snapshots` rows, and it will discard the other instance's the moment an
+instance can reset alone.
+
+**A manifest bump prunes across the boundary.** `marketbyprice-bot` holds the
+refdata manifest as one `ManifestState` (`coordinator.go:54`), and `applyManifest`
+broadcasts `msgManifestPrune` carrying only the new `Manifest Seq`
+(`coordinator.go:200-220`). `Shard.pruneManifest` (`dispatch.go:303-329`) then
+walks every entry in `refdata` and drops the instrument, its book, its buffered
+deltas and its gauges wherever `ManifestSeq` is below the cutoff, with no channel
+or instance filter. A manifest published by one path therefore evicts the other
+path's instruments. `marketbyorder-bot` is not exposed to this: its `manifest`
+field is parity bookkeeping and drives no prune (`coordinator.go:25`).
 
 ### The identity exists upstream and is dropped at the boundary
 
@@ -133,16 +159,32 @@ channel instance. It is the same change.
    book-builders and in both parsers, as a declared type rather than as a
    property of which goroutine holds a map.
 2. Two paths carrying one `Channel ID`, on distinct destination ports, produce
-   two independent sequence series, two `Reset Count` values, two snapshot
-   cycles and two sets of rows. Neither wipes, overwrites or reads the other's.
-3. A `Reset Count` change on one instance drains the shards and wipes that
-   instance only.
-4. A datagram-sequence discontinuity on an instance's `snapshot` port
+   two independent sequence series, two `Reset Count` values and two snapshot
+   cycles, and neither wipes, overwrites or reads the other's in-process state.
+3. Both instances' rows survive in every table that retains rows — `events`,
+   `level_snapshots`, `wire_snapshots`, `wire_levels` and `channel_health` are
+   all plain `MergeTree`. `instruments` is the one table that does not, and the
+   criterion is scoped around it rather than over it: it is
+   `ReplacingMergeTree(recv_ts) ORDER BY (channel_id, instrument_id)`
+   (`demo/clickhouse/init/02_schema_mbo.sql:24-25`,
+   `demo/clickhouse/init/03_schema_mbp.sql:25-26`), so two instances of one
+   channel collapse to one row and the last writer wins. The two columns record
+   which instance that row came from; keeping one row per instance is a sort-key
+   change and a table rebuild, and it is in *Out of scope*. In-process refdata is
+   unaffected — it is keyed by `instKey`, which carries the instance.
+4. A `Reset Count` change on one instance drains the shards and wipes that
+   instance's books, refdata, buffered deltas and pending snapshot rows, and
+   only that instance's.
+5. A datagram-sequence discontinuity on an instance's `snapshot` port
    invalidates that instance's open snapshot group, so a lost `SnapshotBegin` or
    `SnapshotEnd` cannot leave levels filed against a stale group.
-5. Every persisted row states which channel instance produced it.
-6. No live process ever reads a field the other side is not yet writing, and no
-   insert is ever accepted with a field the table has no column for.
+6. Every persisted row states which channel instance produced it.
+7. No insert is ever accepted with a field the table has no column for. Exactly
+   one window exists in which a process reads a field the other side is not yet
+   writing — a book-builder rolled ahead of its parser — and in it the
+   book-builder's behaviour is defined rather than guessed: it degrades to the
+   `Channel ID` key, counts every such record, and runs no continuity check on
+   records it cannot attribute. See *Migration and compatibility order*.
 
 Explicitly **not** a success criterion: folding two instances of one channel
 into one book. See *Out of scope*.
@@ -155,7 +197,7 @@ Two, on all four `Record` declarations:
 
 | Go field | JSON key | Go type | Why that type |
 |---|---|---|---|
-| `SourceAddr` | `source_addr` | `netip.Addr` | Comparable, so it is usable directly in a map key with no allocation per datagram — the reason `pubKey` already holds one (`go/marketbyorder-parser/runner.go:29-30`). It implements `MarshalText`/`UnmarshalText`, so it encodes as a dotted quad string in JSONL and decodes on the book-builder side with no helper. |
+| `SourceAddr` | `source_addr` | `netip.Addr` | Comparable, so it is usable directly in a map key with no allocation per datagram — the reason `pubKey` already holds one (`go/marketbyorder-parser/runner.go:29-30`). It implements `MarshalText`/`UnmarshalText`, so it encodes as a dotted quad string in JSONL and decodes on the book-builder side with no helper. The zero `Addr` is the one value that is not a dotted quad: it marshals to `""` and unmarshals back to the zero `Addr`, which is what makes an unstamped record recognisable — and why a ClickHouse row is built through the helper under *The column is forward-only* rather than from the field. |
 | `DstPort` | `dst_port` | `uint16` | The destination port **number**. A UDP port is a `u16`; `portConfig.Port` is an `int` only because `net.UDPAddr.Port` is. |
 
 Both are unconditional: no `omitempty`. A record whose instance identity is
@@ -257,27 +299,58 @@ whose third dimension is implied by a goroutine's lifetime.
 | `go/marketbyorder-bot` | `Coordinator.snapshotRoute` | deleted, replaced by `open map[channelInstance]openGroup` |
 | `go/marketbyorder-bot` | `Shard.snapCtx`, `snapKey{ch, snap}` | `map[instKey]SnapshotContext` — one open cycle per instrument per instance |
 | `go/marketbyorder-bot` | `Coordinator.seqLast` | `map[channelInstance]uint64`, and read |
+| `go/marketbyorder-bot` | `SnapshotWriter.dirty`, `withInstrument`, `MarkDirty`, and the constructor's fixed `channel` | keyed on `instKey`; `channel_id` on a `level_snapshots` row comes from the key instead of the constructor argument |
 | `go/marketbyprice-bot` | `instKey{ch, id}` | `instKey{inst channelInstance, id uint32}` |
 | `go/marketbyprice-bot` | `Coordinator.resetCount` | `map[channelInstance]uint8` |
 | `go/marketbyprice-bot` | `Coordinator.open` | `map[channelInstance]openGroup` |
+| `go/marketbyprice-bot` | `Coordinator.manifest` | `map[channelInstance]ManifestState`, and `msgManifestPrune` carries the instance |
+| both book-builders | `shardMsg.ch` | `shardMsg.inst channelInstance`, for `msgReset` and `msgManifestPrune` |
+| both book-builders | `SnapshotWriter.Reset`, `doReset`, `generation` | `Reset(ctx, inst)`; `dirty` and `lastWrittenAt` lose only that instance's entries, and the generation is held per instance |
 
-Two notes on the market-by-order side.
+Five notes on what that table leaves implicit.
 
-**`snapshotRoute` goes away rather than being re-keyed.** Re-keying it on the
-channel instance would fix the collapse between two paths and leave the defect
-within one: `Snapshot ID` is monotonic per `(Channel ID, Instrument ID)`, not per
-channel, so two instruments routinely sit at one value inside a cycle and an
-id-keyed route delivers levels to whichever instrument last claimed it. That is
-already written down twice, at `go/marketbyprice-bot/coordinator.go:19-24` and
-`go/marketbyprice-bot/README.md:156`, and named there as the open issue against
-`marketbyorder-bot`. So `marketbyorder-bot` adopts the shape
-`marketbyprice-bot` already proved: one open group per channel instance, routed
-by the group and validated — never keyed — by `Snapshot ID`.
+**One open group per channel instance is the sufficient state, and the protocol
+is what makes it sufficient.** A publisher MUST NOT interleave snapshot groups
+within one channel instance — stated at `go/marketbyprice-bot/coordinator.go:26-27`
+and at `docs/2026-04-23-marketbyorder-plan.md:3066-3068`, and it is why
+`marketbyprice-bot` holds one `openGroup` rather than a set. Two instances of one
+channel are two publishers, and they do interleave with each other, so the
+sufficient state is one open group **per channel instance** and one per channel
+is not. That is the whole of the change to the open group: the cardinality the
+protocol already implies, keyed on the unit the glossary already names.
 
-With the route following the open group, `Shard.applySnapshotOrder`
-(`shard.go:184-200`) stops scanning instruments for a matching `OpenSnapshot`
-and resolves the instrument from the record it was stamped with, the way
-`marketbyprice-bot` does at `coordinator.go:124-126`.
+**`snapshotRoute` goes away rather than being re-keyed.** Under that protocol an
+id-keyed route is unambiguous while no `snapshot_begin` or `snapshot_end` is
+lost: `Dispatch` deletes the route at `snapshot_end`
+(`go/marketbyorder-bot/coordinator.go:85`) and the next group's `snapshot_begin`
+claims the id afresh (`:68`), so two instruments never hold one `Snapshot ID`
+at the same time within one instance. Re-keying it on the channel instance would
+therefore fix the collapse between two paths and leave two things standing.
+
+The first is that the association is resolved by a search rather than by the
+group. `Shard.applySnapshotOrder` (`shard.go:184-200`) scans every instrument
+the shard owns for one whose `OpenSnapshot.SnapshotID` matches, with no channel
+and no instance filter, and Go's map iteration order decides which one it finds
+when more than one matches. Two instances of one channel publish the same
+`Snapshot ID` values at the same time, so two matching open shadows on one shard
+is the steady state rather than the edge case, and the instrument a level is
+filed against is then not determined by anything.
+
+The second is what a lost `snapshot_end` leaves behind: the route entry is never
+deleted, the instrument's shadow stays open, and the next group at the same id
+is resolved against both. `Snapshot ID` is monotonic per
+`(Channel ID, Instrument ID)`, not per channel, so the next instrument's cycle
+routinely reaches that value — which is the defect
+`go/marketbyprice-bot/coordinator.go:19-24` and
+`go/marketbyprice-bot/README.md:156` name as the open issue against
+`marketbyorder-bot`, reachable through loss rather than through interleaving.
+
+So `marketbyorder-bot` adopts the shape `marketbyprice-bot` already proved: one
+open group per channel instance, routed by the group and validated — never keyed
+— by `Snapshot ID`. `Shard.applySnapshotOrder` stops scanning and resolves the
+instrument from the record the coordinator stamped, the way `marketbyprice-bot`
+does at `coordinator.go:124-126`; and the continuity check below is what closes
+a group whose `snapshot_end` never arrived.
 
 **`Shard.snapCtx` re-keys onto `instKey` rather than onto a snapshot key.** Its
 only consumers are the `wire_snapshots` writes at `shard.go:458-460`, which need
@@ -285,13 +358,43 @@ the group's symbol and exponents. With the coordinator stamping the instrument,
 the instrument is the key, and `Snapshot ID` stays inside the value as the
 membership check it already is.
 
+**The reset marker carries the instance, and so does the writer's reset.**
+`shardMsg.ch uint8` (`go/marketbyorder-bot/shard.go:535`,
+`go/marketbyprice-bot/shard.go:136`) becomes `inst channelInstance`, so
+`resetChannel` cannot be reached with a bare `Channel ID`. That alone is not
+enough: the shard follows the wipe with `SnapshotWriter.Reset(ctx)`, which takes
+no key and replaces `dirty` and `lastWrittenAt` whole. `Reset` therefore becomes
+`Reset(ctx, inst)` and `doReset` deletes only the entries whose `instKey` carries
+that instance. The generation counter follows the same rule: it is held per
+instance, `flushDue` records the generation of the instance whose batch it
+extracted, and a reset on one instance no longer abandons a batch of rows
+already computed for the other. Without this, a reset on one instance still
+drops the other's pending `level_snapshots` rows even though its book is
+untouched, and `level_snapshots` is where a reader looks to see that the spared
+instance kept serving.
+
+**The manifest is per channel instance, and so is the prune.**
+`marketbyprice-bot`'s `Coordinator.manifest` becomes
+`map[channelInstance]ManifestState`, `msgManifestPrune` carries the instance
+beside the `Manifest Seq`, and `Shard.pruneManifest` skips entries whose
+`instKey` names another instance. The one-generation grace window
+(`go/marketbyprice-bot/dispatch.go:305-309`) is unchanged; it is the comparison
+set that narrows. Without this the first manifest bump on one path deletes the
+other path's instruments, books and buffered deltas outright — a wipe with no
+`Reset Count` change behind it, and one no barrier or counter accounts for.
+`runResetBarrier`'s `c.manifest = ManifestState{}` (`coordinator.go:256`) becomes
+a delete of the resetting instance's entry, for the same reason.
+`marketbyorder-bot` needs neither change: its `manifest` field is parity
+bookkeeping and no prune reads it (`coordinator.go:25`).
+
 ## `seqLast` is read, not deleted
 
 Deleting it would be honest about today and would throw away the only
 discriminator available. So it is read.
 
 **The check.** On every record, in `Coordinator.Dispatch`, for a record whose
-port role is not `refdata`:
+port role is not `refdata` and whose instance identity is present — an
+unidentified record is counted and skipped, for the reason given above:
 
 - First sight of a channel instance establishes its baseline silently. This
   mirrors `seqTracker.observe` (`go/marketbyorder-parser/runner.go:46-53`) and
@@ -350,6 +453,17 @@ Two things the code gains instead of the prose:
   being removed is the failure this design is most exposed to, so it is
   counted.
 
+An unidentified record is counted and then kept out of the continuity check
+entirely — not run through it on the degraded key. Two instances of one channel
+arriving under one key are two ascending sequence series interleaved, which the
+check below reads as a discontinuity on very nearly every datagram: on the
+`snapshot` port that deletes the open group on every datagram, and no snapshot
+cycle ever completes. The degraded window has to behave as the tree behaves
+today: no instance keying, and none of the checks that only instance keying
+makes sound. So the rule is exact — a record with the zero `netip.Addr` or
+`dst_port` 0 increments the counter, skips the continuity check, and is
+otherwise dispatched as it is today.
+
 The deployment constraint that does survive is the glossary's own, and it is not
 ours to enforce: "Each host publishes on a distinct destination port by
 deployment convention, defined out of band." A subscriber cannot check it. What
@@ -367,9 +481,11 @@ it can do is key on what it observes, which is this change.
 | `go/marketbyprice-bot/record.go:5` `Record` | two fields |
 | `go/marketbyorder-parser/runner.go`, `go/marketbyprice-parser/runner.go` | `portConfig` into `receive`; `stampInstance` |
 | `go/marketbyorder-bot/coordinator.go`, `shard.go` | the keying above |
-| `go/marketbyprice-bot/coordinator.go`, `shard.go`, `dispatch.go` | the keying above |
-| `go/marketbyorder-bot/events_writer.go`, `snapshot_writer.go` | the row key |
-| `go/marketbyprice-bot/events_writer.go`, `snapshot_writer.go` | the row key |
+| `go/marketbyprice-bot/coordinator.go`, `shard.go`, `dispatch.go` | the keying above, and the manifest |
+| `go/marketbyorder-bot/snapshot_writer.go` | re-keyed onto `instKey`; `Reset(ctx, inst)`; the row key |
+| `go/marketbyprice-bot/snapshot_writer.go` | `Reset(ctx, inst)`; the row key |
+| `go/marketbyorder-bot/events_writer.go`, `go/marketbyprice-bot/events_writer.go` | the row key |
+| `go/marketbyorder-bot/main.go`, `go/marketbyprice-bot/main.go` | every `instKey` literal and `NewSnapshotWriter` call site |
 | `go/internal/clickhouse/client.go` | the insert setting |
 | `go/marketbyorder-bot/clickhouse.go`, `go/topofbook-bot/clickhouse.go` | the insert setting |
 
@@ -401,9 +517,18 @@ channel instance's view:
 path, and two paths keying together would let one path's exponents decode the
 other path's prices
 (`docs/superpowers/specs/2026-09-05-recorder-market-data-rows-design.md:489-492`).
-Both tables are `ReplacingMergeTree` ordered on `(channel_id, instrument_id)`,
-so two instances of one channel currently collapse to one row and the last
-writer wins.
+Both tables are `ReplacingMergeTree(recv_ts)` ordered on
+`(channel_id, instrument_id)` (`demo/clickhouse/init/02_schema_mbo.sql:24-25`,
+`demo/clickhouse/init/03_schema_mbp.sql:25-26`), and adding a column does not
+change that: two instances of one channel collapse to one row and the newest
+`recv_ts` wins, before this change and after it. What the columns buy on
+`instruments` is therefore narrower than on the other eight tables — the
+surviving row states which instance wrote it, rather than both rows surviving —
+and an operator joining `level_snapshots`, which keeps every instance's rows, to
+`instruments` for exponents reads one instance's definition for both. The
+in-process hazard the recorder names is closed regardless, because refdata is
+keyed by `instKey` and `instKey` carries the instance. Keeping one row per
+instance needs the sort key, which is a table rebuild and is in *Out of scope*.
 
 **No `port_role` column.** Here the recorder's argument does apply — the role is
 recoverable from the number by anyone holding the feed's port assignment, which
@@ -448,6 +573,36 @@ newly written provenance-free, and there is no honest alternative for a row
 nobody stamped. The sentinel is also self-consistent for the one query that
 matters — see *Grafana* — because every pre-migration row shares it and
 therefore groups exactly as it does today.
+
+**A `DEFAULT` only applies to a column the row does not name, so the writer
+serializes the sentinel itself.** A row is a `map[string]any` encoded with
+`encoding/json` (`go/internal/clickhouse/client.go:202-208`,
+`go/marketbyorder-bot/clickhouse.go:153-159`), and a `netip.Addr` in that map
+encodes through `MarshalText`. The zero `netip.Addr` marshals to the empty
+string, so a row built straight from `Record.SourceAddr` names `source_addr`
+with `""` — a value the `IPv4` parser refuses. The column default never runs,
+because the column was named; the insert is refused; and since the batcher posts
+a whole batch in one request, one unidentified record fails every row batched
+beside it. That is the opposite of the compatibility window this design claims,
+so the serialization is stated rather than left to the field's type:
+
+> Every writer puts `source_addr` into the row as a **string**, produced by one
+> helper per book-builder: the dotted quad when `SourceAddr` is a valid IPv4
+> address, and the literal `"0.0.0.0"` otherwise. `dst_port` goes in as the
+> `uint16` it is; `0` is a valid `UInt16` and needs no special case.
+
+Writing the sentinel rather than omitting the key keeps one row shape per table,
+which is what makes "this table's row carries both keys" a property a test can
+assert; and it leaves the row identical to what the column default would have
+produced, so a pre-migration row and a mid-deploy row group together in the
+Grafana panel below. It also keeps the loaded value independent of
+`input_format_defaults_for_omitted_fields`, which is a different setting from
+the one pinned below and one this design does not touch.
+
+The helper is a ClickHouse concern only. The record on the unix socket keeps the
+`netip.Addr` and the empty string is correct there, because
+`netip.Addr.UnmarshalText` maps empty text back to the zero `Addr` — which is
+exactly how a book-builder recognises an unidentified record and counts it.
 
 ### The insert format, and why the schema leads
 
@@ -542,7 +697,10 @@ roll separately and the order is part of the design.
    behaves exactly as it does today — which is why
    `unidentified_records_total` exists rather than a hard refusal: a stack
    mid-deploy must keep serving, and the counter is what makes the window
-   visible instead of silent.
+   visible instead of silent. "Exactly as it does today" is load-bearing and has
+   two consequences in the code: the continuity check does not run on such a
+   record, and its rows carry the serialized sentinel rather than the zero
+   `netip.Addr`, so the batch still loads.
 
 **Parsers before book-builders, never the other way round**, and the reason is
 asymmetric tolerance rather than preference. A parser ahead of its book-builder
@@ -581,18 +739,37 @@ is additive and the setting refuses only the direction that was already wrong.
   `TestDispatch_InterleavedChannelsWithDistinctResetCountsRunNoBarrier`, present
   in both `go/marketbyorder-bot/coordinator_test.go` and
   `go/marketbyprice-bot/coordinator_test.go` — from two channels to two
-  instances of one channel, which is the case neither covers.
+  instances of one channel, which is the case neither covers. The spared side is
+  asserted on the pending rows as well as on the book: the other instance's
+  instrument is left dirty in the `SnapshotWriter` and its `level_snapshots`
+  rows must still be written after the reset.
+- **Manifest isolation.** In `marketbyprice-bot`, a `manifest_summary` on one
+  instance with a raised `Manifest Seq` leaves the other instance's instruments,
+  books and buffered deltas standing, and still prunes its own. The existing
+  prune tests cover one instance only, so the isolation assertion is new.
 - **The continuity check.** A `snapshot`-port sequence discontinuity drops that
   instance's open group and not the other instance's; a `refdata`-port
-  discontinuity drops nothing; a reorder (`seq <= last`) drops nothing; and
-  first sight of an instance reports no gap.
+  discontinuity drops nothing; a reorder (`seq <= last`) drops nothing; first
+  sight of an instance reports no gap; and a run of unidentified records
+  alternating between two paths raises `unidentified_records_total`, raises no
+  gap count and drops no group.
+- **Fixtures give the two instances disjoint sequence ranges.** Every test that
+  interleaves two instances does so with sequence numbers that do not overlap —
+  one instance low, the other far above it. Two instances at the same sequence
+  numbers, folded onto one key, read as reorders and duplicates rather than as
+  discontinuities, and `seq <= last` is ignored: a channel-keyed implementation
+  passes such a fixture and the test asserts nothing.
 - **The insert setting.** The query string of a posted batch carries
   `input_format_skip_unknown_fields=0`, asserted on the value and not only on
   the key, in all three paths. `TestBuildInsertURL`
   (`go/topofbook-bot/clickhouse_test.go:16`) is the precedent and the other two
   already stand up an `httptest` server the query string is readable from.
 - **The row key.** Each writer's row map carries `source_addr` and `dst_port`
-  with the record's values, per table.
+  with the record's values, per table — and, for an unidentified record, the
+  **encoded batch** carries `"source_addr":"0.0.0.0"` rather than
+  `"source_addr":""`. Asserting on the row map alone would pass against a map
+  holding a zero `netip.Addr`, which is the value that fails the insert, so the
+  assertion is on the body the batcher posts to the `httptest` server.
 - **The DDL.** There is no automated suite over `demo/clickhouse/`. Said plainly
   rather than covered by something that would look like a gate: the check is
   `clickhouse-client --multiquery` over both init files against the pinned 24.8,
@@ -618,6 +795,11 @@ is additive and the setting refuses only the direction that was already wrong.
 | No `port_role` column | Recoverable from `dst_port` for the operator holding the port assignment. |
 | No `ORDER BY` change | ClickHouse cannot prepend a sort-key column; a rebuild is a separate change. |
 | Schema, then parsers, then book-builders | The only order in which no live process reads a field the other side is not writing, and no insert is silently accepted with a field the table lacks. |
+| Writers serialize `"0.0.0.0"`, they do not omit the key | A `DEFAULT` applies only to a column the row does not name, and a zero `netip.Addr` names it with `""`, which the `IPv4` parser refuses and which fails every row in the same batch. One row shape per table is also the property a test can assert. |
+| An unidentified record skips the continuity check | Two instances folded onto one key are two interleaved sequence series; checked, they report a discontinuity on nearly every datagram and no snapshot cycle completes. The degraded window must behave as the tree behaves today. |
+| The manifest and its prune key on the instance | `pruneManifest` deletes by `Manifest Seq` alone, so one path's bump evicts the other path's instruments — a wipe with no `Reset Count` behind it and no counter accounting for it. |
+| `SnapshotWriter.Reset` takes the instance | It replaces `dirty` and `lastWrittenAt` whole and bumps one generation, so a reset on one instance drops pending rows for a book that never reset. |
+| `instruments` keeps one row per channel | The sort key is `(channel_id, instrument_id)` and a `ReplacingMergeTree` collapse follows it. The columns name the surviving row's instance; keeping both is a table rebuild. |
 
 ## Out of scope / non-goals
 
@@ -644,6 +826,13 @@ is additive and the setting refuses only the direction that was already wrong.
   the one change that must not get its rollout order wrong.
 - **The `instruments` sort key.** Stays `(channel_id, instrument_id)`, so the
   `ReplacingMergeTree` collapse still keeps one row per channel. The columns
-  record which instance wrote it; the collapse is a table rebuild.
+  record which instance wrote it; the collapse is a table rebuild. Adding
+  `source_addr` and `dst_port` to the key means creating the table afresh,
+  copying every row into it and renaming — ClickHouse cannot prepend to a sort
+  key in place — and the copy has to settle what a pre-migration row's instance
+  is, which is the same question the sentinel answers by refusing to. Until then
+  an operator reading `instruments` for exponents reads one instance's
+  definition for both, while `level_snapshots` beside it keeps both instances'
+  rows. Success criterion 3 is scoped around exactly that.
 - **The parser metric label rename.** See *Decisions*.
 - **`go/topofbook-*` keying.** No per-instance recovery state to key.
