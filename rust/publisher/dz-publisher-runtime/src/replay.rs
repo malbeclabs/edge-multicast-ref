@@ -1,7 +1,7 @@
 //! An `Input` that reads payloads from a directory instead of a connection.
 //!
 //! `[adapter.replay]` was a configuration key with nothing behind it: it
-//! parsed, and [`run`](crate::run) did not read it. This is what it now
+//! parsed, and [`run`](crate::run()) did not read it. This is what it now
 //! selects, and it exists so that the one path a venue's `main` actually calls
 //! can be exercised end to end without a network — the real config, the real
 //! registry, the real adapter, the real lowering, the real sockets, and
@@ -27,6 +27,21 @@
 //! when, as here, the replay is only ever an example or a test. Without it
 //! startup refuses and names what the binary does link, which is the honest
 //! failure and not an obvious one to read the first time.
+//!
+//! # One connection, however many `[[source]]` blocks a document declares
+//!
+//! [`run`](crate::run()) replaces **every** enabled block with a single one of
+//! these, named after the primary: a fixture directory is one recording, so
+//! replaying it once per block would publish every payload as many times as
+//! there are enabled blocks. A replay therefore drives one connection. Every
+//! payload reaches the adapter on that [`ConnectionId`], only that connection
+//! sees `on_connected` and `on_disconnected`, and the ingress metric families
+//! labelled by `connection` are pre-created from the substituted list — one
+//! `connection` value, not one per enabled block. So the primary's own entry is
+//! all an offline run exercises, and nothing that turns on *which* connection
+//! delivered a payload is exercised at all. `BRINGING-UP-A-FEED.md` states the
+//! whole of it for a venue planning an offline proof, the exit code a spent
+//! recording produces included.
 //!
 //! # What it does not pretend to be
 //!
@@ -242,5 +257,104 @@ impl Input for ReplayInput {
 
     fn shutdown(&mut self) -> BoxFuture<'_, ()> {
         Box::pin(async {})
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ReplayInput, SETTLE};
+    use dz_adapter_core::{ConnectionId, DisconnectReason};
+    use dz_ingress_core::{IngressError, Input, Received};
+
+    /// A fixture directory holding `n` payloads, zero-padded so that name order
+    /// and write order agree.
+    ///
+    /// The `TempDir` is returned rather than dropped here: it removes the
+    /// directory when it goes, so every caller has to hold it for as long as
+    /// the `ReplayInput` reading from it.
+    fn recording(n: usize) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        for i in 0..n {
+            std::fs::write(dir.path().join(format!("{i:02}.json")), b"{}")
+                .expect("the payload is written");
+        }
+        dir
+    }
+
+    /// The input a replay run composes: one, named after the primary.
+    ///
+    /// The `TempDir` comes back with it and each test binds it, because
+    /// dropping it here would delete the recording out from under the input.
+    fn open(n: usize) -> (ReplayInput, tempfile::TempDir) {
+        let dir = recording(n);
+        let input = ReplayInput::open(ConnectionId::new("primary"), dir.path())
+            .expect("the directory holds payloads");
+        (input, dir)
+    }
+
+    /// A spent recording ends the connection rather than rewinding to its first
+    /// payload.
+    ///
+    /// **This is the first half of why a replay run exits non-zero**, which
+    /// `BRINGING-UP-A-FEED.md` tells a venue not to gate CI on. `Ended` is the
+    /// retryable error, so what the driver does next is reconnect — and the
+    /// test below is what that reconnect meets.
+    #[tokio::test(start_paused = true)]
+    async fn a_spent_recording_ends_the_connection() {
+        let (mut input, _recording) = open(1);
+        input.connect(SETTLE).await.expect("the first connect");
+        let first = input.recv(None).await.expect("the one payload");
+        assert!(matches!(first, Received::Payload { .. }));
+
+        let Err(error) = input.recv(None).await else {
+            panic!("nothing is left to hand over")
+        };
+        assert!(
+            matches!(
+                error,
+                IngressError::Ended {
+                    reason: DisconnectReason::RemoteClose,
+                    ..
+                }
+            ),
+            "a spent recording ends the connection, and it did not: {error}"
+        );
+        assert!(
+            !error.is_fatal(),
+            "`Ended` is what the driver reconnects on"
+        );
+        assert_eq!(input.remaining(), 0);
+    }
+
+    /// The reconnect that follows is refused, and fatally: a replay that
+    /// reconnected would fold the same deltas into the venue's book twice.
+    ///
+    /// **This is the second half.** `Fatal` is what `Driver::run` returns on,
+    /// and a replay carries the primary's `ConnectionId`, so the first primary
+    /// to give up ends the process through the consistency guard — the
+    /// `ExitCode::FAILURE` arm in `run`.
+    #[tokio::test(start_paused = true)]
+    async fn the_reconnect_after_it_is_refused_fatally() {
+        let (mut input, _recording) = open(1);
+        input.connect(SETTLE).await.expect("the first connect");
+        input.recv(None).await.expect("the one payload");
+
+        let error = input
+            .connect(SETTLE)
+            .await
+            .expect_err("a replay does not reconnect");
+        assert!(
+            error.is_fatal(),
+            "the refusal has to be fatal or the driver spins: {error}"
+        );
+    }
+
+    /// A replay that has handed over nothing may still connect: the refusal is
+    /// about payloads already spent, not about connecting twice.
+    #[tokio::test(start_paused = true)]
+    async fn the_first_connect_is_not_refused() {
+        let (mut input, _recording) = open(2);
+        input.connect(SETTLE).await.expect("the first connect");
+        assert_eq!(input.remaining(), 2);
     }
 }

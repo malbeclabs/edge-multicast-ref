@@ -128,22 +128,40 @@ pub enum IngressError {
     /// startup is diagnosable, and a driver that hides the same fault behind a
     /// backoff is not.
     ///
-    /// # What happens next depends on whose connection it was
+    /// **Any operation on the connection may report it, and not connect
+    /// alone.** [`Input::send`](crate::Input::send) states it for a message
+    /// this transport cannot carry at all, at logon and mid-session alike, and
+    /// [`Input::recv`](crate::Input::recv) for what a read cannot get past by
+    /// trying again. [`Driver`](crate::Driver) stops on all three, because the
+    /// one thing it acts on is what they have in common: another attempt
+    /// fetches the same answer.
     ///
-    /// **A primary source's:** the process ends, and the supervisor's restart
-    /// policy applies. That is the right layer, and it is also what retries the
-    /// fault — several of the causes above are only fatal *for this attempt*,
-    /// and a credential path that does not exist yet is the plain example: under
-    /// late secret injection the same configuration succeeds on the next start.
+    /// # What happens next is the caller's answer, and it is per connection
     ///
-    /// **A non-primary source's:** the driver is dropped, the publisher carries
-    /// on, and that connection's `connection_state` stays at 0. Nothing retries
-    /// it — **a restart is what retries it**, and until one happens the source
-    /// is down for the life of the process. That is the deliberate trade: a
-    /// source that by design must not reach the wire must not be able to take
-    /// the wire down with it, and the cost is that a fault which used to clear
-    /// on a restart the process took itself now needs one somebody takes. The
-    /// gauge at 0 is the signal.
+    /// This crate drives one connection and does not know what else a process
+    /// is doing, so it reports the fault and returns. Whether that ends the
+    /// process is the caller's: `dz-publisher-runtime` asks the `role` that
+    /// connection is declared under, and `dz_venue_composition::SourceRole`'s
+    /// `fatal_error_ends_the_process` is the whole of that answer.
+    ///
+    /// **Where the answer is yes** — a `primary`, an `upstream-partition`, and
+    /// every connection of a publisher whose document declares no upstream
+    /// connections — the process ends and the supervisor's restart policy
+    /// applies. That is the right layer, and it is also what retries the fault:
+    /// several of the causes above are only fatal *for this attempt*, and a
+    /// credential path that does not exist yet is the plain example, because
+    /// under late secret injection the same configuration succeeds on the next
+    /// start.
+    ///
+    /// **Where it is no** — a `comparison`, whose data arrives on the primary
+    /// too — the driver is dropped, the publisher carries on, and that
+    /// connection's `connection_state` stays at 0. Nothing retries it: **a
+    /// restart is what retries it**, and until one happens that connection is
+    /// down for the life of the process. That is the deliberate trade. A
+    /// connection that by design must not reach the wire must not be able to
+    /// take the wire down with it, and the cost is a fault that a restart would
+    /// clear waiting for a restart somebody takes. The gauge at 0 is the
+    /// signal.
     #[error("upstream connection is not usable as configured: {detail}")]
     Fatal { detail: String },
 }

@@ -31,6 +31,11 @@ import (
 const (
 	datagramHeaderBytes = 24
 
+	// Every application message carries a 4-byte header: Msg Type (u8),
+	// Msg Length (u8) and Flags (u16). Named as in the marketbyprice and
+	// marketbyorder siblings, whose header is the same four bytes.
+	messageHeaderSize = 4
+
 	// Magic bytes at the start of every datagram: "DZ".
 	datagramMagic0 = 0x5A
 	datagramMagic1 = 0x44
@@ -52,6 +57,20 @@ const (
 	instDefSymLenV3  = 64
 	instDefBodyLenV1 = 76
 	instDefBodyLenV3 = 126
+)
+
+// Body lengths for the fixed-size message types, excluding the 4-byte message
+// header. Each is the message size in the wire spec minus that header:
+// Heartbeat 16, Quote 60, Trade 52, ChannelReset 12, EndOfSession 12,
+// ManifestSummary 24. InstrumentDefinition is the one type whose body length
+// varies, and its lengths are the constants above.
+const (
+	heartbeatBodyLen       = 12
+	quoteBodyLen           = 56
+	tradeBodyLen           = 48
+	channelResetBodyLen    = 8
+	endOfSessionBodyLen    = 8
+	manifestSummaryBodyLen = 20
 )
 
 const (
@@ -149,7 +168,12 @@ type topOfBookEndOfSession struct {
 }
 
 type topOfBookManifestSummary struct {
-	ChannelID       uint8
+	ChannelID uint8
+	// Valid is 1 once the published set is established, and 0 while the
+	// publisher is uninitialized or shutting down. It is not a liveness
+	// signal: a channel whose instruments are all dormant is silent and
+	// valid.
+	Valid           uint8
 	ManifestSeq     uint16
 	InstrumentCount uint32
 	Timestamp       uint64
@@ -270,10 +294,10 @@ func decodeTopOfBookDatagram(data []byte) (*topOfBookDatagram, error) {
 			return nil, fmt.Errorf("decoding message %d header: %w", i, r.err)
 		}
 
-		if msg.MsgLength < 4 {
-			return nil, fmt.Errorf("message %d: msg_length %d too small (min 4)", i, msg.MsgLength)
+		if int(msg.MsgLength) < messageHeaderSize {
+			return nil, fmt.Errorf("message %d: msg_length %d too small (min %d)", i, msg.MsgLength, messageHeaderSize)
 		}
-		bodyLen := int(msg.MsgLength) - 4
+		bodyLen := int(msg.MsgLength) - messageHeaderSize
 		bodyBuf := r.bytes(bodyLen)
 		if r.err != nil {
 			return nil, fmt.Errorf("decoding message %d body (len=%d): %w", i, bodyLen, r.err)
@@ -290,6 +314,27 @@ func decodeTopOfBookDatagram(data []byte) (*topOfBookDatagram, error) {
 	return &f, nil
 }
 
+// checkBodyLen refuses a body that is not exactly want bytes long.
+//
+// wireReader reports a body that ran short (io.ErrUnexpectedEOF) but says
+// nothing about one that ran long, so without this check a message declaring a
+// larger msg_length decodes and its trailing bytes are silently dropped.
+// marketbyorder and marketbyprice refuse both directions per message type, and
+// the Rust codec rejects a declared msg_length that disagrees with the type's
+// size, so this decoder refuses both directions too.
+//
+// The word "truncated" is deliberate for an over-long body as well:
+// classifyParseErr in runner.go buckets on substrings, and this fault must land
+// in the same "truncated" bucket as the identical fault on marketbyorder and
+// marketbyprice. The message name is carried by the prefix rather than repeated
+// inside the reason, as in the instrument_definition error below.
+func checkBodyLen(name string, buf []byte, want int) error {
+	if len(buf) != want {
+		return fmt.Errorf("%s: truncated: expected %d bytes, got %d", name, want, len(buf))
+	}
+	return nil
+}
+
 // decodeTopOfBookBody dispatches on msg type to decode a message body.
 // Returns (nil, nil) for unknown types so the parser skips them.
 func decodeTopOfBookBody(msgType uint8, buf []byte, schemaVersion uint8) (any, error) {
@@ -297,6 +342,9 @@ func decodeTopOfBookBody(msgType uint8, buf []byte, schemaVersion uint8) (any, e
 
 	switch msgType {
 	case msgHeartbeat:
+		if err := checkBodyLen("heartbeat", buf, heartbeatBodyLen); err != nil {
+			return nil, err
+		}
 		var b topOfBookHeartbeat
 		b.ChannelID = br.u8()
 		br.skip(3) // reserved
@@ -364,6 +412,9 @@ func decodeTopOfBookBody(msgType uint8, buf []byte, schemaVersion uint8) (any, e
 		return &b, nil
 
 	case msgQuote:
+		if err := checkBodyLen("quote", buf, quoteBodyLen); err != nil {
+			return nil, err
+		}
 		var b topOfBookQuote
 		b.InstrumentID = br.u32()
 		b.SourceID = br.u16()
@@ -383,6 +434,9 @@ func decodeTopOfBookBody(msgType uint8, buf []byte, schemaVersion uint8) (any, e
 		return &b, nil
 
 	case msgTrade:
+		if err := checkBodyLen("trade", buf, tradeBodyLen); err != nil {
+			return nil, err
+		}
 		var b topOfBookTrade
 		b.InstrumentID = br.u32()
 		b.SourceID = br.u16()
@@ -399,6 +453,9 @@ func decodeTopOfBookBody(msgType uint8, buf []byte, schemaVersion uint8) (any, e
 		return &b, nil
 
 	case msgChannelReset:
+		if err := checkBodyLen("channel_reset", buf, channelResetBodyLen); err != nil {
+			return nil, err
+		}
 		var b topOfBookChannelReset
 		b.Timestamp = br.u64()
 		if br.err != nil {
@@ -407,6 +464,9 @@ func decodeTopOfBookBody(msgType uint8, buf []byte, schemaVersion uint8) (any, e
 		return &b, nil
 
 	case msgEndOfSession:
+		if err := checkBodyLen("end_of_session", buf, endOfSessionBodyLen); err != nil {
+			return nil, err
+		}
 		var b topOfBookEndOfSession
 		b.Timestamp = br.u64()
 		if br.err != nil {
@@ -415,9 +475,13 @@ func decodeTopOfBookBody(msgType uint8, buf []byte, schemaVersion uint8) (any, e
 		return &b, nil
 
 	case msgManifestSummary:
+		if err := checkBodyLen("manifest_summary", buf, manifestSummaryBodyLen); err != nil {
+			return nil, err
+		}
 		var b topOfBookManifestSummary
 		b.ChannelID = br.u8()
-		br.skip(3) // reserved
+		b.Valid = br.u8()
+		br.skip(2) // reserved
 		b.ManifestSeq = br.u16()
 		br.skip(2) // reserved
 		b.InstrumentCount = br.u32()

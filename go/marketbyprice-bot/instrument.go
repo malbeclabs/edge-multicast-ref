@@ -113,6 +113,18 @@ type Instrument struct {
 	OpenSnapshot *PendingSnapshot
 	Pending      map[uint32]Record // out-of-order deltas keyed by per_instrument_seq
 
+	// LostInstrumentSeq holds the Per-Instrument Seq of every book-affecting
+	// message this process classified as malformed and therefore never applied.
+	//
+	// The publisher consumed the sequence for it, so nothing will ever fill the
+	// hole: without this set, the recovery that follows re-walks the reorder
+	// window over a number that cannot arrive. That costs a whole window of
+	// valid buffered deltas and a per_instrument_gaps_total the book engine
+	// caused itself — the counter this demotion exists to keep clean. It is
+	// consulted when the next expected sequence is computed and pruned whenever
+	// the tracker moves past an entry.
+	LostInstrumentSeq map[uint32]bool
+
 	// LastBegin is the identity of the most recent SnapshotBegin, accepted or
 	// declined. Used only to denormalize group identity onto wire_levels rows.
 	LastBegin *SnapshotGroup
@@ -187,6 +199,58 @@ func (i *Instrument) ApplyLevelUpdate(sideByte uint8, priceRaw int64, qtyRaw uin
 
 var errBookClearScopeSide = errors.New("book_clear scope=1 with clear_side=both")
 
+var errBookClearReserved = errors.New("book_clear carries a reserved Clear Side or Scope value")
+
+// The values clearSideFromString and scopeFromString return for a spelling the
+// parser does not define. They are outside both wire enumerations — Clear Side
+// is 0..2 and Scope is 0..1 — so they cannot collide with a real value.
+const (
+	clearSideReserved uint8 = 0xff
+	scopeReserved     uint8 = 0xff
+)
+
+// Reason labels for malformed_deltas_total. The values match the parser's
+// dz_mbp_parser_malformed_total{reason} for the same wire conditions, so the
+// decode-side and book-side counters line up on one dashboard.
+const (
+	reasonBookClearScopeSide = "bookclear_scope_side"
+	// reasonMalformedOther labels a book-affecting message rejected by a rule
+	// other than BookClear's scope/side rule. A BookClear carrying a reserved
+	// Clear Side or Scope value lands here.
+	reasonMalformedOther = "other"
+)
+
+// malformedReason names the rule a book-affecting message broke, for the metric
+// label and the log line.
+func malformedReason(err error) string {
+	if errors.Is(err, errBookClearScopeSide) {
+		return reasonBookClearScopeSide
+	}
+	return reasonMalformedOther
+}
+
+// bookClearMalformed reports the rule a BookClear breaks, or nil when it is
+// well-formed.
+//
+// It reads the message's own fields and nothing else, which is what lets a record
+// be classified the moment it arrives — before its Per-Instrument Seq says
+// whether it is ready to apply, and therefore before the reorder window can hold
+// it. Shard.applyDeltaToReady classifies on receipt for exactly that reason.
+func bookClearMalformed(clearSide, scope uint8) error {
+	// A reserved value first, because the rule below reads both as if they were
+	// defined. The spec states Clear Side 0..2 and Scope 0..1; anything else is
+	// a publisher defect, and applying it would delete levels on a side the
+	// message never named.
+	if clearSide > 2 || scope > 1 {
+		return fmt.Errorf("%w: clear_side=%d scope=%d", errBookClearReserved, clearSide, scope)
+	}
+	if scope == 1 && clearSide == 2 {
+		// One price cannot bound both sides.
+		return fmt.Errorf("%w", errBookClearScopeSide)
+	}
+	return nil
+}
+
 // ApplyBookClear removes levels in bulk. clearSide 0=bid, 1=ask, 2=both.
 // scope 0 clears the whole side(s); scope 1 clears from fromPriceRaw outward —
 // for bids every level at or below it, for asks every level at or above it.
@@ -194,9 +258,8 @@ var errBookClearScopeSide = errors.New("book_clear scope=1 with clear_side=both"
 // A BookClear is not a resynchronisation signal: an instrument that applies one
 // stays ready.
 func (i *Instrument) ApplyBookClear(clearSide, scope uint8, fromPriceRaw int64) error {
-	if scope == 1 && clearSide == 2 {
-		// One price cannot bound both sides.
-		return fmt.Errorf("%w", errBookClearScopeSide)
+	if err := bookClearMalformed(clearSide, scope); err != nil {
+		return err
 	}
 	clear := func(book map[int64]*LevelState, isBid bool) {
 		if scope == 0 {
@@ -303,6 +366,11 @@ func (i *Instrument) EndSnapshot(snapID uint32, anchorSeq uint64) error {
 	i.Asks = i.OpenSnapshot.Asks
 	i.LastAppliedMktdataSeq = i.OpenSnapshot.AnchorSeq
 	i.LastAppliedInstrumentSeq = i.OpenSnapshot.LastInstrumentSeq
+	// A snapshot at or past a lost sequence already accounts for it: its book
+	// is the state after that message would have applied. One captured BEFORE
+	// it does not, and that entry has to survive — it is the whole reason this
+	// set exists.
+	i.pruneLostInstrumentSeq()
 	i.DepthBound = &depth
 	// Clear the required anchor on ANY accepted snapshot at or after it, not
 	// only an exact match: the publisher's mandated snapshot at S' can itself be
@@ -377,6 +445,47 @@ func (i *Instrument) Reset(requiredAnchor *uint64) {
 	i.LastAppliedMktdataSeq = 0
 	i.LastAppliedInstrumentSeq = 0
 	i.LastAppliedSendTS = time.Time{}
+	// A reset starts a new Per-Instrument Seq series, so every number in the
+	// old one is meaningless rather than merely applied.
+	i.LostInstrumentSeq = nil
 	i.DepthBound = nil // back to unknown, never 0
 	i.RequiredAnchorSeq = requiredAnchor
+}
+
+// NextExpectedInstrumentSeq is the Per-Instrument Seq this instrument is
+// waiting for: one past the last applied, advanced over any sequence recorded
+// as permanently lost.
+//
+// A malformed book-affecting message consumes its sequence at the publisher and
+// is never applied here, so the number it took can never arrive. Treating it as
+// a hole sends the instrument through the reorder window to a gap it declares
+// against itself.
+func (i *Instrument) NextExpectedInstrumentSeq() uint32 {
+	expected := i.LastAppliedInstrumentSeq + 1
+	for i.LostInstrumentSeq[expected] {
+		expected++
+	}
+	return expected
+}
+
+// MarkInstrumentSeqLost records that a Per-Instrument Seq was consumed by a
+// message this process will never apply.
+func (i *Instrument) MarkInstrumentSeqLost(seq uint32) {
+	if i.LostInstrumentSeq == nil {
+		i.LostInstrumentSeq = map[uint32]bool{}
+	}
+	i.LostInstrumentSeq[seq] = true
+}
+
+// pruneLostInstrumentSeq drops the entries the tracker has moved past, so the
+// set cannot grow for the life of the process.
+func (i *Instrument) pruneLostInstrumentSeq() {
+	for seq := range i.LostInstrumentSeq {
+		if seq <= i.LastAppliedInstrumentSeq {
+			delete(i.LostInstrumentSeq, seq)
+		}
+	}
+	if len(i.LostInstrumentSeq) == 0 {
+		i.LostInstrumentSeq = nil
+	}
 }

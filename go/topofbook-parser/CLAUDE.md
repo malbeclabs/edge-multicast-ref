@@ -10,10 +10,17 @@ This tool has no dependency on `doublezerod` or any DoubleZero library. It is a 
 
 ```bash
 go build -o dz-topofbook-parser .
-go test -v .
+go test -v ./...
 ```
 
-Single Go module, one external dep (`golang.org/x/net/ipv4` for multicast control messages). Everything is `package main` in a flat directory.
+`tob/golden_test.go` decodes the five top-of-book and reference-data vectors in
+`testdata/golden` — Quote, Trade, ManifestSummary, and InstrumentDefinition in
+both schema generations — and asserts every field against the values
+`manifest.json` records. Those vectors were transcribed by hand from the
+`edge-feed-spec` field tables, so they bind this decoder to the wire rather than
+to a fixture written from the same reading of the spec the decoder was.
+
+One Go module in the `go/` workspace. The only external dep is `prometheus/client_golang` for `/metrics`; the sink transport and the UDP receive path come from the `go/internal` workspace member. The module root is `package main`; the wire decoder and the parser it drives are `package tob` under `tob/`, and the root `parser.go` re-exports `tob.Record`, `tob.PacketMeta` and `tob.Parser` so the rest of `main` names them unqualified.
 
 ## How to run
 
@@ -56,15 +63,22 @@ flags          u16   (0x0001 = snapshot)
 
 ### Message types
 
-| ID | Name | Body bytes | Channel | Notes |
+| ID | Name | Message bytes | Channel | Notes |
 |---:|---|---:|---|---|
 | 0x01 | Heartbeat | 16 | either | Idle liveness |
 | 0x02 | InstrumentDefinition | 80 (v1) / 130 (v3) | refdata | instrument_id → source_id, symbol, price/qty exponents. Both lengths are exact, matching the Schema Version in the datagram header — a datagram whose declared version disagrees with the message length it actually carries is rejected, not guessed at. There is no version 2 |
 | 0x03 | Quote (BBO) | 60 | marketdata | Best bid/ask per instrument |
-| 0x04 | Trade | 52 | marketdata | Single trade |
+| 0x04 | Trade | 52 | mktdata | Single trade |
 | 0x05 | ChannelReset | 12 | either | Publisher startup — drop cached state |
 | 0x06 | EndOfSession | 12 | either | Publisher shutdown |
-| 0x07 | ManifestSummary | variable | refdata | Periodic instrument count |
+| 0x07 | ManifestSummary | 24 | refdata | Periodic summary of the published set: valid, manifest_seq, instrument_count |
+
+Every length in the table above is a whole message, `msg_length` included, and
+every one of them is exact. A known message type whose `msg_length` disagrees
+with its size is refused and counted as `parse_errors_total{reason="truncated"}`,
+whether it came up short or ran long; an over-long body is never decoded with
+its tail ignored. Subtract the 4-byte message header for the body length a
+decoder reads (ManifestSummary: 24 on the wire, 20 of body).
 
 ### Price/quantity encoding
 
@@ -80,13 +94,18 @@ Unknown message types are skipped, not rejected. Schema version is checked — u
 |---|---|
 | `main.go` | CLI flags, signal handling, creates parser + sink + runner, runs until signal |
 | `runner.go` | Two goroutines: one on the marketdata port, one on the refdata port. Reads UDP datagrams, hands them to the parser, writes records to the sink. A third goroutine logs a summary every 30s. Accepts `--interface` to resolve and pass a `*net.Interface` to `ListenMulticastUDP` instead of nil. |
-| `parser.go` | `Parser` interface + `Record` type + parser registry. `Record` is the unit of output — a typed struct with `Type`, `Timestamp`, `ChannelID`, `SequenceNumber`, `InstrumentID`, `Symbol`, and a `Fields map[string]any` for type-specific data. |
-| `topofbook_wire.go` | Wire format types and the `decodeTopOfBookDatagram` function. `wireReader` is a small helper with sticky errors so the decoder can do a block of reads and check `err` once. Types are unexported (`topOfBookDatagram`, `topOfBookQuote`, etc.) — only the parser uses them. |
-| `topofbook.go` | `TopOfBookParser` implementation. Stateful: holds `map[instrumentID]*instrumentInfo` learned from InstrumentDefinition messages. Uses those to convert raw ints → floats on Quote/Trade. |
-| `sink.go` | `OutputSink` interface + `NewSink` factory. Routes on format (json/csv) and path prefix (unix:// → socket, else file). |
-| `sink_json.go` | JSON Lines file sink. |
-| `sink_csv.go` | CSV sink with auto-inferred header row. Pivots the `Fields` map into stable columns. |
-| `sink_socket.go` | Unix domain socket broadcast sink. Drop-on-slow-consumer: a stalled reader gets gaps, not backpressure. |
+| `parser.go` | Parser registry (`NewParser`, `RegisteredParsers`) and the aliases that re-export `tob.Record`, `tob.PacketMeta` and `tob.Parser` into `main`. |
+| `tob/parser.go` | `Parser` interface + `Record` type. `Record` is the unit of output — a typed struct with `Type`, `Timestamp`, `ChannelID`, `SequenceNumber`, `InstrumentID`, `Symbol`, and a `Fields map[string]any` for type-specific data. |
+| `tob/topofbook_wire.go` | Wire format types and the `decodeTopOfBookDatagram` function. `wireReader` is a small helper with sticky errors so the decoder can do a block of reads and check `err` once. Types are unexported (`topOfBookDatagram`, `topOfBookQuote`, etc.) — only the parser uses them. |
+| `tob/topofbook.go` | `TopOfBookParser` implementation. Stateful: holds `map[instrumentID]*instrumentInfo` learned from InstrumentDefinition messages. Uses those to convert raw ints → floats on Quote/Trade. |
+| `sink.go` | `OutputSink` + `JSONFileSink` over `go/internal/sink`, and the `NewSink` factory. Routes on format (json/csv) and path prefix (unix:// → socket, else file), and the format picks which per-client encoder a socket sink is handed. |
+| `sink_csv.go` | CSV file sink and CSV socket writer, sharing the quote/trade column layout. Pivots the `Fields` map into stable columns. |
+
+The JSON Lines file sink and the Unix domain socket broadcast sink live in
+`go/internal/sink`, shared with the market-by-order and market-by-price
+parsers and generic over each feed's own `Record`. The socket sink is
+drop-on-slow-consumer: a stalled reader gets gaps, not backpressure. The UDP
+receive path with its kernel receive timestamp is `go/internal/udp`.
 
 ## Parser state machine
 
@@ -134,5 +153,5 @@ Per-venue runbooks and the end-to-end POC writeup live in the `malbeclabs/double
 ## Style
 
 - Go. No codegen, no third-party frameworks. `encoding/binary` for wire decode, `log/slog` for structured logging, `flag` for CLI.
-- `package main` — flat directory, single binary. If it ever needs to be importable as a library, split into a sub-package + `cmd/` directory.
-- Tests use the standard `testing` package. No testify. Synthetic wire-format bytes are built by test helpers, not fixtures.
+- Single binary. The module root is `package main`; the wire format and the parser state machine are the `tob` sub-package, and a new shared type belongs with the layer it serves.
+- Tests use the standard `testing` package. No testify. Synthetic wire-format bytes are built by test helpers rather than fixtures checked in beside them, with one deliberate exception: `tob/golden_test.go` reads the shared vectors in `testdata/golden`, which are the cross-language contract and carry their force precisely because this package did not write them.

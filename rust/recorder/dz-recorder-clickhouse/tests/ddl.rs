@@ -10,7 +10,7 @@
 //! it makes the files consistently formatted as well as consistently named.
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use dz_recorder_clickhouse::{migrations, schema, Migration, ACCESS_MANAGEMENT};
 use dz_recorder_rows::Grain;
@@ -118,6 +118,11 @@ fn pairing_sql() -> &'static str {
     sql_of("006_recorder_book_top_pairing.sql")
 }
 
+/// The provenance column, and the views it re-states, which are `008`.
+fn derivation_sql() -> &'static str {
+    sql_of("008_recorder_derivation.sql")
+}
+
 /// The cross-site views, which are `007`.
 fn cross_site_sql() -> &'static str {
     sql_of("007_recorder_cross_site.sql")
@@ -143,6 +148,73 @@ fn view_body(sql: &'static str, name: &str) -> &'static str {
     let body = &sql[start..];
     body.find("\nCREATE OR REPLACE VIEW")
         .map_or(body, |end| &body[..end])
+}
+
+/// One `CREATE OR REPLACE VIEW recorder.<name>` statement and nothing after it.
+///
+/// [`view_body`] runs to the next declaration, so it carries the prose between
+/// them — and two files state their reasons in their own words even where the
+/// statement between them is one statement. This is the statement alone, which
+/// is what a re-statement has to match character for character.
+fn view_statement(sql: &'static str, name: &str) -> &'static str {
+    let needle = format!("CREATE OR REPLACE VIEW recorder.{name} AS");
+    let start = sql
+        .find(&needle)
+        .unwrap_or_else(|| panic!("the schema declares no view `{name}`"));
+    let body = &sql[start..];
+    // A statement in these files carries no interior `;`, so the first one ends
+    // it. Terminated on the last line of a file, the search finds nothing and
+    // the whole of what is left is the statement — asserted, because a
+    // declaration this walker read to the end of the file without finding a
+    // terminator is a declaration it read wrongly.
+    match body.find(";\n") {
+        Some(at) => &body[..=at],
+        None => {
+            assert!(
+                body.trim_end().ends_with(';'),
+                "the declaration of `{name}` is not terminated, so this is not \
+                 one statement"
+            );
+            body.trim_end()
+        }
+    }
+}
+
+/// Every `recorder.` object a view body READS, in the order they are written.
+///
+/// `FROM` AND `JOIN`, BECAUSE BOTH ARE READS AND ONLY ONE OF THEM IS OBVIOUS.
+/// A view that reaches a table through `ASOF LEFT JOIN recorder.era_opening`
+/// is expanded into the query above it exactly as a `FROM` is, so whoever asks
+/// needs the same grant on it — and this schema writes joins that way in
+/// `003`, in `006` beneath a sibling of a view the reader holds, and five
+/// times in `007`. A parse that saw only `FROM` would report a closed closure
+/// over a view with an unreadable table joined into it, which is a check that
+/// passes because it stopped looking rather than because the schema is sound.
+///
+/// Prose is skipped: a header that quotes another view's `SELECT` is an
+/// argument about it and not a read of it, and `view_body` runs to the next
+/// statement, so it carries the comment block of whatever follows. A subquery
+/// joined in needs nothing extra, because its own `FROM` is a line of its own.
+fn objects_read(body: &str) -> Vec<String> {
+    body.lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with("--"))
+        .flat_map(|l| {
+            ["FROM recorder.", "JOIN recorder."]
+                .into_iter()
+                .flat_map(move |needle| {
+                    l.match_indices(needle)
+                        .map(move |(at, n)| &l[at + n.len()..])
+                })
+        })
+        .map(|rest| {
+            rest.split(|c: char| !c.is_alphanumeric() && c != '_')
+                .next()
+                .unwrap_or_default()
+        })
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 fn sql_of(name: &str) -> &'static str {
@@ -835,6 +907,154 @@ fn the_race_is_one_statement_written_into_two_files() {
         in_nine, in_ten,
         "`009` and `010` state the race differently, so a deployment created \
          from scratch and one upgraded to it answer the same question two ways"
+    );
+}
+
+/// **`008` tells an operator to apply it again.**
+///
+/// A view re-statement in a file every deployment has applied is a repair that
+/// reaches nothing on its own. There is no migration framework here — the files
+/// are applied by hand or by the deploy, as `001`'s header states — so a
+/// deployment holds what it was given, and the deployments `008`'s view block is
+/// written for are exactly the ones that have already applied `008`. Without an
+/// instruction in the file, the repair is in the repository and on no cluster.
+///
+/// A heading, for the reason
+/// [`the_venue_file_tells_an_operator_to_re_apply_the_reader_file`] gives about
+/// `009`'s: an operator skimming a file for what applying it obliges them to do
+/// reads the headings, and a true sentence in the middle of a paragraph is a
+/// sentence nobody is obliged to reach.
+///
+/// And it says the apply is safe, because an instruction to apply a file again
+/// that leaves an operator to work out whether it is idempotent is an
+/// instruction they are right to hesitate over.
+#[test]
+fn the_derivation_file_tells_an_operator_to_apply_it_again() {
+    let sql = derivation_sql();
+
+    assert!(
+        sql.contains("APPLY THIS FILE AGAIN ON EVERY DEPLOYMENT THAT HAS ALREADY APPLIED IT"),
+        "`008` does not tell an operator, in a heading, to apply it again — so \
+         the re-statements below reach only a deployment created afterwards, \
+         which is the one that never needed them"
+    );
+    assert!(
+        sql.contains("Safe to apply any number of times"),
+        "`008` asks for a second apply without saying it is idempotent"
+    );
+
+    // The instruction is about something. A file with the heading and no
+    // re-statement would be telling an operator to apply a no-op.
+    assert!(
+        sql.contains("CREATE OR REPLACE VIEW recorder."),
+        "`008` asks to be applied again and re-states no view, so there is \
+         nothing a second apply would do"
+    );
+}
+
+/// **A star view re-stated by a later file is that file's copy of the earlier
+/// file's text.**
+///
+/// [`a_select_star_view_is_re_stated_after_a_column_reaches_its_table`] is why
+/// these re-statements exist: a file that moves a table's column list re-states
+/// every `SELECT *` view over that table, or an upgraded deployment holds the
+/// old column list for ever. The re-statement is a second copy of a statement
+/// the earlier file declares, and this is the guard on the copy — the same guard
+/// [`the_race_is_one_statement_written_into_two_files`] puts on `feed_race`, and
+/// for the same reason: two definitions nobody compares are two definitions that
+/// diverge.
+///
+/// The drift here runs the wrong way round, which is what makes it worth a test
+/// of its own. The later file wins on every deployment, fresh and upgraded — so
+/// an amendment made to the earlier declaration alone is not a change that takes
+/// effect on some deployments and not others. It is a change that takes effect
+/// nowhere, silently overwritten by a copy further down the set, with the
+/// earlier file left reading as though it decided something.
+///
+/// Character for character. The pairs are read out of the set rather than
+/// listed here, because a listed pair is a pair somebody has to remember to add:
+/// the next file that moves one of these tables' column lists will be *required*
+/// by the test above to re-state its stars, and that copy would land with no
+/// equality on it.
+///
+/// Stars only, and that is the line. A star is re-stated to refresh a column
+/// list, so the re-statement can only be the same text; a re-statement that
+/// lists its columns is free to say something else, which is what `010` does to
+/// `009`'s `feed_race_occurrence` by adding the publisher branch to it.
+#[test]
+fn a_re_stated_star_view_is_the_text_the_earlier_file_declares() {
+    let statements = schema_statements();
+
+    let mut declared: BTreeMap<String, Vec<&Statement>> = BTreeMap::new();
+    for statement in &statements {
+        if let Some(rest) = statement
+            .flat()
+            .strip_prefix("CREATE OR REPLACE VIEW recorder.")
+        {
+            let name = rest.split_whitespace().next().expect("a view has a name");
+            declared.entry(name.to_owned()).or_default().push(statement);
+        }
+    }
+
+    let mut compared = 0usize;
+    for (name, declarations) in &declared {
+        let last = declarations
+            .iter()
+            .max_by_key(|statement| statement.position())
+            .expect("a name in this map has a declaration");
+        if declarations.len() < 2 || starred_object(&last.code).is_none() {
+            continue;
+        }
+
+        let mut copies: Vec<(&str, &str)> = Vec::new();
+        for declaration in declarations {
+            // `view_statement` reads the first declaration in the file, so a
+            // file that declared one view twice would be compared on a
+            // statement no deployment holds. No file does, and this is what
+            // says so rather than assuming it.
+            assert_eq!(
+                declarations
+                    .iter()
+                    .filter(|other| other.file == declaration.file)
+                    .count(),
+                1,
+                "{} declares `recorder.{name}` more than once",
+                declaration.file
+            );
+            let copy = view_statement(sql_of(declaration.file), name);
+            // A helper that returned the same empty slice every time would
+            // satisfy the equality below on its own.
+            assert!(
+                starred_object(copy).is_some() && copy.trim_end().ends_with(';'),
+                "what is being compared for {}'s `{name}` is not a whole star \
+                 declaration: {copy}",
+                declaration.file
+            );
+            copies.push((declaration.file, copy));
+        }
+
+        let (earlier_file, earlier) = copies[0];
+        for (later_file, later) in &copies[1..] {
+            compared += 1;
+            assert_eq!(
+                earlier, *later,
+                "{earlier_file} and {later_file} state `recorder.{name}` \
+                 differently. {later_file} is applied second, so it is the \
+                 declaration every deployment ends up holding and \
+                 {earlier_file}'s is the one that reaches nobody — a decision \
+                 recorded in the file a reader looks in and in force on no \
+                 deployment at all."
+            );
+        }
+    }
+
+    // `era_opening` and `datagram_in_era` across `003` and `008`, and
+    // `book_top_settled` across `006` and `010`. A walk that resolved no star,
+    // or read a re-statement as a separate view, would compare nothing and pass.
+    assert!(
+        compared >= 3,
+        "{compared} re-stated stars were compared and the set holds three, so \
+         this is reading declarations it does not understand"
     );
 }
 
@@ -1983,12 +2203,17 @@ fn the_era_opening_is_collapsed_by_final_over_a_partitioned_table() {
         sql.contains("affordable because the table underneath it is partitioned"),
         "why `FINAL` is acceptable has to be stated beside it"
     );
-    // Exactly one view reads the base table, so the collapse and the filter are
-    // written once and the other two views build on it.
+    // In this file, exactly one view reads the base table, so the collapse and
+    // the filter are stated once here and the other two views build on them.
+    // `008` re-states this view over the table as it now is, so the set holds a
+    // second copy of the collapse —
+    // [`a_re_stated_star_view_is_the_text_the_earlier_file_declares`] is what
+    // holds that copy to this text.
     assert_eq!(
         sql.matches("recorder.era FINAL").count(),
         1,
-        "the collapse is written once"
+        "`003` states the collapse more than once, so a reader has two places \
+         to look and two places to amend"
     );
     // Once as a join and once as a scan, which is the two views a caller uses.
     assert_eq!(
@@ -2036,8 +2261,8 @@ fn resolving_a_datagram_to_its_era_needs_no_window_and_no_final() {
     );
     assert!(
         datagram_in_era.contains("recorder.era_opening"),
-        "the collapse and the `continuation = 0` filter are written once, in \
-         the view this builds on"
+        "the collapse and the `continuation = 0` filter are not restated here: \
+         this builds on the view that holds them"
     );
 }
 
@@ -2535,34 +2760,6 @@ fn changes_a_column_list(flat: &str) -> bool {
         .any(|phrase| flat.contains(phrase))
 }
 
-/// The `SELECT *` views a released migration already froze, named here rather
-/// than hidden behind a weaker parse.
-///
-/// `008` adds `derivation` to `recorder.era` and to `recorder.datagram` and
-/// re-states no view — it contains no `CREATE OR REPLACE VIEW` at all — so
-/// `003`'s `era_opening` and `datagram_in_era` are expanded without that column
-/// on every deployment that was upgraded and with it on every deployment
-/// created since. Two column lists under one view name.
-///
-/// It is latent only because nothing reads `derivation` through either view
-/// yet: `006` takes three columns out of `era_opening` and the cross-site views
-/// take named columns out of `datagram_in_era`. The first query that reaches
-/// `era_opening.derivation` breaks on the deployments that have been running
-/// longest, which is the opposite of the order anybody tests in.
-///
-/// **Not repaired here.** The repair is a `CREATE OR REPLACE VIEW` for each in
-/// `008`, which changes a migration every deployment has already applied and
-/// wants its own argument about what a released file may be amended to say. It
-/// is tracked as a follow-up against `008_recorder_derivation.sql`.
-///
-/// Listed rather than allowed silently, and every entry is asserted below to
-/// still be a violation — so the day `008` re-states them, this list fails
-/// until the entry is deleted.
-const FROZEN_BY_A_RELEASED_MIGRATION: [(&str, &str); 2] = [
-    ("era_opening", "008_recorder_derivation.sql"),
-    ("datagram_in_era", "008_recorder_derivation.sql"),
-];
-
 /// **A `SELECT *` view is re-stated by the file that moves its table's column
 /// list.**
 ///
@@ -2585,19 +2782,84 @@ const FROZEN_BY_A_RELEASED_MIGRATION: [(&str, &str); 2] = [
 /// that a view's *last* declaration comes after the last `ALTER` that moves its
 /// table's column list, which is the question "does a deployment that applied
 /// every file in order hold the same view as one created from scratch". `008`
-/// adds `derivation` to `recorder.book_top` and re-states nothing, and `010`
-/// re-states `book_top_settled` afterwards — so the freeze `008` opened is
-/// closed by the time the set has been applied, and this test does not report
-/// it. Reported, it would be a finding that outlives its own repair; the two
-/// entries in [`FROZEN_BY_A_RELEASED_MIGRATION`] are the ones no later file
-/// closes.
+/// adds `derivation` to `recorder.book_top` and re-states no view over that
+/// table, and `010` re-states `book_top_settled` afterwards — so the freeze
+/// `008` opens there is closed by the time the set has been applied, and this
+/// test does not report it. Reported, it would be a finding that outlives its
+/// own repair.
+///
+/// **Every star these files declare satisfies the rule, and the assertion is
+/// unconditional.** There is no allow-list: a file that moves a column list and
+/// leaves a star over that table frozen fails this test, and the repair is the
+/// `CREATE OR REPLACE VIEW` the message asks for rather than an entry excusing
+/// it. `008` re-states `era_opening` and `datagram_in_era` after its own
+/// `ALTER`s for that reason, in the shape `010` uses for `book_top_settled`, and
+/// [`a_re_stated_star_view_is_the_text_the_earlier_file_declares`] holds the
+/// copies that repair makes to one text.
 #[test]
 fn a_select_star_view_is_re_stated_after_a_column_reaches_its_table() {
     let statements = schema_statements();
 
+    // A walk that read no star, or no `ALTER`, would pass over anything. The two
+    // named here are `003`'s star over `recorder.era` and `008`'s column on that
+    // table, so a report below is the property and not the parse. Named in the
+    // files they are first declared in, because the walk resolves each view to
+    // its *last* declaration and both of these are re-stated in `008`.
+    assert!(
+        statements.iter().any(|statement| {
+            statement.file == "003_recorder_era_rank.sql"
+                && statement
+                    .flat()
+                    .starts_with("CREATE OR REPLACE VIEW recorder.era_opening ")
+        }),
+        "the walk reads no `era_opening` in `003`, so it is reading no views"
+    );
+    assert!(
+        statements.iter().any(|statement| {
+            let flat = statement.flat();
+            statement.file == "008_recorder_derivation.sql"
+                && flat.starts_with("ALTER TABLE recorder.era ")
+                && changes_a_column_list(&flat)
+        }),
+        "the walk reads no column `ALTER` on `recorder.era` in `008`, so it is \
+         reading no column changes"
+    );
+
+    let reading = star_reading(&statements);
+    assert!(
+        reading.frozen.is_empty(),
+        "{}",
+        reading.frozen.join("\n\n----\n\n")
+    );
+    assert!(
+        reading.stars >= 4,
+        "the walk read {} `SELECT *` views and these files declare four, so the \
+         parse is reading a projection it does not understand",
+        reading.stars
+    );
+}
+
+/// What one walk over a set of statements found.
+struct StarReading {
+    /// One report per frozen view, in the words a failure needs.
+    frozen: Vec<String>,
+    /// How many `SELECT *` projections the walk resolved to an object.
+    stars: usize,
+}
+
+/// Every star view whose last declaration comes before something that moves the
+/// column list it was expanded from.
+///
+/// Reported rather than asserted, because the assertion over the migrations is
+/// that nothing comes back — and a walk that found nothing whatever it was
+/// handed would satisfy that over anything.
+/// [`the_star_walk_reports_a_frozen_view_and_passes_one_re_stated_after_it`]
+/// runs this same walk over two statements that do freeze a view, which is the
+/// only way to hold the comparison the rule rests on.
+fn star_reading(statements: &[Statement]) -> StarReading {
     let mut declarations: Vec<(String, &Statement)> = Vec::new();
     let mut column_alters: Vec<(String, &Statement)> = Vec::new();
-    for statement in &statements {
+    for statement in statements {
         let flat = statement.flat();
         if let Some(rest) = flat.strip_prefix("CREATE OR REPLACE VIEW recorder.") {
             let name = rest.split_whitespace().next().expect("a view has a name");
@@ -2612,27 +2874,6 @@ fn a_select_star_view_is_re_stated_after_a_column_reaches_its_table() {
             }
         }
     }
-
-    // A walker that found no star, or no `ALTER`, would pass over anything. The
-    // two named here are `003`'s star over `recorder.era` and `008`'s column on
-    // that table — the pair the exception list is about, and neither of them the
-    // statement this test exists to hold in place, so a failure below is the
-    // property and not the parse.
-    assert!(
-        declarations
-            .iter()
-            .any(|(name, statement)| name == "era_opening"
-                && statement.file == "003_recorder_era_rank.sql"),
-        "the walker read no `era_opening` in `003`, so it is reading no views"
-    );
-    assert!(
-        column_alters
-            .iter()
-            .any(|(table, statement)| table == "era"
-                && statement.file == "008_recorder_derivation.sql"),
-        "the walker read no column `ALTER` on `recorder.era` in `008`, so it is \
-         reading no column changes"
-    );
 
     let names: BTreeSet<String> = declarations.iter().map(|(name, _)| name.clone()).collect();
     let last_declaration = |name: &str| -> &Statement {
@@ -2651,14 +2892,16 @@ fn a_select_star_view_is_re_stated_after_a_column_reaches_its_table() {
             .max_by_key(|statement| statement.position())
     };
 
-    let mut stars_read = 0usize;
-    let mut exceptions_taken: BTreeSet<(String, &str)> = BTreeSet::new();
+    let mut reading = StarReading {
+        frozen: Vec::new(),
+        stars: 0,
+    };
     for name in &names {
         let declaration = last_declaration(name);
         let Some(starred) = starred_object(&declaration.code) else {
             continue;
         };
-        stars_read += 1;
+        reading.stars += 1;
 
         // What can move the column list the star was expanded from. A star over
         // a view is chased through to the table underneath it, because
@@ -2697,11 +2940,7 @@ fn a_select_star_view_is_re_stated_after_a_column_reaches_its_table() {
             if hazard.position() <= declaration.position() {
                 continue;
             }
-            let excepted = FROZEN_BY_A_RELEASED_MIGRATION
-                .iter()
-                .any(|(view, file)| *view == name.as_str() && *file == hazard.file);
-            assert!(
-                excepted,
+            reading.frozen.push(format!(
                 "`recorder.{name}` is declared `SELECT *` over \
                  `recorder.{starred}` at {declared}, and {altered} {what} — with \
                  no re-statement of `recorder.{name}` after it.\n\n\
@@ -2720,28 +2959,121 @@ fn a_select_star_view_is_re_stated_after_a_column_reaches_its_table() {
                 declared = declaration.at(),
                 altered = hazard.at(),
                 file = hazard.file,
-            );
-            exceptions_taken.insert((name.clone(), hazard.file));
+            ));
         }
     }
 
-    assert!(
-        stars_read >= 4,
-        "the walker read {stars_read} `SELECT *` views and these files declare \
-         four, so the parse is reading a projection it does not understand"
-    );
+    reading
+}
 
-    // Every exception is still a violation. An entry that has stopped being one
-    // is a repair nobody deleted the exception for, and a list that outlives
-    // what it excuses is how an allow-list becomes the rule.
-    for (view, file) in FROZEN_BY_A_RELEASED_MIGRATION {
+/// The walk reports a view a later column change froze, and passes one re-stated
+/// after that change.
+///
+/// Over two literal statements rather than over the migrations, for the reason
+/// the star walker's own test gives: what
+/// [`a_select_star_view_is_re_stated_after_a_column_reaches_its_table`] pins is
+/// that these files hold no frozen view, so a walk that reported none whatever
+/// it was handed would make that assertion pass over anything. The cases below
+/// are the *same* two statements rearranged, so nothing but which statement
+/// comes last can decide them — which is the whole of the rule.
+///
+/// **Two of them put both statements in one file**, and that is the case `008`
+/// and `010` are. A file is one `order`, so within it only the line number
+/// separates the `ALTER` from the re-statement after it — and a walk that
+/// compared files and not lines would pass `008` with its two
+/// `CREATE OR REPLACE VIEW` statements moved above its `ALTER`s, which is the
+/// regression this whole rule exists to catch.
+#[test]
+fn the_star_walk_reports_a_frozen_view_and_passes_one_re_stated_after_it() {
+    let view = "CREATE OR REPLACE VIEW recorder.t_settled AS\nSELECT *\nFROM recorder.t FINAL;\n";
+    let column = "ALTER TABLE recorder.t\nADD COLUMN IF NOT EXISTS c String;\n";
+    let statement = |file: &'static str, order: usize, line: usize, code: &str| Statement {
+        file,
+        order,
+        line,
+        code: code.to_owned(),
+    };
+
+    // The declaration first and the column second: the freeze.
+    let frozen = star_reading(&[
+        statement("first.sql", 0, 5, view),
+        statement("second.sql", 1, 10, column),
+    ]);
+    assert_eq!(
+        frozen.stars, 1,
+        "the walk resolved no star over `recorder.t`, so it read nothing and \
+         the report below is about nothing either"
+    );
+    assert_eq!(
+        frozen.frozen.len(),
+        1,
+        "the walk does not report a star frozen by a column change after it: \
+         {:?}",
+        frozen.frozen
+    );
+    for expected in [
+        "`recorder.t_settled`",
+        "`recorder.t`",
+        "first.sql:5",
+        "second.sql:10",
+    ] {
         assert!(
-            exceptions_taken.contains(&(view.to_owned(), file)),
-            "{file} does not freeze `recorder.{view}`, so delete that entry \
-             from `FROZEN_BY_A_RELEASED_MIGRATION` rather than leaving a list \
-             that excuses nothing"
+            frozen.frozen[0].contains(expected),
+            "the report names no {expected}, so it does not send a reader to \
+             the statements: {}",
+            frozen.frozen[0]
         );
     }
+
+    // The same two, and the declaration re-stated after the column: the repair
+    // `008` and `010` make.
+    let repaired = star_reading(&[
+        statement("first.sql", 0, 5, view),
+        statement("second.sql", 1, 10, column),
+        statement("second.sql", 1, 40, view),
+    ]);
+    assert_eq!(
+        repaired.stars, 1,
+        "a view declared twice is one star, and the walk read {} — so it is \
+         reading a re-statement as a second view",
+        repaired.stars
+    );
+    assert!(
+        repaired.frozen.is_empty(),
+        "a view re-stated after the column that moved its table's column list \
+         is reported frozen: {:?}",
+        repaired.frozen
+    );
+
+    // Both statements in one file, the declaration above the `ALTER`: `008`
+    // with its two re-statements moved to the top, which is the one
+    // rearrangement of this file that puts the freeze back. One `order`, so
+    // only the line separates them.
+    let one_file = star_reading(&[
+        statement("only.sql", 0, 5, view),
+        statement("only.sql", 0, 40, column),
+    ]);
+    assert_eq!(
+        one_file.frozen.len(),
+        1,
+        "a declaration above an `ALTER` in the same file is not reported \
+         frozen, so the walk is comparing files and not statements: {:?}",
+        one_file.frozen
+    );
+
+    // And the same file the other way up, which is the shape `008` and `010`
+    // are written in.
+    let one_file_repaired = star_reading(&[
+        statement("only.sql", 0, 5, column),
+        statement("only.sql", 0, 40, view),
+    ]);
+    assert!(
+        one_file_repaired.frozen.is_empty(),
+        "a declaration below the `ALTER` in the same file is reported frozen, \
+         so no file could both move a column list and repair its own stars: \
+         {:?}",
+        one_file_repaired.frozen
+    );
 }
 
 /// The star walker reads the projections these files are written in, and the
@@ -3481,7 +3813,7 @@ fn the_reader_file_grants_without_creating_the_reader() {
         .collect::<Vec<_>>()
         .join("\n");
 
-    // EXACTLY these three statements, compared whole. An earlier version of
+    // EXACTLY these nine statements, compared whole. An earlier version of
     // this test built the set with `strip_prefix("GRANT SELECT ON ")` and so
     // pinned the OBJECT without pinning the PRIVILEGE: any other verb dropped
     // out of the compared set silently, and the only remaining gate asked that
@@ -3501,6 +3833,17 @@ fn the_reader_file_grants_without_creating_the_reader() {
         "GRANT SELECT ON recorder.venue_book_top TO grafana;",
         "GRANT SELECT ON recorder.venue_object TO grafana;",
         "GRANT SELECT ON recorder.venue_book_top_settled TO grafana;",
+        // ...and the six the race needs, which is that same rule applied to a
+        // chain rather than to one pair. A panel names `feed_race` and reads
+        // everything beneath it, both branches, down to the two tables — so
+        // the list is the transitive closure of `FROM` in `009` and `010`, and
+        // not what the panel mentions. `012`'s header draws it.
+        "GRANT SELECT ON recorder.venue_book_top_occurrence TO grafana;",
+        "GRANT SELECT ON recorder.book_top TO grafana;",
+        "GRANT SELECT ON recorder.book_top_settled TO grafana;",
+        "GRANT SELECT ON recorder.publisher_book_top_occurrence TO grafana;",
+        "GRANT SELECT ON recorder.feed_race_occurrence TO grafana;",
+        "GRANT SELECT ON recorder.feed_race TO grafana;",
         // Lake is deliberately absent; `012`'s header carries the reasoning, and
         // the exactness of this set is what would refuse a grant added without it.
     ]
@@ -3508,7 +3851,7 @@ fn the_reader_file_grants_without_creating_the_reader() {
     .collect();
     assert_eq!(
         granted, intended,
-        "the reader's grants drifted from the three this file is scoped to"
+        "the reader's grants drifted from the nine this file is scoped to"
     );
 
     // And it is not in what a test or a schema deploy applies, for `004`'s
@@ -3516,6 +3859,164 @@ fn the_reader_file_grants_without_creating_the_reader() {
     assert!(
         !schema().iter().any(|m| m.name.contains("reader_grants")),
         "the reader's grants are applied by an administrator, not by the row writer"
+    );
+}
+
+/// Everything a granted view reads is granted too, derived from the schema
+/// rather than from a list somebody keeps.
+///
+/// A VIEW HERE IS A NORMAL VIEW: it stores no rows, it is expanded into the
+/// query that reads it, and at `SQL SECURITY INVOKER` — the default for a view
+/// that is not materialised — every object the expansion touches is read with
+/// the privileges of whoever asked. So a grant on the object a panel NAMES buys
+/// nothing on its own, and the server says which link is missing one `497` at a
+/// time: `feed_race` first, then `feed_race_occurrence`, then the branch under
+/// it. That is a chain of four on the publisher side, and the way it goes wrong
+/// is an author granting the two views a dashboard mentions.
+///
+/// WHY IT IS DERIVED AND NOT LISTED. `the_reader_file_grants_without_creating_the_reader`
+/// pins the set, which is what refuses a grant nobody argued for. This asks the
+/// opposite question — whether the set is CLOSED — and a second hand-written
+/// list would answer it with the same reasoning that produced the first. The
+/// closure is read out of the view definitions, so a new branch added beneath
+/// a view the reader ALREADY holds fails here without anyone remembering to
+/// extend anything.
+///
+/// WHAT IT DOES NOT REACH, SINCE A DERIVED CHECK INVITES BEING READ AS A
+/// GUARANTEE. The walk starts from the set `012` grants and descends. A view
+/// declared next year that a dashboard reads and no file grants is reached by
+/// nothing here — there is no grant to start from and nothing points at it —
+/// and neither is an object a panel names directly, the way `venue_object` is
+/// named. That direction is `012`'s standing rule, which is prose an author
+/// has to read.
+///
+/// THE LAST DEFINITION WINS, which is not a detail. `010` replaces `009`'s seam
+/// and `006`'s collapse, and a closure taken over the first definition of each
+/// name walks the venue branch alone — the exact shape the grants had while the
+/// publisher side of the race was unreadable.
+#[test]
+fn the_reader_can_read_everything_under_the_views_it_is_granted() {
+    let granted: BTreeSet<String> = migration("012_recorder_reader_grants.sql")
+        .sql
+        .lines()
+        .map(str::trim)
+        .filter_map(|l| l.strip_prefix("GRANT SELECT ON recorder."))
+        .filter_map(|l| l.strip_suffix(" TO grafana;"))
+        .map(str::to_owned)
+        .collect();
+    assert!(
+        !granted.is_empty(),
+        "no grant parsed: the shape of the file changed"
+    );
+
+    // The definition a deployment ends up with, which is the last one in the
+    // order the files are applied.
+    let definition = |name: &str| -> Option<&'static str> {
+        migrations().into_iter().rev().find_map(|m| {
+            m.sql
+                .contains(&format!("CREATE OR REPLACE VIEW recorder.{name} AS"))
+                .then(|| view_body(m.sql, name))
+        })
+    };
+
+    let mut pending: Vec<String> = granted.iter().cloned().collect();
+    let mut walked = BTreeSet::new();
+    let mut reads = BTreeSet::new();
+    while let Some(object) = pending.pop() {
+        if !walked.insert(object.clone()) {
+            continue;
+        }
+        // A table is where the walk stops: nothing is expanded beneath it.
+        let Some(body) = definition(&object) else {
+            continue;
+        };
+        // `FROM` and `JOIN` both, which `objects_read` is where it is because
+        // the parse is the part of this check that can go quietly blind.
+        for read in objects_read(body) {
+            assert!(
+                granted.contains(&read),
+                "the reader is granted `{object}`, which reads `recorder.{read}`, \
+                 which it is not granted: a panel over `{object}` answers `497` \
+                 naming `recorder.{read}`"
+            );
+            reads.insert((object.clone(), read.clone()));
+            pending.push(read);
+        }
+    }
+
+    // A WALK THAT FOUND NO EDGES PASSES EVERY ASSERTION ABOVE, which is the
+    // usual way a derived check stops deriving anything: the parse goes stale,
+    // the closure is the granted set itself, and the test reports success for
+    // whatever the file says. So the edges the race is made of are named, and
+    // they are named as edges rather than as objects — every object below is
+    // granted, so asserting the walk *visited* them would hold even if it
+    // never read a definition.
+    for (object, read) in [
+        ("feed_race", "feed_race_occurrence"),
+        ("feed_race_occurrence", "venue_book_top_occurrence"),
+        // The one that is `010`'s, and the one a closure over the FIRST
+        // definition of each name would miss: `009` declares this seam with
+        // the venue branch alone.
+        ("feed_race_occurrence", "publisher_book_top_occurrence"),
+        ("publisher_book_top_occurrence", "book_top_settled"),
+        ("book_top_settled", "book_top"),
+        ("venue_book_top_occurrence", "venue_book_top_settled"),
+        ("venue_book_top_settled", "venue_book_top"),
+    ] {
+        assert!(
+            reads.contains(&(object.to_owned(), read.to_owned())),
+            "the walk never read `recorder.{read}` beneath `{object}`, so the \
+             closure it checked is not the one a race panel reads"
+        );
+    }
+}
+
+/// The read-extraction sees a `JOIN`, which is the form it used to miss.
+///
+/// `the_reader_can_read_everything_under_the_views_it_is_granted` is only as
+/// good as what it counts as a read, and every edge in the chain it walks
+/// today is a `FROM`. So the closure could be closed and the parse blind at
+/// the same time, and nothing in that test would say which: review made the
+/// point by adding `LEFT JOIN recorder.instrument` to a granted view and
+/// watching the whole file stay green while the reader would meet `497`
+/// naming `recorder.instrument`.
+///
+/// This is that case, pinned. It fails on a parse narrowed back to `FROM`,
+/// which is what the closure walk itself cannot do while no granted view
+/// joins anything.
+#[test]
+fn the_read_extraction_sees_a_join_and_not_only_a_from() {
+    // Live syntax first, so the shape under test is the schema's and not an
+    // invention: `006`'s `book_top_occurrence` is the sibling of the
+    // occurrence view the reader IS granted, and it reaches its era through
+    // `ASOF LEFT JOIN`.
+    let sibling: BTreeSet<String> = objects_read(view_body(pairing_sql(), "book_top_occurrence"))
+        .into_iter()
+        .collect();
+    assert!(
+        sibling.contains("era_opening"),
+        "`book_top_occurrence` joins `recorder.era_opening` and the parse does \
+         not see it, so a grant on a view that joins reports a closure it \
+         never walked"
+    );
+    assert!(
+        sibling.contains("book_top_settled"),
+        "the parse lost the `FROM` while gaining the `JOIN`"
+    );
+
+    // And review's injection, which is the shape the closure walk has to fail
+    // on: a granted view given a join to a table nothing grants. Both edges,
+    // in the order written, and the commented one is prose.
+    let injected = "CREATE OR REPLACE VIEW recorder.publisher_book_top_occurrence AS\n\
+                    SELECT *\n\
+                    -- FROM recorder.a_header_quoting_another_view\n\
+                    FROM recorder.book_top_settled\n\
+                    LEFT JOIN recorder.instrument USING (instrument_id);\n";
+    assert_eq!(
+        objects_read(injected),
+        ["book_top_settled", "instrument"],
+        "the injected join is not an edge, so the closure walk cannot fail on \
+         it and `497` is what finds it instead"
     );
 }
 
@@ -3648,7 +4149,92 @@ fn the_reader_file_records_the_grants_the_cluster_still_holds() {
     );
 }
 
-/// `009` tells an operator to re-apply the READER's grants too.
+/// `012` dates its operational history and never narrates the gap between two
+/// dates.
+///
+/// The paragraph arguing that a grant is written down before it is applied made
+/// its case by naming how long the first three went unrecorded for. Review
+/// checked that duration against the file's own dates and it did not survive
+/// the subtraction. The duration was never the argument — the ORDER is, and the
+/// order is what the paragraph states now — but a number of days or months
+/// invites exactly that check, cannot be settled from the sentence it lives in,
+/// and stops being true as soon as either end of it moves.
+///
+/// So the history is carried by dates, each stated once where a reader can
+/// subtract them if the distance ever matters: `2026-09-19` for the hand
+/// application, `2026-09-21` for the record that followed it. What this refuses
+/// is the distance written out as prose beside them.
+///
+/// WHAT IS SCANNED FOR IS A COUNT IMMEDIATELY FOLLOWED BY A UNIT OF TIME, which
+/// is narrower than it sounds and deliberately so. "a later file", "three
+/// grants" and "the six race grants" are all untouched, because neither half is
+/// the trigger on its own. `a month` and `two days` are, and `a month` is the
+/// sentence review rejected.
+#[test]
+fn the_reader_file_dates_its_history_and_never_narrates_the_gap() {
+    let reader = migration("012_recorder_reader_grants.sql").sql;
+
+    // Unwrapped, for the reason the Lake test gives: an interval that wraps
+    // between its count and its unit is the same interval.
+    let prose = reader
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("--"))
+        .map(|l| l.trim_start_matches('-').trim())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    // The two ends of the interval this file no longer states, so that dropping
+    // the duration cannot be satisfied by dropping the history with it.
+    assert!(
+        prose.contains("2026-09-19"),
+        "`012` does not date the hand application, so its opening paragraph \
+         describes a state rather than recording an event"
+    );
+    assert!(
+        prose.contains("2026-09-21"),
+        "`012` does not date the record itself, so nothing says when this file \
+         and the cluster were first reconciled"
+    );
+
+    const UNITS: [&str; 10] = [
+        "day",
+        "days",
+        "week",
+        "weeks",
+        "fortnight",
+        "month",
+        "months",
+        "year",
+        "years",
+        "decade",
+    ];
+    const COUNTS: [&str; 14] = [
+        "a", "an", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        "several", "few",
+    ];
+
+    let words: Vec<String> = prose
+        .split_whitespace()
+        .map(|w| {
+            w.trim_matches(|c: char| !c.is_ascii_alphanumeric())
+                .to_ascii_lowercase()
+        })
+        .collect();
+    for pair in words.windows(2) {
+        let (count, unit) = (pair[0].as_str(), pair[1].as_str());
+        let counted = COUNTS.contains(&count)
+            || (!count.is_empty() && count.chars().all(|c| c.is_ascii_digit()));
+        assert!(
+            !(counted && UNITS.contains(&unit)),
+            "`012` narrates `{count} {unit}`: an elapsed interval a reader \
+             cannot settle against the dates beside it, and one that stops \
+             being true as soon as either end of it moves"
+        );
+    }
+}
+
+/// `009` and `010` tell an operator to re-apply the READER's grants too.
 ///
 /// The sibling of `the_venue_file_tells_an_operator_to_re_apply_the_account_file`,
 /// and it exists because review pointed out that `012`'s own "standing rule"
@@ -3661,9 +4247,40 @@ fn the_reader_file_records_the_grants_the_cluster_still_holds() {
 /// instruction has to be findable rather than merely true. A missing INSERT
 /// grant fails an insert and names a table. A missing SELECT grant renders an
 /// empty panel, which reads as a recorder that captured nothing.
+///
+/// TWO FILES AND NOT ONE, BECAUSE THE RULE WAS ALREADY MISSED ONCE. `010` added
+/// the publisher branch of the race — a view of its own, a re-stated collapse,
+/// and both sides of the seam — with no grant and no instruction, and the miss
+/// surfaced as a `497` on a race panel rather than in review
+/// (`malbeclabs/phoenix#290`). A test that read only `009` could not have
+/// caught it: every grant in `012` was a venue grant, so the pairing held
+/// while the file that needed it said nothing.
+///
+/// WHAT THE LOOP BELOW ACTUALLY ASKS, WHICH IS LESS THAN IT SOUNDS. It takes
+/// each grant line in `012` and requires that same line, verbatim, somewhere
+/// in `009` or `010`. That is textual containment and not a parse: it does not
+/// ask which file DECLARES the object, and review made the point by pasting a
+/// commented grant for an object no file declares into `009` and passing. So
+/// it cannot tell a correct instruction from a plausible-looking one. What it
+/// does catch is the defect above — a grant in `012` that no file's heading
+/// mentions, which is a grant nobody is told to apply — and that is the whole
+/// of its claim.
+///
+/// AND IT IS DRIVEN BY `012`, WHICH BOUNDS IT IN THE DIRECTION THAT MATTERS.
+/// This loop and the closure walk both iterate over the set `012` grants, so
+/// neither reaches a file that declares a readable view and grants nothing:
+/// there is no grant to start the pairing from, and the walk never descends
+/// into a view nothing points at. A `013` therefore does NOT inherit the rule
+/// by being checked, and saying otherwise here would be the same mistake as
+/// `010`'s "NO GRANT CHANGE" — true of what the author had in mind and silent
+/// about this direction. Upward from a new file the rule still rests on an
+/// author reading `012`'s header. What is mechanised is downward: a new branch
+/// beneath a view the reader ALREADY holds fails
+/// `the_reader_can_read_everything_under_the_views_it_is_granted`.
 #[test]
-fn the_venue_file_tells_an_operator_to_re_apply_the_reader_file() {
+fn the_venue_and_book_key_files_tell_an_operator_to_re_apply_the_reader_file() {
     let sql = venue_sql();
+    let book_key = book_key_sql();
     let reader = migration("012_recorder_reader_grants.sql").sql;
 
     // A heading, for the reason the account file's version gives: the
@@ -3683,18 +4300,32 @@ fn the_venue_file_tells_an_operator_to_re_apply_the_reader_file() {
         "the account whose grants are missing is not named"
     );
 
-    // And every grant the reader file holds is written in `009` too, so the
-    // pair cannot drift into a grant nobody is told to apply. Per statement and
-    // not as one sentence, which is what makes a fourth grant added next year
-    // get its instruction as well.
+    // The same heading in `010`, because that is where the publisher branch of
+    // the race is declared and the operator applying it is a different
+    // operator on a different day.
+    assert!(
+        book_key.contains("RE-APPLY `012` TOO"),
+        "`010` declares the publisher side of the race and does not tell a \
+         reader skimming it that the grants are somewhere else"
+    );
+    assert!(
+        book_key.contains("012_recorder_reader_grants.sql") && book_key.contains("grafana"),
+        "`010`'s instruction names neither the file nor the account"
+    );
+
+    // And every grant the reader file holds is written in the file that
+    // declares its object, so the set cannot drift into a grant nobody is told
+    // to apply. Per statement and not as one sentence, which is what makes a
+    // tenth grant added next year get its instruction as well.
     for line in reader
         .lines()
         .map(str::trim)
         .filter(|l| l.starts_with("GRANT"))
     {
         assert!(
-            sql.contains(line),
-            "`012` grants `{line}` and `009` does not tell an operator to apply it"
+            sql.contains(line) || book_key.contains(line),
+            "`012` grants `{line}` and neither `009` nor `010` tells an \
+             operator to apply it"
         );
     }
 }
@@ -3707,6 +4338,15 @@ fn the_venue_file_tells_an_operator_to_re_apply_the_reader_file() {
 /// nothing, and a privilege statement applied by whatever runs a schema
 /// deploy — the one outcome the split exists to prevent, and one that no test
 /// keyed on the old name would notice.
+///
+/// A RENAME IS NOT THE ONLY WAY IN, WHICH IS WHY THE MATCH BELOW IS CASE
+/// FOLDED. This test is the whole argument that a schema file holds no
+/// privilege statement, and it used to make that argument by looking for
+/// UPPERCASE verbs at the start of a line. The house style is uppercase, so
+/// the check agreed with every file while asserting nothing about the one way
+/// a file leaves that style: ClickHouse accepts `grant select on recorder.x
+/// to grafana;` exactly as it accepts the shouted form, and a lowercase line
+/// appended to `009` stayed in `schema()` for a row writer to apply.
 #[test]
 fn the_access_management_list_matches_the_files_that_grant() {
     for name in ACCESS_MANAGEMENT {
@@ -3730,9 +4370,18 @@ fn the_access_management_list_matches_the_files_that_grant() {
             "CREATE SETTINGS PROFILE",
             "CREATE QUOTA",
         ];
+        // Case folded, and read up to any trailing comment. ClickHouse does
+        // not care about the case of a keyword, so a lowercase `grant select
+        // on recorder.x to grafana;` appended to a schema file is a privilege
+        // statement that an uppercase-only match leaves in `schema()` for a
+        // row writer to apply — the outcome above, reached by a house-style
+        // slip rather than a rename. The verb is looked for anywhere in the
+        // statement for the same reason: a `;` and a second statement on one
+        // line is not a shape this schema writes, and a test that trusts it
+        // not to is a test that believes the formatting.
         let grants = m.sql.lines().any(|l| {
-            let l = l.trim_start();
-            !l.starts_with("--") && PRIVILEGE_VERBS.iter().any(|v| l.starts_with(v))
+            let code = l.split("--").next().unwrap_or_default().to_uppercase();
+            PRIVILEGE_VERBS.iter().any(|v| code.contains(v))
         });
         assert_eq!(
             grants,

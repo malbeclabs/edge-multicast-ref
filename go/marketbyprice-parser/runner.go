@@ -11,9 +11,16 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/malbeclabs/edge-multicast-ref/go/internal/udp"
 )
 
 const maxUDPPacket = 65536
+
+// readDeadline bounds a single read so a port that is receiving nothing still
+// comes back around to check whether the context has been cancelled. Its expiry
+// is the idle path, not a failure.
+const readDeadline = 500 * time.Millisecond
 
 const datagramHeaderSeqOffset = 4
 const datagramHeaderChannelOffset = 3
@@ -71,15 +78,6 @@ func (s *seqTracker) observe(src netip.Addr, ch uint8, seq uint64) (gaps, missin
 	return gaps, missing
 }
 
-// srcAddr normalises a datagram's sender address so one publisher always
-// produces one map key. Shared by both build-tagged readDatagram variants.
-func srcAddr(addr *net.UDPAddr) netip.Addr {
-	if addr == nil {
-		return netip.Addr{}
-	}
-	return addr.AddrPort().Addr().Unmap()
-}
-
 // portConfig binds a label to a UDP listening address.
 type portConfig struct {
 	Label string
@@ -125,37 +123,65 @@ func NewRunner(parser Parser, sink OutputSink, metrics *Metrics, group string, i
 	}, nil
 }
 
-// Run spawns one goroutine per port and blocks until ctx is cancelled.
-func (r *Runner) Run(ctx context.Context) error {
-	var wg sync.WaitGroup
-	errs := make(chan error, len(r.ports))
+// portConn pairs an open socket with the port role it serves.
+type portConn struct {
+	label string
+	conn  *net.UDPConn
+}
 
-	var opened []*net.UDPConn
+// Run opens every port and serves them until the caller cancels ctx or one of
+// them fails fatally. Every socket is opened before any receive loop starts, so
+// a failure here closes only sockets nothing is reading.
+func (r *Runner) Run(ctx context.Context) error {
+	var opened []portConn
 	for _, pc := range r.ports {
 		conn, err := r.openMulticast(pc.Port)
 		if err != nil {
-			for _, c := range opened {
-				c.Close()
+			for _, o := range opened {
+				o.conn.Close()
 			}
 			return fmt.Errorf("open %s port %d: %w", pc.Label, pc.Port, err)
 		}
-		opened = append(opened, conn)
+		opened = append(opened, portConn{label: pc.Label, conn: conn})
+	}
+	return r.serve(ctx, opened)
+}
+
+// serve runs one receive goroutine per port and blocks until all of them have
+// stopped. The first fatal read error cancels the siblings, so serve returns
+// that error rather than leaving the process reading the ports that still work;
+// a cancellation from the caller returns nil. Each socket is closed by the
+// goroutine reading it, so all of them are closed by the time serve returns.
+func (r *Runner) serve(ctx context.Context, ports []portConn) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	errs := make(chan error, len(ports))
+
+	for _, pc := range ports {
 		wg.Add(1)
 		go func(label string, conn *net.UDPConn) {
 			defer wg.Done()
 			defer conn.Close()
-			r.receive(ctx, label, conn, errs)
-		}(pc.Label, conn)
+			if err := r.receive(ctx, label, conn); err != nil {
+				// errs holds one slot per port and each goroutine sends at most
+				// once, so this send cannot block.
+				errs <- err
+				cancel()
+			}
+		}(pc.label, pc.conn)
 	}
 
 	wg.Wait()
+
+	// Every goroutine has finished, so closing errs here is safe, and it makes a
+	// send that arrived anyway panic rather than pass unnoticed. Values come off
+	// in the order they went in, so the first is the error that triggered the
+	// wind-down and the rest, if any, are ports that failed alongside it; an
+	// empty closed channel yields the nil of a clean cancellation.
 	close(errs)
-	for e := range errs {
-		if e != nil {
-			return e
-		}
-	}
-	return nil
+	return <-errs
 }
 
 func (r *Runner) openMulticast(port int) (*net.UDPConn, error) {
@@ -167,31 +193,36 @@ func (r *Runner) openMulticast(port int) (*net.UDPConn, error) {
 	if err := conn.SetReadBuffer(64 * 1024 * 1024); err != nil {
 		log.Printf("warning: SetReadBuffer: %v", err)
 	}
-	if err := enableTimestamping(conn); err != nil {
-		log.Printf("warning: enableTimestamping: %v", err)
+	if err := udp.EnableTimestamping(conn); err != nil {
+		log.Printf("warning: udp.EnableTimestamping: %v", err)
 	}
 	return conn, nil
 }
 
-func (r *Runner) receive(ctx context.Context, port string, conn *net.UDPConn, errs chan<- error) {
+// receive reads one port until ctx is cancelled, which returns nil, or until a
+// read fails other than by the deadline, which returns that error. A deadline
+// timeout is the normal idle path and carries on reading.
+func (r *Runner) receive(ctx context.Context, port string, conn *net.UDPConn) error {
 	buf := make([]byte, maxUDPPacket)
+	// One Reader per receive goroutine, like buf: it holds the control-message
+	// buffer that every read overwrites.
+	reader := udp.NewReader()
 	var tracker seqTracker
 
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		default:
 		}
 
-		_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-		n, src, recvTime, recvKind, err := readDatagram(conn, buf)
+		_ = conn.SetReadDeadline(time.Now().Add(readDeadline))
+		n, src, recvTime, recvKind, err := reader.ReadDatagram(conn, buf)
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				continue
 			}
-			errs <- fmt.Errorf("read %s: %w", port, err)
-			return
+			return fmt.Errorf("read %s: %w", port, err)
 		}
 
 		// Refdata is low-rate periodic-retransmit traffic; datagram-seq gaps there
@@ -245,7 +276,8 @@ func (r *Runner) receive(ctx context.Context, port string, conn *net.UDPConn, er
 		}
 
 		// An all-skipped or all-malformed datagram yields no records. Writing the
-		// empty batch would still consume a per-client queue slot in SocketSink.
+		// empty batch would still consume a per-client queue slot in the socket
+		// sink.
 		if len(records) > 0 {
 			if err := r.sink.Write(records); err != nil {
 				r.metrics.SinkWriteErrors.Inc()

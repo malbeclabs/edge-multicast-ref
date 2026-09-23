@@ -299,6 +299,7 @@ version = "0.2.0"
 dependencies = [
  "dz-edge-core",
  "dz-edge-tob",
+ "serde_json",
 ]
 
 [[package]]
@@ -306,6 +307,7 @@ name = "dz-edge-refdata"
 version = "0.2.0"
 dependencies = [
  "dz-edge-core",
+ "serde_json",
 ]
 
 [[package]]
@@ -313,6 +315,7 @@ name = "dz-edge-tob"
 version = "0.2.0"
 dependencies = [
  "dz-edge-core",
+ "serde_json",
 ]
 
 [[package]]
@@ -392,6 +395,7 @@ dependencies = [
  "dz-edge-mbp",
  "dz-edge-refdata",
  "dz-edge-tob",
+ "serde_json",
  "thiserror 1.0.69",
 ]
 
@@ -437,6 +441,7 @@ dependencies = [
  "dz-publisher-refdata",
  "dz-venue-composition",
  "serde",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "toml",
@@ -596,7 +601,7 @@ dependencies = [
 
 [[package]]
 name = "dz-recorder-load"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ctrlc",
  "dz-edge-core",

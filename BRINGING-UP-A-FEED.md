@@ -168,6 +168,42 @@ fallback: a `[adapter] kind` this binary did not register is a startup error
 naming every token it did, because *what is in this binary* is the question an
 operator cannot answer from the config file in front of them.
 
+The command line is the configuration path — bare, after `--config`, or joined
+to it as `--config=<path>` — plus `--version`/`-V` and `--help`/`-h`, which are
+answered wherever on the line they are written rather than in first position
+only. The arguments are read in order and the first decisive one answers: an
+option the command-line reader does not know is refused by name rather than
+opened as a file, so a misspelled flag fails as the flag it is; two
+configuration files are refused naming both rather than one of them being
+dropped; an option left without its value is named as the option, in either
+spelling; and a flag that publishes nothing is answered from the flag itself,
+so `--version` reached before a misspelling prints the version and `--version`
+reached after one reports the misspelling. `--help` prints the accepted forms
+on stdout and exits 0.
+
+**`--version` writes one line to stdout and exits 0: the version, alone.** That
+is the string a deployment compares against the version it pinned, and the tag
+with the `v` removed, so the comparison is an equality rather than a parse. A
+version handed over with nothing in it, or with a line break inside it, is
+reported as `unknown`: one line that fails every comparison is an answer, and
+two lines are not a version.
+`run()` answers with the runtime's own version. A venue that releases on its own
+stream answers with its own — the whole of the change is which function `main`
+calls:
+
+```rust
+fn main() -> std::process::ExitCode {
+    dz_publisher_runtime::run_with_version(env!("CARGO_PKG_VERSION"), registry())
+}
+```
+
+The same string reaches `dz_publisher_build_info{version}`, so what a scrape
+reports and what the binary answers cannot disagree about which build is
+deployed. The commit and the toolchain are on that gauge and deliberately not on
+the line: a consumer of `--version` compares one string against one pin, and a
+second field on the line is a field position for it to parse. A build handed no
+version reports `unknown`, which compares equal to no pin anybody holds.
+
 The transport comes from [`rust/ingress`](rust/ingress/). `[ingress] kind` names
 one of a closed set — `websocket`, `fix`, `multicast`, `poll`, `filetail`,
 `uds` — and the ones that are built are:
@@ -218,14 +254,16 @@ sent. A connect at which the adapter writes no logon is refused naming
 `on_connected`, because a transport that logged on with a body it composed
 itself would be signing for the venue.
 
-**That refusal is a fatal error, and a fatal error ends the process only on a
-`primary`.** On the single source most publishers run it is exactly the startup
-failure it reads as. On a `role = "comparison"` source it is that source's
-driver dropped and named on stderr, with its `connection_state` left at 0 and
-the publisher carrying on — so an adapter with a logon bug on a comparison
-source gives a process that looks healthy while one upstream never connects at
-all. Read [Several sources for one feed](#several-sources-for-one-feed) before
-relying on a startup failure to tell you, and watch
+**That refusal is a fatal error, and whether a fatal error ends the process is
+that connection's `role`.** On the one connection most publishers run it is
+exactly the startup failure it reads as, and the same on a `role = "primary"`
+or `role = "upstream-partition"` connection. On a `role = "comparison"`
+connection it is that connection's driver dropped and named on stderr, with its
+`connection_state` left at 0 and the publisher carrying on — so an adapter with
+a logon bug on a comparison connection gives a process that looks healthy while
+one upstream never connects at all. Read
+[Several sources for one feed](#several-sources-for-one-feed) before relying on
+a startup failure to tell you, and watch
 `dz_publisher_ingress_connection_state` per `connection` rather than the
 process being up.
 
@@ -290,6 +328,58 @@ Lay recorded payloads out in name order, point `[adapter.replay] path` at them,
 and read the other end with this repository's own Go parser — asserting
 *values*, not datagram counts. Every end-to-end exercise here does exactly
 that, and each one has found bugs that no unit test did.
+
+**A replay drives one connection, however many `[[source]]` blocks the document
+declares.** A fixture directory is one recording and nothing in it says which
+connection a payload arrived on, so one replaying input replaces every enabled
+block and takes the primary's name. Replaying the directory once per block would
+publish every payload as many times as there are enabled blocks, and a race
+between two copies of one recording is not a race. So a replay is a
+single-upstream exercise by construction, and a publisher with several enabled
+blocks has to plan its offline proof around that:
+
+- **Every payload reaches the adapter on the primary's connection**, so nothing
+  that turns on *which* connection delivered a payload runs offline — the
+  primary's own entry is exercised and nothing beside it is: a mapping from a
+  connection to the part of the upstream subscribed there, a
+  first-copy-wins discard across redundant paths — the second copy never
+  arrives, so the discard never runs — or `on_connected` and `on_disconnected`
+  for any block but the primary's. The per-`conn` state failure in
+  [Several sources for one feed](#several-sources-for-one-feed) is exactly the
+  failure a replay cannot reproduce.
+- **Metric pre-creation reads the input list after the substitution**, so the
+  two families labelled by `connection` —
+  `dz_publisher_ingress_connection_state` and
+  `dz_publisher_ingress_messages_total` — come up with one connection value in a
+  replay run rather than one per enabled block. This is the quiet one: the run
+  publishes and nothing names the narrowing, and a venue checking that every
+  series renders at startup gets a pass covering one connection out of however
+  many it enabled. That check belongs against a live run.
+- **What a replay does settle for several blocks is the document and the
+  composition**: the roles resolve, the venue's `main` builds one `Input` per
+  enabled block, and the enabled set and the built set are held equal — so an
+  enabled block the binary does not build is a startup failure offline too. A
+  block carrying `enabled = false` is skipped before either set is formed, so it
+  is declared, is not built, and is not a startup failure. Those
+  transports are built and never connected, and a line on stderr names how many
+  payloads are being replayed, from where, and under which connection.
+
+For the single upstream source the mechanism was built for, that bounds nothing:
+the recorded bytes drive the whole of `run()` — the config document, the
+registry, the adapter, the lowering, the sockets and the teardown — which is the
+strongest offline proof this runtime offers.
+
+**A replay that reaches the end of its recording exits non-zero**, so the exit
+code is not the thing to gate on. The payloads run out, the driver reads that as
+a connection that closed and reconnects, and the second connect is refused —
+a replay that reconnected would fold the same deltas into the book twice. That
+refusal is fatal, the replaying input carries the primary's connection, and the
+first primary to give up ends the process through the consistency guard, which
+is a failing exit code. `rust/publisher/dz-publisher-runtime/examples/replay.sh`
+runs the publisher accordingly. What an offline proof asserts on is what came
+out of the sockets — the records a subscriber decoded, read with this
+repository's own Go parser — together with the line stderr carries per replayed
+payload.
 
 ### 5. Configuration
 
@@ -439,6 +529,83 @@ role = "comparison"         # connected, driven, counted — for the race
   a partition while nothing partitions is worse than no key: it made two
   primaries with disjoint declarations resolve cleanly while both upstreams'
   events landed on one channel instance.
+- **An upstream that arrives partitioned declares one `primary` and one
+  `upstream-partition` per further connection.** A partitioned upstream is one
+  whose connections each carry instruments no other connection carries — a
+  venue that splits its subscriptions across sessions, or admits only so many
+  instruments per connection. Losing one of those loses that subset entirely,
+  so `role = "upstream-partition"` says one thing about a live run: **its fatal
+  error ends the process**, exactly as the primary's does.
+
+  ```toml
+  [[source]]
+  name = "ws-a"
+  ingress = "websocket"
+  role = "primary"              # the one the published set is defined against
+
+  [[source]]
+  name = "ws-b"
+  ingress = "websocket"
+  role = "upstream-partition"   # carries what `ws-a` does not
+  ```
+
+  Declare that second connection `comparison` instead — the only other role
+  that is not a primary — and a fatal error on it is a driver dropped, a gauge
+  at 0, and a publisher that carries on serving the instruments it still gets:
+  half the published set goes stale while the process reports itself healthy,
+  and the idle guard sees nothing because the surviving connections keep the
+  aggregate busy.
+
+  Which connection is nominated `primary` is the operator's choice, and the
+  one-primary rule counts it and nothing else — so a partitioned upstream is
+  one primary however many connections it arrives on. The role states **no
+  routing**: it names no instruments, no feeds and no shards, every payload
+  from it reaches the one adapter exactly as the primary's does, and the
+  adapter is what knows which instruments arrive where. It is not a `carries`
+  key under another name, and what makes it statable is that it describes
+  nothing but which failures are fatal and, at load, whether two of these
+  blocks may state one credential.
+
+  **What it covers is a fatal error, and that is narrower than "the partition
+  stopped working".** A driver returns only on `IngressError::Fatal`, which is
+  any non-retryable connect, send or receive operation on that connection — a
+  configuration fault found at connect most of all, and equally a message the
+  transport cannot carry at all; `Connect` and `Ended` are the retryable cases,
+  retried for ever with no attempt limit. So a partition whose session the venue
+  stops accepting mid-run, or whose host stops resolving after start, reconnects
+  at the backoff ceiling and the process does **not** end: its instruments go
+  stale, its `connection_state` flaps or sits at 0, and the venue-wide idle
+  guard stays quiet because the other connections keep the aggregate busy.
+  Watch `dz_publisher_ingress_connection_state` and
+  `dz_publisher_ingress_reconnects_total` per `connection`, and alert on a
+  partition's gauge at 0 the same way you would on a single-connection
+  publisher's.
+
+  **One venue account across the partitions is statable**, which is the shape
+  most of them arrive in. The shared-credential rule below refuses two enabled
+  blocks when one's whole `credentials` table appears in the other's, and this
+  is the one pair of roles it is not asked about: a `primary` beside an
+  `upstream-partition`, or two `upstream-partition` blocks, may write the same
+  `key_path` and the document loads. A venue that permits several sessions per
+  credential and hands out one credential leaves no other way to write it, and
+  the refusal's advice — give each block its own credential, or disable one of
+  them — would have left you copying one key file to as many paths as you have
+  connections.
+
+  What the exemption does not do is promise the venue agrees. Whether one
+  credential may hold several sessions is the venue's answer, not this file's:
+  if it permits one and you write one, the second logon evicts the first, and
+  the symptom is `dz_publisher_ingress_reconnects_total` climbing on two
+  connections together with `dz_publisher_ingress_connection_state` alternating
+  between them. Give each connection its own credential when the venue issues
+  them, and read the exemption as the file getting out of your way rather than
+  as a statement about the venue.
+
+  **A `comparison` block is not exempt**, in either direction, and neither is a
+  second `primary`. A block in either of those roles carries the whole book, so
+  a second logon of it on one credential is the copy-paste the rule exists to
+  refuse. A venue whose connections need no credential writes none, and several
+  blocks with no `credentials` table are not two logons with one credential.
 - **The transport is named once.** Either `[ingress] kind` for a publisher with
   one source, or `[[source]] ingress` per source. Both is refused: a key read
   only when another is absent is a key an operator cannot reason about. A
@@ -473,7 +640,12 @@ role = "comparison"         # connected, driven, counted — for the race
   `connection`, pre-created at 0 for every declared source, so a second upstream
   that never came up is a series sitting at zero rather than no series at all. A
   name with leading or trailing whitespace is refused rather than trimmed —
-  `"ws"` and `"ws "` would be two series a dashboard cannot tell apart.
+  `"ws"` and `"ws "` would be two series a dashboard cannot tell apart. Under
+  `[adapter.replay]` that pre-creation follows the one replaying input instead,
+  so `connection` takes one value whatever the document declares — a narrower
+  label, not a single series, since `dz_publisher_ingress_messages_total` keeps
+  a child per `message_type` under it: see
+  [Prove it offline before you point it at anything](#4-prove-it-offline-before-you-point-it-at-anything).
 - **One session per source, and per nothing else.** One driver is opened per
   enabled `[[source]]`, so a publisher carrying sixty-two channel instances of
   one feed specification over one source opens **one** upstream connection: a
@@ -502,6 +674,15 @@ role = "comparison"         # connected, driven, counted — for the race
   nothing here can know that, and its symptom is both sources reconnecting in
   step, with `dz_publisher_ingress_connection_state` alternating between them.
   The venue's own logon refusal is the authority.
+
+  **The one pair of roles this is not asked about** is a `primary` beside an
+  `upstream-partition`, or two `upstream-partition` blocks: those are several
+  sessions of one venue account by definition, and one credential between them
+  loads. Every pair involving a `comparison` is refused as above, and a second
+  `primary` is refused by the one-primary rule, so the copy-paste is intact — a
+  block duplicated and left alone carries the role it was copied from, and
+  reaching the exemption costs you the one line copy-paste is defined by not
+  editing. See the `upstream-partition` bullet above for the limit of it.
 - **Absent `[[source]]` is one source**, named by the transport the venue builds.
   Every document written before the array existed still means exactly that,
   including that its fatal errors end the process.
@@ -516,15 +697,18 @@ validator streams this way with a reorder window and a grace fallback.
 Two consequences an operator has to know before configuring a second source.
 
 **`role` is not a gate on what reaches the wire.** The runtime cannot keep a
-`comparison` source off it, because the adapter emits events and no event
-carries the source it came from. What it buys is the label, the startup check
-above, what an analysis tier reads to know which side of a race is which — and
-one runtime behaviour: **only a `primary`'s fatal error ends the process.** A
-driver returns only on a fatal error, and those are the per-source configuration
-faults found at connect: an invalid endpoint, a missing credential path, an
-unsupported scheme. A mistyped URL on a comparison source is now that source's
-driver dropped and named, with its `connection_state` left at 0 — the alert for
-exactly this case — and the primary carrying on.
+`comparison` connection off it, because the adapter emits events and no event
+carries the connection it arrived on. What it buys is the name in the file, the
+startup check above, what an analysis tier reads to know which side of a race is
+which — and one runtime behaviour: **whether a fatal error on that connection
+ends the process.** A driver returns only on a fatal error, and those are the
+non-retryable connect, send and receive operations: an invalid endpoint, a
+missing credential path, an unsupported scheme, a message the transport cannot
+carry at all. A fatal error on the `primary` ends the process, and so does one
+on an `upstream-partition`, because what either carries the published set
+depends on. A fatal error on a `comparison` does not: a mistyped URL on one is
+that connection's driver dropped and named, with its `connection_state` left at
+0 — the alert for exactly this case — and the primary carrying on.
 
 **Nothing retries that source, and a restart is what does.** Some of those
 causes are only fatal for one attempt — a credential path that does not exist
@@ -545,7 +729,10 @@ discontinuity — which an adapter that answers discontinuities with a reset tur
 into an `InstrumentReset` and a recovery snapshot on the live wire, from a
 connection that publishes nothing. Migration is one config block and one line in
 the venue's `main` with the adapter untouched, which is exactly why this is
-worth reading first.
+worth reading first — and an offline run is not what catches it, because a
+replay drives one connection, the `primary`'s, and no other block's
+`on_connected` ever runs. See
+[Prove it offline before you point it at anything](#4-prove-it-offline-before-you-point-it-at-anything).
 
 ## The recorder
 
@@ -810,6 +997,7 @@ infrastructure repositories, and each of those owns its own review.
 - [ ] `on_connected` composes the subscription, and is idempotent across reconnects
 - [ ] the binary registers the adapter under a `kind` token, and links the transports it allows
 - [ ] for a venue with several upstreams: one `[[source]]` per connection, exactly one `primary` **publisher-wide** (not per feed), and one `Input` built per `cx.sources()` entry
+- [ ] for a venue whose upstream arrives partitioned — each connection carrying instruments no other carries: every connection but the nominated `primary` is `role = "upstream-partition"`, so that a **fatal** error on one ends the process rather than dropping that connection and serving its instruments stale. A partition that reconnects for ever, or that stays connected and stops sending, is not a fatal error and ends nothing — watch `dz_publisher_ingress_connection_state` and `reconnects_total` per `connection`. One venue account across those blocks needs nothing said: the shared-credential refusal is not asked about this pair of roles, so the same `key_path` in each block loads
 - [ ] for a venue with several upstreams: per-connection state in the adapter keyed by `conn`, and `on_payload` emitting from the connection it means to publish — the runtime cannot hold a `comparison` source's events back
 - [ ] an offline replay run publishes, and this repository's Go parser reads the values back
 - [ ] config reviewed for `pin`, `source_id`, `channel_id`, group and ports — and `shard`, for a venue whose instrument set is sharded across channels

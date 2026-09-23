@@ -36,7 +36,8 @@ fn the_source_address_comes_from_the_route_and_not_from_configuration() {
     // attached segment only, so the number is pinned here rather than left to
     // follow whatever the constant becomes.
     assert_eq!(
-        DEFAULT_TTL, 1,
+        DEFAULT_TTL.get(),
+        1,
         "one hop, as `EgressPolicy::default` carries it and as the runtime's refusal names it"
     );
 }

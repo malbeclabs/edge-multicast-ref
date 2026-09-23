@@ -44,12 +44,23 @@ pub struct IngressConfig {
     #[serde(default = "default_connect_timeout", deserialize_with = "de_duration")]
     pub connect_timeout: Duration,
 
-    /// The first delay before a retry, and the one a proven connection resets
-    /// to.
+    /// The shortest a retry ever waits, and the base the delay ceiling doubles
+    /// from: the first delay is drawn between this and twice it — or between
+    /// this and `reconnect_backoff_max`, wherever the maximum is lower — and a
+    /// proven connection returns to that window. See
+    /// [`Backoff`](crate::Backoff) for what is drawn and why.
     #[serde(default = "default_backoff_initial", deserialize_with = "de_duration")]
     pub reconnect_backoff_initial: Duration,
 
     /// The ceiling on that delay.
+    ///
+    /// Equal to `reconnect_backoff_initial` is a fixed delay rather than a
+    /// refusal: the window is a single point, so every retry waits that one
+    /// value and the connections of one publisher retry in lockstep. It is
+    /// stated at startup rather than left to be inferred from the delays — see
+    /// [`BackoffPolicy::lockstep_line`](crate::BackoffPolicy::lockstep_line) —
+    /// because it is a configuration to mean and not one to arrive at by
+    /// accident.
     #[serde(default = "default_backoff_max", deserialize_with = "de_duration")]
     pub reconnect_backoff_max: Duration,
 

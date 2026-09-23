@@ -16,6 +16,7 @@ const (
 
 	tobMsgHeartbeat            = 0x01
 	tobMsgInstrumentDefinition = 0x02
+	tobMsgManifestSummary      = 0x07
 )
 
 // buildTobDatagram assembles a datagram header plus a single application message.
@@ -72,6 +73,9 @@ func buildHeartbeatBody() []byte {
 //     check, must classify as "schema_version". Version 2 is the fixture for
 //     "unsupported" here: it was specified upstream and superseded before any
 //     publisher emitted it, so it is rejected exactly like version 255 would be;
+//   - a body length that disagrees with its message type's fixed size, in
+//     either direction, must classify as "truncated" too — an over-long
+//     ManifestSummary is the fixture, since that is the one this PR pins;
 //   - bad magic still classifies as "bad_magic".
 //
 // This guards the ordering dependency I1 removed: before I1, a version-2
@@ -102,6 +106,11 @@ func TestClassifyParseErr_PinsReasons(t *testing.T) {
 		{
 			name: "instrument_definition length disagrees with declared version 3",
 			data: buildTobDatagram(3, tobMsgInstrumentDefinition, buildInstDefBody76()), // want 126
+			want: "truncated",
+		},
+		{
+			name: "manifest_summary body runs long",
+			data: buildTobDatagram(1, tobMsgManifestSummary, make([]byte, 26)), // want 20
 			want: "truncated",
 		},
 		{

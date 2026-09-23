@@ -9,6 +9,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/malbeclabs/edge-multicast-ref/go/internal/sink"
 )
 
 // Latency histogram buckets: 100us .. 60s, log-spaced.
@@ -185,6 +187,56 @@ func newMetrics() *metrics {
 	)
 
 	return m
+}
+
+// metrics carries the socket sink's counters for the shared transport in
+// go/internal/sink, which reports through this interface rather than holding a
+// metrics backend of its own.
+var _ sink.SocketMetrics = (*metrics)(nil)
+
+// socketMetrics hands these counters to the shared socket sink, and hands it
+// an untyped nil when there are none. That is the difference between the sink
+// skipping the counting outright and it calling methods on a nil pointer
+// wrapped in a non-nil interface, which only the nil-receiver guards below
+// would then save.
+func (m *metrics) socketMetrics() sink.SocketMetrics {
+	if m == nil {
+		return nil
+	}
+	return m
+}
+
+// SetSocketClients reports the number of currently connected socket clients.
+//
+// A nil receiver counts nothing: SinkConfig.Metrics is optional and reaches the
+// sink as it stands, so all three of these tolerate one.
+func (m *metrics) SetSocketClients(n int) {
+	if m == nil {
+		return
+	}
+	m.socketClients.Set(float64(n))
+}
+
+// AddSocketClientDrops counts n drops for reason, and what one drop is depends
+// on the reason: sink.DropReasonQueueFull counts one batch dropped for a client
+// whose outbound queue was full, which stays connected, while
+// sink.DropReasonWriteError counts one client disconnected after a failed
+// write.
+func (m *metrics) AddSocketClientDrops(reason string, n int) {
+	if m == nil {
+		return
+	}
+	m.socketClientDrops.WithLabelValues(reason).Add(float64(n))
+}
+
+// AddSocketRecordsSent counts n records queued to at least one socket client.
+// Queued, not delivered: a batch a client's queue accepted and its writer then
+// failed to write counts here, and again as a write-error drop.
+func (m *metrics) AddSocketRecordsSent(n int) {
+	if m == nil {
+		return
+	}
+	m.socketRecordsSent.Add(float64(n))
 }
 
 // serve starts an HTTP server on addr exposing /metrics. Returns when the

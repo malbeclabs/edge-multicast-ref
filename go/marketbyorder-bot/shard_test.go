@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"log"
 	"testing"
 	"time"
 
@@ -258,10 +260,10 @@ func snapshotBeginRec(ch uint8, instID, snapID, total uint32, anchor uint64, las
 	return Record{
 		Type: "snapshot_begin", ChannelID: ch, InstrumentID: instID,
 		Fields: map[string]any{
-			"snapshot_id":          float64(snapID),
-			"total_orders":         float64(total),
-			"anchor_seq":           float64(anchor),
-			"last_instrument_seq":  float64(lastInstr),
+			"snapshot_id":         float64(snapID),
+			"total_orders":        float64(total),
+			"anchor_seq":          float64(anchor),
+			"last_instrument_seq": float64(lastInstr),
 		},
 	}
 }
@@ -463,5 +465,465 @@ func TestSteadyStateIgnoresLossySnapshots(t *testing.T) {
 	}
 	if got := testCounter(t, s.metrics.BookDemotionsTotal); got != 0 {
 		t.Fatalf("book_demotions_total = %v, want 0", got)
+	}
+}
+
+// --- SnapshotOrder association: the open group, validated by Snapshot ID ---
+
+// snapshotShardWithCapture builds a single shard whose ClickHouse rows are captured.
+func snapshotShardWithCapture(t *testing.T) (*Shard, *captureWriter) {
+	t.Helper()
+	cw := &captureWriter{}
+	return NewShard(0, 1, NewEventsWriter(cw), nil, NewMetrics("test", "test")), cw
+}
+
+// wireSnapshotRows selects the wire_snapshots rows from everything captured.
+// total_orders is carried by no other table.
+func wireSnapshotRows(cw *captureWriter) []map[string]any {
+	var out []map[string]any
+	for _, row := range cw.captured() {
+		if _, ok := row["total_orders"]; ok {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+// Snapshot ID is monotonic per (channel_id, instrument_id), so a lost
+// SnapshotEnd leaves a shadow open at an id the next instrument's cycle reuses.
+// The order belongs to the instrument whose SnapshotBegin is open, never to
+// whichever lingering shadow shares the id — eight decoys and -count=20 make
+// Go's randomized map order an unreliable way to be right.
+func TestSnapshotOrderFollowsOpenGroupNotMatchingSnapshotID(t *testing.T) {
+	const snapID = 7
+	s, cw := snapshotShardWithCapture(t)
+
+	stale := []uint32{11, 12, 13, 14, 15, 16, 17, 18}
+	for _, id := range stale {
+		s.handle(sr("instrument_definition", "refdata", 1, id, map[string]any{"symbol": "STALE"}))
+		s.handle(snapshotBeginRec(0, id, snapID, 3, 2000, 20)) // no SnapshotEnd follows
+	}
+	s.handle(sr("instrument_definition", "refdata", 1, 99, map[string]any{"symbol": "OPEN-99"}))
+	s.handle(snapshotBeginRec(0, 99, snapID, 1, 3000, 30))
+	s.handle(snapshotOrderRec(0, snapID, 555, 0, 100, 5))
+
+	open := s.instruments[instKey{0, 99}].OpenSnapshot
+	if open.ReceivedOrders != 1 {
+		t.Errorf("open group received %d orders, want 1", open.ReceivedOrders)
+	}
+	if _, ok := open.Bids[555]; !ok {
+		t.Error("the order is missing from the open group's shadow")
+	}
+	for _, id := range stale {
+		if got := s.instruments[instKey{0, id}].OpenSnapshot.ReceivedOrders; got != 0 {
+			t.Errorf("lingering shadow for instrument %d absorbed %d orders, want 0", id, got)
+		}
+	}
+
+	rows := wireSnapshotRows(cw)
+	if len(rows) != 1 {
+		t.Fatalf("wire_snapshots rows = %d, want 1", len(rows))
+	}
+	if rows[0]["instrument_id"] != uint32(99) || rows[0]["symbol"] != "OPEN-99" {
+		t.Errorf("wire_snapshots row = instrument %v %q, want 99 \"OPEN-99\"",
+			rows[0]["instrument_id"], rows[0]["symbol"])
+	}
+}
+
+// A Ready, current instrument declines its own snapshot, and the publisher still
+// sends every order of the group. Those orders must not join a lingering shadow
+// left by another instrument at the same Snapshot ID: doing so overruns its
+// order count and costs that instrument a recovery cycle. Declining is the
+// steady state, so the drop counter must stay silent for it.
+func TestDeclinedGroupOrdersDoNotInflateALingeringShadow(t *testing.T) {
+	s, _ := snapshotShardWithCapture(t)
+
+	// Instrument 41 is recovering. Its shadow completes, then its SnapshotEnd is lost.
+	s.handle(snapshotBeginRec(0, 41, 7, 1, 2000, 20))
+	s.handle(snapshotOrderRec(0, 7, 900, 0, 100, 5))
+
+	// Instrument 42 is Ready and current, so it declines its own group at the
+	// same Snapshot ID one cycle later.
+	k42 := instKey{0, 42}
+	s.instruments[k42] = NewInstrument(42, "READY-42", 0, 0)
+	s.instruments[k42].Status = StatusReady
+	s.handle(snapshotBeginRec(0, 42, 7, 2, 4000, 40))
+
+	before := testCounter(t, s.metrics.SnapshotOrderDroppedTotal)
+	s.handle(snapshotOrderRec(0, 7, 901, 0, 101, 6))
+	s.handle(snapshotOrderRec(0, 7, 902, 1, 102, 7))
+
+	lingering := s.instruments[instKey{0, 41}].OpenSnapshot
+	if lingering.ReceivedOrders != 1 {
+		t.Errorf("lingering shadow received %d orders, want 1", lingering.ReceivedOrders)
+	}
+	if _, ok := lingering.Bids[901]; ok {
+		t.Error("a declined group's order joined another instrument's shadow")
+	}
+	if s.instruments[k42].OpenSnapshot != nil {
+		t.Error("a Ready instrument must not build a shadow")
+	}
+	if got := testCounter(t, s.metrics.SnapshotOrderDroppedTotal) - before; got != 0 {
+		t.Errorf("snapshot_order_dropped_total += %v for a declined group, want 0", got)
+	}
+}
+
+// The snapshot context is keyed by (channel, instrument). Keyed by
+// (channel, snapshot_id) it would hold one entry per lost SnapshotEnd, since the
+// id advances every cycle and the entry is never overwritten.
+func TestSnapshotContextKeyedByInstrumentNotSnapshotID(t *testing.T) {
+	s, cw := snapshotShardWithCapture(t)
+	s.handle(sr("instrument_definition", "refdata", 1, 55, map[string]any{"symbol": "SYM-55"}))
+
+	// Three cycles, each SnapshotEnd lost, each at its own Snapshot ID.
+	for snapID := uint32(7); snapID <= 9; snapID++ {
+		s.handle(snapshotBeginRec(0, 55, snapID, 1, uint64(1000*snapID), 20))
+		s.handle(snapshotOrderRec(0, snapID, uint64(snapID), 0, 100, 5))
+	}
+
+	if len(s.snapCtx) != 1 {
+		t.Errorf("snapCtx holds %d entries after three lost SnapshotEnds, want 1", len(s.snapCtx))
+	}
+	ctx, ok := s.snapCtx[instKey{0, 55}]
+	if !ok {
+		t.Fatal("snapshot context is not keyed by (channel, instrument)")
+	}
+	if ctx.SnapshotID != 9 {
+		t.Errorf("snapshot context holds id %d, want the open group's 9", ctx.SnapshotID)
+	}
+
+	rows := wireSnapshotRows(cw)
+	if len(rows) != 3 {
+		t.Fatalf("wire_snapshots rows = %d, want 3", len(rows))
+	}
+	for i, row := range rows {
+		if row["instrument_id"] != uint32(55) || row["symbol"] != "SYM-55" {
+			t.Errorf("row %d = instrument %v %q, want 55 \"SYM-55\"", i, row["instrument_id"], row["symbol"])
+		}
+	}
+}
+
+// Snapshot ID validates membership: an order whose id disagrees with the open
+// group belongs to no group this shard can name, so it is dropped and counted,
+// and nothing is persisted for it.
+func TestSnapshotOrderWithMismatchedSnapshotIDIsDroppedAndCounted(t *testing.T) {
+	s, cw := snapshotShardWithCapture(t)
+	s.handle(snapshotBeginRec(0, 61, 7, 1, 2000, 20))
+
+	before := testCounter(t, s.metrics.SnapshotOrderDroppedTotal)
+	s.handle(snapshotOrderRec(0, 8, 700, 0, 100, 5))
+
+	if got := s.instruments[instKey{0, 61}].OpenSnapshot.ReceivedOrders; got != 0 {
+		t.Errorf("open group received %d orders at a mismatched id, want 0", got)
+	}
+	if got := testCounter(t, s.metrics.SnapshotOrderDroppedTotal) - before; got != 1 {
+		t.Errorf("snapshot_order_dropped_total += %v, want 1", got)
+	}
+	if rows := wireSnapshotRows(cw); len(rows) != 0 {
+		t.Errorf("wire_snapshots rows = %d for an order matching no open group, want 0", len(rows))
+	}
+}
+
+// SnapshotEnd closes the group, so an order trailing it has no instrument to
+// belong to: dropped, counted, and kept out of the committed book.
+func TestSnapshotOrderAfterEndIsDroppedAndCounted(t *testing.T) {
+	s, cw := snapshotShardWithCapture(t)
+	s.handle(sr("instrument_definition", "refdata", 1, 71, map[string]any{"symbol": "SYM-71"}))
+	s.handle(snapshotBeginRec(0, 71, 7, 1, 2000, 20))
+	s.handle(snapshotOrderRec(0, 7, 800, 0, 100, 5))
+	s.handle(snapshotEndRec(0, 71, 7, 2000))
+
+	inst := s.instruments[instKey{0, 71}]
+	if inst.Status != StatusReady {
+		t.Fatalf("instrument status %v, want ready", inst.Status)
+	}
+	before := testCounter(t, s.metrics.SnapshotOrderDroppedTotal)
+	s.handle(snapshotOrderRec(0, 7, 801, 0, 101, 6))
+
+	if _, ok := s.open[0]; ok {
+		t.Error("SnapshotEnd left the group open")
+	}
+	if got := testCounter(t, s.metrics.SnapshotOrderDroppedTotal) - before; got != 1 {
+		t.Errorf("snapshot_order_dropped_total += %v for an order after SnapshotEnd, want 1", got)
+	}
+	if len(inst.Bids) != 1 {
+		t.Errorf("committed book holds %d bids, want the snapshot's 1", len(inst.Bids))
+	}
+	if rows := wireSnapshotRows(cw); len(rows) != 1 {
+		t.Errorf("wire_snapshots rows = %d, want 1 (the in-group order only)", len(rows))
+	}
+}
+
+// A SnapshotEnd delayed behind the next SnapshotBegin names a group that is
+// already finished. It must leave the live group open, or the rest of that
+// group's orders are dropped as belonging to nothing and persist no rows.
+func TestDelayedSnapshotEndDoesNotCloseTheLiveGroup(t *testing.T) {
+	s, cw := snapshotShardWithCapture(t)
+	s.handle(sr("instrument_definition", "refdata", 1, 55, map[string]any{"symbol": "SYM-55"}))
+
+	// One cycle at id 7 whose SnapshotEnd is lost, then the next at id 8.
+	s.handle(snapshotBeginRec(0, 55, 7, 1, 1000, 10))
+	s.handle(snapshotBeginRec(0, 55, 8, 2, 2000, 20))
+	s.handle(snapshotOrderRec(0, 8, 801, 0, 100, 5))
+	// The id-7 end arrives now, behind the id-8 begin.
+	s.handle(snapshotEndRec(0, 55, 7, 1000))
+
+	g, ok := s.open[0]
+	if !ok || g.snapID != 8 || g.inst != (instKey{0, 55}) {
+		t.Fatalf("open group = %+v (present %v), want instrument 55 at the live id 8", g, ok)
+	}
+
+	before := testCounter(t, s.metrics.SnapshotOrderDroppedTotal)
+	s.handle(snapshotOrderRec(0, 8, 802, 0, 101, 6))
+	if got := testCounter(t, s.metrics.SnapshotOrderDroppedTotal) - before; got != 0 {
+		t.Errorf("snapshot_order_dropped_total += %v for an order of the live group, want 0", got)
+	}
+	if rows := wireSnapshotRows(cw); len(rows) != 2 {
+		t.Errorf("wire_snapshots rows = %d, want 2 (both orders of the live group)", len(rows))
+	}
+}
+
+// Snapshot ID validates membership whether or not the open group's instrument
+// accepted the snapshot. A ready instrument declines its group and builds no
+// shadow, and the drop counter must still tell that group's own orders — the
+// steady state — apart from an order belonging to no open group at all.
+func TestMismatchedSnapshotIDIsCountedEvenWhenTheGroupWasDeclined(t *testing.T) {
+	s, cw := snapshotShardWithCapture(t)
+	s.handle(sr("instrument_definition", "refdata", 1, 42, map[string]any{"symbol": "READY-42"}))
+	s.instruments[instKey{0, 42}].Status = StatusReady
+	s.handle(snapshotBeginRec(0, 42, 7, 2, 4000, 40))
+	if s.instruments[instKey{0, 42}].OpenSnapshot != nil {
+		t.Fatal("a Ready instrument must decline the group and build no shadow")
+	}
+
+	before := testCounter(t, s.metrics.SnapshotOrderDroppedTotal)
+	s.handle(snapshotOrderRec(0, 7, 901, 0, 101, 6))
+	if got := testCounter(t, s.metrics.SnapshotOrderDroppedTotal) - before; got != 0 {
+		t.Errorf("snapshot_order_dropped_total += %v for the declined group's own order, want 0", got)
+	}
+
+	s.handle(snapshotOrderRec(0, 999, 902, 0, 102, 7))
+	if got := testCounter(t, s.metrics.SnapshotOrderDroppedTotal) - before; got != 1 {
+		t.Errorf("snapshot_order_dropped_total += %v for an id matching no open group, want 1", got)
+	}
+
+	rows := wireSnapshotRows(cw)
+	if len(rows) != 1 {
+		t.Fatalf("wire_snapshots rows = %d, want 1 (the declined group's own order only)", len(rows))
+	}
+	if rows[0]["instrument_id"] != uint32(42) || rows[0]["snapshot_id"] != uint32(7) {
+		t.Errorf("row = instrument %v id %v, want 42 at id 7", rows[0]["instrument_id"], rows[0]["snapshot_id"])
+	}
+}
+
+// A SnapshotEnd delayed behind the next SnapshotBegin names a group that is
+// already finished, and the shadow in progress belongs to the newer group. The
+// end must leave that shadow alone: offering it to EndSnapshot fails the id
+// check there, which discards the shadow, and the rest of the live group's
+// orders then have nothing to build into — the instrument loses the recovery
+// cycle it was about to complete.
+func TestDelayedSnapshotEndDoesNotDiscardTheLiveShadow(t *testing.T) {
+	s, _ := snapshotShardWithCapture(t)
+	k := instKey{0, 55}
+	s.handle(sr("instrument_definition", "refdata", 1, 55, map[string]any{"symbol": "SYM-55"}))
+
+	// One cycle at id 7 whose SnapshotEnd is lost, then the next at id 8,
+	// carrying two orders.
+	s.handle(snapshotBeginRec(0, 55, 7, 1, 1000, 10))
+	s.handle(snapshotBeginRec(0, 55, 8, 2, 2000, 20))
+	s.handle(snapshotOrderRec(0, 8, 801, 0, 100, 5))
+
+	// The id-7 end arrives now, behind the id-8 begin.
+	beforeMismatch := testCounterVec(t, s.metrics.SnapshotDiscardedTotal, "mismatch")
+	s.handle(snapshotEndRec(0, 55, 7, 1000))
+
+	shadow := s.instruments[k].OpenSnapshot
+	if shadow == nil {
+		t.Fatal("the delayed end discarded the live group's shadow")
+	}
+	if shadow.SnapshotID != 8 || shadow.ReceivedOrders != 1 {
+		t.Fatalf("shadow = id %d holding %d orders, want the live id 8 holding 1",
+			shadow.SnapshotID, shadow.ReceivedOrders)
+	}
+	if got := testCounterVec(t, s.metrics.SnapshotDiscardedTotal, "mismatch") - beforeMismatch; got != 0 {
+		t.Errorf("snapshot_discarded_total{reason=\"mismatch\"} += %v for a delayed end, want 0", got)
+	}
+
+	// The live group completes, so the instrument recovers on this cycle.
+	beforeDropped := testCounter(t, s.metrics.SnapshotOrderDroppedTotal)
+	s.handle(snapshotOrderRec(0, 8, 802, 1, 101, 6))
+	s.handle(snapshotEndRec(0, 55, 8, 2000))
+
+	inst := s.instruments[k]
+	if inst.Status != StatusReady {
+		t.Fatalf("instrument status %v, want ready", inst.Status)
+	}
+	if len(inst.Bids) != 1 || len(inst.Asks) != 1 {
+		t.Errorf("committed book = %d bids / %d asks, want the live group's 1 and 1",
+			len(inst.Bids), len(inst.Asks))
+	}
+	if got := testCounter(t, s.metrics.SnapshotOrderDroppedTotal) - beforeDropped; got != 0 {
+		t.Errorf("snapshot_order_dropped_total += %v for an order of the live group, want 0", got)
+	}
+	if _, ok := s.open[0]; ok {
+		t.Error("the live group's own end left it open")
+	}
+}
+
+// captureLog redirects the standard logger into buf for the duration of the
+// test and returns a function that puts it back early, so an assertion can read
+// a settled buffer.
+func captureLog(t *testing.T, buf *bytes.Buffer) func() {
+	t.Helper()
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(buf)
+	log.SetFlags(0)
+	var restored bool
+	restore := func() {
+		if restored {
+			return
+		}
+		restored = true
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	}
+	t.Cleanup(restore)
+	return restore
+}
+
+// A SnapshotEnd whose Snapshot ID is AHEAD of the open shadow is not a delayed
+// end. Ids are monotonic per (channel_id, instrument_id), so the end names a
+// later group of this instrument whose own SnapshotBegin was lost, and the
+// shadow belongs to a cycle that is over and whose end will never arrive. The
+// end must reach EndSnapshot, which discards the dead shadow and counts
+// snapshot_discarded_total{reason="mismatch"} — the series the Grafana
+// dashboard plots by reason. Holding the shadow instead keeps a snapshot
+// nothing can close and charges a log line to every stale end that follows,
+// which is the same event spread over thousands of lines and no counter.
+func TestSnapshotEndAheadOfTheShadowDiscardsItAndCountsMismatch(t *testing.T) {
+	s, _ := snapshotShardWithCapture(t)
+	k := instKey{0, 55}
+	s.handle(sr("instrument_definition", "refdata", 1, 55, map[string]any{"symbol": "SYM-55"}))
+	s.handle(snapshotBeginRec(0, 55, 7, 2, 1000, 10))
+
+	var logs bytes.Buffer
+	restore := captureLog(t, &logs)
+	before := testCounterVec(t, s.metrics.SnapshotDiscardedTotal, "mismatch")
+
+	// The id-8 begin was lost, so its end is the first record of that group to
+	// arrive and it meets the id-7 shadow.
+	s.handle(snapshotEndRec(0, 55, 8, 2000))
+
+	if got := testCounterVec(t, s.metrics.SnapshotDiscardedTotal, "mismatch") - before; got != 1 {
+		t.Errorf("snapshot_discarded_total{reason=%q} += %v for an end ahead of the shadow, want 1",
+			"mismatch", got)
+	}
+	if s.instruments[k].OpenSnapshot != nil {
+		t.Error("the end ahead of the shadow left the dead shadow in place")
+	}
+
+	// With the shadow gone the stale ends that follow cost nothing: the
+	// nil-shadow guard returns before any of them counts or logs.
+	const stale = 5000
+	for i := uint32(0); i < stale; i++ {
+		s.handle(snapshotEndRec(0, 55, 9+i, 2000))
+	}
+	restore()
+
+	if got := testCounterVec(t, s.metrics.SnapshotDiscardedTotal, "mismatch") - before; got != 1 {
+		t.Errorf("snapshot_discarded_total{reason=%q} += %v after %d further stale ends, want 1",
+			"mismatch", got, stale)
+	}
+	if n := bytes.Count(logs.Bytes(), []byte("\n")); n != 1 {
+		t.Errorf("%d stale ends logged %d lines, want the single discard line", stale+1, n)
+	}
+	if inst := s.instruments[k]; inst.Status != StatusAwaitingSnapshot || len(inst.Bids) != 0 || len(inst.Asks) != 0 {
+		t.Errorf("the live book must be untouched: status %v, %d bids / %d asks",
+			inst.Status, len(inst.Bids), len(inst.Asks))
+	}
+}
+
+// A SnapshotEnd whose Snapshot ID is BEHIND the open shadow is the delayed end
+// the guard exists for: this instrument's own next SnapshotBegin replaced the
+// group the end names, so there is nothing left to commit and the live shadow
+// has to survive to commit on its own end. It is silent — no shadow discarded,
+// nothing counted, and no line per record, so a reorder rate cannot turn into
+// log volume.
+func TestSnapshotEndBehindTheShadowIsTheDelayedEndAndIsSilent(t *testing.T) {
+	s, _ := snapshotShardWithCapture(t)
+	k := instKey{0, 55}
+	s.handle(sr("instrument_definition", "refdata", 1, 55, map[string]any{"symbol": "SYM-55"}))
+
+	// The id-7 cycle loses its end; the id-8 cycle opens and takes one order.
+	s.handle(snapshotBeginRec(0, 55, 7, 1, 1000, 10))
+	s.handle(snapshotBeginRec(0, 55, 8, 1, 2000, 20))
+	s.handle(snapshotOrderRec(0, 8, 801, 0, 100, 5))
+
+	var logs bytes.Buffer
+	restore := captureLog(t, &logs)
+	before := testCounterVec(t, s.metrics.SnapshotDiscardedTotal, "mismatch")
+
+	const delayed = 5000
+	for i := 0; i < delayed; i++ {
+		s.handle(snapshotEndRec(0, 55, 7, 1000))
+	}
+	restore()
+
+	shadow := s.instruments[k].OpenSnapshot
+	if shadow == nil {
+		t.Fatal("the delayed end discarded the live group's shadow")
+	}
+	if shadow.SnapshotID != 8 || shadow.ReceivedOrders != 1 {
+		t.Fatalf("shadow = id %d holding %d orders, want the live id 8 holding 1",
+			shadow.SnapshotID, shadow.ReceivedOrders)
+	}
+	if got := testCounterVec(t, s.metrics.SnapshotDiscardedTotal, "mismatch") - before; got != 0 {
+		t.Errorf("snapshot_discarded_total{reason=%q} += %v for a delayed end, want 0", "mismatch", got)
+	}
+	if n := bytes.Count(logs.Bytes(), []byte("\n")); n != 0 {
+		first, _, _ := bytes.Cut(logs.Bytes(), []byte("\n"))
+		t.Errorf("%d delayed ends logged %d lines, want none; first: %q", delayed, n, first)
+	}
+
+	// The live group still commits on its own end.
+	s.handle(snapshotEndRec(0, 55, 8, 2000))
+	inst := s.instruments[k]
+	if inst.Status != StatusReady || inst.Bids[801] == nil {
+		t.Errorf("instrument = status %v with %d bids, want ready holding its own order 801",
+			inst.Status, len(inst.Bids))
+	}
+}
+
+// clearShadows abandons the snapshot groups a socket drop interrupted — the
+// open group, the half-built shadow and the snapshot context stamping its
+// wire_snapshots rows — without touching a live book. A shadow is never the
+// live book, so a ready instrument keeps serving from deltas.
+func TestClearShadows_DropsInFlightGroupsButKeepsTheLiveBook(t *testing.T) {
+	s, _ := snapshotShardWithCapture(t)
+	k := instKey{0, 55}
+	s.handle(sr("instrument_definition", "refdata", 1, 55, map[string]any{"symbol": "SYM-55"}))
+	inst := s.instruments[k]
+	inst.Status = StatusReady
+	inst.ApplyOrderAdd(101, 0, 0, time.Time{}, 900, 10)
+	inst.BeginSnapshot(7, 1000, 2, 10)
+	s.snapCtx[k] = SnapshotContext{InstrumentID: 55, SnapshotID: 7}
+	s.open[0] = openGroup{inst: k, snapID: 7}
+
+	s.clearShadows()
+
+	if len(s.open) != 0 {
+		t.Errorf("the open group must not survive a socket drop: %+v", s.open)
+	}
+	if inst.OpenSnapshot != nil {
+		t.Error("the in-flight shadow must be dropped")
+	}
+	if len(s.snapCtx) != 0 {
+		t.Errorf("the abandoned group's snapshot context must go with it: %+v", s.snapCtx)
+	}
+	if inst.Status != StatusReady {
+		t.Errorf("a ready instrument must keep serving: %v", inst.Status)
+	}
+	if inst.Bids[101] == nil {
+		t.Errorf("the live book must be untouched: %d bids", len(inst.Bids))
 	}
 }

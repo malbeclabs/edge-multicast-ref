@@ -62,3 +62,17 @@ tokio = { version = "1", default-features = false, features = [
 # `a_transport_this_binary_was_not_built_with_is_a_different_error`, which uses
 # a kind the feature does not cover.
 dz-ingress-core = { path = "../../ingress/dz-ingress-core", features = ["uds"] }
+
+# `test-util` on top of what the library already takes. `ReplayInput::connect`
+# waits `SETTLE` before it yields, for the reason its own comment gives, and a
+# paused clock is what keeps a test of the refusal that follows from waiting
+# it out — this crate's rule that no test has to sleep applies to its own
+# tests too.
+tokio = { version = "1", default-features = false, features = ["test-util"] }
+
+# The fixture recordings these tests build are directories, and a test that
+# leaves one behind leaks it for the life of the machine: the tests ran under
+# `std::env::temp_dir()` keyed by pid, so a second run under a fresh pid never
+# reclaimed the first one's. `TempDir` removes it on drop, which is also what
+# makes the fixture safe to key by label alone.
+tempfile = { workspace = true }

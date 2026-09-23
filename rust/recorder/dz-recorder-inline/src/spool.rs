@@ -254,6 +254,15 @@ struct GrainDigest {
 #[derive(Debug)]
 pub struct Spool {
     dir: PathBuf,
+    /// The feed every window in this spool belongs to.
+    ///
+    /// One spool and one ledger per feed -- `inline_runner` opens both under
+    /// `join(&feed.spec)` -- so this is constant for the life of the spool. It
+    /// is carried rather than left empty because the ledger entry has a `feed`
+    /// and a ledger that does not fill it is one whose trailers all key on the
+    /// empty string: correct while nothing reads them, and wrong the moment
+    /// something does.
+    feed: String,
     budget_bytes: u64,
     /// Keyed on the directory name, which begins with a zero-padded start
     /// stamp: iteration order is consumption order, and it is the same order
@@ -286,13 +295,18 @@ impl Spool {
     /// directory that cannot be read is not the same as an empty one: starting
     /// on the second is resuming from nothing, and starting on the first is
     /// running with a disk full of windows nothing will ever post or evict.
-    pub fn open(dir: impl Into<PathBuf>, budget_bytes: u64) -> Result<Self, SpoolError> {
+    pub fn open(
+        dir: impl Into<PathBuf>,
+        budget_bytes: u64,
+        feed: impl Into<String>,
+    ) -> Result<Self, SpoolError> {
         let dir = dir.into();
         fs::create_dir_all(&dir).map_err(|source| SpoolError::Io {
             path: dir.clone(),
             source,
         })?;
         let mut spool = Self {
+            feed: feed.into(),
             dir: dir.clone(),
             budget_bytes,
             windows: BTreeMap::new(),
@@ -575,6 +589,7 @@ impl Spool {
             // better answer for.
             loaded_at_ns: now_unix_nanos(),
             trailer: window.sidecar.trailer.clone(),
+            feed: self.feed.clone(),
         };
         match ledger.record(entry) {
             Ok(()) => {
