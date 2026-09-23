@@ -390,7 +390,22 @@ impl<'a> Driver<'a> {
     /// capped: each delay is drawn inside its window per connection, so
     /// several connections dropped by one event do not attempt at the same
     /// instant — see [`Backoff`] — and each settles at about four attempts per
-    /// three ceilings rather than a burst of all of them at every ceiling.
+    /// three of whichever ceiling its sequence is sitting at, rather than a
+    /// burst of all of them at every ceiling.
+    ///
+    /// **Which ceiling that is, is the venue's to decide.** An outage that
+    /// refuses every attempt, or drops every connection before a payload,
+    /// carries the ceiling to `reconnect_backoff_max` and holds it there: four
+    /// attempts per three maxima, which is the rate that key is set for. A
+    /// venue that accepts, delivers one payload and closes sits at the other
+    /// end of the same arithmetic. One delivered payload is the proof this loop
+    /// asks for, so `cycle` answers `Cycle::Proven`, the sequence resets, and
+    /// such a connection never leaves the opening window: four attempts per
+    /// three *opening* ceilings, which at the documented pair of 500ms and 30s
+    /// is four attempts per three seconds — about 1.3 a second — for as long as
+    /// the venue keeps doing it. That is the shape of a throttle that lets one
+    /// payload through, and it is the rate to size a per-address budget
+    /// against, not the one at the maximum.
     pub async fn run(&mut self, events: &mut dyn EventSink) -> IngressError {
         loop {
             match self.cycle(events).await {

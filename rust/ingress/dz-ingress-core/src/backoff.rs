@@ -129,12 +129,16 @@ impl BackoffPolicy {
 ///   80.
 ///
 /// So the draw is **equal jitter**: uniform over `[ceiling / 2, ceiling]`,
-/// which is the window `[previous ceiling, this ceiling]`, clamped so that no
-/// delay is below the configured initial delay or above the configured
-/// maximum. For the documented pair — 500ms and 30s — the windows are 500ms to
-/// 1s, 1s to 2s, and so on to 15s to 30s. The burst is flattened across half
-/// the ceiling, and the average delay is three quarters of it: a sustained rate
-/// of about `4/3` of one attempt per ceiling rather than `2`.
+/// clamped so that no delay is below the configured initial delay or above the
+/// configured maximum. Half the ceiling is the *previous* ceiling only while
+/// the ceiling is still doubling; from the first capped ceiling on, the floor
+/// stays at half the configured maximum whatever the ceiling before it was. For
+/// the documented pair — 500ms and 30s — the windows are 500ms to 1s, 1s to 2s,
+/// and so on to 15s to 30s, which is the window every further attempt of an
+/// outage is drawn from: the ceiling before it is 16s once and 30s thereafter,
+/// and the floor is 15s in both cases. The burst is flattened across half the
+/// ceiling, and the average delay is three quarters of it: a sustained rate of
+/// about `4/3` of one attempt per ceiling rather than `2`.
 ///
 /// Three properties follow, and the last is why this is not decorrelated
 /// jitter, where the *state* is what the draw replaces (`ceiling =
@@ -243,9 +247,14 @@ impl Backoff {
     pub fn next_delay(&mut self) -> Duration {
         let ceiling = self.ceiling;
         self.ceiling = Self::doubled(ceiling, self.policy);
-        // Half the ceiling is the bottom of the window, which is the previous
-        // ceiling - and the configured initial delay whenever that is longer,
-        // which is the case of a maximum less than twice the initial delay.
+        // Half the ceiling is the bottom of the window - and the configured
+        // initial delay whenever that is longer, which is the case of a
+        // maximum less than twice the initial delay. Half the ceiling is the
+        // previous ceiling only while the ceiling is still doubling: a capped
+        // ceiling keeps its floor at half the configured maximum, so the
+        // window a settled sequence draws from stays `[max / 2, max]` - 15s to
+        // 30s for the documented pair, under a previous ceiling of 16s once
+        // and 30s thereafter - rather than closing to a point.
         let floor = (ceiling - ceiling / 2).max(self.policy.initial);
         // The window, in nanoseconds a draw can address. One wider than
         // `u64::MAX` nanoseconds is 584 years of window, so clamping there
@@ -478,6 +487,64 @@ mod tests {
         assert!(
             mean > Duration::from_millis(21_500) && mean < Duration::from_millis(23_500),
             "the mean delay at a 30s ceiling was {mean:?}, not about 22.5s"
+        );
+    }
+
+    #[test]
+    fn the_floor_at_the_cap_is_half_the_maximum_and_not_the_ceiling_before_it() {
+        // Half the ceiling is the previous ceiling only while the ceiling is
+        // still doubling. At the cap the two part company: for 500ms/30s the
+        // ceiling before the first capped one is 16s and the ceiling before
+        // every later one is 30s, while the floor is 15s throughout. A floor
+        // that tracked the previous ceiling would draw the first capped delay
+        // over 16s to 30s and every later one over the single point 30s -
+        // which is the lockstep this type exists to remove, arriving exactly
+        // where an outage settles.
+        let floor = Duration::from_secs(15);
+        let max = Duration::from_secs(30);
+        let ceiling_before_the_cap = Duration::from_secs(16);
+        let mut below_the_ceiling_before_the_cap = 0;
+        let mut settled_below_the_maximum = 0;
+        for seed in 0..256 {
+            let mut backoff = Backoff::new(policy(500, 30_000), seed);
+            // Five draws take the ceiling 1s, 2s, 4s, 8s, 16s; the sixth is
+            // the first one drawn under the cap.
+            for _ in 0..5 {
+                backoff.next_delay();
+            }
+            assert_eq!(backoff.ceiling(), max, "seed {seed} is not at the cap");
+            let first_capped = backoff.next_delay();
+            assert!(
+                first_capped >= floor && first_capped <= max,
+                "seed {seed} drew {first_capped:?} outside 15s to 30s"
+            );
+            if first_capped < ceiling_before_the_cap {
+                below_the_ceiling_before_the_cap += 1;
+            }
+            // The next one, whose previous ceiling is the maximum itself.
+            let settled = backoff.next_delay();
+            assert!(
+                settled >= floor && settled <= max,
+                "seed {seed} drew {settled:?} outside 15s to 30s"
+            );
+            if settled < max {
+                settled_below_the_maximum += 1;
+            }
+        }
+        // A fifteenth of a 15s-to-30s window is below 16s, so a floor at the
+        // previous ceiling would take this to zero.
+        assert!(
+            below_the_ceiling_before_the_cap > 4,
+            "only {below_the_ceiling_before_the_cap} of 256 first capped draws \
+             fell below the 16s ceiling that preceded them"
+        );
+        // And a floor at the previous ceiling would pin every one of these to
+        // 30s exactly.
+        assert_eq!(
+            settled_below_the_maximum,
+            256,
+            "a settled sequence drew the maximum exactly in {} of 256 cases",
+            256 - settled_below_the_maximum
         );
     }
 

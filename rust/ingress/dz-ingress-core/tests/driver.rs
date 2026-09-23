@@ -1011,6 +1011,57 @@ fn the_ceiling_doubles_across_failures_and_resets_for_a_proven_connection() {
 }
 
 #[test]
+fn a_venue_that_delivers_one_payload_and_closes_is_retried_in_the_opening_window() {
+    // The reconnect rate `run`'s rustdoc states, as a number. One delivered
+    // payload is all the proof the driver asks for, so a venue that accepts,
+    // delivers and closes - a session boundary, or a throttle that lets one
+    // payload through - resets the sequence on every cycle and never leaves the
+    // window it opens with. The ceiling therefore stays at 1s here however long
+    // the venue keeps it up, and the rate to size a per-address budget against
+    // is four attempts per three seconds rather than the four per three maxima
+    // an outage settles at.
+    let script = || {
+        Connection::live(vec![
+            Read::Payload(b"a"),
+            Read::Ended(DisconnectReason::RemoteClose),
+        ])
+    };
+    let outcome = run(
+        policy(),
+        RecordingAdapter::default(),
+        (0..8).map(|_| script()).collect(),
+    );
+
+    let slept = outcome.clock.slept();
+    // Eight proven connections, eight delays, every one of them drawn under the
+    // opening ceiling rather than under a ceiling that doubled.
+    within_the_windows(&slept, &[Duration::from_secs(1); 8]);
+    assert_eq!(
+        slept,
+        vec![
+            Duration::from_nanos(704_608_578),
+            Duration::from_nanos(769_940_704),
+            Duration::from_nanos(768_813_418),
+            Duration::from_nanos(880_908_841),
+            Duration::from_nanos(956_535_681),
+            Duration::from_nanos(560_445_938),
+            Duration::from_nanos(809_736_297),
+            Duration::from_nanos(511_942_275),
+        ]
+    );
+    // And the rate itself: these eight took 5.963s, against the six seconds
+    // four attempts per three seconds predicts, with the window's own bounds -
+    // 4s and 8s for eight draws - as the check that does not depend on a seed.
+    // A sequence that climbed instead would spend more than a minute on the
+    // same eight attempts.
+    let waited: Duration = slept.iter().sum();
+    assert!(
+        waited >= Duration::from_secs(4) && waited <= Duration::from_secs(8),
+        "eight retries of a venue that proves every connection took {waited:?}"
+    );
+}
+
+#[test]
 fn a_connection_that_delivered_and_was_then_rate_limited_does_not_reset_the_sequence() {
     // The venue has just said we are going too fast. Starting the sequence over
     // because the connection had been productive is how that becomes a ban
