@@ -175,16 +175,13 @@ func (r *Runner) serve(ctx context.Context, ports []portConn) error {
 
 	wg.Wait()
 
-	// Every goroutine has finished, so no further send can arrive. Values come
-	// off errs in the order they went in, so the first one is the error that
-	// triggered the wind-down; the rest, if any, are ports that failed
-	// alongside it.
-	select {
-	case err := <-errs:
-		return err
-	default:
-		return nil
-	}
+	// Every goroutine has finished, so closing errs here is safe, and it makes a
+	// send that arrived anyway panic rather than pass unnoticed. Values come off
+	// in the order they went in, so the first is the error that triggered the
+	// wind-down and the rest, if any, are ports that failed alongside it; an
+	// empty closed channel yields the nil of a clean cancellation.
+	close(errs)
+	return <-errs
 }
 
 func (r *Runner) openMulticast(port int) (*net.UDPConn, error) {

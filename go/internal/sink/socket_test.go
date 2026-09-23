@@ -662,3 +662,119 @@ func TestSocket_RegisterReportsTheClientCountUnderTheLock(t *testing.T) {
 		t.Error("register reported the client count with the sink mutex free; a concurrent drop's newer count can be overtaken by it")
 	}
 }
+
+// waitForClients blocks until the accept loop has registered n connections.
+// Write only reaches clients registered by the time it runs, so a batch
+// written before that was never queued at all.
+func waitForClients(t *testing.T, s *Socket[testRecord], n int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		s.mu.Lock()
+		got := len(s.clients)
+		s.mu.Unlock()
+		if got == n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the sink registered %d clients, want %d", got, n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestSocket_CloseFlushesQueuedBatches pins what Close owes a connected
+// client: the batches already queued for it go out before its socket is
+// closed. Write hands a batch to the client's outbound queue and returns, so
+// when a parser winds down there is almost always one sitting there; close the
+// socket first and the drain behind it writes into a closed connection, and
+// those records are lost with nothing to show for it but a dropped-client
+// warning.
+func TestSocket_CloseFlushesQueuedBatches(t *testing.T) {
+	sockPath := shortTempSock(t)
+
+	s, err := NewSocket(sockPath, NewJSONConnWriter[testRecord], nil)
+	if err != nil {
+		t.Fatalf("creating socket sink: %v", err)
+	}
+
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("connecting client: %v", err)
+	}
+	defer conn.Close()
+	waitForClients(t, s, 1)
+
+	const batches = 8
+	for i := 0; i < batches; i++ {
+		if err := s.Write([]testRecord{{Type: "quote", Seq: uint64(i)}}); err != nil {
+			t.Fatalf("writing batch %d: %v", i, err)
+		}
+	}
+
+	if err := s.Close(); err != nil {
+		t.Fatalf("closing the sink: %v", err)
+	}
+
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
+	scanner := bufio.NewScanner(conn)
+	got := 0
+	for scanner.Scan() {
+		var r testRecord
+		if err := json.Unmarshal(scanner.Bytes(), &r); err != nil {
+			t.Fatalf("decoding record %d: %v", got, err)
+		}
+		if r.Seq != uint64(got) {
+			t.Errorf("record %d carries seq %d, want %d: the client read them out of order", got, r.Seq, got)
+		}
+		got++
+	}
+	if got != batches {
+		t.Errorf("the client received %d of the %d batches queued before Close (scan error %v); the rest were dropped", got, batches, scanner.Err())
+	}
+}
+
+// TestSocket_CloseDoesNotWaitOnAClientThatStoppedReading pins the bound on that
+// drain. A client that has stopped reading fills the socket buffer and leaves
+// its writer blocked mid-batch; Close sets a write deadline before waiting, so
+// shutdown stays bounded instead of resting on a client that will never take
+// another byte.
+func TestSocket_CloseDoesNotWaitOnAClientThatStoppedReading(t *testing.T) {
+	sockPath := shortTempSock(t)
+
+	s, err := NewSocket(sockPath, NewJSONConnWriter[testRecord], nil)
+	if err != nil {
+		t.Fatalf("creating socket sink: %v", err)
+	}
+
+	// net.Pipe is unbuffered and nothing reads the far end, so the writer
+	// blocks on its first write and only the deadline releases it: a client
+	// that has stopped reading, without the timing of a real socket buffer.
+	stalled, farEnd := net.Pipe()
+	defer stalled.Close()
+	defer farEnd.Close()
+
+	cw := &clientWriter[testRecord]{
+		conn: stalled,
+		ch:   make(chan []testRecord, outQueueLen),
+		done: make(chan struct{}),
+		w:    NewJSONConnWriter[testRecord](stalled),
+	}
+	s.mu.Lock()
+	s.clients[stalled] = cw
+	s.mu.Unlock()
+	go s.serve(cw)
+
+	if err := s.Write([]testRecord{{Type: "quote", Seq: 1}}); err != nil {
+		t.Fatalf("writing: %v", err)
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- s.Close() }()
+
+	select {
+	case <-closed:
+	case <-time.After(4 * flushTimeout):
+		t.Fatalf("Close still waiting %s after a client stopped reading; the drain has to be bounded by the write deadline", 4*flushTimeout)
+	}
+}
