@@ -268,24 +268,28 @@ mod tests {
 
     /// A fixture directory holding `n` payloads, zero-padded so that name order
     /// and write order agree.
-    fn recording(label: &str, n: usize) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "dz-publisher-replay-{label}-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("a temporary directory");
+    ///
+    /// The `TempDir` is returned rather than dropped here: it removes the
+    /// directory when it goes, so every caller has to hold it for as long as
+    /// the `ReplayInput` reading from it.
+    fn recording(n: usize) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("a temporary directory");
         for i in 0..n {
-            std::fs::write(dir.join(format!("{i:02}.json")), b"{}")
+            std::fs::write(dir.path().join(format!("{i:02}.json")), b"{}")
                 .expect("the payload is written");
         }
         dir
     }
 
     /// The input a replay run composes: one, named after the primary.
-    fn open(label: &str, n: usize) -> ReplayInput {
-        ReplayInput::open(ConnectionId::new("primary"), &recording(label, n))
-            .expect("the directory holds payloads")
+    ///
+    /// The `TempDir` comes back with it and each test binds it, because
+    /// dropping it here would delete the recording out from under the input.
+    fn open(n: usize) -> (ReplayInput, tempfile::TempDir) {
+        let dir = recording(n);
+        let input = ReplayInput::open(ConnectionId::new("primary"), dir.path())
+            .expect("the directory holds payloads");
+        (input, dir)
     }
 
     /// A spent recording ends the connection rather than rewinding to its first
@@ -297,7 +301,7 @@ mod tests {
     /// test below is what that reconnect meets.
     #[tokio::test(start_paused = true)]
     async fn a_spent_recording_ends_the_connection() {
-        let mut input = open("spent", 1);
+        let (mut input, _recording) = open(1);
         input.connect(SETTLE).await.expect("the first connect");
         let first = input.recv(None).await.expect("the one payload");
         assert!(matches!(first, Received::Payload { .. }));
@@ -331,7 +335,7 @@ mod tests {
     /// `ExitCode::FAILURE` arm in `run`.
     #[tokio::test(start_paused = true)]
     async fn the_reconnect_after_it_is_refused_fatally() {
-        let mut input = open("reconnect", 1);
+        let (mut input, _recording) = open(1);
         input.connect(SETTLE).await.expect("the first connect");
         input.recv(None).await.expect("the one payload");
 
@@ -349,7 +353,7 @@ mod tests {
     /// about payloads already spent, not about connecting twice.
     #[tokio::test(start_paused = true)]
     async fn the_first_connect_is_not_refused() {
-        let mut input = open("first", 2);
+        let (mut input, _recording) = open(2);
         input.connect(SETTLE).await.expect("the first connect");
         assert_eq!(input.remaining(), 2);
     }

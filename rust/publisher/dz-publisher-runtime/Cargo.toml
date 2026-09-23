@@ -69,3 +69,10 @@ dz-ingress-core = { path = "../../ingress/dz-ingress-core", features = ["uds"] }
 # it out — this crate's rule that no test has to sleep applies to its own
 # tests too.
 tokio = { version = "1", default-features = false, features = ["test-util"] }
+
+# The fixture recordings these tests build are directories, and a test that
+# leaves one behind leaks it for the life of the machine: the tests ran under
+# `std::env::temp_dir()` keyed by pid, so a second run under a fresh pid never
+# reclaimed the first one's. `TempDir` removes it on drop, which is also what
+# makes the fixture safe to key by label alone.
+tempfile = { workspace = true }
