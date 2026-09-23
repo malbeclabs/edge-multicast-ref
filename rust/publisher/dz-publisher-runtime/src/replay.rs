@@ -30,17 +30,18 @@
 //!
 //! # One connection, however many `[[source]]` blocks a document declares
 //!
-//! [`run`](crate::run()) replaces **every** declared block with a single one of
+//! [`run`](crate::run()) replaces **every** enabled block with a single one of
 //! these, named after the primary: a fixture directory is one recording, so
 //! replaying it once per block would publish every payload as many times as
-//! there are blocks. A replay therefore drives one connection. Every payload
-//! reaches the adapter on that [`ConnectionId`], only that connection sees
-//! `on_connected` and `on_disconnected`, and the ingress metric families
+//! there are enabled blocks. A replay therefore drives one connection. Every
+//! payload reaches the adapter on that [`ConnectionId`], only that connection
+//! sees `on_connected` and `on_disconnected`, and the ingress metric families
 //! labelled by `connection` are pre-created from the substituted list — one
-//! `connection` value, not one per declared block. So nothing an adapter keys
-//! on the connection that delivered a payload is exercised offline, and
-//! `BRINGING-UP-A-FEED.md` states the whole of it for a venue planning an
-//! offline proof.
+//! `connection` value, not one per enabled block. So the primary's own entry is
+//! all an offline run exercises, and nothing that turns on *which* connection
+//! delivered a payload is exercised at all. `BRINGING-UP-A-FEED.md` states the
+//! whole of it for a venue planning an offline proof, the exit code a spent
+//! recording produces included.
 //!
 //! # What it does not pretend to be
 //!

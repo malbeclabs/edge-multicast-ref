@@ -293,16 +293,17 @@ that, and each one has found bugs that no unit test did.
 
 **A replay drives one connection, however many `[[source]]` blocks the document
 declares.** A fixture directory is one recording and nothing in it says which
-connection a payload arrived on, so one replaying input replaces every declared
+connection a payload arrived on, so one replaying input replaces every enabled
 block and takes the primary's name. Replaying the directory once per block would
-publish every payload as many times as there are blocks, and a race between two
-copies of one recording is not a race. So a replay is a single-upstream exercise
-by construction, and a publisher that declares several blocks has to plan its
-offline proof around that:
+publish every payload as many times as there are enabled blocks, and a race
+between two copies of one recording is not a race. So a replay is a
+single-upstream exercise by construction, and a publisher with several enabled
+blocks has to plan its offline proof around that:
 
 - **Every payload reaches the adapter on the primary's connection**, so nothing
-  the adapter keys on the connection that delivered it runs offline: a mapping
-  from a connection to the part of the upstream subscribed there, a
+  that turns on *which* connection delivered a payload runs offline — the
+  primary's own entry is exercised and nothing beside it is: a mapping from a
+  connection to the part of the upstream subscribed there, a
   first-copy-wins discard across redundant paths — the second copy never
   arrives, so the discard never runs — or `on_connected` and `on_disconnected`
   for any block but the primary's. The per-`conn` state failure in
@@ -312,14 +313,16 @@ offline proof around that:
   two families labelled by `connection` —
   `dz_publisher_ingress_connection_state` and
   `dz_publisher_ingress_messages_total` — come up with one connection value in a
-  replay run rather than one per declared block. This is the quiet one: the run
-  succeeds and publishes, and a venue checking that every series renders at
-  startup gets a pass covering one connection out of however many it declared.
-  That check belongs against a live run.
+  replay run rather than one per enabled block. This is the quiet one: the run
+  publishes and nothing names the narrowing, and a venue checking that every
+  series renders at startup gets a pass covering one connection out of however
+  many it enabled. That check belongs against a live run.
 - **What a replay does settle for several blocks is the document and the
   composition**: the roles resolve, the venue's `main` builds one `Input` per
-  declared block, and the declared set and the built set are held equal — so a
-  block the binary does not build is a startup failure offline too. Those
+  enabled block, and the enabled set and the built set are held equal — so an
+  enabled block the binary does not build is a startup failure offline too. A
+  block carrying `enabled = false` is skipped before either set is formed, so it
+  is declared, is not built, and is not a startup failure. Those
   transports are built and never connected, and a line on stderr names how many
   payloads are being replayed, from where, and under which connection.
 
@@ -327,6 +330,18 @@ For the single upstream source the mechanism was built for, that bounds nothing:
 the recorded bytes drive the whole of `run()` — the config document, the
 registry, the adapter, the lowering, the sockets and the teardown — which is the
 strongest offline proof this runtime offers.
+
+**A replay that reaches the end of its recording exits non-zero**, so the exit
+code is not the thing to gate on. The payloads run out, the driver reads that as
+a connection that closed and reconnects, and the second connect is refused —
+a replay that reconnected would fold the same deltas into the book twice. That
+refusal is fatal, the replaying input carries the primary's connection, and the
+first primary to give up ends the process through the consistency guard, which
+is a failing exit code. `rust/publisher/dz-publisher-runtime/examples/replay.sh`
+runs the publisher accordingly. What an offline proof asserts on is what came
+out of the sockets — the records a subscriber decoded, read with this
+repository's own Go parser — together with the line stderr carries per replayed
+payload.
 
 ### 5. Configuration
 
