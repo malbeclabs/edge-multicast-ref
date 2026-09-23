@@ -274,8 +274,8 @@ impl WebSocketInput {
     /// **The provider must not put anything in the body it would not put in a
     /// log line**, on the understanding that the body reaches the venue and the
     /// venue's own logs. Nothing in this crate prints it: the length is what an
-    /// over-long payload is reported by, and [`Debug`] says only whether a body
-    /// is computed at all.
+    /// over-long payload is reported by, and [`Debug`] says only whether a
+    /// provider is installed.
     ///
     /// # Why the provider neither fails nor declines
     ///
@@ -438,8 +438,15 @@ impl WebSocketInput {
 /// is one of the values: whether the upgrade is signed is printed, because that
 /// is what an operator reading a 401 wants to know, and what it is signed with
 /// is not. And it covers [`WebSocketInput::with_ping_payload`], whose body is
-/// where a venue that reads one wants a token: whether the ping carries a body
-/// is printed, and the body is not.
+/// where a venue that reads one wants a token: whether a provider is installed
+/// is printed, and what it computes is not.
+///
+/// `ping_payload_configured` is the whole of that claim, and deliberately not a
+/// claim about the ping on the wire. The provider is free to return an empty
+/// body — that is the best-effort answer this hook asks for when a token is
+/// momentarily unavailable — so a field promising that the ping carries
+/// something would print `true` over an empty ping in exactly the case an
+/// operator is reading it.
 impl core::fmt::Debug for WebSocketInput {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("WebSocketInput")
@@ -450,10 +457,12 @@ impl core::fmt::Debug for WebSocketInput {
             // venue answers with a 401 - and the only part of a credential
             // that is safe to print.
             .field("authenticated", &self.headers.is_some())
-            // Whether the ping carries a body, which is the first question an
-            // unexplained `timeout` disconnect raises against a venue that
-            // reads one - and, like a signature, not a thing to print.
-            .field("ping_carries_payload", &self.ping_payload.is_some())
+            // Whether a ping body is configured, which is the first question
+            // an unexplained `timeout` disconnect raises against a venue that
+            // reads one - and, like a signature, what it computes is not a
+            // thing to print. `is_some` knows that a provider was installed
+            // and nothing about what the last ping carried.
+            .field("ping_payload_configured", &self.ping_payload.is_some())
             .finish()
     }
 }
@@ -839,10 +848,10 @@ mod tests {
     }
 
     #[test]
-    fn a_debug_line_says_that_the_ping_carries_a_body_and_not_what_is_in_it() {
+    fn a_debug_line_says_that_a_ping_body_is_configured_and_not_what_is_in_it() {
         // A venue that reads a ping body reads a token out of it, so the rule
-        // that keeps a signature out of a log line covers this too. Whether
-        // there is a body is worth printing: it is the first question an
+        // that keeps a signature out of a log line covers this too. Whether a
+        // body is configured is worth printing: it is the first question an
         // unexplained `timeout` disconnect raises.
         let input = WebSocketInput::new(ConnectionId::new("mktdata"), "wss://example.com/stream")
             .expect("a well-formed endpoint")
@@ -853,8 +862,30 @@ mod tests {
             "{rendered}"
         );
         assert!(
-            rendered.contains("ping_carries_payload: true"),
+            rendered.contains("ping_payload_configured: true"),
             "{rendered}"
+        );
+    }
+
+    #[test]
+    fn a_provider_that_returns_nothing_is_still_a_configured_one() {
+        // The case the field is named for. A provider whose token is
+        // momentarily unavailable sends its best effort, and an empty `Vec` is
+        // that best effort - the ping goes out empty. What `is_some` knows is
+        // that a hook was installed, so that is what the field says; a field
+        // claiming the ping carries a body would print `true` over an empty
+        // ping in exactly the situation an operator is reading it.
+        let input = WebSocketInput::new(ConnectionId::new("mktdata"), "wss://example.com/stream")
+            .expect("a well-formed endpoint")
+            .with_ping_payload(Vec::new);
+        assert_eq!(
+            input.ping_message().expect("an empty body is sendable"),
+            Message::Ping(Default::default()),
+            "the ping goes out empty"
+        );
+        assert!(
+            format!("{input:?}").contains("ping_payload_configured: true"),
+            "{input:?}"
         );
     }
 

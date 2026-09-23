@@ -39,6 +39,7 @@ use dz_ingress_core::{
 use dz_ingress_websocket::WebSocketInput;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpListener;
+use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Message};
@@ -79,6 +80,15 @@ enum Serve {
     /// Reading a ping is also what queues the library's pong, and the pong is
     /// flushed by the next read or write on this side — so a script that wants
     /// the client's receive to return follows this with something to send.
+    ///
+    /// Non-ping messages read on the way are recorded into the same sink
+    /// [`Serve::Expect`] fills, so a script mixing the two does not lose the
+    /// message that arrived first. Both wrappers that script a ping —
+    /// [`serve_recording_pings`] and [`serve_recording_all`] — hand that sink
+    /// back, so what is recorded is what a caller can read.
+    ///
+    /// Every outcome other than a ping is recorded as one too, and stops the
+    /// rest of the script: see [`Ping`].
     ExpectPing,
     /// Close, with a code.
     Close(CloseCode),
@@ -94,12 +104,42 @@ enum Serve {
 /// first.
 type Upgrades = Arc<Mutex<Vec<Vec<(String, String)>>>>;
 
-/// The body of each ping the client sent, in the order they arrived.
+/// What the server got where a script asked for a ping.
 ///
-/// Bytes and not text: a venue that reads a ping body may want a sequence
-/// value in it, and a recorder that could only hold UTF-8 would be one this
-/// transport's callers could outgrow.
-type Pings = Arc<Mutex<Vec<Vec<u8>>>>;
+/// An absence is a recorded outcome and not an empty recorder. A read loop
+/// that gave up without a ping would otherwise leave behind exactly what a
+/// connection leaves before its first ping falls due — nothing — and a script
+/// could then assert its way past a ping that never went out. Each
+/// [`Serve::ExpectPing`] contributes one entry, always.
+#[derive(Debug, PartialEq, Eq)]
+enum Ping {
+    /// A ping arrived, carrying this body.
+    ///
+    /// Bytes and not text: a venue that reads a ping body may want a sequence
+    /// value in it, and a recorder that could only hold UTF-8 would be one
+    /// this transport's callers could outgrow.
+    Body(Vec<u8>),
+    /// The connection failed before a ping arrived, with the library's own
+    /// text for it. This is what a client sending a message the protocol
+    /// forbids looks like from here.
+    Failed(String),
+    /// The connection ended before a ping arrived.
+    Ended,
+    /// The connection stayed open and silent for [`PING_ARRIVAL_BOUND`].
+    Silence,
+}
+
+/// The outcome of each ping the script expected, in the order they arrived.
+type Pings = Arc<Mutex<Vec<Ping>>>;
+
+/// How long [`Serve::ExpectPing`] waits on one read before calling it silence.
+///
+/// Long enough that it is never the cadence under test: the slowest of these
+/// is [`PATIENT_PING`], so a ping that is going to arrive has ten intervals to
+/// do it in. Short enough that a ping which never goes out fails its test
+/// rather than hanging it, which is the whole reason the bound exists — a
+/// hung test reports nothing at all.
+const PING_ARRIVAL_BOUND: Duration = Duration::from_secs(2);
 
 /// Binds loopback and serves each script on one accepted connection, in order.
 ///
@@ -124,14 +164,45 @@ async fn serve_recording_upgrades(
     (address, received, upgrades)
 }
 
-/// [`serve`], and also the body of every ping the client sent.
+/// [`serve`], and also the outcome of every ping the script expected.
 ///
 /// A ping's body is only visible from this side: the client's own ping never
 /// comes back to it, and the pong the library answers with carries whatever the
 /// peer chose to echo rather than what went out.
-async fn serve_recording_pings(scripts: Vec<Vec<Serve>>) -> (SocketAddr, Pings) {
-    let (address, _received, _upgrades, pings) = serve_recording_all(scripts).await;
-    (address, pings)
+///
+/// The messages sink comes back with it because [`Serve::ExpectPing`] fills
+/// one on its way to the ping, and a recording no caller can read is not a
+/// recording.
+async fn serve_recording_pings(
+    scripts: Vec<Vec<Serve>>,
+) -> (SocketAddr, Arc<Mutex<Vec<String>>>, Pings) {
+    let (address, received, _upgrades, pings) = serve_recording_all(scripts).await;
+    (address, received, pings)
+}
+
+/// The ping outcomes, once the server has recorded `count` of them, taken out
+/// of the recorder.
+///
+/// Polled rather than awaited on a channel because the server runs as a task
+/// of its own: a test that read the recorder the instant its own call returned
+/// would be racing that task. Bounded by [`PING_ARRIVAL_BOUND`] plus a margin,
+/// because every [`Serve::ExpectPing`] records an outcome within it — so this
+/// returns, or the harness itself is broken.
+async fn pings_recorded(pings: &Pings, count: usize) -> Vec<Ping> {
+    let deadline = tokio::time::Instant::now() + PING_ARRIVAL_BOUND + Duration::from_secs(1);
+    loop {
+        {
+            let mut recorded = pings.lock().expect("the recorder");
+            if recorded.len() >= count {
+                return std::mem::take(&mut *recorded);
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the server recorded no outcome for a scripted ping"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 /// The server each wrapper above is one view of.
@@ -203,17 +274,39 @@ async fn serve_recording_all(
                     Serve::ExpectPing => {
                         // Reading past anything else on the way - a client is
                         // free to send its subscriptions before its first ping
-                        // falls due - and recording it, so that a script mixing
-                        // this with `Expect` does not lose the message that
-                        // arrived first.
-                        while let Some(Ok(message)) = stream.next().await {
-                            if let Message::Ping(body) = message {
-                                pinged.lock().expect("the recorder").push(body.to_vec());
-                                break;
+                        // falls due - and recording it into the sink
+                        // `serve_recording_pings` hands back, so that a script
+                        // mixing this with `Expect` does not lose the message
+                        // that arrived first.
+                        //
+                        // Every way of not getting a ping is recorded as the
+                        // outcome it is. A read loop that simply exited would
+                        // leave the recorder holding what a healthy connection
+                        // holds before its first ping - nothing - so a script
+                        // could assert on a ping that never went out and pass.
+                        let outcome = loop {
+                            match timeout(PING_ARRIVAL_BOUND, stream.next()).await {
+                                Ok(Some(Ok(Message::Ping(body)))) => {
+                                    break Ping::Body(body.to_vec())
+                                }
+                                Ok(Some(Ok(message))) => sink
+                                    .lock()
+                                    .expect("the recorder")
+                                    .push(message.to_text().unwrap_or("<binary>").to_string()),
+                                Ok(Some(Err(error))) => break Ping::Failed(error.to_string()),
+                                Ok(None) => break Ping::Ended,
+                                Err(_elapsed) => break Ping::Silence,
                             }
-                            sink.lock()
-                                .expect("the recorder")
-                                .push(message.to_text().unwrap_or("<binary>").to_string());
+                        };
+                        let arrived = matches!(outcome, Ping::Body(_));
+                        pinged.lock().expect("the recorder").push(outcome);
+                        if !arrived {
+                            // The rest of this script is written for a
+                            // connection that pinged. Abandoning it drops the
+                            // connection, so the client's own read returns
+                            // instead of waiting on a message that is not
+                            // coming - a failed test rather than a hung one.
+                            break;
                         }
                     }
                     Serve::Hold(duration) => tokio::time::sleep(duration).await,
@@ -496,7 +589,7 @@ async fn a_handshake_the_far_side_answers_with_http_is_a_retryable_connect_error
 
 #[tokio::test]
 async fn the_ping_body_the_provider_computed_reaches_the_venue() {
-    let (address, pings) = serve_recording_pings(vec![vec![
+    let (address, _received, pings) = serve_recording_pings(vec![vec![
         Serve::ExpectPing,
         // Sent after the ping was read, which is what flushes the library's
         // pong and so what lets the client's receive return at all.
@@ -519,10 +612,12 @@ async fn the_ping_body_the_provider_computed_reaches_the_venue() {
         "the connection did not survive the ping"
     );
     // Asserted from the server's side of the socket, because that is the only
-    // place that says the body was sent rather than merely stored.
+    // place that says the body was sent rather than merely stored - and on a
+    // recorder that has an entry for every way of not being pinged, so that
+    // "the body arrived" is not the same reading as "nothing arrived".
     assert_eq!(
-        pings.lock().expect("the recorder").as_slice(),
-        [b"not-a-real-keepalive-token".to_vec()],
+        pings_recorded(&pings, 1).await,
+        [Ping::Body(b"not-a-real-keepalive-token".to_vec())],
         "the venue did not see the body the provider computed"
     );
 }
@@ -532,7 +627,7 @@ async fn a_transport_with_no_ping_body_configured_pings_with_an_empty_one() {
     // The compatibility guarantee, and asserted where it is observable rather
     // than on the absence of a provider: a venue that reads nothing out of a
     // ping must see the same empty ping whether or not this hook exists.
-    let (address, pings) =
+    let (address, _received, pings) =
         serve_recording_pings(vec![vec![Serve::ExpectPing, Serve::Text("after the ping")]]).await;
 
     let mut input = WebSocketInput::new(CONNECTION, endpoint(address))
@@ -548,8 +643,8 @@ async fn a_transport_with_no_ping_body_configured_pings_with_an_empty_one() {
         b"after the ping".to_vec()
     );
     assert_eq!(
-        pings.lock().expect("the recorder").as_slice(),
-        [Vec::<u8>::new()],
+        pings_recorded(&pings, 1).await,
+        [Ping::Body(Vec::new())],
         "an unconfigured ping carries nothing"
     );
 }
@@ -562,7 +657,7 @@ async fn the_provider_runs_again_for_every_ping_and_the_second_body_is_the_new_o
     // the failure is the quiet one, because the connection stays up until the
     // venue decides it has waited long enough. The counter here stands in for
     // that value: a body computed once would arrive twice as `1`.
-    let (address, pings) = serve_recording_pings(vec![vec![
+    let (address, _received, pings) = serve_recording_pings(vec![vec![
         Serve::ExpectPing,
         Serve::Text("one"),
         Serve::ExpectPing,
@@ -589,8 +684,8 @@ async fn the_provider_runs_again_for_every_ping_and_the_second_body_is_the_new_o
     assert_eq!(payload_past_liveness(&mut input).await, b"one".to_vec());
     assert_eq!(payload_past_liveness(&mut input).await, b"two".to_vec());
     assert_eq!(
-        pings.lock().expect("the recorder").as_slice(),
-        [b"1".to_vec(), b"2".to_vec()],
+        pings_recorded(&pings, 2).await,
+        [Ping::Body(b"1".to_vec()), Ping::Body(b"2".to_vec())],
         "the venue saw one body twice"
     );
     assert_eq!(calls.load(Ordering::SeqCst), 2);
@@ -605,14 +700,17 @@ async fn a_ping_body_over_the_protocol_limit_stops_the_driver_rather_than_going_
     // reach. Stopped instead, for the reason an invalid header value stops the
     // driver.
     //
-    // **That the ping did not go out is read off the error and not off the
-    // recorder.** The server here is this same library, which refuses an
-    // over-long control message before any of its own code sees one, so an
-    // empty ping recorder says only that nothing was recorded. The fatal below
-    // is the discriminator: with the length guard removed this call returns
-    // `Ended` instead - "Connection reset without closing handshake", the
-    // server having failed the connection over the ping it was sent.
-    let (address, _pings) = serve_recording_pings(vec![vec![Serve::ExpectPing]]).await;
+    // **That the ping did not go out is read off the error and off the
+    // recorder, which say it two ways.** The server here is this same library,
+    // which refuses an over-long control message before any of its own code
+    // sees one, so the body never reaches the recorder whichever way this
+    // goes; what reaches it is the outcome, and the two outcomes differ. With
+    // the guard in place nothing is sent and the connection is recorded
+    // silent. With it removed the server fails the connection over the
+    // message it was sent, which is recorded as `Ping::Failed` - and this
+    // call returns `Ended` rather than `Fatal`, "Connection reset without
+    // closing handshake".
+    let (address, _received, pings) = serve_recording_pings(vec![vec![Serve::ExpectPing]]).await;
 
     let token = "not-a-real-keepalive-token";
     let mut input = WebSocketInput::new(CONNECTION, endpoint(address))
@@ -649,6 +747,14 @@ async fn a_ping_body_over_the_protocol_limit_stops_the_driver_rather_than_going_
     assert!(
         !error.to_string().contains(token),
         "a ping body reached a log line: {error}"
+    );
+    // The server's half of the same claim. `Silence` is the entry for a
+    // connection that stayed open and carried nothing; a body that had gone
+    // out would be recorded as the connection the server failed over it.
+    assert_eq!(
+        pings_recorded(&pings, 1).await,
+        [Ping::Silence],
+        "an over-long body reached the venue"
     );
 }
 
