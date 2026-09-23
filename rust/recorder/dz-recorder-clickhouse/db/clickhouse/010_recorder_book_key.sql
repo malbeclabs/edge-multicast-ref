@@ -206,6 +206,44 @@
 -- publisher-side rows were moves.
 --
 --
+-- RE-APPLY `012` TOO, OR THE RACE IS UNREADABLE BY THE DASHBOARDS
+--
+-- `012_recorder_reader_grants.sql` holds the `GRANT SELECT`s that let the
+-- `grafana` reader see what this file declares, written there exactly as they
+-- would be written here:
+--
+--   GRANT SELECT ON recorder.book_top TO grafana;
+--   GRANT SELECT ON recorder.book_top_settled TO grafana;
+--   GRANT SELECT ON recorder.publisher_book_top_occurrence TO grafana;
+--   GRANT SELECT ON recorder.feed_race_occurrence TO grafana;
+--   GRANT SELECT ON recorder.feed_race TO grafana;
+--
+-- THIS SECTION IS LATE, AND THE FILE IT BELONGED IN FROM THE START IS THIS ONE.
+-- `009` carries the same heading for the venue side and `012` states the
+-- standing rule — a file that adds an object the dashboards read adds its grant
+-- there and says so here — and the release of this file did neither. What it
+-- said about privilege was "NO GRANT CHANGE", which is true of `004` and of the
+-- loader's INSERT, and silent about the reader. The symptom arrived the way
+-- that rule predicts rather than in review: a race panel answering `497`
+-- (`malbeclabs/phoenix#290`).
+--
+-- ONE GRANT PER OBJECT, INCLUDING THE TABLE THIS FILE ONLY ALTERS. A panel
+-- names `recorder.feed_race` and reads everything beneath it: a normal view
+-- holds no rows and is expanded into the query that reads it, and at `SQL
+-- SECURITY INVOKER` — the default for a view that is not materialised — every
+-- object in that expansion is read with the privileges of whoever asked. So the
+-- chain is four deep on this side and `book_top` is the bottom of it, granted
+-- although `005` declares it and this file only adds a column. `012` draws the
+-- whole chain, both branches, in one place rather than leaving it to be
+-- re-derived here; the venue branch's grants are in `009`'s heading, for the
+-- same reason these are in this one.
+--
+-- NOT A REASON TO MOVE THE GRANTS HERE: they name an account this repository
+-- does not create, and `012` is out of `schema()` because granting needs
+-- access-management rights. `009`'s own section on that decision is the whole
+-- argument and it holds unchanged for this file.
+--
+--
 -- WHY `005` DECLARES THE COLUMN TOO
 --
 -- For the reason `008` gives at length: `005`'s `CREATE TABLE` is the

@@ -1,4 +1,4 @@
--- What may READ the venue tables, recorded where it can be re-applied.
+-- What may READ what the dashboards read, recorded where it can be re-applied.
 --
 -- Separate from `004` deliberately, and not because grants belong in two
 -- places. `004` is the loader's ACCOUNT: it creates the user, sets the profile
@@ -51,18 +51,47 @@
 -- Idempotent by construction: a grant the account already holds is replayed,
 -- never doubled, so re-applying is always safe and is never a schema change.
 --
--- THE STANDING RULE FROM `004` APPLIES HERE TOO: a later file that adds a venue
--- table the dashboards read adds its `GRANT SELECT` to this list and says in
--- its own header that this file has to be applied again. A file that does not do
--- so ships a table the reader cannot see, found when somebody opens a panel
--- rather than in review.
+-- THE STANDING RULE FROM `004` APPLIES HERE TOO: a later file that adds an
+-- object the dashboards read — a table, a view, or a view over a view — adds
+-- its `GRANT SELECT` to this list and says in its own header that this file has
+-- to be applied again. A file that does not do so ships something the reader
+-- cannot see, found when somebody opens a panel rather than in review.
 --
--- SCOPED TO THE VENUE TABLES AND NOT TO `recorder.*`, matching `004`'s
--- table-level grants and matching what was actually applied. The cost is the
--- one `009` already documents for the loader: a new venue grain needs its own
--- line here. The benefit is that the transport and market-data grains of `001`
--- and `005` — which nothing reads through this account today — do not quietly
--- become readable because a wildcard was easier to write.
+-- "AN OBJECT" AND NOT "A VENUE TABLE", WHICH IS WHAT THIS PARAGRAPH SAID AND
+-- HOW IT WAS READ PAST. A view is not a table and the publisher side of a race
+-- is not a venue grain, so a file that added four views over both sides could
+-- satisfy the rule as written by doing nothing at all.
+--
+-- `010` IS THAT FILE, AND IT IS WHY SIX OF THE NINE GRANTS BELOW ARRIVED LATE.
+-- It declares `publisher_book_top_occurrence`, re-states `book_top_settled`
+-- over the column it adds, and replaces the seam and the pairing with two-sided
+-- definitions — four views a dashboard reads — and the only thing it says about
+-- privilege is "NO GRANT CHANGE", which is true of `004` and of the loader's
+-- INSERT and says nothing about this direction. Found exactly the way the rule
+-- predicts: somebody opened a race panel and met `497`
+-- (`malbeclabs/phoenix#290`). The rule stands; what it needed was something
+-- other than a header to hold it, so `ddl.rs` now pairs every statement below
+-- against the file that declares its object.
+--
+-- `011` IS CLEAR OF THE RULE, checked rather than assumed. It adds two columns
+-- to `recorder.event`, declares no table and no view, and nothing selects from
+-- `recorder.event` — so there is no object the reader could be missing, and its
+-- own "NO GRANT CHANGE" is the whole truth about it.
+--
+-- SCOPED TO THE OBJECTS A DASHBOARD READS AND NOT TO `recorder.*`, matching
+-- `004`'s table-level grants and matching what was actually applied. The cost
+-- is the one `009` already documents for the loader: a new venue grain needs
+-- its own line here, and so does every view a panel is moved onto. The benefit
+-- is that the transport grains of `001` — which nothing reads through this
+-- account today — do not quietly become readable because a wildcard was easier
+-- to write.
+--
+-- IT IS NO LONGER SCOPED TO THE VENUE TABLES, WHICH IS THE SENTENCE THIS
+-- PARAGRAPH USED TO MAKE, and the change is worth naming rather than editing
+-- away. A race has two sides, and the other one is `005`'s `book_top`: the
+-- first market-data grain this reader may read. Table level is what keeps that
+-- from being the whole of `005` — `event` and `instrument` sit beside it and
+-- stay unreadable, which one `GRANT SELECT ON recorder.*` would have ended.
 
 -- A VIEW NEEDS ITS OWN GRANT, WHICH IS NOT OBVIOUS FROM THE TABLE'S. A grant on
 -- `venue_book_top` does not reach `venue_book_top_settled`, and the server says
@@ -78,6 +107,36 @@
 -- state the other observation point missed. A reader granted the table and not
 -- the view gets the wrong number rather than an error, which is the outcome
 -- worth spending a line to prevent.
+--
+-- AND SO DOES EVERY OBJECT UNDERNEATH IT, which is the same fact one level
+-- further down and is what decides the length of the block below. These are
+-- normal views: they hold no rows, they are expanded into the query that reads
+-- them, and at the server's default — `SQL SECURITY INVOKER` for a view that is
+-- not materialised — every object the expansion touches is read with the
+-- privileges of whoever asked. So a grant on `feed_race` alone answers `497`
+-- naming `feed_race_occurrence`, and a grant on both answers `497` naming the
+-- next one down. The pair already in this file is that rule with two links
+-- rather than a special case: `venue_book_top_settled` was granted BESIDE
+-- `venue_book_top` and not instead of it, and both of them are read by one
+-- `SELECT count()`.
+--
+-- SO THE LIST IS DERIVED FROM THE VIEW DEFINITIONS AND NOT FROM THE PANEL.
+-- What a query names is one object; what it reads is the transitive closure of
+-- `FROM` beneath that object, and only the first of those is visible to whoever
+-- writes the panel. Read off `009` and `010`, a panel over `recorder.feed_race`
+-- reaches eight:
+--
+--   feed_race                          `009`, re-stated by `010`
+--     feed_race_occurrence             `009` venue-only, replaced by `010`
+--       venue_book_top_occurrence      `009`
+--         venue_book_top_settled       `009`
+--           venue_book_top             `009`
+--       publisher_book_top_occurrence  `010`
+--         book_top_settled             `006`, re-stated by `010`
+--           book_top                   `005`
+--
+-- `venue_object` is the ninth grant and is in no chain: it is a table a panel
+-- names directly, and it is what this file was first written for.
 
 -- LAKE IS NOT GRANTED, AND THIS IS THE RECORD OF WHY RATHER THAN AN OMISSION.
 --
@@ -148,9 +207,47 @@
 -- one-time work on one cluster either way, which is why it is recorded and
 -- dated rather than declared.
 
+-- THE SIX RACE GRANTS ARE WRITTEN HERE BEFORE THEY ARE APPLIED, WHICH IS THE
+-- OPPOSITE ORDER FROM THE FIRST THREE AND IS THE ORDER THIS FILE ARGUES FOR.
+-- The first three were applied by hand and written down afterwards, and the
+-- paragraph at the top of this file is what that order cost. How long it
+-- lasted is not the point and a short gap is no defence: for as long as it
+-- lasted, the cluster held a grant no file named, and a rebuild in that window
+-- would have come back without it. These are written down first: an
+-- administrator applies the file, and the record and the cluster agree from
+-- the beginning rather than after somebody reconciles them.
+--
+-- SO THE READER DOES NOT HOLD THEM AS OF 2026-09-22, AND WHAT SAYS SO IS A
+-- SYMPTOM RATHER THAN THE CLUSTER. `malbeclabs/phoenix#290` reports a panel
+-- over `recorder.feed_race` answering `497`, which is the same evidence the
+-- first three grants were written from. `grafana` has no privilege on
+-- `system.grants` — `SHOW ACCESS` answers `497` through the Grafana data
+-- source's own credential — so the state is read with
+-- `SHOW GRANTS FOR grafana;` from an administrator's session, which is the
+-- session that applies this file anyway.
+-- The dashboard the six are for is `malbeclabs/phoenix#291`; until they are
+-- applied it renders the venue counts and nothing about the race.
+
 -- The venue-side tables of `009`, read by the Grafana data source that backs
 -- the `phoenix-venue-recorder` dashboard in `malbeclabs/infra`.
 GRANT SELECT ON recorder.venue_book_top TO grafana;
 GRANT SELECT ON recorder.venue_object TO grafana;
 -- And `009`'s collapsed view over the first of them, for counts.
 GRANT SELECT ON recorder.venue_book_top_settled TO grafana;
+-- The venue side's occurrence ordinal, which the race is an aggregate over and
+-- which the grant on the collapsed view beneath it does not reach.
+GRANT SELECT ON recorder.venue_book_top_occurrence TO grafana;
+
+-- The publisher side of the same race: `005`'s table, `006`'s collapse over it
+-- as `010` re-states it, and `010`'s numbering on the key both sides compute.
+-- A table of `005` is granted here for the first time, and the paragraph on
+-- scope above says why that is a decision rather than a widening.
+GRANT SELECT ON recorder.book_top TO grafana;
+GRANT SELECT ON recorder.book_top_settled TO grafana;
+GRANT SELECT ON recorder.publisher_book_top_occurrence TO grafana;
+
+-- The seam both sides enter by, and the pairing over it — the two a feed-race
+-- panel names, and the only two of the nine somebody writing one would think to
+-- ask for.
+GRANT SELECT ON recorder.feed_race_occurrence TO grafana;
+GRANT SELECT ON recorder.feed_race TO grafana;
