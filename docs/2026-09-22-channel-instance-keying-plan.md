@@ -2,10 +2,16 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Key gap detection, recovery state, `Reset Count` and the snapshot cycle
-on `(source IP address, Channel ID, destination port)` — the channel instance —
-in both parsers and both book-builders, by carrying that identity on the record
-instead of dropping it at the parser boundary.
+**Goal:** Carry `(source IP address, Channel ID, destination port)` — the
+channel instance — on the record instead of dropping it at the parser boundary,
+and key on it in both parsers and both book-builders: **gap detection on the
+channel instance, and recovery state on the publisher channel**
+`(source IP address, Channel ID)`, which is the same identity with the port role
+dropped. One publisher is three channel instances, one per port role, and an
+instrument's definition, deltas and snapshot cycle arrive on all three, so a
+book keyed on the finer value is three books that never meet. The design's
+*Two keys, because one publisher is three channel instances* settles which
+structure takes which.
 
 **Design:** `docs/2026-09-22-channel-instance-keying-design.md`
 
@@ -23,9 +29,17 @@ Thirteen tasks, all in this repository. No wire-format change at any point: the
 source IP address and the destination port are properties of the UDP datagram
 read from the socket, never of the payload.
 
-The worked case throughout is the design's: **two channel instances of one
-`Channel ID`, on distinct destination ports, carrying one `Instrument ID`** —
-against the one instance per `Channel ID` the tree assumes today.
+Two worked cases throughout, both the design's, and every task is against one
+of them:
+
+- **Two paths carrying one `Channel ID`**, on distinct destination ports and
+  from distinct source IP addresses, carrying one `Instrument ID` — against the
+  one publisher per `Channel ID` the tree assumes today. This is what the
+  publisher channel separates.
+- **One publisher's three port roles carrying one `Instrument ID`** — its
+  definition on `refdata`, its deltas on `mktdata`, its cycle on `snapshot`.
+  This is what the publisher channel must *not* separate, and it is the
+  regression a book keyed on the channel instance produces.
 
 ---
 
@@ -91,13 +105,20 @@ independently gateable.
 - **No venue names and no host counts.** This repository is public. Example
   addresses come from the documentation range (`198.51.100.0/24`), not from a
   private or multicast range.
-- **Two instances in a fixture get disjoint sequence ranges.** Every test that
-  interleaves two channel instances gives them sequence numbers that do not
-  overlap — one instance from 1, the other from 1,000,000. Identical or
-  overlapping ranges make the folded key read as reorders and duplicates, and
-  `seq <= last` is ignored by design, so a `Channel ID`-keyed implementation
-  passes the fixture and the test asserts nothing. The same applies to
-  `Reset Count`: differing steady values, not one shared value.
+- **Two paths in a fixture get disjoint sequence ranges.** Every test that
+  interleaves two paths gives them sequence numbers that do not overlap — one
+  from 1, the other from 1,000,000, a separation wider than task 10's
+  `reorderWindow`. Identical or overlapping ranges make the folded key read as
+  reorders and duplicates, and that branch is ignored by design, so a
+  `Channel ID`-keyed implementation passes the fixture and the test asserts
+  nothing. The same applies to `Reset Count`: differing steady values, not one
+  shared value.
+- **Every book-builder fixture drives all three port roles.** A fixture that
+  feeds only `mktdata` records cannot see the split this plan's second worked
+  case is about: the definition has to arrive on `refdata`, the cycle on
+  `snapshot`, and the assertion has to reach the symbol and the exponents those
+  records carried. A test whose records all share one `DstPort` passes against
+  an `instKey` keyed on the destination port.
 - **Commit before any step that rewrites files in place**, and in particular
   before task 3's DDL run against a container volume.
 - **Commit messages:** all lowercase, no `Co-Authored-By`, no attribution
@@ -110,6 +131,19 @@ independently gateable.
 Stated up front, because each was found by reading the code and each is a task
 below that would otherwise be written wrong.
 
+- **One publisher is three channel instances, so the book cannot key on one.**
+  Each port role is a separate instance with its own series
+  (`rust/publisher/dz-publisher-egress/src/instance.rs:19-23`), and the
+  publisher keys only its `Sequencer` that finely (`sequencer.rs:36-39`) while
+  its era covers all three roles (`era.rs:47-50`). Put the destination port in
+  `instKey` and `applyInstrumentDefinition`'s write at
+  `go/marketbyorder-bot/shard.go:150-154` lands under a key no reader uses:
+  `s.refdata[k]` at `shard.go:446` and `:468` are reached from `snapshot` and
+  `mktdata` records and both miss every time — empty symbol, exponent `0`, no
+  book ever `StatusReady`. `instKey`, `instruments`, `refdata`, `deltaBuf`,
+  `resetCount`, `open`, the manifest and the `SnapshotWriter` take
+  `publisherChannel`; only `seqTracker.last` and `seqLast` take
+  `channelInstance`.
 - **`input_format_skip_unknown_fields` must be pinned before any row carries the
   new key, not with it.** It defaults to `1`, and at `1` an insert naming a
   column the table does not have is answered `200` and the field is discarded
@@ -117,6 +151,18 @@ below that would otherwise be written wrong.
   `rust/recorder/dz-recorder-clickhouse/src/config.rs:195-226`). Pinning it in
   the same task as the row key would refuse the first mis-ordered batch instead
   of making the ordering impossible to get wrong.
+- **A refused batch is destroyed, not held.** "The batch loads on its own once
+  the column exists" is the recorder's property, whose rows are objects in
+  storage (`rust/recorder/dz-recorder-clickhouse/src/config.rs:210-215`). All
+  three Go paths hold the batch in memory only and, on a refusal, log it, count
+  it and truncate the buffer: `go/marketbyorder-bot/clickhouse.go:117-125`,
+  `go/internal/clickhouse/client.go:159-173`, and
+  `go/topofbook-bot/clickhouse.go:265-274` with `buf.Reset()` in its caller at
+  `:203-210`. So the rollout order is a deploy gate and not a recoverable
+  mistake: a book-builder landed ahead of its migration loses that window's
+  rows. Watch `clickhouse_rows_dropped_total{reason="write_failed"}` in both
+  book-builders and `{reason=~"http_4.."}` in `go/topofbook-bot` throughout
+  tasks 7 to 12.
 - **Adding a field to `Record` adds no ClickHouse column.** Every row is an
   explicit `map[string]any` literal (`go/marketbyorder-bot/events_writer.go:28-46`),
   so the record change and the row change are genuinely separable. A task that
@@ -129,15 +175,15 @@ below that would otherwise be written wrong.
   beside `RecvTSNS`, not in the decoder.
 - **`marketbyorder-bot`'s `snapshotRoute` is deleted, not re-keyed.** Not
   because two instruments hold one `Snapshot ID` at once — the publisher MUST
-  NOT interleave snapshot groups within an instance
+  NOT interleave snapshot groups within a channel
   (`go/marketbyprice-bot/coordinator.go:26-27`,
   `docs/2026-04-23-marketbyorder-plan.md:3066-3068`) and `Dispatch` deletes the
   route at `snapshot_end` (`go/marketbyorder-bot/coordinator.go:85`), so within
-  one instance and with no loss the id is unambiguous. It goes because the
+  one publisher channel and with no loss the id is unambiguous. It goes because the
   instrument is found by a **search**, not by the group:
   `Shard.applySnapshotOrder` (`shard.go:184-200`) scans every instrument the
   shard owns for a matching open `Snapshot ID`, with no channel or instance
-  filter, and map iteration order picks between matches. Two instances of one
+  filter, and map iteration order picks between matches. Two publishers of one
   channel publish the same ids at the same time, so two matches on one shard is
   the steady state. Re-keying the route leaves that scan in place; routing by
   the open group and stamping the instrument removes it.
@@ -155,14 +201,14 @@ below that would otherwise be written wrong.
   `lastWrittenAt` whole and bumps one generation
   (`go/marketbyorder-bot/snapshot_writer.go:92-96`,
   `go/marketbyprice-bot/snapshot_writer.go:134-142`). Narrowing `resetChannel`'s
-  loops to the instance and leaving that call alone spares the other instance's
-  book and still drops its pending `level_snapshots` rows.
+  loops to the publisher channel and leaving that call alone spares the other
+  path's book and still drops its pending `level_snapshots` rows.
 - **`marketbyprice-bot`'s manifest is one value for the whole process, and its
   prune has no key at all.** `applyManifest` broadcasts `msgManifestPrune` with
   only a `Manifest Seq` (`coordinator.go:200-220`) and `Shard.pruneManifest`
   walks all of `refdata` (`dispatch.go:303-329`). Once `instKey` carries the
-  instance, one path's manifest bump deletes the other path's instruments unless
-  the manifest is keyed too. Task 11 covers it.
+  publisher channel, one path's manifest bump deletes the other path's
+  instruments unless the manifest is keyed too. Task 11 covers it.
 
 ---
 
@@ -330,7 +376,7 @@ two statements of one fact and both are required.
 
 ---
 
-## Task 4: `channelInstance`, and the parsers' trackers keyed on it
+## Task 4: `channelInstance` and `publisherChannel`, and the parsers' trackers keyed on the first
 
 **Files:** `go/marketbyorder-parser/runner.go` + `seqtracker_test.go`,
 `go/marketbyprice-parser/runner.go` + `seqtracker_test.go`
@@ -351,7 +397,27 @@ type channelInstance struct {
 	ch   uint8
 	port uint16
 }
+
+// publisherChannel is one publisher's view of one channel across all three of
+// its port roles: the unit that owns an era, a book, its reference data and
+// its snapshot cycle. A channel instance with the port role dropped, because
+// an instrument's definition arrives on refdata, its deltas on mktdata and its
+// cycle on snapshot, and those are one instrument.
+type publisherChannel struct {
+	addr netip.Addr
+	ch   uint8
+}
+
+func (i channelInstance) channel() publisherChannel {
+	return publisherChannel{addr: i.addr, ch: i.ch}
+}
 ```
+
+Both types go in both parsers and both book-builders. The parsers hold no book
+and use only `channelInstance`; declaring `publisherChannel` there anyway would
+be dead code, so tasks 7 onward declare it in the book-builders and this task
+declares `channelInstance` alone in the parsers. The `channel()` method travels
+with `publisherChannel`.
 
 `seqTracker.last` becomes `map[channelInstance]uint64` and `observe` takes
 `(inst channelInstance, seq uint64)`. Its existing semantics are unchanged and
@@ -485,24 +551,33 @@ struct.
 
 ---
 
-## Task 7: `marketbyorder-bot` — `resetCount` keyed on the channel instance
+## Task 7: `marketbyorder-bot` — `publisherChannel`, and `resetCount` keyed on it
 
 **Files:** `go/marketbyorder-bot/coordinator.go` + `coordinator_test.go`
 
-`Coordinator.resetCount` (`coordinator.go:24`) becomes
-`map[channelInstance]uint8`, and `Dispatch`'s barrier trigger
-(`coordinator.go:53-58`) reads it by the instance the record was stamped with.
-`runResetBarrier` (`coordinator.go:113`) takes the held record's instance and
-adopts its `Reset Count` for that instance alone.
+`publisherChannel` and `channel()` are declared here, in the shape task 4 gives
+them. `Coordinator.resetCount` (`coordinator.go:24`) becomes
+`map[publisherChannel]uint8`, and `Dispatch`'s barrier trigger
+(`coordinator.go:53-58`) reads it by `channel()` of the instance the record was
+stamped with. `runResetBarrier` (`coordinator.go:113`) takes the held record's
+publisher channel and adopts its `Reset Count` for that publisher channel alone.
 
-- [ ] **Step 1: Write the failing tests.** Two instances of one `Channel ID`
-  differing only in `DstPort`, with differing but steady `Reset Count` values,
-  interleaved: **no** barrier fires. Then a `Reset Count` change on one: exactly
-  one barrier, and the other instance's `Reset Count` is untouched. These extend
+Per publisher channel and not per channel instance, because one era covers all
+three of a publisher's port roles — "the block's three port roles share it,
+because a restart is one event for the whole feed"
+(`rust/publisher/dz-publisher-egress/src/era.rs:47-50`). Keyed finer, one
+restart would raise three barriers and each would wipe a third of a book.
+
+- [ ] **Step 1: Write the failing tests.** Two paths carrying one `Channel ID`,
+  differing in `SourceAddr` and `DstPort`, with differing but steady
+  `Reset Count` values, interleaved: **no** barrier fires. Then a `Reset Count`
+  change on one: exactly one barrier, and the other path's `Reset Count` is
+  untouched. Then one publisher's three port roles at one steady `Reset Count`:
+  **no** barrier, and one `resetCount` entry rather than three. These extend
   `TestDispatch_InterleavedChannelsWithDistinctResetCountsRunNoBarrier` and
   `TestDispatch_ResetOnOneChannelSparesTheOther`
-  (`coordinator_test.go:363`, `:382`) from two channels to two instances of one,
-  which is the case neither covers.
+  (`coordinator_test.go:363`, `:382`) from two channels to two paths carrying
+  one, which is the case neither covers.
 - [ ] **Step 2: Run, watch the first fail** — under the `Channel ID` key the
   alternation reads as a reset on every datagram and the barrier fires on each.
 - [ ] **Step 3: Re-key the field**, and re-key `snapshotRoute`'s barrier-time
@@ -510,15 +585,17 @@ adopts its `Reset Count` for that instance alone.
   task 8 but must compile here.
 - [ ] **Step 4: Full suite**, `gofmt`, commit.
 
-> **The mutant is the two-field key.** Key `resetCount` on `rec.ChannelID` again
-> and the interleave test must fail with a barrier count in the thousands where
-> zero was expected. Watch the *count*, not just the pass: a barrier that fires
-> once looks like a legitimate first-sight baseline, and the defect is that it
-> fires on every alternation.
+> **Two mutants.** Key `resetCount` on `rec.ChannelID` again and the interleave
+> test must fail with a barrier count in the thousands where zero was expected.
+> Watch the *count*, not just the pass: a barrier that fires once looks like a
+> legitimate first-sight baseline, and the defect is that it fires on every
+> alternation. Then key it on the full `channelInstance`: the three-port-role
+> test must fail with three `resetCount` entries for one publisher, which is
+> the over-fine key this plan's second worked case exists to catch.
 
 ---
 
-## Task 8: `marketbyorder-bot` — the open snapshot group, per instance
+## Task 8: `marketbyorder-bot` — the open snapshot group, per publisher channel
 
 **Files:** `go/marketbyorder-bot/coordinator.go`, `shard.go`,
 `coordinator_test.go`, `shard_test.go`
@@ -528,7 +605,7 @@ adopts its `Reset Count` for that instance alone.
 `marketbyprice-bot` already proved (`go/marketbyprice-bot/coordinator.go:12-32`):
 
 ```go
-open map[channelInstance]openGroup
+open map[publisherChannel]openGroup
 ```
 
 with `openGroup{instrumentID uint32, snapshotID uint32, shard int}`. Registered
@@ -540,14 +617,17 @@ implies it.
 
 `Snapshot ID` validates membership and is never the key.
 
-**One open group per channel instance is sufficient, and the protocol says so.**
-A publisher MUST NOT interleave snapshot groups within one channel instance
+**One open group per publisher channel is sufficient, and the protocol says
+so.** A publisher MUST NOT interleave snapshot groups within one channel
 (`go/marketbyprice-bot/coordinator.go:26-27`,
-`docs/2026-04-23-marketbyorder-plan.md:3066-3068`). Two instances of one channel
-are two publishers and do interleave with each other, which is why the map is
-keyed on `channelInstance` and not on `Channel ID`. Nothing in this task widens
-the state to more than one open group per instance, and a task that finds itself
-needing to has hit a protocol question this plan does not answer.
+`docs/2026-04-23-marketbyorder-plan.md:3066-3068`). Two paths carrying one
+channel are two publishers and do interleave with each other, which is why the
+map is keyed on `publisherChannel` and not on `Channel ID`. The finer key buys
+nothing above it: a snapshot group is carried wholly on the `snapshot` port, so
+a publisher channel has exactly one port role that can open one. Nothing in this
+task widens the state to more than one open group per publisher channel, and a
+task that finds itself needing to has hit a protocol question this plan does not
+answer.
 
 Two consequences:
 
@@ -560,30 +640,30 @@ Two consequences:
   the key.
 
 `SnapshotOrderDroppedTotal` keeps its meaning: a snapshot order with no open
-group for its instance is dropped and counted.
+group for its publisher channel is dropped and counted.
 
 > **What (b) is not.** It is not two *instruments* mid-cycle at one
-> `Snapshot ID` inside a single instance. That case is unreachable: the
-> publisher does not interleave groups within an instance, and the route entry
+> `Snapshot ID` inside a single publisher channel. That case is unreachable: the
+> publisher does not interleave groups within a channel, and the route entry
 > is deleted at each `snapshot_end` (`coordinator.go:85`), so the next group
 > claims the id afresh and the unfixed tree passes such a test. The reachable
-> within-one-instance case is a **lost** `snapshot_end` leaving a shadow open
+> within-one-publisher case is a **lost** `snapshot_end` leaving a shadow open
 > across the cycle boundary, and that is task 10's subject rather than this
 > one's — the continuity check closes the group. This task's job is only that
 > the instrument is resolved from the group rather than searched for.
 
-- [ ] **Step 1: Write the failing tests.** (a) Two instances of one
+- [ ] **Step 1: Write the failing tests.** (a) Two paths carrying one
   `Channel ID`, each opening a group for a different `Instrument ID`,
-  interleaved: each instance's snapshot orders reach its own instrument's shadow
+  interleaved: each path's snapshot orders reach its own instrument's shadow
   and neither group is overwritten. Give the two instruments ids that land on
   **different shards** under `id % n`, so the misrouting a single route entry
-  causes is deterministic rather than a matter of map order. (b) Two instances
-  of one `Channel ID`, each opening a group for a different `Instrument ID`
+  causes is deterministic rather than a matter of map order. (b) Two paths
+  carrying one `Channel ID`, each opening a group for a different `Instrument ID`
   whose ids land on the **same** shard under `id % n`, both mid-cycle at the
   same `Snapshot ID` — two open shadows, one shard, one id, which is the steady
   state for redundant paths because `Snapshot ID` is monotonic per
   `(Channel ID, Instrument ID)` and both paths run the same cycles: each
-  instance's orders reach the instrument its own group named, and the two
+  path's orders reach the instrument its own group named, and the two
   shadows hold disjoint order sets. This case needs no key change in the shard
   and passes at the end of this task. (c) A snapshot order
   arriving after its `snapshot_end` is dropped and counted, not routed — the
@@ -591,18 +671,23 @@ group for its instance is dropped and counted.
   `TestDispatch_StrayLevelAfterSnapshotEndIsDroppedNotRouted`
   (`go/marketbyprice-bot/coordinator_test.go:461`).
 - [ ] **Step 2: Run, watch (a) and (b) fail** — (a) because one `Channel ID`
-  gives one route entry and the second `snapshot_begin` overwrites the first,
+  gives one route entry and the second path's `snapshot_begin` overwrites the
+  first's,
   (b) because `applySnapshotOrder` scans for a matching open `Snapshot ID` and
   two shadows on that shard match, so the orders split between them in whatever
   order the map yields.
 - [ ] **Step 3: Delete `snapshotRoute` and `snapKey`; add `open`;** stamp on
   `snapshot_order`; simplify `applySnapshotOrder`; re-key `snapCtx`; narrow
-  `resetChannel`'s `snapCtx` loop (`shard.go:111-115`) to the instance.
+  `resetChannel`'s `snapCtx` loop (`shard.go:111-115`) to the publisher channel.
 - [ ] **Step 4: Full suite**, `gofmt`, commit.
 
-> **Two mutants, and both must be killed.** Re-key `open` on `rec.ChannelID`
-> alone: test (a) must fail, with the second instance's group having overwritten
-> the first's and the first's orders filed into the second instrument's shadow.
+> **Three mutants, and all must be killed.** Re-key `open` on `rec.ChannelID`
+> alone: test (a) must fail, with the second path's group having overwritten
+> the first's and the first's orders filed into the second instrument's
+> shadow.
+> Re-key it on the full `channelInstance`: nothing in this task fails, because a
+> group lives on one port role — which is why the over-fine key is caught in
+> task 9 on `refdata` and not here.
 > Then restore `applySnapshotOrder`'s scan over `s.instruments` for a matching
 > `OpenSnapshot.SnapshotID`, keeping the per-instance route: test (b) must fail,
 > because two shadows on one shard match one id and the orders land in whichever
@@ -614,28 +699,37 @@ group for its instance is dropped and counted.
 
 ---
 
-## Task 9: `marketbyorder-bot` — `instKey`, the reset marker and the SnapshotWriter on the channel instance
+## Task 9: `marketbyorder-bot` — `instKey`, the reset marker and the SnapshotWriter on the publisher channel
 
 **Files:** `go/marketbyorder-bot/shard.go` + `shard_test.go`,
 `snapshot_writer.go` + `snapshot_writer_test.go`, `main.go` + `main_test.go`,
 `parity_test.go`
 
 `instKey{ch uint8, id uint32}` (`shard.go:15`) becomes
-`instKey{inst channelInstance, id uint32}`. Everything keyed by it follows:
+`instKey{pc publisherChannel, id uint32}`. Everything keyed by it follows:
 `instruments`, `refdata`, `deltaBuf`, `snapCtx`, and `resetChannel`, whose
-signature becomes `resetChannel(inst channelInstance)` (`shard.go:95`).
+signature becomes `resetChannel(pc publisherChannel)` (`shard.go:95`).
+
+**`publisherChannel` and not `channelInstance`, and this is the task where the
+difference is load-bearing.** `applyInstrumentDefinition` writes `s.refdata[k]`
+from a record that arrived on the `refdata` port (`shard.go:150-154`), and the
+reads at `shard.go:446` and `:468` are reached from `snapshot` and `mktdata`
+records. With the destination port in the key those are three keys for one
+instrument and both reads miss on every record: empty symbol, exponent `0`, and
+a book that never reaches `StatusReady`. `channel()` of the record's instance is
+what makes the three port roles meet.
 
 The shard's routing hash is unchanged: `int(rec.InstrumentID) % c.n`. One
-`Instrument ID` still lands on one shard whichever instance carried it, so
-per-instrument FIFO holds and the two instances' books are two entries in one
+`Instrument ID` still lands on one shard whichever path carried it, so
+per-instrument FIFO holds and the two paths' books are two entries in one
 shard's maps rather than work on two shards.
 
 **Three things the key change drags with it, and none of them compiles or
 behaves correctly if left out.**
 
-`shardMsg.ch uint8` (`shard.go:535`) becomes `inst channelInstance`, so the
-reset marker names the instance to wipe and `resetChannel` cannot be reached
-with a bare `Channel ID`.
+`shardMsg.ch uint8` (`shard.go:535`) becomes `pc publisherChannel`, so the
+reset marker names the publisher channel to wipe and `resetChannel` cannot be
+reached with a bare `Channel ID`.
 
 `SnapshotWriter` is re-keyed. Today it holds `dirty map[uint32]*dirtyEntry`
 beside a `channel uint8` fixed by its constructor (`snapshot_writer.go:24-26`),
@@ -652,41 +746,54 @@ one entry and persists whichever flushed last.
 
 `SnapshotWriter.Reset` is scoped. The shard calls it straight after the wipe
 (`shard.go:505-511`), and `doReset` replaces `dirty` whole and bumps one
-`generation` (`snapshot_writer.go:92-96`), so a reset on one instance discards
+`generation` (`snapshot_writer.go:92-96`), so a reset on one path discards
 pending `level_snapshots` rows for every book on that shard. It becomes
-`Reset(ctx, inst channelInstance)`, deleting only the `dirty` entries whose key
-carries that instance; `generation` becomes per instance
-(`map[channelInstance]uint64`), and `flushDue` compares the generation of the
-instance whose batch it extracted.
+`Reset(ctx, pc publisherChannel)`, deleting only the `dirty` entries whose key
+carries that publisher channel; `generation` becomes per publisher channel
+(`map[publisherChannel]uint64`), and `flushDue` compares the generation of the
+publisher channel whose batch it extracted.
 
 `main.go:90-96` and `main_test.go:63` are updated with the constructor and the
 closure. `parity_test.go:76-80` holds the same pair.
 
-- [ ] **Step 1: Write the failing tests.** (a) Two instances of one
-  `Channel ID` carrying one `Instrument ID`: two independent books, two
+- [ ] **Step 1: Write the failing tests.** (a) Two paths carrying one
+  `Channel ID` and one `Instrument ID`: two independent books, two
   independent per-instrument sequence positions, and a per-instrument gap on one
   raising `per_instrument_gaps_total` without demoting the other. (b) A
-  `Reset Count` change on one instance: `resetChannel` wipes that instance's
-  instruments, refdata and buffered deltas and leaves the other instance's
-  `StatusReady` book standing. (c) The spared instance's **pending rows**
-  survive that reset: mark both instances' instruments dirty, reset one, drive
-  the writer's tick, and the spared instance's `level_snapshots` rows are
-  enqueued. (d) A `level_snapshots` row carries the `channel_id` of the instance
-  whose book it read, not `0`.
+  `Reset Count` change on one path: `resetChannel` wipes that publisher
+  channel's instruments, refdata and buffered deltas and leaves the other
+  path's `StatusReady` book standing. (c) The spared path's **pending rows**
+  survive that reset: mark both paths' instruments dirty, reset one, drive
+  the writer's tick, and the spared path's `level_snapshots` rows are
+  enqueued. (d) A `level_snapshots` row carries the `channel_id` of the book it
+  read, not `0`. (e) **One publisher, three port roles, one book:** an
+  `instrument_definition` on the `refdata` port, a `snapshot_begin`/`_end` pair
+  on the `snapshot` port and a delta on the `mktdata` port, one `SourceAddr`,
+  one `Channel ID`, one `Instrument ID`, three different `DstPort` values.
+  Exactly one entry in `instruments` and in `refdata`, one book reaching
+  `StatusReady`, and the definition's symbol and exponents on the rows the other
+  two port roles produce.
 - [ ] **Step 2: Run, watch them fail** — (a) and (b) because one `instKey` means
-  the two instances share one `Instrument`, one sequence position and one delta
+  the two paths share one `Instrument`, one sequence position and one delta
   buffer, and one reset wipes both; (c) because `Reset` clears the whole map;
-  (d) because the row takes `w.channel`, which is the constructor's `0`.
-- [ ] **Step 3: Re-key `instKey` and thread the instance through** `apply`,
+  (d) because the row takes `w.channel`, which is the constructor's `0`. (e)
+  passes before the change and after it, and is the guard on the over-fine key
+  rather than on the under-fine one — run it against the `channelInstance`
+  mutant below.
+- [ ] **Step 3: Re-key `instKey` and thread the publisher channel through** `apply`,
   `handle`, `bufferDelta`, `replayBuffer`, `refdataFor` and `resetChannel`; carry
   it on `shardMsg`; re-key the `SnapshotWriter` and narrow its `Reset`; update
   `main.go`, `main_test.go` and `parity_test.go`.
 - [ ] **Step 4: Full suite, then `-race`**, `gofmt`, commit.
 
-> **Three mutants.** Drop `inst` from `instKey`: (a) and (b) must fail twice
-> over — the interleaved deltas of two instances are applied to one
-> `Instrument`, so each instance's `per_instrument_seq` reads as a gap in the
-> other's, and the reset takes both books. Restore `doReset`'s whole-map
+> **Four mutants.** Drop `pc` from `instKey`: (a) and (b) must fail twice
+> over — the interleaved deltas of two paths are applied to one
+> `Instrument`, so each path's `per_instrument_seq` reads as a gap in the
+> other's, and the reset takes both books. Put the **full `channelInstance`**
+> into `instKey` instead: (e) must fail, with an empty symbol and a zero
+> exponent on the `mktdata` and `snapshot` rows, because the definition landed
+> under the `refdata` port's key. That mutant passes (a) through (d) unchanged,
+> which is exactly why (e) exists. Restore `doReset`'s whole-map
 > replacement while keeping the narrowed `resetChannel`: (c) must fail, and this
 > is the mutant the obvious implementation leaves alive, because every other
 > assertion in this task passes against it. Put the constructor's fixed channel
@@ -714,15 +821,43 @@ parsers already apply at `go/marketbyorder-parser/runner.go:199`, because
 refdata is low-rate periodic-retransmit traffic whose datagram-sequence gaps are
 not a loss signal — **and when the record carries an instance identity at all**:
 
-- First sight of an instance sets the baseline silently. Same reason as
+- First sight of a channel instance sets the baseline silently. Same reason as
   `seqTracker.observe` (`go/marketbyorder-parser/runner.go:46-53`): a newly
   appearing path must not report a phantom gap the size of its sequence.
-- `seq <= last`: reorder or duplicate. Ignored, `last` unchanged.
+- `seq <= last` and `last - seq <= reorderWindow`: reorder or duplicate.
+  Ignored, `last` unchanged.
 - `seq > last+1`: a discontinuity on that instance. Count it, and **if the port
-  role is `snapshot`, delete that instance's entry from `open`.**
+  role is `snapshot`, delete `inst.channel()`'s entry from `open`.**
+- `last - seq > reorderWindow`: a restart the era did not announce. Re-baseline
+  that instance (`last = seq`), count it separately, and apply the same
+  `snapshot`-port consequence.
 
-A new counter in each: `datagram_seq_gaps_total` labelled `{port}`, under the
-existing `dz_mbo_bot` / `dz_mbp_bot` namespaces.
+Two new counters in each: `datagram_seq_gaps_total` and
+`seq_rebaselined_total`, both labelled `{port}`, under the existing
+`dz_mbo_bot` / `dz_mbp_bot` namespaces.
+
+`reorderWindow` is a package constant, `1 << 12`, and not a flag.
+
+**Why the fourth rule is not optional.** The barrier is what normally clears a
+baseline, and an ordinary restart of this publisher reaches it:
+`EraStore::begin_era` returns `previous.wrapping_add(1)`
+(`rust/publisher/dz-publisher-egress/src/era.rs:190-211`), so `Reset Count`
+moves and `runResetBarrier` re-baselines. But the era lives in a file, and a
+publisher whose state directory does not survive its own restart reads no file
+and resolves to `FIRST_ERA` every time (`era.rs:60-69`), so the era never moves
+while the series returns to 0 on every start. `Sequencer::register` names that
+combination "the one combination a subscriber cannot interpret"
+(`sequencer.rs:59-65`). Without the fourth rule `seqLast` stays pinned high,
+every later datagram takes the reorder branch, and the check — and with it the
+snapshot-group invalidation this task exists for — is dead for the life of the
+process with no counter moving. The residual is bounded rather than removed: a
+restart while `last` is itself below `reorderWindow` is not distinguishable from
+a reorder, but the series climbs back past `last` within `reorderWindow`
+datagrams and the check resumes on its own.
+
+**A re-baseline wipes nothing.** No barrier, no shard drain, no book dropped:
+with `Reset Count` unchanged the publisher has said the era is still running,
+and a wipe against that field would be a guess. The counter is the output.
 
 **A record with the zero `netip.Addr` or `dst_port` 0 is excluded from the
 check**, counted by task 12's `unidentified_records_total`, and otherwise
@@ -743,9 +878,9 @@ and a cycle nobody opened is routed by the previous cycle's group. The existing
 neither, because in both cases the id *matches* a group that is open.
 
 - [ ] **Step 1: Write the failing tests**, in both book-builders. (a) A
-  `snapshot`-port discontinuity on one instance drops that instance's open group
-  and leaves the other instance's standing; the next snapshot order on the first
-  instance is dropped and counted. (b) A `refdata`-port discontinuity drops no
+  `snapshot`-port discontinuity on one path drops that publisher channel's open
+  group and leaves the other path's standing; the next snapshot order on the
+  first path is dropped and counted. (b) A `refdata`-port discontinuity drops no
   group. (c) A reorder (`seq <= last`) drops nothing and leaves `last` unchanged.
   (d) First sight of an instance reports no gap. (e) A datagram lost on the
   `mktdata` port raises the counter and drops no group. (f) A run of records
@@ -754,15 +889,29 @@ neither, because in both cases the id *matches* a group that is open.
   lands, raises `unidentified_records_total` once per record. Give the two
   series disjoint ranges, per *Global constraints*; at overlapping ranges the
   folded key reads as duplicates and (f) passes against a check that is not
-  excluded at all.
+  excluded at all. (g) A series climbing well past `reorderWindow` and then
+  restarting at 0 with `Reset Count` unchanged: `seq_rebaselined_total` rises by
+  one, that publisher channel's open group is dropped, and — the assertion that
+  matters — **a discontinuity introduced after the restart is still reported**.
+  (h) An ordinary restart, with `Reset Count` moved, re-baselines through
+  `runResetBarrier` and leaves `seq_rebaselined_total` at zero. (i) A barrier on
+  one path leaves the other path's `seqLast` entry intact.
 - [ ] **Step 2: Run, watch them fail** — in `marketbyorder-bot` because nothing
   reads the field, in `marketbyprice-bot` because there is no field.
-- [ ] **Step 3: Re-key `seqLast`, add the check, add the counter,** and clear the
-  instance's entry in `runResetBarrier` rather than clearing the whole map
-  (`go/marketbyorder-bot/coordinator.go:140`).
+- [ ] **Step 3: Re-key `seqLast`, add the check, the re-baseline rule and both
+  counters,** and make `runResetBarrier` delete only the entries whose
+  `channelInstance.channel()` is the resetting publisher channel, rather than
+  assigning `c.seqLast = map[string]uint64{}`
+  (`go/marketbyorder-bot/coordinator.go:141`), which empties the map for every
+  path it holds.
 - [ ] **Step 4: Full suite in both, then `-race`**, `gofmt`, commit.
 
-> **Four mutants.** Delete the `open` deletion: (a) must fail, and this is the
+> **Seven mutants.** Delete the re-baseline rule: (g) must fail on its last
+> assertion — the post-restart discontinuity goes unreported — while (a) to (f)
+> all still pass, which is what makes that assertion and not the counter the
+> subject. Raise `reorderWindow` above the fixture's separation: (g) must fail
+> the same way. Restore `c.seqLast = map[string]uint64{}` in the barrier: (i)
+> must fail. Delete the `open` deletion: (a) must fail, and this is the
 > assertion that makes the field read rather than merely written — a version that
 > only increments the counter passes every other test in this plan.
 > Drop the `refdata` exemption: (b) must fail. Change `seq <= last` to `seq < last`
@@ -774,7 +923,7 @@ neither, because in both cases the id *matches* a group that is open.
 
 ---
 
-## Task 11: `marketbyprice-bot` — `resetCount`, `open`, `instKey` and the manifest on the instance
+## Task 11: `marketbyprice-bot` — `resetCount`, `open`, `instKey` and the manifest on the publisher channel
 
 **Files:** `go/marketbyprice-bot/coordinator.go` + `coordinator_test.go`,
 `go/marketbyprice-bot/shard.go` + `shard_test.go`, `dispatch.go` +
@@ -783,67 +932,71 @@ neither, because in both cases the id *matches* a group that is open.
 The market-by-price half of tasks 7 to 9. Its shapes are already the right ones
 and only the key changes:
 
-- `Coordinator.resetCount` (`coordinator.go:53`) → `map[channelInstance]uint8`
-- `Coordinator.open` (`coordinator.go:55`) → `map[channelInstance]openGroup`
-- `instKey` (`shard.go:27`) → `{inst channelInstance, id uint32}`, and with it
+- `Coordinator.resetCount` (`coordinator.go:53`) → `map[publisherChannel]uint8`
+- `Coordinator.open` (`coordinator.go:55`) → `map[publisherChannel]openGroup`
+- `instKey` (`shard.go:27`) → `{pc publisherChannel, id uint32}`, and with it
   `instruments`, `refdata`, `deltaBuf`, `touched`, `crossed`, and
-  `resetChannel(inst channelInstance)` (`dispatch.go:338`)
-- `shardMsg.ch` (`shard.go:136`) → `inst channelInstance`, carried by `msgReset`
+  `resetChannel(pc publisherChannel)` (`dispatch.go:338`)
+- `shardMsg.ch` (`shard.go:136`) → `pc publisherChannel`, carried by `msgReset`
   and by `msgManifestPrune`
-- `SnapshotWriter.Reset` (`snapshot_writer.go:118`) → `Reset(ctx, inst)`;
-  `doReset` (`:134-143`) deletes only that instance's `dirty` and
+- `SnapshotWriter.Reset` (`snapshot_writer.go:118`) → `Reset(ctx, pc)`;
+  `doReset` (`:134-143`) deletes only that publisher channel's `dirty` and
   `lastWrittenAt` entries instead of replacing both maps, and `generation`
-  becomes one counter per instance. `dirty` is already keyed by `instKey`, so
+  becomes one counter per publisher channel. `dirty` is already keyed by
+  `instKey`, so
   the key follows for free and only the reset has to be narrowed — which is
   exactly why it is easy to miss.
 - `main.go:121-128`'s `withInstrument` closure follows `instKey`
 - `OnDisconnect` (`coordinator.go:177`) clears the whole `open` map, which is
-  correct unchanged: a socket drop invalidates every instance's in-flight group.
+  correct unchanged: a socket drop invalidates every path's in-flight group.
 
 **The manifest, which is not just a key change.** `Coordinator.manifest` is one
 `ManifestState` for the whole process (`coordinator.go:54`), and `applyManifest`
 (`:200-220`) broadcasts `msgManifestPrune` carrying only the new `Manifest Seq`.
 `Shard.pruneManifest` (`dispatch.go:303-329`) then walks every entry of
 `refdata` and, below the cutoff, deletes the definition, the book, the buffered
-deltas, `crossed` and `touched` — with no channel and no instance filter. Once
-`instKey` carries the instance, that is one path deleting the other path's
-instruments on its own manifest bump, with no `Reset Count` behind it and no
-counter accounting for it. So:
+deltas, `crossed` and `touched` — with no channel and no path filter. Once
+`instKey` carries the publisher channel, that is one path deleting the other
+path's instruments on its own manifest bump, with no `Reset Count` behind it and
+no counter accounting for it. So:
 
-- `manifest` becomes `map[channelInstance]ManifestState`, and `applyManifest`
-  compares the new `Manifest Seq` against that instance's previous one.
-- `msgManifestPrune` carries the instance, and `pruneManifest` skips entries
-  whose `instKey` names another. The one-generation grace window
+- `manifest` becomes `map[publisherChannel]ManifestState`, and `applyManifest`
+  compares the new `Manifest Seq` against that publisher channel's previous one.
+- `msgManifestPrune` carries the publisher channel, and `pruneManifest` skips
+  entries whose `instKey` names another. The one-generation grace window
   (`dispatch.go:305-309`) is unchanged; it is the set it compares over that
   narrows.
 - `runResetBarrier`'s `c.manifest = ManifestState{}` (`coordinator.go:256`)
-  becomes a delete of the resetting instance's entry, and its comment goes with
-  the four in task 13.
+  becomes a delete of the resetting publisher channel's entry, and its comment
+  goes with the four in task 13.
 
-- [ ] **Step 1: Write the failing tests**, the twins of tasks 7, 8(a) and 9:
-  no barrier on two instances with steady differing `Reset Count` values; a
-  reset on one instance sparing the other's book **and its pending
-  `level_snapshots` rows**; each instance's snapshot levels stamped with its own
-  group's instrument. Extend
+- [ ] **Step 1: Write the failing tests**, the twins of tasks 7, 8(a), 9(b),
+  9(c) and 9(e): no barrier on two paths with steady differing `Reset Count`
+  values; a reset on one path sparing the other's book **and its pending
+  `level_snapshots` rows**; each path's snapshot levels stamped with its own
+  group's instrument; and one publisher's three port roles building one book
+  from a `refdata` definition, `mktdata` deltas and a `snapshot` cycle. Extend
   `TestDispatch_InterleavedChannelsWithDistinctResetCountsRunNoBarrier`
   (`coordinator_test.go:316`), `TestDispatch_ResetOnOneChannelSparesTheOther`
   (`:335`) and `TestDispatch_SnapshotLevelStampedWithOpenGroupInstrument`
   (`:493`). Then the manifest test: both instances hold instruments at
-  `Manifest Seq` 3; one instance publishes a `manifest_summary` at 5; that
-  instance's stale instruments are pruned and the other instance's are all still
+  `Manifest Seq` 3; one path publishes a `manifest_summary` at 5; that
+  path's stale instruments are pruned and the other path's are all still
   present, books, buffered deltas and gauges included.
 - [ ] **Step 2: Run, watch them fail.** The manifest test fails by deleting
-  everything below the cutoff on both instances.
+  everything below the cutoff on both paths.
 - [ ] **Step 3: Re-key all of the above**, narrow `resetChannel`'s five keyed
   loops (`dispatch.go:338-374`) and `pruneManifest`'s one, narrow
   `SnapshotWriter.Reset`, and update `main.go`.
 - [ ] **Step 4: Full suite, then `-race`**, `gofmt`, commit.
 
-> **Five mutants**, each killed on its own. `rec.ChannelID` back in `resetCount`
+> **Six mutants**, each killed on its own. `rec.ChannelID` back in `resetCount`
 > fails the barrier count; back in `open` fails the stamping test with one
-> instance's levels carrying the other's instrument; back in `instKey` fails the
-> spared-book assertion. Drop the instance filter from `pruneManifest`: the
-> manifest test must fail with the spared instance's instruments gone. Restore
+> path's levels carrying the other's instrument; back in `instKey` fails the
+> spared-book assertion. The full `channelInstance` in `instKey` instead: the
+> three-port-role test must fail with the definition unreachable from the
+> `mktdata` and `snapshot` records. Drop the path filter from `pruneManifest`:
+> the manifest test must fail with the spared path's instruments gone. Restore
 > `doReset`'s whole-map replacement: the pending-rows assertion must fail while
 > every book assertion still passes — that one is the whole point of asserting
 > on the rows and not only on the books. Run all five reverts separately: a
@@ -874,8 +1027,10 @@ through `MarshalText` — and the zero `Addr` marshals to `""`. That is not vali
 input for an `IPv4` column: the column names itself in the row, so
 `DEFAULT toIPv4(0)` never runs, the server refuses the insert, and because
 `send` posts a whole batch as one body, one unidentified record fails every row
-batched beside it. A book-builder deployed ahead of its parser would then load
-nothing at all, which is the opposite of the window this plan is built around.
+batched beside it — and a refused batch here is **dropped**, not queued
+(`go/internal/clickhouse/client.go:159-173`), so those rows never arrive. A
+book-builder deployed ahead of its parser would then load nothing at all, which
+is the opposite of the window this plan is built around.
 So each book-builder gets one helper, used by every row map:
 
 ```go
@@ -960,8 +1115,8 @@ and uses it to justify keying on the `Channel ID`:
 and the two test comments that restate them
 (`go/marketbyorder-bot/coordinator_test.go:359-360`,
 `go/marketbyprice-bot/coordinator_test.go:310-311`). What replaces them is not
-another comment: it is `channelInstance` and the fact that `resetChannel` cannot
-be called with a bare `Channel ID`. The constraint they recorded is now
+another comment: it is `channelInstance` and `publisherChannel`, and the fact
+that `resetChannel` cannot be called with a bare `Channel ID`. The constraint they recorded is now
 unstatable rather than merely undocumented.
 
 `docs/superpowers/plans/2026-08-10-per-publisher-seq-tracking.md` keeps every one
@@ -969,25 +1124,30 @@ of its copies. It is a dated document and a record of the code as it stood that
 day.
 
 **The panels.** `PARTITION BY channel_id, instrument_id` becomes
-`PARTITION BY source_addr, dst_port, channel_id, instrument_id` in panel 20,
+`PARTITION BY source_addr, channel_id, instrument_id` in panel 20,
 "Sequence gaps (per-instrument)", of both dashboards
 (`demo/grafana/dashboards/marketbyorder.json:1407`,
-`demo/grafana/dashboards/marketbyprice.json:1345`). Without it `lagInFrame`
-over `per_instrument_seq` compares one instance's sequence to the other's and
-reports the difference as missing messages — the panel's own defect, as a false
-positive.
+`demo/grafana/dashboards/marketbyprice.json:1345`). Without the address
+`lagInFrame` over `per_instrument_seq` compares one path's sequence to the
+other's and reports the difference as missing messages — the panel's own defect,
+as a false positive. `dst_port` stays **out** of the partition:
+`per_instrument_seq` is dense per publisher channel and instrument, and only
+`mktdata`-port rows carry it (`go/marketbyorder-bot/events_writer.go:63-82`,
+and the panel's own `WHERE per_instrument_seq > 0`), so the column is constant
+inside every partition today and would split the series the day it is not.
 
 The panel's `description` moves with its query. Both read "Missing messages
 detected from the dense per-(channel,instrument) sequence (per_instrument_seq)"
 (`marketbyorder.json:1411`, `marketbyprice.json:1349`), and after this change
-the sequence the panel reads is dense per channel instance and instrument, not
+the sequence the panel reads is dense per publisher channel and instrument, not
 per channel and instrument. A description naming the old partition is the one
 piece of this change an operator reads before deciding whether to trust the
 number.
 
 **The prose.** `go/marketbyprice-bot/README.md:20` ("Each
 `(channel_id, instrument_id)`"), `:154`, `:156`, and
-`go/marketbyorder-bot/README.md:13`, `:25`, restated on the channel instance.
+`go/marketbyorder-bot/README.md:13`, `:25`, restated on the publisher channel
+for book state and on the channel instance for the sequence series.
 
 - [ ] **Step 1: Delete the four comments and the two test comments.**
 - [ ] **Step 2: Edit both dashboard `rawSql` strings, and both panel
@@ -997,7 +1157,7 @@ number.
 - [ ] **Step 4: Full suite in all five Go modules, `-race` in both
   book-builders, `gofmt -l .` clean in each.**
 - [ ] **Step 5: Verify the dashboards render** against the demo stack, with two
-  instances of one `Channel ID` present in `events`, and confirm the panel
+  paths carrying one `Channel ID` present in `events`, and confirm the panel
   reports no missing messages where none are missing.
 - [ ] **Step 6: Commit.**
 
@@ -1013,11 +1173,21 @@ number.
 
 ## Verification, end to end
 
-After task 13, on the demo stack with two channel instances of one `Channel ID`
-on distinct destination ports:
+After task 13, on the demo stack with two paths carrying one `Channel ID` from
+distinct source IP addresses on distinct destination ports:
 
 - `dz_mbo_bot_channel_resets_total` and `dz_mbp_bot_channel_resets_total` flat
-  while both instances publish steady, differing `Reset Count` values.
+  while both paths publish steady, differing `Reset Count` values.
+- Every instrument reaches `StatusReady` with a non-empty symbol and its real
+  exponents, which is the end-to-end form of task 9(e): a book assembled across
+  the three port roles rather than three fragments that never meet.
+- `dz_mbo_bot_clickhouse_rows_dropped_total{reason="write_failed"}`, its
+  market-by-price twin and `dz_bot_clickhouse_rows_dropped_total{reason=~"http_4.."}`
+  all flat across the whole rollout. A refused batch is destroyed, so a
+  non-zero rate here is rows already lost and not rows waiting.
+- `dz_mbo_bot_seq_rebaselined_total` and its twin at zero against a publisher
+  whose era store is healthy, and non-zero only against one whose era does not
+  survive its own restart.
 - `dz_mbo_bot_unidentified_records_total` and its market-by-price twin at zero
   once both halves are deployed, and non-zero for exactly the window in which a
   book-builder ran ahead of its parser.
@@ -1028,17 +1198,17 @@ on distinct destination ports:
   `ReplacingMergeTree(recv_ts) ORDER BY (channel_id, instrument_id)`, the sort
   key does not change here, and the columns record which instance's definition
   survived. The design names it under *Out of scope*.
-- `dz_mbp_bot` shows no instrument count dropping on the instance that did not
+- `dz_mbp_bot` shows no instrument count dropping on the path that did not
   publish the manifest bump, across at least two `Manifest Seq` increments.
 - Panel 20 on both dashboards reports no missing messages.
 - `dz_mbo_bot_snapshot_order_dropped_total` and
   `dz_mbp_bot_snapshot_level_dropped_total` flat, where before the change each
-  instance's snapshot cycle discarded the other's levels.
+  path's snapshot cycle discarded the other's levels.
 
 ## Out of scope
 
 Named in the design and repeated here so no task reaches for them: arbitrating
-between two instances of one channel into one book; binding more than one
+between two paths carrying one channel into one book; binding more than one
 destination port per port role in a parser; renaming `Record.Port` to
 `PortRole`; changing any `ORDER BY`, including `marketbyorder.instruments`' and
 `marketbyprice.instruments'` `(channel_id, instrument_id)`; renaming the parsers'
