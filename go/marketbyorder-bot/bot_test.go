@@ -23,14 +23,27 @@ func stubMetrics() *Metrics {
 }
 
 type capturingDispatcher struct {
-	mu      sync.Mutex
-	records []Record
+	mu          sync.Mutex
+	records     []Record
+	disconnects int
 }
 
 func (d *capturingDispatcher) Dispatch(r Record) {
 	d.mu.Lock()
 	d.records = append(d.records, r)
 	d.mu.Unlock()
+}
+
+func (d *capturingDispatcher) OnDisconnect() {
+	d.mu.Lock()
+	d.disconnects++
+	d.mu.Unlock()
+}
+
+func (d *capturingDispatcher) disconnectCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.disconnects
 }
 
 func (d *capturingDispatcher) snapshot() []Record {
@@ -131,4 +144,41 @@ func TestBot_ReconnectsOnDisconnect(t *testing.T) {
 	if got := len(disp.snapshot()); got < 1 {
 		t.Fatalf("expected >=1 record after reconnect, got %d", got)
 	}
+}
+
+// A drop must reach the dispatcher even when nothing is read, so state that
+// spans records — the open snapshot group above all — is never carried across
+// a break. The reader finds OnDisconnect by type assertion, so a dispatcher
+// that stops satisfying DisconnectAware goes quiet with nothing failing.
+func TestBot_NotifiesDispatcherOnDisconnect(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "d.sock")
+
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		conn.Close() // immediate hang-up, no records
+	}()
+
+	disp := &capturingDispatcher{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go NewBot(sockPath, disp, stubMetrics()).Run(ctx)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if disp.disconnectCount() >= 1 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("the dispatcher was never told the socket dropped: got %d", disp.disconnectCount())
 }
