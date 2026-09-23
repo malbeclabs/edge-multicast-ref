@@ -3,8 +3,11 @@
 package udp
 
 import (
+	"bytes"
 	"encoding/binary"
+	"log/slog"
 	"net"
+	"strings"
 	"testing"
 	"time"
 	"unsafe"
@@ -62,29 +65,8 @@ func TestExtractKernelTimestamp_IgnoresOtherControlMessages(t *testing.T) {
 	}
 }
 
-// enablePktinfo turns on the second control message a parser asks for.
-// topofbook-parser asks for it as ipv4.FlagDst, which x/net resolves on Linux
-// to exactly this setsockopt; setting it directly keeps the udp package's
-// tests free of a dependency on x/net.
-func enablePktinfo(t *testing.T, conn *net.UDPConn) {
-	t.Helper()
-	rawConn, err := conn.SyscallConn()
-	if err != nil {
-		t.Fatalf("SyscallConn: %v", err)
-	}
-	var setsockoptErr error
-	if err := rawConn.Control(func(fd uintptr) {
-		setsockoptErr = unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_PKTINFO, 1)
-	}); err != nil {
-		t.Fatalf("Control: %v", err)
-	}
-	if setsockoptErr != nil {
-		t.Fatalf("setting IP_PKTINFO: %v", setsockoptErr)
-	}
-}
-
-// loopbackPair returns a listening socket with every control message the
-// parsers ask for enabled, and a sender connected to it.
+// loopbackPair returns a listening socket configured the way a parser
+// configures its own, and a sender connected to it.
 func loopbackPair(t *testing.T) (*net.UDPConn, *net.UDPConn) {
 	t.Helper()
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
@@ -93,7 +75,6 @@ func loopbackPair(t *testing.T) (*net.UDPConn, *net.UDPConn) {
 	}
 	t.Cleanup(func() { conn.Close() })
 
-	enablePktinfo(t, conn)
 	if err := EnableTimestamping(conn); err != nil {
 		t.Fatalf("EnableTimestamping: %v", err)
 	}
@@ -110,77 +91,28 @@ func loopbackPair(t *testing.T) (*net.UDPConn, *net.UDPConn) {
 	return conn, sender
 }
 
-// TestControlBuffer_HoldsEveryRequestedControlMessage asks the kernel itself
-// whether a Reader's control buffer was big enough. It enables both control
-// messages the parsers enable on a real socket, sends a datagram, and reads it
-// into the very buffer a Reader carries.
-//
-// When that buffer is too small the kernel writes what fits, discards the rest
-// and raises MSG_CTRUNC — and ReadMsgUDP still returns a nil error, which is
-// why ReadDatagram cannot see the loss and the receive timestamp can degrade
-// to the userspace fallback for a whole parser with nothing reported. Which
-// control message loses depends on the order the kernel emits them in, so the
-// assertion is that none was discarded, not that one of them survived.
-func TestControlBuffer_HoldsEveryRequestedControlMessage(t *testing.T) {
-	conn, sender := loopbackPair(t)
-
-	if _, err := sender.Write([]byte("kernel please stamp this")); err != nil {
-		t.Fatalf("sending: %v", err)
-	}
-
-	// The buffer under test is the one a Reader carries, so the sizing is taken
-	// off the production path rather than restated here.
-	oob := NewReader().oob
-	buf := make([]byte, 2048)
-	_, oobn, flags, _, err := conn.ReadMsgUDP(buf, oob)
-	if err != nil {
-		t.Fatalf("ReadMsgUDP: %v", err)
-	}
-	if flags&unix.MSG_CTRUNC != 0 {
-		t.Errorf("the kernel raised MSG_CTRUNC: the %d-byte control buffer could not hold every "+
-			"control message the socket asked for, so one was discarded with no error", len(oob))
-	}
-
-	cmsgs, err := unix.ParseSocketControlMessage(oob[:oobn])
-	if err != nil {
-		t.Fatalf("parsing the control messages: %v", err)
-	}
-	var timestampns, pktinfo bool
-	for _, cmsg := range cmsgs {
-		switch {
-		case cmsg.Header.Level == unix.SOL_SOCKET && cmsg.Header.Type == unix.SCM_TIMESTAMPNS:
-			if len(cmsg.Data) < scmTimestampnsLen {
-				t.Errorf("SCM_TIMESTAMPNS carries %d bytes, want at least %d: its payload was truncated",
-					len(cmsg.Data), scmTimestampnsLen)
-			}
-			timestampns = true
-		case cmsg.Header.Level == unix.SOL_IP && cmsg.Header.Type == unix.IP_PKTINFO:
-			if len(cmsg.Data) < unix.SizeofInet4Pktinfo {
-				t.Errorf("IP_PKTINFO carries %d bytes, want at least %d: its payload was truncated",
-					len(cmsg.Data), unix.SizeofInet4Pktinfo)
-			}
-			pktinfo = true
-		}
-	}
-	if !timestampns {
-		t.Error("SCM_TIMESTAMPNS did not arrive, so ReadDatagram would report the userspace fallback")
-	}
-	if !pktinfo {
-		t.Error("IP_PKTINFO did not arrive although the socket asked for it")
-	}
+// captureWarnings sends the default logger's output to a buffer for the length
+// of one test, so what ReadDatagram reports about a truncated control buffer
+// can be asserted on.
+func captureWarnings(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var out bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&out, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return &out
 }
 
 // TestReadDatagram_ReportsKernelTimestamp pins the timestamp quality the
-// parsers label their metrics with, on a socket configured the way
-// topofbook-parser configures its own: the kernel's own value, never the
+// parsers label their metrics with: the kernel's own value, never the
 // userspace fallback.
 //
-// On a kernel that emits SCM_TIMESTAMPNS ahead of the IP control messages this
-// still passes with a one-message control buffer, because the message
-// discarded there is IP_PKTINFO. It guards the reverse order, where the
-// timestamp is the one lost; the sizing itself is held by
-// TestControlBuffer_HoldsEveryRequestedControlMessage.
+// It is also what holds controlBufferSize. The socket asks for
+// SCM_TIMESTAMPNS, so a buffer too small for it makes the kernel discard the
+// message and raise MSG_CTRUNC, which is not a read error — the kind silently
+// becomes the fallback, and this test is what says so.
 func TestReadDatagram_ReportsKernelTimestamp(t *testing.T) {
+	warnings := captureWarnings(t)
 	conn, sender := loopbackPair(t)
 
 	// One Reader across several datagrams, the way a receive goroutine uses it,
@@ -202,6 +134,49 @@ func TestReadDatagram_ReportsKernelTimestamp(t *testing.T) {
 		if recvTime.IsZero() {
 			t.Errorf("datagram %d: receive timestamp is zero", i)
 		}
+	}
+	if got := warnings.String(); got != "" {
+		t.Errorf("ReadDatagram warned about the %d-byte control buffer it was given: %s",
+			len(reader.oob), got)
+	}
+}
+
+// TestReadDatagram_WarnsWhenTheKernelTruncatesControlMessages holds the other
+// half: that a control buffer too small for what the socket asks for is
+// reported rather than swallowed.
+//
+// The kernel signals it with MSG_CTRUNC and a nil error, so nothing downstream
+// can tell a lost timestamp from a socket that never had timestamping on. The
+// Reader is given a buffer one control message header wide, which cannot hold
+// a struct timespec, to put a real MSG_CTRUNC on the read rather than a
+// simulated one. The warning is once per Reader: the cause does not change
+// between datagrams, and the receive path runs at line rate.
+func TestReadDatagram_WarnsWhenTheKernelTruncatesControlMessages(t *testing.T) {
+	warnings := captureWarnings(t)
+	conn, sender := loopbackPair(t)
+
+	reader := &Reader{oob: make([]byte, unix.CmsgSpace(0))}
+	buf := make([]byte, 2048)
+	for i := range 3 {
+		if _, err := sender.Write([]byte("kernel please stamp this")); err != nil {
+			t.Fatalf("sending datagram %d: %v", i, err)
+		}
+		_, _, _, kind, err := reader.ReadDatagram(conn, buf)
+		if err != nil {
+			t.Fatalf("ReadDatagram %d: %v", i, err)
+		}
+		if kind != RecvTimestampKindAppFallback {
+			t.Errorf("datagram %d: receive-timestamp kind %q, want %q: the timestamp cannot have "+
+				"survived a control buffer this small", i, kind, RecvTimestampKindAppFallback)
+		}
+	}
+
+	if got := strings.Count(warnings.String(), "level=WARN"); got != 1 {
+		t.Errorf("ReadDatagram logged %d warnings across 3 truncated reads, want 1:\n%s",
+			got, warnings.String())
+	}
+	if !strings.Contains(warnings.String(), "control_buffer_bytes=") {
+		t.Errorf("the warning does not name the buffer that was too small:\n%s", warnings.String())
 	}
 }
 

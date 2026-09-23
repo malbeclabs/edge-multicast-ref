@@ -12,8 +12,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/net/ipv4"
-
 	"github.com/malbeclabs/edge-multicast-ref/go/internal/udp"
 )
 
@@ -163,10 +161,6 @@ func (r *Runner) listenPort(ctx context.Context, port int, label string) error {
 		slog.Warn("could not set UDP read buffer size", "error", err)
 	}
 
-	pc := ipv4.NewPacketConn(conn)
-	if err := pc.SetControlMessage(ipv4.FlagDst, true); err != nil {
-		slog.Warn("could not set control message flag", "error", err)
-	}
 	if err := udp.EnableTimestamping(conn); err != nil {
 		slog.Warn("could not enable UDP receive timestamping", "error", err)
 	}
@@ -216,9 +210,12 @@ func (r *Runner) listenPort(ctx context.Context, port int, label string) error {
 			RecvTimestamp:   recvTime,
 			RecvTimestampNS: uint64(recvTime.UnixNano()),
 			RecvTSKind:      recvKind,
-			MulticastGroup:  r.cfg.GroupIP.String(),
-			Port:            port,
-			Channel:         label,
+			// The socket is bound to this group, so every datagram it delivers
+			// was sent to it: the destination address is known from the
+			// binding and does not have to be read off the datagram.
+			MulticastGroup: r.cfg.GroupIP.String(),
+			Port:           port,
+			Channel:        label,
 		})
 		if err != nil {
 			if r.cfg.Metrics != nil {

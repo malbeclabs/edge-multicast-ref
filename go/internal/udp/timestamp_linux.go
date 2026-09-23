@@ -4,6 +4,7 @@ package udp
 
 import (
 	"encoding/binary"
+	"log/slog"
 	"net"
 	"net/netip"
 	"time"
@@ -23,17 +24,18 @@ const (
 const scmTimestampnsLen = 16
 
 // controlBufferSize is the room a Reader gives the kernel for control messages.
-// Every control message any caller asks for needs its own slot here. The kernel
-// fills the buffer in its own order and, once out of room, drops the rest and
-// raises MSG_CTRUNC — which is not a read error, so a control message that does
-// not fit is lost with no signal whatsoever. The two asked for today are:
+// SO_TIMESTAMPNS is the only one this package asks for, so a Reader holds one
+// SCM_TIMESTAMPNS and nothing else.
 //
-//   - SO_TIMESTAMPNS, set by EnableTimestamping, which yields SCM_TIMESTAMPNS.
-//   - IP_PKTINFO, set by topofbook-parser through ipv4.FlagDst, which yields a
-//     struct in_pktinfo.
-//
-// A caller that enables a further control message must add its space here too.
-var controlBufferSize = unix.CmsgSpace(scmTimestampnsLen) + unix.CmsgSpace(unix.SizeofInet4Pktinfo)
+// The size matters because a control message that does not fit is not a read
+// error: the kernel writes what fits, discards the rest, raises MSG_CTRUNC, and
+// ReadMsgUDP still returns nil. A socket given a further control message
+// elsewhere — IP_PKTINFO, SO_RXQ_OVFL — can therefore lose the timestamp and
+// degrade every latency the process reports to the userspace fallback.
+// ReadDatagram repeats the kernel's MSG_CTRUNC rather than let that happen
+// quietly, so this buffer and what a socket asks for cannot drift apart
+// unnoticed.
+var controlBufferSize = unix.CmsgSpace(scmTimestampnsLen)
 
 // EnableTimestamping asks the kernel to attach an SO_TIMESTAMPNS control
 // message to every datagram read from conn.
@@ -55,11 +57,15 @@ func EnableTimestamping(conn *net.UDPConn) error {
 // A Reader reads datagrams off a socket, holding the control-message buffer
 // across reads so the receive path does not allocate one per datagram.
 //
-// That buffer is the Reader's only state and it is overwritten by every read,
-// so a Reader must not be used from two goroutines at once: a receive goroutine
-// makes its own, next to its own datagram buffer.
+// That buffer is overwritten by every read and the Reader's other field is
+// written without a lock, so a Reader must not be used from two goroutines at
+// once: a receive goroutine makes its own, next to its own datagram buffer.
 type Reader struct {
 	oob []byte
+	// controlTruncationLogged holds the MSG_CTRUNC warning to one line per
+	// Reader. The cause is how the socket is configured, so it holds for every
+	// datagram that follows and would otherwise be logged at line rate.
+	controlTruncationLogged bool
 }
 
 // NewReader returns a Reader for one receive goroutine.
@@ -70,10 +76,20 @@ func NewReader() *Reader {
 // ReadDatagram reads one datagram and returns the sender address plus the
 // kernel receive timestamp when available, otherwise an application-time
 // fallback.
+//
+// A datagram whose control messages the kernel had to truncate is still
+// returned — the payload is intact — but the first one warns, because the
+// timestamp it should have carried may be the message that was discarded.
 func (r *Reader) ReadDatagram(conn *net.UDPConn, buf []byte) (int, netip.Addr, time.Time, string, error) {
-	n, oobn, _, addr, err := conn.ReadMsgUDP(buf, r.oob)
+	n, oobn, flags, addr, err := conn.ReadMsgUDP(buf, r.oob)
 	if err != nil {
 		return 0, netip.Addr{}, time.Time{}, "", err
+	}
+	if flags&unix.MSG_CTRUNC != 0 && !r.controlTruncationLogged {
+		r.controlTruncationLogged = true
+		slog.Warn("the kernel discarded a control message: this socket asks for more of them "+
+			"than the control buffer holds, so the receive timestamp can fall back to application time",
+			"control_buffer_bytes", len(r.oob))
 	}
 	src := srcAddr(addr)
 	if recvTime, ok := extractKernelTimestamp(r.oob[:oobn]); ok {
