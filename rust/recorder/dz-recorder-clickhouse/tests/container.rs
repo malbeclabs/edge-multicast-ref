@@ -45,6 +45,12 @@ const DEFAULT_URL: &str = "http://127.0.0.1:8123";
 const RETENTION: &str = "002_recorder_retention.sql";
 /// Applied a second time by the one test that is about the upgrade path.
 const BOOK_KEY: &str = "010_recorder_book_key.sql";
+/// Re-applied by the one test that reconstructs a deployment holding the two
+/// star views this file declares, frozen over tables that had no `derivation`.
+const ERA_RANK: &str = "003_recorder_era_rank.sql";
+/// Applied a second time by that same test, which is the instruction this file
+/// gives every deployment that has already applied it.
+const DERIVATION: &str = "008_recorder_derivation.sql";
 
 /// A database of this test's own, so a run cannot disturb a live one.
 struct Scratch {
@@ -526,6 +532,125 @@ fn the_era_rank_view_numbers_the_openings_densely() {
         )),
         "2"
     );
+}
+
+/// **A deployment that applied `008` as it was released comes out of a second
+/// apply holding the two star views over the column that file added.**
+///
+/// The two `CREATE OR REPLACE VIEW` statements at the end of `008` exist for
+/// one deployment: the one that applied `003` over tables carrying no
+/// `derivation`, so both stars expanded without it, and then applied the
+/// released `008`, so its tables carry the column and its views do not. That
+/// deployment reaches the repair only when an operator applies the file again,
+/// which is what this test performs.
+///
+/// EVERY OTHER TEST HERE WOULD ASSERT THIS VACUOUSLY. `Scratch::open` applies
+/// `001`, and `001` declares `derivation` in the `CREATE TABLE` blocks of both
+/// `era` and `datagram` — so on a fresh database `003`'s stars expand over the
+/// column and both views carry it whether or not `008` ever re-states them. A
+/// column count taken on a fresh database therefore passes with the two
+/// statements deleted, which is no assertion at all. The fixture below is what
+/// makes the reads that follow it mean something.
+///
+/// THE FIXTURE IS THE CURRENT SET WITH THE RELEASE TAKEN BACK OUT, because the
+/// `001` that lacked the column is not in the tree to apply and a second copy
+/// of it checked in beside the live one would be a file nobody maintains. The
+/// column is dropped from the two tables — it is in neither sort key, which is
+/// what `001` says it is out of them for — `003` is applied over them as that
+/// deployment applied it, from its own checked-in text rather than a copy, and
+/// the released `008`'s two `ALTER`s put the column back. The state that
+/// leaves is asserted before the repair, so a fixture that stopped
+/// reconstructing it fails here instead of passing silently.
+///
+/// THE MUTANT THIS KILLS IS THE TWO `CREATE OR REPLACE VIEW` STATEMENTS
+/// DELETED FROM `008`. The fixture has already applied that file's `ALTER`s,
+/// so those two statements are the only thing left in it with anything to do:
+/// without them the second apply changes nothing and both reads below fail —
+/// the column count on the number, and the read through each view with
+/// `UNKNOWN_IDENTIFIER`, which is the failure an operator's panel meets.
+#[test]
+fn a_second_apply_of_the_derivation_file_re_states_the_two_frozen_star_views() {
+    let mut scratch = Scratch::open("frozen_star_views");
+
+    /// Whether a relation carries `derivation`, as `0` or `1`. A view is in
+    /// `system.columns` exactly as a table is, and for a view the answer is the
+    /// column list the star was expanded to when it was created.
+    fn carries(scratch: &Scratch, relation: &str) -> String {
+        scratch.scalar(&format!(
+            "SELECT count() FROM system.columns WHERE database = '{}' \
+             AND table = '{relation}' AND name = 'derivation'",
+            scratch.database
+        ))
+    }
+
+    // The deployment as the released `008` left it: the column absent when
+    // `003` ran, and added by `ALTER` afterwards.
+    for table in ["era", "datagram"] {
+        scratch.scalar(&format!(
+            "ALTER TABLE {}.{table} DROP COLUMN derivation",
+            scratch.database
+        ));
+    }
+    scratch.apply(ERA_RANK);
+    for table in ["era", "datagram"] {
+        scratch.scalar(&format!(
+            "ALTER TABLE {}.{table} ADD COLUMN IF NOT EXISTS derivation \
+             LowCardinality(String) DEFAULT 'archive' AFTER object_sha256",
+            scratch.database
+        ));
+    }
+
+    // And that state is the one the repair is addressed to: the column on both
+    // tables, and on neither view.
+    for table in ["era", "datagram"] {
+        assert_eq!(
+            carries(&scratch, table),
+            "1",
+            "the fixture left `{table}` without the column the released `008` \
+             adds, so what follows is not the deployment this repair is for"
+        );
+    }
+    for view in ["era_opening", "datagram_in_era"] {
+        assert_eq!(
+            carries(&scratch, view),
+            "0",
+            "`{view}` was reconstructed already carrying the column, so an \
+             assertion that it carries one after the apply would pass with the \
+             re-statement deleted"
+        );
+    }
+
+    // The repair, as an operator applying the one file again performs it.
+    scratch.apply(DERIVATION);
+
+    for view in ["era_opening", "datagram_in_era"] {
+        assert_eq!(
+            carries(&scratch, view),
+            "1",
+            "`{view}` still stands for the column list it froze before the \
+             column reached the table under it"
+        );
+    }
+
+    // And the column reads back *through* both views, which is what a panel
+    // does and what answered `UNKNOWN_IDENTIFIER` a moment ago. The rows are
+    // loaded after the repair because the `ALTER`s above are what makes the
+    // tables accept a row carrying the column at all.
+    scratch
+        .sink
+        .write_batch(batch(200, Fault::ResetCountAdvance), NOW)
+        .expect("the load");
+    for view in ["era_opening", "datagram_in_era"] {
+        assert_eq!(
+            scratch.scalar(&format!(
+                "SELECT DISTINCT derivation FROM {}.{view}",
+                scratch.database
+            )),
+            "archive",
+            "the provenance an archive derivation wrote does not read back \
+             through `{view}`"
+        );
+    }
 }
 
 /// The base rows expire and the derived rows do not.
