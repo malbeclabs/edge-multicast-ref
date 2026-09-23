@@ -1,4 +1,5 @@
 mod book;
+mod channel;
 mod egress;
 mod ingress;
 mod latency;
@@ -7,6 +8,7 @@ mod process;
 mod refdata;
 
 pub use book::BookMetrics;
+pub use channel::ChannelMetrics;
 pub use egress::EgressMetrics;
 pub use ingress::IngressMetrics;
 pub use latency::LatencyMetrics;

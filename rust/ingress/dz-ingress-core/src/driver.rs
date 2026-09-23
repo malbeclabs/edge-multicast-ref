@@ -321,7 +321,7 @@ enum Stop {
 /// - **The delay sequence resets only for a connection that delivered a
 ///   payload.** A venue that accepts a socket and closes it — the usual shape of
 ///   being throttled, or of an expired credential — would otherwise be
-///   reconnected against at the initial delay indefinitely. And a connection
+///   reconnected against in the opening window indefinitely. And a connection
 ///   that ended in `rate_limit` never resets, however much it delivered: the
 ///   venue has just said we are going too fast, and starting the sequence over
 ///   is how that becomes a ban.
@@ -350,6 +350,12 @@ impl<'a> Driver<'a> {
     /// driving several connections holds one of each: a publisher taking
     /// first-copy-wins from two upstreams has two drivers, two `Input`s, and one
     /// registry.
+    ///
+    /// **The delay sequence is seeded here, from the clock and the
+    /// connection's name.** Two drivers in one publisher are built in the same
+    /// loop off the same clock, so it is the name that separates their retries
+    /// — see [`Backoff::seed`], and [`Backoff`] for why two connections
+    /// retrying in step is the failure being avoided.
     pub fn new(
         input: &'a mut dyn Input,
         adapter: &'a mut dyn Adapter,
@@ -357,13 +363,14 @@ impl<'a> Driver<'a> {
         observer: &'a dyn IngressObserver,
         policy: Policy,
     ) -> Self {
+        let seed = Backoff::seed(clock.wall_ns(), input.connection().as_str());
         Self {
             input,
             adapter,
             clock,
             observer,
             policy,
-            backoff: Backoff::new(policy.backoff),
+            backoff: Backoff::new(policy.backoff, seed),
             limiter: RateLimiter::new(policy.rate_limit_per_second),
         }
     }
@@ -377,6 +384,28 @@ impl<'a> Driver<'a> {
     /// `dz_publisher_ingress_connection_state`, which is pre-created at 0 for
     /// exactly that case. A driver that gave up would turn a recoverable
     /// outage into an operator action.
+    ///
+    /// What that leaves unbounded is the *total* number of attempts against a
+    /// venue that publishes a connection-attempt budget. They are spread, not
+    /// capped: each delay is drawn inside its window per connection, so
+    /// several connections dropped by one event do not attempt at the same
+    /// instant — see [`Backoff`] — and each settles at about four attempts per
+    /// three of whichever ceiling its sequence is sitting at, rather than a
+    /// burst of all of them at every ceiling.
+    ///
+    /// **Which ceiling that is, is the venue's to decide.** An outage that
+    /// refuses every attempt, or drops every connection before a payload,
+    /// carries the ceiling to `reconnect_backoff_max` and holds it there: four
+    /// attempts per three maxima, which is the rate that key is set for. A
+    /// venue that accepts, delivers one payload and closes sits at the other
+    /// end of the same arithmetic. One delivered payload is the proof this loop
+    /// asks for, so `cycle` answers `Cycle::Proven`, the sequence resets, and
+    /// such a connection never leaves the opening window: four attempts per
+    /// three *opening* ceilings, which at the documented pair of 500ms and 30s
+    /// is four attempts per three seconds — about 1.3 a second — for as long as
+    /// the venue keeps doing it. That is the shape of a throttle that lets one
+    /// payload through, and it is the rate to size a per-address budget
+    /// against, not the one at the maximum.
     pub async fn run(&mut self, events: &mut dyn EventSink) -> IngressError {
         loop {
             match self.cycle(events).await {
@@ -390,7 +419,7 @@ impl<'a> Driver<'a> {
         }
     }
 
-    /// The delay before the next attempt, taken from the sequence.
+    /// The delay before the next attempt, drawn from the sequence.
     async fn wait(&mut self) {
         let delay = self.backoff.next_delay();
         self.clock.sleep(delay).await;

@@ -3,9 +3,12 @@ package main
 import (
 	"encoding/csv"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"sync"
+
+	"github.com/malbeclabs/edge-multicast-ref/go/internal/sink"
 )
 
 // CSV column definitions for each supported record type.
@@ -82,6 +85,53 @@ func (s *CSVFileSink) Close() error {
 	defer s.mu.Unlock()
 	s.w.Flush()
 	return s.file.Close()
+}
+
+// csvConnWriter writes CSV quote/trade rows to a single connected socket
+// client. The column layout is this feed's own, so the shared socket sink is
+// handed this writer rather than knowing the format itself.
+type csvConnWriter struct {
+	w             *csv.Writer
+	wroteQuoteHdr bool
+	wroteTradeHdr bool
+}
+
+// newCSVConnWriter serves one socket client CSV. Its signature is what
+// sink.NewSocket takes for a per-client encoder.
+func newCSVConnWriter(w io.Writer) sink.ConnWriter[Record] {
+	return &csvConnWriter{w: csv.NewWriter(w)}
+}
+
+func (c *csvConnWriter) WriteRecords(records []Record) error {
+	for i := range records {
+		r := &records[i]
+		switch r.Type {
+		case "quote":
+			if !c.wroteQuoteHdr {
+				if err := c.w.Write(quoteCSVHeader); err != nil {
+					return err
+				}
+				c.wroteQuoteHdr = true
+			}
+			if err := c.w.Write(quoteToCSVRow(r)); err != nil {
+				return err
+			}
+		case "trade":
+			if !c.wroteTradeHdr {
+				if err := c.w.Write(tradeCSVHeader); err != nil {
+					return err
+				}
+				c.wroteTradeHdr = true
+			}
+			if err := c.w.Write(tradeToCSVRow(r)); err != nil {
+				return err
+			}
+		default:
+			continue
+		}
+	}
+	c.w.Flush()
+	return c.w.Error()
 }
 
 func quoteToCSVRow(r *Record) []string {

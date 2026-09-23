@@ -27,7 +27,7 @@ use dz_adapter_core::{
 use dz_edge_core::PortRole;
 use dz_edge_tob::TopOfBook;
 use dz_publisher_egress::{
-    EgressPolicy, EraStore, FailureScope, KernelRoute, MulticastTransmitter, Tee,
+    EgressPolicy, EraStore, FailureScope, KernelRoute, MulticastTransmitter, Tee, DEFAULT_TTL,
 };
 use dz_publisher_lowering::SourceId;
 use dz_publisher_metrics::{PublisherMetrics, PublisherMetricsConfig};
@@ -206,7 +206,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // No prefix declared: this is a loopback group, and the invariant a
         // prefix enforces is about a production route.
         expected_prefix: None,
-        ttl: 1,
+        // One hop, which is the whole of what a subscriber on this host needs.
+        // A hop count is a `NonZeroU8`: the constant is one, and a composed
+        // zero does not compile.
+        ttl: DEFAULT_TTL,
     };
     let route = KernelRoute;
 

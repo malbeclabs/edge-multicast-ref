@@ -1,5 +1,13 @@
 name: go tests
 
+# Unfiltered, and deliberately, for the reason rust-codec.yml states at length:
+# a paths-filtered workflow reports nothing on a pull request that touches none
+# of its paths, and a *required* check that never reports blocks that pull
+# request for ever. These checks are required.
+#
+# Adding `testdata/golden/**` to a filter would not make one safe. It would be
+# necessary — these suites assert against those vectors, so a commit touching
+# only a vector has to run them — and it would not be sufficient.
 on:
   pull_request:
   push:
@@ -38,8 +46,12 @@ jobs:
           cache-dependency-path: |
             ${{ matrix.module }}/go.sum
 
+      # -race is what makes the socket sink's concurrency guards testable: the
+      # sink holds its mutex across every send so Close cannot close a client's
+      # outbound queue mid-send, and reverting that survives repeated plain runs
+      # while the race detector fails on the first.
       - name: test
         working-directory: ${{ matrix.module }}
         env:
           TMPDIR: /tmp
-        run: go test ./...
+        run: go test -race ./...

@@ -61,6 +61,7 @@ const PROPOSED_NAMES: &[&str] = &[
     "dz_publisher_ingress_connect_failures_total",
     "dz_publisher_ingress_adapter_errors_total",
     "dz_publisher_lowering_refusals_total",
+    "dz_publisher_channel_last_published_timestamp_seconds",
 ];
 
 fn touch_every_family(m: &PublisherMetrics) {
@@ -102,6 +103,8 @@ fn touch_every_family(m: &PublisherMetrics) {
     m.egress().set_sequence(PortRole::Mktdata, 1, 1);
     m.egress()
         .set_heartbeat_last_sent(PortRole::Mktdata, 1, 1.0);
+
+    m.channel().set_last_published(1, 1.0);
 
     m.latency()
         .observe_venue_to_recv(TimestampKind::ExchangeRecv, 0.001);
@@ -165,12 +168,18 @@ fn every_proposed_family_says_in_its_help_that_it_is_a_proposal() {
     // A family the playbook does not carry, rendered with no sign of that, is
     // one somebody reads off a scrape and writes into a dashboard as though it
     // were part of the shared contract.
+    //
+    // Nothing is touched: every proposal has to say so from startup, which is
+    // when an operator first reads the exposition. One Channel ID is declared
+    // because a registry renders no family that has no series, and
+    // `dz_publisher_channel_last_published_timestamp_seconds` is keyed on the
+    // declared set the way the manifest gauges are.
     let metrics = PublisherMetrics::new(&PublisherMetricsConfig {
         venue: "test-venue",
         source_id: 7,
         port_roles: &[PortRole::Mktdata],
         connections: &[],
-        channel_ids: &[],
+        channel_ids: &[1],
         ingress_message_types: &[],
     });
     let rendered = metrics.render();

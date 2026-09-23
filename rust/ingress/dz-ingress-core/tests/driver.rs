@@ -182,6 +182,10 @@ impl Connection {
 
 /// A transport that answers from a script.
 struct ScriptedInput {
+    /// The name this transport answers with, which is half of what seeds its
+    /// driver's delay sequence. A parameter rather than the constant, so that
+    /// two connections of one publisher can be run against one script.
+    connection: ConnectionId,
     connections: VecDeque<Connection>,
     current: Option<Connection>,
     clock: Arc<TestClock>,
@@ -195,8 +199,9 @@ struct ScriptedInput {
 }
 
 impl ScriptedInput {
-    fn new(clock: Arc<TestClock>, connections: Vec<Connection>) -> Self {
+    fn new(connection: ConnectionId, clock: Arc<TestClock>, connections: Vec<Connection>) -> Self {
         Self {
+            connection,
             connections: connections.into(),
             current: None,
             clock,
@@ -210,7 +215,7 @@ impl ScriptedInput {
 
 impl Input for ScriptedInput {
     fn connection(&self) -> ConnectionId {
-        CONNECTION
+        self.connection
     }
 
     fn connect(&mut self, _timeout: Duration) -> BoxFuture<'_, Result<(), IngressError>> {
@@ -560,13 +565,49 @@ impl IngressObserver for TestObserver {
 // Running one
 // ---------------------------------------------------------------------------
 
+/// The floor of every reconnect delay, and the bottom of the window the first
+/// one is drawn from: under the 30s maximum below, that window is this to twice
+/// this, so the first delay is drawn inside it rather than being this value.
+const INITIAL_DELAY: Duration = Duration::from_millis(500);
+
 fn policy() -> Policy {
     Policy {
         connect_timeout: Duration::from_secs(5),
-        backoff: BackoffPolicy::new(Duration::from_millis(500), Duration::from_secs(30))
+        backoff: BackoffPolicy::new(INITIAL_DELAY, Duration::from_secs(30))
             .expect("a valid policy"),
         rate_limit_per_second: 0,
         idle_timeout: None,
+    }
+}
+
+/// Checks every delay the driver waited against the window its step draws
+/// from, given that step's ceiling: half the ceiling - or the configured
+/// initial delay, whichever is longer - up to the ceiling itself.
+///
+/// The tests below assert the delays exactly as well, which they can because
+/// the sequence is seeded from the test clock's reading and the connection's
+/// name rather than from ambient randomness. That equality is what catches a
+/// change in the arithmetic; this is what says which bounds the numbers are
+/// supposed to sit inside, so that a reader can check the list rather than take
+/// it.
+fn within_the_windows(slept: &[Duration], ceilings: &[Duration]) {
+    assert_eq!(
+        slept.len(),
+        ceilings.len(),
+        "{} delays against {} windows",
+        slept.len(),
+        ceilings.len()
+    );
+    for (step, (delay, ceiling)) in slept.iter().zip(ceilings).enumerate() {
+        let floor = (*ceiling - *ceiling / 2).max(INITIAL_DELAY);
+        assert!(
+            *delay >= floor,
+            "delay {step} was {delay:?}, below its window's floor of {floor:?}"
+        );
+        assert!(
+            *delay <= *ceiling,
+            "delay {step} was {delay:?}, above its ceiling of {ceiling:?}"
+        );
     }
 }
 
@@ -585,9 +626,21 @@ struct Run {
 
 /// Drives one script to its fatal end and hands back what happened.
 fn run(policy: Policy, adapter: RecordingAdapter, connections: Vec<Connection>) -> Run {
+    run_as(CONNECTION, policy, adapter, connections)
+}
+
+/// The same, for a named connection: what separates two drivers' delay
+/// sequences is the name they answer with, so a test about two connections has
+/// to be able to state them.
+fn run_as(
+    connection: ConnectionId,
+    policy: Policy,
+    adapter: RecordingAdapter,
+    connections: Vec<Connection>,
+) -> Run {
     let clock = TestClock::new();
     let observer = Arc::new(TestObserver::default());
-    let mut input = ScriptedInput::new(Arc::clone(&clock), connections);
+    let mut input = ScriptedInput::new(connection, Arc::clone(&clock), connections);
     let mut adapter = adapter;
     let mut events = RecordingEvents::default();
 
@@ -880,15 +933,24 @@ fn an_adapter_error_on_connect_is_counted_and_retried_under_the_backoff() {
         .map(|(_, connected)| *connected)
         .collect();
     assert_eq!(announced, vec![false, false]);
-    // Retried, and each retry further along the sequence rather than at the
-    // same delay: an adapter that cannot compose its subscription usually
-    // cannot yet read a credential, and hammering does not make it readable.
+    // Retried, and each retry drawn under a ceiling twice the last one's
+    // rather than at the same delay: an adapter that cannot compose its
+    // subscription usually cannot yet read a credential, and hammering does not
+    // make it readable.
+    within_the_windows(
+        &outcome.clock.slept(),
+        &[
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+            Duration::from_secs(4),
+        ],
+    );
     assert_eq!(
         outcome.clock.slept(),
         vec![
-            Duration::from_millis(500),
-            Duration::from_secs(1),
-            Duration::from_secs(2),
+            Duration::from_nanos(704_608_578),
+            Duration::from_nanos(1_539_881_408),
+            Duration::from_nanos(3_075_253_670),
         ]
     );
     drop(recorded);
@@ -896,7 +958,7 @@ fn an_adapter_error_on_connect_is_counted_and_retried_under_the_backoff() {
 }
 
 #[test]
-fn the_delay_sequence_doubles_across_failures_and_resets_for_a_proven_connection() {
+fn the_ceiling_doubles_across_failures_and_resets_for_a_proven_connection() {
     let outcome = run(
         policy(),
         RecordingAdapter::default(),
@@ -917,19 +979,85 @@ fn the_delay_sequence_doubles_across_failures_and_resets_for_a_proven_connection
         ],
     );
 
-    assert_eq!(
-        outcome.clock.slept(),
-        vec![
-            Duration::from_millis(500),
+    within_the_windows(
+        &outcome.clock.slept(),
+        &[
             Duration::from_secs(1),
             Duration::from_secs(2),
             Duration::from_secs(4),
-            // The reset: back to the initial delay, not to zero. A venue that
-            // closes a healthy connection on purpose - a session boundary, a
-            // maintenance window - must not be reconnected against instantly.
-            Duration::from_millis(500),
+            Duration::from_secs(8),
+            // The reset: the ceiling back at the one a sequence opens with, so
+            // this delay is drawn between the configured initial delay and
+            // twice it rather than near the ceiling - and never zero. A venue
+            // that closes a healthy connection on purpose - a session
+            // boundary, a maintenance window - must not be reconnected against
+            // instantly.
             Duration::from_secs(1),
+            Duration::from_secs(2),
+        ],
+    );
+    assert_eq!(
+        outcome.clock.slept(),
+        vec![
+            Duration::from_nanos(704_608_578),
+            Duration::from_nanos(1_539_881_408),
+            Duration::from_nanos(3_075_253_670),
+            Duration::from_nanos(7_047_270_727),
+            // The reset, drawn from the opening window.
+            Duration::from_nanos(956_535_681),
+            Duration::from_nanos(1_120_891_876),
         ]
+    );
+}
+
+#[test]
+fn a_venue_that_delivers_one_payload_and_closes_is_retried_in_the_opening_window() {
+    // The reconnect rate `run`'s rustdoc states, as a number. One delivered
+    // payload is all the proof the driver asks for, so a venue that accepts,
+    // delivers and closes - a session boundary, or a throttle that lets one
+    // payload through - resets the sequence on every cycle and never leaves the
+    // window it opens with. The ceiling therefore stays at 1s here however long
+    // the venue keeps it up, and the rate to size a per-address budget against
+    // is four attempts per three seconds rather than the four per three maxima
+    // an outage settles at.
+    let script = || {
+        Connection::live(vec![
+            Read::Payload(b"a"),
+            Read::Ended(DisconnectReason::RemoteClose),
+        ])
+    };
+    let outcome = run(
+        policy(),
+        RecordingAdapter::default(),
+        (0..8).map(|_| script()).collect(),
+    );
+
+    let slept = outcome.clock.slept();
+    // Eight proven connections, eight delays, every one of them drawn under the
+    // opening ceiling rather than under a ceiling that doubled.
+    within_the_windows(&slept, &[Duration::from_secs(1); 8]);
+    assert_eq!(
+        slept,
+        vec![
+            Duration::from_nanos(704_608_578),
+            Duration::from_nanos(769_940_704),
+            Duration::from_nanos(768_813_418),
+            Duration::from_nanos(880_908_841),
+            Duration::from_nanos(956_535_681),
+            Duration::from_nanos(560_445_938),
+            Duration::from_nanos(809_736_297),
+            Duration::from_nanos(511_942_275),
+        ]
+    );
+    // And the rate itself: these eight took 5.963s, against the six seconds
+    // four attempts per three seconds predicts, with the window's own bounds -
+    // 4s and 8s for eight draws - as the check that does not depend on a seed.
+    // A sequence that climbed instead would spend more than a minute on the
+    // same eight attempts.
+    let waited: Duration = slept.iter().sum();
+    assert!(
+        waited >= Duration::from_secs(4) && waited <= Duration::from_secs(8),
+        "eight retries of a venue that proves every connection took {waited:?}"
     );
 }
 
@@ -954,14 +1082,79 @@ fn a_connection_that_delivered_and_was_then_rate_limited_does_not_reset_the_sequ
         ],
     );
 
+    // The ceiling went on doubling through both rate-limited connections: a
+    // reset would have put the third delay back in the opening window, 500ms
+    // to 1s, rather than in the 2s to 4s window it is drawn from here.
+    within_the_windows(
+        &outcome.clock.slept(),
+        &[
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+            Duration::from_secs(4),
+        ],
+    );
     assert_eq!(
         outcome.clock.slept(),
         vec![
-            Duration::from_millis(500),
-            Duration::from_secs(1),
-            Duration::from_secs(2),
+            Duration::from_nanos(704_608_578),
+            Duration::from_nanos(1_539_881_408),
+            Duration::from_nanos(3_075_253_670),
         ]
     );
+}
+
+#[test]
+fn two_connections_of_one_publisher_do_not_retry_in_step() {
+    // The burst a venue's connection-attempt budget is spent by. Both drivers
+    // are built off one clock reading, which is what a publisher starting its
+    // connections in a loop produces, and both fail on the same script - so an
+    // unjittered sequence has them attempt at the same instants for as long as
+    // the outage lasts, which is what a per-address limit counted over a short
+    // window sees as one burst of two rather than two attempts.
+    let script = || {
+        vec![
+            Connection::refused(),
+            Connection::refused(),
+            Connection::refused(),
+            Connection::refused(),
+        ]
+    };
+    let primary = run_as(
+        ConnectionId::new("mktdata"),
+        policy(),
+        RecordingAdapter::default(),
+        script(),
+    );
+    let comparison = run_as(
+        ConnectionId::new("mktdata-comparison"),
+        policy(),
+        RecordingAdapter::default(),
+        script(),
+    );
+
+    let ceilings = [
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+        Duration::from_secs(4),
+        Duration::from_secs(8),
+    ];
+    within_the_windows(&primary.clock.slept(), &ceilings);
+    within_the_windows(&comparison.clock.slept(), &ceilings);
+    // Every delay, the first one included: two connections that agreed on one
+    // of them are two connections that attempted together that time, and the
+    // first attempt after a drop is the one a per-address burst limit counts.
+    for (step, (one, other)) in primary
+        .clock
+        .slept()
+        .iter()
+        .zip(comparison.clock.slept())
+        .enumerate()
+    {
+        assert_ne!(
+            *one, other,
+            "both connections waited {one:?} before attempt {step}"
+        );
+    }
 }
 
 #[test]
@@ -1113,8 +1306,9 @@ fn the_outbound_rate_limit_defers_a_send_rather_than_dropping_it() {
         vec![
             Duration::from_millis(200),
             Duration::from_millis(200),
-            // The reconnect delay after the scripted close.
-            Duration::from_millis(500),
+            // The reconnect delay after the scripted close, drawn between the
+            // configured initial delay and twice it.
+            Duration::from_nanos(704_608_578),
         ]
     );
     // And our own pacing is not the venue rate-limiting us: that series must
@@ -1238,6 +1432,46 @@ fn a_fatal_transport_fault_stops_the_driver_rather_than_retrying_it_forever() {
         outcome.clock.slept().is_empty(),
         "it did not back off first"
     );
+}
+
+#[test]
+fn a_fatal_read_stops_the_driver_rather_than_reconnecting_into_it() {
+    // The same rule on the other operation, and this is the one that had no
+    // test: `Input::recv` states `IngressError::Fatal` for what a read cannot
+    // get past by trying again, and the pump stops on it rather than
+    // reconnecting, which is the one thing it shares with a fatal `connect`:
+    // the teardown asserted below is this path's own, because the connection
+    // was established. A driver that reconnected into it would reopen the
+    // session for as long as nobody looks at a dashboard, with the connection
+    // gauge flapping at 1 and `reconnects_total` climbing on a fault no
+    // reconnect reaches.
+    let outcome = run(
+        policy(),
+        RecordingAdapter::default(),
+        vec![
+            Connection::live(vec![Read::Fatal]),
+            // Never reached, and reaching it is what the count below refuses: a
+            // reconnect would open this one, and the run would then end on the
+            // script running out rather than on the read.
+            Connection::live(vec![
+                Read::Payload(b"a"),
+                Read::Ended(DisconnectReason::RemoteClose),
+            ]),
+        ],
+    );
+
+    assert!(outcome.exit.is_fatal());
+    assert_eq!(outcome.connects, 1, "it reconnected into a fatal read");
+    assert_eq!(
+        outcome.exit.to_string(),
+        "upstream connection is not usable as configured: scripted",
+        "the run ended on the read and not on the script running out"
+    );
+    // The connection existed, so the adapter is owed its pairing and the
+    // transport its release, on the way out as on any other ending.
+    assert_eq!(outcome.adapter.connected.len(), 1);
+    assert_eq!(outcome.adapter.disconnected.len(), 1);
+    assert_eq!(outcome.shutdowns, 1);
 }
 
 #[test]
@@ -1713,6 +1947,90 @@ fn a_failed_mid_session_send_ends_the_connection_and_the_reconnect_subscribes_ag
         outcome.adapter.connected.len(),
         2,
         "the second connection re-ran `on_connected`"
+    );
+}
+
+#[test]
+fn a_fatal_mid_session_write_stops_the_driver_rather_than_reconnecting_into_it() {
+    // `Input::send` states `IngressError::Fatal` for a message this transport
+    // cannot carry at all, which is the adapter or the document to correct
+    // rather than anything a reconnect reaches. So the write that reports it
+    // stops the driver, and the reconnect that a *failed* write earns is the
+    // one thing it does not get: the same body would be composed again on the
+    // next session, and refused again.
+    let adapter = RecordingAdapter {
+        outstanding: VecDeque::from(vec![vec!["subscribe:A-B"]]),
+        ..RecordingAdapter::default()
+    };
+    let mut refusing = Connection::live(vec![
+        Read::Keepalive(UPSTREAM_POLL),
+        Read::Payload(b"never-reached"),
+    ]);
+    refusing.send = Some(IngressError::fatal("this transport cannot carry that"));
+    let outcome = run(
+        policy(),
+        adapter,
+        vec![
+            refusing,
+            // Never reached: opening it is what a reconnect would do.
+            Connection::live(vec![Read::Ended(DisconnectReason::RemoteClose)]),
+        ],
+    );
+
+    assert!(outcome.exit.is_fatal());
+    assert_eq!(outcome.connects, 1, "it reconnected into a fatal write");
+    assert_eq!(
+        outcome.exit.to_string(),
+        "upstream connection is not usable as configured: this transport cannot carry that",
+        "the run ended on the write and not on the script running out"
+    );
+    assert_eq!(outcome.adapter.connected.len(), 1);
+    assert_eq!(outcome.adapter.disconnected.len(), 1, "the pairing holds");
+}
+
+#[test]
+fn a_fatal_logon_write_stops_the_driver_rather_than_reconnecting_into_it() {
+    // The same refusal on the write `on_connected` composes, which is the one
+    // an adapter is most likely to get wrong: a body missing what the protocol
+    // requires of it is refused on every session the driver could open, so a
+    // driver that backed off and logged on again would compose it for as long
+    // as nobody looks at a dashboard.
+    let adapter = RecordingAdapter {
+        subscriptions: vec!["subscribe:A-B"],
+        ..RecordingAdapter::default()
+    };
+    let mut refusing = Connection::live(vec![Read::Payload(b"never-reached")]);
+    refusing.send = Some(IngressError::fatal("this logon is not one"));
+    let outcome = run(
+        policy(),
+        adapter,
+        vec![
+            refusing,
+            // Never reached, for the same reason.
+            Connection::live(vec![Read::Ended(DisconnectReason::RemoteClose)]),
+        ],
+    );
+
+    assert!(outcome.exit.is_fatal());
+    assert_eq!(
+        outcome.connects, 1,
+        "it logged on again after a fatal write"
+    );
+    assert_eq!(
+        outcome.exit.to_string(),
+        "upstream connection is not usable as configured: this logon is not one",
+        "the run ended on the logon write and not on the script running out"
+    );
+    // Announced up only after the logon went out, so this connection never
+    // reached the gauge at 1.
+    assert!(
+        outcome
+            .observer
+            .recorded()
+            .states
+            .iter()
+            .all(|(_, up)| !*up),
+        "a connection whose logon was refused was never announced as up"
     );
 }
 

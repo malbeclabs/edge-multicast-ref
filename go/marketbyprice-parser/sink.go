@@ -3,15 +3,22 @@ package main
 import (
 	"fmt"
 	"strings"
+
+	"github.com/malbeclabs/edge-multicast-ref/go/internal/sink"
 )
 
 // OutputSink writes decoded records to a destination.
-type OutputSink interface {
-	// Write outputs one or more records.
-	Write(records []Record) error
+//
+// The transport lives in go/internal/sink and is shared with the other
+// parsers; Record is this module's own, and the sink is generic over it.
+type OutputSink = sink.Sink[Record]
 
-	// Close releases any resources held by the sink.
-	Close() error
+// JSONFileSink writes records as newline-delimited JSON (JSONL) to a file.
+type JSONFileSink = sink.JSONFile[Record]
+
+// NewJSONFileSink opens (or creates) the file at path for JSONL output.
+func NewJSONFileSink(path string) (*JSONFileSink, error) {
+	return sink.NewJSONFile[Record](path)
 }
 
 // SinkConfig describes the desired output format and destination.
@@ -39,7 +46,7 @@ func NewSink(cfg SinkConfig) (OutputSink, error) {
 	switch cfg.Format {
 	case "json":
 		if isSocket {
-			return NewSocketSink("json", strings.TrimPrefix(cfg.Path, "unix://"), cfg.Metrics)
+			return sink.NewSocket(strings.TrimPrefix(cfg.Path, "unix://"), sink.NewJSONConnWriter[Record], cfg.Metrics.socketMetrics())
 		}
 		return NewJSONFileSink(cfg.Path)
 	default:

@@ -292,6 +292,32 @@ fn a_command_line_that_cannot_be_understood_exits_differently_from_a_refusal() {
     );
 }
 
+/// Two configuration files, as an operator meets them: nothing bound, nothing
+/// read, and both files on stderr.
+///
+/// The experience is the point. The recorder used to run the second file and
+/// say nothing, so a unit file pointed at a new configuration while the old
+/// argument stayed behind recorded under whichever one came last — a live
+/// recorder whose own command line says two different things about what it is
+/// recording. Both paths are asserted because either could be the one that was
+/// meant, and the exit code is the command-line one: a pipeline is being told
+/// it invoked the binary wrongly, not that this host's configuration is bad.
+#[test]
+fn two_configuration_files_are_refused_and_both_are_named() {
+    let ran = run(&["--config", "a.toml", "--config", "b.toml"]);
+    assert_eq!(ran.code(), 2, "{}", ran.stderr);
+    assert!(ran.stderr.contains("a.toml"), "{}", ran.stderr);
+    assert!(ran.stderr.contains("b.toml"), "{}", ran.stderr);
+    assert!(ran.stderr.contains("Usage:"), "{}", ran.stderr);
+    // Nothing was read: the refusal is the command line's, so neither file
+    // being absent is what stopped it. `reading <path>:` is how this binary
+    // says it could not read a configuration — `StartupError::Read`, in
+    // `src/startup.rs` — and it is the line a parser that kept one of the two
+    // and ran on it would print, for whichever one it kept.
+    assert!(!ran.stderr.contains("reading a.toml"), "{}", ran.stderr);
+    assert!(!ran.stderr.contains("reading b.toml"), "{}", ran.stderr);
+}
+
 #[test]
 fn the_version_names_the_build_and_admits_an_unknown_commit() {
     let ran = run(&["--version"]);
@@ -301,6 +327,13 @@ fn the_version_names_the_build_and_admits_an_unknown_commit() {
     // one. What must never appear is an empty parenthesis, which reads as a
     // field somebody forgot rather than as an answer.
     assert!(!ran.stdout.contains("()"), "{}", ran.stdout);
+
+    // The short spelling is the same answer. `-V` is the conventional short
+    // spelling of `--version`, and a deployment role that reaches for it is
+    // asking what this binary is, not asking it wrongly.
+    let short = run(&["-V"]);
+    assert_eq!(short.code(), 0, "{}", short.stderr);
+    assert_eq!(short.stdout, ran.stdout);
 }
 
 #[test]

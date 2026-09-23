@@ -864,13 +864,6 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
             .set_venue_timestamps_available(i64::from(self.venue_timestamp_kind.is_some()));
     }
 
-    /// Record build identity, once, at startup.
-    pub fn record_build_info(&self, version: &str, commit: &str, toolchain: &str) {
-        self.metrics
-            .process()
-            .set_build_info(version, commit, toolchain);
-    }
-
     /// Drain the adapter's listings if the poll is due.
     ///
     /// The adapter is an argument rather than a field, for the same reason the
@@ -1567,7 +1560,22 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
         }
     }
 
-    /// One message reached the wire.
+    /// One message reached the wire, on the channel that carried it.
+    ///
+    /// Two recordings, and the `channel_id` is why there are two. The guard and
+    /// `dz_publisher_idle_guard_last_update_timestamp_seconds` are the
+    /// publisher's: *upstream in, nothing out* is a process-wide conjunction,
+    /// and a guard that ended the process over one channel's silence would
+    /// restart every other channel with it. What that leaves invisible is one
+    /// feed of several going silent while a sibling keeps the process-wide
+    /// gauge at *now*, so the same event also sets
+    /// `dz_publisher_channel_last_published_timestamp_seconds` for the channel
+    /// it reached. One function, so a call site cannot record one and forget
+    /// the other.
+    ///
+    /// A message that reaches two channels calls this twice, which is exactly
+    /// what it means: each channel has its own silence, and the process-wide
+    /// half is a set to the same value.
     ///
     /// This is where `dz_publisher_recv_to_send_latency_seconds` would be
     /// observed and is not: it wants the interval between the payload arriving
@@ -1576,11 +1584,15 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
     /// `EventSink` — which is the whole of what this type is handed — does not
     /// carry it. Named here rather than left as a silently empty family; see
     /// the crate documentation.
-    fn published(&mut self, now_mono_ns: u64, now_unix_ns: u64) {
+    fn published(&mut self, channel_id: u8, now_mono_ns: u64, now_unix_ns: u64) {
+        let unix_seconds = unix_seconds(now_unix_ns);
         self.idle.published(now_mono_ns);
         self.metrics
             .process()
-            .set_idle_guard_last_update(unix_seconds(now_unix_ns));
+            .set_idle_guard_last_update(unix_seconds);
+        self.metrics
+            .channel()
+            .set_last_published(channel_id, unix_seconds);
     }
 
     /// The two families that measure from a payload's arrival.
@@ -1784,6 +1796,7 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                     self.unroutable += 1;
                     return;
                 };
+                let channel_id = pipeline.channel_id();
                 let sent = timed(&self.metrics, EgressMessageType::InstrumentReset, || {
                     pipeline.send_instrument_reset(&reset, now_mono, now_unix)
                 });
@@ -1792,7 +1805,7 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                     // snapshot owed for a reset no subscriber saw would arrive
                     // with an anchor nobody is waiting for.
                     self.owed.push((instrument, reset.new_anchor_seq));
-                    self.published(now_mono, now_unix);
+                    self.published(channel_id, now_mono, now_unix);
                 }
             }
             Err(error) => self.refusals.record(error, &self.metrics),
@@ -1863,11 +1876,12 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                             self.unroutable += 1;
                             return;
                         };
+                        let channel_id = pipeline.channel_id();
                         let sent = timed(&self.metrics, EgressMessageType::Quote, || {
                             pipeline.send_quote(&quote, now_mono, now_unix)
                         });
                         if sent.is_ok() {
-                            self.published(now_mono, now_unix);
+                            self.published(channel_id, now_mono, now_unix);
                             self.observe_arrival_latency(source_ts_ns, kind, now_unix);
                         }
                     }
@@ -1908,21 +1922,32 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                     // Seq` — the message has no such field, and it is not a
                     // book mutation.
                     Ok(trade) => {
-                        let mut reached = false;
+                        // Which channels took it, not whether any did: the two
+                        // send paths are two channel instances, each one's
+                        // silence is its own, and a trade the depth feed sent
+                        // and the top-of-book feed refused must not refresh
+                        // top-of-book's channel.
+                        let mut reached: [Option<u8>; 2] = [None; 2];
                         timed(&self.metrics, EgressMessageType::Trade, || {
                             if let Some(pipeline) =
                                 shard.and_then(|shard| self.feeds.top_of_book_on_mut(shard))
                             {
-                                reached |= pipeline.send_trade(&trade, now_mono, now_unix).is_ok();
+                                let channel_id = pipeline.channel_id();
+                                if pipeline.send_trade(&trade, now_mono, now_unix).is_ok() {
+                                    reached[0] = Some(channel_id);
+                                }
                             }
                             if let Some(pipeline) =
                                 shard.and_then(|shard| self.feeds.market_by_price_on_mut(shard))
                             {
-                                reached |= pipeline.send_trade(&trade, now_mono, now_unix).is_ok();
+                                let channel_id = pipeline.channel_id();
+                                if pipeline.send_trade(&trade, now_mono, now_unix).is_ok() {
+                                    reached[1] = Some(channel_id);
+                                }
                             }
                         });
-                        if reached {
-                            self.published(now_mono, now_unix);
+                        for channel_id in reached.into_iter().flatten() {
+                            self.published(channel_id, now_mono, now_unix);
                         }
                     }
                     Err(error) => self.refusals.record(error, &self.metrics),
@@ -1976,11 +2001,12 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                             self.unroutable += 1;
                             return;
                         };
+                        let channel_id = pipeline.channel_id();
                         let sent = timed(&self.metrics, EgressMessageType::LevelUpdate, || {
                             pipeline.send_level(&level, now_mono, now_unix)
                         });
                         if sent.is_ok() {
-                            self.published(now_mono, now_unix);
+                            self.published(channel_id, now_mono, now_unix);
                             self.observe_arrival_latency(source_ts_ns, kind, now_unix);
                         }
                     }
@@ -2023,11 +2049,12 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                             self.unroutable += 1;
                             return;
                         };
+                        let channel_id = pipeline.channel_id();
                         let sent = timed(&self.metrics, EgressMessageType::BookClear, || {
                             pipeline.send_book_clear(&clear, now_mono, now_unix)
                         });
                         if sent.is_ok() {
-                            self.published(now_mono, now_unix);
+                            self.published(channel_id, now_mono, now_unix);
                             self.observe_arrival_latency(source_ts_ns, kind, now_unix);
                         }
                     }

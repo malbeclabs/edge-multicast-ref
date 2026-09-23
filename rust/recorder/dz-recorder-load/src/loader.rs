@@ -126,6 +126,10 @@ pub struct Pending {
     /// object *n+1* is derived — and without it every boundary after the first
     /// in a pass would be written uncertain.
     pub trailer: SegmentTrailer,
+    /// The feed this object belongs to. Held for the same reason the ledger
+    /// holds it: `segment_seq` restarts per feed, so a pending trailer is only
+    /// evidence about its own.
+    pub feed: String,
     pub written: Written,
     pub bytes_read: u64,
 }
@@ -171,6 +175,25 @@ impl Failed {
     }
 }
 
+/// Whether a pass saw the whole objects directory, or only part of it.
+///
+/// **A named outcome and not a `bool`, because the call site spends it on the
+/// ledger.** `run_once` compacts the ledger against the set of objects the pass
+/// found, so "found nothing under this feed" and "could not look under this
+/// feed" have opposite consequences: the first is a feed whose objects are
+/// genuinely gone and whose entries should be dropped, the second is a feed
+/// whose entries must be kept or it re-derives and re-inserts every object when
+/// the directory recovers. A `bool` at that call site reads correctly either
+/// way round, which is how the distinction gets lost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Enumeration {
+    /// Every directory the pass needed to read, it read.
+    Complete,
+    /// At least one directory could not be read or classified, so the object
+    /// set is a subset of what is on disk and may not be compacted against.
+    Incomplete,
+}
+
 impl<S: RowSink> Loader<'_, S> {
     /// Walks the directory once.
     ///
@@ -184,7 +207,7 @@ impl<S: RowSink> Loader<'_, S> {
         let now_ns = now_unix_nanos();
         let mut pass = Pass::default();
         let mut errors = Vec::new();
-        let candidates = self.candidates(&mut errors);
+        let (candidates, enumeration) = self.candidates(&mut errors);
         let mut present: HashSet<(String, String)> = HashSet::new();
         // Every object the pass saw that had no ledger entry when it was
         // scanned, with the end of its receive window. Filtered against the
@@ -356,13 +379,44 @@ impl<S: RowSink> Loader<'_, S> {
         pass.market_data_oldest_unloaded_age_seconds =
             oldest_age(derived_unloaded.map(|(end, _)| *end), now_seconds);
 
-        if let Err(e) = self.ledger.compact(&present) {
-            // Not a failed load: the ledger is still correct, only longer than
-            // it needs to be.
-            self.metrics.error(ErrorKind::Ledger, now_unix_seconds());
-            errors.push(e.to_string());
+        // **COMPACT ONLY AGAINST A COMPLETE ENUMERATION.** `present` is what the
+        // pass found, and compaction drops every ledger entry outside it -- so a
+        // feed whose subdirectory could not be read this pass would have its
+        // entries removed and every one of its objects re-derived and
+        // re-inserted when the directory recovers. A transient I/O error would
+        // buy duplicate rows. Skipping costs nothing that matters: the ledger
+        // stays correct and merely longer than it needs to be, which is the
+        // same price the error branch below already accepts.
+        match enumeration {
+            Enumeration::Complete => {
+                if let Err(e) = self.ledger.compact(&present) {
+                    // Not a failed load: the ledger is still correct, only
+                    // longer than it needs to be.
+                    self.metrics.error(ErrorKind::Ledger, now_unix_seconds());
+                    errors.push(e.to_string());
+                }
+            }
+            Enumeration::Incomplete if candidates.is_empty() => {
+                // Nothing was enumerated at all, so the I/O error already
+                // pushed above is the whole story and there is no wrong
+                // inference left to correct. Saying it twice would double the
+                // output of every pass on a host whose recorder has not created
+                // the directory yet, which is an expected state.
+            }
+            Enumeration::Incomplete => {
+                // Here the pass DID load objects, so a reader would otherwise
+                // reasonably take the ledger to have been compacted against a
+                // complete set. That is the inference worth refusing.
+                errors.push(
+                    "the objects directory was enumerated incompletely, so the ledger was not \
+                     compacted: compacting against a partial object set would drop the entries \
+                     of any feed that could not be read and re-insert its rows later"
+                        .to_owned(),
+                );
+            }
         }
         self.metrics.pass_finished(
+            candidates.len() as i64,
             pass.unloaded as i64,
             pass.held as i64,
             pass.oldest_unloaded_age_seconds,
@@ -398,7 +452,7 @@ impl<S: RowSink> Loader<'_, S> {
         // pass the previous object is still pending when this one is derived,
         // and consulting only the ledger would write an uncertain boundary for
         // every object after the first.
-        let trailer = self.trailer();
+        let trailer = self.trailer(&manifest.feed);
         // Before the sink is touched, which is what makes this failure one the
         // held rows survive.
         let mut derived = derive_object(&candidate.object, manifest, trailer.as_ref())
@@ -436,6 +490,7 @@ impl<S: RowSink> Loader<'_, S> {
                 sha256: manifest.sha256.clone(),
             },
             trailer: derived.trailer,
+            feed: manifest.feed.clone(),
             written: rows,
             bytes_read,
         });
@@ -451,13 +506,14 @@ impl<S: RowSink> Loader<'_, S> {
     /// tie of nothing: a pending trailer is evidence about an object on disk,
     /// which is what the check is about — whether its rows have landed yet is a
     /// different question.
-    fn trailer(&self) -> Option<SegmentTrailer> {
+    fn trailer(&self, feed: &str) -> Option<SegmentTrailer> {
         let pending = self
             .pending
             .iter()
+            .filter(|p| p.feed == feed)
             .map(|p| &p.trailer)
             .max_by_key(|t| t.segment_seq);
-        match (pending, self.ledger.trailer()) {
+        match (pending, self.ledger.trailer(feed)) {
             (Some(p), Some(l)) if l.segment_seq > p.segment_seq => Some(l.clone()),
             (Some(p), _) => Some(p.clone()),
             (None, l) => l.cloned(),
@@ -484,23 +540,110 @@ impl<S: RowSink> Loader<'_, S> {
         errors.push(message);
     }
 
-    /// Every object in the directory with a manifest beside it, oldest first.
-    fn candidates(&self, errors: &mut Vec<String>) -> Vec<Candidate> {
+    /// Every object with a manifest beside it, oldest first, from the objects
+    /// directory AND from one level of subdirectory under it.
+    ///
+    /// **The subdirectory level is the whole point, and its absence was silent.**
+    /// `dz-recorder` writes `completed/<feed spec>/` — `startup.rs`'s
+    /// `config.archive.completed_dir.join(&spec)` — while this read only the top
+    /// level and matched on a file NAME ending in the manifest suffix. A
+    /// directory does not end in `.manifest.json`, so every object a recorder
+    /// had ever written under a spec was skipped, the pass found zero
+    /// candidates, and it reported `derived 0` with no error, because an empty
+    /// directory is not one. Measured on a host archiving two feeds
+    /// continuously: 2,088 objects on disk, `rows_written_total` zero for every
+    /// grain, and no skip counter moving either — the objects were not being
+    /// refused, they were not being seen.
+    ///
+    /// ONE LEVEL AND NOT A FULL WALK. The layout is `completed/<spec>/<object>`
+    /// and nothing writes deeper, so a recursive walk would only widen what a
+    /// stray directory could feed this. The top level is still read, because a
+    /// recorder configured without a spec writes there and those deployments
+    /// worked.
+    ///
+    /// A subdirectory that cannot be read is an error and not a skip: it is a
+    /// feed whose objects would go unloaded for as long as it lasts, which is
+    /// exactly what went unnoticed here.
+    fn candidates(&self, errors: &mut Vec<String>) -> (Vec<Candidate>, Enumeration) {
+        let mut manifests: Vec<PathBuf> = Vec::new();
+        let mut subdirs: Vec<PathBuf> = Vec::new();
+        let mut enumeration = Enumeration::Complete;
+
         let entries = match std::fs::read_dir(self.objects_dir) {
             Ok(entries) => entries,
             Err(e) => {
                 self.metrics.error(ErrorKind::Io, now_unix_seconds());
                 errors.push(format!("{}: {e}", self.objects_dir.display()));
-                return Vec::new();
+                // The top level unreadable is the strongest case for not
+                // compacting: nothing at all was enumerated.
+                return (Vec::new(), Enumeration::Incomplete);
             }
         };
-
-        let mut manifests: Vec<PathBuf> = Vec::new();
-        for entry in entries.filter_map(Result::ok) {
+        for entry in entries {
+            // **A DROPPED ENTRY IS AN OMISSION, NOT A NON-ENTRY.** `filter_map
+            // (Result::ok)` stood here and discarded an iteration failure while
+            // leaving the enumeration Complete -- so the ledger would be
+            // compacted against a set missing whatever was dropped, and at THIS
+            // level a dropped entry is a whole feed's subdirectory. The same
+            // silent omission the `file_type` arm below refuses.
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    self.metrics.error(ErrorKind::Io, now_unix_seconds());
+                    errors.push(format!("{}: {e}", self.objects_dir.display()));
+                    enumeration = Enumeration::Incomplete;
+                    continue;
+                }
+            };
             let name = entry.file_name();
             let name = name.to_string_lossy();
             if name.ends_with(MANIFEST_SUFFIX) {
                 manifests.push(entry.path());
+            } else {
+                // `file_type` CAN FAIL, and `unwrap_or(false)` would read that
+                // failure as "not a directory" -- omitting a feed silently,
+                // which is the contract this function exists to stop breaking.
+                match entry.file_type() {
+                    Ok(t) if t.is_dir() => subdirs.push(entry.path()),
+                    Ok(_) => {}
+                    Err(e) => {
+                        self.metrics.error(ErrorKind::Io, now_unix_seconds());
+                        errors.push(format!("{}: {e}", entry.path().display()));
+                        // Unknown, so assume it was a directory that mattered.
+                        enumeration = Enumeration::Incomplete;
+                    }
+                }
+            }
+        }
+
+        for dir in subdirs {
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(e) => {
+                    self.metrics.error(ErrorKind::Io, now_unix_seconds());
+                    errors.push(format!("{}: {e}", dir.display()));
+                    enumeration = Enumeration::Incomplete;
+                    continue;
+                }
+            };
+            for entry in entries {
+                // Same reasoning as the top level: a dropped entry here is one
+                // object of this feed, and compacting without it would drop its
+                // ledger line and re-insert its rows.
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(e) => {
+                        self.metrics.error(ErrorKind::Io, now_unix_seconds());
+                        errors.push(format!("{}: {e}", dir.display()));
+                        enumeration = Enumeration::Incomplete;
+                        continue;
+                    }
+                };
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.ends_with(MANIFEST_SUFFIX) {
+                    manifests.push(entry.path());
+                }
             }
         }
 
@@ -514,9 +657,16 @@ impl<S: RowSink> Loader<'_, S> {
             // The compressor names an object `{start}-{end}-{seq}.pcapng.zst`
             // and its manifest `{start}-{end}-{seq}.manifest.json`, so the
             // object is the same stem with either archive suffix.
+            // Beside the MANIFEST and not beside `objects_dir`: with the
+            // subdirectory level admitted above, an object under
+            // `completed/<spec>/` would otherwise be looked for at the top and
+            // every one of them would count as unpaired.
+            let beside = manifest_path
+                .parent()
+                .map_or_else(|| self.objects_dir.to_path_buf(), Path::to_path_buf);
             let object = ["pcapng.zst", "pcapng"]
                 .into_iter()
-                .map(|suffix| self.objects_dir.join(format!("{stem}.{suffix}")))
+                .map(|suffix| beside.join(format!("{stem}.{suffix}")))
                 .find(|p| p.is_file());
             let Some(object) = object else {
                 // A manifest lands before its object, so a pass that ran during
@@ -538,7 +688,7 @@ impl<S: RowSink> Loader<'_, S> {
         // Oldest first: the oldest object is the one closest to eviction, and
         // in-order loading is what makes an era boundary certain.
         out.sort_by_key(|c| (c.start_ns, c.object.clone()));
-        out
+        (out, enumeration)
     }
 }
 
@@ -603,6 +753,7 @@ pub fn record_landed(
             object_sha256: done.id.sha256.clone(),
             loaded_at_ns: now_unix_nanos(),
             trailer: done.trailer,
+            feed: done.feed.clone(),
         }) {
             Ok(()) => {
                 metrics.object_loaded(&done.written, done.bytes_read);
@@ -728,9 +879,67 @@ mod pass_tests {
     pub(super) fn archive(segments: usize, per_segment: usize) -> Archive {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let completed = dir.path().join("completed");
+        write_feed(dir.path(), &completed, "top-of-book", segments, per_segment);
+        Archive {
+            completed,
+            rows: dir.path().join("rows"),
+            ledger: dir.path().join("ledger.jsonl"),
+            _dir: dir,
+        }
+    }
+
+    /// The two feeds [`archive_of_two_feeds`] writes, named in the order their
+    /// objects are walked.
+    ///
+    /// Both writers open at the same nanosecond and rotate on the same
+    /// schedule, so every segment produces one object per feed with the same
+    /// `start_ns`, and the walk's `(start_ns, path)` sort breaks that tie on
+    /// the subdirectory name. `market-by-price` sorts before `top-of-book`, so
+    /// the objects interleave by segment and the second feed's object is
+    /// always derived with the first feed's higher `segment_seq` sitting in
+    /// `pending`.
+    pub(super) const FIRST_FEED: &str = "market-by-price";
+    pub(super) const SECOND_FEED: &str = "top-of-book";
+
+    /// Two feeds' objects under `completed/<spec>/`, which is the layout
+    /// `dz-recorder` writes and the one a per-feed trailer is needed for.
+    ///
+    /// The two feeds share a channel — same group, same port, same `Reset
+    /// Count` — so neither feed's trailer looks inapplicable to the other's
+    /// object. Only the `segment_seq` spaces are independent, and they both
+    /// start at 0, which is exactly the confusion a global trailer makes.
+    pub(super) fn archive_of_two_feeds(segments: usize, per_segment: usize) -> Archive {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let completed = dir.path().join("completed");
+        for feed in [FIRST_FEED, SECOND_FEED] {
+            write_feed(
+                dir.path(),
+                &completed.join(feed),
+                feed,
+                segments,
+                per_segment,
+            );
+        }
+        Archive {
+            completed,
+            rows: dir.path().join("rows"),
+            ledger: dir.path().join("ledger.jsonl"),
+            _dir: dir,
+        }
+    }
+
+    /// `segments` objects of one feed into `completed_dir`, staged under a
+    /// directory of the feed's own so two writers can run over one root.
+    fn write_feed(
+        root: &Path,
+        completed_dir: &Path,
+        feed: &str,
+        segments: usize,
+        per_segment: usize,
+    ) {
         let cfg = ArchiveWriterConfig {
-            staging_dir: dir.path().join("staging"),
-            completed_dir: completed.clone(),
+            staging_dir: root.join("staging").join(feed),
+            completed_dir: completed_dir.to_path_buf(),
             rotate_bytes: 1 << 30,
             rotate_interval: Duration::from_secs(3600),
             staging_max: 1 << 40,
@@ -743,7 +952,7 @@ mod pass_tests {
                 build_commit: "0000000".to_owned(),
                 config_hash: "a".repeat(64),
             },
-            feed: "top-of-book".to_owned(),
+            feed: feed.to_owned(),
             roles_joined: vec![RoleJoin::on(
                 PortRole::Mktdata,
                 GROUP,
@@ -765,12 +974,6 @@ mod pass_tests {
                 .wait_completed()
                 .expect("the compressor publishes exactly one object")
                 .expect("publication");
-        }
-        Archive {
-            completed,
-            rows: dir.path().join("rows"),
-            ledger: dir.path().join("ledger.jsonl"),
-            _dir: dir,
         }
     }
 
@@ -884,7 +1087,10 @@ mod pass_tests {
         // And the trailer that settled them is in the ledger, so a restart
         // settles the next one too rather than starting uncertain again.
         assert_eq!(
-            ledger.trailer().expect("a trailer").segment_seq,
+            ledger
+                .trailer("top-of-book")
+                .expect("a trailer")
+                .segment_seq,
             2,
             "the highest segment, not the last line written"
         );
@@ -1031,6 +1237,179 @@ mod pass_tests {
         assert_eq!(pass.unloaded, 3);
     }
 
+    /// Two feeds keep two trailers, because `segment_seq` restarts per feed.
+    ///
+    /// **This is what walking `completed/<spec>/` made reachable.** Before it a
+    /// loader saw one feed, so one global trailer and a `seq + 1` adjacency
+    /// check agreed with each other. With two, each feed's `segment_seq` starts
+    /// at 0 independently, and a global trailer answers about whichever feed
+    /// last counted highest: the second feed's era rows come out
+    /// `anchor_certain = 0`, or — where the sequences happen to line up —
+    /// `anchor_certain = 1, continuation = 0`, a reset that did not happen,
+    /// which `ReplacingMergeTree(anchor_certain)` then keeps.
+    ///
+    /// The fixture interleaves deliberately: the high sequence belongs to the
+    /// feed that is NOT being asked about, so a global trailer would answer
+    /// with it and the assertion would catch that rather than an ordering
+    /// accident.
+    #[test]
+    fn each_feed_keeps_its_own_trailer() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let mut ledger = Ledger::open(dir.path().join("ledger.jsonl")).expect("a new ledger");
+
+        let entry = |key: &str, feed: &str, seq: u64| Entry {
+            object_key: key.to_owned(),
+            object_sha256: format!("{seq:064}"),
+            loaded_at_ns: now_unix_nanos(),
+            trailer: SegmentTrailer {
+                segment_seq: seq,
+                ..SegmentTrailer::default()
+            },
+            feed: feed.to_owned(),
+        };
+
+        // `slow` reaches 2; `fast` reaches 90 and is written last, so a global
+        // trailer would be 90 for both.
+        ledger.record(entry("slow/1", "slow", 1)).expect("writable");
+        ledger
+            .record(entry("fast/88", "fast", 88))
+            .expect("writable");
+        ledger.record(entry("slow/2", "slow", 2)).expect("writable");
+        ledger
+            .record(entry("fast/90", "fast", 90))
+            .expect("writable");
+
+        assert_eq!(
+            ledger.trailer("slow").map(|t| t.segment_seq),
+            Some(2),
+            "the slow feed's next object would consult the fast feed's segment"
+        );
+        assert_eq!(
+            ledger.trailer("fast").map(|t| t.segment_seq),
+            Some(90),
+            "the fast feed lost its own trailer"
+        );
+        assert_eq!(
+            ledger
+                .trailer("a-feed-with-no-entries")
+                .map(|t| t.segment_seq),
+            None,
+            "a feed this ledger has never seen must have no trailer, not somebody else's"
+        );
+    }
+
+    /// An unreadable subdirectory makes the enumeration incomplete, and an
+    /// incomplete enumeration does not compact the ledger.
+    ///
+    /// This is the defect review caught in the subdirectory walk. `present` is
+    /// what the pass found, and `compact` drops every entry outside it -- so a
+    /// feed whose directory could not be read for one pass would have its
+    /// entries removed and every one of its objects re-derived and re-inserted
+    /// when the directory came back. A transient I/O error would buy duplicate
+    /// rows, silently, because nothing about the pass would look wrong.
+    ///
+    /// Asserted on the ledger's own contents rather than on the outcome value,
+    /// because the outcome is only interesting for what it spends itself on.
+    #[test]
+    fn an_unreadable_subdirectory_does_not_compact_the_ledger() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let archive = archive(3, 1);
+        let spec = archive.completed.join("top-of-book");
+        std::fs::create_dir_all(&spec).expect("the subdirectory is creatable");
+        for entry in std::fs::read_dir(&archive.completed).expect("completed exists") {
+            let path = entry.expect("an entry").path();
+            if path.is_file() {
+                let name = path.file_name().expect("a file name").to_owned();
+                std::fs::rename(&path, spec.join(name)).expect("the move succeeds");
+            }
+        }
+
+        // A ledger entry the pass must not lose, standing for an object of a
+        // feed this pass cannot see -- exactly what compacting against a partial
+        // set would drop.
+        //
+        // **AND IT MUST NOT BE THE TRAILER'S OWN ENTRY**, or the test proves
+        // nothing: `compact` keeps a line whose `trailer.segment_seq` matches the
+        // ledger's current trailer whatever became of its object, so an orphan
+        // recorded last survives compaction on that path alone. The first
+        // version of this test did exactly that and passed with the fix removed.
+        // So a second entry is recorded after it, taking the trailer with it.
+        const ORPHAN_KEY: &str = "a-feed-this-pass-cannot-see/object-1";
+        let orphan_sha = "0".repeat(64);
+        let mut ledger = Ledger::open(&archive.ledger).expect("a new ledger");
+        ledger
+            .record(Entry {
+                object_key: ORPHAN_KEY.to_owned(),
+                object_sha256: orphan_sha.clone(),
+                loaded_at_ns: now_unix_nanos(),
+                trailer: SegmentTrailer {
+                    segment_seq: 1,
+                    ..SegmentTrailer::default()
+                },
+                feed: "a-feed-this-pass-cannot-see".to_owned(),
+            })
+            .expect("the ledger is writable");
+        ledger
+            .record(Entry {
+                object_key: "a-later-object".to_owned(),
+                object_sha256: "1".repeat(64),
+                loaded_at_ns: now_unix_nanos(),
+                trailer: SegmentTrailer {
+                    segment_seq: 2,
+                    ..SegmentTrailer::default()
+                },
+                feed: "a-feed-this-pass-cannot-see".to_owned(),
+            })
+            .expect("the ledger is writable");
+        assert!(
+            ledger.is_loaded(ORPHAN_KEY, &orphan_sha),
+            "the fixture must start with an entry to lose"
+        );
+
+        // Now make the feed's directory unreadable, so the objects inside it
+        // cannot be enumerated.
+        let mut perms = std::fs::metadata(&spec)
+            .expect("the subdirectory exists")
+            .permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&spec, perms).expect("the mode is settable");
+
+        let metrics = LoaderMetrics::new(SITE, RECORDER);
+        let mut sink = FileSink::create(&archive.rows).expect("the directory is writable");
+        let stop = never();
+        let (_pass, errors) = Loader {
+            objects_dir: &archive.completed,
+            site: SITE,
+            recorder: RECORDER,
+            max_objects: 0,
+            ledger: &mut ledger,
+            sink: &mut sink,
+            metrics: &metrics,
+            market_data: &[],
+            pending: &mut Vec::new(),
+        }
+        .run_once(&stop);
+
+        // Restore before asserting, so a failure does not leave an unreadable
+        // directory behind for the tempdir's own cleanup.
+        let mut perms = std::fs::metadata(&spec)
+            .expect("the subdirectory exists")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&spec, perms).expect("the mode is settable");
+
+        assert!(
+            errors.iter().any(|e| e.contains("top-of-book")),
+            "the unreadable subdirectory was not reported: {errors:?}"
+        );
+        assert!(
+            ledger.is_loaded(ORPHAN_KEY, &orphan_sha),
+            "the ledger was compacted against a partial object set, so an \
+             unseen feed's entry was dropped and its rows would be re-inserted"
+        );
+    }
+
     /// A directory that is not there is one counted error and an empty pass,
     /// not a crash: the recorder may not have created it yet.
     #[test]
@@ -1079,7 +1458,7 @@ mod pass_tests {
             pending: &mut Vec::new(),
         };
         let mut errors = Vec::new();
-        let candidates = loader.candidates(&mut errors);
+        let (candidates, _) = loader.candidates(&mut errors);
         assert!(errors.is_empty());
         assert_eq!(candidates.len(), 3);
         assert!(
@@ -1088,6 +1467,79 @@ mod pass_tests {
                 .all(|w| w[0].start_ns <= w[1].start_ns),
             "{candidates:?}"
         );
+    }
+
+    /// Objects under a per-feed subdirectory are found, which is the layout the
+    /// recorder actually writes.
+    ///
+    /// `dz-recorder` puts every object under `completed/<feed spec>/`
+    /// (`startup.rs`: `config.archive.completed_dir.join(&spec)`), and
+    /// `candidates` read only the top level and matched on a file NAME ending in
+    /// the manifest suffix. A directory does not, so every object was skipped,
+    /// the pass reported `derived 0`, and nothing errored — an empty directory
+    /// is not an error. On a host archiving two feeds continuously that was
+    /// 2,088 objects on disk against `rows_written_total` of zero for every
+    /// grain, with no skip counter moving either.
+    ///
+    /// The test moves a flat archive into a subdirectory rather than asserting
+    /// on a hand-built tree, so it fails for the reason the deployment did: the
+    /// objects and manifests are the writer's own, and only their location
+    /// changes.
+    #[test]
+    fn candidates_are_found_under_a_per_feed_subdirectory() {
+        let archive = archive(3, 1);
+        let spec = archive.completed.join("top-of-book");
+        std::fs::create_dir_all(&spec).expect("the subdirectory is creatable");
+        for entry in std::fs::read_dir(&archive.completed).expect("completed exists") {
+            let path = entry.expect("an entry").path();
+            if path.is_file() {
+                let name = path.file_name().expect("a file name").to_owned();
+                std::fs::rename(&path, spec.join(name)).expect("the move succeeds");
+            }
+        }
+        assert!(
+            std::fs::read_dir(&archive.completed)
+                .expect("completed exists")
+                .filter_map(Result::ok)
+                .all(|e| e.path().is_dir()),
+            "the top level must hold only the subdirectory, or this proves nothing"
+        );
+
+        let metrics = LoaderMetrics::new(SITE, RECORDER);
+        let mut ledger = Ledger::open(&archive.ledger).expect("a new ledger");
+        let mut sink = FileSink::create(&archive.rows).expect("the directory is writable");
+        let loader = Loader {
+            objects_dir: &archive.completed,
+            site: SITE,
+            recorder: RECORDER,
+            max_objects: 0,
+            ledger: &mut ledger,
+            sink: &mut sink,
+            metrics: &metrics,
+            market_data: &[],
+            pending: &mut Vec::new(),
+        };
+        let mut errors = Vec::new();
+        let (candidates, _) = loader.candidates(&mut errors);
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(
+            candidates.len(),
+            3,
+            "objects under the subdirectory were not seen"
+        );
+        // And each object resolved BESIDE ITS MANIFEST rather than at the top
+        // level: looking beside `objects_dir` would have counted all three as
+        // unpaired, which is a skip rather than an error and so would have read
+        // as "nothing to do" all over again.
+        for candidate in &candidates {
+            assert_eq!(
+                candidate.object.parent(),
+                candidate.manifest_path.parent(),
+                "the object was not resolved beside its manifest"
+            );
+            assert!(candidate.object.is_file(), "{:?}", candidate.object);
+        }
     }
 
     pub(super) fn sorted_objects(archive: &Archive) -> Vec<PathBuf> {
@@ -1677,6 +2129,75 @@ mod deferred_ledger_tests {
             })
             .collect();
         assert_eq!(certain, vec![0, 1, 1], "only the first is unsettled");
+    }
+
+    /// **And the pending trailer a feed's object consults is its own feed's.**
+    ///
+    /// `each_feed_keeps_its_own_trailer` covers the other half of this, the
+    /// `Ledger` map, and a ledger entry exists only once an insert has landed.
+    /// Within one pass under a coalescing sink nothing has landed, so `pending`
+    /// is the whole supply of trailers — and a `pending` consulted without
+    /// regard to feed answers with whichever object last counted highest.
+    /// Two feeds' `segment_seq` spaces are independent, so that answer does not
+    /// precede the segment being derived, and every object of the second feed
+    /// after its first comes out `anchor_certain = 0`: an era boundary nobody
+    /// settled, which `ReplacingMergeTree(anchor_certain)` then keeps for ever.
+    ///
+    /// A `FileSink` cannot show this — it lands every batch as it takes it, so
+    /// the ledger supplies the trailer and the `pending` path is never the one
+    /// under test.
+    #[test]
+    fn a_pending_trailer_settles_only_its_own_feeds_next_object() {
+        let archive = archive_of_two_feeds(3, 40);
+        let metrics = LoaderMetrics::new(SITE, RECORDER);
+        let mut ledger = Ledger::open(&archive.ledger).expect("a new ledger");
+        let mut sink = HoldingSink::default();
+        let mut pending = Vec::new();
+
+        let (pass, errors) = Loader {
+            objects_dir: &archive.completed,
+            site: SITE,
+            recorder: RECORDER,
+            max_objects: 0,
+            ledger: &mut ledger,
+            sink: &mut sink,
+            metrics: &metrics,
+            market_data: &[],
+            pending: &mut pending,
+        }
+        .run_once(&|| false);
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(pass.derived, 6, "three objects of each feed");
+        assert_eq!(
+            ledger.entries(),
+            0,
+            "the sink is still holding every batch, so `pending` is the only \
+             trailer in play and this is the within-pass path"
+        );
+        assert_eq!(pending.len(), 6);
+
+        // One boundary per object, in derivation order, for one feed's objects.
+        let certain = |feed: &str| -> Vec<u8> {
+            let prefix = format!("feed={feed}/");
+            sink.taken
+                .iter()
+                .filter(|(key, _)| key.starts_with(&prefix))
+                .map(|(_, eras)| *eras.first().expect("one boundary per object"))
+                .collect()
+        };
+
+        assert_eq!(
+            certain(FIRST_FEED),
+            vec![0, 1, 1],
+            "nothing precedes the first object, and its own feed settles the rest"
+        );
+        assert_eq!(
+            certain(SECOND_FEED),
+            vec![0, 1, 1],
+            "the second feed's objects were settled against the other feed's \
+             pending trailer, so their boundaries came out unsettled"
+        );
     }
 }
 

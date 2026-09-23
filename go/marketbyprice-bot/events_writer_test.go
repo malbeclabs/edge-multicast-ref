@@ -253,3 +253,79 @@ func TestEventsWriter_WireLevelOmittedOrderCountIsNull(t *testing.T) {
 		t.Errorf("an omitted order_count must be nil, got %v", row["order_count"])
 	}
 }
+
+// A batch_boundary belongs to the channel, not to an instrument: the wire
+// carries no Instrument ID, so rec.InstrumentID is 0 and no symbol answers to
+// it. The row must therefore carry NEITHER column, whatever the caller passes
+// for symbol — stamping them makes every boundary row claim instrument 0 and
+// whichever symbol the refdata map holds at key 0.
+//
+// The symbol argument here is deliberately non-empty. Today's two call sites
+// both pass "", so the wrong symbol is not reachable through them; that is the
+// call sites being careful, not the writer being correct, and this asserts the
+// writer.
+func TestEventsWriter_BatchBoundaryCarriesNoInstrumentIdentity(t *testing.T) {
+	st := newStubEnqueuer()
+	w := NewEventsWriter(st)
+
+	w.Write(ChannelEvent{
+		Kind: KindBatchBoundary,
+		Record: Record{
+			Type: "batch_boundary", Port: "mktdata", ChannelID: 2,
+			SequenceNumber: 91, ResetCount: 3,
+			Fields: map[string]any{"batch_id": float64(77), "batch_ts": "2026-08-02T00:00:00Z"},
+		},
+	}, 2, "BTC-USDT", -2, -8)
+
+	if n := len(st.rows["channel_health"]); n != 0 {
+		t.Errorf("a boundary carries batch_id and batch_ts, which channel_health has no columns for; got %d rows there", n)
+	}
+	row := st.only(t, "events")
+	if got, ok := row["symbol"]; ok {
+		t.Errorf("symbol must be omitted for a batch_boundary, got %#v", got)
+	}
+	if got, ok := row["instrument_id"]; ok {
+		t.Errorf("instrument_id must be omitted for a batch_boundary, got %#v", got)
+	}
+	// The channel-scoped columns and the boundary payload still have to land.
+	if row["kind"] != "batch_boundary" {
+		t.Errorf("kind: %v", row["kind"])
+	}
+	if row["channel_id"] != uint8(2) {
+		t.Errorf("channel_id: got %v want 2", row["channel_id"])
+	}
+	if row["mktdata_seq"] != uint64(91) {
+		t.Errorf("mktdata_seq: got %v want 91", row["mktdata_seq"])
+	}
+	if row["reset_count"] != uint8(3) {
+		t.Errorf("reset_count: got %v want 3", row["reset_count"])
+	}
+	if row["batch_id"] != uint32(77) {
+		t.Errorf("batch_id: got %v want 77", row["batch_id"])
+	}
+	if row["batch_ts"] == nil || row["batch_ts"] == "" {
+		t.Errorf("batch_ts: got %#v", row["batch_ts"])
+	}
+}
+
+// The counterpart: an instrument-tied kind must still be stamped with the
+// identity it does have. Dropping the identity columns wholesale would be the
+// opposite defect.
+func TestEventsWriter_InstrumentTiedKindKeepsIdentity(t *testing.T) {
+	st := newStubEnqueuer()
+	w := NewEventsWriter(st)
+
+	w.Write(ChannelEvent{
+		Kind:         KindAppliedDelta,
+		InstrumentID: 11,
+		Record:       levelUpdateRec(11, 900, 6, "bid", 1000, 5),
+	}, 0, "BTC-USDT", 0, 0)
+
+	row := st.only(t, "events")
+	if row["symbol"] != "BTC-USDT" {
+		t.Errorf("symbol: got %#v want BTC-USDT", row["symbol"])
+	}
+	if row["instrument_id"] != uint32(11) {
+		t.Errorf("instrument_id: got %#v want 11", row["instrument_id"])
+	}
+}

@@ -25,7 +25,7 @@
 //!
 //! # Proposed additions the playbook does not yet carry
 //!
-//! Three families and two label values here are **not** normative. Each exists
+//! Four families and two label values here are **not** normative. Each exists
 //! because a piece of work in this workspace produced a number with nowhere to
 //! go and refused to invent a series for it, leaving the count exposed on a
 //! struct or in a log line instead. They are marked as proposals in their own
@@ -39,6 +39,8 @@
 //!   [`ConnectFailureReason`].
 //! - `dz_publisher_ingress_adapter_errors_total{reason}` - see
 //!   [`AdapterErrorReason`].
+//! - `dz_publisher_channel_last_published_timestamp_seconds{channel_id}` - see
+//!   [`ChannelMetrics`].
 //! - `not_carried_by_feed` and `malformed_message` on the normative
 //!   `dz_publisher_egress_errors_total{port_role,reason}` - see
 //!   [`EgressErrorReason`].
@@ -77,8 +79,8 @@ pub use labels::{
     RecoveryOutcome, RefdataLoadErrorReason, TimestampKind,
 };
 pub use metrics::{
-    BookMetrics, EgressMetrics, IngressMetrics, LatencyMetrics, LoweringMetrics, ProcessMetrics,
-    RefdataMetrics,
+    BookMetrics, ChannelMetrics, EgressMetrics, IngressMetrics, LatencyMetrics, LoweringMetrics,
+    ProcessMetrics, RefdataMetrics,
 };
 pub use server::{serve, MetricsServer};
 pub use venue_registry::VenueRegistry;
@@ -108,7 +110,7 @@ pub struct PublisherMetricsConfig<'a> {
     /// to fire until the first successful connection.
     pub connections: &'a [&'a str],
     /// Every Channel ID this publisher sends on, so the sequence,
-    /// heartbeat and manifest gauges exist from startup.
+    /// heartbeat, manifest and last-published gauges exist from startup.
     pub channel_ids: &'a [u8],
     /// The upstream source's own message-type names that this publisher
     /// counts individually on `dz_publisher_ingress_messages_total`.
@@ -134,6 +136,7 @@ pub struct PublisherMetrics {
     book: BookMetrics,
     refdata: RefdataMetrics,
     egress: EgressMetrics,
+    channel: ChannelMetrics,
     latency: LatencyMetrics,
     process: ProcessMetrics,
     venue_registry: VenueRegistry,
@@ -173,6 +176,7 @@ impl PublisherMetrics {
         let refdata =
             RefdataMetrics::new(&registry, &labels, config.channel_ids, config.port_roles);
         let egress = EgressMetrics::new(&registry, &labels, config.port_roles, config.channel_ids);
+        let channel = ChannelMetrics::new(&registry, &labels, config.channel_ids);
         let latency = LatencyMetrics::new(&registry, &labels);
         let process = ProcessMetrics::new(&registry, &labels);
 
@@ -183,6 +187,7 @@ impl PublisherMetrics {
             book,
             refdata,
             egress,
+            channel,
             latency,
             process,
             venue_registry: VenueRegistry::new(&labels),
@@ -215,6 +220,14 @@ impl PublisherMetrics {
     #[must_use]
     pub fn egress(&self) -> &EgressMetrics {
         &self.egress
+    }
+
+    /// When the upstream's activity last put a message on each Channel ID.
+    /// A proposed addition to the normative set rather than one the governing
+    /// playbook carries; see [`ChannelMetrics`].
+    #[must_use]
+    pub fn channel(&self) -> &ChannelMetrics {
+        &self.channel
     }
 
     #[must_use]

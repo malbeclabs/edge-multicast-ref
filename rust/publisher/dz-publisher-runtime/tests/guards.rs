@@ -16,15 +16,51 @@ use std::time::Duration;
 use dz_adapter_core::EventSink;
 use dz_publisher_metrics::ExitReason;
 use dz_publisher_runtime::{Exit, FeedSpec, Inconsistency};
-use harness::{feed, harness, FakeAdapter};
+use harness::{feed, harness, FakeAdapter, CHANNEL_ID, DEPTH_CHANNEL_ID};
 
 /// The window every test here uses, so the arithmetic is readable.
 const WINDOW: Duration = Duration::from_secs(60);
+
+/// The Unix second the harness clock starts at, which is the value a gauge set
+/// before the clock moves renders.
+const START_UNIX_SECONDS: f64 = 1_700_000_000.0;
+
+const CHANNEL_LAST_PUBLISHED: &str = "dz_publisher_channel_last_published_timestamp_seconds";
+const IDLE_GUARD_LAST_UPDATE: &str = "dz_publisher_idle_guard_last_update_timestamp_seconds";
 
 fn guarded() -> harness::Harness {
     let mut feed = feed();
     feed.idle_guard = WINDOW;
     harness(feed)
+}
+
+/// One gauge sample's value, found by family name and an optional label
+/// fragment.
+///
+/// Read off the rendered exposition rather than through an accessor, because
+/// the rendered series is the whole of what an operator can write an alert
+/// against: a value correct in a field and absent from the scrape is the
+/// failure these series exist to end.
+fn gauge(exposition: &str, name: &str, label: Option<&str>) -> f64 {
+    let line = exposition
+        .lines()
+        .find(|line| {
+            line.starts_with(&format!("{name}{{")) && label.is_none_or(|label| line.contains(label))
+        })
+        .unwrap_or_else(|| panic!("no {name} sample matching {label:?} in:\n{exposition}"));
+    line.rsplit(' ')
+        .next()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| panic!("not a gauge sample: {line}"))
+}
+
+/// When the upstream's activity last put a message on `channel_id`.
+fn last_published(exposition: &str, channel_id: u8) -> f64 {
+    gauge(
+        exposition,
+        CHANNEL_LAST_PUBLISHED,
+        Some(&format!("channel_id=\"{channel_id}\"")),
+    )
 }
 
 #[test]
@@ -256,4 +292,311 @@ fn a_dropped_reference_stream_is_named_and_darkens_nothing() {
     // The transmitters are untouched: what a dropped auxiliary member costs is
     // the copy and nothing else.
     assert!(h.mktdata().len() > 1);
+}
+
+// --- What the idle guard is the wrong instrument for -------------------------
+//
+// One feed of several going permanently silent. The guard measures a
+// process-wide conjunction and must keep doing so: a guard that ended the
+// process over one channel's silence would restart every other channel with
+// it. So the condition is made *visible* per channel instead, on
+// `dz_publisher_channel_last_published_timestamp_seconds`, and these are the
+// tests of that.
+
+#[test]
+fn one_feed_going_silent_is_visible_while_its_sibling_publishes() {
+    // The incident. Everything upstream of the depth feed has failed: the
+    // top-of-book feed keeps publishing, the shared guard keeps being fed, the
+    // exit never fires — correctly — and nothing else notices, because
+    // connection state is per connection, the aggregate is healthy, and the
+    // manifest still lists the depth feed's instruments as published.
+    let mut h = harness::harness_both();
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+
+    // A quote is a top-of-book message and the specification carries it
+    // nowhere else, so this is one feed publishing and its sibling not.
+    h.publisher.upstream_message("quote");
+    h.publisher.event(harness::quote(instrument, 1));
+
+    let exposition = h.metrics.render();
+    assert_eq!(
+        last_published(&exposition, CHANNEL_ID),
+        START_UNIX_SECONDS,
+        "the channel that published is not reporting when it did:\n{exposition}"
+    );
+    assert_eq!(
+        last_published(&exposition, DEPTH_CHANNEL_ID),
+        0.0,
+        "the silent channel is reporting a publication it never made:\n{exposition}"
+    );
+    // The process-wide gauge the playbook carries, held at *now* by the busy
+    // feed. This is the series that cannot answer the question, which is why
+    // there is a second one.
+    assert_eq!(
+        gauge(&exposition, IDLE_GUARD_LAST_UPDATE, None),
+        START_UNIX_SECONDS
+    );
+
+    // And the exit stays where it was. Ten windows of one feed publishing and
+    // the other silent is not a process to end.
+    h.clock.advance(WINDOW * 10);
+    h.publisher.upstream_message("quote");
+    h.publisher.event(harness::quote(instrument, 2));
+    assert!(
+        h.publisher.tick().is_none(),
+        "one silent feed ended the process, taking the busy one with it"
+    );
+}
+
+#[test]
+fn traffic_this_publisher_paces_itself_refreshes_no_channel() {
+    // The whole reason this is a series of its own rather than a reading off
+    // the egress counters. A heartbeat, a definition, a manifest and a
+    // snapshot are all paced by this publisher, so a channel whose upstream
+    // has died goes on sending every one of them: anything that counted them
+    // would report a dead channel as fresh for as long as the process lives.
+    //
+    // All four, and the snapshot is the one that needs asking for: the depth
+    // block configures no rotation unless a test states a cycle, so without
+    // one this asserts nothing about the kind of traffic that is a *derived*
+    // copy of a book rather than a fixed-size message on a timer.
+    let mut h = harness::harness_both_with_rotation(Duration::from_secs(2));
+    let mut adapter =
+        FakeAdapter::new(&["A-B"]).with_book(&[(dz_adapter_core::Side::Bid, "100.25", "2.500")]);
+    h.publisher.poll_listings(&mut adapter);
+
+    // A tick sends heartbeats on both channels, the definition cycle and the
+    // first manifest. The rotation schedules on its first tick and snapshots
+    // from the second.
+    assert!(h.publisher.tick().is_none());
+    h.clock.advance(Duration::from_secs(30));
+    assert!(h.publisher.tick().is_none());
+    for _ in 0..2 {
+        h.clock.advance(Duration::from_secs(2));
+        let _ = h.publisher.periodic_snapshot(&adapter);
+        assert!(h.publisher.tick().is_none());
+    }
+    assert!(
+        h.tob.as_ref().expect("a top-of-book feed").mktdata.len() > 0,
+        "nothing reached the wire, so this test is asserting nothing"
+    );
+    assert!(
+        h.mbp
+            .as_ref()
+            .expect("a market-by-price feed")
+            .snapshot
+            .as_ref()
+            .expect("a depth feed has a snapshot port")
+            .len()
+            > 0,
+        "no snapshot was sent, so this test is not asserting anything about one"
+    );
+    assert!(
+        h.tob.as_ref().expect("a top-of-book feed").refdata.len() > 0
+            && h.mbp
+                .as_ref()
+                .expect("a market-by-price feed")
+                .refdata
+                .len()
+                > 0,
+        "no definition and no manifest reached a refdata port role, so this test is \
+         asserting nothing about the two kinds that go there"
+    );
+
+    let exposition = h.metrics.render();
+    for channel_id in [CHANNEL_ID, DEPTH_CHANNEL_ID] {
+        assert_eq!(
+            last_published(&exposition, channel_id),
+            0.0,
+            "traffic this publisher paced itself reported Channel ID {channel_id} as having \
+             published:\n{exposition}"
+        );
+    }
+}
+
+#[test]
+fn an_instrument_reset_reports_the_channel_it_was_announced_on() {
+    // The one message that is neither a lowered price event nor paced by this
+    // publisher, and it counts: an adapter announces a discard on discovering
+    // its own book has stopped being right, which is upstream activity
+    // reaching the wire and is what feeds the idle guard too.
+    //
+    // It is the sharp edge of the series and is written down rather than left
+    // to be found: an adapter that announced a discard on every reconnect
+    // would hold a dead channel's gauge at *now* for the life of the process.
+    // Whether it should is a question about that adapter's contract, and
+    // deciding it here would change what the venue-wide guard measures.
+    let mut h = harness::harness_both();
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+
+    h.publisher
+        .desynchronised(instrument, dz_adapter_core::Desync::UpstreamGap);
+
+    let exposition = h.metrics.render();
+    assert_eq!(
+        last_published(&exposition, DEPTH_CHANNEL_ID),
+        START_UNIX_SECONDS,
+        "the reset reached the depth channel and it is not reporting it:\n{exposition}"
+    );
+    // And nowhere else. `0x14` is a market-by-price message; the top-of-book
+    // channel carried nothing.
+    assert_eq!(last_published(&exposition, CHANNEL_ID), 0.0);
+}
+
+#[test]
+fn a_level_reports_the_channel_that_carried_it() {
+    // The depth channel's steady state. A level update is what a
+    // market-by-price channel spends almost all of its time sending, so it is
+    // what holds that channel's gauge at *now* while its upstream is healthy —
+    // and a level that refreshed nothing would leave a busy depth channel
+    // reading as silent from its first second.
+    let mut h = harness::harness_both();
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+
+    h.publisher.upstream_message("level");
+    h.publisher.event(harness::bid_level(instrument, 1));
+
+    assert!(
+        h.mbp
+            .as_ref()
+            .expect("a market-by-price feed")
+            .mktdata
+            .len()
+            > 0,
+        "the level never reached the wire, so this test is asserting nothing"
+    );
+
+    let exposition = h.metrics.render();
+    assert_eq!(
+        last_published(&exposition, DEPTH_CHANNEL_ID),
+        START_UNIX_SECONDS,
+        "the depth channel carried the level and is not reporting it:\n{exposition}"
+    );
+    // And nowhere else. `0x40` is a market-by-price message; the top-of-book
+    // channel carried nothing.
+    assert_eq!(
+        last_published(&exposition, CHANNEL_ID),
+        0.0,
+        "the top-of-book channel carried no level and is reporting one:\n{exposition}"
+    );
+}
+
+#[test]
+fn a_book_clear_reports_the_channel_that_carried_it() {
+    // The other half of that steady state, and the half easier to forget: a
+    // side emptying is still a message on the wire, so a run of clears with no
+    // level between them is a channel that is publishing and must read as one.
+    let mut h = harness::harness_both();
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+
+    h.publisher.upstream_message("clear");
+    h.publisher.event(harness::clear(instrument, 1));
+
+    assert!(
+        h.mbp
+            .as_ref()
+            .expect("a market-by-price feed")
+            .mktdata
+            .len()
+            > 0,
+        "the book clear never reached the wire, so this test is asserting nothing"
+    );
+
+    let exposition = h.metrics.render();
+    assert_eq!(
+        last_published(&exposition, DEPTH_CHANNEL_ID),
+        START_UNIX_SECONDS,
+        "the depth channel carried the book clear and is not reporting it:\n{exposition}"
+    );
+    // And nowhere else. `0x41` is a market-by-price message; the top-of-book
+    // channel carried nothing.
+    assert_eq!(
+        last_published(&exposition, CHANNEL_ID),
+        0.0,
+        "the top-of-book channel carried no book clear and is reporting one:\n{exposition}"
+    );
+}
+
+#[test]
+fn a_trade_reports_both_of_the_channels_it_reached() {
+    // `0x04` is the one message both specifications carry, lowered once and
+    // handed to both send paths. Two channel instances took it, so both
+    // report it: a trade recorded against one of them would leave the other
+    // reading as stale while its subscribers were being served.
+    let mut h = harness::harness_both();
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+
+    h.publisher.upstream_message("trade");
+    h.publisher.event(harness::trade(instrument, 1));
+
+    let exposition = h.metrics.render();
+    for channel_id in [CHANNEL_ID, DEPTH_CHANNEL_ID] {
+        assert_eq!(
+            last_published(&exposition, channel_id),
+            START_UNIX_SECONDS,
+            "Channel ID {channel_id} carried the trade and is not reporting it:\n{exposition}"
+        );
+    }
+}
+
+#[test]
+fn a_trade_one_feed_refused_refreshes_only_the_channel_that_took_it() {
+    // Why the send paths are asked *which* of them took the trade rather than
+    // whether either did. One lowered value, two channel instances, and one of
+    // them cannot put it on the wire: a runtime that recorded the trade instead
+    // of the sends would report a channel whose every datagram is being refused
+    // as freshly published, which is the reading this series exists to end.
+    //
+    // Both members of top-of-book's mktdata fan-out refuse, because that is the
+    // only shape in which a send fails: `Tee::send` absorbs a member's failure
+    // and reports `NotRegistered` only once no live member is left. So the first
+    // trade is the send that collapses the fan-out and the second is the one
+    // refused.
+    let mut h = harness::harness_both();
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+
+    let tob = h.tob.as_ref().expect("a top-of-book feed");
+    tob.mktdata_refusal.set(true);
+    tob.reference_refusal.set(true);
+
+    h.publisher.upstream_message("trade");
+    h.publisher.event(harness::trade(instrument, 1));
+
+    h.clock.advance(Duration::from_secs(5));
+    h.publisher.upstream_message("trade");
+    h.publisher.event(harness::trade(instrument, 2));
+
+    let exposition = h.metrics.render();
+    assert_eq!(
+        last_published(&exposition, DEPTH_CHANNEL_ID),
+        START_UNIX_SECONDS + 5.0,
+        "the depth channel took the second trade and is not reporting it:\n{exposition}"
+    );
+    assert_eq!(
+        last_published(&exposition, CHANNEL_ID),
+        START_UNIX_SECONDS,
+        "the top-of-book channel refused the second trade and is reporting it as \
+         published:\n{exposition}"
+    );
+    assert!(
+        h.mbp
+            .as_ref()
+            .expect("a market-by-price feed")
+            .mktdata
+            .len()
+            > 0,
+        "nothing reached the depth feed's wire, so this test is asserting nothing"
+    );
 }

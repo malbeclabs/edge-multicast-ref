@@ -130,16 +130,28 @@
 --     there is nothing to exclude and no ordinal to shift by excluding it late.
 --
 --
--- RE-APPLY `012` TOO, OR THE TWO TABLES BELOW ARE UNREADABLE BY THE DASHBOARDS
+-- RE-APPLY `012` TOO, OR WHAT THIS FILE DECLARES IS UNREADABLE BY THE
+-- DASHBOARDS
 --
 -- `012_recorder_reader_grants.sql` is the same arrangement for the other
 -- direction: it holds the `GRANT SELECT`s that let the `grafana` reader see
--- these tables, and the collapsed view declared further down, written there
--- exactly as they would be written here:
+-- these tables, and every view declared further down, written there exactly as
+-- they would be written here:
 --
 --   GRANT SELECT ON recorder.venue_book_top TO grafana;
 --   GRANT SELECT ON recorder.venue_object TO grafana;
 --   GRANT SELECT ON recorder.venue_book_top_settled TO grafana;
+--   GRANT SELECT ON recorder.venue_book_top_occurrence TO grafana;
+--   GRANT SELECT ON recorder.feed_race_occurrence TO grafana;
+--   GRANT SELECT ON recorder.feed_race TO grafana;
+--
+-- SIX AND NOT THREE, because a panel reads a view and a view reads what is
+-- under it: at `SQL SECURITY INVOKER`, which is a normal view's default, the
+-- whole chain is read with the privileges of whoever asked. `012` draws that
+-- chain out. The publisher side of the race has grants of its own and they are
+-- in `010`'s heading rather than in this one, because `010` is the file that
+-- declares those objects — the rule is per file, so that an operator applying
+-- one of them reads what applying it obliges them to do.
 --
 -- The hazard has the same shape as `004`'s and a quieter symptom. A partial
 -- apply leaves the tables readable by nothing, and what an operator meets is

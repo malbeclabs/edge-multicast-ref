@@ -343,3 +343,183 @@ func buildInstrumentDefMsgV3(instID uint32, symbol, leg1, leg2 string) []byte {
 	msg[1] = uint8(4 + len(body))
 	return append(msg, body...)
 }
+
+// buildManifestSummaryMsg constructs a full 24-byte ManifestSummary message
+// (4-byte header + 20-byte body). Both reserved runs carry a distinctive
+// non-zero pattern, so a decode that reads Valid from the wrong offset, or
+// skips the wrong number of reserved bytes, yields a wrong value here instead
+// of passing on zero-filled padding.
+func buildManifestSummaryMsg(channelID, valid uint8, manifestSeq uint16, instrumentCount uint32, ts uint64) []byte {
+	buf := make([]byte, 24)
+	buf[0] = msgManifestSummary
+	buf[1] = 24
+	binary.LittleEndian.PutUint16(buf[2:4], 0) // flags
+	buf[4] = channelID
+	buf[5] = valid
+	buf[6], buf[7] = 0xAA, 0xBB // reserved
+	binary.LittleEndian.PutUint16(buf[8:10], manifestSeq)
+	buf[10], buf[11] = 0xCC, 0xDD // reserved
+	binary.LittleEndian.PutUint32(buf[12:16], instrumentCount)
+	binary.LittleEndian.PutUint64(buf[16:24], ts)
+	return buf
+}
+
+// Valid sits at ManifestSummary offset 5, between Channel ID and the two
+// reserved bytes. It is the only signal distinguishing an established
+// instrument set from an uninitialized or shutting-down channel, so it must
+// decode in both states; asserting the fields after it pins the reserved run
+// at two bytes, since a wider skip shifts Manifest Seq onward.
+func TestDecodeManifestSummary_DecodesValid(t *testing.T) {
+	const ts = uint64(1700000000000000000)
+
+	for _, valid := range []uint8{0, 1} {
+		msg := buildManifestSummaryMsg(3, valid, 9, 41, ts)
+		body, err := decodeTopOfBookBody(msgManifestSummary, msg[4:], 1)
+		if err != nil {
+			t.Fatalf("valid=%d: %v", valid, err)
+		}
+		got, ok := body.(*topOfBookManifestSummary)
+		if !ok {
+			t.Fatalf("wrong body type %T", body)
+		}
+		if got.Valid != valid {
+			t.Errorf("valid=%d: got %d", valid, got.Valid)
+		}
+		if got.ChannelID != 3 {
+			t.Errorf("valid=%d channel id: got %d want 3", valid, got.ChannelID)
+		}
+		if got.ManifestSeq != 9 {
+			t.Errorf("valid=%d manifest seq: got %d want 9", valid, got.ManifestSeq)
+		}
+		if got.InstrumentCount != 41 {
+			t.Errorf("valid=%d instrument count: got %d want 41", valid, got.InstrumentCount)
+		}
+		if got.Timestamp != ts {
+			t.Errorf("valid=%d timestamp: got %d want %d", valid, got.Timestamp, ts)
+		}
+	}
+}
+
+// Valid must reach the record's Fields map as a uint8 under the key "valid",
+// matching the marketbyprice and marketbyorder parsers, because that map is
+// where a book-builder reads it.
+//
+// This covers the plumbing from the decoded body to that map, for both values
+// of the byte. It does not pin the byte's offset on the wire: the body here is
+// built by buildManifestSummaryMsg from the same reading of the spec the
+// decoder was written from, so the two agree even when the reading is wrong.
+// TestGoldenManifestSummary in golden_test.go is what pins the offset, against
+// a vector transcribed from the spec tables independently of this package.
+func TestParse_ManifestSummaryCarriesValid(t *testing.T) {
+	const ts = uint64(1700000000000000000)
+
+	for _, valid := range []uint8{0, 1} {
+		p := NewTopOfBookParser()
+		datagram := buildDatagram(3, 100, ts, buildManifestSummaryMsg(3, valid, 9, 41, ts))
+
+		recs, err := p.Parse(datagram, PacketMeta{})
+		if err != nil {
+			t.Fatalf("valid=%d: %v", valid, err)
+		}
+		if len(recs) != 1 {
+			t.Fatalf("valid=%d: expected 1 record, got %d", valid, len(recs))
+		}
+		if recs[0].Type != "manifest_summary" {
+			t.Fatalf("valid=%d record type: got %q want manifest_summary", valid, recs[0].Type)
+		}
+		if got := recs[0].Fields["valid"]; got != valid {
+			t.Errorf("valid: got %v (%T) want uint8(%d)", got, got, valid)
+		}
+		if got := recs[0].Fields["manifest_seq"]; got != uint16(9) {
+			t.Errorf("valid=%d manifest_seq: got %v (%T) want uint16(9)", valid, got, got)
+		}
+		if got := recs[0].Fields["instrument_count"]; got != uint32(41) {
+			t.Errorf("valid=%d instrument_count: got %v (%T) want uint32(41)", valid, got, got)
+		}
+	}
+}
+
+// An over-long ManifestSummary must be refused, not decoded with its tail
+// ignored. wireReader reports a body that ran short but says nothing about one
+// that ran long, so a message declaring msg_length 30 decodes as a well-formed
+// summary with six trailing bytes silently dropped.
+//
+// A hand-built body is the only way to state this one: manifest-summary-v3.bin
+// is exactly 24 bytes, so TestGoldenManifestSummary exercises the length that
+// is correct and can say nothing about the lengths that are not.
+func TestDecodeManifestSummary_RejectsOverLongBody(t *testing.T) {
+	const ts = uint64(1700000000000000000)
+
+	msg := buildManifestSummaryMsg(3, 1, 9, 41, ts)
+	over := append(append([]byte{}, msg...), 0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE)
+	over[1] = uint8(len(over)) // msg_length 30, i.e. a 26-byte body
+
+	got, err := decodeTopOfBookBody(msgManifestSummary, over[4:], 1)
+	if err == nil {
+		t.Fatalf("a 26-byte manifest_summary body must be refused, got body %+v", got)
+	}
+	// Same reason as marketbyorder and marketbyprice, which refuse any
+	// manifest_summary body that is not exactly 20 bytes. The runner's
+	// classifyParseErr buckets on substrings, so this must read as "truncated"
+	// and must not mention "schema", which is the bucket for an unsupported
+	// Schema Version.
+	if !strings.Contains(err.Error(), "truncat") {
+		t.Errorf("error must contain \"truncat\": %q", err.Error())
+	}
+	if strings.Contains(err.Error(), "schema") {
+		t.Errorf("error must not contain \"schema\" (would misclassify as schema_version): %q", err.Error())
+	}
+	if want := "expected 20 bytes, got 26"; !strings.Contains(err.Error(), want) {
+		t.Errorf("error must state the expected and the actual body length (%q): %q", want, err.Error())
+	}
+
+	// And the datagram carrying it is rejected whole, not delivered in part.
+	recs, err := NewTopOfBookParser().Parse(buildDatagram(3, 100, ts, over), PacketMeta{})
+	if err == nil {
+		t.Fatalf("Parse must reject the datagram, got %d records", len(recs))
+	}
+	if len(recs) != 0 {
+		t.Errorf("a rejected datagram must yield no records, got %d", len(recs))
+	}
+}
+
+// Every fixed-size body in decodeTopOfBookBody is pinned to an exact length,
+// not only InstrumentDefinition and ManifestSummary. Each case reads its
+// fields positionally through the sticky wireReader, which reports a body that
+// ran short but never one that ran long, so an unpinned case decodes an
+// over-long message and drops the tail. marketbyorder and marketbyprice pin
+// every body length, and the Rust codec rejects a declared msg_length that
+// disagrees with the type's size.
+func TestDecodeBody_LengthIsExactForEveryFixedSizeType(t *testing.T) {
+	tests := []struct {
+		name    string
+		msgType uint8
+		want    int
+	}{
+		{"heartbeat", msgHeartbeat, heartbeatBodyLen},
+		{"quote", msgQuote, quoteBodyLen},
+		{"trade", msgTrade, tradeBodyLen},
+		{"channel_reset", msgChannelReset, channelResetBodyLen},
+		{"end_of_session", msgEndOfSession, endOfSessionBodyLen},
+		{"manifest_summary", msgManifestSummary, manifestSummaryBodyLen},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := decodeTopOfBookBody(tc.msgType, make([]byte, tc.want), 1); err != nil {
+				t.Fatalf("a %d-byte body must decode: %v", tc.want, err)
+			}
+
+			for _, n := range []int{tc.want - 1, tc.want + 1, tc.want + 8} {
+				_, err := decodeTopOfBookBody(tc.msgType, make([]byte, n), 1)
+				if err == nil {
+					t.Errorf("a %d-byte body must be refused (want exactly %d)", n, tc.want)
+					continue
+				}
+				if !strings.Contains(err.Error(), "truncat") {
+					t.Errorf("%d-byte body: error must contain \"truncat\": %q", n, err.Error())
+				}
+			}
+		})
+	}
+}

@@ -231,13 +231,15 @@ fn start_feed(
         source,
     })?;
 
-    let spool =
-        Spool::open(config.inline.spool_dir.join(&feed.spec), spool_max).map_err(|source| {
-            RunError::Spool {
-                feed: feed.spec.clone(),
-                message: source.to_string(),
-            }
-        })?;
+    let spool = Spool::open(
+        config.inline.spool_dir.join(&feed.spec),
+        spool_max,
+        &feed.spec,
+    )
+    .map_err(|source| RunError::Spool {
+        feed: feed.spec.clone(),
+        message: source.to_string(),
+    })?;
     let ledger = Ledger::open(ledger_for(&config.inline.ledger, &feed.spec)).map_err(|source| {
         RunError::Ledger {
             feed: feed.spec.clone(),

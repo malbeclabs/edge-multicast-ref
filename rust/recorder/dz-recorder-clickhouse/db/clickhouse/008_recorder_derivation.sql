@@ -52,14 +52,45 @@
 -- two are the authoritative definitions of these tables — their `CREATE TABLE`
 -- blocks are what the row types are held against, column for column, in
 -- `tests/ddl.rs` — so the column is declared there and a deployment created from
--- scratch has it before this file runs. This file is for the deployments that applied 001 when it did
--- not: their tables exist, `CREATE TABLE IF NOT EXISTS` will not alter them, and
--- an `ALTER` is the only thing that reaches them. On a fresh deployment every
--- statement below is a no-op, which is why it is safe to apply unconditionally
--- and in order.
+-- scratch has it before this file runs. The `ALTER`s are for the deployments
+-- that applied 001 when it did not: their tables exist, `CREATE TABLE IF NOT
+-- EXISTS` will not alter them, and an `ALTER` is the only thing that reaches
+-- them. On a fresh deployment every `ALTER` below is a no-op, which is why they
+-- are safe to apply unconditionally and in order, and `IF NOT EXISTS` on every
+-- one of them for that reason, as `CREATE TABLE IF NOT EXISTS` makes 001
+-- re-appliable.
 --
--- `IF NOT EXISTS` throughout for that reason, as `CREATE TABLE IF NOT EXISTS`
--- makes 001 re-appliable.
+-- THE TWO `CREATE OR REPLACE VIEW` STATEMENTS AT THE END ARE NOT IN THAT CLASS,
+-- and reading "then a no-op" across the whole of this file is how a deployment
+-- ends up holding a view under one name and another deployment holding a
+-- different one. Those two run on every deployment, fresh and upgraded, and they
+-- carry no `IF NOT EXISTS`: a view is replaced rather than skipped, which is
+-- exactly what makes the one statement correct on both. The block above them
+-- states why they are here.
+--
+--
+-- APPLY THIS FILE AGAIN ON EVERY DEPLOYMENT THAT HAS ALREADY APPLIED IT
+--
+-- There is no migration framework here: the files are applied by hand or by the
+-- deploy, as 001's own header states, and nothing re-reads a file a deployment
+-- has been given. So a deployment that has applied this file and holds
+-- `era_opening` and `datagram_in_era` with no `derivation` column reaches the
+-- two statements at the end only when an operator applies this file again — and
+-- that deployment is precisely the one those two statements are for. Applied
+-- nowhere else, the repair reaches nowhere.
+--
+-- Safe to apply any number of times, which is why the instruction is simply to
+-- apply it. Every `ALTER` is `ADD COLUMN IF NOT EXISTS` and finds the column
+-- already there. `CREATE OR REPLACE VIEW` replaces a view rather than failing on
+-- one that exists, and a view holds no rows — so an apply that changes anything
+-- at all changes one thing: the stored column list of a view expanded before the
+-- column reached its table, which is the repair.
+--
+-- NOTHING ELSE HAS TO BE RE-APPLIED WITH IT, unlike 009, which says to re-apply
+-- 004 and 012 after itself. This file creates no table and no account, and 004
+-- grants `INSERT` at table level rather than per column, as the section above
+-- says — so the loader and the dashboards' reader keep exactly the access they
+-- hold.
 
 ALTER TABLE recorder.datagram
     ADD COLUMN IF NOT EXISTS derivation LowCardinality(String) DEFAULT 'archive'
@@ -97,3 +128,89 @@ ALTER TABLE recorder.instrument
 ALTER TABLE recorder.book_top
     ADD COLUMN IF NOT EXISTS derivation LowCardinality(String) DEFAULT 'archive'
     AFTER object_key;
+
+
+-- THE TWO `SELECT *` VIEWS OVER THE TABLES ABOVE, RE-STATED OVER THEM AS THEY
+-- NOW ARE.
+--
+-- **A view's `SELECT *` is expanded when the view is created, not when it is
+-- read.** `003` declares `era_opening` as `SELECT * FROM recorder.era FINAL`
+-- and `datagram_in_era` as a `d.*` over `recorder.datagram` — a qualified star
+-- freezes exactly as a bare one does — and a deployment being upgraded applies
+-- these files in order, so `003` expands both stars over tables that do not
+-- carry `derivation` and the `ALTER`s above run afterwards. Without the two
+-- statements below, one view name stands for two column lists: no `derivation`
+-- on every deployment upgraded in file order, `derivation` on every deployment
+-- created since, and which one a deployment holds settled by nothing but how
+-- long it has been running.
+--
+-- Nothing fails while no query reads `derivation` through either view, and
+-- every reader of them in this set takes a named column list: `006` takes
+-- `anchor_ts`, `anchor_seq` and `anchor_certain` out of `era_opening`, and
+-- `003`'s own `era_ranked` lists every column it selects from it. Nothing in
+-- this set reads `datagram_in_era` at all — it is declared for the time-ranged
+-- panel `003` points at it, which is written outside these files and is
+-- therefore the reader least likely to be checked against them. The first
+-- query, panel or migration that reaches `era_opening.derivation` or
+-- `datagram_in_era.derivation` fails with `UNKNOWN_IDENTIFIER` on the
+-- deployments that have been running longest and passes everywhere it was
+-- written and tested — the failure landing on the oldest and least disposable
+-- deployments, and at query time rather than at deploy time. A later
+-- `CREATE OR REPLACE VIEW` that itself read the column through one of these
+-- views would fail to create, which is the same defect turned into a failed
+-- schema apply. `derivation` is provenance, so the query most likely to reach
+-- it is a query about whether a finding may be trusted.
+--
+-- A view holds no rows, so re-creating it loses nothing. This is a metadata
+-- change on both deployments — a no-op on a fresh one, the repair on an
+-- upgraded one — and the text is `003`'s text unchanged, so that one view name
+-- means one view on every deployment. `003` is still where the argument for
+-- each of them lives: the partitioned collapse under `era_opening`, and the
+-- `ASOF LEFT JOIN` on the anchor that resolves a datagram to its era. This is
+-- the hazard `010` states at length above its own re-statement of
+-- `book_top_settled`, reached earlier and closed here.
+--
+-- TWO, AND THE OTHER SIX TABLES ABOVE ARE NOT AN OVERSIGHT. Three of the eight
+-- carry a star view over them. `recorder.era` and `recorder.datagram` are
+-- below. `recorder.book_top`'s is `006`'s `book_top_settled`, and `010`
+-- re-states that view after its own `ALTER` — so the freeze this file opens on
+-- it is closed by the time the set has been applied, and a second re-statement
+-- here would duplicate a repair rather than make one. `segment_coverage`,
+-- `sequence_gap`, `conformance_finding`, `event` and `instrument` have no star
+-- view over them anywhere in the set, so for those five there is nothing to
+-- re-state.
+--
+-- WHY `datagram_in_era` KEEPS ITS `d.*`. A star over the largest table in the
+-- schema is what this whole class of defect rests on, and naming `datagram`'s
+-- columns here would stop the class recurring on this one view. It is left a
+-- star deliberately. A named list buys that safety by requiring a second edit
+-- before a column added to `datagram` reaches the view a panel reads, and
+-- nothing fails when that edit is forgotten — the column is simply absent, for
+-- a reader who cannot tell the omission from a decision. The star has the
+-- opposite failure: it is loud, it is caught in the file that moves the column
+-- list, and the rule that such a file re-states every star over that table is
+-- asserted over these files in `tests/ddl.rs`. Between a safety that depends on
+-- nobody forgetting and a hazard a test refuses to let past, this file takes
+-- the second.
+
+CREATE OR REPLACE VIEW recorder.era_opening AS
+SELECT *
+FROM recorder.era FINAL
+WHERE continuation = 0;
+
+
+CREATE OR REPLACE VIEW recorder.datagram_in_era AS
+SELECT
+    d.*,
+    e.anchor_ts      AS era_anchor_ts,
+    e.anchor_seq     AS era_anchor_seq,
+    e.reset_count    AS era_reset_count,
+    e.anchor_certain AS anchor_certain
+FROM recorder.datagram AS d
+ASOF LEFT JOIN recorder.era_opening AS e
+    ON  d.site        = e.site
+    AND d.recorder    = e.recorder
+    AND d.source_addr = e.source_addr
+    AND d.channel_id  = e.channel_id
+    AND d.dst_port    = e.dst_port
+    AND e.anchor_ts  <= d.recv_ts;

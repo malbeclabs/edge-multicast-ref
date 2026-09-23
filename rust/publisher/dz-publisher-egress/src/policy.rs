@@ -35,6 +35,7 @@
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
+use std::num::NonZeroU8;
 
 /// One hop: the group is delivered on the attached segment and the network's own
 /// last-mile carries it from there.
@@ -51,7 +52,7 @@ use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 /// half is a real link and not a coincidence of two literals: `TtlUnstated` in
 /// `dz-publisher-runtime` interpolates this constant into its message, so
 /// changing the number here changes the line operators are told to write.
-pub const DEFAULT_TTL: u8 = 1;
+pub const DEFAULT_TTL: NonZeroU8 = NonZeroU8::new(1).expect("one hop is not zero");
 
 /// An IPv4 prefix, for stating an invariant about a discovered address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,21 +174,43 @@ pub struct EgressPolicy {
     pub pin: Option<Ipv4Addr>,
     /// An invariant on the address, not a source of one. See the module docs.
     pub expected_prefix: Option<Ipv4Prefix>,
-    /// The multicast TTL. See [`DEFAULT_TTL`].
+    /// The multicast TTL, which cannot be zero. See [`DEFAULT_TTL`].
     ///
-    /// **Zero is not checked here.** `[egress] ttl = 0` is a refusal to start
-    /// in `dz-publisher-runtime`, because zero is no hop at all: the kernel
-    /// accepts every datagram, none reaches an interface, and even a subscriber
-    /// on this host's own segment — the one check that catches a hop count set
-    /// too low — receives nothing. A hand-composed policy gets no such refusal.
-    /// This is a plain `u8`, [`crate::KernelSocket::open`] passes it to
-    /// `set_multicast_ttl_v4` as given, and a composed zero reproduces that
-    /// silence exactly.
+    /// **A [`NonZeroU8`] because zero is no hop at all**: the kernel accepts
+    /// every datagram, none reaches an interface, and even a subscriber on this
+    /// host's own segment — the one check that catches a hop count set too low
+    /// — receives nothing. [`crate::KernelSocket::open`] takes the same type
+    /// and hands it to `set_multicast_ttl_v4` as given, so the value that
+    /// reaches the socket is nonzero on every path that composes a policy,
+    /// rather than on the paths somebody remembered to check.
     ///
-    /// Closing it means a checked constructor or a `NonZeroU8`, either of which
-    /// changes the literal every composing caller writes — so it is a change to
-    /// this struct's own shape, not a line in the runtime's document path.
-    pub ttl: u8,
+    /// `[egress] ttl = 0` in a document is refused at startup by
+    /// `dz-publisher-runtime`, whose message names the line an operator has to
+    /// write instead; a hand-composed zero is refused by the compiler:
+    ///
+    /// ```compile_fail
+    /// use dz_publisher_egress::EgressPolicy;
+    ///
+    /// let policy = EgressPolicy {
+    ///     pin: None,
+    ///     expected_prefix: None,
+    ///     ttl: 0,
+    /// };
+    /// ```
+    ///
+    /// ```
+    /// use std::num::NonZeroU8;
+    ///
+    /// use dz_publisher_egress::EgressPolicy;
+    ///
+    /// let policy = EgressPolicy {
+    ///     pin: None,
+    ///     expected_prefix: None,
+    ///     ttl: NonZeroU8::new(64).expect("a routed group's hop count"),
+    /// };
+    /// assert_eq!(policy.ttl.get(), 64);
+    /// ```
+    pub ttl: NonZeroU8,
 }
 
 impl Default for EgressPolicy {

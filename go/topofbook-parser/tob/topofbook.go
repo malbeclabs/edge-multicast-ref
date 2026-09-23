@@ -369,6 +369,7 @@ func (p *TopOfBookParser) handleManifestSummary(channelID uint8, seq uint64, res
 		SequenceNumber: seq,
 		ResetCount:     reset,
 		Fields: map[string]any{
+			"valid":            body.Valid,
 			"manifest_seq":     body.ManifestSeq,
 			"instrument_count": body.InstrumentCount,
 		},

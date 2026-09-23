@@ -23,7 +23,9 @@ COPY go/marketbyprice-bot/go.mod go/marketbyprice-bot/go.sum ./go/marketbyprice-
 WORKDIR /src/go/marketbyorder-parser
 RUN go mod download
 
-# Now copy only the parser's source code.
+# Now copy the parser's source code, and go/internal for the shared sink and
+# UDP receive layer it imports.
+COPY go/internal/ /src/go/internal/
 COPY go/marketbyorder-parser/ ./
 
 ARG VERSION=dev
