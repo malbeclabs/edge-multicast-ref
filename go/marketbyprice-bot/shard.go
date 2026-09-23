@@ -289,12 +289,21 @@ func (s *Shard) applyDeltaToReady(k instKey, inst *Instrument, rec Record) []Cha
 		// never applied to. The next live delta then walks the reorder window to
 		// a second gap, and one loss is counted twice.
 		//
+		// The floor is `piSeq - 1`, everything before the one record that will
+		// replay. That covers the deltas Pending is about to drop AND the ones
+		// that never arrived at all: this branch also trips on distance, where
+		// `piSeq` is far past `expected` with almost nothing held, and a
+		// requirement of `expected` there lets a snapshot commit that leaves the
+		// whole run between them missing — the replay finds the hole and
+		// declares a second gap for the same loss.
+		//
+		// Then the scan, because a Pending key can exceed `piSeq` and those
+		// records are dropped here without being buffered. `piSeq` itself is
+		// excluded: it is buffered below and replays, so requiring it would
+		// refuse a snapshot that is perfectly good with that record on top.
 		// Read while Pending is still around, the way evictLargestBuffer reads
-		// its buffer. `piSeq` is a key here too but is buffered below and
-		// replays, so it is excluded: requiring it would refuse a snapshot that
-		// is perfectly good with that record on top. A key can exceed `piSeq`,
-		// so this is a scan rather than a comparison against it.
-		required := expected
+		// its buffer.
+		required := piSeq - 1
 		for seq := range inst.Pending {
 			if seq != piSeq && seq > required {
 				required = seq

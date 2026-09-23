@@ -878,8 +878,14 @@ func TestApply_SequenceGapRefusesSnapshotFromBeforeTheHole(t *testing.T) {
 	if got := counterValue(m.PerInstrumentGapsTotal); got != 1 {
 		t.Fatalf("fixture: per_instrument_gaps_total = %v want 1", got)
 	}
-	if got := requiredSeq(inst.RequiredInstrumentSeq); got != "6" {
-		t.Fatalf("the gap must record its hole: got %s want 6", got)
+	// The requirement is the seq before the record that will replay, not the
+	// hole. This branch tripped on DISTANCE: 6..22 never arrived at all, and
+	// only 23 is held and buffered. A snapshot at the hole would commit and
+	// leave 7..22 missing, so the replay of 23 would find a second hole and
+	// declare a second gap for the same loss.
+	const held = 5 + reorderWindow + 2
+	if got, want := requiredSeq(inst.RequiredInstrumentSeq), strconv.Itoa(held-1); got != want {
+		t.Fatalf("the gap must record the seq before the record that replays: got %s want %s", got, want)
 	}
 
 	s.apply(snapBeginRec(11, 5, 1, 5, 0, 899))
@@ -893,11 +899,18 @@ func TestApply_SequenceGapRefusesSnapshotFromBeforeTheHole(t *testing.T) {
 		t.Errorf("snapshot_discarded_total{stale_instrument_seq}: got %v want 1", got)
 	}
 
-	// Captured at the hole: acceptable, so the refusal delays recovery by a cycle
-	// rather than wedging the instrument.
+	// A snapshot at the hole is refused too, for the reason above: it predates
+	// everything between the hole and the held record.
 	s.apply(snapBeginRec(11, 6, 1, 6, 0, 901))
+	if inst.OpenSnapshot != nil {
+		t.Error("a snapshot at the hole must not open a shadow while later deltas are missing")
+	}
+
+	// The one that covers the whole missing run does open, so the refusal costs
+	// a snapshot cycle rather than wedging the instrument.
+	s.apply(snapBeginRec(11, 7, 1, held-1, 0, 902))
 	if inst.OpenSnapshot == nil {
-		t.Error("a snapshot at the hole must open a shadow")
+		t.Error("a snapshot covering the missing run must open a shadow")
 	}
 }
 

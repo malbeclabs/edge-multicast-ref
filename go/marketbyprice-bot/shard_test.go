@@ -1477,3 +1477,58 @@ func TestApplyDelta_GapRequiresASnapshotPastEveryDiscardedDelta(t *testing.T) {
 		t.Errorf("recovery must not declare another gap: got %v want 1", got)
 	}
 }
+
+// The gap branch also trips on DISTANCE, and there the discarded-range scan is
+// not enough on its own.
+//
+// When one delta arrives far past the hole, Pending holds almost nothing: the
+// deltas in between never arrived at all rather than being dropped here. A
+// requirement read only from Pending names the hole, a snapshot there commits,
+// and the replay of the held record finds the whole run still missing and
+// declares a second gap — one loss counted twice, the same outcome the
+// discarded-range fix exists to prevent, reached the other way. The floor is
+// the seq before the record that will replay.
+func TestApplyDelta_GapOnDistanceRequiresTheWholeMissingRun(t *testing.T) {
+	m := NewMetrics("test", "test")
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
+	k := instKey{0, 11}
+	inst := readyInstrumentInShard(t, s, k, 100)
+
+	// 101..150 never arrive; 151 is 50 past the hole, well beyond the window.
+	const held = 151
+	s.applyDelta(k, levelUpdateRec(11, held, held, "bid", 1000, 5))
+	if inst.Status != StatusGap {
+		t.Fatalf("status %v want gap", inst.Status)
+	}
+	if got := counterValue(m.PerInstrumentGapsTotal); got != 1 {
+		t.Fatalf("one gap for one loss: got %v want 1", got)
+	}
+	if inst.RequiredInstrumentSeq == nil {
+		t.Fatal("the gap must state a requirement")
+	}
+	if got, want := *inst.RequiredInstrumentSeq, uint32(held-1); got != want {
+		t.Errorf("required seq: got %d want %d (the whole missing run, not the hole at 101)", got, want)
+	}
+
+	// A snapshot at the hole is refused: 102..150 are still missing.
+	inst.BeginSnapshot(1, 50, 0, 101, 0)
+	if err := inst.EndSnapshot(1, 50); err == nil {
+		t.Error("a snapshot at the hole must not commit while the run behind it is missing")
+	}
+
+	// The one that covers the run does, and the held record replays on top.
+	inst.BeginSnapshot(2, 51, 0, held-1, 0)
+	if err := inst.EndSnapshot(2, 51); err != nil {
+		t.Fatalf("snapshot commit: %v", err)
+	}
+	s.replayBuffer(k, inst)
+	if inst.Status != StatusReady {
+		t.Errorf("status after recovery: got %v want ready", inst.Status)
+	}
+	if got := inst.LastAppliedInstrumentSeq; got != held {
+		t.Errorf("the held record must replay: tracker %d want %d", got, held)
+	}
+	if got := counterValue(m.PerInstrumentGapsTotal); got != 1 {
+		t.Errorf("one loss must not be counted twice: got %v want 1", got)
+	}
+}
