@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"golang.org/x/net/ipv4"
+
+	"github.com/malbeclabs/edge-multicast-ref/go/internal/udp"
 )
 
 const (
@@ -74,15 +76,6 @@ func (s *seqTracker) observe(src netip.Addr, ch uint8, seq uint64) (gaps, missin
 		s.last[k] = seq
 	}
 	return gaps, missing
-}
-
-// srcAddr normalises a datagram's sender address so one publisher always
-// produces one map key. Shared by both build-tagged readDatagram variants.
-func srcAddr(addr *net.UDPAddr) netip.Addr {
-	if addr == nil {
-		return netip.Addr{}
-	}
-	return addr.AddrPort().Addr().Unmap()
 }
 
 type RunnerConfig struct {
@@ -174,7 +167,7 @@ func (r *Runner) listenPort(ctx context.Context, port int, label string) error {
 	if err := pc.SetControlMessage(ipv4.FlagDst, true); err != nil {
 		slog.Warn("could not set control message flag", "error", err)
 	}
-	if err := enableTimestamping(conn); err != nil {
+	if err := udp.EnableTimestamping(conn); err != nil {
 		slog.Warn("could not enable UDP receive timestamping", "error", err)
 	}
 
@@ -190,7 +183,7 @@ func (r *Runner) listenPort(ctx context.Context, port int, label string) error {
 		default:
 		}
 
-		n, src, recvTime, recvKind, err := readDatagram(conn, buf)
+		n, src, recvTime, recvKind, err := udp.ReadDatagram(conn, buf)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil

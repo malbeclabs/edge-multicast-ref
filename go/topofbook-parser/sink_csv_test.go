@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"encoding/csv"
+	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -183,5 +187,175 @@ func TestCSVFileSink_HeaderWrittenOnce(t *testing.T) {
 	}
 	if rows[0][0] != "type" {
 		t.Errorf("expected header row first, got %q", rows[0][0])
+	}
+}
+
+// shortTempSock returns a Unix-domain socket path short enough to fit within the
+// macOS sockaddr_un.sun_path limit (104 bytes). t.TempDir() embeds the test's
+// function name, which for longer names pushes the socket path over that limit
+// and makes bind fail with EINVAL ("invalid argument"). A minimal-prefix temp
+// dir keeps the path short regardless of the test name.
+func shortTempSock(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "s")
+	if err != nil {
+		t.Fatalf("creating temp dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return filepath.Join(dir, "s.sock")
+}
+
+// quoteRecord is a quote record carrying every field the CSV column layout
+// reads, so it serves the CSV and the JSON socket tests alike.
+func quoteRecord(ts time.Time) Record {
+	return Record{
+		Type: "quote", Timestamp: ts, ChannelID: 1, SequenceNumber: 100,
+		InstrumentID: 42, Symbol: "BTC-USDT",
+		Fields: map[string]any{
+			"source_id": uint16(1), "bid_price": 67432.5, "bid_qty": 1.25,
+			"ask_price": 67433.0, "ask_qty": 0.8, "bid_source_count": uint16(5),
+			"ask_source_count": uint16(3), "update_flags": uint8(3), "snapshot": false,
+		},
+	}
+}
+
+// TestNewSink_CSVOverSocket covers the format seam this feed owns: a csv
+// socket client is served the quote/trade columns, header first.
+func TestNewSink_CSVOverSocket(t *testing.T) {
+	sockPath := shortTempSock(t)
+
+	s, err := NewSink(SinkConfig{Format: "csv", Path: "unix://" + sockPath})
+	if err != nil {
+		t.Fatalf("error creating socket sink: %v", err)
+	}
+	defer s.Close()
+
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("error connecting: %v", err)
+	}
+	defer conn.Close()
+
+	time.Sleep(50 * time.Millisecond)
+
+	ts := time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC)
+	if err := s.Write([]Record{quoteRecord(ts)}); err != nil {
+		t.Fatalf("error writing: %v", err)
+	}
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
+	scanner := bufio.NewScanner(conn)
+
+	// First line should be the CSV header.
+	if !scanner.Scan() {
+		t.Fatal("no header received")
+	}
+	header := scanner.Text()
+	if !strings.HasPrefix(header, "type,") {
+		t.Errorf("expected the CSV header, got %q", header)
+	}
+	if header != strings.Join(quoteCSVHeader, ",") {
+		t.Errorf("header is %q, want %q", header, strings.Join(quoteCSVHeader, ","))
+	}
+
+	// Second line should be the data row.
+	if !scanner.Scan() {
+		t.Fatal("no data row received")
+	}
+	row := scanner.Text()
+	if !strings.HasPrefix(row, "quote,") {
+		t.Errorf("expected a quote row, got %q", row)
+	}
+}
+
+// TestNewSink_CSVHeaderWrittenOncePerClient pins that the header tracking is
+// per client rather than per batch.
+func TestNewSink_CSVHeaderWrittenOncePerClient(t *testing.T) {
+	sockPath := shortTempSock(t)
+
+	s, err := NewSink(SinkConfig{Format: "csv", Path: "unix://" + sockPath})
+	if err != nil {
+		t.Fatalf("error creating socket sink: %v", err)
+	}
+	defer s.Close()
+
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("error connecting: %v", err)
+	}
+	defer conn.Close()
+
+	time.Sleep(50 * time.Millisecond)
+
+	ts := time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 2; i++ {
+		if err := s.Write([]Record{quoteRecord(ts)}); err != nil {
+			t.Fatalf("error writing batch %d: %v", i, err)
+		}
+	}
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
+	scanner := bufio.NewScanner(conn)
+	var lines []string
+	for len(lines) < 3 && scanner.Scan() {
+		lines = append(lines, scanner.Text())
+	}
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 lines, got %d: %q", len(lines), lines)
+	}
+	if !strings.HasPrefix(lines[0], "type,") {
+		t.Errorf("first line is not the header: %q", lines[0])
+	}
+	for _, line := range lines[1:] {
+		if strings.HasPrefix(line, "type,") {
+			t.Errorf("the header was written more than once: %q", lines)
+		}
+	}
+}
+
+// TestNewSink_JSONOverSocket pins the other branch of the same switch: a json
+// socket client is served JSONL by the shared writer.
+func TestNewSink_JSONOverSocket(t *testing.T) {
+	sockPath := shortTempSock(t)
+
+	s, err := NewSink(SinkConfig{Format: "json", Path: "unix://" + sockPath})
+	if err != nil {
+		t.Fatalf("error creating socket sink: %v", err)
+	}
+	defer s.Close()
+
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("error connecting: %v", err)
+	}
+	defer conn.Close()
+
+	time.Sleep(50 * time.Millisecond)
+
+	ts := time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC)
+	if err := s.Write([]Record{quoteRecord(ts)}); err != nil {
+		t.Fatalf("error writing: %v", err)
+	}
+
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
+	scanner := bufio.NewScanner(conn)
+	if !scanner.Scan() {
+		t.Fatal("no data received")
+	}
+	var r Record
+	if err := json.Unmarshal(scanner.Bytes(), &r); err != nil {
+		t.Fatalf("error decoding JSON: %v", err)
+	}
+	if r.Symbol != "BTC-USDT" {
+		t.Errorf("expected symbol BTC-USDT, got %q", r.Symbol)
+	}
+}
+
+// TestNewSink_UnknownFormat keeps an unrecognised format an error rather than a
+// sink that silently serves nothing.
+func TestNewSink_UnknownFormat(t *testing.T) {
+	if s, err := NewSink(SinkConfig{Format: "parquet", Path: filepath.Join(t.TempDir(), "out")}); err == nil {
+		s.Close()
+		t.Fatal("expected an error for an unknown format, got nil")
 	}
 }
