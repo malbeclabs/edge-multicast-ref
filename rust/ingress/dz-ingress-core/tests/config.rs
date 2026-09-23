@@ -135,6 +135,51 @@ fn a_transposed_backoff_pair_is_refused_rather_than_clamped() {
 }
 
 #[test]
+fn a_fixed_delay_pair_loads_and_the_policy_it_produces_states_the_lockstep() {
+    // The pair `BackoffPolicy::new` accepts and cannot help: a maximum equal to
+    // the initial delay leaves the draw a single point, so every connection of
+    // a publisher retries at the same instants. Two things are asserted here
+    // and both are the decision - that the document *loads*, because a fixed
+    // retry cadence is a configuration to mean, and that the policy it produces
+    // carries the line an operator who did not mean it needs. Before the line
+    // existed this document loaded and said nothing anywhere.
+    let policy = parse(
+        r#"
+        kind                      = "websocket"
+        reconnect_backoff_initial = "1s"
+        reconnect_backoff_max     = "1s"
+        "#,
+    )
+    .expect("the values parse; the pair is what is degenerate")
+    .policy()
+    .expect("a fixed delay is a configuration, not a refusal");
+    let line = policy
+        .backoff
+        .lockstep_line()
+        .expect("a loaded policy with no window in it must say so");
+    assert!(line.contains("reconnect_backoff_max"), "{line}");
+    assert!(line.contains("lockstep"), "{line}");
+}
+
+#[test]
+fn the_documented_pair_loads_with_nothing_to_state() {
+    // The same path over the section as the design documents it. A line stated
+    // for the ordinary pair is a line every publisher prints at every start,
+    // which is a line nobody reads.
+    let policy = parse(
+        r#"
+        kind                      = "websocket"
+        reconnect_backoff_initial = "500ms"
+        reconnect_backoff_max     = "30s"
+        "#,
+    )
+    .expect("the documented section must parse")
+    .policy()
+    .expect("the documented pair must resolve");
+    assert_eq!(policy.backoff.lockstep_line(), None);
+}
+
+#[test]
 fn a_send_rate_finer_than_the_clock_is_refused_rather_than_silently_unpaced() {
     // Integer division by a rate above a billion gives an interval of zero, so
     // every send would go immediately while the configuration said the
