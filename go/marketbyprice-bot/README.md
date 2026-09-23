@@ -29,7 +29,19 @@ The spec's five-state machine collapses to three because two of its states are r
 
 Transitions: a committed snapshot moves any status to `ready`. Three things move `ready` to `gap` — a confirmed per-instrument sequence gap, a delta-buffer eviction, and a malformed book-affecting message (see below). An `InstrumentReset` moves any status to `awaiting-snapshot` and records a required anchor.
 
-**A malformed book-affecting record gaps its instrument immediately.** `LevelUpdate` and `BookClear` share one `Per-Instrument Seq` series, because both mutate the book. A `BookClear` the book-builder receives and discards as malformed (`Scope = 1` with `Clear Side = 2`, which the [market-by-price spec](https://github.com/malbeclabs/edge-feed-spec/blob/main/market-by-price/spec.md) declares malformed and requires a subscriber to discard and count) therefore consumed a sequence number at the publisher, and the mutation it carried is lost. That is `gap`, the same end state a sequence gap reaches, and it is declared on the malformed record rather than after the reorder window: the window exists for deltas that may still arrive out of order, and this loss is already known. Holding the next ~16 deltas to wait for a hole that can never fill buys nothing.
+**A malformed book-affecting record gaps its instrument immediately.** `LevelUpdate` and `BookClear` share one `Per-Instrument Seq` series, because both mutate the book. A `BookClear` the book-builder receives and discards as malformed (`Scope = 1` with `Clear Side = 2`, which the [market-by-price spec](https://github.com/malbeclabs/edge-feed-spec/blob/main/market-by-price/spec.md) declares malformed and requires a subscriber to discard and count, or a reserved `Clear Side` or `Scope` value outside the enumerations the spec defines) therefore consumed a sequence number at the publisher, and the mutation it carried is lost. That is `gap`, the same end state a sequence gap reaches, and it is declared on the malformed record rather than after the reorder window: the window exists for deltas that may still arrive out of order, and this loss is already known. Holding the next ~16 deltas to wait for a hole that can never fill buys nothing.
+
+**The lost sequence is recorded, so the recovery does not re-walk the window.**
+The publisher consumed that `Per-Instrument Seq` and nothing will ever fill it.
+A recovery snapshot captured *before* the malformed message carries a `Last
+Instrument Seq` just behind that number, so without the record the instrument
+came back expecting exactly the sequence that cannot arrive: the buffered
+deltas read as a forward gap, filled the reorder window, and the gap branch
+cleared them and declared `per_instrument_gaps_total` — discarding a window of
+valid deltas and charging this book engine's own demotion to the counter that
+means mktdata never arrived. The demotion records the sequence, the next
+expected sequence steps over it, and the entry is dropped once the tracker has
+passed it.
 
 It increments `malformed_deltas_total{reason}`, never `per_instrument_gaps_total`. The gap counter measures records that never reached this process; a malformed record arrived intact and is a publisher defect, and an operator who cannot tell the two apart goes looking for datagram loss that is not there.
 

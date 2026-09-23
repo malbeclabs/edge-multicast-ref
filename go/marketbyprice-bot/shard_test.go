@@ -1269,3 +1269,119 @@ func TestApplyDelta_MalformedBookClearAheadOfExpectedCountsOnReceipt(t *testing.
 		t.Errorf("exactly one malformed delta, counted once: got %v want 1", got)
 	}
 }
+
+// A BookClear carrying a reserved Clear Side or Scope byte is a publisher
+// defect, and applying it would delete levels on a side the message never
+// named.
+//
+// The parser renders a byte outside the wire enumeration as "unknown", and this
+// bot's mappers used to fall through to 0 — so Clear Side 3 read as "bid",
+// scope 0 wiped the entire bid side, and the instrument stayed ready with a
+// half-empty book and nothing counted. The reserved value now reaches
+// bookClearMalformed as a sentinel and demotes under reasonMalformedOther.
+func TestApplyDelta_BookClearWithAReservedEnumIsMalformed(t *testing.T) {
+	for _, tc := range []struct{ name, clearSide, scope string }{
+		{"reserved clear side", "unknown", "entire_side"},
+		{"reserved scope", "bid", "unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewMetrics("test", "test")
+			s := NewShard(0, 1, NewEventsWriter(nil), m)
+			k := instKey{0, 11}
+			inst := readyInstrumentInShard(t, s, k, 5)
+			inst.Bids[900] = &LevelState{QtyRaw: 7}
+			inst.Asks[1100] = &LevelState{QtyRaw: 4}
+
+			evs := s.applyDelta(k, bookClearRec(11, 900, 6, tc.clearSide, tc.scope, 1000))
+
+			if len(evs) != 1 || evs[0].Kind != KindMalformedDelta {
+				t.Fatalf("events: %+v", evs)
+			}
+			if inst.Status != StatusGap {
+				t.Errorf("a reserved value must gap the instrument, got %v", inst.Status)
+			}
+			if got := malformedCount(m, reasonMalformedOther); got != 1 {
+				t.Errorf("malformed_deltas_total{other}: got %v want 1", got)
+			}
+			// The whole point: nothing was deleted on a side the message never
+			// named.
+			if len(inst.Bids) != 1 || len(inst.Asks) != 1 {
+				t.Errorf("no level may be cleared by a reserved value: bids=%d asks=%d", len(inst.Bids), len(inst.Asks))
+			}
+			if got := counterValue(m.PerInstrumentGapsTotal); got != 0 {
+				t.Errorf("a publisher defect must not read as mktdata loss: got %v want 0", got)
+			}
+		})
+	}
+}
+
+// The recovery snapshot is not guaranteed to be captured AFTER the malformed
+// message, and when it is captured before it, the instrument used to re-walk
+// the reorder window over a sequence that can never arrive.
+//
+// The publisher consumed the Per-Instrument Seq for the malformed record, so
+// the hole at that number is permanent. A snapshot whose Last Instrument Seq
+// sits just behind it leaves the tracker expecting exactly that number: every
+// buffered delta then read as a forward gap, the window filled, and the gap
+// branch cleared Pending and declared per_instrument_gaps_total — discarding a
+// full window of valid deltas and charging this book engine's own demotion to
+// the counter that means mktdata never arrived.
+//
+// demoteMalformed now records the lost sequence and NextExpectedInstrumentSeq
+// steps over it, so the recovery applies the buffered deltas instead.
+func TestApplyDelta_SnapshotBehindAMalformedSeqDoesNotReWalkTheWindow(t *testing.T) {
+	m := NewMetrics("test", "test")
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
+	k := instKey{0, 11}
+	inst := readyInstrumentInShard(t, s, k, 5)
+
+	// The malformed BookClear consumes per-instrument seq 6.
+	evs := s.applyDelta(k, bookClearRec(11, 900, 6, "both", "from_price", 1000))
+	if len(evs) != 1 || evs[0].Kind != KindMalformedDelta {
+		t.Fatalf("want one malformed_delta, got %+v", evs)
+	}
+	if inst.Status != StatusGap {
+		t.Fatalf("status: got %v want gap", inst.Status)
+	}
+
+	// One more than a full reorder window follows, and is buffered for replay.
+	// One past the window is what makes the gap branch reachable: at exactly
+	// reorderWindow the held records still fit and no gap is declared, so a
+	// test sized there would pass with the skip reverted.
+	const following = reorderWindow + 1
+	for i := 0; i < following; i++ {
+		s.applyDelta(k, levelUpdateRec(11, uint64(901+i), uint32(7+i), "bid", int64(3000+i), 5))
+	}
+	if got := len(s.deltaBuf[k]); got != following {
+		t.Fatalf("buffered: got %d want %d", got, following)
+	}
+
+	// The recovery snapshot was captured BEFORE the malformed message: its Last
+	// Instrument Seq is 5, the sequence behind the one that was lost.
+	inst.BeginSnapshot(1, 899, 0, 5, 0)
+	if err := inst.EndSnapshot(1, 899); err != nil {
+		t.Fatalf("snapshot commit: %v", err)
+	}
+	s.replayBuffer(k, inst)
+
+	if inst.Status != StatusReady {
+		t.Errorf("the buffered deltas must replay onto the snapshot, got %v", inst.Status)
+	}
+	if got := counterValue(m.PerInstrumentGapsTotal); got != 0 {
+		t.Errorf("the book engine must not charge its own demotion to mktdata loss: per_instrument_gaps_total = %v want 0", got)
+	}
+	if want := uint32(6 + following); inst.LastAppliedInstrumentSeq != want {
+		t.Errorf("every buffered delta must apply: tracker %d want %d", inst.LastAppliedInstrumentSeq, want)
+	}
+	if len(s.deltaBuf[k]) != 0 || s.bufferedN != 0 {
+		t.Errorf("nothing may be left buffered: %d records bufferedN=%d", len(s.deltaBuf[k]), s.bufferedN)
+	}
+	if got := malformedCount(m, reasonBookClearScopeSide); got != 1 {
+		t.Errorf("the malformed record is counted once: got %v want 1", got)
+	}
+	// The set is pruned once the tracker has passed the lost sequence, so it
+	// cannot grow for the life of the process.
+	if inst.LostInstrumentSeq != nil {
+		t.Errorf("the lost-sequence set must be pruned once passed, got %v", inst.LostInstrumentSeq)
+	}
+}
