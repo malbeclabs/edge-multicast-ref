@@ -659,7 +659,7 @@ pub enum StartupError {
     #[error("no configuration file: {usage}")]
     NoConfigPath { usage: &'static str },
 
-    /// An option the argument parser does not know.
+    /// An option the command-line reader does not know.
     ///
     /// Named, and never read as a path. An option that fell through to the
     /// configuration path would be opened as a file, so the refusal an operator

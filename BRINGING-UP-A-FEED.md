@@ -168,21 +168,25 @@ fallback: a `[adapter] kind` this binary did not register is a startup error
 naming every token it did, because *what is in this binary* is the question an
 operator cannot answer from the config file in front of them.
 
-The command line is the configuration path — bare, or after `--config` — plus
-`--version`/`-V` and `--help`/`-h`, which are answered wherever on the line they
-are written rather than in first position only. The arguments are read in order
-and the first decisive one answers: an option the parser does not know is
-refused by name rather than opened as a file, so a misspelled flag fails as the
-flag it is; two configuration files are refused naming both rather than one of
-them being dropped; an option left without its value is named as the option; and
-a flag that publishes nothing is answered from the flag itself, so `--version`
-reached before a misspelling prints the version and `--version` reached after
-one reports the misspelling. `--help` prints the accepted forms on stdout and
-exits 0.
+The command line is the configuration path — bare, after `--config`, or joined
+to it as `--config=<path>` — plus `--version`/`-V` and `--help`/`-h`, which are
+answered wherever on the line they are written rather than in first position
+only. The arguments are read in order and the first decisive one answers: an
+option the command-line reader does not know is refused by name rather than
+opened as a file, so a misspelled flag fails as the flag it is; two
+configuration files are refused naming both rather than one of them being
+dropped; an option left without its value is named as the option, in either
+spelling; and a flag that publishes nothing is answered from the flag itself,
+so `--version` reached before a misspelling prints the version and `--version`
+reached after one reports the misspelling. `--help` prints the accepted forms
+on stdout and exits 0.
 
 **`--version` writes one line to stdout and exits 0: the version, alone.** That
 is the string a deployment compares against the version it pinned, and the tag
-with the `v` removed, so the comparison is an equality rather than a parse.
+with the `v` removed, so the comparison is an equality rather than a parse. A
+version handed over with nothing in it, or with a line break inside it, is
+reported as `unknown`: one line that fails every comparison is an answer, and
+two lines are not a version.
 `run()` answers with the runtime's own version. A venue that releases on its own
 stream answers with its own — the whole of the change is which function `main`
 calls:
