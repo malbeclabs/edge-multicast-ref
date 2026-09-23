@@ -399,6 +399,17 @@ pub fn harness_both() -> Harness {
     harness_inner(&[feed(), depth_feed()], false)
 }
 
+/// The same, with a snapshot rotation on the depth block.
+///
+/// The opt-in [`depth_feed`] documents: a cycle running underneath the
+/// assertions about one pulled snapshot would put datagrams on the snapshot
+/// port that no test sent. What it is for here is the opposite — a test that
+/// wants every kind of traffic this publisher paces itself, on both channels.
+#[must_use]
+pub fn harness_both_with_rotation(cycle: Duration) -> Harness {
+    harness_inner(&[feed(), depth_feed_with_rotation(cycle)], false)
+}
+
 /// The four `[[feed]]` blocks of a publisher carrying two shards of both
 /// specifications: four channel instances over one published set.
 ///

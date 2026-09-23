@@ -372,6 +372,11 @@ fn declared_channel_ids_render_at_zero_from_startup() {
             "dz_publisher_refdata_instruments_current",
             &[("channel_id", channel_id)],
         );
+        assert_zero(
+            &rendered,
+            "dz_publisher_channel_last_published_timestamp_seconds",
+            &[("channel_id", channel_id)],
+        );
     }
 }
 
@@ -380,8 +385,8 @@ fn declared_channel_ids_render_at_zero_from_startup() {
 /// Read off the exposition rather than worked out from the config, because a
 /// test that computes the number the same way the code does passes against
 /// both of them being wrong. It also names families rather than looking for
-/// the ones it expects, so a fifth family that starts carrying `channel_id`
-/// arrives here as a key nothing asserted.
+/// the ones it expects, so a family that starts carrying `channel_id` without
+/// being listed arrives here as a key nothing asserted.
 fn channel_keyed_series(rendered: &str) -> BTreeMap<&str, usize> {
     let mut counts = BTreeMap::new();
     for line in rendered.lines() {
@@ -426,13 +431,14 @@ fn precreated_channel_keyed(channel_ids: &[u8]) -> BTreeMap<&'static str, usize>
 const CHANNEL_KEYED_FAMILIES: &[&str] = &[
     "dz_publisher_egress_sequence_current",
     "dz_publisher_egress_heartbeat_last_sent_timestamp_seconds",
+    "dz_publisher_channel_last_published_timestamp_seconds",
     "dz_publisher_refdata_manifest_seq",
     "dz_publisher_refdata_manifest_valid",
     "dz_publisher_refdata_instruments_current",
 ];
 
 #[test]
-fn six_channel_keyed_series_and_one_instrument_count_are_precreated_per_channel_id() {
+fn seven_channel_keyed_series_and_one_instrument_count_are_precreated_per_channel_id() {
     // The pre-created surface is sized rather than discovered: it is entirely
     // built at startup, so a publisher that declares many channel instances
     // pays all of it before its first datagram. The two sizes below are a
@@ -450,11 +456,12 @@ fn six_channel_keyed_series_and_one_instrument_count_are_precreated_per_channel_
                 "dz_publisher_egress_heartbeat_last_sent_timestamp_seconds",
                 2
             ),
+            ("dz_publisher_channel_last_published_timestamp_seconds", 2),
             ("dz_publisher_refdata_manifest_seq", 2),
             ("dz_publisher_refdata_manifest_valid", 2),
             ("dz_publisher_refdata_instruments_current", 2),
         ]),
-        "12 channel-keyed series plus 2 for the instrument count"
+        "14 channel-keyed series plus 2 for the instrument count"
     );
 
     let sixty_two: Vec<u8> = (0..62).collect();
@@ -467,27 +474,28 @@ fn six_channel_keyed_series_and_one_instrument_count_are_precreated_per_channel_
                 "dz_publisher_egress_heartbeat_last_sent_timestamp_seconds",
                 62
             ),
+            ("dz_publisher_channel_last_published_timestamp_seconds", 62),
             ("dz_publisher_refdata_manifest_seq", 62),
             ("dz_publisher_refdata_manifest_valid", 62),
             ("dz_publisher_refdata_instruments_current", 62),
         ]),
-        "372 channel-keyed series plus 62 for the instrument count"
+        "434 channel-keyed series plus 62 for the instrument count"
     );
 
     // Stated as the two totals as well: the tables above are what a reader
     // checks line by line, and the totals are what an operator sizes a scrape
     // on.
     const INSTRUMENT_COUNT: &str = "dz_publisher_refdata_instruments_current";
-    let four_families = |counts: &BTreeMap<&str, usize>| {
+    let five_families = |counts: &BTreeMap<&str, usize>| {
         counts
             .iter()
             .filter(|(family, _)| **family != INSTRUMENT_COUNT)
             .map(|(_, count)| *count)
             .sum::<usize>()
     };
-    assert_eq!(four_families(&at_two), 12);
+    assert_eq!(five_families(&at_two), 14);
     assert_eq!(at_two[INSTRUMENT_COUNT], 2);
-    assert_eq!(four_families(&at_sixty_two), 372);
+    assert_eq!(five_families(&at_sixty_two), 434);
     assert_eq!(at_sixty_two[INSTRUMENT_COUNT], 62);
 }
 

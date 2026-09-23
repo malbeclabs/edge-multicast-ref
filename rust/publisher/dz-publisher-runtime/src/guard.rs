@@ -78,6 +78,17 @@ pub enum Upstream {
 /// process over that would restart a publisher every time a venue went quiet
 /// overnight, and would restart the busy feeds along with the quiet one.
 ///
+/// That leaves a gap this guard is the wrong instrument for: one feed of
+/// several whose upstream has died, while a sibling keeps publishing and keeps
+/// feeding this guard. What separates a *quiet* feed from a *dead* one is
+/// whether its siblings share the silence, which is a comparison across
+/// channels rather than a threshold on one — and a comparison whose window is
+/// the venue's calendar rather than anything this process knows, so it belongs
+/// in an alert expression and not in a guard that ends a process.
+/// `dz_publisher_channel_last_published_timestamp_seconds{channel_id}` is what
+/// makes the comparison writable; see
+/// [`published`](Self::published).
+///
 /// Not *no upstream payloads* either. That silence is the transport's, it is
 /// measured by the driver against `[ingress] idle_timeout`, and its answer is to
 /// reconnect — which is a far cheaper and more specific action than ending the
@@ -91,13 +102,20 @@ pub enum Upstream {
 /// adapter is no longer holding handles for — and none of those recover without
 /// a restart, which is why this one ends the process.
 ///
-/// # Recording, and the metric that goes with it
+/// # Recording, and the two metrics that go with it
 ///
 /// [`published`](Self::published) also sets
 /// `dz_publisher_idle_guard_last_update_timestamp_seconds`, which is the series
 /// an operator writes the staleness rule against. Its own HELP text asks for
 /// that rule to be guarded on `dz_publisher_uptime_seconds`, because the gauge
 /// is pre-created at 0 and `time() - 0` reads as an age of decades.
+///
+/// The same event sets
+/// `dz_publisher_channel_last_published_timestamp_seconds{channel_id}` for the
+/// channel that carried the message. That series is the one a multi-feed
+/// publisher's silence is visible in: the process-wide gauge above answers
+/// *has this publisher published*, and a publisher whose busy feed is
+/// publishing answers yes whatever its siblings are doing.
 #[derive(Debug, Clone)]
 pub struct IdleGuard {
     window: Duration,
@@ -136,6 +154,11 @@ impl IdleGuard {
     }
 
     /// A message reached the wire.
+    ///
+    /// Which channel carried it is not this guard's question — the conjunction
+    /// it measures is the process's — and it is
+    /// [`Publisher::published`](crate::Publisher)'s, which records this and the
+    /// per-channel gauge from one place.
     pub fn published(&mut self, now_ns: u64) {
         self.started_ns.get_or_insert(now_ns);
         self.last_published_ns = Some(now_ns);
