@@ -13,6 +13,9 @@
 //! }
 //! ```
 //!
+//! A binary whose deployment pins its own version says one more thing —
+//! [`run_with_version`] takes it, and answers `--version` with it.
+//!
 //! Everything else is here: the configuration document, the guards, the
 //! signals, the metrics, the egress and the reference data. This crate is a
 //! *library* rather than a service for that reason — Rust has no runtime
@@ -206,4 +209,4 @@ pub use publisher::{
 };
 pub use replay::ReplayInput;
 pub use rotation::SnapshotRotation;
-pub use run::{check_sources, compose_feeds, run, KernelPorts, PortOpener};
+pub use run::{check_sources, compose_feeds, run, run_with_version, KernelPorts, PortOpener};

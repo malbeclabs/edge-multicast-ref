@@ -864,13 +864,6 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
             .set_venue_timestamps_available(i64::from(self.venue_timestamp_kind.is_some()));
     }
 
-    /// Record build identity, once, at startup.
-    pub fn record_build_info(&self, version: &str, commit: &str, toolchain: &str) {
-        self.metrics
-            .process()
-            .set_build_info(version, commit, toolchain);
-    }
-
     /// Drain the adapter's listings if the poll is due.
     ///
     /// The adapter is an argument rather than a field, for the same reason the

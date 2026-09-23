@@ -59,7 +59,7 @@ Without them the refusal at startup is correct and confusing.
 | `dz-adapter-core` | the boundary a venue implements — the one crate every venue compiles against |
 | `dz-edge-core`, `dz-edge-tob`, `dz-edge-mbp`, `dz-edge-refdata` | the wire format |
 | `dz-publisher-lowering`, `-egress`, `-refdata`, `-metrics` | the shared publisher pieces |
-| `dz-publisher-runtime` | `run()`, the function a venue's `main` calls |
+| `dz-publisher-runtime` | `run()`, the function a venue's `main` calls — or `run_with_version()`, which takes the version the binary answers `--version` with |
 | `dz-ingress-core`, `dz-ingress-websocket` | the transports |
 | `dz-recorder-core`, `-capture`, `-archive`, `-replay`, `-loss`, `-health` | a recorder built out of libraries |
 | `dz-recorder-relower` | offline re-lowering, for the analysis tier |
