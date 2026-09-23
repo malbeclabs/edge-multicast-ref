@@ -452,8 +452,9 @@ fn compose_and_run(
     // registry, the venue's own adapter, the lowering, the sockets — with
     // recorded upstream bytes in place of a live venue. The adapter cannot tell
     // the difference, which is the property that makes the exercise worth
-    // anything; the transport the venue built is dropped unused, and a line
-    // says so rather than leaving an operator to wonder why nothing connected.
+    // anything; the transport the venue built is never connected — it is held,
+    // unused, for the length of the run — and a line says so rather than
+    // leaving an operator to wonder why nothing connected.
     //
     // **One replaying input replaces every source**, named after the primary. A
     // fixture directory is one recording, so replaying it once per source would
@@ -487,10 +488,17 @@ fn compose_and_run(
         let held = adapter.lock().unwrap_or_else(|held| held.into_inner());
         held.message_types().to_vec()
     };
-    // Every source's name, so that `ingress_connection_state` is pre-created at
-    // 0 for each of them: a publisher whose second upstream never came up is
-    // the case the alert exists for, and a series that appeared on first
-    // success would not carry it.
+    // Every input's connection name, so that `ingress_connection_state` is
+    // pre-created at 0 for each of them: a publisher whose second upstream never
+    // came up is the case the alert exists for, and a series that appeared on
+    // first success would not carry it.
+    //
+    // **The list this reads is the substituted one**, so a replay run
+    // pre-creates one `connection` value and not one per declared `[[source]]`
+    // — every family labelled by `connection` comes up as narrow as the run is.
+    // That is the one consequence of the substitution above a venue is likely
+    // to plan against without noticing, so `BRINGING-UP-A-FEED.md` states it
+    // beside the offline proof.
     let connections: Vec<&'static str> = inputs
         .iter()
         .map(|input| input.connection().as_str())
