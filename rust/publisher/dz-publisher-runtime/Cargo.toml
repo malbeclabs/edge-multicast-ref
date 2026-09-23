@@ -62,3 +62,10 @@ tokio = { version = "1", default-features = false, features = [
 # `a_transport_this_binary_was_not_built_with_is_a_different_error`, which uses
 # a kind the feature does not cover.
 dz-ingress-core = { path = "../../ingress/dz-ingress-core", features = ["uds"] }
+
+# `test-util` on top of what the library already takes. `ReplayInput::connect`
+# waits `SETTLE` before it yields, for the reason its own comment gives, and a
+# paused clock is what keeps a test of the refusal that follows from waiting
+# it out — this crate's rule that no test has to sleep applies to its own
+# tests too.
+tokio = { version = "1", default-features = false, features = ["test-util"] }
