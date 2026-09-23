@@ -2,13 +2,12 @@ package tob
 
 import (
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
-	"strconv"
 	"testing"
+
+	"github.com/malbeclabs/edge-multicast-ref/go/internal/golden"
 )
 
 // The golden vectors are the cross-language contract. These five were
@@ -85,17 +84,13 @@ func header(t *testing.T, buf []byte, wantType uint8, wantSize int, wantFlags ui
 
 // goldenField is one row of a vector's `fields` block: the manifest's name for
 // it, the value this parser decoded, and the value the manifest states.
-type goldenField struct {
-	name string
-	got  int64
-	want int64
-}
+type goldenField = golden.Field
 
 func checkFields(t *testing.T, fields []goldenField) {
 	t.Helper()
 	for _, f := range fields {
-		if f.got != f.want {
-			t.Errorf("%s = %d, want %d", f.name, f.got, f.want)
+		if f.Got != f.Want {
+			t.Errorf("%s = %d, want %d", f.Name, f.Got, f.Want)
 		}
 	}
 }
@@ -103,17 +98,13 @@ func checkFields(t *testing.T, fields []goldenField) {
 // goldenText is a goldenField for the fixed-width ASCII fields. This decoder
 // returns them null-padded and the rest of the parser trims with trimNull, so
 // the comparison trims too.
-type goldenText struct {
-	name string
-	got  string
-	want string
-}
+type goldenText = golden.Text
 
 func checkText(t *testing.T, fields []goldenText) {
 	t.Helper()
 	for _, f := range fields {
-		if got := trimNull(f.got); got != f.want {
-			t.Errorf("%s = %q, want %q", f.name, got, f.want)
+		if got := trimNull(f.Got); got != f.Want {
+			t.Errorf("%s = %q, want %q", f.Name, got, f.Want)
 		}
 	}
 }
@@ -141,7 +132,7 @@ func decodeGolden[T any](t *testing.T, body []byte, msgType uint8, schemaVersion
 // two tests need it. The case below asserts the rows against the bytes; the
 // manifest test asserts the same rows against manifest.json. Stated once, they
 // cannot disagree with each other, which is the only way a comment naming the
-// manifest as the source of these values can be true of the code.
+// manifest as the authority for these values can be true of the code.
 type goldenVector struct {
 	file   string
 	typeID uint8
@@ -161,16 +152,16 @@ func goldenVectors() []goldenVector {
 			rows: func(t *testing.T, body []byte) ([]goldenField, []goldenText) {
 				q := decodeGolden[topOfBookQuote](t, body, msgQuote, schemaVersionV3)
 				return []goldenField{
-					{"instrument_id", int64(q.InstrumentID), 1},
-					{"source_id", int64(q.SourceID), 2},
-					{"update_flags", int64(q.UpdateFlags), 3},
-					{"source_timestamp_ns", int64(q.SourceTimestamp), 1700000000000000000},
-					{"bid_price", q.BidPrice, 9999500},
-					{"bid_qty", int64(q.BidQty), 12500},
-					{"ask_price", q.AskPrice, 10000500},
-					{"ask_qty", int64(q.AskQty), 7250},
-					{"bid_source_count", int64(q.BidSourceCount), 3},
-					{"ask_source_count", int64(q.AskSourceCount), 4},
+					{Name: "instrument_id", Got: int64(q.InstrumentID), Want: 1},
+					{Name: "source_id", Got: int64(q.SourceID), Want: 2},
+					{Name: "update_flags", Got: int64(q.UpdateFlags), Want: 3},
+					{Name: "source_timestamp_ns", Got: int64(q.SourceTimestamp), Want: 1700000000000000000},
+					{Name: "bid_price", Got: q.BidPrice, Want: 9999500},
+					{Name: "bid_qty", Got: int64(q.BidQty), Want: 12500},
+					{Name: "ask_price", Got: q.AskPrice, Want: 10000500},
+					{Name: "ask_qty", Got: int64(q.AskQty), Want: 7250},
+					{Name: "bid_source_count", Got: int64(q.BidSourceCount), Want: 3},
+					{Name: "ask_source_count", Got: int64(q.AskSourceCount), Want: 4},
 				}, nil
 			},
 		},
@@ -179,15 +170,15 @@ func goldenVectors() []goldenVector {
 			rows: func(t *testing.T, body []byte) ([]goldenField, []goldenText) {
 				tr := decodeGolden[topOfBookTrade](t, body, msgTrade, schemaVersionV3)
 				return []goldenField{
-					{"instrument_id", int64(tr.InstrumentID), 1},
-					{"source_id", int64(tr.SourceID), 2},
-					{"aggressor_side", int64(tr.AggressorSide), 1},
-					{"trade_flags", int64(tr.TradeFlags), 2},
-					{"source_timestamp_ns", int64(tr.SourceTimestamp), 1700000000000000001},
-					{"trade_price", tr.TradePrice, 10000000},
-					{"trade_qty", int64(tr.TradeQty), 500},
-					{"trade_id", int64(tr.TradeID), 987654321},
-					{"cumulative_volume", int64(tr.CumulativeVolume), 1000000},
+					{Name: "instrument_id", Got: int64(tr.InstrumentID), Want: 1},
+					{Name: "source_id", Got: int64(tr.SourceID), Want: 2},
+					{Name: "aggressor_side", Got: int64(tr.AggressorSide), Want: 1},
+					{Name: "trade_flags", Got: int64(tr.TradeFlags), Want: 2},
+					{Name: "source_timestamp_ns", Got: int64(tr.SourceTimestamp), Want: 1700000000000000001},
+					{Name: "trade_price", Got: tr.TradePrice, Want: 10000000},
+					{Name: "trade_qty", Got: int64(tr.TradeQty), Want: 500},
+					{Name: "trade_id", Got: int64(tr.TradeID), Want: 987654321},
+					{Name: "cumulative_volume", Got: int64(tr.CumulativeVolume), Want: 1000000},
 				}, nil
 			},
 		},
@@ -214,11 +205,11 @@ func goldenVectors() []goldenVector {
 			rows: func(t *testing.T, body []byte) ([]goldenField, []goldenText) {
 				m := decodeGolden[topOfBookManifestSummary](t, body, msgManifestSummary, schemaVersionV3)
 				return []goldenField{
-					{"channel_id", int64(m.ChannelID), 7},
-					{"valid", int64(m.Valid), 1},
-					{"manifest_seq", int64(m.ManifestSeq), 9},
-					{"instrument_count", int64(m.InstrumentCount), 1234},
-					{"timestamp_ns", int64(m.Timestamp), 1700000000000000002},
+					{Name: "channel_id", Got: int64(m.ChannelID), Want: 7},
+					{Name: "valid", Got: int64(m.Valid), Want: 1},
+					{Name: "manifest_seq", Got: int64(m.ManifestSeq), Want: 9},
+					{Name: "instrument_count", Got: int64(m.InstrumentCount), Want: 1234},
+					{Name: "timestamp_ns", Got: int64(m.Timestamp), Want: 1700000000000000002},
 				}, nil
 			},
 		},
@@ -230,27 +221,27 @@ func goldenVectors() []goldenVector {
 // states it decodes as 0, which is the Source ID Registry's Unknown value.
 func instDefFields(d *topOfBookInstrumentDef, wantSourceID int64) []goldenField {
 	return []goldenField{
-		{"instrument_id", int64(d.InstrumentID), 1},
-		{"source_id", int64(d.SourceID), wantSourceID},
-		{"asset_class", int64(d.AssetClass), 1},
-		{"price_exponent", int64(d.PriceExponent), -2},
-		{"qty_exponent", int64(d.QtyExponent), -8},
-		{"market_model", int64(d.MarketModel), 1},
-		{"tick_size", d.TickSize, 1},
-		{"lot_size", int64(d.LotSize), 1000},
-		{"contract_value", int64(d.ContractValue), 0},
-		{"expiry_ns", int64(d.Expiry), 0},
-		{"settle_type", int64(d.SettleType), 0},
-		{"price_bound", int64(d.PriceBound), 0},
-		{"manifest_seq", int64(d.ManifestSeq), 9},
+		{Name: "instrument_id", Got: int64(d.InstrumentID), Want: 1},
+		{Name: "source_id", Got: int64(d.SourceID), Want: wantSourceID},
+		{Name: "asset_class", Got: int64(d.AssetClass), Want: 1},
+		{Name: "price_exponent", Got: int64(d.PriceExponent), Want: -2},
+		{Name: "qty_exponent", Got: int64(d.QtyExponent), Want: -8},
+		{Name: "market_model", Got: int64(d.MarketModel), Want: 1},
+		{Name: "tick_size", Got: d.TickSize, Want: 1},
+		{Name: "lot_size", Got: int64(d.LotSize), Want: 1000},
+		{Name: "contract_value", Got: int64(d.ContractValue), Want: 0},
+		{Name: "expiry_ns", Got: int64(d.Expiry), Want: 0},
+		{Name: "settle_type", Got: int64(d.SettleType), Want: 0},
+		{Name: "price_bound", Got: int64(d.PriceBound), Want: 0},
+		{Name: "manifest_seq", Got: int64(d.ManifestSeq), Want: 9},
 	}
 }
 
 func instDefText(d *topOfBookInstrumentDef) []goldenText {
 	return []goldenText{
-		{"symbol", d.Symbol, "BTC-USDT"},
-		{"leg1", d.Leg1, "BTC"},
-		{"leg2", d.Leg2, "USDT"},
+		{Name: "symbol", Got: d.Symbol, Want: "BTC-USDT"},
+		{Name: "leg1", Got: d.Leg1, Want: "BTC"},
+		{Name: "leg2", Got: d.Leg2, Want: "USDT"},
 	}
 }
 
@@ -301,44 +292,6 @@ func TestGoldenManifestSummary(t *testing.T) { runGoldenVector(t, "manifest-summ
 // The manifest, made load-bearing
 // ---------------------------------------------------------------------------
 
-// goldenManifest is testdata/golden/manifest.json reduced to the keys this
-// suite holds itself to. The rest — `message`, `feed`, `note`, `lowered_from`,
-// `spec_revision` — is prose about a vector rather than a value to assert.
-type goldenManifest struct {
-	Vectors []goldenManifestVector `json:"vectors"`
-}
-
-type goldenManifestVector struct {
-	File          string `json:"file"`
-	TypeID        string `json:"type_id"`
-	Size          int    `json:"size"`
-	SchemaVersion uint8  `json:"schema_version"`
-	FlagsOnWire   uint16 `json:"flags_on_wire"`
-	// Raw, so that a nanosecond timestamp is read as the integer it is. Decoded
-	// into interface{} it would become a float64 and 1700000000000000003 would
-	// compare equal to 1700000000000000002.
-	Fields map[string]json.RawMessage `json:"fields"`
-}
-
-func readGoldenManifest(t *testing.T) map[string]goldenManifestVector {
-	t.Helper()
-	var m goldenManifest
-	if err := json.Unmarshal(goldenBytes(t, "manifest.json"), &m); err != nil {
-		t.Fatalf("parse manifest.json: %v", err)
-	}
-	if len(m.Vectors) == 0 {
-		t.Fatalf("manifest.json lists no vectors")
-	}
-	byFile := make(map[string]goldenManifestVector, len(m.Vectors))
-	for _, v := range m.Vectors {
-		if _, dup := byFile[v.File]; dup {
-			t.Fatalf("manifest.json lists %s twice", v.File)
-		}
-		byFile[v.File] = v
-	}
-	return byFile
-}
-
 // TestGoldenManifestStatesWhatTheseCasesAssert is what makes the manifest the
 // source of truth this file's header calls it.
 //
@@ -354,7 +307,7 @@ func readGoldenManifest(t *testing.T) map[string]goldenManifestVector {
 // fails its own case. Between the two, the only arrangement that passes is one
 // where the manifest, the bytes and these assertions all say the same thing.
 func TestGoldenManifestStatesWhatTheseCasesAssert(t *testing.T) {
-	stated := readGoldenManifest(t)
+	stated := golden.Read(t, goldenDir)
 	for _, v := range goldenVectors() {
 		t.Run(v.file, func(t *testing.T) {
 			m, ok := stated[v.file]
@@ -374,59 +327,7 @@ func TestGoldenManifestStatesWhatTheseCasesAssert(t *testing.T) {
 				t.Errorf("schema_version = %d, want %d", m.SchemaVersion, v.schema)
 			}
 			fields, text := v.decodeRows(t)
-			checkManifestFields(t, m, fields, text)
+			golden.CheckFields(t, m, fields, text)
 		})
-	}
-}
-
-// checkManifestFields compares one vector's `fields` block with the rows this
-// suite asserts, both ways round.
-func checkManifestFields(t *testing.T, m goldenManifestVector, fields []goldenField, text []goldenText) {
-	t.Helper()
-	asserted := make(map[string]bool, len(fields)+len(text))
-	for _, f := range fields {
-		asserted[f.name] = true
-		raw, ok := m.Fields[f.name]
-		if !ok {
-			t.Errorf("fields has no %s, which this suite asserts as %d", f.name, f.want)
-			continue
-		}
-		got, err := strconv.ParseInt(string(raw), 10, 64)
-		if err != nil {
-			t.Errorf("fields.%s = %s, which is not an integer: %v", f.name, raw, err)
-			continue
-		}
-		if got != f.want {
-			t.Errorf("fields.%s = %d, but this suite asserts %d", f.name, got, f.want)
-		}
-	}
-	for _, f := range text {
-		asserted[f.name] = true
-		raw, ok := m.Fields[f.name]
-		if !ok {
-			t.Errorf("fields has no %s, which this suite asserts as %q", f.name, f.want)
-			continue
-		}
-		var got string
-		if err := json.Unmarshal(raw, &got); err != nil {
-			t.Errorf("fields.%s = %s, which is not a string: %v", f.name, raw, err)
-			continue
-		}
-		if got != f.want {
-			t.Errorf("fields.%s = %q, but this suite asserts %q", f.name, got, f.want)
-		}
-	}
-	// The other direction. A field added to the manifest and asserted nowhere
-	// is a value nothing holds the decoder to, which is exactly what this
-	// test refuses to let the manifest carry.
-	var unasserted []string
-	for name := range m.Fields {
-		if !asserted[name] {
-			unasserted = append(unasserted, name)
-		}
-	}
-	sort.Strings(unasserted)
-	for _, name := range unasserted {
-		t.Errorf("fields.%s = %s, which this suite asserts nowhere", name, m.Fields[name])
 	}
 }

@@ -52,6 +52,17 @@ Each also checks the `size`, `type_id`, `flags_on_wire` and `schema_version` the
 manifest records. So the manifest cannot drift from the bytes, and an assertion
 cannot drift from the manifest, in either language and either direction.
 
+The `lowered_from` block of the five `-from-event-` vectors is held the same
+way, and separately, because it is the only thing that makes those bytes
+reproducible: `fields` says what came out, `lowered_from` says what went in, and
+no assertion over the output can catch a recipe that does not produce it.
+`the_manifest_states_the_event_these_vectors_were_lowered_from` in
+`dz-publisher-lowering` builds each block from the same constants the fixtures
+hand to the lowering and compares every key both ways, so a rewritten `px`,
+`side`, `anchor_seq` or `depth_bound` fails, and so does a key stated there and
+asserted nowhere. Only `framing`, `note` and `preceded_by` are exempt, as prose
+about the fixture rather than a value the lowering read.
+
 Who reads what is worth stating exactly, because a vector no suite reads and no
 document mentions is invisible rather than merely unbound — which is how the
 five `-from-event-` vectors below stayed bound in one language only. Every
@@ -129,7 +140,7 @@ is what they are.** They are what the lowering encodes, not what leaves the
 publisher: bit 0 is stamped at `push`, from the port, after the body is
 encoded. The codec's own snapshot vectors are taken after that stamp and carry
 1. An implementation reproducing these bytes has the flag still to do, and the
-`flags_on_wire` these state is what says so.
+`flags_on_wire` value records that fact.
 
 They exist separately from the codec's own vectors rather than replacing them,
 and the reason is worth stating: those vectors set every field to a distinct

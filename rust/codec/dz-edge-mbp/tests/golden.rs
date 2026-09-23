@@ -245,9 +245,27 @@ fn manifest_entry(file: &str) -> Value {
     let text =
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let doc: Value = serde_json::from_str(&text).expect("manifest.json is JSON");
-    doc["vectors"]
+    let vectors = doc["vectors"]
         .as_array()
-        .expect("manifest.json has a `vectors` array")
+        .expect("manifest.json has a `vectors` array");
+    // Every `file` is rejected for being stated twice before anything is looked
+    // up, which is what the Go readers do (`readGoldenManifest` builds a map and
+    // fails on a repeated `file`). A bare `find` answers with the first of two
+    // entries for one vector and never reads the second, so a manifest carrying
+    // a correct entry followed by a contradicting one would leave this suite
+    // green while stating two different things about the same bytes.
+    let mut seen = std::collections::BTreeSet::new();
+    for vector in vectors {
+        let name = vector["file"]
+            .as_str()
+            .expect("a vector's `file` is a string");
+        assert!(
+            seen.insert(name),
+            "manifest.json lists {name} twice: the first entry would answer for both and the \
+             second binds nothing"
+        );
+    }
+    vectors
         .iter()
         .find(|v| v["file"] == file)
         .unwrap_or_else(|| panic!("manifest.json carries no entry for {file}"))
