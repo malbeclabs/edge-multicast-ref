@@ -194,7 +194,21 @@ channel instance. It is the same change.
    group. Its one blind spot — a series that restarts at 0 under an unchanged
    `Reset Count` — is bounded, re-baselined and counted; see *A restart the era
    does not announce*.
-7. Every persisted row states which channel instance produced it.
+7. Every persisted row states which channel instance produced it, and the
+   criterion is scoped around the two tables that cannot rather than asserted
+   over them. A row written from a **record** carries the instance the record
+   arrived on. A row written from **book state** has no record in hand: the
+   `SnapshotWriter` flushes `level_snapshots` on a tick, from the instrument's
+   accumulated book, and after the key splits its `instKey` carries
+   `publisherChannel{addr, ch}` — the destination port is deliberately not in
+   it, because a book is built from all three port roles and belongs to none.
+   There is no port to write. So `level_snapshots.dst_port` holds `0`, the
+   sentinel meaning "assembled from the publisher channel rather than received
+   on one port", and `source_addr` is still the real one. `book_top` omits both
+   columns for the same reason and is out of this criterion entirely. What the
+   criterion does assert for those two tables is the publisher channel: a row
+   states which *publisher* produced it, and two paths carrying one
+   `Channel ID` remain distinguishable.
 8. No insert is ever accepted with a field the table has no column for. Exactly
    one window exists in which a process reads a field the other side is not yet
    writing — a book-builder rolled ahead of its parser — and in it the
@@ -258,7 +272,7 @@ assignment.
 In `Runner.receive`, in the loop that already stamps `RecvTSNS` and
 `RecvTSKind` (`go/marketbyorder-parser/runner.go:224-229`,
 `go/marketbyprice-parser/runner.go:240-245`). Both values are in hand there:
-`src` is returned by `readDatagram` (`runner.go:188`) and normalised by
+`src` is returned by `udp.Reader.ReadDatagram` (`runner.go:220`, the shared receive path #153 moved into `go/internal/udp`) and normalised by
 `srcAddr`, and the destination port number reaches the goroutine by passing the
 whole `portConfig` into `receive` instead of only `pc.Label`
 (`runner.go:144-148`).
@@ -347,16 +361,29 @@ detection is per `channelInstance`, which is the series the publisher numbers,
 and recovery state is per publisher channel, which is the unit the publisher
 resets and the unit whose three port roles carry one instrument between them.
 
-Both types are declared once in each of the four modules that need them — both
-parsers and both book-builders — rather than once in `go/internal/`. `go/go.work`
-lists nine separate Go modules and of the four only `marketbyprice-bot` depends
-on `go/internal` today: `grep -ln 'go/internal' go/*/go.mod` names it,
-`kernel-receiver` and `xdp-receiver`, and nothing else. `marketbyorder-bot`,
-`marketbyorder-parser` and `marketbyprice-parser` would each gain a module
-dependency and a `replace` directive for two small comparable structs. The tree
-already duplicates `Record` four times for exactly that reason, and the
-duplication is the cheaper edge. The parsers hold no book, so they declare
-`channelInstance` alone; the book-builders declare both.
+Both types are declared **once, in `go/internal/`**, and the four modules that
+need them — both parsers and both book-builders — import them.
+
+This reverses an earlier decision in this document, and the reason it reversed
+is that its premise expired under #153. That decision counted three of the four
+modules as having to gain a module dependency and a `replace` directive for two
+small comparable structs, and concluded the duplication was the cheaper edge.
+#153 moved the parsers' sinks and UDP receive path into `go/internal`, so
+`grep -ln 'go/internal' go/*/go.mod` now names `marketbyorder-parser`,
+`marketbyprice-parser`, `topofbook-parser`, `marketbyprice-bot`,
+`kernel-receiver` and `xdp-receiver`. Of the four modules here, only
+`marketbyorder-bot` would gain anything, and it gains one dependency on a module
+its two siblings already carry.
+
+One copy is also the stronger shape for what these types are. They are the
+definition of the key the glossary mandates, and four copies is four places for
+that definition to drift while every suite stays green — the same argument that
+moved the golden-vector manifest reader into `go/internal/golden` in #159. The
+duplicated `Record` is not a counter-example: the decoders are deliberately
+independent readings of the spec, and a comparable two-field key is not.
+
+The parsers hold no book, so they use `channelInstance` alone; the book-builders
+use both.
 
 `channelInstance` replaces `pubKey` in both parsers. Within one `receive`
 goroutine the `port` field is constant, so it is redundant *there* — and that
@@ -672,7 +699,7 @@ it can do is key on what it observes, which is this change.
 ### The sinks need no change
 
 `JSONFileSink.Write` encodes `&records[i]` whole
-(`go/marketbyorder-parser/sink_json.go:32`) and `SocketSink` marshals the same
+(`go/internal/sink/json.go`, where #153 moved it from each parser's `sink_json.go`) and `SocketSink` marshals the same
 struct, so both carry the new keys as soon as the struct has them. On the
 reading side both book-builders decode with `encoding/json`, which ignores an
 unknown key — `json.Unmarshal` at `go/marketbyorder-bot/bot.go:90` and a

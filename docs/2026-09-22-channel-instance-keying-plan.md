@@ -227,7 +227,7 @@ below that would otherwise be written wrong.
 - `go/marketbyorder-bot/clickhouse.go` + `clickhouse_test.go`
 - `go/topofbook-bot/clickhouse.go` + `clickhouse_test.go`
 - `go/marketbyorder-parser/`: `runner.go`, `parser.go`, `seqtracker_test.go`,
-  `sink_json_test.go`, `README.md`
+  `go/internal/sink/json_test.go`, `README.md`
 - `go/marketbyprice-parser/`: the same set, plus `README.md`'s JSONL example
 - `go/marketbyorder-bot/`: `main.go`, `record.go`, `coordinator.go`, `shard.go`,
   `events_writer.go`, `snapshot_writer.go`, `metrics.go`, `main_test.go`,
@@ -378,8 +378,16 @@ two statements of one fact and both are required.
 
 ## Task 4: `channelInstance` and `publisherChannel`, and the parsers' trackers keyed on the first
 
-**Files:** `go/marketbyorder-parser/runner.go` + `seqtracker_test.go`,
-`go/marketbyprice-parser/runner.go` + `seqtracker_test.go`
+**Files:** `go/internal/channel/channel.go` + `channel_test.go`,
+`go/marketbyorder-parser/runner.go` + `seqtracker_test.go`,
+`go/marketbyprice-parser/runner.go` + `seqtracker_test.go`,
+`go/marketbyorder-bot/go.mod` (the one module that gains the dependency)
+
+Both types are declared **once**, in `go/internal`, for the reason the design
+gives under *Two keys*: three of the four modules that need them already depend
+on it after #153, so the duplication this plan originally chose now costs four
+definitions to save one `require` line. `marketbyorder-bot` gains the dependency
+and the `replace` directive; the other three already have both.
 
 `pubKey{src netip.Addr, ch uint8}` (`runner.go:31` in both) becomes:
 
@@ -516,8 +524,8 @@ assignment moves.
 ## Task 6: The record's two fields on the book-builder side, and the round trip
 
 **Files:** `go/marketbyorder-bot/record.go`, `go/marketbyprice-bot/record.go`,
-`go/marketbyorder-parser/sink_json_test.go`,
-`go/marketbyprice-parser/sink_json_test.go`,
+`go/internal/sink/json_test.go` (one file, not one per parser: #153 moved the
+sinks into `go/internal`),
 `go/marketbyorder-bot/bot_test.go`, `go/marketbyprice-bot/bot_test.go`
 
 The same two fields, with the same JSON keys, on both book-builders' `Record`
@@ -527,7 +535,7 @@ ignore it, which is a deliberate intermediate state and the last one that
 changes no behaviour.
 
 The sinks need no change: `JSONFileSink.Write` encodes `&records[i]` whole
-(`go/marketbyorder-parser/sink_json.go:32`) and `SocketSink` marshals the same
+(`go/internal/sink/json.go`, where #153 moved it from each parser's `sink_json.go`) and `SocketSink` marshals the same
 struct.
 
 - [ ] **Step 1: Write the failing tests.** Parser side: the JSONL line a
@@ -600,22 +608,35 @@ restart would raise three barriers and each would wipe a third of a book.
 **Files:** `go/marketbyorder-bot/coordinator.go`, `shard.go`,
 `coordinator_test.go`, `shard_test.go`
 
-`Coordinator.snapshotRoute map[snapKey]int` (`coordinator.go:27`) and
-`snapKey` (`shard.go:24`) are **deleted**. In their place, the shape
-`marketbyprice-bot` already proved (`go/marketbyprice-bot/coordinator.go:12-32`):
+**#139 landed the model this task originally proposed**, so what is left is a
+re-key and not a replacement. `Coordinator.snapshotRoute map[snapKey]int` and
+`snapKey` are gone; `applySnapshotOrder` already resolves the instrument from
+the open group rather than scanning for a matching `Snapshot ID`; and
+`Shard.snapCtx` is already `map[instKey]SnapshotContext` (`shard.go:79`).
+
+What survives is the same defect in the two structures that replaced them, both
+keyed on bare `Channel ID`:
 
 ```go
-open map[publisherChannel]openGroup
+Coordinator.open map[uint8]openRoute  // coordinator.go:27
+Shard.open       map[uint8]openGroup  // shard.go:80
 ```
 
-with `openGroup{instrumentID uint32, snapshotID uint32, shard int}`. Registered
-on `snapshot_begin`, cleared on `snapshot_end`, and used to **stamp** the
-instrument onto each `snapshot_order` the way
-`go/marketbyprice-bot/coordinator.go:124-126` does — the wire omits
-`instrument_id` on a snapshot order because the containing `SnapshotBegin`
-implies it.
+Both re-key onto `publisherChannel`. Two paths carrying one `Channel ID` are two
+publishers, each running its own snapshot cycle, and a single entry per
+`Channel ID` means the second path's `snapshot_begin` overwrites the first's —
+which is the misrouting this task exists to prevent, unchanged by #139.
 
 `Snapshot ID` validates membership and is never the key.
+
+**`Shard.clearShadows` (`shard.go:149`) needs the same narrowing `resetChannel`
+gets.** It does `s.open = map[uint8]openGroup{}` and
+`s.snapCtx = map[instKey]SnapshotContext{}`, clearing *every* channel's state on
+one path's disconnect. Once the key carries the path, one path dropping its
+socket must not discard the other's open groups or snapshot contexts: both loops
+filter on the publisher channel, the way `resetChannel` filters `s.instruments`
+and `s.refdata` on `k.ch == ch` (`shard.go:110-119`). `clearShadows` takes the
+disconnecting publisher channel as an argument to do it.
 
 **One open group per publisher channel is sufficient, and the protocol says
 so.** A publisher MUST NOT interleave snapshot groups within one channel
@@ -629,15 +650,12 @@ task widens the state to more than one open group per publisher channel, and a
 task that finds itself needing to has hit a protocol question this plan does not
 answer.
 
-Two consequences:
+One consequence, where #139 left two:
 
-- `Shard.applySnapshotOrder` (`shard.go:184-200`) stops scanning every instrument
-  for one whose `OpenSnapshot.SnapshotID` matches, and resolves the instrument
-  from the stamped record.
-- `Shard.snapCtx` (`shard.go:66`) re-keys from `snapKey` onto `instKey`. Its only
-  consumers are the `wire_snapshots` writes at `shard.go:458-460`, which need the
-  group's symbol and exponents; with the instrument stamped, the instrument is
-  the key.
+- `Shard.snapCtx` is already keyed on `instKey`, and `instKey` carries the
+  publisher channel after task 4, so it follows the re-key with no change of its
+  own. Its consumers are the `wire_snapshots` writes, which need the group's
+  symbol and exponents.
 
 `SnapshotOrderDroppedTotal` keeps its meaning: a snapshot order with no open
 group for its publisher channel is dropped and counted.
@@ -669,16 +687,21 @@ group for its publisher channel is dropped and counted.
   arriving after its `snapshot_end` is dropped and counted, not routed — the
   `marketbyorder` twin of
   `TestDispatch_StrayLevelAfterSnapshotEndIsDroppedNotRouted`
-  (`go/marketbyprice-bot/coordinator_test.go:461`).
+  (`go/marketbyprice-bot/coordinator_test.go:461`). (d) Two paths carrying one
+  `Channel ID`, each with an open group, one path disconnecting: the surviving
+  path keeps its open group and its snapshot context, and its next
+  `snapshot_order` is still routed. This is the `clearShadows` case and it fails
+  on the current tree, where one disconnect clears both maps for every channel.
 - [ ] **Step 2: Run, watch (a) and (b) fail** — (a) because one `Channel ID`
   gives one route entry and the second path's `snapshot_begin` overwrites the
   first's,
   (b) because `applySnapshotOrder` scans for a matching open `Snapshot ID` and
   two shadows on that shard match, so the orders split between them in whatever
   order the map yields.
-- [ ] **Step 3: Delete `snapshotRoute` and `snapKey`; add `open`;** stamp on
-  `snapshot_order`; simplify `applySnapshotOrder`; re-key `snapCtx`; narrow
-  `resetChannel`'s `snapCtx` loop (`shard.go:111-115`) to the publisher channel.
+- [ ] **Step 3: Re-key `Coordinator.open` and `Shard.open`** from `uint8` onto
+  `publisherChannel`; give `clearShadows` the disconnecting publisher channel and
+  filter both its loops on it; narrow `resetChannel`'s loops
+  (`shard.go:110-119`) to the publisher channel.
 - [ ] **Step 4: Full suite**, `gofmt`, commit.
 
 > **Three mutants, and all must be killed.** Re-key `open` on `rec.ChannelID`
@@ -688,14 +711,11 @@ group for its publisher channel is dropped and counted.
 > Re-key it on the full `channelInstance`: nothing in this task fails, because a
 > group lives on one port role — which is why the over-fine key is caught in
 > task 9 on `refdata` and not here.
-> Then restore `applySnapshotOrder`'s scan over `s.instruments` for a matching
-> `OpenSnapshot.SnapshotID`, keeping the per-instance route: test (b) must fail,
-> because two shadows on one shard match one id and the orders land in whichever
-> the scan reaches first. Killing only the first leaves the search that
-> `go/marketbyprice-bot/coordinator.go:19-24` names as the open issue against
-> this book-builder; killing only the second leaves the one this plan is for.
-> If (b) passes intermittently under that mutant, it is reading map order rather
-> than the fix: assert on both shadows' contents, not on one.
+> Then revert `clearShadows` to clearing both maps wholesale: test (d) must
+> fail, with the surviving path's open group and snapshot context gone and its
+> next `snapshot_order` dropped for want of a group. That mutant is the one
+> #139 introduced and this task inherits — the other two are about the key, and
+> this one is about who a disconnect is allowed to affect.
 
 ---
 
@@ -824,13 +844,20 @@ not a loss signal — **and when the record carries an instance identity at all*
 - First sight of a channel instance sets the baseline silently. Same reason as
   `seqTracker.observe` (`go/marketbyorder-parser/runner.go:46-53`): a newly
   appearing path must not report a phantom gap the size of its sequence.
-- `seq <= last` and `last - seq <= reorderWindow`: reorder or duplicate.
-  Ignored, `last` unchanged.
-- `seq > last+1`: a discontinuity on that instance. Count it, and **if the port
-  role is `snapshot`, delete `inst.channel()`'s entry from `open`.**
-- `last - seq > reorderWindow`: a restart the era did not announce. Re-baseline
-  that instance (`last = seq`), count it separately, and apply the same
-  `snapshot`-port consequence.
+- `seq <= last`, and then two cases **nested inside that branch**, because
+  `last - seq` is `uint64` subtraction and wraps to a huge value whenever
+  `seq > last`. Evaluated as a sibling, the second of these would match every
+  ordinary forward gap and re-baseline on it.
+  - `last - seq <= reorderWindow`: reorder or duplicate. Ignored, `last`
+    unchanged.
+  - `last - seq > reorderWindow`: a restart the era did not announce.
+    Re-baseline that instance (`last = seq`), count it in
+    `seq_rebaselined_total`, and apply the same `snapshot`-port consequence as
+    a discontinuity.
+- `seq > last+1`: a discontinuity on that instance. Count it in
+  `datagram_seq_gaps_total`, and **if the port role is `snapshot`, delete
+  `inst.channel()`'s entry from `open`.** This is the ordinary-loss path and it
+  must never touch `seq_rebaselined_total`.
 
 Two new counters in each: `datagram_seq_gaps_total` and
 `seq_rebaselined_total`, both labelled `{port}`, under the existing
@@ -883,7 +910,12 @@ neither, because in both cases the id *matches* a group that is open.
   first path is dropped and counted. (b) A `refdata`-port discontinuity drops no
   group. (c) A reorder (`seq <= last`) drops nothing and leaves `last` unchanged.
   (d) First sight of an instance reports no gap. (e) A datagram lost on the
-  `mktdata` port raises the counter and drops no group. (f) A run of records
+  `mktdata` port raises `datagram_seq_gaps_total` by one, leaves
+  `seq_rebaselined_total` at **zero** and drops no group. Both counters are
+  asserted, because this is the case the unnested `last - seq > reorderWindow`
+  rule gets wrong: on `seq > last` that subtraction wraps and an ordinary loss
+  takes the re-baseline path, which a test asserting only "the counter" would
+  not catch. (f) A run of records
   with the zero `netip.Addr` and `dst_port` 0, alternating between two ascending
   sequence series, raises no gap count and drops no group — and, once task 12
   lands, raises `unidentified_records_total` once per record. Give the two
@@ -906,7 +938,13 @@ neither, because in both cases the id *matches* a group that is open.
   path it holds.
 - [ ] **Step 4: Full suite in both, then `-race`**, `gofmt`, commit.
 
-> **Seven mutants.** Delete the re-baseline rule: (g) must fail on its last
+> **Eight mutants.** Flatten the re-baseline rule out of the `seq <= last`
+> branch, so `last - seq > reorderWindow` is evaluated as a sibling: (e) must
+> fail, because on an ordinary forward gap that `uint64` subtraction wraps and
+> the loss re-baselines instead of being reported. This is the mutant the
+> rules-as-siblings wording produced, and (e) only catches it because it
+> asserts `seq_rebaselined_total` is zero rather than asserting "the counter".
+> Delete the re-baseline rule: (g) must fail on its last
 > assertion — the post-restart discontinuity goes unreported — while (a) to (f)
 > all still pass, which is what makes that assertion and not the counter the
 > subject. Raise `reorderWindow` above the fixture's separation: (g) must fail
@@ -1015,9 +1053,18 @@ Two things, together because they are the same window.
 **The row key.** Every row map gains `"source_addr"` and `"dst_port"` from the
 record, for the ten tables of task 2. `EventsWriter.Write` enumerates its keys
 explicitly (`go/marketbyorder-bot/events_writer.go:28-46`), so this is a
-deliberate addition per table, not a consequence of task 6. `SnapshotWriter`'s
-`level_snapshots` rows take them from the instance its `instKey` carries after
-tasks 9 and 11.
+deliberate addition per table, not a consequence of task 6. `SnapshotWriter`'s `level_snapshots` rows are the exception, and the one place
+the pair cannot both be read from a record. It flushes on a tick from
+accumulated book state with no `Record` in hand, and its `instKey` carries
+`publisherChannel{addr, ch}` after task 4 — no destination port, deliberately,
+because a book is assembled from all three port roles and belongs to none. So
+`source_addr` comes from the `instKey` and **`dst_port` is written as `0`**, the
+sentinel for "assembled from the publisher channel rather than received on one
+port". Criterion 7 is scoped around this the way criterion 4 is scoped around
+`instruments`. A task that finds itself threading a port into the
+`SnapshotWriter` to satisfy the criterion literally has picked the wrong one of
+the two: the port would name whichever role happened to write last, which is
+worse than the sentinel because it reads as a fact.
 
 **And the row's `source_addr` is a string the writer builds, never the
 `netip.Addr` itself.** A row is a `map[string]any` encoded with `encoding/json`
