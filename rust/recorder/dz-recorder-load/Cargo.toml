@@ -18,7 +18,7 @@ name = "dz-recorder-load"
 #
 # `.github/workflows/loader-release.yml` reads this key and refuses to publish a
 # tag that disagrees with it.
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
