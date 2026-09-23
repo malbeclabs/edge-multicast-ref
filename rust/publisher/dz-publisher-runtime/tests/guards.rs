@@ -448,6 +448,84 @@ fn an_instrument_reset_reports_the_channel_it_was_announced_on() {
 }
 
 #[test]
+fn a_level_reports_the_channel_that_carried_it() {
+    // The depth channel's steady state. A level update is what a
+    // market-by-price channel spends almost all of its time sending, so it is
+    // what holds that channel's gauge at *now* while its upstream is healthy —
+    // and a level that refreshed nothing would leave a busy depth channel
+    // reading as silent from its first second.
+    let mut h = harness::harness_both();
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+
+    h.publisher.upstream_message("level");
+    h.publisher.event(harness::bid_level(instrument, 1));
+
+    assert!(
+        h.mbp
+            .as_ref()
+            .expect("a market-by-price feed")
+            .mktdata
+            .len()
+            > 0,
+        "the level never reached the wire, so this test is asserting nothing"
+    );
+
+    let exposition = h.metrics.render();
+    assert_eq!(
+        last_published(&exposition, DEPTH_CHANNEL_ID),
+        START_UNIX_SECONDS,
+        "the depth channel carried the level and is not reporting it:\n{exposition}"
+    );
+    // And nowhere else. `0x40` is a market-by-price message; the top-of-book
+    // channel carried nothing.
+    assert_eq!(
+        last_published(&exposition, CHANNEL_ID),
+        0.0,
+        "the top-of-book channel carried no level and is reporting one:\n{exposition}"
+    );
+}
+
+#[test]
+fn a_book_clear_reports_the_channel_that_carried_it() {
+    // The other half of that steady state, and the half easier to forget: a
+    // side emptying is still a message on the wire, so a run of clears with no
+    // level between them is a channel that is publishing and must read as one.
+    let mut h = harness::harness_both();
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+
+    h.publisher.upstream_message("clear");
+    h.publisher.event(harness::clear(instrument, 1));
+
+    assert!(
+        h.mbp
+            .as_ref()
+            .expect("a market-by-price feed")
+            .mktdata
+            .len()
+            > 0,
+        "the book clear never reached the wire, so this test is asserting nothing"
+    );
+
+    let exposition = h.metrics.render();
+    assert_eq!(
+        last_published(&exposition, DEPTH_CHANNEL_ID),
+        START_UNIX_SECONDS,
+        "the depth channel carried the book clear and is not reporting it:\n{exposition}"
+    );
+    // And nowhere else. `0x41` is a market-by-price message; the top-of-book
+    // channel carried nothing.
+    assert_eq!(
+        last_published(&exposition, CHANNEL_ID),
+        0.0,
+        "the top-of-book channel carried no book clear and is reporting one:\n{exposition}"
+    );
+}
+
+#[test]
 fn a_trade_reports_both_of_the_channels_it_reached() {
     // `0x04` is the one message both specifications carry, lowered once and
     // handed to both send paths. Two channel instances took it, so both
