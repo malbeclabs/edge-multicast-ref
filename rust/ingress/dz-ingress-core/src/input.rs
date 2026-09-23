@@ -205,6 +205,22 @@ pub trait Input: Send {
     ///
     /// [`IngressError::Ended`] carrying the reason, when the connection is
     /// gone.
+    ///
+    /// [`IngressError::Fatal`] for what this transport reads and another
+    /// attempt cannot get past. A transport with nothing of that kind to report
+    /// never returns it.
+    ///
+    /// What this shares with a fatal error from [`connect`](Self::connect) is
+    /// the whole of what the driver acts on: it stops rather than reconnecting
+    /// into the fault, and [`Driver::run`](crate::Driver::run) returns the
+    /// error. The teardown is not shared, because a read reaches this only on a
+    /// connection that was established. So the adapter is told, with the
+    /// `on_disconnected` it is owed for the `on_connected` it has already had,
+    /// `dz_publisher_ingress_connection_state` goes to 0, the ending is counted
+    /// in `dz_publisher_ingress_reconnects_total{reason="remote_close"}`, and
+    /// the transport is released through [`shutdown`](Self::shutdown). A fatal
+    /// error from `connect` does none of that: nothing was established, so
+    /// there is nothing to tear down and the gauge is already 0.
     fn recv<'a>(
         &'a mut self,
         budget: Option<Duration>,

@@ -162,22 +162,45 @@ pub struct Document {
 /// **The runtime cannot enforce that a `comparison` source stays off the wire.**
 /// The adapter emits events and no event carries the source it came from, so
 /// there is no seam at which one source's data could be held back from a feed.
-/// So `role` is a declaration and a metric label, and it is *not* a gate on
-/// what reaches the wire. Nothing here pretends otherwise, and the one rule that
-/// depends on it — exactly one enabled `primary` — is publisher-wide for exactly
-/// that reason: a per-feed rule would describe routing the runtime does not do.
+/// So `role` is a declaration an operator and an analysis tier read, and it is
+/// *not* a gate on what reaches the wire. Nothing here pretends otherwise, and
+/// the one rule that depends on it — exactly one enabled `primary` — is
+/// publisher-wide for exactly that reason: a per-feed rule would describe
+/// routing the runtime does not do.
 ///
-/// What it does decide, and the reason it is not decoration:
-/// **only a `primary`'s fatal error ends the process.** `Driver::run` returns
-/// only on [`IngressError::Fatal`](dz_ingress_core::IngressError::Fatal), whose
-/// documented causes are the per-source configuration faults found at connect —
-/// an invalid endpoint, a missing credential path, an unsupported scheme. A
-/// mistyped URL on a source that by design must not reach the wire took the
-/// healthy primary down and kept it down across restarts. Now that source's
-/// driver is dropped and named, its `connection_state` stays at 0 — which is
-/// the alert for exactly this case — and the primary carries on.
+/// What it does decide, and the reason it is not decoration: **whether a fatal
+/// error on that connection ends the process.** `Driver::run` returns only on
+/// [`IngressError::Fatal`](dz_ingress_core::IngressError::Fatal), which any
+/// non-retryable connect, send or receive operation can report — a
+/// per-connection configuration fault found at connect most of all, an invalid
+/// endpoint, a missing credential path or an unsupported scheme, and equally a
+/// message the transport cannot carry at all.
 ///
-/// # There is no `carries`
+/// - A fatal error on the `primary` ends the process, because the wire is fed
+///   from that upstream source.
+/// - A fatal error on a `comparison` does not end it. Everything that
+///   connection carries arrives on the primary too, so a mistyped URL on a
+///   connection that by design must not reach the wire leaves that driver
+///   dropped and named with its `connection_state` at 0 — the alert for exactly
+///   this case — and the primary carrying on.
+/// - A fatal error on an `upstream-partition` ends the process. What that
+///   connection carries arrives on no other, so carrying on without it serves
+///   that subset of instruments stale while every other signal says the
+///   publisher is well: the surviving connections hold their own
+///   `connection_state` at 1 and keep the aggregate busy under the idle guard.
+///
+/// [`SourceRole::fatal_error_ends_the_process`] is that answer, and it is the
+/// whole of what a role decides about a live run. A replay run reads the role
+/// once more: `[adapter.replay]` publishes under the primary's connection,
+/// because that is the connection the offline comparison is defined against.
+///
+/// At load the role is read once more still, by the credential rule in
+/// `resolve_sources`: a `primary` beside an `upstream-partition`, or two
+/// `upstream-partition` blocks, may state one credential, because several
+/// sessions of one venue account is what a partitioned upstream source is. See
+/// [`SourceRole::credential_may_be_shared_with`].
+///
+/// # There is no `carries`, and `upstream-partition` is not it
 ///
 /// There was, and it declared which feeds a source's data reached. It could not
 /// be honoured: every payload reaches one adapter and every event it emits
@@ -186,6 +209,12 @@ pub struct Document {
 /// while nothing partitions is worse than no key — it made two primaries with
 /// disjoint declarations resolve cleanly while both upstreams' events landed on
 /// one channel instance under one `Sequence Number` series.
+///
+/// `role = "upstream-partition"` states no routing either, and that is what
+/// makes it statable at all: it names no instruments, no feeds and no shards,
+/// and every payload from such a connection reaches the one adapter exactly as
+/// the primary's does. What it states is which failures are fatal, which is a
+/// question about this runtime's own behaviour and one the runtime answers.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceSection {
@@ -1380,7 +1409,8 @@ fn check_shards_carry_the_same_specifications(feeds: &[Feed]) -> Result<(), Star
 /// thing an operator has to be able to read off the document. What this
 /// function refuses is the copy-paste failure: two enabled blocks where one's
 /// whole `credentials` table also appears in the other's, under the same keys
-/// with the same values. Equal tables are that case with nothing added, and
+/// with the same values — save for the one pair of roles that states the second
+/// session is deliberate, which the section below is about. Equal tables are that case with nothing added, and
 /// `key_path` in one block beside the same `key_path` plus a `passphrase_path`
 /// in the next is that case with a key added afterwards — one credential
 /// either way, and the second spelling is at least as likely a copy-paste as
@@ -1399,8 +1429,39 @@ fn check_shards_carry_the_same_specifications(feeds: &[Feed]) -> Result<(), Star
 /// [`StartupError::SourceCredentialsShared`](crate::StartupError) states both
 /// why and what this still cannot see.
 ///
-/// A `comparison` source is refused nothing else: several are fine, and one
-/// arriving beside the primary is the whole point of the role.
+/// No rule here counts a `comparison` or an `upstream-partition`: several of
+/// either are fine, and one arriving beside the primary is the whole point of
+/// each role. Only a `primary` is counted by the rule above, so a partitioned
+/// upstream declares one `primary` and one `upstream-partition` per further
+/// connection and the count reads as it does on a single-connection publisher.
+///
+/// # The one pair of roles that may state one credential
+///
+/// A partitioned upstream source is several sessions of **one** venue account,
+/// so the same `key_path` in every block is the shape it arrives in — and for a
+/// venue that permits several sessions per credential and hands out one
+/// credential, the only shape available. So the credential rule asks
+/// [`SourceRole::credential_may_be_shared_with`] about each pair before it
+/// compares their tables, and a `primary` beside an `upstream-partition`, or two
+/// `upstream-partition` blocks, are let through with one credential between
+/// them.
+///
+/// **Every pair involving a `comparison` is still refused**, which is the
+/// copy-paste the rule was written for: a block duplicated and left alone
+/// carries the role it was copied from, so a second `comparison` on one
+/// credential is refused as before, and a second `primary` is refused by the
+/// count above. Reaching the exemption costs the one edit that copy-paste is
+/// defined by not making — the line that says this connection carries
+/// instruments no other connection carries.
+///
+/// What the exemption does not claim is that the venue permits it. That is not
+/// in the document and the venue's own logon refusal is the authority; the
+/// symptom of getting it wrong is both connections reconnecting in step, which
+/// [`StartupError::SourceCredentialsShared`](crate::StartupError) describes.
+/// Before this, the refusal's advice — give each block its own credential, or
+/// disable one of them — was unactionable for such a venue, whose operator
+/// could satisfy it only by copying one key file to as many paths as there
+/// were connections.
 fn resolve_sources(sections: Vec<SourceSection>) -> Result<Vec<Source>, StartupError> {
     let mut sources: Vec<Source> = Vec::new();
     let mut seen: BTreeMap<String, ()> = BTreeMap::new();
@@ -1467,6 +1528,13 @@ fn resolve_sources(sections: Vec<SourceSection>) -> Result<Vec<Source>, StartupE
     // `StartupError::SourceCredentialsShared` for the failure it prevents and
     // for the case it cannot see.
     //
+    // Except for the one pair of roles that states the second connection is
+    // deliberate: `SourceRole::credential_may_be_shared_with` is asked about
+    // every pair before their tables are compared, and a `primary` beside an
+    // `upstream-partition`, or two `upstream-partition` blocks, are several
+    // sessions of one venue account and are let through. Every pair that
+    // involves a `comparison` is compared exactly as before.
+    //
     // Over the *enabled* sources only, unlike the name check: a disabled block
     // opens no session, so it cannot be one of two logons. And an empty
     // credentials table is not a shared credential — a venue that needs none
@@ -1485,6 +1553,7 @@ fn resolve_sources(sections: Vec<SourceSection>) -> Result<Vec<Source>, StartupE
         }
         if let Some(other) = sources[..index].iter().find(|earlier| {
             !earlier.credentials.is_empty()
+                && !earlier.role.credential_may_be_shared_with(source.role)
                 && (credential_within(&earlier.credentials, &source.credentials)
                     || credential_within(&source.credentials, &earlier.credentials))
         }) {
@@ -1495,6 +1564,14 @@ fn resolve_sources(sections: Vec<SourceSection>) -> Result<Vec<Source>, StartupE
         }
     }
 
+    // `is_primary` and not "whatever the published set depends on": an
+    // `upstream-partition` is depended on exactly as the primary is, and it is
+    // still not a primary. What this rule refuses is two upstream connections
+    // each declared to carry the whole book, whose events interleave on one
+    // channel instance under one `Sequence Number` series — so counting a
+    // partition here would refuse the one configuration the role exists to
+    // express, and would report two blocks that are not in conflict as though
+    // they were.
     let primaries: Vec<&str> = sources
         .iter()
         .filter(|source| source.is_primary())

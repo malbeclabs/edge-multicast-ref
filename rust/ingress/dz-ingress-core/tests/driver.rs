@@ -1435,6 +1435,46 @@ fn a_fatal_transport_fault_stops_the_driver_rather_than_retrying_it_forever() {
 }
 
 #[test]
+fn a_fatal_read_stops_the_driver_rather_than_reconnecting_into_it() {
+    // The same rule on the other operation, and this is the one that had no
+    // test: `Input::recv` states `IngressError::Fatal` for what a read cannot
+    // get past by trying again, and the pump stops on it rather than
+    // reconnecting, which is the one thing it shares with a fatal `connect`:
+    // the teardown asserted below is this path's own, because the connection
+    // was established. A driver that reconnected into it would reopen the
+    // session for as long as nobody looks at a dashboard, with the connection
+    // gauge flapping at 1 and `reconnects_total` climbing on a fault no
+    // reconnect reaches.
+    let outcome = run(
+        policy(),
+        RecordingAdapter::default(),
+        vec![
+            Connection::live(vec![Read::Fatal]),
+            // Never reached, and reaching it is what the count below refuses: a
+            // reconnect would open this one, and the run would then end on the
+            // script running out rather than on the read.
+            Connection::live(vec![
+                Read::Payload(b"a"),
+                Read::Ended(DisconnectReason::RemoteClose),
+            ]),
+        ],
+    );
+
+    assert!(outcome.exit.is_fatal());
+    assert_eq!(outcome.connects, 1, "it reconnected into a fatal read");
+    assert_eq!(
+        outcome.exit.to_string(),
+        "upstream connection is not usable as configured: scripted",
+        "the run ended on the read and not on the script running out"
+    );
+    // The connection existed, so the adapter is owed its pairing and the
+    // transport its release, on the way out as on any other ending.
+    assert_eq!(outcome.adapter.connected.len(), 1);
+    assert_eq!(outcome.adapter.disconnected.len(), 1);
+    assert_eq!(outcome.shutdowns, 1);
+}
+
+#[test]
 fn nothing_in_this_crate_can_report_a_duplicate() {
     // Not an aspiration: `dz_publisher_ingress_duplicates_total` exists and the
     // boundary gives an adapter no way to report the upstream's own sequence
@@ -1907,6 +1947,90 @@ fn a_failed_mid_session_send_ends_the_connection_and_the_reconnect_subscribes_ag
         outcome.adapter.connected.len(),
         2,
         "the second connection re-ran `on_connected`"
+    );
+}
+
+#[test]
+fn a_fatal_mid_session_write_stops_the_driver_rather_than_reconnecting_into_it() {
+    // `Input::send` states `IngressError::Fatal` for a message this transport
+    // cannot carry at all, which is the adapter or the document to correct
+    // rather than anything a reconnect reaches. So the write that reports it
+    // stops the driver, and the reconnect that a *failed* write earns is the
+    // one thing it does not get: the same body would be composed again on the
+    // next session, and refused again.
+    let adapter = RecordingAdapter {
+        outstanding: VecDeque::from(vec![vec!["subscribe:A-B"]]),
+        ..RecordingAdapter::default()
+    };
+    let mut refusing = Connection::live(vec![
+        Read::Keepalive(UPSTREAM_POLL),
+        Read::Payload(b"never-reached"),
+    ]);
+    refusing.send = Some(IngressError::fatal("this transport cannot carry that"));
+    let outcome = run(
+        policy(),
+        adapter,
+        vec![
+            refusing,
+            // Never reached: opening it is what a reconnect would do.
+            Connection::live(vec![Read::Ended(DisconnectReason::RemoteClose)]),
+        ],
+    );
+
+    assert!(outcome.exit.is_fatal());
+    assert_eq!(outcome.connects, 1, "it reconnected into a fatal write");
+    assert_eq!(
+        outcome.exit.to_string(),
+        "upstream connection is not usable as configured: this transport cannot carry that",
+        "the run ended on the write and not on the script running out"
+    );
+    assert_eq!(outcome.adapter.connected.len(), 1);
+    assert_eq!(outcome.adapter.disconnected.len(), 1, "the pairing holds");
+}
+
+#[test]
+fn a_fatal_logon_write_stops_the_driver_rather_than_reconnecting_into_it() {
+    // The same refusal on the write `on_connected` composes, which is the one
+    // an adapter is most likely to get wrong: a body missing what the protocol
+    // requires of it is refused on every session the driver could open, so a
+    // driver that backed off and logged on again would compose it for as long
+    // as nobody looks at a dashboard.
+    let adapter = RecordingAdapter {
+        subscriptions: vec!["subscribe:A-B"],
+        ..RecordingAdapter::default()
+    };
+    let mut refusing = Connection::live(vec![Read::Payload(b"never-reached")]);
+    refusing.send = Some(IngressError::fatal("this logon is not one"));
+    let outcome = run(
+        policy(),
+        adapter,
+        vec![
+            refusing,
+            // Never reached, for the same reason.
+            Connection::live(vec![Read::Ended(DisconnectReason::RemoteClose)]),
+        ],
+    );
+
+    assert!(outcome.exit.is_fatal());
+    assert_eq!(
+        outcome.connects, 1,
+        "it logged on again after a fatal write"
+    );
+    assert_eq!(
+        outcome.exit.to_string(),
+        "upstream connection is not usable as configured: this logon is not one",
+        "the run ended on the logon write and not on the script running out"
+    );
+    // Announced up only after the logon went out, so this connection never
+    // reached the gauge at 1.
+    assert!(
+        outcome
+            .observer
+            .recorded()
+            .states
+            .iter()
+            .all(|(_, up)| !*up),
+        "a connection whose logon was refused was never announced as up"
     );
 }
 

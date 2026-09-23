@@ -280,6 +280,11 @@ pub enum StartupError {
     /// Two primaries are therefore two publishers' worth of events wherever
     /// they land. None is a publisher whose data has no path to the wire at all,
     /// heartbeating channels it never fills.
+    ///
+    /// **Only a `primary` block is counted.** A `comparison` block and an
+    /// `upstream-partition` block are not primaries, so neither can satisfy this
+    /// rule nor break it: a partitioned upstream declares one `primary` and one
+    /// `upstream-partition` per further connection, and the count is one.
     #[error(
         "exactly one enabled `[[source]]` must have `role = \"primary\"`; there {} {primaries}. \
          Every source's payloads reach one adapter and no event carries the source it came \
@@ -315,6 +320,23 @@ pub enum StartupError {
     /// with another on a key they both write is one somebody edited, and a
     /// table lying wholly inside another is one nobody finished editing.
     ///
+    /// # The one pair of roles this is not asked about
+    ///
+    /// A partitioned upstream source is several sessions of **one** venue
+    /// account, so the same `key_path` in every block is the shape it arrives
+    /// in — and for a venue that permits several sessions per credential and
+    /// hands out one credential, the only shape available. Such a document is
+    /// not refused: a `primary` beside an `upstream-partition`, or two
+    /// `upstream-partition` blocks, may state one credential. See
+    /// [`dz_venue_composition::SourceRole::credential_may_be_shared_with`] for
+    /// why the token can be trusted with that and what it does not claim.
+    ///
+    /// **Every pair involving a `comparison` is still refused**, and so is a
+    /// second `primary` — by the count above. That is the copy-paste intact: a
+    /// block duplicated and left alone carries the role it was copied from, and
+    /// reaching the exemption costs the one edit copy-paste is defined by not
+    /// making.
+    ///
     /// # What this does not catch, stated rather than implied
     ///
     /// **Two different paths holding the same account.** Nothing here can know
@@ -330,7 +352,7 @@ pub enum StartupError {
     /// legitimately share a trust root.
     ///
     /// What can be said is what happens then. The eviction shows as both
-    /// sources reconnecting in step —
+    /// connections reconnecting in step —
     /// `dz_publisher_ingress_reconnects_total{connection}` climbing on two
     /// connections together, with
     /// `dz_publisher_ingress_connection_state{connection}` alternating between
@@ -345,9 +367,13 @@ pub enum StartupError {
          copy-paste with a key added afterwards. They are two logons with one credential, and a \
          venue that permits one session per credential answers the second by evicting the \
          first — which reads, on both connections, as a venue that keeps closing the \
-         connection. Give each block its own credential, or disable one of them. Two \
-         *different* paths holding the same account is the case this cannot see: its symptom \
-         is both sources reconnecting in step"
+         connection. Give each block its own credential, or disable one of them. If instead \
+         these are several deliberate connections to one upstream source, each carrying \
+         instruments no other carries, `role = \"upstream-partition\"` on the further \
+         connections states that — and a `primary` beside them, or two of them, may state \
+         one credential, at the price that a fatal error on any of them ends the process. \
+         Two *different* paths holding the same account is the case this cannot see: its \
+         symptom is both connections reconnecting in step"
     )]
     SourceCredentialsShared { one: String, another: String },
 
