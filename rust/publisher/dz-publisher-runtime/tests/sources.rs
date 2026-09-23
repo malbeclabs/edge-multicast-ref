@@ -1230,15 +1230,23 @@ fn a_partition_that_writes_one_more_path_for_the_same_account_resolves() {
 /// primary too, so a second logon on one credential is the copy-paste the rule
 /// was written for, whatever the other block's role is. Both orders, because
 /// the exemption is a question about a pair and a pair has two spellings.
+///
+/// The primary states a key of its own, so that the comparison beside the
+/// partition is the one pair in the document with a credential between them.
+/// The rule reports the first sharing pair it finds, so a primary holding the
+/// shared key would answer for a pair this test does not name and
+/// `credential_may_be_shared_with(Comparison, UpstreamPartition)` would not be
+/// asked at all.
 #[test]
 fn a_comparison_sharing_a_credential_with_an_upstream_partition_is_refused() {
     let key = "key_path = \"/etc/a-publisher/venue-account.key\"\n";
+    let own_key = "key_path = \"/etc/a-publisher/primary-account.key\"\n";
     for (which, second, third) in [
         ("the comparison last", "upstream-partition", "comparison"),
         ("the comparison first", "comparison", "upstream-partition"),
     ] {
         let doc = with_sources(&format!(
-            "{}[source.credentials]\n{key}\n\
+            "{}[source.credentials]\n{own_key}\n\
              {}[source.credentials]\n{key}\n\
              {}[source.credentials]\n{key}",
             source("ws-a", "uds", "primary"),
@@ -1252,16 +1260,12 @@ fn a_comparison_sharing_a_credential_with_an_upstream_partition_is_refused() {
 
         match &error {
             StartupError::SourceCredentialsShared { one, another } => {
-                // The refused pair and not the exempt one: the primary beside
-                // the partition is let through, so the two blocks named are the
-                // pair the comparison is half of.
-                let named = [one.as_str(), another.as_str()];
-                let comparison = if third == "comparison" {
-                    "ws-c"
-                } else {
-                    "ws-b"
-                };
-                assert!(named.contains(&comparison), "{which}: {named:?}");
+                // Both names, and in the order the document writes them: the
+                // pair refused is the comparison beside the partition, whichever
+                // of the two roles is written first, and the primary is in no
+                // sharing pair for the rule to have stopped at instead.
+                assert_eq!(one, "ws-b", "{which}");
+                assert_eq!(another, "ws-c", "{which}");
             }
             other => panic!("{which}: {other}"),
         }
