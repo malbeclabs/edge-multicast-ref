@@ -23,11 +23,33 @@ Each `(channel_id, instrument_id)` sits in one of three statuses:
 |---|---|
 | `awaiting-snapshot` | No usable book. Deltas are buffered, not applied. |
 | `ready` | Book is usable and deltas apply in sequence. |
-| `gap` | A per-instrument sequence gap was confirmed. Deltas buffer until the next snapshot repairs it. |
+| `gap` | A book-affecting message was lost, so the book may be stale. Deltas buffer until the next snapshot repairs it. |
 
 The spec's five-state machine collapses to three because two of its states are represented orthogonally: *awaiting-refdata* is absence from the shard's instrument map, and *building-snapshot* is `OpenSnapshot != nil`, deliberately independent of serving status so that building a snapshot can never make a good book unavailable.
 
-Transitions: a committed snapshot moves any status to `ready`. A confirmed per-instrument gap or a delta-buffer eviction moves `ready` to `gap`. An `InstrumentReset` moves any status to `awaiting-snapshot` and records a required anchor.
+Transitions: a committed snapshot moves any status to `ready`. Three things move `ready` to `gap` — a confirmed per-instrument sequence gap, a delta-buffer eviction, and a malformed book-affecting message (see below). An `InstrumentReset` moves any status to `awaiting-snapshot` and records a required anchor.
+
+**A malformed book-affecting record gaps its instrument immediately.** `LevelUpdate` and `BookClear` share one `Per-Instrument Seq` series, because both mutate the book. A `BookClear` the book-builder receives and discards as malformed (`Scope = 1` with `Clear Side = 2`, which the [market-by-price spec](https://github.com/malbeclabs/edge-feed-spec/blob/main/market-by-price/spec.md) declares malformed and requires a subscriber to discard and count, or a reserved `Clear Side` or `Scope` value outside the enumerations the spec defines) therefore consumed a sequence number at the publisher, and the mutation it carried is lost. That is `gap`, the same end state a sequence gap reaches, and it is declared on the malformed record rather than after the reorder window: the window exists for deltas that may still arrive out of order, and this loss is already known. Holding the next ~16 deltas to wait for a hole that can never fill buys nothing.
+
+**The lost sequence is recorded, so the recovery does not re-walk the window.**
+The publisher consumed that `Per-Instrument Seq` and nothing will ever fill it.
+A recovery snapshot captured *before* the malformed message carries a `Last
+Instrument Seq` just behind that number, so without the record the instrument
+came back expecting exactly the sequence that cannot arrive: the buffered
+deltas read as a forward gap, filled the reorder window, and the gap branch
+cleared them and declared `per_instrument_gaps_total` — discarding a window of
+valid deltas and charging this book engine's own demotion to the counter that
+means mktdata never arrived. The demotion records the sequence, the next
+expected sequence steps over it, and the entry is dropped once the tracker has
+passed it.
+
+It increments `malformed_deltas_total{reason}`, never `per_instrument_gaps_total`. The gap counter measures records that never reached this process; a malformed record arrived intact and is a publisher defect, and an operator who cannot tell the two apart goes looking for datagram loss that is not there.
+
+Which is why the record is classified **on receipt**, before the sequencing decision, and not when it comes up for apply. A malformed record that arrives ahead of the expected `Per-Instrument Seq` would otherwise be held for reordering unexamined; if the hole in front of it never fills, the reorder window expires and clears the held records, and the defect leaves with them — uncounted, with the demotion reported as `per_instrument_gaps_total`. The verdict does not depend on arrival order: the message reads malformed from its own fields, and the mutation it consumed a sequence number for is lost whether or not the records before it arrive. Records buffered while an instrument is not `ready` are classified when the buffer replays, which runs the same path.
+
+**Which counter fires depends on which process saw the bytes.** `marketbyprice-parser` refuses `Scope = 1` with `Clear Side = 2` at decode, drops the message without failing its datagram, and counts `dz_mbp_parser_malformed_total{reason="bookclear_scope_side"}`. It emits no record for it, so on the reference pipeline the book-builder never receives one: `malformed_deltas_total` stays at zero, and the `Per-Instrument Seq` the publisher consumed reads here as an ordinary hole — a `per_instrument_gap` after the reorder window, like any other missing delta. Read the parser's counter to find the defect. The book-builder's demotion covers a record that reaches it anyway: a parser that does not refuse the pairing, or a hand-fed socket. The reason labels are shared between the two counters so one dashboard can put them side by side.
+
+A malformed message that affects no book state does **not** demote. The line is drawn at the `Per-Instrument Seq` series: only `LevelUpdate` and `BookClear` carry it, so only they can lose a mutation the publisher counted. A `LevelUpdate` whose `Action` disagrees with this book engine's book is not on that side of the line — the absolute-apply rule still produces the correct level, so it is counted as `book_divergence_total{kind}` and the instrument stays `ready`. Nor is a discarded snapshot, which loses no delta: only the shadow is dropped and the status is untouched.
 
 ## Feed-specific behavior
 
@@ -66,7 +88,7 @@ When `--clickhouse-url` is non-empty, the book-builder writes to five ClickHouse
 **`events` is not one row per `ChannelEvent`.** The mapping is deliberately narrower than the event stream in both directions:
 
 - **`applied_snapshot` produces no row.** Its `Record.Type` is `snapshot_end`, which the writer has no case for. The committed book is captured in `level_snapshots` instead, and the group's raw levels in `wire_levels`.
-- **`per_instrument_gap` and `malformed_delta` produce no row.** Both report a record that was seen and deliberately *not* applied — a gapped delta is buffered for replay, and a malformed `BookClear` is discarded without advancing the sequence trackers — yet both carry an ordinary delta `Record.Type` (`level_update` and `book_clear` respectively). Persisting them would make them indistinguishable from real applied deltas in a table defined as an applied-delta log. They remain visible as `per_instrument_gaps_total` and in the log.
+- **`per_instrument_gap` and `malformed_delta` produce no row.** Both report a record that was seen and deliberately *not* applied — a gapped delta is buffered for replay, and a malformed `BookClear` is discarded without advancing the sequence trackers — yet both carry an ordinary delta `Record.Type` (`level_update` and `book_clear` respectively). Persisting them would make them indistinguishable from real applied deltas in a table defined as an applied-delta log. They remain visible as `per_instrument_gaps_total` and `malformed_deltas_total` respectively, and in the log.
 - **`batch_boundary` produces exactly one row per wire message.** It is channel-scoped, carries no `instrument_id` and no symbol, and is broadcast to every shard so each can evaluate crossed-book for its own instruments. The Coordinator writes the single row; the shards do not.
 - **`instrument_definition` writes to `instruments`, not `events`.**
 
@@ -122,7 +144,8 @@ Namespace `dz_mbp_bot`.
 | `book_divergence_total{kind}` | Publisher/subscriber disagreements on a `LevelUpdate`: `new_on_present`, `change_on_absent`, `delete_nonzero_qty`, `zero_qty_wrong_action`. Counted without altering the applied result. |
 | `crossed_book_events_total` | Crossed inside-market observations at consistency points. |
 | `crossed_instruments{shard}` | Instruments currently crossed, per shard. Shards own disjoint instruments, so take `sum()` for the process total. |
-| `per_instrument_gaps_total` | Confirmed per-instrument sequence gaps. |
+| `per_instrument_gaps_total` | Per-instrument sequence gaps confirmed after the reorder window: a `Per-Instrument Seq` this process never received. A malformed record it *did* receive is counted in `malformed_deltas_total` instead. |
+| `malformed_deltas_total{reason}` | Book-affecting records this book-builder received and the spec declares malformed, each demoting its instrument to `gap` immediately: `bookclear_scope_side` (`Scope = 1` with `Clear Side = 2`) or `other`. A publisher defect, not loss in transit. Zero on the reference pipeline, where the parser refuses the pairing at decode and counts `dz_mbp_parser_malformed_total{reason}`; the reason values match, so the two sit side by side on one dashboard. |
 | `instrument_resets_total{reason}` | `InstrumentReset` messages applied. |
 | `channel_resets_total` | `Reset Count` era changes, each draining every shard. |
 | `snapshot_discarded_total{reason}` | Snapshots discarded: `stale_anchor`, `short`, `mismatch`, `other`. A `snapshot_end` with no open shadow is not a discard — it is the healthy path where a ready, current instrument declined the begin. |
@@ -168,7 +191,7 @@ Shards report state changes outward as `ChannelEvent`s, which the `EventsWriter`
 | `trade` | no | A `Trade` or `Liquidation`; no book effect. |
 | `batch_boundary` | no | A consistency point; carries no instrument. |
 | `per_instrument_gap` | no | A confirmed sequence gap; the record was buffered, not applied. |
-| `malformed_delta` | no | A `BookClear` the engine rejected; nothing was applied and the sequence trackers did not advance. |
+| `malformed_delta` | no | A `BookClear` the book engine rejected; nothing was applied, the sequence trackers did not advance, and the instrument is demoted to `gap`. |
 
 There is no `channel_reset` kind. A `Reset Count` era change is handled by draining every shard through the reset barrier, which produces no per-instrument event; it is observable as `channel_resets_total`.
 

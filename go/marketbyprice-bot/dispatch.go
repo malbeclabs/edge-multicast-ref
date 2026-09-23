@@ -429,8 +429,8 @@ func (s *Shard) handle(rec Record) {
 //   - malformed_delta carries Record.Type "book_clear" but nothing was applied.
 //
 // `events` is defined as an applied-delta log, so the latter two do not belong
-// in it at all — they are already observable as per_instrument_gaps_total and in
-// the log line applyOne emits.
+// in it at all — they are observable as per_instrument_gaps_total and
+// malformed_deltas_total respectively, and in the log line demoteMalformed emits.
 func persistableFromShard(kind string) bool {
 	switch kind {
 	case KindBatchBoundary, KindPerInstrumentGap, KindMalformedDelta:
