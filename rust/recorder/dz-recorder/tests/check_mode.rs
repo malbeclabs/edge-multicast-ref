@@ -310,8 +310,12 @@ fn two_configuration_files_are_refused_and_both_are_named() {
     assert!(ran.stderr.contains("b.toml"), "{}", ran.stderr);
     assert!(ran.stderr.contains("Usage:"), "{}", ran.stderr);
     // Nothing was read: the refusal is the command line's, so neither file
-    // being absent is what stopped it.
-    assert!(!ran.stderr.contains("could not be read"), "{}", ran.stderr);
+    // being absent is what stopped it. `reading <path>:` is how this binary
+    // says it could not read a configuration — `StartupError::Read`, in
+    // `src/startup.rs` — and it is the line a parser that kept one of the two
+    // and ran on it would print, for whichever one it kept.
+    assert!(!ran.stderr.contains("reading a.toml"), "{}", ran.stderr);
+    assert!(!ran.stderr.contains("reading b.toml"), "{}", ran.stderr);
 }
 
 #[test]
