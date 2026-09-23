@@ -209,8 +209,11 @@
 
 -- THE SIX RACE GRANTS ARE WRITTEN HERE BEFORE THEY ARE APPLIED, WHICH IS THE
 -- OPPOSITE ORDER FROM THE FIRST THREE AND IS THE ORDER THIS FILE ARGUES FOR.
--- The first three were applied by hand and written down a month later, and the
--- paragraph at the top of this file is what that cost. These are written down
+-- The first three were applied by hand on 2026-09-19 and written down on
+-- 2026-09-21, and the paragraph at the top of this file is what those two days
+-- cost. The interval is not the point and a short one is not a defence: for as
+-- long as it lasted, the cluster held a grant no file named, and a rebuild in
+-- that window would have come back without it. These are written down
 -- first: an administrator applies the file, and the record and the cluster
 -- agree from the beginning rather than after somebody reconciles them.
 --
