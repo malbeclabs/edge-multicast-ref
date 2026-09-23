@@ -20,7 +20,7 @@ both schema generations — and asserts every field against the values
 `edge-feed-spec` field tables, so they bind this decoder to the wire rather than
 to a fixture written from the same reading of the spec the decoder was.
 
-One Go module in the `go/` workspace. External deps are `golang.org/x/net/ipv4` for multicast control messages and `prometheus/client_golang` for `/metrics`; the sink transport and the UDP receive path come from the `go/internal` workspace member. The module root is `package main`; the wire decoder and the parser it drives are `package tob` under `tob/`, and the root `parser.go` re-exports `tob.Record`, `tob.PacketMeta` and `tob.Parser` so the rest of `main` names them unqualified.
+One Go module in the `go/` workspace. The only external dep is `prometheus/client_golang` for `/metrics`; the sink transport and the UDP receive path come from the `go/internal` workspace member. The module root is `package main`; the wire decoder and the parser it drives are `package tob` under `tob/`, and the root `parser.go` re-exports `tob.Record`, `tob.PacketMeta` and `tob.Parser` so the rest of `main` names them unqualified.
 
 ## How to run
 

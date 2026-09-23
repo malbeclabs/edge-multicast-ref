@@ -3,8 +3,11 @@
 package udp
 
 import (
+	"bytes"
 	"encoding/binary"
+	"log/slog"
 	"net"
+	"strings"
 	"testing"
 	"time"
 	"unsafe"
@@ -15,8 +18,8 @@ import (
 func TestExtractKernelTimestamp_ParsesScmTimestampns(t *testing.T) {
 	want := time.Unix(1717689600, 123456789).UTC()
 	data := make([]byte, 16)
-	binary.LittleEndian.PutUint64(data[0:8], uint64(want.Unix()))
-	binary.LittleEndian.PutUint64(data[8:16], uint64(want.Nanosecond()))
+	binary.NativeEndian.PutUint64(data[0:8], uint64(want.Unix()))
+	binary.NativeEndian.PutUint64(data[8:16], uint64(want.Nanosecond()))
 
 	oob := buildCmsg(unix.SOL_SOCKET, unix.SCM_TIMESTAMPNS, data)
 
@@ -40,7 +43,7 @@ func TestExtractKernelTimestamp_EmptyReturnsFalse(t *testing.T) {
 // carries fewer than the 16 bytes the two u64s need.
 func TestExtractKernelTimestamp_IgnoresOtherControlMessages(t *testing.T) {
 	data := make([]byte, 16)
-	binary.LittleEndian.PutUint64(data[0:8], 1717689600)
+	binary.NativeEndian.PutUint64(data[0:8], 1717689600)
 
 	tests := []struct {
 		name  string
@@ -62,15 +65,15 @@ func TestExtractKernelTimestamp_IgnoresOtherControlMessages(t *testing.T) {
 	}
 }
 
-// TestReadDatagram_ReportsKernelTimestamp asserts the Linux path returns the
-// kernel's own receive timestamp: EnableTimestamping has succeeded, so the
-// control message must arrive and the fallback must not be reported.
-func TestReadDatagram_ReportsKernelTimestamp(t *testing.T) {
+// loopbackPair returns a listening socket configured the way a parser
+// configures its own, and a sender connected to it.
+func loopbackPair(t *testing.T) (*net.UDPConn, *net.UDPConn) {
+	t.Helper()
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatalf("listening: %v", err)
 	}
-	defer conn.Close()
+	t.Cleanup(func() { conn.Close() })
 
 	if err := EnableTimestamping(conn); err != nil {
 		t.Fatalf("EnableTimestamping: %v", err)
@@ -80,25 +83,100 @@ func TestReadDatagram_ReportsKernelTimestamp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dialling: %v", err)
 	}
-	defer sender.Close()
-
-	if _, err := sender.Write([]byte("kernel please stamp this")); err != nil {
-		t.Fatalf("sending: %v", err)
-	}
+	t.Cleanup(func() { sender.Close() })
 
 	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		t.Fatalf("setting the read deadline: %v", err)
 	}
+	return conn, sender
+}
+
+// captureWarnings sends the default logger's output to a buffer for the length
+// of one test, so what ReadDatagram reports about a truncated control buffer
+// can be asserted on.
+func captureWarnings(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var out bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&out, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return &out
+}
+
+// TestReadDatagram_ReportsKernelTimestamp pins the timestamp quality the
+// parsers label their metrics with: the kernel's own value, never the
+// userspace fallback.
+//
+// It is also what holds controlBufferSize. The socket asks for
+// SCM_TIMESTAMPNS, so a buffer too small for it makes the kernel discard the
+// message and raise MSG_CTRUNC, which is not a read error — the kind silently
+// becomes the fallback, and this test is what says so.
+func TestReadDatagram_ReportsKernelTimestamp(t *testing.T) {
+	warnings := captureWarnings(t)
+	conn, sender := loopbackPair(t)
+
+	// One Reader across several datagrams, the way a receive goroutine uses it,
+	// so a control buffer left in a bad state by the previous read shows up.
+	reader := NewReader()
 	buf := make([]byte, 2048)
-	_, _, recvTime, kind, err := ReadDatagram(conn, buf)
-	if err != nil {
-		t.Fatalf("ReadDatagram: %v", err)
+	for i := range 3 {
+		if _, err := sender.Write([]byte("kernel please stamp this")); err != nil {
+			t.Fatalf("sending datagram %d: %v", i, err)
+		}
+		_, _, recvTime, kind, err := reader.ReadDatagram(conn, buf)
+		if err != nil {
+			t.Fatalf("ReadDatagram %d: %v", i, err)
+		}
+		if kind != RecvTimestampKindKernelSoftware {
+			t.Errorf("datagram %d: receive-timestamp kind %q, want %q",
+				i, kind, RecvTimestampKindKernelSoftware)
+		}
+		if recvTime.IsZero() {
+			t.Errorf("datagram %d: receive timestamp is zero", i)
+		}
 	}
-	if kind != RecvTimestampKindKernelSoftware {
-		t.Errorf("receive-timestamp kind %q, want %q", kind, RecvTimestampKindKernelSoftware)
+	if got := warnings.String(); got != "" {
+		t.Errorf("ReadDatagram warned about the %d-byte control buffer it was given: %s",
+			len(reader.oob), got)
 	}
-	if recvTime.IsZero() {
-		t.Error("receive timestamp is zero")
+}
+
+// TestReadDatagram_WarnsWhenTheKernelTruncatesControlMessages holds the other
+// half: that a control buffer too small for what the socket asks for is
+// reported rather than swallowed.
+//
+// The kernel signals it with MSG_CTRUNC and a nil error, so nothing downstream
+// can tell a lost timestamp from a socket that never had timestamping on. The
+// Reader is given a buffer one control message header wide, which cannot hold
+// a struct timespec, to put a real MSG_CTRUNC on the read rather than a
+// simulated one. The warning is once per Reader: the cause does not change
+// between datagrams, and the receive path runs at line rate.
+func TestReadDatagram_WarnsWhenTheKernelTruncatesControlMessages(t *testing.T) {
+	warnings := captureWarnings(t)
+	conn, sender := loopbackPair(t)
+
+	reader := &Reader{oob: make([]byte, unix.CmsgSpace(0))}
+	buf := make([]byte, 2048)
+	for i := range 3 {
+		if _, err := sender.Write([]byte("kernel please stamp this")); err != nil {
+			t.Fatalf("sending datagram %d: %v", i, err)
+		}
+		_, _, _, kind, err := reader.ReadDatagram(conn, buf)
+		if err != nil {
+			t.Fatalf("ReadDatagram %d: %v", i, err)
+		}
+		if kind != RecvTimestampKindAppFallback {
+			t.Errorf("datagram %d: receive-timestamp kind %q, want %q: the timestamp cannot have "+
+				"survived a control buffer this small", i, kind, RecvTimestampKindAppFallback)
+		}
+	}
+
+	if got := strings.Count(warnings.String(), "level=WARN"); got != 1 {
+		t.Errorf("ReadDatagram logged %d warnings across 3 truncated reads, want 1:\n%s",
+			got, warnings.String())
+	}
+	if !strings.Contains(warnings.String(), "control_buffer_bytes=") {
+		t.Errorf("the warning does not name the buffer that was too small:\n%s", warnings.String())
 	}
 }
 

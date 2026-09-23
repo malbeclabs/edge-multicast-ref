@@ -3,9 +3,12 @@
 //
 // On Linux that is the kernel's SO_TIMESTAMPNS value, taken from the control
 // message that arrives with the datagram; elsewhere it is application time
-// read just after the datagram. ReadDatagram names which one it returned, so a
-// parser can label its latency metrics with the clock they were measured
-// against.
+// read just after the datagram. Reader.ReadDatagram names which one it
+// returned, so a parser can label its latency metrics with the clock they were
+// measured against.
+//
+// A Reader belongs to one receive goroutine, like the datagram buffer it is
+// given: it holds the control-message buffer that every read overwrites.
 package udp
 
 import (

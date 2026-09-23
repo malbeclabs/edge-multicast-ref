@@ -204,6 +204,9 @@ func (r *Runner) openMulticast(port int) (*net.UDPConn, error) {
 // timeout is the normal idle path and carries on reading.
 func (r *Runner) receive(ctx context.Context, port string, conn *net.UDPConn) error {
 	buf := make([]byte, maxUDPPacket)
+	// One Reader per receive goroutine, like buf: it holds the control-message
+	// buffer that every read overwrites.
+	reader := udp.NewReader()
 	var tracker seqTracker
 
 	for {
@@ -214,7 +217,7 @@ func (r *Runner) receive(ctx context.Context, port string, conn *net.UDPConn) er
 		}
 
 		_ = conn.SetReadDeadline(time.Now().Add(readDeadline))
-		n, src, recvTime, recvKind, err := udp.ReadDatagram(conn, buf)
+		n, src, recvTime, recvKind, err := reader.ReadDatagram(conn, buf)
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				continue

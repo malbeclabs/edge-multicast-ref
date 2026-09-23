@@ -6,7 +6,6 @@ require (
 	github.com/malbeclabs/edge-multicast-ref/go/internal v0.0.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
-	golang.org/x/net v0.55.0
 )
 
 require (
