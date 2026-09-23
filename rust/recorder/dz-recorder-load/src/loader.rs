@@ -879,9 +879,67 @@ mod pass_tests {
     pub(super) fn archive(segments: usize, per_segment: usize) -> Archive {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let completed = dir.path().join("completed");
+        write_feed(dir.path(), &completed, "top-of-book", segments, per_segment);
+        Archive {
+            completed,
+            rows: dir.path().join("rows"),
+            ledger: dir.path().join("ledger.jsonl"),
+            _dir: dir,
+        }
+    }
+
+    /// The two feeds [`archive_of_two_feeds`] writes, named in the order their
+    /// objects are walked.
+    ///
+    /// Both writers open at the same nanosecond and rotate on the same
+    /// schedule, so every segment produces one object per feed with the same
+    /// `start_ns`, and the walk's `(start_ns, path)` sort breaks that tie on
+    /// the subdirectory name. `market-by-price` sorts before `top-of-book`, so
+    /// the objects interleave by segment and the second feed's object is
+    /// always derived with the first feed's higher `segment_seq` sitting in
+    /// `pending`.
+    pub(super) const FIRST_FEED: &str = "market-by-price";
+    pub(super) const SECOND_FEED: &str = "top-of-book";
+
+    /// Two feeds' objects under `completed/<spec>/`, which is the layout
+    /// `dz-recorder` writes and the one a per-feed trailer is needed for.
+    ///
+    /// The two feeds share a channel — same group, same port, same `Reset
+    /// Count` — so neither feed's trailer looks inapplicable to the other's
+    /// object. Only the `segment_seq` spaces are independent, and they both
+    /// start at 0, which is exactly the confusion a global trailer makes.
+    pub(super) fn archive_of_two_feeds(segments: usize, per_segment: usize) -> Archive {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let completed = dir.path().join("completed");
+        for feed in [FIRST_FEED, SECOND_FEED] {
+            write_feed(
+                dir.path(),
+                &completed.join(feed),
+                feed,
+                segments,
+                per_segment,
+            );
+        }
+        Archive {
+            completed,
+            rows: dir.path().join("rows"),
+            ledger: dir.path().join("ledger.jsonl"),
+            _dir: dir,
+        }
+    }
+
+    /// `segments` objects of one feed into `completed_dir`, staged under a
+    /// directory of the feed's own so two writers can run over one root.
+    fn write_feed(
+        root: &Path,
+        completed_dir: &Path,
+        feed: &str,
+        segments: usize,
+        per_segment: usize,
+    ) {
         let cfg = ArchiveWriterConfig {
-            staging_dir: dir.path().join("staging"),
-            completed_dir: completed.clone(),
+            staging_dir: root.join("staging").join(feed),
+            completed_dir: completed_dir.to_path_buf(),
             rotate_bytes: 1 << 30,
             rotate_interval: Duration::from_secs(3600),
             staging_max: 1 << 40,
@@ -894,7 +952,7 @@ mod pass_tests {
                 build_commit: "0000000".to_owned(),
                 config_hash: "a".repeat(64),
             },
-            feed: "top-of-book".to_owned(),
+            feed: feed.to_owned(),
             roles_joined: vec![RoleJoin::on(
                 PortRole::Mktdata,
                 GROUP,
@@ -916,12 +974,6 @@ mod pass_tests {
                 .wait_completed()
                 .expect("the compressor publishes exactly one object")
                 .expect("publication");
-        }
-        Archive {
-            completed,
-            rows: dir.path().join("rows"),
-            ledger: dir.path().join("ledger.jsonl"),
-            _dir: dir,
         }
     }
 
@@ -2077,6 +2129,75 @@ mod deferred_ledger_tests {
             })
             .collect();
         assert_eq!(certain, vec![0, 1, 1], "only the first is unsettled");
+    }
+
+    /// **And the pending trailer a feed's object consults is its own feed's.**
+    ///
+    /// `each_feed_keeps_its_own_trailer` covers the other half of this, the
+    /// `Ledger` map, and a ledger entry exists only once an insert has landed.
+    /// Within one pass under a coalescing sink nothing has landed, so `pending`
+    /// is the whole supply of trailers — and a `pending` consulted without
+    /// regard to feed answers with whichever object last counted highest.
+    /// Two feeds' `segment_seq` spaces are independent, so that answer does not
+    /// precede the segment being derived, and every object of the second feed
+    /// after its first comes out `anchor_certain = 0`: an era boundary nobody
+    /// settled, which `ReplacingMergeTree(anchor_certain)` then keeps for ever.
+    ///
+    /// A `FileSink` cannot show this — it lands every batch as it takes it, so
+    /// the ledger supplies the trailer and the `pending` path is never the one
+    /// under test.
+    #[test]
+    fn a_pending_trailer_settles_only_its_own_feeds_next_object() {
+        let archive = archive_of_two_feeds(3, 40);
+        let metrics = LoaderMetrics::new(SITE, RECORDER);
+        let mut ledger = Ledger::open(&archive.ledger).expect("a new ledger");
+        let mut sink = HoldingSink::default();
+        let mut pending = Vec::new();
+
+        let (pass, errors) = Loader {
+            objects_dir: &archive.completed,
+            site: SITE,
+            recorder: RECORDER,
+            max_objects: 0,
+            ledger: &mut ledger,
+            sink: &mut sink,
+            metrics: &metrics,
+            market_data: &[],
+            pending: &mut pending,
+        }
+        .run_once(&|| false);
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(pass.derived, 6, "three objects of each feed");
+        assert_eq!(
+            ledger.entries(),
+            0,
+            "the sink is still holding every batch, so `pending` is the only \
+             trailer in play and this is the within-pass path"
+        );
+        assert_eq!(pending.len(), 6);
+
+        // One boundary per object, in derivation order, for one feed's objects.
+        let certain = |feed: &str| -> Vec<u8> {
+            let prefix = format!("feed={feed}/");
+            sink.taken
+                .iter()
+                .filter(|(key, _)| key.starts_with(&prefix))
+                .map(|(_, eras)| *eras.first().expect("one boundary per object"))
+                .collect()
+        };
+
+        assert_eq!(
+            certain(FIRST_FEED),
+            vec![0, 1, 1],
+            "nothing precedes the first object, and its own feed settles the rest"
+        );
+        assert_eq!(
+            certain(SECOND_FEED),
+            vec![0, 1, 1],
+            "the second feed's objects were settled against the other feed's \
+             pending trailer, so their boundaries came out unsettled"
+        );
     }
 }
 
