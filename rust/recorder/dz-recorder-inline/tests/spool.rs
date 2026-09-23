@@ -21,6 +21,10 @@ use std::path::{Path, PathBuf};
 
 use dz_recorder_inline::spool::{Recorded, Spool, SpoolError, CLOSED};
 use dz_recorder_load::ledger::Ledger;
+
+/// One feed per spool and per ledger, so a fixture is one feed and this is
+/// the key its entries carry.
+const TEST_FEED: &str = "top-of-book";
 use dz_recorder_rows::{
     Accepted, BookTop, Derivation, Era, FileSink, Grain, Landed, Nanos, ObjectId, RowBatch,
     RowSink, RowSinkError, SegmentTrailer, UncertainReason, Written,
@@ -291,7 +295,7 @@ fn a_destination_that_refuses_leaves_the_window_on_disk_and_the_ledger_empty() {
     let root = tempfile::tempdir().expect("a temporary directory");
     let ledger_path = root.path().join("ledger.jsonl");
     let spool_dir = root.path().join("spool");
-    let mut spool = Spool::open(&spool_dir, 1 << 20).expect("a spool");
+    let mut spool = Spool::open(&spool_dir, 1 << 20, TEST_FEED).expect("a spool");
     let mut ledger = Ledger::open(&ledger_path).expect("a ledger");
     let mut sink = FakeSink::new(&ledger_path);
     sink.refuse = true;
@@ -328,7 +332,7 @@ fn a_destination_that_refuses_leaves_the_window_on_disk_and_the_ledger_empty() {
 fn a_destination_that_recovers_lands_the_windows_oldest_first_and_records_each_after_its_rows() {
     let root = tempfile::tempdir().expect("a temporary directory");
     let ledger_path = root.path().join("ledger.jsonl");
-    let mut spool = Spool::open(root.path().join("spool"), 1 << 20).expect("a spool");
+    let mut spool = Spool::open(root.path().join("spool"), 1 << 20, TEST_FEED).expect("a spool");
     let mut ledger = Ledger::open(&ledger_path).expect("a ledger");
     let mut sink = FakeSink::new(&ledger_path);
     sink.refuse = true;
@@ -384,7 +388,7 @@ fn a_destination_that_recovers_lands_the_windows_oldest_first_and_records_each_a
     // The trailer travelled with the window, so a restart resumes with the
     // certainty this run had.
     assert_eq!(
-        ledger.trailer().map(|t| t.segment_seq),
+        ledger.trailer(TEST_FEED).map(|t| t.segment_seq),
         Some(2),
         "the highest window's trailer is what the next adjacency check consults"
     );
@@ -395,7 +399,7 @@ fn rows_the_sink_has_taken_and_not_sent_are_not_recorded_in_the_ledger() {
     let root = tempfile::tempdir().expect("a temporary directory");
     let ledger_path = root.path().join("ledger.jsonl");
     let spool_dir = root.path().join("spool");
-    let mut spool = Spool::open(&spool_dir, 1 << 20).expect("a spool");
+    let mut spool = Spool::open(&spool_dir, 1 << 20, TEST_FEED).expect("a spool");
     let mut ledger = Ledger::open(&ledger_path).expect("a ledger");
     let mut sink = FakeSink::new(&ledger_path);
     // A sink that coalesces: it takes the rows and sends nothing.
@@ -439,13 +443,14 @@ fn a_full_budget_evicts_the_oldest_window_and_the_reported_age_is_the_oldest_lef
 
     // Sized from a window that is already on disk, so the budget holds two and
     // not three whatever the rows happen to serialise to.
-    let mut measure = Spool::open(root.path().join("measure"), u64::MAX).expect("a spool");
+    let mut measure =
+        Spool::open(root.path().join("measure"), u64::MAX, TEST_FEED).expect("a spool");
     measure
         .store(0, batch("window-measure", 4), trailer(0))
         .expect("one window, to measure");
     let budget = measure.bytes() * 2 + measure.bytes() / 2;
 
-    let mut spool = Spool::open(&spool_dir, budget).expect("a spool");
+    let mut spool = Spool::open(&spool_dir, budget, TEST_FEED).expect("a spool");
     for (n, key) in ["window-a", "window-b"].iter().enumerate() {
         spool
             .store(
@@ -514,13 +519,14 @@ fn a_window_whose_rows_landed_is_the_last_one_the_budget_takes() {
 
     // Sized from a window already on disk, so the budget holds two and not
     // three whatever the rows happen to serialise to.
-    let mut measure = Spool::open(root.path().join("measure"), u64::MAX).expect("a spool");
+    let mut measure =
+        Spool::open(root.path().join("measure"), u64::MAX, TEST_FEED).expect("a spool");
     measure
         .store(0, batch("window-measure", 4), trailer(0))
         .expect("one window, to measure");
     let budget = measure.bytes() * 2 + measure.bytes() / 2;
 
-    let mut spool = Spool::open(&spool_dir, budget).expect("a spool");
+    let mut spool = Spool::open(&spool_dir, budget, TEST_FEED).expect("a spool");
     let mut ledger = Ledger::open(&ledger_path).expect("a ledger");
     let mut sink = FakeSink::new(&ledger_path);
 
@@ -590,13 +596,14 @@ fn an_eviction_that_cannot_delete_stops_being_a_window_rather_than_stopping_the_
     let root = tempfile::tempdir().expect("a temporary directory");
     let spool_dir = root.path().join("spool");
 
-    let mut measure = Spool::open(root.path().join("measure"), u64::MAX).expect("a spool");
+    let mut measure =
+        Spool::open(root.path().join("measure"), u64::MAX, TEST_FEED).expect("a spool");
     measure
         .store(0, batch("window-measure", 4), trailer(0))
         .expect("one window, to measure");
     let budget = measure.bytes() * 2 + measure.bytes() / 2;
 
-    let mut spool = Spool::open(&spool_dir, budget).expect("a spool");
+    let mut spool = Spool::open(&spool_dir, budget, TEST_FEED).expect("a spool");
     for (n, key) in ["window-a", "window-b"].iter().enumerate() {
         spool
             .store(
@@ -677,7 +684,7 @@ fn a_store_that_fails_leaves_no_bytes_the_spool_cannot_see() {
 
     let root = tempfile::tempdir().expect("a temporary directory");
     let spool_dir = root.path().join("spool");
-    let mut spool = Spool::open(&spool_dir, 1 << 20).expect("a spool");
+    let mut spool = Spool::open(&spool_dir, 1 << 20, TEST_FEED).expect("a spool");
 
     spool
         .store(10 * SECOND, batch("window-a", 2), trailer(0))
@@ -723,7 +730,7 @@ fn a_spool_abandoned_without_posting_is_replayed_on_the_next_open_and_lands() {
 
     // The run that died: two windows on disk, nothing posted, no ledger.
     {
-        let mut spool = Spool::open(&spool_dir, 1 << 20).expect("a spool");
+        let mut spool = Spool::open(&spool_dir, 1 << 20, TEST_FEED).expect("a spool");
         spool
             .store(10 * SECOND, batch("window-a", 2), trailer(0))
             .expect("the window reaches the disk");
@@ -734,7 +741,7 @@ fn a_spool_abandoned_without_posting_is_replayed_on_the_next_open_and_lands() {
     assert_eq!(ledger_entries(&ledger_path), 0);
 
     // The next run adopts them before it derives anything of its own.
-    let mut spool = Spool::open(&spool_dir, 1 << 20).expect("a spool");
+    let mut spool = Spool::open(&spool_dir, 1 << 20, TEST_FEED).expect("a spool");
     assert_eq!(spool.windows(), 2, "the previous run's windows are adopted");
     assert_eq!(
         spool.oldest_age_seconds(30 * SECOND),
@@ -761,7 +768,7 @@ fn a_corrupted_grain_file_is_discarded_by_name_and_the_windows_around_it_still_l
     let spool_dir = root.path().join("spool");
 
     {
-        let mut spool = Spool::open(&spool_dir, 1 << 20).expect("a spool");
+        let mut spool = Spool::open(&spool_dir, 1 << 20, TEST_FEED).expect("a spool");
         for (n, key) in ["window-a", "window-b", "window-c"].iter().enumerate() {
             spool
                 .store(
@@ -785,7 +792,7 @@ fn a_corrupted_grain_file_is_discarded_by_name_and_the_windows_around_it_still_l
     // between the bytes and the digest and not a missing window.
     assert!(spool_dir.join(&damaged).join(CLOSED).is_file());
 
-    let mut spool = Spool::open(&spool_dir, 1 << 20).expect("a spool");
+    let mut spool = Spool::open(&spool_dir, 1 << 20, TEST_FEED).expect("a spool");
     let mut ledger = Ledger::open(&ledger_path).expect("a ledger");
     let mut sink = FakeSink::new(&ledger_path);
     let drained = drain(&mut spool, &mut sink, &mut ledger, 100 * SECOND)
@@ -821,7 +828,7 @@ fn a_window_whose_close_never_finished_is_discarded_rather_than_loaded_in_part()
     let root = tempfile::tempdir().expect("a temporary directory");
     let spool_dir = root.path().join("spool");
     {
-        let mut spool = Spool::open(&spool_dir, 1 << 20).expect("a spool");
+        let mut spool = Spool::open(&spool_dir, 1 << 20, TEST_FEED).expect("a spool");
         spool
             .store(10 * SECOND, batch("window-a", 2), trailer(0))
             .expect("the window reaches the disk");
@@ -835,7 +842,7 @@ fn a_window_whose_close_never_finished_is_discarded_rather_than_loaded_in_part()
     let names = window_dirs(&spool_dir);
     std::fs::remove_file(spool_dir.join(&names[0]).join(CLOSED)).expect("the sidecar goes");
 
-    let mut spool = Spool::open(&spool_dir, 1 << 20).expect("a spool");
+    let mut spool = Spool::open(&spool_dir, 1 << 20, TEST_FEED).expect("a spool");
     assert_eq!(spool.windows(), 1, "only the window that was closed");
     assert_eq!(spool.windows_discarded_total(), 1);
     assert!(!spool_dir.join(&names[0]).exists());
@@ -854,7 +861,7 @@ fn a_name_the_spool_did_not_write_is_counted_and_left_alone() {
     let theirs = spool_dir.join("somebody-elses.db");
     std::fs::write(&theirs, b"not ours to delete").expect("their file is written");
 
-    let spool = Spool::open(&spool_dir, 1 << 20).expect("a spool");
+    let spool = Spool::open(&spool_dir, 1 << 20, TEST_FEED).expect("a spool");
 
     assert_eq!(spool.windows(), 0);
     assert_eq!(spool.unreclaimable_bytes(), 18);
@@ -870,7 +877,7 @@ fn a_refusal_between_taking_a_window_and_recording_it_leaves_it_on_disk_and_unre
     let root = tempfile::tempdir().expect("a temporary directory");
     let ledger_path = root.path().join("ledger.jsonl");
     let spool_dir = root.path().join("spool");
-    let mut spool = Spool::open(&spool_dir, 1 << 20).expect("a spool");
+    let mut spool = Spool::open(&spool_dir, 1 << 20, TEST_FEED).expect("a spool");
     let mut ledger = Ledger::open(&ledger_path).expect("a ledger");
     let mut sink = FakeSink::new(&ledger_path);
     sink.refuse = true;
@@ -919,7 +926,7 @@ fn ids_landed_from_earlier_windows_are_recorded_when_a_later_insert_flushes_them
     let root = tempfile::tempdir().expect("a temporary directory");
     let ledger_path = root.path().join("ledger.jsonl");
     let spool_dir = root.path().join("spool");
-    let mut spool = Spool::open(&spool_dir, 1 << 20).expect("a spool");
+    let mut spool = Spool::open(&spool_dir, 1 << 20, TEST_FEED).expect("a spool");
     let mut ledger = Ledger::open(&ledger_path).expect("a ledger");
     let mut sink = FakeSink::new(&ledger_path);
     // The first two inserts hold; the third is the one that makes the buffer
@@ -970,7 +977,7 @@ fn ids_landed_from_earlier_windows_are_recorded_when_a_later_insert_flushes_them
         "every window's directory went with its entry, not only the last one's"
     );
     assert_eq!(
-        ledger.trailer().map(|t| t.segment_seq),
+        ledger.trailer(TEST_FEED).map(|t| t.segment_seq),
         Some(2),
         "each window was recorded with its own trailer"
     );
@@ -984,7 +991,7 @@ fn a_window_the_ledger_already_records_is_dropped_rather_than_posted_again() {
 
     // A run that wrote the entry and died before deleting the directory.
     {
-        let mut spool = Spool::open(&spool_dir, 1 << 20).expect("a spool");
+        let mut spool = Spool::open(&spool_dir, 1 << 20, TEST_FEED).expect("a spool");
         let mut ledger = Ledger::open(&ledger_path).expect("a ledger");
         let mut sink = FakeSink::new(&ledger_path);
         spool
@@ -1008,7 +1015,7 @@ fn a_window_the_ledger_already_records_is_dropped_rather_than_posted_again() {
     assert_eq!(ledger_entries(&ledger_path), 1);
     assert_eq!(window_dirs(&spool_dir).len(), 1);
 
-    let mut spool = Spool::open(&spool_dir, 1 << 20).expect("a spool");
+    let mut spool = Spool::open(&spool_dir, 1 << 20, TEST_FEED).expect("a spool");
     let ledger = Ledger::open(&ledger_path).expect("a ledger");
     assert_eq!(spool.windows(), 1, "the directory was adopted");
 
@@ -1026,7 +1033,7 @@ fn a_window_whose_ledger_entry_will_not_write_owes_an_entry_and_not_a_second_ins
     let root = tempfile::tempdir().expect("a temporary directory");
     let ledger_path = root.path().join("ledger.jsonl");
     let spool_dir = root.path().join("spool");
-    let mut spool = Spool::open(&spool_dir, 1 << 20).expect("a spool");
+    let mut spool = Spool::open(&spool_dir, 1 << 20, TEST_FEED).expect("a spool");
     let mut ledger = Ledger::open(&ledger_path).expect("a ledger");
     let mut sink = FakeSink::new(&ledger_path);
 
@@ -1077,7 +1084,7 @@ fn a_window_whose_ledger_entry_will_not_write_owes_an_entry_and_not_a_second_ins
         "what was owed was the entry, not the insert"
     );
     assert_eq!(
-        ledger.trailer().map(|t| t.segment_seq),
+        ledger.trailer(TEST_FEED).map(|t| t.segment_seq),
         Some(0),
         "the trailer survived the ledger being unavailable"
     );
@@ -1109,7 +1116,7 @@ fn a_window_spooled_before_book_top_carried_the_key_still_replays_and_reads_as_z
     let spool_dir = root.path().join("spool");
 
     {
-        let mut spool = Spool::open(&spool_dir, 1 << 20).expect("a spool");
+        let mut spool = Spool::open(&spool_dir, 1 << 20, TEST_FEED).expect("a spool");
         let mut rows = batch("window-a", 2);
         rows.book_top.push(book_top("window-a"));
         spool
@@ -1145,7 +1152,7 @@ fn a_window_spooled_before_book_top_carried_the_key_still_replays_and_reads_as_z
     std::fs::write(&path, older.as_bytes()).expect("the older rows are written");
     reseal(&dir, Grain::BookTop, older.as_bytes());
 
-    let mut spool = Spool::open(&spool_dir, 1 << 20).expect("a spool");
+    let mut spool = Spool::open(&spool_dir, 1 << 20, TEST_FEED).expect("a spool");
     let mut ledger = Ledger::open(&ledger_path).expect("a ledger");
     let mut sink = FakeSink::new(&ledger_path);
     let drained =

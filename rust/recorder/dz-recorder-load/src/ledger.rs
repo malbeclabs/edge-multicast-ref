@@ -21,7 +21,7 @@
 //! which costs a replace and not a duplication, but also costs the eviction race
 //! the lag metric exists to watch.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
 use std::path::PathBuf;
 
@@ -51,6 +51,21 @@ pub struct Entry {
     /// had: without it the first object after every restart writes an uncertain
     /// era boundary, and every gap in it is reported `unverifiable`.
     pub trailer: SegmentTrailer,
+    /// The feed the object belongs to, which is what makes the trailer above
+    /// answerable.
+    ///
+    /// **`segment_seq` IS PER FEED AND RESTARTS AT 0 FOR EACH.** One loader
+    /// reading `completed/<spec>/` sees several, so a trailer without this is a
+    /// trailer whose `seq + 1` adjacency check consults whichever feed last
+    /// wrote the highest number.
+    ///
+    /// `default` for the lines a ledger written before this field holds. They
+    /// come back under the empty feed, so the first object of each real feed
+    /// after the upgrade finds no trailer of its own and writes one uncertain
+    /// boundary -- the same one-off cost a restart already pays, and stated
+    /// here so it is not mistaken for a defect.
+    #[serde(default)]
+    pub feed: String,
 }
 
 /// The ledger, held in memory and appended to on disk.
@@ -58,9 +73,13 @@ pub struct Entry {
 pub struct Ledger {
     path: PathBuf,
     loaded: HashSet<(String, String)>,
-    /// The trailer of the highest `segment_seq` this ledger knows, which is what
-    /// the next object's adjacency check consults.
-    trailer: Option<SegmentTrailer>,
+    /// The trailer of the highest `segment_seq` this ledger knows FOR EACH
+    /// FEED, which is what that feed's next object consults.
+    ///
+    /// Keyed, because `segment_seq` restarts at 0 per feed: one map and not one
+    /// trailer is the difference between an adjacency check that answers about
+    /// its own feed and one that answers about whichever feed counted highest.
+    trailers: HashMap<String, SegmentTrailer>,
     entries: usize,
 }
 
@@ -93,7 +112,7 @@ impl Ledger {
         let mut ledger = Self {
             path: path.clone(),
             loaded: HashSet::new(),
-            trailer: None,
+            trailers: HashMap::new(),
             entries: 0,
         };
         let text = match std::fs::read_to_string(&path) {
@@ -116,7 +135,7 @@ impl Ledger {
         Self {
             path: PathBuf::new(),
             loaded: HashSet::new(),
-            trailer: None,
+            trailers: HashMap::new(),
             entries: 0,
         }
     }
@@ -129,8 +148,8 @@ impl Ledger {
 
     /// The trailer the next object's adjacency check should consult.
     #[must_use]
-    pub const fn trailer(&self) -> Option<&SegmentTrailer> {
-        self.trailer.as_ref()
+    pub fn trailer(&self, feed: &str) -> Option<&SegmentTrailer> {
+        self.trailers.get(feed)
     }
 
     #[must_use]
@@ -210,8 +229,8 @@ impl Ledger {
                 // and it is one line.
                 present.contains(&(e.object_key.clone(), e.object_sha256.clone()))
                     || self
-                        .trailer
-                        .as_ref()
+                        .trailers
+                        .get(&e.feed)
                         .is_some_and(|t| t.segment_seq == e.trailer.segment_seq)
             })
             .collect();
@@ -257,11 +276,12 @@ impl Ledger {
         // out-of-order object must not leave the earlier object's trailer as the
         // evidence the next object consults.
         if self
-            .trailer
-            .as_ref()
+            .trailers
+            .get(&entry.feed)
             .is_none_or(|t| entry.trailer.segment_seq >= t.segment_seq)
         {
-            self.trailer = Some(entry.trailer.clone());
+            self.trailers
+                .insert(entry.feed.clone(), entry.trailer.clone());
         }
     }
 }

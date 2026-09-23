@@ -17,6 +17,10 @@ use dz_recorder_replay::synthetic::SyntheticPublisher;
 use dz_recorder_rows::{Accepted, Landed, ObjectId, RowBatch, RowSink, RowSinkError, Written};
 use tempfile::TempDir;
 
+/// The spool and the ledger are opened per feed, so every fixture here is one
+/// feed and its name is the key its ledger entries carry.
+const TEST_FEED: &str = "top-of-book";
+
 /// A destination that records what it was given, and can be told to panic.
 ///
 /// Shared through an `Arc` so the test can read it after the pipeline has taken
@@ -79,7 +83,7 @@ fn fixture() -> Fixture {
     // Beside the spool and never inside it: a file the budget cannot classify
     // is a file eviction cannot reach.
     let ledger_path = dir.path().join("ledger.jsonl");
-    let spool = Spool::open(&spool_dir, 64 * 1024 * 1024).expect("the spool opens");
+    let spool = Spool::open(&spool_dir, 64 * 1024 * 1024, TEST_FEED).expect("the spool opens");
     let ledger = Ledger::open(&ledger_path).expect("the ledger opens");
     Fixture {
         _dir: dir,
@@ -335,7 +339,7 @@ fn run_at(
     sent: &[OwnedDatagram],
 ) -> Vec<RowBatch> {
     let store = Arc::new(Mutex::new(Store::default()));
-    let spool = Spool::open(spool_dir, 64 * 1024 * 1024).expect("the spool opens");
+    let spool = Spool::open(spool_dir, 64 * 1024 * 1024, TEST_FEED).expect("the spool opens");
     let ledger = Ledger::open(ledger_path).expect("the ledger opens");
     let (mut tx, rx) = ring(256);
     let mut cfg = config();
@@ -392,7 +396,7 @@ fn a_restart_does_not_anchor_its_first_window_on_the_ledgers_trailer() {
     // What the restart inherits, read the way a startup would read it.
     let inherited = Ledger::open(&ledger_path).expect("the ledger opens");
     let trailer = inherited
-        .trailer()
+        .trailer(TEST_FEED)
         .expect("the first run landed a window, so its trailer is in the ledger");
     assert_eq!(
         trailer.segment_seq, 0,
@@ -452,7 +456,7 @@ fn a_window_the_spool_refused_leaves_the_next_window_uncertain() {
     let dir = TempDir::new().expect("a temporary directory");
     let spool_dir = dir.path().join("spool");
     let ledger_path = dir.path().join("ledger.jsonl");
-    let spool = Spool::open(&spool_dir, 64 * 1024 * 1024).expect("the spool opens");
+    let spool = Spool::open(&spool_dir, 64 * 1024 * 1024, TEST_FEED).expect("the spool opens");
     let ledger = Ledger::open(&ledger_path).expect("the ledger opens");
 
     let (mut tx, rx) = ring(256);
