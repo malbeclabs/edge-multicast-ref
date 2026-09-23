@@ -27,6 +27,10 @@ use dz_publisher_lowering::{Instrument, InstrumentTable, Lowering, SourceId};
 /// production id, so the checked type admits it.
 const SOURCE_ID: u16 = 2;
 
+/// The vectors' `Instrument ID`, which every `lowered_from` block in the
+/// manifest records as the instrument the event was stated about.
+const INSTRUMENT_ID: u32 = 1;
+
 /// The exponents that make the vectors' raw integers the decimals a venue would
 /// have quoted. Transcribed by reading the vector, not by running the code:
 /// `bid_price = 9_999_500` at `-4` is `999.95`, and `bid_qty = 12_500` at `-2`
@@ -44,8 +48,7 @@ fn golden(name: &str) -> Vec<u8> {
 fn table() -> InstrumentTable {
     let mut instruments = InstrumentTable::new();
     instruments.admit(Instrument {
-        // The vectors' `Instrument ID`.
-        instrument_id: 1,
+        instrument_id: INSTRUMENT_ID,
         price_exponent: PRICE_EXPONENT,
         qty_exponent: QTY_EXPONENT,
         quoted_per_contract: None,
@@ -200,17 +203,32 @@ const SNAPSHOT_TS: u64 = 1_700_000_000_000_000_005;
 /// read.
 const DEPTH_BOUND: u32 = 50;
 
+/// The venue-stated values of the two delta events and the snapshot's first
+/// level. They are constants rather than literals inside the fixtures because
+/// `the_manifest_states_the_event_these_vectors_were_lowered_from` asserts the
+/// manifest's `lowered_from` against these same names: written twice, the
+/// manifest could state an event these bytes were not lowered from and both
+/// sides would still pass.
+const LEVEL_TS: u64 = 1_700_000_000_000_000_003;
+const LEVEL_PX: &str = "1000.05";
+const LEVEL_QTY: &str = "72.50";
+const LEVEL_ORDER_COUNT: u16 = 5;
+const CLEAR_TS: u64 = 1_700_000_000_000_000_004;
+const SNAPSHOT_BID_PX: &str = "999.95";
+const SNAPSHOT_BID_QTY: &str = "125.00";
+const SNAPSHOT_BID_ORDER_COUNT: u16 = 3;
+
 /// The one level update these vectors carry, from the event a venue states.
 fn lowered_level(instruments: &InstrumentTable, depth: &mut DepthLowering) -> LevelUpdate {
     depth
         .lower_level(
             instruments,
             InstrumentRef::from_admission(0),
-            1_700_000_000_000_000_003,
+            LEVEL_TS,
             Side::Ask,
-            Scalar::text("1000.05"),
-            Scalar::text("72.50"),
-            Some(5),
+            Scalar::text(LEVEL_PX),
+            Scalar::text(LEVEL_QTY),
+            Some(LEVEL_ORDER_COUNT),
             Presence::New,
         )
         .expect("exact at these exponents")
@@ -223,10 +241,10 @@ fn lowered_clear(instruments: &InstrumentTable, depth: &mut DepthLowering) -> Bo
         .lower_clear(
             instruments,
             InstrumentRef::from_admission(0),
-            1_700_000_000_000_000_004,
+            CLEAR_TS,
             ClearScope::FromPrice {
                 side: Side::Ask,
-                px: Scalar::text("1000.05"),
+                px: Scalar::text(LEVEL_PX),
             },
         )
         .expect("exact at these exponents")
@@ -247,14 +265,14 @@ fn lowered_snapshot(
         .expect("held");
     framer.level(
         Side::Bid,
-        Scalar::text("999.95"),
-        Scalar::text("125.00"),
-        Some(3),
+        Scalar::text(SNAPSHOT_BID_PX),
+        Scalar::text(SNAPSHOT_BID_QTY),
+        Some(SNAPSHOT_BID_ORDER_COUNT),
     );
     framer.level(
         Side::Ask,
-        Scalar::text("1000.05"),
-        Scalar::text("72.50"),
+        Scalar::text(LEVEL_PX),
+        Scalar::text(LEVEL_QTY),
         None,
     );
     let snapshot = framer
@@ -385,4 +403,342 @@ fn a_pulled_snapshot_lowers_to_its_committed_vectors() {
         golden("snapshot-end-from-event-v3.bin").as_slice()
     );
     assert_eq!(SnapshotEnd::decode(&buf).expect("decodes"), end);
+}
+
+// ---------------------------------------------------------------------------
+// The manifest, made load-bearing
+// ---------------------------------------------------------------------------
+//
+// `testdata/golden/README.md` names `manifest.json` as where an implementation
+// in any language reads a vector's field values from, and the paragraph above
+// says another language can reproduce these five the way it reproduces the
+// codec's — from the `lowered_from` block beside the bytes. A suite that asserts
+// the bytes and leaves the manifest unread leaves both sentences claims rather
+// than bindings: the manifest could then drift from the bytes in either
+// direction with every suite green.
+//
+// The two tests below close it. Each lowered message is turned into the rows the
+// manifest names and compared with its `fields` block in both directions, and
+// the `lowered_from` block's instrument and `Source ID` are compared with the
+// values this suite actually drives the lowering with. The reverse drift needs
+// no new test — a value changed in the lowering stops reproducing the committed
+// bytes and fails the cases above.
+
+use dz_edge_core::{PortRole, FLAG_SNAPSHOT, SCHEMA_VERSION};
+use serde_json::Value;
+
+/// The five vectors this crate is the sole author of. Named once so that a
+/// vector added to the group and left out of these tests is a one-line change
+/// away from being covered rather than something to notice.
+const LOWERED_VECTORS: [&str; 5] = [
+    "level-update-from-event-v3.bin",
+    "book-clear-from-event-v3.bin",
+    "snapshot-begin-from-event-v3.bin",
+    "snapshot-level-from-event-v3.bin",
+    "snapshot-end-from-event-v3.bin",
+];
+
+/// One vector's entry in `testdata/golden/manifest.json`.
+///
+/// A missing entry panics rather than passing quietly, for the reason the
+/// vectors themselves are read with `unwrap_or_else`: a check that asserts
+/// nothing because it found nothing reports the same success as one that
+/// compared every row.
+fn manifest_entry(file: &str) -> Value {
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../testdata/golden/manifest.json");
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let doc: Value = serde_json::from_str(&text).expect("manifest.json is JSON");
+    let vectors = doc["vectors"]
+        .as_array()
+        .expect("manifest.json has a `vectors` array");
+    // Every `file` is rejected for being stated twice before anything is looked
+    // up, which is what the Go readers do (`readGoldenManifest` builds a map and
+    // fails on a repeated `file`). A bare `find` answers with the first of two
+    // entries for one vector and never reads the second, so a manifest carrying
+    // a correct entry followed by a contradicting one would leave this suite
+    // green while stating two different things about the same bytes.
+    let mut seen = std::collections::BTreeSet::new();
+    for vector in vectors {
+        let name = vector["file"]
+            .as_str()
+            .expect("a vector's `file` is a string");
+        assert!(
+            seen.insert(name),
+            "manifest.json lists {name} twice: the first entry would answer for both and the \
+             second binds nothing"
+        );
+    }
+    vectors
+        .iter()
+        .find(|v| v["file"] == file)
+        .unwrap_or_else(|| panic!("manifest.json carries no entry for {file}"))
+        .clone()
+}
+
+/// Asserts that the manifest states exactly what this suite lowers: the same
+/// header values, and the same `fields` block down to the set of names.
+///
+/// `flags_on_wire` is 0 for all five, including the three snapshot messages,
+/// and that is not an oversight on either side. These files are what the
+/// lowering encodes, not what leaves the publisher: bit 0 is stamped at push,
+/// from the port, after the body is encoded. So the value is asserted against
+/// what the bytes hold rather than against the message's port role — which is
+/// how the codec's own snapshot vectors, taken after the stamp, differ from
+/// these — and the mismatch is stated here so an implementation reading these
+/// bytes is told the bit is still to come rather than left to notice.
+fn manifest_states<M: AppMessage>(file: &str, rows: &[(&str, i64)]) {
+    let entry = manifest_entry(file);
+    assert_eq!(entry["size"].as_u64(), Some(M::SIZE as u64), "{file}: size");
+    assert_eq!(
+        entry["type_id"].as_str(),
+        Some(format!("{:#04x}", M::TYPE_ID).as_str()),
+        "{file}: type_id"
+    );
+    let bytes = golden(file);
+    assert_eq!(
+        entry["flags_on_wire"].as_u64(),
+        Some(u64::from(u16::from_le_bytes([bytes[2], bytes[3]]))),
+        "{file}: flags_on_wire"
+    );
+    if M::PORT_ROLES.contains(&PortRole::Snapshot) {
+        assert_eq!(
+            entry["flags_on_wire"].as_u64(),
+            Some(0),
+            "{file}: a snapshot-port vector taken before push carries 0; \
+             if this one now carries {FLAG_SNAPSHOT} the generator was changed \
+             and this comment with it"
+        );
+    }
+    assert_eq!(
+        entry["schema_version"].as_u64(),
+        Some(u64::from(SCHEMA_VERSION)),
+        "{file}: schema_version"
+    );
+
+    let fields = entry["fields"]
+        .as_object()
+        .unwrap_or_else(|| panic!("{file}: the manifest entry has no `fields` block"));
+    for (name, want) in rows {
+        let stated = fields.get(*name).unwrap_or_else(|| {
+            panic!("{file}: the manifest states no `{name}`, which this suite asserts as {want}")
+        });
+        assert_eq!(
+            stated.as_i64(),
+            Some(*want),
+            "{file}: fields.{name} is {stated}, but this suite asserts {want}"
+        );
+    }
+
+    // The other direction. A field added to the manifest and asserted nowhere
+    // is a value nothing holds the lowering to, which is exactly what this
+    // test refuses to let the manifest carry.
+    let mut asserted: Vec<&str> = rows.iter().map(|(n, _)| *n).collect();
+    asserted.sort_unstable();
+    let mut stated: Vec<&str> = fields.keys().map(String::as_str).collect();
+    stated.sort_unstable();
+    assert_eq!(
+        stated, asserted,
+        "{file}: the manifest's `fields` block and this suite's rows must name the same fields"
+    );
+}
+
+/// Each message as the rows the manifest names for it. Built from the lowered
+/// value rather than restated, so the two cannot hold different numbers.
+fn level_update_rows(m: &LevelUpdate) -> Vec<(&'static str, i64)> {
+    vec![
+        ("instrument_id", i64::from(m.instrument_id)),
+        ("source_id", i64::from(m.source_id)),
+        ("side", i64::from(m.side)),
+        ("action", i64::from(m.action)),
+        ("per_instrument_seq", i64::from(m.per_instrument_seq)),
+        ("price_raw", m.price_raw),
+        ("qty_raw", m.qty_raw as i64),
+        ("timestamp_ns", m.timestamp_ns as i64),
+        ("order_count", i64::from(m.order_count)),
+        ("level_index", i64::from(m.level_index)),
+        ("update_reason", i64::from(m.update_reason)),
+        ("level_flags", i64::from(m.level_flags)),
+    ]
+}
+
+fn book_clear_rows(m: &BookClear) -> Vec<(&'static str, i64)> {
+    vec![
+        ("instrument_id", i64::from(m.instrument_id)),
+        ("source_id", i64::from(m.source_id)),
+        ("clear_side", i64::from(m.clear_side)),
+        ("scope", i64::from(m.scope)),
+        ("per_instrument_seq", i64::from(m.per_instrument_seq)),
+        ("from_price_raw", m.from_price_raw),
+        ("timestamp_ns", m.timestamp_ns as i64),
+        ("clear_reason", i64::from(m.clear_reason)),
+    ]
+}
+
+fn snapshot_begin_rows(m: &SnapshotBegin) -> Vec<(&'static str, i64)> {
+    vec![
+        ("instrument_id", i64::from(m.instrument_id)),
+        ("anchor_seq", m.anchor_seq as i64),
+        ("total_levels", i64::from(m.total_levels)),
+        ("snapshot_id", i64::from(m.snapshot_id)),
+        ("last_instrument_seq", i64::from(m.last_instrument_seq)),
+        ("timestamp_ns", m.timestamp_ns as i64),
+        ("depth_bound", i64::from(m.depth_bound)),
+    ]
+}
+
+fn snapshot_level_rows(m: &SnapshotLevel) -> Vec<(&'static str, i64)> {
+    vec![
+        ("snapshot_id", i64::from(m.snapshot_id)),
+        ("price_raw", m.price_raw),
+        ("qty_raw", m.qty_raw as i64),
+        ("order_count", i64::from(m.order_count)),
+        ("side", i64::from(m.side)),
+        ("level_flags", i64::from(m.level_flags)),
+    ]
+}
+
+fn snapshot_end_rows(m: &SnapshotEnd) -> Vec<(&'static str, i64)> {
+    vec![
+        ("instrument_id", i64::from(m.instrument_id)),
+        ("anchor_seq", m.anchor_seq as i64),
+        ("snapshot_id", i64::from(m.snapshot_id)),
+    ]
+}
+
+#[test]
+fn the_manifest_states_what_the_lowering_produces() {
+    let instruments = table();
+
+    let mut depth = DepthLowering::new(source_id());
+    let level = lowered_level(&instruments, &mut depth);
+    manifest_states::<LevelUpdate>("level-update-from-event-v3.bin", &level_update_rows(&level));
+    let clear = lowered_clear(&instruments, &mut depth);
+    manifest_states::<BookClear>("book-clear-from-event-v3.bin", &book_clear_rows(&clear));
+
+    // A lowering of its own, for the reason the generator gives: a shared one
+    // would leave the snapshot's `Last Instrument Seq` carrying the deltas
+    // above it.
+    let mut depth = DepthLowering::new(source_id());
+    let (begin, levels, end) = lowered_snapshot(&instruments, &mut depth);
+    manifest_states::<SnapshotBegin>(
+        "snapshot-begin-from-event-v3.bin",
+        &snapshot_begin_rows(&begin),
+    );
+    manifest_states::<SnapshotLevel>(
+        "snapshot-level-from-event-v3.bin",
+        &snapshot_level_rows(&levels[0]),
+    );
+    manifest_states::<SnapshotEnd>("snapshot-end-from-event-v3.bin", &snapshot_end_rows(&end));
+}
+
+/// The keys of a `lowered_from` block that describe the fixture in prose
+/// rather than carrying a value the lowering read. They are held to being
+/// strings; every other key has to be one the assertion below states.
+const LOWERED_FROM_PROSE: [&str; 3] = ["framing", "note", "preceded_by"];
+
+/// The event each vector was lowered from, as the manifest has to state it.
+///
+/// Built from the same constants the fixtures above hand to the lowering, so
+/// the two cannot disagree. Stating it twice would defeat the point: these
+/// five blocks are the only reproduction recipe another language has for the
+/// `-from-event-` bytes, and no assertion over the output can catch a recipe
+/// that does not produce them.
+fn lowered_from_expected(file: &str) -> Value {
+    let instrument = serde_json::json!({
+        "instrument_id": INSTRUMENT_ID,
+        "price_exponent": PRICE_EXPONENT,
+        "qty_exponent": QTY_EXPONENT,
+        "quoted_per_contract": Value::Null,
+    });
+    match file {
+        "level-update-from-event-v3.bin" => serde_json::json!({
+            "event": "Level",
+            "instrument": instrument,
+            "source_id": SOURCE_ID,
+            "source_ts_ns": LEVEL_TS,
+            "side": "ask",
+            "px": LEVEL_PX,
+            "qty": LEVEL_QTY,
+            "order_count": LEVEL_ORDER_COUNT,
+            "presence": "new",
+        }),
+        "book-clear-from-event-v3.bin" => serde_json::json!({
+            "event": "Clear",
+            "instrument": instrument,
+            "source_id": SOURCE_ID,
+            "source_ts_ns": CLEAR_TS,
+            "scope": "from_price",
+            "side": "ask",
+            "px": LEVEL_PX,
+        }),
+        "snapshot-begin-from-event-v3.bin" => serde_json::json!({
+            "instrument": instrument,
+            "anchor_seq": ANCHOR_SEQ,
+            "timestamp_ns": SNAPSHOT_TS,
+            "depth_bound": DEPTH_BOUND,
+        }),
+        "snapshot-level-from-event-v3.bin" => serde_json::json!({
+            "instrument": instrument,
+            "side": "bid",
+            "px": SNAPSHOT_BID_PX,
+            "qty": SNAPSHOT_BID_QTY,
+            "order_count": SNAPSHOT_BID_ORDER_COUNT,
+        }),
+        "snapshot-end-from-event-v3.bin" => serde_json::json!({
+            "instrument": instrument,
+            "anchor_seq": ANCHOR_SEQ,
+        }),
+        other => panic!("no expected `lowered_from` is stated for {other}"),
+    }
+}
+
+/// The other half of the manifest's statement about these five, and the half
+/// that makes them reproducible elsewhere at all: `fields` says what came out,
+/// and `lowered_from` says what went in. An exponent stated wrongly there sends
+/// another language to a different raw integer from the same decimal, which is
+/// a drift no assertion over the output would catch.
+///
+/// Every value key is bound, in both directions. Binding only the instrument
+/// left the rest of the recipe free: `px`, `qty`, `side`, `order_count`,
+/// `source_ts_ns`, `scope`, `anchor_seq` and `depth_bound` could all be
+/// rewritten across all five entries, and a key added that nothing reads, with
+/// every suite in both languages still green.
+#[test]
+fn the_manifest_states_the_event_these_vectors_were_lowered_from() {
+    for file in LOWERED_VECTORS {
+        let entry = manifest_entry(file);
+        let stated = entry["lowered_from"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{file}: lowered_from is an object"));
+        let expected = lowered_from_expected(file);
+        let expected = expected.as_object().expect("built as an object");
+
+        for (key, want) in expected {
+            let got = stated.get(key).unwrap_or_else(|| {
+                panic!("{file}: lowered_from has no {key}, which the fixture lowers as {want}")
+            });
+            assert_eq!(got, want, "{file}: lowered_from.{key}");
+        }
+
+        // The other direction, which is what keeps the recipe complete: a key
+        // stated here and asserted nowhere is a value another language would
+        // read and this suite would not notice changing.
+        for key in stated.keys() {
+            assert!(
+                expected.contains_key(key) || LOWERED_FROM_PROSE.contains(&key.as_str()),
+                "{file}: lowered_from.{key} is stated and asserted nowhere; add it to \
+                 `lowered_from_expected` or to `LOWERED_FROM_PROSE` if it is prose"
+            );
+        }
+        for key in LOWERED_FROM_PROSE {
+            if let Some(value) = stated.get(key) {
+                assert!(
+                    value.is_string(),
+                    "{file}: lowered_from.{key} is prose about the fixture and has to be a string"
+                );
+            }
+        }
+    }
 }

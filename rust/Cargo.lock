@@ -299,6 +299,7 @@ version = "0.2.0"
 dependencies = [
  "dz-edge-core",
  "dz-edge-tob",
+ "serde_json",
 ]
 
 [[package]]
@@ -306,6 +307,7 @@ name = "dz-edge-refdata"
 version = "0.2.0"
 dependencies = [
  "dz-edge-core",
+ "serde_json",
 ]
 
 [[package]]
@@ -313,6 +315,7 @@ name = "dz-edge-tob"
 version = "0.2.0"
 dependencies = [
  "dz-edge-core",
+ "serde_json",
 ]
 
 [[package]]
@@ -392,6 +395,7 @@ dependencies = [
  "dz-edge-mbp",
  "dz-edge-refdata",
  "dz-edge-tob",
+ "serde_json",
  "thiserror 1.0.69",
 ]
 

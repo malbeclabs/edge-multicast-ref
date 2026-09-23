@@ -2,9 +2,12 @@ package main
 
 import (
 	"encoding/binary"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/malbeclabs/edge-multicast-ref/go/internal/golden"
 )
 
 // The golden vectors are the cross-language contract. Four of the five below
@@ -40,10 +43,12 @@ import (
 // The expected values are the `fields` block of testdata/golden/manifest.json,
 // which is where an implementation in any language reads them from, and the
 // names below are the manifest's names so a failure points straight at the row
-// that disagrees. Where the manifest's name and this parser's field spelling
-// differ, the difference is the `Raw` suffix this parser puts on a value still
-// in wire units, or the `_ns` the wire structs drop because they hold a
-// time.Time:
+// that disagrees. That is a binding and not a claim:
+// TestGoldenManifestStatesWhatTheseCasesAssert compares every row below with
+// the manifest's own, in both directions. Where the manifest's name and this
+// parser's field spelling differ, the difference is the `Raw` suffix this parser
+// puts on a value still in wire units, or the `_ns` the wire structs drop
+// because they hold a time.Time:
 //
 //	trade_price         -> TradePriceRaw        tick_size -> TickSizeRaw
 //	trade_qty           -> TradeQtyRaw          lot_size  -> LotSizeRaw
@@ -98,17 +103,13 @@ func header(t *testing.T, buf []byte, wantType uint8, wantSize int, wantFlags ui
 
 // goldenField is one row of a vector's `fields` block: the manifest's name for
 // it, the value this parser decoded, and the value the manifest states.
-type goldenField struct {
-	name string
-	got  int64
-	want int64
-}
+type goldenField = golden.Field
 
 func checkFields(t *testing.T, fields []goldenField) {
 	t.Helper()
 	for _, f := range fields {
-		if f.got != f.want {
-			t.Errorf("%s = %d, want %d", f.name, f.got, f.want)
+		if f.Got != f.Want {
+			t.Errorf("%s = %d, want %d", f.Name, f.Got, f.Want)
 		}
 	}
 }
@@ -116,38 +117,123 @@ func checkFields(t *testing.T, fields []goldenField) {
 // goldenText is a goldenField for the fixed-width ASCII fields, which
 // fixedString has already trimmed of their null padding by the time they get
 // here.
-type goldenText struct {
-	name string
-	got  string
-	want string
-}
+type goldenText = golden.Text
 
 func checkText(t *testing.T, fields []goldenText) {
 	t.Helper()
 	for _, f := range fields {
-		if f.got != f.want {
-			t.Errorf("%s = %q, want %q", f.name, f.got, f.want)
+		if f.Got != f.Want {
+			t.Errorf("%s = %q, want %q", f.Name, f.Got, f.Want)
 		}
 	}
 }
 
-func TestGoldenTrade(t *testing.T) {
-	body := header(t, goldenBytes(t, "trade-v3.bin"), msgTypeTrade, 52, 0)
-	tr, err := ParseTrade(body)
-	if err != nil {
-		t.Fatalf("ParseTrade: %v", err)
+// goldenVector is one vector's whole expectation: the header values the
+// manifest records as `type_id`, `size`, `flags_on_wire` and `schema_version`,
+// and a decode of the body that yields the `fields` rows.
+//
+// The expectation is a table rather than a statement inside a test body because
+// two tests need it. The case below asserts the rows against the bytes; the
+// manifest test asserts the same rows against manifest.json. Stated once, they
+// cannot disagree with each other, which is the only way a comment naming the
+// manifest as the authority for these values can be true of the code.
+type goldenVector struct {
+	file   string
+	typeID uint8
+	size   int
+	flags  uint16
+	schema uint8
+	rows   func(t *testing.T, body []byte) ([]goldenField, []goldenText)
+}
+
+// goldenVectors is every vector this parser reads: the four the family shares,
+// and snapshot-end-v3.bin, whose bytes this feed and market-by-price both send.
+// The ten it does not are market-by-price's, whose depth and lowered messages
+// this decoder has different layouts for; go/marketbyprice-parser reads those,
+// and its own manifest test is what holds the corpus to having no vector nobody
+// reads.
+func goldenVectors() []goldenVector {
+	return []goldenVector{
+		{
+			file: "trade-v3.bin", typeID: msgTypeTrade, size: 52, flags: 0, schema: mboSchemaVersionV3,
+			rows: func(t *testing.T, body []byte) ([]goldenField, []goldenText) {
+				tr, err := ParseTrade(body)
+				if err != nil {
+					t.Fatalf("ParseTrade: %v", err)
+				}
+				return []goldenField{
+					{Name: "instrument_id", Got: int64(tr.InstrumentID), Want: 1},
+					{Name: "source_id", Got: int64(tr.SourceID), Want: 2},
+					{Name: "aggressor_side", Got: int64(tr.AggressorSide), Want: 1},
+					{Name: "trade_flags", Got: int64(tr.TradeFlags), Want: 2},
+					{Name: "source_timestamp_ns", Got: tr.SourceTimestamp.UnixNano(), Want: 1700000000000000001},
+					{Name: "trade_price", Got: tr.TradePriceRaw, Want: 10000000},
+					{Name: "trade_qty", Got: int64(tr.TradeQtyRaw), Want: 500},
+					{Name: "trade_id", Got: int64(tr.TradeID), Want: 987654321},
+					{Name: "cumulative_volume", Got: int64(tr.CumulativeVolumeRaw), Want: 1000000},
+				}, nil
+			},
+		},
+		{
+			file: "instrument-definition-v3.bin", typeID: msgTypeInstrumentDefinition, size: 130, flags: 0, schema: mboSchemaVersionV3,
+			rows: func(t *testing.T, body []byte) ([]goldenField, []goldenText) {
+				d, err := ParseInstrumentDefinition(body, mboSchemaVersionV3)
+				if err != nil {
+					t.Fatalf("ParseInstrumentDefinition: %v", err)
+				}
+				return instDefFields(d, 2), instDefText(d)
+			},
+		},
+		{
+			// The schema 1 vector is decode-only: nothing here emits that
+			// layout, and InstrumentDefinition is the one message in this
+			// family whose layout changed between schema generations, so it is
+			// the one most likely to drift.
+			file: "instrument-definition-v1.bin", typeID: msgTypeInstrumentDefinition, size: 80, flags: 0, schema: mboSchemaVersionV1,
+			rows: func(t *testing.T, body []byte) ([]goldenField, []goldenText) {
+				d, err := ParseInstrumentDefinition(body, mboSchemaVersionV1)
+				if err != nil {
+					t.Fatalf("ParseInstrumentDefinition: %v", err)
+				}
+				return instDefFields(d, 0), instDefText(d)
+			},
+		},
+		{
+			file: "manifest-summary-v3.bin", typeID: msgTypeManifestSummary, size: 24, flags: 0, schema: mboSchemaVersionV3,
+			rows: func(t *testing.T, body []byte) ([]goldenField, []goldenText) {
+				m, err := ParseManifestSummary(body)
+				if err != nil {
+					t.Fatalf("ParseManifestSummary: %v", err)
+				}
+				return []goldenField{
+					{Name: "channel_id", Got: int64(m.ChannelID), Want: 7},
+					{Name: "valid", Got: int64(m.Valid), Want: 1},
+					{Name: "manifest_seq", Got: int64(m.ManifestSeq), Want: 9},
+					{Name: "instrument_count", Got: int64(m.InstrumentCount), Want: 1234},
+					{Name: "timestamp_ns", Got: m.Timestamp.UnixNano(), Want: 1700000000000000002},
+				}, nil
+			},
+		},
+		{
+			// SnapshotEnd is the one depth message whose bytes this feed and
+			// market-by-price share: the same three fields in the same 16-byte
+			// body under type id 0x22. The vector was captured from the
+			// market-by-price encoder, so binding it here is what keeps the two
+			// decoders from drifting apart over a message neither owns alone.
+			file: "snapshot-end-v3.bin", typeID: msgTypeSnapshotEnd, size: 20, flags: flagSnapshot, schema: mboSchemaVersionV3,
+			rows: func(t *testing.T, body []byte) ([]goldenField, []goldenText) {
+				e, err := ParseSnapshotEnd(body)
+				if err != nil {
+					t.Fatalf("ParseSnapshotEnd: %v", err)
+				}
+				return []goldenField{
+					{Name: "instrument_id", Got: int64(e.InstrumentID), Want: 1},
+					{Name: "anchor_seq", Got: int64(e.AnchorSeq), Want: 918273645},
+					{Name: "snapshot_id", Got: int64(e.SnapshotID), Want: 77},
+				}, nil
+			},
+		},
 	}
-	checkFields(t, []goldenField{
-		{"instrument_id", int64(tr.InstrumentID), 1},
-		{"source_id", int64(tr.SourceID), 2},
-		{"aggressor_side", int64(tr.AggressorSide), 1},
-		{"trade_flags", int64(tr.TradeFlags), 2},
-		{"source_timestamp_ns", tr.SourceTimestamp.UnixNano(), 1700000000000000001},
-		{"trade_price", tr.TradePriceRaw, 10000000},
-		{"trade_qty", int64(tr.TradeQtyRaw), 500},
-		{"trade_id", int64(tr.TradeID), 987654321},
-		{"cumulative_volume", int64(tr.CumulativeVolumeRaw), 1000000},
-	})
 }
 
 // instDefFields is the InstrumentDefinition expectation both schema generations
@@ -155,82 +241,113 @@ func TestGoldenTrade(t *testing.T) {
 // states it decodes as 0, which is the Source ID Registry's Unknown value.
 func instDefFields(d InstrumentDefinitionBody, wantSourceID int64) []goldenField {
 	return []goldenField{
-		{"instrument_id", int64(d.InstrumentID), 1},
-		{"source_id", int64(d.SourceID), wantSourceID},
-		{"asset_class", int64(d.AssetClass), 1},
-		{"price_exponent", int64(d.PriceExponent), -2},
-		{"qty_exponent", int64(d.QtyExponent), -8},
-		{"market_model", int64(d.MarketModel), 1},
-		{"tick_size", d.TickSizeRaw, 1},
-		{"lot_size", int64(d.LotSizeRaw), 1000},
-		{"contract_value", int64(d.ContractValue), 0},
-		{"expiry_ns", d.Expiry.UnixNano(), 0},
-		{"settle_type", int64(d.SettleType), 0},
-		{"price_bound", int64(d.PriceBound), 0},
-		{"manifest_seq", int64(d.ManifestSeq), 9},
+		{Name: "instrument_id", Got: int64(d.InstrumentID), Want: 1},
+		{Name: "source_id", Got: int64(d.SourceID), Want: wantSourceID},
+		{Name: "asset_class", Got: int64(d.AssetClass), Want: 1},
+		{Name: "price_exponent", Got: int64(d.PriceExponent), Want: -2},
+		{Name: "qty_exponent", Got: int64(d.QtyExponent), Want: -8},
+		{Name: "market_model", Got: int64(d.MarketModel), Want: 1},
+		{Name: "tick_size", Got: d.TickSizeRaw, Want: 1},
+		{Name: "lot_size", Got: int64(d.LotSizeRaw), Want: 1000},
+		{Name: "contract_value", Got: int64(d.ContractValue), Want: 0},
+		{Name: "expiry_ns", Got: d.Expiry.UnixNano(), Want: 0},
+		{Name: "settle_type", Got: int64(d.SettleType), Want: 0},
+		{Name: "price_bound", Got: int64(d.PriceBound), Want: 0},
+		{Name: "manifest_seq", Got: int64(d.ManifestSeq), Want: 9},
 	}
 }
 
 func instDefText(d InstrumentDefinitionBody) []goldenText {
 	return []goldenText{
-		{"symbol", d.Symbol, "BTC-USDT"},
-		{"leg1", d.Leg1, "BTC"},
-		{"leg2", d.Leg2, "USDT"},
+		{Name: "symbol", Got: d.Symbol, Want: "BTC-USDT"},
+		{Name: "leg1", Got: d.Leg1, Want: "BTC"},
+		{Name: "leg2", Got: d.Leg2, Want: "USDT"},
 	}
 }
+
+// goldenVectorNamed returns the one table entry for a file, so each case below
+// keeps its own name in the test output instead of becoming a subtest.
+func goldenVectorNamed(t *testing.T, file string) goldenVector {
+	t.Helper()
+	for _, v := range goldenVectors() {
+		if v.file == file {
+			return v
+		}
+	}
+	t.Fatalf("no golden vector named %s in this suite's table", file)
+	return goldenVector{}
+}
+
+// decodeRows asserts the vector's header and returns the rows its body decodes
+// to, paired with the values the case expects.
+func (v goldenVector) decodeRows(t *testing.T) ([]goldenField, []goldenText) {
+	t.Helper()
+	return v.rows(t, header(t, goldenBytes(t, v.file), v.typeID, v.size, v.flags))
+}
+
+// runGoldenVector is one case: decode the vector and compare every row.
+func runGoldenVector(t *testing.T, file string) {
+	t.Helper()
+	v := goldenVectorNamed(t, file)
+	fields, text := v.decodeRows(t)
+	checkFields(t, fields)
+	checkText(t, text)
+}
+
+func TestGoldenTrade(t *testing.T) { runGoldenVector(t, "trade-v3.bin") }
 
 func TestGoldenInstrumentDefinitionV3(t *testing.T) {
-	body := header(t, goldenBytes(t, "instrument-definition-v3.bin"), msgTypeInstrumentDefinition, 130, 0)
-	d, err := ParseInstrumentDefinition(body, mboSchemaVersionV3)
-	if err != nil {
-		t.Fatalf("ParseInstrumentDefinition: %v", err)
-	}
-	checkFields(t, instDefFields(d, 2))
-	checkText(t, instDefText(d))
+	runGoldenVector(t, "instrument-definition-v3.bin")
 }
 
-// The schema 1 vector is decode-only: nothing here emits that layout, and
-// InstrumentDefinition is the one message in this family whose layout changed
-// between schema generations, so it is the one most likely to drift.
 func TestGoldenInstrumentDefinitionV1(t *testing.T) {
-	body := header(t, goldenBytes(t, "instrument-definition-v1.bin"), msgTypeInstrumentDefinition, 80, 0)
-	d, err := ParseInstrumentDefinition(body, mboSchemaVersionV1)
-	if err != nil {
-		t.Fatalf("ParseInstrumentDefinition: %v", err)
-	}
-	checkFields(t, instDefFields(d, 0))
-	checkText(t, instDefText(d))
+	runGoldenVector(t, "instrument-definition-v1.bin")
 }
 
-func TestGoldenManifestSummary(t *testing.T) {
-	body := header(t, goldenBytes(t, "manifest-summary-v3.bin"), msgTypeManifestSummary, 24, 0)
-	m, err := ParseManifestSummary(body)
-	if err != nil {
-		t.Fatalf("ParseManifestSummary: %v", err)
-	}
-	checkFields(t, []goldenField{
-		{"channel_id", int64(m.ChannelID), 7},
-		{"valid", int64(m.Valid), 1},
-		{"manifest_seq", int64(m.ManifestSeq), 9},
-		{"instrument_count", int64(m.InstrumentCount), 1234},
-		{"timestamp_ns", m.Timestamp.UnixNano(), 1700000000000000002},
-	})
-}
+func TestGoldenManifestSummary(t *testing.T) { runGoldenVector(t, "manifest-summary-v3.bin") }
 
-// SnapshotEnd is the one depth message whose bytes this feed and market-by-price
-// share: the same three fields in the same 16-byte body under type id 0x22. The
-// vector was captured from the market-by-price encoder, so binding it here is
-// what keeps the two decoders from drifting apart over a message neither owns
-// alone.
-func TestGoldenSnapshotEnd(t *testing.T) {
-	body := header(t, goldenBytes(t, "snapshot-end-v3.bin"), msgTypeSnapshotEnd, 20, flagSnapshot)
-	e, err := ParseSnapshotEnd(body)
-	if err != nil {
-		t.Fatalf("ParseSnapshotEnd: %v", err)
+func TestGoldenSnapshotEnd(t *testing.T) { runGoldenVector(t, "snapshot-end-v3.bin") }
+
+// ---------------------------------------------------------------------------
+// The manifest, made load-bearing
+// ---------------------------------------------------------------------------
+
+// TestGoldenManifestStatesWhatTheseCasesAssert is what makes the manifest the
+// source of truth this file's header calls it.
+//
+// Every case above states its expectation as a literal. Without this test, the
+// sentence "the expected values are the `fields` block of manifest.json" is a
+// claim the code does not hold: the manifest could drift from the bytes and
+// from these literals in either direction with every suite still green.
+//
+// So each row is compared with the manifest's own, by the manifest's name for
+// it, in both directions — a value the manifest states differently fails, and
+// so does a field named on one side and not the other. The reverse drift is
+// already covered: a literal edited here disagrees with the decoded vector and
+// fails its own case. Between the two, the only arrangement that passes is one
+// where the manifest, the bytes and these assertions all say the same thing.
+func TestGoldenManifestStatesWhatTheseCasesAssert(t *testing.T) {
+	stated := golden.Read(t, goldenDir)
+	for _, v := range goldenVectors() {
+		t.Run(v.file, func(t *testing.T) {
+			m, ok := stated[v.file]
+			if !ok {
+				t.Fatalf("manifest.json carries no entry for %s", v.file)
+			}
+			if m.Size != v.size {
+				t.Errorf("size = %d, want %d", m.Size, v.size)
+			}
+			if want := fmt.Sprintf("0x%02x", v.typeID); m.TypeID != want {
+				t.Errorf("type_id = %q, want %q", m.TypeID, want)
+			}
+			if m.FlagsOnWire != v.flags {
+				t.Errorf("flags_on_wire = %d, want %d", m.FlagsOnWire, v.flags)
+			}
+			if m.SchemaVersion != v.schema {
+				t.Errorf("schema_version = %d, want %d", m.SchemaVersion, v.schema)
+			}
+			fields, text := v.decodeRows(t)
+			golden.CheckFields(t, m, fields, text)
+		})
 	}
-	checkFields(t, []goldenField{
-		{"instrument_id", int64(e.InstrumentID), 1},
-		{"anchor_seq", int64(e.AnchorSeq), 918273645},
-		{"snapshot_id", int64(e.SnapshotID), 77},
-	})
 }

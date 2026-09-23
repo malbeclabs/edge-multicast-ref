@@ -19,3 +19,10 @@ dz-edge-mbp = { path = "../../codec/dz-edge-mbp" }
 dz-edge-refdata = { path = "../../codec/dz-edge-refdata" }
 dz-edge-tob = { path = "../../codec/dz-edge-tob" }
 thiserror = { workspace = true }
+
+# Tests only. `tests/golden.rs` reads testdata/golden/manifest.json and holds
+# both its `fields` and its `lowered_from` blocks to what this lowering actually
+# produces from the event it records, so the file the corpus names as its source
+# of truth is one a drift fails against rather than a document nothing reads.
+[dev-dependencies]
+serde_json = { workspace = true }
