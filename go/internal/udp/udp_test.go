@@ -89,7 +89,7 @@ func TestReadDatagram_Loopback(t *testing.T) {
 		t.Errorf("read %q, want %q", buf[:n], payload)
 	}
 	if want := netip.MustParseAddr("127.0.0.1"); src != want {
-		t.Errorf("source address %v, want %v", src, want)
+		t.Errorf("source IP address %v, want %v", src, want)
 	}
 	if kind != RecvTimestampKindKernelSoftware && kind != RecvTimestampKindAppFallback {
 		t.Errorf("receive-timestamp kind %q is neither of the two defined kinds", kind)
