@@ -279,7 +279,38 @@ func (s *Shard) applyDeltaToReady(k instKey, inst *Instrument, rec Record) []Cha
 		log.Printf("shard %d instrument %d: per-instrument gap, expected %d got %d",
 			s.idx, inst.ID, expected, piSeq)
 		inst.Status = StatusGap
+		// Recovery needs a snapshot captured at or after everything this branch
+		// is about to lose, which is not the same as the hole.
+		//
+		// `expected` names only the OLDEST missing delta. Pending holds every
+		// record that arrived ahead of it, and clearing it below discards them
+		// without buffering — so a snapshot at `expected` predates all of them,
+		// commits, and returns the instrument to ready holding a book they were
+		// never applied to. The next live delta then walks the reorder window to
+		// a second gap, and one loss is counted twice.
+		//
+		// The floor is `piSeq - 1`, everything before the one record that will
+		// replay. That covers the deltas Pending is about to drop AND the ones
+		// that never arrived at all: this branch also trips on distance, where
+		// `piSeq` is far past `expected` with almost nothing held, and a
+		// requirement of `expected` there lets a snapshot commit that leaves the
+		// whole run between them missing — the replay finds the hole and
+		// declares a second gap for the same loss.
+		//
+		// Then the scan, because a Pending key can exceed `piSeq` and those
+		// records are dropped here without being buffered. `piSeq` itself is
+		// excluded: it is buffered below and replays, so requiring it would
+		// refuse a snapshot that is perfectly good with that record on top.
+		// Read while Pending is still around, the way evictLargestBuffer reads
+		// its buffer.
+		required := piSeq - 1
+		for seq := range inst.Pending {
+			if seq != piSeq && seq > required {
+				required = seq
+			}
+		}
 		inst.Pending = nil
+		inst.RequireSnapshotAtLeast(required)
 		s.bufferDelta(k, rec)
 		if s.metrics != nil {
 			s.metrics.PerInstrumentGapsTotal.Inc()
@@ -377,15 +408,28 @@ func malformedRecord(rec Record) error {
 // where the delta that revealed the gap is a valid message worth replaying, this
 // one can never contribute anything, and replaying it would only demote the
 // instrument a second time.
+//
+// Recovery is pinned to the malformed record's OWN Per-Instrument Seq, not to
+// the instrument's expected seq. The two differ whenever the record arrives
+// ahead of a hole: the seqs between them are buffered and replay, while the one
+// the malformed record consumed is gone for good, so it is the seq a recovery
+// snapshot has to reach.
 func (s *Shard) demoteMalformed(k instKey, inst *Instrument, rec Record, err error) {
 	reason := malformedReason(err)
 	log.Printf("shard %d instrument %d: %v, demoting to gap reason=%s", s.idx, inst.ID, err, reason)
 	inst.Status = StatusGap
-	// The publisher consumed this Per-Instrument Seq for a mutation this book
-	// never took, so nothing will ever fill it. Recorded before Pending moves,
-	// because the recovery that replays those records has to know to step over
-	// this number rather than walk the reorder window to a gap of its own.
-	inst.MarkInstrumentSeqLost(toUint32(rec.Fields["per_instrument_seq"]))
+	// The two sides of the same hole, and both are recorded here.
+	//
+	// MarkInstrumentSeqLost says the number can never arrive, so the recovery
+	// steps over it instead of walking the reorder window to a gap of its own.
+	// RequireSnapshotAtLeast says a snapshot from before it does not repair the
+	// instrument. Recorded before Pending moves and before bufferDelta, which
+	// can evict this instrument's buffer and state a requirement of its own:
+	// RequireSnapshotAtLeast only ever raises the bar, so whichever runs second
+	// cannot waive the other's hole.
+	lost := toUint32(rec.Fields["per_instrument_seq"])
+	inst.MarkInstrumentSeqLost(lost)
+	inst.RequireSnapshotAtLeast(lost)
 	// Collected before buffering: bufferDelta can evict this instrument's buffer
 	// under the shard budget, and that eviction clears Pending out from under a
 	// range over it.
@@ -517,12 +561,33 @@ func (s *Shard) evictLargestBuffer() {
 	if best <= 0 {
 		return
 	}
-	s.bufferedN -= best
-	delete(s.deltaBuf, victim)
-	if inst, ok := s.instruments[victim]; ok {
+	{
+		// instrumentFor, not an early return on absence, matching
+		// applyInstrumentReset. applyDelta buffers awaiting-refdata deltas under
+		// a key with no instrument, and at cold start those buffers are the
+		// largest — so they are the likeliest victims, and skipping them left the
+		// eviction recording no hole at all. The definition then lands, the fresh
+		// instrument has no requirement, and it takes a snapshot from inside the
+		// range this shard chose to discard.
+		inst := s.instrumentFor(victim)
 		inst.Status = StatusGap
 		inst.Pending = nil
+		// Recovery must reach the highest Per-Instrument Seq being discarded, read
+		// here while the buffer is still around. Nothing else on this path knows
+		// it: unlike the other two demotions, the eviction is not triggered by a
+		// record of the victim's own, so the expected seq names only the oldest of
+		// the mutations about to be lost. It is the floor, so an entry with no
+		// readable per_instrument_seq still demands a snapshot newer than the book.
+		required := inst.LastAppliedInstrumentSeq + 1
+		for _, b := range s.deltaBuf[victim] {
+			if seq := toUint32(b.Record.Fields["per_instrument_seq"]); seq > required {
+				required = seq
+			}
+		}
+		inst.RequireSnapshotAtLeast(required)
 	}
+	s.bufferedN -= best
+	delete(s.deltaBuf, victim)
 	if s.metrics != nil {
 		s.metrics.DeltaBufferOverflowTotal.Inc()
 	}

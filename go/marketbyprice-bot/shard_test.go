@@ -602,26 +602,51 @@ func TestApplyOne_MalformedBookClearReportsDistinctKind(t *testing.T) {
 	}
 }
 
-// evictLargestBuffer must survive a victim that has buffered deltas but no
-// Instrument yet — the awaiting-refdata case, where deltas arrive before the
-// definition that would create it.
+// An eviction whose victim has no Instrument yet must still record the hole.
+//
+// applyDelta buffers awaiting-refdata deltas under a key with no instrument,
+// and at cold start those buffers are the largest, so they are the likeliest
+// victims. Skipping them recorded nothing: when the definition landed, the
+// fresh instrument had no requirement and took a snapshot from inside the very
+// range this shard had chosen to discard — a self-inflicted gap, uncounted.
 func TestEvictLargestBuffer_VictimAbsentFromInstruments(t *testing.T) {
 	s := newTestShard(t)
 	s.maxBuffered = 2
-	k := instKey{0, 42} // deliberately never added to s.instruments
+	k := instKey{0, 42} // never added to s.instruments before the eviction
 
 	for i := 0; i < 3; i++ {
 		s.bufferDelta(k, levelUpdateRec(42, uint64(i), uint32(i+1), "bid", 1000, 5))
 	}
 
-	if _, ok := s.instruments[k]; ok {
-		t.Fatal("fixture: the victim must have no Instrument")
-	}
 	if _, ok := s.deltaBuf[k]; ok {
 		t.Error("the overflowing buffer should have been evicted")
 	}
 	if s.bufferedN != 0 {
 		t.Errorf("bufferedN must track the eviction: got %d want 0", s.bufferedN)
+	}
+
+	// The eviction creates the instrument so it has somewhere to record the
+	// hole, the way applyInstrumentReset does.
+	inst, ok := s.instruments[k]
+	if !ok {
+		t.Fatal("the eviction must create the instrument to record the hole on")
+	}
+	if inst.Status != StatusGap {
+		t.Errorf("an evicted instrument is gapped: got %v", inst.Status)
+	}
+	if inst.RequiredInstrumentSeq == nil {
+		t.Fatal("the eviction must record the highest discarded seq")
+	}
+	// Three deltas at per-instrument seq 1..3 were discarded, so a snapshot has
+	// to reach 3 — not 1, and not the book's own next-expected.
+	if got := *inst.RequiredInstrumentSeq; got != 3 {
+		t.Errorf("required seq: got %d want 3", got)
+	}
+
+	// And a snapshot from inside the discarded range is refused.
+	inst.BeginSnapshot(1, 100, 0, 2, 0)
+	if err := inst.EndSnapshot(1, 100); err == nil {
+		t.Error("a snapshot from inside the discarded range must not commit")
 	}
 }
 
@@ -1315,21 +1340,19 @@ func TestApplyDelta_BookClearWithAReservedEnumIsMalformed(t *testing.T) {
 	}
 }
 
-// The recovery snapshot is not guaranteed to be captured AFTER the malformed
-// message, and when it is captured before it, the instrument used to re-walk
-// the reorder window over a sequence that can never arrive.
+// A snapshot from before the malformed record's own sequence does not repair
+// the instrument, and the one that does applies every delta held behind it.
 //
-// The publisher consumed the Per-Instrument Seq for the malformed record, so
-// the hole at that number is permanent. A snapshot whose Last Instrument Seq
-// sits just behind it leaves the tracker expecting exactly that number: every
-// buffered delta then read as a forward gap, the window filled, and the gap
-// branch cleared Pending and declared per_instrument_gaps_total — discarding a
-// full window of valid deltas and charging this book engine's own demotion to
-// the counter that means mktdata never arrived.
-//
-// demoteMalformed now records the lost sequence and NextExpectedInstrumentSeq
-// steps over it, so the recovery applies the buffered deltas instead.
-func TestApplyDelta_SnapshotBehindAMalformedSeqDoesNotReWalkTheWindow(t *testing.T) {
+// Two mechanisms meet here and this pins both. RequireSnapshotAtLeast refuses
+// the early snapshot outright, so the instrument stays gapped rather than
+// coming back with a book missing the buffered deltas. MarkInstrumentSeqLost
+// records that the malformed record's sequence can never arrive, so once a
+// usable snapshot commits the replay steps over that number instead of
+// treating it as a hole — without it the buffered deltas read as a forward
+// gap, fill the reorder window, and the gap branch clears them and declares
+// per_instrument_gaps_total, charging this book engine's own demotion to the
+// counter that means mktdata never arrived.
+func TestApplyDelta_SnapshotBehindAMalformedSeqIsRefusedAndTheNextOneReplays(t *testing.T) {
 	m := NewMetrics("test", "test")
 	s := NewShard(0, 1, NewEventsWriter(nil), m)
 	k := instKey{0, 11}
@@ -1344,10 +1367,9 @@ func TestApplyDelta_SnapshotBehindAMalformedSeqDoesNotReWalkTheWindow(t *testing
 		t.Fatalf("status: got %v want gap", inst.Status)
 	}
 
-	// One more than a full reorder window follows, and is buffered for replay.
+	// One more than a full reorder window follows and is buffered for replay.
 	// One past the window is what makes the gap branch reachable: at exactly
-	// reorderWindow the held records still fit and no gap is declared, so a
-	// test sized there would pass with the skip reverted.
+	// reorderWindow the held records still fit and no gap is declared.
 	const following = reorderWindow + 1
 	for i := 0; i < following; i++ {
 		s.applyDelta(k, levelUpdateRec(11, uint64(901+i), uint32(7+i), "bid", int64(3000+i), 5))
@@ -1356,10 +1378,20 @@ func TestApplyDelta_SnapshotBehindAMalformedSeqDoesNotReWalkTheWindow(t *testing
 		t.Fatalf("buffered: got %d want %d", got, following)
 	}
 
-	// The recovery snapshot was captured BEFORE the malformed message: its Last
-	// Instrument Seq is 5, the sequence behind the one that was lost.
+	// A snapshot captured BEFORE the malformed message is refused: its book is
+	// the state before a mutation that is gone, and committing it would serve a
+	// book the buffered deltas were never applied to.
 	inst.BeginSnapshot(1, 899, 0, 5, 0)
-	if err := inst.EndSnapshot(1, 899); err != nil {
+	if err := inst.EndSnapshot(1, 899); err == nil {
+		t.Fatal("a snapshot from before the hole must not commit")
+	}
+	if inst.Status != StatusGap {
+		t.Errorf("a refused snapshot leaves the instrument gapped, got %v", inst.Status)
+	}
+
+	// The snapshot at the hole does repair it, and every held delta applies.
+	inst.BeginSnapshot(2, 900, 0, 6, 0)
+	if err := inst.EndSnapshot(2, 900); err != nil {
 		t.Fatalf("snapshot commit: %v", err)
 	}
 	s.replayBuffer(k, inst)
@@ -1376,12 +1408,127 @@ func TestApplyDelta_SnapshotBehindAMalformedSeqDoesNotReWalkTheWindow(t *testing
 	if len(s.deltaBuf[k]) != 0 || s.bufferedN != 0 {
 		t.Errorf("nothing may be left buffered: %d records bufferedN=%d", len(s.deltaBuf[k]), s.bufferedN)
 	}
-	if got := malformedCount(m, reasonBookClearScopeSide); got != 1 {
-		t.Errorf("the malformed record is counted once: got %v want 1", got)
-	}
-	// The set is pruned once the tracker has passed the lost sequence, so it
-	// cannot grow for the life of the process.
 	if inst.LostInstrumentSeq != nil {
 		t.Errorf("the lost-sequence set must be pruned once passed, got %v", inst.LostInstrumentSeq)
+	}
+}
+
+// The gap's requirement must name the NEWEST delta it discards, not the oldest.
+//
+// `expected` is only the first missing seq. Pending holds everything that
+// arrived ahead of it, and the gap branch clears it without buffering, so a
+// snapshot at `expected` predates all of them: it commits, returns the
+// instrument to ready holding a book those deltas were never applied to, and
+// the next live delta walks the reorder window to a second gap. One loss,
+// counted twice.
+func TestApplyDelta_GapRequiresASnapshotPastEveryDiscardedDelta(t *testing.T) {
+	m := NewMetrics("test", "test")
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
+	k := instKey{0, 11}
+	inst := readyInstrumentInShard(t, s, k, 100)
+
+	// 101 is lost. 102..117 arrive and are held, which is one past the window
+	// and so trips the gap on the last of them.
+	const firstHeld, lastHeld = 102, 102 + reorderWindow
+	for seq := firstHeld; seq <= lastHeld; seq++ {
+		s.applyDelta(k, levelUpdateRec(11, uint64(seq), uint32(seq), "bid", int64(1000+seq), 5))
+	}
+	if inst.Status != StatusGap {
+		t.Fatalf("the window must have been exceeded: status %v", inst.Status)
+	}
+	if got := counterValue(m.PerInstrumentGapsTotal); got != 1 {
+		t.Fatalf("one gap for one loss: got %v want 1", got)
+	}
+	if inst.RequiredInstrumentSeq == nil {
+		t.Fatal("the gap must state a requirement")
+	}
+	// lastHeld is the record that tripped the branch: it is buffered and
+	// replays, so the requirement stops at the highest seq actually discarded.
+	if got, want := *inst.RequiredInstrumentSeq, uint32(lastHeld-1); got != want {
+		t.Errorf("required seq: got %d want %d (the newest discarded, not the hole at 101)", got, want)
+	}
+
+	// A snapshot at the hole is refused: it predates every held delta.
+	// The anchor stays below the buffered record's mktdata seq, or replayBuffer
+	// would filter it as already covered and the assertion below would pass for
+	// the wrong reason.
+	inst.BeginSnapshot(1, 50, 0, 101, 0)
+	if err := inst.EndSnapshot(1, 50); err == nil {
+		t.Error("a snapshot at the hole must not commit while newer deltas were discarded")
+	}
+	if got := counterValue(m.PerInstrumentGapsTotal); got != 1 {
+		t.Errorf("one loss must not be counted twice: per_instrument_gaps_total = %v want 1", got)
+	}
+
+	// The snapshot that covers the discarded range does commit, and the record
+	// that tripped the gap replays on top of it.
+	inst.BeginSnapshot(2, 51, 0, lastHeld-1, 0)
+	if err := inst.EndSnapshot(2, 51); err != nil {
+		t.Fatalf("snapshot commit: %v", err)
+	}
+	s.replayBuffer(k, inst)
+	if inst.Status != StatusReady {
+		t.Errorf("status after recovery: got %v want ready", inst.Status)
+	}
+	if got := inst.LastAppliedInstrumentSeq; got != lastHeld {
+		t.Errorf("the buffered record must replay: tracker %d want %d", got, lastHeld)
+	}
+	if got := counterValue(m.PerInstrumentGapsTotal); got != 1 {
+		t.Errorf("recovery must not declare another gap: got %v want 1", got)
+	}
+}
+
+// The gap branch also trips on DISTANCE, and there the discarded-range scan is
+// not enough on its own.
+//
+// When one delta arrives far past the hole, Pending holds almost nothing: the
+// deltas in between never arrived at all rather than being dropped here. A
+// requirement read only from Pending names the hole, a snapshot there commits,
+// and the replay of the held record finds the whole run still missing and
+// declares a second gap — one loss counted twice, the same outcome the
+// discarded-range fix exists to prevent, reached the other way. The floor is
+// the seq before the record that will replay.
+func TestApplyDelta_GapOnDistanceRequiresTheWholeMissingRun(t *testing.T) {
+	m := NewMetrics("test", "test")
+	s := NewShard(0, 1, NewEventsWriter(nil), m)
+	k := instKey{0, 11}
+	inst := readyInstrumentInShard(t, s, k, 100)
+
+	// 101..150 never arrive; 151 is 50 past the hole, well beyond the window.
+	const held = 151
+	s.applyDelta(k, levelUpdateRec(11, held, held, "bid", 1000, 5))
+	if inst.Status != StatusGap {
+		t.Fatalf("status %v want gap", inst.Status)
+	}
+	if got := counterValue(m.PerInstrumentGapsTotal); got != 1 {
+		t.Fatalf("one gap for one loss: got %v want 1", got)
+	}
+	if inst.RequiredInstrumentSeq == nil {
+		t.Fatal("the gap must state a requirement")
+	}
+	if got, want := *inst.RequiredInstrumentSeq, uint32(held-1); got != want {
+		t.Errorf("required seq: got %d want %d (the whole missing run, not the hole at 101)", got, want)
+	}
+
+	// A snapshot at the hole is refused: 102..150 are still missing.
+	inst.BeginSnapshot(1, 50, 0, 101, 0)
+	if err := inst.EndSnapshot(1, 50); err == nil {
+		t.Error("a snapshot at the hole must not commit while the run behind it is missing")
+	}
+
+	// The one that covers the run does, and the held record replays on top.
+	inst.BeginSnapshot(2, 51, 0, held-1, 0)
+	if err := inst.EndSnapshot(2, 51); err != nil {
+		t.Fatalf("snapshot commit: %v", err)
+	}
+	s.replayBuffer(k, inst)
+	if inst.Status != StatusReady {
+		t.Errorf("status after recovery: got %v want ready", inst.Status)
+	}
+	if got := inst.LastAppliedInstrumentSeq; got != held {
+		t.Errorf("the held record must replay: tracker %d want %d", got, held)
+	}
+	if got := counterValue(m.PerInstrumentGapsTotal); got != 1 {
+		t.Errorf("one loss must not be counted twice: got %v want 1", got)
 	}
 }
