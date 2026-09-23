@@ -17,6 +17,15 @@ type Dispatcher interface {
 	Dispatch(rec Record)
 }
 
+// DisconnectAware is an optional Dispatcher capability. A dispatcher holding
+// state that spans records — an open snapshot group, say — cannot tell that the
+// connection was interrupted, because the reader simply resumes after
+// reconnecting.
+// Implementing this lets it drop what the break invalidated.
+type DisconnectAware interface {
+	OnDisconnect()
+}
+
 // Bot is the market-by-order book-builder: it reads JSONL Records from a
 // parser Unix socket and dispatches them.
 // Reconnects with exponential backoff on disconnect.
@@ -59,6 +68,11 @@ func (b *Bot) Run(ctx context.Context) {
 		reason := b.read(ctx, conn)
 		_ = conn.Close()
 		b.metrics.SocketConnected.Set(0)
+		// Tell the dispatcher the connection broke, before any reconnect can feed
+		// it records that its pre-drop state would misroute.
+		if d, ok := b.dispatcher.(DisconnectAware); ok {
+			d.OnDisconnect()
+		}
 		if ctx.Err() == nil {
 			b.metrics.SocketReconnects.WithLabelValues(reason).Inc()
 		}

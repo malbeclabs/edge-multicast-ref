@@ -131,6 +131,30 @@ func (s *Shard) resetChannel(ch uint8) {
 	delete(s.open, ch)
 }
 
+// clearShadows abandons every in-flight snapshot group after a socket drop: the
+// open group on each channel, the half-built shadows those groups were filling,
+// and the snapshot contexts stamping their wire_snapshots rows.
+//
+// The break spans a group, so what the open group names is no longer what the
+// next snapshot_order belongs to: that record carries no instrument_id, and
+// filing it by a pre-drop pointer puts one instrument's orders into another
+// instrument's shadow. Every channel goes, not one: all of them arrive over the
+// parser socket that dropped.
+//
+// Status and the live book are deliberately untouched. A shadow is never the
+// live book, so abandoning a half-built one costs nothing a ready instrument is
+// serving from, and the next snapshot cycle rebuilds it; demoting here would
+// throw away books the deltas are keeping correct.
+func (s *Shard) clearShadows() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.open = map[uint8]openGroup{}
+	s.snapCtx = map[instKey]SnapshotContext{}
+	for _, inst := range s.instruments {
+		inst.OpenSnapshot = nil
+	}
+}
+
 // apply mutates book state for one record and returns the resulting events.
 // It holds s.mu so the SnapshotWriter's withInstrument callback is safe.
 func (s *Shard) apply(rec Record) []ChannelEvent {
@@ -266,17 +290,29 @@ func (s *Shard) applySnapshotEnd(k instKey, rec Record) []ChannelEvent {
 	if inst.OpenSnapshot == nil {
 		return nil // no shadow in progress; ignore (never demote)
 	}
-	if inst.OpenSnapshot.SnapshotID != snapID {
-		// The shadow in progress is a later group's: this instrument's own next
+	if snapID < inst.OpenSnapshot.SnapshotID {
+		// The delayed end, and the only direction this guard is for. The shadow
+		// in progress is a later group's: this instrument's own next
 		// SnapshotBegin replaced the one the end names. EndSnapshot discards the
 		// shadow on an id it disagrees with, so offering this end to it would
 		// throw away a group whose orders are still arriving and cost the
 		// instrument the recovery cycle it is in the middle of. The end names a
 		// group that is already finished, so there is nothing left to commit.
-		log.Printf("shard %d instrument %d: snapshot end for id %d behind the open id %d; ignored",
-			s.idx, k.id, snapID, inst.OpenSnapshot.SnapshotID)
+		//
+		// Silent by design: an end reordered past the next begin is ordinary
+		// datagram behavior, the shadow it protects goes on to commit or to be
+		// counted on its own end, and a line per record would grow with the
+		// reorder rate while naming nothing that is not already visible.
 		return nil
 	}
+	// Ids are monotonic per (channel_id, instrument_id), so an end ahead of the
+	// shadow is this instrument's own later group announcing itself: that
+	// group's SnapshotBegin was lost, and the shadow belongs to a cycle that is
+	// over and whose end will never arrive. It falls through to EndSnapshot,
+	// which discards the dead shadow and counts
+	// snapshot_discarded_total{reason="mismatch"}. Holding the shadow instead
+	// would keep a snapshot no end can close and charge a log line to every
+	// further end that names an id it disagrees with.
 	anchor := toUint64(rec.Fields["anchor_seq"])
 	if _, _, err := inst.EndSnapshot(snapID, anchor); err != nil {
 		if s.metrics != nil {
@@ -580,7 +616,9 @@ func (s *Shard) handle(rec Record) {
 
 // Run is the shard goroutine. It processes its FIFO inbox until ctx is done.
 // Records mutate book state; a reset marker wipes state and quiesces the
-// SnapshotWriter before acking; a fence marker only acks (FIFO already
+// SnapshotWriter before acking; a clear-shadows marker abandons in-flight
+// snapshot groups without acking, FIFO being enough to order it ahead of every
+// record dispatched after a reconnect; a fence marker only acks (FIFO already
 // guarantees preceding records' rows are enqueued).
 func (s *Shard) Run(ctx context.Context) {
 	for {
@@ -591,6 +629,8 @@ func (s *Shard) Run(ctx context.Context) {
 			switch msg.kind {
 			case msgRecord:
 				s.handle(*msg.rec)
+			case msgClearShadows:
+				s.clearShadows()
 			case msgReset:
 				s.mu.Lock()
 				s.resetChannel(msg.ch)
@@ -615,9 +655,10 @@ func (s *Shard) Run(ctx context.Context) {
 }
 
 // shardMsg is the inbox protocol. A record mutates book state; a reset wipes one
-// channel's share of it and acks; a fence only acks, which is enough to order a
-// channel-scoped write after every preceding instrument write because the inbox
-// is FIFO.
+// channel's share of it and acks; a clear-shadows drops the snapshot groups a
+// socket drop invalidated, leaving live books alone; a fence only acks, which is
+// enough to order a channel-scoped write after every preceding instrument write
+// because the inbox is FIFO.
 type shardMsg struct {
 	rec  *Record
 	kind shardMsgKind
@@ -631,4 +672,5 @@ const (
 	msgRecord shardMsgKind = iota
 	msgReset
 	msgFence
+	msgClearShadows
 )

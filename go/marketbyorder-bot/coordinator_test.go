@@ -558,7 +558,209 @@ func TestDispatch_DelayedSnapshotEndLeavesTheLiveGroupsRoute(t *testing.T) {
 	if got := testCounterVec(t, c.metrics.SnapshotDiscardedTotal, "mismatch"); got != 0 {
 		t.Errorf("snapshot_discarded_total{reason=\"mismatch\"} = %v, want 0", got)
 	}
-	if _, ok := c.snapshotRoute[snapKey{0, snapID}]; ok {
-		t.Error("the live group's own end left its route in place")
+	if got := len(c.open); got != 0 {
+		t.Errorf("the live group's own end left %d routes in place, want 0", got)
+	}
+}
+
+// drainShards applies everything queued on each shard's inbox, in FIFO order,
+// the way Shard.Run would.
+func drainShards(shards []*Shard) {
+	for _, s := range shards {
+		for drained := false; !drained; {
+			select {
+			case m := <-s.inbox:
+				switch m.kind {
+				case msgRecord:
+					s.handle(*m.rec)
+				case msgClearShadows:
+					s.clearShadows()
+				}
+			default:
+				drained = true
+			}
+		}
+	}
+}
+
+// snapInstDefRec builds an instrument_definition carrying the same Reset Count
+// as the snapshot record builders, so a test can mix the two without tripping
+// the reset barrier.
+func snapInstDefRec(ch uint8, instID uint32, symbol string) Record {
+	return Record{
+		Type: "instrument_definition", ChannelID: ch, InstrumentID: instID,
+		Fields: map[string]any{
+			"symbol": symbol, "price_exponent": float64(-2), "qty_exponent": float64(-8),
+		},
+	}
+}
+
+// A parser socket drop must not leave the open snapshot group behind. The
+// reader resumes after reconnecting with no other signal, and a socket-only
+// drop leaves Reset Count untouched, so the reset barrier does not cover it.
+//
+// Without OnDisconnect the coordinator still names the group that was in flight
+// when the socket died. The first snapshot_order after the reconnect carries no
+// instrument_id and its own snapshot_begin was lost in the outage, so it is
+// routed to that stale group's shard and filed into that instrument's shadow:
+// instrument 4's shadow absorbs two of instrument 6's orders, reaches the
+// total_orders instrument 4 declared, and commits a book of another
+// instrument's orders with nothing dropped and nothing discarded.
+func TestDispatch_ReconnectDoesNotFileAnotherInstrumentsOrdersIntoTheOpenShadow(t *testing.T) {
+	c, shards := newCoordWithShards(2)
+	s := shards[0] // 4 % 2 == 0 and 6 % 2 == 0: one shard holds both instruments
+
+	for _, rec := range []Record{
+		snapInstDefRec(0, 4, "INST-4"),
+		snapInstDefRec(0, 6, "INST-6"),
+		// Instrument 4 opens a two-order group at its own id 7.
+		snapshotBeginRec(0, 4, 7, 2, 1000, 10),
+	} {
+		c.Dispatch(rec)
+	}
+	drainShards(shards)
+
+	// The socket drops here, taking instrument 4's own two orders and
+	// instrument 6's snapshot_begin with it.
+	c.OnDisconnect()
+	drainShards(shards)
+
+	for _, rec := range []Record{
+		// Instrument 6's group resumes mid-flight, at its own id 7.
+		snapshotOrderRec(0, 7, 61, 0, 600, 6),
+		snapshotOrderRec(0, 7, 62, 1, 601, 7),
+		// The snapshot port re-sends instrument 4's end for the group the
+		// outage interrupted.
+		snapshotEndRec(0, 4, 7, 1000),
+	} {
+		c.Dispatch(rec)
+	}
+	drainShards(shards)
+
+	inst, ok := s.instruments[instKey{0, 4}]
+	if !ok {
+		t.Fatal("shard 0 does not hold instrument 4")
+	}
+	if inst.Bids[61] != nil || inst.Asks[62] != nil {
+		t.Errorf("instrument 4 took instrument 6's orders into its book: %d bids / %d asks",
+			len(inst.Bids), len(inst.Asks))
+	}
+	if inst.Status == StatusReady {
+		t.Error("instrument 4 went ready on a book it never received")
+	}
+	if got := testCounter(t, c.metrics.SnapshotOrderDroppedTotal); got != 2 {
+		t.Errorf("snapshot_order_dropped_total = %v, want 2: the reconnect ended the group "+
+			"those orders would have been filed into", got)
+	}
+}
+
+// OnDisconnect clears the coordinator's open groups and tells every shard to
+// abandon the groups it had in flight, so an order arriving before the next
+// snapshot_begin is discarded rather than misfiled.
+func TestOnDisconnect_ClearsTheOpenGroupAndTellsEveryShard(t *testing.T) {
+	c, shards := newCoordWithShards(2)
+
+	c.Dispatch(snapshotBeginRec(0, 7, 3, 1, 1000, 10)) // 7 % 2 == 1
+	if len(c.open) == 0 {
+		t.Fatal("setup: a group should be open")
+	}
+	drainShards(shards)
+
+	c.OnDisconnect()
+
+	if len(c.open) != 0 {
+		t.Errorf("the open group must not survive a disconnect: %+v", c.open)
+	}
+	for i, s := range shards {
+		var sawClear bool
+		for drained := false; !drained; {
+			select {
+			case m := <-s.inbox:
+				if m.kind == msgClearShadows {
+					sawClear = true
+					s.clearShadows()
+				}
+			default:
+				drained = true
+			}
+		}
+		if !sawClear {
+			t.Errorf("shard %d was not told to clear its in-flight groups", i)
+		}
+	}
+
+	// An order arriving before the next begin is now discarded, not misrouted.
+	c.Dispatch(snapshotOrderRec(0, 3, 31, 0, 300, 3))
+	for i, s := range shards {
+		select {
+		case m := <-s.inbox:
+			t.Errorf("shard %d received an orphaned order: %+v", i, m.rec)
+		default:
+		}
+	}
+	if got := testCounter(t, c.metrics.SnapshotOrderDroppedTotal); got != 1 {
+		t.Errorf("snapshot_order_dropped_total = %v, want 1", got)
+	}
+}
+
+// Snapshot routing is one open group per channel, never one entry per
+// Snapshot ID. Ids are monotonic per (channel_id, instrument_id), so a map
+// keyed by id gains an entry on every snapshot_begin and gives it back only to
+// a matching end: each lost SnapshotEnd leaves its key behind for good, since
+// the next cycle writes a different key and nothing ever overwrites the dead
+// one, and only a Reset Count barrier clears the accumulation.
+func TestDispatch_LostSnapshotEndsLeaveOneOpenGroupPerChannel(t *testing.T) {
+	c, shards := newCoordWithShards(2)
+
+	const lost = 5000
+	for i := uint32(0); i < lost; i++ {
+		// A fresh cycle at a fresh id, every one of them losing its end.
+		c.Dispatch(snapshotBeginRec(0, 4, 7+i, 1, uint64(1000+i), 10))
+		drainShards(shards)
+	}
+	if got := len(c.open); got != 1 {
+		t.Errorf("%d lost snapshot ends left %d open groups, want 1 per channel", lost, got)
+	}
+
+	// A second channel is a second entry, and still one per channel.
+	c.Dispatch(snapshotBeginRec(1, 5, 7, 1, 1000, 10))
+	drainShards(shards)
+	if got := len(c.open); got != 2 {
+		t.Errorf("two channels left %d open groups, want 2", got)
+	}
+}
+
+// An order left over from a group the channel has since replaced must be
+// dropped and counted, not routed by the id its own group used. Keyed by
+// Snapshot ID the replaced group's route outlives it, so the late order is
+// handed back to the shard that still holds that instrument's open group and is
+// filed into its shadow — orders of one instrument counted toward another's
+// total_orders.
+func TestDispatch_OrderOfAReplacedGroupIsDroppedNotRoutedByItsOldID(t *testing.T) {
+	c, shards := newCoordWithShards(2)
+
+	for _, rec := range []Record{
+		snapInstDefRec(0, 4, "INST-4"),
+		snapInstDefRec(0, 5, "INST-5"),
+		// Instrument 4 opens id 7 on shard 0 and loses its end.
+		snapshotBeginRec(0, 4, 7, 2, 1000, 10),
+		// Instrument 5 opens id 8 on shard 1, replacing the channel's group.
+		snapshotBeginRec(0, 5, 8, 1, 2000, 20),
+		// An order of the replaced id-7 group arrives late.
+		snapshotOrderRec(0, 7, 41, 0, 100, 5),
+	} {
+		c.Dispatch(rec)
+	}
+	drainShards(shards)
+
+	shadow := shards[0].instruments[instKey{0, 4}].OpenSnapshot
+	if shadow == nil {
+		t.Fatal("setup: instrument 4's shadow should still be open")
+	}
+	if shadow.ReceivedOrders != 0 || shadow.Bids[41] != nil {
+		t.Errorf("the replaced group's shadow absorbed %d late orders, want 0", shadow.ReceivedOrders)
+	}
+	if got := testCounter(t, c.metrics.SnapshotOrderDroppedTotal); got != 1 {
+		t.Errorf("snapshot_order_dropped_total = %v, want 1 for an order no open group can place", got)
 	}
 }
