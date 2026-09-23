@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"time"
 )
 
 // Socket listens on a Unix domain socket and writes records to all
@@ -32,6 +33,12 @@ type Socket[R any] struct {
 // burst variance when the book-builder's single-goroutine dispatch falls behind;
 // dropping here is preferred over dropping at the kernel UDP socket.
 const outQueueLen = 16384
+
+// flushTimeout bounds how long Close waits for one client's queued batches to
+// reach its socket. A client that has stopped reading fills the socket buffer
+// and leaves its serve goroutine blocked in a write, so without a deadline one
+// such client would hold the whole process open at shutdown.
+const flushTimeout = 2 * time.Second
 
 type clientWriter[R any] struct {
 	conn net.Conn
@@ -224,17 +231,25 @@ func (s *Socket[R]) Close() error {
 	s.clients = make(map[net.Conn]*clientWriter[R])
 	// Close every client's outbound queue while holding mu. This is safe
 	// because Write() also holds mu during its sends, so we can never close a
-	// queue that Write is currently sending on.
+	// queue that Write is currently sending on. Closing the queue ends serve's
+	// range loop once it has written out the batches still behind it; the write
+	// deadline bounds that drain, so a client that has stopped reading and
+	// filled the socket buffer cannot hold shutdown open indefinitely.
 	for _, cw := range clients {
 		close(cw.ch)
-		cw.conn.Close()
+		cw.conn.SetWriteDeadline(time.Now().Add(flushTimeout)) //nolint:errcheck
 	}
 	s.mu.Unlock()
 
 	// Wait for serve() goroutines OUTSIDE mu. serve() calls dropClient() which
-	// takes mu; waiting here while holding mu would deadlock.
+	// takes mu; waiting here while holding mu would deadlock. Each socket is
+	// closed only once its serve has returned, so the batches queued for that
+	// client go out first: close it here and the drain writes into a closed
+	// connection and those records are lost, with nothing to show for it but a
+	// dropped-client warning.
 	for _, cw := range clients {
 		<-cw.done
+		cw.conn.Close()
 	}
 
 	// The connected-client gauge is a level, so shutdown has to state it.
