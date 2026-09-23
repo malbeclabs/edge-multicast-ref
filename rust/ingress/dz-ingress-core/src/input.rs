@@ -221,6 +221,10 @@ pub trait Input: Send {
     /// the transport is released through [`shutdown`](Self::shutdown). A fatal
     /// error from `connect` does none of that: nothing was established, so
     /// there is nothing to tear down and the gauge is already 0.
+    ///
+    /// A keepalive body a transport is configured to send and the protocol
+    /// refuses to carry is one such fault: the configuration is what there is
+    /// to correct, so reconnecting would meet the same refusal.
     fn recv<'a>(
         &'a mut self,
         budget: Option<Duration>,
