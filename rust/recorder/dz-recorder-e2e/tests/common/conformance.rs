@@ -22,8 +22,10 @@
 //! record has nowhere to write `epb_dropcount` — the recorder's own admission of
 //! what it failed to record. Over a converted file the rule set sees every gap
 //! the recorder caused and nothing saying the recorder caused it, so it grades
-//! them against the publisher. `a_recorders_own_loss_is_not_charged_to_the_
-//! publisher` is the case that holds this open.
+//! them against the publisher.
+//! `encoder_to_archive.rs`'s
+//! `the_recorders_own_loss_reaches_the_rule_set_rather_than_the_publisher` is
+//! the case that holds this open.
 //!
 //! What stays here is the assertion. This gate reads the tool's raw exit code
 //! and its raw standard error, uninterpreted, because a gate that shared the
@@ -39,10 +41,10 @@
 
 use std::path::PathBuf;
 
-use super::{port_of, replay, Recorded, ALL_ROLES, GROUP};
+use super::{port_of, Recorded, ALL_ROLES, GROUP};
 use dz_recorder_conformance::segment::{write_group_segments, SectionProvenance};
 use dz_recorder_conformance::tool::{ConformanceTool, Invocation, PortRoles};
-use dz_recorder_replay::ArchiveSource;
+use dz_recorder_replay::{ArchiveSource, OwnedDatagram, Termination};
 
 /// Where the tool is. Set by whatever runs the suite, because it is built from
 /// a sibling repository this one does not vendor.
@@ -89,23 +91,40 @@ impl Verdict {
     }
 }
 
-/// What the archive states about itself, so the segment written from it states
-/// the same and invents nothing.
-fn provenance_of(archive: &Recorded) -> SectionProvenance {
-    let source = ArchiveSource::open(&archive.object).expect("the archive opens");
-    SectionProvenance::of(&source).expect("an archive this recorder wrote states its own section")
+/// The archive's datagrams and what its section states, out of one read.
+///
+/// One `ArchiveSource` for both, so the provenance is the section the datagrams
+/// were read under rather than a second parse of the same file that could come
+/// to disagree with it. It is read before the datagrams and checked again after:
+/// an archive whose identity changed partway through holds more than one
+/// section, and one segment written under the first section's claims would be
+/// describing the rest wrongly.
+fn replayed_with_provenance(archive: &Recorded) -> (Vec<OwnedDatagram>, SectionProvenance) {
+    let mut source = ArchiveSource::open(&archive.object).expect("the archive opens");
+    let provenance = SectionProvenance::of(&source)
+        .expect("an archive this recorder wrote states its own section");
+    let datagrams: Vec<OwnedDatagram> = (&mut source).collect();
+    assert_eq!(
+        source.terminated_by(),
+        Termination::Eof,
+        "the archive did not end cleanly: {:?}",
+        source.last_error()
+    );
+    assert_eq!(
+        source.identity(),
+        Some(&provenance.identity),
+        "one section per archive here, so one section's claims describe every datagram"
+    );
+    (datagrams, provenance)
 }
 
 /// Replays the archive, writes it back out as a segment and runs the tool over
 /// it.
 pub fn conformance_of(archive: &Recorded, feed: &str) -> Verdict {
     let dir = tempfile::tempdir().expect("a temporary directory");
-    let segments = write_group_segments(
-        dir.path(),
-        &replay(&archive.object),
-        &provenance_of(archive),
-    )
-    .expect("the bridge writes a segment");
+    let (datagrams, provenance) = replayed_with_provenance(archive);
+    let segments = write_group_segments(dir.path(), &datagrams, &provenance)
+        .expect("the bridge writes a segment");
 
     // One group throughout this crate, so one invocation. The bridge writes one
     // file per group because the tool's port map is keyed on the destination

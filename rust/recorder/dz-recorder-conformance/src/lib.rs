@@ -44,8 +44,7 @@ pub mod tool;
 
 pub use report::{EvidenceRange, Outcome, ReportError, ReportInstance, RuleOutcome, RuleSetReport};
 pub use segment::{
-    segment_len_bound, write_group_segments, write_segment, BridgeError, GroupSegment,
-    SectionProvenance,
+    write_group_segments, write_segment, BridgeError, GroupSegment, SectionProvenance,
 };
 pub use tool::{
     ConformanceTool, Invocation, PinnedRuleSet, PortRoles, RuleSet, ToolError, ToolRun,

@@ -49,6 +49,17 @@
 //! Two groups carried on the same three port roles — the ordinary arrangement —
 //! would be read out of one file as a single series, and the two sequence
 //! spaces interleaved would be reported as loss in both.
+//!
+//! **Splitting has a cost the writer cannot pay for itself: the recorder's
+//! admissions do not know which group they belong to.** A `drop_delta` is what
+//! the capture handle lost between the previous datagram and this one, and it
+//! rides on whichever datagram happened to be kept next — of any group. Left on
+//! that datagram, a split puts group A's losses in group B's file, and A's file
+//! then holds a sequence gap with no admission beside it: the exact
+//! misattribution the pcapng format was chosen to prevent, back by another
+//! route. So an admission is carried into **every** group's file, onto the next
+//! datagram each one keeps. See [`write_group_segments`] for why that
+//! overstatement is the right way to be wrong.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -56,8 +67,9 @@ use std::io::{self, BufWriter};
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 
+use dz_edge_core::PortRole;
 use dz_recorder_archive::{
-    LinkHeaders, RoleJoin, SegmentWriter, SegmentWriterConfig, ALL_ROLES, LINK_HEADER_LEN,
+    role_index, LinkHeaders, RoleJoin, SegmentWriter, SegmentWriterConfig, ALL_ROLES,
 };
 use dz_recorder_core::{CaptureDropScope, RecorderIdentity, SinkError};
 use dz_recorder_replay::{ArchiveSource, LinkHeaderProvenance, OwnedDatagram};
@@ -115,13 +127,30 @@ impl SectionProvenance {
     /// else — but it is not re-writable *as one of ours*, and the refusal says
     /// which fact was missing rather than inventing it.
     pub fn of(source: &ArchiveSource) -> Result<Self, BridgeError> {
-        let identity = source
-            .identity()
+        Self::from_section(
+            source.identity(),
+            source.link_headers(),
+            source.capture_drop_scope(),
+        )
+    }
+
+    /// The same, from the three facts a section states, each of which it may
+    /// not.
+    ///
+    /// Separate from [`of`](Self::of) so that every refusal is reachable on its
+    /// own: a capture this recorder did not write states none of the three, and
+    /// a test through it could only ever reach the first.
+    pub fn from_section(
+        identity: Option<&RecorderIdentity>,
+        link_headers: LinkHeaderProvenance,
+        capture_drop_scope: Option<CaptureDropScope>,
+    ) -> Result<Self, BridgeError> {
+        let identity = identity
             .ok_or(BridgeError::Unstated {
                 missing: "recorder identity",
             })?
             .clone();
-        let link_headers = match source.link_headers() {
+        let link_headers = match link_headers {
             LinkHeaderProvenance::Captured => LinkHeaders::Captured,
             LinkHeaderProvenance::Synthesised => LinkHeaders::Synthesised,
             LinkHeaderProvenance::Unstated => {
@@ -130,7 +159,7 @@ impl SectionProvenance {
                 })
             }
         };
-        let capture_drop_scope = source.capture_drop_scope().ok_or(BridgeError::Unstated {
+        let capture_drop_scope = capture_drop_scope.ok_or(BridgeError::Unstated {
             missing: "capture drop scope",
         })?;
         Ok(Self {
@@ -159,20 +188,70 @@ pub struct GroupSegment {
 /// The files come back ordered by group, and a group with no datagrams produces
 /// no file: the tool's exit code cannot distinguish *clean* from *saw nothing*,
 /// so an empty file is a trap rather than a convenience.
+///
+/// # Every admission goes into every group's file
+///
+/// A datagram's `drop_delta` is carried into each group's file, onto the next
+/// datagram that file holds, and not left only on the datagram it arrived on.
+/// How far it is carried is the drop scope's to say:
+///
+/// - **`capture-handle`**: the ring lost frames before it could tell anything
+///   apart, so the admission may belong to any group and any role. It is
+///   carried to the next datagram of every group, whatever its role.
+/// - **`port-role`**: the handle was per role, so the admission belongs to the
+///   role it arrived on — but two groups on one set of ports share that handle,
+///   so it may still belong to either group. It is carried to the next
+///   datagram of that role in every group.
+///
+/// **This overstates each file's loss, and that is the direction to be wrong
+/// in.** The rule set grades a window with an admitted drop in it as
+/// `capture_loss` rather than `violation`, so an admission carried into a file
+/// that did not need it costs that file some coverage — a window reported as
+/// unverifiable. An admission withheld from the file that did need it costs a
+/// publisher a violation for a loss the recorder caused. The first is a
+/// coverage figure an operator can read; the second is an accusation.
+///
+/// An admission after a group's last datagram has nowhere to ride in that file
+/// and is dropped from it. That loses nothing the rule set could have used: a
+/// gap is only visible between two sequence numbers, and there is no second
+/// one.
 pub fn write_group_segments(
     dir: &Path,
     datagrams: &[OwnedDatagram],
     provenance: &SectionProvenance,
 ) -> Result<Vec<GroupSegment>, BridgeError> {
-    let mut by_group: BTreeMap<Ipv4Addr, Vec<&OwnedDatagram>> = BTreeMap::new();
+    let groups: Vec<Ipv4Addr> = datagrams
+        .iter()
+        .map(|dg| *dg.dst.ip())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    // Keyed on the group and, at port-role scope, the role — by `role_index`, the
+    // fixed mapping `interface_id` already uses: the unit a pending admission is
+    // owed to.
+    let owed_to = |group: Ipv4Addr, role: PortRole| match provenance.capture_drop_scope {
+        CaptureDropScope::CaptureHandle => (group, None),
+        CaptureDropScope::PortRole => (group, Some(role_index(role))),
+    };
+    let mut pending: BTreeMap<(Ipv4Addr, Option<u32>), u32> = BTreeMap::new();
+    let mut by_group: BTreeMap<Ipv4Addr, Vec<OwnedDatagram>> = BTreeMap::new();
     for dg in datagrams {
-        by_group.entry(*dg.dst.ip()).or_default().push(dg);
+        if dg.drop_delta != 0 {
+            for group in &groups {
+                let owed = pending.entry(owed_to(*group, dg.role)).or_default();
+                *owed = owed.saturating_add(dg.drop_delta);
+            }
+        }
+        let group = *dg.dst.ip();
+        let mut kept = dg.clone();
+        kept.drop_delta = pending.remove(&owed_to(group, dg.role)).unwrap_or(0);
+        by_group.entry(group).or_default().push(kept);
     }
 
     let mut out = Vec::with_capacity(by_group.len());
     for (group, group_datagrams) in by_group {
         let path = dir.join(format!("group-{group}.pcapng"));
-        write_segment(&path, group_datagrams.iter().copied(), provenance)?;
+        write_segment(&path, group_datagrams.iter(), provenance)?;
         out.push(GroupSegment {
             group,
             path,
@@ -206,9 +285,14 @@ where
     let mut writer =
         SegmentWriter::new(BufWriter::new(file), &cfg).map_err(|e| sink_error(path, e))?;
     for dg in datagrams {
-        writer
-            .write(&dg.as_recorded())
-            .map_err(|e| sink_error(path, e))?;
+        let mut recorded = dg.as_recorded();
+        // What was sent is at least what was kept. A block whose original
+        // length undercuts its captured length is one every reader rejects, and
+        // `OwnedDatagram` is a public struct a caller can hand this with the
+        // field unset. Replay already floors it; this is for everyone else.
+        let held = u32::try_from(recorded.payload.len()).unwrap_or(u32::MAX);
+        recorded.wire_payload_len = recorded.wire_payload_len.max(held);
+        writer.write(&recorded).map_err(|e| sink_error(path, e))?;
     }
     let (inner, _stats) = writer.finish().map_err(|e| sink_error(path, e))?;
     // `finish` flushes the `BufWriter` it was handed; the `File` underneath is
@@ -238,39 +322,6 @@ fn roles_carrying(datagrams: &[&OwnedDatagram]) -> Vec<RoleJoin> {
             Some(RoleJoin::on(role, *dg.dst.ip(), dg.dst.port()))
         })
         .collect()
-}
-
-/// The largest a segment holding these datagrams can be, before any of it is
-/// written.
-///
-/// The manifest states `datagram_count` and `payload_byte_count` before the
-/// object is opened, so a caller can refuse an object it has no room for rather
-/// than filling the disk the archive is staged on.
-///
-/// An upper bound and not the exact size, which is the difference from the
-/// arithmetic a classic `pcap` allowed. A pcapng block's length depends on
-/// options the writer adds per datagram — a drop count, a stamp-kind mark, a
-/// provenance mark — and on padding to a four-byte boundary, so an exact figure
-/// would mean predicting the writer's decisions here and then keeping the
-/// prediction in step with them. A bound cannot silently become wrong in the
-/// direction that matters.
-#[must_use]
-pub fn segment_len_bound(datagrams: &[OwnedDatagram]) -> u64 {
-    datagrams.iter().fold(SECTION_BOUND, |acc, dg| {
-        acc + BLOCK_BOUND + link_headers_len(dg) as u64 + dg.payload.len() as u64
-    })
-}
-
-/// Section Header and three Interface Description blocks, with room for the
-/// options the writer puts in them: the identity, the build, the configuration
-/// hash and the per-role descriptions are all bounded strings.
-const SECTION_BOUND: u64 = 4096;
-
-/// One Enhanced Packet Block's header, its options and its padding.
-const BLOCK_BOUND: u64 = 256;
-
-fn link_headers_len(dg: &OwnedDatagram) -> usize {
-    dg.link_headers.as_ref().map_or(LINK_HEADER_LEN, Vec::len)
 }
 
 fn sink_error(path: &Path, e: SinkError) -> BridgeError {

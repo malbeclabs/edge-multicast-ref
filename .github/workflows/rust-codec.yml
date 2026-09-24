@@ -235,12 +235,17 @@ jobs:
   conformance:
     runs-on: ubuntu-latest
     env:
-      # conformance: don't score a publisher's clean shutdown as non-conformance (#48).
+      # The floor is 4568cfb (upstream #63), where `input/pcapng.go` lands and
+      # the tool reads the recorder's segment, `epb_dropcount` included. An
+      # older rule set reads that segment only as far as its magic and refuses
+      # it, so this pin and the bridge in dz-recorder-conformance move together.
       #
-      # At or after 931d68d, because that is where `input/pcapng.go` lands and
-      # the tool stops needing a classic `pcap`. An older rule set reads the
-      # segment this suite now writes only as far as its magic and then refuses
-      # it, so this pin and the bridge move together.
+      # Pinned at 931d68d (upstream #81), upstream's head when the floor moved,
+      # so the move from e68184b carried eleven commits and not one. Three of
+      # them change what the rule set judges — #64 (an overflowed delta journal
+      # stays unverifiable), #66 (both ends of an MBP snapshot rotation) and #70
+      # (schema 1 and schema 3 in one binary) — and a conformance failure that
+      # first appears at this pin may be theirs rather than this repository's.
       SPEC_REF: 931d68d9a5d2446c56cdbf644acd518ed91beafa
     steps:
       - uses: actions/checkout@v4

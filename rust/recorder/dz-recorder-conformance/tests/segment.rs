@@ -18,10 +18,10 @@ use std::path::Path;
 use dz_edge_core::PortRole;
 use dz_recorder_archive::{LinkHeaders, LINK_HEADER_LEN};
 use dz_recorder_conformance::segment::{
-    segment_len_bound, write_group_segments, write_segment, BridgeError, SectionProvenance,
+    write_group_segments, write_segment, BridgeError, SectionProvenance,
 };
 use dz_recorder_core::{CaptureDropScope, RecorderIdentity, RecvTsKind};
-use dz_recorder_replay::{ArchiveSource, OwnedDatagram, Termination};
+use dz_recorder_replay::{ArchiveSource, LinkHeaderProvenance, OwnedDatagram, Termination};
 
 const PUBLISHER_A: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
 const GROUP_A: Ipv4Addr = Ipv4Addr::new(233, 252, 0, 10);
@@ -365,30 +365,141 @@ fn an_archive_holding_nothing_produces_no_file_to_read_a_clean_exit_from() {
     );
 }
 
-/// The bound is a bound.
+/// The recorder's admission belongs to no group, so a split must not decide one.
 ///
-/// A caller refuses an object it has no room for by this number, so the one
-/// direction it may never be wrong in is *under* the size actually written.
+/// At capture-handle scope the ring lost frames before it could tell groups or
+/// roles apart, and the count rides on whichever datagram was kept next — here
+/// group B's. Left there, group A's file would hold A's gap with nothing beside
+/// it, and the rule set would charge that gap to the publisher. Carried, both
+/// files say the recorder lost something before their next datagram.
 #[test]
-fn the_predicted_size_is_never_below_the_size_written() {
+fn a_split_carries_the_recorders_admission_into_every_groups_file() {
     let dir = tempfile::tempdir().expect("a temporary directory");
-    let path = dir.path().join("one.pcapng");
-
-    let mut with_options = datagram(GROUP_A, PortRole::Mktdata, vec![4u8; 1200]);
-    with_options.drop_delta = 3;
-    with_options.recv_ts_kind = RecvTsKind::ApplicationFallback;
+    let mut after_the_hole = datagram(GROUP_B, PortRole::Mktdata, vec![2u8; 30]);
+    after_the_hole.drop_delta = 3;
     let datagrams = vec![
         datagram(GROUP_A, PortRole::Mktdata, vec![1u8; 30]),
-        datagram(GROUP_A, PortRole::Refdata, vec![2u8; 130]),
-        with_options,
+        after_the_hole,
+        datagram(GROUP_A, PortRole::Refdata, vec![3u8; 30]),
+        datagram(GROUP_B, PortRole::Mktdata, vec![4u8; 30]),
     ];
 
-    write_segment(&path, datagrams.iter(), &synthesised_section()).expect("the bridge writes");
+    let files = write_group_segments(dir.path(), &datagrams, &synthesised_section())
+        .expect("the bridge writes");
 
-    let written = std::fs::metadata(&path).expect("the file exists").len();
-    let bound = segment_len_bound(&datagrams);
-    assert!(
-        bound >= written,
-        "the bound {bound} is below the {written} bytes actually written"
+    let a = read_back(&files[0].path);
+    assert_eq!(
+        a.iter().map(|dg| dg.drop_delta).collect::<Vec<_>>(),
+        vec![0, 3],
+        "group A's next datagram carries the admission, whatever its role: at \
+         capture-handle scope the ring could not tell roles apart either"
     );
+    let b = read_back(&files[1].path);
+    assert_eq!(
+        b.iter().map(|dg| dg.drop_delta).collect::<Vec<_>>(),
+        vec![3, 0],
+        "and group B keeps it on the datagram it arrived on, once"
+    );
+}
+
+/// At port-role scope the admission is the role's, and still no group's.
+///
+/// Two groups on one set of ports share the role's handle, so the count may be
+/// either group's — but it is not another role's, and carrying it onto a
+/// refdata datagram would taint a series the handle never lost anything from.
+#[test]
+fn at_port_role_scope_an_admission_stays_on_its_own_role() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let mut provenance = synthesised_section();
+    provenance.capture_drop_scope = CaptureDropScope::PortRole;
+
+    let mut after_the_hole = datagram(GROUP_B, PortRole::Mktdata, vec![2u8; 30]);
+    after_the_hole.drop_delta = 3;
+    let datagrams = vec![
+        after_the_hole,
+        datagram(GROUP_A, PortRole::Refdata, vec![3u8; 30]),
+        datagram(GROUP_A, PortRole::Mktdata, vec![4u8; 30]),
+    ];
+
+    let files =
+        write_group_segments(dir.path(), &datagrams, &provenance).expect("the bridge writes");
+
+    let a = read_back(&files[0].path);
+    assert_eq!(
+        a.iter()
+            .map(|dg| (dg.role, dg.drop_delta))
+            .collect::<Vec<_>>(),
+        vec![(PortRole::Refdata, 0), (PortRole::Mktdata, 3)],
+        "the refdata datagram is untouched and the next mktdata one carries it"
+    );
+}
+
+/// What was sent is never less than what was kept.
+///
+/// `OwnedDatagram` is public, and a caller that leaves `wire_payload_len` unset
+/// would otherwise produce a block whose original length undercuts its captured
+/// length — one every reader rejects.
+#[test]
+fn an_unset_wire_length_is_floored_at_the_payload_held() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let path = dir.path().join("one.pcapng");
+    let mut dg = datagram(GROUP_A, PortRole::Mktdata, vec![7u8; 40]);
+    dg.wire_payload_len = 0;
+    write_segment(&path, [&dg], &synthesised_section()).expect("the bridge writes");
+
+    let back = read_back(&path);
+    assert_eq!(back[0].payload.len(), 40);
+    assert_eq!(
+        back[0].wire_payload_len, 40,
+        "the original length is at least the captured one"
+    );
+}
+
+/// Each fact a section may fail to state is refused on its own, by name.
+///
+/// A foreign capture states none of the three and so only ever reaches the
+/// first refusal. The two after it are the defaults that would do the damage — a
+/// `captured` claim over synthesised bytes, an invented per-role drop scope — so
+/// they are reached here directly.
+#[test]
+fn each_unstated_fact_is_refused_by_name_rather_than_defaulted() {
+    let identity = synthesised_section().identity;
+    let missing = |r: Result<SectionProvenance, BridgeError>| match r {
+        Err(BridgeError::Unstated { missing }) => missing,
+        other => panic!("expected a refusal, got {other:?}"),
+    };
+
+    assert_eq!(
+        missing(SectionProvenance::from_section(
+            None,
+            LinkHeaderProvenance::Synthesised,
+            Some(CaptureDropScope::CaptureHandle),
+        )),
+        "recorder identity"
+    );
+    assert_eq!(
+        missing(SectionProvenance::from_section(
+            Some(&identity),
+            LinkHeaderProvenance::Unstated,
+            Some(CaptureDropScope::CaptureHandle),
+        )),
+        "link-header provenance"
+    );
+    assert_eq!(
+        missing(SectionProvenance::from_section(
+            Some(&identity),
+            LinkHeaderProvenance::Synthesised,
+            None,
+        )),
+        "capture drop scope"
+    );
+
+    let stated = SectionProvenance::from_section(
+        Some(&identity),
+        LinkHeaderProvenance::Captured,
+        Some(CaptureDropScope::PortRole),
+    )
+    .expect("a section stating all three is carried");
+    assert_eq!(stated.link_headers, LinkHeaders::Captured);
+    assert_eq!(stated.capture_drop_scope, CaptureDropScope::PortRole);
 }
