@@ -18,8 +18,8 @@
 //! re-check. What the re-write adds to the chain is still nothing: the datagram
 //! bytes handed to the writer are exactly the bytes replay produced.
 //!
-//! pcapng and not the classic `pcap` the tool also accepts, because a classic
-//! record has nowhere to write `epb_dropcount` — the recorder's own admission of
+//! It uses pcapng rather than the classic `pcap` the tool also accepts, because
+//! a classic record has nowhere to write `epb_dropcount` — the recorder's own admission of
 //! what it failed to record. Over a converted file the rule set sees every gap
 //! the recorder caused and nothing saying the recorder caused it, so it grades
 //! them against the publisher.
@@ -95,24 +95,26 @@ impl Verdict {
 ///
 /// One `ArchiveSource` for both, so the provenance is the section the datagrams
 /// were read under rather than a second parse of the same file that could come
-/// to disagree with it. It is read before the datagrams and checked again after:
-/// an archive whose identity changed partway through holds more than one
-/// section, and one segment written under the first section's claims would be
-/// describing the rest wrongly.
+/// to disagree with it. It is read before the datagrams and checked again after,
+/// **all three facts and not only the identity**: `ArchiveSource` updates every
+/// one of them at a later Section Header, and an archive whose second section
+/// kept the recorder but changed its link-header claim or its drop scope would
+/// otherwise be re-written under the first section's claims — captured bytes
+/// marked synthesised, or drops subtracted at a scope they were not counted at.
 fn replayed_with_provenance(archive: &Recorded) -> (Vec<OwnedDatagram>, SectionProvenance) {
-    let mut source = ArchiveSource::open(&archive.object).expect("the archive opens");
-    let provenance = SectionProvenance::of(&source)
+    let mut reader = ArchiveSource::open(&archive.object).expect("the archive opens");
+    let provenance = SectionProvenance::of(&reader)
         .expect("an archive this recorder wrote states its own section");
-    let datagrams: Vec<OwnedDatagram> = (&mut source).collect();
+    let datagrams: Vec<OwnedDatagram> = (&mut reader).collect();
     assert_eq!(
-        source.terminated_by(),
+        reader.terminated_by(),
         Termination::Eof,
         "the archive did not end cleanly: {:?}",
-        source.last_error()
+        reader.last_error()
     );
     assert_eq!(
-        source.identity(),
-        Some(&provenance.identity),
+        SectionProvenance::of(&reader).ok().as_ref(),
+        Some(&provenance),
         "one section per archive here, so one section's claims describe every datagram"
     );
     (datagrams, provenance)

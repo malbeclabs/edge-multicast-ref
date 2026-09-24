@@ -82,11 +82,11 @@ use dz_recorder_replay::{ArchiveSource, LinkHeaderProvenance, OwnedDatagram};
 /// unjudged for ever.
 #[derive(Debug, thiserror::Error)]
 pub enum BridgeError {
-    #[error("writing {path}: {source}")]
+    #[error("writing {path}: {io_error}")]
     Io {
         path: PathBuf,
         #[source]
-        source: io::Error,
+        io_error: io::Error,
     },
     #[error("writing {path}: {detail}")]
     Encode { path: PathBuf, detail: String },
@@ -102,7 +102,7 @@ pub enum BridgeError {
 /// What the archive being replayed said about itself, carried into the segment
 /// written from it.
 ///
-/// **Every field is read off the source and none of them has a default**, and
+/// **Every field is read from the archive and none of them has a default**, and
 /// that is the whole point of the type. A re-write is a second copy of an
 /// archive, and a second copy that states a recorder identity, a link-header
 /// provenance or a drop scope the first one did not is a copy asserting
@@ -111,7 +111,7 @@ pub enum BridgeError {
 /// treat a zero TTL as an observation, and a `capture_drop_scope` invented as
 /// `port-role` invites the analysis tier to subtract one role's drops from that
 /// role's sequence gaps when the ring never knew whose frames it lost.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SectionProvenance {
     pub identity: RecorderIdentity,
     pub link_headers: LinkHeaders,
@@ -119,18 +119,19 @@ pub struct SectionProvenance {
 }
 
 impl SectionProvenance {
-    /// What the source archive states, or a refusal naming what it does not.
+    /// What the archive being replayed states, or a refusal naming what it does
+    /// not.
     ///
     /// `ArchiveSource` recovers all three from the Section Header block, and a
     /// pcapng this recorder did not write states none of them. Such a capture is
     /// judgeable — the datagrams are all there is and the tool needs nothing
     /// else — but it is not re-writable *as one of ours*, and the refusal says
     /// which fact was missing rather than inventing it.
-    pub fn of(source: &ArchiveSource) -> Result<Self, BridgeError> {
+    pub fn of(archive: &ArchiveSource) -> Result<Self, BridgeError> {
         Self::from_section(
-            source.identity(),
-            source.link_headers(),
-            source.capture_drop_scope(),
+            archive.identity(),
+            archive.link_headers(),
+            archive.capture_drop_scope(),
         )
     }
 
@@ -278,9 +279,9 @@ where
         capture_drop_scope: provenance.capture_drop_scope,
     };
 
-    let file = File::create(path).map_err(|source| BridgeError::Io {
+    let file = File::create(path).map_err(|io_error| BridgeError::Io {
         path: path.to_path_buf(),
-        source,
+        io_error,
     })?;
     let mut writer =
         SegmentWriter::new(BufWriter::new(file), &cfg).map_err(|e| sink_error(path, e))?;
@@ -326,9 +327,9 @@ fn roles_carrying(datagrams: &[&OwnedDatagram]) -> Vec<RoleJoin> {
 
 fn sink_error(path: &Path, e: SinkError) -> BridgeError {
     match e {
-        SinkError::Io(source) => BridgeError::Io {
+        SinkError::Io(io_error) => BridgeError::Io {
             path: path.to_path_buf(),
-            source,
+            io_error,
         },
         other => BridgeError::Encode {
             path: path.to_path_buf(),

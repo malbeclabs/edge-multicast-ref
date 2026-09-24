@@ -17,12 +17,12 @@
 //!   a bridge where the gate and the runner can disagree about what the tool was
 //!   shown — with the gate being the one nobody would think to re-check.
 //!
-//!   pcapng and not the classic `pcap` the tool also accepts, because a classic
-//!   record has nowhere to write `epb_dropcount`. That field is the recorder's
-//!   admission of what it failed to record, and it is the only thing in a
-//!   segment that separates capture loss from publisher loss: a conversion that
-//!   drops it hands the rule set every gap the recorder caused with nothing to
-//!   say the publisher did not cause it.
+//!   It uses pcapng rather than the classic `pcap` the tool also accepts,
+//!   because a classic record has nowhere to write `epb_dropcount`. That field
+//!   is the recorder's admission of what it failed to record, and it is the
+//!   only thing in a segment that separates capture loss from publisher loss: a
+//!   conversion that drops it hands the rule set every gap the recorder caused
+//!   with nothing to say the publisher did not cause it.
 //! - [`tool`] is the boundary against the rule set: a trait, one implementation
 //!   that runs the binary, and the version resolution that has to happen before
 //!   any verdict may be stamped.

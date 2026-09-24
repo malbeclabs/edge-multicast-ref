@@ -111,9 +111,9 @@ impl PortRoles {
 /// One run of the rule set: one capture file, one group, one feed.
 ///
 /// One group and not several, and **not because the tool takes one `-group`** —
-/// it ignores that flag in replay. Because its port map is keyed on the
-/// destination port alone, so two groups on the same three port roles read out
-/// of one file as one interleaved series. An archive holding two groups is
+/// it ignores that flag in replay. The reason is its port map, which is keyed
+/// on the destination port alone: two groups on the same three port roles read
+/// out of one file as one interleaved series. An archive holding two groups is
 /// therefore two invocations over two files, and the per-object process count
 /// follows from what the recorder was asked to join rather than from anything
 /// the runner chose.

@@ -48,13 +48,13 @@ fn synthesised_section() -> SectionProvenance {
 
 /// Reads the segment back the way the analysis tier would.
 fn read_back(path: &Path) -> Vec<OwnedDatagram> {
-    let mut source = ArchiveSource::open(path).expect("the segment the bridge wrote opens");
-    let out: Vec<OwnedDatagram> = (&mut source).collect();
+    let mut archive = ArchiveSource::open(path).expect("the segment the bridge wrote opens");
+    let out: Vec<OwnedDatagram> = (&mut archive).collect();
     assert_eq!(
-        source.terminated_by(),
+        archive.terminated_by(),
         Termination::Eof,
         "the segment did not end cleanly: {:?}",
-        source.last_error()
+        archive.last_error()
     );
     out
 }
@@ -88,7 +88,7 @@ fn port_of(role: PortRole) -> u16 {
 fn captured_link_headers(payload_len: u16) -> Vec<u8> {
     let mut out = Vec::with_capacity(LINK_HEADER_LEN);
     out.extend_from_slice(&[0xaa; 6]); // a real destination MAC
-    out.extend_from_slice(&[0xbb; 6]); // a real source MAC
+    out.extend_from_slice(&[0xbb; 6]); // a real sender MAC
     out.extend_from_slice(&0x0800u16.to_be_bytes());
     out.push(0x45);
     out.push(0xb8); // DSCP the sender set
@@ -153,9 +153,9 @@ fn the_section_states_the_scope_the_drops_may_be_subtracted_at() {
         let dg = datagram(GROUP_A, PortRole::Mktdata, vec![1u8; 30]);
         write_segment(&path, [&dg], &provenance).expect("the bridge writes");
 
-        let source = ArchiveSource::open(&path).expect("the segment opens");
+        let archive = ArchiveSource::open(&path).expect("the segment opens");
         assert_eq!(
-            source.capture_drop_scope(),
+            archive.capture_drop_scope(),
             Some(scope),
             "the scope the archive stated is the scope the re-write states"
         );
@@ -171,8 +171,8 @@ fn the_section_carries_the_recorder_the_archive_named() {
     let dg = datagram(GROUP_A, PortRole::Mktdata, vec![1u8; 30]);
     write_segment(&path, [&dg], &provenance).expect("the bridge writes");
 
-    let source = ArchiveSource::open(&path).expect("the segment opens");
-    let identity = source.identity().expect("the section names a recorder");
+    let archive = ArchiveSource::open(&path).expect("the segment opens");
+    let identity = archive.identity().expect("the section names a recorder");
     assert_eq!(identity.site, provenance.identity.site);
     assert_eq!(identity.recorder, provenance.identity.recorder);
     assert_eq!(
@@ -186,8 +186,8 @@ fn the_section_carries_the_recorder_the_archive_named() {
 /// missing.
 #[test]
 fn a_foreign_capture_is_refused_rather_than_given_a_section_we_made_up() {
-    let (foreign, source) = foreign_capture();
-    let err = SectionProvenance::of(&source).expect_err(&format!(
+    let (foreign, archive) = foreign_capture();
+    let err = SectionProvenance::of(&archive).expect_err(&format!(
         "{} states no section of ours, so it cannot be re-written as one",
         foreign.display()
     ));
