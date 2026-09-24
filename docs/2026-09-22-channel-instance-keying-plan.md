@@ -692,15 +692,15 @@ group for its publisher channel is dropped and counted.
 
 > **What (b) is not.** It is not two *instruments* mid-cycle at one
 > `Snapshot ID` inside a single publisher channel. That case is unreachable: the
-> publisher does not interleave groups within a channel, and the route entry
-> is deleted at each `snapshot_end` (`coordinator.go:85`), so the next group
-> claims the id afresh and the unfixed tree passes such a test. The reachable
-> within-one-publisher case is a **lost** `snapshot_end` leaving a shadow open
-> across the cycle boundary, and that is task 10's subject rather than this
-> one's — the continuity check closes the group. This task's job is only that
-> the instrument is resolved from the group rather than searched for.
+> publisher does not interleave groups within a channel, and the open entry is
+> deleted at each `snapshot_end`, so the next group claims the id afresh. The
+> reachable within-one-publisher case is a **lost** `snapshot_end` leaving a
+> shadow open across the cycle boundary, and that is task 10's subject rather
+> than this one's — the continuity check closes the group. Resolving the
+> instrument from the group rather than searching for it is not this task's job
+> either: #139 did it.
 
-- [ ] **Step 1: Write the failing tests.** (a) Two paths carrying one
+- [ ] **Step 1: Write the tests — one failing, three guards.** (a) Two paths carrying one
   `Channel ID`, each opening a group for a different `Instrument ID`,
   interleaved: each path's snapshot orders reach its own instrument's shadow
   and neither group is overwritten. Give the two instruments ids that land on
@@ -722,16 +722,19 @@ group for its publisher channel is dropped and counted.
   `Channel ID`, both with an open group: **both** groups are cleared, and the
   first `snapshot_order` after the reconnect is dropped rather than filed into
   either stale shadow. There is one socket, so there is no such thing as one
-  path disconnecting; this test pins that the re-key did not turn the clear into
-  a per-channel one.
-- [ ] **Step 2: Run, watch (a) and (d) fail** — (a) because one `Channel ID`
-  gives one `open` entry and the second path's `snapshot_begin` overwrites the
-  first's; (d) because the re-key has not happened yet, so the clear and the
-  reconnect are already consistent and the test only starts to mean something
-  once `open` carries the path. **(b) passes from the start**, and that is its
-  purpose: #139 removed the scan over shadows with a matching `Snapshot ID`, so
-  the case that used to split orders between two shadows is already fixed and
-  (b) is here to keep it fixed through the re-key.
+  path disconnecting.
+
+  **(b) and (d) are guards, not failing tests, and both pass from the start.**
+  (b) because #139 removed the scan over shadows with a matching `Snapshot ID`,
+  so the case that used to split orders between two shadows is already fixed.
+  (d) because `Shard.open` holds one entry per `Channel ID` today, so two paths
+  share it, the wholesale clear empties it, and the reconnect already drops the
+  next `snapshot_order`. Neither can fail before the re-key; each exists to
+  catch a way the re-key could break something that currently works, and each
+  is gated by a mutant below rather than by step 2.
+- [ ] **Step 2: Run, watch (a) fail** — one `Channel ID` gives one `open` entry
+  and the second path's `snapshot_begin` overwrites the first's. It is the only
+  test here that fails on the current tree; (b), (c) and (d) pass throughout.
 - [ ] **Step 3: Re-key `Coordinator.open` and `Shard.open`** from `uint8` onto
   `publisherChannel`; leave `clearShadows` clearing every entry, re-typed only;
   narrow `resetChannel`'s loops (`shard.go:110-119`) to the publisher channel,

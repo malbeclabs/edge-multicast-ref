@@ -440,37 +440,28 @@ port role that can open one, and there its `channelInstance` and its
 **#139 already did the half of this that was not a re-key.** This section
 originally argued that `snapshotRoute` should go away rather than be re-keyed,
 because an id-keyed route left two things standing beyond the two-path
-collapse: the association resolved by a search over every shadow with a
-matching `Snapshot ID`, and a route entry leaked per lost `snapshot_end`. #139
-landed both fixes — the open-group model replaced the route, and
-`applySnapshotOrder` resolves from the group — so neither argument is live.
+collapse. The first was that the association was resolved by a search over
+every shadow with a matching `Snapshot ID`. The second was what a lost
+`snapshot_end` left behind: a route entry never deleted, a shadow left open,
+and the next group at the same id resolved against both — reachable through
+loss rather than through interleaving, and named as the open issue against
+`marketbyorder-bot` at `go/marketbyprice-bot/coordinator.go:19-24` and
+`go/marketbyprice-bot/README.md:156`.
 
-What #139 did not do is key its replacement on the path. `Coordinator.open` and
-`Shard.open` are `map[uint8]…` per `Channel ID`, so two publishers of one
-channel still collapse into one entry, which is the defect this document is
-about and the only one left in this book-builder.
+#139 landed both. It replaced the route with the open-group shape
+`marketbyprice-bot` had already proved, made `applySnapshotOrder` resolve the
+instrument from the group instead of scanning, and re-keyed `Shard.snapCtx`
+onto `instKey` (`shard.go:79`). Neither argument is live, and neither is work
+this change does.
 
-The second is what a lost `snapshot_end` leaves behind: the route entry is never
-deleted, the instrument's shadow stays open, and the next group at the same id
-is resolved against both. `Snapshot ID` is monotonic per
-`(Channel ID, Instrument ID)`, not per channel, so the next instrument's cycle
-routinely reaches that value — which is the defect
-`go/marketbyprice-bot/coordinator.go:19-24` and
-`go/marketbyprice-bot/README.md:156` name as the open issue against
-`marketbyorder-bot`, reachable through loss rather than through interleaving.
-
-So `marketbyorder-bot` adopts the shape `marketbyprice-bot` already proved: one
-open group per publisher channel, routed by the group and validated — never keyed
-— by `Snapshot ID`. `Shard.applySnapshotOrder` stops scanning and resolves the
-instrument from the record the coordinator stamped, the way `marketbyprice-bot`
-does at `coordinator.go:124-126`; and the continuity check below is what closes
-a group whose `snapshot_end` never arrived.
-
-**`Shard.snapCtx` re-keys onto `instKey` rather than onto a snapshot key.** Its
-only consumers are the `wire_snapshots` writes at `shard.go:458-460`, which need
-the group's symbol and exponents. With the coordinator stamping the instrument,
-the instrument is the key, and `Snapshot ID` stays inside the value as the
-membership check it already is.
+What #139 did not do is key its replacement on the path. `Coordinator.open`
+(`coordinator.go:27`) and `Shard.open` (`shard.go:80`) are both `map[uint8]…`
+per `Channel ID`, so two publishers of one channel still collapse into one
+entry. That is the defect this document is about and the only one left in this
+book-builder, so task 8 is a re-key onto `publisherChannel` and nothing more.
+`Shard.snapCtx` follows `instKey`'s own re-key with no change of its own, and
+the continuity check below is what closes a group whose `snapshot_end` never
+arrived.
 
 **The reset marker carries the publisher channel, and so does the writer's
 reset.** `shardMsg.ch uint8` (`go/marketbyorder-bot/shard.go:535`,
@@ -1084,7 +1075,7 @@ is additive and the setting refuses only the direction that was already wrong.
 | `netip.Addr`, not `string` | Comparable, no allocation per datagram, and it is what `pubKey` already holds. |
 | Two keys, not one | One publisher is three channel instances, one per port role (`dz-publisher-egress/src/instance.rs:19-23`), and its definition, deltas and snapshot cycle arrive on all three. A series keys on the instance; a book, its reference data, its era and its snapshot cycle key on the publisher channel. |
 | `publisherChannel` derived, never stamped | `channel()` of the instance the record already carries. A second stamped field is a second thing that can disagree with the first. |
-| `channelInstance` and `publisherChannel` per module, not in `go/internal` | Three of the five modules have no dependency on `go/internal`; `Record` is already duplicated four times on the same reasoning. |
+| `channelInstance` and `publisherChannel` once, in `go/internal/channel` | Reversed from per-module during review. #153 moved the parsers' sinks and receive path into `go/internal`, so six modules depend on it and only `marketbyorder-bot` gains anything — one dependency its two siblings already carry. Four copies of the key the glossary mandates is four places to drift with every suite green, which is why #159 moved the manifest reader there too. `Record` is not the counter-example: independent decoders are deliberate, a two-field comparable key is not. Costs `COPY go/internal/` in `go/marketbyorder-bot/Dockerfile`, which the suite cannot catch. |
 | `seqLast` read, not deleted | Sequence continuity on the `snapshot` port is the only discriminator between two groups sharing a `Snapshot ID`, and the field is already the right shape once it is keyed. |
 | The four comments deleted | The glossary is the authority and says two paths may carry one channel. A comment asserting the opposite cannot stay beside code that keys on the path. |
 | `Coordinator.open`/`Shard.open` re-keyed rather than replaced | #139 already replaced the id-keyed `snapshotRoute` with the open-group shape, and resolved the association from the group. What it left is the key, so this plan re-keys and does not redesign. |
