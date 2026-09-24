@@ -328,9 +328,17 @@ not survive any of those.
 alternative — classic `pcap` plus a JSON manifest — is the cheaper thing to
 reach for, and it is rejected on that separation: two files that must travel
 together will one day not, and the one that goes missing is the small one that
-says which recorder, which config and how many drops. The Go reader moves to
-pcapng in the same library; it is a contained change and it buys that side the
-same block metadata.
+says which recorder, which config and how many drops. The Go reader has since
+moved to pcapng, and not by the route this sentence expected:
+`edge-feed-spec`'s `tools/conformance/input/pcapng.go` parses the blocks itself,
+because `pcapgo`'s `NgReader` reads the format correctly and then discards every
+per-packet option — and `epb_dropcount` is a per-packet option. That one field is
+the only thing in a segment that separates capture loss from publisher loss, so a
+reader that drops it leaves the rule set structurally unable to tell them apart.
+Which is the argument for replaying the archive to the tool rather than
+converting it: a classic `pcap` has nowhere to carry the recorder's admission,
+and a conversion therefore hands the rule set a segment that claims the recorder
+lost nothing.
 
 ### Where the bytes are captured
 
@@ -824,21 +832,28 @@ report a clean archive of nothing.
 | Step | Work | Status | Risk |
 |---|---|---|---|
 | 1 | `dz-recorder-core`, `-capture`, `-archive`, `-replay`; round-trip test | **done** (#60) | none; nothing runs on a host yet, and every test is a CI test needing no privileges and no network |
-| 2 | The Go capture reader moves to pcapng | not started | none; classic-`pcap` fixtures still read |
+| 2 | The Go capture reader moves to pcapng | **done, and not here**: `edge-feed-spec`'s `tools/conformance/input/pcapng.go` reads the format and keeps `epb_dropcount`, which `pcapgo`'s own reader discards. This repository's half — the pinned revision, and handing the tool a segment instead of a classic `pcap` converted from one — is not | none; the tool takes either format, chosen by the file's own magic |
 | 3 | Run the recorder on one host and compare its archive, datagram for datagram, against a capture taken at the same point by independent tooling | not started | one host, and the comparison *is* the acceptance test — a byte-level control, not an inspection |
 | 4 | `-health` and `dz_recorder_*` | **done** (#61) | the first step that makes a claim rather than matching one; alerts and dashboards land, and capture loss becomes visible for the first time |
-| 5 | Object layout, manifest and index table | object key and manifest **done** (#60, #61); the index table and the shipper contract are not | the first storage cost; the retention policy is decided here |
+| 5 | Object layout, manifest and index table | object key and manifest **done** (#60, #61); the index table **done** — `recorder.segment_coverage`, the manifest loaded without opening an object; the shipper contract is stated at `completed_dir` and no shipper implements it | the first storage cost; the retention policy is decided here |
 | 6 | Roll out one host at a time, each proven before the next | not started | bounded to one host per change, with a rollback that does not depend on the new path being healthy |
-| 7 | Analysis tier: replay into conformance plus the row loaders | sequence loss **done** (#63); `dz-edge-mbp` **done**; the state machine, book, fingerprint, conformance runner and loaders are not | none; re-runnable by construction, and it needs only an archive |
-| 8 | Cross-site join | not started | the payoff |
+| 7 | Analysis tier: replay into conformance plus the row loaders | **done**: sequence loss (#63), `dz-edge-mbp` (#67), the state machine, book and fingerprint (`dz-recorder-events`), the conformance runner (`dz-recorder-conformance`) and the loaders (`dz-recorder-load`, idempotent on `(object key, sha256)`). What it has never run over is an archive a host wrote | none; re-runnable by construction, and it needs only an archive |
+| 8 | Cross-site join | **done** — `007_recorder_cross_site.sql`, as views over rows both sites already write rather than as a table | the payoff |
 | 9 | Point the dashboards at the analysis tier's rows | not started | the rows must be proven equivalent to what a dashboard already shows before anything is switched over |
 
-Steps 4 and 7 ran ahead of 2, 3 and 6, which the paragraph below anticipated for
-7 and did not for 4: the health tier landed before any host ran the recorder,
-because everything in it is testable without one. What has *not* moved is the
-part that needs a host — the acceptance comparison at step 3 and the rollout at
-step 6 — and no claim in this document about running recorders should be read as
-describing something that has happened.
+Steps 4, 5, 7 and 8 ran ahead of 3 and 6, which the paragraph below anticipated
+for 7 and did not for the rest. One thing separates what moved from what did
+not, and it is not difficulty: **every step that needs no host is done, and the
+two that need one are the two that have not started.** The health tier, the
+index table, the whole analysis tier and the cross-site join are all testable
+without a recorder ever having run, so they were.
+
+What has *not* moved is therefore the part that needs a host — the acceptance
+comparison at step 3 and the rollout at step 6 — and no claim in this document
+about running recorders should be read as describing something that has
+happened. Step 7 carries the same caveat one layer in: the analysis tier is
+complete and has never been pointed at an archive a host wrote, so what is
+proven is the tier and not the traffic.
 
 Three properties of this order are deliberate. **Nothing runs on a host before
 step 3**, and step 3 is one host. **The health tier comes before the object

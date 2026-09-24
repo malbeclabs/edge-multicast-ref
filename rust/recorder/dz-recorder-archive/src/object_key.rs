@@ -1,7 +1,8 @@
 //! Where an object lands, decided here rather than by whatever ships it.
 //!
 //! The recorder does not upload — `completed_dir` is the whole interface to a
-//! shipper — but it does decide the layout, and the manifest states it. That
+//! shipper, and `SHIPPER-CONTRACT.md` states the whole of it — but it does decide
+//! the layout, and the manifest states that. That
 //! split keeps a shipper as dumb as possible, which was the argument for not
 //! writing one: moving immutable hashed files is a solved problem, and a
 //! solved problem stays solved only if nobody has to teach it a partitioning

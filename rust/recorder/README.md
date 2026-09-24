@@ -96,7 +96,7 @@ One vantage point cannot tell those apart, which is why a `sequence_gap` row lan
 |---|---|
 | `dz-recorder-core` | The types every other crate speaks: `RecordedDatagram`, `ChannelInstance`, the `Source`/`Sink`/`Observer` traits, `RecorderIdentity`, and the configuration |
 | `dz-recorder-capture` | Live capture as a `Source`: membership, kernel receive timestamps, drop accounting, rejoin, source admission |
-| `dz-recorder-archive` | Two archive shapes: the pcapng writer for datagrams, the [upstream-message object format](dz-recorder-archive/UPSTREAM-OBJECT-FORMAT.md) for a venue's own bytes, and the rotation, compression, hashing, manifest and staging watermark both share |
+| `dz-recorder-archive` | Two archive shapes: the pcapng writer for datagrams, the [upstream-message object format](dz-recorder-archive/UPSTREAM-OBJECT-FORMAT.md) for a venue's own bytes, and the rotation, compression, hashing, manifest and staging watermark both share. What lands in `completed_dir`, and what is required of whatever moves it, is the [shipper contract](dz-recorder-archive/SHIPPER-CONTRACT.md) |
 | `dz-recorder-replay` | An archive read back as a `Source`, plus the synthetic publisher the tests are built on |
 | `dz-recorder-loss` | Which sequence values nobody delivered, per channel instance and per era, and whose they are |
 | `dz-recorder-relower` | An archive read back as decoded messages, and re-run against a venue's own mapping: *did the publisher publish what the venue said?* |
@@ -703,8 +703,10 @@ and `unverifiable` as the verdict until the join has run.
 Any repoint of an existing dashboard. Rows have to be proven equivalent to what
 a panel already shows before anything is switched over.
 
-Any shipper. The loader is deliberately arranged so that not having one costs
-retention and not the join.
+Any shipper. What one has to do is stated in full — the
+[shipper contract](dz-recorder-archive/SHIPPER-CONTRACT.md) at `completed_dir` —
+and nothing implements it. The loader is deliberately arranged so that not having
+one costs retention and not the join.
 
 A venue-side receive path. A venue-side observation needs an `Input`, and the
 two transports a venue would use for one — a session transport and a polled one
