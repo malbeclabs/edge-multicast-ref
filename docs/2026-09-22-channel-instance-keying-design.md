@@ -43,8 +43,9 @@ key it from cannot carry anything else.
 | `instKey` | `go/marketbyprice-bot/shard.go:27` | `{ch uint8, id uint32}` | publisher channel + `Instrument ID` |
 | `Coordinator.resetCount` | `go/marketbyorder-bot/coordinator.go:24` | `map[uint8]uint8` per `Channel ID` | publisher channel |
 | `Coordinator.resetCount` | `go/marketbyprice-bot/coordinator.go:53` | `map[uint8]uint8` per `Channel ID` | publisher channel |
-| `Coordinator.snapshotRoute` | `go/marketbyorder-bot/coordinator.go:27` | `map[snapKey]int`, `snapKey{ch, snap}` | publisher channel |
-| `Shard.snapCtx` | `go/marketbyorder-bot/shard.go:66` | `map[snapKey]SnapshotContext` | publisher channel + `Instrument ID` |
+| `Coordinator.open` | `go/marketbyorder-bot/coordinator.go:27` | `map[uint8]openRoute` per `Channel ID` | publisher channel |
+| `Shard.open` | `go/marketbyorder-bot/shard.go:80` | `map[uint8]openGroup` per `Channel ID` | publisher channel |
+| `Shard.snapCtx` | `go/marketbyorder-bot/shard.go:79` | `map[instKey]SnapshotContext` | publisher channel + `Instrument ID` — already correct once `instKey` is re-keyed |
 | `Coordinator.open` | `go/marketbyprice-bot/coordinator.go:55` | `map[uint8]openGroup` per `Channel ID` | publisher channel |
 | `Coordinator.seqLast` | `go/marketbyorder-bot/coordinator.go:26` | `map[string]uint64` keyed on the port role token | channel instance — and it is never read |
 | `Coordinator.manifest` | `go/marketbyprice-bot/coordinator.go:54` | one `ManifestState` for the process | publisher channel |
@@ -69,10 +70,14 @@ with that group's instrument (`coordinator.go:114-126`) because the wire omits
 `instrument_id` on a level. Two paths carrying one channel give one map entry:
 the second path's `SnapshotBegin` overwrites the first's, and the first path's
 levels are stamped with the second path's instrument and filed into its shadow.
-`marketbyorder-bot` reaches the same end by a different route — `snapshotRoute`
-is keyed `(Channel ID, Snapshot ID)`, and `Shard.applySnapshotOrder`
-(`shard.go:184-200`) then scans every instrument the shard owns for one whose
-`OpenSnapshot.SnapshotID` matches, without filtering on the channel at all.
+`marketbyorder-bot` reaches the same end by the same route since #139, which
+replaced its id-keyed `snapshotRoute` with an open-group model: `Coordinator.open`
+(`coordinator.go:27`) and `Shard.open` (`shard.go:80`) are both
+`map[uint8]…` per `Channel ID`, so the second path's `SnapshotBegin` overwrites
+the first's there too. #139 removed the search that used to compound it —
+`applySnapshotOrder` now resolves the instrument from the open group instead of
+scanning every shadow for a matching `Snapshot ID` — so what is left in this
+book-builder is the key alone.
 
 **`Reset Count` is arbitrated by a guess.** `Reset Count` is per channel
 publisher, so two paths carrying one channel hold two independent, differing,
@@ -401,8 +406,8 @@ it: a tracker keys a series, so it takes the finer key and gains the port.
 | `go/marketbyprice-parser` | `pubKey{src, ch}` | the same |
 | `go/marketbyorder-bot` | `instKey{ch, id}` | `instKey{pc publisherChannel, id uint32}` — `instruments`, `refdata`, `deltaBuf` and `resetChannel` follow it |
 | `go/marketbyorder-bot` | `Coordinator.resetCount` | `map[publisherChannel]uint8` — one era per publisher, shared by its three port roles |
-| `go/marketbyorder-bot` | `Coordinator.snapshotRoute` | deleted, replaced by `open map[publisherChannel]openGroup` |
-| `go/marketbyorder-bot` | `Shard.snapCtx`, `snapKey{ch, snap}` | `map[instKey]SnapshotContext` — one open cycle per instrument per publisher channel |
+| `go/marketbyorder-bot` | `Coordinator.open`, `Shard.open` | `map[uint8]…` re-keyed onto `publisherChannel`; #139 already replaced the id-keyed `snapshotRoute` these succeeded |
+| `go/marketbyorder-bot` | `Shard.snapCtx` | already `map[instKey]SnapshotContext` since #139; follows `instKey`'s re-key with no change of its own |
 | `go/marketbyorder-bot` | `Coordinator.seqLast` | `map[channelInstance]uint64`, and read — the one book-builder structure on the finer key |
 | `go/marketbyorder-bot` | `SnapshotWriter.dirty`, `withInstrument`, `MarkDirty`, and the constructor's fixed `channel` | keyed on `instKey`; `channel_id` on a `level_snapshots` row comes from the key instead of the constructor argument |
 | `go/marketbyprice-bot` | `instKey{ch, id}` | `instKey{pc publisherChannel, id uint32}` |
@@ -432,23 +437,18 @@ is carried wholly on the `snapshot` port, so a publisher channel has exactly one
 port role that can open one, and there its `channelInstance` and its
 `publisherChannel` name the same group.
 
-**`snapshotRoute` goes away rather than being re-keyed.** Under that protocol an
-id-keyed route is unambiguous while no `snapshot_begin` or `snapshot_end` is
-lost: `Dispatch` deletes the route at `snapshot_end`
-(`go/marketbyorder-bot/coordinator.go:85`) and the next group's `snapshot_begin`
-claims the id afresh (`:68`), so two instruments never hold one `Snapshot ID`
-at the same time within one publisher channel. Re-keying it on the publisher
-channel would therefore fix the collapse between two paths and leave two things
-standing.
+**#139 already did the half of this that was not a re-key.** This section
+originally argued that `snapshotRoute` should go away rather than be re-keyed,
+because an id-keyed route left two things standing beyond the two-path
+collapse: the association resolved by a search over every shadow with a
+matching `Snapshot ID`, and a route entry leaked per lost `snapshot_end`. #139
+landed both fixes — the open-group model replaced the route, and
+`applySnapshotOrder` resolves from the group — so neither argument is live.
 
-The first is that the association is resolved by a search rather than by the
-group. `Shard.applySnapshotOrder` (`shard.go:184-200`) scans every instrument
-the shard owns for one whose `OpenSnapshot.SnapshotID` matches, with no channel
-and no instance filter, and Go's map iteration order decides which one it finds
-when more than one matches. Two publishers of one channel publish the same
-`Snapshot ID` values at the same time, so two matching open shadows on one shard
-is the steady state rather than the edge case, and the instrument a level is
-filed against is then not determined by anything.
+What #139 did not do is key its replacement on the path. `Coordinator.open` and
+`Shard.open` are `map[uint8]…` per `Channel ID`, so two publishers of one
+channel still collapse into one entry, which is the defect this document is
+about and the only one left in this book-builder.
 
 The second is what a lost `snapshot_end` leaves behind: the route entry is never
 deleted, the instrument's shadow stays open, and the next group at the same id
@@ -1087,7 +1087,7 @@ is additive and the setting refuses only the direction that was already wrong.
 | `channelInstance` and `publisherChannel` per module, not in `go/internal` | Three of the five modules have no dependency on `go/internal`; `Record` is already duplicated four times on the same reasoning. |
 | `seqLast` read, not deleted | Sequence continuity on the `snapshot` port is the only discriminator between two groups sharing a `Snapshot ID`, and the field is already the right shape once it is keyed. |
 | The four comments deleted | The glossary is the authority and says two paths may carry one channel. A comment asserting the opposite cannot stay beside code that keys on the path. |
-| `snapshotRoute` deleted rather than re-keyed | Re-keying fixes the collapse between instances and leaves the collapse within one, which `marketbyprice-bot`'s open-group shape already solves. |
+| `Coordinator.open`/`Shard.open` re-keyed rather than replaced | #139 already replaced the id-keyed `snapshotRoute` with the open-group shape, and resolved the association from the group. What it left is the key, so this plan re-keys and does not redesign. |
 | No `port_role` column | Recoverable from `dst_port` for the operator holding the port assignment. |
 | No `ORDER BY` change | ClickHouse cannot prepend a sort-key column; a rebuild is a separate change. |
 | Schema, then parsers, then book-builders | The only order in which no live process reads a field the other side is not writing, and no insert is silently accepted with a field the table lacks. Getting it wrong is not recoverable by waiting: the Go batchers drop a refused batch, so the order is a deploy gate with the drop counter as its alarm. |

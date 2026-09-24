@@ -173,20 +173,15 @@ below that would otherwise be written wrong.
   reason `marketbyprice-parser` returns `Defects` rather than accumulating them
   (`go/marketbyprice-parser/runner.go:223-225`). The stamp goes in the runner,
   beside `RecvTSNS`, not in the decoder.
-- **`marketbyorder-bot`'s `snapshotRoute` is deleted, not re-keyed.** Not
-  because two instruments hold one `Snapshot ID` at once — the publisher MUST
-  NOT interleave snapshot groups within a channel
-  (`go/marketbyprice-bot/coordinator.go:26-27`,
-  `docs/2026-04-23-marketbyorder-plan.md:3066-3068`) and `Dispatch` deletes the
-  route at `snapshot_end` (`go/marketbyorder-bot/coordinator.go:85`), so within
-  one publisher channel and with no loss the id is unambiguous. It goes because the
-  instrument is found by a **search**, not by the group:
-  `Shard.applySnapshotOrder` (`shard.go:184-200`) scans every instrument the
-  shard owns for a matching open `Snapshot ID`, with no channel or instance
-  filter, and map iteration order picks between matches. Two publishers of one
-  channel publish the same ids at the same time, so two matches on one shard is
-  the steady state. Re-keying the route leaves that scan in place; routing by
-  the open group and stamping the instrument removes it.
+- **`marketbyorder-bot`'s open-group state is re-keyed, not replaced.** #139
+  already did the replacing: it deleted the id-keyed `snapshotRoute` and
+  `snapKey`, put `Coordinator.open` and `Shard.open` in their place, and made
+  `applySnapshotOrder` resolve the instrument from the open group instead of
+  scanning every shadow for a matching `Snapshot ID`. That scan was the reason
+  this plan originally argued for deletion over a re-key, and it is gone.
+  What #139 left is the key: both structures are `map[uint8]…` per
+  `Channel ID`, so two publishers of one channel still collapse into one entry.
+  Task 8 is therefore a re-key onto `publisherChannel` and nothing more.
 - **`ORDER BY` cannot gain a prepended column.** The migration adds columns and
   leaves every sort key alone. A task that tries to put `source_addr` at the
   front of `marketbyorder.instruments`' key is attempting a table rebuild.
@@ -219,6 +214,9 @@ below that would otherwise be written wrong.
 - `demo/clickhouse/migrations/002_add_channel_instance_columns.sql` — the
   `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` set for the ten tables, for volumes
   that predate this change.
+- `go/internal/channel/channel.go` and `channel_test.go` — `channelInstance`,
+  `publisherChannel` and `channel()`, declared once for the four modules that
+  need them (task 4).
 
 **Modify**
 
@@ -255,10 +253,16 @@ literals, and `go/marketbyprice-bot/shard_test.go`,
 `snapshot_writer_test.go`, `dispatch_test.go` and `coordinator_test.go` hold
 theirs.
 
+- `go/marketbyorder-bot/Dockerfile` — the `COPY go/internal/ /src/go/internal/`
+  line every other `go/internal` dependant already carries; without it the image
+  build cannot find `go/internal/channel` (task 4).
+
 **Delete**
 
-- `pubKey` in both parsers' `runner.go`; `snapKey` and `Coordinator.snapshotRoute`
-  in `go/marketbyorder-bot`; the four comments listed in task 13.
+- `pubKey` in both parsers' `runner.go`; the four comments listed in task 13.
+  `snapKey` and `Coordinator.snapshotRoute` are **not** here: #139 deleted them
+  already. What replaced them — `Coordinator.open` and `Shard.open` — is
+  re-keyed under *Change*, not deleted.
 
 ---
 
@@ -381,7 +385,19 @@ two statements of one fact and both are required.
 **Files:** `go/internal/channel/channel.go` + `channel_test.go`,
 `go/marketbyorder-parser/runner.go` + `seqtracker_test.go`,
 `go/marketbyprice-parser/runner.go` + `seqtracker_test.go`,
-`go/marketbyorder-bot/go.mod` (the one module that gains the dependency)
+`go/marketbyorder-bot/go.mod` and `go/marketbyorder-bot/Dockerfile` (the one
+module that gains the dependency, and the one build that cannot find the
+package without a second change)
+
+**The Dockerfile is not optional and the task's own gate cannot catch it.**
+`go/marketbyorder-bot/Dockerfile:24` copies only `COPY go/marketbyorder-bot/ ./`,
+so the moment that module imports `go/internal/channel` the container build
+fails to find the package. Every other module that depends on `go/internal`
+already carries the extra line #153 added for exactly this —
+`COPY go/internal/ /src/go/internal/` at `:28` in both parsers, and
+`go/marketbyprice-bot/Dockerfile:28` with the comment saying why. The suite and
+`go build ./...` run in workspace mode, where the package resolves from the
+work tree, so they pass while the image does not. Build the image in step 4.
 
 Both types are declared **once**, in `go/internal`, for the reason the design
 gives under *Two keys*: three of the four modules that need them already depend
@@ -449,7 +465,11 @@ two-field key whose third dimension is implied by a goroutine's lifetime.
   once per datagram from `src`, `ch` and its own port number, which arrives in
   task 5; until then it passes the role's configured port by threading
   `portConfig` through, which is the same edit and may be done here.
-- [ ] **Step 4: Full suite in both parsers**, `gofmt`, commit.
+- [ ] **Step 4: Full suite in both parsers**, `gofmt`, **and build
+  `go/marketbyorder-bot`'s image** (`docker build -f go/marketbyorder-bot/Dockerfile .`),
+  because that is the only gate that fails when the `COPY go/internal/` line is
+  missing — the suite and `go build ./...` run in workspace mode and resolve the
+  package from the work tree. Then commit.
 
 > **The mutant is the missing field.** Remove `port` from `channelInstance` and
 > the new case must fail: the two ports share one entry, the second port's first
@@ -588,9 +608,9 @@ restart would raise three barriers and each would wipe a third of a book.
   one, which is the case neither covers.
 - [ ] **Step 2: Run, watch the first fail** — under the `Channel ID` key the
   alternation reads as a reset on every datagram and the barrier fires on each.
-- [ ] **Step 3: Re-key the field**, and re-key `snapshotRoute`'s barrier-time
-  clearing loop (`coordinator.go:135-139`) to match; it is replaced wholesale in
-  task 8 but must compile here.
+- [ ] **Step 3: Re-key the field**, and re-key `Coordinator.open`'s
+  barrier-time clearing loop (`coordinator.go:135-139`) to match; task 8 re-keys
+  the map itself, but this loop must compile here.
 - [ ] **Step 4: Full suite**, `gofmt`, commit.
 
 > **Two mutants.** Key `resetCount` on `rec.ChannelID` again and the interleave
@@ -629,14 +649,24 @@ which is the misrouting this task exists to prevent, unchanged by #139.
 
 `Snapshot ID` validates membership and is never the key.
 
-**`Shard.clearShadows` (`shard.go:149`) needs the same narrowing `resetChannel`
-gets.** It does `s.open = map[uint8]openGroup{}` and
-`s.snapCtx = map[instKey]SnapshotContext{}`, clearing *every* channel's state on
-one path's disconnect. Once the key carries the path, one path dropping its
-socket must not discard the other's open groups or snapshot contexts: both loops
-filter on the publisher channel, the way `resetChannel` filters `s.instruments`
-and `s.refdata` on `k.ch == ch` (`shard.go:110-119`). `clearShadows` takes the
-disconnecting publisher channel as an argument to do it.
+**`Shard.clearShadows` (`shard.go:149`) is deliberately left clearing
+everything, and re-keying must not narrow it.** It is tempting to filter it the
+way `resetChannel` is filtered, and that would be wrong: there is no per-path
+disconnect to filter on. A book-builder reads **one** unix socket from one
+parser (`bot.go:33,53` — a single `socketPath`), carrying every channel and
+every path, and `OnDisconnect` fires when that socket drops (`bot.go:68-74`).
+The clear covers every channel because every channel arrived over the socket
+that dropped.
+
+Narrowed to one publisher channel, a surviving path would keep a stale `open`
+entry across the outage, and the first `snapshot_order` after the reconnect —
+carrying no `instrument_id`, its own `snapshot_begin` lost in the gap — would be
+filed into that stale group's shadow. That is precisely what `OnDisconnect`
+exists to prevent (`coordinator.go:144-159`), and a `Reset Count` change does
+not cover it because a socket-only drop leaves `Reset Count` untouched.
+
+So the re-key changes the *type* of `Shard.open`'s key and nothing about the
+scope of the clear: `s.open = map[publisherChannel]openGroup{}`.
 
 **One open group per publisher channel is sufficient, and the protocol says
 so.** A publisher MUST NOT interleave snapshot groups within one channel
@@ -683,25 +713,29 @@ group for its publisher channel is dropped and counted.
   `(Channel ID, Instrument ID)` and both paths run the same cycles: each
   path's orders reach the instrument its own group named, and the two
   shadows hold disjoint order sets. This case needs no key change in the shard
-  and passes at the end of this task. (c) A snapshot order
+  and passes from the start, because #139 already replaced the scan it used to
+  fail on; it is a regression guard for the re-key, not a failing test. (c) A snapshot order
   arriving after its `snapshot_end` is dropped and counted, not routed — the
   `marketbyorder` twin of
   `TestDispatch_StrayLevelAfterSnapshotEndIsDroppedNotRouted`
-  (`go/marketbyprice-bot/coordinator_test.go:461`). (d) Two paths carrying one
-  `Channel ID`, each with an open group, one path disconnecting: the surviving
-  path keeps its open group and its snapshot context, and its next
-  `snapshot_order` is still routed. This is the `clearShadows` case and it fails
-  on the current tree, where one disconnect clears both maps for every channel.
-- [ ] **Step 2: Run, watch (a) and (b) fail** — (a) because one `Channel ID`
-  gives one route entry and the second path's `snapshot_begin` overwrites the
-  first's,
-  (b) because `applySnapshotOrder` scans for a matching open `Snapshot ID` and
-  two shadows on that shard match, so the orders split between them in whatever
-  order the map yields.
+  (`go/marketbyprice-bot/coordinator_test.go:461`). (d) A parser-socket drop with two paths carrying one
+  `Channel ID`, both with an open group: **both** groups are cleared, and the
+  first `snapshot_order` after the reconnect is dropped rather than filed into
+  either stale shadow. There is one socket, so there is no such thing as one
+  path disconnecting; this test pins that the re-key did not turn the clear into
+  a per-channel one.
+- [ ] **Step 2: Run, watch (a) and (d) fail** — (a) because one `Channel ID`
+  gives one `open` entry and the second path's `snapshot_begin` overwrites the
+  first's; (d) because the re-key has not happened yet, so the clear and the
+  reconnect are already consistent and the test only starts to mean something
+  once `open` carries the path. **(b) passes from the start**, and that is its
+  purpose: #139 removed the scan over shadows with a matching `Snapshot ID`, so
+  the case that used to split orders between two shadows is already fixed and
+  (b) is here to keep it fixed through the re-key.
 - [ ] **Step 3: Re-key `Coordinator.open` and `Shard.open`** from `uint8` onto
-  `publisherChannel`; give `clearShadows` the disconnecting publisher channel and
-  filter both its loops on it; narrow `resetChannel`'s loops
-  (`shard.go:110-119`) to the publisher channel.
+  `publisherChannel`; leave `clearShadows` clearing every entry, re-typed only;
+  narrow `resetChannel`'s loops (`shard.go:110-119`) to the publisher channel,
+  which *is* per-channel because a `Reset Count` change names one.
 - [ ] **Step 4: Full suite**, `gofmt`, commit.
 
 > **Three mutants, and all must be killed.** Re-key `open` on `rec.ChannelID`
@@ -711,11 +745,11 @@ group for its publisher channel is dropped and counted.
 > Re-key it on the full `channelInstance`: nothing in this task fails, because a
 > group lives on one port role — which is why the over-fine key is caught in
 > task 9 on `refdata` and not here.
-> Then revert `clearShadows` to clearing both maps wholesale: test (d) must
-> fail, with the surviving path's open group and snapshot context gone and its
-> next `snapshot_order` dropped for want of a group. That mutant is the one
-> #139 introduced and this task inherits — the other two are about the key, and
-> this one is about who a disconnect is allowed to affect.
+> Then filter `clearShadows` on one publisher channel, the way `resetChannel`
+> is filtered: test (d) must fail, with a surviving path's stale `open` entry
+> catching the first `snapshot_order` after the reconnect and filing it into the
+> wrong instrument's shadow. That mutant is the plausible wrong turn this task
+> invites, since every other structure here does get narrowed.
 
 ---
 
