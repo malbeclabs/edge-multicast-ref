@@ -56,8 +56,12 @@ being dropped on the floor.
 ### 1. `SPEC_REF` moves to a revision whose reader takes pcapng
 
 `.github/workflows/rust-codec.yml` pins `e68184b`, which predates
-`tools/conformance/input/pcapng.go`. Move it to `931d68d`, and keep the comment
-that says why a revision is pinned at all.
+`tools/conformance/input/pcapng.go`. That file lands at `4568cfb` (upstream #63),
+which is the floor. Move the pin to `931d68d`, upstream's head when this was
+written, and say in the comment that the move carries eleven upstream commits and
+not one: `4568cfb` alone reads the segment, and the others include rule changes —
+schema 1 and schema 3 decoding among them — that a new failure after this change
+could come from.
 
 **Verification:** the `conformance` job builds the tool and `--version` prints
 the new ref. A pin that did not move would make task 2's tests fail at the tool,
@@ -73,8 +77,15 @@ format they describe.
 
 `provenance` is the section the segment is written under, and it is an argument
 rather than a default. `ArchiveSource` exposes `identity()`,
-`capture_drop_scope()`, `link_headers()` and `section_recv_ts_kind()` precisely
-so that a re-write states what the archive stated. **A default here would be an
+`capture_drop_scope()` and `link_headers()` precisely so that a re-write states
+what the archive stated, and those three are carried.
+
+`section_recv_ts_kind()` is the fourth, and it is **not** carried, because
+nothing is lost by leaving it: `SegmentWriter` states `kernel-software` for every
+section and marks each datagram whose stamp fell back, and `OwnedDatagram`
+carries each datagram's own `recv_ts_kind` into the writer. What a reader
+recovers is the per-datagram kind, and that survives exactly. The section default
+is only the writer's shorthand for the common case. **A default here would be an
 invented fact**: a section claiming `link_headers=captured` over synthesised
 bytes is a claim the archive does not support, and the writer marks every
 datagram that contradicts its section.

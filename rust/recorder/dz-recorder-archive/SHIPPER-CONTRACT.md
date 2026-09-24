@@ -123,6 +123,15 @@ recompresses or repackages an object breaks that pair and is not a shipper.
 Deleting an object and its manifest once both are safely in object storage is
 expected, and the recorder tolerates a file the shipper has already taken.
 
+**Delete the manifest first and the object second** — publication in reverse.
+The order is not cosmetic. An object whose manifest is gone is still named as an
+object, so the watermark accounts for it and eviction can reach it. A manifest
+whose object is gone matches nothing the watermark can name: it is never
+evicted, and it sits in `unreclaimable_bytes` for as long as the directory
+exists. One shipper that deletes the object, then fails before the manifest, has
+left a file nothing will ever remove, and a shipper that does it on every
+failure turns an intermittent outage into an unbounded disk.
+
 If `completed_dir` is not drained, the multicast recorder does **not** block. A
 watermark covers everything on the disk it fills — the staging directory and
 `completed_dir` together — and when it is exceeded the oldest multicast objects
@@ -130,10 +139,12 @@ are deleted, with their manifests, and counted in
 `dz_recorder_segments_evicted_total`.
 
 **The watermark covers the multicast shape only.** It classifies files by the
-`pcapng` and `pcapng.zst` names, so a `dzus` object is to it a file it did not
-write: not counted against the budget, and never evicted. Nothing else bounds
-them either. For the upstream shape, the shipper draining `completed_dir` is
-the only thing standing between a storage outage and a full disk.
+`pcapng` and `pcapng.zst` names, so a `dzus` object in the same directory is to
+it a file it did not write: never evicted, left out of the total eviction works
+against, and tallied instead in `unreclaimable_bytes` — which raises a fault once
+it alone exceeds `staging_max`, and does nothing else. Nothing bounds them. For
+the upstream shape, the shipper draining `completed_dir` is the only thing
+standing between a storage outage and a full disk.
 
 This is the design's one deliberate loss, and the reason is worth stating to
 whoever operates the shipper: a writer that blocked on a full disk would stall
@@ -149,17 +160,26 @@ is silent unless somebody watches that counter.
 ## What a shipper may leave in the directory
 
 A shipper may keep its own state file in `completed_dir`. The recorder does not
-delete files it did not write, and does not count them against the watermark: a
-stray file large enough to exceed the budget on its own would otherwise make
-every eviction pass delete every object without the total ever falling, losing
-the archive to a file eviction cannot reach.
+delete files it did not write, and leaves them out of the total eviction works
+against: a stray file large enough to exceed the budget on its own would
+otherwise make every eviction pass delete every object without the total ever
+falling, losing the archive to a file eviction cannot reach. They are not
+invisible, though. Their bytes are tallied as `unreclaimable_bytes`, and a fault
+is raised once that tally alone exceeds `staging_max` — so a state file that
+grows without bound is reported, not silently tolerated.
 
-**Every name beginning with a dot belongs to the recorder.** An object under
-assembly is `.<name>.part` or `.<name>.tmp` depending on which shape is being
-written, and both are hidden precisely so that a shipper matching object names
-never sees a partial object. A segment whose run ended before it rotated is
-`segment-<seq>.recovered-<ns>.pcapng`, adopted by the next run. Leave all of
-them alone.
+**Every name beginning with a dot belongs to the recorder.** An upstream object
+under assembly is `.<name>.tmp` in `completed_dir`, hidden precisely so that a
+shipper matching object names never sees a partial object. Leave it alone.
+
+**A recovered segment never reaches `completed_dir`.** A segment whose run ended
+before it rotated is kept as `segment-<seq>.recovered-<ns>.pcapng` in the
+*staging* directory, and it stays there: it is not compressed, not manifested
+and not published, and the watermark evicts it with the rest of the staged
+history. The window it holds therefore never reaches object storage through a
+shipper. That is the recorder's behaviour, not a shipper's to fix — a shipper
+that reached into staging for it would be shipping an object with no manifest,
+no digest and no key.
 
 What is yours to take, once uploaded, is a file named
 `<digits>-<digits>-<digits>.` followed by `pcapng`, `dzus`, either of those with
@@ -184,8 +204,8 @@ The shipper must:
 - upload both files, to the key the manifest states;
 - verify the digest;
 - never modify an object;
-- delete both once they are durable;
-- leave dotfiles and `.recovered-` files alone;
+- delete both once they are durable, the manifest first and the object second;
+- leave dotfiles alone, and never reach into the staging directory;
 - and be watched, because the recorder's response to a shipper that stopped is
   to delete multicast history quietly and count it, and to let upstream objects
   fill the disk.
