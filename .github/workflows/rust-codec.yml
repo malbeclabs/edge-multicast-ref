@@ -235,8 +235,13 @@ jobs:
   conformance:
     runs-on: ubuntu-latest
     env:
-      # conformance: don't score a publisher's clean shutdown as non-conformance (#48)
-      SPEC_REF: e68184bc25e25f1a9f0c26c465fdaf3bb5f23268
+      # conformance: don't score a publisher's clean shutdown as non-conformance (#48).
+      #
+      # At or after 931d68d, because that is where `input/pcapng.go` lands and
+      # the tool stops needing a classic `pcap`. An older rule set reads the
+      # segment this suite now writes only as far as its magic and then refuses
+      # it, so this pin and the bridge move together.
+      SPEC_REF: 931d68d9a5d2446c56cdbf644acd518ed91beafa
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4

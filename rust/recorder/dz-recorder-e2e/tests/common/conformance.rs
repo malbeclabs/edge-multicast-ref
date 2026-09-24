@@ -9,14 +9,21 @@
 //! specification's own tool, in the specification's own repository, and it
 //! knows 88 rules this repository has never encoded.
 //!
-//! It reads classic `pcap` and the archive is `pcapng`, so replay's output is
-//! written into one — **by `dz-recorder-conformance`, and no longer here.**
-//! That crate is the analysis tier's bridge, and this gate reaches the tool
-//! through it deliberately: a bridge with two implementations is a bridge where
-//! the gate and the runner can disagree about what the tool was shown, and the
-//! gate is the one nobody would think to re-check. What the conversion adds to
-//! the chain is still nothing: the datagram bytes handed to the writer are
-//! exactly the bytes replay produced.
+//! The tool is handed the segment itself: replay's output, written back out as
+//! pcapng by the recorder's own `SegmentWriter` — **inside
+//! `dz-recorder-conformance`, and not here.** That crate is the analysis tier's
+//! bridge, and this gate reaches the tool through it deliberately: a bridge with
+//! two implementations is a bridge where the gate and the runner can disagree
+//! about what the tool was shown, and the gate is the one nobody would think to
+//! re-check. What the re-write adds to the chain is still nothing: the datagram
+//! bytes handed to the writer are exactly the bytes replay produced.
+//!
+//! pcapng and not the classic `pcap` the tool also accepts, because a classic
+//! record has nowhere to write `epb_dropcount` — the recorder's own admission of
+//! what it failed to record. Over a converted file the rule set sees every gap
+//! the recorder caused and nothing saying the recorder caused it, so it grades
+//! them against the publisher. `a_recorders_own_loss_is_not_charged_to_the_
+//! publisher` is the case that holds this open.
 //!
 //! What stays here is the assertion. This gate reads the tool's raw exit code
 //! and its raw standard error, uninterpreted, because a gate that shared the
@@ -33,8 +40,9 @@
 use std::path::PathBuf;
 
 use super::{port_of, replay, Recorded, ALL_ROLES, GROUP};
-use dz_recorder_conformance::pcap::write_group_pcaps;
+use dz_recorder_conformance::segment::{write_group_segments, SectionProvenance};
 use dz_recorder_conformance::tool::{ConformanceTool, Invocation, PortRoles};
+use dz_recorder_replay::ArchiveSource;
 
 /// Where the tool is. Set by whatever runs the suite, because it is built from
 /// a sibling repository this one does not vendor.
@@ -81,17 +89,30 @@ impl Verdict {
     }
 }
 
-/// Replays the archive, writes it as a pcap and runs the tool over it.
+/// What the archive states about itself, so the segment written from it states
+/// the same and invents nothing.
+fn provenance_of(archive: &Recorded) -> SectionProvenance {
+    let source = ArchiveSource::open(&archive.object).expect("the archive opens");
+    SectionProvenance::of(&source).expect("an archive this recorder wrote states its own section")
+}
+
+/// Replays the archive, writes it back out as a segment and runs the tool over
+/// it.
 pub fn conformance_of(archive: &Recorded, feed: &str) -> Verdict {
     let dir = tempfile::tempdir().expect("a temporary directory");
-    let pcaps =
-        write_group_pcaps(dir.path(), &replay(&archive.object)).expect("the bridge writes a pcap");
+    let segments = write_group_segments(
+        dir.path(),
+        &replay(&archive.object),
+        &provenance_of(archive),
+    )
+    .expect("the bridge writes a segment");
 
     // One group throughout this crate, so one invocation. The bridge writes one
-    // file per group because the tool takes one `-group`, and a second file
-    // here would mean a second group nobody in this suite joined.
+    // file per group because the tool's port map is keyed on the destination
+    // port alone, and a second file here would mean a second group nobody in
+    // this suite joined.
     assert_eq!(
-        pcaps.iter().map(|p| p.group).collect::<Vec<_>>(),
+        segments.iter().map(|s| s.group).collect::<Vec<_>>(),
         vec![GROUP],
         "these fixtures publish to one group, and the tool judges one at a time"
     );
@@ -104,8 +125,8 @@ pub fn conformance_of(archive: &Recorded, feed: &str) -> Verdict {
     let run = ConformanceTool::new(tool(), dir.path())
         .run(
             &Invocation {
-                pcap: &pcaps[0].path,
-                group: pcaps[0].group,
+                capture: &segments[0].path,
+                group: segments[0].group,
                 feed,
                 ports,
             },

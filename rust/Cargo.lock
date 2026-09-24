@@ -517,6 +517,7 @@ name = "dz-recorder-conformance"
 version = "0.2.0"
 dependencies = [
  "dz-edge-core",
+ "dz-recorder-archive",
  "dz-recorder-core",
  "dz-recorder-replay",
  "serde",

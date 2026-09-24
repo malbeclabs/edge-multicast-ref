@@ -434,3 +434,41 @@ fn what_the_publisher_wrote_and_the_recorder_kept_is_valid_by_the_spec() {
     let archive = record(&correct_stream(), ALL_ROLES);
     common::conformance::conformance_of(&archive, "tob").assert_clean();
 }
+
+/// The recorder's own loss reaches the rule set, so the gap behind it is not
+/// charged to the publisher.
+///
+/// This is the case that decides the capture format, and the fixture needed
+/// nothing added to it: `correct_stream` has always had the recorder admit
+/// `LOST_BEFORE` datagrams on the second instance. What it did not have is
+/// anywhere for that admission to go. `epb_dropcount` is the recorder saying it
+/// never wrote them, a classic `pcap` record has no field to carry it, and the
+/// conversion this gate used to run through therefore handed the rule set a
+/// clean capture with an unexplained sequence hole in it. The hole was the
+/// publisher's as far as the tool could tell, and the tool had no way to say
+/// otherwise.
+///
+/// The exit code is deliberately not the assertion. The tool leaves it at zero —
+/// a lossy segment is still worth replaying and the violations it does confirm
+/// are real — so an assertion on the code would have passed just as well over
+/// the conversion that deleted the evidence.
+#[cfg(feature = "conformance")]
+#[test]
+fn the_recorders_own_loss_reaches_the_rule_set_rather_than_the_publisher() {
+    let archive = record(&correct_stream(), ALL_ROLES);
+    let verdict = common::conformance::conformance_of(&archive, "tob");
+
+    assert_ne!(
+        verdict.code, 2,
+        "dz-conformance could not run at all:\n{}",
+        verdict.stderr
+    );
+    assert!(
+        verdict
+            .stderr
+            .contains(&format!("failed to record {LOST_BEFORE} datagram(s)")),
+        "the rule set was not told what the recorder admits it lost, so the gap \
+         behind it is the publisher's as far as the tool can tell:\n{}",
+        verdict.stderr
+    );
+}

@@ -10,12 +10,19 @@
 //!
 //! Two halves, and they are separable on purpose.
 //!
-//! - [`pcap`] converts a replayed archive into the classic pcap the tool reads.
-//!   It is the *only* such conversion in this repository. `dz-recorder-e2e`'s
-//!   conformance gate ran its own copy until this crate existed, and a bridge
-//!   with two implementations is a bridge where the gate and the runner can
-//!   disagree about what the tool was shown — with the gate being the one nobody
-//!   would think to re-check.
+//! - [`segment`] writes a replayed archive back out as the pcapng segment the
+//!   tool reads, using the recorder's own `SegmentWriter`. It is the *only* such
+//!   conversion in this repository. `dz-recorder-e2e`'s conformance gate ran its
+//!   own copy until this crate existed, and a bridge with two implementations is
+//!   a bridge where the gate and the runner can disagree about what the tool was
+//!   shown — with the gate being the one nobody would think to re-check.
+//!
+//!   pcapng and not the classic `pcap` the tool also accepts, because a classic
+//!   record has nowhere to write `epb_dropcount`. That field is the recorder's
+//!   admission of what it failed to record, and it is the only thing in a
+//!   segment that separates capture loss from publisher loss: a conversion that
+//!   drops it hands the rule set every gap the recorder caused with nothing to
+//!   say the publisher did not cause it.
 //! - [`tool`] is the boundary against the rule set: a trait, one implementation
 //!   that runs the binary, and the version resolution that has to happen before
 //!   any verdict may be stamped.
@@ -31,12 +38,15 @@
 //! was shown, and which rule set answered.
 #![forbid(unsafe_code)]
 
-pub mod pcap;
 pub mod report;
+pub mod segment;
 pub mod tool;
 
-pub use pcap::{write_group_pcaps, write_pcap, BridgeError, GroupPcap};
 pub use report::{EvidenceRange, Outcome, ReportError, ReportInstance, RuleOutcome, RuleSetReport};
+pub use segment::{
+    segment_len_bound, write_group_segments, write_segment, BridgeError, GroupSegment,
+    SectionProvenance,
+};
 pub use tool::{
     ConformanceTool, Invocation, PinnedRuleSet, PortRoles, RuleSet, ToolError, ToolRun,
 };
