@@ -54,12 +54,21 @@ key is in the manifest.
 
 ## Publication is an atomic rename, and the object is the signal
 
-The object is assembled in the staging directory under `.<name>.part`, hashed,
-and moved into `completed_dir` with a single `rename`. **A partial object is
-never visible under its final name.** A shipper may begin uploading the instant
-it sees one.
+Each object is assembled under a hidden temporary name, hashed, and moved to its
+final name with a single `rename`. Where the temporary lives differs by shape:
 
-The two renames are ordered, and the order matters to a shipper:
+| Shape | Assembled as | In |
+|---|---|---|
+| multicast (`pcapng`) | `.<name>.part` | the staging directory |
+| upstream (`dzus`) | `.<name>.tmp` | `completed_dir` itself |
+
+So a shipper listing `completed_dir` can see an upstream object's temporary,
+and never a multicast one's. Either way **a partial object is never visible
+under its final name**, and a shipper may begin uploading the instant it sees
+one.
+
+Both shapes order their two renames the same way, and the order matters to a
+shipper:
 
 1. the manifest is moved into `completed_dir`,
 2. then the object.
@@ -114,11 +123,17 @@ recompresses or repackages an object breaks that pair and is not a shipper.
 Deleting an object and its manifest once both are safely in object storage is
 expected, and the recorder tolerates a file the shipper has already taken.
 
-If `completed_dir` is not drained, the recorder does **not** block. A watermark
-covers everything on the disk it fills — the staging directory and
-`completed_dir` together — and when it is exceeded the oldest objects are
-deleted, with their manifests, and counted in
+If `completed_dir` is not drained, the multicast recorder does **not** block. A
+watermark covers everything on the disk it fills — the staging directory and
+`completed_dir` together — and when it is exceeded the oldest multicast objects
+are deleted, with their manifests, and counted in
 `dz_recorder_segments_evicted_total`.
+
+**The watermark covers the multicast shape only.** It classifies files by the
+`pcapng` and `pcapng.zst` names, so a `dzus` object is to it a file it did not
+write: not counted against the budget, and never evicted. Nothing else bounds
+them either. For the upstream shape, the shipper draining `completed_dir` is
+the only thing standing between a storage outage and a full disk.
 
 This is the design's one deliberate loss, and the reason is worth stating to
 whoever operates the shipper: a writer that blocked on a full disk would stall
@@ -159,8 +174,9 @@ The recorder guarantees:
 - an object under its final name is complete and hashed;
 - the manifest for an object is present before the object is;
 - the manifest states the object key, the digest and the byte count;
-- an object nothing removes will eventually be evicted and counted, and the
-  record path will not stall waiting for anybody.
+- a multicast object nothing removes will eventually be evicted and counted,
+  and the record path will not stall waiting for anybody. An upstream object
+  is not evicted, and nothing bounds it but the shipper.
 
 The shipper must:
 
@@ -171,4 +187,5 @@ The shipper must:
 - delete both once they are durable;
 - leave dotfiles and `.recovered-` files alone;
 - and be watched, because the recorder's response to a shipper that stopped is
-  to delete history quietly and count it.
+  to delete multicast history quietly and count it, and to let upstream objects
+  fill the disk.
