@@ -203,7 +203,7 @@ impl StandIns {
         Self { _dir: dir, dir: at }
     }
 
-    /// The stand-in reads its own arguments back to the directory the pcap is
+    /// The stand-in reads its own arguments back to the directory the capture is
     /// in, so that one script serves every test without any of them sharing a
     /// file.
     fn write(at: &Path, spec: FakeSpec) {
@@ -270,8 +270,8 @@ impl FakeTool {
             .collect()
     }
 
-    fn pcap(&self) -> PathBuf {
-        let path = self.dir.path().join("replayed.pcap");
+    fn capture(&self) -> PathBuf {
+        let path = self.dir.path().join("replayed.pcapng");
         std::fs::write(&path, b"not read by the stand-in").expect("a file to point at");
         path
     }
@@ -323,13 +323,13 @@ fn an_exit_of_two_is_an_error_and_yields_no_report_at_all() {
         report: Report::Clean,
         ..FakeSpec::default()
     });
-    let pcap = fake.pcap();
+    let capture = fake.capture();
     let tool_path = fake.tool.path().display().to_string();
 
     let err = fake
         .tool
         .judge(&Invocation {
-            pcap: &pcap,
+            capture: &capture,
             group: GROUP,
             feed: "mbp",
             ports: ports(),
@@ -356,12 +356,12 @@ fn an_exit_of_one_yields_the_report_it_wrote() {
         report: Report::Violation,
         ..FakeSpec::default()
     });
-    let pcap = fake.pcap();
+    let capture = fake.capture();
 
     let report = fake
         .tool
         .judge(&Invocation {
-            pcap: &pcap,
+            capture: &capture,
             group: GROUP,
             feed: "mbp",
             ports: ports(),
@@ -405,12 +405,12 @@ fn an_exit_of_zero_yields_the_report_and_not_an_inferred_pass() {
         report: Report::Clean,
         ..FakeSpec::default()
     });
-    let pcap = fake.pcap();
+    let capture = fake.capture();
 
     let report = fake
         .tool
         .judge(&Invocation {
-            pcap: &pcap,
+            capture: &capture,
             group: GROUP,
             feed: "mbp",
             ports: ports(),
@@ -436,13 +436,13 @@ fn an_unparseable_report_is_an_error_and_never_an_empty_set_of_passes() {
         report: Report::Garbage,
         ..FakeSpec::default()
     });
-    let pcap = fake.pcap();
+    let capture = fake.capture();
     let tool_path = fake.tool.path().display().to_string();
 
     let err = fake
         .tool
         .judge(&Invocation {
-            pcap: &pcap,
+            capture: &capture,
             group: GROUP,
             feed: "mbp",
             ports: ports(),
@@ -466,12 +466,12 @@ fn an_exit_within_the_contract_with_no_report_is_an_error() {
         report: Report::None,
         ..FakeSpec::default()
     });
-    let pcap = fake.pcap();
+    let capture = fake.capture();
 
     let err = fake
         .tool
         .judge(&Invocation {
-            pcap: &pcap,
+            capture: &capture,
             group: GROUP,
             feed: "mbp",
             ports: ports(),
@@ -496,11 +496,11 @@ fn a_missing_report_and_an_unreadable_one_do_not_claim_the_same_thing() {
         report: Report::None,
         ..FakeSpec::default()
     });
-    let missing_pcap = missing.pcap();
+    let missing_capture = missing.capture();
     let missing = missing
         .tool
         .judge(&Invocation {
-            pcap: &missing_pcap,
+            capture: &missing_capture,
             group: GROUP,
             feed: "mbp",
             ports: ports(),
@@ -513,11 +513,11 @@ fn a_missing_report_and_an_unreadable_one_do_not_claim_the_same_thing() {
         report: Report::Garbage,
         ..FakeSpec::default()
     });
-    let unreadable_pcap = unreadable.pcap();
+    let unreadable_capture = unreadable.capture();
     let unreadable = unreadable
         .tool
         .judge(&Invocation {
-            pcap: &unreadable_pcap,
+            capture: &unreadable_capture,
             group: GROUP,
             feed: "mbp",
             ports: ports(),
@@ -558,13 +558,13 @@ fn a_report_for_another_feed_is_refused_and_names_both() {
         report: Report::Clean,
         ..FakeSpec::default()
     });
-    let pcap = fake.pcap();
+    let capture = fake.capture();
 
     // The fixture reports on `mbp`; this invocation asks about `mbo`.
     let err = fake
         .tool
         .judge(&Invocation {
-            pcap: &pcap,
+            capture: &capture,
             group: GROUP,
             feed: "mbo",
             ports: ports(),
@@ -593,12 +593,12 @@ fn an_exit_outside_the_contract_is_refused_rather_than_rounded() {
         report: Report::Clean,
         ..FakeSpec::default()
     });
-    let pcap = fake.pcap();
+    let capture = fake.capture();
 
     let err = fake
         .tool
         .judge(&Invocation {
-            pcap: &pcap,
+            capture: &capture,
             group: GROUP,
             feed: "mbp",
             ports: ports(),
@@ -613,12 +613,12 @@ fn an_exit_outside_the_contract_is_refused_rather_than_rounded() {
 fn a_tool_that_is_not_there_is_an_error_that_names_it() {
     let dir = tempfile::tempdir().expect("a temporary directory");
     let tool = ConformanceTool::new(dir.path().join("absent-dz-conformance"), dir.path());
-    let pcap = dir.path().join("replayed.pcap");
-    std::fs::write(&pcap, b"").expect("a file to point at");
+    let capture = dir.path().join("replayed.pcapng");
+    std::fs::write(&capture, b"").expect("a file to point at");
 
     let err = tool
         .judge(&Invocation {
-            pcap: &pcap,
+            capture: &capture,
             group: GROUP,
             feed: "mbp",
             ports: ports(),
@@ -640,11 +640,11 @@ fn a_role_nobody_joined_leaves_its_flag_unset() {
         report: Report::Clean,
         ..FakeSpec::default()
     });
-    let pcap = fake.pcap();
+    let capture = fake.capture();
 
     fake.tool
         .judge(&Invocation {
-            pcap: &pcap,
+            capture: &capture,
             group: GROUP,
             feed: "mbp",
             ports: PortRoles::none().with(PortRole::Mktdata, 40_000),

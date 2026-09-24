@@ -13,11 +13,17 @@ description = "The seam between a replayed archive and the specification's own r
 # repository. `dz-edge-core` is present for `PortRole` alone, which is a token
 # in a command line rather than a message type.
 #
+# `dz-recorder-archive` is here for one type: the recorder's own `SegmentWriter`
+# writes the segment the tool is handed. A second encoder in this crate would be
+# a second thing to keep in step with the archive, and the gate would go on
+# passing over bytes no recorder would ever write.
+#
 # `tempfile` is a dependency and not only a dev-dependency: each invocation of
 # the tool writes its report into a directory of its own, so that a report left
 # behind by an earlier run can never be read as this one's.
 [dependencies]
 dz-edge-core = { path = "../../codec/dz-edge-core" }
+dz-recorder-archive = { path = "../dz-recorder-archive" }
 dz-recorder-core = { path = "../dz-recorder-core" }
 dz-recorder-replay = { path = "../dz-recorder-replay" }
 serde = { workspace = true }

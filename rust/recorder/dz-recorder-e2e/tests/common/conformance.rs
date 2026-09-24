@@ -9,14 +9,23 @@
 //! specification's own tool, in the specification's own repository, and it
 //! knows 88 rules this repository has never encoded.
 //!
-//! It reads classic `pcap` and the archive is `pcapng`, so replay's output is
-//! written into one — **by `dz-recorder-conformance`, and no longer here.**
-//! That crate is the analysis tier's bridge, and this gate reaches the tool
-//! through it deliberately: a bridge with two implementations is a bridge where
-//! the gate and the runner can disagree about what the tool was shown, and the
-//! gate is the one nobody would think to re-check. What the conversion adds to
-//! the chain is still nothing: the datagram bytes handed to the writer are
-//! exactly the bytes replay produced.
+//! The tool is handed the segment itself: replay's output, written back out as
+//! pcapng by the recorder's own `SegmentWriter` — **inside
+//! `dz-recorder-conformance`, and not here.** That crate is the analysis tier's
+//! bridge, and this gate reaches the tool through it deliberately: a bridge with
+//! two implementations is a bridge where the gate and the runner can disagree
+//! about what the tool was shown, and the gate is the one nobody would think to
+//! re-check. What the re-write adds to the chain is still nothing: the datagram
+//! bytes handed to the writer are exactly the bytes replay produced.
+//!
+//! It uses pcapng rather than the classic `pcap` the tool also accepts, because
+//! a classic record has nowhere to write `epb_dropcount` — the recorder's own admission of
+//! what it failed to record. Over a converted file the rule set sees every gap
+//! the recorder caused and nothing saying the recorder caused it, so it grades
+//! them against the publisher.
+//! `encoder_to_archive.rs`'s
+//! `the_recorders_own_loss_reaches_the_rule_set_rather_than_the_publisher` is
+//! the case that holds this open.
 //!
 //! What stays here is the assertion. This gate reads the tool's raw exit code
 //! and its raw standard error, uninterpreted, because a gate that shared the
@@ -32,9 +41,10 @@
 
 use std::path::PathBuf;
 
-use super::{port_of, replay, Recorded, ALL_ROLES, GROUP};
-use dz_recorder_conformance::pcap::write_group_pcaps;
+use super::{port_of, Recorded, ALL_ROLES, GROUP};
+use dz_recorder_conformance::segment::{write_group_segments, SectionProvenance};
 use dz_recorder_conformance::tool::{ConformanceTool, Invocation, PortRoles};
+use dz_recorder_replay::{ArchiveSource, OwnedDatagram, Termination};
 
 /// Where the tool is. Set by whatever runs the suite, because it is built from
 /// a sibling repository this one does not vendor.
@@ -81,17 +91,49 @@ impl Verdict {
     }
 }
 
-/// Replays the archive, writes it as a pcap and runs the tool over it.
+/// The archive's datagrams and what its section states, out of one read.
+///
+/// One `ArchiveSource` for both, so the provenance is the section the datagrams
+/// were read under rather than a second parse of the same file that could come
+/// to disagree with it. It is read before the datagrams and checked again after,
+/// **all three facts and not only the identity**: `ArchiveSource` updates every
+/// one of them at a later Section Header, and an archive whose second section
+/// kept the recorder but changed its link-header claim or its drop scope would
+/// otherwise be re-written under the first section's claims — captured bytes
+/// marked synthesised, or drops subtracted at a scope they were not counted at.
+fn replayed_with_provenance(archive: &Recorded) -> (Vec<OwnedDatagram>, SectionProvenance) {
+    let mut reader = ArchiveSource::open(&archive.object).expect("the archive opens");
+    let provenance = SectionProvenance::of(&reader)
+        .expect("an archive this recorder wrote states its own section");
+    let datagrams: Vec<OwnedDatagram> = (&mut reader).collect();
+    assert_eq!(
+        reader.terminated_by(),
+        Termination::Eof,
+        "the archive did not end cleanly: {:?}",
+        reader.last_error()
+    );
+    assert_eq!(
+        SectionProvenance::of(&reader).ok().as_ref(),
+        Some(&provenance),
+        "one section per archive here, so one section's claims describe every datagram"
+    );
+    (datagrams, provenance)
+}
+
+/// Replays the archive, writes it back out as a segment and runs the tool over
+/// it.
 pub fn conformance_of(archive: &Recorded, feed: &str) -> Verdict {
     let dir = tempfile::tempdir().expect("a temporary directory");
-    let pcaps =
-        write_group_pcaps(dir.path(), &replay(&archive.object)).expect("the bridge writes a pcap");
+    let (datagrams, provenance) = replayed_with_provenance(archive);
+    let segments = write_group_segments(dir.path(), &datagrams, &provenance)
+        .expect("the bridge writes a segment");
 
     // One group throughout this crate, so one invocation. The bridge writes one
-    // file per group because the tool takes one `-group`, and a second file
-    // here would mean a second group nobody in this suite joined.
+    // file per group because the tool's port map is keyed on the destination
+    // port alone, and a second file here would mean a second group nobody in
+    // this suite joined.
     assert_eq!(
-        pcaps.iter().map(|p| p.group).collect::<Vec<_>>(),
+        segments.iter().map(|s| s.group).collect::<Vec<_>>(),
         vec![GROUP],
         "these fixtures publish to one group, and the tool judges one at a time"
     );
@@ -104,8 +146,8 @@ pub fn conformance_of(archive: &Recorded, feed: &str) -> Verdict {
     let run = ConformanceTool::new(tool(), dir.path())
         .run(
             &Invocation {
-                pcap: &pcaps[0].path,
-                group: pcaps[0].group,
+                capture: &segments[0].path,
+                group: segments[0].group,
                 feed,
                 ports,
             },

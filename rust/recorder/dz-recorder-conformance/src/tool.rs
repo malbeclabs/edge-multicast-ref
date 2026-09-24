@@ -110,13 +110,20 @@ impl PortRoles {
 
 /// One run of the rule set: one capture file, one group, one feed.
 ///
-/// One group and not several, because the tool takes one `-group`. An archive
-/// holding two groups is two invocations over two files, and the per-object
-/// process count follows from what the recorder was asked to join rather than
-/// from anything the runner chose.
+/// One group and not several, and **not because the tool takes one `-group`** —
+/// it ignores that flag in replay. The reason is its port map, which is keyed
+/// on the destination port alone: two groups on the same three port roles read
+/// out of one file as one interleaved series. An archive holding two groups is
+/// therefore two invocations over two files, and the per-object process count
+/// follows from what the recorder was asked to join rather than from anything
+/// the runner chose.
 #[derive(Debug, Clone, Copy)]
 pub struct Invocation<'a> {
-    pub pcap: &'a Path,
+    /// The capture file, which is a pcapng segment. The tool's own flag is
+    /// `-pcap` and it takes either format, choosing by the file's magic; the
+    /// field is named for what we hand it rather than for what the flag is
+    /// called.
+    pub capture: &'a Path,
     pub group: Ipv4Addr,
     /// The feed specification's name, as the manifest states it.
     pub feed: &'a str,
@@ -194,14 +201,14 @@ pub enum ToolError {
 
 /// What a rule set can be asked.
 ///
-/// Two methods rather than one: the plan describes the seam as *given a pcap, a
-/// group, the three ports and a feed, return a report*, and the design requires
+/// Two methods rather than one: the plan describes the seam as *given a capture,
+/// a group, the three ports and a feed, return a report*, and the design requires
 /// besides that the runner ask the tool which rule set it is. Resolving the
 /// version anywhere but through this same trait would leave the refusal that
 /// matters most — a tool that cannot name itself — with nothing to stand in for
 /// it in a test.
 pub trait RuleSet {
-    /// Runs the rule set over one group's capture file.
+    /// Runs the rule set over one group's segment.
     fn judge(&self, invocation: &Invocation<'_>) -> Result<RuleSetReport, ToolError>;
 
     /// Which rule set this is, as the rule set itself states it.
@@ -268,7 +275,7 @@ impl ConformanceTool {
         cmd.arg("-feed")
             .arg(invocation.feed)
             .arg("-pcap")
-            .arg(invocation.pcap)
+            .arg(invocation.capture)
             .arg("-group")
             .arg(invocation.group.to_string());
         for role in [PortRole::Mktdata, PortRole::Refdata, PortRole::Snapshot] {
