@@ -147,6 +147,23 @@ enum Read {
     Ended(DisconnectReason),
     /// Something retrying cannot fix.
     Fatal,
+    /// Pending on the first poll, then the read it wraps.
+    NotYet(Box<Read>),
+}
+
+/// Pending once, then ready, waking itself so nothing outside is awaited.
+struct YieldOnce(bool);
+
+impl Future for YieldOnce {
+    type Output = ();
+    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        if std::mem::replace(&mut self.0, true) {
+            Poll::Ready(())
+        } else {
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
 }
 
 /// One scripted connection: what `connect` does, what `send` does, and what the
@@ -262,10 +279,14 @@ impl Input for ScriptedInput {
                 .current
                 .as_mut()
                 .expect("the driver received on a connection it had not opened");
-            let read = open
+            let mut read = open
                 .reads
                 .pop_front()
                 .expect("the driver received past the end of a scripted connection");
+            if let Read::NotYet(inner) = read {
+                YieldOnce(false).await;
+                read = *inner;
+            }
             match read {
                 Read::Payload(bytes) => Ok(Received::Payload { bytes, ts_ns: None }),
                 Read::Stamped(bytes, ts_ns) => Ok(Received::Payload {
@@ -283,6 +304,7 @@ impl Input for ScriptedInput {
                 }
                 Read::Ended(reason) => Err(IngressError::ended(reason, "scripted")),
                 Read::Fatal => Err(IngressError::fatal("scripted")),
+                Read::NotYet(_) => unreachable!("unwrapped above"),
             }
         })
     }
@@ -470,6 +492,8 @@ struct RecordingEvents {
     /// Every scope transition, in order, so that a test can assert the pairing
     /// and not just the value.
     scopes: Vec<Option<u64>>,
+    /// The event count and the scope in force at each `drained`.
+    drained: Vec<(usize, Option<u64>)>,
     /// Every instrument the adapter stopped trusting its book for, in order.
     desynchronised: Vec<(InstrumentRef, Desync)>,
     /// One entry per event: the payload receive stamp it was attributable to,
@@ -496,6 +520,10 @@ impl EventSink for RecordingEvents {
     fn payload_scope(&mut self, recv_ts_ns: Option<u64>) {
         self.scopes.push(recv_ts_ns);
         self.in_force = recv_ts_ns;
+    }
+
+    fn drained(&mut self) {
+        self.drained.push((self.events, self.in_force));
     }
 }
 
@@ -796,6 +824,41 @@ fn a_payload_reaches_the_adapter_with_its_bytes_and_a_receive_timestamp() {
     // Bytes are counted as the adapter sees them: payload bytes, not bytes off
     // the socket.
     assert_eq!(outcome.observer.recorded().bytes, 6);
+}
+
+#[test]
+fn the_runtime_is_told_the_input_drained_only_when_nothing_was_ready() {
+    let outcome = run(
+        policy(),
+        RecordingAdapter::default(),
+        vec![Connection::live(vec![
+            Read::Payload(b"one"),
+            Read::Payload(b"two"),
+            Read::NotYet(Box::new(Read::Payload(b"three"))),
+            Read::Ended(DisconnectReason::RemoteClose),
+        ])],
+    );
+
+    assert_eq!(outcome.events.events, 3);
+    assert_eq!(
+        outcome.events.drained,
+        vec![(2, None), (3, None)],
+        "after the two waiting payloads and when the connection ended, outside any payload scope"
+    );
+}
+
+#[test]
+fn a_connection_that_ends_while_input_is_ready_still_drains() {
+    let outcome = run(
+        policy(),
+        RecordingAdapter::default(),
+        vec![Connection::live(vec![
+            Read::Payload(b"one"),
+            Read::Ended(DisconnectReason::RemoteClose),
+        ])],
+    );
+
+    assert_eq!(outcome.events.drained, vec![(1, None)]);
 }
 
 #[test]

@@ -10,6 +10,7 @@
 //! by waiting would cost the suite a minute and be asserted by nobody.
 
 mod harness;
+use harness::Arrive as _;
 
 use std::time::Duration;
 
@@ -124,7 +125,7 @@ fn publishing_resets_the_idle_guards_window() {
 
     for _ in 0..3 {
         h.publisher.upstream_message("quote");
-        h.publisher.event(harness::quote(instrument, 1));
+        h.publisher.arrive(harness::quote(instrument, 1));
         h.clock.advance(WINDOW - Duration::from_secs(1));
         assert!(
             h.publisher.tick().is_none(),
@@ -176,7 +177,7 @@ fn the_consistency_guard_is_reported_ahead_of_the_idle_guard() {
 
     h.mktdata_refusal().set(true);
     h.publisher.upstream_message("quote");
-    h.publisher.event(harness::quote(instrument, 1));
+    h.publisher.arrive(harness::quote(instrument, 1));
     h.clock.advance(WINDOW * 2);
     h.publisher.upstream_message("quote");
 
@@ -318,7 +319,7 @@ fn one_feed_going_silent_is_visible_while_its_sibling_publishes() {
     // A quote is a top-of-book message and the specification carries it
     // nowhere else, so this is one feed publishing and its sibling not.
     h.publisher.upstream_message("quote");
-    h.publisher.event(harness::quote(instrument, 1));
+    h.publisher.arrive(harness::quote(instrument, 1));
 
     let exposition = h.metrics.render();
     assert_eq!(
@@ -343,7 +344,7 @@ fn one_feed_going_silent_is_visible_while_its_sibling_publishes() {
     // the other silent is not a process to end.
     h.clock.advance(WINDOW * 10);
     h.publisher.upstream_message("quote");
-    h.publisher.event(harness::quote(instrument, 2));
+    h.publisher.arrive(harness::quote(instrument, 2));
     assert!(
         h.publisher.tick().is_none(),
         "one silent feed ended the process, taking the busy one with it"
@@ -460,7 +461,7 @@ fn a_level_reports_the_channel_that_carried_it() {
     let instrument = adapter.handles()[0];
 
     h.publisher.upstream_message("level");
-    h.publisher.event(harness::bid_level(instrument, 1));
+    h.publisher.arrive(harness::bid_level(instrument, 1));
 
     assert!(
         h.mbp
@@ -498,7 +499,7 @@ fn a_book_clear_reports_the_channel_that_carried_it() {
     let instrument = adapter.handles()[0];
 
     h.publisher.upstream_message("clear");
-    h.publisher.event(harness::clear(instrument, 1));
+    h.publisher.arrive(harness::clear(instrument, 1));
 
     assert!(
         h.mbp
@@ -537,7 +538,7 @@ fn a_trade_reports_both_of_the_channels_it_reached() {
     let instrument = adapter.handles()[0];
 
     h.publisher.upstream_message("trade");
-    h.publisher.event(harness::trade(instrument, 1));
+    h.publisher.arrive(harness::trade(instrument, 1));
 
     let exposition = h.metrics.render();
     for channel_id in [CHANNEL_ID, DEPTH_CHANNEL_ID] {
@@ -572,11 +573,11 @@ fn a_trade_one_feed_refused_refreshes_only_the_channel_that_took_it() {
     tob.reference_refusal.set(true);
 
     h.publisher.upstream_message("trade");
-    h.publisher.event(harness::trade(instrument, 1));
+    h.publisher.arrive(harness::trade(instrument, 1));
 
     h.clock.advance(Duration::from_secs(5));
     h.publisher.upstream_message("trade");
-    h.publisher.event(harness::trade(instrument, 2));
+    h.publisher.arrive(harness::trade(instrument, 2));
 
     let exposition = h.metrics.render();
     assert_eq!(

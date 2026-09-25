@@ -22,6 +22,7 @@
 #![forbid(unsafe_code)]
 
 mod harness;
+use harness::Arrive as _;
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -30,7 +31,6 @@ use dz_edge_mbp::MAGIC_MBP;
 use dz_edge_tob::MAGIC_TOB;
 use std::time::Duration;
 
-use dz_adapter_core::EventSink as _;
 use dz_publisher_egress::EraStore;
 use dz_publisher_metrics::{PublisherMetrics, PublisherMetricsConfig};
 use dz_publisher_refdata::{
@@ -410,7 +410,7 @@ fn a_send_for_a_shard_with_no_pipeline_is_refused_before_the_lowering() {
     let on_b = adapter.handles()[0];
 
     let before = publisher.unroutable();
-    publisher.event(quote(on_b, 1));
+    publisher.arrive(quote(on_b, 1));
 
     assert_eq!(
         publisher.unroutable(),

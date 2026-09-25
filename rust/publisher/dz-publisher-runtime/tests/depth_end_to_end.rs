@@ -17,6 +17,7 @@
 //! literals below are the only independent control there is.
 
 mod harness;
+use harness::Arrive as _;
 
 use std::time::Duration;
 
@@ -72,7 +73,7 @@ fn a_fake_adapters_depth_events_reach_a_fake_datagram_sink_as_datagrams() {
     // Three levels on the first instrument and one on the second, so the
     // per-instrument series can be shown to be *per instrument*.
     h.publisher.upstream_message("level");
-    h.publisher.event(harness::level(
+    h.publisher.arrive(harness::level(
         first,
         1_700_000_000_000_000_001,
         Side::Bid,
@@ -80,7 +81,7 @@ fn a_fake_adapters_depth_events_reach_a_fake_datagram_sink_as_datagrams() {
         "2.500",
         Presence::New,
     ));
-    h.publisher.event(harness::level(
+    h.publisher.arrive(harness::level(
         first,
         1_700_000_000_000_000_002,
         Side::Ask,
@@ -88,7 +89,7 @@ fn a_fake_adapters_depth_events_reach_a_fake_datagram_sink_as_datagrams() {
         "1.250",
         Presence::Change,
     ));
-    h.publisher.event(harness::level(
+    h.publisher.arrive(harness::level(
         second,
         1_700_000_000_000_000_003,
         Side::Bid,
@@ -96,7 +97,7 @@ fn a_fake_adapters_depth_events_reach_a_fake_datagram_sink_as_datagrams() {
         "10.000",
         Presence::Unknown,
     ));
-    h.publisher.event(harness::level(
+    h.publisher.arrive(harness::level(
         first,
         1_700_000_000_000_000_004,
         Side::Bid,
@@ -215,7 +216,7 @@ fn every_presence_and_quantity_pairing_reaches_the_action_the_table_states() {
         h.publisher.poll_listings(&mut adapter);
         let instrument = adapter.handles()[0];
 
-        h.publisher.event(harness::level(
+        h.publisher.arrive(harness::level(
             instrument,
             1,
             Side::Bid,
@@ -251,9 +252,9 @@ fn a_clear_takes_the_next_number_in_the_same_series_as_a_level() {
     h.publisher.poll_listings(&mut adapter);
     let instrument = adapter.handles()[0];
 
-    h.publisher.event(harness::bid_level(instrument, 1));
-    h.publisher.event(harness::clear(instrument, 2));
-    h.publisher.event(harness::bid_level(instrument, 3));
+    h.publisher.arrive(harness::bid_level(instrument, 1));
+    h.publisher.arrive(harness::clear(instrument, 2));
+    h.publisher.arrive(harness::bid_level(instrument, 3));
 
     let messages = h.mktdata().messages();
     let ordered: Vec<u8> = messages
@@ -297,10 +298,10 @@ fn a_trade_on_a_depth_channel_spends_no_per_instrument_number() {
     h.publisher.poll_listings(&mut adapter);
     let instrument = adapter.handles()[0];
 
-    h.publisher.event(harness::bid_level(instrument, 1));
-    h.publisher.event(harness::trade(instrument, 2));
-    h.publisher.event(harness::trade(instrument, 3));
-    h.publisher.event(harness::bid_level(instrument, 4));
+    h.publisher.arrive(harness::bid_level(instrument, 1));
+    h.publisher.arrive(harness::trade(instrument, 2));
+    h.publisher.arrive(harness::trade(instrument, 3));
+    h.publisher.arrive(harness::bid_level(instrument, 4));
 
     let type_ids: Vec<u8> = h
         .mktdata()
@@ -332,7 +333,7 @@ fn one_trade_reaches_both_feeds_as_the_same_bytes() {
     h.publisher.poll_listings(&mut adapter);
     let instrument = adapter.handles()[0];
 
-    h.publisher.event(harness::trade(instrument, 77));
+    h.publisher.arrive(harness::trade(instrument, 77));
 
     let tob = h.tob.as_ref().expect("this publisher emits top-of-book");
     let mbp = h.mbp.as_ref().expect("and market-by-price");
@@ -379,9 +380,9 @@ fn a_publisher_emitting_both_feeds_routes_each_event_to_the_feed_that_carries_it
     h.publisher.poll_listings(&mut adapter);
     let instrument = adapter.handles()[0];
 
-    h.publisher.event(harness::quote(instrument, 1));
-    h.publisher.event(harness::bid_level(instrument, 2));
-    h.publisher.event(harness::clear(instrument, 3));
+    h.publisher.arrive(harness::quote(instrument, 1));
+    h.publisher.arrive(harness::bid_level(instrument, 2));
+    h.publisher.arrive(harness::clear(instrument, 3));
 
     let tob = h.tob.as_ref().expect("top-of-book");
     let mbp = h.mbp.as_ref().expect("market-by-price");
@@ -455,7 +456,7 @@ fn shutting_down_a_depth_publisher_ends_every_feeds_mktdata_channel() {
     let mut adapter = FakeAdapter::new(&["A-B"]);
     h.publisher.poll_listings(&mut adapter);
     h.publisher
-        .event(harness::bid_level(adapter.handles()[0], 1));
+        .arrive(harness::bid_level(adapter.handles()[0], 1));
 
     h.publisher.shut_down(Exit::Signal);
 
@@ -495,7 +496,7 @@ fn a_quote_reaches_its_own_shards_top_of_book_feed_and_no_other_sink() {
     h.publisher.poll_listings(&mut adapter);
     let on_b = adapter.handles()[1];
 
-    h.publisher.event(harness::quote(on_b, 1));
+    h.publisher.arrive(harness::quote(on_b, 1));
 
     let mut carried = Vec::new();
     for (index, shard) in h.shards.iter().enumerate() {
@@ -534,9 +535,9 @@ fn a_reset_is_anchored_at_its_own_shards_sequence() {
     // Three levels on shard A and one on shard B, so the two channels are at
     // different points in their own series.
     for source_ts_ns in 1..=3 {
-        h.publisher.event(harness::bid_level(on_a, source_ts_ns));
+        h.publisher.arrive(harness::bid_level(on_a, source_ts_ns));
     }
-    h.publisher.event(harness::bid_level(on_b, 4));
+    h.publisher.arrive(harness::bid_level(on_b, 4));
 
     let a = h.shards[0].mbp.as_ref().expect("shard A carries depth");
     let b = h.shards[1].mbp.as_ref().expect("shard B carries depth");

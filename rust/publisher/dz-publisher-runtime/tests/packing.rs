@@ -1,0 +1,401 @@
+//! The live path packs what arrived together and sends it when the input drains.
+
+mod harness;
+
+use std::time::Duration;
+
+use dz_adapter_core::EventSink;
+use dz_edge_core::Datagram;
+use dz_edge_mbp::MAGIC_MBP;
+use dz_publisher_refdata::Clock as _;
+use dz_publisher_runtime::MAX_LIVE_HOLD;
+use harness::{depth_feed, feed, harness, FakeAdapter};
+
+fn depth() -> harness::Harness {
+    harness(depth_feed())
+}
+
+fn send_timestamps(recorder: &harness::Recorder) -> Vec<u64> {
+    recorder
+        .datagrams()
+        .iter()
+        .map(|datagram| {
+            Datagram::decode(datagram, MAGIC_MBP)
+                .expect("composed")
+                .header()
+                .send_timestamp_ns
+        })
+        .collect()
+}
+
+/// `(sequence_number, message_count)` of each datagram, in order.
+fn counts(recorder: &harness::Recorder) -> Vec<(u64, u8)> {
+    recorder
+        .datagrams()
+        .iter()
+        .map(|datagram| {
+            let header = *Datagram::decode(datagram, MAGIC_MBP)
+                .expect("composed")
+                .header();
+            (header.sequence_number, header.msg_count)
+        })
+        .collect()
+}
+
+fn rendered(exposition: &str, prefix: &str) -> f64 {
+    exposition
+        .lines()
+        .filter(|line| line.starts_with(prefix))
+        .filter_map(|line| line.rsplit(' ').next()?.parse::<f64>().ok())
+        .sum()
+}
+
+#[test]
+fn events_that_arrived_together_leave_as_one_datagram_when_the_input_drains() {
+    let mut h = depth();
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+
+    for step in 0..5 {
+        h.publisher.event(harness::bid_level(instrument, step));
+    }
+    assert_eq!(
+        h.mktdata().len(),
+        0,
+        "nothing leaves before the input drains"
+    );
+
+    h.publisher.drained();
+    assert_eq!(h.mktdata().len(), 1);
+    assert_eq!(h.mktdata().messages().len(), 5);
+    assert_eq!(h.mktdata().headers(), vec![(0, h.mktdata().headers()[0].1)]);
+
+    h.publisher.drained();
+    assert_eq!(
+        h.mktdata().len(),
+        1,
+        "a drain with nothing packed sends nothing"
+    );
+}
+
+#[test]
+fn the_send_timestamp_is_the_flush_and_not_the_first_message() {
+    let mut h = depth();
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+
+    // Both waits inside `MAX_LIVE_HOLD`, so the drain is what sends it.
+    h.publisher.event(harness::bid_level(instrument, 1));
+    h.clock.advance(Duration::from_micros(300));
+    h.publisher.event(harness::bid_level(instrument, 2));
+    h.clock.advance(Duration::from_micros(200));
+    let flushed_at = h.clock.unix_ns();
+    h.publisher.drained();
+
+    assert_eq!(send_timestamps(h.mktdata()), vec![flushed_at]);
+}
+
+#[test]
+fn the_tick_sends_what_the_input_never_drained_on() {
+    let mut h = depth();
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+
+    h.publisher.event(harness::bid_level(instrument, 1));
+    let _ = h.publisher.tick();
+
+    assert_eq!(h.mktdata().messages().len(), 1);
+}
+
+#[test]
+fn a_snapshot_is_anchored_after_what_was_packed_has_left() {
+    let mut h = depth();
+    let mut adapter =
+        FakeAdapter::new(&["A-B"]).with_book(&[(dz_adapter_core::Side::Bid, "100.25", "2.500")]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+
+    for step in 0..3 {
+        h.publisher.event(harness::bid_level(instrument, step));
+    }
+    let framed = h.publisher.snapshot(&adapter, instrument).expect("framed");
+
+    assert_eq!(h.mktdata().len(), 1);
+    assert_eq!(h.mktdata().headers()[0].0, 0);
+    assert_eq!(framed.begin.anchor_seq, 1);
+    assert_eq!(framed.begin.last_instrument_seq, 3);
+}
+
+#[test]
+fn recv_to_send_is_measured_to_the_flush() {
+    let mut h = depth();
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+
+    let recv_ts_ns = h.clock.unix_ns();
+    h.publisher.payload_scope(Some(recv_ts_ns));
+    h.publisher.event(harness::bid_level(instrument, 1));
+    h.publisher.payload_scope(None);
+    h.clock.advance(Duration::from_millis(7));
+    h.publisher.drained();
+
+    let exposition = h.metrics.render();
+    assert_eq!(
+        rendered(
+            &exposition,
+            "dz_publisher_recv_to_send_latency_seconds_count"
+        ),
+        1.0
+    );
+    let sum = rendered(&exposition, "dz_publisher_recv_to_send_latency_seconds_sum");
+    assert!(
+        (sum - 0.007).abs() < 1e-9,
+        "measured {sum}s, not the 7ms to the flush"
+    );
+}
+
+#[test]
+fn a_top_of_book_quote_leaves_without_waiting_for_the_drain() {
+    let mut h = harness(feed());
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+
+    h.publisher.event(harness::quote(instrument, 1));
+    h.publisher.event(harness::quote(instrument, 2));
+
+    assert_eq!(h.mktdata().len(), 2);
+}
+
+#[test]
+fn a_tick_that_sends_a_late_batch_sends_no_heartbeat_behind_it() {
+    let mut h = depth();
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+
+    h.publisher.event(harness::bid_level(instrument, 1));
+    h.clock.advance(Duration::from_secs(2));
+    let _ = h.publisher.tick();
+
+    assert_eq!(h.mktdata().type_ids(), vec![0x40]);
+}
+
+#[test]
+fn a_datagram_that_never_left_is_not_measured() {
+    let mut h = depth();
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+
+    h.only().mktdata_refusal.set(true);
+    h.only().reference_refusal.set(true);
+    // The first refused send drops every member; the next finds none live.
+    h.publisher.event(harness::bid_level(instrument, 0));
+    h.publisher.drained();
+    h.publisher.payload_scope(Some(h.clock.unix_ns()));
+    h.publisher.event(harness::bid_level(instrument, 1));
+    h.publisher.payload_scope(None);
+    h.publisher.drained();
+
+    let exposition = h.metrics.render();
+    assert_eq!(
+        rendered(
+            &exposition,
+            "dz_publisher_recv_to_send_latency_seconds_count"
+        ),
+        0.0
+    );
+}
+
+#[test]
+fn a_datagram_the_mtu_sent_is_measured_when_it_left() {
+    let mut h = depth();
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+
+    h.publisher.payload_scope(Some(h.clock.unix_ns()));
+    let mut total = 0;
+    while h.mktdata().len() == 0 {
+        h.publisher.event(harness::bid_level(instrument, total));
+        total += 1;
+    }
+    h.publisher.payload_scope(None);
+    let first = h.mktdata().messages().len() as u64;
+    h.clock.advance(Duration::from_millis(7));
+    h.publisher.drained();
+
+    let exposition = h.metrics.render();
+    assert_eq!(
+        rendered(
+            &exposition,
+            "dz_publisher_recv_to_send_latency_seconds_count"
+        ),
+        total as f64
+    );
+    let sum = rendered(&exposition, "dz_publisher_recv_to_send_latency_seconds_sum");
+    let expected = (total - first) as f64 * 0.007;
+    assert!(
+        (sum - expected).abs() < 1e-9,
+        "measured {sum}s, not 0 for the {first} the MTU sent and 7ms for the rest"
+    );
+}
+
+#[test]
+fn a_top_of_book_quote_is_published_and_measured_at_its_send() {
+    let mut h = harness(feed());
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+
+    h.publisher.payload_scope(Some(h.clock.unix_ns()));
+    h.publisher.event(harness::quote(instrument, 1));
+    h.publisher.payload_scope(None);
+
+    let exposition = h.metrics.render();
+    assert_eq!(
+        rendered(
+            &exposition,
+            "dz_publisher_recv_to_send_latency_seconds_count"
+        ),
+        1.0
+    );
+    assert!(
+        rendered(
+            &exposition,
+            "dz_publisher_channel_last_published_timestamp_seconds"
+        ) > 0.0
+    );
+}
+
+/// A payload that publishes no depth still ends a hold that has run out.
+///
+/// The case the drain cannot see: the input stays ready — here, a payload that
+/// carried nothing for this feed — so it never drains, and the tick shares a
+/// task with the drivers and does not run either. Without a bound on the event
+/// path the delta waits for whichever comes first of a quiet input and a full
+/// MTU.
+#[test]
+fn a_packed_delta_leaves_once_it_has_waited_the_hold_though_the_input_never_drains() {
+    let mut h = depth();
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+
+    h.publisher.event(harness::bid_level(instrument, 1));
+    h.clock.advance(MAX_LIVE_HOLD / 2);
+    h.publisher.payload_scope(Some(h.clock.unix_ns()));
+    h.publisher.payload_scope(None);
+    assert_eq!(
+        h.mktdata().len(),
+        0,
+        "inside the hold, a payload is not a reason to send"
+    );
+
+    h.clock.advance(MAX_LIVE_HOLD / 2);
+    let expired_at = h.clock.unix_ns();
+    h.publisher.payload_scope(Some(expired_at));
+    h.publisher.payload_scope(None);
+    assert_eq!(
+        h.mktdata().len(),
+        1,
+        "at the hold, the next payload sends it without a drain or a tick"
+    );
+    assert_eq!(send_timestamps(h.mktdata()), vec![expired_at]);
+}
+
+/// The event that finds the hold run out opens the next datagram.
+///
+/// It is checked before the event is packed, so the delta that arrives late
+/// does not join a datagram that has already waited too long — it starts the
+/// next one, with a hold of its own.
+#[test]
+fn a_delta_arriving_after_the_hold_starts_the_next_datagram() {
+    let mut h = depth();
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+
+    h.publisher.event(harness::bid_level(instrument, 1));
+    h.publisher.event(harness::bid_level(instrument, 2));
+    h.clock.advance(MAX_LIVE_HOLD);
+    h.publisher.event(harness::bid_level(instrument, 3));
+    assert_eq!(
+        counts(h.mktdata()),
+        vec![(0, 2)],
+        "the two that waited, and not the one that arrived after"
+    );
+
+    h.publisher.drained();
+    assert_eq!(counts(h.mktdata()), vec![(0, 2), (1, 1)]);
+}
+
+/// The hold is a shard's own, and another shard's traffic ends it.
+///
+/// A sparse shard is the other case the reviewer named: its datagram is open,
+/// every event is for a different shard, and none of them is for this one.
+#[test]
+fn another_shards_traffic_sends_a_datagram_whose_hold_ran_out() {
+    let mut h = harness::harness_two_shards();
+    let mut adapter =
+        FakeAdapter::on_shards(&[("A-B", harness::SHARD_A), ("C-D", harness::SHARD_B)]);
+    h.publisher.poll_listings(&mut adapter);
+    let [on_a, on_b] = [adapter.handles()[0], adapter.handles()[1]];
+
+    h.publisher.event(harness::bid_level(on_a, 1));
+    h.clock.advance(MAX_LIVE_HOLD);
+    h.publisher.event(harness::bid_level(on_b, 1));
+
+    assert_eq!(
+        h.shards[0]
+            .mbp
+            .as_ref()
+            .expect("depth on alpha")
+            .mktdata
+            .len(),
+        1,
+        "alpha's delta left on beta's event"
+    );
+    assert_eq!(
+        h.shards[1]
+            .mbp
+            .as_ref()
+            .expect("depth on beta")
+            .mktdata
+            .len(),
+        0,
+        "and beta's own delta is still inside its hold"
+    );
+}
+
+/// The hold runs from the datagram's first message, not its latest.
+///
+/// A steady trickle is the other way the input never drains: each delta arrives
+/// inside the hold of the one before it. Timed from the latest message, every
+/// arrival would restart the clock and the datagram would wait for the MTU;
+/// timed from the first, it leaves once its oldest delta has waited the hold.
+#[test]
+fn a_steady_trickle_does_not_keep_restarting_the_hold() {
+    let mut h = depth();
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+
+    let gap = MAX_LIVE_HOLD * 3 / 5;
+    for step in 0..5 {
+        h.publisher.event(harness::bid_level(instrument, step));
+        h.clock.advance(gap);
+    }
+
+    assert_eq!(
+        counts(h.mktdata()),
+        vec![(0, 2), (1, 2)],
+        "each datagram left at the first event past its oldest delta's hold, \
+         with no drain and no tick"
+    );
+}

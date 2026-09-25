@@ -324,6 +324,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `Publisher` is itself the `EventSink`, so this is the whole ingress
     // path with the transport removed: bytes in, datagrams out.
     adapter.on_payload(&payload, &mut publisher)?;
+    // What the driver says when the input has nothing more ready.
+    dz_adapter_core::EventSink::drained(&mut publisher);
     for _ in 0..8 {
         // A guard firing here is the run reporting itself, so it ends the loop
         // rather than being discarded.

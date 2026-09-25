@@ -205,7 +205,7 @@ pub use observer::MetricsObserver;
 pub use pipeline::{DroppedSink, FeedPipeline, Port, Ports};
 pub use publisher::{
     Feeds, Publisher, Refusals, ShardFeeds, SnapshotError, SnapshotRefusals, Teardown,
-    TeardownStep, LISTING_POLL,
+    TeardownStep, LISTING_POLL, MAX_LIVE_HOLD,
 };
 pub use replay::ReplayInput;
 pub use rotation::SnapshotRotation;

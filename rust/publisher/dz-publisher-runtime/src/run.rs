@@ -1419,6 +1419,10 @@ impl<S: StateStore, K: Clock + Clone> EventSink for SharedSink<'_, S, K> {
         self.0.borrow_mut().payload_scope(recv_ts_ns);
     }
 
+    fn drained(&mut self) {
+        self.0.borrow_mut().drained();
+    }
+
     fn event(&mut self, event: Event<'_>) {
         self.0.borrow_mut().event(event);
     }
