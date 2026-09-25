@@ -33,8 +33,10 @@
 //!
 //! - **Market-by-price** (rule 7 is a MUST) packs live messages and flushes when
 //!   the input drains ([`EventSink::drained`](dz_adapter_core::EventSink::drained)),
-//!   on the MTU, or on the tick. A datagram holds only messages that arrived
-//!   together; `Send Timestamp` and the number are stamped at the flush.
+//!   on the MTU, on the tick, or once its first message has waited
+//!   [`MAX_LIVE_HOLD`](crate::publisher::MAX_LIVE_HOLD). A datagram holds only
+//!   messages that arrived together; `Send Timestamp` and the number are stamped
+//!   at the flush.
 //! - **Top-of-book** (batching is a MAY), heartbeat, `EndOfSession` and
 //!   `InstrumentReset` send at once.
 //! - **The definition cycle and a snapshot pack.** Both are bulk state the
@@ -152,6 +154,9 @@ pub struct FeedPipeline<F: EmittedFeed> {
     last_mktdata_ns: Option<u64>,
     /// The open mktdata datagram holds packed live messages.
     live_packed: bool,
+    /// Monotonic. When the open datagram's first live message was packed, so
+    /// the wait it has had can be bounded.
+    live_since_ns: Option<u64>,
     /// Arrivals in the open mktdata datagram.
     packed_arrivals: Vec<Arrival>,
     /// Arrivals whose datagram left, with its `Send Timestamp`; a lost one's are dropped.
@@ -221,6 +226,7 @@ impl<F: EmittedFeed> FeedPipeline<F> {
             snapshot_cycle: feed.snapshot_cycle,
             last_mktdata_ns: None,
             live_packed: false,
+            live_since_ns: None,
             packed_arrivals: Vec::new(),
             sent_arrivals: Vec::new(),
             live_sent: None,
@@ -618,6 +624,13 @@ impl<F: EmittedFeed> FeedPipeline<F> {
         self.packed_arrivals.push(arrival);
     }
 
+    /// Monotonic. When the open datagram's first live message was packed, or
+    /// `None` when nothing live is waiting.
+    #[must_use]
+    pub const fn live_held_since(&self) -> Option<u64> {
+        self.live_since_ns
+    }
+
     /// `(monotonic, unix)` of the last packed datagram to leave, once.
     pub fn take_live_sent(&mut self) -> Option<(u64, u64)> {
         self.live_sent.take()
@@ -667,6 +680,12 @@ impl<F: EmittedFeed> FeedPipeline<F> {
         match F::SPEC {
             FeedSpec::MarketByPrice => {
                 self.pack_mktdata(message, message_type, now_mono_ns, send_ts_ns)?;
+                // After the push, which may have sent the datagram this message
+                // did not fit in: the clock is the new datagram's, and it starts
+                // with this message.
+                if !self.live_packed {
+                    self.live_since_ns = Some(now_mono_ns);
+                }
                 self.live_packed = true;
                 Ok(())
             }
@@ -678,6 +697,7 @@ impl<F: EmittedFeed> FeedPipeline<F> {
 
     /// The datagram holding packed live messages was sent, or lost.
     fn live_finished(&mut self, sent: bool, now_mono_ns: u64, send_ts_ns: u64) {
+        self.live_since_ns = None;
         if !std::mem::take(&mut self.live_packed) {
             return;
         }

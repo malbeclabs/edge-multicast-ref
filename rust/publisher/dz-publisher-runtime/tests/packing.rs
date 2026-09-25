@@ -8,6 +8,7 @@ use dz_adapter_core::EventSink;
 use dz_edge_core::Datagram;
 use dz_edge_mbp::MAGIC_MBP;
 use dz_publisher_refdata::Clock as _;
+use dz_publisher_runtime::MAX_LIVE_HOLD;
 use harness::{depth_feed, feed, harness, FakeAdapter};
 
 fn depth() -> harness::Harness {
@@ -23,6 +24,20 @@ fn send_timestamps(recorder: &harness::Recorder) -> Vec<u64> {
                 .expect("composed")
                 .header()
                 .send_timestamp_ns
+        })
+        .collect()
+}
+
+/// `(sequence_number, message_count)` of each datagram, in order.
+fn counts(recorder: &harness::Recorder) -> Vec<(u64, u8)> {
+    recorder
+        .datagrams()
+        .iter()
+        .map(|datagram| {
+            let header = *Datagram::decode(datagram, MAGIC_MBP)
+                .expect("composed")
+                .header();
+            (header.sequence_number, header.msg_count)
         })
         .collect()
 }
@@ -71,10 +86,11 @@ fn the_send_timestamp_is_the_flush_and_not_the_first_message() {
     h.publisher.poll_listings(&mut adapter);
     let instrument = adapter.handles()[0];
 
+    // Both waits inside `MAX_LIVE_HOLD`, so the drain is what sends it.
     h.publisher.event(harness::bid_level(instrument, 1));
-    h.clock.advance(Duration::from_millis(3));
+    h.clock.advance(Duration::from_micros(300));
     h.publisher.event(harness::bid_level(instrument, 2));
-    h.clock.advance(Duration::from_millis(2));
+    h.clock.advance(Duration::from_micros(200));
     let flushed_at = h.clock.unix_ns();
     h.publisher.drained();
 
@@ -254,5 +270,105 @@ fn a_top_of_book_quote_is_published_and_measured_at_its_send() {
             &exposition,
             "dz_publisher_channel_last_published_timestamp_seconds"
         ) > 0.0
+    );
+}
+
+/// A payload that publishes no depth still ends a hold that has run out.
+///
+/// The case the drain cannot see: the input stays ready — here, a payload that
+/// carried nothing for this feed — so it never drains, and the tick shares a
+/// task with the drivers and does not run either. Without a bound on the event
+/// path the delta waits for whichever comes first of a quiet input and a full
+/// MTU.
+#[test]
+fn a_packed_delta_leaves_once_it_has_waited_the_hold_though_the_input_never_drains() {
+    let mut h = depth();
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+
+    h.publisher.event(harness::bid_level(instrument, 1));
+    h.clock.advance(MAX_LIVE_HOLD / 2);
+    h.publisher.payload_scope(Some(h.clock.unix_ns()));
+    h.publisher.payload_scope(None);
+    assert_eq!(
+        h.mktdata().len(),
+        0,
+        "inside the hold, a payload is not a reason to send"
+    );
+
+    h.clock.advance(MAX_LIVE_HOLD / 2);
+    let expired_at = h.clock.unix_ns();
+    h.publisher.payload_scope(Some(expired_at));
+    h.publisher.payload_scope(None);
+    assert_eq!(
+        h.mktdata().len(),
+        1,
+        "at the hold, the next payload sends it without a drain or a tick"
+    );
+    assert_eq!(send_timestamps(h.mktdata()), vec![expired_at]);
+}
+
+/// The event that finds the hold run out opens the next datagram.
+///
+/// It is checked before the event is packed, so the delta that arrives late
+/// does not join a datagram that has already waited too long — it starts the
+/// next one, with a hold of its own.
+#[test]
+fn a_delta_arriving_after_the_hold_starts_the_next_datagram() {
+    let mut h = depth();
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+
+    h.publisher.event(harness::bid_level(instrument, 1));
+    h.publisher.event(harness::bid_level(instrument, 2));
+    h.clock.advance(MAX_LIVE_HOLD);
+    h.publisher.event(harness::bid_level(instrument, 3));
+    assert_eq!(
+        counts(h.mktdata()),
+        vec![(0, 2)],
+        "the two that waited, and not the one that arrived after"
+    );
+
+    h.publisher.drained();
+    assert_eq!(counts(h.mktdata()), vec![(0, 2), (1, 1)]);
+}
+
+/// The hold is a shard's own, and another shard's traffic ends it.
+///
+/// A sparse shard is the other case the reviewer named: its datagram is open,
+/// every event is for a different shard, and none of them is for this one.
+#[test]
+fn another_shards_traffic_sends_a_datagram_whose_hold_ran_out() {
+    let mut h = harness::harness_two_shards();
+    let mut adapter =
+        FakeAdapter::on_shards(&[("A-B", harness::SHARD_A), ("C-D", harness::SHARD_B)]);
+    h.publisher.poll_listings(&mut adapter);
+    let [on_a, on_b] = [adapter.handles()[0], adapter.handles()[1]];
+
+    h.publisher.event(harness::bid_level(on_a, 1));
+    h.clock.advance(MAX_LIVE_HOLD);
+    h.publisher.event(harness::bid_level(on_b, 1));
+
+    assert_eq!(
+        h.shards[0]
+            .mbp
+            .as_ref()
+            .expect("depth on alpha")
+            .mktdata
+            .len(),
+        1,
+        "alpha's delta left on beta's event"
+    );
+    assert_eq!(
+        h.shards[1]
+            .mbp
+            .as_ref()
+            .expect("depth on beta")
+            .mktdata
+            .len(),
+        0,
+        "and beta's own delta is still inside its hold"
     );
 }

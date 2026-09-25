@@ -77,6 +77,55 @@ fn the_anchor_is_the_sequence_number_of_the_datagram_that_carries_it() {
 }
 
 #[test]
+fn a_reset_does_not_share_a_datagram_with_the_deltas_packed_before_it() {
+    // What the anchor is *for*. It names a datagram, and a subscriber reads the
+    // reset as taking effect at that datagram's boundary: everything before it
+    // belongs to the book being discarded, everything after to the one the
+    // recovery snapshot rebuilds. Packed into the datagram still open behind
+    // the deltas, the reset would satisfy the rule the test above grades —
+    // its anchor is its own datagram's number — while that one number named
+    // both sides of the discard at once. So the open datagram leaves first,
+    // and the reset starts the next one alone.
+    let mut h = harness(depth_feed());
+    let mut adapter = FakeAdapter::new(&["ONE"]);
+    h.publisher.poll_listings(&mut adapter);
+
+    let one = dz_adapter_core::InstrumentRef::from_admission(0);
+    for step in 0..3 {
+        h.publisher.event(harness::bid_level(one, step));
+    }
+    assert_eq!(
+        h.only().mktdata.len(),
+        0,
+        "the deltas are packed and waiting"
+    );
+    h.publisher.desynchronised(one, Desync::UpstreamGap);
+
+    let shapes: Vec<(u64, u8)> = h
+        .only()
+        .mktdata
+        .datagrams()
+        .iter()
+        .map(|datagram| {
+            let header = *dz_edge_core::Datagram::decode(datagram, dz_edge_mbp::MAGIC_MBP)
+                .expect("composed")
+                .header();
+            (header.sequence_number, header.msg_count)
+        })
+        .collect();
+    assert_eq!(
+        shapes,
+        vec![(0, 3), (1, 1)],
+        "the three deltas in one datagram, then the reset in the next, alone"
+    );
+    let messages = h.only().mktdata.messages();
+    let (type_id, body) = messages.last().expect("the reset reached the wire");
+    assert_eq!(*type_id, TYPE_INSTRUMENT_RESET);
+    let anchor = u64::from_le_bytes(body[12..20].try_into().expect("eight bytes"));
+    assert_eq!(anchor, 1, "anchored at the datagram after the deltas");
+}
+
+#[test]
 fn the_recovery_snapshot_is_owed_and_the_caller_drains_it() {
     // Owed rather than sent inside the adapter's callback: capturing a book is
     // a walk of it, and a snapshot has to be captured *after* the reset that

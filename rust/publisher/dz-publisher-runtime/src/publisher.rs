@@ -96,6 +96,23 @@ use crate::rotation::{schedule_share, SnapshotRotation, WHOLE_SNAPSHOT_CAPACITY}
 /// disk.
 pub const LISTING_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// The longest a packed market-by-price message waits for the input to drain.
+///
+/// Draining is the flush that packs well, and it is not enough on its own. The
+/// drivers and the tick share one task under `select!`, so while `recv` stays
+/// ready the tick never runs, and a datagram opened by one delta waits for the
+/// input to first return pending or the MTU to fill. On a sparse shard, or
+/// while the connection's payloads publish no depth, that is unbounded — and a
+/// datagram that waits is a delta a subscriber sees late, with every one behind
+/// it held too.
+///
+/// Checked on the event path, at every payload and every event, against the
+/// open datagram's **first** message: the one that has waited longest. One
+/// millisecond, the hold kalshi#290 settled on for the same case; a constant and
+/// not a key, because the design names none and the value that matters is the
+/// order of magnitude, not the digit.
+pub const MAX_LIVE_HOLD: std::time::Duration = std::time::Duration::from_millis(1);
+
 /// One shard's send paths: a channel instance per feed specification it carries.
 ///
 /// A shard is a partition of the instrument set and a channel instance is the
@@ -1622,6 +1639,30 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
         }
     }
 
+    /// Send every packed live datagram whose first message has waited
+    /// [`MAX_LIVE_HOLD`] or longer.
+    ///
+    /// Every shard and not only the one an event is for: the case this exists
+    /// for is a shard the current traffic is not reaching.
+    fn flush_expired_live(&mut self) {
+        let now_mono = dz_publisher_refdata::Clock::monotonic_ns(&self.clock);
+        let hold = u64::try_from(MAX_LIVE_HOLD.as_nanos()).unwrap_or(u64::MAX);
+        for shard in 0..self.feeds.shard_count() {
+            let expired = self
+                .feeds
+                .market_by_price_on(shard)
+                .and_then(FeedPipeline::live_held_since)
+                .is_some_and(|since| now_mono.saturating_sub(since) >= hold);
+            if expired {
+                let now_unix = self.clock.unix_ns();
+                if let Some(pipeline) = self.feeds.market_by_price_on_mut(shard) {
+                    let _ = pipeline.flush_mktdata(now_mono, now_unix);
+                }
+                self.settle_live(Some(shard));
+            }
+        }
+    }
+
     /// Report what left a market-by-price send path at the instant it left.
     fn settle_live(&mut self, shard: Option<usize>) {
         let timestamp_kind = self.venue_timestamp_kind;
@@ -1868,6 +1909,10 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
     /// There is nothing for an adapter to remember, which is why it cannot
     /// forget.
     fn payload_scope(&mut self, recv_ts_ns: Option<u64>) {
+        // A payload that publishes no depth still means time has passed, and
+        // it is the case the drain cannot see: the input is ready, so it never
+        // drains.
+        self.flush_expired_live();
         self.payload_recv_ts_ns = recv_ts_ns;
     }
 
@@ -1877,6 +1922,9 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
     }
 
     fn event(&mut self, event: Event<'_>) {
+        // Before this event is packed, so it opens the next datagram rather
+        // than joining one that has already waited too long.
+        self.flush_expired_live();
         // Read once, before the match, so every branch labels its observation
         // the same way and a new branch cannot forget to.
         let kind = event_kind(&event);
