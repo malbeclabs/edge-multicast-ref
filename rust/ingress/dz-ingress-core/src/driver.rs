@@ -510,6 +510,8 @@ impl<'a> Driver<'a> {
         self.observer.connection_state(connection.as_str(), true);
 
         let (stop, delivered) = self.pump(events, connection).await;
+        // Nothing more arrives with what this connection delivered.
+        events.drained();
         let reason = match &stop {
             Stop::Reason(reason) => *reason,
             Stop::Fatal(error) => error

@@ -53,9 +53,12 @@ use dz_edge_refdata::{InstrumentDefinition, ManifestSummary};
 use dz_edge_tob::{Quote, Trade};
 use dz_publisher_egress::{ChannelEgress, EgressEndpoint, EgressError, Tee};
 use dz_publisher_lowering::Snapshot;
-use dz_publisher_metrics::{EgressMessageType, PublisherMetrics};
+use dz_publisher_metrics::{EgressMessageType, EventKind, PublisherMetrics};
 
 use crate::config::{EmittedFeed, Feed, FeedSpec, ShardName};
+
+/// `(recv_ts_ns, source_ts_ns, kind)` of one live message from upstream.
+pub type Arrival = (u64, u64, EventKind);
 
 /// One port role's fan-out and the identity it sends under.
 ///
@@ -147,8 +150,14 @@ pub struct FeedPipeline<F: EmittedFeed> {
     /// *"sent when there is no other traffic"* rather than sent on a timer
     /// alongside traffic.
     last_mktdata_ns: Option<u64>,
-    /// Live mktdata reached the wire since the last [`take_sent`](Self::take_sent).
-    sent_unreported: bool,
+    /// The open mktdata datagram holds packed live messages.
+    live_packed: bool,
+    /// Arrivals in the open mktdata datagram.
+    packed_arrivals: Vec<Arrival>,
+    /// Arrivals whose datagram left, with its `Send Timestamp`; a lost one's are dropped.
+    sent_arrivals: Vec<(Arrival, u64)>,
+    /// `(monotonic, unix)` of the last packed datagram to leave, until taken.
+    live_sent: Option<(u64, u64)>,
     /// Monotonic. When the manifest is next due.
     next_manifest_ns: Option<u64>,
     feed: PhantomData<F>,
@@ -211,7 +220,10 @@ impl<F: EmittedFeed> FeedPipeline<F> {
             manifest_cadence_ns: nanos(feed.manifest_cadence),
             snapshot_cycle: feed.snapshot_cycle,
             last_mktdata_ns: None,
-            sent_unreported: false,
+            live_packed: false,
+            packed_arrivals: Vec::new(),
+            sent_arrivals: Vec::new(),
+            live_sent: None,
             next_manifest_ns: None,
             feed: PhantomData,
         }
@@ -595,21 +607,30 @@ impl<F: EmittedFeed> FeedPipeline<F> {
     /// # Errors
     ///
     /// As [`send_quote`](Self::send_quote).
-    pub fn flush_mktdata(&mut self, send_ts_ns: u64) -> Result<(), EgressError> {
-        let packed = self.mktdata.is_open(self.channel_id);
-        self.mktdata.flush(self.channel_id, send_ts_ns)?;
-        self.sent_unreported |= packed;
-        Ok(())
+    pub fn flush_mktdata(&mut self, now_mono_ns: u64, send_ts_ns: u64) -> Result<(), EgressError> {
+        let result = self.mktdata.flush(self.channel_id, send_ts_ns);
+        self.live_finished(result.is_ok(), now_mono_ns, send_ts_ns);
+        result
     }
 
-    /// Whether live messages reached the wire since the last call.
-    pub fn take_sent(&mut self) -> bool {
-        std::mem::take(&mut self.sent_unreported)
+    /// Record the arrival of the live message just packed.
+    pub fn packed_arrival(&mut self, arrival: Arrival) {
+        self.packed_arrivals.push(arrival);
+    }
+
+    /// `(monotonic, unix)` of the last packed datagram to leave, once.
+    pub fn take_live_sent(&mut self) -> Option<(u64, u64)> {
+        self.live_sent.take()
+    }
+
+    /// Arrivals whose datagram left, each with its `Send Timestamp`.
+    pub fn sent_arrivals(&mut self) -> std::vec::Drain<'_, (Arrival, u64)> {
+        self.sent_arrivals.drain(..)
     }
 
     /// `Anchor Seq` for a book captured now; sends the open datagram first.
-    pub fn anchor_sequence(&mut self, send_ts_ns: u64) -> Option<u64> {
-        let _ = self.flush_mktdata(send_ts_ns);
+    pub fn anchor_sequence(&mut self, now_mono_ns: u64, send_ts_ns: u64) -> Option<u64> {
+        let _ = self.flush_mktdata(now_mono_ns, send_ts_ns);
         self.mktdata_sequence()
     }
 
@@ -632,7 +653,7 @@ impl<F: EmittedFeed> FeedPipeline<F> {
         send_ts_ns: u64,
     ) -> Result<(), EgressError> {
         self.pack_mktdata(message, message_type, now_mono_ns, send_ts_ns)?;
-        self.mktdata.flush(self.channel_id, send_ts_ns)
+        self.flush_mktdata(now_mono_ns, send_ts_ns)
     }
 
     /// A live message: packed on market-by-price, sent at once on top-of-book.
@@ -645,13 +666,31 @@ impl<F: EmittedFeed> FeedPipeline<F> {
     ) -> Result<(), EgressError> {
         match F::SPEC {
             FeedSpec::MarketByPrice => {
-                self.pack_mktdata(message, message_type, now_mono_ns, send_ts_ns)
-            }
-            FeedSpec::TopOfBook => {
-                self.send_mktdata(message, message_type, now_mono_ns, send_ts_ns)?;
-                self.sent_unreported = true;
+                self.pack_mktdata(message, message_type, now_mono_ns, send_ts_ns)?;
+                self.live_packed = true;
                 Ok(())
             }
+            FeedSpec::TopOfBook => {
+                self.send_mktdata(message, message_type, now_mono_ns, send_ts_ns)
+            }
+        }
+    }
+
+    /// The datagram holding packed live messages was sent, or lost.
+    fn live_finished(&mut self, sent: bool, now_mono_ns: u64, send_ts_ns: u64) {
+        if !std::mem::take(&mut self.live_packed) {
+            return;
+        }
+        if sent {
+            self.last_mktdata_ns = Some(now_mono_ns);
+            self.live_sent = Some((now_mono_ns, send_ts_ns));
+            self.sent_arrivals.extend(
+                self.packed_arrivals
+                    .drain(..)
+                    .map(|arrival| (arrival, send_ts_ns)),
+            );
+        } else {
+            self.packed_arrivals.clear();
         }
     }
 
@@ -666,8 +705,16 @@ impl<F: EmittedFeed> FeedPipeline<F> {
         // as an attempt this feed made: the alternative is a refused message
         // type provoking a heartbeat on every tick.
         self.last_mktdata_ns = Some(now_mono_ns);
-        self.mktdata
-            .push(self.channel_id, message, message_type, send_ts_ns)
+        let before = self.mktdata_sequence();
+        let result = self
+            .mktdata
+            .push(self.channel_id, message, message_type, send_ts_ns);
+        if self.mktdata_sequence() != before {
+            // The message did not fit, so the push sent the open datagram first.
+            let sent = !matches!(result, Err(EgressError::Sink { .. }));
+            self.live_finished(sent, now_mono_ns, send_ts_ns);
+        }
+        result
     }
 }
 

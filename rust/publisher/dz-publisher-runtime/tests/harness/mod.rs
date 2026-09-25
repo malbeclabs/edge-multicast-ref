@@ -229,7 +229,6 @@ impl DatagramSink for RecordingSink {
     }
 }
 
-/// A publisher composed over recorders, and the handles a test drives it with.
 /// An event that arrived alone: mapped, then the input drained.
 pub trait Arrive {
     fn arrive(&mut self, event: dz_adapter_core::Event<'_>);
@@ -244,6 +243,7 @@ impl<S: dz_publisher_refdata::StateStore, K: dz_publisher_runtime::Clock + Clone
     }
 }
 
+/// A publisher composed over recorders, and the handles a test drives it with.
 pub struct Harness {
     pub publisher: Publisher<MemoryStore, ManualClock>,
     pub clock: ManualClock,

@@ -842,9 +842,23 @@ fn the_runtime_is_told_the_input_drained_only_when_nothing_was_ready() {
     assert_eq!(outcome.events.events, 3);
     assert_eq!(
         outcome.events.drained,
-        vec![(2, None)],
-        "one drain, after the two waiting payloads and outside any payload scope"
+        vec![(2, None), (3, None)],
+        "after the two waiting payloads and when the connection ended, outside any payload scope"
     );
+}
+
+#[test]
+fn a_connection_that_ends_while_input_is_ready_still_drains() {
+    let outcome = run(
+        policy(),
+        RecordingAdapter::default(),
+        vec![Connection::live(vec![
+            Read::Payload(b"one"),
+            Read::Ended(DisconnectReason::RemoteClose),
+        ])],
+    );
+
+    assert_eq!(outcome.events.drained, vec![(1, None)]);
 }
 
 #[test]

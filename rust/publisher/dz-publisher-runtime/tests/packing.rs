@@ -154,3 +154,105 @@ fn a_top_of_book_quote_leaves_without_waiting_for_the_drain() {
 
     assert_eq!(h.mktdata().len(), 2);
 }
+
+#[test]
+fn a_tick_that_sends_a_late_batch_sends_no_heartbeat_behind_it() {
+    let mut h = depth();
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+
+    h.publisher.event(harness::bid_level(instrument, 1));
+    h.clock.advance(Duration::from_secs(2));
+    let _ = h.publisher.tick();
+
+    assert_eq!(h.mktdata().type_ids(), vec![0x40]);
+}
+
+#[test]
+fn a_datagram_that_never_left_is_not_measured() {
+    let mut h = depth();
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+
+    h.only().mktdata_refusal.set(true);
+    h.only().reference_refusal.set(true);
+    // The first refused send drops every member; the next finds none live.
+    h.publisher.event(harness::bid_level(instrument, 0));
+    h.publisher.drained();
+    h.publisher.payload_scope(Some(h.clock.unix_ns()));
+    h.publisher.event(harness::bid_level(instrument, 1));
+    h.publisher.payload_scope(None);
+    h.publisher.drained();
+
+    let exposition = h.metrics.render();
+    assert_eq!(
+        rendered(
+            &exposition,
+            "dz_publisher_recv_to_send_latency_seconds_count"
+        ),
+        0.0
+    );
+}
+
+#[test]
+fn a_datagram_the_mtu_sent_is_measured_when_it_left() {
+    let mut h = depth();
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+
+    h.publisher.payload_scope(Some(h.clock.unix_ns()));
+    let mut total = 0;
+    while h.mktdata().len() == 0 {
+        h.publisher.event(harness::bid_level(instrument, total));
+        total += 1;
+    }
+    h.publisher.payload_scope(None);
+    let first = h.mktdata().messages().len() as u64;
+    h.clock.advance(Duration::from_millis(7));
+    h.publisher.drained();
+
+    let exposition = h.metrics.render();
+    assert_eq!(
+        rendered(
+            &exposition,
+            "dz_publisher_recv_to_send_latency_seconds_count"
+        ),
+        total as f64
+    );
+    let sum = rendered(&exposition, "dz_publisher_recv_to_send_latency_seconds_sum");
+    let expected = (total - first) as f64 * 0.007;
+    assert!(
+        (sum - expected).abs() < 1e-9,
+        "measured {sum}s, not 0 for the {first} the MTU sent and 7ms for the rest"
+    );
+}
+
+#[test]
+fn a_top_of_book_quote_is_published_and_measured_at_its_send() {
+    let mut h = harness(feed());
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+
+    h.publisher.payload_scope(Some(h.clock.unix_ns()));
+    h.publisher.event(harness::quote(instrument, 1));
+    h.publisher.payload_scope(None);
+
+    let exposition = h.metrics.render();
+    assert_eq!(
+        rendered(
+            &exposition,
+            "dz_publisher_recv_to_send_latency_seconds_count"
+        ),
+        1.0
+    );
+    assert!(
+        rendered(
+            &exposition,
+            "dz_publisher_channel_last_published_timestamp_seconds"
+        ) > 0.0
+    );
+}
