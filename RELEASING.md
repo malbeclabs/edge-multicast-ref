@@ -8,11 +8,11 @@ repository is the release, and a consumer pins the tag.
 
 ```toml
 [dependencies]
-dz-adapter-core = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.2.0" }
+dz-adapter-core = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.3.0" }
 
 # Everything from the same tag. See below — this is the one rule that matters.
-dz-publisher-runtime = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.2.0" }
-dz-ingress-core = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.2.0", features = ["uds"] }
+dz-publisher-runtime = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.3.0" }
+dz-ingress-core = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.3.0", features = ["uds"] }
 ```
 
 The workspace manifest lives in [`rust/`](rust/) rather than at the repository
@@ -37,8 +37,8 @@ Pin the tag once, in one place:
 
 ```toml
 [workspace.dependencies]
-dz-adapter-core = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.2.0" }
-dz-publisher-lowering = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.2.0" }
+dz-adapter-core = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.3.0" }
+dz-publisher-lowering = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.3.0" }
 ```
 
 and let each crate write `dz-adapter-core = { workspace = true }`.
@@ -77,7 +77,7 @@ answer. So a binary released on its own stream states its own `version` in its
 own manifest, and its tag names which binary it is rather than sharing the `v*`
 tags a consumer pins.
 
-**The current library tag is `v0.2.0`, and `[workspace.package]` says 0.2.0 —
+**The current library tag is `v0.3.0`, and `[workspace.package]` says 0.3.0 —
 the gap is closed.** It was open because `dz-recorder/v0.1.1` was released by
 bumping the workspace version, which moved every library crate for a change to a
 binary and produced a number with no library tag behind it. Under the rule above
@@ -91,7 +91,7 @@ examples below pin what exists.
 **Pre-1.0, so a minor release may break you.** `0.x` is what these crates are,
 and it is honest: the boundary is young and has already gained methods twice
 while being implemented for its first two venues. What a tag promises is that
-*it* does not change — a tag is immutable and a build against `v0.2.0` resolves
+*it* does not change — a tag is immutable and a build against `v0.3.0` resolves
 the same bytes forever.
 
 Read the release notes before moving a pin. A change that adds an `Event`
@@ -112,8 +112,8 @@ for everybody else, and those are called out.
 4. Tag the merge commit and push the tag:
 
    ```sh
-   git tag -a v0.2.0 -m "what changed, and what breaks an implementor"
-   git push origin v0.2.0
+   git tag -a v0.3.0 -m "what changed, and what breaks an implementor"
+   git push origin v0.3.0
    ```
 
 5. Say what breaks. The tag message and the GitHub release are where a consumer
