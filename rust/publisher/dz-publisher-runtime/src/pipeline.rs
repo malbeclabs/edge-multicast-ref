@@ -29,7 +29,7 @@
 //! which is the difference between this and the publisher that shipped 1448
 //! bytes to production from a key exactly like the one that is missing.
 //!
-//! # Market-by-price packs its live path, and nothing waits
+//! # Market-by-price packs its live path, and nothing waits past the hold
 //!
 //! - **Market-by-price** (rule 7 is a MUST) packs live messages and flushes when
 //!   the input drains ([`EventSink::drained`](dz_adapter_core::EventSink::drained)),
