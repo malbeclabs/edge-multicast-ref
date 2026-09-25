@@ -372,3 +372,30 @@ fn another_shards_traffic_sends_a_datagram_whose_hold_ran_out() {
         "and beta's own delta is still inside its hold"
     );
 }
+
+/// The hold runs from the datagram's first message, not its latest.
+///
+/// A steady trickle is the other way the input never drains: each delta arrives
+/// inside the hold of the one before it. Timed from the latest message, every
+/// arrival would restart the clock and the datagram would wait for the MTU;
+/// timed from the first, it leaves once its oldest delta has waited the hold.
+#[test]
+fn a_steady_trickle_does_not_keep_restarting_the_hold() {
+    let mut h = depth();
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+
+    let gap = MAX_LIVE_HOLD * 3 / 5;
+    for step in 0..5 {
+        h.publisher.event(harness::bid_level(instrument, step));
+        h.clock.advance(gap);
+    }
+
+    assert_eq!(
+        counts(h.mktdata()),
+        vec![(0, 2), (1, 2)],
+        "each datagram left at the first event past its oldest delta's hold, \
+         with no drain and no tick"
+    );
+}
