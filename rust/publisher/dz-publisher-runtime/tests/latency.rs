@@ -11,6 +11,7 @@
 //! does, and assert what the runtime then observes.
 
 mod harness;
+use harness::Arrive as _;
 
 use dz_adapter_core::{EventSink, VenueTimestampKind};
 use harness::{feed, harness, FakeAdapter};
@@ -73,7 +74,7 @@ fn an_event_that_arrived_in_a_payload_moves_both_families() {
     // The scope the driver's wrapper opens before the adapter is handed
     // anything, stated here the same way.
     h.publisher.payload_scope(Some(RECV_TS_NS));
-    h.publisher.event(harness::quote(
+    h.publisher.arrive(harness::quote(
         dz_adapter_core::InstrumentRef::from_admission(0),
         SOURCE_TS_NS,
     ));
@@ -132,7 +133,7 @@ fn an_event_that_came_from_no_payload_moves_neither() {
     h.publisher.poll_listings(&mut adapter);
 
     // No scope stated, which is what the runtime's own paths look like.
-    h.publisher.event(harness::quote(
+    h.publisher.arrive(harness::quote(
         dz_adapter_core::InstrumentRef::from_admission(0),
         SOURCE_TS_NS,
     ));
@@ -166,9 +167,9 @@ fn a_scope_that_closed_does_not_attribute_the_next_event() {
     let one = dz_adapter_core::InstrumentRef::from_admission(0);
 
     h.publisher.payload_scope(Some(RECV_TS_NS));
-    h.publisher.event(harness::quote(one, SOURCE_TS_NS));
+    h.publisher.arrive(harness::quote(one, SOURCE_TS_NS));
     h.publisher.payload_scope(None);
-    h.publisher.event(harness::quote(one, SOURCE_TS_NS));
+    h.publisher.arrive(harness::quote(one, SOURCE_TS_NS));
 
     assert_eq!(
         rendered_count(
@@ -198,7 +199,7 @@ fn a_venue_that_declares_no_clock_leaves_the_venue_family_alone() {
     );
 
     h.publisher.payload_scope(Some(RECV_TS_NS));
-    h.publisher.event(harness::quote(
+    h.publisher.arrive(harness::quote(
         dz_adapter_core::InstrumentRef::from_admission(0),
         SOURCE_TS_NS,
     ));

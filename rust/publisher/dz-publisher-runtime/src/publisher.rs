@@ -729,6 +729,8 @@ pub struct Publisher<S: StateStore, K: Clock + Clone> {
     /// cycle — and neither latency family is observed for those, because
     /// neither arrived from upstream.
     payload_recv_ts_ns: Option<u64>,
+    /// `(recv_ts_ns, source_ts_ns, kind)` per packed message, observed at the flush.
+    pending_arrivals: Vec<(u64, u64, EventKind)>,
     /// Which venue clock this adapter's `source_ts_ns` values carry, read once
     /// at startup. `None` for a venue that publishes none, which is a real
     /// answer and not a missing one.
@@ -814,6 +816,7 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
             unroutable: 0,
             owed: Vec::new(),
             payload_recv_ts_ns: None,
+            pending_arrivals: Vec::new(),
             venue_timestamp_kind: None,
             last_poll_ns: None,
             snapshots,
@@ -915,6 +918,8 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
     /// configured.
     #[must_use]
     pub fn tick(&mut self) -> Option<Exit> {
+        // The backstop for a live datagram the input never drained on.
+        self.flush_live();
         let now_mono = dz_publisher_refdata::Clock::monotonic_ns(&self.clock);
         let now_unix = self.clock.unix_ns();
 
@@ -996,9 +1001,12 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
                 return Err(error);
             }
         };
+        let now_unix = self.clock.unix_ns();
         let anchor = shard
-            .and_then(|shard| self.feeds.market_by_price_on(shard))
-            .map_or(0, |pipeline| pipeline.mktdata_sequence().unwrap_or(0));
+            .and_then(|shard| self.feeds.market_by_price_on_mut(shard))
+            .map_or(0, |pipeline| {
+                pipeline.anchor_sequence(now_unix).unwrap_or(0)
+            });
         self.snapshot_anchored_at(adapter, instrument, anchor)
     }
 
@@ -1611,16 +1619,43 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
     /// `venue_to_recv` needs a kind to label the observation with, so an
     /// adapter that reads a venue clock and does not declare which one leaves
     /// it unobserved rather than mislabelled.
-    fn observe_arrival_latency(&mut self, source_ts_ns: u64, kind: EventKind, sent_unix_ns: u64) {
-        let Some(recv_ts_ns) = self.payload_recv_ts_ns else {
-            return;
-        };
+    fn observe_arrival_latency(&mut self, source_ts_ns: u64, kind: EventKind) {
+        if let Some(recv_ts_ns) = self.payload_recv_ts_ns {
+            self.pending_arrivals.push((recv_ts_ns, source_ts_ns, kind));
+        }
+    }
+
+    /// Send every packed live datagram and observe its latency at that instant.
+    fn flush_live(&mut self) {
+        let now_mono = dz_publisher_refdata::Clock::monotonic_ns(&self.clock);
+        let now_unix = self.clock.unix_ns();
+        let mut sent = Vec::new();
+        for shard in self.feeds.shards_mut() {
+            if let Some(pipeline) = shard.top_of_book_mut() {
+                let _ = pipeline.flush_mktdata(now_unix);
+                if pipeline.take_sent() {
+                    sent.push(pipeline.channel_id());
+                }
+            }
+            if let Some(pipeline) = shard.market_by_price_mut() {
+                let _ = pipeline.flush_mktdata(now_unix);
+                if pipeline.take_sent() {
+                    sent.push(pipeline.channel_id());
+                }
+            }
+        }
+        for channel_id in sent {
+            self.published(channel_id, now_mono, now_unix);
+        }
         let latency = self.metrics.latency();
-        // Saturating, because a venue clock ahead of ours is a clock-skew
-        // observation and not a negative duration. Zero is the honest floor.
-        latency.observe_recv_to_send(kind, seconds(sent_unix_ns.saturating_sub(recv_ts_ns)));
-        if let Some(kind) = self.venue_timestamp_kind {
-            latency.observe_venue_to_recv(kind, seconds(recv_ts_ns.saturating_sub(source_ts_ns)));
+        for (recv_ts_ns, source_ts_ns, kind) in self.pending_arrivals.drain(..) {
+            // Saturating, because a venue clock ahead of ours is a clock-skew
+            // observation and not a negative duration. Zero is the honest floor.
+            latency.observe_recv_to_send(kind, seconds(now_unix.saturating_sub(recv_ts_ns)));
+            if let Some(kind) = self.venue_timestamp_kind {
+                latency
+                    .observe_venue_to_recv(kind, seconds(recv_ts_ns.saturating_sub(source_ts_ns)));
+            }
         }
     }
 }
@@ -1767,8 +1802,10 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
         // another channel instance's series, which the subscriber will compare
         // against its own — a wrong answer, not a late one.
         let anchor = shard
-            .and_then(|shard| self.feeds.market_by_price_on(shard))
-            .map_or(0, |pipeline| pipeline.mktdata_sequence().unwrap_or(0));
+            .and_then(|shard| self.feeds.market_by_price_on_mut(shard))
+            .map_or(0, |pipeline| {
+                pipeline.anchor_sequence(now_unix).unwrap_or(0)
+            });
 
         let lowered = self.depth.lower_instrument_reset(
             self.refdata.instruments(),
@@ -1821,6 +1858,11 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
     /// forget.
     fn payload_scope(&mut self, recv_ts_ns: Option<u64>) {
         self.payload_recv_ts_ns = recv_ts_ns;
+    }
+
+    /// The input has nothing more ready, so what is packed goes out now.
+    fn drained(&mut self) {
+        self.flush_live();
     }
 
     fn event(&mut self, event: Event<'_>) {
@@ -1876,13 +1918,11 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                             self.unroutable += 1;
                             return;
                         };
-                        let channel_id = pipeline.channel_id();
                         let sent = timed(&self.metrics, EgressMessageType::Quote, || {
                             pipeline.send_quote(&quote, now_mono, now_unix)
                         });
                         if sent.is_ok() {
-                            self.published(channel_id, now_mono, now_unix);
-                            self.observe_arrival_latency(source_ts_ns, kind, now_unix);
+                            self.observe_arrival_latency(source_ts_ns, kind);
                         }
                     }
                     Err(error) => self.refusals.record(error, &self.metrics),
@@ -1922,33 +1962,19 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                     // Seq` — the message has no such field, and it is not a
                     // book mutation.
                     Ok(trade) => {
-                        // Which channels took it, not whether any did: the two
-                        // send paths are two channel instances, each one's
-                        // silence is its own, and a trade the depth feed sent
-                        // and the top-of-book feed refused must not refresh
-                        // top-of-book's channel.
-                        let mut reached: [Option<u8>; 2] = [None; 2];
+                        // Each channel counts as published at its own successful send.
                         timed(&self.metrics, EgressMessageType::Trade, || {
                             if let Some(pipeline) =
                                 shard.and_then(|shard| self.feeds.top_of_book_on_mut(shard))
                             {
-                                let channel_id = pipeline.channel_id();
-                                if pipeline.send_trade(&trade, now_mono, now_unix).is_ok() {
-                                    reached[0] = Some(channel_id);
-                                }
+                                let _ = pipeline.send_trade(&trade, now_mono, now_unix);
                             }
                             if let Some(pipeline) =
                                 shard.and_then(|shard| self.feeds.market_by_price_on_mut(shard))
                             {
-                                let channel_id = pipeline.channel_id();
-                                if pipeline.send_trade(&trade, now_mono, now_unix).is_ok() {
-                                    reached[1] = Some(channel_id);
-                                }
+                                let _ = pipeline.send_trade(&trade, now_mono, now_unix);
                             }
                         });
-                        for channel_id in reached.into_iter().flatten() {
-                            self.published(channel_id, now_mono, now_unix);
-                        }
                     }
                     Err(error) => self.refusals.record(error, &self.metrics),
                 }
@@ -2001,13 +2027,11 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                             self.unroutable += 1;
                             return;
                         };
-                        let channel_id = pipeline.channel_id();
                         let sent = timed(&self.metrics, EgressMessageType::LevelUpdate, || {
                             pipeline.send_level(&level, now_mono, now_unix)
                         });
                         if sent.is_ok() {
-                            self.published(channel_id, now_mono, now_unix);
-                            self.observe_arrival_latency(source_ts_ns, kind, now_unix);
+                            self.observe_arrival_latency(source_ts_ns, kind);
                         }
                     }
                     Err(error) => self.refusals.record(error, &self.metrics),
@@ -2049,13 +2073,11 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                             self.unroutable += 1;
                             return;
                         };
-                        let channel_id = pipeline.channel_id();
                         let sent = timed(&self.metrics, EgressMessageType::BookClear, || {
                             pipeline.send_book_clear(&clear, now_mono, now_unix)
                         });
                         if sent.is_ok() {
-                            self.published(channel_id, now_mono, now_unix);
-                            self.observe_arrival_latency(source_ts_ns, kind, now_unix);
+                            self.observe_arrival_latency(source_ts_ns, kind);
                         }
                     }
                     Err(error) => self.refusals.record(error, &self.metrics),

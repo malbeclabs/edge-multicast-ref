@@ -11,6 +11,7 @@
 //! that nothing has arrived for a minute. This is that something, once, for
 //! every venue.
 
+use std::task::Poll;
 use std::time::Duration;
 
 use dz_adapter_core::{
@@ -247,6 +248,9 @@ impl EventSink for PayloadSink<'_> {
     /// driver's to state — see this type's own note. An adapter calling this
     /// reaches here and no further.
     fn payload_scope(&mut self, _recv_ts_ns: Option<u64>) {}
+
+    /// Not forwarded: only the driver knows the input is empty.
+    fn drained(&mut self) {}
 }
 
 /// How one pass through connect, subscribe and receive ended.
@@ -559,7 +563,18 @@ impl<'a> Driver<'a> {
                     Duration::from_nanos(self.clock.steady_ns().saturating_sub(last_payload_ns));
                 limit.saturating_sub(waited)
             });
-            match self.input.recv(budget).await {
+            // Pending on the first poll means the input drained.
+            let received = {
+                let mut recv = self.input.recv(budget);
+                match std::future::poll_fn(|cx| Poll::Ready(recv.as_mut().poll(cx))).await {
+                    Poll::Ready(received) => received,
+                    Poll::Pending => {
+                        events.drained();
+                        recv.await
+                    }
+                }
+            };
+            match received {
                 Ok(Received::Payload { bytes, ts_ns }) => {
                     let payload = Payload {
                         bytes,

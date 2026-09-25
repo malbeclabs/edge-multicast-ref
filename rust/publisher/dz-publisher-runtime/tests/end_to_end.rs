@@ -15,6 +15,7 @@
 //! makes it evidence rather than a restatement.
 
 mod harness;
+use harness::Arrive as _;
 
 use dz_adapter_core::EventSink;
 use dz_edge_refdata::InstrumentDefinition;
@@ -49,13 +50,13 @@ fn a_fake_adapters_events_reach_a_fake_datagram_sink_as_datagrams() {
     // 2. The adapter emits normalized events, in the venue's own decimal text.
     h.publisher.upstream_message("quote");
     h.publisher
-        .event(harness::quote(first, 1_700_000_000_000_000_001));
+        .arrive(harness::quote(first, 1_700_000_000_000_000_001));
     h.publisher.upstream_message("trade");
     h.publisher
-        .event(harness::trade(second, 1_700_000_000_000_000_002));
+        .arrive(harness::trade(second, 1_700_000_000_000_000_002));
     h.publisher.upstream_message("quote");
     h.publisher
-        .event(harness::one_sided_quote(second, 1_700_000_000_000_000_003));
+        .arrive(harness::one_sided_quote(second, 1_700_000_000_000_000_003));
 
     // 3. Ticks, so the definition cycle and the manifest reach the refdata port
     //    too. Two of them, and the reason is the pacer's: the first tick with a
@@ -196,7 +197,7 @@ fn the_egress_series_move_without_anyone_having_thought_about_them() {
     let mut h = harness(feed());
     let mut adapter = FakeAdapter::new(&["A-B"]);
     h.publisher.poll_listings(&mut adapter);
-    h.publisher.event(harness::quote(adapter.handles()[0], 1));
+    h.publisher.arrive(harness::quote(adapter.handles()[0], 1));
     let _ = h.publisher.tick();
     h.clock.advance(std::time::Duration::from_secs(20));
     let _ = h.publisher.tick();
@@ -239,7 +240,8 @@ fn a_refused_scaling_drops_one_message_and_leaves_the_publisher_running() {
     h.publisher.poll_listings(&mut adapter);
     let instrument = adapter.handles()[0];
 
-    h.publisher.event(harness::too_precise_quote(instrument, 1));
+    h.publisher
+        .arrive(harness::too_precise_quote(instrument, 1));
     assert_eq!(h.publisher.refusals().too_precise, 1);
     assert_eq!(h.publisher.refusals().total(), 1);
     assert!(
@@ -249,7 +251,7 @@ fn a_refused_scaling_drops_one_message_and_leaves_the_publisher_running() {
 
     // And the next one goes out, which is the half that says a single
     // instrument's wrong exponent must not darken a feed.
-    h.publisher.event(harness::quote(instrument, 2));
+    h.publisher.arrive(harness::quote(instrument, 2));
     let quotes: Vec<Quote> = h
         .mktdata()
         .messages()
@@ -274,9 +276,9 @@ fn an_event_no_enabled_feed_carries_is_dropped_without_spending_a_sequence_numbe
     let instrument = adapter.handles()[0];
 
     for step in 0..4 {
-        h.publisher.event(harness::bid_level(instrument, step));
+        h.publisher.arrive(harness::bid_level(instrument, step));
     }
-    h.publisher.event(harness::clear(instrument, 5));
+    h.publisher.arrive(harness::clear(instrument, 5));
     assert_eq!(h.publisher.unroutable(), 5);
     assert_eq!(h.publisher.refusals().total(), 0, "not a lowering refusal");
     assert!(h.mktdata().datagrams().is_empty());
@@ -303,7 +305,7 @@ fn a_quote_has_nowhere_to_go_on_a_publisher_that_emits_only_depth() {
     h.publisher.poll_listings(&mut adapter);
     let instrument = adapter.handles()[0];
 
-    h.publisher.event(harness::quote(instrument, 1));
+    h.publisher.arrive(harness::quote(instrument, 1));
     assert_eq!(h.publisher.unroutable(), 1);
     assert!(!h.mktdata().type_ids().contains(&0x03));
 }
@@ -327,7 +329,7 @@ fn an_event_naming_a_withdrawn_instrument_is_refused_rather_than_republished() {
     h.publisher.poll_listings(&mut shorter);
     assert_eq!(h.publisher.refdata().published(), 1);
 
-    h.publisher.event(harness::quote(withdrawn, 9));
+    h.publisher.arrive(harness::quote(withdrawn, 9));
     assert_eq!(h.publisher.refusals().unknown_instrument, 1);
     assert!(!h.mktdata().type_ids().contains(&0x03));
 }
@@ -337,7 +339,7 @@ fn a_signal_shuts_the_composed_publisher_down_cleanly() {
     let mut h = harness(feed());
     let mut adapter = FakeAdapter::new(&["A-B"]);
     h.publisher.poll_listings(&mut adapter);
-    h.publisher.event(harness::quote(adapter.handles()[0], 1));
+    h.publisher.arrive(harness::quote(adapter.handles()[0], 1));
     let teardown = h.publisher.shut_down(Exit::Signal);
     assert_eq!(teardown.steps().len(), 6);
     assert_eq!(h.mktdata().type_ids().last(), Some(&0x06));

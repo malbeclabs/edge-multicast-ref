@@ -201,6 +201,12 @@ impl<F: Feed, S: DatagramSink> ChannelEgress<F, S> {
         result
     }
 
+    /// Whether this `Channel ID` holds a datagram that has not been sent.
+    #[must_use]
+    pub fn is_open(&self, channel_id: u8) -> bool {
+        self.open.contains_key(&channel_id)
+    }
+
     /// Flush every `Channel ID` with a datagram open.
     ///
     /// Every one is attempted even after one fails, because they are separate

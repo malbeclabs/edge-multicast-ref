@@ -8,6 +8,7 @@
 //! `Instrument ID` minted during shutdown is persisted and never published.
 
 mod harness;
+use harness::Arrive as _;
 
 use dz_adapter_core::{EventSink, DEFAULT_SHARD};
 use dz_edge_core::{AppMessage, EndOfSession, Heartbeat};
@@ -40,7 +41,7 @@ fn the_last_message_on_the_mktdata_port_is_end_of_session() {
     let instrument = adapter.handles()[0];
 
     h.publisher.upstream_message("quote");
-    h.publisher.event(harness::quote(instrument, 7));
+    h.publisher.arrive(harness::quote(instrument, 7));
     // Past the heartbeat interval, so a heartbeat is due: a heartbeat is sent
     // when there is *no other traffic*, and the quote above is other traffic.
     h.clock.advance(std::time::Duration::from_secs(1));
@@ -82,7 +83,7 @@ fn a_heartbeat_is_suppressed_while_market_data_is_flowing() {
 
     for step in 0..5 {
         h.clock.advance(std::time::Duration::from_millis(900));
-        h.publisher.event(harness::quote(instrument, step));
+        h.publisher.arrive(harness::quote(instrument, step));
         let _ = h.publisher.tick();
     }
 

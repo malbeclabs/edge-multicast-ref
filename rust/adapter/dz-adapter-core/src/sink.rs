@@ -175,6 +175,10 @@ pub trait EventSink {
         let _ = recv_ts_ns;
     }
 
+    /// The input has nothing more ready; a transmitting sink sends what it packed.
+    /// Called by the driver, never by an adapter.
+    fn drained(&mut self) {}
+
     /// This adapter no longer trusts its own book for one instrument.
     ///
     /// **The one thing a venue knows that nothing else can.** An adapter owns

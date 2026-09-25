@@ -25,8 +25,8 @@
 #![forbid(unsafe_code)]
 
 mod harness;
+use harness::Arrive as _;
 
-use dz_adapter_core::EventSink as _;
 use dz_edge_refdata::InstrumentDefinition;
 use harness::{harness_two_shards, quote, FakeAdapter, SHARD_A, SHARD_B};
 
@@ -181,7 +181,7 @@ fn a_quote_reaches_its_own_shards_channel_and_no_other() {
     // first would be invisible against the first.
     let on_b = adapter.handles()[1];
 
-    h.publisher.event(quote(on_b, 1));
+    h.publisher.arrive(quote(on_b, 1));
 
     let mut reached: Vec<usize> = Vec::new();
     for (index, shard) in h.shards.iter().enumerate() {

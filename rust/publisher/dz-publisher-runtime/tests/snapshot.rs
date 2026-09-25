@@ -16,10 +16,11 @@
 //! policy of its own.
 
 mod harness;
+use harness::Arrive as _;
 
 use std::time::Duration;
 
-use dz_adapter_core::{AdapterError, EventSink, Side};
+use dz_adapter_core::{AdapterError, Side};
 use dz_edge_mbp::{SnapshotBegin, SnapshotEnd, SnapshotLevel};
 use dz_publisher_runtime::SnapshotError;
 use harness::{depth_feed, depth_feed_with_rotation, feed, harness, FakeAdapter, SOURCE_ID};
@@ -169,7 +170,7 @@ fn the_snapshot_anchor_is_the_live_sequence_the_book_state_is_true_as_of() {
 
     // Three live datagrams on the mktdata series first.
     for step in 0..3 {
-        h.publisher.event(harness::bid_level(instrument, step));
+        h.publisher.arrive(harness::bid_level(instrument, step));
     }
     let framed = h.publisher.snapshot(&adapter, instrument).expect("framed");
 
@@ -193,12 +194,12 @@ fn opening_a_snapshot_does_not_reset_the_per_instrument_sequence() {
     h.publisher.poll_listings(&mut adapter);
     let instrument = adapter.handles()[0];
 
-    h.publisher.event(harness::bid_level(instrument, 1));
-    h.publisher.event(harness::bid_level(instrument, 2));
+    h.publisher.arrive(harness::bid_level(instrument, 1));
+    h.publisher.arrive(harness::bid_level(instrument, 2));
     let framed = h.publisher.snapshot(&adapter, instrument).expect("framed");
     assert_eq!(framed.begin.last_instrument_seq, 2);
 
-    h.publisher.event(harness::bid_level(instrument, 3));
+    h.publisher.arrive(harness::bid_level(instrument, 3));
     let levels: Vec<_> = h
         .mktdata()
         .messages()
@@ -425,7 +426,7 @@ fn a_periodic_snapshot_is_anchored_where_the_live_stream_has_reached() {
     h.publisher.poll_listings(&mut adapter);
     for step in 0..4 {
         h.publisher
-            .event(harness::bid_level(adapter.handles()[0], step));
+            .arrive(harness::bid_level(adapter.handles()[0], step));
     }
 
     h.clock.advance(Duration::from_secs(1));
