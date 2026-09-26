@@ -131,7 +131,7 @@ struct Member {
 }
 
 /// Where one fan-out member stands with its route. See
-/// [`SinkError::RouteDown`](crate::SinkError::RouteDown).
+/// [`SinkError::RouteDown`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteState {
     /// Sending, or dropped for a reason that was not its route.
