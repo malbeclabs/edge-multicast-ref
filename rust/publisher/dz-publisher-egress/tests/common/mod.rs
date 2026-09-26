@@ -205,6 +205,9 @@ pub enum Verdict {
     WouldBlock,
     /// Any other socket failure: not transient.
     Broken,
+    /// The route is down, as while the tunnel interface is gone: transient
+    /// until the transmitter gives up on it.
+    RouteDown,
 }
 
 impl Verdict {
@@ -219,6 +222,9 @@ impl Verdict {
             }
             Self::WouldBlock => Err(SinkError::WouldBlock),
             Self::Broken => Err(SinkError::Socket(io::Error::other("fixture"))),
+            Self::RouteDown => Err(SinkError::RouteDown(io::Error::from(
+                io::ErrorKind::NetworkUnreachable,
+            ))),
         }
     }
 }

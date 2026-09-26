@@ -53,7 +53,7 @@ use dz_edge_core::{AppMessage, EndOfSession, Heartbeat, PortRole, ResetCount, MA
 use dz_edge_mbp::{BookClear, InstrumentReset, LevelUpdate};
 use dz_edge_refdata::{InstrumentDefinition, ManifestSummary};
 use dz_edge_tob::{Quote, Trade};
-use dz_publisher_egress::{ChannelEgress, EgressEndpoint, EgressError, Tee};
+use dz_publisher_egress::{ChannelEgress, EgressEndpoint, EgressError, RouteState, Tee};
 use dz_publisher_lowering::Snapshot;
 use dz_publisher_metrics::{EgressMessageType, EventKind, PublisherMetrics};
 
@@ -109,6 +109,44 @@ impl std::fmt::Display for DroppedSink<'_> {
             self.port_role.as_str(),
             self.spec.as_str(),
             self.live
+        )
+    }
+}
+
+/// One fan-out member and where it stands with its route.
+///
+/// Separate from [`DroppedSink`] because the operator reads the two
+/// oppositely. A dropped member is gone for the life of the process; one whose
+/// route is down is expected back, and the line saying it is back is the one
+/// that matters. See
+/// [`SinkError::RouteDown`](dz_publisher_egress::SinkError::RouteDown).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RouteSink<'a> {
+    /// The feed whose fan-out it is in.
+    pub spec: FeedSpec,
+    /// The shard that feed carries.
+    pub shard: &'a str,
+    /// The port role.
+    pub port_role: PortRole,
+    /// Its position in that fan-out. Two members may share a name — the
+    /// transmitter and its reference stream both do — so this is what tells
+    /// them apart.
+    pub member: usize,
+    /// [`DatagramSink::name`](dz_publisher_egress::DatagramSink::name).
+    pub name: &'a str,
+    /// Where it stands.
+    pub state: RouteState,
+}
+
+impl std::fmt::Display for RouteSink<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "`{}` on the {} port role of `{}` on shard `{}`",
+            self.name,
+            self.port_role.as_str(),
+            self.spec.as_str(),
+            self.shard
         )
     }
 }
@@ -606,6 +644,40 @@ impl<F: EmittedFeed> FeedPipeline<F> {
             }
         }
         dropped
+    }
+
+    /// Every fan-out member of this feed and where it stands with its route.
+    /// See [`RouteSink`].
+    #[must_use]
+    pub fn route_states(&self) -> Vec<RouteSink<'_>> {
+        let mut states = Vec::new();
+        let roles = [
+            (PortRole::Mktdata, Some(&self.mktdata)),
+            (PortRole::Refdata, Some(&self.refdata)),
+            (PortRole::Snapshot, self.snapshot.as_ref()),
+        ];
+        for (port_role, egress) in roles {
+            let Some(egress) = egress else { continue };
+            for (member, (name, state)) in egress.sink().routes().enumerate() {
+                states.push(RouteSink {
+                    spec: F::SPEC,
+                    shard: self.shard.as_str(),
+                    port_role,
+                    member,
+                    name,
+                    state,
+                });
+            }
+        }
+        states
+    }
+
+    /// Whether this feed's mktdata transmitter has no route: the one fan-out
+    /// whose sends say whether this channel is publishing. Not the other
+    /// port roles, whose flag can go stale on a port that sends rarely.
+    #[must_use]
+    pub fn mktdata_route_down(&self) -> bool {
+        self.mktdata.sink().essential_route_down()
     }
 
     /// Send the mktdata datagram under construction, if any.

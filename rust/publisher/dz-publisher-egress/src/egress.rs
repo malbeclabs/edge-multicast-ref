@@ -308,7 +308,10 @@ impl<F: Feed, S: DatagramSink> ChannelEgress<F, S> {
             // pre-created at 0, and a staleness alert on a series nobody ever
             // sets cannot be distinguished from a publisher that has stopped
             // heartbeating.
-            if message_type == EgressMessageType::Heartbeat {
+            //
+            // Not while a transmitter's route is down: the fan-out took the
+            // heartbeat and nothing left.
+            if message_type == EgressMessageType::Heartbeat && self.sink.reached_wire() {
                 egress.set_heartbeat_last_sent(
                     port_role,
                     channel_id,

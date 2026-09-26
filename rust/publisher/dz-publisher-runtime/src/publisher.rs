@@ -82,7 +82,7 @@ use dz_publisher_refdata::{Counts, Registry, StateStore};
 use crate::clock::Clock;
 use crate::config::EmittedFeed;
 use crate::guard::{ConsistencyGuard, Exit, IdleGuard, Inconsistency};
-use crate::pipeline::{Arrival, DroppedSink, FeedPipeline};
+use crate::pipeline::{Arrival, DroppedSink, FeedPipeline, RouteSink};
 use crate::rotation::{schedule_share, SnapshotRotation, WHOLE_SNAPSHOT_CAPACITY};
 
 /// How often the runtime drains the adapter's listings.
@@ -252,6 +252,20 @@ impl ShardFeeds {
             dropped.extend(pipeline.dropped_sinks());
         }
         dropped
+    }
+
+    /// Every fan-out member of this shard and where it stands with its route.
+    /// See [`FeedPipeline::route_states`].
+    #[must_use]
+    pub fn route_states(&self) -> Vec<RouteSink<'_>> {
+        let mut states: Vec<RouteSink<'_>> = Vec::new();
+        if let Some(pipeline) = self.top_of_book() {
+            states.extend(pipeline.route_states());
+        }
+        if let Some(pipeline) = self.market_by_price() {
+            states.extend(pipeline.route_states());
+        }
+        states
     }
 
     /// Everything this shard's send paths owe a tick, given its reference data.
@@ -448,6 +462,13 @@ impl Feeds {
     #[must_use]
     pub fn dropped_sinks(&self) -> Vec<DroppedSink<'_>> {
         self.shards().flat_map(ShardFeeds::dropped_sinks).collect()
+    }
+
+    /// Every fan-out member, on any shard, and where it stands with its route.
+    /// See [`FeedPipeline::route_states`].
+    #[must_use]
+    pub fn route_states(&self) -> Vec<RouteSink<'_>> {
+        self.shards().flat_map(ShardFeeds::route_states).collect()
     }
 }
 
@@ -1413,6 +1434,16 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
         self.feeds.dropped_sinks()
     }
 
+    /// Every fan-out member and where it stands with its route. A member whose
+    /// route is down is still offered every datagram and refuses each one, so
+    /// the numbers it carries are a gap every subscriber recovers from. Read
+    /// between ticks like [`Self::dropped_sinks`], and named by the runtime
+    /// when a member's route goes down and again when it comes back.
+    #[must_use]
+    pub fn route_states(&self) -> Vec<RouteSink<'_>> {
+        self.feeds.route_states()
+    }
+
     /// The reference-data owner, for a diagnostic and for a test.
     #[must_use]
     pub const fn refdata(&self) -> &Registry<S, K> {
@@ -1608,15 +1639,28 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
     /// `EventSink` — which is the whole of what this type is handed — does not
     /// carry it. Named here rather than left as a silently empty family; see
     /// the crate documentation.
-    fn published(&mut self, channel_id: u8, now_mono_ns: u64, now_unix_ns: u64) {
+    fn published(
+        &mut self,
+        channel_id: u8,
+        reached_wire: bool,
+        now_mono_ns: u64,
+        now_unix_ns: u64,
+    ) {
         let unix_seconds = unix_seconds(now_unix_ns);
         self.idle.published(now_mono_ns);
         self.metrics
             .process()
             .set_idle_guard_last_update(unix_seconds);
-        self.metrics
-            .channel()
-            .set_last_published(channel_id, unix_seconds);
+        // A fan-out whose transmitter has no route still returns `Ok`, so the
+        // caller says whether the datagram left, read off the mktdata fan-out
+        // of the pipeline that sent it. The idle guard is fed regardless, so
+        // the outage is bounded by `MAX_ROUTE_DOWN` and not by an `idle_guard`
+        // set shorter than it; the channel's freshness is not.
+        if reached_wire {
+            self.metrics
+                .channel()
+                .set_last_published(channel_id, unix_seconds);
+        }
     }
 
     /// This payload's arrival, for a message that came from upstream.
@@ -1671,11 +1715,15 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
             return;
         };
         let channel_id = pipeline.channel_id();
+        let reached_wire = !pipeline.mktdata_route_down();
         for (arrival, sent_unix_ns) in pipeline.sent_arrivals() {
-            observe_arrival_latency(&self.metrics, timestamp_kind, arrival, sent_unix_ns);
+            // Not a latency: the datagram did not leave. See `published`.
+            if reached_wire {
+                observe_arrival_latency(&self.metrics, timestamp_kind, arrival, sent_unix_ns);
+            }
         }
         if let Some((sent_mono_ns, sent_unix_ns)) = pipeline.take_live_sent() {
-            self.published(channel_id, sent_mono_ns, sent_unix_ns);
+            self.published(channel_id, reached_wire, sent_mono_ns, sent_unix_ns);
         }
     }
 }
@@ -1889,12 +1937,13 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                 let sent = timed(&self.metrics, EgressMessageType::InstrumentReset, || {
                     pipeline.send_instrument_reset(&reset, now_mono, now_unix)
                 });
+                let reached_wire = !pipeline.mktdata_route_down();
                 if sent.is_ok() {
                     // Recorded only once the announcement reached the wire. A
                     // snapshot owed for a reset no subscriber saw would arrive
                     // with an anchor nobody is waiting for.
                     self.owed.push((instrument, reset.new_anchor_seq));
-                    self.published(channel_id, now_mono, now_unix);
+                    self.published(channel_id, reached_wire, now_mono, now_unix);
                 }
             }
             Err(error) => self.refusals.record(error, &self.metrics),
@@ -1981,9 +2030,11 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                         let sent = timed(&self.metrics, EgressMessageType::Quote, || {
                             pipeline.send_quote(&quote, now_mono, now_unix)
                         });
+                        let reached_wire = !pipeline.mktdata_route_down();
                         if sent.is_ok() {
-                            self.published(channel_id, now_mono, now_unix);
-                            if let Some(arrival) = self.arrival(source_ts_ns, kind) {
+                            self.published(channel_id, reached_wire, now_mono, now_unix);
+                            let arrival = self.arrival(source_ts_ns, kind).filter(|_| reached_wire);
+                            if let Some(arrival) = arrival {
                                 observe_arrival_latency(
                                     &self.metrics,
                                     self.venue_timestamp_kind,
@@ -2040,7 +2091,7 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                             {
                                 let channel_id = pipeline.channel_id();
                                 if pipeline.send_trade(&trade, now_mono, now_unix).is_ok() {
-                                    reached = Some(channel_id);
+                                    reached = Some((channel_id, !pipeline.mktdata_route_down()));
                                 }
                             }
                             if let Some(pipeline) =
@@ -2049,8 +2100,8 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                                 let _ = pipeline.send_trade(&trade, now_mono, now_unix);
                             }
                         });
-                        if let Some(channel_id) = reached {
-                            self.published(channel_id, now_mono, now_unix);
+                        if let Some((channel_id, reached_wire)) = reached {
+                            self.published(channel_id, reached_wire, now_mono, now_unix);
                         }
                         self.settle_live(shard);
                     }

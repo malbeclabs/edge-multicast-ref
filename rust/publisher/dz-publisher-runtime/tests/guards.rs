@@ -15,6 +15,7 @@ use harness::Arrive as _;
 use std::time::Duration;
 
 use dz_adapter_core::EventSink;
+use dz_publisher_egress::RouteState;
 use dz_publisher_metrics::ExitReason;
 use dz_publisher_runtime::{Exit, FeedSpec, Inconsistency};
 use harness::{feed, harness, FakeAdapter, CHANNEL_ID, DEPTH_CHANNEL_ID};
@@ -28,6 +29,7 @@ const START_UNIX_SECONDS: f64 = 1_700_000_000.0;
 
 const CHANNEL_LAST_PUBLISHED: &str = "dz_publisher_channel_last_published_timestamp_seconds";
 const IDLE_GUARD_LAST_UPDATE: &str = "dz_publisher_idle_guard_last_update_timestamp_seconds";
+const HEARTBEAT_LAST_SENT: &str = "dz_publisher_egress_heartbeat_last_sent_timestamp_seconds";
 
 fn guarded() -> harness::Harness {
     let mut feed = feed();
@@ -163,6 +165,101 @@ fn a_dark_transmitter_fires_the_consistency_guard() {
         other => panic!("expected a dark transmitter, got {other:?}"),
     }
     assert_eq!(exit.reason(), ExitReason::ConsistencyGuard);
+}
+
+#[test]
+fn a_transmitter_whose_route_goes_and_comes_back_does_not_end_the_process() {
+    // A client upgrade restarts the tunnel daemon and the interface is gone for
+    // a few seconds. The socket is bound to an address that comes back on the
+    // same interface, so it sends again once the route returns, and ending the
+    // process over it would cost every subscriber a new era for nothing.
+    let mut h = guarded();
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    assert!(h.publisher.tick().is_none());
+    let before = h.only().mktdata.headers();
+    let heartbeat = |h: &harness::Harness| {
+        gauge(
+            &h.metrics.render(),
+            HEARTBEAT_LAST_SENT,
+            Some(&format!("channel_id=\"{CHANNEL_ID}\"")),
+        )
+    };
+    let heartbeat_before = heartbeat(&h);
+
+    h.only().mktdata_route_down.set(true);
+    for _ in 0..3 {
+        // Each tick is due a heartbeat, which is the send that finds the route.
+        h.clock.advance(Duration::from_secs(2));
+        assert!(
+            h.publisher.tick().is_none(),
+            "a route that is down is not a dark transmitter"
+        );
+    }
+    let down: Vec<String> = h
+        .publisher
+        .route_states()
+        .iter()
+        .filter(|sink| sink.state == RouteState::Down)
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(down.len(), 1, "{down:?}");
+    assert!(
+        down[0].starts_with("`mktdata` on the mktdata port role of `top-of-book` on shard"),
+        "{down:?}"
+    );
+
+    // A trade while the route is down: the fan-out takes it and nothing
+    // leaves, so the channel must not read as freshly published.
+    let instrument = adapter.handles()[0];
+    let published_before = last_published(&h.metrics.render(), harness::CHANNEL_ID);
+    h.publisher.upstream_message("trade");
+    h.publisher.arrive(harness::trade(instrument, 1));
+    assert_eq!(
+        last_published(&h.metrics.render(), harness::CHANNEL_ID),
+        published_before,
+        "a datagram that did not leave is not a publish"
+    );
+    assert!(h.publisher.dropped_sinks().is_empty(), "held, not dropped");
+    assert_eq!(
+        heartbeat(&h),
+        heartbeat_before,
+        "a heartbeat that did not leave does not refresh the gauge"
+    );
+    assert_eq!(
+        h.only().mktdata.headers(),
+        before,
+        "nothing reached the wire"
+    );
+
+    h.only().mktdata_route_down.set(false);
+    h.clock.advance(Duration::from_secs(2));
+    assert!(h.publisher.tick().is_none());
+    assert!(
+        h.publisher
+            .route_states()
+            .iter()
+            .all(|sink| sink.state == RouteState::Up),
+        "the route is back"
+    );
+    h.publisher.upstream_message("trade");
+    h.publisher.arrive(harness::trade(instrument, 2));
+    assert!(
+        last_published(&h.metrics.render(), harness::CHANNEL_ID) > published_before,
+        "and a trade that leaves is a publish again"
+    );
+
+    assert!(heartbeat(&h) > heartbeat_before, "and one that left does");
+    let after = h.only().mktdata.headers();
+    assert!(after.len() > before.len(), "the same socket sends again");
+    let (last_before, era) = *before.last().expect("a heartbeat before the outage");
+    let (first_after, era_after) = after[before.len()];
+    assert_eq!(era_after, era, "the same era: nothing restarted");
+    assert!(
+        first_after > last_before + 1,
+        "the numbers spent while the route was down are a gap subscribers recover \
+         from: {last_before} then {first_after}"
+    );
 }
 
 #[test]
@@ -599,5 +696,37 @@ fn a_trade_one_feed_refused_refreshes_only_the_channel_that_took_it() {
             .len()
             > 0,
         "nothing reached the depth feed's wire, so this test is asserting nothing"
+    );
+}
+
+#[test]
+fn one_feeds_route_down_does_not_freeze_another_channels_freshness() {
+    // The depth feed's transmitter has no route and the top-of-book one does.
+    // A trade goes to both: the top-of-book channel published it, and reading
+    // the route off every fan-out in the process would have frozen that
+    // channel's freshness too.
+    let mut h = harness::harness_both();
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+    h.mbp
+        .as_ref()
+        .expect("a market-by-price feed")
+        .mktdata_route_down
+        .set(true);
+
+    h.clock.advance(Duration::from_secs(5));
+    h.publisher.upstream_message("trade");
+    h.publisher.arrive(harness::trade(instrument, 1));
+
+    let exposition = h.metrics.render();
+    assert_eq!(
+        last_published(&exposition, CHANNEL_ID),
+        START_UNIX_SECONDS + 5.0,
+        "the top-of-book channel took the trade:\n{exposition}"
+    );
+    assert!(
+        last_published(&exposition, DEPTH_CHANNEL_ID) < START_UNIX_SECONDS + 5.0,
+        "the depth channel's datagram did not leave:\n{exposition}"
     );
 }

@@ -27,13 +27,28 @@ pub enum SinkError {
     #[error("the send buffer is full and the socket would have blocked")]
     WouldBlock,
 
+    /// The route to the destination has gone: `ENETUNREACH`, `ENETDOWN`,
+    /// `EHOSTUNREACH` or `EADDRNOTAVAIL`, which is what a send returns while the
+    /// tunnel interface is being torn down and brought back.
+    ///
+    /// **Transient**, because the socket survives it: bound to an address that
+    /// returns on the same interface, the next send after the route is back
+    /// succeeds on the same socket, with no reopen. A client upgrade restarting
+    /// the tunnel daemon is the ordinary cause, and ending the process over a
+    /// few seconds of it costs every subscriber a new era. The case that does
+    /// not come back — the interface returning under a different address — is
+    /// bounded by [`MulticastTransmitter`](crate::MulticastTransmitter), which
+    /// reports it as [`Self::Socket`] once it has lasted
+    /// [`MAX_ROUTE_DOWN`](crate::transmitter::MAX_ROUTE_DOWN).
+    #[error("the route to the destination is down: {0}")]
+    RouteDown(#[source] io::Error),
     /// The socket refused the datagram for any other reason.
     ///
-    /// Treated as **not** transient. The failure this crate exists to survive
-    /// is a tunnel interface re-provisioned underneath a live socket, which
-    /// returns the same error forever; recovering from it means re-deriving the
-    /// source address and opening a new socket, not retrying this one. See
-    /// [`Self::is_transient`].
+    /// Treated as **not** transient. A route that stays gone — a tunnel
+    /// re-provisioned under a different address, which returns the same error
+    /// forever — ends here too, after [`Self::RouteDown`] has been given its
+    /// window; recovering from it means re-deriving the source IP address and
+    /// opening a new socket, not retrying this one. See [`Self::is_transient`].
     #[error("send failed: {0}")]
     Socket(#[from] io::Error),
 
@@ -83,8 +98,10 @@ impl SinkError {
     pub const fn reason(&self) -> EgressErrorReason {
         match self {
             Self::WouldBlock => EgressErrorReason::SendWouldBlock,
-            // One label for two variants, deliberately: see `ConsumerAbsent`.
-            Self::Socket(_) | Self::ConsumerAbsent(_) => EgressErrorReason::SocketError,
+            // One label for three variants, deliberately: see `ConsumerAbsent`.
+            Self::Socket(_) | Self::RouteDown(_) | Self::ConsumerAbsent(_) => {
+                EgressErrorReason::SocketError
+            }
             Self::TooLarge { .. } => EgressErrorReason::MtuExceeded,
             Self::NotRegistered => EgressErrorReason::NotRegistered,
         }
@@ -94,8 +111,10 @@ impl SinkError {
     ///
     /// This decides whether a fan-out drops the member that produced it (see
     /// [`Tee`](crate::Tee)). A full send buffer drains; a socket whose route
-    /// has gone does not, and a per-datagram syscall that has failed the same
-    /// way for an hour is a cost paid to learn nothing.
+    /// has gone for good does not, and a per-datagram syscall that has failed
+    /// the same way for an hour is a cost paid to learn nothing. A route that is
+    /// coming back is transient for as long as it is given to; see
+    /// [`Self::RouteDown`].
     ///
     /// A consumer that is not there yet drains too, and that is the second
     /// value here rather than a special case: the thing on the other end of a
@@ -104,7 +123,10 @@ impl SinkError {
     /// absent for. See [`Self::ConsumerAbsent`].
     #[must_use]
     pub const fn is_transient(&self) -> bool {
-        matches!(self, Self::WouldBlock | Self::ConsumerAbsent(_))
+        matches!(
+            self,
+            Self::WouldBlock | Self::RouteDown(_) | Self::ConsumerAbsent(_)
+        )
     }
 }
 

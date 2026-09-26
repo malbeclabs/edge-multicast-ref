@@ -28,6 +28,7 @@
 //! confined to this module.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::net::SocketAddrV4;
 use std::os::unix::ffi::OsStrExt as _;
@@ -46,7 +47,7 @@ use dz_edge_mbp::MarketByPrice;
 use dz_edge_tob::TopOfBook;
 use dz_ingress_core::{Driver, IngressError, Input};
 use dz_publisher_egress::{
-    EraStore, FailureScope, KernelRoute, MulticastTransmitter, ReferenceStream, Tee,
+    EraStore, FailureScope, KernelRoute, MulticastTransmitter, ReferenceStream, RouteState, Tee,
 };
 use dz_publisher_metrics::{PublisherMetrics, PublisherMetricsConfig};
 use dz_publisher_refdata::{
@@ -58,7 +59,7 @@ use crate::config::{Config, Feed, FeedSpec, ShardName, Source, SourceRole};
 use crate::error::StartupError;
 use crate::guard::{Exit, Inconsistency};
 use crate::observer::MetricsObserver;
-use crate::pipeline::{FeedPipeline, Port, Ports};
+use crate::pipeline::{FeedPipeline, Port, Ports, RouteSink};
 use crate::publisher::{Feeds, Publisher, ShardFeeds, SnapshotError};
 use crate::{AdapterContext, AdapterRegistry};
 
@@ -1229,6 +1230,10 @@ async fn tick_loop<S: StateStore, K: Clock + Clone>(
     // again: the drop is permanent by construction, so a line per tick would be
     // a line per tick forever. The exit report names the whole set again.
     let mut named_dropped: Vec<String> = Vec::new();
+    // A member whose route is down is named when it goes down and again when
+    // it comes back, and not in between: it refuses every datagram while it is
+    // down, so anything per datagram or per tick is noise.
+    let mut routes: HashMap<String, RouteState> = HashMap::new();
     loop {
         clock.sleep(TICK).await;
         // One synchronous critical section, and nothing awaited inside it. See
@@ -1304,6 +1309,9 @@ async fn tick_loop<S: StateStore, K: Clock + Clone>(
                     eprintln!("dz-publisher-runtime: no longer sending to {name}");
                     named_dropped.push(name);
                 }
+            }
+            for line in route_transitions(&mut routes, &publisher.route_states()) {
+                eprintln!("dz-publisher-runtime: {line}");
             }
             let exit = publisher.tick();
             // The tick that just ran counted whether the configured cycles can
@@ -1707,6 +1715,44 @@ fn register_venue_collectors(
     Ok(())
 }
 
+/// The route changes since the last reading, as log lines, and the reading
+/// kept for the next one.
+///
+/// Keyed on the member's position as well as its display, because two members
+/// of one fan-out can share a name. A member that goes from down to given up
+/// gets no line here: the drop is named by the dropped-member line.
+fn route_transitions(
+    previous: &mut HashMap<String, RouteState>,
+    now: &[RouteSink<'_>],
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut next = HashMap::with_capacity(now.len());
+    for sink in now {
+        let key = format!(
+            "{}/{}/{}/{}",
+            sink.shard,
+            sink.spec.as_str(),
+            sink.port_role.as_str(),
+            sink.member
+        );
+        let before = previous.get(&key).copied().unwrap_or(RouteState::Up);
+        match (before, sink.state) {
+            (RouteState::Up, RouteState::Down) => lines.push(format!(
+                "the route is down for {sink}; holding its socket for up to {:?} from the \
+                 first refused send",
+                dz_publisher_egress::MAX_ROUTE_DOWN
+            )),
+            (RouteState::Down, RouteState::Up) => {
+                lines.push(format!("the route is back for {sink}"));
+            }
+            _ => {}
+        }
+        next.insert(key, sink.state);
+    }
+    *previous = next;
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1717,6 +1763,49 @@ mod tests {
     /// arguments after the program name, and nothing else.
     fn invocation_of(args: &[&str]) -> Result<Invocation, StartupError> {
         invocation(args.iter().map(OsString::from))
+    }
+
+    fn route(shard: &'static str, member: usize, state: RouteState) -> RouteSink<'static> {
+        RouteSink {
+            spec: FeedSpec::TopOfBook,
+            shard,
+            port_role: PortRole::Mktdata,
+            member,
+            name: "mktdata",
+            state,
+        }
+    }
+
+    /// Down and back are each named once, a member given up on is not named
+    /// back, and two members of one name — the transmitter and its reference
+    /// stream, or one shard's and another's — are kept apart.
+    #[test]
+    fn route_changes_are_named_once_per_member() {
+        use RouteState::{Down, GaveUp, Up};
+        let mut seen = HashMap::new();
+
+        assert!(route_transitions(&mut seen, &[route("a", 0, Up), route("a", 1, Up)]).is_empty());
+        let down = route_transitions(&mut seen, &[route("a", 0, Down), route("a", 1, GaveUp)]);
+        assert_eq!(down.len(), 1, "{down:?}");
+        assert!(
+            down[0].starts_with("the route is down for `mktdata`"),
+            "{down:?}"
+        );
+        assert!(
+            route_transitions(&mut seen, &[route("a", 0, Down), route("a", 1, GaveUp)]).is_empty(),
+            "nothing new, nothing named"
+        );
+        let back = route_transitions(&mut seen, &[route("a", 0, Up), route("a", 1, GaveUp)]);
+        assert_eq!(back, vec!["the route is back for `mktdata` on the mktdata port role of `top-of-book` on shard `a`".to_owned()]);
+
+        let mut seen = HashMap::new();
+        route_transitions(&mut seen, &[route("a", 0, Down), route("b", 0, Down)]);
+        let lines = route_transitions(&mut seen, &[route("a", 0, Up), route("b", 0, GaveUp)]);
+        assert_eq!(
+            lines,
+            vec!["the route is back for `mktdata` on the mktdata port role of `top-of-book` on shard `a`".to_owned()],
+            "one shard back and the other given up on"
+        );
     }
 
     /// A real file is still named bare, and still named after `--config`.
