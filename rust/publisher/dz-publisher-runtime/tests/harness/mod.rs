@@ -182,7 +182,7 @@ pub struct RecordingSink {
     scope: FailureScope,
     recorder: Recorder,
     refusing: Rc<Cell<bool>>,
-    path_down: Rc<Cell<bool>>,
+    route_down: Rc<Cell<bool>>,
 }
 
 impl RecordingSink {
@@ -193,7 +193,7 @@ impl RecordingSink {
             scope,
             recorder: Recorder::new(magic),
             refusing: Rc::new(Cell::new(false)),
-            path_down: Rc::new(Cell::new(false)),
+            route_down: Rc::new(Cell::new(false)),
         }
     }
 
@@ -212,8 +212,8 @@ impl RecordingSink {
     /// A handle that makes every later send find the route down, which is what
     /// a socket does while its tunnel interface is gone.
     #[must_use]
-    pub fn path_down_switch(&self) -> Rc<Cell<bool>> {
-        Rc::clone(&self.path_down)
+    pub fn route_down_switch(&self) -> Rc<Cell<bool>> {
+        Rc::clone(&self.route_down)
     }
 }
 
@@ -229,8 +229,8 @@ impl DatagramSink for RecordingSink {
             // observable to the consistency guard.
             return Err(SinkError::NotRegistered);
         }
-        if self.path_down.get() {
-            return Err(SinkError::PathDown(std::io::Error::from(
+        if self.route_down.get() {
+            return Err(SinkError::RouteDown(std::io::Error::from(
                 std::io::ErrorKind::NetworkUnreachable,
             )));
         }
@@ -295,7 +295,7 @@ pub struct FeedRecorders {
     /// Makes the mktdata transmitter find its route down, as while the tunnel
     /// interface is gone. Transient, so the publisher must hold on rather than
     /// exit.
-    pub mktdata_path_down: Rc<Cell<bool>>,
+    pub mktdata_route_down: Rc<Cell<bool>>,
     /// What the mktdata role's **reference stream** recorded: the second member
     /// of that fan-out, at `FailureScope::Channel`, as `[adapter.tee]` adds it.
     pub reference: Recorder,
@@ -534,7 +534,7 @@ pub fn ports(feed: &Feed, metrics: &Arc<PublisherMetrics>, magic: u16) -> (Ports
         let sink = RecordingSink::new(name, FailureScope::Process, magic);
         let recorder = sink.recorder();
         let refusal = sink.refusal_switch();
-        let path_down = sink.path_down_switch();
+        let route_down = sink.route_down_switch();
         let reference = RecordingSink::new(reference_name, FailureScope::Channel, magic);
         let reference_recorder = reference.recorder();
         let reference_refusal = reference.refusal_switch();
@@ -546,14 +546,14 @@ pub fn ports(feed: &Feed, metrics: &Arc<PublisherMetrics>, magic: u16) -> (Ports
                 endpoint: EgressEndpoint::new(role, SOURCE, port),
                 sink: tee,
             },
-            (recorder, refusal, path_down),
+            (recorder, refusal, route_down),
             (reference_recorder, reference_refusal),
         )
     };
 
     let (
         mktdata,
-        (mktdata_recorder, mktdata_refusal, mktdata_path_down),
+        (mktdata_recorder, mktdata_refusal, mktdata_route_down),
         (reference_recorder, reference_refusal),
     ) = open(
         "mktdata",
@@ -588,7 +588,7 @@ pub fn ports(feed: &Feed, metrics: &Arc<PublisherMetrics>, magic: u16) -> (Ports
             refdata: refdata_recorder,
             snapshot: snapshot_recorder,
             mktdata_refusal,
-            mktdata_path_down,
+            mktdata_route_down,
             reference: reference_recorder,
             reference_refusal,
             refdata_reference_refusal,

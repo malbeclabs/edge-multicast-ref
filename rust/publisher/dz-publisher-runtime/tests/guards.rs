@@ -15,6 +15,7 @@ use harness::Arrive as _;
 use std::time::Duration;
 
 use dz_adapter_core::EventSink;
+use dz_publisher_egress::RouteState;
 use dz_publisher_metrics::ExitReason;
 use dz_publisher_runtime::{Exit, FeedSpec, Inconsistency};
 use harness::{feed, harness, FakeAdapter, CHANNEL_ID, DEPTH_CHANNEL_ID};
@@ -177,7 +178,7 @@ fn a_transmitter_whose_route_goes_and_comes_back_does_not_end_the_process() {
     assert!(h.publisher.tick().is_none());
     let before = h.only().mktdata.headers();
 
-    h.only().mktdata_path_down.set(true);
+    h.only().mktdata_route_down.set(true);
     for _ in 0..3 {
         // Each tick is due a heartbeat, which is the send that finds the route.
         h.clock.advance(Duration::from_secs(2));
@@ -186,15 +187,29 @@ fn a_transmitter_whose_route_goes_and_comes_back_does_not_end_the_process() {
             "a route that is down is not a dark transmitter"
         );
     }
-    let named: Vec<String> = h
+    let down: Vec<String> = h
         .publisher
-        .path_down_sinks()
+        .route_states()
         .iter()
+        .filter(|sink| sink.state == RouteState::Down)
         .map(ToString::to_string)
         .collect();
+    assert_eq!(down.len(), 1, "{down:?}");
+    assert!(
+        down[0].starts_with("`mktdata` on the mktdata port role of `top-of-book` on shard"),
+        "{down:?}"
+    );
+
+    // A trade while the route is down: the fan-out takes it and nothing
+    // leaves, so the channel must not read as freshly published.
+    let instrument = adapter.handles()[0];
+    let published_before = last_published(&h.metrics.render(), harness::CHANNEL_ID);
+    h.publisher.upstream_message("trade");
+    h.publisher.arrive(harness::trade(instrument, 1));
     assert_eq!(
-        named,
-        vec!["`mktdata` on the mktdata port role of `top-of-book`"]
+        last_published(&h.metrics.render(), harness::CHANNEL_ID),
+        published_before,
+        "a datagram that did not leave is not a publish"
     );
     assert!(h.publisher.dropped_sinks().is_empty(), "held, not dropped");
     assert_eq!(
@@ -203,12 +218,21 @@ fn a_transmitter_whose_route_goes_and_comes_back_does_not_end_the_process() {
         "nothing reached the wire"
     );
 
-    h.only().mktdata_path_down.set(false);
+    h.only().mktdata_route_down.set(false);
     h.clock.advance(Duration::from_secs(2));
     assert!(h.publisher.tick().is_none());
     assert!(
-        h.publisher.path_down_sinks().is_empty(),
+        h.publisher
+            .route_states()
+            .iter()
+            .all(|sink| sink.state == RouteState::Up),
         "the route is back"
+    );
+    h.publisher.upstream_message("trade");
+    h.publisher.arrive(harness::trade(instrument, 2));
+    assert!(
+        last_published(&h.metrics.render(), harness::CHANNEL_ID) > published_before,
+        "and a trade that leaves is a publish again"
     );
 
     let after = h.only().mktdata.headers();

@@ -80,7 +80,7 @@ pub use policy::{
 };
 pub use reference::ReferenceStream;
 pub use sequencer::Sequencer;
-pub use sink::{DatagramSink, FailureScope, Tee};
+pub use sink::{DatagramSink, FailureScope, RouteState, Tee};
 pub use transmitter::{
-    DatagramSocket, KernelSocket, MulticastTransmitter, OpenError, MAX_PATH_DOWN,
+    DatagramSocket, KernelSocket, MulticastTransmitter, OpenError, MAX_ROUTE_DOWN,
 };

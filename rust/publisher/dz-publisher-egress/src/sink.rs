@@ -124,8 +124,23 @@ struct Member {
     sink: Box<dyn DatagramSink>,
     live: bool,
     failures: u64,
-    /// Its last send found the route down. Cleared by the next send it takes.
-    path_down: bool,
+    /// A send found the route down and none has succeeded since.
+    route_down: bool,
+    /// Dropped while its route was down: the transmitter gave up waiting.
+    gave_up: bool,
+}
+
+/// Where one fan-out member stands with its route. See
+/// [`SinkError::RouteDown`](crate::SinkError::RouteDown).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteState {
+    /// Sending, or dropped for a reason that was not its route.
+    Up,
+    /// Still offered every datagram, and refusing each one until the route
+    /// returns.
+    Down,
+    /// Dropped because its route stayed down past the transmitter's window.
+    GaveUp,
 }
 
 impl Tee {
@@ -150,7 +165,8 @@ impl Tee {
             sink,
             live: true,
             failures: 0,
-            path_down: false,
+            route_down: false,
+            gave_up: false,
         });
     }
 
@@ -172,15 +188,29 @@ impl Tee {
             .map(|m| m.sink.name())
     }
 
-    /// The names of the live members whose route is down: still offered every
-    /// datagram, and refusing each one until the route returns or the
-    /// transmitter gives up on it. See
-    /// [`SinkError::PathDown`](crate::SinkError::PathDown).
-    pub fn path_down(&self) -> impl Iterator<Item = &str> {
+    /// Every member's name and where it stands with its route, in the order
+    /// the members were added, which is what tells two members of one name
+    /// apart.
+    pub fn routes(&self) -> impl Iterator<Item = (&str, RouteState)> {
+        self.members.iter().map(|m| {
+            let state = if m.gave_up {
+                RouteState::GaveUp
+            } else if m.live && m.route_down {
+                RouteState::Down
+            } else {
+                RouteState::Up
+            };
+            (m.sink.name(), state)
+        })
+    }
+
+    /// Whether a live member whose failure darkens the publisher has no
+    /// route: the fan-out still returns `Ok`, and nothing reached the wire.
+    #[must_use]
+    pub fn essential_route_down(&self) -> bool {
         self.members
             .iter()
-            .filter(|m| m.live && m.path_down)
-            .map(|m| m.sink.name())
+            .any(|m| m.live && m.route_down && m.sink.failure_scope() == FailureScope::Process)
     }
 
     /// Failures absorbed, live members and dropped ones together. Counted in
@@ -233,13 +263,19 @@ impl DatagramSink for Tee {
                 continue;
             }
             match member.sink.send(datagram) {
-                Ok(()) => member.path_down = false,
+                Ok(()) => member.route_down = false,
                 Err(error) => {
-                    member.path_down = matches!(error, SinkError::PathDown(_));
+                    // Only a send that reached the route says anything about
+                    // it: a full buffer or an oversized datagram leaves the
+                    // state where it was.
+                    if matches!(error, SinkError::RouteDown(_)) {
+                        member.route_down = true;
+                    }
                     member.failures += 1;
                     self.metrics.egress().error(self.port_role, error.reason());
                     if !error.is_transient() {
                         member.live = false;
+                        member.gave_up = std::mem::take(&mut member.route_down);
                         if member.sink.failure_scope() == FailureScope::Process
                             && self.process_failure.is_none()
                         {

@@ -82,7 +82,7 @@ use dz_publisher_refdata::{Counts, Registry, StateStore};
 use crate::clock::Clock;
 use crate::config::EmittedFeed;
 use crate::guard::{ConsistencyGuard, Exit, IdleGuard, Inconsistency};
-use crate::pipeline::{Arrival, DroppedSink, FeedPipeline, PathDownSink};
+use crate::pipeline::{Arrival, DroppedSink, FeedPipeline, RouteSink};
 use crate::rotation::{schedule_share, SnapshotRotation, WHOLE_SNAPSHOT_CAPACITY};
 
 /// How often the runtime drains the adapter's listings.
@@ -254,18 +254,28 @@ impl ShardFeeds {
         dropped
     }
 
-    /// Every fan-out member of this shard whose route is down. See
-    /// [`FeedPipeline::path_down_sinks`].
+    /// Every fan-out member of this shard and where it stands with its route.
+    /// See [`FeedPipeline::route_states`].
     #[must_use]
-    pub fn path_down_sinks(&self) -> Vec<PathDownSink<'_>> {
-        let mut down: Vec<PathDownSink<'_>> = Vec::new();
+    pub fn route_states(&self) -> Vec<RouteSink<'_>> {
+        let mut states: Vec<RouteSink<'_>> = Vec::new();
         if let Some(pipeline) = self.top_of_book() {
-            down.extend(pipeline.path_down_sinks());
+            states.extend(pipeline.route_states());
         }
         if let Some(pipeline) = self.market_by_price() {
-            down.extend(pipeline.path_down_sinks());
+            states.extend(pipeline.route_states());
         }
-        down
+        states
+    }
+
+    /// Whether a transmitter of this shard, on either feed, has no route.
+    #[must_use]
+    pub fn essential_route_down(&self) -> bool {
+        self.top_of_book()
+            .is_some_and(FeedPipeline::essential_route_down)
+            || self
+                .market_by_price()
+                .is_some_and(FeedPipeline::essential_route_down)
     }
 
     /// Everything this shard's send paths owe a tick, given its reference data.
@@ -464,13 +474,17 @@ impl Feeds {
         self.shards().flat_map(ShardFeeds::dropped_sinks).collect()
     }
 
-    /// Every fan-out member, on any shard, whose route is down. See
-    /// [`FeedPipeline::path_down_sinks`].
+    /// Every fan-out member, on any shard, and where it stands with its route.
+    /// See [`FeedPipeline::route_states`].
     #[must_use]
-    pub fn path_down_sinks(&self) -> Vec<PathDownSink<'_>> {
-        self.shards()
-            .flat_map(ShardFeeds::path_down_sinks)
-            .collect()
+    pub fn route_states(&self) -> Vec<RouteSink<'_>> {
+        self.shards().flat_map(ShardFeeds::route_states).collect()
+    }
+
+    /// Whether any transmitter, on any shard, has no route.
+    #[must_use]
+    pub fn essential_route_down(&self) -> bool {
+        self.shards().any(ShardFeeds::essential_route_down)
     }
 }
 
@@ -1436,14 +1450,14 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
         self.feeds.dropped_sinks()
     }
 
-    /// Every fan-out member whose route is down: still offered every datagram
-    /// and refusing each one, so the numbers they carry are a gap every
-    /// subscriber recovers from. Read between ticks like
-    /// [`Self::dropped_sinks`], and named by the runtime when a member goes
-    /// down and again when it comes back.
+    /// Every fan-out member and where it stands with its route. A member whose
+    /// route is down is still offered every datagram and refuses each one, so
+    /// the numbers it carries are a gap every subscriber recovers from. Read
+    /// between ticks like [`Self::dropped_sinks`], and named by the runtime
+    /// when a member's route goes down and again when it comes back.
     #[must_use]
-    pub fn path_down_sinks(&self) -> Vec<PathDownSink<'_>> {
-        self.feeds.path_down_sinks()
+    pub fn route_states(&self) -> Vec<RouteSink<'_>> {
+        self.feeds.route_states()
     }
 
     /// The reference-data owner, for a diagnostic and for a test.
@@ -1647,9 +1661,15 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
         self.metrics
             .process()
             .set_idle_guard_last_update(unix_seconds);
-        self.metrics
-            .channel()
-            .set_last_published(channel_id, unix_seconds);
+        // A fan-out whose transmitter has no route still returns `Ok`. The
+        // idle guard is fed regardless, so the outage is bounded by
+        // `MAX_ROUTE_DOWN` and not by an `idle_guard` set shorter than it; the
+        // channel's freshness is not, because nothing reached the wire.
+        if !self.feeds.essential_route_down() {
+            self.metrics
+                .channel()
+                .set_last_published(channel_id, unix_seconds);
+        }
     }
 
     /// This payload's arrival, for a message that came from upstream.
@@ -1699,13 +1719,17 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
     /// Report what left a market-by-price send path at the instant it left.
     fn settle_live(&mut self, shard: Option<usize>) {
         let timestamp_kind = self.venue_timestamp_kind;
+        let route_down = self.feeds.essential_route_down();
         let Some(pipeline) = shard.and_then(|shard| self.feeds.market_by_price_on_mut(shard))
         else {
             return;
         };
         let channel_id = pipeline.channel_id();
         for (arrival, sent_unix_ns) in pipeline.sent_arrivals() {
-            observe_arrival_latency(&self.metrics, timestamp_kind, arrival, sent_unix_ns);
+            // Not a latency: the datagram did not leave. See `published`.
+            if !route_down {
+                observe_arrival_latency(&self.metrics, timestamp_kind, arrival, sent_unix_ns);
+            }
         }
         if let Some((sent_mono_ns, sent_unix_ns)) = pipeline.take_live_sent() {
             self.published(channel_id, sent_mono_ns, sent_unix_ns);
@@ -2016,7 +2040,10 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                         });
                         if sent.is_ok() {
                             self.published(channel_id, now_mono, now_unix);
-                            if let Some(arrival) = self.arrival(source_ts_ns, kind) {
+                            let arrival = self
+                                .arrival(source_ts_ns, kind)
+                                .filter(|_| !self.feeds.essential_route_down());
+                            if let Some(arrival) = arrival {
                                 observe_arrival_latency(
                                     &self.metrics,
                                     self.venue_timestamp_kind,

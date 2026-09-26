@@ -202,7 +202,7 @@ pub use config::{
 pub use error::{AdapterInitError, StartupError};
 pub use guard::{ConsistencyGuard, Exit, IdleGuard, Inconsistency, Upstream};
 pub use observer::MetricsObserver;
-pub use pipeline::{DroppedSink, FeedPipeline, PathDownSink, Port, Ports};
+pub use pipeline::{DroppedSink, FeedPipeline, Port, Ports, RouteSink};
 pub use publisher::{
     Feeds, Publisher, Refusals, ShardFeeds, SnapshotError, SnapshotRefusals, Teardown,
     TeardownStep, LISTING_POLL, MAX_LIVE_HOLD,

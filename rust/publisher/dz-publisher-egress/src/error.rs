@@ -39,14 +39,14 @@ pub enum SinkError {
     /// not come back — the interface returning under a different address — is
     /// bounded by [`MulticastTransmitter`](crate::MulticastTransmitter), which
     /// reports it as [`Self::Socket`] once it has lasted
-    /// [`MAX_PATH_DOWN`](crate::transmitter::MAX_PATH_DOWN).
+    /// [`MAX_ROUTE_DOWN`](crate::transmitter::MAX_ROUTE_DOWN).
     #[error("the route to the destination is down: {0}")]
-    PathDown(#[source] io::Error),
+    RouteDown(#[source] io::Error),
     /// The socket refused the datagram for any other reason.
     ///
     /// Treated as **not** transient. A route that stays gone — a tunnel
     /// re-provisioned under a different address, which returns the same error
-    /// forever — ends here too, after [`Self::PathDown`] has been given its
+    /// forever — ends here too, after [`Self::RouteDown`] has been given its
     /// window; recovering from it means re-deriving the source address and
     /// opening a new socket, not retrying this one. See [`Self::is_transient`].
     #[error("send failed: {0}")]
@@ -99,7 +99,7 @@ impl SinkError {
         match self {
             Self::WouldBlock => EgressErrorReason::SendWouldBlock,
             // One label for three variants, deliberately: see `ConsumerAbsent`.
-            Self::Socket(_) | Self::PathDown(_) | Self::ConsumerAbsent(_) => {
+            Self::Socket(_) | Self::RouteDown(_) | Self::ConsumerAbsent(_) => {
                 EgressErrorReason::SocketError
             }
             Self::TooLarge { .. } => EgressErrorReason::MtuExceeded,
@@ -114,7 +114,7 @@ impl SinkError {
     /// has gone for good does not, and a per-datagram syscall that has failed
     /// the same way for an hour is a cost paid to learn nothing. A route that is
     /// coming back is transient for as long as it is given to; see
-    /// [`Self::PathDown`].
+    /// [`Self::RouteDown`].
     ///
     /// A consumer that is not there yet drains too, and that is the second
     /// value here rather than a special case: the thing on the other end of a
@@ -125,7 +125,7 @@ impl SinkError {
     pub const fn is_transient(&self) -> bool {
         matches!(
             self,
-            Self::WouldBlock | Self::PathDown(_) | Self::ConsumerAbsent(_)
+            Self::WouldBlock | Self::RouteDown(_) | Self::ConsumerAbsent(_)
         )
     }
 }

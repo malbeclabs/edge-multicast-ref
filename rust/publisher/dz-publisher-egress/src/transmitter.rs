@@ -22,7 +22,7 @@ use crate::sink::{DatagramSink, FailureScope};
 /// came back under a different address — and so never serves this socket
 /// again — ends the process within a minute rather than leaving it counting
 /// failures forever. The supervisor's restart is what re-derives the address.
-pub const MAX_PATH_DOWN: Duration = Duration::from_secs(60);
+pub const MAX_ROUTE_DOWN: Duration = Duration::from_secs(60);
 
 /// The one socket operation egress needs, behind a trait so the layers above
 /// it are tested with no privileges and no network.
@@ -37,7 +37,7 @@ pub trait DatagramSocket {
     /// # Errors
     ///
     /// [`SinkError::WouldBlock`] for a full send buffer, which must never
-    /// block, [`SinkError::PathDown`] for a route that has gone, and
+    /// block, [`SinkError::RouteDown`] for a route that has gone, and
     /// [`SinkError::Socket`] for anything else.
     fn send(&self, datagram: &[u8]) -> Result<(), SinkError>;
 }
@@ -122,7 +122,7 @@ fn classify(error: io::Error) -> SinkError {
         io::ErrorKind::NetworkUnreachable
         | io::ErrorKind::NetworkDown
         | io::ErrorKind::HostUnreachable
-        | io::ErrorKind::AddrNotAvailable => SinkError::PathDown(error),
+        | io::ErrorKind::AddrNotAvailable => SinkError::RouteDown(error),
         _ => SinkError::Socket(error),
     }
 }
@@ -141,9 +141,9 @@ pub struct MulticastTransmitter<S: DatagramSocket> {
     socket: S,
     endpoint: EgressEndpoint,
     scope: FailureScope,
-    max_path_down: Duration,
-    /// When the current run of [`SinkError::PathDown`] began.
-    path_down_since: Option<Instant>,
+    max_route_down: Duration,
+    /// When the current run of [`SinkError::RouteDown`] began.
+    route_down_since: Option<Instant>,
 }
 
 impl<S: DatagramSocket> MulticastTransmitter<S> {
@@ -163,15 +163,15 @@ impl<S: DatagramSocket> MulticastTransmitter<S> {
             socket,
             endpoint,
             scope,
-            max_path_down: MAX_PATH_DOWN,
-            path_down_since: None,
+            max_route_down: MAX_ROUTE_DOWN,
+            route_down_since: None,
         }
     }
 
-    /// Replace [`MAX_PATH_DOWN`], for a test that cannot wait a minute.
+    /// Replace [`MAX_ROUTE_DOWN`], for a test that cannot wait a minute.
     #[must_use]
-    pub const fn with_max_path_down(mut self, max_path_down: Duration) -> Self {
-        self.max_path_down = max_path_down;
+    pub const fn with_max_route_down(mut self, max_route_down: Duration) -> Self {
+        self.max_route_down = max_route_down;
         self
     }
 
@@ -236,16 +236,16 @@ impl<S: DatagramSocket> DatagramSink for MulticastTransmitter<S> {
         }
         match self.socket.send(datagram) {
             Ok(()) => {
-                self.path_down_since = None;
+                self.route_down_since = None;
                 Ok(())
             }
-            Err(SinkError::PathDown(error)) => {
+            Err(SinkError::RouteDown(error)) => {
                 let now = Instant::now();
-                let since = *self.path_down_since.get_or_insert(now);
-                if now.duration_since(since) >= self.max_path_down {
+                let since = *self.route_down_since.get_or_insert(now);
+                if now.duration_since(since) >= self.max_route_down {
                     Err(SinkError::Socket(error))
                 } else {
-                    Err(SinkError::PathDown(error))
+                    Err(SinkError::RouteDown(error))
                 }
             }
             Err(error) => Err(error),
@@ -279,11 +279,11 @@ mod tests {
     /// The errno the measurement found, and the kinds beside it, are a route
     /// that may come back; anything else about the socket is not.
     #[test]
-    fn a_route_error_is_a_path_down_and_nothing_else_is() {
+    fn a_route_error_is_a_route_down_and_nothing_else_is() {
         for errno in [101, 100, 113, 99] {
             // ENETUNREACH, ENETDOWN, EHOSTUNREACH, EADDRNOTAVAIL on Linux.
             let error = classify(io::Error::from_raw_os_error(errno));
-            assert!(matches!(error, SinkError::PathDown(_)), "{errno}: {error}");
+            assert!(matches!(error, SinkError::RouteDown(_)), "{errno}: {error}");
             assert!(error.is_transient());
         }
         let refused = classify(io::Error::from_raw_os_error(1));
