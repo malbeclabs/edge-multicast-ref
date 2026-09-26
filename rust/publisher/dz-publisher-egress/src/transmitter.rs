@@ -142,8 +142,9 @@ pub struct MulticastTransmitter<S: DatagramSocket> {
     endpoint: EgressEndpoint,
     scope: FailureScope,
     max_route_down: Duration,
-    /// When the current run of [`SinkError::RouteDown`] began.
-    route_down_since: Option<Instant>,
+    /// When the current run of [`SinkError::RouteDown`] began, and when its
+    /// latest refusal was.
+    route_down: Option<(Instant, Instant)>,
 }
 
 impl<S: DatagramSocket> MulticastTransmitter<S> {
@@ -164,7 +165,7 @@ impl<S: DatagramSocket> MulticastTransmitter<S> {
             endpoint,
             scope,
             max_route_down: MAX_ROUTE_DOWN,
-            route_down_since: None,
+            route_down: None,
         }
     }
 
@@ -236,12 +237,19 @@ impl<S: DatagramSocket> DatagramSink for MulticastTransmitter<S> {
         }
         match self.socket.send(datagram) {
             Ok(()) => {
-                self.route_down_since = None;
+                self.route_down = None;
                 Ok(())
             }
             Err(SinkError::RouteDown(error)) => {
                 let now = Instant::now();
-                let since = *self.route_down_since.get_or_insert(now);
+                // A run whose latest refusal is older than the window is over,
+                // even with no send in between to say so: a port that sends
+                // rarely must not carry one outage's clock into the next.
+                let since = match self.route_down {
+                    Some((since, last)) if now.duration_since(last) < self.max_route_down => since,
+                    _ => now,
+                };
+                self.route_down = Some((since, now));
                 if now.duration_since(since) >= self.max_route_down {
                     Err(SinkError::Socket(error))
                 } else {

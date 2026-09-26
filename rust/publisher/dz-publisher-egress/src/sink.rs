@@ -76,6 +76,16 @@ pub trait DatagramSink {
     /// worth trying again.
     fn send(&mut self, datagram: &[u8]) -> Result<(), SinkError>;
 
+    /// Whether the last datagram this sink took, with `Ok`, left for the wire.
+    ///
+    /// `true` for a sink that is its own destination. A [`Tee`] answers for its
+    /// essential members: it returns `Ok` while a transmitter's route is down,
+    /// and a series that marks a datagram reaching the wire must not advance
+    /// on that.
+    fn reached_wire(&self) -> bool {
+        true
+    }
+
     /// What a failure of this sink costs. No default: a sink whose scope
     /// nobody stated would be given one by whichever answer this crate
     /// happened to pick, and both answers are wrong for some sink.
@@ -286,6 +296,10 @@ impl DatagramSink for Tee {
             }
         }
         Ok(())
+    }
+
+    fn reached_wire(&self) -> bool {
+        !self.essential_route_down()
     }
 
     /// The widest scope any member declares.

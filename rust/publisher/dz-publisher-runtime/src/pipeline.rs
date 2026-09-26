@@ -672,15 +672,12 @@ impl<F: EmittedFeed> FeedPipeline<F> {
         states
     }
 
-    /// Whether a transmitter of this feed, on any port role, has no route.
+    /// Whether this feed's mktdata transmitter has no route: the one fan-out
+    /// whose sends say whether this channel is publishing. Not the other
+    /// port roles, whose flag can go stale on a port that sends rarely.
     #[must_use]
-    pub fn essential_route_down(&self) -> bool {
+    pub fn mktdata_route_down(&self) -> bool {
         self.mktdata.sink().essential_route_down()
-            || self.refdata.sink().essential_route_down()
-            || self
-                .snapshot
-                .as_ref()
-                .is_some_and(|egress| egress.sink().essential_route_down())
     }
 
     /// Send the mktdata datagram under construction, if any.

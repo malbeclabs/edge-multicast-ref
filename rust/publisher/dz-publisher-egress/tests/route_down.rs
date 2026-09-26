@@ -118,16 +118,38 @@ fn within_the_window_a_route_down_is_transient_on_every_send() {
 
 #[test]
 fn a_route_that_stays_down_past_a_real_window_gives_up() {
-    // The window is timed, not counted: refused inside it, then refused again
-    // once it has passed, and only the second refusal is a socket failure.
+    // The window is timed, not counted: refused every few milliseconds, and
+    // only the refusal once it has passed is a socket failure.
+    let socket = FakeSocket::new();
+    socket.always(Verdict::RouteDown);
+    let mut transmitter = transmitter(&socket).with_max_route_down(Duration::from_millis(50));
+
+    let started = std::time::Instant::now();
+    let mut last = transmitter.send(b"a").expect_err("down");
+    while started.elapsed() < Duration::from_millis(80) {
+        assert!(last.is_transient(), "gave up inside the window: {last}");
+        std::thread::sleep(Duration::from_millis(5));
+        last = transmitter.send(b"x").expect_err("still down");
+        if matches!(last, SinkError::Socket(_)) {
+            break;
+        }
+    }
+    assert!(matches!(last, SinkError::Socket(_)), "{last}");
+}
+
+#[test]
+fn a_refusal_long_after_the_last_one_starts_a_new_window() {
+    // A port that sends rarely: refused once, silent past the window, and
+    // refused again in a later outage. That is a new outage, not the old one
+    // run long, and it must not end the process on its first refusal.
     let socket = FakeSocket::new();
     socket.always(Verdict::RouteDown);
     let mut transmitter = transmitter(&socket).with_max_route_down(Duration::from_millis(20));
 
     assert!(transmitter.send(b"a").expect_err("down").is_transient());
     std::thread::sleep(Duration::from_millis(40));
-    let error = transmitter.send(b"b").expect_err("still down");
-    assert!(matches!(error, SinkError::Socket(_)), "{error}");
+    let error = transmitter.send(b"b").expect_err("down again");
+    assert!(matches!(error, SinkError::RouteDown(_)), "{error}");
 }
 
 #[test]
@@ -189,4 +211,18 @@ fn only_an_essential_member_without_a_route_is_an_essential_route_down() {
         vec![("mktdata", RouteState::Up), ("mktdata", RouteState::Down)],
         "two members of one name, told apart by position"
     );
+}
+
+#[test]
+fn a_fan_out_whose_transmitter_has_no_route_did_not_reach_the_wire() {
+    let metrics = metrics(&[PortRole::Mktdata], &[7]);
+    let sink = FakeSink::essential("mktdata");
+    sink.script([Verdict::RouteDown]);
+    let mut fan_out = Tee::new(PortRole::Mktdata, Arc::clone(&metrics));
+    fan_out.add(sink.boxed());
+
+    fan_out.send(b"a").expect("absorbed");
+    assert!(!fan_out.reached_wire());
+    fan_out.send(b"b").expect("sent");
+    assert!(fan_out.reached_wire());
 }
