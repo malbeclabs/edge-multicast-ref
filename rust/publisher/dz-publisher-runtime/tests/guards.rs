@@ -166,6 +166,64 @@ fn a_dark_transmitter_fires_the_consistency_guard() {
 }
 
 #[test]
+fn a_transmitter_whose_route_goes_and_comes_back_does_not_end_the_process() {
+    // A client upgrade restarts the tunnel daemon and the interface is gone for
+    // a few seconds. The socket is bound to an address that comes back on the
+    // same interface, so it sends again once the route returns, and ending the
+    // process over it would cost every subscriber a new era for nothing.
+    let mut h = guarded();
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    assert!(h.publisher.tick().is_none());
+    let before = h.only().mktdata.headers();
+
+    h.only().mktdata_path_down.set(true);
+    for _ in 0..3 {
+        // Each tick is due a heartbeat, which is the send that finds the route.
+        h.clock.advance(Duration::from_secs(2));
+        assert!(
+            h.publisher.tick().is_none(),
+            "a route that is down is not a dark transmitter"
+        );
+    }
+    let named: Vec<String> = h
+        .publisher
+        .path_down_sinks()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        named,
+        vec!["`mktdata` on the mktdata port role of `top-of-book`"]
+    );
+    assert!(h.publisher.dropped_sinks().is_empty(), "held, not dropped");
+    assert_eq!(
+        h.only().mktdata.headers(),
+        before,
+        "nothing reached the wire"
+    );
+
+    h.only().mktdata_path_down.set(false);
+    h.clock.advance(Duration::from_secs(2));
+    assert!(h.publisher.tick().is_none());
+    assert!(
+        h.publisher.path_down_sinks().is_empty(),
+        "the route is back"
+    );
+
+    let after = h.only().mktdata.headers();
+    assert!(after.len() > before.len(), "the same socket sends again");
+    let (last_before, era) = *before.last().expect("a heartbeat before the outage");
+    let (first_after, era_after) = after[before.len()];
+    assert_eq!(era_after, era, "the same era: nothing restarted");
+    assert!(
+        first_after > last_before + 1,
+        "the numbers spent while the route was down are a gap subscribers recover \
+         from: {last_before} then {first_after}"
+    );
+}
+
+#[test]
 fn the_consistency_guard_is_reported_ahead_of_the_idle_guard() {
     // Both are true: the transmitter is gone, and therefore nothing is reaching
     // the wire. Reporting the idle guard would send an operator to look at the

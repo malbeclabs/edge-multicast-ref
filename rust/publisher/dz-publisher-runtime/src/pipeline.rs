@@ -113,6 +113,36 @@ impl std::fmt::Display for DroppedSink<'_> {
     }
 }
 
+/// A fan-out member whose route is down: still offered every datagram, and
+/// refusing each one until the route returns.
+///
+/// Separate from [`DroppedSink`] because the operator reads the two
+/// oppositely. A dropped member is gone for the life of the process; one whose
+/// route is down is expected back, and the line saying it is back is the one
+/// that matters. See
+/// [`SinkError::PathDown`](dz_publisher_egress::SinkError::PathDown).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathDownSink<'a> {
+    /// The feed whose fan-out it is in.
+    pub spec: FeedSpec,
+    /// The port role.
+    pub port_role: PortRole,
+    /// [`DatagramSink::name`](dz_publisher_egress::DatagramSink::name).
+    pub name: &'a str,
+}
+
+impl std::fmt::Display for PathDownSink<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "`{}` on the {} port role of `{}`",
+            self.name,
+            self.port_role.as_str(),
+            self.spec.as_str()
+        )
+    }
+}
+
 /// The port roles one feed operates.
 pub struct Ports {
     pub mktdata: Port,
@@ -606,6 +636,29 @@ impl<F: EmittedFeed> FeedPipeline<F> {
             }
         }
         dropped
+    }
+
+    /// Every fan-out member of this feed whose route is down. See
+    /// [`PathDownSink`].
+    #[must_use]
+    pub fn path_down_sinks(&self) -> Vec<PathDownSink<'_>> {
+        let mut down = Vec::new();
+        let roles = [
+            (PortRole::Mktdata, Some(&self.mktdata)),
+            (PortRole::Refdata, Some(&self.refdata)),
+            (PortRole::Snapshot, self.snapshot.as_ref()),
+        ];
+        for (port_role, egress) in roles {
+            let Some(egress) = egress else { continue };
+            for name in egress.sink().path_down() {
+                down.push(PathDownSink {
+                    spec: F::SPEC,
+                    port_role,
+                    name,
+                });
+            }
+        }
+        down
     }
 
     /// Send the mktdata datagram under construction, if any.

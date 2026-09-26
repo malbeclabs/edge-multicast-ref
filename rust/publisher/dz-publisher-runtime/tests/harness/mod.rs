@@ -182,6 +182,7 @@ pub struct RecordingSink {
     scope: FailureScope,
     recorder: Recorder,
     refusing: Rc<Cell<bool>>,
+    path_down: Rc<Cell<bool>>,
 }
 
 impl RecordingSink {
@@ -192,6 +193,7 @@ impl RecordingSink {
             scope,
             recorder: Recorder::new(magic),
             refusing: Rc::new(Cell::new(false)),
+            path_down: Rc::new(Cell::new(false)),
         }
     }
 
@@ -206,6 +208,13 @@ impl RecordingSink {
     pub fn refusal_switch(&self) -> Rc<Cell<bool>> {
         Rc::clone(&self.refusing)
     }
+
+    /// A handle that makes every later send find the route down, which is what
+    /// a socket does while its tunnel interface is gone.
+    #[must_use]
+    pub fn path_down_switch(&self) -> Rc<Cell<bool>> {
+        Rc::clone(&self.path_down)
+    }
 }
 
 impl DatagramSink for RecordingSink {
@@ -219,6 +228,11 @@ impl DatagramSink for RecordingSink {
             // retrying it - which is what makes the process-scope failure
             // observable to the consistency guard.
             return Err(SinkError::NotRegistered);
+        }
+        if self.path_down.get() {
+            return Err(SinkError::PathDown(std::io::Error::from(
+                std::io::ErrorKind::NetworkUnreachable,
+            )));
         }
         self.recorder.datagrams.borrow_mut().push(datagram.to_vec());
         Ok(())
@@ -278,6 +292,10 @@ pub struct FeedRecorders {
     /// Depth feeds only.
     pub snapshot: Option<Recorder>,
     pub mktdata_refusal: Rc<Cell<bool>>,
+    /// Makes the mktdata transmitter find its route down, as while the tunnel
+    /// interface is gone. Transient, so the publisher must hold on rather than
+    /// exit.
+    pub mktdata_path_down: Rc<Cell<bool>>,
     /// What the mktdata role's **reference stream** recorded: the second member
     /// of that fan-out, at `FailureScope::Channel`, as `[adapter.tee]` adds it.
     pub reference: Recorder,
@@ -516,6 +534,7 @@ pub fn ports(feed: &Feed, metrics: &Arc<PublisherMetrics>, magic: u16) -> (Ports
         let sink = RecordingSink::new(name, FailureScope::Process, magic);
         let recorder = sink.recorder();
         let refusal = sink.refusal_switch();
+        let path_down = sink.path_down_switch();
         let reference = RecordingSink::new(reference_name, FailureScope::Channel, magic);
         let reference_recorder = reference.recorder();
         let reference_refusal = reference.refusal_switch();
@@ -527,19 +546,22 @@ pub fn ports(feed: &Feed, metrics: &Arc<PublisherMetrics>, magic: u16) -> (Ports
                 endpoint: EgressEndpoint::new(role, SOURCE, port),
                 sink: tee,
             },
-            (recorder, refusal),
+            (recorder, refusal, path_down),
             (reference_recorder, reference_refusal),
         )
     };
 
-    let (mktdata, (mktdata_recorder, mktdata_refusal), (reference_recorder, reference_refusal)) =
-        open(
-            "mktdata",
-            "mktdata-reference",
-            PortRole::Mktdata,
-            feed.mktdata_port,
-        );
-    let (refdata, (refdata_recorder, _), (_, refdata_reference_refusal)) = open(
+    let (
+        mktdata,
+        (mktdata_recorder, mktdata_refusal, mktdata_path_down),
+        (reference_recorder, reference_refusal),
+    ) = open(
+        "mktdata",
+        "mktdata-reference",
+        PortRole::Mktdata,
+        feed.mktdata_port,
+    );
+    let (refdata, (refdata_recorder, _, _), (_, refdata_reference_refusal)) = open(
         "refdata",
         "refdata-reference",
         PortRole::Refdata,
@@ -550,7 +572,7 @@ pub fn ports(feed: &Feed, metrics: &Arc<PublisherMetrics>, magic: u16) -> (Ports
         .map(|port| open("snapshot", "snapshot-reference", PortRole::Snapshot, port));
     let snapshot_recorder = snapshot
         .as_ref()
-        .map(|(_, (recorder, _), _)| recorder.clone());
+        .map(|(_, (recorder, _, _), _)| recorder.clone());
     let snapshot_reference_refusal = snapshot
         .as_ref()
         .map(|(_, _, (_, refusal))| Rc::clone(refusal));
@@ -566,6 +588,7 @@ pub fn ports(feed: &Feed, metrics: &Arc<PublisherMetrics>, magic: u16) -> (Ports
             refdata: refdata_recorder,
             snapshot: snapshot_recorder,
             mktdata_refusal,
+            mktdata_path_down,
             reference: reference_recorder,
             reference_refusal,
             refdata_reference_refusal,

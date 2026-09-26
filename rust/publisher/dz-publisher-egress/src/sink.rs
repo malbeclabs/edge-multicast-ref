@@ -124,6 +124,8 @@ struct Member {
     sink: Box<dyn DatagramSink>,
     live: bool,
     failures: u64,
+    /// Its last send found the route down. Cleared by the next send it takes.
+    path_down: bool,
 }
 
 impl Tee {
@@ -148,6 +150,7 @@ impl Tee {
             sink,
             live: true,
             failures: 0,
+            path_down: false,
         });
     }
 
@@ -166,6 +169,17 @@ impl Tee {
         self.members
             .iter()
             .filter(|m| !m.live)
+            .map(|m| m.sink.name())
+    }
+
+    /// The names of the live members whose route is down: still offered every
+    /// datagram, and refusing each one until the route returns or the
+    /// transmitter gives up on it. See
+    /// [`SinkError::PathDown`](crate::SinkError::PathDown).
+    pub fn path_down(&self) -> impl Iterator<Item = &str> {
+        self.members
+            .iter()
+            .filter(|m| m.live && m.path_down)
             .map(|m| m.sink.name())
     }
 
@@ -219,8 +233,9 @@ impl DatagramSink for Tee {
                 continue;
             }
             match member.sink.send(datagram) {
-                Ok(()) => {}
+                Ok(()) => member.path_down = false,
                 Err(error) => {
+                    member.path_down = matches!(error, SinkError::PathDown(_));
                     member.failures += 1;
                     self.metrics.egress().error(self.port_role, error.reason());
                     if !error.is_transient() {

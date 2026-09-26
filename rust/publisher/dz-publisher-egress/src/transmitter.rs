@@ -4,6 +4,7 @@
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::num::NonZeroU8;
+use std::time::{Duration, Instant};
 
 use dz_edge_core::{PortRole, MAX_DATAGRAM_SIZE};
 
@@ -11,6 +12,17 @@ use crate::error::SinkError;
 use crate::instance::EgressEndpoint;
 use crate::policy::{EgressPolicy, PolicyError, RouteLookup};
 use crate::sink::{DatagramSink, FailureScope};
+
+/// How long a transmitter's route may stay down before its failure stops
+/// being transient.
+///
+/// The same span as the runtime's default `idle_guard`, and for the same
+/// reason: long enough for a tunnel daemon restart, which took five seconds on
+/// the host this was measured on, and short enough that an interface which
+/// came back under a different address — and so never serves this socket
+/// again — ends the process within a minute rather than leaving it counting
+/// failures forever. The supervisor's restart is what re-derives the address.
+pub const MAX_PATH_DOWN: Duration = Duration::from_secs(60);
 
 /// The one socket operation egress needs, behind a trait so the layers above
 /// it are tested with no privileges and no network.
@@ -25,7 +37,8 @@ pub trait DatagramSocket {
     /// # Errors
     ///
     /// [`SinkError::WouldBlock`] for a full send buffer, which must never
-    /// block, and [`SinkError::Socket`] for anything else.
+    /// block, [`SinkError::PathDown`] for a route that has gone, and
+    /// [`SinkError::Socket`] for anything else.
     fn send(&self, datagram: &[u8]) -> Result<(), SinkError>;
 }
 
@@ -91,9 +104,26 @@ impl DatagramSocket for KernelSocket {
                 "sent {sent} of {} bytes",
                 datagram.len()
             )))),
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Err(SinkError::WouldBlock),
-            Err(error) => Err(SinkError::Socket(error)),
+            Err(error) => Err(classify(error)),
         }
+    }
+}
+
+/// What a failed send on a [`KernelSocket`] means.
+///
+/// Measured in a network namespace against a socket bound as this crate binds
+/// one: the interface deleted gives `ENETUNREACH` on every send, the interface
+/// restored under the same address makes the same socket send again, and
+/// restored under a different address gives `ENETUNREACH` for good. The other
+/// three kinds are what the same event can surface as on another route shape.
+fn classify(error: io::Error) -> SinkError {
+    match error.kind() {
+        io::ErrorKind::WouldBlock => SinkError::WouldBlock,
+        io::ErrorKind::NetworkUnreachable
+        | io::ErrorKind::NetworkDown
+        | io::ErrorKind::HostUnreachable
+        | io::ErrorKind::AddrNotAvailable => SinkError::PathDown(error),
+        _ => SinkError::Socket(error),
     }
 }
 
@@ -111,6 +141,9 @@ pub struct MulticastTransmitter<S: DatagramSocket> {
     socket: S,
     endpoint: EgressEndpoint,
     scope: FailureScope,
+    max_path_down: Duration,
+    /// When the current run of [`SinkError::PathDown`] began.
+    path_down_since: Option<Instant>,
 }
 
 impl<S: DatagramSocket> MulticastTransmitter<S> {
@@ -130,7 +163,16 @@ impl<S: DatagramSocket> MulticastTransmitter<S> {
             socket,
             endpoint,
             scope,
+            max_path_down: MAX_PATH_DOWN,
+            path_down_since: None,
         }
+    }
+
+    /// Replace [`MAX_PATH_DOWN`], for a test that cannot wait a minute.
+    #[must_use]
+    pub const fn with_max_path_down(mut self, max_path_down: Duration) -> Self {
+        self.max_path_down = max_path_down;
+        self
     }
 
     /// The identity this transmitter sends under, to hand to the composer so
@@ -192,7 +234,22 @@ impl<S: DatagramSocket> DatagramSink for MulticastTransmitter<S> {
                 len: datagram.len(),
             });
         }
-        self.socket.send(datagram)
+        match self.socket.send(datagram) {
+            Ok(()) => {
+                self.path_down_since = None;
+                Ok(())
+            }
+            Err(SinkError::PathDown(error)) => {
+                let now = Instant::now();
+                let since = *self.path_down_since.get_or_insert(now);
+                if now.duration_since(since) >= self.max_path_down {
+                    Err(SinkError::Socket(error))
+                } else {
+                    Err(SinkError::PathDown(error))
+                }
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn failure_scope(&self) -> FailureScope {
@@ -218,6 +275,24 @@ pub enum OpenError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The errno the measurement found, and the kinds beside it, are a route
+    /// that may come back; anything else about the socket is not.
+    #[test]
+    fn a_route_error_is_a_path_down_and_nothing_else_is() {
+        for errno in [101, 100, 113, 99] {
+            // ENETUNREACH, ENETDOWN, EHOSTUNREACH, EADDRNOTAVAIL on Linux.
+            let error = classify(io::Error::from_raw_os_error(errno));
+            assert!(matches!(error, SinkError::PathDown(_)), "{errno}: {error}");
+            assert!(error.is_transient());
+        }
+        let refused = classify(io::Error::from_raw_os_error(1));
+        assert!(matches!(refused, SinkError::Socket(_)), "EPERM: {refused}");
+        assert!(matches!(
+            classify(io::Error::from(io::ErrorKind::WouldBlock)),
+            SinkError::WouldBlock
+        ));
+    }
 
     use crate::policy::DEFAULT_TTL;
 

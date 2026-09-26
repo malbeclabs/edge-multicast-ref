@@ -58,7 +58,7 @@ use crate::config::{Config, Feed, FeedSpec, ShardName, Source, SourceRole};
 use crate::error::StartupError;
 use crate::guard::{Exit, Inconsistency};
 use crate::observer::MetricsObserver;
-use crate::pipeline::{FeedPipeline, Port, Ports};
+use crate::pipeline::{FeedPipeline, PathDownSink, Port, Ports};
 use crate::publisher::{Feeds, Publisher, ShardFeeds, SnapshotError};
 use crate::{AdapterContext, AdapterRegistry};
 
@@ -1229,6 +1229,10 @@ async fn tick_loop<S: StateStore, K: Clock + Clone>(
     // again: the drop is permanent by construction, so a line per tick would be
     // a line per tick forever. The exit report names the whole set again.
     let mut named_dropped: Vec<String> = Vec::new();
+    // A member whose route is down is named when it goes down and again when
+    // it comes back, and not in between: it refuses every datagram while it is
+    // down, so anything per datagram or per tick is noise.
+    let mut named_path_down: Vec<String> = Vec::new();
     loop {
         clock.sleep(TICK).await;
         // One synchronous critical section, and nothing awaited inside it. See
@@ -1305,6 +1309,40 @@ async fn tick_loop<S: StateStore, K: Clock + Clone>(
                     named_dropped.push(name);
                 }
             }
+            let path_down: Vec<String> = publisher
+                .path_down_sinks()
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+            for name in &path_down {
+                if !named_path_down.contains(name) {
+                    eprintln!(
+                        "dz-publisher-runtime: the route is down for {name}; holding its socket \
+                         for up to {:?} for the route to return",
+                        dz_publisher_egress::MAX_PATH_DOWN
+                    );
+                }
+            }
+            // A member that left the set because the transmitter gave up on it
+            // is dropped, not back; the line above already named it.
+            let given_up: Vec<String> = publisher
+                .dropped_sinks()
+                .iter()
+                .map(|d| {
+                    PathDownSink {
+                        spec: d.spec,
+                        port_role: d.port_role,
+                        name: d.name,
+                    }
+                    .to_string()
+                })
+                .collect();
+            for name in &named_path_down {
+                if !path_down.contains(name) && !given_up.contains(name) {
+                    eprintln!("dz-publisher-runtime: the route is back for {name}");
+                }
+            }
+            named_path_down = path_down;
             let exit = publisher.tick();
             // The tick that just ran counted whether the configured cycles can
             // be met. On the decade schedule, because a document that asks for

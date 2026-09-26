@@ -82,7 +82,7 @@ use dz_publisher_refdata::{Counts, Registry, StateStore};
 use crate::clock::Clock;
 use crate::config::EmittedFeed;
 use crate::guard::{ConsistencyGuard, Exit, IdleGuard, Inconsistency};
-use crate::pipeline::{Arrival, DroppedSink, FeedPipeline};
+use crate::pipeline::{Arrival, DroppedSink, FeedPipeline, PathDownSink};
 use crate::rotation::{schedule_share, SnapshotRotation, WHOLE_SNAPSHOT_CAPACITY};
 
 /// How often the runtime drains the adapter's listings.
@@ -252,6 +252,20 @@ impl ShardFeeds {
             dropped.extend(pipeline.dropped_sinks());
         }
         dropped
+    }
+
+    /// Every fan-out member of this shard whose route is down. See
+    /// [`FeedPipeline::path_down_sinks`].
+    #[must_use]
+    pub fn path_down_sinks(&self) -> Vec<PathDownSink<'_>> {
+        let mut down: Vec<PathDownSink<'_>> = Vec::new();
+        if let Some(pipeline) = self.top_of_book() {
+            down.extend(pipeline.path_down_sinks());
+        }
+        if let Some(pipeline) = self.market_by_price() {
+            down.extend(pipeline.path_down_sinks());
+        }
+        down
     }
 
     /// Everything this shard's send paths owe a tick, given its reference data.
@@ -448,6 +462,15 @@ impl Feeds {
     #[must_use]
     pub fn dropped_sinks(&self) -> Vec<DroppedSink<'_>> {
         self.shards().flat_map(ShardFeeds::dropped_sinks).collect()
+    }
+
+    /// Every fan-out member, on any shard, whose route is down. See
+    /// [`FeedPipeline::path_down_sinks`].
+    #[must_use]
+    pub fn path_down_sinks(&self) -> Vec<PathDownSink<'_>> {
+        self.shards()
+            .flat_map(ShardFeeds::path_down_sinks)
+            .collect()
     }
 }
 
@@ -1411,6 +1434,16 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
     #[must_use]
     pub fn dropped_sinks(&self) -> Vec<DroppedSink<'_>> {
         self.feeds.dropped_sinks()
+    }
+
+    /// Every fan-out member whose route is down: still offered every datagram
+    /// and refusing each one, so the numbers they carry are a gap every
+    /// subscriber recovers from. Read between ticks like
+    /// [`Self::dropped_sinks`], and named by the runtime when a member goes
+    /// down and again when it comes back.
+    #[must_use]
+    pub fn path_down_sinks(&self) -> Vec<PathDownSink<'_>> {
+        self.feeds.path_down_sinks()
     }
 
     /// The reference-data owner, for a diagnostic and for a test.
