@@ -47,7 +47,7 @@ pub enum SinkError {
     /// Treated as **not** transient. A route that stays gone — a tunnel
     /// re-provisioned under a different address, which returns the same error
     /// forever — ends here too, after [`Self::RouteDown`] has been given its
-    /// window; recovering from it means re-deriving the source address and
+    /// window; recovering from it means re-deriving the source IP address and
     /// opening a new socket, not retrying this one. See [`Self::is_transient`].
     #[error("send failed: {0}")]
     Socket(#[from] io::Error),
