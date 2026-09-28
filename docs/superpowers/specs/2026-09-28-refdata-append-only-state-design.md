@@ -18,14 +18,14 @@ Two things are wrong, and they have separate fixes:
 The record stays one file, `instruments.state`, and becomes a snapshot followed by appended lines.
 
 ```
-dz-refdata-state 2 <source_id> <next_id>
+dz-refdata-state 2 <source_id> <next_id> <snapshot entries>
 <instrument_id> <symbol, 128 hex digits>
 <instrument_id> <symbol, 128 hex digits> <unix seconds>
 ...
 <instrument_id> <symbol, 128 hex digits>
 ```
 
-The **snapshot** is the header and the entries written with it. The **appended lines** follow it. Every entry line uses one grammar:
+The **snapshot** is the header and as many entries as the header counts. The **appended lines** follow it. The count is what tells them apart, since a restating line names an ID already below `next_id`, just as a snapshot entry does. Every entry line uses one grammar:
 
 - Two fields: this `Instrument ID` is this `Symbol`, and the instrument was published when the line was written.
 - Three fields (snapshot only): this `Instrument ID` is this `Symbol`, the instrument was not published when the snapshot was written, and it was last published at that Unix second.
@@ -38,7 +38,7 @@ An appended line either **mints**, meaning its `Instrument ID` equals the runnin
 
 | Event | Write |
 |---|---|
-| A symbol never minted | One minting line, appended and flushed before the instrument is admitted. |
+| A symbol never minted | One minting line, appended and flushed before the instrument is admitted. The first mint a directory ever sees writes a snapshot instead, because a line has nothing to be appended to until one exists. |
 | A relisting of a symbol the record holds with a timestamp | One restating line, appended and flushed before admission. |
 | A relisting of a symbol the record holds as published | Nothing. |
 | A delisting | Nothing. The time is held in memory until the next compaction. |
@@ -56,13 +56,15 @@ A group would save flushes, fourteen per window becoming one, but `ListingSink::
 
 Compaction writes a fresh snapshot of every retained entry, with the atomic pending-file-and-rename that is used for every write now. It runs:
 
-- **At open, every time.** This drops a torn final line, turns a version-1 record into version 2, and applies the horizon to entries that expired while the publisher was down.
+- **At open, when the record needs it:** a torn final line, which the next append would otherwise run on from; a version-1 record, which has no entry count to append after; an entry the horizon forgot while the publisher was down, which the record must not go on holding, since a later mint of the same symbol would then appear in it twice; or appended lines past the threshold. A record that needs none of these is not written at open.
 - **While running, when the appended lines reach the snapshot's size**, and never below 1,024 lines. It runs after the append that crosses the threshold. That mint is already durable, so a failed compaction faults the registry without refusing the admission that set it off.
 
-The threshold is what makes the cost constant. Each compaction rewrites at most as many lines as were appended since the last one, so a mint pays for itself and for at most one rewritten line. Compaction runs on the tick like every other write. Its size is set by what is retained, which is why the horizon exists.
+The threshold is what makes the cost constant. A snapshot holds at most the last one's entries plus the lines appended since, so it rewrites at most two entries for each line appended. Compaction runs on the tick like every other write. Its size is set by what is retained, which is why the horizon exists.
 
 | Case | Snapshot | Appended between compactions |
 |---|---|---|
+A snapshot writes an entry as published when it is published. While seeding, it also does so when the record already holds the entry as published and the venue has not offered it yet: a seed that has not finished has not said the instrument is gone. Every other entry is written with the second it was last published.
+
 | 1,344 mints a day, horizon `168h` | ~9,400 entries, ~1.3 MB | ~9,400 lines, about a week |
 | 1,344 mints a day, no horizon, after a year | ~490,000 entries, ~67 MB | ~490,000 lines, about a year |
 
@@ -70,7 +72,7 @@ Without a horizon a mint is still constant and the file stays below twice the hi
 
 ## Forgetting delisted instruments
 
-`[refdata] forget_delisted_after` is an optional duration. When it is set, compaction drops every entry that is not published and was last published at least that long ago. When it is absent, every entry is retained for good. A value of zero is refused at load.
+`[refdata] forget_delisted_after` is an optional duration. When it is set, compaction drops every entry that is not published and was last published at least that long ago. When it is absent, every entry is retained for good. Anything under a second is refused at load, because the record counts whole seconds and a horizon of zero forgets an instrument the moment it is delisted.
 
 ```toml
 [refdata]

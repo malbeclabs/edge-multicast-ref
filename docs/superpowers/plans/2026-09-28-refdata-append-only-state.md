@@ -16,14 +16,14 @@ Breaks [the design](../specs/2026-09-28-refdata-append-only-state-design.md) int
 
 ### 1. The record: version 2, appended lines, and a torn tail
 
-- [ ] `FORMAT_VERSION` becomes 2, and `decode` also accepts 1.
-- [ ] `Entry` gains `delisted_at: Option<u64>`, the Unix second it was last published, for a snapshot entry that was not published when written.
-- [ ] `decode` reads the appended lines under the design's two rules, mint and restate, and returns the running `next_id`. It refuses a skipped or reused ID, a known ID with a different `Symbol`, and a timestamp on an appended line, each as its own `RecordError`.
-- [ ] `decode` drops a final line with no newline, and reports that it did, so the registry can say so.
-- [ ] `encode` writes a snapshot; `encode_line` writes one appended line.
-- [ ] The `StateRecord` doc comment on `next_id` states the rule as it now stands: entries are removed, so `next_id` is the only thing standing between a retired ID and a new instrument.
+- [x] `FORMAT_VERSION` becomes 2, and `decode` also accepts 1.
+- [x] `Entry` gains `delisted_at: Option<u64>`, the Unix second it was last published, for a snapshot entry that was not published when written.
+- [x] `decode` reads the appended lines under the design's two rules, mint and restate, and returns the running `next_id`. It refuses a skipped or reused ID, a known ID with a different `Symbol`, and a timestamp on an appended line, each as its own `RecordError`.
+- [x] `decode` drops a final line with no newline, and reports that it did, so the registry can say so.
+- [x] `encode` writes a snapshot; `encode_line` writes one appended line.
+- [x] The `StateRecord` doc comment on `next_id` states the rule as it now stands: entries are removed, so `next_id` is the only thing standing between a retired ID and a new instrument.
 
-**Test** (`tests/identity.rs` and the unit tests in `state.rs`): round trip with timestamps; a version-1 record reads with every entry recorded as published; each refusal above; a torn final line is dropped, and a complete malformed final line is refused.
+**Test** (`tests/persistence.rs`): round trip with timestamps; a version-1 record reads with every entry recorded as published; each refusal above; a torn final line is dropped, and a complete malformed final line is refused.
 
 **The revert:** accept a skipped ID in the appended lines, and the skipped-ID test fails. Drop the newline check, and the torn-tail test fails, because the partial line parses as a malformed entry.
 
@@ -31,11 +31,11 @@ Breaks [the design](../specs/2026-09-28-refdata-append-only-state-design.md) int
 
 ### 2. `StateStore::append`
 
-- [ ] The trait gains `append(&mut self, bytes: &[u8])`, with the design's contract on what a `load` after an error may see.
-- [ ] `FileStore`: an `O_APPEND` handle on the record, opened lazily and reopened after every `store`, written with `write_all` and flushed with `sync_data`.
-- [ ] `MemoryStore`: extends its record, and counts `store` and `append` calls for tests. `break_writes` fails both.
+- [x] The trait gains `append(&mut self, bytes: &[u8])`, with the design's contract on what a `load` after an error may see.
+- [x] `FileStore`: an `O_APPEND` handle on the record, opened lazily and reopened after every `store`, written with `write_all` and flushed with `sync_data`.
+- [x] `MemoryStore`: extends its record, and counts `store` and `append` calls for tests. `break_writes` fails both.
 
-**Test** (`file_store.rs` unit tests, over a temporary directory): an append after a `store` lands in the new record rather than the renamed-away inode; appends survive a reopen of the store.
+**Test** (`tests/persistence.rs`, over a temporary directory): an append after a `store` lands in the new record rather than the renamed-away inode; appends survive a reopen of the store.
 
 **The revert:** skip the reopen after `store`, and the first test fails: the line is written to the unlinked inode and `load` does not see it.
 
@@ -43,15 +43,15 @@ Breaks [the design](../specs/2026-09-28-refdata-append-only-state-design.md) int
 
 ### 3. The registry appends, compacts, and forgets
 
-- [ ] Per entry: the ID, whether the record holds it as published, and when it was last published.
-- [ ] `open` sets the time an entry recorded as published was last published to the open time, applies the horizon, and compacts, every time.
-- [ ] A mint appends one line. A relisting of an entry the record holds with a timestamp appends a restating line. Both happen before admission, and a failure is the existing fault.
-- [ ] `withdraw` stamps the time in memory and writes nothing.
-- [ ] Compaction runs when the appended lines reach `max(snapshot lines, 1_024)`, after the append that crosses the threshold. It forgets on the horizon, then stores the snapshot. A failure faults the registry and does not refuse the admission already persisted.
-- [ ] `RegistryConfig::forget_delisted_after: Option<Duration>`.
-- [ ] The doc comments on `persist`, `withdraw`, `minted` and the registry's guarantee state the new rule, including what a forgotten symbol costs when it is relisted.
+- [x] Per entry: the ID, whether the record holds it as published, and when it was last published.
+- [x] `open` sets the time an entry recorded as published was last published to the open time, applies the horizon, and compacts when the design's four conditions call for it.
+- [x] A mint appends one line. A relisting of an entry the record holds with a timestamp appends a restating line. Both happen before admission, and a failure is the existing fault.
+- [x] `withdraw` stamps the time in memory and writes nothing.
+- [x] Compaction runs when the appended lines reach `max(snapshot entries, COMPACTION_FLOOR)`, after the append that crosses the threshold. It forgets on the horizon, then stores the snapshot. A failure faults the registry and does not refuse the admission already persisted.
+- [x] `RegistryConfig::forget_delisted_after: Option<Duration>`.
+- [x] The doc comments on `persist`, `withdraw`, `minted` and the registry's guarantee state the new rule, including what a forgotten symbol costs when it is relisted.
 
-**Test** (`tests/identity.rs`, over `MemoryStore` and `ManualClock`):
+**Test** (`tests/persistence.rs`, over `MemoryStore` and `ManualClock`):
 - a mint is one `append` and no `store` once the registry is open, asserted as counts and as the record growing by one line;
 - 2,000 mints produce a bounded number of `store` calls, and the record after them decodes to the same map;
 - with a horizon: an entry delisted for longer is gone after the next compaction, and relisting it mints `next_id`, not the old ID; an entry delisted for less is kept; a published entry is never forgotten, however old its mint;
@@ -65,15 +65,33 @@ Breaks [the design](../specs/2026-09-28-refdata-append-only-state-design.md) int
 
 ### 4. The key
 
-- [ ] `[refdata] forget_delisted_after`, an optional duration parsed by the existing `de_optional_duration`, refused at zero.
-- [ ] Wired from `Config` into `RegistryConfig` in `run.rs`, and every other `RegistryConfig` literal gains `forget_delisted_after: None`.
-- [ ] `BRINGING-UP-A-FEED.md`'s `[refdata]` section gains the key, its default, and what a relisting past it costs.
+- [x] `[refdata] forget_delisted_after`, an optional duration parsed by the existing `de_optional_duration`, refused under a second.
+- [x] Wired from `Config` into `RegistryConfig` in `run.rs`, and every other `RegistryConfig` literal gains `forget_delisted_after: None`.
+- [x] `BRINGING-UP-A-FEED.md`'s `[refdata]` section gains the key, its default, and what a relisting past it costs.
 
-**Test** (`config.rs` unit tests): the key parses; absent is `None`; `"0s"` is refused with the key named.
+**Test** (`tests/config_document.rs`): the key parses; absent is `None`; `"0s"` and `"500ms"` are refused with the key named.
 
 **The revert:** drop the zero check, and the refusal test fails.
 
 ---
+
+## The reverts, as run
+
+Each was applied to a committed tree, from a copy taken for that mutant alone, with the replacement asserted to have matched.
+
+| Revert | Fails |
+|---|---|
+| Write a whole snapshot per mint | `a_mint_appends_one_line_and_rewrites_nothing`, `a_venue_that_lists_forever_rewrites_the_record_a_bounded_number_of_times`, and two more |
+| Measure the threshold against the map instead of the snapshot | `a_venue_that_lists_forever_rewrites_the_record_a_bounded_number_of_times`, and four more |
+| Stamp an entry recorded as published with 0 instead of the open time | `an_entry_published_when_the_publisher_stopped_is_measured_from_the_restart`, and four more |
+| Skip the restating append | `a_relisting_the_record_holds_as_delisted_is_written_down_before_it_is_admitted`, `a_relisting_that_cannot_be_written_down_admits_nothing` |
+| Forget a published entry | `a_published_instrument_is_never_forgotten_however_old_its_mint` |
+| Forget at open without rewriting | `an_entry_forgotten_at_open_is_gone_from_the_record_before_its_symbol_is_minted_again` |
+| Keep the append handle across a `store` | `an_append_after_a_snapshot_lands_in_the_record_that_replaced_the_old_one` |
+| Refuse a torn final line | `a_torn_final_line_is_dropped_and_the_next_mint_does_not_run_on_from_it` |
+| Leave a torn final line unrewritten at open | `a_torn_final_line_is_dropped_and_the_next_mint_does_not_run_on_from_it` |
+| Accept an appended line that skips an ID | `a_record_that_is_complete_and_wrong_is_refused` |
+| Accept a horizon under a second | `a_forget_delisted_after_under_a_second_is_refused` |
 
 ## Acceptance
 
