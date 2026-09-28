@@ -19,3 +19,6 @@ dz-publisher-lowering = { path = "../dz-publisher-lowering" }
 # this adds one crate to the graph and no C dependency.
 nix = { version = "0.30", default-features = false, features = ["fs"] }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

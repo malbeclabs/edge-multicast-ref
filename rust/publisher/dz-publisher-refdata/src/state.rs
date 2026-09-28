@@ -94,6 +94,8 @@ pub struct Loaded {
     /// The layout it was written in. Anything but [`FORMAT_VERSION`] is
     /// rewritten when the registry opens.
     pub version: u32,
+    /// How many entries the snapshot held.
+    pub snapshot: usize,
     /// How many complete appended lines followed the snapshot.
     pub appended: usize,
     /// Whether a final appended line with no newline was dropped: an append
@@ -468,6 +470,7 @@ impl StateRecord {
                 entries,
             },
             version,
+            snapshot: read - appended,
             appended,
             torn,
         })

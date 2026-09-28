@@ -277,6 +277,9 @@ pub struct Registry<S: StateStore, C: Clock> {
     /// Whether the directory holds a snapshot that lines can be appended to.
     /// False only before the first mint of a publisher that has never minted.
     snapshot_written: bool,
+    /// Entries in the last snapshot, which is what the appended lines are
+    /// measured against.
+    snapshot_entries: usize,
     /// Lines appended since the last snapshot.
     appended: usize,
     /// The live handle for each published symbol, so a re-offer is one lookup.
@@ -434,6 +437,7 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             minted,
             next_id: record.next_id,
             snapshot_written: loaded.is_some(),
+            snapshot_entries: loaded.as_ref().map_or(0, |loaded| loaded.snapshot),
             appended: loaded.as_ref().map_or(0, |loaded| loaded.appended),
             handles: HashMap::new(),
             slots: Vec::new(),
@@ -448,12 +452,14 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             fault: None,
             config,
         };
-        registry.forget(opened_s);
+        let forgot = registry.forget(opened_s);
         // Rewritten here only when it has to be: a torn final line, which the
         // next append would otherwise run on from; a layout this build does
-        // not append to; or appended lines past the threshold.
+        // not append to; appended lines past the threshold; or an entry
+        // forgotten, which the record must not go on holding, since a mint of
+        // the same symbol would then be in it twice.
         if let Some(loaded) = &loaded {
-            if loaded.needs_rewrite() || registry.compaction_due() {
+            if loaded.needs_rewrite() || forgot || registry.compaction_due() {
                 registry
                     .write_snapshot(None)
                     .map_err(RefdataError::State)?;
@@ -952,7 +958,7 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         // instrument as published. The line is already durable, so a snapshot
         // that fails faults what follows and not this admission.
         if self.compaction_due() {
-            self.forget(unix_s(&self.clock));
+            let _ = self.forget(unix_s(&self.clock));
             if let Err(error) = self.write_snapshot(None) {
                 self.fault = Some(error);
             }
@@ -985,13 +991,13 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         })
     }
 
-    /// Whether the appended lines have reached the retained entries.
+    /// Whether the appended lines have reached the last snapshot's size.
     ///
-    /// Each snapshot rewrites at most as many entries as lines were appended
-    /// since the last one, which is what keeps a mint's cost constant however
-    /// long the history is.
+    /// A snapshot holds at most the last one's entries plus the lines appended
+    /// since, so it rewrites at most two entries for every line appended.
+    /// That is what keeps a mint's cost constant however long the history is.
     fn compaction_due(&self) -> bool {
-        self.appended >= self.minted.len().max(COMPACTION_FLOOR)
+        self.appended >= self.snapshot_entries.max(COMPACTION_FLOOR)
     }
 
     /// Drop every entry that is not published and was last published at least
@@ -999,17 +1005,20 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
     ///
     /// `next_id` is untouched, and it is what keeps a forgotten ID from being
     /// minted again. What goes is the promise that the symbol comes back under
-    /// that ID, which is the cost the configuration's key states.
-    fn forget(&mut self, now_s: u64) {
+    /// that ID, which is the cost the configuration's key states. Returns
+    /// whether anything went.
+    fn forget(&mut self, now_s: u64) -> bool {
         let Some(horizon) = self.config.forget_delisted_after else {
-            return;
+            return false;
         };
+        let before = self.minted.len();
         let horizon_s = horizon.as_secs();
         let handles = &self.handles;
         self.minted.retain(|symbol, minted| {
             handles.contains_key(symbol)
                 || now_s < minted.last_published_s.saturating_add(horizon_s)
         });
+        self.minted.len() != before
     }
 
     /// Replace the record with a snapshot of every retained entry, plus
@@ -1049,6 +1058,7 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             entries,
         };
         self.store.store(&record.encode())?;
+        self.snapshot_entries = record.entries.len();
         let handles = &self.handles;
         for (symbol, minted) in &mut self.minted {
             minted.recorded_published =
