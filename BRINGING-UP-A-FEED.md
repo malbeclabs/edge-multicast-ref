@@ -410,6 +410,7 @@ idle_guard = "30s"
 
 [refdata]
 state_dir = "/var/lib/a-venue-publisher"
+# forget_delisted_after = "168h"   # absent keeps every Instrument ID for good
 
 [refdata.selection]
 bootstrap_top_n = 64
@@ -478,6 +479,16 @@ kind = "a-venue-tob"
   guard measures one publisher's silence. Two enabled feeds stating different
   values is a startup error naming both, rather than the first block's answer
   quietly winning.
+- **`forget_delisted_after` is what bounds the state record, and it has a
+  cost.** Each new instrument appends one line to `[refdata] state_dir`, and a
+  delisted one keeps its entry so that a relisting gets its own `Instrument ID`
+  back. For a venue that lists short-lived instruments, the entries have no end
+  unless this key is set. Set, an entry is dropped once the instrument has not
+  been published for that long, and **a symbol the venue relists after that is
+  minted a new `Instrument ID`**: a subscriber holding the old one sees an
+  instrument end and a different one begin. State it longer than any gap after
+  which the venue relists a symbol it delisted. No `Instrument ID` is ever
+  re-issued, whatever it is set to. Anything under a second is refused.
 - **A depth feed with no `snapshot_cycle` cannot be joined mid-session.** It
   still emits the recovery snapshots a reset obliges, but a subscriber that
   arrives after the deltas started has nothing to build a book from — a level

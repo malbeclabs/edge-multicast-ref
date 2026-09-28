@@ -252,8 +252,16 @@ pub struct Counts {
 ///   [`fault`](Self::fault).
 /// - An ID is never re-used, not even for a delisted instrument, because a
 ///   subscriber holding a book keyed on one must never find it pointing at
-///   something else. A relisted symbol gets its own ID back, since a symbol is
-///   the identity.
+///   something else. `next_id` is what guarantees it, and nothing lowers it.
+/// - A relisted symbol gets its own ID back, since a symbol is the identity —
+///   unless it was delisted for longer than
+///   [`forget_delisted_after`](RegistryConfig::forget_delisted_after), when
+///   its entry has been forgotten and it is minted a new one. A forgotten
+///   entry belongs to an instrument no definition names, so the sentence above
+///   still holds.
+/// - A mint is one appended line, and the record is rewritten only when the
+///   lines appended reach the size of the last snapshot. What a mint costs is
+///   therefore constant, and not the size of the venue's history.
 /// - The state directory takes one writer. Two writers means the last flush
 ///   wins and half the published IDs resolve to nothing after a restart.
 ///
@@ -460,9 +468,7 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         // the same symbol would then be in it twice.
         if let Some(loaded) = &loaded {
             if loaded.needs_rewrite() || forgot || registry.compaction_due() {
-                registry
-                    .write_snapshot(None)
-                    .map_err(RefdataError::State)?;
+                registry.write_snapshot(None).map_err(RefdataError::State)?;
             }
         }
         Ok(registry)
@@ -1034,8 +1040,8 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             .minted
             .iter()
             .map(|(symbol, minted)| {
-                let published = self.handles.contains_key(symbol)
-                    || (seeding && minted.recorded_published);
+                let published =
+                    self.handles.contains_key(symbol) || (seeding && minted.recorded_published);
                 Entry {
                     instrument_id: minted.instrument_id,
                     symbol: *symbol,

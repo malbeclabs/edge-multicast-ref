@@ -159,7 +159,10 @@ fn a_venue_that_lists_forever_rewrites_the_record_a_bounded_number_of_times() {
     // after them.
     let loaded = StateRecord::load(&store.record().expect("persisted")).expect("our own bytes");
     assert_eq!(loaded.record.entries.len(), mints);
-    assert_eq!(loaded.record.next_id, u32::try_from(mints).expect("small") + 1);
+    assert_eq!(
+        loaded.record.next_id,
+        u32::try_from(mints).expect("small") + 1
+    );
     // The last snapshot holds each delisting's time. The one exception is the
     // instrument whose mint set it off, which was published when it was
     // written; the lines appended since carry no time at all.
@@ -461,7 +464,11 @@ fn a_torn_final_line_is_dropped_and_the_next_mint_does_not_run_on_from_it() {
     {
         let mut registry = opened(store.clone(), &clock, None);
         let handle = registry.list(&spec("CCC")).expect("admitted");
-        assert_eq!(id_of(&registry, handle), 2, "the torn ID was never admitted");
+        assert_eq!(
+            id_of(&registry, handle),
+            2,
+            "the torn ID was never admitted"
+        );
     }
     let loaded = StateRecord::load(&store.record().expect("persisted")).expect("our own bytes");
     assert!(!loaded.torn);
@@ -475,7 +482,11 @@ fn a_record_that_is_complete_and_wrong_is_refused() {
     // A complete final line that is malformed was written by something this
     // build did not write.
     assert!(matches!(
-        refused(format!("{}{}2 not-hexadecimal\n", header(1, 0), line(1, "AAA"))),
+        refused(format!(
+            "{}{}2 not-hexadecimal\n",
+            header(1, 0),
+            line(1, "AAA")
+        )),
         RecordError::Malformed { .. }
     ));
     // A snapshot is written whole, so a torn one is damage and not an append
@@ -501,7 +512,12 @@ fn a_record_that_is_complete_and_wrong_is_refused() {
     ));
     // A restatement under another symbol.
     assert!(matches!(
-        refused(format!("{}{}{}", header(2, 1), line(1, "AAA"), line(1, "BBB"))),
+        refused(format!(
+            "{}{}{}",
+            header(2, 1),
+            line(1, "AAA"),
+            line(1, "BBB")
+        )),
         RecordError::RestatedUnderAnotherSymbol {
             instrument_id: 1,
             ..
@@ -519,7 +535,12 @@ fn a_record_that_is_complete_and_wrong_is_refused() {
     ));
     // A second mint of a symbol already in the record.
     assert!(matches!(
-        refused(format!("{}{}{}", header(2, 1), line(1, "AAA"), line(2, "AAA"))),
+        refused(format!(
+            "{}{}{}",
+            header(2, 1),
+            line(1, "AAA"),
+            line(2, "AAA")
+        )),
         RecordError::DuplicateSymbol {
             first: 1,
             second: 2

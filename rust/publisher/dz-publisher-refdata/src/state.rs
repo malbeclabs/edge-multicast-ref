@@ -384,7 +384,9 @@ impl StateRecord {
                 ),
             };
             if fields.next().is_some() {
-                return Err(malformed("an entry carries more fields than this format has"));
+                return Err(malformed(
+                    "an entry carries more fields than this format has",
+                ));
             }
             let instrument_id: u32 = id
                 .parse()
