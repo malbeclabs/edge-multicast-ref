@@ -46,6 +46,7 @@ fn config() -> RegistryConfig {
         shards: vec![ShardConfig::default_shard(3)],
         selection: SelectionPolicy::from_seed(8).expect("8 is a seed"),
         schedule: CycleSchedule::new(std::time::Duration::from_secs(30), 1232, 8),
+        forget_delisted_after: None,
     }
 }
 
@@ -252,11 +253,11 @@ fn a_damaged_record_stops_the_publisher_starting() {
     // basis: a layout this build does not know may hold a field that changes
     // what the fields it does know mean.
     let newer = MemoryStore::new();
-    newer.set_record(b"dz-refdata-state 2 7 1\n".to_vec());
+    newer.set_record(b"dz-refdata-state 3 7 1 0\n".to_vec());
     assert!(matches!(
         open(newer),
         Err(RefdataError::CorruptState(
-            RecordError::UnsupportedVersion { found: 2 }
+            RecordError::UnsupportedVersion { found: 3 }
         ))
     ));
 
@@ -278,6 +279,7 @@ fn a_damaged_record_stops_the_publisher_starting() {
             entries: vec![Entry {
                 instrument_id: 1,
                 symbol: symbol_field("AAA").0,
+                delisted_at: None,
             }],
         }
         .encode(),
@@ -307,6 +309,7 @@ fn a_record_minted_under_another_source_id_stops_the_publisher_starting() {
             entries: vec![Entry {
                 instrument_id: 1,
                 symbol: symbol_field("AAA").0,
+                delisted_at: None,
             }],
         }
         .encode(),
@@ -367,10 +370,12 @@ fn a_record_round_trips_and_encodes_the_same_bytes_whatever_order_it_was_built_i
     let aaa = Entry {
         instrument_id: 1,
         symbol: symbol_field("AAA").0,
+        delisted_at: None,
     };
     let bbb = Entry {
         instrument_id: 2,
         symbol: symbol_field("BBB").0,
+        delisted_at: None,
     };
     let one_way = StateRecord {
         source_id: SOURCE_ID,
@@ -392,7 +397,7 @@ fn a_record_round_trips_and_encodes_the_same_bytes_whatever_order_it_was_built_i
     // The header, transcribed by hand. A reader that accepted a different tag
     // or a different version would be accepting somebody else's format.
     let text = String::from_utf8(one_way.encode()).expect("ASCII");
-    assert!(text.starts_with("dz-refdata-state 1 7 3\n"), "{text}");
+    assert!(text.starts_with("dz-refdata-state 2 7 3 2\n"), "{text}");
 }
 
 #[test]

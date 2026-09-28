@@ -1,5 +1,5 @@
-//! The state directory on a real filesystem: an advisory lock and an atomic
-//! rename.
+//! The state directory on a real filesystem: an advisory lock, an atomic
+//! rename, and an append.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -52,12 +52,19 @@ const LOCK: &str = "writer.lock";
 /// directory. The rename is what makes a reader see either the old record whole
 /// or the new one whole; the flush before it is what makes that true after a
 /// power loss rather than only after a crash.
+///
+/// [`append`](StateStore::append) writes through a handle opened with
+/// `O_APPEND` on the record and flushes it with `sync_data`. The handle is
+/// dropped by every `store`, because the rename leaves it on the replaced
+/// inode, and a line appended there is a line no `load` will ever read.
 #[derive(Debug)]
 pub struct FileStore {
     dir: PathBuf,
     /// Held, never read. Dropping it releases the claim, so this field is the
     /// claim's lifetime and removing it would silently remove the guard.
     claim: Option<Flock<File>>,
+    /// The record, opened for appending, until the next `store` replaces it.
+    appending: Option<File>,
 }
 
 impl FileStore {
@@ -68,6 +75,7 @@ impl FileStore {
         Self {
             dir: state_dir.into(),
             claim: None,
+            appending: None,
         }
     }
 
@@ -112,6 +120,9 @@ impl StateStore for FileStore {
     }
 
     fn store(&mut self, record: &[u8]) -> Result<(), StateError> {
+        // Dropped before the rename, so no path through here leaves an append
+        // handle on an inode the rename is about to unlink.
+        self.appending = None;
         let pending = self.path(PENDING);
         let mut file = File::create(&pending).map_err(StateError::Write)?;
         file.write_all(record).map_err(StateError::Write)?;
@@ -122,6 +133,25 @@ impl StateStore for FileStore {
         drop(file);
         std::fs::rename(&pending, self.path(RECORD)).map_err(StateError::Write)?;
         sync_dir(&self.dir).map_err(StateError::Write)
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> Result<(), StateError> {
+        let file = match &mut self.appending {
+            Some(file) => file,
+            // No `create`: the first write to a directory is a `store`, so a
+            // record missing here is one somebody removed, and appending would
+            // start a file that is not our format.
+            None => self.appending.insert(
+                OpenOptions::new()
+                    .append(true)
+                    .open(self.path(RECORD))
+                    .map_err(StateError::Write)?,
+            ),
+        };
+        file.write_all(bytes).map_err(StateError::Write)?;
+        // `sync_data` and not `sync_all`: the size is the one piece of metadata
+        // an append changes, and `fdatasync` flushes it.
+        file.sync_data().map_err(StateError::Write)
     }
 }
 

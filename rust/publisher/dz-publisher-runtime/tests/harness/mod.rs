@@ -707,6 +707,7 @@ fn harness_inner(configured: &[Feed], break_writes: bool) -> Harness {
                 .collect(),
             selection: SelectionPolicy::new(8, 16, 8).expect("a coherent policy"),
             schedule: CycleSchedule::new(identity.definition_cycle, 1232, 1),
+            forget_delisted_after: None,
         },
         store,
         clock.clone(),

@@ -453,6 +453,18 @@ pub struct RefdataSection {
     /// and takes exactly one writer; clearing it restarts the feed's identity
     /// history.
     pub state_dir: PathBuf,
+    /// How long after it was last published a delisted instrument's
+    /// `Instrument ID` is kept for it. Absent keeps every one for good.
+    ///
+    /// **A symbol the venue relists after this has passed is minted a new
+    /// `Instrument ID`**, and a subscriber holding the old one sees an
+    /// instrument end and a different one begin. It is what bounds the state
+    /// record for a venue that lists short-lived instruments, and it should be
+    /// longer than any gap after which the venue relists a symbol it delisted.
+    /// No `Instrument ID` is re-issued whatever it is set to. Refused under a
+    /// second, because the record counts in whole seconds.
+    #[serde(default, deserialize_with = "de_optional_duration")]
+    pub forget_delisted_after: Option<Duration>,
     pub selection: SelectionSection,
 }
 
@@ -815,6 +827,7 @@ pub struct Feed {
 #[derive(Debug, Clone)]
 pub struct Refdata {
     pub state_dir: PathBuf,
+    pub forget_delisted_after: Option<Duration>,
     pub selection: SelectionPolicy,
 }
 
@@ -960,6 +973,14 @@ impl Document {
             });
         }
 
+        if let Some(horizon) = self.refdata.forget_delisted_after {
+            if horizon.as_secs() == 0 {
+                return Err(StartupError::DurationUnderASecond {
+                    key: "[refdata] forget_delisted_after",
+                });
+            }
+        }
+
         let selection = SelectionPolicy::new(
             self.refdata.selection.bootstrap_top_n,
             self.refdata.selection.max_published,
@@ -1006,6 +1027,7 @@ impl Document {
             feeds,
             refdata: Refdata {
                 state_dir: self.refdata.state_dir,
+                forget_delisted_after: self.refdata.forget_delisted_after,
                 selection,
             },
             metrics: self.metrics,

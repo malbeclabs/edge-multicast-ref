@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 /// The persisted state, as this crate reaches it.
 ///
-/// Three operations, in the order they are called: claim the directory, read
-/// what is in it, write it back. Everything about *what* is written is
+/// Four operations, in the order they are called: claim the directory, read
+/// what is in it, replace it, and add to it. Everything about *what* is written is
 /// [`StateRecord`](crate::StateRecord)'s; everything about *where* is an
 /// implementation of this.
 ///
@@ -67,6 +67,20 @@ pub trait StateStore {
     /// nothing further: an `Instrument ID` that was published but not persisted
     /// is one that resolves to nothing after a restart.
     fn store(&mut self, record: &[u8]) -> Result<(), StateError>;
+
+    /// Add bytes to the end of the persisted record.
+    ///
+    /// The bytes are durable when this returns `Ok`. After an error, a
+    /// subsequent [`load`](Self::load) sees the record without them, or with a
+    /// prefix of them; a prefix of one line has no newline, and the reader
+    /// drops exactly that. It is never called on a directory holding no record:
+    /// the first write is always a [`store`](Self::store).
+    ///
+    /// # Errors
+    ///
+    /// [`StateError::Write`]. The caller treats this as the fault
+    /// [`store`](Self::store) is treated as.
+    fn append(&mut self, bytes: &[u8]) -> Result<(), StateError>;
 }
 
 /// What the state directory can refuse.
@@ -130,6 +144,8 @@ struct Directory {
     claimed: bool,
     read_fails: Option<String>,
     write_fails: Option<String>,
+    stores: usize,
+    appends: usize,
 }
 
 impl MemoryStore {
@@ -145,6 +161,18 @@ impl MemoryStore {
         self.lock().record.clone()
     }
 
+    /// How many times the record has been replaced whole.
+    #[must_use]
+    pub fn stores(&self) -> usize {
+        self.lock().stores
+    }
+
+    /// How many times bytes have been appended to the record.
+    #[must_use]
+    pub fn appends(&self) -> usize {
+        self.lock().appends
+    }
+
     /// Put bytes in the directory without going through a writer, to stand in
     /// for a record damaged by something outside this process.
     pub fn set_record(&self, record: Vec<u8>) {
@@ -157,7 +185,8 @@ impl MemoryStore {
         self.lock().read_fails = Some(message.to_owned());
     }
 
-    /// Make every write fail, standing in for a full or read-only directory.
+    /// Make every write fail, whole or appended, standing in for a full or
+    /// read-only directory.
     pub fn break_writes(&self, message: &str) {
         self.lock().write_fails = Some(message.to_owned());
     }
@@ -202,6 +231,20 @@ impl StateStore for MemoryStore {
         // Assigned whole, so a reader never sees half of it - the same property
         // the atomic rename buys on a real filesystem.
         directory.record = Some(record.to_vec());
+        directory.stores += 1;
+        Ok(())
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> Result<(), StateError> {
+        let mut directory = self.lock();
+        if let Some(message) = &directory.write_fails {
+            return Err(StateError::Write(std::io::Error::other(message.clone())));
+        }
+        directory
+            .record
+            .get_or_insert_with(Vec::new)
+            .extend_from_slice(bytes);
+        directory.appends += 1;
         Ok(())
     }
 }

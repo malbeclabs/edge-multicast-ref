@@ -551,6 +551,14 @@ pub enum StartupError {
     #[error("`{key}` must be greater than zero")]
     ZeroDuration { key: &'static str },
 
+    /// A duration key counted in whole seconds, stated under one.
+    ///
+    /// Refused rather than rounded: rounded down it is zero, and a
+    /// `forget_delisted_after` of zero forgets an instrument the moment it is
+    /// delisted.
+    #[error("`{key}` must be at least one second")]
+    DurationUnderASecond { key: &'static str },
+
     /// `[egress] ttl` is not stated, and it has no default.
     ///
     /// # Why the key is stated rather than defaulted
