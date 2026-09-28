@@ -246,6 +246,7 @@ fn drive<S: RowSink>(
     loop {
         let (pass, errors) = Loader {
             objects_dir: &config.loader.objects_dir,
+            feeds: &config.loader.feeds,
             site: &config.loader.site,
             recorder: &config.loader.recorder,
             max_objects: config.loader.max_objects_per_pass,

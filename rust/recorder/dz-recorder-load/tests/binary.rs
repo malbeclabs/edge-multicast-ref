@@ -178,6 +178,38 @@ fn a_configuration_that_names_nothing_real_is_refused_by_name() {
     assert!(text.contains("read-only"), "{text}");
 }
 
+/// A feed that derives but is never scanned is refused where somebody is
+/// watching.
+///
+/// This is the whole point of the scan set having a `--check` of its own. The
+/// two keys are read by different parts of the process — `feeds` decides which
+/// objects are walked, `[[market_data]]` decides which walked objects are
+/// decoded — so a configuration that names a feed in the second and omits it
+/// from the first is internally consistent, parses, runs, and derives nothing
+/// at all for that feed: no `event`, and no `datagram` either. Every counter
+/// reads healthy, because the objects were never seen in order to be refused.
+/// A deployment pipeline is the only place left to catch it.
+#[test]
+fn a_feed_that_derives_but_is_never_scanned_is_refused_at_check() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let objects = archive(dir.path(), 1);
+    let path = dir.path().join("narrowed.toml");
+    let text = std::fs::read_to_string(config_at(dir.path(), &objects, "http://192.0.2.20:1"))
+        .expect("the fixture is readable")
+        .replace(
+            "poll_interval = 1",
+            "poll_interval = 1\nfeeds = [\"scanned\"]",
+        )
+        + "\n[[market_data]]\nfeed = \"derives-but-is-never-scanned\"\nmagic = 0x4442\n";
+    std::fs::write(&path, text).expect("the configuration is writable");
+
+    let output = run(&["--config", &path.display().to_string(), "--check"]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = stderr(&output);
+    assert!(stderr.contains("derives-but-is-never-scanned"), "{stderr}");
+    assert!(stderr.contains("feeds"), "{stderr}");
+}
+
 /// `--check` validates and reaches for the destination, and loads nothing.
 ///
 /// The destination here is a documentation address nothing answers on, so the

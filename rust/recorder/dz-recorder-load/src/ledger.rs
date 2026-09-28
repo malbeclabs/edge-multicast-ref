@@ -11,7 +11,10 @@
 //! # Append-only, and compacted against the directory
 //!
 //! Each load appends one line. On a full pass the ledger is rewritten keeping
-//! only the entries whose objects are still in the directory, plus the trailer:
+//! only the entries whose objects are still in the part of the directory the
+//! pass scanned — see [`Ledger::compact`], whose `scope` is what keeps a feed
+//! the pass was configured not to look at out of that judgement — plus the
+//! trailer:
 //! an entry about an object nobody can present again is an entry nothing will
 //! ever match, and objects here are evicted under a staging budget, so without
 //! compaction the ledger grows without bound on a host whose archive does not.
@@ -197,15 +200,38 @@ impl Ledger {
         Ok(())
     }
 
-    /// Drops every entry whose object is no longer in `objects_dir`, and
-    /// rewrites the file.
+    /// Drops every entry whose object is no longer in the part of `objects_dir`
+    /// the pass scanned, and rewrites the file.
+    ///
+    /// **`scope` IS WHAT STOPS THIS EATING A FEED NOBODY LOOKED AT.** `present`
+    /// is what the pass saw, and a pass with `[loader] feeds` set deliberately
+    /// sees a subset of the archive — so without a scope every unscanned feed's
+    /// entries fall outside `present` and are dropped, and the day that feed is
+    /// named again its whole surviving archive re-derives and re-inserts. This
+    /// is the same failure an unreadable subdirectory would cause, arrived at
+    /// on purpose rather than by accident, so it needs its own answer:
+    ///
+    /// - `None` — the whole directory was scanned. Every entry is in scope,
+    ///   which is what this has always done.
+    /// - `Some(feeds)` — only these feeds were scanned. An entry whose `feed`
+    ///   is outside the set is kept whatever `present` says, because this pass
+    ///   is not evidence about it either way.
+    ///
+    /// An entry from before [`Entry::feed`] existed carries the empty feed, so
+    /// under a non-empty scope it is out of scope and kept for ever. That is
+    /// the safe direction and it is bounded: a kept entry costs one line, a
+    /// dropped one costs the object's rows again.
     ///
     /// # Errors
     ///
     /// [`LedgerError::Io`]. A compaction that fails is not a failed load: the
     /// ledger is still correct, only longer than it needs to be, so a caller
     /// counts this and carries on.
-    pub fn compact(&mut self, present: &HashSet<(String, String)>) -> Result<(), LedgerError> {
+    pub fn compact(
+        &mut self,
+        present: &HashSet<(String, String)>,
+        scope: Option<&HashSet<String>>,
+    ) -> Result<(), LedgerError> {
         if self.path.as_os_str().is_empty() {
             return Ok(());
         }
@@ -227,7 +253,8 @@ impl Ledger {
                 // The trailer's own entry is kept whatever became of its object:
                 // it is the evidence the next object's adjacency check needs,
                 // and it is one line.
-                present.contains(&(e.object_key.clone(), e.object_sha256.clone()))
+                scope.is_some_and(|feeds| !feeds.contains(&e.feed))
+                    || present.contains(&(e.object_key.clone(), e.object_sha256.clone()))
                     || self
                         .trailers
                         .get(&e.feed)
