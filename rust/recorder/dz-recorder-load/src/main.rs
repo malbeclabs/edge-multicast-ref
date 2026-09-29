@@ -48,6 +48,7 @@ mod cli;
 mod endpoint;
 mod identity;
 
+use std::collections::HashSet;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -158,6 +159,22 @@ fn run(args: &Args) -> Result<(), Failure> {
         // this runs in a deployment pipeline, against a host that may already be
         // loading, before anything is restarted.
         print!("{}", config.summary());
+        // **A WARNING AND NOT A REFUSAL, AND THE DIFFERENCE IS A DEPLOY.** A
+        // feed configured in the same change as the recorder that will write it
+        // has no directory until that recorder's first publication, so refusing
+        // would fail every simultaneous deploy. The other cause is a
+        // misspelling, which scans nothing for ever while everything reads
+        // healthy -- so it is said here, on the one surface a pipeline reads,
+        // and `dz_loader_scanned_feeds_without_objects` is what says it later.
+        for feed in config.feeds_without_a_directory() {
+            eprintln!(
+                "dz-recorder-load: warning: [loader] feeds names `{feed}`, which has no \
+                 directory under {}. If its recorder has not published yet this clears \
+                 itself; if the name is wrong it scans nothing, for ever, with no error. \
+                 dz_loader_scanned_feeds_without_objects counts these every pass.",
+                config.loader.objects_dir.display()
+            );
+        }
         let sink = ClickHouseSink::over_http(config.clickhouse.clone());
         let probe = sink
             .statement("SELECT 1")
@@ -242,10 +259,20 @@ fn drive<S: RowSink>(
     // Carried across passes because the sink is: a quiet feed's rows may be
     // held for the whole `insert_max_delay`, which is several passes.
     let mut pending: Vec<loader::Pending> = Vec::new();
+    // Built once and not per pass. It is the one representation of the scan
+    // set, and both the walk's filter and the ledger's compaction scope are
+    // spent from it -- two spellings is how those two come to disagree about
+    // which feeds a pass was responsible for.
+    let feeds: Option<HashSet<String>> = config
+        .loader
+        .feeds
+        .as_ref()
+        .map(|feeds| feeds.iter().cloned().collect());
 
     loop {
         let (pass, errors) = Loader {
             objects_dir: &config.loader.objects_dir,
+            feeds: feeds.as_ref(),
             site: &config.loader.site,
             recorder: &config.loader.recorder,
             max_objects: config.loader.max_objects_per_pass,

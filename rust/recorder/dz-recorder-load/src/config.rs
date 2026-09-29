@@ -64,6 +64,47 @@ pub enum ConfigError {
          failure looks like a switch that is off rather than a name that is wrong"
     )]
     PaddedDerivedFeed(String),
+    #[error(
+        "[loader] feeds is present but names nothing. **An empty list is not a way to turn \
+         the loader off**, and it is not read as one: omitting the key means every feed, so \
+         `feeds = []` would be the widest setting written in the words of the narrowest. \
+         Remove the key to scan every feed, or stop running the loader on this host"
+    )]
+    EmptyScanSet,
+    #[error(
+        "[loader] feeds names an empty entry: it matches no subdirectory of objects_dir, so \
+         it narrows the scan by one feed and adds nothing, and the list reads as though it \
+         had named something"
+    )]
+    NoScannedFeed,
+    #[error(
+        "[loader] feeds `{0}` is padded with whitespace: the name is matched against the \
+         subdirectory the recorder writes, so a padded one matches no feed, that feed loads \
+         nothing, and the failure looks like a feed nobody published on rather than a name \
+         that is wrong"
+    )]
+    PaddedScannedFeed(String),
+    #[error(
+        "[loader] feeds names `{0}` twice: a list that says the same thing twice is a list \
+         somebody edited without reading it, and the duplicate stands where the name that \
+         was meant to be there is not"
+    )]
+    DuplicateScannedFeed(String),
+    #[error(
+        "[loader] feeds `{0}` is not a name the recorder can have written: a spec is ASCII \
+         letters, digits, `.`, `-` and `_`, and is neither `.` nor `..` -- `check_spec` in \
+         dz-recorder refuses anything else, so a name outside that set cannot be a directory \
+         under completed/ and can only ever scan nothing"
+    )]
+    ScannedFeedIsNotASpecName(String),
+    #[error(
+        "[[market_data]] feed `{0}` is not named in [loader] feeds, so its objects are never \
+         scanned and it derives nothing at all -- not event, and not datagram either. A \
+         derivation switch that is correct and never reached fills no table, which reads \
+         exactly like a feed nobody published on: name the feed in the scan set, or remove \
+         the entry that says it derives"
+    )]
+    DerivedFeedIsNotScanned(String),
 }
 
 /// One loader host's whole configuration.
@@ -135,6 +176,50 @@ pub struct Loader {
     /// The recorder's `completed_dir`, opened read-only. The loader and the
     /// recorder share this directory and nothing else.
     pub objects_dir: PathBuf,
+    /// Which feeds under `objects_dir` are scanned, named by the subdirectory
+    /// the recorder writes them into.
+    ///
+    /// **Empty is the default, and empty means every feed.** A host that
+    /// upgrades this binary and changes no configuration scans exactly what it
+    /// scanned before. A name here is the recorder's *spec*: the same string
+    /// `[[market_data]] feed` is matched against in the manifest, and the same
+    /// string `dz-recorder` joins onto its own `completed_dir`.
+    ///
+    /// **THIS GATES THE SCAN, WHICH IS NOT WHAT THE RECORDER'S
+    /// `expected_sources` GATES.** That one gates counting and alerting and
+    /// never the archive. This one decides whether a row exists at all:
+    /// `datagram`, `era`, `segment_coverage` and `sequence_gap` are derived for
+    /// every object a pass *scans*, whatever `[[market_data]]` names. So a feed
+    /// left out of a non-empty list writes no row of any grain, and no
+    /// `dz_loader_*` series says so — there is no "configured feed produced
+    /// nothing" signal to say it with. That is why `check` refuses a
+    /// `[[market_data]]` entry this list does not carry: the deploy pipeline is
+    /// the only place the mistake is visible.
+    ///
+    /// **It exists because the alternative to narrowing is a back-load.**
+    /// Widening a host whose scan was narrowed to one feed derives every object
+    /// of every other feed still on disk, at the `datagram` grain, one row per
+    /// datagram, into a destination that may be rationing writes — tens of
+    /// gigabytes of archive nobody agreed to spend. Naming the feeds that are
+    /// wanted costs those feeds and nothing else.
+    ///
+    /// **A NARROWED SCAN DOES NOT READ THE TOP LEVEL OF `objects_dir`.** A
+    /// recorder configured without a spec writes its objects there, and their
+    /// feed is knowable only from the manifest, which the walk does not open —
+    /// so reading them would put objects in the pass that the compaction scope,
+    /// which is keyed on the feed, does not cover. Their ledger entries would
+    /// then be kept for ever once the objects were evicted, and the ledger
+    /// would grow without bound. A narrowed scan is exactly the feeds it names;
+    /// omit the key on a host that writes loose objects and everything is read,
+    /// as it always was.
+    ///
+    /// **`Option`, SO THAT `feeds = []` IS NOT THE SAME SENTENCE AS SAYING NOTHING.**
+    /// Absent is every feed. An empty list is refused, because an operator who
+    /// writes one means "none for now" and would be handed the widest setting
+    /// there is — a full-archive scan at the `datagram` grain, which is the
+    /// exact cost this key exists to avoid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feeds: Option<Vec<String>>,
     /// Where the load ledger lives. On the loader's own writable path, never
     /// inside `objects_dir`: a loader that wrote into the recorder's directory
     /// would put a file the staging budget cannot classify next to the objects
@@ -159,6 +244,7 @@ impl Default for Loader {
             site: String::new(),
             recorder: String::new(),
             objects_dir: PathBuf::new(),
+            feeds: None,
             ledger: PathBuf::new(),
             poll_interval: Duration::from_secs(30),
             max_objects_per_pass: 0,
@@ -186,6 +272,51 @@ impl Default for MetricsConfig {
             listen_addr: SocketAddr::from(([127, 0, 0, 1], 9101)),
         }
     }
+}
+
+/// Which rule a feed name broke, so the two lists can share the rules and
+/// still report their own errors.
+///
+/// The keys fail differently — one derives nothing, the other scans nothing —
+/// and the message is what an operator acts on, so they do not share a
+/// `ConfigError`. What they share is the definition of a name.
+enum FeedNameError {
+    Empty,
+    Padded,
+    Duplicate,
+}
+
+/// Empty, padded and duplicate, checked once for both lists.
+fn check_feed_name(name: &str, earlier: &[String]) -> Result<(), FeedNameError> {
+    if name.trim().is_empty() {
+        return Err(FeedNameError::Empty);
+    }
+    // Refused rather than trimmed. Trimming would make the configuration and
+    // the thing it configures disagree about what the operator wrote, and it
+    // would make `"a"` and `"a "` one entry for the duplicate check while
+    // `--check` still echoed two.
+    if name.trim() != name {
+        return Err(FeedNameError::Padded);
+    }
+    if earlier.iter().any(|e| e == name) {
+        return Err(FeedNameError::Duplicate);
+    }
+    Ok(())
+}
+
+/// Whether the recorder could have written a directory of this name.
+///
+/// The same rule as `check_spec` in `dz-recorder`'s `startup.rs`, which is what
+/// creates the directory this name has to match. Kept as a copy rather than
+/// shared: the loader does not depend on the recorder's crate, and the
+/// alternative to a copy is a dependency edge between two binaries that share
+/// one directory and nothing else.
+fn is_spec_name(name: &str) -> bool {
+    name != "."
+        && name != ".."
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
 }
 
 impl LoaderConfig {
@@ -223,6 +354,11 @@ impl LoaderConfig {
             return Err(ConfigError::NoPollInterval);
         }
         self.check_market_data()?;
+        // After `check_market_data`, so the cross-check below compares a name
+        // that has already been held to being unpadded and unique. A padded
+        // derivation name would otherwise fail here, as a feed the scan set
+        // does not carry, and the message would describe the wrong mistake.
+        self.check_feeds()?;
         self.clickhouse.check()?;
         Ok(())
     }
@@ -235,28 +371,90 @@ impl LoaderConfig {
     /// otherwise present as an empty `event` table, which is indistinguishable
     /// from a feed nobody published on.
     fn check_market_data(&self) -> Result<(), ConfigError> {
+        let names: Vec<String> = self
+            .market_data
+            .iter()
+            .map(|derived| derived.feed.clone())
+            .collect();
         for (index, derived) in self.market_data.iter().enumerate() {
-            if derived.feed.trim().is_empty() {
-                return Err(ConfigError::NoDerivedFeed);
-            }
-            // Refused rather than trimmed. Trimming would make the configuration
-            // and the thing it configures disagree about what the operator
-            // wrote, and it would make `"a"` and `"a "` one entry for the
-            // duplicate check while `--check` still echoed two.
-            if derived.feed.trim() != derived.feed {
-                return Err(ConfigError::PaddedDerivedFeed(derived.feed.clone()));
-            }
+            // Shared with the scan set's check, so the two lists cannot drift
+            // apart on what a feed name is. They report different errors,
+            // because the two keys fail differently and the message is what an
+            // operator acts on -- but they agree on the rules.
+            //
+            //
+            // The character set is NOT applied here. This name is matched
+            // against the manifest's `feed` rather than against a directory;
+            // the recorder writes both from one spec, but tightening a manifest
+            // match to the directory character set is a separate decision, and
+            // this is not the change that takes it.
+            check_feed_name(&derived.feed, &names[..index]).map_err(|kind| match kind {
+                FeedNameError::Empty => ConfigError::NoDerivedFeed,
+                FeedNameError::Padded => ConfigError::PaddedDerivedFeed(derived.feed.clone()),
+                FeedNameError::Duplicate => ConfigError::DuplicateDerivedFeed(derived.feed.clone()),
+            })?;
             if derived.magic == 0 {
                 return Err(ConfigError::NoMagic(derived.feed.clone()));
             }
-            if self.market_data[..index]
-                .iter()
-                .any(|earlier| earlier.feed == derived.feed)
-            {
-                return Err(ConfigError::DuplicateDerivedFeed(derived.feed.clone()));
+        }
+        Ok(())
+    }
+
+    /// The scan set, checked where somebody is watching.
+    ///
+    /// Every failure below is one that would otherwise present as a feed
+    /// loading nothing — indistinguishable from a feed nobody published on, and
+    /// the exact condition that ran for ten days on a host scanning one feed's
+    /// directory out of thirteen with every counter reading healthy.
+    fn check_feeds(&self) -> Result<(), ConfigError> {
+        let Some(feeds) = self.loader.feeds.as_deref() else {
+            // Absent is every feed, so there is nothing to narrow and nothing
+            // for a derivation to fall outside of.
+            return Ok(());
+        };
+        if feeds.is_empty() {
+            return Err(ConfigError::EmptyScanSet);
+        }
+        for (index, feed) in feeds.iter().enumerate() {
+            check_feed_name(feed, &feeds[..index]).map_err(|kind| match kind {
+                FeedNameError::Empty => ConfigError::NoScannedFeed,
+                FeedNameError::Padded => ConfigError::PaddedScannedFeed(feed.clone()),
+                FeedNameError::Duplicate => ConfigError::DuplicateScannedFeed(feed.clone()),
+            })?;
+            // And this one only here: a scan-set entry becomes a directory
+            // name, so the recorder's own rule for what a spec may contain is
+            // the rule for what can possibly be found.
+            if !is_spec_name(feed) {
+                return Err(ConfigError::ScannedFeedIsNotASpecName(feed.clone()));
+            }
+        }
+        for derived in &self.market_data {
+            if !feeds.iter().any(|feed| feed == &derived.feed) {
+                return Err(ConfigError::DerivedFeedIsNotScanned(derived.feed.clone()));
             }
         }
         Ok(())
+    }
+
+    /// The feeds named that have no directory under `objects_dir`.
+    ///
+    /// **Not a refusal, and deliberately not one.** A feed configured in the
+    /// same change as the recorder that will write it has no directory until
+    /// that recorder's first publication, so refusing here would fail every
+    /// simultaneous deploy. But the other cause is a misspelling, and a
+    /// misspelled entry scans nothing for ever while `--check` passes — the
+    /// silent shape this whole key is meant to stop producing. So `--check`
+    /// says which ones, and [`crate::metrics`] counts them every pass, and the
+    /// operator decides which of the two it is.
+    #[must_use]
+    pub fn feeds_without_a_directory(&self) -> Vec<&str> {
+        self.loader
+            .feeds
+            .iter()
+            .flatten()
+            .filter(|feed| !self.loader.objects_dir.join(feed).is_dir())
+            .map(String::as_str)
+            .collect()
     }
 
     /// What `--check` prints, so an operator can see what was read rather than
@@ -272,6 +470,13 @@ impl LoaderConfig {
             self.loader.site, self.loader.recorder
         );
         let _ = writeln!(out, "objects={}", self.loader.objects_dir.display());
+        // Printed only when the scan is narrowed, and the absence is the
+        // statement -- the same line `market_data` takes below. An empty
+        // `feeds=` would read as "no feeds", which is the opposite of what an
+        // empty list means.
+        if let Some(feeds) = &self.loader.feeds {
+            let _ = writeln!(out, "feeds={}", feeds.join(" "));
+        }
         let _ = writeln!(out, "ledger={}", self.loader.ledger.display());
         let _ = writeln!(
             out,
@@ -610,5 +815,153 @@ persist_snapshot_levels = true
             "the example points at `{}` and the DDL creates `{account}`",
             config.clickhouse.user
         );
+    }
+
+    /// The compatibility promise, and the one the deployed fleet relies on: a
+    /// host that upgrades this binary and changes no configuration scans the
+    /// whole archive exactly as it did before.
+    #[test]
+    fn a_configuration_that_names_no_feeds_scans_every_feed() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let config = config_with_objects_dir(dir.path());
+
+        assert!(
+            config.loader.feeds.is_none(),
+            "an absent `feeds` key must mean every feed, not no feed"
+        );
+        config.check().expect("it checks out");
+    }
+
+    /// A derivation the scan set does not carry derives nothing at all -- not
+    /// `event`, and not `datagram` either -- and nothing on the host says so.
+    /// So `--check` is where it is said.
+    #[test]
+    fn a_derived_feed_the_scan_set_omits_is_refused() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let mut config = config_with_objects_dir(dir.path());
+        config.loader.feeds = Some(vec!["scanned".to_owned()]);
+        config.market_data = vec![MarketDataFeed {
+            feed: "derives-but-is-never-scanned".to_owned(),
+            magic: 0x4442,
+            persist_snapshot_levels: false,
+        }];
+
+        let message = config.check().expect_err("it is refused").to_string();
+        assert!(
+            message.contains("derives-but-is-never-scanned"),
+            "the refusal must name the feed: {message}"
+        );
+    }
+
+    /// And the same entry with no scan set is accepted, because empty is every
+    /// feed. Paired with the test above deliberately: the refusal must come
+    /// from the narrowing and not from the derivation.
+    #[test]
+    fn the_same_derived_feed_is_accepted_when_no_scan_set_is_named() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let mut config = config_with_objects_dir(dir.path());
+        config.market_data = vec![MarketDataFeed {
+            feed: "derives-but-is-never-scanned".to_owned(),
+            magic: 0x4442,
+            persist_snapshot_levels: false,
+        }];
+
+        config
+            .check()
+            .expect("an unnarrowed scan reaches every feed");
+    }
+
+    #[test]
+    fn a_scan_set_entry_that_names_nothing_usable_is_refused() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        for (feeds, what) in [
+            (vec![String::new()], "an empty name"),
+            (vec![" padded".to_owned()], "a padded name"),
+            (vec!["a".to_owned(), "a".to_owned()], "a duplicate name"),
+            (vec!["a/b".to_owned()], "a separator"),
+            (vec!["..".to_owned()], "a parent directory"),
+            (vec![".".to_owned()], "the directory itself"),
+            // The recorder's own `check_spec` refuses these, so no directory
+            // of this name can exist and the entry could only ever scan
+            // nothing. Same rule, restated where the name is read.
+            (vec!["a b".to_owned()], "an internal space"),
+            (vec!["a?b".to_owned()], "a shell metacharacter"),
+            (vec!["a\\b".to_owned()], "a backslash"),
+        ] {
+            let mut config = config_with_objects_dir(dir.path());
+            config.loader.feeds = Some(feeds);
+            config
+                .check()
+                .expect_err(&format!("{what} must be refused"));
+        }
+    }
+
+    /// Printed when the scan is narrowed and absent when it is not, because an
+    /// empty `feeds=` line would read as "no feeds" and empty means every one.
+    #[test]
+    fn the_summary_names_the_scan_set_only_when_there_is_one() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let mut config = config_with_objects_dir(dir.path());
+        assert!(
+            !config.summary().contains("feeds="),
+            "an unnarrowed scan must say nothing: {}",
+            config.summary()
+        );
+
+        config.loader.feeds = Some(vec!["one".to_owned(), "two".to_owned()]);
+        let summary = config.summary();
+        assert!(summary.contains("feeds=one two"), "{summary}");
+    }
+
+    /// **`feeds = []` IS NOT A WAY TO PAUSE THE LOADER, AND IT MUST NOT READ AS
+    /// THE WIDEST SETTING THERE IS.**
+    ///
+    /// Absent means every feed. An operator who writes an empty list means the
+    /// opposite, and with a plain `Vec` the two are the same value — so the
+    /// narrowest thing anyone can write would have produced a full-archive
+    /// scan at the `datagram` grain, which is the exact cost this key exists
+    /// to avoid. `Option` is what keeps them different, and this is what holds
+    /// it there.
+    #[test]
+    fn an_empty_scan_set_is_refused_rather_than_read_as_every_feed() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let mut config = config_with_objects_dir(dir.path());
+        config.loader.feeds = Some(Vec::new());
+
+        config.check().expect_err("an empty list is refused");
+
+        // And the distinction survives a round trip through TOML, which is
+        // where the operator actually writes it.
+        let text = toml::to_string(&config).expect("it serialises");
+        assert!(text.contains("feeds = []"), "{text}");
+        LoaderConfig::parse(&text)
+            .expect("it parses")
+            .check()
+            .expect_err("and is still refused after a round trip");
+    }
+
+    /// The scan set is reported against the directory, so a misspelling has
+    /// somewhere to show up.
+    ///
+    /// Not a refusal: a feed configured in the same change as the recorder that
+    /// will write it has no directory until the first publication. The two
+    /// cases are told apart by whether it clears.
+    #[test]
+    fn a_named_feed_with_no_directory_is_reported_but_not_refused() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        std::fs::create_dir(dir.path().join("written")).expect("creatable");
+        let mut config = config_with_objects_dir(dir.path());
+        config.loader.feeds = Some(vec!["written".to_owned(), "never-written".to_owned()]);
+
+        config.check().expect("it is not a refusal");
+        assert_eq!(config.feeds_without_a_directory(), vec!["never-written"]);
+    }
+
+    /// An unnarrowed configuration reports nothing, because it names nothing.
+    #[test]
+    fn an_unnarrowed_configuration_reports_no_missing_feeds() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let config = config_with_objects_dir(dir.path());
+        assert!(config.feeds_without_a_directory().is_empty());
     }
 }

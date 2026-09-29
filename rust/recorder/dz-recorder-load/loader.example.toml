@@ -24,6 +24,43 @@ recorder = "recorder-1"
 # the rows travel and the bytes stay local.
 objects_dir = "/var/lib/dz-recorder/completed"
 
+# WHICH FEEDS UNDER objects_dir ARE SCANNED. OMIT IT AND EVERY FEED IS, WHICH IS
+# WHAT THIS HAS ALWAYS DONE. `feeds = []` IS REFUSED -- an empty list is what an
+# operator writes to mean "none for now", and reading it as "every feed" would
+# hand them the widest setting there is in the words of the narrowest.
+#
+# A name here is the recorder's spec -- the subdirectory it writes under
+# `completed/`, and the same string a [[market_data]] entry matches against the
+# manifest. It is one directory name: no separator, no `..`.
+#
+# **NARROWING THIS TURNS FEEDS OFF ENTIRELY, NOT JUST THEIR MARKET DATA.** The
+# transport tables -- datagram, era, segment_coverage, sequence_gap -- are
+# derived for every object a pass SCANS, whatever [[market_data]] names. A feed
+# left out of a non-empty list writes no row of any grain, and nothing on the
+# host says so: the objects are never seen, so no skip counter moves and no lag
+# gauge rises. The one guard is that --check refuses a [[market_data]] feed this
+# list does not carry.
+#
+# It is here because the alternative to narrowing is a back-load. Widening a
+# host that was scanning one feed derives every object of every other feed still
+# on disk, one row per datagram, into a destination that may be rationing
+# writes. Naming the feeds that are wanted costs those feeds and nothing else.
+#
+# A NARROWED SCAN DOES NOT READ THE TOP LEVEL of objects_dir. A recorder
+# configured without a spec writes its objects there, and their feed is only in
+# the manifest, which the walk does not open -- so a narrowed pass that read
+# them would hold ledger entries outside its own compaction scope, kept for ever
+# once the objects were evicted. A narrowed scan is exactly the feeds it names.
+# On a host that writes loose objects, omit this key.
+#
+# A name here that matches no directory is NOT refused -- a feed configured in
+# the same change as the recorder that will write it has none until the first
+# publication -- but --check says which, and
+# dz_loader_scanned_feeds_without_objects counts them every pass. One that stays
+# above zero is a misspelling, which scans nothing for ever.
+#
+# feeds = ["tob_edge_binance_spot", "tob_edge_binance_usdsm"]
+
 # What has been loaded, keyed on (object key, sha256). On the loader's own
 # writable path and never inside `objects_dir`: a file the recorder's staging
 # budget cannot classify is a file eviction cannot reach.

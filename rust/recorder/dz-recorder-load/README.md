@@ -63,6 +63,55 @@ alone misleads:
 A backlog of two hundred young objects is a busy loader. One object an hour
 older than the eviction window is history already gone. **Alert on the age.**
 
+## The scan set, and which dial it is
+
+`[loader] feeds` names the feeds under `objects_dir` a pass reads. Omit it and
+every feed is read, which is what this has always done and what every host that
+upgrades without editing its configuration keeps doing.
+
+```toml
+[loader]
+objects_dir = "/var/lib/dz-recorder/completed"
+feeds = ["tob_edge_binance_spot", "tob_edge_binance_usdsm"]
+```
+
+**It is a coarser dial than `[[market_data]]`, and they are often confused.**
+The four transport tables are derived per object **scanned**; `event`,
+`instrument` and `book_top` are derived per feed **named** in
+`[[market_data]]`. So narrowing the scan turns feeds off entirely — a feed left
+out writes no `datagram` row either — where narrowing the derivation only
+declines to decode. On a destination with a write budget the scan set is the
+first thing to reach for and the derivation is the second.
+
+**Nothing on the host reports a feed that is configured and never scanned.**
+The objects are not seen, so no skip counter moves, no lag gauge rises and no
+error is printed; it reads as a feed nobody published on. That is why `--check`
+refuses a `[[market_data]]` feed the scan set omits — the deployment pipeline
+is the only place the mistake is visible. It is also why a narrowing wants a
+reason written beside it.
+
+One reading changes under a narrowed scan: `dz_loader_objects_present` counts
+what the pass scanned, not what is in the archive. It falling after a narrowing
+is the narrowing working.
+
+**A narrowed scan does not read the top level of `objects_dir`.** A recorder
+configured without a spec writes its objects there, and their feed is knowable
+only from the manifest, which the walk does not open — so a narrowed pass that
+read them would hold ledger entries outside its own compaction scope, and those
+entries would be kept for ever once the objects were evicted. A narrowed scan
+is exactly the feeds it names. Omit the key on a host that writes loose objects
+and everything is read, as it always was.
+
+`feeds = []` is refused rather than read as every feed: an empty list is what
+an operator writes to mean "none for now", and the two must not be one value.
+
+A name that matches no directory is not refused — a feed configured in the same
+change as the recorder that will write it has none until the first publication.
+`--check` says which ones, and `dz_loader_scanned_feeds_without_objects` counts
+them every pass. It clears itself in that case and does not when the name is
+wrong, which is the only thing separating a pending deploy from a misspelling
+that scans nothing for ever.
+
 ## What it cannot do
 
 **It cannot touch the recorder.** The objects directory is opened read-only —

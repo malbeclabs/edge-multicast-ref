@@ -61,6 +61,12 @@ stay local. The gate on that arrangement is dz_loader_oldest_unloaded_age_second
 against the eviction window: a loader that falls behind eviction loses history
 that no re-run can recover.
 
+Which feeds it walks is [loader] feeds, and omitting it walks every one.
+Narrowing it turns the feeds it leaves out off entirely, transport rows
+included, and a narrowed walk does not read the top level of the objects
+directory. --check refuses a [[market_data]] feed the scan set omits, and warns
+about a named feed with no directory.
+
 The password for the column store comes from DZ_LOADER_CLICKHOUSE_PASSWORD and
 from nowhere else. There is no configuration key for it.";
 
