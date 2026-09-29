@@ -595,7 +595,8 @@ fn a_record_that_is_complete_and_wrong_is_refused() {
     ));
     // A final line with no newline that no append could have started: only
     // a prefix of a line this build appends is an append that never finished.
-    for tail in ["not-an-append", "1 NOT-HEX", "1 2 3", " 00"] {
+    let too_long = format!("1 {}", "0".repeat(129));
+    for tail in ["not-an-append", "1 NOT-HEX", "1 2 3", " 00", &too_long] {
         assert!(
             matches!(
                 refused(format!("{}{}{tail}", header(2, 1), line(1, "AAA"))),
