@@ -17,10 +17,10 @@ const FORMAT_VERSION: u32 = 2;
 
 /// The layout before appended lines, which this build still reads.
 ///
-/// A snapshot with no entry count and no timestamps. Every entry in it is read
+/// A base with no entry count and no timestamps. Every entry in it is read
 /// as recorded published, and the registry rewrites it as the current version
 /// when it opens, since a line appended to it could not be told apart from the
-/// snapshot.
+/// base.
 const FORMAT_VERSION_V1: u32 = 1;
 
 /// One instrument's persisted identity.
@@ -67,15 +67,15 @@ pub struct Entry {
 /// # The layout
 ///
 /// ```text
-/// dz-refdata-state 2 <source_id> <next_id> <snapshot entries>
+/// dz-refdata-state 2 <source_id> <next_id> <base entries>
 /// <instrument_id> <symbol, 128 hex digits>
 /// <instrument_id> <symbol, 128 hex digits> <unix seconds>
 /// ...
 /// <instrument_id> <symbol, 128 hex digits>
 /// ```
 ///
-/// A **snapshot** — the header and as many entries as it counts — followed by
-/// **appended lines**. [`encode`](Self::encode) writes a snapshot and
+/// A **base** — the header and as many entries as it counts — followed by
+/// **appended lines**. [`encode`](Self::encode) writes a base and
 /// [`encode_line`] writes one appended line, which is what makes a mint cost a
 /// line rather than the whole history. [`load`](Self::load) reads both and
 /// folds the appended lines into the entries.
@@ -89,14 +89,14 @@ pub struct StateRecord {
 /// A record as read back, and what reading it found besides the entries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Loaded {
-    /// The snapshot with every appended line folded in.
+    /// The base with every appended line folded in.
     pub record: StateRecord,
     /// The layout it was written in. Anything but [`FORMAT_VERSION`] is
     /// rewritten when the registry opens.
     pub version: u32,
-    /// How many entries the snapshot held.
-    pub snapshot: usize,
-    /// How many complete appended lines followed the snapshot.
+    /// How many entries the base held.
+    pub base: usize,
+    /// How many complete appended lines followed the base.
     pub appended: usize,
     /// Whether a final appended line with no newline was dropped: an append
     /// that never completed, whose admission therefore never happened.
@@ -238,7 +238,7 @@ impl StateRecord {
         }
     }
 
-    /// The bytes of a snapshot.
+    /// The bytes of a base.
     ///
     /// Entries are written in `Instrument ID` order, so the same set of
     /// admissions produces the same bytes whatever order the venue offered them
@@ -280,7 +280,7 @@ impl StateRecord {
     /// **A final appended line with no newline is dropped**, and only that.
     /// It is an append that never completed: an instrument is admitted only
     /// after its line is flushed, so nothing published depends on it. A
-    /// snapshot line with no newline is not the same thing — a snapshot is
+    /// base line with no newline is not the same thing — a base is
     /// written whole and renamed into place, so a torn one is damage — and a
     /// line that is complete and wrong was written by something this build did
     /// not write. Both are refusals.
@@ -327,8 +327,8 @@ impl StateRecord {
                     line: 1,
                     what: "the header has no readable next_id",
                 })?;
-        // Version 1 has no count: every line is the snapshot.
-        let snapshot: Option<usize> = if version == FORMAT_VERSION_V1 {
+        // Version 1 has no count: every line is the base.
+        let base: Option<usize> = if version == FORMAT_VERSION_V1 {
             None
         } else {
             Some(fields.next().and_then(|field| field.parse().ok()).ok_or(
@@ -362,10 +362,15 @@ impl StateRecord {
                 line: line_number,
                 what,
             };
-            let in_snapshot = snapshot.is_none_or(|count| read < count);
+            let in_base = base.is_none_or(|count| read < count);
             let Some(line) = raw.strip_suffix('\n') else {
-                if in_snapshot {
-                    return Err(malformed("a snapshot entry is not a complete line"));
+                if in_base {
+                    return Err(malformed("a base entry is not a complete line"));
+                }
+                if !starts_an_appended_line(raw) {
+                    return Err(malformed(
+                        "a final line with no newline is not the start of an appended line",
+                    ));
                 }
                 torn = true;
                 break;
@@ -382,7 +387,7 @@ impl StateRecord {
                 Some(_) if version == FORMAT_VERSION_V1 => {
                     return Err(malformed("a version 1 entry carries a timestamp"));
                 }
-                Some(_) if !in_snapshot => {
+                Some(_) if !in_base => {
                     return Err(malformed("an appended line carries a timestamp"));
                 }
                 Some(at) => Some(
@@ -404,7 +409,7 @@ impl StateRecord {
             let symbol = decode_symbol(symbol)
                 .ok_or_else(|| malformed("an entry's Symbol is not 64 hexadecimal bytes"))?;
 
-            if in_snapshot {
+            if in_base {
                 if instrument_id >= next_id {
                     return Err(RecordError::IdNotBelowNext {
                         instrument_id,
@@ -430,7 +435,7 @@ impl StateRecord {
 
             appended += 1;
             if let Some(&at) = ids.get(&instrument_id) {
-                // A restatement: the instrument was relisted after a snapshot
+                // A restatement: the instrument was relisted after a base
                 // recorded it as delisted.
                 if entries[at].symbol != symbol {
                     return Err(RecordError::RestatedUnderAnotherSymbol {
@@ -463,11 +468,11 @@ impl StateRecord {
                 });
             }
         }
-        if let Some(count) = snapshot {
+        if let Some(count) = base {
             if read < count {
                 return Err(RecordError::Malformed {
                     line: read + 2,
-                    what: "the snapshot is shorter than its header counts",
+                    what: "the base is shorter than its header counts",
                 });
             }
         }
@@ -479,12 +484,27 @@ impl StateRecord {
                 entries,
             },
             version,
-            snapshot: read - appended,
+            base: read - appended,
             appended,
             torn,
             complete,
         })
     }
+}
+
+/// Whether `tail` is what [`encode_line`] writes, cut short before its newline:
+/// digits, then a space and at most `SYMBOL_LEN * 2` lowercase hexadecimal
+/// digits.
+///
+/// Only a prefix of a line this build appends can be an append that never
+/// completed. Anything else with no newline was written by something else, and
+/// cutting it off would hide the damage rather than refuse it.
+fn starts_an_appended_line(tail: &str) -> bool {
+    let (id, symbol) = tail.split_once(' ').unwrap_or((tail, ""));
+    let digits = |text: &str| text.bytes().all(|byte| byte.is_ascii_digit());
+    let id_fits = !id.is_empty() && id.len() <= u32::MAX.to_string().len() && digits(id);
+    let symbol_fits = symbol.len() <= SYMBOL_LEN * 2 && symbol.bytes().all(|b| nibble(b).is_some());
+    id_fits && symbol_fits
 }
 
 /// The 64 bytes behind `SYMBOL_LEN * 2` hexadecimal digits, or `None`.

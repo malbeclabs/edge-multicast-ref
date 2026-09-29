@@ -483,10 +483,11 @@ kind = "a-venue-tob"
   cost.** Each new instrument appends one line to `[refdata] state_dir`, and a
   delisted one keeps its entry so that a relisting gets its own `Instrument ID`
   back. For a venue that lists short-lived instruments, the entries have no end
-  unless this key is set. Set, an entry is dropped once the instrument has not
-  been published for that long, and **a symbol the venue relists after that is
-  minted a new `Instrument ID`**: a subscriber holding the old one sees an
-  instrument end and a different one begin. State it longer than any gap after
+  unless this key is set. Set, an entry is dropped at the first compaction after
+  the instrument has gone that long unpublished, and **a symbol the venue
+  relists after it has been dropped is minted a new `Instrument ID`**: a
+  subscriber holding the old one sees an instrument end and a different one
+  begin. A relisting before that compaction keeps its own ID. State it longer than any gap after
   which the venue relists a symbol it delisted. No `Instrument ID` is ever
   re-issued, whatever it is set to. Anything under a second is refused, and a
   fraction of a second above that is rounded up.

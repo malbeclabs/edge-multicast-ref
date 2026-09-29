@@ -456,9 +456,12 @@ pub struct RefdataSection {
     /// How long after it was last published a delisted instrument's
     /// `Instrument ID` is kept for it. Absent keeps every one for good.
     ///
-    /// **A symbol the venue relists after this has passed is minted a new
-    /// `Instrument ID`**, and a subscriber holding the old one sees an
-    /// instrument end and a different one begin. It is what bounds the state
+    /// The entry is forgotten at the first compaction after this has passed,
+    /// and **a symbol the venue relists after it has been forgotten is minted
+    /// a new `Instrument ID`**: a subscriber holding the old one sees an
+    /// instrument end and a different one begin. A relisting before that
+    /// compaction keeps its own ID, since the horizon is when an entry may go
+    /// and not when it must. It is what bounds the state
     /// record for a venue that lists short-lived instruments, and it should be
     /// longer than any gap after which the venue relists a symbol it delisted.
     /// No `Instrument ID` is re-issued whatever it is set to. Refused under a

@@ -110,7 +110,7 @@ fn a_mint_appends_one_line_and_rewrites_nothing() {
     let clock = clock_at(START_NS);
     let mut registry = opened(store.clone(), &clock, None);
 
-    // The first write a directory ever sees is a snapshot, because a line has
+    // The first write a directory ever sees is a base, because a line has
     // nothing to be appended to until one exists.
     registry.list(&spec("AAA")).expect("admitted");
     assert_eq!((store.stores(), store.appends()), (1, 0));
@@ -147,12 +147,12 @@ fn a_venue_that_lists_forever_rewrites_the_record_a_bounded_number_of_times() {
     let mints = 3 * COMPACTION_FLOOR;
     churn(&mut registry, "W", mints);
 
-    // One snapshot to start the record, and one each time the appended lines
-    // reach the snapshot: at the floor, and at twice the floor. A store per
+    // One base to start the record, and one each time the appended lines
+    // reach the base: at the floor, and at twice the floor. A store per
     // mint would be 3,072.
     assert_eq!(store.stores(), 3);
     // Every mint but the first is appended, including the ones that set a
-    // compaction off: the line is durable before the snapshot is written.
+    // compaction off: the line is durable before the base is written.
     assert_eq!(store.appends(), mints - 1);
 
     // What was compacted is what was minted: every ID, once, and the next one
@@ -163,7 +163,7 @@ fn a_venue_that_lists_forever_rewrites_the_record_a_bounded_number_of_times() {
         loaded.record.next_id,
         u32::try_from(mints).expect("small") + 1
     );
-    // The last snapshot holds each delisting's time. The one exception is the
+    // The last base holds each delisting's time. The one exception is the
     // instrument whose mint set it off, which was published when it was
     // written; the lines appended since carry no time at all.
     let stamped = loaded
@@ -172,7 +172,7 @@ fn a_venue_that_lists_forever_rewrites_the_record_a_bounded_number_of_times() {
         .iter()
         .filter(|entry| entry.delisted_at.is_some())
         .count();
-    assert_eq!(stamped, loaded.snapshot - 1);
+    assert_eq!(stamped, loaded.base - 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -237,7 +237,7 @@ fn an_entry_forgotten_at_open_is_gone_from_the_record_before_its_symbol_is_minte
         let mut registry = opened(store.clone(), &clock, HORIZON);
         let handle = registry.list(&spec("OLD")).expect("admitted");
         registry.delist(handle);
-        // A delisting's time reaches the record only through a snapshot.
+        // A delisting's time reaches the record only through a base.
         churn(&mut registry, "W", COMPACTION_FLOOR + 1);
     }
 
@@ -327,7 +327,7 @@ fn a_relisting_the_record_holds_as_delisted_is_written_down_before_it_is_admitte
         let mut registry = opened(store.clone(), &clock, HORIZON);
         let handle = registry.list(&spec("BACK")).expect("admitted");
         registry.delist(handle);
-        // A snapshot now holds it with the delisting's second.
+        // A base now holds it with the delisting's second.
         churn(&mut registry, "W", COMPACTION_FLOOR + 1);
 
         clock.set_unix_ns(START_NS + HOUR_NS / 2);
@@ -346,7 +346,7 @@ fn a_relisting_the_record_holds_as_delisted_is_written_down_before_it_is_admitte
         // Stopped with it published.
     }
 
-    // Ninety minutes after the delisting the snapshot holds: past the horizon
+    // Ninety minutes after the delisting the base holds: past the horizon
     // from that second. The restated line is what keeps it.
     clock.set_unix_ns(START_NS + HOUR_NS + HOUR_NS / 2);
     let mut registry = opened(store, &clock, HORIZON);
@@ -381,10 +381,10 @@ fn line(id: u32, symbol: &str) -> String {
 }
 
 #[test]
-fn a_record_folds_its_appended_lines_into_its_snapshot() {
-    let snapshot_aaa = format!("{} 1800000000\n", line(1, "AAA").trim_end());
+fn a_record_folds_its_appended_lines_into_its_base() {
+    let base_aaa = format!("{} 1800000000\n", line(1, "AAA").trim_end());
     let text = format!(
-        "{}{snapshot_aaa}{}{}",
+        "{}{base_aaa}{}{}",
         header(2, 1),
         line(2, "BBB"),
         line(1, "AAA")
@@ -392,7 +392,7 @@ fn a_record_folds_its_appended_lines_into_its_snapshot() {
     let loaded = StateRecord::load(text.as_bytes()).expect("our own bytes");
 
     assert_eq!(loaded.record.next_id, 3, "the minting line advanced it");
-    assert_eq!((loaded.snapshot, loaded.appended), (1, 2));
+    assert_eq!((loaded.base, loaded.appended), (1, 2));
     assert!(!loaded.torn && !loaded.needs_rewrite());
     assert_eq!(loaded.record.entries.len(), 2);
     assert!(
@@ -406,7 +406,7 @@ fn a_record_folds_its_appended_lines_into_its_snapshot() {
 }
 
 #[test]
-fn a_snapshot_round_trips_with_its_timestamps() {
+fn a_base_round_trips_with_its_timestamps() {
     let store = MemoryStore::new();
     let clock = clock_at(START_NS);
     let mut registry = opened(store.clone(), &clock, None);
@@ -512,7 +512,9 @@ fn an_append_whose_flush_fails_costs_an_id_and_admits_nothing() {
         let mut registry = opened(store.clone(), &clock, None);
         registry.list(&spec("AAA")).expect("admitted");
         store.break_flushes("input/output error");
+        let appends = store.appends();
         assert!(registry.list(&spec("BBB")).is_none(), "nothing is admitted");
+        assert_eq!(store.appends(), appends + 1, "the line is in the record");
         assert!(registry.fault().is_some());
         assert!(registry.list(&spec("CCC")).is_none(), "nothing further");
     }
@@ -574,14 +576,14 @@ fn a_record_that_is_complete_and_wrong_is_refused() {
         )),
         RecordError::Malformed { .. }
     ));
-    // A snapshot is written whole, so a torn one is damage and not an append
+    // A base is written whole, so a torn one is damage and not an append
     // that never completed.
     let aaa = line(1, "AAA");
     assert!(matches!(
         refused(format!("{}{}", header(2, 1), &aaa[..aaa.len() - 1])),
         RecordError::Malformed { .. }
     ));
-    // A version 1 record is all snapshot, so its final line torn is damage
+    // A version 1 record is all base, so its final line torn is damage
     // too, and dropping it would lose an ID the upgrade must keep.
     assert!(matches!(
         refused(format!(
@@ -591,7 +593,18 @@ fn a_record_that_is_complete_and_wrong_is_refused() {
         )),
         RecordError::Malformed { .. }
     ));
-    // A snapshot shorter than its header counts.
+    // A final line with no newline that no append could have started: only
+    // a prefix of a line this build appends is an append that never finished.
+    for tail in ["not-an-append", "1 NOT-HEX", "1 2 3", " 00"] {
+        assert!(
+            matches!(
+                refused(format!("{}{}{tail}", header(2, 1), line(1, "AAA"))),
+                RecordError::Malformed { .. }
+            ),
+            "{tail:?}"
+        );
+    }
+    // A base shorter than its header counts.
     assert!(matches!(
         refused(format!("{}{}", header(3, 2), line(1, "AAA"))),
         RecordError::Malformed { .. }
@@ -659,7 +672,7 @@ fn a_record_that_cannot_be_rewritten_on_open_stops_the_publisher_starting() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn an_append_after_a_snapshot_lands_in_the_record_that_replaced_the_old_one() {
+fn an_append_after_a_base_lands_in_the_record_that_replaced_the_old_one() {
     let dir = tempfile::tempdir().expect("a temporary directory");
     let mut store = FileStore::new(dir.path());
     store.claim().expect("unclaimed");

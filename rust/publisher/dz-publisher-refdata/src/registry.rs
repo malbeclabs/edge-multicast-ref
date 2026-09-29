@@ -260,7 +260,7 @@ pub struct Counts {
 ///   entry belongs to an instrument no definition names, so the sentence above
 ///   still holds.
 /// - A mint is one appended line, and the record is rewritten only when the
-///   lines appended reach the size of the last snapshot. What a mint costs is
+///   lines appended reach the size of the last base. What a mint costs is
 ///   therefore constant, and not the size of the venue's history.
 /// - The state directory takes one writer. Two writers means the last flush
 ///   wins and half the published IDs resolve to nothing after a restart.
@@ -282,13 +282,13 @@ pub struct Registry<S: StateStore, C: Clock> {
     /// horizon removes one. What makes an ID unreusable is `next_id`.
     minted: HashMap<SymbolKey, Minted>,
     next_id: u32,
-    /// Whether the directory holds a snapshot that lines can be appended to.
+    /// Whether the directory holds a base that lines can be appended to.
     /// False only before the first mint of a publisher that has never minted.
-    snapshot_written: bool,
-    /// Entries in the last snapshot, which is what the appended lines are
+    base_written: bool,
+    /// Entries in the last base, which is what the appended lines are
     /// measured against.
-    snapshot_entries: usize,
-    /// Lines appended since the last snapshot.
+    base_entries: usize,
+    /// Lines appended since the last base.
     appended: usize,
     /// The live handle for each published symbol, so a re-offer is one lookup.
     handles: HashMap<SymbolKey, InstrumentRef>,
@@ -444,8 +444,8 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             clock,
             minted,
             next_id: record.next_id,
-            snapshot_written: loaded.is_some(),
-            snapshot_entries: loaded.as_ref().map_or(0, |loaded| loaded.snapshot),
+            base_written: loaded.is_some(),
+            base_entries: loaded.as_ref().map_or(0, |loaded| loaded.base),
             appended: loaded.as_ref().map_or(0, |loaded| loaded.appended),
             handles: HashMap::new(),
             slots: Vec::new(),
@@ -470,7 +470,7 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         // is what an append that ran the disk out of room leaves.
         if let Some(loaded) = &loaded {
             if loaded.needs_rewrite() || forgot || registry.compaction_due() {
-                registry.write_snapshot(None).map_err(RefdataError::State)?;
+                registry.write_base(None).map_err(RefdataError::State)?;
             } else if loaded.torn {
                 registry
                     .store
@@ -967,12 +967,12 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         self.counts.admitted += 1;
         self.count_fits(composed.fits);
         self.advance_manifest(shard);
-        // After the admission and not before it, so the snapshot holds the
-        // instrument as published. The line is already durable, so a snapshot
+        // After the admission and not before it, so the base holds the
+        // instrument as published. The line is already durable, so a base
         // that fails faults what follows and not this admission.
         if self.compaction_due() {
             let _ = self.forget(now_s(&self.clock));
-            if let Err(error) = self.write_snapshot(None) {
+            if let Err(error) = self.write_base(None) {
                 self.fault = Some(error);
             }
         }
@@ -984,19 +984,19 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
     ///
     /// **One appended line**, flushed, whatever the size of the record. The
     /// only exception is the first write a directory ever sees, which is a
-    /// snapshot, since a line has nothing to be appended to until one exists.
+    /// base, since a line has nothing to be appended to until one exists.
     fn persist(
         &mut self,
         instrument_id: u32,
         symbol: SymbolKey,
         next_id: u32,
     ) -> Result<(), Refusal> {
-        let written = if self.snapshot_written {
+        let written = if self.base_written {
             self.store
                 .append(&encode_line(instrument_id, &symbol))
                 .map(|()| self.appended += 1)
         } else {
-            self.write_snapshot(Some((instrument_id, symbol, next_id)))
+            self.write_base(Some((instrument_id, symbol, next_id)))
         };
         written.map_err(|error| {
             self.fault = Some(error);
@@ -1004,13 +1004,13 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         })
     }
 
-    /// Whether the appended lines have reached the last snapshot's size.
+    /// Whether the appended lines have reached the last base's size.
     ///
-    /// A snapshot holds at most the last one's entries plus the lines appended
+    /// A base holds at most the last one's entries plus the lines appended
     /// since, so it rewrites at most two entries for every line appended.
     /// That is what keeps a mint's cost constant however long the history is.
     fn compaction_due(&self) -> bool {
-        self.appended >= self.snapshot_entries.max(COMPACTION_FLOOR)
+        self.appended >= self.base_entries.max(COMPACTION_FLOOR)
     }
 
     /// Drop every entry that is not published and was last published at least
@@ -1037,14 +1037,14 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         self.minted.len() != before
     }
 
-    /// Replace the record with a snapshot of every retained entry, plus
+    /// Replace the record with a base of every retained entry, plus
     /// `minting` when this is a directory's first write.
     ///
     /// An entry is written as published when it is, and — while seeding — when
     /// the record already holds it so and the venue has not offered it yet: a
     /// seed that has not finished has not said it is gone. Anything else is
     /// written with the second it was last published.
-    fn write_snapshot(&mut self, minting: Option<(u32, SymbolKey, u32)>) -> Result<(), StateError> {
+    fn write_base(&mut self, minting: Option<(u32, SymbolKey, u32)>) -> Result<(), StateError> {
         let seeding = matches!(self.phase, Phase::Seeding);
         let mut entries: Vec<Entry> = self
             .minted
@@ -1074,13 +1074,13 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             entries,
         };
         self.store.store(&record.encode())?;
-        self.snapshot_entries = record.entries.len();
+        self.base_entries = record.entries.len();
         let handles = &self.handles;
         for (symbol, minted) in &mut self.minted {
             minted.recorded_published =
                 handles.contains_key(symbol) || (seeding && minted.recorded_published);
         }
-        self.snapshot_written = true;
+        self.base_written = true;
         self.appended = 0;
         Ok(())
     }
@@ -1099,7 +1099,7 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         self.counts.delisted += 1;
         // The entry stays, and gives the symbol its own ID back if the venue
         // relists it. A delisting writes nothing, which is why it cannot fail:
-        // when it happened is held here until the next snapshot writes it.
+        // when it happened is held here until the next base writes it.
         let delisted_s = stamp_s(&self.clock);
         if let Some(minted) = self.minted.get_mut(&entry.symbol) {
             minted.last_published_s = delisted_s;

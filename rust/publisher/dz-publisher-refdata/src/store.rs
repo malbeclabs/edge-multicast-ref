@@ -270,10 +270,12 @@ impl StateStore for MemoryStore {
             .record
             .get_or_insert_with(Vec::new)
             .extend_from_slice(bytes);
+        // Counted before the flush can fail: the bytes are in the record
+        // either way.
+        directory.appends += 1;
         if let Some(message) = &directory.flush_fails {
             return Err(StateError::Write(std::io::Error::other(message.clone())));
         }
-        directory.appends += 1;
         Ok(())
     }
 
