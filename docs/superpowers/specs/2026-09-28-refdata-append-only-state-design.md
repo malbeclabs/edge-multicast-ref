@@ -15,30 +15,30 @@ Two things are wrong, and they have separate fixes:
 
 ## A mint appends one line
 
-The record stays one file, `instruments.state`, and becomes a snapshot followed by appended lines.
+The record stays one file, `instruments.state`, and becomes a base followed by appended lines.
 
 ```
-dz-refdata-state 2 <source_id> <next_id> <snapshot entries>
+dz-refdata-state 2 <source_id> <next_id> <base entries>
 <instrument_id> <symbol, 128 hex digits>
 <instrument_id> <symbol, 128 hex digits> <unix seconds>
 ...
 <instrument_id> <symbol, 128 hex digits>
 ```
 
-The **snapshot** is the header and as many entries as the header counts. The **appended lines** follow it. The count is what tells them apart, since a restating line names an ID already below `next_id`, just as a snapshot entry does. Every entry line uses one grammar:
+The **base** is the header and as many entries as the header counts. The **appended lines** follow it. The count is what tells them apart, since a restating line names an ID already below `next_id`, just as a base entry does. Every entry line uses one grammar:
 
 - Two fields: this `Instrument ID` is this `Symbol`, and the instrument was published when the line was written.
-- Three fields (snapshot only): this `Instrument ID` is this `Symbol`, the instrument was not published when the snapshot was written, and it was last published at that Unix second.
+- Three fields (base only): this `Instrument ID` is this `Symbol`, the instrument was not published when the base was written, and it was last published at that Unix second.
 
 An appended line either **mints**, meaning its `Instrument ID` equals the running `next_id` and its `Symbol` is not yet in the record, which advances the running `next_id` by one, or **restates** an `(Instrument ID, Symbol)` pair already in the record as published. Anything else is a damaged record and a startup refusal, as it is now. That includes an appended line that skips an ID, reuses one, pairs a known ID with a different `Symbol`, or carries a timestamp.
 
-**A final appended line with no terminating newline is discarded.** It is an append that never completed. The admission it was persisting did not happen, because an instrument is admitted only after its line is flushed, so nothing published depends on it. The open cuts the file back to the newline before it. Only an appended line gets this: one that comes after every entry the version-2 header counts. A snapshot entry with no newline is damage, since a snapshot is written whole and renamed into place, and so is the last line of a version-1 record, which is all snapshot and whose every entry the upgrade must keep. Every other kind of damage stays a refusal: a line that is complete and wrong was written by something this build did not write.
+**A final appended line with no terminating newline is discarded.** It is an append that never completed. The admission it was persisting did not happen, because an instrument is admitted only after its line is flushed, so nothing published depends on it. The open cuts the file back to the newline before it. Only an appended line gets this: one that comes after every entry the version-2 header counts, and that is a prefix of what a mint writes, meaning digits, then a space and at most 128 lowercase hexadecimal digits. Any other final line with no newline was written by something else, and it is refused rather than cut off. A base entry with no newline is damage, since a base is written whole and renamed into place, and so is the last line of a version-1 record, which is all base and whose every entry the upgrade must keep. Every other kind of damage stays a refusal: a line that is complete and wrong was written by something this build did not write.
 
 **What writes, and when:**
 
 | Event | Write |
 |---|---|
-| A symbol never minted | One minting line, appended and flushed before the instrument is admitted. The first mint a directory ever sees writes a snapshot instead, because a line has nothing to be appended to until one exists. |
+| A symbol never minted | One minting line, appended and flushed before the instrument is admitted. The first mint a directory ever sees writes a base instead, because a line has nothing to be appended to until one exists. |
 | A relisting of a symbol the record holds with a timestamp | One restating line, appended and flushed before admission. |
 | A relisting of a symbol the record holds as published | Nothing. |
 | A delisting | Nothing. The time is held in memory until the next compaction. |
@@ -54,16 +54,16 @@ A group would save flushes, fourteen per window becoming one, but `ListingSink::
 
 ## Compaction
 
-Compaction writes a fresh snapshot of every retained entry, with the atomic pending-file-and-rename that is used for every write now. It runs:
+Compaction writes a fresh base of every retained entry, with the atomic pending-file-and-rename that is used for every write now. It runs:
 
 - **At open, when the record needs it:** a version-1 record, which has no entry count to append after; an entry the horizon forgot while the publisher was down, which the record must not go on holding, since a later mint of the same symbol would then appear in it twice; or appended lines past the threshold. A record that needs none of these is not rewritten at open. A torn final line, which the next append would otherwise run on from, goes with the rewrite when there is one. When there is none, the file is cut back to the newline before it. Cutting needs no free space, and a torn line is what an append that ran out of disk space leaves, so a publisher on a full disk still starts and serves every ID it holds.
-- **While running, when the appended lines reach the snapshot's size**, and never below 1,024 lines. It runs after the append that crosses the threshold. That mint is already durable, so a failed compaction faults the registry without refusing the admission that set it off.
+- **While running, when the appended lines reach the base's size**, and never below 1,024 lines. It runs after the append that crosses the threshold. That mint is already durable, so a failed compaction faults the registry without refusing the admission that set it off.
 
-The threshold is what makes the cost constant. A snapshot holds at most the last one's entries plus the lines appended since, so it rewrites at most two entries for each line appended. Compaction runs on the tick like every other write. Its size is set by what is retained, which is why the horizon exists.
+The threshold is what makes the cost constant. A base holds at most the last one's entries plus the lines appended since, so it rewrites at most two entries for each line appended. Compaction runs on the tick like every other write. Its size is set by what is retained, which is why the horizon exists.
 
-A snapshot writes an entry as published when it is published. While seeding, it also does so when the record already holds the entry as published and the venue has not offered it yet: a seed that has not finished has not said the instrument is gone. Every other entry is written with the second it was last published.
+A base writes an entry as published when it is published. While seeding, it also does so when the record already holds the entry as published and the venue has not offered it yet: a seed that has not finished has not said the instrument is gone. Every other entry is written with the second it was last published.
 
-| Case | Snapshot | Appended between compactions |
+| Case | Base | Appended between compactions |
 |---|---|---|
 | 1,344 mints a day, horizon `168h` | ~9,400 entries, ~1.3 MB | ~9,400 lines, about a week |
 | 1,344 mints a day, no horizon, after a year | ~490,000 entries, ~67 MB | ~490,000 lines, about a year |
@@ -72,7 +72,7 @@ Without a horizon a mint is still constant and the file stays below twice the hi
 
 ## Forgetting delisted instruments
 
-`[refdata] forget_delisted_after` is an optional duration. When it is set, compaction drops every entry that is not published and was last published at least that long ago. When it is absent, every entry is retained for good. Anything under a second is refused at load, because the record counts whole seconds and a horizon of zero forgets an instrument the moment it is delisted. A fraction of a second above that is rounded up, so `1500ms` keeps an entry for two seconds.
+`[refdata] forget_delisted_after` is an optional duration. When it is set, compaction drops every entry that is not published and was last published at least that long ago. The horizon is when an entry may go, not when it must. It goes at the first compaction after the horizon, at open or when the appended lines reach the threshold, and a relisting before that gets its own ID back. Expiring an entry at the relisting instead would add a write to that path, and it would only take away an ID the subscriber still holds. When it is absent, every entry is retained for good. Anything under a second is refused at load, because the record counts whole seconds and a horizon of zero forgets an instrument the moment it is delisted. A fraction of a second above that is rounded up, so `1500ms` keeps an entry for two seconds.
 
 ```toml
 [refdata]
@@ -80,7 +80,7 @@ state_dir = "/var/lib/a-venue-publisher"
 forget_delisted_after = "168h"
 ```
 
-**What forgetting keeps.** `next_id` is the guarantee that an `Instrument ID` is never re-issued. It lives in the snapshot header, it is never derived from the entries, and forgetting never lowers it. What the map holds is the other promise: that a relisted symbol comes back under its own ID. A delisted instrument appears in no published definition, so dropping it cannot break the invariant that **a published `Instrument ID` always resolves to a published definition**.
+**What forgetting keeps.** `next_id` is the guarantee that an `Instrument ID` is never re-issued. It lives in the base header, it is never derived from the entries, and forgetting never lowers it. What the map holds is the other promise: that a relisted symbol comes back under its own ID. A delisted instrument appears in no published definition, so dropping it cannot break the invariant that **a published `Instrument ID` always resolves to a published definition**.
 
 **What forgetting costs, stated in the key's contract.** A symbol relisted after it has been forgotten is minted a **new** `Instrument ID`. A subscriber that kept the old one sees an instrument end and a different one begin. Set the horizon longer than any gap after which the venue relists a symbol it has delisted.
 
@@ -95,7 +95,7 @@ The current second is rounded down when it is compared against them. Each roundi
 ## Compatibility
 
 - **Upgrade:** a version-1 record is read as version 2, with every entry recorded as published, and rewritten as version 2 by the compaction at open.
-- **Rollback:** a build that reads only version 1 refuses a version-2 record as `UnsupportedVersion` and does not start. That is the refusal the format tag exists to produce. A publisher rolled back across this change needs its record converted to a version-1 snapshot of the same entries and the same `next_id`, with the appended lines folded in and the timestamps dropped.
+- **Rollback:** a build that reads only version 1 refuses a version-2 record as `UnsupportedVersion` and does not start. That is the refusal the format tag exists to produce. A publisher rolled back across this change needs its record converted to a version-1 base of the same entries and the same `next_id`, with the appended lines folded in and the timestamps dropped.
 - **Wire:** no change. No message, field or metric is added.
 
 ## What changes
@@ -103,7 +103,7 @@ The current second is rounded down when it is compared against them. Each roundi
 - `StateStore` gains `append`: the bytes are durable when it returns, and after an error a later `load` sees the record without them, with an unterminated prefix of them, or with all of them.
 - `StateStore` gains `truncate`: the record is cut back to a length, durably. It is how the open takes a torn final line off.
 - `FileStore::append` writes through a handle opened with `O_APPEND` on the record, reopened after each `store`, and flushes with `sync_data`. `FileStore::truncate` shortens the record in place and flushes with `sync_data`.
-- `MemoryStore` appends to its record and counts `store` and `append` calls, so a test can show that a mint writes one line. It can also make an append land whole and then fail, as a failed `sync_data` does.
+- `MemoryStore` appends to its record and counts `store` and `append` calls, so a test can show that a mint writes one line. It can also make an append land whole and then fail, as a failed `sync_data` does, and it counts that append too.
 - `StateRecord` reads and writes version 2, reads version 1, and carries the appended lines' rules above.
 - `Registry` holds per entry whether it is recorded as published and when it was last published, appends instead of rewriting, compacts on the threshold, and forgets on the horizon.
 - `RegistryConfig` gains `forget_delisted_after: Option<Duration>`, and `[refdata]` gains the key.

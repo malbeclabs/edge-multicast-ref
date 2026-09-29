@@ -17,13 +17,13 @@ Breaks [the design](../specs/2026-09-28-refdata-append-only-state-design.md) int
 ### 1. The record: version 2, appended lines, and a torn tail
 
 - [x] `FORMAT_VERSION` becomes 2, and `decode` also accepts 1.
-- [x] `Entry` gains `delisted_at: Option<u64>`, the Unix second it was last published, rounded up, for a snapshot entry that was not published when written.
+- [x] `Entry` gains `delisted_at: Option<u64>`, the Unix second it was last published, rounded up, for a base entry that was not published when written.
 - [x] `decode` reads the appended lines under the design's two rules, mint and restate, and returns the running `next_id`. It refuses a skipped or reused ID, a known ID with a different `Symbol`, and a timestamp on an appended line, each as its own `RecordError`.
-- [x] `decode` drops a final appended line with no newline, one past every entry the version-2 header counts, and reports that it did and the length before it, so the registry can cut it off. A snapshot entry or a version-1 line with no newline is refused.
-- [x] `encode` writes a snapshot; `encode_line` writes one appended line.
+- [x] `decode` drops a final appended line with no newline, one past every entry the version-2 header counts, and reports that it did and the length before it, so the registry can cut it off. The dropped line must be a prefix of what `encode_line` writes. A base entry, a version-1 line, or any other final line with no newline is refused.
+- [x] `encode` writes a base; `encode_line` writes one appended line.
 - [x] The `StateRecord` doc comment on `next_id` states the rule as it now stands: entries are removed, so `next_id` is the only thing standing between a retired ID and a new instrument.
 
-**Test** (`tests/persistence.rs`): round trip with timestamps; a version-1 record reads with every entry recorded as published; each refusal above; a torn final appended line is dropped, a complete malformed final line is refused, and an unterminated snapshot entry or version-1 final line is refused.
+**Test** (`tests/persistence.rs`): round trip with timestamps; a version-1 record reads with every entry recorded as published; each refusal above; a torn final appended line is dropped, a complete malformed final line is refused, and an unterminated base entry, version-1 final line, or tail that is not the start of an appended line is refused.
 
 **The revert:** accept a skipped ID in the appended lines, and the skipped-ID test fails. Drop the newline check, and the torn-tail test fails, because the partial line parses as a malformed entry.
 
@@ -34,7 +34,7 @@ Breaks [the design](../specs/2026-09-28-refdata-append-only-state-design.md) int
 - [x] The trait gains `append(&mut self, bytes: &[u8])`, with the design's contract on what a `load` after an error may see: none of the bytes, a prefix, or all of them.
 - [x] The trait gains `truncate(&mut self, len: usize)`, which cuts the record back to `len` bytes, durably.
 - [x] `FileStore`: an `O_APPEND` handle on the record, opened lazily and reopened after every `store`, written with `write_all` and flushed with `sync_data`. `truncate` is `set_len` and `sync_data`.
-- [x] `MemoryStore`: extends its record, and counts `store` and `append` calls for tests. `break_writes` fails all three writes. `break_flushes` lets an append land whole and then fails it.
+- [x] `MemoryStore`: extends its record, and counts `store` and `append` calls for tests. `break_writes` fails all three writes. `break_flushes` lets an append land whole, counts it, and then fails it.
 
 **Test** (`tests/persistence.rs`, over a temporary directory): an append after a `store` lands in the new record rather than the renamed-away inode; appends survive a reopen of the store; a torn final line is cut off a real record in place.
 
@@ -49,7 +49,7 @@ Breaks [the design](../specs/2026-09-28-refdata-append-only-state-design.md) int
 - [x] Every stamp rounds the clock up to a whole second, the horizon rounds up, and the current second rounds down, so no rounding forgets an entry early.
 - [x] A mint appends one line. A relisting of an entry the record holds with a timestamp appends a restating line. Both happen before admission, and a failure is the existing fault.
 - [x] `withdraw` stamps the time in memory and writes nothing.
-- [x] Compaction runs when the appended lines reach `max(snapshot entries, COMPACTION_FLOOR)`, after the append that crosses the threshold. It forgets on the horizon, then stores the snapshot. A failure faults the registry and does not refuse the admission already persisted.
+- [x] Compaction runs when the appended lines reach `max(base entries, COMPACTION_FLOOR)`, after the append that crosses the threshold. It forgets on the horizon, then stores the base. A failure faults the registry and does not refuse the admission already persisted.
 - [x] `RegistryConfig::forget_delisted_after: Option<Duration>`.
 - [x] The doc comments on `persist`, `withdraw`, `minted` and the registry's guarantee state the new rule, including what a forgotten symbol costs when it is relisted.
 
@@ -63,7 +63,7 @@ Breaks [the design](../specs/2026-09-28-refdata-append-only-state-design.md) int
 - a delisting at 0.999 s into a second is not forgotten at the start of the next under a one-second horizon, and a `1500ms` horizon does not forget at 1.2 s;
 - an append whose flush fails admits nothing and faults the registry, and after a restart the whole line it left reserves its ID, which no other instrument is given.
 
-**The revert (the plan's centre):** persist the whole record per mint again, and the append-count test fails. Stamp an entry recorded as published with its snapshot time instead of the open time, and the restart test fails. Skip the restating append, and the relisting-across-a-restart test fails.
+**The revert (the plan's centre):** persist the whole record per mint again, and the append-count test fails. Stamp an entry recorded as published with its base time instead of the open time, and the restart test fails. Skip the restating append, and the relisting-across-a-restart test fails.
 
 ---
 
@@ -85,13 +85,13 @@ Each was applied to a committed tree, from a copy taken for that mutant alone, w
 
 | Revert | Fails |
 |---|---|
-| Write a whole snapshot per mint | `a_mint_appends_one_line_and_rewrites_nothing`, `a_venue_that_lists_forever_rewrites_the_record_a_bounded_number_of_times`, and two more |
-| Measure the threshold against the map instead of the snapshot | `a_venue_that_lists_forever_rewrites_the_record_a_bounded_number_of_times`, and four more |
+| Write a whole base per mint | `a_mint_appends_one_line_and_rewrites_nothing`, `a_venue_that_lists_forever_rewrites_the_record_a_bounded_number_of_times`, and two more |
+| Measure the threshold against the map instead of the base | `a_venue_that_lists_forever_rewrites_the_record_a_bounded_number_of_times`, and four more |
 | Stamp an entry recorded as published with 0 instead of the open time | `an_entry_published_when_the_publisher_stopped_is_measured_from_the_restart`, and four more |
 | Skip the restating append | `a_relisting_the_record_holds_as_delisted_is_written_down_before_it_is_admitted`, `a_relisting_that_cannot_be_written_down_admits_nothing` |
 | Forget a published entry | `a_published_instrument_is_never_forgotten_however_old_its_mint` |
 | Forget at open without rewriting | `an_entry_forgotten_at_open_is_gone_from_the_record_before_its_symbol_is_minted_again` |
-| Keep the append handle across a `store` | `an_append_after_a_snapshot_lands_in_the_record_that_replaced_the_old_one` |
+| Keep the append handle across a `store` | `an_append_after_a_base_lands_in_the_record_that_replaced_the_old_one` |
 | Refuse a torn final line | `a_torn_final_line_is_dropped_and_the_next_mint_does_not_run_on_from_it` |
 | Leave a torn final line in place at open | `a_torn_final_line_is_dropped_and_the_next_mint_does_not_run_on_from_it` |
 | Accept an appended line that skips an ID | `a_record_that_is_complete_and_wrong_is_refused` |
@@ -101,6 +101,9 @@ Each was applied to a committed tree, from a copy taken for that mutant alone, w
 | Rewrite a torn final line at open instead of cutting it off | `a_torn_final_line_is_dropped_and_the_next_mint_does_not_run_on_from_it`, `a_torn_final_line_is_cut_off_a_real_record_in_place` |
 | Make `FileStore::truncate` cut nothing | `a_torn_final_line_is_cut_off_a_real_record_in_place` |
 | Drop a torn final line of a version-1 record | `a_record_that_is_complete_and_wrong_is_refused` |
+| Accept any final line with no newline as torn | `a_record_that_is_complete_and_wrong_is_refused` |
+| Accept a torn tail longer than a line | `a_record_that_is_complete_and_wrong_is_refused` |
+| Count an append only once its flush succeeds | `an_append_whose_flush_fails_costs_an_id_and_admits_nothing` |
 | Leave the registry unfaulted after a failed append | `an_append_whose_flush_fails_costs_an_id_and_admits_nothing`, `a_relisting_that_cannot_be_written_down_admits_nothing` |
 
 ## Acceptance
