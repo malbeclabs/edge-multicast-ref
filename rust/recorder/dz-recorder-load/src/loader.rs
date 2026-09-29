@@ -91,15 +91,21 @@ pub struct Pass {
 /// Everything one pass needs.
 pub struct Loader<'a, S: RowSink> {
     pub objects_dir: &'a Path,
-    /// Which feed subdirectories of `objects_dir` this pass reads.
+    /// Which feed subdirectories of `objects_dir` this pass reads, or `None`
+    /// for all of them.
     ///
-    /// **Empty is every feed**, which is what the walk has always done. A
-    /// non-empty list is a deliberate narrowing, and it is deliberate in the
-    /// expensive direction: the transport grains are derived per object
-    /// *scanned*, so a feed left out writes no row at all, and the ledger
-    /// compaction below has to be told about it or it will drop that feed's
-    /// history and re-insert it the day the list widens.
-    pub feeds: &'a [String],
+    /// **`None` IS EVERY FEED AND IT IS NOT THE SAME AS AN EMPTY SET**, which
+    /// the configuration refuses for that reason. A set is a deliberate
+    /// narrowing, and it is deliberate in the expensive direction: the
+    /// transport grains derive per object *scanned*, so a feed left out writes
+    /// no row at all.
+    ///
+    /// One representation, built once, spent on two things: [`Self::scans`]
+    /// filters the walk with it and `compact` scopes the ledger with it. Two
+    /// spellings of one set is how the walk and the compaction come to disagree
+    /// about which feeds a pass was responsible for, and that disagreement is
+    /// either a dropped ledger entry or one kept for ever.
+    pub feeds: Option<&'a HashSet<String>>,
     pub site: &'a str,
     pub recorder: &'a str,
     pub max_objects: usize,
@@ -216,7 +222,7 @@ impl<S: RowSink> Loader<'_, S> {
         let now_ns = now_unix_nanos();
         let mut pass = Pass::default();
         let mut errors = Vec::new();
-        let (candidates, enumeration) = self.candidates(&mut errors);
+        let (candidates, enumeration, feeds_without_objects) = self.candidates(&mut errors);
         let mut present: HashSet<(String, String)> = HashSet::new();
         // Every object the pass saw that had no ledger entry when it was
         // scanned, with the end of its receive window. Filtered against the
@@ -399,15 +405,12 @@ impl<S: RowSink> Loader<'_, S> {
         // And only within the scope it was asked to scan. A narrowed `feeds`
         // makes every pass a deliberate subset, so the scope is what tells
         // `compact` that an entry of a feed this pass never looked at is not
-        // an entry whose object has gone.
-        let scope: Option<HashSet<String>> = if self.feeds.is_empty() {
-            None
-        } else {
-            Some(self.feeds.iter().cloned().collect())
-        };
+        // an entry whose object has gone. It is the same set the walk filtered
+        // on and not a second copy of it, which is what makes "every feed this
+        // pass was responsible for" one answer rather than two.
         match enumeration {
             Enumeration::Complete => {
-                if let Err(e) = self.ledger.compact(&present, scope.as_ref()) {
+                if let Err(e) = self.ledger.compact(&present, self.feeds) {
                     // Not a failed load: the ledger is still correct, only
                     // longer than it needs to be.
                     self.metrics.error(ErrorKind::Ledger, now_unix_seconds());
@@ -441,6 +444,7 @@ impl<S: RowSink> Loader<'_, S> {
             self.ledger.entries() as i64,
             now_seconds,
         );
+        self.metrics.scan_set_checked(feeds_without_objects);
         self.metrics.market_data_pass_finished(
             pass.market_data_unloaded as i64,
             pass.market_data_oldest_unloaded_age_seconds,
@@ -558,6 +562,14 @@ impl<S: RowSink> Loader<'_, S> {
         errors.push(message);
     }
 
+    /// Whether a feed subdirectory of this name is one this pass reads.
+    ///
+    /// `None` is every feed, so an unnarrowed loader walks the whole archive
+    /// exactly as it always has.
+    fn scans(&self, name: &str) -> bool {
+        self.feeds.is_none_or(|feeds| feeds.contains(name))
+    }
+
     /// Every object with a manifest beside it, oldest first, from the objects
     /// directory AND from one level of subdirectory under it.
     ///
@@ -591,17 +603,14 @@ impl<S: RowSink> Loader<'_, S> {
     /// the narrowing costs is paid at the compaction in `run_once`, which is
     /// told the scope so it does not drop the entries of a feed nobody looked
     /// at.
-    /// Whether a feed subdirectory of this name is one this pass reads.
-    ///
-    /// Empty is every feed, so an unconfigured loader walks the whole archive
-    /// exactly as it always has.
-    fn scans(&self, name: &str) -> bool {
-        self.feeds.is_empty() || self.feeds.iter().any(|feed| feed == name)
-    }
-
-    fn candidates(&self, errors: &mut Vec<String>) -> (Vec<Candidate>, Enumeration) {
+    fn candidates(&self, errors: &mut Vec<String>) -> (Vec<Candidate>, Enumeration, i64) {
         let mut manifests: Vec<PathBuf> = Vec::new();
         let mut subdirs: Vec<PathBuf> = Vec::new();
+        // Named feeds this pass found a directory for. What is left over is
+        // either a recorder that has not published yet or a misspelling, and
+        // the pass cannot tell which -- so it counts them and says nothing,
+        // and the gauge is what an operator alerts on once it persists.
+        let mut found: HashSet<&str> = HashSet::new();
         let mut enumeration = Enumeration::Complete;
 
         let entries = match std::fs::read_dir(self.objects_dir) {
@@ -611,7 +620,11 @@ impl<S: RowSink> Loader<'_, S> {
                 errors.push(format!("{}: {e}", self.objects_dir.display()));
                 // The top level unreadable is the strongest case for not
                 // compacting: nothing at all was enumerated.
-                return (Vec::new(), Enumeration::Incomplete);
+                return (
+                    Vec::new(),
+                    Enumeration::Incomplete,
+                    self.feeds.map_or(0, |f| f.len() as i64),
+                );
             }
         };
         for entry in entries {
@@ -633,7 +646,23 @@ impl<S: RowSink> Loader<'_, S> {
             let name = entry.file_name();
             let name = name.to_string_lossy();
             if name.ends_with(MANIFEST_SUFFIX) {
-                manifests.push(entry.path());
+                // **AND NOT WHEN THE SCAN IS NARROWED.** A loose object's feed
+                // is knowable only from its manifest, which this walk does not
+                // open, so reading it would make "scanned" mean one thing here
+                // and another in `run_once`'s compaction scope, which is keyed
+                // on the feed. That disagreement is not cosmetic: the entry of
+                // a loose object is outside any narrowed scope, so once its
+                // object was evicted the entry would be kept for ever and the
+                // ledger would grow without bound -- undoing the one thing
+                // compaction is for.
+                //
+                // So a narrowed scan is exactly the feeds it names, and a
+                // recorder configured without a spec is a recorder this key is
+                // not for. Omit the key on such a host and everything is read,
+                // as it always was.
+                if self.feeds.is_none() {
+                    manifests.push(entry.path());
+                }
             } else {
                 // `file_type` CAN FAIL, and `unwrap_or(false)` would read that
                 // failure as "not a directory" -- omitting a feed silently,
@@ -645,7 +674,14 @@ impl<S: RowSink> Loader<'_, S> {
                     // standing a feed the recorder does not record has. What
                     // makes that safe rather than silent is `--check`, which
                     // refuses a `[[market_data]]` feed the scan set omits.
-                    Ok(t) if t.is_dir() && self.scans(&name) => subdirs.push(entry.path()),
+                    Ok(t) if t.is_dir() && self.scans(&name) => {
+                        if let Some(feeds) = self.feeds {
+                            if let Some(feed) = feeds.get(name.as_ref()) {
+                                found.insert(feed.as_str());
+                            }
+                        }
+                        subdirs.push(entry.path());
+                    }
                     Ok(_) => {}
                     Err(e) => {
                         self.metrics.error(ErrorKind::Io, now_unix_seconds());
@@ -729,7 +765,10 @@ impl<S: RowSink> Loader<'_, S> {
         // Oldest first: the oldest object is the one closest to eviction, and
         // in-order loading is what makes an era boundary certain.
         out.sort_by_key(|c| (c.start_ns, c.object.clone()));
-        (out, enumeration)
+        let missing = self
+            .feeds
+            .map_or(0, |feeds| (feeds.len() - found.len()) as i64);
+        (out, enumeration, missing)
     }
 }
 
@@ -1031,7 +1070,7 @@ mod pass_tests {
         let stop = never();
         let result = Loader {
             objects_dir: &archive.completed,
-            feeds: &[],
+            feeds: None,
             site: SITE,
             recorder: RECORDER,
             max_objects: 0,
@@ -1056,7 +1095,7 @@ mod pass_tests {
     /// [`pass`], with the scan narrowed to the feeds named.
     fn pass_scanning(
         archive: &Archive,
-        feeds: &[String],
+        feeds: Option<&HashSet<String>>,
         ledger: &mut Ledger,
         metrics: &LoaderMetrics,
     ) -> (Pass, Vec<String>) {
@@ -1079,6 +1118,10 @@ mod pass_tests {
         result
     }
 
+    fn feed_set(names: &[&str]) -> HashSet<String> {
+        names.iter().map(|n| (*n).to_owned()).collect()
+    }
+
     /// A feed the scan set does not name is not walked, and the objects it
     /// holds are neither loaded nor counted as refused.
     ///
@@ -1092,8 +1135,8 @@ mod pass_tests {
         let metrics = LoaderMetrics::new(SITE, RECORDER);
         let mut ledger = Ledger::open(&archive.ledger).expect("a new ledger");
 
-        let feeds = vec![FIRST_FEED.to_owned()];
-        let (pass, errors) = pass_scanning(&archive, &feeds, &mut ledger, &metrics);
+        let feeds = feed_set(&[FIRST_FEED]);
+        let (pass, errors) = pass_scanning(&archive, Some(&feeds), &mut ledger, &metrics);
 
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(pass.loaded, 2, "only the named feed's objects load");
@@ -1114,7 +1157,7 @@ mod pass_tests {
         let metrics = LoaderMetrics::new(SITE, RECORDER);
         let mut ledger = Ledger::open(&archive.ledger).expect("a new ledger");
 
-        let (pass, errors) = pass_scanning(&archive, &[], &mut ledger, &metrics);
+        let (pass, errors) = pass_scanning(&archive, None, &mut ledger, &metrics);
 
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(pass.loaded, 4, "both feeds' objects load");
@@ -1122,24 +1165,102 @@ mod pass_tests {
         assert!(ledger.trailer(SECOND_FEED).is_some());
     }
 
-    /// A feed named before its recorder has written anything is not an error.
+    /// **A NARROWED SCAN DOES NOT READ THE TOP LEVEL, AND THAT IS THE WHOLE
+    /// REASON THE COMPACTION SCOPE IS SOUND.**
     ///
-    /// The directory is created by the recorder's first publication, so a feed
-    /// configured on both sides at once has a window where the loader is
-    /// pointed at a path that does not exist yet. Reporting that would make
-    /// every such deploy noisy for as long as the feed was quiet, which is
-    /// exactly when nobody should be reading past an error.
+    /// A loose object's feed is only in its manifest, which the walk does not
+    /// open, so a narrowed pass that read it would hold an entry outside its
+    /// own scope: kept for ever once the object was evicted, because the scope
+    /// says this pass was not responsible for that feed. The ledger would grow
+    /// without bound on that layout, undoing what compaction is for.
+    ///
+    /// So the two agree by construction — a narrowed pass reads exactly the
+    /// feeds it names — and the cost is stated rather than discovered: a
+    /// recorder configured without a spec is a recorder this key is not for.
     #[test]
-    fn a_named_feed_with_no_directory_yet_is_not_an_error() {
+    fn a_narrowed_scan_does_not_read_loose_objects_at_the_top_level() {
+        let archive = archive_of_two_feeds(2, 10);
+        // One feed's objects moved up to the top level, where a recorder
+        // configured without a spec would have written them.
+        let from = archive.completed.join(SECOND_FEED);
+        for entry in std::fs::read_dir(&from).expect("the feed directory exists") {
+            let path = entry.expect("an entry").path();
+            let name = path.file_name().expect("a file name").to_owned();
+            std::fs::rename(&path, archive.completed.join(name)).expect("the move succeeds");
+        }
+        std::fs::remove_dir(&from).expect("the emptied directory goes");
+
+        let metrics = LoaderMetrics::new(SITE, RECORDER);
+        let mut ledger = Ledger::open(&archive.ledger).expect("a new ledger");
+        let feeds = feed_set(&[FIRST_FEED]);
+        let (narrowed, errors) = pass_scanning(&archive, Some(&feeds), &mut ledger, &metrics);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(
+            narrowed.loaded, 2,
+            "a narrowed pass read the loose objects, so its compaction scope no longer \
+             covers everything it loaded"
+        );
+
+        // And an unnarrowed pass over the same tree still reads them, which is
+        // the deployment the top-level walk exists for.
+        let archive = archive_of_two_feeds(2, 10);
+        let from = archive.completed.join(SECOND_FEED);
+        for entry in std::fs::read_dir(&from).expect("the feed directory exists") {
+            let path = entry.expect("an entry").path();
+            let name = path.file_name().expect("a file name").to_owned();
+            std::fs::rename(&path, archive.completed.join(name)).expect("the move succeeds");
+        }
+        let mut ledger = Ledger::open(&archive.ledger).expect("a new ledger");
+        let (wide, errors) = pass_scanning(&archive, None, &mut ledger, &metrics);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(wide.loaded, 4, "the top level stopped being read at all");
+    }
+
+    /// A named feed with no directory is counted, and counting it is the point.
+    ///
+    /// **The test this replaces asserted only that it was not an error, which
+    /// no code path could have produced** — `scans` filters directories that
+    /// already exist, so nothing was ever going to fail. It passed against a
+    /// build that ignored `feeds` entirely, and what it documented was the
+    /// silent typo: `feeds = ["tob_edge_binance_spto"]` scanning nothing, for
+    /// ever, while `--check` passed and no counter moved.
+    ///
+    /// Not an error still, because a feed configured in the same change as the
+    /// recorder that will write it has no directory until the first
+    /// publication. The gauge is what separates that from a misspelling: it
+    /// clears itself in the first case and does not in the second.
+    #[test]
+    fn a_named_feed_with_no_directory_is_counted_and_is_not_an_error() {
         let archive = archive_of_two_feeds(2, 10);
         let metrics = LoaderMetrics::new(SITE, RECORDER);
         let mut ledger = Ledger::open(&archive.ledger).expect("a new ledger");
 
-        let feeds = vec![FIRST_FEED.to_owned(), "a-feed-not-yet-recorded".to_owned()];
-        let (pass, errors) = pass_scanning(&archive, &feeds, &mut ledger, &metrics);
+        let feeds = feed_set(&[FIRST_FEED, "a-feed-not-yet-recorded"]);
+        let (pass, errors) = pass_scanning(&archive, Some(&feeds), &mut ledger, &metrics);
 
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(pass.loaded, 2);
+        assert!(
+            metrics
+                .render()
+                .contains("dz_loader_scanned_feeds_without_objects{recorder=\"recorder-1\",site=\"site-1\"} 1"),
+            "the named feed with no directory was not counted:\n{}",
+            metrics.render()
+        );
+
+        // And a scan set whose feeds all exist reads zero, so the gauge is a
+        // signal rather than a constant.
+        let archive = archive_of_two_feeds(2, 10);
+        let mut ledger = Ledger::open(&archive.ledger).expect("a new ledger");
+        let feeds = feed_set(&[FIRST_FEED, SECOND_FEED]);
+        pass_scanning(&archive, Some(&feeds), &mut ledger, &metrics);
+        assert!(
+            metrics
+                .render()
+                .contains("dz_loader_scanned_feeds_without_objects{recorder=\"recorder-1\",site=\"site-1\"} 0"),
+            "{}",
+            metrics.render()
+        );
     }
 
     /// A narrowed scan does not compact away the feeds it was told not to look
@@ -1183,8 +1304,8 @@ mod pass_tests {
             .record(entry("the-unscanned-feed/object-2", 2))
             .expect("writable");
 
-        let feeds = vec![FIRST_FEED.to_owned()];
-        let (_, errors) = pass_scanning(&archive, &feeds, &mut ledger, &metrics);
+        let feeds = feed_set(&[FIRST_FEED]);
+        let (_, errors) = pass_scanning(&archive, Some(&feeds), &mut ledger, &metrics);
         assert!(errors.is_empty(), "{errors:?}");
 
         let text = std::fs::read_to_string(&archive.ledger).expect("the ledger is readable");
@@ -1293,7 +1414,7 @@ mod pass_tests {
         let stop = never();
         let (pass, errors) = Loader {
             objects_dir: &archive.completed,
-            feeds: &[],
+            feeds: None,
             site: "some-other-site",
             recorder: RECORDER,
             max_objects: 0,
@@ -1377,7 +1498,7 @@ mod pass_tests {
         let stop = never();
         let (pass, _) = Loader {
             objects_dir: &archive.completed,
-            feeds: &[],
+            feeds: None,
             site: SITE,
             recorder: RECORDER,
             max_objects: 2,
@@ -1407,7 +1528,7 @@ mod pass_tests {
         let stop = || true;
         let (pass, errors) = Loader {
             objects_dir: &archive.completed,
-            feeds: &[],
+            feeds: None,
             site: SITE,
             recorder: RECORDER,
             max_objects: 0,
@@ -1567,7 +1688,7 @@ mod pass_tests {
         let stop = never();
         let (_pass, errors) = Loader {
             objects_dir: &archive.completed,
-            feeds: &[],
+            feeds: None,
             site: SITE,
             recorder: RECORDER,
             max_objects: 0,
@@ -1610,7 +1731,7 @@ mod pass_tests {
         let missing = archive.completed.join("not-here");
         let (pass, errors) = Loader {
             objects_dir: &missing,
-            feeds: &[],
+            feeds: None,
             site: SITE,
             recorder: RECORDER,
             max_objects: 0,
@@ -1637,7 +1758,7 @@ mod pass_tests {
         let mut sink = FileSink::create(&archive.rows).expect("the directory is writable");
         let loader = Loader {
             objects_dir: &archive.completed,
-            feeds: &[],
+            feeds: None,
             site: SITE,
             recorder: RECORDER,
             max_objects: 0,
@@ -1648,7 +1769,7 @@ mod pass_tests {
             pending: &mut Vec::new(),
         };
         let mut errors = Vec::new();
-        let (candidates, _) = loader.candidates(&mut errors);
+        let (candidates, _, _) = loader.candidates(&mut errors);
         assert!(errors.is_empty());
         assert_eq!(candidates.len(), 3);
         assert!(
@@ -1700,7 +1821,7 @@ mod pass_tests {
         let mut sink = FileSink::create(&archive.rows).expect("the directory is writable");
         let loader = Loader {
             objects_dir: &archive.completed,
-            feeds: &[],
+            feeds: None,
             site: SITE,
             recorder: RECORDER,
             max_objects: 0,
@@ -1711,7 +1832,7 @@ mod pass_tests {
             pending: &mut Vec::new(),
         };
         let mut errors = Vec::new();
-        let (candidates, _) = loader.candidates(&mut errors);
+        let (candidates, _, _) = loader.candidates(&mut errors);
 
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(
@@ -1848,7 +1969,7 @@ mod deferred_ledger_tests {
 
         let (pass, errors) = Loader {
             objects_dir: &archive.completed,
-            feeds: &[],
+            feeds: None,
             site: SITE,
             recorder: RECORDER,
             max_objects: 0,
@@ -1885,7 +2006,7 @@ mod deferred_ledger_tests {
         let pass = |ledger: &mut Ledger, sink: &mut HoldingSink, pending: &mut Vec<Pending>| {
             Loader {
                 objects_dir: &archive.completed,
-                feeds: &[],
+                feeds: None,
                 site: SITE,
                 recorder: RECORDER,
                 max_objects: 0,
@@ -1947,7 +2068,7 @@ mod deferred_ledger_tests {
         // The first pass accepts both and posts nothing, so nothing fails yet.
         let (first, errors) = Loader {
             objects_dir: &archive.completed,
-            feeds: &[],
+            feeds: None,
             site: SITE,
             recorder: RECORDER,
             max_objects: 0,
@@ -1971,7 +2092,7 @@ mod deferred_ledger_tests {
         let mut sink = HoldingSink::default();
         let (second, _) = Loader {
             objects_dir: &archive.completed,
-            feeds: &[],
+            feeds: None,
             site: SITE,
             recorder: RECORDER,
             max_objects: 0,
@@ -2007,7 +2128,7 @@ mod deferred_ledger_tests {
         let pass = |ledger: &mut Ledger, sink: &mut HoldingSink, pending: &mut Vec<Pending>| {
             Loader {
                 objects_dir: &archive.completed,
-                feeds: &[],
+                feeds: None,
                 site: SITE,
                 recorder: RECORDER,
                 max_objects: 0,
@@ -2088,7 +2209,7 @@ mod deferred_ledger_tests {
 
         let (pass, errors) = Loader {
             objects_dir: &archive.completed,
-            feeds: &[],
+            feeds: None,
             site: SITE,
             recorder: RECORDER,
             max_objects: 0,
@@ -2138,7 +2259,7 @@ mod deferred_ledger_tests {
 
         let (pass, errors) = Loader {
             objects_dir: &archive.completed,
-            feeds: &[],
+            feeds: None,
             site: SITE,
             recorder: RECORDER,
             max_objects: 0,
@@ -2187,7 +2308,7 @@ mod deferred_ledger_tests {
 
         let (pass, errors) = Loader {
             objects_dir: &archive.completed,
-            feeds: &[],
+            feeds: None,
             site: SITE,
             recorder: RECORDER,
             max_objects: 2,
@@ -2237,7 +2358,7 @@ mod deferred_ledger_tests {
         let pass = |ledger: &mut Ledger, sink: &mut HoldingSink, pending: &mut Vec<Pending>| {
             Loader {
                 objects_dir: &archive.completed,
-                feeds: &[],
+                feeds: None,
                 site: SITE,
                 recorder: RECORDER,
                 max_objects: 0,
@@ -2302,7 +2423,7 @@ mod deferred_ledger_tests {
         let mut pending = Vec::new();
         Loader {
             objects_dir: &archive.completed,
-            feeds: &[],
+            feeds: None,
             site: SITE,
             recorder: RECORDER,
             max_objects: 0,
@@ -2357,7 +2478,7 @@ mod deferred_ledger_tests {
 
         let (pass, errors) = Loader {
             objects_dir: &archive.completed,
-            feeds: &[],
+            feeds: None,
             site: SITE,
             recorder: RECORDER,
             max_objects: 0,
@@ -2682,7 +2803,7 @@ mod market_data_tests {
         let stop = || false;
         let (pass, errors) = Loader {
             objects_dir: &archive.completed,
-            feeds: &[],
+            feeds: None,
             site: SITE,
             recorder: RECORDER,
             max_objects: 0,
@@ -2888,7 +3009,7 @@ mod market_data_tests {
         let stopped = || true;
         let (off, _) = Loader {
             objects_dir: &archive.completed,
-            feeds: &[],
+            feeds: None,
             site: SITE,
             recorder: RECORDER,
             max_objects: 0,
@@ -2909,7 +3030,7 @@ mod market_data_tests {
         let mut ledger = Ledger::open(&archive.ledger).expect("a new ledger");
         let (on, _) = Loader {
             objects_dir: &archive.completed,
-            feeds: &[],
+            feeds: None,
             site: SITE,
             recorder: RECORDER,
             max_objects: 0,

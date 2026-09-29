@@ -157,6 +157,7 @@ pub struct LoaderMetrics {
     held_objects: IntGauge,
     oldest_unloaded_age_seconds: IntGauge,
     ledger_entries: IntGauge,
+    scanned_feeds_without_objects: IntGauge,
     market_data_unloaded_objects: IntGauge,
     market_data_oldest_unloaded_age_seconds: IntGauge,
     market_data_refused_total: IntCounterVec,
@@ -297,6 +298,18 @@ impl LoaderMetrics {
                 "Lines in the load ledger after compaction.",
                 &labels,
             ),
+            scanned_feeds_without_objects: gauge(
+                &registry,
+                "dz_loader_scanned_feeds_without_objects",
+                "Feeds named in [loader] feeds with no directory under objects_dir. \
+                 Zero on a correctly configured host. A feed configured in the same \
+                 change as the recorder that will write it reads 1 until that \
+                 recorder's first publication and then 0; one that stays above zero \
+                 is a name that matches nothing, which scans nothing for ever and \
+                 reads exactly like a feed nobody published on. Alert on it being \
+                 non-zero for longer than a deploy takes.",
+                &labels,
+            ),
             market_data_unloaded_objects: gauge(
                 &registry,
                 "dz_loader_market_data_unloaded_objects",
@@ -413,6 +426,17 @@ impl LoaderMetrics {
         self.last_pass_timestamp_seconds.set(now_unix_seconds);
     }
 
+    /// How many named feeds the pass found no directory for.
+    ///
+    /// Its own setter and not another argument to `pass_finished`: this is
+    /// about the configuration rather than about the backlog, and it is
+    /// published even on a pass that enumerated nothing, which is exactly the
+    /// pass an operator is looking at when the scan set is wrong.
+    pub fn scan_set_checked(&self, feeds_without_objects: i64) {
+        self.scanned_feeds_without_objects
+            .set(feeds_without_objects);
+    }
+
     /// The derivation's own lag, published beside the load's and never as it.
     ///
     /// Both halves again, because either alone misleads in exactly the way the
@@ -509,6 +533,7 @@ mod tests {
             "dz_loader_held_objects",
             "dz_loader_oldest_unloaded_age_seconds",
             "dz_loader_ledger_entries",
+            "dz_loader_scanned_feeds_without_objects",
             "dz_loader_market_data_unloaded_objects",
             "dz_loader_market_data_oldest_unloaded_age_seconds",
             "dz_loader_market_data_refused_total",

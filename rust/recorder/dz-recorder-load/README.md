@@ -94,10 +94,23 @@ One reading changes under a narrowed scan: `dz_loader_objects_present` counts
 what the pass scanned, not what is in the archive. It falling after a narrowing
 is the narrowing working.
 
-Objects at the top level of `objects_dir` are read whatever `feeds` says. A
-recorder configured without a spec writes them there and their feed is knowable
-only from the manifest, which the walk does not open; the list selects
-subdirectories, and a loose object is not one.
+**A narrowed scan does not read the top level of `objects_dir`.** A recorder
+configured without a spec writes its objects there, and their feed is knowable
+only from the manifest, which the walk does not open — so a narrowed pass that
+read them would hold ledger entries outside its own compaction scope, and those
+entries would be kept for ever once the objects were evicted. A narrowed scan
+is exactly the feeds it names. Omit the key on a host that writes loose objects
+and everything is read, as it always was.
+
+`feeds = []` is refused rather than read as every feed: an empty list is what
+an operator writes to mean "none for now", and the two must not be one value.
+
+A name that matches no directory is not refused — a feed configured in the same
+change as the recorder that will write it has none until the first publication.
+`--check` says which ones, and `dz_loader_scanned_feeds_without_objects` counts
+them every pass. It clears itself in that case and does not when the name is
+wrong, which is the only thing separating a pending deploy from a misspelling
+that scans nothing for ever.
 
 ## What it cannot do
 
