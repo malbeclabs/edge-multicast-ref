@@ -5,10 +5,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 /// The persisted state, as this crate reaches it.
 ///
-/// Four operations, in the order they are called: claim the directory, read
-/// what is in it, replace it, and add to it. Everything about *what* is written is
-/// [`StateRecord`](crate::StateRecord)'s; everything about *where* is an
-/// implementation of this.
+/// Five operations, in the order they are called: claim the directory, read
+/// what is in it, cut a torn end off it, replace it, and add to it. Everything
+/// about *what* is written is [`StateRecord`](crate::StateRecord)'s;
+/// everything about *where* is an implementation of this.
 ///
 /// # Why this is a trait
 ///
@@ -71,16 +71,33 @@ pub trait StateStore {
     /// Add bytes to the end of the persisted record.
     ///
     /// The bytes are durable when this returns `Ok`. After an error, a
-    /// subsequent [`load`](Self::load) sees the record without them, or with a
-    /// prefix of them; a prefix of one line has no newline, and the reader
-    /// drops exactly that. It is never called on a directory holding no record:
-    /// the first write is always a [`store`](Self::store).
+    /// subsequent [`load`](Self::load) sees the record without them, with a
+    /// prefix of them, or with all of them: a flush that fails does not take
+    /// back the write before it. A prefix of one line has no newline, and the
+    /// reader drops exactly that. A whole line reads back as the mint or
+    /// restatement it is, of an instrument that was never admitted, which
+    /// costs an ID that is never re-issued and nothing else. It is never
+    /// called on a directory holding no record: the first write is always a
+    /// [`store`](Self::store).
     ///
     /// # Errors
     ///
     /// [`StateError::Write`]. The caller treats this as the fault
     /// [`store`](Self::store) is treated as.
     fn append(&mut self, bytes: &[u8]) -> Result<(), StateError>;
+
+    /// Cut the persisted record back to its first `len` bytes, durably.
+    ///
+    /// How a torn final line is taken off at open. Shortening a file needs no
+    /// free space, so a publisher whose last append ran the disk out of room
+    /// still starts and serves every `Instrument ID` it had minted, where a
+    /// rewrite would need room for the whole record.
+    ///
+    /// # Errors
+    ///
+    /// [`StateError::Write`]. The caller refuses to start: the next append
+    /// would otherwise run on from the torn line.
+    fn truncate(&mut self, len: usize) -> Result<(), StateError>;
 }
 
 /// What the state directory can refuse.
@@ -144,6 +161,7 @@ struct Directory {
     claimed: bool,
     read_fails: Option<String>,
     write_fails: Option<String>,
+    flush_fails: Option<String>,
     stores: usize,
     appends: usize,
 }
@@ -191,9 +209,17 @@ impl MemoryStore {
         self.lock().write_fails = Some(message.to_owned());
     }
 
+    /// Make every append land whole and then fail, standing in for a
+    /// `sync_data` that fails after the write before it went through.
+    pub fn break_flushes(&self, message: &str) {
+        self.lock().flush_fails = Some(message.to_owned());
+    }
+
     /// Let writes through again.
     pub fn repair_writes(&self) {
-        self.lock().write_fails = None;
+        let mut directory = self.lock();
+        directory.write_fails = None;
+        directory.flush_fails = None;
     }
 
     fn lock(&self) -> MutexGuard<'_, Directory> {
@@ -244,7 +270,21 @@ impl StateStore for MemoryStore {
             .record
             .get_or_insert_with(Vec::new)
             .extend_from_slice(bytes);
+        if let Some(message) = &directory.flush_fails {
+            return Err(StateError::Write(std::io::Error::other(message.clone())));
+        }
         directory.appends += 1;
+        Ok(())
+    }
+
+    fn truncate(&mut self, len: usize) -> Result<(), StateError> {
+        let mut directory = self.lock();
+        if let Some(message) = &directory.write_fails {
+            return Err(StateError::Write(std::io::Error::other(message.clone())));
+        }
+        if let Some(record) = &mut directory.record {
+            record.truncate(len);
+        }
         Ok(())
     }
 }

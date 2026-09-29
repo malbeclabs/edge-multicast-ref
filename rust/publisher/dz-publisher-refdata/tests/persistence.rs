@@ -463,6 +463,14 @@ fn a_torn_final_line_is_dropped_and_the_next_mint_does_not_run_on_from_it() {
     let clock = clock_at(START_NS);
     {
         let mut registry = opened(store.clone(), &clock, None);
+        // Cut off, not rewritten: a rewrite needs room for the whole record,
+        // and a torn line is what an append that ran the disk out of room
+        // leaves.
+        assert_eq!(
+            store.record().expect("persisted"),
+            format!("{}{}", header(1, 0), line(1, "AAA")).into_bytes()
+        );
+        assert_eq!(store.stores(), 0, "nothing was rewritten at open");
         let handle = registry.list(&spec("CCC")).expect("admitted");
         assert_eq!(
             id_of(&registry, handle),
@@ -473,6 +481,83 @@ fn a_torn_final_line_is_dropped_and_the_next_mint_does_not_run_on_from_it() {
     let loaded = StateRecord::load(&store.record().expect("persisted")).expect("our own bytes");
     assert!(!loaded.torn);
     assert_eq!(loaded.record.entries.len(), 2);
+}
+
+#[test]
+fn a_torn_final_line_is_cut_off_a_real_record_in_place() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let whole = format!("{}{}", header(1, 0), line(1, "AAA"));
+    let partial = line(2, "BBB");
+    std::fs::write(
+        dir.path().join("instruments.state"),
+        format!("{whole}{}", &partial[..partial.len() / 2]),
+    )
+    .expect("writable");
+
+    let clock = clock_at(START_NS);
+    drop(opened(FileStore::new(dir.path()), &clock, None));
+    assert_eq!(
+        std::fs::read(dir.path().join("instruments.state")).expect("readable"),
+        whole.into_bytes()
+    );
+}
+
+#[test]
+fn an_append_whose_flush_fails_costs_an_id_and_admits_nothing() {
+    // A failed `sync_data` does not take back the write before it, so the whole
+    // line can be in the record after the append returned an error.
+    let store = MemoryStore::new();
+    let clock = clock_at(START_NS);
+    {
+        let mut registry = opened(store.clone(), &clock, None);
+        registry.list(&spec("AAA")).expect("admitted");
+        store.break_flushes("input/output error");
+        assert!(registry.list(&spec("BBB")).is_none(), "nothing is admitted");
+        assert!(registry.fault().is_some());
+        assert!(registry.list(&spec("CCC")).is_none(), "nothing further");
+    }
+    store.repair_writes();
+
+    // The line reads back as the mint it is. The ID it holds was never
+    // published, and it is not handed to anything else.
+    let mut registry = opened(store, &clock, None);
+    let handle = registry.list(&spec("CCC")).expect("admitted");
+    assert_eq!(id_of(&registry, handle), 3);
+    let handle = registry.list(&spec("BBB")).expect("admitted");
+    assert_eq!(id_of(&registry, handle), 2);
+}
+
+#[test]
+fn a_delisting_late_in_a_second_is_not_forgotten_early_in_the_next() {
+    // A whole second rounded down would record 10.999 s as 10, and a
+    // one-second horizon would forget it at 11.000 s, a millisecond later.
+    let store = MemoryStore::new();
+    let clock = clock_at(START_NS + 999_999_999);
+    let mut registry = opened(store.clone(), &clock, Some(Duration::from_secs(1)));
+    let handle = registry.list(&spec("LATE")).expect("admitted");
+    let id = id_of(&registry, handle);
+    registry.delist(handle);
+
+    clock.set_unix_ns(START_NS + 1_000_000_000);
+    churn(&mut registry, "W", COMPACTION_FLOOR + 1);
+    let relisted = registry.list(&spec("LATE")).expect("admitted");
+    assert_eq!(id_of(&registry, relisted), id);
+}
+
+#[test]
+fn a_horizon_with_a_fraction_of_a_second_is_not_cut_short() {
+    // `1500ms` rounded down is one second, and would forget at 1.2 s.
+    let store = MemoryStore::new();
+    let clock = clock_at(START_NS);
+    let mut registry = opened(store.clone(), &clock, Some(Duration::from_millis(1_500)));
+    let handle = registry.list(&spec("FRAC")).expect("admitted");
+    let id = id_of(&registry, handle);
+    registry.delist(handle);
+
+    clock.set_unix_ns(START_NS + 1_200_000_000);
+    churn(&mut registry, "W", COMPACTION_FLOOR + 1);
+    let relisted = registry.list(&spec("FRAC")).expect("admitted");
+    assert_eq!(id_of(&registry, relisted), id);
 }
 
 #[test]
@@ -494,6 +579,16 @@ fn a_record_that_is_complete_and_wrong_is_refused() {
     let aaa = line(1, "AAA");
     assert!(matches!(
         refused(format!("{}{}", header(2, 1), &aaa[..aaa.len() - 1])),
+        RecordError::Malformed { .. }
+    ));
+    // A version 1 record is all snapshot, so its final line torn is damage
+    // too, and dropping it would lose an ID the upgrade must keep.
+    assert!(matches!(
+        refused(format!(
+            "dz-refdata-state 1 {SOURCE_ID} 3\n{}{}",
+            aaa,
+            line(2, "BBB").trim_end()
+        )),
         RecordError::Malformed { .. }
     ));
     // A snapshot shorter than its header counts.

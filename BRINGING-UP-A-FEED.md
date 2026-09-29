@@ -488,7 +488,8 @@ kind = "a-venue-tob"
   minted a new `Instrument ID`**: a subscriber holding the old one sees an
   instrument end and a different one begin. State it longer than any gap after
   which the venue relists a symbol it delisted. No `Instrument ID` is ever
-  re-issued, whatever it is set to. Anything under a second is refused.
+  re-issued, whatever it is set to. Anything under a second is refused, and a
+  fraction of a second above that is rounded up.
 - **A depth feed with no `snapshot_cycle` cannot be joined mid-session.** It
   still emits the recovery snapshots a reset obliges, but a subscriber that
   arrives after the deltas started has nothing to build a book from — a level

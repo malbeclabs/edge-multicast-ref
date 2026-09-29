@@ -101,15 +101,20 @@ pub struct Loaded {
     /// Whether a final appended line with no newline was dropped: an append
     /// that never completed, whose admission therefore never happened.
     pub torn: bool,
+    /// How many bytes of the record were read, which is every byte but a torn
+    /// final line: what the record is cut back to, to take that line off.
+    pub complete: usize,
 }
 
 impl Loaded {
     /// Whether the record has to be rewritten before a line can be appended to
-    /// it: a torn final line the next append would run on from, or a layout
-    /// this build does not append to.
+    /// it: a layout this build does not append to.
+    ///
+    /// A torn final line is not one. Cutting it off is enough, and needs no
+    /// free space, where a rewrite needs room for the whole record.
     #[must_use]
     pub const fn needs_rewrite(&self) -> bool {
-        self.torn || self.version != FORMAT_VERSION
+        self.version != FORMAT_VERSION
     }
 }
 
@@ -350,6 +355,7 @@ impl StateRecord {
         let mut read = 0usize;
         let mut appended = 0usize;
         let mut torn = false;
+        let mut complete = header.len();
         for (index, raw) in lines {
             let line_number = index + 1;
             let malformed = |what| RecordError::Malformed {
@@ -365,6 +371,7 @@ impl StateRecord {
                 break;
             };
             read += 1;
+            complete += raw.len();
             let mut fields = line.split(' ');
             let id = fields.next().unwrap_or_default();
             let symbol = fields
@@ -475,6 +482,7 @@ impl StateRecord {
             snapshot: read - appended,
             appended,
             torn,
+            complete,
         })
     }
 }

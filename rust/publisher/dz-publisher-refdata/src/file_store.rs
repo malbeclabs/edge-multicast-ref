@@ -57,6 +57,10 @@ const LOCK: &str = "writer.lock";
 /// `O_APPEND` on the record and flushes it with `sync_data`. The handle is
 /// dropped by every `store`, because the rename leaves it on the replaced
 /// inode, and a line appended there is a line no `load` will ever read.
+///
+/// [`truncate`](StateStore::truncate) shortens the record in place and flushes
+/// it with `sync_data`, which is what lets a full disk still start: it
+/// allocates nothing.
 #[derive(Debug)]
 pub struct FileStore {
     dir: PathBuf,
@@ -151,6 +155,15 @@ impl StateStore for FileStore {
         file.write_all(bytes).map_err(StateError::Write)?;
         // `sync_data` and not `sync_all`: the size is the one piece of metadata
         // an append changes, and `fdatasync` flushes it.
+        file.sync_data().map_err(StateError::Write)
+    }
+
+    fn truncate(&mut self, len: usize) -> Result<(), StateError> {
+        let file = OpenOptions::new()
+            .write(true)
+            .open(self.path(RECORD))
+            .map_err(StateError::Write)?;
+        file.set_len(len as u64).map_err(StateError::Write)?;
         file.sync_data().map_err(StateError::Write)
     }
 }

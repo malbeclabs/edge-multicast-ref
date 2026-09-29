@@ -462,7 +462,8 @@ pub struct RefdataSection {
     /// record for a venue that lists short-lived instruments, and it should be
     /// longer than any gap after which the venue relists a symbol it delisted.
     /// No `Instrument ID` is re-issued whatever it is set to. Refused under a
-    /// second, because the record counts in whole seconds.
+    /// second, because the record counts in whole seconds, and a fraction of
+    /// one above that is rounded up.
     #[serde(default, deserialize_with = "de_optional_duration")]
     pub forget_delisted_after: Option<Duration>,
     pub selection: SelectionSection,

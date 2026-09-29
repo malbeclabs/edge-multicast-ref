@@ -84,7 +84,7 @@ pub struct RegistryConfig {
     /// `Instrument ID`**, and a subscriber that kept the old one sees an
     /// instrument end and a different one begin. The configuration refuses
     /// anything under a second; a caller composing this itself gets whole
-    /// seconds, rounded down.
+    /// seconds, rounded up, so the horizon is never shorter than stated.
     pub forget_delisted_after: Option<Duration>,
 }
 
@@ -414,7 +414,7 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         // may have gone on being published until the process stopped. When is
         // not known; the open is later than both, so it is the answer that
         // can only keep an entry longer.
-        let opened_s = unix_s(&clock);
+        let opened_s = stamp_s(&clock);
         let minted = record
             .entries
             .iter()
@@ -460,15 +460,22 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             fault: None,
             config,
         };
-        let forgot = registry.forget(opened_s);
-        // Rewritten here only when it has to be: a torn final line, which the
-        // next append would otherwise run on from; a layout this build does
-        // not append to; appended lines past the threshold; or an entry
-        // forgotten, which the record must not go on holding, since a mint of
-        // the same symbol would then be in it twice.
+        let forgot = registry.forget(now_s(&registry.clock));
+        // Rewritten here only when it has to be: a layout this build does not
+        // append to; appended lines past the threshold; or an entry forgotten,
+        // which the record must not go on holding, since a mint of the same
+        // symbol would then be in it twice. A torn final line, which the next
+        // append would otherwise run on from, goes with the rewrite, or is cut
+        // off when there is none: cutting needs no free space, and a torn line
+        // is what an append that ran the disk out of room leaves.
         if let Some(loaded) = &loaded {
             if loaded.needs_rewrite() || forgot || registry.compaction_due() {
                 registry.write_snapshot(None).map_err(RefdataError::State)?;
+            } else if loaded.torn {
+                registry
+                    .store
+                    .truncate(loaded.complete)
+                    .map_err(RefdataError::State)?;
             }
         }
         Ok(registry)
@@ -964,7 +971,7 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         // instrument as published. The line is already durable, so a snapshot
         // that fails faults what follows and not this admission.
         if self.compaction_due() {
-            let _ = self.forget(unix_s(&self.clock));
+            let _ = self.forget(now_s(&self.clock));
             if let Err(error) = self.write_snapshot(None) {
                 self.fault = Some(error);
             }
@@ -1018,7 +1025,10 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             return false;
         };
         let before = self.minted.len();
-        let horizon_s = horizon.as_secs();
+        // Rounded up, like every stamp, and compared against the current second
+        // rounded down: each rounding can only keep an entry longer, so none
+        // is forgotten before the horizon has passed.
+        let horizon_s = horizon.as_secs() + u64::from(horizon.subsec_nanos() > 0);
         let handles = &self.handles;
         self.minted.retain(|symbol, minted| {
             handles.contains_key(symbol)
@@ -1090,9 +1100,9 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         // The entry stays, and gives the symbol its own ID back if the venue
         // relists it. A delisting writes nothing, which is why it cannot fail:
         // when it happened is held here until the next snapshot writes it.
-        let now_s = unix_s(&self.clock);
+        let delisted_s = stamp_s(&self.clock);
         if let Some(minted) = self.minted.get_mut(&entry.symbol) {
-            minted.last_published_s = now_s;
+            minted.last_published_s = delisted_s;
         }
         self.advance_manifest(entry.shard);
     }
@@ -1204,7 +1214,17 @@ impl<S: StateStore, C: Clock> ListingSink for Registry<S, C> {
     }
 }
 
-/// The clock's Unix reading in whole seconds, which is what the record holds.
-fn unix_s<C: Clock>(clock: &C) -> u64 {
+/// The clock's Unix reading in whole seconds, rounded down: the second a
+/// horizon is measured at.
+fn now_s<C: Clock>(clock: &C) -> u64 {
     clock.unix_ns() / 1_000_000_000
+}
+
+/// The clock's Unix reading in whole seconds, rounded up: the second an entry
+/// is recorded as last published at, which is what the record holds.
+///
+/// Up and not down. A delisting at 10.999 s recorded as second 10 would be
+/// forgotten at 11.000 s under a one-second horizon, a millisecond after it.
+fn stamp_s<C: Clock>(clock: &C) -> u64 {
+    clock.unix_ns().div_ceil(1_000_000_000)
 }
