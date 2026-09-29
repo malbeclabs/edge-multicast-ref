@@ -1,7 +1,7 @@
 //! The reference-data owner: who an instrument is, and how a subscriber comes
 //! to know it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use dz_adapter_core::{InstrumentRef, InstrumentSpec, ListingSink, DEFAULT_SHARD};
@@ -290,6 +290,11 @@ pub struct Registry<S: StateStore, C: Clock> {
     base_entries: usize,
     /// Lines appended since the last base.
     appended: usize,
+    /// The appended lines at which the next compaction is tried. The last
+    /// base's size, or further on after a compaction that could not be
+    /// written, so a full disk is not asked to take the whole record again on
+    /// every mint.
+    compaction_at: usize,
     /// The live handle for each published symbol, so a re-offer is one lookup.
     handles: HashMap<SymbolKey, InstrumentRef>,
     /// Parallel to the instrument table's slots, so the definition cycle walks
@@ -447,6 +452,10 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             base_written: loaded.is_some(),
             base_entries: loaded.as_ref().map_or(0, |loaded| loaded.base),
             appended: loaded.as_ref().map_or(0, |loaded| loaded.appended),
+            compaction_at: loaded
+                .as_ref()
+                .map_or(0, |loaded| loaded.base)
+                .max(COMPACTION_FLOOR),
             handles: HashMap::new(),
             slots: Vec::new(),
             published: 0,
@@ -460,18 +469,27 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             fault: None,
             config,
         };
-        let forgot = registry.forget(now_s(&registry.clock));
-        // Rewritten here only when it has to be: a layout this build does not
-        // append to; appended lines past the threshold; or an entry forgotten,
-        // which the record must not go on holding, since a mint of the same
-        // symbol would then be in it twice. A torn final line, which the next
-        // append would otherwise run on from, goes with the rewrite, or is cut
-        // off when there is none: cutting needs no free space, and a torn line
-        // is what an append that ran the disk out of room leaves.
+        // Rewritten here only when it has to be, or when it is owed: a layout
+        // this build does not append to has to be; appended lines past the
+        // threshold, or an entry to forget, are a compaction. A compaction
+        // that cannot be written leaves the record as it is, which reads back
+        // whole and takes the next mint's line: a disk too full for the whole
+        // record starts and serves every `Instrument ID` it holds. A torn final
+        // line, which the next append would otherwise run on from, goes with
+        // the rewrite, or is cut off when there is none: cutting needs no free
+        // space, and a torn line is what an append that ran the disk out of
+        // room leaves.
         if let Some(loaded) = &loaded {
-            if loaded.needs_rewrite() || forgot || registry.compaction_due() {
-                registry.write_base(None).map_err(RefdataError::State)?;
-            } else if loaded.torn {
+            let rewritten = if loaded.needs_rewrite() {
+                let forgetting = registry.forgettable(now_s(&registry.clock));
+                registry
+                    .write_base(None, &forgetting)
+                    .map_err(RefdataError::State)?;
+                true
+            } else {
+                registry.compact(true).map_err(RefdataError::State)?
+            };
+            if !rewritten && loaded.torn {
                 registry
                     .store
                     .truncate(loaded.complete)
@@ -970,11 +988,8 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         // After the admission and not before it, so the base holds the
         // instrument as published. The line is already durable, so a base
         // that fails faults what follows and not this admission.
-        if self.compaction_due() {
-            let _ = self.forget(now_s(&self.clock));
-            if let Err(error) = self.write_base(None) {
-                self.fault = Some(error);
-            }
+        if let Err(error) = self.compact(false) {
+            self.fault = Some(error);
         }
         Ok(handle)
     }
@@ -996,7 +1011,7 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
                 .append(&encode_line(instrument_id, &symbol))
                 .map(|()| self.appended += 1)
         } else {
-            self.write_base(Some((instrument_id, symbol, next_id)))
+            self.write_base(Some((instrument_id, symbol, next_id)), &HashSet::new())
         };
         written.map_err(|error| {
             self.fault = Some(error);
@@ -1009,46 +1024,84 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
     /// A base holds at most the last one's entries plus the lines appended
     /// since, so it rewrites at most two entries for every line appended.
     /// That is what keeps a mint's cost constant however long the history is.
-    fn compaction_due(&self) -> bool {
-        self.appended >= self.base_entries.max(COMPACTION_FLOOR)
+    const fn compaction_due(&self) -> bool {
+        self.appended >= self.compaction_at
     }
 
-    /// Drop every entry that is not published and was last published at least
-    /// the horizon before `now_s`.
+    /// Fold the appended lines into a new base when they are due, or at open
+    /// when there is an entry to forget.
+    ///
+    /// Returns whether the record was rewritten. A base that could not be
+    /// written and left the record as it was is not an error: every entry is
+    /// still in it, and the next is tried a threshold's worth of lines later.
+    /// Only a store that cannot say which record it left is.
+    fn compact(&mut self, opening: bool) -> Result<bool, StateError> {
+        let forgetting = if opening || self.compaction_due() {
+            self.forgettable(now_s(&self.clock))
+        } else {
+            HashSet::new()
+        };
+        if !self.compaction_due() && forgetting.is_empty() {
+            return Ok(false);
+        }
+        match self.write_base(None, &forgetting) {
+            Ok(()) => Ok(true),
+            Err(StateError::NotReplaced(_)) => {
+                self.compaction_at = self.appended + self.base_entries.max(COMPACTION_FLOOR);
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Every entry that is not published and was last published at least the
+    /// horizon before `now_s`.
+    ///
+    /// Forgotten only by a base that lands: an entry dropped here and still in
+    /// the record would come back as a second entry for its symbol the next
+    /// time the venue listed it, and a record holding a symbol twice is
+    /// refused at the next start.
     ///
     /// `next_id` is untouched, and it is what keeps a forgotten ID from being
     /// minted again. What goes is the promise that the symbol comes back under
-    /// that ID, which is the cost the configuration's key states. Returns
-    /// whether anything went.
-    fn forget(&mut self, now_s: u64) -> bool {
+    /// that ID, which is the cost the configuration's key states.
+    fn forgettable(&self, now_s: u64) -> HashSet<SymbolKey> {
         let Some(horizon) = self.config.forget_delisted_after else {
-            return false;
+            return HashSet::new();
         };
-        let before = self.minted.len();
         // Rounded up, like every stamp, and compared against the current second
         // rounded down: each rounding can only keep an entry longer, so none
         // is forgotten before the horizon has passed.
         let horizon_s = horizon.as_secs() + u64::from(horizon.subsec_nanos() > 0);
-        let handles = &self.handles;
-        self.minted.retain(|symbol, minted| {
-            handles.contains_key(symbol)
-                || now_s < minted.last_published_s.saturating_add(horizon_s)
-        });
-        self.minted.len() != before
+        self.minted
+            .iter()
+            .filter(|(symbol, minted)| {
+                !self.handles.contains_key(*symbol)
+                    && now_s >= minted.last_published_s.saturating_add(horizon_s)
+            })
+            .map(|(symbol, _)| *symbol)
+            .collect()
     }
 
-    /// Replace the record with a base of every retained entry, plus
-    /// `minting` when this is a directory's first write.
+    /// Replace the record with a base of every entry but `forgetting`, plus
+    /// `minting` when this is a directory's first write. The forgotten entries
+    /// leave this registry only once the base holding none of them has
+    /// landed.
     ///
     /// An entry is written as published when it is, and — while seeding — when
     /// the record already holds it so and the venue has not offered it yet: a
     /// seed that has not finished has not said it is gone. Anything else is
     /// written with the second it was last published.
-    fn write_base(&mut self, minting: Option<(u32, SymbolKey, u32)>) -> Result<(), StateError> {
+    fn write_base(
+        &mut self,
+        minting: Option<(u32, SymbolKey, u32)>,
+        forgetting: &HashSet<SymbolKey>,
+    ) -> Result<(), StateError> {
         let seeding = matches!(self.phase, Phase::Seeding);
         let mut entries: Vec<Entry> = self
             .minted
             .iter()
+            .filter(|(symbol, _)| !forgetting.contains(*symbol))
             .map(|(symbol, minted)| {
                 let published =
                     self.handles.contains_key(symbol) || (seeding && minted.recorded_published);
@@ -1074,7 +1127,11 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             entries,
         };
         self.store.store(&record.encode())?;
+        for symbol in forgetting {
+            self.minted.remove(symbol);
+        }
         self.base_entries = record.entries.len();
+        self.compaction_at = self.base_entries.max(COMPACTION_FLOOR);
         let handles = &self.handles;
         for (symbol, minted) in &mut self.minted {
             minted.recorded_published =

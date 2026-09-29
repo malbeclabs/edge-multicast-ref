@@ -51,7 +51,9 @@ const LOCK: &str = "writer.lock";
 /// flushes it to the device, renames it over the record, and then flushes the
 /// directory. The rename is what makes a reader see either the old record whole
 /// or the new one whole; the flush before it is what makes that true after a
-/// power loss rather than only after a crash.
+/// power loss rather than only after a crash. A failure before the rename
+/// removes the pending file, so a record that could not be replaced on a full
+/// disk leaves the room it had for appends.
 ///
 /// [`append`](StateStore::append) writes through a handle opened with
 /// `O_APPEND` on the record and flushes it with `sync_data`. The handle is
@@ -85,6 +87,19 @@ impl FileStore {
 
     fn path(&self, name: &str) -> PathBuf {
         self.dir.join(name)
+    }
+
+    /// Write `record` beside the record and rename it over it. An error leaves
+    /// the record as it was.
+    fn write_pending(&self, pending: &Path, record: &[u8]) -> std::io::Result<()> {
+        let mut file = File::create(pending)?;
+        file.write_all(record)?;
+        // Before the rename, not after: a rename that reaches the directory
+        // ahead of the bytes it names leaves a record that exists and is empty,
+        // which reads back as damaged and stops the next start.
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(pending, self.path(RECORD))
     }
 }
 
@@ -128,14 +143,14 @@ impl StateStore for FileStore {
         // handle on an inode the rename is about to unlink.
         self.appending = None;
         let pending = self.path(PENDING);
-        let mut file = File::create(&pending).map_err(StateError::Write)?;
-        file.write_all(record).map_err(StateError::Write)?;
-        // Before the rename, not after: a rename that reaches the directory
-        // ahead of the bytes it names leaves a record that exists and is empty,
-        // which reads back as damaged and stops the next start.
-        file.sync_all().map_err(StateError::Write)?;
-        drop(file);
-        std::fs::rename(&pending, self.path(RECORD)).map_err(StateError::Write)?;
+        self.write_pending(&pending, record).map_err(|error| {
+            // Removed, so a write that ran the disk out of room does not keep
+            // that room from the appends that go on after it.
+            let _ = std::fs::remove_file(&pending);
+            StateError::NotReplaced(error)
+        })?;
+        // After the rename the record may be either one, and a directory sync
+        // that fails does not say which.
         sync_dir(&self.dir).map_err(StateError::Write)
     }
 

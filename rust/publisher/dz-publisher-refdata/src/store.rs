@@ -63,9 +63,15 @@ pub trait StateStore {
     ///
     /// # Errors
     ///
-    /// [`StateError::Write`]. The caller treats this as a fault and mints
-    /// nothing further: an `Instrument ID` that was published but not persisted
-    /// is one that resolves to nothing after a restart.
+    /// [`StateError::NotReplaced`] when the record is still the previous one,
+    /// and nothing of the new one is left taking up room in the directory.
+    /// The caller can go on appending to it, which is what a compaction that
+    /// failed on a full disk does.
+    ///
+    /// [`StateError::Write`] when which of the two a later load sees is not
+    /// known. The caller treats this as a fault and mints nothing further: an
+    /// `Instrument ID` that was published but not persisted is one that
+    /// resolves to nothing after a restart.
     fn store(&mut self, record: &[u8]) -> Result<(), StateError>;
 
     /// Add bytes to the end of the persisted record.
@@ -119,6 +125,11 @@ pub enum StateError {
 
     #[error("the persisted record could not be written")]
     Write(#[source] std::io::Error),
+
+    /// A [`store`](StateStore::store) that failed and left the previous
+    /// record in place.
+    #[error("the persisted record could not be replaced, and is the one it was")]
+    NotReplaced(#[source] std::io::Error),
 }
 
 /// A state directory that is not one.
@@ -161,6 +172,7 @@ struct Directory {
     claimed: bool,
     read_fails: Option<String>,
     write_fails: Option<String>,
+    store_fails: Option<String>,
     flush_fails: Option<String>,
     stores: usize,
     appends: usize,
@@ -209,8 +221,16 @@ impl MemoryStore {
         self.lock().write_fails = Some(message.to_owned());
     }
 
-    /// Make every append land whole and then fail, standing in for a
-    /// `sync_data` that fails after the write before it went through.
+    /// Make every replacement of the record fail and leave it as it was,
+    /// while appends go on landing: a disk with room for a line and not for
+    /// the whole record.
+    pub fn break_stores(&self, message: &str) {
+        self.lock().store_fails = Some(message.to_owned());
+    }
+
+    /// Make every write land whole and then fail, standing in for a
+    /// `sync_data` that fails after the write before it went through, or a
+    /// directory sync that fails after the rename.
     pub fn break_flushes(&self, message: &str) {
         self.lock().flush_fails = Some(message.to_owned());
     }
@@ -219,6 +239,7 @@ impl MemoryStore {
     pub fn repair_writes(&self) {
         let mut directory = self.lock();
         directory.write_fails = None;
+        directory.store_fails = None;
         directory.flush_fails = None;
     }
 
@@ -251,13 +272,22 @@ impl StateStore for MemoryStore {
 
     fn store(&mut self, record: &[u8]) -> Result<(), StateError> {
         let mut directory = self.lock();
-        if let Some(message) = &directory.write_fails {
-            return Err(StateError::Write(std::io::Error::other(message.clone())));
+        if let Some(message) = directory
+            .write_fails
+            .as_ref()
+            .or(directory.store_fails.as_ref())
+        {
+            return Err(StateError::NotReplaced(std::io::Error::other(
+                message.clone(),
+            )));
         }
         // Assigned whole, so a reader never sees half of it - the same property
         // the atomic rename buys on a real filesystem.
         directory.record = Some(record.to_vec());
         directory.stores += 1;
+        if let Some(message) = &directory.flush_fails {
+            return Err(StateError::Write(std::io::Error::other(message.clone())));
+        }
         Ok(())
     }
 

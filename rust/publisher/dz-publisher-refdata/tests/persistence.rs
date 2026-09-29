@@ -14,8 +14,8 @@ use dz_adapter_core::{
 use dz_publisher_lowering::SourceId;
 use dz_publisher_refdata::{
     encode_line, symbol_field, CycleSchedule, FileStore, ManualClock, MemoryStore, RecordError,
-    RefdataError, Registry, RegistryConfig, SelectionPolicy, ShardConfig, StateRecord, StateStore,
-    COMPACTION_FLOOR,
+    RefdataError, Registry, RegistryConfig, SelectionPolicy, ShardConfig, StateError, StateRecord,
+    StateStore, COMPACTION_FLOOR,
 };
 
 const SOURCE_ID: u16 = 7;
@@ -669,6 +669,122 @@ fn a_record_that_cannot_be_rewritten_on_open_stops_the_publisher_starting() {
 }
 
 // ---------------------------------------------------------------------------
+// A compaction that cannot be written.
+// ---------------------------------------------------------------------------
+
+/// A record whose appended lines are due a compaction at open: an empty base
+/// and one minting line per ID up to the floor.
+fn due_a_compaction() -> String {
+    let mut text = header(1, 0);
+    for id in 1..=u32::try_from(COMPACTION_FLOOR).expect("small") {
+        text.push_str(&line(id, &format!("S-{id}")));
+    }
+    text
+}
+
+#[test]
+fn a_compaction_due_at_open_that_cannot_be_written_still_starts() {
+    // A disk with room for a line and not for the whole record. What is there
+    // reads back whole, so the publisher serves every ID it holds.
+    let whole = due_a_compaction();
+    let partial = line(9_999, "TORN");
+    let store = MemoryStore::new();
+    store.set_record(format!("{whole}{}", &partial[..partial.len() / 2]).into_bytes());
+    store.break_stores("no space left on device");
+
+    let clock = clock_at(START_NS);
+    let mut registry = opened(store.clone(), &clock, None);
+    assert_eq!(store.stores(), 0);
+    assert_eq!(
+        store.record().expect("persisted"),
+        whole.clone().into_bytes(),
+        "the torn line is cut off, as it is when no compaction is due"
+    );
+    assert!(registry.fault().is_none());
+    let handle = registry.list(&spec("S-5")).expect("admitted");
+    assert_eq!(id_of(&registry, handle), 5);
+    let handle = registry.list(&spec("NEW")).expect("admitted");
+    let floor = u32::try_from(COMPACTION_FLOOR).expect("small");
+    assert_eq!(id_of(&registry, handle), floor + 1);
+}
+
+#[test]
+fn a_base_that_may_have_replaced_the_record_stops_the_publisher_starting() {
+    // A store that fails after the rename cannot say which record a later
+    // load sees, so nothing can be appended to either with confidence.
+    let store = MemoryStore::new();
+    store.set_record(due_a_compaction().into_bytes());
+    store.break_flushes("input/output error");
+
+    let opened = Registry::open(config(None), store, clock_at(START_NS));
+    assert!(matches!(opened, Err(RefdataError::State(_))));
+}
+
+#[test]
+fn a_compaction_that_cannot_be_written_while_running_faults_nothing_and_waits_a_threshold() {
+    let store = MemoryStore::new();
+    let clock = clock_at(START_NS);
+    let mut registry = opened(store.clone(), &clock, None);
+    // The first mint is the base, and each one after it a line: one short of
+    // the floor.
+    churn(&mut registry, "W", COMPACTION_FLOOR);
+    assert_eq!(store.stores(), 1);
+
+    store.break_stores("no space left on device");
+    churn(&mut registry, "X", 1);
+    assert!(
+        registry.fault().is_none(),
+        "the line it set off from landed"
+    );
+    assert_eq!(store.stores(), 1);
+    store.repair_writes();
+
+    // Not tried again on the next mint: a full disk asked for the whole record
+    // on every mint would make each one cost the history.
+    churn(&mut registry, "Y", COMPACTION_FLOOR - 1);
+    assert_eq!(store.stores(), 1);
+    churn(&mut registry, "Z", 1);
+    assert_eq!(store.stores(), 2);
+
+    drop(registry);
+    let loaded = StateRecord::load(&store.record().expect("persisted")).expect("our own bytes");
+    assert_eq!(loaded.record.entries.len(), 2 * COMPACTION_FLOOR + 1);
+}
+
+#[test]
+fn an_entry_is_forgotten_only_by_a_base_that_lands() {
+    // An entry dropped from memory and left in the record would be minted a
+    // second entry for its symbol on relisting, and the next start would
+    // refuse the record as damaged.
+    let store = MemoryStore::new();
+    let clock = clock_at(START_NS);
+    let old_id;
+    {
+        let mut registry = opened(store.clone(), &clock, HORIZON);
+        let handle = registry.list(&spec("OLD")).expect("admitted");
+        old_id = id_of(&registry, handle);
+        registry.delist(handle);
+        // A delisting's time reaches the record only through a base.
+        churn(&mut registry, "W", COMPACTION_FLOOR + 1);
+    }
+
+    clock.set_unix_ns(START_NS + 2 * HOUR_NS);
+    store.break_stores("no space left on device");
+    {
+        let mut registry = opened(store.clone(), &clock, HORIZON);
+        let handle = registry.list(&spec("OLD")).expect("admitted");
+        assert_eq!(id_of(&registry, handle), old_id, "still in the record");
+    }
+    store.repair_writes();
+
+    let mut registry =
+        Registry::open(config(HORIZON), store, clock.clone()).expect("the record holds OLD once");
+    registry.seeding_complete();
+    let handle = registry.list(&spec("OLD")).expect("admitted");
+    assert_eq!(id_of(&registry, handle), old_id);
+}
+
+// ---------------------------------------------------------------------------
 // The real directory.
 // ---------------------------------------------------------------------------
 
@@ -689,6 +805,26 @@ fn an_append_after_a_base_lands_in_the_record_that_replaced_the_old_one() {
         store.load().expect("readable").expect("present"),
         b"second\nb\n"
     );
+}
+
+#[test]
+fn a_base_that_cannot_be_renamed_leaves_the_record_and_no_pending_file() {
+    // A directory in the record's place refuses the rename. The pending file
+    // goes with the failure, or on a full disk it would hold the room the
+    // appends after it need.
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    std::fs::create_dir(dir.path().join("instruments.state")).expect("writable");
+    std::fs::write(dir.path().join("instruments.state").join("held"), b"").expect("writable");
+    let mut store = FileStore::new(dir.path());
+    store.claim().expect("unclaimed");
+
+    let stored = store.store(b"record\n");
+    assert!(
+        matches!(stored, Err(StateError::NotReplaced(_))),
+        "{stored:?}"
+    );
+    assert!(!dir.path().join("instruments.state.pending").exists());
+    assert!(dir.path().join("instruments.state").is_dir());
 }
 
 #[test]
