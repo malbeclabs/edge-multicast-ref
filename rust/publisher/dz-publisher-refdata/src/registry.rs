@@ -1,7 +1,8 @@
 //! The reference-data owner: who an instrument is, and how a subscriber comes
 //! to know it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use dz_adapter_core::{InstrumentRef, InstrumentSpec, ListingSink, DEFAULT_SHARD};
 use dz_edge_refdata::{InstrumentDefinition, ManifestSummary, SYMBOL_LEN};
@@ -13,7 +14,7 @@ use crate::error::RefdataError;
 use crate::pacer::DefinitionPacer;
 use crate::policy::{Phase, SelectionPolicy};
 use crate::refusal::Refusal;
-use crate::state::{Entry, StateRecord};
+use crate::state::{encode_line, Entry, StateRecord};
 use crate::store::{StateError, StateStore};
 use crate::CycleSchedule;
 
@@ -75,6 +76,36 @@ pub struct RegistryConfig {
     pub shards: Vec<ShardConfig>,
     pub selection: SelectionPolicy,
     pub schedule: CycleSchedule,
+    /// `[refdata] forget_delisted_after`: how long after it was last published
+    /// a delisted instrument's entry is kept. `None` keeps every entry for
+    /// good.
+    ///
+    /// **A symbol relisted after it has been forgotten is minted a new
+    /// `Instrument ID`**, and a subscriber that kept the old one sees an
+    /// instrument end and a different one begin. The configuration refuses
+    /// anything under a second; a caller composing this itself gets whole
+    /// seconds, rounded up, so the horizon is never shorter than stated.
+    pub forget_delisted_after: Option<Duration>,
+}
+
+/// The fewest appended lines that set off a compaction while running.
+///
+/// The threshold is otherwise the number of retained entries, which is what
+/// makes a mint pay for at most one rewritten line. The floor is so that a
+/// record of a handful of entries is not rewritten every handful of mints.
+pub const COMPACTION_FLOOR: usize = 1_024;
+
+/// One minted `Instrument ID`, and what the forgetting needs to know about it.
+#[derive(Debug, Clone, Copy)]
+struct Minted {
+    instrument_id: u32,
+    /// Whether the record holds this entry as published when written. A
+    /// relisting of one it does not is written down, so that a timestamp in
+    /// the record is never older than the instrument's last publication.
+    recorded_published: bool,
+    /// The Unix second this instrument was last published. Read only while it
+    /// is not published.
+    last_published_s: u64,
 }
 
 /// One published instrument.
@@ -221,8 +252,16 @@ pub struct Counts {
 ///   [`fault`](Self::fault).
 /// - An ID is never re-used, not even for a delisted instrument, because a
 ///   subscriber holding a book keyed on one must never find it pointing at
-///   something else. A relisted symbol gets its own ID back, since a symbol is
-///   the identity.
+///   something else. `next_id` is what guarantees it, and nothing lowers it.
+/// - A relisted symbol gets its own ID back, since a symbol is the identity —
+///   unless it was delisted for longer than
+///   [`forget_delisted_after`](RegistryConfig::forget_delisted_after), when
+///   its entry has been forgotten and it is minted a new one. A forgotten
+///   entry belongs to an instrument no definition names, so the sentence above
+///   still holds.
+/// - A mint is one appended line, and the record is rewritten only when the
+///   lines appended reach the size of the last base. What a mint costs is
+///   therefore constant, and not the size of the venue's history.
 /// - The state directory takes one writer. Two writers means the last flush
 ///   wins and half the published IDs resolve to nothing after a restart.
 ///
@@ -238,11 +277,24 @@ pub struct Registry<S: StateStore, C: Clock> {
     config: RegistryConfig,
     store: S,
     clock: C,
-    /// Every `Instrument ID` ever minted, by symbol. Append-only: a delisting
-    /// leaves the entry, which is what makes the ID unreusable and what lets a
-    /// relisted symbol come back as itself.
-    minted: HashMap<SymbolKey, u32>,
+    /// Every retained `Instrument ID`, by symbol. A delisting leaves the entry,
+    /// which is what lets a relisted symbol come back as itself; only the
+    /// horizon removes one. What makes an ID unreusable is `next_id`.
+    minted: HashMap<SymbolKey, Minted>,
     next_id: u32,
+    /// Whether the directory holds a base that lines can be appended to.
+    /// False only before the first mint of a publisher that has never minted.
+    base_written: bool,
+    /// Entries in the last base, which is what the appended lines are
+    /// measured against.
+    base_entries: usize,
+    /// Lines appended since the last base.
+    appended: usize,
+    /// The appended lines at which the next compaction is tried. The last
+    /// base's size, or further on after a compaction that could not be
+    /// written, so a full disk is not asked to take the whole record again on
+    /// every mint.
+    compaction_at: usize,
     /// The live handle for each published symbol, so a re-offer is one lookup.
     handles: HashMap<SymbolKey, InstrumentRef>,
     /// Parallel to the instrument table's slots, so the definition cycle walks
@@ -348,10 +400,14 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             Err(StateError::AlreadyHeld) => return Err(RefdataError::StateHeldByAnotherWriter),
             Err(error) => return Err(RefdataError::State(error)),
         }
-        let record = match store.load().map_err(RefdataError::State)? {
-            None => StateRecord::empty(config.source_id.get()),
-            Some(bytes) => StateRecord::decode(&bytes)?,
+        let loaded = match store.load().map_err(RefdataError::State)? {
+            None => None,
+            Some(bytes) => Some(StateRecord::load(&bytes)?),
         };
+        let record = loaded.as_ref().map_or_else(
+            || StateRecord::empty(config.source_id.get()),
+            |loaded| loaded.record.clone(),
+        );
         if record.source_id != config.source_id.get() {
             return Err(RefdataError::StateBelongsToAnotherSource {
                 persisted: record.source_id,
@@ -359,10 +415,24 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             });
         }
 
+        // An entry recorded as published was published at the last write and
+        // may have gone on being published until the process stopped. When is
+        // not known; the open is later than both, so it is the answer that
+        // can only keep an entry longer.
+        let opened_s = stamp_s(&clock);
         let minted = record
             .entries
             .iter()
-            .map(|entry| (entry.symbol, entry.instrument_id))
+            .map(|entry| {
+                (
+                    entry.symbol,
+                    Minted {
+                        instrument_id: entry.instrument_id,
+                        recorded_published: entry.delisted_at.is_none(),
+                        last_published_s: entry.delisted_at.unwrap_or(opened_s),
+                    },
+                )
+            })
             .collect();
         let sets = config
             .shards
@@ -374,11 +444,18 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
                 cursor: 0,
             })
             .collect();
-        Ok(Self {
+        let mut registry = Self {
             store,
             clock,
             minted,
             next_id: record.next_id,
+            base_written: loaded.is_some(),
+            base_entries: loaded.as_ref().map_or(0, |loaded| loaded.base),
+            appended: loaded.as_ref().map_or(0, |loaded| loaded.appended),
+            compaction_at: loaded
+                .as_ref()
+                .map_or(0, |loaded| loaded.base)
+                .max(COMPACTION_FLOOR),
             handles: HashMap::new(),
             slots: Vec::new(),
             published: 0,
@@ -391,7 +468,35 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             last_refusal: None,
             fault: None,
             config,
-        })
+        };
+        // Rewritten here only when it has to be, or when it is owed: a layout
+        // this build does not append to has to be; appended lines past the
+        // threshold, or an entry to forget, are a compaction. A compaction
+        // that cannot be written leaves the record as it is, which reads back
+        // whole and takes the next mint's line: a disk too full for the whole
+        // record starts and serves every `Instrument ID` it holds. A torn final
+        // line, which the next append would otherwise run on from, goes with
+        // the rewrite, or is cut off when there is none: cutting needs no free
+        // space, and a torn line is what an append that ran the disk out of
+        // room leaves.
+        if let Some(loaded) = &loaded {
+            let rewritten = if loaded.needs_rewrite() {
+                let forgetting = registry.forgettable(now_s(&registry.clock));
+                registry
+                    .write_base(None, &forgetting)
+                    .map_err(RefdataError::State)?;
+                true
+            } else {
+                registry.compact(true).map_err(RefdataError::State)?
+            };
+            if !rewritten && loaded.torn {
+                registry
+                    .store
+                    .truncate(loaded.complete)
+                    .map_err(RefdataError::State)?;
+            }
+        }
+        Ok(registry)
     }
 
     /// The lowering's view of the admitted set.
@@ -822,24 +927,46 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         // run, or before a delisting - keeps the ID it was published under; a
         // new one takes the next, and only if the definition composes.
         let recalled = self.minted.get(&symbol).copied();
-        let instrument_id = recalled.unwrap_or(self.next_id);
+        let instrument_id = recalled.map_or(self.next_id, |minted| minted.instrument_id);
         if instrument_id == 0 {
             return Err(Refusal::IdSpaceExhausted);
         }
         let composed = definition::compose(spec, instrument_id, self.config.source_id)?;
 
-        if recalled.is_none() {
-            let next_id = self
-                .next_id
-                .checked_add(1)
-                .ok_or(Refusal::IdSpaceExhausted)?;
-            // Persisted before it is admitted, and a failure to persist admits
-            // nothing: an `Instrument ID` published from memory and absent from
-            // the record is one that resolves to nothing after a restart, and
-            // one that the next run will hand to a different instrument.
-            self.persist(instrument_id, symbol, next_id)?;
-            self.minted.insert(symbol, instrument_id);
-            self.next_id = next_id;
+        match recalled {
+            None => {
+                let next_id = self
+                    .next_id
+                    .checked_add(1)
+                    .ok_or(Refusal::IdSpaceExhausted)?;
+                // Persisted before it is admitted, and a failure to persist
+                // admits nothing: an `Instrument ID` published from memory and
+                // absent from the record is one that resolves to nothing after
+                // a restart, and one that the next run will hand to a
+                // different instrument.
+                self.persist(instrument_id, symbol, next_id)?;
+                self.minted.insert(
+                    symbol,
+                    Minted {
+                        instrument_id,
+                        recorded_published: true,
+                        last_published_s: 0,
+                    },
+                );
+                self.next_id = next_id;
+            }
+            // A relisting the record holds as delisted. Written down before it
+            // is admitted, because the timestamp in the record would otherwise
+            // outlive this publication: after a restart that the venue did not
+            // relist it across, it would read as delisted since then, and be
+            // forgotten early.
+            Some(minted) if !minted.recorded_published => {
+                self.persist(instrument_id, symbol, self.next_id)?;
+                if let Some(minted) = self.minted.get_mut(&symbol) {
+                    minted.recorded_published = true;
+                }
+            }
+            Some(_) => {}
         }
 
         let handle = self.instruments.admit(composed.instrument);
@@ -858,47 +985,161 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         self.counts.admitted += 1;
         self.count_fits(composed.fits);
         self.advance_manifest(shard);
+        // After the admission and not before it, so the base holds the
+        // instrument as published. The line is already durable, so a base
+        // that fails faults what follows and not this admission.
+        if let Err(error) = self.compact(false) {
+            self.fault = Some(error);
+        }
         Ok(handle)
     }
 
-    /// Write the record this admission would produce, before relying on it.
+    /// Write down an `Instrument ID` this admission relies on, before relying
+    /// on it: a mint, or a relisting the record holds as delisted.
     ///
-    /// The whole record, every time, because the write has to be atomic against
-    /// a reader and a rename of a whole file is what makes it so. The cost is
-    /// one rewrite per instrument the venue has *never* listed before, sized by
-    /// everything it has ever listed — so a re-offer writes nothing, a
-    /// delisting writes nothing, and the steady state is no writes at all. What
-    /// pays it is a first start, once, bounded by the policy's cap.
+    /// **One appended line**, flushed, whatever the size of the record. The
+    /// only exception is the first write a directory ever sees, which is a
+    /// base, since a line has nothing to be appended to until one exists.
     fn persist(
         &mut self,
         instrument_id: u32,
         symbol: SymbolKey,
         next_id: u32,
     ) -> Result<(), Refusal> {
+        let written = if self.base_written {
+            self.store
+                .append(&encode_line(instrument_id, &symbol))
+                .map(|()| self.appended += 1)
+        } else {
+            self.write_base(Some((instrument_id, symbol, next_id)), &HashSet::new())
+        };
+        written.map_err(|error| {
+            self.fault = Some(error);
+            Refusal::Unpersistable
+        })
+    }
+
+    /// Whether the appended lines have reached the last base's size.
+    ///
+    /// A base holds at most the last one's entries plus the lines appended
+    /// since, so it rewrites at most two entries for every line appended.
+    /// That is what keeps a mint's cost constant however long the history is.
+    const fn compaction_due(&self) -> bool {
+        self.appended >= self.compaction_at
+    }
+
+    /// Fold the appended lines into a new base when they are due, or at open
+    /// when there is an entry to forget.
+    ///
+    /// Returns whether the record was rewritten. A base that could not be
+    /// written and left the record as it was is not an error: every entry is
+    /// still in it, and the next is tried a threshold's worth of lines later.
+    /// Only a store that cannot say which record it left is.
+    fn compact(&mut self, opening: bool) -> Result<bool, StateError> {
+        let forgetting = if opening || self.compaction_due() {
+            self.forgettable(now_s(&self.clock))
+        } else {
+            HashSet::new()
+        };
+        if !self.compaction_due() && forgetting.is_empty() {
+            return Ok(false);
+        }
+        match self.write_base(None, &forgetting) {
+            Ok(()) => Ok(true),
+            Err(StateError::NotReplaced(_)) => {
+                self.compaction_at = self.appended + self.base_entries.max(COMPACTION_FLOOR);
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Every entry that is not published and was last published at least the
+    /// horizon before `now_s`.
+    ///
+    /// Forgotten only by a base that lands: an entry dropped here and still in
+    /// the record would come back as a second entry for its symbol the next
+    /// time the venue listed it, and a record holding a symbol twice is
+    /// refused at the next start.
+    ///
+    /// `next_id` is untouched, and it is what keeps a forgotten ID from being
+    /// minted again. What goes is the promise that the symbol comes back under
+    /// that ID, which is the cost the configuration's key states.
+    fn forgettable(&self, now_s: u64) -> HashSet<SymbolKey> {
+        let Some(horizon) = self.config.forget_delisted_after else {
+            return HashSet::new();
+        };
+        // Rounded up, like every stamp, and compared against the current second
+        // rounded down: each rounding can only keep an entry longer, so none
+        // is forgotten before the horizon has passed.
+        let horizon_s = horizon.as_secs() + u64::from(horizon.subsec_nanos() > 0);
+        self.minted
+            .iter()
+            .filter(|(symbol, minted)| {
+                !self.handles.contains_key(*symbol)
+                    && now_s >= minted.last_published_s.saturating_add(horizon_s)
+            })
+            .map(|(symbol, _)| *symbol)
+            .collect()
+    }
+
+    /// Replace the record with a base of every entry but `forgetting`, plus
+    /// `minting` when this is a directory's first write. The forgotten entries
+    /// leave this registry only once the base holding none of them has
+    /// landed.
+    ///
+    /// An entry is written as published when it is, and — while seeding — when
+    /// the record already holds it so and the venue has not offered it yet: a
+    /// seed that has not finished has not said it is gone. Anything else is
+    /// written with the second it was last published.
+    fn write_base(
+        &mut self,
+        minting: Option<(u32, SymbolKey, u32)>,
+        forgetting: &HashSet<SymbolKey>,
+    ) -> Result<(), StateError> {
+        let seeding = matches!(self.phase, Phase::Seeding);
         let mut entries: Vec<Entry> = self
             .minted
             .iter()
-            .map(|(&symbol, &instrument_id)| Entry {
-                instrument_id,
-                symbol,
+            .filter(|(symbol, _)| !forgetting.contains(*symbol))
+            .map(|(symbol, minted)| {
+                let published =
+                    self.handles.contains_key(symbol) || (seeding && minted.recorded_published);
+                Entry {
+                    instrument_id: minted.instrument_id,
+                    symbol: *symbol,
+                    delisted_at: (!published).then_some(minted.last_published_s),
+                }
             })
             .collect();
-        entries.push(Entry {
-            instrument_id,
-            symbol,
-        });
+        let mut next_id = self.next_id;
+        if let Some((instrument_id, symbol, next)) = minting {
+            entries.push(Entry {
+                instrument_id,
+                symbol,
+                delisted_at: None,
+            });
+            next_id = next;
+        }
         let record = StateRecord {
             source_id: self.config.source_id.get(),
             next_id,
             entries,
         };
-        match self.store.store(&record.encode()) {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                self.fault = Some(error);
-                Err(Refusal::Unpersistable)
-            }
+        self.store.store(&record.encode())?;
+        for symbol in forgetting {
+            self.minted.remove(symbol);
         }
+        self.base_entries = record.entries.len();
+        self.compaction_at = self.base_entries.max(COMPACTION_FLOOR);
+        let handles = &self.handles;
+        for (symbol, minted) in &mut self.minted {
+            minted.recorded_published =
+                handles.contains_key(symbol) || (seeding && minted.recorded_published);
+        }
+        self.base_written = true;
+        self.appended = 0;
+        Ok(())
     }
 
     /// Withdraw a published instrument.
@@ -913,10 +1154,13 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         self.published -= 1;
         self.sets[entry.shard].published -= 1;
         self.counts.delisted += 1;
-        // The persisted entry stays. It is what stops the ID being minted for
-        // something else, and what gives the symbol its own ID back if the
-        // venue relists it - so a delisting writes nothing, which is why it
-        // cannot fail.
+        // The entry stays, and gives the symbol its own ID back if the venue
+        // relists it. A delisting writes nothing, which is why it cannot fail:
+        // when it happened is held here until the next base writes it.
+        let delisted_s = stamp_s(&self.clock);
+        if let Some(minted) = self.minted.get_mut(&entry.symbol) {
+            minted.last_published_s = delisted_s;
+        }
         self.advance_manifest(entry.shard);
     }
 
@@ -1025,4 +1269,19 @@ impl<S: StateStore, C: Clock> ListingSink for Registry<S, C> {
     fn delist(&mut self, instrument: InstrumentRef) {
         self.withdraw(instrument);
     }
+}
+
+/// The clock's Unix reading in whole seconds, rounded down: the second a
+/// horizon is measured at.
+fn now_s<C: Clock>(clock: &C) -> u64 {
+    clock.unix_ns() / 1_000_000_000
+}
+
+/// The clock's Unix reading in whole seconds, rounded up: the second an entry
+/// is recorded as last published at, which is what the record holds.
+///
+/// Up and not down. A delisting at 10.999 s recorded as second 10 would be
+/// forgotten at 11.000 s under a one-second horizon, a millisecond after it.
+fn stamp_s<C: Clock>(clock: &C) -> u64 {
+    clock.unix_ns().div_ceil(1_000_000_000)
 }

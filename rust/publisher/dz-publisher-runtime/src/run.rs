@@ -565,6 +565,7 @@ fn compose_and_run(
             shards,
             selection: config.refdata.selection,
             schedule,
+            forget_delisted_after: config.refdata.forget_delisted_after,
         },
         FileStore::new(&config.refdata.state_dir),
         clock.clone(),

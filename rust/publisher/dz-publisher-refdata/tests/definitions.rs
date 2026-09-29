@@ -75,6 +75,7 @@ fn config(selection: SelectionPolicy) -> RegistryConfig {
         shards: vec![ShardConfig::default_shard(3)],
         selection,
         schedule: CycleSchedule::new(std::time::Duration::from_secs(30), 1232, 8),
+        forget_delisted_after: None,
     }
 }
 

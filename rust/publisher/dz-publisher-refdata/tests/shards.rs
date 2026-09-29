@@ -53,6 +53,7 @@ fn config(shards: Vec<ShardConfig>) -> RegistryConfig {
         shards,
         selection: SelectionPolicy::from_seed(8).expect("8 is a seed"),
         schedule: CycleSchedule::new(Duration::from_secs(30), 1232, 8),
+        forget_delisted_after: None,
     }
 }
 

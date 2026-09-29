@@ -1083,6 +1083,58 @@ fn a_zero_snapshot_cycle_is_refused_rather_than_run_every_tick() {
     );
 }
 
+/// A document whose `[refdata]` section also states `forget_delisted_after`.
+fn with_forget_delisted_after(value: &str) -> String {
+    let mut doc = Doc::valid();
+    doc.refdata = doc.refdata.replacen(
+        "[refdata]\n",
+        &format!("[refdata]\nforget_delisted_after = \"{value}\"\n"),
+        1,
+    );
+    doc.render()
+}
+
+#[test]
+fn forget_delisted_after_is_absent_unless_stated_and_read_when_it_is() {
+    // Absent keeps every entry for good, which is what a document that has
+    // never heard of the key must get.
+    let absent = Document::parse(&Doc::valid().render())
+        .expect("valid")
+        .resolve()
+        .expect("resolvable");
+    assert_eq!(absent.refdata.forget_delisted_after, None);
+
+    let stated = Document::parse(&with_forget_delisted_after("168h"))
+        .expect("valid")
+        .resolve()
+        .expect("resolvable");
+    assert_eq!(
+        stated.refdata.forget_delisted_after,
+        Some(Duration::from_secs(168 * 3600))
+    );
+}
+
+#[test]
+fn a_forget_delisted_after_under_a_second_is_refused() {
+    // Zero forgets an instrument the moment it is delisted, and the record
+    // counts in whole seconds, so anything under one rounds to that.
+    for value in ["0s", "500ms"] {
+        let error = Document::parse(&with_forget_delisted_after(value))
+            .expect("parses")
+            .resolve()
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                StartupError::DurationUnderASecond {
+                    key: "[refdata] forget_delisted_after"
+                }
+            ),
+            "{value}: {error}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Two feeds, one publisher: the keys that cannot differ.
 // ---------------------------------------------------------------------------

@@ -5,10 +5,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 /// The persisted state, as this crate reaches it.
 ///
-/// Three operations, in the order they are called: claim the directory, read
-/// what is in it, write it back. Everything about *what* is written is
-/// [`StateRecord`](crate::StateRecord)'s; everything about *where* is an
-/// implementation of this.
+/// Five operations, in the order they are called: claim the directory, read
+/// what is in it, cut a torn end off it, replace it, and add to it. Everything
+/// about *what* is written is [`StateRecord`](crate::StateRecord)'s;
+/// everything about *where* is an implementation of this.
 ///
 /// # Why this is a trait
 ///
@@ -63,10 +63,47 @@ pub trait StateStore {
     ///
     /// # Errors
     ///
-    /// [`StateError::Write`]. The caller treats this as a fault and mints
-    /// nothing further: an `Instrument ID` that was published but not persisted
-    /// is one that resolves to nothing after a restart.
+    /// [`StateError::NotReplaced`] when the record is still the previous one,
+    /// and nothing of the new one is left taking up room in the directory.
+    /// The caller can go on appending to it, which is what a compaction that
+    /// failed on a full disk does.
+    ///
+    /// [`StateError::Write`] when which of the two a later load sees is not
+    /// known. The caller treats this as a fault and mints nothing further: an
+    /// `Instrument ID` that was published but not persisted is one that
+    /// resolves to nothing after a restart.
     fn store(&mut self, record: &[u8]) -> Result<(), StateError>;
+
+    /// Add bytes to the end of the persisted record.
+    ///
+    /// The bytes are durable when this returns `Ok`. After an error, a
+    /// subsequent [`load`](Self::load) sees the record without them, with a
+    /// prefix of them, or with all of them: a flush that fails does not take
+    /// back the write before it. A prefix of one line has no newline, and the
+    /// reader drops exactly that. A whole line reads back as the mint or
+    /// restatement it is, of an instrument that was never admitted, which
+    /// costs an ID that is never re-issued and nothing else. It is never
+    /// called on a directory holding no record: the first write is always a
+    /// [`store`](Self::store).
+    ///
+    /// # Errors
+    ///
+    /// [`StateError::Write`]. The caller treats this as the fault
+    /// [`store`](Self::store) is treated as.
+    fn append(&mut self, bytes: &[u8]) -> Result<(), StateError>;
+
+    /// Cut the persisted record back to its first `len` bytes, durably.
+    ///
+    /// How a torn final line is taken off at open. Shortening a file needs no
+    /// free space, so a publisher whose last append ran the disk out of room
+    /// still starts and serves every `Instrument ID` it had minted, where a
+    /// rewrite would need room for the whole record.
+    ///
+    /// # Errors
+    ///
+    /// [`StateError::Write`]. The caller refuses to start: the next append
+    /// would otherwise run on from the torn line.
+    fn truncate(&mut self, len: usize) -> Result<(), StateError>;
 }
 
 /// What the state directory can refuse.
@@ -88,6 +125,11 @@ pub enum StateError {
 
     #[error("the persisted record could not be written")]
     Write(#[source] std::io::Error),
+
+    /// A [`store`](StateStore::store) that failed and left the previous
+    /// record in place.
+    #[error("the persisted record could not be replaced, and is the one it was")]
+    NotReplaced(#[source] std::io::Error),
 }
 
 /// A state directory that is not one.
@@ -130,6 +172,10 @@ struct Directory {
     claimed: bool,
     read_fails: Option<String>,
     write_fails: Option<String>,
+    store_fails: Option<String>,
+    flush_fails: Option<String>,
+    stores: usize,
+    appends: usize,
 }
 
 impl MemoryStore {
@@ -145,6 +191,18 @@ impl MemoryStore {
         self.lock().record.clone()
     }
 
+    /// How many times the record has been replaced whole.
+    #[must_use]
+    pub fn stores(&self) -> usize {
+        self.lock().stores
+    }
+
+    /// How many times bytes have been appended to the record.
+    #[must_use]
+    pub fn appends(&self) -> usize {
+        self.lock().appends
+    }
+
     /// Put bytes in the directory without going through a writer, to stand in
     /// for a record damaged by something outside this process.
     pub fn set_record(&self, record: Vec<u8>) {
@@ -157,14 +215,32 @@ impl MemoryStore {
         self.lock().read_fails = Some(message.to_owned());
     }
 
-    /// Make every write fail, standing in for a full or read-only directory.
+    /// Make every write fail, whole or appended, standing in for a full or
+    /// read-only directory.
     pub fn break_writes(&self, message: &str) {
         self.lock().write_fails = Some(message.to_owned());
     }
 
+    /// Make every replacement of the record fail and leave it as it was,
+    /// while appends go on landing: a disk with room for a line and not for
+    /// the whole record.
+    pub fn break_stores(&self, message: &str) {
+        self.lock().store_fails = Some(message.to_owned());
+    }
+
+    /// Make every write land whole and then fail, standing in for a
+    /// `sync_data` that fails after the write before it went through, or a
+    /// directory sync that fails after the rename.
+    pub fn break_flushes(&self, message: &str) {
+        self.lock().flush_fails = Some(message.to_owned());
+    }
+
     /// Let writes through again.
     pub fn repair_writes(&self) {
-        self.lock().write_fails = None;
+        let mut directory = self.lock();
+        directory.write_fails = None;
+        directory.store_fails = None;
+        directory.flush_fails = None;
     }
 
     fn lock(&self) -> MutexGuard<'_, Directory> {
@@ -196,12 +272,51 @@ impl StateStore for MemoryStore {
 
     fn store(&mut self, record: &[u8]) -> Result<(), StateError> {
         let mut directory = self.lock();
-        if let Some(message) = &directory.write_fails {
-            return Err(StateError::Write(std::io::Error::other(message.clone())));
+        if let Some(message) = directory
+            .write_fails
+            .as_ref()
+            .or(directory.store_fails.as_ref())
+        {
+            return Err(StateError::NotReplaced(std::io::Error::other(
+                message.clone(),
+            )));
         }
         // Assigned whole, so a reader never sees half of it - the same property
         // the atomic rename buys on a real filesystem.
         directory.record = Some(record.to_vec());
+        directory.stores += 1;
+        if let Some(message) = &directory.flush_fails {
+            return Err(StateError::Write(std::io::Error::other(message.clone())));
+        }
+        Ok(())
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> Result<(), StateError> {
+        let mut directory = self.lock();
+        if let Some(message) = &directory.write_fails {
+            return Err(StateError::Write(std::io::Error::other(message.clone())));
+        }
+        directory
+            .record
+            .get_or_insert_with(Vec::new)
+            .extend_from_slice(bytes);
+        // Counted before the flush can fail: the bytes are in the record
+        // either way.
+        directory.appends += 1;
+        if let Some(message) = &directory.flush_fails {
+            return Err(StateError::Write(std::io::Error::other(message.clone())));
+        }
+        Ok(())
+    }
+
+    fn truncate(&mut self, len: usize) -> Result<(), StateError> {
+        let mut directory = self.lock();
+        if let Some(message) = &directory.write_fails {
+            return Err(StateError::Write(std::io::Error::other(message.clone())));
+        }
+        if let Some(record) = &mut directory.record {
+            record.truncate(len);
+        }
         Ok(())
     }
 }

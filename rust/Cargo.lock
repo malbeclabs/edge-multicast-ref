@@ -422,6 +422,7 @@ dependencies = [
  "dz-edge-refdata",
  "dz-publisher-lowering",
  "nix 0.30.1",
+ "tempfile",
  "thiserror 1.0.69",
 ]
 
