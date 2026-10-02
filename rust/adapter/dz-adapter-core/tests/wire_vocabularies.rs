@@ -51,6 +51,7 @@ fn asset_class_matches_the_reference_data_table() {
             AssetClass::PerpetualFuture,
             wire::ASSET_CLASS_PERPETUAL_FUTURE,
         ),
+        (AssetClass::DatedFuture, wire::ASSET_CLASS_DATED_FUTURE),
     ];
 
     assert_distinct_and_dense(&table, "asset class");

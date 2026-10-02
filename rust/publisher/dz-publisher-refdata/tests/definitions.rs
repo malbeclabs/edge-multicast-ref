@@ -14,9 +14,9 @@ use dz_adapter_core::{
 };
 use dz_edge_core::Fit;
 use dz_edge_refdata::{
-    ASSET_CLASS_PERPETUAL_FUTURE, ASSET_CLASS_UNKNOWN, LEG_LEN, MARKET_MODEL_AMM,
-    MARKET_MODEL_UNKNOWN, PRICE_BOUND_UNBOUNDED, PRICE_BOUND_UNIT_INTERVAL, SETTLE_TYPE_CASH,
-    SETTLE_TYPE_NA, SYMBOL_LEN,
+    ASSET_CLASS_DATED_FUTURE, ASSET_CLASS_PERPETUAL_FUTURE, ASSET_CLASS_UNKNOWN, LEG_LEN,
+    MARKET_MODEL_AMM, MARKET_MODEL_UNKNOWN, PRICE_BOUND_UNBOUNDED, PRICE_BOUND_UNIT_INTERVAL,
+    SETTLE_TYPE_CASH, SETTLE_TYPE_NA, SYMBOL_LEN,
 };
 use dz_publisher_lowering::{LoweringError, SourceId};
 use dz_publisher_refdata::{
@@ -435,4 +435,64 @@ fn a_restated_contract_factor_is_refused_even_when_the_definition_does_not_chang
         &one.instrument,
         "the conversion the instrument was admitted with stands"
     );
+}
+
+/// A dated future as a venue states one: an expiry and a settle type.
+fn dated_future() -> InstrumentSpec<'static> {
+    InstrumentSpec {
+        symbol: "BTC-USD-261225",
+        asset_class: AssetClass::DatedFuture,
+        expiry_ns: Some(1_798_185_600_000_000_000),
+        settle_type: SettleType::Cash,
+        ..nothing_optional()
+    }
+}
+
+#[test]
+fn a_dated_future_is_asset_class_six_with_its_expiry() {
+    let definition = compose(&dated_future(), 9, source_id())
+        .expect("expiry and settle type are stated")
+        .definition;
+
+    // Against the codec's constant and against the specification's table,
+    // transcribed by hand.
+    assert_eq!(definition.asset_class, ASSET_CLASS_DATED_FUTURE);
+    assert_eq!(definition.asset_class, 6);
+    assert_eq!(definition.expiry_ns, 1_798_185_600_000_000_000);
+    assert_eq!(definition.settle_type, SETTLE_TYPE_CASH);
+}
+
+#[test]
+fn a_dated_future_without_an_expiry_or_a_settle_type_is_never_admitted() {
+    // The specification binds both fields to `Asset Class` `6`. Without an
+    // expiry the definition reads as a contract that never expires, which is
+    // wrong in a way no subscriber can detect, so the listing is refused at
+    // admission rather than published.
+    let mut registry = registry();
+
+    let mut no_expiry = dated_future();
+    no_expiry.expiry_ns = None;
+    let mut zero_expiry = dated_future();
+    zero_expiry.expiry_ns = Some(0);
+    let mut no_settle_type = dated_future();
+    no_settle_type.settle_type = SettleType::NotApplicable;
+
+    for spec in [no_expiry, zero_expiry, no_settle_type] {
+        assert_eq!(
+            compose(&spec, 1, source_id()).expect_err("terms are missing"),
+            Refusal::DatedFutureTerms
+        );
+        assert!(registry.list(&spec).is_none());
+    }
+
+    assert_eq!(registry.published(), 0);
+    assert_eq!(registry.counts().declined_unrepresentable, 3);
+    assert!(!registry.last_refusal().expect("declined").is_ordinary());
+
+    // The same rule does not bind any other class: a perpetual with no expiry
+    // is the ordinary case.
+    let mut perpetual = dated_future();
+    perpetual.asset_class = AssetClass::PerpetualFuture;
+    perpetual.expiry_ns = None;
+    assert!(compose(&perpetual, 1, source_id()).is_ok());
 }
