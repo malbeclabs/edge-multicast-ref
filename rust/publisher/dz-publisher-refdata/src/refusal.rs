@@ -79,6 +79,16 @@ pub enum Refusal {
     #[error("an exponent or contract factor was restated for a published instrument")]
     ScaleRestated,
 
+    /// The venue stated a dated future without an expiry, or without a settle
+    /// type.
+    ///
+    /// The specification requires both for `Asset Class` `6`. Published
+    /// without them, the definition reads to a subscriber as a contract that
+    /// never expires, or as one whose settlement means nothing. That is wrong
+    /// in a way nothing downstream detects, so the instrument is not admitted.
+    #[error("a dated future was stated without an expiry or a settle type")]
+    DatedFutureTerms,
+
     /// The venue named a shard this publisher was not configured with.
     ///
     /// Refused rather than defaulted. Falling back to the default shard would

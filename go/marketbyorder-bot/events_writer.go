@@ -239,6 +239,10 @@ func assetClassString(v uint8) string {
 		return "prediction_scalar"
 	case 4:
 		return "prediction_categorical"
+	case 5:
+		return "perpetual_future"
+	case 6:
+		return "dated_future"
 	default:
 		return "unknown"
 	}
