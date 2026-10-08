@@ -244,6 +244,90 @@ fn consecutive_requests_share_one_connection() {
     rx.recv_timeout(Duration::from_secs(5)).expect("the second");
 }
 
+/// Three bodies through a transport allowed three at once are all in flight
+/// together, each on a connection of its own.
+///
+/// The listener answers nobody until it has read all three requests, so a
+/// transport that sent them one after another would wait on the first answer
+/// for ever, and its timeout is what fails the test.
+#[test]
+fn bodies_sent_together_are_in_flight_together() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("a port");
+    let addr = listener.local_addr().expect("an address");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut open = Vec::new();
+        let mut bodies = Vec::new();
+        for _ in 0..3 {
+            let (stream, _) = listener.accept().expect("a connection");
+            let mut reader = BufReader::new(stream);
+            let mut length = 0usize;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("a line");
+                let line = line.trim_end();
+                if line.is_empty() {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':') {
+                    if name.trim().eq_ignore_ascii_case("content-length") {
+                        length = value.trim().parse().expect("a length");
+                    }
+                }
+            }
+            let mut body = vec![0u8; length];
+            reader.read_exact(&mut body).expect("the whole body");
+            bodies.push(zstd::stream::decode_all(body.as_slice()).expect("a zstd frame"));
+            open.push(reader);
+        }
+        // All three have arrived and none has been answered.
+        for reader in &mut open {
+            reader
+                .get_mut()
+                .write_all(b"HTTP/1.1 200 X\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .expect("the response is writable");
+        }
+        let _ = tx.send(bodies);
+    });
+
+    let transport = HttpTransport::new(Duration::from_secs(5)).with_concurrency(3);
+    assert_eq!(transport.concurrency(), 3);
+    let bodies: [&[u8]; 3] = [b"{\"a\":1}\n", b"{\"a\":2}\n", b"{\"a\":3}\n"];
+    let results = transport.post_all(
+        &format!("http://{addr}/"),
+        &Credentials::new("loader", None),
+        &bodies,
+    );
+    assert_eq!(results.len(), 3);
+    for result in &results {
+        assert_eq!(
+            result.as_ref().expect("the listener answered 200").status,
+            200
+        );
+    }
+    let mut arrived = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the listener saw all three");
+    arrived.sort();
+    assert_eq!(
+        arrived,
+        bodies.iter().map(|b| b.to_vec()).collect::<Vec<_>>(),
+        "each body arrived once"
+    );
+}
+
+/// One at a time is the default, and zero is read as one.
+#[test]
+fn a_transport_sends_one_body_at_a_time_unless_told_otherwise() {
+    assert_eq!(HttpTransport::new(Duration::from_secs(5)).concurrency(), 1);
+    assert_eq!(
+        HttpTransport::new(Duration::from_secs(5))
+            .with_concurrency(0)
+            .concurrency(),
+        1
+    );
+}
+
 /// A refusal carries the status and the server's own body, because a column
 /// store's message names the column it could not parse and nothing else here
 /// can.

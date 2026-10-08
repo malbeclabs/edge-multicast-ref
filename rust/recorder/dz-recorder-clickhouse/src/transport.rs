@@ -79,6 +79,33 @@ pub trait Transport {
         credentials: &Credentials,
         body: &[u8],
     ) -> Result<Response, TransportError>;
+
+    /// How many bodies [`post_all`](Self::post_all) puts in flight at once.
+    ///
+    /// One unless an implementation says otherwise, and the sink reads it to
+    /// decide how many bodies to hand over together: a transport that sends one
+    /// at a time is given one at a time, so a failure still stops the bodies
+    /// behind it from being sent at all.
+    fn concurrency(&self) -> usize {
+        1
+    }
+
+    /// Posts every body to `url` once, and returns what each one got, in order.
+    ///
+    /// One attempt each and no retry: retrying is the sink's, which knows how
+    /// many attempts a batch is allowed. The default sends them one after
+    /// another, which is all a fake needs.
+    fn post_all(
+        &self,
+        url: &str,
+        credentials: &Credentials,
+        bodies: &[&[u8]],
+    ) -> Vec<Result<Response, TransportError>> {
+        bodies
+            .iter()
+            .map(|body| self.post(url, credentials, body))
+            .collect()
+    }
 }
 
 /// The level every request body is compressed at.
@@ -115,6 +142,7 @@ const MAX_IDLE_AGE: Duration = Duration::from_secs(5);
 #[derive(Debug, Clone)]
 pub struct HttpTransport {
     agent: ureq::Agent,
+    concurrency: usize,
 }
 
 impl HttpTransport {
@@ -135,7 +163,22 @@ impl HttpTransport {
             .max_idle_age(MAX_IDLE_AGE)
             .build()
             .into();
-        Self { agent }
+        Self {
+            agent,
+            concurrency: 1,
+        }
+    }
+
+    /// Lets [`post_all`](Transport::post_all) keep `concurrency` requests in
+    /// flight, each on a connection of its own.
+    ///
+    /// The destination parses one body on the threads its profile gives the
+    /// account, so one request at a time is a ceiling on rows per second that
+    /// neither the path nor this host sets. Zero is read as one.
+    #[must_use]
+    pub fn with_concurrency(mut self, concurrency: usize) -> Self {
+        self.concurrency = concurrency.max(1);
+        self
     }
 }
 
@@ -198,5 +241,67 @@ impl Transport for HttpTransport {
                 message: e.to_string(),
             }),
         }
+    }
+
+    fn concurrency(&self) -> usize {
+        self.concurrency
+    }
+
+    /// The bodies, with up to [`concurrency`](Self::concurrency) of them in
+    /// flight. Compression happens on the sending thread, so it is spread over
+    /// the same threads as the requests.
+    fn post_all(
+        &self,
+        url: &str,
+        credentials: &Credentials,
+        bodies: &[&[u8]],
+    ) -> Vec<Result<Response, TransportError>> {
+        let workers = self.concurrency.min(bodies.len());
+        if workers <= 1 {
+            return bodies
+                .iter()
+                .map(|body| self.post(url, credentials, body))
+                .collect();
+        }
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let mut results: Vec<Option<Result<Response, TransportError>>> =
+            (0..bodies.len()).map(|_| None).collect();
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..workers)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut mine = Vec::new();
+                        loop {
+                            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let Some(body) = bodies.get(i) else {
+                                break;
+                            };
+                            mine.push((i, self.post(url, credentials, body)));
+                        }
+                        mine
+                    })
+                })
+                .collect();
+            for handle in handles {
+                // A sender that panicked leaves its bodies unanswered, and those
+                // are reported below as unreachable rather than as landed.
+                if let Ok(mine) = handle.join() {
+                    for (i, result) in mine {
+                        results[i] = Some(result);
+                    }
+                }
+            }
+        });
+        results
+            .into_iter()
+            .map(|result| {
+                result.unwrap_or_else(|| {
+                    Err(TransportError::Unreachable {
+                        url: url.to_owned(),
+                        message: "the request was never sent: its sender stopped".to_owned(),
+                    })
+                })
+            })
+            .collect()
     }
 }

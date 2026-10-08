@@ -148,6 +148,18 @@ insert_max_bytes = 268435456
 # back to it — an unbounded retry inside one object is a loader that stops making
 # progress on every other object while looking busy.
 attempts = 4
+
+# Inserts of one grain in flight at once, 1 to 8. Leave it out for one at a
+# time, which is what every version before 0.5.0 did.
+#
+# Raise it when a loader that is not short of network or CPU still cannot catch
+# up. The destination parses a body on the threads its settings profile allows
+# this account, so one request at a time loads at the rate one request is
+# parsed, and on a busy recorder that is about the rate it records. Bodies of
+# the same grain go out together; the order between grains does not change.
+# Each one in flight is a concurrent insert on the destination: ask before
+# raising it far.
+# insert_concurrency = 3
 timeout = 30
 
 [metrics]
