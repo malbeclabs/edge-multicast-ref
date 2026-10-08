@@ -128,6 +128,22 @@ store's password comes from a systemd credential
 (`DZ_LOADER_CLICKHOUSE_PASSWORD_FILE`) or, second best, from
 `DZ_LOADER_CLICKHOUSE_PASSWORD`.
 
+## What goes on the wire
+
+**Every insert body is zstd, sent under `Content-Encoding: zstd`, and
+consecutive bodies share a connection.** A column store decompresses a request
+body by that header, so there is nothing to configure on either side. The
+compression is not there to save bandwidth. Uncompressed, a recorder a long
+round trip from the store could send one body at the rate the path allowed and
+no faster, which was slower than it recorded: it fell behind and stayed behind,
+and the recorder evicts by staging budget whether or not an object was loaded.
+Compressed, the same rows are several times fewer bytes on that path. The
+connection is kept for the same reason: a handshake and a slow start per body
+cost the most where the round trip is longest.
+
+`dz_loader_bytes_written_total` still counts the rows as serialized, not the
+bytes after compression, so it stays comparable across versions.
+
 ## Two things to do at provisioning, neither of them in this crate
 
 **Build with `--features tls` if the destination is `https://`.** TLS is off by
