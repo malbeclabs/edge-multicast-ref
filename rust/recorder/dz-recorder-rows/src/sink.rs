@@ -125,7 +125,8 @@ impl ObjectId {
 pub struct Landed {
     /// The objects whose rows are now durable. Empty when nothing was due.
     pub objects: Vec<ObjectId>,
-    /// Bytes this call sent, and `0` when it sent nothing.
+    /// Bytes of rows this call sent, as serialized, and `0` when it sent
+    /// nothing. Not the bytes on the wire: a sink may compress the body.
     ///
     /// A property of the *request* and not of an object: the rows of four
     /// objects in one body have one length between them, and dividing it up
@@ -149,7 +150,9 @@ pub struct Accepted {
     /// The objects whose rows are now durable, if this call posted. Empty means
     /// the sink is still holding them.
     pub landed: Vec<ObjectId>,
-    /// Bytes this call actually sent, and `0` when it held.
+    /// Bytes of rows this call actually sent, as serialized, and `0` when it
+    /// held. A sink that compresses a body reports its length before that, so
+    /// this is not the bytes on the wire.
     ///
     /// Here rather than on [`Written`] because once an insert spans objects a
     /// byte count is a property of the *request* and not of an object: the rows

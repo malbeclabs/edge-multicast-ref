@@ -380,7 +380,8 @@ impl LoaderMetrics {
         }
     }
 
-    /// Bytes one request put on the wire.
+    /// Bytes of rows one request sent, as serialized and before the transport
+    /// compressed them.
     ///
     /// Counted per request and never per object, which is why it is not part of
     /// [`object_loaded`](Self::object_loaded): once an insert spans objects the
