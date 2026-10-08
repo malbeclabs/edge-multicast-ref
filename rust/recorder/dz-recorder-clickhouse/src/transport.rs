@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use crate::config::Credentials;
+use crate::config::{Credentials, MAX_INSERT_CONCURRENCY};
 
 /// A request could not be completed, or completed with a refusal.
 ///
@@ -161,6 +161,11 @@ impl HttpTransport {
             // operator with a status code and no cause.
             .http_status_as_error(false)
             .max_idle_age(MAX_IDLE_AGE)
+            // As many as a configuration may ask for bodies at once. The agent's
+            // own default is three, and with more than that in flight the
+            // connections past the third would be closed after every chunk and
+            // opened again for the next.
+            .max_idle_connections_per_host(MAX_INSERT_CONCURRENCY)
             .build()
             .into();
         Self {

@@ -316,6 +316,75 @@ fn bodies_sent_together_are_in_flight_together() {
     );
 }
 
+/// Every connection a full chunk opened is kept for the next chunk.
+///
+/// The agent keeps as many idle connections to one host as a configuration may
+/// ask for bodies at once. Fewer, and the connections past that number are
+/// closed after every chunk and opened again for the next, which is the
+/// handshake per body that sharing a connection exists to avoid.
+#[test]
+fn a_full_chunk_reuses_every_connection_it_opened() {
+    const TOGETHER: usize = 8;
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("a port");
+    let addr = listener.local_addr().expect("an address");
+    std::thread::spawn(move || {
+        // Eight accepts and no more. A client that dropped one of them after
+        // the first chunk sends that body on a connection nobody accepts, and
+        // the end of file on the dropped one stops this thread answering at
+        // all: the client's timeout is what fails the test.
+        let mut open: Vec<BufReader<std::net::TcpStream>> = (0..TOGETHER)
+            .map(|_| BufReader::new(listener.accept().expect("a connection").0))
+            .collect();
+        for _ in 0..2 {
+            for reader in &mut open {
+                let mut length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).expect("a line") == 0 {
+                        return;
+                    }
+                    let line = line.trim_end();
+                    if line.is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':') {
+                        if name.trim().eq_ignore_ascii_case("content-length") {
+                            length = value.trim().parse().expect("a length");
+                        }
+                    }
+                }
+                let mut body = vec![0u8; length];
+                reader.read_exact(&mut body).expect("the whole body");
+            }
+            for reader in &mut open {
+                reader
+                    .get_mut()
+                    .write_all(b"HTTP/1.1 200 X\r\nContent-Length: 2\r\n\r\nok")
+                    .expect("the response is writable");
+            }
+        }
+    });
+
+    let transport = HttpTransport::new(Duration::from_secs(5)).with_concurrency(TOGETHER);
+    let bodies: Vec<&[u8]> = (0..TOGETHER).map(|_| b"{\"a\":1}\n".as_slice()).collect();
+    for chunk in ["first", "second"] {
+        let results = transport.post_all(
+            &format!("http://{addr}/"),
+            &Credentials::new("loader", None),
+            &bodies,
+        );
+        for result in &results {
+            assert_eq!(
+                result
+                    .as_ref()
+                    .unwrap_or_else(|e| panic!("the {chunk} chunk was answered: {e}"))
+                    .status,
+                200
+            );
+        }
+    }
+}
+
 /// One at a time is the default, and zero is read as one.
 #[test]
 fn a_transport_sends_one_body_at_a_time_unless_told_otherwise() {
