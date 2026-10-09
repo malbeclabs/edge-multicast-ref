@@ -286,6 +286,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             selection: SelectionPolicy::new(8, 16, 8)?,
             schedule: CycleSchedule::new(feed.definition_cycle, 1232, 1),
             forget_delisted_after: None,
+            id_allocation: dz_publisher_refdata::IdAllocation::Sequential,
         },
         FileStore::new(&state_dir),
         clock.clone(),

@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use dz_edge_core::PortRole;
 use dz_publisher_egress::DEFAULT_TTL;
+use dz_publisher_refdata::IdAllocation;
 use dz_publisher_runtime::config::ShardName;
 use dz_publisher_runtime::{Document, FeedSpec, StartupError, TeeConfig};
 use harness::{Doc, CHANNEL_ID, DEPTH_CHANNEL_ID, GROUP, MKTDATA_PORT, REFDATA_PORT, SOURCE_ID};
@@ -1133,6 +1134,57 @@ fn a_forget_delisted_after_under_a_second_is_refused() {
             "{value}: {error}"
         );
     }
+}
+
+fn with_refdata_lines(lines: &str) -> String {
+    let mut doc = Doc::valid();
+    doc.refdata = doc
+        .refdata
+        .replacen("[refdata]\n", &format!("[refdata]\n{lines}"), 1);
+    doc.render()
+}
+
+#[test]
+fn id_allocation_is_sequential_unless_derived_is_stated() {
+    // Absent is what every document written before the key must get.
+    let absent = Document::parse(&Doc::valid().render())
+        .expect("valid")
+        .resolve()
+        .expect("resolvable");
+    assert_eq!(absent.refdata.id_allocation, IdAllocation::Sequential);
+
+    let derived = Document::parse(&with_refdata_lines("id_allocation = \"derived\"\n"))
+        .expect("valid")
+        .resolve()
+        .expect("resolvable");
+    assert_eq!(derived.refdata.id_allocation, IdAllocation::Derived);
+
+    let sequential = Document::parse(&with_refdata_lines("id_allocation = \"sequential\"\n"))
+        .expect("valid")
+        .resolve()
+        .expect("resolvable");
+    assert_eq!(sequential.refdata.id_allocation, IdAllocation::Sequential);
+}
+
+#[test]
+fn an_id_allocation_this_build_does_not_know_is_refused() {
+    // A misspelling would otherwise fall back to sequential, and a host meant
+    // to agree with its peers would mint from its own history instead.
+    assert!(Document::parse(&with_refdata_lines("id_allocation = \"derive\"\n")).is_err());
+}
+
+#[test]
+fn derived_allocation_with_forget_delisted_after_is_refused() {
+    let error = Document::parse(&with_refdata_lines(
+        "id_allocation = \"derived\"\nforget_delisted_after = \"168h\"\n",
+    ))
+    .expect("parses")
+    .resolve()
+    .unwrap_err();
+    assert!(
+        matches!(error, StartupError::ForgettingUnderDerivedIds),
+        "{error}"
+    );
 }
 
 // ---------------------------------------------------------------------------

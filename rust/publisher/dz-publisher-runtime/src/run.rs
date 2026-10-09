@@ -51,7 +51,7 @@ use dz_publisher_egress::{
 };
 use dz_publisher_metrics::{PublisherMetrics, PublisherMetricsConfig};
 use dz_publisher_refdata::{
-    CycleSchedule, FileStore, Registry, RegistryConfig, ShardConfig, StateStore,
+    CycleSchedule, FileStore, Registry, RegistryConfig, ShardConfig, StateStore, UnavailableId,
 };
 
 use crate::clock::{Clock, SystemClock};
@@ -566,6 +566,7 @@ fn compose_and_run(
             selection: config.refdata.selection,
             schedule,
             forget_delisted_after: config.refdata.forget_delisted_after,
+            id_allocation: config.refdata.id_allocation,
         },
         FileStore::new(&config.refdata.state_dir),
         clock.clone(),
@@ -1101,6 +1102,37 @@ fn unknown_shard_line(offered: &str, configured: &[String]) -> String {
     )
 }
 
+/// The line an instrument declined under derived allocation earns.
+///
+/// **Both symbols, when there are two.** The declined one alone says an ID was
+/// taken; the holder says by what, which is the difference between two live
+/// instruments that collide and a symbol long gone that still holds its ID.
+/// When no symbol holds it, the ID was `0` or below the floor, and the line
+/// says that instead.
+fn unavailable_id_line(declined: &UnavailableId) -> String {
+    let why = declined.holder.as_ref().map_or_else(
+        || "which is zero or below the state record's floor".to_owned(),
+        |holder| format!("which `{}` already holds", symbol_text(holder)),
+    );
+    format!(
+        "dz-publisher-runtime: `{}` derives Instrument ID {}, {why}. It is declined and reaches no \
+         channel; the ID is not moved, so that every publisher of this channel declines it alike. \
+         Said once for this symbol.",
+        symbol_text(&declined.symbol),
+        declined.instrument_id,
+    )
+}
+
+/// A wire `Symbol` for a log line: up to its first NUL, with anything that is
+/// not UTF-8 replaced rather than dropped.
+fn symbol_text(symbol: &[u8]) -> String {
+    let end = symbol
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(symbol.len());
+    String::from_utf8_lossy(&symbol[..end]).into_owned()
+}
+
 /// The numbers no series carries, on the way out.
 ///
 /// Seven of them, each named where it is documented: lowering refusals by
@@ -1263,6 +1295,11 @@ async fn tick_loop<S: StateStore, K: Clock + Clone>(
                     for name in offered {
                         eprintln!("{}", unknown_shard_line(&name, &configured));
                     }
+                }
+                // An instrument declined because the ID its symbol derives is
+                // taken, zero, or below the floor. Once per symbol, as above.
+                for declined in publisher.take_unavailable_ids() {
+                    eprintln!("{}", unavailable_id_line(&declined));
                 }
                 // The recovery snapshots an `InstrumentReset` obliged. Drained
                 // here rather than inside the adapter's own callback because
@@ -2570,6 +2607,34 @@ mod tests {
     // -----------------------------------------------------------------------
     // The unknown shard name, and the line an operator gets
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn the_unavailable_id_line_names_both_symbols_or_says_why_there_is_one() {
+        let mut symbol = [0u8; dz_edge_refdata::SYMBOL_LEN];
+        symbol[..4].copy_from_slice(b"NEWS");
+        let mut holder = [0u8; dz_edge_refdata::SYMBOL_LEN];
+        holder[..4].copy_from_slice(b"OLDS");
+        let collided = unavailable_id_line(&UnavailableId {
+            symbol,
+            instrument_id: 77,
+            holder: Some(holder),
+        });
+        assert!(
+            collided.contains("`NEWS`") && collided.contains("`OLDS`"),
+            "{collided}"
+        );
+        assert!(
+            collided.contains("77") && collided.contains("declined"),
+            "{collided}"
+        );
+
+        let below = unavailable_id_line(&UnavailableId {
+            symbol,
+            instrument_id: 3,
+            holder: None,
+        });
+        assert!(below.contains("below the state record's floor"), "{below}");
+    }
 
     #[test]
     fn the_unknown_shard_line_names_the_offer_and_the_configured_shards() {

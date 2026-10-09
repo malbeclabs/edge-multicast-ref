@@ -120,6 +120,20 @@ pub enum Refusal {
     #[error("the Instrument ID space is exhausted")]
     IdSpaceExhausted,
 
+    /// Under [`IdAllocation::Derived`](crate::IdAllocation::Derived), the ID
+    /// this symbol derives is `0`, below the record's floor, or held by another
+    /// symbol.
+    ///
+    /// **Declined, never moved.** The instrument holding the ID keeps it, and
+    /// nothing probes to a free neighbour: which neighbour is free depends on
+    /// what this publisher admitted first, and that is exactly how two
+    /// publishers of one channel would come to disagree. Not ordinary — a
+    /// collision is rare enough to be worth a line, and
+    /// [`Registry::take_unavailable_ids`](crate::Registry::take_unavailable_ids)
+    /// names the symbol that holds the ID.
+    #[error("the Instrument ID this symbol derives is unavailable")]
+    IdUnavailable,
+
     /// The persisted state could not be written, so no further ID is minted.
     ///
     /// An `Instrument ID` that was published and not persisted resolves to

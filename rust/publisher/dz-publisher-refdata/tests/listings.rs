@@ -11,8 +11,8 @@ use dz_adapter_core::{
 };
 use dz_publisher_lowering::SourceId;
 use dz_publisher_refdata::{
-    CycleSchedule, ManualClock, MemoryStore, Phase, Refusal, Registry, RegistryConfig,
-    SelectionPolicy, ShardConfig,
+    CycleSchedule, IdAllocation, ManualClock, MemoryStore, Phase, Refusal, Registry,
+    RegistryConfig, SelectionPolicy, ShardConfig,
 };
 
 /// An instrument whose every scalar converts exactly at its own exponents:
@@ -43,6 +43,7 @@ fn config(selection: SelectionPolicy) -> RegistryConfig {
         selection,
         schedule: CycleSchedule::new(std::time::Duration::from_secs(30), 1232, 8),
         forget_delisted_after: None,
+        id_allocation: IdAllocation::Sequential,
     }
 }
 

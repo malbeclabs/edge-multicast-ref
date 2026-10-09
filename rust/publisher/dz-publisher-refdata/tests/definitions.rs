@@ -20,8 +20,8 @@ use dz_edge_refdata::{
 };
 use dz_publisher_lowering::{LoweringError, SourceId};
 use dz_publisher_refdata::{
-    compose, CycleSchedule, ManualClock, MemoryStore, Refusal, Registry, RegistryConfig,
-    SelectionPolicy, ShardConfig,
+    compose, CycleSchedule, IdAllocation, ManualClock, MemoryStore, Refusal, Registry,
+    RegistryConfig, SelectionPolicy, ShardConfig,
 };
 
 fn source_id() -> SourceId {
@@ -76,6 +76,7 @@ fn config(selection: SelectionPolicy) -> RegistryConfig {
         selection,
         schedule: CycleSchedule::new(std::time::Duration::from_secs(30), 1232, 8),
         forget_delisted_after: None,
+        id_allocation: IdAllocation::Sequential,
     }
 }
 
