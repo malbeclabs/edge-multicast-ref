@@ -111,13 +111,18 @@ fn the_body_handed_to_the_transport_is_the_body_that_arrives() {
         "{}",
         arrived.request_line
     );
+    // Compressed on the wire, and labelled as such: a column store decompresses
+    // a request body by this header and by nothing else, so a compressed body
+    // without it is rows the server cannot parse.
+    assert_eq!(arrived.header("content-encoding"), Some("zstd"));
     assert_eq!(
-        arrived.body, body,
-        "the body on the wire is not the body handed over"
+        zstd::stream::decode_all(arrived.body.as_slice()).expect("the body is one zstd frame"),
+        body,
+        "the body on the wire does not decompress to the body handed over"
     );
     assert_eq!(
         arrived.header("content-length"),
-        Some(body.len().to_string().as_str())
+        Some(arrived.body.len().to_string().as_str())
     );
     // The credentials travel in headers, not in the query string: a query
     // string is what ends up in an access log.
@@ -131,6 +136,112 @@ fn the_body_handed_to_the_transport_is_the_body_that_arrives() {
         "{}",
         arrived.request_line
     );
+}
+
+/// A body of the shape the sink sends is several times smaller on the wire.
+///
+/// This is the reason the compression exists: a recorder far from the column
+/// store sends at the rate the path allows and no faster, so the bytes are what
+/// decide whether the loader keeps up.
+#[test]
+fn a_body_of_repeated_rows_is_several_times_smaller_on_the_wire() {
+    let (addr, rx) = serve_one(200);
+    let transport = HttpTransport::new(Duration::from_secs(5));
+    let mut body = Vec::new();
+    for i in 0..5_000u32 {
+        body.extend_from_slice(
+            format!(
+                "{{\"recorder\":\"aws-tyo-mn-feedrecorder1\",\"feed\":\"tob_edge_binance_usdsm\",\"recv_ts\":{},\"bid_px_raw\":{},\"ask_px_raw\":{}}}\n",
+                1_759_900_000_000_000_000u64 + u64::from(i) * 1_000,
+                6_000_000 + i,
+                6_000_010 + i
+            )
+            .as_bytes(),
+        );
+    }
+
+    transport
+        .post(
+            &format!("http://{addr}/"),
+            &Credentials::new("loader", None),
+            &body,
+        )
+        .expect("the listener answered 200");
+
+    let arrived = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the listener recorded the request");
+    assert!(
+        arrived.body.len() * 4 < body.len(),
+        "{} bytes on the wire for a body of {}",
+        arrived.body.len(),
+        body.len()
+    );
+    assert_eq!(
+        zstd::stream::decode_all(arrived.body.as_slice()).expect("the body is one zstd frame"),
+        body
+    );
+}
+
+/// Two requests through one transport arrive on one connection.
+///
+/// A connection per body pays a handshake and a slow start for every batch, and
+/// pays most on the long paths where the loader was already behind.
+#[test]
+fn consecutive_requests_share_one_connection() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("a port");
+    let addr = listener.local_addr().expect("an address");
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        // One accept, and both requests read off it. A client that opened a
+        // second connection would wait on a listener nobody is accepting from,
+        // and its timeout is what fails the test.
+        let (stream, _) = listener.accept().expect("a connection");
+        let mut reader = BufReader::new(stream);
+        for _ in 0..2 {
+            let mut length = 0usize;
+            let mut first = true;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).expect("a line") == 0 {
+                    return;
+                }
+                let line = line.trim_end();
+                if first {
+                    first = false;
+                    continue;
+                }
+                if line.is_empty() {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':') {
+                    if name.trim().eq_ignore_ascii_case("content-length") {
+                        length = value.trim().parse().expect("a length");
+                    }
+                }
+            }
+            let mut body = vec![0u8; length];
+            reader.read_exact(&mut body).expect("the whole body");
+            reader
+                .get_mut()
+                .write_all(b"HTTP/1.1 200 X\r\nContent-Length: 2\r\n\r\nok")
+                .expect("the response is writable");
+            let _ = tx.send(());
+        }
+    });
+
+    let transport = HttpTransport::new(Duration::from_secs(5));
+    for _ in 0..2 {
+        transport
+            .post(
+                &format!("http://{addr}/"),
+                &Credentials::new("loader", None),
+                b"{\"a\":1}\n",
+            )
+            .expect("the listener answered 200 on the connection it accepted");
+    }
+    rx.recv_timeout(Duration::from_secs(5)).expect("the first");
+    rx.recv_timeout(Duration::from_secs(5)).expect("the second");
 }
 
 /// A refusal carries the status and the server's own body, because a column

@@ -217,7 +217,8 @@ impl LoaderMetrics {
             bytes_written_total: counter(
                 &registry,
                 "dz_loader_bytes_written_total",
-                "Row bytes put on the wire, summed per request. Per request and not per \
+                "Row bytes as serialized, before the request body is compressed, summed \
+                 per request. Per request and not per \
                  object: an insert spans objects, so the rows of several of them have one \
                  length between them and dividing it up would be inventing a number.",
                 &labels,
@@ -379,7 +380,8 @@ impl LoaderMetrics {
         }
     }
 
-    /// Bytes one request put on the wire.
+    /// Bytes of rows one request sent, as serialized and before the transport
+    /// compressed them.
     ///
     /// Counted per request and never per object, which is why it is not part of
     /// [`object_loaded`](Self::object_loaded): once an insert spans objects the

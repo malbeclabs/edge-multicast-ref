@@ -1873,7 +1873,7 @@ mod pass_tests {
 mod deferred_ledger_tests {
     use dz_recorder_rows::{Accepted, Landed, RowBatch, RowSinkError, Written};
 
-    /// What this sink pretends one object's rows cost on the wire, so a test
+    /// What this sink pretends one object's rows come to when serialized, so a test
     /// can name the total a request should have counted.
     const BYTES_PER_OBJECT: u64 = 1_000;
 

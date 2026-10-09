@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "The column-store row sink: JSONEachRow over HTTP, batched, with the batch as the retry unit"
+description = "The column-store row sink: zstd-compressed JSONEachRow over HTTP, batched, with the batch as the retry unit"
 
 [dependencies]
 dz-recorder-rows = { path = "../dz-recorder-rows" }
@@ -19,6 +19,9 @@ thiserror = { workspace = true }
 # silently downgraded. Turning the `tls` feature on is the whole change if that
 # path ever stops being private.
 ureq = { version = "3", default-features = false }
+# The request body, compressed. The archive already links it, so this adds
+# nothing to the build.
+zstd = { workspace = true }
 
 [dev-dependencies]
 dz-recorder-replay = { path = "../dz-recorder-replay" }

@@ -85,8 +85,9 @@ pub struct ClickHouseSink<T: Transport> {
     sleep: fn(Duration),
     /// The rows taken and not yet posted, and who they belong to.
     held: Held,
-    /// Bytes sent, cumulatively. Per request rather than per object, for the
-    /// reason `Accepted::bytes_posted` states.
+    /// Bytes of rows sent, cumulatively, as serialized: the transport
+    /// compresses a body, and this is its length before that. Per request
+    /// rather than per object, for the reason `Accepted::bytes_posted` states.
     bytes_posted: u64,
 }
 
@@ -260,7 +261,11 @@ impl<T: Transport> ClickHouseSink<T> {
             .map(|r| r.body)
     }
 
-    /// Bytes sent, cumulatively.
+    /// Bytes of rows sent, cumulatively, as serialized.
+    ///
+    /// The length of every body before the transport compressed it, and so
+    /// not what crossed the wire. Kept that way so the number means the same
+    /// thing whatever the transport does to a body.
     #[must_use]
     pub const fn bytes_posted(&self) -> u64 {
         self.bytes_posted
@@ -399,7 +404,8 @@ impl<T: Transport> ClickHouseSink<T> {
         Ok((objects, bytes))
     }
 
-    /// [`post`](Self::post), with the bytes it sent added to the running total.
+    /// [`post`](Self::post), with the serialized bytes it sent added to the
+    /// running total.
     ///
     /// Every path out of this sink goes through here, so the accumulator cannot
     /// be missing the one that carries most of the traffic — which is what it

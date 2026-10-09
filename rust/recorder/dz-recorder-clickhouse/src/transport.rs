@@ -81,33 +81,47 @@ pub trait Transport {
     ) -> Result<Response, TransportError>;
 }
 
-/// HTTP/1.1, over a plain connection.
+/// The level every request body is compressed at.
+///
+/// zstd's own default. A body is one batch of `JSONEachRow`, which is the same
+/// keys on every line, so the ratio is already several-fold here and a higher
+/// level would spend CPU on the recorder host to save bytes that are no longer
+/// the bottleneck.
+const BODY_COMPRESSION_LEVEL: i32 = 3;
+
+/// How long an idle connection is kept before the next request opens a new one.
+///
+/// Shorter than a column store's own keep-alive, which is what matters: a
+/// connection the server has already closed fails the request that reuses it,
+/// and that failure spends one of the sink's bounded attempts on nothing.
+const MAX_IDLE_AGE: Duration = Duration::from_secs(5);
+
+/// HTTP/1.1, over a plain connection, with every body compressed.
 ///
 /// No TLS in this build. The loader runs on the recorder host and reaches the
 /// column store over a private path, and an `https://` endpoint is refused at
 /// configuration load rather than silently downgraded — see
 /// [`ClickHouseConfig::check`](crate::ClickHouseConfig::check).
+///
+/// **The body goes out as zstd, under `Content-Encoding: zstd`.** A column store
+/// decompresses a request body by that header. Uncompressed, a recorder far from
+/// the store could not send a batch as fast as it recorded one: the rate was the
+/// receive window across the round trip, which no setting on the client moves,
+/// so the loader fell behind and stayed there.
+///
+/// **One agent for the transport's lifetime, so consecutive batches share a
+/// connection.** A connection per body paid a handshake and a slow start for
+/// every batch, which costs the most on the same long paths.
 #[derive(Debug, Clone)]
 pub struct HttpTransport {
-    timeout: Duration,
+    agent: ureq::Agent,
 }
 
 impl HttpTransport {
     #[must_use]
-    pub const fn new(timeout: Duration) -> Self {
-        Self { timeout }
-    }
-}
-
-impl Transport for HttpTransport {
-    fn post(
-        &self,
-        url: &str,
-        credentials: &Credentials,
-        body: &[u8],
-    ) -> Result<Response, TransportError> {
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_global(Some(self.timeout))
+    pub fn new(timeout: Duration) -> Self {
+        let agent = ureq::Agent::config_builder()
+            .timeout_global(Some(timeout))
             // A redirect would re-send the body to somewhere the configuration
             // did not name, and the credentials with it.
             .max_redirects(0)
@@ -118,20 +132,42 @@ impl Transport for HttpTransport {
             // could not parse, and a bounded retry that throws it away leaves an
             // operator with a status code and no cause.
             .http_status_as_error(false)
+            .max_idle_age(MAX_IDLE_AGE)
             .build()
             .into();
+        Self { agent }
+    }
+}
 
-        let mut request = agent
+impl Transport for HttpTransport {
+    fn post(
+        &self,
+        url: &str,
+        credentials: &Credentials,
+        body: &[u8],
+    ) -> Result<Response, TransportError> {
+        // Compressed whole, in memory: the body is already a buffer the sink
+        // holds, and its bound is the sink's own `insert_max_bytes`.
+        let compressed = zstd::bulk::compress(body, BODY_COMPRESSION_LEVEL).map_err(|e| {
+            TransportError::Unreachable {
+                url: url.to_owned(),
+                message: format!("the request body could not be compressed: {e}"),
+            }
+        })?;
+
+        let mut request = self
+            .agent
             .post(url)
             // The user goes in a header rather than in the query string, because
             // a query string is what ends up in an access log.
             .header("X-ClickHouse-User", &credentials.user)
-            .header("Content-Type", "application/json");
+            .header("Content-Type", "application/json")
+            .header("Content-Encoding", "zstd");
         if let Some(password) = credentials.password() {
             request = request.header("X-ClickHouse-Key", password);
         }
 
-        match request.send(body) {
+        match request.send(compressed.as_slice()) {
             Ok(mut response) => {
                 let status = response.status().as_u16();
                 let body = response
