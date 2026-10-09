@@ -43,7 +43,9 @@ The copy can be in any layout the source host wrote. Version 1, version 2 and th
 
 **Every path of a channel starts from the same seed, or all of them start from none.** A host started cold under `"derived"` derives IDs for symbols that seeded hosts hold below the floor, and disagrees on all of them. This is stated on the key, because nothing in one process can see it.
 
-The source host need not switch. If it keeps minting sequentially, it agrees with the seeded hosts on everything up to the seed, and may disagree on a listing after it.
+**The same seed means the same record at the moment `"derived"` takes over.** A copy goes stale with the source's next sequential mint. A host that will be seeded later takes its copy from a host that already runs `"derived"`, not an old copy of a host still minting sequentially. The floor is the record's `next_id` when it is first opened under `"derived"`, so two hosts seeded from different points in a sequential history differ in their floors as well as in their entries.
+
+The source host need not switch. If it keeps minting sequentially, it agrees with the seeded hosts on everything up to the seed, and **disagrees on every listing after it, by construction**. It mints the next sequential ID and they mint the CRC-32. This is the milder kind of disagreement. Every seeded ID sits below the floor, so no host gives a seeded ID to a different instrument. A derived ID matches one the source minted for another symbol only if its CRC-32 lands among the few IDs the source mints above the floor. But the disagreement on new listings is certain, not possible, and it lasts as long as the source keeps minting sequentially.
 
 ## The record
 
