@@ -72,4 +72,24 @@ pub enum RefdataError {
     /// would find two publishers claiming the same instrument identity.
     #[error("the persisted state was minted under Source ID {persisted}, not {configured}")]
     StateBelongsToAnotherSource { persisted: u16, configured: u16 },
+
+    /// Derived allocation was configured together with a horizon for
+    /// forgetting delisted instruments.
+    ///
+    /// Two publishers of one channel forget about one poll apart, so a symbol
+    /// relisted near the horizon would come back under the record's ID on one
+    /// and under a fresh derivation on the other. The document check refuses
+    /// this first; this is the second line, for a caller composing the
+    /// configuration itself.
+    #[error("derived Instrument ID allocation forgets nothing, so it cannot be combined with forget_delisted_after")]
+    ForgettingUnderDerivedIds,
+
+    /// The record was written under derived allocation and the configuration
+    /// asks for sequential.
+    ///
+    /// Sequential minting would continue from the record's floor, straight into
+    /// IDs the derived mints above it already hold. There is no way back that
+    /// keeps every published ID, so there is none here.
+    #[error("the persisted state was written under derived Instrument ID allocation, and sequential allocation cannot continue it")]
+    StateIsDerived,
 }

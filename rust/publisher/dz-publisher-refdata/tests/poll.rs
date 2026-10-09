@@ -16,7 +16,8 @@ use dz_adapter_core::{
 };
 use dz_publisher_lowering::SourceId;
 use dz_publisher_refdata::{
-    CycleSchedule, ManualClock, MemoryStore, Registry, RegistryConfig, SelectionPolicy, ShardConfig,
+    CycleSchedule, IdAllocation, ManualClock, MemoryStore, Registry, RegistryConfig,
+    SelectionPolicy, ShardConfig,
 };
 
 const ALPHA: &str = "alpha";
@@ -58,6 +59,7 @@ fn registry() -> Registry<MemoryStore, ManualClock> {
         selection: SelectionPolicy::from_seed(64).expect("a seed"),
         schedule: CycleSchedule::new(std::time::Duration::from_secs(30), 1232, 8),
         forget_delisted_after: None,
+        id_allocation: IdAllocation::Sequential,
     };
     Registry::open(config, MemoryStore::new(), ManualClock::new())
         .expect("an empty directory is a cold start")

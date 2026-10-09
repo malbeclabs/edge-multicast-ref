@@ -411,6 +411,7 @@ idle_guard = "30s"
 [refdata]
 state_dir = "/var/lib/a-venue-publisher"
 # forget_delisted_after = "168h"   # absent keeps every Instrument ID for good
+# id_allocation = "derived"        # absent is "sequential"; see below before setting it
 
 [refdata.selection]
 bootstrap_top_n = 64
@@ -493,6 +494,25 @@ kind = "a-venue-tob"
   fraction of a second above that is rounded up. A compaction the disk has no
   room for leaves the record as it is, and the publisher goes on appending to
   it and serving every `Instrument ID` in it.
+- **`id_allocation = "derived"` is for a channel published from more than one
+  host.** Under the default, `"sequential"`, an `Instrument ID` is the next
+  number in the order this process first saw each instrument, so two hosts
+  carrying one channel agree only while they see every listing in the same
+  order. Under `"derived"`, a symbol the record does not hold gets the CRC-32
+  of its `Symbol`, at or above a floor that is the record's `next_id` when the
+  key was first set. Two hosts then agree on every ID without sharing anything.
+  A derived ID that is zero, below the floor, or already held is declined, not
+  moved, so every host declines it alike, and the publisher names both
+  symbols in a log line. Three rules come with it:
+  - **Every host of the channel starts from the same record, or all of them
+    start from none.** Seed a new host by copying the first host's
+    `instruments.state` into its `state_dir` before it first starts: not the
+    era file and not `writer.lock`. A host started cold derives IDs for
+    symbols a seeded one holds below its floor, and disagrees on every one.
+  - **It forgets nothing.** It is refused together with
+    `forget_delisted_after`.
+  - **There is no way back.** A record written under `"derived"` is refused by
+    a later `"sequential"` start.
 - **A depth feed with no `snapshot_cycle` cannot be joined mid-session.** It
   still emits the recovery snapshots a reset obliges, but a subscriber that
   arrives after the deltas started has nothing to build a book from — a level

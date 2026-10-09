@@ -559,6 +559,16 @@ pub enum StartupError {
     #[error("`{key}` must be at least one second")]
     DurationUnderASecond { key: &'static str },
 
+    /// `[refdata] id_allocation = "derived"` together with
+    /// `forget_delisted_after`.
+    ///
+    /// Two publishers of one channel forget about one poll apart, so a symbol
+    /// relisted near the horizon would come back under the record's ID on one
+    /// and under a fresh derivation on the other. Derived allocation keeps
+    /// every entry for good, which is what this key would undo.
+    #[error("`[refdata] id_allocation = \"derived\"` forgets nothing, so `[refdata] forget_delisted_after` cannot be set with it")]
+    ForgettingUnderDerivedIds,
+
     /// `[egress] ttl` is not stated, and it has no default.
     ///
     /// # Why the key is stated rather than defaulted

@@ -13,9 +13,9 @@ use dz_adapter_core::{
 };
 use dz_publisher_lowering::SourceId;
 use dz_publisher_refdata::{
-    encode_line, symbol_field, CycleSchedule, FileStore, ManualClock, MemoryStore, RecordError,
-    RefdataError, Registry, RegistryConfig, SelectionPolicy, ShardConfig, StateError, StateRecord,
-    StateStore, COMPACTION_FLOOR,
+    encode_line, symbol_field, CycleSchedule, FileStore, IdAllocation, ManualClock, MemoryStore,
+    RecordError, RefdataError, Registry, RegistryConfig, SelectionPolicy, ShardConfig, StateError,
+    StateRecord, StateStore, COMPACTION_FLOOR,
 };
 
 const SOURCE_ID: u16 = 7;
@@ -49,6 +49,7 @@ fn config(forget_delisted_after: Option<Duration>) -> RegistryConfig {
         selection: SelectionPolicy::from_seed(8).expect("8 is a seed"),
         schedule: CycleSchedule::new(Duration::from_secs(30), 1232, 8),
         forget_delisted_after,
+        id_allocation: IdAllocation::Sequential,
     }
 }
 
