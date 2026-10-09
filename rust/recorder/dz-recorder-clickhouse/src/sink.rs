@@ -191,7 +191,8 @@ impl ClickHouseSink<HttpTransport> {
     #[must_use]
     pub fn over_http(config: ClickHouseConfig) -> Self {
         let credentials = Credentials::from_env(config.user.clone());
-        let transport = HttpTransport::new(config.timeout);
+        let transport =
+            HttpTransport::new(config.timeout).with_concurrency(config.insert_concurrency);
         Self::with_transport(config, credentials, transport)
     }
 }
@@ -318,10 +319,26 @@ impl<T: Transport> ClickHouseSink<T> {
     /// Sends one body, retrying while the failure is one a retry could fix.
     fn send(&mut self, grain: Grain, body: &Body) -> Result<(), TransportError> {
         let url = self.config.insert_url(grain.table());
+        let first = self.transport.post(&url, &self.credentials, &body.bytes);
+        self.settle(grain, body, &url, first)
+    }
+
+    /// Takes a body from its first attempt to landed or refused.
+    ///
+    /// `first` is what that attempt got, whoever made it: the bodies of a grain
+    /// may have been sent together, and each is then retried here on its own.
+    fn settle(
+        &mut self,
+        grain: Grain,
+        body: &Body,
+        url: &str,
+        first: Result<crate::transport::Response, TransportError>,
+    ) -> Result<(), TransportError> {
         let mut backoff = FIRST_BACKOFF;
         let mut attempt = 1;
+        let mut result = first;
         loop {
-            match self.transport.post(&url, &self.credentials, &body.bytes) {
+            match result {
                 Ok(_) => return Ok(()),
                 Err(e) => {
                     self.last_error = Some(format!("{grain}: {e}"));
@@ -335,6 +352,7 @@ impl<T: Transport> ClickHouseSink<T> {
                     (self.sleep)(backoff);
                     backoff = (backoff * 2).min(MAX_BACKOFF);
                     attempt += 1;
+                    result = self.transport.post(url, &self.credentials, &body.bytes);
                 }
             }
         }
@@ -347,17 +365,39 @@ impl<T: Transport> ClickHouseSink<T> {
         objects: &[ObjectId],
     ) -> Result<u64, RowSinkError> {
         let mut bytes = 0u64;
-        for body in self.bodies(grain, rows)? {
-            self.send(grain, &body)
-                .map_err(|e| RowSinkError::Rejected {
-                    // The insert spans objects, so the refusal names them all:
-                    // every one of them stays unloaded, and an error naming one of
-                    // several would send an operator after the wrong file.
-                    object_key: describe(objects),
-                    attempts: self.config.attempts,
-                    last: e.to_string(),
-                })?;
-            bytes += body.bytes.len() as u64;
+        let bodies = self.bodies(grain, rows)?;
+        // The insert spans objects, so a refusal names them all: every one of
+        // them stays unloaded, and an error naming one of several would send an
+        // operator after the wrong file.
+        let attempts = self.config.attempts;
+        let rejected = |e: TransportError| RowSinkError::Rejected {
+            object_key: describe(objects),
+            attempts,
+            last: e.to_string(),
+        };
+        let together = self.transport.concurrency();
+        if together <= 1 {
+            for body in &bodies {
+                self.send(grain, body).map_err(rejected)?;
+                bytes += body.bytes.len() as u64;
+            }
+            return Ok(bytes);
+        }
+        // Several bodies of ONE grain at a time, and never bodies of two grains:
+        // the order between grains is the one `post` states, and sending a
+        // derived grain beside its base would bring back the intermediate state
+        // that order exists to avoid. Within a grain no body depends on another.
+        //
+        // A chunk at a time, so a refusal stops the chunks behind it from being
+        // sent at all, as it stops the bodies behind it when they go one by one.
+        let url = self.config.insert_url(grain.table());
+        for chunk in bodies.chunks(together) {
+            let slices: Vec<&[u8]> = chunk.iter().map(|body| body.bytes.as_slice()).collect();
+            let firsts = self.transport.post_all(&url, &self.credentials, &slices);
+            for (body, first) in chunk.iter().zip(firsts) {
+                self.settle(grain, body, &url, first).map_err(rejected)?;
+                bytes += body.bytes.len() as u64;
+            }
         }
         Ok(bytes)
     }

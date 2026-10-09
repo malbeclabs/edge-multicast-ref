@@ -144,6 +144,18 @@ cost the most where the round trip is longest.
 `dz_loader_bytes_written_total` still counts the rows as serialized, not the
 bytes after compression, so it stays comparable across versions.
 
+**`insert_concurrency` sends several bodies of one grain at once, and the
+default is one.** Compression took the network out of the way and showed what
+was behind it: the destination parses a body on the threads its settings profile
+allows the loader's account, so one request at a time loads at the rate one
+request is parsed. Measured on recorders taking 30,000 to 40,000 datagrams a
+second, that was about the rate they recorded, with the host a quarter busy and
+the path nearly idle, so a loader that had fallen behind stayed behind. With
+`insert_concurrency = 3` up to three bodies of the same grain are in flight, each
+on its own connection. Grains are still sent in order, base before derived, and
+a refusal still fails every object in the batch. It is bounded at 8, and each
+request in flight is a concurrent insert on a cluster somebody else also uses.
+
 ## Two things to do at provisioning, neither of them in this crate
 
 **Build with `--features tls` if the destination is `https://`.** TLS is off by
