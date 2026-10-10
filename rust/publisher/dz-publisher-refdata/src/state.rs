@@ -297,21 +297,26 @@ const CRC32_TABLE: [u32; 256] = {
 };
 
 /// The `Instrument ID` [`IdAllocation::Derived`] gives a symbol: CRC-32/ISO-HDLC
-/// (initial value and final XOR `0xFFFFFFFF`) over the wire `Symbol` up to its
-/// first NUL.
+/// (initial value and final XOR `0xFFFFFFFF`) over the wire `Symbol` with its
+/// trailing NULs removed.
 ///
 /// The wire field, not the venue's own ticker, because it is what the record
 /// keys on: two tickers that are one symbol on the wire are one input here
-/// too. Stated in full so that a consumer can recompute an ID from a symbol
-/// without asking the publisher. The result may be `0`, below a record's floor,
-/// or already held, and the registry declines all three rather than moving the
-/// ID.
+/// too. Only the trailing padding is removed, not everything after the first
+/// NUL: a ticker with an interior NUL is still admitted, and the record keys on
+/// all 64 bytes, so stopping at the first NUL would give two distinct keys one
+/// input and decline the second for ever.
+///
+/// Stated in full so the derivation can be audited. It does not let a consumer
+/// recompute IDs: a seeded symbol keeps its sequential ID and the floor is not
+/// on the wire. The result may be `0`, below a record's floor, or already
+/// held, and the registry declines all three rather than moving the ID.
 #[must_use]
 pub fn derive_instrument_id(symbol: &[u8; SYMBOL_LEN]) -> u32 {
     let end = symbol
         .iter()
-        .position(|&byte| byte == 0)
-        .unwrap_or(SYMBOL_LEN);
+        .rposition(|&byte| byte != 0)
+        .map_or(0, |last| last + 1);
     let mut crc = 0xFFFF_FFFFu32;
     for &byte in &symbol[..end] {
         crc = (crc >> 8) ^ CRC32_TABLE[((crc ^ u32::from(byte)) & 0xFF) as usize];

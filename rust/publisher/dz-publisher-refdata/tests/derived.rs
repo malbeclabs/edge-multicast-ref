@@ -107,19 +107,41 @@ fn the_derivation_is_crc32_iso_hdlc() {
 }
 
 #[test]
-fn the_derivation_reads_the_symbol_up_to_its_first_nul() {
+fn the_derivation_ignores_the_trailing_nul_padding() {
+    assert_eq!(
+        derive_instrument_id(&key("ABC")),
+        crc32_of(b"ABC"),
+        "the padding is not part of the input"
+    );
+}
+
+#[test]
+fn symbols_that_differ_only_past_an_interior_nul_derive_differently() {
+    // Two distinct record keys, as a ticker with an interior NUL is admitted.
+    // Stopping at the first NUL would give both one ID and decline the second
+    // for ever.
     let mut one = [0u8; SYMBOL_LEN];
     let mut other = [0u8; SYMBOL_LEN];
-    one[..3].copy_from_slice(b"ABC");
-    other[..3].copy_from_slice(b"ABC");
-    // Past the first NUL, which the wire field reads as padding.
-    one[10] = b'X';
-    other[10] = b'Y';
-    assert_eq!(derive_instrument_id(&one), derive_instrument_id(&other));
-    assert_eq!(
-        derive_instrument_id(&one),
-        derive_instrument_id(&key("ABC"))
-    );
+    one[..5].copy_from_slice(b"AB\0CX");
+    other[..5].copy_from_slice(b"AB\0CY");
+    assert_ne!(derive_instrument_id(&one), derive_instrument_id(&other));
+    assert_eq!(derive_instrument_id(&one), crc32_of(b"AB\0CX"));
+}
+
+/// CRC-32/ISO-HDLC bit by bit, independent of the table under test.
+fn crc32_of(bytes: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &byte in bytes {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 1 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
 }
 
 // ---------------------------------------------------------------------------
@@ -335,6 +357,40 @@ fn a_collision_is_declined_and_the_holder_keeps_its_id() {
     assert_eq!(id_of(&mut host, newcomer), None);
     assert_eq!(host.counts().declined_id_unavailable, 2);
     assert!(host.take_unavailable_ids().is_empty());
+}
+
+#[test]
+fn colliding_symbols_seen_in_opposite_orders_split_the_two_hosts() {
+    // The divergence the design accepts rather than prevents: each host keeps
+    // the colliding symbol it admitted first, so one ID names a different
+    // instrument on each path. A change that claims to remove this has to
+    // change this test.
+    let (a, b) = COLLIDES;
+    let mut one = opened(MemoryStore::new(), IdAllocation::Derived);
+    let mut other = opened(MemoryStore::new(), IdAllocation::Derived);
+
+    assert_eq!(id_of(&mut one, a), Some(0x4DDB_0C25));
+    assert_eq!(id_of(&mut one, b), None);
+    assert_eq!(id_of(&mut other, b), Some(0x4DDB_0C25));
+    assert_eq!(id_of(&mut other, a), None);
+
+    assert_eq!(one.take_unavailable_ids()[0].holder, Some(key(a)));
+    assert_eq!(other.take_unavailable_ids()[0].holder, Some(key(b)));
+}
+
+#[test]
+fn a_seed_that_cannot_be_rewritten_does_not_open() {
+    // A disk with room for a line and not for the record. Starting on the
+    // version-2 seed would append a derived mint to it, and the next start
+    // would refuse the record as `AppendedOutOfOrder`.
+    let bytes = seed(&["S-1", "S-2"]);
+    let store = seeded(&bytes);
+    store.break_stores("no room for the record");
+    assert!(matches!(
+        Registry::open(config(IdAllocation::Derived), store.clone(), ManualClock::new()),
+        Err(RefdataError::State(_))
+    ));
+    assert_eq!(store.record(), Some(bytes), "the seed is left as it was");
 }
 
 #[test]
