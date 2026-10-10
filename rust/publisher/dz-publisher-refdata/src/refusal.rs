@@ -127,7 +127,12 @@ pub enum Refusal {
     /// **Declined, never moved.** The instrument holding the ID keeps it, and
     /// nothing probes to a free neighbour: which neighbour is free depends on
     /// what this publisher admitted first, and that is exactly how two
-    /// publishers of one channel would come to disagree. Not ordinary — a
+    /// publishers of one channel would come to disagree. Declining is not
+    /// order-free either: the holder is whichever symbol was admitted first,
+    /// so two publishers that admit a colliding pair in opposite orders hold
+    /// the ID under different symbols. No rule that keeps a published ID
+    /// resolvable avoids that, so it is reported rather than prevented. Not
+    /// ordinary — a
     /// collision is rare enough to be worth a line, and
     /// [`Registry::take_unavailable_ids`](crate::Registry::take_unavailable_ids)
     /// names the symbol that holds the ID.

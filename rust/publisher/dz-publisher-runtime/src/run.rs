@@ -1116,8 +1116,9 @@ fn unavailable_id_line(declined: &UnavailableId) -> String {
     );
     format!(
         "dz-publisher-runtime: `{}` derives Instrument ID {}, {why}. It is declined and reaches no \
-         channel; the ID is not moved, so that every publisher of this channel declines it alike. \
-         Said once for this symbol.",
+         channel. The ID is not moved, because where it would move to depends on what this \
+         publisher admitted first. A publisher of this channel that admitted the two symbols in \
+         the other order holds the ID under this one instead. Said once for this symbol.",
         symbol_text(&declined.symbol),
         declined.instrument_id,
     )

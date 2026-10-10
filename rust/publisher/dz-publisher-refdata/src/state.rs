@@ -48,7 +48,9 @@ pub enum IdAllocation {
     Sequential,
     /// [`derive_instrument_id`] of the `Symbol`, at or above the record's
     /// floor. A fact about the instrument, so two publishers that start from
-    /// the same record agree on every ID with no coordination.
+    /// the same record agree on every ID with no coordination, except where a
+    /// colliding pair is first admitted in different orders, which
+    /// [`Refusal::IdUnavailable`](crate::Refusal::IdUnavailable) describes.
     ///
     /// **Every path of a channel starts from the same record, or all of them
     /// start from none.** A publisher started cold derives IDs for symbols that
@@ -141,8 +143,9 @@ pub struct StateRecord {
 pub struct Loaded {
     /// The base with every appended line folded in.
     pub record: StateRecord,
-    /// The layout it was written in. Anything but [`FORMAT_VERSION`] is
-    /// rewritten when the registry opens.
+    /// The layout it was written in. Anything but the layout of the record's
+    /// own [`allocation`](StateRecord::allocation) is rewritten when the
+    /// registry opens, and so is a record opened under another allocation.
     pub version: u32,
     /// How many entries the base held.
     pub base: usize,
