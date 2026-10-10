@@ -77,7 +77,7 @@ use dz_publisher_metrics::{
     EgressMessageType, EventKind, LoweringRefusalReason, PublisherMetrics, RefdataLoadErrorReason,
     TimestampKind,
 };
-use dz_publisher_refdata::{Counts, Registry, StateStore};
+use dz_publisher_refdata::{Counts, Registry, StateStore, UnavailableId};
 
 use crate::clock::Clock;
 use crate::config::EmittedFeed;
@@ -1473,6 +1473,15 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
     /// reach this, which is the only part of the path a test can reach.
     pub fn take_unknown_shards(&mut self) -> Vec<String> {
         self.refdata.take_unknown_shards()
+    }
+
+    /// The offers declined because the `Instrument ID` their symbol derives is
+    /// unavailable, since the last call. Drained by [`run`](crate::run) beside
+    /// [`take_unknown_shards`](Self::take_unknown_shards), and for the same
+    /// reason: the count says how many, and only the line can say which two
+    /// symbols met.
+    pub fn take_unavailable_ids(&mut self) -> Vec<UnavailableId> {
+        self.refdata.take_unavailable_ids()
     }
 
     /// The send paths, for a diagnostic and for a test.

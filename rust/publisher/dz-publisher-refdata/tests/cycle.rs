@@ -18,8 +18,8 @@ use dz_edge_core::AppMessage;
 use dz_edge_refdata::{InstrumentDefinition, ManifestSummary};
 use dz_publisher_lowering::SourceId;
 use dz_publisher_refdata::{
-    definitions_per_datagram, CycleSchedule, ManualClock, MemoryStore, Registry, RegistryConfig,
-    SelectionPolicy, ShardConfig, LAP_PERCENT,
+    definitions_per_datagram, CycleSchedule, IdAllocation, ManualClock, MemoryStore, Registry,
+    RegistryConfig, SelectionPolicy, ShardConfig, LAP_PERCENT,
 };
 
 /// The mandated datagram size. Not derived here: every feed specification
@@ -61,6 +61,7 @@ fn seeded(
         selection: SelectionPolicy::from_seed(published.max(1)).expect("a seed"),
         schedule: CycleSchedule::new(CYCLE, MTU, datagrams_per_tick),
         forget_delisted_after: None,
+        id_allocation: IdAllocation::Sequential,
     };
     let mut registry = Registry::open(config, MemoryStore::new(), clock.clone())
         .expect("an empty directory is a cold start");
@@ -106,6 +107,7 @@ fn seeded_on_two_shards(
         selection: SelectionPolicy::from_seed((alpha + beta).max(1)).expect("a seed"),
         schedule: CycleSchedule::new(CYCLE, MTU, datagrams_per_tick),
         forget_delisted_after: None,
+        id_allocation: IdAllocation::Sequential,
     };
     let mut registry = Registry::open(config, MemoryStore::new(), clock.clone())
         .expect("an empty directory is a cold start");
@@ -387,6 +389,7 @@ fn the_valid_flag_means_the_published_set_is_established() {
         selection: SelectionPolicy::from_seed(4).expect("4 is a seed"),
         schedule: CycleSchedule::new(CYCLE, MTU, 8),
         forget_delisted_after: None,
+        id_allocation: IdAllocation::Sequential,
     };
     let mut registry = Registry::open(config, MemoryStore::new(), clock.clone())
         .expect("an empty directory is a cold start");
