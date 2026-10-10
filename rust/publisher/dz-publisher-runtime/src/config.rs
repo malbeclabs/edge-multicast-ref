@@ -475,10 +475,12 @@ pub struct RefdataSection {
     ///
     /// `"derived"` is what lets two publishers of one channel agree on every
     /// ID without sharing anything. **Every path of a channel starts from the
-    /// same record, or all of them start from none**: seed a second host by
-    /// copying the first one's `instruments.state` into its `state_dir` before
-    /// it first starts. A host started cold derives IDs for symbols a seeded
-    /// one holds below its floor, and disagrees on every one of them.
+    /// same record, or all of them start from none**. Seed a second host by
+    /// switching the first one to `"derived"`, and only then copying its
+    /// `instruments.state` into the second's `state_dir` before that first
+    /// starts. A copy of a host still minting sequentially goes stale with its
+    /// next mint. A host started cold derives IDs for symbols a seeded one
+    /// holds below its floor, and disagrees on every one of them.
     ///
     /// `"derived"` forgets nothing, so it is refused together with
     /// `forget_delisted_after`, and a record written under it is refused by a

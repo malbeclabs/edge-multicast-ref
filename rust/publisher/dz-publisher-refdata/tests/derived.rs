@@ -387,7 +387,11 @@ fn a_seed_that_cannot_be_rewritten_does_not_open() {
     let store = seeded(&bytes);
     store.break_stores("no room for the record");
     assert!(matches!(
-        Registry::open(config(IdAllocation::Derived), store.clone(), ManualClock::new()),
+        Registry::open(
+            config(IdAllocation::Derived),
+            store.clone(),
+            ManualClock::new()
+        ),
         Err(RefdataError::State(_))
     ));
     assert_eq!(store.record(), Some(bytes), "the seed is left as it was");

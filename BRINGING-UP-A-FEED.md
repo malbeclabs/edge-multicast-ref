@@ -502,13 +502,20 @@ kind = "a-venue-tob"
   of its `Symbol`, at or above a floor that is the record's `next_id` when the
   key was first set. Two hosts then agree on every ID without sharing anything.
   A derived ID that is zero, below the floor, or already held is declined, not
-  moved, so every host declines it alike, and the publisher names both
-  symbols in a log line. Three rules come with it:
+  moved, and the publisher names the symbol, and the holder if there is one,
+  in a log line. One divergence is left: two hosts that first admit a
+  colliding pair in opposite orders hold the ID under different symbols. It
+  needs a CRC-32 collision, and is reported on both hosts rather than
+  prevented. Three rules come with it:
   - **Every host of the channel starts from the same record, or all of them
-    start from none.** Seed a new host by copying the first host's
-    `instruments.state` into its `state_dir` before it first starts: not the
-    era file and not `writer.lock`. A host started cold derives IDs for
-    symbols a seeded one holds below its floor, and disagrees on every one.
+    start from none.** Seed a new host in two steps. First switch the host it
+    is seeded from to `"derived"`, with a restart. Then copy that host's
+    `instruments.state` into the new host's `state_dir` before the new host
+    first starts: not the era file and not `writer.lock`. The copy can be
+    taken while the source runs. A copy of a host still minting sequentially
+    goes stale with its next mint, which is why the switch comes first. A
+    host started cold derives IDs for symbols a seeded one holds below its
+    floor, and disagrees on every one.
   - **It forgets nothing.** It is refused together with
     `forget_delisted_after`.
   - **There is no way back.** A record written under `"derived"` is refused by
