@@ -183,6 +183,9 @@ const fn wire_size(has_strike: bool) -> usize {
 struct PublishedSet {
     published: usize,
     manifest_seq: u16,
+    /// Whether a poll in progress has changed this set. The poll's end
+    /// advances `manifest_seq` once for it; see [`Registry::poll`].
+    changed: bool,
     pacer: DefinitionPacer,
     /// Where this shard's next lap resumes in [`Registry::slots`]. The slots
     /// are shared, so a cursor is per shard and skips what is not its own.
@@ -366,6 +369,9 @@ pub struct Registry<S: StateStore, C: Clock> {
     /// One per configured shard, in the order [`RegistryConfig::shards`] states
     /// them, so an index into either is an index into the other.
     sets: Vec<PublishedSet>,
+    /// Whether a [`poll`](Self::poll) is in progress, which is what holds a
+    /// changed set's `Manifest Seq` until the poll ends.
+    polling: bool,
     phase: Phase,
     counts: Counts,
     /// Distinct shard names offered that this publisher has none of, in the
@@ -496,6 +502,7 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             .map(|_| PublishedSet {
                 published: 0,
                 manifest_seq: 0,
+                changed: false,
                 pacer: DefinitionPacer::new(config.schedule),
                 cursor: 0,
                 strikes_pending: 0,
@@ -519,6 +526,7 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             published: 0,
             instruments: InstrumentTable::new(),
             sets,
+            polling: false,
             phase: Phase::Seeding,
             counts: Counts::default(),
             unknown_shards: Vec::new(),
@@ -599,6 +607,11 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
     /// channel*. A process-wide one would advance on a quiet channel for an
     /// admission its subscribers cannot see, and each of them would re-check a
     /// set that had not changed.
+    ///
+    /// It advances by one for each [`poll`](Self::poll) that changed the
+    /// shard's set, however many instruments that poll admitted, withdrew or
+    /// restated. The field says the set changed, and not how many changes went
+    /// into it.
     ///
     /// Zero until the shard's first published set exists, which is the value a
     /// subscriber only ever sees paired with `Valid` at 0. `None` for a shard
@@ -1048,6 +1061,71 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         })
     }
 
+    /// Run one listings poll against this registry, and advance `Manifest Seq`
+    /// once for each shard whose set the poll changed.
+    ///
+    /// `drain` is handed the registry as the [`ListingSink`] an adapter's
+    /// `poll_listings` takes. Every admission, withdrawal and restated
+    /// definition it makes takes effect as it is made; what waits for the end
+    /// of the poll is the `Manifest Seq`. A shard the poll changed advances by
+    /// exactly one, and a shard it did not change does not advance.
+    ///
+    /// **One advance per poll, because the unit a subscriber can see is the
+    /// manifest and not the admission.** No manifest and no definition leaves
+    /// while a poll is running, so the intermediate sets never exist on the
+    /// wire. An advance for each of them moved the seq by `k` between two
+    /// manifests for a poll of `k` changes, where the specification's rule is
+    /// that a set change moves it by one, and the first `Valid` manifest of a
+    /// process stated the size of the seeded set rather than 1. Each advance
+    /// also costs a subscriber the definitions it has collected.
+    ///
+    /// A poll that admits an instrument and withdraws it again has changed the
+    /// set as far as this is concerned, and advances. It is not worth telling
+    /// apart: the `Instrument ID` it used is spent either way.
+    ///
+    /// # A change made outside a poll
+    ///
+    /// [`offer`](Self::offer), [`ListingSink::list_on`] and
+    /// [`ListingSink::delist`] called on the registry directly, outside this,
+    /// advance the shard's `Manifest Seq` at once, each call on its own. There
+    /// is no later moment to hold such a change for, and a set that changed
+    /// under a seq that did not is the failure the field exists to prevent.
+    /// The runtime makes no such call: every change it makes comes through
+    /// here.
+    ///
+    /// # A poll that panics
+    ///
+    /// The poll ends as `drain` unwinds, exactly as it does when `drain`
+    /// returns: the shards changed so far advance, and the registry is no
+    /// longer polling. A caller that catches the panic therefore never sees a
+    /// changed set under the seq it had before, and a change it makes
+    /// afterwards advances at once rather than waiting for a poll that is not
+    /// running.
+    pub fn poll<R>(&mut self, drain: impl FnOnce(&mut dyn ListingSink) -> R) -> R {
+        /// Ends the poll when dropped, which is on return and on unwind alike.
+        struct Polling<'a, S: StateStore, C: Clock>(&'a mut Registry<S, C>);
+
+        impl<S: StateStore, C: Clock> Drop for Polling<'_, S, C> {
+            fn drop(&mut self) {
+                self.0.end_poll();
+            }
+        }
+
+        self.polling = true;
+        let poll = Polling(self);
+        drain(&mut *poll.0)
+    }
+
+    /// Advance every shard the poll changed, by one, and stop holding changes.
+    fn end_poll(&mut self) {
+        self.polling = false;
+        for shard in 0..self.sets.len() {
+            if std::mem::take(&mut self.sets[shard].changed) {
+                self.advance_manifest(shard);
+            }
+        }
+    }
+
     /// The unknown shard names offered since this was last called.
     ///
     /// Each distinct name once, in the order it was first seen, for the log
@@ -1159,7 +1237,7 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         }
         // The published content changed, so the manifest a subscriber is
         // reconciling against has too — this shard's, and no other's.
-        self.advance_manifest(shard);
+        self.set_changed(shard);
     }
 
     /// A symbol that has never been published in this process.
@@ -1243,7 +1321,7 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         self.sets[shard].published += 1;
         self.counts.admitted += 1;
         self.count_fits(composed.fits);
-        self.advance_manifest(shard);
+        self.set_changed(shard);
         // After the admission and not before it, so the base holds the
         // instrument as published. The line is already durable, so a base
         // that fails faults what follows and not this admission.
@@ -1423,11 +1501,24 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         if let Some(minted) = self.minted.get_mut(&entry.symbol) {
             minted.last_published_s = delisted_s;
         }
-        self.advance_manifest(entry.shard);
+        self.set_changed(entry.shard);
     }
 
     /// One shard's published set has changed, so the manifest describing it
-    /// must.
+    /// must: at the end of the poll that changed it, or now when no poll is in
+    /// progress.
+    ///
+    /// Marking rather than advancing is what makes a poll of `k` changes one
+    /// advance. See [`poll`](Self::poll).
+    fn set_changed(&mut self, shard: usize) {
+        if self.polling {
+            self.sets[shard].changed = true;
+        } else {
+            self.advance_manifest(shard);
+        }
+    }
+
+    /// Advance one shard's `Manifest Seq` by one.
     ///
     /// That shard's and no other's: a subscriber whose manifest sequence
     /// advanced for an admission on a channel it is not bound to would re-check

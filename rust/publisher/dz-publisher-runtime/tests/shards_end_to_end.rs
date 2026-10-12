@@ -269,3 +269,167 @@ fn a_shard_the_document_has_no_channel_for_is_named_once_however_often_it_is_off
         "a name already reported was reported again"
     );
 }
+
+/// One poll is one step of `Manifest Seq` on the wire, on each shard it
+/// changed, however many instruments it admitted or withdrew there.
+///
+/// Read off the reference-data port rather than off the registry, because the
+/// manifests are what a subscriber and the specification's rule set see: the
+/// first `Valid` one carries 1 whatever the size of the seed, and no two in a
+/// row are further apart than one. An advance for each admission put the first
+/// at the size of the set and each later poll's step at the number of
+/// instruments it moved.
+#[test]
+fn a_poll_moves_the_manifest_on_the_wire_by_one_however_many_instruments_it_moved() {
+    use dz_edge_refdata::ManifestSummary;
+
+    /// `ManifestSummary`, on the reference-data port.
+    const MANIFEST: u8 = 0x07;
+
+    let mut h = harness_two_shards();
+    let valid_seqs = |recorders: &harness::FeedRecorders| -> Vec<(u16, u32)> {
+        recorders
+            .refdata
+            .messages()
+            .iter()
+            .filter(|(type_id, _)| *type_id == MANIFEST)
+            .map(|(_, bytes)| ManifestSummary::decode(bytes).expect("composed"))
+            .filter(|manifest| manifest.valid == 1)
+            .map(|manifest| (manifest.manifest_seq, manifest.instrument_count))
+            .collect()
+    };
+    let second = std::time::Duration::from_secs(1);
+
+    // The seed: three instruments on A and two on B, in one poll.
+    let mut seed = FakeAdapter::on_shards(&[
+        ("A-B", SHARD_A),
+        ("A-C", SHARD_A),
+        ("A-D", SHARD_A),
+        ("B-E", SHARD_B),
+        ("B-F", SHARD_B),
+    ]);
+    assert!(h.publisher.poll_listings(&mut seed));
+    let withdrawn = [seed.handles()[0], seed.handles()[1]];
+    let _ = h.publisher.tick();
+    h.clock.advance(second);
+    let _ = h.publisher.tick();
+
+    // A roll on A — two instruments out and three in, in one poll — while B's
+    // set is offered again unchanged.
+    let mut roll = FakeAdapter::on_shards(&[
+        ("A-D", SHARD_A),
+        ("A-G", SHARD_A),
+        ("A-H", SHARD_A),
+        ("A-I", SHARD_A),
+        ("B-E", SHARD_B),
+        ("B-F", SHARD_B),
+    ]);
+    for handle in withdrawn {
+        roll.withdraw(handle);
+    }
+    h.clock.advance(dz_publisher_runtime::LISTING_POLL);
+    assert!(h.publisher.poll_listings(&mut roll));
+    for _ in 0..3 {
+        let _ = h.publisher.tick();
+        h.clock.advance(second);
+    }
+
+    for (shard, last) in [(&h.shards[0], (2, 4)), (&h.shards[1], (1, 2))] {
+        for recorders in [&shard.tob, &shard.mbp] {
+            let recorders = recorders.as_ref().expect("both specifications are carried");
+            let seen = valid_seqs(recorders);
+            assert_eq!(
+                seen.first().map(|(seq, _)| *seq),
+                Some(1),
+                "the first `Valid` manifest states one change, not the size of the seed: {seen:?}"
+            );
+            assert_eq!(seen.last(), Some(&last), "{seen:?}");
+            for pair in seen.windows(2) {
+                assert!(
+                    pair[1].0 == pair[0].0 || pair[1].0 == pair[0].0 + 1,
+                    "two manifests in a row are more than one change apart: {seen:?}"
+                );
+            }
+        }
+    }
+}
+
+/// A manifest leaves with the advance, so the step a subscriber sees is one
+/// whatever the manifest cadence is.
+///
+/// The listings poll runs every second and an operator may set
+/// `manifest_cadence` longer; the bring-up guide uses five. Left to the
+/// cadence, three polls that each change the set fall between two manifests,
+/// and the second states a sequence three past the first. One poll per manifest,
+/// as the test above has it, never meets that.
+///
+/// The second half is the order on the port: every definition is tagged with a
+/// sequence a manifest before it has already stated, because a subscriber
+/// discards one that is not.
+#[test]
+fn a_manifest_leaves_with_each_advance_so_a_long_cadence_does_not_skip_one() {
+    use dz_edge_refdata::{InstrumentDefinition, ManifestSummary};
+
+    const DEFINITION: u8 = 0x02;
+    const MANIFEST: u8 = 0x07;
+    const SCHEMA: u8 = 3;
+
+    let mut h = harness::harness(dz_publisher_runtime::Feed {
+        manifest_cadence: std::time::Duration::from_secs(5),
+        ..harness::feed()
+    });
+    let second = std::time::Duration::from_secs(1);
+
+    // The seed, then three polls a second apart that each admit one more. All
+    // four fall inside one manifest cadence.
+    let symbols = ["A-B", "A-C", "A-D", "A-E"];
+    for listed in 1..=symbols.len() {
+        let mut adapter = FakeAdapter::new(&symbols[..listed]);
+        assert!(h.publisher.poll_listings(&mut adapter));
+        let _ = h.publisher.tick();
+        h.clock.advance(second);
+    }
+    // And long enough after for the cycle to define the set.
+    for _ in 0..30 {
+        let _ = h.publisher.tick();
+        h.clock.advance(second);
+    }
+
+    let recorders = h.tob.as_ref().expect("top-of-book is carried");
+    let mut stated: Vec<u16> = Vec::new();
+    let mut definitions = 0;
+    for (type_id, bytes) in recorders.refdata.messages() {
+        match type_id {
+            MANIFEST => {
+                let manifest = ManifestSummary::decode(&bytes).expect("composed");
+                if manifest.valid == 1 {
+                    stated.push(manifest.manifest_seq);
+                }
+            }
+            DEFINITION => {
+                let definition = InstrumentDefinition::decode(&bytes, SCHEMA).expect("composed");
+                definitions += 1;
+                assert_eq!(
+                    stated.last(),
+                    Some(&definition.manifest_seq),
+                    "a definition is tagged with a sequence the last manifest did not state"
+                );
+            }
+            _ => {}
+        }
+    }
+
+    assert!(definitions >= symbols.len(), "the set was defined");
+    assert_eq!(stated.first(), Some(&1), "{stated:?}");
+    assert_eq!(
+        stated.last(),
+        Some(&4),
+        "four polls changed the set: {stated:?}"
+    );
+    for pair in stated.windows(2) {
+        assert!(
+            pair[1] == pair[0] || pair[1] == pair[0] + 1,
+            "two manifests in a row are more than one change apart: {stated:?}"
+        );
+    }
+}
