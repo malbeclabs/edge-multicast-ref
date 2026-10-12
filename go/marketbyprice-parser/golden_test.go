@@ -143,9 +143,9 @@ type goldenVector struct {
 
 // goldenVectors is every vector this parser reads: its own five depth messages,
 // the four the family shares, and the five the shared lowering produced from a
-// normalized event. The one it does not read is quote-v3.bin, which this feed
-// has no message type for — goldenVectorsReadElsewhere names it and the suite
-// that does.
+// normalized event. The two it does not read are quote-v3.bin, which this feed
+// has no message type for, and strike-interval-v3.bin, which it skips by its
+// length — goldenVectorsReadElsewhere names each and the suite that reads it.
 func goldenVectors() []goldenVector {
 	return append(goldenDepthVectors(), append(goldenSharedVectors(), goldenLoweredVectors()...)...)
 }
@@ -538,13 +538,14 @@ func TestGoldenManifestStatesWhatTheseCasesAssert(t *testing.T) {
 // goldenVectorsReadElsewhere names the vectors the manifest carries that this
 // parser has no message type for, and the suite that reads each.
 //
-// This parser decodes fourteen of the fifteen, which makes it the one place a
+// This parser decodes fourteen of the sixteen, which makes it the one place a
 // vector nobody reads can be noticed at all. That is what the list is for: a
 // vector no suite reads and no document mentions is invisible rather than
 // merely unbound, and it stays that way until someone counts the files by
 // hand.
 var goldenVectorsReadElsewhere = map[string]string{
-	"quote-v3.bin": "go/topofbook-parser's tob.TestGoldenQuote; market-by-price carries no Quote",
+	"quote-v3.bin":           "go/topofbook-parser's tob.TestGoldenQuote; market-by-price carries no Quote",
+	"strike-interval-v3.bin": "rust/codec/dz-edge-refdata's tests/golden.rs; this parser has no decoder for StrikeInterval and skips it by its length",
 }
 
 // TestGoldenManifestHasNoVectorNobodyReads holds the corpus to being wholly

@@ -40,5 +40,6 @@ impl dz_edge_core::Feed for TopOfBook {
         0x06, // EndOfSession
         0x07, // ManifestSummary
         0x08, // Liquidation
+        0x09, // StrikeInterval
     ];
 }
