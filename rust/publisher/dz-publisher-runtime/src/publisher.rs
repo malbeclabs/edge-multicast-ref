@@ -921,7 +921,12 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
             return false;
         }
         self.last_poll_ns = Some(now_ns);
-        adapter.poll_listings(&mut self.refdata);
+        // Through the registry's own `poll`, and not by handing it over as the
+        // sink: that is what makes this call one advance of a shard's
+        // `Manifest Seq` however many instruments it admitted or withdrew
+        // there. Handed over bare, each of them would advance it.
+        self.refdata
+            .poll(|listings| adapter.poll_listings(listings));
         // The seed limit gives way to the cap, and the manifest becomes
         // `Valid`, once — and only after the *first* poll has returned. Calling
         // it earlier would spend the headroom the cap leaves above the seed on

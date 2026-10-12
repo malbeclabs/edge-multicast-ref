@@ -93,6 +93,13 @@ pub trait Adapter: Send {
     ///
     /// Re-offering an instrument already admitted is free and returns the same
     /// handle, so an implementation may simply offer its current set each time.
+    ///
+    /// **One call is one change to a subscriber.** The publisher advances a
+    /// shard's `Manifest Seq` once for a call that changed that shard's set,
+    /// however many instruments the call admitted or withdrew there, and each
+    /// advance costs a subscriber the definitions it has collected. So
+    /// instruments that enter or leave trading together belong in one call:
+    /// spread over several, they are that many changes.
     fn poll_listings(&mut self, out: &mut dyn ListingSink);
 
     /// Write whatever must be sent upstream after a connection is established.
