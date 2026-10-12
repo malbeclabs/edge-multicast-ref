@@ -114,12 +114,14 @@ pub enum Refusal {
     /// A stated strike cannot be carried: a bound that is not a decimal or does
     /// not fit, or a fixed strike with neither bound.
     ///
-    /// What the instrument publishes is unchanged. An instrument whose first
-    /// stated strike is refused is published without one, which a subscriber
-    /// reads as a contract that pays on no strike; that is wrong, and it is the
-    /// lesser wrong. Withdrawing a live book over a strike would end an
-    /// instrument the venue is still trading, and a pending strike in its place
-    /// would promise a value this publisher cannot send.
+    /// The strike the instrument publishes is unchanged. An instrument with
+    /// no strike yet, whose first definition has not gone out, is given a
+    /// pending one: the venue has said the contract pays on a strike, and the
+    /// supplement requires one from the first definition. Published bare, it
+    /// would read as a contract that pays on no strike, and the valid strike
+    /// the venue states a poll later would be refused as
+    /// [`StrikePresence`](Self::StrikePresence). A strike that stays pending is
+    /// what `Registry::strikes_pending_on` shows.
     #[error("the stated strike cannot be represented")]
     StrikeUnrepresentable,
 

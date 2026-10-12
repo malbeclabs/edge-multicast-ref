@@ -25,6 +25,53 @@ const STRIKE: u8 = 0x09;
 const SCHEMA: u8 = 3;
 const HEADER: usize = 24;
 
+/// Eight instruments whose venue fixes every strike in one poll.
+struct Fleet {
+    fixed: bool,
+}
+
+impl Adapter for Fleet {
+    fn message_types(&self) -> &[&'static str] {
+        &[]
+    }
+
+    fn poll_listings(&mut self, out: &mut dyn ListingSink) {
+        for index in 0..8 {
+            let Some(handle) = out.list(&spec(&format!("W{index}"))) else {
+                continue;
+            };
+            let strike = if self.fixed {
+                Strike::Fixed {
+                    lower: Some(StrikeBound::inclusive(Scalar::text("82506.23"))),
+                    upper: None,
+                    fixing_time_ns: None,
+                }
+            } else {
+                Strike::Pending
+            };
+            out.strike(handle, &strike);
+        }
+    }
+
+    fn on_payload(
+        &mut self,
+        _payload: &Payload<'_>,
+        _out: &mut dyn EventSink,
+    ) -> Result<(), ParseError> {
+        Ok(())
+    }
+
+    fn snapshot(
+        &self,
+        _instrument: InstrumentRef,
+        _out: &mut dyn dz_adapter_core::SnapshotSink,
+    ) -> Result<dz_adapter_core::DepthBound, dz_adapter_core::AdapterError> {
+        Err(dz_adapter_core::AdapterError::NotReady {
+            detail: "no book in this test",
+        })
+    }
+}
+
 /// Two instruments: one whose contract pays on a strike the venue fixes after
 /// listing, and one that pays on none.
 struct Windows {
@@ -221,5 +268,48 @@ fn a_strike_the_venue_fixes_is_sent_at_once_behind_a_manifest_that_did_not_move(
             .find(|(s, _)| s == "WINDOW")
             .unwrap();
         assert!(!last.unwrap().is_pending(), "{feed}");
+    }
+}
+
+/// A full batch of changed strikes is one datagram, summary and all.
+///
+/// Six pairs behind the 24-byte summary are 1,068 bytes. Seven would be 1,238
+/// with the header, over the 1,232 a datagram may be, so the seventh used to
+/// leave in a second datagram that the summary was not in.
+#[test]
+fn a_batch_of_fixed_strikes_shares_one_datagram_with_its_manifest() {
+    let mut h = harness_both();
+    let mut adapter = Fleet { fixed: false };
+    assert!(h.publisher.poll_listings(&mut adapter));
+    lap(&mut h);
+    let sent: Vec<usize> = refdata_ports(&h).iter().map(|(_, r)| r.len()).collect();
+
+    adapter.fixed = true;
+    h.clock.advance(dz_publisher_runtime::LISTING_POLL);
+    assert!(h.publisher.poll_listings(&mut adapter));
+    // Two ticks with no time between them, so the cycle owes nothing and what
+    // leaves is the changed strikes alone: six, and then the two left over.
+    let _ = h.publisher.tick();
+    let _ = h.publisher.tick();
+
+    for ((feed, recorder), before) in refdata_ports(&h).into_iter().zip(sent) {
+        let raw = recorder.datagrams();
+        let all = datagrams(&recorder);
+        let (new, new_raw) = (&all[before..], &raw[before..]);
+        assert_eq!(new.len(), 2, "{feed}: one datagram a tick");
+        for (messages, pairs) in new.iter().zip([6usize, 2]) {
+            let types: Vec<u8> = messages.iter().map(|(type_id, _)| *type_id).collect();
+            let mut want = vec![MANIFEST];
+            want.extend([DEFINITION, STRIKE].repeat(pairs));
+            assert_eq!(types, want, "{feed}");
+        }
+        assert_eq!(new_raw[0].len(), 24 + 24 + 6 * 170, "{feed}");
+        assert_eq!(new_raw[0].len(), 1068, "{feed}");
+        for (_, bytes) in new.iter().flatten().filter(|(t, _)| *t == STRIKE) {
+            assert!(
+                !StrikeInterval::decode(bytes).unwrap().is_pending(),
+                "{feed}"
+            );
+        }
     }
 }

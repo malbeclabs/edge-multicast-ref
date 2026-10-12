@@ -967,8 +967,11 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
             let Some(name) = self.feeds.shard_name(index) else {
                 continue;
             };
-            // Ahead of the cycle, so that a strike fixed since the last tick is
-            // not also this tick's cycle entry for the same instrument.
+            // What a changed strike owes, and then what the cycle owes. The two
+            // are independent: if the cycle's cursor is on an instrument whose
+            // strike just changed, both hand it out and its pair leaves twice
+            // in this tick, which is two transmissions of the same definition
+            // and harmless.
             self.refdata.strike_changes(name, &mut self.strike_changes);
             self.refdata.definition_tick(name, &mut self.definitions);
             // A shard the reference-data owner has no published set for cannot
@@ -1834,8 +1837,6 @@ fn timed<T>(
     outcome
 }
 
-/// Everything one feed's send path owes a tick.
-///
 /// The definitions one shard owes a tick.
 #[derive(Clone, Copy)]
 pub struct Owed<'a> {
@@ -1845,6 +1846,8 @@ pub struct Owed<'a> {
     pub cycle: &'a [PublishedDefinition],
 }
 
+/// Everything one feed's send path owes a tick.
+///
 /// A free function generic over the feed, because the two send paths are
 /// different types and this is the same behaviour for both. The definitions and
 /// the manifest arrive as arguments rather than being drained here, so that a

@@ -74,7 +74,7 @@ pub use clock::{Clock, ManualClock, SystemClock};
 pub use definition::{compose, symbol_field, Composition, Fits};
 pub use error::RefdataError;
 pub use file_store::FileStore;
-pub use pacer::{definitions_per_datagram, CycleSchedule, DefinitionPacer, LAP_PERCENT};
+pub use pacer::{definitions_per_datagram, CycleSchedule, DefinitionPacer, TickRoom, LAP_PERCENT};
 pub use policy::{Phase, PolicyError, SelectionPolicy};
 pub use refusal::Refusal;
 pub use registry::{

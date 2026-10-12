@@ -476,6 +476,11 @@ fn a_lap_of_a_set_with_strikes_still_defines_every_instrument_once() {
 
 /// A venue that fixes every strike in one poll is spread over the ticks that
 /// follow, oldest first, and is not a burst.
+///
+/// Six to a tick, not the seven a datagram holds: the caller sends a 24-byte
+/// `ManifestSummary` ahead of them, and 24 + 7 x 170 is 1,214 of the 1,208
+/// bytes a datagram has for messages. A seventh would leave in a second
+/// datagram, without the summary.
 #[test]
 fn many_strikes_fixed_at_once_are_owed_a_datagram_at_a_time() {
     let (mut registry, clock) = one_shard(20);
@@ -501,7 +506,7 @@ fn many_strikes_fixed_at_once_are_owed_a_datagram_at_a_time() {
         sizes.push(owed.len());
         order.extend(owed.iter().map(|entry| entry.definition.instrument_id));
     }
-    assert_eq!(sizes, [7, 7, 6]);
+    assert_eq!(sizes, [6, 6, 6, 2]);
     let expected: Vec<u32> = handles.iter().map(|h| id_of(&registry, *h)).collect();
     assert_eq!(order, expected, "oldest first, each once");
 }
@@ -522,4 +527,122 @@ fn two_changes_before_a_tick_are_one_definition_carrying_the_last() {
     assert_eq!(owed.len(), 1);
     assert_eq!(owed[0].strike.unwrap().lower_bound, 2);
     assert_eq!(registry.counts().strikes_changed, 2);
+}
+
+/// Rule 1 is a MUST: a contract that pays on a strike has one from its first
+/// definition. A venue that says so in a way the wire cannot carry has still
+/// said so.
+#[test]
+fn a_first_statement_the_wire_cannot_carry_leaves_the_strike_pending() {
+    let neither_bound = Strike::Fixed {
+        lower: None,
+        upper: None,
+        fixing_time_ns: None,
+    };
+    for (what, stated) in [
+        ("not a decimal", at_or_above("TBD")),
+        ("neither bound", neither_bound),
+    ] {
+        let (mut registry, clock) = one_shard(4);
+        let handle = registry.list(&spec("WINDOW")).unwrap();
+        let id = id_of(&registry, handle);
+
+        assert_eq!(
+            registry.state_strike(handle, &stated),
+            Err(Refusal::StrikeUnrepresentable),
+            "{what}"
+        );
+        assert_eq!(registry.counts().declined_unrepresentable, 1, "{what}");
+        assert_eq!(
+            registry.strikes_pending_on(DEFAULT_SHARD),
+            Some(1),
+            "{what}"
+        );
+
+        let seen = lap(&mut registry, &clock, DEFAULT_SHARD);
+        assert!(
+            strike_of(&seen, id)
+                .unwrap_or_else(|| panic!("{what}: defined without a strike"))
+                .is_pending(),
+            "{what}"
+        );
+
+        // And the strike the venue states properly a poll later is taken.
+        assert_eq!(
+            registry.state_strike(handle, &at_or_above("82506.23")),
+            Ok(()),
+            "{what}"
+        );
+        assert_eq!(
+            registry.strikes_pending_on(DEFAULT_SHARD),
+            Some(0),
+            "{what}"
+        );
+        let owed = changes(&mut registry, DEFAULT_SHARD);
+        assert_eq!(owed.len(), 1, "{what}");
+        assert_eq!(owed[0].strike.unwrap().lower_bound, 8_250_623, "{what}");
+    }
+}
+
+/// Only the first statement: a strike already held is not replaced by a
+/// statement that is refused.
+#[test]
+fn a_later_statement_the_wire_cannot_carry_leaves_the_held_strike() {
+    let (mut registry, clock) = one_shard(4);
+    let handle = registry.list(&spec("WINDOW")).unwrap();
+    registry.strike(handle, &at_or_above("82506.23"));
+    let id = id_of(&registry, handle);
+
+    assert_eq!(
+        registry.state_strike(handle, &at_or_above("TBD")),
+        Err(Refusal::StrikeUnrepresentable)
+    );
+
+    assert_eq!(registry.strikes_pending_on(DEFAULT_SHARD), Some(0));
+    let seen = lap(&mut registry, &clock, DEFAULT_SHARD);
+    assert_eq!(strike_of(&seen, id).unwrap().lower_bound, 8_250_623);
+}
+
+/// What the cycle hands out on a shard no strike was stated on is what it
+/// handed out before there were strikes: nine to a tick.
+#[test]
+fn a_shard_with_no_strike_is_paced_as_it_was() {
+    let (mut registry, clock) = one_shard(64);
+    for index in 0..64 {
+        registry.list(&spec(&format!("W{index}"))).unwrap();
+    }
+    let mut out = Vec::new();
+    registry.definition_tick(DEFAULT_SHARD, &mut out);
+    clock.advance(Duration::from_secs(12));
+    registry.definition_tick(DEFAULT_SHARD, &mut out);
+    assert_eq!(out.len(), 9);
+}
+
+/// One instrument with a strike among many without is enough to change what a
+/// tick holds, and only on the tick that carries it.
+#[test]
+fn one_strike_on_a_shard_costs_the_tick_that_carries_it_and_no_other() {
+    let (mut registry, clock) = one_shard(64);
+    for index in 0..64 {
+        let handle = registry.list(&spec(&format!("W{index}"))).unwrap();
+        if index == 4 {
+            registry.strike(handle, &Strike::Pending);
+        }
+    }
+    let mut out = Vec::new();
+    registry.definition_tick(DEFAULT_SHARD, &mut out);
+    clock.advance(Duration::from_secs(12));
+
+    // Nine bare definitions are 1,170 bytes; with one of them 40 bytes larger
+    // the ninth no longer fits the 1,208.
+    registry.definition_tick(DEFAULT_SHARD, &mut out);
+    assert_eq!(out.len(), 8);
+    assert_eq!(
+        out.iter()
+            .map(PublishedDefinition::wire_size)
+            .sum::<usize>(),
+        7 * 130 + 170
+    );
+    registry.definition_tick(DEFAULT_SHARD, &mut out);
+    assert_eq!(out.len(), 9, "the next nine are all bare");
 }

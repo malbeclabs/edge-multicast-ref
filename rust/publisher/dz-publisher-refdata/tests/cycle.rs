@@ -614,3 +614,38 @@ fn a_definition_carries_its_own_shards_manifest_and_not_another_shards() {
         registry.manifest_seq(BETA).expect("configured")
     );
 }
+
+/// The pacer says what it owes without taking it, so a caller whose ceiling
+/// costs a walk makes the walk only when something is owed.
+#[test]
+fn the_pacer_states_its_debt_without_taking_it() {
+    let schedule = CycleSchedule::new(CYCLE, MTU, 1);
+    let mut pacer = dz_publisher_refdata::DefinitionPacer::new(schedule);
+    let second = 1_000_000_000u64;
+
+    assert_eq!(pacer.owed(0, 24), 0, "no lap has started");
+    assert_eq!(pacer.due(0, 24), 0, "which starts it");
+    assert_eq!(pacer.owed(0, 24), 0, "and no time has passed");
+
+    // A 24-second lap of 24 instruments owes one a second.
+    assert_eq!(pacer.owed(3 * second, 24), 3);
+    assert_eq!(pacer.owed(3 * second, 24), 3, "asking takes nothing");
+    assert_eq!(pacer.due_at_most(3 * second, 24, 2), 2);
+    assert_eq!(pacer.owed(3 * second, 24), 1, "what the ceiling held back");
+    assert_eq!(pacer.due(3 * second, 24), 1);
+    assert_eq!(pacer.owed(3 * second, 24), 0);
+    assert_eq!(pacer.owed(3 * second, 0), 0, "nothing is published");
+}
+
+/// A fit behind something else already in the first datagram.
+#[test]
+fn a_fit_behind_a_reserved_message_holds_one_pair_fewer() {
+    let schedule = CycleSchedule::new(CYCLE, MTU, 1);
+    let pairs = || std::iter::repeat_n(170usize, 20);
+    assert_eq!(schedule.fitting(pairs()), 7);
+    assert_eq!(schedule.fitting_behind(24, pairs()), 6);
+    assert_eq!(schedule.fitting_behind(0, pairs()), 7);
+    // Never zero for something to send, however much is reserved.
+    assert_eq!(schedule.fitting_behind(5_000, pairs()), 1);
+    assert_eq!(schedule.fitting_behind(24, std::iter::empty()), 0);
+}

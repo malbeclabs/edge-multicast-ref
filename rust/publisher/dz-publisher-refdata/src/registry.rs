@@ -785,23 +785,27 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         };
         let now_ns = self.clock.monotonic_ns();
         let published = self.sets[index].published;
-        // How many of the definitions next in line this tick's datagrams hold.
-        // A definition with a strike is a larger message than the pacer's
-        // ceiling counts, so the ceiling is read off the entries themselves.
-        let fitting = self.config.schedule.fitting(self.in_line(index));
-        let due = self.sets[index]
-            .pacer
-            .due_at_most(now_ns, published, fitting);
-        if due == 0 {
+        // The pacer's debt first, without taking it. This runs on the thread
+        // that carries ingress, on every tick, and the slots are walked only on
+        // a tick that owes something. A tick that owes nothing still tells the
+        // pacer the time, which is what starts a lap and ends an empty one.
+        let owed = self.sets[index].pacer.owed(now_ns, published);
+        if owed == 0 {
+            let _ = self.sets[index].pacer.due_at_most(now_ns, published, 0);
             return;
         }
+        // A definition with a strike is a larger message than the pacer's
+        // ceiling counts, so what the tick's datagrams hold is read off the
+        // entries as they are walked: one walk, no further than what is owed.
+        let mut room = self.config.schedule.room_behind(0);
         let manifest_seq = self.sets[index].manifest_seq;
         let mut cursor = self.sets[index].cursor;
         let slots = self.slots.len();
-        while out.len() < due {
+        let mut full = false;
+        while out.len() < owed && !full {
             let before = out.len();
             for _ in 0..slots {
-                if out.len() == due {
+                if out.len() == owed {
                     break;
                 }
                 // Every slot is walked and only this shard's are emitted. The
@@ -810,6 +814,12 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
                 // channel whose manifest does not count it.
                 if let Some(entry) = &mut self.slots[cursor] {
                     if entry.shard == index {
+                        if !room.take(wire_size(entry.strike.is_some())) {
+                            // The cursor stays on it: it is the next tick's
+                            // first, and still owed.
+                            full = true;
+                            break;
+                        }
                         entry.defined = true;
                         out.push(PublishedDefinition {
                             definition: definition::stamped(&entry.definition, manifest_seq),
@@ -828,19 +838,12 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             }
         }
         self.sets[index].cursor = cursor;
+        // Taken from the pacer only now, and only what was handed out: what the
+        // datagrams did not hold stays owed.
+        let _ = self.sets[index]
+            .pacer
+            .due_at_most(now_ns, published, out.len());
         self.counts.definitions_emitted += out.len() as u64;
-    }
-
-    /// What each of one shard's definitions next in line takes of a datagram,
-    /// in the order [`definition_tick`](Self::definition_tick) walks them, for
-    /// one lap of the slots.
-    fn in_line(&self, shard: usize) -> impl Iterator<Item = usize> + '_ {
-        let slots = self.slots.len();
-        let cursor = self.sets[shard].cursor;
-        (0..slots).filter_map(move |step| {
-            let entry = self.slots[(cursor + step) % slots].as_ref()?;
-            (entry.shard == shard).then(|| wire_size(entry.strike.is_some()))
-        })
     }
 
     /// The definitions one shard owes ahead of the cycle, because their strike
@@ -858,9 +861,10 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
     /// discards a definition tagged with a sequence it has not been told, and
     /// after an admission the summary is otherwise sent only on its cadence.
     ///
-    /// Bounded by what one tick's datagrams hold, the same ceiling the cycle
-    /// keeps, so a venue that fixes a thousand strikes in one poll is spread
-    /// over the ticks that follow and is not a burst. What is not taken stays
+    /// Bounded by what one tick's datagrams hold behind that summary, so a
+    /// venue that fixes a thousand strikes in one poll is spread over the ticks
+    /// that follow and is not a burst. Six at the mandated datagram size: the
+    /// summary's 24 bytes are the room a seventh would have needed. What is not taken stays
     /// owed, oldest first. These are extra to the cycle and are not counted
     /// against its lap.
     pub fn strike_changes(&mut self, shard: &str, out: &mut Vec<PublishedDefinition>) {
@@ -872,19 +876,21 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             return;
         }
         let waiting = std::mem::take(&mut self.sets[index].strikes_changed);
-        // A handle that has since been withdrawn owes nothing. One that was
-        // withdrawn and admitted again is a new publication with no change
-        // waiting, and its slot says so: it has not been defined yet.
-        let owed = |entry: &Published| entry.shard == index && entry.defined;
-        let sizes = waiting.iter().filter_map(|handle| {
-            let entry = self.slot(*handle)?;
-            owed(entry).then(|| wire_size(entry.strike.is_some()))
-        });
-        let fitting = self.config.schedule.fitting(sizes);
+        // A handle that has since been withdrawn owes nothing, and resolves to
+        // nothing: a slot is never used again, so a symbol admitted again has
+        // another handle. Whatever still resolves is owed.
+        let sizes = waiting
+            .iter()
+            .filter_map(|handle| self.slot(*handle))
+            .map(|entry| wire_size(entry.strike.is_some()));
+        let fitting = self
+            .config
+            .schedule
+            .fitting_behind(ManifestSummary::SIZE, sizes);
         let manifest_seq = self.sets[index].manifest_seq;
         let mut kept = Vec::new();
         for handle in waiting {
-            let Some(entry) = self.slot(handle).filter(|entry| owed(entry)) else {
+            let Some(entry) = self.slot(handle) else {
                 continue;
             };
             if out.len() == fitting {
@@ -933,7 +939,9 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
     ///
     /// [`Refusal::StrikeUnrepresentable`], [`Refusal::StrikeEmpty`],
     /// [`Refusal::StrikeUnfixed`] and [`Refusal::StrikePresence`]. Each is
-    /// counted, and what the instrument publishes is unchanged.
+    /// counted, and what the instrument publishes is unchanged, with one
+    /// exception: a first statement the wire cannot carry leaves the
+    /// instrument with a pending strike, where it had none.
     pub fn state_strike(
         &mut self,
         instrument: InstrumentRef,
@@ -955,28 +963,51 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         entry: &Published,
         stated: &Strike<'_>,
     ) -> Result<(), Refusal> {
-        let composed = strike::compose(
-            stated,
-            entry.definition.instrument_id,
-            self.config.source_id,
-        )?;
-        let was_pending = match entry.strike {
+        let instrument_id = entry.definition.instrument_id;
+        let composed = match strike::compose(stated, instrument_id, self.config.source_id) {
+            Ok(composed) => composed,
+            Err(refusal) => {
+                // The venue said this contract pays on a strike and said it in
+                // a way the wire cannot carry. Before the first definition that
+                // is still something to publish: a strike, pending. Publishing
+                // the instrument bare instead would state that it pays on no
+                // strike, and would settle that for the era, so the valid
+                // strike the venue states a poll later would be refused too.
+                if entry.strike.is_none() && !entry.defined {
+                    let source_id = self.config.source_id.get();
+                    let pending = StrikeInterval::pending(instrument_id, source_id, 0);
+                    self.replace_strike(instrument, entry, pending);
+                }
+                return Err(refusal);
+            }
+        };
+        match entry.strike {
             Some(current) if current == composed => return Ok(()),
             Some(current) if !current.is_pending() && composed.is_pending() => {
                 return Err(Refusal::StrikeUnfixed);
             }
-            Some(current) => current.is_pending(),
             None if entry.defined => return Err(Refusal::StrikePresence),
-            None => false,
-        };
+            _ => {}
+        }
+        self.replace_strike(instrument, entry, composed);
+        Ok(())
+    }
+
+    /// Hold `strike` for an instrument whose entry was `entry` until now.
+    fn replace_strike(
+        &mut self,
+        instrument: InstrumentRef,
+        entry: &Published,
+        strike: StrikeInterval,
+    ) {
         if let Some(slot) = self.slot_mut(instrument) {
-            slot.strike = Some(composed);
+            slot.strike = Some(strike);
         }
         let set = &mut self.sets[entry.shard];
-        if was_pending {
+        if entry.strike.is_some_and(|current| current.is_pending()) {
             set.strikes_pending -= 1;
         }
-        if composed.is_pending() {
+        if strike.is_pending() {
             set.strikes_pending += 1;
         }
         // Before its first definition there is nothing to send again: the
@@ -987,7 +1018,6 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
                 set.strikes_changed.push(instrument);
             }
         }
-        Ok(())
     }
 
     /// One shard's manifest, as of now.
