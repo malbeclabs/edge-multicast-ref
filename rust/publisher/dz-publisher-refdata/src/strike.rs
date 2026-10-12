@@ -121,19 +121,22 @@ fn coarsest_exponent(value: Scalar<'_>) -> Result<i8, Refusal> {
             digits
         }
     };
-    i8::try_from(digits)
-        .map(|digits| -digits)
-        .map_err(|_| Refusal::StrikeUnrepresentable)
+    // Negated before it is narrowed: 128 digits is `i8::MIN`, which the wire can
+    // state and `i8` cannot hold the positive of.
+    i64::try_from(digits)
+        .ok()
+        .and_then(|digits| i8::try_from(-digits).ok())
+        .ok_or(Refusal::StrikeUnrepresentable)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const SOURCE: u16 = 3;
+    const SOURCE_ID: u16 = 3;
 
-    fn source() -> SourceId {
-        SourceId::new(SOURCE).expect("a source id")
+    fn source_id() -> SourceId {
+        SourceId::new(SOURCE_ID).expect("a source id")
     }
 
     fn fixed<'a>(lower: Option<StrikeBound<'a>>, upper: Option<StrikeBound<'a>>) -> Strike<'a> {
@@ -150,15 +153,15 @@ mod tests {
 
     #[test]
     fn a_pending_strike_has_no_bound() {
-        let composed = compose(&Strike::Pending, 7, source()).unwrap();
-        assert_eq!(composed, StrikeInterval::pending(7, SOURCE, 0));
+        let composed = compose(&Strike::Pending, 7, source_id()).unwrap();
+        assert_eq!(composed, StrikeInterval::pending(7, SOURCE_ID, 0));
         assert!(composed.is_pending());
     }
 
     #[test]
     fn at_or_above_is_an_inclusive_lower_bound_at_the_venues_digits() {
         let strike = fixed(Some(StrikeBound::inclusive(text("82506.23"))), None);
-        let composed = compose(&strike, 7, source()).unwrap();
+        let composed = compose(&strike, 7, source_id()).unwrap();
         assert_eq!(
             (
                 composed.strike_exponent,
@@ -168,13 +171,13 @@ mod tests {
             ),
             (-2, 0b0011, 8_250_623, 0)
         );
-        assert_eq!((composed.instrument_id, composed.source_id), (7, SOURCE));
+        assert_eq!((composed.instrument_id, composed.source_id), (7, SOURCE_ID));
     }
 
     #[test]
     fn below_is_an_exclusive_upper_bound() {
         let strike = fixed(None, Some(StrikeBound::exclusive(text("74200"))));
-        let composed = compose(&strike, 7, source()).unwrap();
+        let composed = compose(&strike, 7, source_id()).unwrap();
         assert_eq!(
             (
                 composed.strike_exponent,
@@ -192,7 +195,7 @@ mod tests {
             Some(StrikeBound::inclusive(text("92700"))),
             Some(StrikeBound::inclusive(text("92799.99"))),
         );
-        let composed = compose(&strike, 7, source()).unwrap();
+        let composed = compose(&strike, 7, source_id()).unwrap();
         assert_eq!(
             (
                 composed.strike_exponent,
@@ -211,7 +214,7 @@ mod tests {
             compose(
                 &fixed(Some(StrikeBound::inclusive(value)), None),
                 7,
-                source(),
+                source_id(),
             )
             .unwrap()
         };
@@ -223,10 +226,33 @@ mod tests {
         assert_eq!(stated(text("92700.00")), stated(Scalar::fixed(927, 2)));
     }
 
+    /// `Strike Exponent` is an `i8`, and its least value is one the wire states.
+    #[test]
+    fn the_finest_exponent_the_wire_has_is_reached_and_one_finer_is_refused() {
+        let stated = |value| {
+            compose(
+                &fixed(Some(StrikeBound::inclusive(value)), None),
+                7,
+                source_id(),
+            )
+        };
+        let finest = stated(Scalar::fixed(1, i8::MIN)).unwrap();
+        assert_eq!((finest.strike_exponent, finest.lower_bound), (-128, 1));
+
+        let text = format!("0.{}1", "0".repeat(127));
+        assert_eq!(stated(Scalar::text(&text)).unwrap(), finest);
+
+        let finer = format!("0.{}1", "0".repeat(128));
+        assert_eq!(
+            stated(Scalar::text(&finer)),
+            Err(Refusal::StrikeUnrepresentable)
+        );
+    }
+
     #[test]
     fn a_negative_bound_is_carried() {
         let strike = fixed(Some(StrikeBound::exclusive(text("-1.5"))), None);
-        let composed = compose(&strike, 7, source()).unwrap();
+        let composed = compose(&strike, 7, source_id()).unwrap();
         assert_eq!((composed.strike_exponent, composed.lower_bound), (-1, -15));
     }
 
@@ -237,14 +263,14 @@ mod tests {
             upper: None,
             fixing_time_ns: Some(1_700_000_000_000_000_000),
         };
-        let composed = compose(&strike, 7, source()).unwrap();
+        let composed = compose(&strike, 7, source_id()).unwrap();
         assert_eq!(composed.fixing_time_ns, 1_700_000_000_000_000_000);
     }
 
     #[test]
     fn a_fixed_strike_with_neither_bound_is_refused() {
         assert_eq!(
-            compose(&fixed(None, None), 7, source()),
+            compose(&fixed(None, None), 7, source_id()),
             Err(Refusal::StrikeUnrepresentable)
         );
     }
@@ -262,7 +288,7 @@ mod tests {
                 compose(
                     &fixed(Some(StrikeBound::inclusive(value)), None),
                     7,
-                    source()
+                    source_id()
                 ),
                 Err(Refusal::StrikeUnrepresentable),
                 "{value:?}"
@@ -278,7 +304,7 @@ mod tests {
             Some(StrikeBound::inclusive(text("9223372036854775807"))),
         );
         assert_eq!(
-            compose(&strike, 7, source()),
+            compose(&strike, 7, source_id()),
             Err(Refusal::StrikeUnrepresentable)
         );
     }
@@ -296,7 +322,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                compose(&fixed(Some(lower), Some(upper)), 7, source()),
+                compose(&fixed(Some(lower), Some(upper)), 7, source_id()),
                 Err(Refusal::StrikeEmpty)
             );
         }
@@ -305,6 +331,6 @@ mod tests {
             Some(StrikeBound::inclusive(text("9"))),
             Some(StrikeBound::inclusive(text("9.0"))),
         );
-        assert!(compose(&point, 7, source()).is_ok());
+        assert!(compose(&point, 7, source_id()).is_ok());
     }
 }
