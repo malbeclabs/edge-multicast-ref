@@ -835,16 +835,38 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
     /// under a seq that did not is the failure the field exists to prevent.
     /// The runtime makes no such call: every change it makes comes through
     /// here.
+    ///
+    /// # A poll that panics
+    ///
+    /// The poll ends as `drain` unwinds, exactly as it does when `drain`
+    /// returns: the shards changed so far advance, and the registry is no
+    /// longer polling. A caller that catches the panic therefore never sees a
+    /// changed set under the seq it had before, and a change it makes
+    /// afterwards advances at once rather than waiting for a poll that is not
+    /// running.
     pub fn poll<R>(&mut self, drain: impl FnOnce(&mut dyn ListingSink) -> R) -> R {
+        /// Ends the poll when dropped, which is on return and on unwind alike.
+        struct Polling<'a, S: StateStore, C: Clock>(&'a mut Registry<S, C>);
+
+        impl<S: StateStore, C: Clock> Drop for Polling<'_, S, C> {
+            fn drop(&mut self) {
+                self.0.end_poll();
+            }
+        }
+
         self.polling = true;
-        let result = drain(self);
+        let poll = Polling(self);
+        drain(&mut *poll.0)
+    }
+
+    /// Advance every shard the poll changed, by one, and stop holding changes.
+    fn end_poll(&mut self) {
         self.polling = false;
         for shard in 0..self.sets.len() {
             if std::mem::take(&mut self.sets[shard].changed) {
                 self.advance_manifest(shard);
             }
         }
-        result
     }
 
     /// The unknown shard names offered since this was last called.

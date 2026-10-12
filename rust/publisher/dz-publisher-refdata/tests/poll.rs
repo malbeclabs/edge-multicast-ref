@@ -260,6 +260,38 @@ fn a_restated_definition_shares_the_polls_one_advance() {
 }
 
 #[test]
+fn a_poll_that_panics_ends_as_one_that_returned() {
+    // A caller that catches the panic holds a registry whose set changed. Its
+    // seq has to say so, and the registry must not go on holding changes for a
+    // poll that is no longer running.
+    let mut registry = registry();
+    poll_offering(&mut registry, ALPHA, &["A0"]);
+    let before = seq(&registry, ALPHA);
+
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        registry.poll(|listings| {
+            listings.list_on(ALPHA, &spec("A1")).expect("admitted");
+            listings.list_on(ALPHA, &spec("A2")).expect("admitted");
+            panic!("the adapter failed mid-poll");
+        })
+    }));
+    assert!(unwound.is_err());
+    assert_eq!(
+        seq(&registry, ALPHA),
+        before + 1,
+        "one advance, as on a return"
+    );
+
+    // Not polling any more: a direct change advances at once.
+    registry.list_on(ALPHA, &spec("A3")).expect("admitted");
+    assert_eq!(seq(&registry, ALPHA), before + 2);
+
+    // And nothing is left marked for the next poll to advance for.
+    registry.poll(|_| ());
+    assert_eq!(seq(&registry, ALPHA), before + 2);
+}
+
+#[test]
 fn a_change_made_outside_a_poll_advances_the_seq_at_once() {
     // The runtime makes no such call. A caller that does has no poll whose end
     // could carry the advance, and a set that changed under a seq that did not
