@@ -584,7 +584,21 @@ fn every_channel_instances_final_manifest_carries_its_own_shards_published_set()
         ("E-F", SHARD_B),
         ("G-H", SHARD_B),
     ]);
-    h.publisher.poll_listings(&mut adapter);
+    assert!(h.publisher.poll_listings(&mut adapter));
+
+    // A second poll that changes the second shard only. One poll is one change
+    // to each shard it touched, however many instruments it admitted, so after
+    // the first both shards are at 1 and a process-wide `Manifest Seq` would
+    // pass. This is what puts the two apart.
+    let mut second = FakeAdapter::on_shards(&[
+        ("A-B", SHARD_A),
+        ("C-D", SHARD_B),
+        ("E-F", SHARD_B),
+        ("G-H", SHARD_B),
+        ("I-J", SHARD_B),
+    ]);
+    h.clock.advance(dz_publisher_runtime::LISTING_POLL);
+    assert!(h.publisher.poll_listings(&mut second));
 
     h.publisher.shut_down(Exit::Signal);
 
@@ -614,9 +628,10 @@ fn every_channel_instances_final_manifest_carries_its_own_shards_published_set()
     }
     assert_eq!(
         counts,
-        [(1, 1), (1, 1), (3, 3), (3, 3)],
+        [(1, 1), (1, 1), (4, 2), (4, 2)],
         "each channel instance's final manifest must describe its own shard's published set: one \
-         instrument and one change on the first shard, three of each on the second"
+         instrument and one change on the first shard, four instruments and two changes on the \
+         second"
     );
 }
 
