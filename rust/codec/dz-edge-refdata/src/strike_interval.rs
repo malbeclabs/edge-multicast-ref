@@ -162,8 +162,10 @@ impl AppMessage for StrikeInterval {
     const PORT_ROLES: &'static [PortRole] = &[PortRole::Refdata];
 
     /// Refuses what [`StrikeInterval::defect`] names, where it is written. A
-    /// publisher that sent it would state a strike every conformance run reports
-    /// and no subscriber can price against.
+    /// subscriber could still read most of it, by the one rule it applies to
+    /// every `Bound Flags` value, which is why `decode` lets it through. But a
+    /// publisher that sent it would break a rule of its own, and every
+    /// conformance run would report it.
     fn validate(&self) -> Result<(), EncodeError> {
         match self.defect() {
             Some(what) => Err(EncodeError::MalformedMessage {
