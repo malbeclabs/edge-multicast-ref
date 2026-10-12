@@ -267,6 +267,63 @@ impl<F: Feed> DatagramBuilder<F> {
         self.push_with_flags(msg, flags)
     }
 
+    /// Append two messages that must share a datagram, or neither.
+    ///
+    /// For a pair a specification forbids dividing: the second is read against
+    /// the first, so one of them alone in a datagram says something the
+    /// publisher did not mean. `push` twice cannot hold that. Its second call
+    /// fails on a full datagram with the first message already in it, and the
+    /// caller that then finishes the datagram has divided the pair.
+    ///
+    /// Everything `push` would refuse about either message is refused here
+    /// before either is written, so on `Err` the builder is unchanged, as it is
+    /// for `push`. A caller may finish the datagram and retry the pair on a
+    /// fresh one; a pair no datagram can hold fails there too.
+    ///
+    /// # Errors
+    ///
+    /// What [`push`](Self::push) returns for either message, with
+    /// [`EncodeError::DatagramFull`] and
+    /// [`EncodeError::MessageCountExhausted`] judged for the two together.
+    pub fn push_pair<A: AppMessage, B: AppMessage>(
+        &mut self,
+        first: &A,
+        second: &B,
+    ) -> Result<(), EncodeError> {
+        self.sendable(first)?;
+        self.sendable(second)?;
+        if self.msg_count > u8::MAX - 2 {
+            return Err(EncodeError::MessageCountExhausted { max: u8::MAX });
+        }
+        if A::SIZE + B::SIZE > self.remaining() {
+            return Err(EncodeError::DatagramFull {
+                attempted: self.buf.len() + A::SIZE + B::SIZE,
+                capacity: self.capacity,
+            });
+        }
+        self.push(first)?;
+        self.push(second)
+    }
+
+    /// Whether this feed, this message's own rules and this port role permit
+    /// it: every refusal of `push` that is not about room.
+    fn sendable<M: AppMessage>(&self, msg: &M) -> Result<(), EncodeError> {
+        if !F::carries(M::TYPE_ID) {
+            return Err(EncodeError::NotCarriedByFeed {
+                feed: F::NAME,
+                type_id: M::TYPE_ID,
+            });
+        }
+        msg.validate()?;
+        if !M::PORT_ROLES.contains(&self.port_role) {
+            return Err(EncodeError::WrongPortRole {
+                message: core::any::type_name::<M>(),
+                role: self.port_role.as_str(),
+            });
+        }
+        Ok(())
+    }
+
     fn push_with_flags<M: AppMessage>(&mut self, msg: &M, flags: u16) -> Result<(), EncodeError> {
         // `SIZE` includes the 4-byte message header, so anything smaller is a broken
         // `AppMessage` impl rather than a runtime condition. `M::SIZE` is an associated
