@@ -6,7 +6,10 @@
 //! match code that started failing.
 
 use dz_edge_core::{AppMessage, SCHEMA_VERSION, SCHEMA_VERSION_V1};
-use dz_edge_refdata::{InstrumentDefinition, ManifestSummary, LEG_LEN, SIZE_V1, SYMBOL_LEN};
+use dz_edge_refdata::{
+    InstrumentDefinition, ManifestSummary, StrikeInterval, BOUND_LOWER_INCLUSIVE,
+    BOUND_LOWER_PRESENT, BOUND_UPPER_PRESENT, LEG_LEN, SIZE_V1, SYMBOL_LEN,
+};
 use std::path::PathBuf;
 
 fn golden(name: &str) -> Vec<u8> {
@@ -53,6 +56,21 @@ fn canonical_manifest_summary() -> ManifestSummary {
         manifest_seq: 9,
         instrument_count: 1234,
         timestamp_ns: 1_700_000_000_000_000_002,
+    }
+}
+
+/// The canonical StrikeInterval: "at or above 92,700.00 and below 92,799.99". The
+/// two ends differ in value and in whether they are inclusive, so neither bound
+/// nor either inclusive bit can be transposed and pass.
+fn canonical_strike_interval() -> StrikeInterval {
+    StrikeInterval {
+        instrument_id: 1,
+        source_id: 2,
+        strike_exponent: -2,
+        bound_flags: BOUND_LOWER_PRESENT | BOUND_LOWER_INCLUSIVE | BOUND_UPPER_PRESENT,
+        lower_bound: 9_270_000,
+        upper_bound: 9_279_999,
+        fixing_time_ns: 1_700_000_000_000_000_003,
     }
 }
 
@@ -118,6 +136,21 @@ fn manifest_summary_golden_vector_decodes_to_canonical_values() {
     assert_eq!(
         ManifestSummary::decode(&golden("manifest-summary-v3.bin")).unwrap(),
         canonical_manifest_summary()
+    );
+}
+
+#[test]
+fn strike_interval_matches_its_golden_vector() {
+    let mut b = [0u8; StrikeInterval::SIZE];
+    canonical_strike_interval().encode_into(&mut b);
+    assert_eq!(b.to_vec(), golden("strike-interval-v3.bin"));
+}
+
+#[test]
+fn strike_interval_golden_vector_decodes_to_canonical_values() {
+    assert_eq!(
+        StrikeInterval::decode(&golden("strike-interval-v3.bin")).unwrap(),
+        canonical_strike_interval()
     );
 }
 
@@ -318,6 +351,18 @@ fn manifest_summary_rows(m: &ManifestSummary) -> Vec<(&'static str, i64)> {
     ]
 }
 
+fn strike_interval_rows(s: &StrikeInterval) -> Vec<(&'static str, i64)> {
+    vec![
+        ("instrument_id", i64::from(s.instrument_id)),
+        ("source_id", i64::from(s.source_id)),
+        ("strike_exponent", i64::from(s.strike_exponent)),
+        ("bound_flags", i64::from(s.bound_flags)),
+        ("lower_bound", s.lower_bound),
+        ("upper_bound", s.upper_bound),
+        ("fixing_time_ns", s.fixing_time_ns as i64),
+    ]
+}
+
 #[test]
 fn the_manifest_states_the_canonical_definition_at_schema_3() {
     let d = canonical_definition_v3();
@@ -356,6 +401,17 @@ fn the_manifest_states_the_canonical_manifest_summary() {
         ManifestSummary::SIZE,
         SCHEMA_VERSION,
         &manifest_summary_rows(&canonical_manifest_summary()),
+        &[],
+    );
+}
+
+#[test]
+fn the_manifest_states_the_canonical_strike_interval() {
+    manifest_states::<StrikeInterval>(
+        "strike-interval-v3.bin",
+        StrikeInterval::SIZE,
+        SCHEMA_VERSION,
+        &strike_interval_rows(&canonical_strike_interval()),
         &[],
     );
 }

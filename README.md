@@ -41,7 +41,7 @@ Crates a publisher depends on from its own repository — by git tag, which [REL
 |---|---|
 | [`dz-edge-core`](rust/codec/dz-edge-core/) | Datagram and message headers, sequencing, receive-side walk, decimal conversion |
 | [`dz-edge-tob`](rust/codec/dz-edge-tob/) | Top-of-Book: `Quote`, `Trade` |
-| [`dz-edge-refdata`](rust/codec/dz-edge-refdata/) | Reference data: `InstrumentDefinition`, `ManifestSummary` |
+| [`dz-edge-refdata`](rust/codec/dz-edge-refdata/) | Reference data: `InstrumentDefinition`, `ManifestSummary`, `StrikeInterval` |
 | [`dz-edge-mbp`](rust/codec/dz-edge-mbp/) | Market-by-Price, the first depth feed: `LevelUpdate`, `BookClear`, and the three snapshot messages |
 | [`dz-publisher-metrics`](rust/publisher/dz-publisher-metrics/) | The normative `dz_publisher_*` Prometheus set |
 

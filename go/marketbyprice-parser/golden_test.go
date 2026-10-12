@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/malbeclabs/edge-multicast-ref/go/internal/golden"
 )
@@ -143,9 +144,9 @@ type goldenVector struct {
 
 // goldenVectors is every vector this parser reads: its own five depth messages,
 // the four the family shares, and the five the shared lowering produced from a
-// normalized event. The one it does not read is quote-v3.bin, which this feed
-// has no message type for — goldenVectorsReadElsewhere names it and the suite
-// that does.
+// normalized event. The two it does not read are quote-v3.bin, which this feed
+// has no message type for, and strike-interval-v3.bin, which it skips by its
+// length — goldenVectorsReadElsewhere names each and the suite that reads it.
 func goldenVectors() []goldenVector {
 	return append(goldenDepthVectors(), append(goldenSharedVectors(), goldenLoweredVectors()...)...)
 }
@@ -538,13 +539,14 @@ func TestGoldenManifestStatesWhatTheseCasesAssert(t *testing.T) {
 // goldenVectorsReadElsewhere names the vectors the manifest carries that this
 // parser has no message type for, and the suite that reads each.
 //
-// This parser decodes fourteen of the fifteen, which makes it the one place a
+// This parser decodes fourteen of the sixteen, which makes it the one place a
 // vector nobody reads can be noticed at all. That is what the list is for: a
 // vector no suite reads and no document mentions is invisible rather than
 // merely unbound, and it stays that way until someone counts the files by
 // hand.
 var goldenVectorsReadElsewhere = map[string]string{
-	"quote-v3.bin": "go/topofbook-parser's tob.TestGoldenQuote; market-by-price carries no Quote",
+	"quote-v3.bin":           "go/topofbook-parser's tob.TestGoldenQuote; market-by-price carries no Quote",
+	"strike-interval-v3.bin": "rust/codec/dz-edge-refdata's tests/golden.rs; this parser has no decoder for StrikeInterval and skips it by its length",
 }
 
 // TestGoldenManifestHasNoVectorNobodyReads holds the corpus to being wholly
@@ -579,4 +581,44 @@ func TestGoldenManifestHasNoVectorNobodyReads(t *testing.T) {
 	// Every loop above walks the manifest, so a `.bin` committed with no row
 	// is bound by nothing in either language and fails nothing without this.
 	golden.RequireEveryVectorIsStated(t, goldenDir, stated)
+}
+
+// TestParseDatagramSkipsTheStrikeIntervalVector is the walk past the one vector
+// this parser does not decode, on the datagram a publisher sends it in: the
+// reference-data supplement puts a StrikeInterval directly behind its
+// InstrumentDefinition. The definition before it and the ManifestSummary after
+// it are the golden vectors too, so the three are real messages at their real
+// lengths, and the summary decoding is what shows the walk resumed at the right
+// byte and not merely that it did not fail.
+func TestParseDatagramSkipsTheStrikeIntervalVector(t *testing.T) {
+	definition := goldenBytes(t, "instrument-definition-v3.bin")
+	strike := goldenBytes(t, "strike-interval-v3.bin")
+	summary := goldenBytes(t, "manifest-summary-v3.bin")
+	if strike[0] != 0x09 || len(strike) != 40 || int(strike[1]) != len(strike) {
+		t.Fatalf("strike-interval-v3.bin is not a 40-byte 0x09 message: type 0x%02x, %d bytes, declares %d", strike[0], len(strike), strike[1])
+	}
+
+	total := datagramHeaderSize + len(definition) + len(strike) + len(summary)
+	datagram := buildDatagramHeader(mbpMagic, mbpSchemaVersionV3, 7, 1, time.Unix(1700000300, 0), 3, 0, uint16(total))
+	datagram = append(datagram, definition...)
+	datagram = append(datagram, strike...)
+	datagram = append(datagram, summary...)
+
+	p := &marketByPriceParser{}
+	recs, defects, err := p.ParseDatagram("refdata", datagram)
+	if err != nil {
+		t.Fatalf("a datagram carrying a StrikeInterval failed to parse: %v", err)
+	}
+	if len(recs) != 2 {
+		t.Fatalf("got %d records, want the definition and the summary: %+v", len(recs), recs)
+	}
+	if recs[0].Type != "instrument_definition" || recs[1].Type != "manifest_summary" {
+		t.Fatalf("record types %q, %q: the walk did not resume behind the strike", recs[0].Type, recs[1].Type)
+	}
+	// Counted as it is today: a Type ID this parser does not implement. A valid
+	// StrikeInterval is not a publisher defect, and the count stops being right
+	// once a publisher sends them; edge-multicast-ref#199 item 6 owns that.
+	if defects.UnknownType != 1 {
+		t.Errorf("UnknownType = %d, want 1 for the skipped StrikeInterval", defects.UnknownType)
+	}
 }
