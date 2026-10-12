@@ -470,3 +470,106 @@ fn port_role_returns_what_was_passed() {
     let b = DatagramBuilder::<TestFeed>::new(channel, PortRole::Refdata, 1232);
     assert_eq!(b.port_role(), PortRole::Refdata);
 }
+
+// ---------------------------------------------------------------------------
+// push_pair: two messages, or neither
+// ---------------------------------------------------------------------------
+//
+// Each case below is one where the first message is acceptable on its own and
+// the second is not, so the first is written and has to be taken back out. A
+// `push_pair` that left it there would hand the caller a datagram ending on the
+// first half of a pair.
+
+/// What a builder holds, as a caller can observe it.
+fn held(b: &DatagramBuilder<TestFeed>) -> (usize, bool) {
+    (b.remaining(), b.is_empty())
+}
+
+#[test]
+fn a_pair_is_two_messages_in_the_order_given() {
+    let channel = ChannelSequence::new(0, ResetCount(0));
+    let mut b = DatagramBuilder::<TestFeed>::new(channel, PortRole::Mktdata, 1232);
+    b.push_pair(&Sixteen, &HeaderOnly).unwrap();
+    let out = b.finish(0).expect("datagram has messages");
+    assert_eq!(out[20], 2, "offset 20: Message Count");
+    assert_eq!(out.len(), DATAGRAM_HEADER_SIZE + 16 + 4);
+    assert_eq!(
+        out[DATAGRAM_HEADER_SIZE + 1],
+        16,
+        "the first message's Length"
+    );
+    assert_eq!(out[DATAGRAM_HEADER_SIZE + 16 + 1], 4, "the second's");
+}
+
+#[test]
+fn a_pair_whose_second_message_does_not_fit_leaves_the_builder_as_it_was() {
+    // 24 bytes of room: one 16-byte message fits and two do not.
+    let channel = ChannelSequence::new(0, ResetCount(0));
+    let mut b = DatagramBuilder::<TestFeed>::new(channel, PortRole::Mktdata, 24 + 16 + 24);
+    b.push(&Sixteen).unwrap();
+    let before = held(&b);
+    assert_eq!(before.0, 24);
+
+    assert_eq!(
+        b.push_pair(&Sixteen, &Sixteen),
+        Err(EncodeError::DatagramFull {
+            attempted: 24 + 16 + 32,
+            capacity: 24 + 16 + 24,
+        })
+    );
+    assert_eq!(held(&b), before, "the first of the pair was taken back out");
+
+    // And the room it gave back is usable.
+    b.push(&Sixteen).unwrap();
+    let out = b.finish(0).expect("datagram has messages");
+    assert_eq!(out[20], 2, "offset 20: Message Count");
+    assert_eq!(out.len(), 24 + 32);
+}
+
+#[test]
+fn a_pair_whose_second_message_the_port_role_refuses_writes_neither() {
+    // On the snapshot role `Sixteen` may be sent and `HeaderOnly` may not.
+    let channel = ChannelSequence::new(0, ResetCount(0));
+    let mut b = DatagramBuilder::<TestFeed>::new(channel, PortRole::Snapshot, 1232);
+    b.push(&Sixteen).unwrap();
+    let before = held(&b);
+
+    assert!(matches!(
+        b.push_pair(&Sixteen, &HeaderOnly),
+        Err(EncodeError::WrongPortRole { .. })
+    ));
+    assert_eq!(held(&b), before);
+    let out = b.finish(0).expect("datagram has messages");
+    assert_eq!(out[20], 1, "offset 20: Message Count");
+    assert_eq!(out.len(), DATAGRAM_HEADER_SIZE + 16);
+}
+
+#[test]
+fn a_pair_that_would_be_the_256th_message_writes_neither() {
+    let channel = ChannelSequence::new(0, ResetCount(0));
+    let mut b = DatagramBuilder::<TestFeed>::new(channel, PortRole::Mktdata, 1232);
+    for _ in 0..253 {
+        b.push(&HeaderOnly).unwrap();
+    }
+    // 253 held: a pair makes 255, which the u8 Message Count can state.
+    b.push_pair(&HeaderOnly, &HeaderOnly).unwrap();
+    assert!(matches!(
+        b.push(&HeaderOnly),
+        Err(EncodeError::MessageCountExhausted { max: 255 })
+    ));
+
+    let mut b = DatagramBuilder::<TestFeed>::new(channel, PortRole::Mktdata, 1232);
+    for _ in 0..254 {
+        b.push(&HeaderOnly).unwrap();
+    }
+    // 254 held: the first of a pair is the 255th and the second has no number.
+    let before = held(&b);
+    assert_eq!(
+        b.push_pair(&HeaderOnly, &HeaderOnly),
+        Err(EncodeError::MessageCountExhausted { max: 255 })
+    );
+    assert_eq!(held(&b), before);
+    let out = b.finish(0).expect("datagram has messages");
+    assert_eq!(out[20], 254, "offset 20: Message Count");
+    assert_eq!(out.len(), DATAGRAM_HEADER_SIZE + 254 * 4);
+}

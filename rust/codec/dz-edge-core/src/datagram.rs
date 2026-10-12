@@ -275,51 +275,29 @@ impl<F: Feed> DatagramBuilder<F> {
     /// fails on a full datagram with the first message already in it, and the
     /// caller that then finishes the datagram has divided the pair.
     ///
-    /// Everything `push` would refuse about either message is refused here
-    /// before either is written, so on `Err` the builder is unchanged, as it is
-    /// for `push`. A caller may finish the datagram and retry the pair on a
-    /// fresh one; a pair no datagram can hold fails there too.
+    /// On `Err` the builder is unchanged, as it is for `push`: whatever the
+    /// second message is refused for, the first is taken back out. That is
+    /// done by restoring the builder and not by checking both messages ahead of
+    /// writing either, so there is no second copy of `push`'s refusals here to
+    /// fall out of step with it. A caller may finish the datagram and retry the
+    /// pair on a fresh one; a pair no datagram can hold fails there too.
     ///
     /// # Errors
     ///
-    /// What [`push`](Self::push) returns for either message, with
-    /// [`EncodeError::DatagramFull`] and
-    /// [`EncodeError::MessageCountExhausted`] judged for the two together.
+    /// What [`push`](Self::push) returns for either message. A pair that does
+    /// not fit is [`EncodeError::DatagramFull`] with the size the two would
+    /// have brought the datagram to.
     pub fn push_pair<A: AppMessage, B: AppMessage>(
         &mut self,
         first: &A,
         second: &B,
     ) -> Result<(), EncodeError> {
-        self.sendable(first)?;
-        self.sendable(second)?;
-        if self.msg_count > u8::MAX - 2 {
-            return Err(EncodeError::MessageCountExhausted { max: u8::MAX });
-        }
-        if A::SIZE + B::SIZE > self.remaining() {
-            return Err(EncodeError::DatagramFull {
-                attempted: self.buf.len() + A::SIZE + B::SIZE,
-                capacity: self.capacity,
-            });
-        }
+        let (len, msg_count) = (self.buf.len(), self.msg_count);
         self.push(first)?;
-        self.push(second)
-    }
-
-    /// Whether this feed, this message's own rules and this port role permit
-    /// it: every refusal of `push` that is not about room.
-    fn sendable<M: AppMessage>(&self, msg: &M) -> Result<(), EncodeError> {
-        if !F::carries(M::TYPE_ID) {
-            return Err(EncodeError::NotCarriedByFeed {
-                feed: F::NAME,
-                type_id: M::TYPE_ID,
-            });
-        }
-        msg.validate()?;
-        if !M::PORT_ROLES.contains(&self.port_role) {
-            return Err(EncodeError::WrongPortRole {
-                message: core::any::type_name::<M>(),
-                role: self.port_role.as_str(),
-            });
+        if let Err(refused) = self.push(second) {
+            self.buf.truncate(len);
+            self.msg_count = msg_count;
+            return Err(refused);
         }
         Ok(())
     }

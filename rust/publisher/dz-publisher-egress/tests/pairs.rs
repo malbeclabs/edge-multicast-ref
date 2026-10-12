@@ -106,14 +106,23 @@ fn types(datagram: &[u8]) -> Vec<u8> {
     out
 }
 
-/// No datagram ends on a definition whose strike opens the next one, and none
-/// starts with a strike.
-fn assert_no_pair_is_divided(sent: &[Vec<u8>], strikes: usize) {
+/// No datagram ends on a definition whose strike opens the next one, none
+/// starts with a strike, and every message packed was sent once.
+///
+/// The definitions are counted as well as the strikes. A builder that wrote a
+/// pair's definition before refusing its strike would send that definition
+/// alone at the end of one datagram and the whole pair again in the next, and
+/// counting strikes alone does not see it.
+fn assert_no_pair_is_divided(sent: &[Vec<u8>], definitions: usize, strikes: usize) {
     let mut seen = 0;
+    let mut defined = 0;
     for datagram in sent {
         let types = types(datagram);
         assert_ne!(types[0], TYPE_STRIKE, "a datagram starts with a strike");
         for (index, type_id) in types.iter().enumerate() {
+            if *type_id == TYPE_DEFINITION {
+                defined += 1;
+            }
             if *type_id == TYPE_STRIKE {
                 seen += 1;
                 assert_eq!(
@@ -125,6 +134,7 @@ fn assert_no_pair_is_divided(sent: &[Vec<u8>], strikes: usize) {
         }
     }
     assert_eq!(seen, strikes, "a strike was lost or sent twice");
+    assert_eq!(defined, definitions, "a definition was lost or sent twice");
 }
 
 #[test]
@@ -173,7 +183,7 @@ fn a_pair_whose_strike_would_not_fit_moves_whole_to_the_next_datagram() {
     assert_eq!(sent.len(), 2);
     assert_eq!(sent[0].len(), 1094, "finished with room for a definition");
     assert_eq!(types(&sent[1]), [TYPE_DEFINITION, TYPE_STRIKE]);
-    assert_no_pair_is_divided(&sent, 5);
+    assert_no_pair_is_divided(&sent, 3 + 5, 5);
 }
 
 #[test]
@@ -184,13 +194,16 @@ fn a_mixed_set_never_ends_a_datagram_between_a_definition_and_its_strike() {
     // Every arrangement of bare definitions and pairs up to a few datagrams'
     // worth, so that each remainder a datagram can be left with is met.
     let mut strikes = 0;
+    let mut definitions = 0;
     for round in 0..40 {
         for _ in 0..(round % 4) {
             bare(&mut egress);
+            definitions += 1;
         }
         for _ in 0..(1 + round % 3) {
             pair(&mut egress);
             strikes += 1;
+            definitions += 1;
         }
     }
     egress.flush(7, 0).expect("the tail datagram");
@@ -200,7 +213,7 @@ fn a_mixed_set_never_ends_a_datagram_between_a_definition_and_its_strike() {
     for datagram in &sent {
         assert!(datagram.len() <= 1232);
     }
-    assert_no_pair_is_divided(&sent, strikes);
+    assert_no_pair_is_divided(&sent, definitions, strikes);
 }
 
 #[test]
