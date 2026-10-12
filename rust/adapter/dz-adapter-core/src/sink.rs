@@ -12,6 +12,7 @@
 use crate::event::{Desync, Event, Side};
 use crate::instrument::{InstrumentRef, InstrumentSpec};
 use crate::scalar::Scalar;
+use crate::strike::Strike;
 
 /// Where market events go.
 pub trait EventSink {
@@ -326,6 +327,38 @@ pub trait ListingSink {
     /// does not reuse its `Instrument ID`: a subscriber holding a book keyed on
     /// one must never find it pointing at something else.
     fn delist(&mut self, instrument: InstrumentRef);
+
+    /// State the strike of an instrument this sink admitted, for a contract
+    /// that pays on one.
+    ///
+    /// Called after [`list_on`](Self::list_on) with the handle it returned, in
+    /// the same poll: the first statement has to arrive before the
+    /// instrument's definition is first published, because a subscriber reads
+    /// *has a strike* off the datagram that carries the definition and the
+    /// answer may not change afterwards. An instrument first stated
+    /// [`Strike::Pending`] and later [`Strike::Fixed`] is the ordinary life of
+    /// one whose venue fixes the strike after listing, and the runtime
+    /// publishes the fixed strike as soon as it is stated, without waiting for
+    /// the instrument's place in the definition cycle.
+    ///
+    /// Stating the same strike again is free, so an adapter that re-offers its
+    /// whole set each poll states its strikes each poll too.
+    ///
+    /// Three statements are refused, counted, and leave what is published as
+    /// it was: a strike for an instrument already published without one, a
+    /// fixed strike returned to pending, and a value the wire cannot carry.
+    /// None of them is reported here, for the reason `list_on` reports none: a
+    /// venue can act on none of them.
+    ///
+    /// # Defaulted, and what that costs
+    ///
+    /// A sink that does not implement this drops the strike, which for a test
+    /// double and for a reader that keeps no strikes is the right behaviour,
+    /// and is why adding the method breaks no implementor. It is the opposite
+    /// trade from `list_on`, deliberately: an implementor that ignores a shard
+    /// publishes instruments on the wrong channel, while one that ignores a
+    /// strike publishes everything it published before.
+    fn strike(&mut self, _instrument: InstrumentRef, _strike: &Strike<'_>) {}
 }
 
 /// Where an adapter writes the book it holds, when asked for a snapshot.

@@ -68,6 +68,7 @@ pub mod refusal;
 pub mod registry;
 pub mod state;
 pub mod store;
+pub mod strike;
 
 pub use clock::{Clock, ManualClock, SystemClock};
 pub use definition::{compose, symbol_field, Composition, Fits};
@@ -76,6 +77,8 @@ pub use file_store::FileStore;
 pub use pacer::{definitions_per_datagram, CycleSchedule, DefinitionPacer, LAP_PERCENT};
 pub use policy::{Phase, PolicyError, SelectionPolicy};
 pub use refusal::Refusal;
-pub use registry::{Counts, Registry, RegistryConfig, ShardConfig, COMPACTION_FLOOR};
+pub use registry::{
+    Counts, PublishedDefinition, Registry, RegistryConfig, ShardConfig, COMPACTION_FLOOR,
+};
 pub use state::{encode_line, Entry, Loaded, RecordError, StateRecord, FIRST_INSTRUMENT_ID};
 pub use store::{MemoryStore, StateError, StateStore};

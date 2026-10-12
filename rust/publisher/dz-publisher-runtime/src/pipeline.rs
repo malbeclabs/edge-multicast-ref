@@ -51,11 +51,12 @@ use std::time::Duration;
 
 use dz_edge_core::{AppMessage, EndOfSession, Heartbeat, PortRole, ResetCount, MAX_DATAGRAM_SIZE};
 use dz_edge_mbp::{BookClear, InstrumentReset, LevelUpdate};
-use dz_edge_refdata::{InstrumentDefinition, ManifestSummary};
+use dz_edge_refdata::ManifestSummary;
 use dz_edge_tob::{Quote, Trade};
 use dz_publisher_egress::{ChannelEgress, EgressEndpoint, EgressError, RouteState, Tee};
 use dz_publisher_lowering::Snapshot;
 use dz_publisher_metrics::{EgressMessageType, EventKind, PublisherMetrics};
+use dz_publisher_refdata::PublishedDefinition;
 
 use crate::config::{EmittedFeed, Feed, FeedSpec, ShardName};
 
@@ -507,7 +508,13 @@ impl<F: EmittedFeed> FeedPipeline<F> {
         )
     }
 
-    /// One `0x02 InstrumentDefinition`, packed onto the refdata port.
+    /// One `0x02 InstrumentDefinition`, packed onto the refdata port, with the
+    /// `0x09 StrikeInterval` that follows it where the instrument has a strike.
+    ///
+    /// **The two enter one datagram or neither does.** The supplement allows a
+    /// strike only directly behind its definition, so a datagram that has room
+    /// for the definition and not for the pair is sent first and the pair
+    /// starts the next.
     ///
     /// **Packed and not flushed.** The definition cycle's whole point is that a
     /// lap is spread across the cycle rather than emitted as a burst, and the
@@ -521,15 +528,23 @@ impl<F: EmittedFeed> FeedPipeline<F> {
     /// As [`send_quote`](Self::send_quote).
     pub fn pack_definition(
         &mut self,
-        definition: &InstrumentDefinition,
+        entry: &PublishedDefinition,
         send_ts_ns: u64,
     ) -> Result<(), EgressError> {
-        self.refdata.push(
-            self.channel_id,
-            definition,
-            EgressMessageType::InstrumentDefinition,
-            send_ts_ns,
-        )
+        match &entry.strike {
+            None => self.refdata.push(
+                self.channel_id,
+                &entry.definition,
+                EgressMessageType::InstrumentDefinition,
+                send_ts_ns,
+            ),
+            Some(strike) => self.refdata.push_pair(
+                self.channel_id,
+                (&entry.definition, EgressMessageType::InstrumentDefinition),
+                (strike, EgressMessageType::StrikeInterval),
+                send_ts_ns,
+            ),
+        }
     }
 
     /// One `0x07 ManifestSummary`, sent.
@@ -543,14 +558,33 @@ impl<F: EmittedFeed> FeedPipeline<F> {
         now_mono_ns: u64,
         send_ts_ns: u64,
     ) -> Result<(), EgressError> {
+        self.pack_manifest(manifest, now_mono_ns, send_ts_ns)?;
+        self.refdata.flush(self.channel_id, send_ts_ns)
+    }
+
+    /// One `0x07 ManifestSummary`, packed ahead of what the caller packs next.
+    ///
+    /// For the definitions a changed strike owes at once. They carry the
+    /// `Manifest Seq` the channel already has, and a subscriber that has not
+    /// been told that sequence discards them, so the summary stating it leads
+    /// the same datagram. It counts as the cadence's summary too.
+    ///
+    /// # Errors
+    ///
+    /// As [`send_quote`](Self::send_quote).
+    pub fn pack_manifest(
+        &mut self,
+        manifest: &ManifestSummary,
+        now_mono_ns: u64,
+        send_ts_ns: u64,
+    ) -> Result<(), EgressError> {
         self.next_manifest_ns = Some(now_mono_ns.saturating_add(self.manifest_cadence_ns));
         self.refdata.push(
             self.channel_id,
             manifest,
             EgressMessageType::ManifestSummary,
             send_ts_ns,
-        )?;
-        self.refdata.flush(self.channel_id, send_ts_ns)
+        )
     }
 
     /// Send whatever is still open on any port role.

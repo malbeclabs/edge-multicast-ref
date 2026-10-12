@@ -195,7 +195,10 @@ fn one_lap_covers_every_published_instrument_exactly_once() {
     for _ in 0..24 {
         clock.advance(Duration::from_secs(1));
         registry.definition_tick(DEFAULT_SHARD, &mut out);
-        seen.extend(out.iter().map(|definition| definition.instrument_id));
+        seen.extend(
+            out.iter()
+                .map(|definition| definition.definition.instrument_id),
+        );
     }
 
     seen.sort_unstable();
@@ -295,7 +298,7 @@ fn an_emitted_definition_carries_the_manifest_it_belongs_to() {
     assert_eq!(out.len(), 2);
     for definition in &out {
         assert_eq!(
-            definition.manifest_seq,
+            definition.definition.manifest_seq,
             registry
                 .manifest_seq(DEFAULT_SHARD)
                 .expect("the default shard")
@@ -310,7 +313,7 @@ fn an_emitted_definition_carries_the_manifest_it_belongs_to() {
     registry.definition_tick(DEFAULT_SHARD, &mut out);
     assert!(!out.is_empty());
     for definition in &out {
-        assert_eq!(definition.manifest_seq, after);
+        assert_eq!(definition.definition.manifest_seq, after);
     }
 }
 
@@ -511,7 +514,10 @@ fn one_lap_of_one_shards_cycle_covers_that_shard_and_none_of_the_other() {
     for _ in 0..24 {
         clock.advance(Duration::from_secs(1));
         registry.definition_tick(ALPHA, &mut out);
-        seen.extend(out.iter().map(|definition| definition.instrument_id));
+        seen.extend(
+            out.iter()
+                .map(|definition| definition.definition.instrument_id),
+        );
     }
 
     seen.sort_unstable();
@@ -531,7 +537,10 @@ fn one_lap_of_one_shards_cycle_covers_that_shard_and_none_of_the_other() {
     for _ in 0..24 {
         clock.advance(Duration::from_secs(1));
         registry.definition_tick(BETA, &mut out);
-        others.extend(out.iter().map(|definition| definition.instrument_id));
+        others.extend(
+            out.iter()
+                .map(|definition| definition.definition.instrument_id),
+        );
     }
     others.sort_unstable();
     assert_eq!(others, (25..=48).collect::<Vec<u32>>());
@@ -589,12 +598,12 @@ fn a_definition_carries_its_own_shards_manifest_and_not_another_shards() {
 
     registry.definition_tick(ALPHA, &mut out);
     assert_eq!(out.len(), 1);
-    assert_eq!(out[0].manifest_seq, alpha);
+    assert_eq!(out[0].definition.manifest_seq, alpha);
 
     registry.definition_tick(BETA, &mut out);
     assert_eq!(out.len(), 3);
     for definition in &out {
-        assert_eq!(definition.manifest_seq, beta);
+        assert_eq!(definition.definition.manifest_seq, beta);
     }
 
     // And the same instrument asked for on its own, which is the path a new

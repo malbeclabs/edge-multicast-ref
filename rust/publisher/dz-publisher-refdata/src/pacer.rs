@@ -47,6 +47,7 @@ pub struct CycleSchedule {
     cycle_ns: u64,
     definitions_per_datagram: usize,
     max_datagrams_per_tick: usize,
+    payload_per_datagram: usize,
 }
 
 impl CycleSchedule {
@@ -68,7 +69,52 @@ impl CycleSchedule {
             // Zero would be a cycle that never emits; one datagram a tick is
             // the smallest schedule that makes progress.
             max_datagrams_per_tick: max_datagrams_per_tick.max(1),
+            payload_per_datagram: (mtu as usize).clamp(DATAGRAM_HEADER_SIZE, MAX_DATAGRAM_SIZE)
+                - DATAGRAM_HEADER_SIZE,
         }
+    }
+
+    /// How many of these messages one tick's datagrams hold, in this order,
+    /// where each is the size of a definition and of whatever must share its
+    /// datagram.
+    ///
+    /// [`max_definitions_per_tick`](Self::max_definitions_per_tick) counts
+    /// bare definitions, and a definition that carries a strike is a larger
+    /// message that may not be divided: seven fit where nine did. Paced by the
+    /// count alone, a tick of such a set would spill into a datagram the
+    /// schedule did not allow it. This packs them as the egress does, an entry
+    /// that does not fit starting the next datagram, and stops when the tick's
+    /// datagrams are spent.
+    ///
+    /// At least one, for a non-empty input, for the reason
+    /// [`definitions_per_datagram`] gives: a tick that can never emit is a
+    /// silent feed.
+    #[must_use]
+    pub fn fitting(&self, sizes: impl IntoIterator<Item = usize>) -> usize {
+        let mut fitted = 0;
+        let mut datagrams = 1;
+        let mut room = self.payload_per_datagram;
+        for size in sizes {
+            if fitted == self.max_definitions_per_tick() {
+                break;
+            }
+            if size > room {
+                if fitted == 0 {
+                    return 1;
+                }
+                if datagrams == self.max_datagrams_per_tick {
+                    break;
+                }
+                datagrams += 1;
+                room = self.payload_per_datagram;
+                if size > room {
+                    break;
+                }
+            }
+            room -= size;
+            fitted += 1;
+        }
+        fitted
     }
 
     /// The lap length: [`LAP_PERCENT`] of the cycle period.
@@ -147,6 +193,16 @@ impl DefinitionPacer {
     /// published set in one call for a set larger than that — which is the rule
     /// this type exists to keep, and the thing to assert about it.
     pub fn due(&mut self, now_ns: u64, published: usize) -> usize {
+        self.due_at_most(now_ns, published, usize::MAX)
+    }
+
+    /// [`due`](Self::due), and never more than `ceiling`.
+    ///
+    /// For a caller that knows how many of the definitions next in line its
+    /// tick can hold, which the count alone does not say once some carry a
+    /// strike. What the ceiling holds back stays owed, exactly as what
+    /// [`CycleSchedule::max_definitions_per_tick`] holds back does.
+    pub fn due_at_most(&mut self, now_ns: u64, published: usize, ceiling: usize) -> usize {
         if published == 0 {
             // Not a stalled lap: there is nothing to lap. The next admission
             // starts a lap from that moment, rather than inheriting a partly
@@ -168,7 +224,8 @@ impl DefinitionPacer {
 
         let due = owed
             .saturating_sub(self.emitted_this_lap)
-            .min(self.schedule.max_definitions_per_tick());
+            .min(self.schedule.max_definitions_per_tick())
+            .min(ceiling);
         self.emitted_this_lap += due;
 
         if self.emitted_this_lap >= published {

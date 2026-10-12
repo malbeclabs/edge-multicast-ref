@@ -111,6 +111,43 @@ pub enum Refusal {
     #[error("a different shard was named for a published instrument")]
     ShardRestated,
 
+    /// A stated strike cannot be carried: a bound that is not a decimal or does
+    /// not fit, or a fixed strike with neither bound.
+    ///
+    /// What the instrument publishes is unchanged. An instrument whose first
+    /// stated strike is refused is published without one, which a subscriber
+    /// reads as a contract that pays on no strike; that is wrong, and it is the
+    /// lesser wrong. Withdrawing a live book over a strike would end an
+    /// instrument the venue is still trading, and a pending strike in its place
+    /// would promise a value this publisher cannot send.
+    #[error("the stated strike cannot be represented")]
+    StrikeUnrepresentable,
+
+    /// A stated strike is an interval no value is inside: a lower bound above
+    /// the upper one, or equal bounds with an exclusive end. The contract could
+    /// never pay, so the statement is refused rather than published.
+    #[error("the stated strike is an empty interval")]
+    StrikeEmpty,
+
+    /// A strike that was published as fixed was restated as pending.
+    ///
+    /// The supplement forbids it: after a fixed `StrikeInterval`, each later
+    /// one for the instrument in the era is fixed. The published strike stands.
+    /// A venue that has genuinely withdrawn a strike has ended the contract it
+    /// defined, which is a delisting.
+    #[error("a fixed strike was restated as pending")]
+    StrikeUnfixed,
+
+    /// A strike was stated for an instrument already published without one.
+    ///
+    /// Whether an instrument has a strike is read off the datagram that carries
+    /// its definition, from the first one, and a subscriber that joined then
+    /// has it as a contract that pays on no strike. So presence is fixed by
+    /// what the first definition carried. The other direction cannot be stated
+    /// at all: nothing withdraws a strike.
+    #[error("a strike was stated for an instrument already published without one")]
+    StrikePresence,
+
     /// The `Instrument ID` space is exhausted.
     ///
     /// Unreachable in practice and refused rather than wrapped: the next ID

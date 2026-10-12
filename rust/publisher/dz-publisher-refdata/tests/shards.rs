@@ -96,7 +96,10 @@ fn lapped(
     for _ in 0..30 {
         clock.advance(Duration::from_secs(1));
         registry.definition_tick(shard, &mut out);
-        seen.extend(out.iter().map(|definition| definition.instrument_id));
+        seen.extend(
+            out.iter()
+                .map(|definition| definition.definition.instrument_id),
+        );
     }
     seen.sort_unstable();
     seen.dedup();
