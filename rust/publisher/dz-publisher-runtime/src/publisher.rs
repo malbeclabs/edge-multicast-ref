@@ -925,6 +925,7 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
         // sink: that is what makes this call one advance of a shard's
         // `Manifest Seq` however many instruments it admitted or withdrew
         // there. Handed over bare, each of them would advance it.
+        let before = self.manifest_seqs();
         self.refdata
             .poll(|listings| adapter.poll_listings(listings));
         // The seed limit gives way to the cap, and the manifest becomes
@@ -935,7 +936,61 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
             self.refdata.seeding_complete();
             self.seeded = true;
         }
+        self.send_advanced_manifests(&before);
         true
+    }
+
+    /// Each shard's `Manifest Seq`, in shard order.
+    fn manifest_seqs(&self) -> Vec<Option<u16>> {
+        (0..self.feeds.shard_count())
+            .map(|index| {
+                let name = self.feeds.shard_name(index)?;
+                self.refdata.manifest_seq(name)
+            })
+            .collect()
+    }
+
+    /// Send the manifest of every shard whose `Manifest Seq` a poll advanced,
+    /// now and not at its cadence.
+    ///
+    /// One poll is one advance, and that only reaches a subscriber as a step of
+    /// one if a manifest leaves between two advances. The listings poll runs
+    /// every [`LISTING_POLL`] and a manifest every `manifest_cadence`, which an
+    /// operator may set longer: at 5 s, three polls that each changed the set
+    /// took consecutive manifests from 1 to 4. Sending the summary with the
+    /// advance makes the step one whatever the cadence is.
+    ///
+    /// It also puts the summary ahead of the definitions tagged with the new
+    /// sequence. The poll runs before the tick that packs them, and a
+    /// subscriber discards a definition tagged with a sequence it has not been
+    /// told.
+    ///
+    /// The cadence restarts from here, as it does for any manifest sent, so
+    /// this adds no manifest to a quiet channel and at most one per poll to a
+    /// changing one.
+    fn send_advanced_manifests(&mut self, before: &[Option<u16>]) {
+        let now_mono = dz_publisher_refdata::Clock::monotonic_ns(&self.clock);
+        let now_unix = self.clock.unix_ns();
+        for (index, before) in before.iter().enumerate() {
+            let Some(name) = self.feeds.shard_name(index) else {
+                continue;
+            };
+            if self.refdata.manifest_seq(name) == *before {
+                continue;
+            }
+            let Some(manifest) = self.refdata.manifest(name) else {
+                continue;
+            };
+            let Some(shard) = self.feeds.shard_mut(index) else {
+                continue;
+            };
+            if let Some(pipeline) = shard.top_of_book_mut() {
+                let _ = pipeline.send_manifest(&manifest, now_mono, now_unix);
+            }
+            if let Some(pipeline) = shard.market_by_price_mut() {
+                let _ = pipeline.send_manifest(&manifest, now_mono, now_unix);
+            }
+        }
     }
 
     /// One pass over everything that is a question of *when*.
