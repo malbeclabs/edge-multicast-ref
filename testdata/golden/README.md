@@ -70,9 +70,11 @@ about the fixture rather than a value the lowering read.
 Who reads what is worth stating exactly, because a vector no suite reads and no
 document mentions is invisible rather than merely unbound — which is how the
 five `-from-event-` vectors below stayed bound in one language only. Every
-vector in the two tables is read by `go/marketbyprice-parser` except
+vector in the two tables is read by `go/marketbyprice-parser` except two:
 `quote-v3.bin`, which that feed has no message type for and which
-`go/topofbook-parser` reads. `TestGoldenManifestHasNoVectorNobodyReads` holds
+`go/topofbook-parser` reads, and `strike-interval-v3.bin`, which no Go parser
+decodes and `rust/codec/dz-edge-refdata` reads.
+`TestGoldenManifestHasNoVectorNobodyReads` holds
 the corpus to that, so a vector added here and asserted nowhere fails rather
 than sitting unnoticed.
 
