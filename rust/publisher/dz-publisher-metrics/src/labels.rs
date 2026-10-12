@@ -500,6 +500,7 @@ pub enum EgressMessageType {
     Trade,
     InstrumentDefinition,
     ManifestSummary,
+    StrikeInterval,
     LevelUpdate,
     BookClear,
     SnapshotBegin,
@@ -511,13 +512,14 @@ pub enum EgressMessageType {
 impl EgressMessageType {
     /// Every variant, in no particular order. Used to pre-create every
     /// child series of this closed-label family at construction.
-    pub(crate) const ALL: [Self; 12] = [
+    pub(crate) const ALL: [Self; 13] = [
         Self::Heartbeat,
         Self::EndOfSession,
         Self::Quote,
         Self::Trade,
         Self::InstrumentDefinition,
         Self::ManifestSummary,
+        Self::StrikeInterval,
         Self::LevelUpdate,
         Self::BookClear,
         Self::SnapshotBegin,
@@ -535,6 +537,7 @@ impl EgressMessageType {
             Self::Trade => "trade",
             Self::InstrumentDefinition => "instrument_definition",
             Self::ManifestSummary => "manifest_summary",
+            Self::StrikeInterval => "strike_interval",
             Self::LevelUpdate => "level_update",
             Self::BookClear => "book_clear",
             Self::SnapshotBegin => "snapshot_begin",
@@ -564,7 +567,9 @@ impl EgressMessageType {
             | Self::LevelUpdate
             | Self::BookClear
             | Self::InstrumentReset => &[PortRole::Mktdata],
-            Self::InstrumentDefinition | Self::ManifestSummary => &[PortRole::Refdata],
+            Self::InstrumentDefinition | Self::ManifestSummary | Self::StrikeInterval => {
+                &[PortRole::Refdata]
+            }
             // The snapshot port carries one book state cut across datagrams,
             // and nothing else does. A snapshot message on the market-data
             // port is a series that can never be written to.
@@ -603,7 +608,7 @@ mod tests {
         use dz_edge_mbp::{
             BookClear, InstrumentReset, LevelUpdate, SnapshotBegin, SnapshotEnd, SnapshotLevel,
         };
-        use dz_edge_refdata::{InstrumentDefinition, ManifestSummary};
+        use dz_edge_refdata::{InstrumentDefinition, ManifestSummary, StrikeInterval};
         use dz_edge_tob::{Quote, Trade};
 
         fn check<M: AppMessage>(message_type: EgressMessageType) {
@@ -621,6 +626,7 @@ mod tests {
         check::<Trade>(EgressMessageType::Trade);
         check::<InstrumentDefinition>(EgressMessageType::InstrumentDefinition);
         check::<ManifestSummary>(EgressMessageType::ManifestSummary);
+        check::<StrikeInterval>(EgressMessageType::StrikeInterval);
         check::<LevelUpdate>(EgressMessageType::LevelUpdate);
         check::<BookClear>(EgressMessageType::BookClear);
         check::<SnapshotBegin>(EgressMessageType::SnapshotBegin);
@@ -632,7 +638,7 @@ mod tests {
         // with no entry here would be pre-created nowhere, silently.
         assert_eq!(
             EgressMessageType::ALL.len(),
-            12,
+            13,
             "a new message type needs a port-role entry and a line in this test"
         );
     }

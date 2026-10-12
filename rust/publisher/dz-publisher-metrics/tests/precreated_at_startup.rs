@@ -548,7 +548,11 @@ fn egress_message_types_are_precreated_only_on_the_port_roles_that_permit_them()
             &[("port_role", "mktdata"), ("message_type", message_type)],
         );
     }
-    for message_type in ["instrument_definition", "manifest_summary"] {
+    for message_type in [
+        "instrument_definition",
+        "manifest_summary",
+        "strike_interval",
+    ] {
         assert_zero(
             &rendered,
             "dz_publisher_egress_messages_total",
@@ -588,6 +592,7 @@ fn every_egress_message_type_precreates_an_encode_duration_series() {
         "trade",
         "instrument_definition",
         "manifest_summary",
+        "strike_interval",
     ] {
         assert_zero(
             &rendered,

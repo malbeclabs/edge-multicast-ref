@@ -267,6 +267,41 @@ impl<F: Feed> DatagramBuilder<F> {
         self.push_with_flags(msg, flags)
     }
 
+    /// Append two messages that must share a datagram, or neither.
+    ///
+    /// For a pair a specification forbids dividing: the second is read against
+    /// the first, so one of them alone in a datagram says something the
+    /// publisher did not mean. `push` twice cannot hold that. Its second call
+    /// fails on a full datagram with the first message already in it, and the
+    /// caller that then finishes the datagram has divided the pair.
+    ///
+    /// On `Err` the builder is unchanged, as it is for `push`: whatever the
+    /// second message is refused for, the first is taken back out. That is
+    /// done by restoring the builder and not by checking both messages ahead of
+    /// writing either, so there is no second copy of `push`'s refusals here to
+    /// fall out of step with it. A caller may finish the datagram and retry the
+    /// pair on a fresh one; a pair no datagram can hold fails there too.
+    ///
+    /// # Errors
+    ///
+    /// What [`push`](Self::push) returns for either message. A pair that does
+    /// not fit is [`EncodeError::DatagramFull`] with the size the two would
+    /// have brought the datagram to.
+    pub fn push_pair<A: AppMessage, B: AppMessage>(
+        &mut self,
+        first: &A,
+        second: &B,
+    ) -> Result<(), EncodeError> {
+        let (len, msg_count) = (self.buf.len(), self.msg_count);
+        self.push(first)?;
+        if let Err(refused) = self.push(second) {
+            self.buf.truncate(len);
+            self.msg_count = msg_count;
+            return Err(refused);
+        }
+        Ok(())
+    }
+
     fn push_with_flags<M: AppMessage>(&mut self, msg: &M, flags: u16) -> Result<(), EncodeError> {
         // `SIZE` includes the 4-byte message header, so anything smaller is a broken
         // `AppMessage` impl rather than a runtime condition. `M::SIZE` is an associated

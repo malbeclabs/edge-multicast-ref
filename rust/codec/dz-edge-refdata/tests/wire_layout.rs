@@ -716,3 +716,58 @@ fn seven_pairs_fill_a_datagram_and_an_eighth_does_not_fit() {
     let types: Vec<u8> = datagram.messages().map(|m| m.type_id).collect();
     assert_eq!(types, [0x02, 0x09].repeat(7));
 }
+
+/// What two separate pushes get wrong: after three bare definitions and four
+/// pairs a definition still fits and its strike does not. The pair is refused
+/// whole, and the builder is as it was.
+#[test]
+fn a_pair_whose_strike_does_not_fit_is_refused_whole() {
+    let channel = ChannelSequence::new(0, ResetCount(0));
+    let mut b = DatagramBuilder::<TestFeed>::new(channel, PortRole::Refdata, 1232);
+    for _ in 0..3 {
+        b.push(&sample()).unwrap();
+    }
+    for _ in 0..4 {
+        b.push_pair(&sample(), &strike()).unwrap();
+    }
+    assert_eq!(
+        b.remaining(),
+        138,
+        "room for a definition, not for the pair"
+    );
+
+    assert_eq!(
+        b.push_pair(&sample(), &strike()),
+        Err(EncodeError::DatagramFull {
+            attempted: 1094 + 170,
+            capacity: 1232,
+        })
+    );
+    assert_eq!(b.remaining(), 138, "the definition was not written either");
+
+    let out = b.finish(0).expect("datagram has messages");
+    let datagram = dz_edge_core::Datagram::decode(&out, TestFeed::MAGIC).unwrap();
+    assert_eq!(datagram.messages().len(), 11);
+}
+
+#[test]
+fn a_pair_whose_strike_is_malformed_writes_neither_message() {
+    let channel = ChannelSequence::new(0, ResetCount(0));
+    let mut b = DatagramBuilder::<TestFeed>::new(channel, PortRole::Refdata, 1232);
+    assert!(matches!(
+        b.push_pair(&sample(), &with(UPPER, 100, 200)),
+        Err(EncodeError::MalformedMessage { .. })
+    ));
+    assert!(b.is_empty());
+}
+
+#[test]
+fn a_pair_on_a_port_role_one_of_them_may_not_use_writes_neither_message() {
+    let channel = ChannelSequence::new(0, ResetCount(0));
+    let mut b = DatagramBuilder::<TestFeed>::new(channel, PortRole::Mktdata, 1232);
+    assert!(matches!(
+        b.push_pair(&sample(), &strike()),
+        Err(EncodeError::WrongPortRole { .. })
+    ));
+    assert!(b.is_empty());
+}
