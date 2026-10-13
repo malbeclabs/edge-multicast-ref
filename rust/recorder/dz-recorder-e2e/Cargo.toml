@@ -41,7 +41,7 @@ dz-recorder-inline = { path = "../dz-recorder-inline" }
 # gates the module that uses it rather than the crate itself: a second copy of
 # the replay-to-pcap conversion here is exactly what promoting it removed.
 dz-recorder-conformance = { path = "../dz-recorder-conformance" }
-# The publisher as a venue links it, for the one suite whose stream no fixture
+# The publisher as a venue links it, for the one suite whose feed no fixture
 # here can state: a strike is published by the reference-data registry behind
 # the runtime's own send path, so `strike_conformance.rs` composes that runtime
 # over recording sinks and archives what it sent. These are what its test

@@ -6,13 +6,13 @@
 //! `STRIKE.*` rules are the specification's reading, in the specification's
 //! repository, so this suite hands them what the runtime sent.
 //!
-//! # The stream is the runtime's, and no fixture's
+//! # The feed is the runtime's, and no fixture's
 //!
 //! Every other suite in this crate states its datagrams message by message
 //! through the codec. A `StrikeInterval` cannot be stated that way and mean
 //! anything: where it stands, what it repeats and what it does to
 //! `Manifest Seq` are decisions of the reference-data registry and of the
-//! egress packer, so a stream assembled here would be judged for what this
+//! egress packer, so a feed assembled here would be judged for what this
 //! file wrote. The publisher is therefore composed as a venue composes it,
 //! over the recording sinks of the runtime's own test harness, and driven the
 //! way `dz_publisher_runtime::run` drives one: a listings poll, the periodic
@@ -389,7 +389,7 @@ fn run() -> Run {
         assert!(
             h.publisher.tick().is_none(),
             "a guard ended the publisher at second {second}, so what follows is not a \
-             publisher's stream"
+             publisher's feed"
         );
         capture.drain(&h);
     }
