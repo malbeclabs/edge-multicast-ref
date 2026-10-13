@@ -22,6 +22,12 @@ type instrumentInfo struct {
 	// definition starts with none, the StrikeInterval directly behind it in the
 	// same datagram sets it, and a channel reset drops both.
 	Strike *topOfBookStrikeInterval
+
+	// def is the decoded message this entry was stored from. A StrikeInterval
+	// is held only on the entry stored from the very message before it, and
+	// the pointer is how that is told: the mktdata goroutine can clear or
+	// replace the entry between the two, since the lock is taken per message.
+	def *topOfBookInstrumentDef
 }
 
 // bufferedMsg holds a raw datagram message that arrived before its
@@ -194,6 +200,7 @@ func (p *TopOfBookParser) handleInstrumentDef(channelID uint8, seq uint64, reset
 		Symbol:        trimNull(body.Symbol),
 		PriceExponent: body.PriceExponent,
 		QtyExponent:   body.QtyExponent,
+		def:           body,
 	}
 
 	p.mu.Lock()
@@ -258,13 +265,36 @@ func (p *TopOfBookParser) handleStrikeInterval(channelID uint8, seq uint64, rese
 	case prevDef == nil || prevDef.InstrumentID != body.InstrumentID:
 		why = "not directly behind the definition of its instrument"
 	case schemaVersion == schemaVersionV3 && prevDef.SourceID != body.SourceID:
-		why = "source id differs from its definition's"
+		why = "Source ID differs from its definition's"
 	}
+
+	// The last StrikeInterval for an instrument is its current strike, held on
+	// the definition it arrived behind and on no other. That definition was
+	// stored a moment ago by handleInstrumentDef, under a lock released since:
+	// the refdata and mktdata ports are read by two goroutines sharing this
+	// parser, and a ChannelReset travels either port. One that lands in between
+	// has cleared the definition, and the strike of a definition this parser no
+	// longer holds is nobody's: holding it is impossible and emitting it would
+	// tell a consumer of a strike on an instrument the parser has just told it
+	// to forget. So the check and the store are one critical section, and the
+	// record is emitted only if the store happened.
+	held := *body
+	p.mu.Lock()
+	if why == "" {
+		if info, ok := p.instruments[body.InstrumentID]; ok && info.def == prevDef {
+			info.Strike = &held
+		} else {
+			why = "its definition is no longer held"
+		}
+	}
+	var ignored uint64
 	if why != "" {
-		p.mu.Lock()
 		p.strikesIgnored++
-		ignored := p.strikesIgnored
-		p.mu.Unlock()
+		ignored = p.strikesIgnored
+	}
+	p.mu.Unlock()
+
+	if why != "" {
 		// The first one is the news; a publisher that does this does it for
 		// every instrument on every definition cycle.
 		level := slog.LevelDebug
@@ -281,17 +311,6 @@ func (p *TopOfBookParser) handleStrikeInterval(channelID uint8, seq uint64, rese
 			"ignored_total", ignored)
 		return nil
 	}
-
-	// The last StrikeInterval for an instrument is its current strike. The
-	// definition was stored a moment ago by handleInstrumentDef; it is absent
-	// only if a ChannelReset on another port cleared it in between, and then
-	// there is nothing to hold the strike on.
-	held := *body
-	p.mu.Lock()
-	if info, ok := p.instruments[body.InstrumentID]; ok {
-		info.Strike = &held
-	}
-	p.mu.Unlock()
 
 	fields := map[string]any{
 		"source_id":       body.SourceID,

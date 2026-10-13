@@ -29,9 +29,16 @@ func recordFromJSON(t *testing.T, line string) Record {
 // seq on the refdata port of channel 0.
 func strikeDefRec(t *testing.T, seq uint64, instID uint32, sourceID uint16) Record {
 	t.Helper()
+	return strikeDefRecAt(t, seq, 0, instID, sourceID)
+}
+
+// strikeDefRecAt is strikeDefRec for a definition that was message msgIndex of
+// its datagram.
+func strikeDefRecAt(t *testing.T, seq uint64, msgIndex uint8, instID uint32, sourceID uint16) Record {
+	t.Helper()
 	b, err := json.Marshal(map[string]any{
 		"type": "instrument_definition", "channel_id": 0, "port": "refdata", "seq": seq,
-		"instrument_id": instID,
+		"msg_index": msgIndex, "instrument_id": instID,
 		"fields": map[string]any{
 			"symbol": "BTC-ABOVE-92799.99", "source_id": sourceID,
 			"price_exponent": -2, "qty_exponent": 0, "manifest_seq": 4,
@@ -53,11 +60,18 @@ const fixedStrikeFields = `"strike_exponent":-2,"bound_flags":7,"pending":false,
 const pendingStrikeFields = `"strike_exponent":-2,"bound_flags":0,"pending":true,` +
 	`"lower_present":false,"lower_inclusive":false,"upper_present":false,"upper_inclusive":false`
 
+// strikeRec is a strike_interval that was message 1 of its datagram: directly
+// behind a definition that opened it.
 func strikeRec(t *testing.T, seq uint64, instID uint32, sourceID uint16, fields string) Record {
+	t.Helper()
+	return strikeRecAt(t, seq, 1, instID, sourceID, fields)
+}
+
+func strikeRecAt(t *testing.T, seq uint64, msgIndex uint8, instID uint32, sourceID uint16, fields string) Record {
 	t.Helper()
 	b, err := json.Marshal(map[string]any{
 		"type": "strike_interval", "channel_id": 0, "port": "refdata", "seq": seq,
-		"instrument_id": instID,
+		"msg_index": msgIndex, "instrument_id": instID,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -193,7 +207,7 @@ func TestStrike_DefinitionWithoutOneDeletesIt(t *testing.T) {
 // a pending one, and counts the fixed strike it was sent as ignored.
 func TestStrike_IgnoredUnlessDirectlyBehindItsOwnDefinition(t *testing.T) {
 	heartbeat := func(t *testing.T, seq uint64) Record {
-		return recordFromJSON(t, fmt.Sprintf(`{"type":"heartbeat","channel_id":0,"port":"refdata","seq":%d}`, seq))
+		return recordFromJSON(t, fmt.Sprintf(`{"type":"heartbeat","channel_id":0,"port":"refdata","seq":%d,"msg_index":1}`, seq))
 	}
 	onPort := func(rec Record, port string) Record { rec.Port = port; return rec }
 	onChannel := func(rec Record, ch uint8) Record { rec.ChannelID = ch; return rec }
@@ -206,7 +220,23 @@ func TestStrike_IgnoredUnlessDirectlyBehindItsOwnDefinition(t *testing.T) {
 		{
 			name: "first in its datagram", reason: strikeIgnoredNotBehindDefinition,
 			recs: func(t *testing.T) []Record {
-				return []Record{strikeRec(t, 20, 5, 2, fixedStrikeFields)}
+				return []Record{strikeRecAt(t, 20, 0, 5, 2, fixedStrikeFields)}
+			},
+		},
+		{
+			// The parser emits no record for a message it skips or drops, so
+			// these two records are neighbours on the socket. The strike was
+			// message 2 and the definition message 0.
+			name: "a message the parser skipped between it and its definition", reason: strikeIgnoredNotBehindDefinition,
+			recs: func(t *testing.T) []Record {
+				return []Record{strikeDefRec(t, 20, 5, 2), strikeRecAt(t, 20, 2, 5, 2, fixedStrikeFields)}
+			},
+		},
+		{
+			// A parser that states no message index states 0 for every record.
+			name: "records with no message index", reason: strikeIgnoredNotBehindDefinition,
+			recs: func(t *testing.T) []Record {
+				return []Record{strikeDefRec(t, 20, 5, 2), strikeRecAt(t, 20, 0, 5, 2, fixedStrikeFields)}
 			},
 		},
 		{
@@ -218,7 +248,7 @@ func TestStrike_IgnoredUnlessDirectlyBehindItsOwnDefinition(t *testing.T) {
 		{
 			name: "a message between it and its definition", reason: strikeIgnoredNotBehindDefinition,
 			recs: func(t *testing.T) []Record {
-				return []Record{strikeDefRec(t, 20, 5, 2), heartbeat(t, 20), strikeRec(t, 20, 5, 2, fixedStrikeFields)}
+				return []Record{strikeDefRec(t, 20, 5, 2), heartbeat(t, 20), strikeRecAt(t, 20, 2, 5, 2, fixedStrikeFields)}
 			},
 		},
 		{
@@ -226,7 +256,7 @@ func TestStrike_IgnoredUnlessDirectlyBehindItsOwnDefinition(t *testing.T) {
 			recs: func(t *testing.T) []Record {
 				return []Record{
 					strikeDefRec(t, 20, 5, 2), strikeRec(t, 20, 5, 2, pendingStrikeFields),
-					strikeRec(t, 20, 5, 2, fixedStrikeFields),
+					strikeRecAt(t, 20, 2, 5, 2, fixedStrikeFields),
 				}
 			},
 		},

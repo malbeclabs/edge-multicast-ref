@@ -37,19 +37,25 @@ type definitionRef struct {
 	channelID    uint8
 	port         string
 	seq          uint64
+	msgIndex     uint8
 	instrumentID uint32
 	sourceID     uint16
 }
 
-// pairs reports whether a strike_interval record directly follows this
-// definition in the same datagram, for the same instrument. The parser writes a
-// datagram's records as one batch, in wire order, and the socket sink keeps or
-// drops a batch whole, so the record after a definition is the message after it
-// unless a datagram boundary lies between them — which channel, port and
-// datagram sequence number together rule out.
+// pairs reports whether a strike_interval record's message directly follows
+// this definition in the same datagram, for the same instrument.
+//
+// Channel, port and datagram sequence number say it is the same datagram. They
+// do not say the two were neighbours in it: the parser emits no record for a
+// message it skips by its length or drops as malformed, so a definition, a
+// message of a type the parser does not know, and a strike reach this process
+// as two neighbouring records. The message index is what tells them apart. It
+// counts every application message of the datagram, so the strike directly
+// behind a definition is the one whose index is one more.
 func (d *definitionRef) pairs(rec Record) bool {
 	return d != nil &&
 		d.channelID == rec.ChannelID && d.port == rec.Port && d.seq == rec.SequenceNumber &&
+		int(rec.MessageIndex) == int(d.msgIndex)+1 &&
 		d.instrumentID == rec.InstrumentID
 }
 
@@ -140,6 +146,7 @@ func (c *Coordinator) Dispatch(rec Record) {
 			channelID:    rec.ChannelID,
 			port:         rec.Port,
 			seq:          rec.SequenceNumber,
+			msgIndex:     rec.MessageIndex,
 			instrumentID: rec.InstrumentID,
 			sourceID:     getUint16(rec.Fields, "source_id"),
 		}

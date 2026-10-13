@@ -2,6 +2,9 @@ package main
 
 import "time"
 
+// Record is the parser's envelope. MessageIndex is the position of the record's
+// message among the application messages of its datagram, from 0, counting the
+// ones the parser emitted no record for.
 type Record struct {
 	Type           string         `json:"type"`
 	Timestamp      time.Time      `json:"ts"`
@@ -12,6 +15,7 @@ type Record struct {
 	ChannelID      uint8          `json:"channel_id"`
 	Port           string         `json:"port"`
 	SequenceNumber uint64         `json:"seq"`
+	MessageIndex   uint8          `json:"msg_index"`
 	ResetCount     uint8          `json:"reset_count"`
 	InstrumentID   uint32         `json:"instrument_id,omitempty"`
 	Fields         map[string]any `json:"fields,omitempty"`

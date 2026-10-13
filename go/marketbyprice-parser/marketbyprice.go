@@ -110,6 +110,9 @@ func (p *marketByPriceParser) ParseDatagram(port string, datagram []byte) ([]Rec
 			}
 			return nil, defects, fmt.Errorf("msg %d type 0x%02x: %w", i, mh.Type, decErr)
 		}
+		// i counts every message of the datagram, so a message skipped or
+		// dropped above leaves a gap in the indexes of the records around it.
+		rec.MessageIndex = i
 		records = append(records, rec)
 	}
 

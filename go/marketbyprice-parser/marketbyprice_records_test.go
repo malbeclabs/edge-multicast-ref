@@ -533,7 +533,7 @@ func TestParseDatagram_UnrecognisedEnumValuesDegradeToUnknown(t *testing.T) {
 }
 
 // A pending strike states no bound and no time, so its record carries none: a
-// 0 there would read as a strike of zero fixed at the epoch. The same holds for
+// 0 there would read as a strike of zero fixed at the Unix epoch. The same holds for
 // the one absent side of a strike bounded on the other. Reserved bits are
 // ignored, so they change none of this.
 func TestParseDatagram_StrikeIntervalOmitsWhatIsNotStated(t *testing.T) {
@@ -742,4 +742,46 @@ func FuzzParseDatagram(f *testing.F) {
 			}
 		}
 	})
+}
+
+// Strike State rule 5 is about the message directly behind a definition, and a
+// message this parser skips or drops is still a message. Each record therefore
+// says where its message stood among the datagram's application messages, so
+// that a book-builder reading records can tell a strike directly behind its
+// definition from one with a skipped message in between: the two look the same
+// as neighbouring records.
+func TestParseDatagram_RecordsCarryTheirMessageIndex(t *testing.T) {
+	def := buildMsg(msgTypeInstrumentDefinition, 0, buildInstDefV1("BTC-ABOVE"))
+	strike := buildMsg(msgTypeStrikeInterval, 0, strikeIntervalBody(4242, 0, -2, 0x01, 100, 0, 0))
+	unknown := buildMsg(0x55, 0, make([]byte, 20))
+	// Scope 1 with Clear Side 2 is the pairing the spec declares malformed.
+	malformed := buildMsg(msgTypeBookClear, 0, bookClearBody(4242, 2, 1, 0, 1000))
+
+	cases := []struct {
+		name        string
+		msgs        [][]byte
+		wantIndexes []uint8 // of the definition and the strike
+	}{
+		{"strike directly behind its definition", [][]byte{def, strike}, []uint8{0, 1}},
+		{"a skipped type between them", [][]byte{def, unknown, strike}, []uint8{0, 2}},
+		{"a malformed message between them", [][]byte{def, malformed, strike}, []uint8{0, 2}},
+		{"a skipped type before both", [][]byte{unknown, def, strike}, []uint8{1, 2}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := &marketByPriceParser{}
+			recs, _, err := p.ParseDatagram("refdata", buildDatagram(t, 0, 1, recordTestTS, 0, c.msgs...))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(recs) != 2 || recs[0].Type != "instrument_definition" || recs[1].Type != "strike_interval" {
+				t.Fatalf("records: %+v", recs)
+			}
+			for i, want := range c.wantIndexes {
+				if got := recs[i].MessageIndex; got != want {
+					t.Errorf("%s message index = %d, want %d", recs[i].Type, got, want)
+				}
+			}
+		})
+	}
 }

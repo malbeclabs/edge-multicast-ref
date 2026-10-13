@@ -100,7 +100,7 @@ func TestParse_StrikeIntervalRecord(t *testing.T) {
 }
 
 // A pending strike states no bound and no time, so its record carries none: a 0
-// there would read as a strike of zero fixed at the epoch. The same holds for
+// there would read as a strike of zero fixed at the Unix epoch. The same holds for
 // the one absent side of a strike bounded on the other. A subscriber ignores
 // Bound Flags bits 4-7, so they change none of this and refuse nothing.
 func TestParse_StrikeIntervalOmitsWhatIsNotStated(t *testing.T) {
@@ -293,4 +293,116 @@ func TestParse_StrikeIntervalLifetime(t *testing.T) {
 	if p.strikesIgnored != 0 {
 		t.Errorf("strikesIgnored = %d, want 0", p.strikesIgnored)
 	}
+}
+
+// The refdata and mktdata ports are read by two goroutines sharing one parser,
+// the lock is taken per message, and a ChannelReset travels either port. So a
+// reset can clear a definition after it was stored and before the strike
+// directly behind it is handled. The strike is then held nowhere, and it yields
+// no record: a record would state a strike for an instrument the parser has
+// just told its consumer to forget.
+//
+// The interleaving is driven by hand, at the one point it can happen: between
+// the two messages of the datagram.
+func TestStrikeInterval_NoRecordWhenItsDefinitionIsNoLongerHeld(t *testing.T) {
+	strike := &topOfBookStrikeInterval{InstrumentID: 42, SourceID: strikeTestSourceID, BoundFlags: 0x01, LowerBound: 500}
+	storeDef := func(p *TopOfBookParser) *topOfBookInstrumentDef {
+		def := &topOfBookInstrumentDef{InstrumentID: 42, SourceID: strikeTestSourceID, Symbol: "X"}
+		p.handleInstrumentDef(1, 100, 0, strikeTestTS(), PacketMeta{}, nil, def)
+		return def
+	}
+	handle := func(p *TopOfBookParser, prevDef *topOfBookInstrumentDef) []Record {
+		return p.handleStrikeInterval(1, 100, 0, strikeTestTS(), PacketMeta{}, strike, prevDef, schemaVersionV3)
+	}
+
+	t.Run("held and emitted when nothing intervenes", func(t *testing.T) {
+		p := NewTopOfBookParser()
+		def := storeDef(p)
+		if recs := handle(p, def); len(recs) != 1 || recs[0].Type != "strike_interval" {
+			t.Fatalf("records: %+v", recs)
+		}
+		if p.instruments[42].Strike == nil || p.strikesIgnored != 0 {
+			t.Errorf("held = %+v, strikesIgnored = %d", p.instruments[42].Strike, p.strikesIgnored)
+		}
+	})
+
+	t.Run("a channel reset cleared the definition", func(t *testing.T) {
+		p := NewTopOfBookParser()
+		def := storeDef(p)
+		p.handleChannelReset(1, 7, 1, &topOfBookChannelReset{})
+		if recs := handle(p, def); len(recs) != 0 {
+			t.Errorf("a strike held nowhere was emitted: %+v", recs)
+		}
+		if len(p.instruments) != 0 {
+			t.Errorf("the strike brought a definition back: %+v", p.instruments)
+		}
+		if p.strikesIgnored != 1 {
+			t.Errorf("strikesIgnored = %d, want 1", p.strikesIgnored)
+		}
+	})
+
+	// The entry is there, for the same instrument, and it is not the one the
+	// strike arrived behind: a reset and a later definition both happened.
+	t.Run("the definition held is not the one it arrived behind", func(t *testing.T) {
+		p := NewTopOfBookParser()
+		def := storeDef(p)
+		p.handleChannelReset(1, 7, 1, &topOfBookChannelReset{})
+		storeDef(p)
+		if recs := handle(p, def); len(recs) != 0 {
+			t.Errorf("a strike was emitted for a definition it did not arrive behind: %+v", recs)
+		}
+		if held := p.instruments[42].Strike; held != nil {
+			t.Errorf("a strike was held on a definition it did not arrive behind: %+v", *held)
+		}
+		if p.strikesIgnored != 1 {
+			t.Errorf("strikesIgnored = %d, want 1", p.strikesIgnored)
+		}
+	})
+}
+
+// The same race, run as one: a goroutine parsing definition-and-strike
+// datagrams against one parsing ChannelResets. What -race checks is the
+// locking. What the loop checks is the accounting: each datagram yields the
+// pair or the definition alone, and the ones that yield the definition alone
+// are exactly the strikes counted as ignored.
+func TestStrikeInterval_ConcurrentChannelResetSuppressesTheStrikesItCounts(t *testing.T) {
+	p := NewTopOfBookParser()
+	pair := buildDatagramWithVersion(3, 1, 100, strikeTestTS(),
+		buildInstrumentDefMsgV3(42, "X", "BTC", "USD"),
+		buildStrikeIntervalMsg(42, strikeTestSourceID, -2, 0x01, 500, 0, 0))
+	resetDatagram := buildDatagramWithVersion(3, 1, 7, strikeTestTS(), buildChannelReset(strikeTestTS()))
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 2000; i++ {
+			if _, err := p.Parse(resetDatagram, PacketMeta{}); err != nil {
+				t.Errorf("reset: %v", err)
+				return
+			}
+		}
+	}()
+	var emitted, ignored int
+	for i := 0; i < 2000; i++ {
+		recs, err := p.Parse(pair, PacketMeta{})
+		if err != nil {
+			t.Fatalf("pair: %v", err)
+		}
+		switch len(recs) {
+		case 2:
+			emitted++
+		case 1:
+			ignored++
+		default:
+			t.Fatalf("records: %v", recordTypes(recs))
+		}
+	}
+	<-done
+	p.mu.RLock()
+	got := p.strikesIgnored
+	p.mu.RUnlock()
+	if int(got) != ignored {
+		t.Errorf("strikesIgnored = %d, but %d datagrams yielded the definition alone", got, ignored)
+	}
+	t.Logf("%d strikes emitted, %d suppressed by a reset in between", emitted, ignored)
 }
