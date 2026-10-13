@@ -646,3 +646,78 @@ fn one_strike_on_a_shard_costs_the_tick_that_carries_it_and_no_other() {
     registry.definition_tick(DEFAULT_SHARD, &mut out);
     assert_eq!(out.len(), 9, "the next nine are all bare");
 }
+
+fn at_or_above_fixed_at(value: &str, fixing_time_ns: Option<u64>) -> Strike<'_> {
+    Strike::Fixed {
+        lower: Some(StrikeBound::inclusive(Scalar::text(value))),
+        upper: None,
+        fixing_time_ns,
+    }
+}
+
+/// Rule 6: a different fixed strike goes out only when the venue corrects it.
+/// A venue that gives the fixing time on one of its paths and not on another
+/// has corrected nothing.
+#[test]
+fn a_fixing_time_that_comes_and_goes_is_not_a_correction() {
+    const FIXED_AT: u64 = 1_700_000_000_000_000_000;
+    let (mut registry, clock) = one_shard(4);
+    let handle = registry.list(&spec("WINDOW")).unwrap();
+    registry.strike(handle, &at_or_above_fixed_at("92700", None));
+    let id = id_of(&registry, handle);
+    lap(&mut registry, &clock, DEFAULT_SHARD);
+
+    for fixing_time_ns in [Some(FIXED_AT), None, Some(FIXED_AT), None] {
+        assert_eq!(
+            registry.state_strike(handle, &at_or_above_fixed_at("92700", fixing_time_ns)),
+            Ok(())
+        );
+        assert!(
+            changes(&mut registry, DEFAULT_SHARD).is_empty(),
+            "the same bounds were sent ahead of the cycle"
+        );
+    }
+    assert_eq!(registry.counts().strikes_changed, 0);
+
+    // The time is kept from when it was first stated, and rides the cycle.
+    let seen = lap(&mut registry, &clock, DEFAULT_SHARD);
+    let strike = strike_of(&seen, id).unwrap();
+    assert_eq!(
+        (strike.lower_bound, strike.fixing_time_ns),
+        (92_700, FIXED_AT)
+    );
+}
+
+/// A later time for the same bounds does not replace the one first stated, so
+/// two paths that disagree about it do not rewrite the strike each poll.
+#[test]
+fn the_fixing_time_first_stated_is_the_one_kept() {
+    let (mut registry, clock) = one_shard(4);
+    let handle = registry.list(&spec("WINDOW")).unwrap();
+    registry.strike(handle, &at_or_above_fixed_at("92700", Some(111)));
+    let id = id_of(&registry, handle);
+    lap(&mut registry, &clock, DEFAULT_SHARD);
+
+    registry.strike(handle, &at_or_above_fixed_at("92700", Some(222)));
+
+    assert!(changes(&mut registry, DEFAULT_SHARD).is_empty());
+    let seen = lap(&mut registry, &clock, DEFAULT_SHARD);
+    assert_eq!(strike_of(&seen, id).unwrap().fixing_time_ns, 111);
+}
+
+/// A correction is a change of the bounds, and it brings its own fixing time.
+#[test]
+fn a_corrected_strike_takes_the_fixing_time_stated_with_it() {
+    let (mut registry, clock) = one_shard(4);
+    let handle = registry.list(&spec("WINDOW")).unwrap();
+    registry.strike(handle, &at_or_above_fixed_at("92700", Some(111)));
+    lap(&mut registry, &clock, DEFAULT_SHARD);
+
+    registry.strike(handle, &at_or_above_fixed_at("92800", None));
+
+    let owed = changes(&mut registry, DEFAULT_SHARD);
+    assert_eq!(owed.len(), 1);
+    let strike = owed[0].strike.unwrap();
+    assert_eq!((strike.lower_bound, strike.fixing_time_ns), (92_800, 0));
+    assert_eq!(registry.counts().strikes_changed, 1);
+}

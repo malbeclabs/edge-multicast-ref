@@ -157,6 +157,20 @@ impl PublishedDefinition {
     }
 }
 
+/// Whether two strikes of one instrument state the same interval: the same
+/// bounds, present and inclusive alike, at the same exponent.
+///
+/// `Fixing Time` is left out. It says when the venue fixed the strike and not
+/// what the strike is, so two statements that differ only there are not a
+/// correction. `strike::compose` gives one value one exponent, so equal
+/// intervals compare equal here however the venue wrote their digits.
+const fn same_interval(left: &StrikeInterval, right: &StrikeInterval) -> bool {
+    left.strike_exponent == right.strike_exponent
+        && left.bound_flags == right.bound_flags
+        && left.lower_bound == right.lower_bound
+        && left.upper_bound == right.upper_bound
+}
+
 const fn wire_size(has_strike: bool) -> usize {
     if has_strike {
         InstrumentDefinition::SIZE + StrikeInterval::SIZE
@@ -876,8 +890,12 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
     ///
     /// Bounded by what one tick's datagrams hold behind that summary, so a
     /// venue that fixes a thousand strikes in one poll is spread over the ticks
-    /// that follow and is not a burst. Six at the mandated datagram size: the
-    /// summary's 24 bytes are the room a seventh would have needed. What is not taken stays
+    /// that follow and is not a burst. Where a tick is one datagram, which is
+    /// what the runtime configures, that is six at the mandated datagram size:
+    /// the summary's 24 bytes are the room a seventh would have needed, and the
+    /// batch and its summary are one datagram. A schedule that allows a tick
+    /// more datagrams lets the batch run on into them; the summary still leads
+    /// the first. What is not taken stays
     /// owed, oldest first. These are extra to the cycle and are not counted
     /// against its lap.
     pub fn strike_changes(&mut self, shard: &str, out: &mut Vec<PublishedDefinition>) {
@@ -938,9 +956,12 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
     /// [`ListingSink::strike`] is this without the reason, as
     /// [`ListingSink::list_on`] is [`offer`](Self::offer) without it.
     ///
-    /// A strike equal to the published one changes nothing and costs a
-    /// comparison, so an adapter may state every strike on every poll. One that
-    /// differs replaces it, and if a definition of the instrument has already
+    /// A strike with the bounds of the published one changes nothing and costs
+    /// a comparison, so an adapter may state every strike on every poll. Its
+    /// fixing time is not part of that comparison: one stated for a strike held
+    /// without it is kept from then on, and neither that nor a later statement
+    /// without it is a change. A strike whose bounds differ replaces the
+    /// published one, and if a definition of the instrument has already
     /// been handed out it is owed again at once; see
     /// [`strike_changes`](Self::strike_changes). `Manifest Seq` is not
     /// advanced in either case.
@@ -995,7 +1016,24 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             }
         };
         match entry.strike {
-            Some(current) if current == composed => return Ok(()),
+            // The same interval is the same strike, whatever its fixing time.
+            // A venue that gives the time on one of its paths and not on
+            // another has stated one strike twice, and sending it again for
+            // that would be a correction that corrects nothing, every poll.
+            Some(current) if same_interval(&current, &composed) => {
+                // The time is kept once it has been stated, and taken when it
+                // is first stated for a strike held without one. Neither is a
+                // change: it goes out at the instrument's place in the cycle.
+                if current.fixing_time_ns == 0 && composed.fixing_time_ns != 0 {
+                    if let Some(slot) = self.slot_mut(instrument) {
+                        slot.strike = Some(StrikeInterval {
+                            fixing_time_ns: composed.fixing_time_ns,
+                            ..current
+                        });
+                    }
+                }
+                return Ok(());
+            }
             Some(current) if !current.is_pending() && composed.is_pending() => {
                 return Err(Refusal::StrikeUnfixed);
             }

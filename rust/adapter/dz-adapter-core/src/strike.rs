@@ -62,6 +62,11 @@ pub enum Strike<'a> {
         /// When the venue fixed it, in nanoseconds since the Unix epoch, where
         /// the venue says. `None` for a strike fixed at listing and for a venue
         /// that gives no time.
+        ///
+        /// It is not part of what makes two statements the same strike. Once
+        /// stated it is kept, so an adapter whose venue gives the time on one
+        /// path and not on another states what each path gave it and need
+        /// not remember the time itself.
         fixing_time_ns: Option<u64>,
     },
 }
