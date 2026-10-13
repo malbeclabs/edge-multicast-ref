@@ -70,14 +70,14 @@ use dz_adapter_core::{
 };
 use dz_edge_core::fixed_point::ScaleError;
 use dz_edge_mbp::MarketByPrice;
-use dz_edge_refdata::{InstrumentDefinition, ManifestSummary};
+use dz_edge_refdata::ManifestSummary;
 use dz_edge_tob::TopOfBook;
 use dz_publisher_lowering::{DepthLowering, Lowering, LoweringError, Snapshot, SourceId};
 use dz_publisher_metrics::{
     EgressMessageType, EventKind, LoweringRefusalReason, PublisherMetrics, RefdataLoadErrorReason,
     TimestampKind,
 };
-use dz_publisher_refdata::{Counts, Registry, StateStore};
+use dz_publisher_refdata::{Counts, PublishedDefinition, Registry, StateStore};
 
 use crate::clock::Clock;
 use crate::config::EmittedFeed;
@@ -274,19 +274,21 @@ impl ShardFeeds {
     /// pacer is drained once per tick however many of that shard's feeds are
     /// enabled: draining per feed would ask for the lap's debt once for each
     /// and emit that many times as much of the set, which is the burst the
-    /// pacer exists to prevent arriving through the caller.
+    /// pacer exists to prevent arriving through the caller. `owed` is the
+    /// same: what a tick owes of the cycle, and what it owes at once because a
+    /// strike changed.
     pub fn tick(
         &mut self,
-        definitions: &[InstrumentDefinition],
+        owed: Owed<'_>,
         manifest: &ManifestSummary,
         now_mono_ns: u64,
         now_unix_ns: u64,
     ) {
         if let Some(pipeline) = self.top_of_book_mut() {
-            tick_pipeline(pipeline, definitions, manifest, now_mono_ns, now_unix_ns);
+            tick_pipeline(pipeline, owed, manifest, now_mono_ns, now_unix_ns);
         }
         if let Some(pipeline) = self.market_by_price_mut() {
-            tick_pipeline(pipeline, definitions, manifest, now_mono_ns, now_unix_ns);
+            tick_pipeline(pipeline, owed, manifest, now_mono_ns, now_unix_ns);
         }
     }
 }
@@ -749,7 +751,9 @@ pub struct Publisher<S: StateStore, K: Clock + Clone> {
     consistency: ConsistencyGuard,
     /// One buffer for the life of the process; `definition_tick` clears and
     /// fills it.
-    definitions: Vec<InstrumentDefinition>,
+    definitions: Vec<PublishedDefinition>,
+    /// The same, for `strike_changes`.
+    strike_changes: Vec<PublishedDefinition>,
     /// The counts already forwarded to the metric registry, so each tick
     /// forwards the delta.
     forwarded: Counts,
@@ -846,6 +850,7 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
             idle: IdleGuard::new(idle_guard),
             consistency: ConsistencyGuard::new(),
             definitions: Vec::new(),
+            strike_changes: Vec::new(),
             forwarded: Counts::default(),
             refusals: Refusals::default(),
             snapshot_refusals: SnapshotRefusals::default(),
@@ -1022,6 +1027,12 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
             let Some(name) = self.feeds.shard_name(index) else {
                 continue;
             };
+            // What a changed strike owes, and then what the cycle owes. The two
+            // are independent: if the cycle's cursor is on an instrument whose
+            // strike just changed, both hand it out and its pair leaves twice
+            // in this tick, which is two transmissions of the same definition
+            // and harmless.
+            self.refdata.strike_changes(name, &mut self.strike_changes);
             self.refdata.definition_tick(name, &mut self.definitions);
             // A shard the reference-data owner has no published set for cannot
             // come out of one document, because the send paths and the registry
@@ -1033,7 +1044,11 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
                 continue;
             };
             if let Some(shard) = self.feeds.shard_mut(index) {
-                shard.tick(&self.definitions, &manifest, now_mono, now_unix);
+                let owed = Owed {
+                    strike_changes: &self.strike_changes,
+                    cycle: &self.definitions,
+                };
+                shard.tick(owed, &manifest, now_mono, now_unix);
             }
         }
 
@@ -1882,6 +1897,15 @@ fn timed<T>(
     outcome
 }
 
+/// The definitions one shard owes a tick.
+#[derive(Clone, Copy)]
+pub struct Owed<'a> {
+    /// Owed at once, because the instrument's strike changed.
+    pub strike_changes: &'a [PublishedDefinition],
+    /// Owed by the definition cycle's pacing.
+    pub cycle: &'a [PublishedDefinition],
+}
+
 /// Everything one feed's send path owes a tick.
 ///
 /// A free function generic over the feed, because the two send paths are
@@ -1891,7 +1915,7 @@ fn timed<T>(
 /// enabled.
 fn tick_pipeline<F: EmittedFeed>(
     pipeline: &mut FeedPipeline<F>,
-    definitions: &[InstrumentDefinition],
+    owed: Owed<'_>,
     manifest: &ManifestSummary,
     now_mono_ns: u64,
     now_unix_ns: u64,
@@ -1899,8 +1923,19 @@ fn tick_pipeline<F: EmittedFeed>(
     if pipeline.heartbeat_due(now_mono_ns) {
         let _ = pipeline.send_heartbeat(now_mono_ns, now_unix_ns);
     }
-    for definition in definitions {
-        let _ = pipeline.pack_definition(definition, now_unix_ns);
+    // A changed strike is not the published set, so its definition carries the
+    // `Manifest Seq` the channel already has. The summary stating it leads the
+    // datagram: after an admission a subscriber may not have been told that
+    // sequence yet, and it discards a definition tagged with one it does not
+    // know.
+    if !owed.strike_changes.is_empty() {
+        let _ = pipeline.pack_manifest(manifest, now_mono_ns, now_unix_ns);
+        for entry in owed.strike_changes {
+            let _ = pipeline.pack_definition(entry, now_unix_ns);
+        }
+    }
+    for entry in owed.cycle {
+        let _ = pipeline.pack_definition(entry, now_unix_ns);
     }
     if pipeline.manifest_due(now_mono_ns) {
         let _ = pipeline.send_manifest(manifest, now_mono_ns, now_unix_ns);

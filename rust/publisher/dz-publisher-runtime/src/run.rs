@@ -1190,6 +1190,20 @@ fn report<S: StateStore, K: Clock + Clone>(
             counts.declined_shard_restated
         );
     }
+    if counts.declined_strike_unfixed > 0 {
+        eprintln!(
+            "dz-publisher-runtime: {} times a fixed strike was restated as pending, and the \
+             published strike stood",
+            counts.declined_strike_unfixed
+        );
+    }
+    if counts.declined_strike_presence > 0 {
+        eprintln!(
+            "dz-publisher-runtime: {} times a strike was stated for an instrument already \
+             published without one, which went on being published without one",
+            counts.declined_strike_presence
+        );
+    }
 }
 
 /// Whether a repetition of the same failure is worth another line.

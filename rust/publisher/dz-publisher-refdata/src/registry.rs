@@ -4,8 +4,9 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use dz_adapter_core::{InstrumentRef, InstrumentSpec, ListingSink, DEFAULT_SHARD};
-use dz_edge_refdata::{InstrumentDefinition, ManifestSummary, SYMBOL_LEN};
+use dz_adapter_core::{InstrumentRef, InstrumentSpec, ListingSink, Strike, DEFAULT_SHARD};
+use dz_edge_core::AppMessage;
+use dz_edge_refdata::{InstrumentDefinition, ManifestSummary, StrikeInterval, SYMBOL_LEN};
 use dz_publisher_lowering::{InstrumentTable, SourceId};
 
 use crate::clock::Clock;
@@ -16,6 +17,7 @@ use crate::policy::{Phase, SelectionPolicy};
 use crate::refusal::Refusal;
 use crate::state::{encode_line, Entry, StateRecord};
 use crate::store::{StateError, StateStore};
+use crate::strike;
 use crate::CycleSchedule;
 
 /// A venue's ticker as the wire carries it, which is the identity everything
@@ -124,6 +126,57 @@ struct Published {
     /// here: a definition sitting in this table between two changes to the
     /// published set would otherwise carry a manifest that no longer exists.
     definition: InstrumentDefinition,
+    /// The strike this instrument publishes after its definition, pending or
+    /// fixed. `None` is a contract that pays on no strike.
+    strike: Option<StrikeInterval>,
+    /// Whether a definition of this instrument has been handed out to send.
+    /// From then on a subscriber may hold it, so whether it has a strike is
+    /// settled.
+    defined: bool,
+}
+
+/// One definition a tick owes, with the strike that must follow it in the same
+/// datagram.
+///
+/// The two are handed out together because the supplement allows the strike
+/// nowhere else: a caller that sent `definition` and dropped `strike` would
+/// publish a contract that pays on a strike as one that does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PublishedDefinition {
+    pub definition: InstrumentDefinition,
+    /// `None` for an instrument whose contract pays on no strike.
+    pub strike: Option<StrikeInterval>,
+}
+
+impl PublishedDefinition {
+    /// What this entry takes of a datagram: the definition, and its strike if
+    /// it has one, which may not start the next.
+    #[must_use]
+    pub const fn wire_size(&self) -> usize {
+        wire_size(self.strike.is_some())
+    }
+}
+
+/// Whether two strikes of one instrument state the same interval: the same
+/// bounds, present and inclusive alike, at the same exponent.
+///
+/// `Fixing Time` is left out. It says when the venue fixed the strike and not
+/// what the strike is, so two statements that differ only there are not a
+/// correction. `strike::compose` gives one value one exponent, so equal
+/// intervals compare equal here however the venue wrote their digits.
+const fn same_interval(left: &StrikeInterval, right: &StrikeInterval) -> bool {
+    left.strike_exponent == right.strike_exponent
+        && left.bound_flags == right.bound_flags
+        && left.lower_bound == right.lower_bound
+        && left.upper_bound == right.upper_bound
+}
+
+const fn wire_size(has_strike: bool) -> usize {
+    if has_strike {
+        InstrumentDefinition::SIZE + StrikeInterval::SIZE
+    } else {
+        InstrumentDefinition::SIZE
+    }
 }
 
 /// One shard's published set.
@@ -151,6 +204,12 @@ struct PublishedSet {
     /// Where this shard's next lap resumes in [`Registry::slots`]. The slots
     /// are shared, so a cursor is per shard and skips what is not its own.
     cursor: usize,
+    /// Published instruments on this shard whose strike is pending.
+    strikes_pending: usize,
+    /// Instruments whose strike changed after their definition was first
+    /// handed out, oldest first. Each is owed a definition and its strike
+    /// ahead of its place in the cycle.
+    strikes_changed: Vec<InstrumentRef>,
 }
 
 /// Counts worth reporting, and where each one goes.
@@ -212,6 +271,17 @@ pub struct Counts {
     /// Re-offers naming a different shard for a published instrument. The
     /// instrument stayed where it was; see [`Refusal::ShardRestated`].
     pub declined_shard_restated: u64,
+    /// Fixed strikes restated as pending. The published strike stood; see
+    /// [`Refusal::StrikeUnfixed`]. A strike that cannot be carried or is empty
+    /// is counted in [`declined_unrepresentable`](Self::declined_unrepresentable)
+    /// with the other statements about an instrument the wire cannot hold.
+    pub declined_strike_unfixed: u64,
+    /// Strikes stated for an instrument already published without one; see
+    /// [`Refusal::StrikePresence`].
+    pub declined_strike_presence: u64,
+    /// Strikes that changed after their instrument was first defined: a pending
+    /// strike the venue fixed, or a fixed one it corrected.
+    pub strikes_changed: u64,
     /// Symbols or legs that could not be stated honestly in their fixed-width
     /// field: truncated, or not representable as NUL-padded ASCII. Reported
     /// once per load rather than per message, which is what the codec's own
@@ -449,6 +519,8 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
                 changed: false,
                 pacer: DefinitionPacer::new(config.schedule),
                 cursor: 0,
+                strikes_pending: 0,
+                strikes_changed: Vec::new(),
             })
             .collect();
         let mut registry = Self {
@@ -733,33 +805,53 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
     /// instrument has to leave one hole rather than two that can disagree.
     /// Neither trade is taken here; if one ever is, the name lookup is the one
     /// to take first, and this note is the reason why.
-    pub fn definition_tick(&mut self, shard: &str, out: &mut Vec<InstrumentDefinition>) {
+    pub fn definition_tick(&mut self, shard: &str, out: &mut Vec<PublishedDefinition>) {
         out.clear();
         let Some(index) = self.shard_index(shard) else {
             return;
         };
         let now_ns = self.clock.monotonic_ns();
         let published = self.sets[index].published;
-        let due = self.sets[index].pacer.due(now_ns, published);
-        if due == 0 {
+        // The pacer's debt first, without taking it. This runs on the thread
+        // that carries ingress, on every tick, and the slots are walked only on
+        // a tick that owes something. A tick that owes nothing still tells the
+        // pacer the time, which is what starts a lap and ends an empty one.
+        let owed = self.sets[index].pacer.owed(now_ns, published);
+        if owed == 0 {
+            let _ = self.sets[index].pacer.due_at_most(now_ns, published, 0);
             return;
         }
+        // A definition with a strike is a larger message than the pacer's
+        // ceiling counts, so what the tick's datagrams hold is read off the
+        // entries as they are walked: one walk, no further than what is owed.
+        let mut room = self.config.schedule.room_behind(0);
         let manifest_seq = self.sets[index].manifest_seq;
         let mut cursor = self.sets[index].cursor;
         let slots = self.slots.len();
-        while out.len() < due {
+        let mut full = false;
+        while out.len() < owed && !full {
             let before = out.len();
             for _ in 0..slots {
-                if out.len() == due {
+                if out.len() == owed {
                     break;
                 }
                 // Every slot is walked and only this shard's are emitted. The
                 // slots are shared because an `Instrument ID` is, and a lap
                 // that emitted another shard's definition would put it on a
                 // channel whose manifest does not count it.
-                if let Some(entry) = &self.slots[cursor] {
+                if let Some(entry) = &mut self.slots[cursor] {
                     if entry.shard == index {
-                        out.push(definition::stamped(&entry.definition, manifest_seq));
+                        if !room.take(wire_size(entry.strike.is_some())) {
+                            // The cursor stays on it: it is the next tick's
+                            // first, and still owed.
+                            full = true;
+                            break;
+                        }
+                        entry.defined = true;
+                        out.push(PublishedDefinition {
+                            definition: definition::stamped(&entry.definition, manifest_seq),
+                            strike: entry.strike,
+                        });
                     }
                 }
                 cursor = (cursor + 1) % slots;
@@ -773,7 +865,210 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             }
         }
         self.sets[index].cursor = cursor;
+        // Taken from the pacer only now, and only what was handed out: what the
+        // datagrams did not hold stays owed.
+        let _ = self.sets[index]
+            .pacer
+            .due_at_most(now_ns, published, out.len());
         self.counts.definitions_emitted += out.len() as u64;
+    }
+
+    /// The definitions one shard owes ahead of the cycle, because their strike
+    /// changed: a pending strike the venue fixed, or a fixed one it corrected.
+    ///
+    /// `out` is cleared and filled, as [`definition_tick`](Self::definition_tick)
+    /// fills it, and each entry carries its strike. The supplement asks that a
+    /// fixed strike be sent when the venue fixes it and not at the instrument's
+    /// place in the cycle, which for a 30-second cycle is up to 30 seconds of a
+    /// subscriber trading a contract whose strike it has not been told.
+    ///
+    /// **`Manifest Seq` does not move.** A strike is not the published set, and
+    /// these definitions carry the sequence the shard already had. A caller
+    /// sends them behind a `ManifestSummary` stating it, because a subscriber
+    /// discards a definition tagged with a sequence it has not been told, and
+    /// after an admission the summary is otherwise sent only on its cadence.
+    ///
+    /// Bounded by what one tick's datagrams hold behind that summary, so a
+    /// venue that fixes a thousand strikes in one poll is spread over the ticks
+    /// that follow and is not a burst. Where a tick is one datagram, which is
+    /// what the runtime configures, that is six at the mandated datagram size:
+    /// the summary's 24 bytes are the room a seventh would have needed, and the
+    /// batch and its summary are one datagram. A schedule that allows a tick
+    /// more datagrams lets the batch run on into them; the summary still leads
+    /// the first. What is not taken stays
+    /// owed, oldest first. These are extra to the cycle and are not counted
+    /// against its lap.
+    pub fn strike_changes(&mut self, shard: &str, out: &mut Vec<PublishedDefinition>) {
+        out.clear();
+        let Some(index) = self.shard_index(shard) else {
+            return;
+        };
+        if self.sets[index].strikes_changed.is_empty() {
+            return;
+        }
+        let waiting = std::mem::take(&mut self.sets[index].strikes_changed);
+        // A handle that has since been withdrawn owes nothing, and resolves to
+        // nothing: a slot is never used again, so a symbol admitted again has
+        // another handle. Whatever still resolves is owed.
+        let sizes = waiting
+            .iter()
+            .filter_map(|handle| self.slot(*handle))
+            .map(|entry| wire_size(entry.strike.is_some()));
+        let fitting = self
+            .config
+            .schedule
+            .fitting_behind(ManifestSummary::SIZE, sizes);
+        let manifest_seq = self.sets[index].manifest_seq;
+        let mut kept = Vec::new();
+        for handle in waiting {
+            let Some(entry) = self.slot(handle) else {
+                continue;
+            };
+            if out.len() == fitting {
+                kept.push(handle);
+                continue;
+            }
+            out.push(PublishedDefinition {
+                definition: definition::stamped(&entry.definition, manifest_seq),
+                strike: entry.strike,
+            });
+        }
+        self.sets[index].strikes_changed = kept;
+        self.counts.definitions_emitted += out.len() as u64;
+    }
+
+    /// How many published instruments on a shard have a pending strike.
+    ///
+    /// The number an operator watches at a venue that fixes strikes after
+    /// listing: it rises at each listing and returns to zero when the venue has
+    /// fixed them. One that stays up is a strike this publisher was never told,
+    /// which no refusal counts, because nothing was refused.
+    ///
+    /// `None` for a shard this registry was not configured with.
+    #[must_use]
+    pub fn strikes_pending_on(&self, shard: &str) -> Option<usize> {
+        Some(self.sets[self.shard_index(shard)?].strikes_pending)
+    }
+
+    /// State the strike of a published instrument, and report why it was
+    /// refused.
+    ///
+    /// [`ListingSink::strike`] is this without the reason, as
+    /// [`ListingSink::list_on`] is [`offer`](Self::offer) without it.
+    ///
+    /// A strike with the bounds of the published one changes nothing and costs
+    /// a comparison, so an adapter may state every strike on every poll. Its
+    /// fixing time is not part of that comparison: one stated for a strike held
+    /// without it is kept from then on, and neither that nor a later statement
+    /// without it is a change. A strike whose bounds differ replaces the
+    /// published one, and if a definition of the instrument has already
+    /// been handed out it is owed again at once; see
+    /// [`strike_changes`](Self::strike_changes). `Manifest Seq` is not
+    /// advanced in either case.
+    ///
+    /// A handle this registry does not hold is ignored, as
+    /// [`ListingSink::delist`] ignores one.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::StrikeUnrepresentable`], [`Refusal::StrikeEmpty`],
+    /// [`Refusal::StrikeUnfixed`] and [`Refusal::StrikePresence`]. Each is
+    /// counted, and what the instrument publishes is unchanged, with one
+    /// exception: a first statement the wire cannot carry leaves the
+    /// instrument with a pending strike, where it had none.
+    pub fn state_strike(
+        &mut self,
+        instrument: InstrumentRef,
+        stated: &Strike<'_>,
+    ) -> Result<(), Refusal> {
+        let Some(entry) = self.slot(instrument).copied() else {
+            return Ok(());
+        };
+        let result = self.restate_strike(instrument, &entry, stated);
+        if let Err(refusal) = result {
+            self.count_refusal(refusal);
+        }
+        result
+    }
+
+    fn restate_strike(
+        &mut self,
+        instrument: InstrumentRef,
+        entry: &Published,
+        stated: &Strike<'_>,
+    ) -> Result<(), Refusal> {
+        let instrument_id = entry.definition.instrument_id;
+        let composed = match strike::compose(stated, instrument_id, self.config.source_id) {
+            Ok(composed) => composed,
+            Err(refusal) => {
+                // The venue said this contract pays on a strike and said it in
+                // a way the wire cannot carry. Before the first definition that
+                // is still something to publish: a strike, pending. Publishing
+                // the instrument bare instead would state that it pays on no
+                // strike, and would settle that for the era, so the valid
+                // strike the venue states a poll later would be refused too.
+                if entry.strike.is_none() && !entry.defined {
+                    let source_id = self.config.source_id.get();
+                    let pending = StrikeInterval::pending(instrument_id, source_id, 0);
+                    self.replace_strike(instrument, entry, pending);
+                }
+                return Err(refusal);
+            }
+        };
+        match entry.strike {
+            // The same interval is the same strike, whatever its fixing time.
+            // A venue that gives the time on one of its paths and not on
+            // another has stated one strike twice, and sending it again for
+            // that would be a correction that corrects nothing, every poll.
+            Some(current) if same_interval(&current, &composed) => {
+                // The time is kept once it has been stated, and taken when it
+                // is first stated for a strike held without one. Neither is a
+                // change: it goes out at the instrument's place in the cycle.
+                if current.fixing_time_ns == 0 && composed.fixing_time_ns != 0 {
+                    if let Some(slot) = self.slot_mut(instrument) {
+                        slot.strike = Some(StrikeInterval {
+                            fixing_time_ns: composed.fixing_time_ns,
+                            ..current
+                        });
+                    }
+                }
+                return Ok(());
+            }
+            Some(current) if !current.is_pending() && composed.is_pending() => {
+                return Err(Refusal::StrikeUnfixed);
+            }
+            None if entry.defined => return Err(Refusal::StrikePresence),
+            _ => {}
+        }
+        self.replace_strike(instrument, entry, composed);
+        Ok(())
+    }
+
+    /// Hold `strike` for an instrument whose entry was `entry` until now.
+    fn replace_strike(
+        &mut self,
+        instrument: InstrumentRef,
+        entry: &Published,
+        strike: StrikeInterval,
+    ) {
+        if let Some(slot) = self.slot_mut(instrument) {
+            slot.strike = Some(strike);
+        }
+        let set = &mut self.sets[entry.shard];
+        if entry.strike.is_some_and(|current| current.is_pending()) {
+            set.strikes_pending -= 1;
+        }
+        if strike.is_pending() {
+            set.strikes_pending += 1;
+        }
+        // Before its first definition there is nothing to send again: the
+        // strike goes out with that definition, at its place in the cycle.
+        if entry.defined {
+            self.counts.strikes_changed += 1;
+            if !set.strikes_changed.contains(&instrument) {
+                set.strikes_changed.push(instrument);
+            }
+        }
     }
 
     /// One shard's manifest, as of now.
@@ -1056,6 +1351,8 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             symbol,
             shard,
             definition: composed.definition,
+            strike: None,
+            defined: false,
         });
         self.handles.insert(symbol, handle);
         self.published += 1;
@@ -1231,6 +1528,9 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         self.instruments.withdraw(instrument);
         self.published -= 1;
         self.sets[entry.shard].published -= 1;
+        if entry.strike.is_some_and(|strike| strike.is_pending()) {
+            self.sets[entry.shard].strikes_pending -= 1;
+        }
         self.counts.delisted += 1;
         // The entry stays, and gives the symbol its own ID back if the venue
         // relists it. A delisting writes nothing, which is why it cannot fail:
@@ -1303,8 +1603,12 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             Refusal::Capped => self.counts.declined_at_cap += 1,
             Refusal::UnknownShard => self.counts.declined_unknown_shard += 1,
             Refusal::ShardRestated => self.counts.declined_shard_restated += 1,
+            Refusal::StrikeUnfixed => self.counts.declined_strike_unfixed += 1,
+            Refusal::StrikePresence => self.counts.declined_strike_presence += 1,
             Refusal::ContractSize
             | Refusal::Field(_)
+            | Refusal::StrikeUnrepresentable
+            | Refusal::StrikeEmpty
             | Refusal::ScaleRestated
             | Refusal::IdSpaceExhausted
             | Refusal::Unpersistable
@@ -1359,6 +1663,12 @@ impl<S: StateStore, C: Clock> ListingSink for Registry<S, C> {
 
     fn delist(&mut self, instrument: InstrumentRef) {
         self.withdraw(instrument);
+    }
+
+    fn strike(&mut self, instrument: InstrumentRef, strike: &Strike<'_>) {
+        // Counted where it was refused. An adapter is told nothing, as for an
+        // offer: it can act on none of the reasons.
+        let _ = self.state_strike(instrument, strike);
     }
 }
 
