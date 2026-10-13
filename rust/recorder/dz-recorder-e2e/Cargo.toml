@@ -41,6 +41,18 @@ dz-recorder-inline = { path = "../dz-recorder-inline" }
 # gates the module that uses it rather than the crate itself: a second copy of
 # the replay-to-pcap conversion here is exactly what promoting it removed.
 dz-recorder-conformance = { path = "../dz-recorder-conformance" }
+# The publisher as a venue links it, for the one suite whose stream no fixture
+# here can state: a strike is published by the reference-data registry behind
+# the runtime's own send path, so `strike_conformance.rs` composes that runtime
+# over recording sinks and archives what it sent. These are what its test
+# harness names, which that suite includes rather than copies.
+dz-adapter-core = { path = "../../adapter/dz-adapter-core" }
+dz-ingress-core = { path = "../../ingress/dz-ingress-core" }
+dz-publisher-egress = { path = "../../publisher/dz-publisher-egress" }
+dz-publisher-lowering = { path = "../../publisher/dz-publisher-lowering" }
+dz-publisher-metrics = { path = "../../publisher/dz-publisher-metrics" }
+dz-publisher-refdata = { path = "../../publisher/dz-publisher-refdata" }
+dz-publisher-runtime = { path = "../../publisher/dz-publisher-runtime" }
 tempfile = { workspace = true }
 # `SegmentManifest` is `Deserialize`, so the per-instance coverage rows are
 # asserted as the typed values the index table holds rather than found by a text

@@ -543,10 +543,17 @@ dependencies = [
 name = "dz-recorder-e2e"
 version = "0.4.0"
 dependencies = [
+ "dz-adapter-core",
  "dz-edge-core",
  "dz-edge-mbp",
  "dz-edge-refdata",
  "dz-edge-tob",
+ "dz-ingress-core",
+ "dz-publisher-egress",
+ "dz-publisher-lowering",
+ "dz-publisher-metrics",
+ "dz-publisher-refdata",
+ "dz-publisher-runtime",
  "dz-recorder-archive",
  "dz-recorder-capture",
  "dz-recorder-clickhouse",

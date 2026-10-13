@@ -245,8 +245,18 @@ jobs:
       # them change what the rule set judges — #64 (an overflowed delta journal
       # stays unverifiable), #66 (both ends of an MBP snapshot rotation) and #70
       # (schema 1 and schema 3 in one binary) — and a conformance failure that
-      # first appears at this pin may be theirs rather than this repository's.
-      SPEC_REF: 931d68d9a5d2446c56cdbf644acd518ed91beafa
+      # first appeared at that pin may be theirs rather than this repository's.
+      #
+      # Pinned now at 57f2bd3 (upstream #84), upstream's head when the second
+      # floor arrived: the five `STRIKE.*` rules exist from 4bf2e03 (upstream
+      # #93), and an older rule set skips a `StrikeInterval` as a type it does
+      # not know, which `strike_conformance.rs` fails on rather than reading as
+      # five passes. The move from 931d68d carries six commits. Three change
+      # what the rule set judges or reports — #51 (`REFDATA.NEVER_REACHES_READY`
+      # decided when the window closes), #93 (the strike rules) and #84 (a
+      # finding names the publisher it judges) — and the other three are
+      # registry and specification text.
+      SPEC_REF: 57f2bd3f83f9d694b7649af5e96b2cad0eda6864
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
