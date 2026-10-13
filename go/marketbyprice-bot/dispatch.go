@@ -15,6 +15,9 @@ func (s *Shard) apply(rec Record) []ChannelEvent {
 	switch rec.Type {
 	case "instrument_definition":
 		return s.applyInstrumentDefinition(k, rec)
+	case "strike_interval":
+		s.applyStrikeInterval(k, rec)
+		return nil
 	case "snapshot_begin":
 		return s.applySnapshotBegin(k, rec)
 	case "snapshot_level":
@@ -46,6 +49,11 @@ func (s *Shard) applyInstrumentDefinition(k instKey, rec Record) []ChannelEvent 
 		PriceExponent: priceExp,
 		QtyExponent:   qtyExp,
 		ManifestSeq:   toUint16(rec.Fields["manifest_seq"]),
+		SourceID:      toUint16(rec.Fields["source_id"]),
+		// Strike is left nil on purpose: a definition with no StrikeInterval
+		// behind it means the contract does not pay on a strike, so the strike
+		// held for the previous transmission does not outlive it. The record
+		// that follows restores it when there is one.
 	}
 	inst, ok := s.instruments[k]
 	if !ok {
@@ -57,6 +65,35 @@ func (s *Shard) applyInstrumentDefinition(k instKey, rec Record) []ChannelEvent 
 	}
 	// Refdata only: the book is untouched, so this is not an applied delta.
 	return []ChannelEvent{{Kind: KindInstrumentDefinition, InstrumentID: k.id, Symbol: symbol, Record: rec}}
+}
+
+// applyStrikeInterval holds a strike on the definition it arrived behind. The
+// last one for an instrument is the current strike.
+//
+// The Coordinator has already established that this record directly follows
+// that definition in one datagram and repeats its Source ID; it is the only
+// place that can, because it alone sees the records of every instrument in
+// order. What is left to refuse here is a strike with no definition to hold it
+// on, which that check makes unreachable from the socket.
+//
+// No event is returned: a strike changes no book, and no table has a column for
+// it, so there is nothing for the persistence layer to do with one.
+func (s *Shard) applyStrikeInterval(k instKey, rec Record) {
+	def, ok := s.refdata[k]
+	if !ok {
+		if s.metrics != nil {
+			s.metrics.StrikeIntervalsIgnoredTotal.WithLabelValues(strikeIgnoredNoDefinition).Inc()
+		}
+		return
+	}
+	def.Strike = &StrikeInterval{
+		Exponent:      toInt8(rec.Fields["strike_exponent"]),
+		BoundFlags:    toUint8(rec.Fields["bound_flags"]),
+		LowerBoundRaw: toInt64(rec.Fields["lower_bound_raw"]),
+		UpperBoundRaw: toInt64(rec.Fields["upper_bound_raw"]),
+		FixingTime:    toTime(rec.Fields["fixing_time"]),
+	}
+	s.refdata[k] = def
 }
 
 func (s *Shard) instrumentFor(k instKey) *Instrument {

@@ -12,8 +12,20 @@ Two properties of that envelope matter here:
 
 - **`snapshot_level` records carry no `instrument_id`.** The wire omits it because the containing `SnapshotBegin` implies it. The coordinator stamps the identity from the currently-open snapshot group before routing.
 - **An absent `order_count` means the `0xFFFF` sentinel, not zero.** The parser omits the key when the venue does not expose a count. Zero is a real count and is emitted as `0`.
+- **A `strike_interval` record belongs to the `instrument_definition` record before it only when their `msg_index` values are consecutive.** The parser writes a datagram's records in wire order and the socket delivers a datagram's records together or not at all, but the parser emits no record for a message it skips or drops, so two neighbouring records were not always neighbouring messages. `msg_index` is the position of a record's message among every application message of its datagram. See [Strikes](#strikes).
 
 The book-builder reconnects to the socket with exponential backoff (250 ms doubling to 5 s) and survives the parser restarting under it.
+
+## Strikes
+
+A `StrikeInterval` is the strike of a contract that pays on a threshold or a range, defined by the [Reference Data supplement](https://github.com/malbeclabs/edge-feed-spec/blob/main/reference-data/spec.md). The book-builder holds it on the instrument's definition, as the supplement's `state.strikes`, with the definition's lifetime:
+
+- Every `instrument_definition` applied starts with no strike. The `strike_interval` directly behind it sets one, fixed or pending, and the last one sent is the current strike. A definition that arrives with none behind it therefore leaves the instrument without a strike: its contract does not pay on one.
+- Whatever drops the definition drops the strike: a manifest prune and a `Reset Count` change.
+- **A strike in any other position is ignored**, as the supplement's Strike State rule 5 requires. The Coordinator holds a `strike_interval` to three conditions before a shard sees it: the record immediately before it is an `instrument_definition`, of the same instrument, from the same datagram (`channel_id`, `port` and `seq`), whose `msg_index` is one less than its own; and its `source_id` is that definition's. The `msg_index` condition is what refuses a strike that had a message between it and its definition which the parser skipped by its length or dropped as malformed, and which therefore left no record. One that fails changes nothing, the strike already held included, and is counted in `strike_intervals_ignored_total{reason}`. The check is the Coordinator's because "immediately before" is a statement about the order of every record, and a shard sees only its own instruments'.
+- The `Source ID` is compared at every schema version. A schema 1 definition carries none and the parser reports `0` for it, so a strike behind one is held only if it also says `0`.
+
+The strike is state only. It moves no book, produces no `ChannelEvent`, and is written to no table: `instruments` has no column for it.
 
 ## State machine
 
@@ -154,6 +166,7 @@ Namespace `dz_mbp_bot`.
 | `malformed_deltas_total{reason}` | Book-affecting records this book-builder received and the spec declares malformed, each demoting its instrument to `gap` immediately: `bookclear_scope_side` (`Scope = 1` with `Clear Side = 2`) or `other`. A publisher defect, not loss in transit. Zero on the reference pipeline, where the parser refuses the pairing at decode and counts `dz_mbp_parser_malformed_total{reason}`; the reason values match, so the two sit side by side on one dashboard. |
 | `instrument_resets_total{reason}` | `InstrumentReset` messages applied. |
 | `channel_resets_total` | `Reset Count` era changes, each draining every shard. |
+| `strike_intervals_ignored_total{reason}` | `StrikeInterval` records ignored and not held as an instrument's strike: `not_behind_definition` (the record before it is not the `InstrumentDefinition` of the same instrument in the same datagram), `source_id` (its `Source ID` is not that definition's), `no_definition` (a shard was handed one for an instrument it holds no definition of, which the first two checks make unreachable from the socket). A conforming publisher causes none. See [Strikes](#strikes). |
 | `snapshot_discarded_total{reason}` | Snapshots discarded: `stale_anchor` (captured before an `InstrumentReset`), `stale_instrument_seq` (captured before the hole that gapped the instrument), `short`, `mismatch`, `other`. A `snapshot_end` with no open shadow is not a discard — it is the healthy path where a ready, current instrument declined the begin. |
 | `snapshot_level_dropped_total` | `SnapshotLevel` records misrouted — no open group at the coordinator, or a `Snapshot ID` that does not match the open group. Levels belonging to a snapshot a ready-and-current instrument declined are NOT counted: the publisher sends every level of a group regardless, so counting them would bury the misroute signal under healthy steady state. |
 | `deltas_discarded_total{reason}` | Deltas seen and not applied. `stale_seq` is a duplicate or late datagram — benign in bursts, but a sustained climb on one instrument with no matching applied traffic means a snapshot set the sequence tracker ahead of reality and the book is wedged. |

@@ -173,6 +173,12 @@ func (b *Bot) handle(rec *Record) {
 
 	// Persist tick-level rows to ClickHouse if a writer is attached.
 	// Non-blocking: the writer drops into metrics if its buffer is full.
+	//
+	// A strike_interval is not among them. This book-builder keeps no
+	// definitions, so it has nothing to hold a strike on, and the instruments
+	// table has no column for one: the record is counted by type above and
+	// goes no further. The parser has already dropped any strike that was not
+	// directly behind its own definition.
 	if b.chw != nil {
 		switch rec.Type {
 		case "quote":
