@@ -17,8 +17,10 @@ The feed is delivered on one multicast group across three UDP ports. Concrete po
 | Port flag | Channel | Carries |
 |---|---|---|
 | `--mktdata-port` | mktdata | `LevelUpdate`, `BookClear`, `Trade`, `Liquidation`, `BatchBoundary`, `InstrumentReset`, `Heartbeat`, `EndOfSession` |
-| `--refdata-port` | refdata | `InstrumentDefinition`, `ManifestSummary` |
+| `--refdata-port` | refdata | `InstrumentDefinition`, `StrikeInterval`, `ManifestSummary` |
 | `--snapshot-port` | snapshot | `SnapshotBegin`, `SnapshotLevel`, `SnapshotEnd` |
+
+`StrikeInterval` (`0x09`, from the [Reference Data supplement](https://github.com/malbeclabs/edge-feed-spec/blob/main/reference-data/spec.md)) is the strike of a contract that pays on a threshold or a range. A publisher sends it directly behind the `InstrumentDefinition` of the same instrument, in the same datagram, and this parser emits it as a `strike_interval` record in that position. Its `fields` carry `source_id`, `strike_exponent`, the `bound_flags` byte as it arrived, and `pending`, `lower_present`, `lower_inclusive`, `upper_present` and `upper_inclusive` read from it. `lower_bound_raw` and `upper_bound_raw` are present only for a bound that is, and `fixing_time` only when the wire value is not `0`; a pending strike carries none of the three. The parser is stateless and decodes the message wherever it finds it. The rule that a strike in any other position is ignored needs the definition before it, so it is the book-builder's: see [marketbyprice-bot](../marketbyprice-bot/README.md#strikes).
 
 A cold-start subscriber binds all three ports. The snapshot stream lets a subscriber bootstrap or recover from packet loss without any out-of-band replay mechanism; a subscriber with its own recovery path may skip `--snapshot-port` at the cost of that in-band recovery.
 
@@ -106,7 +108,7 @@ Namespace `dz_mbp_parser`. All metrics are exposed on `--metrics-addr` at `/metr
 
 ```
 multicast group (UDP)
-  ├── refdata port   ──► InstrumentDefinition, ManifestSummary
+  ├── refdata port   ──► InstrumentDefinition, StrikeInterval, ManifestSummary
   ├── mktdata port   ──► LevelUpdate, BookClear, Trade, Liquidation,
   │                      BatchBoundary, InstrumentReset, Heartbeat, EndOfSession
   └── snapshot port  ──► SnapshotBegin, SnapshotLevel, SnapshotEnd

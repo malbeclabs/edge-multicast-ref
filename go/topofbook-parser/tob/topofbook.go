@@ -1,6 +1,7 @@
 package tob
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"math"
@@ -14,6 +15,13 @@ type instrumentInfo struct {
 	Symbol        string
 	PriceExponent int8
 	QtyExponent   int8
+
+	// Strike is the instrument's strike, or nil when its contract does not pay
+	// on one. It is the Reference Data supplement's state.strikes, held inside
+	// the definition so that the two cannot have different lifetimes: every
+	// definition starts with none, the StrikeInterval directly behind it in the
+	// same datagram sets it, and a channel reset drops both.
+	Strike *topOfBookStrikeInterval
 }
 
 // bufferedMsg holds a raw datagram message that arrived before its
@@ -44,6 +52,9 @@ type TopOfBookParser struct {
 	// bufferFullLogged records whether we've already emitted an INFO log
 	// about hitting the cap; further drops log at DEBUG.
 	bufferFullLogged bool
+	// strikesIgnored counts StrikeInterval messages ignored under the
+	// supplement's Strike State rule 5. A conforming publisher sends none.
+	strikesIgnored uint64
 }
 
 func NewTopOfBookParser() *TopOfBookParser {
@@ -105,12 +116,23 @@ func (p *TopOfBookParser) Parse(data []byte, meta PacketMeta) ([]Record, error) 
 	sendTS := datagram.Header.SendTimestamp
 
 	var records []Record
+	// prevDef is the InstrumentDefinition the message before this one was, if it
+	// was one. A StrikeInterval is its instrument's strike only directly behind
+	// that instrument's definition, in the same datagram; a message of any other
+	// type in between, one this decoder skips included, ends that.
+	var prevDef *topOfBookInstrumentDef
 	for i := range datagram.Messages {
 		msg := &datagram.Messages[i]
-		recs, err := p.processMessage(channelID, seq, reset, sendTS, meta, msg)
-		if err != nil {
-			return records, fmt.Errorf("processing message type 0x%02x: %w", msg.MsgType, err)
+		var recs []Record
+		if strike, ok := msg.Body.(*topOfBookStrikeInterval); ok {
+			recs = p.handleStrikeInterval(channelID, seq, reset, sendTS, meta, strike, prevDef, datagram.Header.SchemaVersion)
+		} else {
+			recs, err = p.processMessage(channelID, seq, reset, sendTS, meta, msg)
+			if err != nil {
+				return records, fmt.Errorf("processing message type 0x%02x: %w", msg.MsgType, err)
+			}
 		}
+		prevDef, _ = msg.Body.(*topOfBookInstrumentDef)
 		records = append(records, recs...)
 	}
 
@@ -216,6 +238,95 @@ func (p *TopOfBookParser) handleInstrumentDef(channelID uint8, seq uint64, reset
 			"price_bound":    body.PriceBound,
 			"manifest_seq":   body.ManifestSeq,
 		},
+	}}, meta)
+}
+
+// handleStrikeInterval holds a strike on the definition it arrived behind and
+// surfaces it as a record. prevDef is the InstrumentDefinition immediately
+// before it in the datagram, or nil when the message before it was anything
+// else or there was none.
+//
+// Strike State rule 5 of the Reference Data supplement: a subscriber MUST
+// ignore a StrikeInterval that does not immediately follow an
+// InstrumentDefinition with the same Instrument ID, and one whose Source ID
+// differs from that definition's where the definition carries one — which a
+// schema 1 definition does not. Ignored means it changes nothing and yields no
+// record: the strike held for the instrument, if any, stays.
+func (p *TopOfBookParser) handleStrikeInterval(channelID uint8, seq uint64, reset uint8, sendTS uint64, meta PacketMeta, body *topOfBookStrikeInterval, prevDef *topOfBookInstrumentDef, schemaVersion uint8) []Record {
+	var why string
+	switch {
+	case prevDef == nil || prevDef.InstrumentID != body.InstrumentID:
+		why = "not directly behind the definition of its instrument"
+	case schemaVersion == schemaVersionV3 && prevDef.SourceID != body.SourceID:
+		why = "source id differs from its definition's"
+	}
+	if why != "" {
+		p.mu.Lock()
+		p.strikesIgnored++
+		ignored := p.strikesIgnored
+		p.mu.Unlock()
+		// The first one is the news; a publisher that does this does it for
+		// every instrument on every definition cycle.
+		level := slog.LevelDebug
+		if ignored == 1 {
+			level = slog.LevelWarn
+		}
+		slog.Log(context.Background(), level, "edge: strike interval ignored",
+			"parser", "topofbook",
+			"reason", why,
+			"instrument_id", body.InstrumentID,
+			"source_id", body.SourceID,
+			"channel_id", channelID,
+			"seq", seq,
+			"ignored_total", ignored)
+		return nil
+	}
+
+	// The last StrikeInterval for an instrument is its current strike. The
+	// definition was stored a moment ago by handleInstrumentDef; it is absent
+	// only if a ChannelReset on another port cleared it in between, and then
+	// there is nothing to hold the strike on.
+	held := *body
+	p.mu.Lock()
+	if info, ok := p.instruments[body.InstrumentID]; ok {
+		info.Strike = &held
+	}
+	p.mu.Unlock()
+
+	fields := map[string]any{
+		"source_id":       body.SourceID,
+		"strike_exponent": body.StrikeExponent,
+		"bound_flags":     body.BoundFlags,
+		"pending":         body.pending(),
+		"lower_present":   body.BoundFlags&boundLowerPresent != 0,
+		"lower_inclusive": body.BoundFlags&boundLowerInclusive != 0,
+		"upper_present":   body.BoundFlags&boundUpperPresent != 0,
+		"upper_inclusive": body.BoundFlags&boundUpperInclusive != 0,
+	}
+	// Raw, in units of 10^strike_exponent, as tick_size is in a definition:
+	// scaled to a float64 a strike of fifteen or more digits would not survive.
+	// A bound that is not present is no limit on that side, and the wire's 0
+	// there is padding, so it is omitted rather than read as a strike of zero.
+	if body.BoundFlags&boundLowerPresent != 0 {
+		fields["lower_bound"] = body.LowerBound
+	}
+	if body.BoundFlags&boundUpperPresent != 0 {
+		fields["upper_bound"] = body.UpperBound
+	}
+	// 0 means pending, fixed at listing, or not available: no time either way.
+	if body.FixingTime != 0 {
+		fields["fixing_time_ns"] = body.FixingTime
+	}
+
+	return applyMeta([]Record{{
+		Type:           "strike_interval",
+		Timestamp:      nsToTime(sendTS),
+		ChannelID:      channelID,
+		SequenceNumber: seq,
+		ResetCount:     reset,
+		InstrumentID:   body.InstrumentID,
+		Symbol:         trimNull(prevDef.Symbol),
+		Fields:         fields,
 	}}, meta)
 }
 

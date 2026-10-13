@@ -13,9 +13,9 @@ go build -o dz-topofbook-parser .
 go test -v ./...
 ```
 
-`tob/golden_test.go` decodes the five top-of-book and reference-data vectors in
-`testdata/golden` — Quote, Trade, ManifestSummary, and InstrumentDefinition in
-both schema generations — and asserts every field against the values
+`tob/golden_test.go` decodes the six top-of-book and reference-data vectors in
+`testdata/golden` — Quote, Trade, ManifestSummary, StrikeInterval, and
+InstrumentDefinition in both schema generations — and asserts every field against the values
 `manifest.json` records. Those vectors were transcribed by hand from the
 `edge-feed-spec` field tables, so they bind this decoder to the wire rather than
 to a fixture written from the same reading of the spec the decoder was.
@@ -72,6 +72,7 @@ flags          u16   (0x0001 = snapshot)
 | 0x05 | ChannelReset | 12 | either | Publisher startup — drop cached state |
 | 0x06 | EndOfSession | 12 | either | Publisher shutdown |
 | 0x07 | ManifestSummary | 24 | refdata | Periodic summary of the published set: valid, manifest_seq, instrument_count |
+| 0x09 | StrikeInterval | 40 | refdata | Strike of a contract that pays on a threshold or a range. Held and emitted only directly behind the InstrumentDefinition of the same instrument in the same datagram; ignored anywhere else |
 
 Every length in the table above is a whole message, `msg_length` included, and
 every one of them is exact. A known message type whose `msg_length` disagrees

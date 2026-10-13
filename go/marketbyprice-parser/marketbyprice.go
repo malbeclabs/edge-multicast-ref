@@ -220,6 +220,43 @@ func (p *marketByPriceParser) decodeMessage(port string, hdr DatagramHeader, mh 
 		}
 		return base, nil
 
+	case msgTypeStrikeInterval:
+		b, err := ParseStrikeInterval(body)
+		if err != nil {
+			return Record{}, err
+		}
+		base.Type = "strike_interval"
+		base.InstrumentID = b.InstrumentID
+		// No source_ts: Fixing Time is when the venue fixed the strike, once,
+		// and the message is retransmitted with its definition every cycle, so
+		// as a source timestamp it would read as a latency that grows for the
+		// life of the contract.
+		base.Fields = map[string]any{
+			"source_id":       b.SourceID,
+			"strike_exponent": b.StrikeExponent,
+			"bound_flags":     b.BoundFlags,
+			"pending":         b.Pending(),
+			"lower_present":   b.BoundFlags&boundLowerPresent != 0,
+			"lower_inclusive": b.BoundFlags&boundLowerInclusive != 0,
+			"upper_present":   b.BoundFlags&boundUpperPresent != 0,
+			"upper_inclusive": b.BoundFlags&boundUpperInclusive != 0,
+		}
+		// A bound that is not present is no limit on that side, and the wire's 0
+		// there is padding. Omitted rather than emitted, so that it cannot be
+		// read as a strike of zero; bound_flags above is the verbatim byte.
+		if b.BoundFlags&boundLowerPresent != 0 {
+			base.Fields["lower_bound_raw"] = b.LowerBoundRaw
+		}
+		if b.BoundFlags&boundUpperPresent != 0 {
+			base.Fields["upper_bound_raw"] = b.UpperBoundRaw
+		}
+		// 0 means pending, fixed at listing, or not available: no time either
+		// way, so no field.
+		if b.FixingTime.UnixNano() != 0 {
+			base.Fields["fixing_time"] = b.FixingTime
+		}
+		return base, nil
+
 	case msgTypeLiquidation:
 		b, err := ParseLiquidation(body)
 		if err != nil {

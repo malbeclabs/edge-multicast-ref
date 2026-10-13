@@ -27,6 +27,7 @@ import (
 //   0x05 channel reset
 //   0x06 end of session
 //   0x07 manifest summary
+//   0x09 strike interval (refdata, directly behind its instrument definition)
 
 const (
 	datagramHeaderBytes = 24
@@ -62,8 +63,8 @@ const (
 // Body lengths for the fixed-size message types, excluding the 4-byte message
 // header. Each is the message size in the wire spec minus that header:
 // Heartbeat 16, Quote 60, Trade 52, ChannelReset 12, EndOfSession 12,
-// ManifestSummary 24. InstrumentDefinition is the one type whose body length
-// varies, and its lengths are the constants above.
+// ManifestSummary 24, StrikeInterval 40. InstrumentDefinition is the one type
+// whose body length varies, and its lengths are the constants above.
 const (
 	heartbeatBodyLen       = 12
 	quoteBodyLen           = 56
@@ -71,6 +72,7 @@ const (
 	channelResetBodyLen    = 8
 	endOfSessionBodyLen    = 8
 	manifestSummaryBodyLen = 20
+	strikeIntervalBodyLen  = 36
 )
 
 const (
@@ -81,6 +83,16 @@ const (
 	msgChannelReset         uint8 = 0x05
 	msgEndOfSession         uint8 = 0x06
 	msgManifestSummary      uint8 = 0x07
+	msgStrikeInterval       uint8 = 0x09
+)
+
+// Bound Flags bits of a StrikeInterval. Bits 4-7 are reserved: a publisher
+// clears them and a subscriber ignores them, so nothing here tests them.
+const (
+	boundLowerPresent   uint8 = 0x01
+	boundLowerInclusive uint8 = 0x02
+	boundUpperPresent   uint8 = 0x04
+	boundUpperInclusive uint8 = 0x08
 )
 
 // topOfBookDatagram is one decoded UDP datagram.
@@ -177,6 +189,33 @@ type topOfBookManifestSummary struct {
 	ManifestSeq     uint16
 	InstrumentCount uint32
 	Timestamp       uint64
+}
+
+// topOfBookStrikeInterval is the strike of one instrument as an interval: a
+// lower bound, an upper bound, or both, from the Reference Data supplement. It
+// follows the instrument's InstrumentDefinition in the same datagram, which is
+// a rule about a datagram and so is held by Parse, not by this type.
+type topOfBookStrikeInterval struct {
+	InstrumentID uint32
+	SourceID     uint16
+	// StrikeExponent scales both bounds. It is independent of the definition's
+	// Price Exponent, which scales the contract's price and not the value the
+	// venue compares with the strike.
+	StrikeExponent int8
+	BoundFlags     uint8
+	LowerBound     int64 // 0 when boundLowerPresent is clear
+	UpperBound     int64 // 0 when boundUpperPresent is clear
+	// FixingTime is nanoseconds since the Unix epoch; 0 while the strike is
+	// pending, when the venue fixed it at listing, and when the time is not
+	// available.
+	FixingTime uint64
+}
+
+// pending reports whether neither bound is present: the venue has listed the
+// instrument and has not fixed its strike. It reads the two presence bits only,
+// so a reserved bit somebody set does not make a pending strike look fixed.
+func (s *topOfBookStrikeInterval) pending() bool {
+	return s.BoundFlags&(boundLowerPresent|boundUpperPresent) == 0
 }
 
 // wireReader is a trivial positional reader for fixed-layout
@@ -486,6 +525,29 @@ func decodeTopOfBookBody(msgType uint8, buf []byte, schemaVersion uint8) (any, e
 		br.skip(2) // reserved
 		b.InstrumentCount = br.u32()
 		b.Timestamp = br.u64()
+		if br.err != nil {
+			return nil, br.err
+		}
+		return &b, nil
+
+	case msgStrikeInterval:
+		// The length is the only thing refused. A body that breaks a publisher
+		// rule — a reserved bit set, an inclusive bit on a bound that is not
+		// present, a bound left non-zero behind a clear presence bit — decodes:
+		// the supplement gives a subscriber one rule for every value of Bound
+		// Flags and tells it to ignore the reserved bits.
+		if err := checkBodyLen("strike_interval", buf, strikeIntervalBodyLen); err != nil {
+			return nil, err
+		}
+		var b topOfBookStrikeInterval
+		b.InstrumentID = br.u32()
+		b.SourceID = br.u16()
+		b.StrikeExponent = br.i8()
+		b.BoundFlags = br.u8()
+		b.LowerBound = br.i64()
+		b.UpperBound = br.i64()
+		b.FixingTime = br.u64()
+		br.skip(4) // reserved
 		if br.err != nil {
 			return nil, br.err
 		}

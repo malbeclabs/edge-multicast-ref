@@ -8,11 +8,11 @@ A multicast subscriber and reusable Go parser for DoubleZero Top-of-Book (DZ-TOB
 
 ## What it does
 
-Joins a multicast group on two UDP ports (marketdata + refdata), decodes the binary DZ-TOB protocol, and outputs structured records (quotes, trades, instrument definitions, heartbeats) as JSON lines, CSV, or a broadcast Unix socket that trading book-builders connect to.
+Joins a multicast group on two UDP ports (marketdata + refdata), decodes the binary DZ-TOB protocol, and outputs structured records (quotes, trades, instrument definitions, strike intervals, heartbeats) as JSON lines, CSV, or a broadcast Unix socket that trading book-builders connect to.
 
 ```
 multicast group (UDP)
-  ├── refdata port ──► InstrumentDefinition messages
+  ├── refdata port ──► InstrumentDefinition, StrikeInterval, ManifestSummary
   └── marketdata port ──► Quote (BBO), Trade, Heartbeat, etc.
                               │
                               ▼
@@ -27,6 +27,12 @@ multicast group (UDP)
                                         all connected
                                         trader bots)
 ```
+
+### Strikes
+
+`StrikeInterval` (`0x09`, from the [Reference Data supplement](https://github.com/malbeclabs/edge-feed-spec/blob/main/reference-data/spec.md)) is the strike of a contract that pays on a threshold or a range. A publisher sends it directly behind the `InstrumentDefinition` of the same instrument, in the same datagram. The parser holds it on that definition and emits a `strike_interval` record carrying the definition's `symbol`. Its `fields` carry `source_id`, `strike_exponent`, the `bound_flags` byte as it arrived, and `pending`, `lower_present`, `lower_inclusive`, `upper_present` and `upper_inclusive` read from it. `lower_bound` and `upper_bound` are raw integers in units of 10^`strike_exponent`, present only for a bound that is; `fixing_time_ns` is present only when the wire value is not `0`. A pending strike carries none of the three.
+
+The strike has the definition's lifetime: the last one sent is current, a definition that arrives with none behind it leaves the instrument without one, and a `ChannelReset` clears both. A `StrikeInterval` in any other position is ignored, as the supplement's Strike State rule 5 requires: one that does not immediately follow the `InstrumentDefinition` of the same instrument in the same datagram, or, at schema version 3, one whose `Source ID` is not that definition's. It yields no record and changes nothing. The first is logged at `WARN` and the rest at `DEBUG`; no metric counts them.
 
 ## Quick start
 

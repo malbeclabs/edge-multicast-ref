@@ -39,6 +39,50 @@ type InstrumentDef struct {
 	PriceExponent int8
 	QtyExponent   int8
 	ManifestSeq   uint16
+	// SourceID is what a StrikeInterval behind this definition must repeat.
+	SourceID uint16
+
+	// Strike is the instrument's strike, or nil when its contract does not pay
+	// on one. It is the Reference Data supplement's state.strikes, held inside
+	// the definition so that the two cannot have different lifetimes: every
+	// definition applied starts with none, the StrikeInterval that follows it in
+	// the same datagram sets it, and whatever drops the definition — a manifest
+	// prune, a channel reset — drops it too.
+	//
+	// The definition and its strike reach the shard as two records, so a reader
+	// taking the lock between them sees a re-advertised definition without the
+	// strike it is about to regain. Nothing reads the strike today; a reader
+	// that needs the pair whole has to be given it whole.
+	Strike *StrikeInterval
+}
+
+// Bound Flags bits of a StrikeInterval. Bits 4-7 are reserved and a subscriber
+// ignores them.
+const (
+	boundLowerPresent   uint8 = 0x01
+	boundLowerInclusive uint8 = 0x02
+	boundUpperPresent   uint8 = 0x04
+	boundUpperInclusive uint8 = 0x08
+)
+
+// StrikeInterval is the strike of one instrument as an interval: a lower bound,
+// an upper bound, or both, each scaled by Exponent — which is independent of
+// the instrument's Price Exponent. With neither bound present the strike is
+// pending: the venue has listed the instrument and not fixed its strike yet.
+type StrikeInterval struct {
+	Exponent      int8
+	BoundFlags    uint8
+	LowerBoundRaw int64 // meaningful only with boundLowerPresent
+	UpperBoundRaw int64 // meaningful only with boundUpperPresent
+	// FixingTime is zero while pending, when the venue fixed the strike at
+	// listing, and when the time is not available.
+	FixingTime time.Time
+}
+
+// Pending reads the two presence bits only, so a reserved bit somebody set
+// does not make a pending strike look fixed.
+func (s StrikeInterval) Pending() bool {
+	return s.BoundFlags&(boundLowerPresent|boundUpperPresent) == 0
 }
 
 // ChannelEvent is the subset of state changes a shard reports outward. The

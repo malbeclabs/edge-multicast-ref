@@ -502,6 +502,7 @@ func TestDecodeBody_LengthIsExactForEveryFixedSizeType(t *testing.T) {
 		{"channel_reset", msgChannelReset, channelResetBodyLen},
 		{"end_of_session", msgEndOfSession, endOfSessionBodyLen},
 		{"manifest_summary", msgManifestSummary, manifestSummaryBodyLen},
+		{"strike_interval", msgStrikeInterval, strikeIntervalBodyLen},
 	}
 
 	for _, tc := range tests {

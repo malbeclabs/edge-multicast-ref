@@ -278,6 +278,47 @@ func TestParseDatagram_AllTypesDecodeToRecords(t *testing.T) {
 			},
 		},
 		{
+			// Bound Flags 0x07: lower present and inclusive, upper present and
+			// exclusive.
+			name: "strike_interval", msgType: msgTypeStrikeInterval, port: "refdata",
+			body: strikeIntervalBody(9, 3, -2, 0x07, 9270000, 9279999, uint64(recordTestTS.UnixNano())), wantType: "strike_interval",
+			check: func(t *testing.T, rec Record) {
+				if rec.InstrumentID != 9 {
+					t.Errorf("instrument id: got %d want 9", rec.InstrumentID)
+				}
+				if got := field(t, rec, "source_id").(uint16); got != 3 {
+					t.Errorf("source_id: got %d want 3", got)
+				}
+				if got := field(t, rec, "strike_exponent").(int8); got != -2 {
+					t.Errorf("strike_exponent: got %d want -2", got)
+				}
+				if got := field(t, rec, "bound_flags").(uint8); got != 0x07 {
+					t.Errorf("bound_flags: got 0x%02x want 0x07", got)
+				}
+				for key, want := range map[string]bool{
+					"pending": false, "lower_present": true, "lower_inclusive": true,
+					"upper_present": true, "upper_inclusive": false,
+				} {
+					if got := field(t, rec, key).(bool); got != want {
+						t.Errorf("%s: got %v want %v", key, got, want)
+					}
+				}
+				if got := field(t, rec, "lower_bound_raw").(int64); got != 9270000 {
+					t.Errorf("lower_bound_raw: got %d want 9270000", got)
+				}
+				if got := field(t, rec, "upper_bound_raw").(int64); got != 9279999 {
+					t.Errorf("upper_bound_raw: got %d want 9279999", got)
+				}
+				if got := field(t, rec, "fixing_time").(time.Time); !got.Equal(recordTestTS) {
+					t.Errorf("fixing_time: got %v want %v", got, recordTestTS)
+				}
+				// Fixing Time is not the venue time of this message.
+				if rec.SourceTSNS != 0 {
+					t.Errorf("strike_interval must not set source_ts_ns, got %d", rec.SourceTSNS)
+				}
+			},
+		},
+		{
 			name: "batch_boundary", msgType: msgTypeBatchBoundary, port: "mktdata",
 			body: batchBoundaryBody(88), wantType: "batch_boundary",
 			check: func(t *testing.T, rec Record) {
@@ -488,6 +529,66 @@ func TestParseDatagram_UnrecognisedEnumValuesDegradeToUnknown(t *testing.T) {
 	}
 	if got := field(t, recs[1], "clear_reason").(string); got != "unknown" {
 		t.Errorf("book_clear clear_reason: got %q want unknown", got)
+	}
+}
+
+// A pending strike states no bound and no time, so its record carries none: a
+// 0 there would read as a strike of zero fixed at the epoch. The same holds for
+// the one absent side of a strike bounded on the other. Reserved bits are
+// ignored, so they change none of this.
+func TestParseDatagram_StrikeIntervalOmitsWhatIsNotStated(t *testing.T) {
+	cases := []struct {
+		name        string
+		flags       uint8
+		wantPending bool
+		wantKeys    []string // of lower_bound_raw, upper_bound_raw, fixing_time
+		fixingNS    uint64
+	}{
+		{"pending", 0x00, true, nil, 0},
+		{"pending with reserved bits set", 0xF0, true, nil, 0},
+		{"lower only, fixed at listing", 0x03, false, []string{"lower_bound_raw"}, 0},
+		{"upper only", 0x04, false, []string{"upper_bound_raw", "fixing_time"}, 1700000000000000009},
+		{"both, with reserved bits set", 0xFF, false, []string{"lower_bound_raw", "upper_bound_raw"}, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var lower, upper int64
+			if c.flags&boundLowerPresent != 0 {
+				lower = 100
+			}
+			if c.flags&boundUpperPresent != 0 {
+				upper = 200
+			}
+			p := &marketByPriceParser{}
+			datagram := buildDatagram(t, 0, 1, recordTestTS, 0,
+				buildMsg(msgTypeStrikeInterval, 0, strikeIntervalBody(9, 3, 0, c.flags, lower, upper, c.fixingNS)))
+			recs, defects, err := p.ParseDatagram("refdata", datagram)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(recs) != 1 || recs[0].Type != "strike_interval" {
+				t.Fatalf("records: %+v", recs)
+			}
+			if defects != (Defects{}) {
+				t.Errorf("defects = %+v, want none", defects)
+			}
+			rec := recs[0]
+			if got := field(t, rec, "pending").(bool); got != c.wantPending {
+				t.Errorf("pending: got %v want %v", got, c.wantPending)
+			}
+			if got := field(t, rec, "bound_flags").(uint8); got != c.flags {
+				t.Errorf("bound_flags: got 0x%02x, want the byte as it arrived, 0x%02x", got, c.flags)
+			}
+			want := map[string]bool{}
+			for _, k := range c.wantKeys {
+				want[k] = true
+			}
+			for _, k := range []string{"lower_bound_raw", "upper_bound_raw", "fixing_time"} {
+				if _, present := rec.Fields[k]; present != want[k] {
+					t.Errorf("%s present = %v, want %v", k, present, want[k])
+				}
+			}
+		})
 	}
 }
 

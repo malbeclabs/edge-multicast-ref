@@ -43,6 +43,7 @@ const (
 	msgTypeInstrumentReset      uint8 = 0x14
 	msgTypeSnapshotEnd          uint8 = 0x22
 	msgTypeLiquidation          uint8 = 0x08
+	msgTypeStrikeInterval       uint8 = 0x09
 	msgTypeSnapshotBegin        uint8 = 0x20
 	msgTypeLevelUpdate          uint8 = 0x40
 	msgTypeBookClear            uint8 = 0x41
@@ -203,6 +204,71 @@ func ParseManifestSummary(buf []byte) (ManifestSummaryBody, error) {
 		ManifestSeq:     binary.LittleEndian.Uint16(buf[4:6]),
 		InstrumentCount: binary.LittleEndian.Uint32(buf[8:12]),
 		Timestamp:       readTSNs(buf[12:20]),
+	}, nil
+}
+
+// Bound Flags bits of a StrikeInterval. Bits 4-7 are reserved: a publisher
+// clears them and a subscriber ignores them, so nothing here tests them.
+const (
+	boundLowerPresent   uint8 = 0x01
+	boundLowerInclusive uint8 = 0x02
+	boundUpperPresent   uint8 = 0x04
+	boundUpperInclusive uint8 = 0x08
+)
+
+// StrikeIntervalBody is the 36-byte body of a StrikeInterval message: the
+// strike of one instrument as an interval, from the Reference Data supplement.
+//
+// It travels the refdata port directly behind the InstrumentDefinition of the
+// same instrument, in the same datagram. That is a rule about a datagram and
+// about a subscriber's definitions, not about these bytes, so it is not held
+// here: this parser keeps no definitions, and the book-builder that does is
+// where a strike in any other position is ignored.
+type StrikeIntervalBody struct {
+	InstrumentID uint32
+	SourceID     uint16
+	// StrikeExponent scales both bounds. It is independent of the definition's
+	// Price Exponent, which scales the contract's price and not the value the
+	// venue compares with the strike.
+	StrikeExponent int8
+	BoundFlags     uint8
+	LowerBoundRaw  int64 // 0 when boundLowerPresent is clear
+	UpperBoundRaw  int64 // 0 when boundUpperPresent is clear
+	// FixingTime is the wire's 0 — the Unix epoch — while the strike is
+	// pending, when the venue fixed it at listing, and when the time is not
+	// available.
+	FixingTime time.Time
+}
+
+// Pending reports whether neither bound is present: the venue has listed the
+// instrument and has not fixed its strike. It reads the two presence bits only,
+// so a reserved bit somebody set does not make a pending strike look fixed.
+func (b StrikeIntervalBody) Pending() bool {
+	return b.BoundFlags&(boundLowerPresent|boundUpperPresent) == 0
+}
+
+// ParseStrikeInterval decodes a StrikeInterval body. buf must be exactly 36
+// bytes.
+//
+// The length is the only thing refused. A body that breaks a publisher rule —
+// a reserved bit set, an inclusive bit on a bound that is not present, a bound
+// left non-zero behind a clear presence bit — decodes: the supplement gives a
+// subscriber one rule for every value of Bound Flags and tells it to ignore the
+// reserved bits, so there is nothing here two readers could disagree about, and
+// refusing would hide from a recorder what a publisher sent. The four reserved
+// bytes at the end are not kept.
+func ParseStrikeInterval(buf []byte) (StrikeIntervalBody, error) {
+	if len(buf) != 36 {
+		return StrikeIntervalBody{}, fmt.Errorf("%w: expected 36 bytes for strike_interval body, got %d", errTruncated, len(buf))
+	}
+	return StrikeIntervalBody{
+		InstrumentID:   binary.LittleEndian.Uint32(buf[0:4]),
+		SourceID:       binary.LittleEndian.Uint16(buf[4:6]),
+		StrikeExponent: int8(buf[6]),
+		BoundFlags:     buf[7],
+		LowerBoundRaw:  int64(binary.LittleEndian.Uint64(buf[8:16])),
+		UpperBoundRaw:  int64(binary.LittleEndian.Uint64(buf[16:24])),
+		FixingTime:     readTSNs(buf[24:32]),
 	}, nil
 }
 
