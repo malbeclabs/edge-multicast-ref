@@ -104,7 +104,9 @@ for everybody else, and those are called out.
 2. Bump `version` in `[workspace.package]` in [`rust/Cargo.toml`](rust/Cargo.toml).
    One version for every crate a consumer resolves: see the two-copies trap
    above. A binary that carries its own version is bumped in its own manifest,
-   on its own release stream, and does not wait for this one.
+   on its own release stream, and does not wait for this one. Move the tag in
+   the examples here and in [BRINGING-UP-A-FEED.md](BRINGING-UP-A-FEED.md) to
+   the new one.
 3. `cargo test --all`, `cargo test --all --release`,
    `cargo clippy --all-targets --all-features -- -D warnings`,
    `cargo fmt --all --check`, `./scripts/check-public-repo-rules.sh`. CI runs all

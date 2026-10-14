@@ -127,11 +127,11 @@ one, but the two lines that matter here:
 
 ```toml
 [workspace.dependencies]
-dz-adapter-core = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.1.0" }
-dz-publisher-runtime = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.1.0" }
-dz-ingress-core = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.1.0", features = ["websocket"] }
+dz-adapter-core = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.6.0" }
+dz-publisher-runtime = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.6.0" }
+dz-ingress-core = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.6.0", features = ["websocket"] }
 # or, for a venue whose feed arrives over a session:
-dz-ingress-fix = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.1.0" }
+dz-ingress-fix = { git = "https://github.com/malbeclabs/edge-multicast-ref", tag = "v0.6.0" }
 ```
 
 **Every crate from the same tag, pinned in one place.** Two tags in one graph

@@ -39,7 +39,11 @@ const FORMAT_VERSION_V1: u32 = 1;
 /// A symbol the record holds keeps its ID under either. The two differ only in
 /// what a new symbol gets, and so in whether two publishers that never
 /// exchange anything can agree.
+///
+/// `#[non_exhaustive]` so that a third policy does not break a caller that
+/// matches on this one.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum IdAllocation {
     /// The next number, `next_id`, in the order the venue first offers each
     /// instrument. A fact about this process's history, so two publishers

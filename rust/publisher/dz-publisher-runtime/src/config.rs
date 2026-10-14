@@ -491,8 +491,11 @@ pub struct RefdataSection {
 }
 
 /// The values `[refdata] id_allocation` takes.
+///
+/// `#[non_exhaustive]` for the reason [`IdAllocation`] is.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum IdAllocationKey {
     #[default]
     Sequential,
