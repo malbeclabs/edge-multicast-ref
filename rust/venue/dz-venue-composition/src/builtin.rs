@@ -195,6 +195,7 @@ token_enum! {
         PredictionScalar => PredictionScalar,
         PredictionCategorical => PredictionCategorical,
         PerpetualFuture => PerpetualFuture,
+        DatedFuture => DatedFuture,
     }
 }
 
