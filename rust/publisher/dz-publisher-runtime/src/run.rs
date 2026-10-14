@@ -1109,39 +1109,68 @@ fn unknown_shard_line(offered: &str, configured: &[String]) -> String {
 /// instruments that collide and a symbol long gone that still holds its ID.
 /// When no symbol holds it, the ID was `0` or below the floor, and the line
 /// says that instead.
+///
+/// **The other order, only where there is one.** A held ID at or above the
+/// floor went to whichever symbol was admitted first, so a publisher that saw
+/// them the other way round holds it under the declined one. An ID below the
+/// floor is closed to every publisher on the same seed whoever holds it, and
+/// saying otherwise sends the operator after a split that cannot exist.
 fn unavailable_id_line(declined: &UnavailableId) -> String {
-    let why = declined.holder.as_ref().map_or_else(
-        || "which is zero or below the state record's floor".to_owned(),
-        |holder| format!("which `{}` already holds", symbol_text(holder)),
-    );
+    let why = match (&declined.holder, declined.below_floor) {
+        (None, _) => "which is zero or below the state record's floor".to_owned(),
+        (Some(holder), true) => format!(
+            "which `{}` already holds, below the state record's floor",
+            symbol_text(holder)
+        ),
+        (Some(holder), false) => format!("which `{}` already holds", symbol_text(holder)),
+    };
+    let other_order = if declined.holder.is_some() && !declined.below_floor {
+        " A publisher of this channel that admitted the two symbols in the other order holds the \
+         ID under this one instead."
+    } else {
+        ""
+    };
     format!(
         "dz-publisher-runtime: `{}` derives Instrument ID {}, {why}. It is declined and reaches no \
          channel. The ID is not moved, because where it would move to depends on what this \
-         publisher admitted first. A publisher of this channel that admitted the two symbols in \
-         the other order holds the ID under this one instead. Said once for this symbol.",
+         publisher admitted first.{other_order} Said once for this symbol.",
         symbol_text(&declined.symbol),
         declined.instrument_id,
     )
 }
 
-/// A wire `Symbol` for a log line: up to its first NUL, with anything that is
-/// not UTF-8 replaced rather than dropped.
+/// A wire `Symbol` for a log line: its trailing NUL padding trimmed, as the
+/// derivation trims it, with an interior NUL or other control character
+/// escaped and anything that is not UTF-8 replaced rather than dropped.
+///
+/// Not cut at the first NUL. Two record keys that differ past an interior NUL
+/// derive different IDs, and can collide with each other, so the line has to
+/// keep them apart too.
 fn symbol_text(symbol: &[u8]) -> String {
     let end = symbol
         .iter()
-        .position(|&byte| byte == 0)
-        .unwrap_or(symbol.len());
-    String::from_utf8_lossy(&symbol[..end]).into_owned()
+        .rposition(|&byte| byte != 0)
+        .map_or(0, |last| last + 1);
+    let mut text = String::with_capacity(end);
+    for character in String::from_utf8_lossy(&symbol[..end]).chars() {
+        if character.is_control() {
+            text.extend(character.escape_default());
+        } else {
+            text.push(character);
+        }
+    }
+    text
 }
 
 /// The numbers no series carries, on the way out.
 ///
-/// Seven of them, each named where it is documented: lowering refusals by
-/// reason, snapshots asked for and not sent, events this build had no feed to
-/// carry, adapter failures the closed family set has nowhere for, fan-out
-/// members that are no longer being fed, and the two shard refusals. A log line
-/// is not a substitute for a series and is not offered as one; it is what a
-/// closed metric set leaves.
+/// Each is named where it is documented: lowering refusals by reason, snapshots
+/// asked for and not sent, fan-out members that are no longer being fed, events
+/// this build had no feed to carry, adapter failures the closed family set has
+/// nowhere for, ticks whose snapshot schedule overran, the two shard refusals,
+/// symbols declined because the ID they derive is unavailable, and the two
+/// strike refusals. A log line is not a substitute for a series and is not
+/// offered as one; it is what a closed metric set leaves.
 ///
 /// The two shard refusals are the newest and the reason they are here is worth
 /// stating. `Counts` maps them to no family deliberately — the normative set is
@@ -1221,6 +1250,16 @@ fn report<S: StateStore, K: Clock + Clone>(
             "dz-publisher-runtime: {} re-offers named a different shard for an instrument \
              already published, which stayed on the shard it was admitted to",
             counts.declined_shard_restated
+        );
+    }
+    // Past the registry's ceiling on named symbols this is the only signal:
+    // the count maps to no family, and the per-symbol lines have stopped.
+    if counts.declined_id_unavailable > 0 {
+        eprintln!(
+            "dz-publisher-runtime: {} offers were declined because the Instrument ID their symbol \
+             derives is unavailable; the symbols are in the lines written when each was first \
+             declined",
+            counts.declined_id_unavailable
         );
     }
     if counts.declined_strike_unfixed > 0 {
@@ -2633,6 +2672,7 @@ mod tests {
             symbol,
             instrument_id: 77,
             holder: Some(holder),
+            below_floor: false,
         });
         assert!(
             collided.contains("`NEWS`") && collided.contains("`OLDS`"),
@@ -2642,13 +2682,44 @@ mod tests {
             collided.contains("77") && collided.contains("declined"),
             "{collided}"
         );
+        assert!(collided.contains("other order"), "{collided}");
 
+        // Below the floor every host on the seed declines it alike, so there
+        // is no other order to speak of, held or not.
         let below = unavailable_id_line(&UnavailableId {
             symbol,
             instrument_id: 3,
             holder: None,
+            below_floor: true,
         });
         assert!(below.contains("below the state record's floor"), "{below}");
+        assert!(!below.contains("other order"), "{below}");
+
+        let seeded = unavailable_id_line(&UnavailableId {
+            symbol,
+            instrument_id: 3,
+            holder: Some(holder),
+            below_floor: true,
+        });
+        assert!(
+            seeded.contains("`OLDS`") && seeded.contains("below the state record's floor"),
+            "{seeded}"
+        );
+        assert!(!seeded.contains("other order"), "{seeded}");
+    }
+
+    #[test]
+    fn a_symbol_in_a_line_keeps_what_follows_an_interior_nul() {
+        // Two record keys that differ past an interior NUL derive different
+        // IDs. Cut at the first NUL, both would print as `AB`.
+        let mut one = [0u8; dz_edge_refdata::SYMBOL_LEN];
+        let mut other = [0u8; dz_edge_refdata::SYMBOL_LEN];
+        one[..5].copy_from_slice(b"AB\0CX");
+        other[..5].copy_from_slice(b"AB\0CY");
+        assert_eq!(symbol_text(&one), "AB\\u{0}CX");
+        assert_ne!(symbol_text(&one), symbol_text(&other));
+        // The padding is still trimmed.
+        assert_eq!(symbol_text(b"ABC\0\0\0"), "ABC");
     }
 
     #[test]

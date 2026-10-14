@@ -128,6 +128,12 @@ fn symbols_that_differ_only_past_an_interior_nul_derive_differently() {
     assert_eq!(derive_instrument_id(&one), crc32_of(b"AB\0CX"));
 }
 
+#[test]
+fn an_all_nul_symbol_derives_zero() {
+    // The CRC-32 of nothing, which is the ID no instrument may hold.
+    assert_eq!(derive_instrument_id(&[0u8; SYMBOL_LEN]), 0);
+}
+
 /// CRC-32/ISO-HDLC bit by bit, independent of the table under test.
 fn crc32_of(bytes: &[u8]) -> u32 {
     let mut crc = 0xFFFF_FFFFu32;
@@ -352,6 +358,7 @@ fn a_collision_is_declined_and_the_holder_keeps_its_id() {
     assert_eq!(reported[0].symbol, key(newcomer));
     assert_eq!(reported[0].instrument_id, id);
     assert_eq!(reported[0].holder, Some(key(held)));
+    assert!(!reported[0].below_floor, "a collision above the floor");
 
     // A re-offer is counted again and named once.
     assert_eq!(id_of(&mut host, newcomer), None);
@@ -406,6 +413,56 @@ fn a_derivation_below_the_floor_is_declined() {
     assert_eq!(host.last_refusal(), Some(Refusal::IdUnavailable));
     let reported = host.take_unavailable_ids();
     assert_eq!(reported[0].holder, None);
+    assert!(reported[0].below_floor);
+}
+
+#[test]
+fn a_derivation_below_the_floor_that_a_seeded_symbol_holds_names_it() {
+    // A seeded symbol whose sequential ID is the newcomer's derivation, under a
+    // floor past it. The holder is named, and the decline is marked below the
+    // floor: every host on this seed declines it, whatever order it saw.
+    let derived = derive_instrument_id(&key("N-1"));
+    let record = derived_record(u32::MAX, &[(derived, "OLD")], &[]);
+    let mut host = opened(seeded(&record.encode()), IdAllocation::Derived);
+    assert_eq!(id_of(&mut host, "N-1"), None);
+    let reported = host.take_unavailable_ids();
+    assert_eq!(reported[0].instrument_id, derived);
+    assert_eq!(reported[0].holder, Some(key("OLD")));
+    assert!(reported[0].below_floor);
+}
+
+#[test]
+fn an_empty_symbol_is_declined_with_no_holder() {
+    // It derives 0, which no instrument may hold.
+    let mut host = opened(MemoryStore::new(), IdAllocation::Derived);
+    assert_eq!(id_of(&mut host, ""), None);
+    assert_eq!(host.last_refusal(), Some(Refusal::IdUnavailable));
+    let reported = host.take_unavailable_ids();
+    assert_eq!(reported[0].instrument_id, 0);
+    assert_eq!(reported[0].holder, None);
+    assert!(reported[0].below_floor);
+}
+
+#[test]
+fn a_definition_that_cannot_compose_is_refused_for_that_and_not_as_a_collision() {
+    // The newcomer's derivation is taken, and its tick cannot be stated at its
+    // price exponent either. The definition is the reason: no publisher could
+    // hold the ID under it, so a collision line would send the operator after
+    // a split that does not exist.
+    let (held, newcomer) = COLLIDES;
+    let mut host = opened(MemoryStore::new(), IdAllocation::Derived);
+    id_of(&mut host, held).expect("admitted");
+
+    let mut unrepresentable = spec(newcomer);
+    unrepresentable.tick_size = Scalar::text("0.00001");
+    assert_eq!(host.list(&unrepresentable), None);
+    assert!(
+        matches!(host.last_refusal(), Some(Refusal::Field(_))),
+        "{:?}",
+        host.last_refusal()
+    );
+    assert_eq!(host.counts().declined_id_unavailable, 0);
+    assert!(host.take_unavailable_ids().is_empty());
 }
 
 #[test]

@@ -110,9 +110,16 @@ pub struct UnavailableId {
     pub symbol: [u8; SYMBOL_LEN],
     /// The ID it derives.
     pub instrument_id: u32,
-    /// The symbol the record holds under that ID. `None` when the ID is `0` or
-    /// below the floor, which no symbol holds.
+    /// The symbol the record holds under that ID. `None` when no symbol does:
+    /// the ID is `0`, or below the floor and never issued. One below the floor
+    /// that a seeded symbol holds names it.
     pub holder: Option<[u8; SYMBOL_LEN]>,
+    /// Whether the ID is below the floor, `0` included. Such an ID is closed to
+    /// every publisher started from the same seed, so the decline does not
+    /// depend on the order anything was admitted in. One at or above it is
+    /// held, and a publisher that admitted the two symbols in the other order
+    /// holds it under this one instead.
+    pub below_floor: bool,
 }
 
 /// The fewest appended lines that set off a compaction while running.
@@ -1381,24 +1388,29 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         // run, or before a delisting - keeps the ID it was published under; a
         // new one takes the next, and only if the definition composes.
         let recalled = self.minted.get(&symbol).copied();
+        let derived = recalled.is_none() && self.config.id_allocation == IdAllocation::Derived;
         let instrument_id = match (recalled, self.config.id_allocation) {
             (Some(minted), _) => minted.instrument_id,
             (None, IdAllocation::Sequential) => self.next_id,
-            // Declined, never moved: see `Refusal::IdUnavailable`. `next_id` is
-            // the floor here, and nothing at or below it is derived into.
-            (None, IdAllocation::Derived) => {
-                let derived = derive_instrument_id(&symbol);
-                if derived == 0 || derived < self.next_id || self.in_use.contains_key(&derived) {
-                    self.remember_unavailable(symbol, derived);
-                    return Err(Refusal::IdUnavailable);
-                }
-                derived
-            }
+            (None, IdAllocation::Derived) => derive_instrument_id(&symbol),
         };
-        if instrument_id == 0 {
+        if instrument_id == 0 && !derived {
             return Err(Refusal::IdSpaceExhausted);
         }
+        // Composed before a derived ID is checked. A definition that could
+        // never be published is refused for that, rather than reported as a
+        // collision that sends the operator after another publisher's record.
         let composed = definition::compose(spec, instrument_id, self.config.source_id)?;
+        // Declined, never moved: see `Refusal::IdUnavailable`. `next_id` is the
+        // floor here, and nothing below it is derived into.
+        if derived
+            && (instrument_id == 0
+                || instrument_id < self.next_id
+                || self.in_use.contains_key(&instrument_id))
+        {
+            self.remember_unavailable(symbol, instrument_id);
+            return Err(Refusal::IdUnavailable);
+        }
 
         match recalled {
             None => {
@@ -1688,6 +1700,17 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
     }
 
     /// Remember an unknown shard name, once, for the caller that logs it.
+    fn remember_unknown_shard(&mut self, shard: &str) {
+        if self.unknown_shards.len() >= MAX_REPORTED_UNKNOWN_SHARDS
+            || self.unknown_shards.iter().any(|seen| seen == shard)
+        {
+            return;
+        }
+        self.unknown_shards.push(shard.to_string());
+    }
+
+    /// Remember a symbol declined as [`Refusal::IdUnavailable`], once, with
+    /// what holds its ID, for the caller that logs it.
     fn remember_unavailable(&mut self, symbol: SymbolKey, instrument_id: u32) {
         if self.unavailable.len() >= MAX_REPORTED_UNAVAILABLE_IDS
             || self.unavailable.iter().any(|seen| seen.symbol == symbol)
@@ -1699,16 +1722,8 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             symbol,
             instrument_id,
             holder,
+            below_floor: instrument_id == 0 || instrument_id < self.next_id,
         });
-    }
-
-    fn remember_unknown_shard(&mut self, shard: &str) {
-        if self.unknown_shards.len() >= MAX_REPORTED_UNKNOWN_SHARDS
-            || self.unknown_shards.iter().any(|seen| seen == shard)
-        {
-            return;
-        }
-        self.unknown_shards.push(shard.to_string());
     }
 
     fn count_refusal(&mut self, refusal: Refusal) {
