@@ -45,7 +45,7 @@ use dz_edge_tob::TopOfBook;
 use dz_ingress_core::{IngressConfig, Kind, Policy};
 use dz_publisher_egress::{EgressPolicy, Ipv4Prefix};
 use dz_publisher_lowering::SourceId;
-use dz_publisher_refdata::SelectionPolicy;
+use dz_publisher_refdata::{IdAllocation, SelectionPolicy};
 use dz_venue_composition::AdapterSection;
 use serde::Deserialize;
 
@@ -469,7 +469,43 @@ pub struct RefdataSection {
     /// one above that is rounded up.
     #[serde(default, deserialize_with = "de_optional_duration")]
     pub forget_delisted_after: Option<Duration>,
+    /// How a symbol the record does not hold is given its `Instrument ID`:
+    /// `"sequential"`, the next number, or `"derived"`, the CRC-32 of its
+    /// `Symbol` at or above the record's floor. Absent is `"sequential"`.
+    ///
+    /// `"derived"` is what lets two publishers of one channel agree on every
+    /// ID without sharing anything. **Every path of a channel starts from the
+    /// same record, or all of them start from none**. Seed a second host by
+    /// switching the first one to `"derived"`, and only then copying its
+    /// `instruments.state` into the second's `state_dir` before that first
+    /// starts. A copy of a host still minting sequentially goes stale with its
+    /// next mint. A host started cold derives IDs for symbols a seeded one
+    /// holds below its floor, and disagrees on every one of them.
+    ///
+    /// `"derived"` forgets nothing, so it is refused together with
+    /// `forget_delisted_after`, and a record written under it is refused by a
+    /// later `"sequential"` start.
+    #[serde(default)]
+    pub id_allocation: IdAllocationKey,
     pub selection: SelectionSection,
+}
+
+/// The values `[refdata] id_allocation` takes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum IdAllocationKey {
+    #[default]
+    Sequential,
+    Derived,
+}
+
+impl From<IdAllocationKey> for IdAllocation {
+    fn from(key: IdAllocationKey) -> Self {
+        match key {
+            IdAllocationKey::Sequential => Self::Sequential,
+            IdAllocationKey::Derived => Self::Derived,
+        }
+    }
 }
 
 /// `[refdata.selection]`: the playbook's policy, stated rather than defaulted.
@@ -832,6 +868,7 @@ pub struct Feed {
 pub struct Refdata {
     pub state_dir: PathBuf,
     pub forget_delisted_after: Option<Duration>,
+    pub id_allocation: IdAllocation,
     pub selection: SelectionPolicy,
 }
 
@@ -983,6 +1020,9 @@ impl Document {
                     key: "[refdata] forget_delisted_after",
                 });
             }
+            if self.refdata.id_allocation == IdAllocationKey::Derived {
+                return Err(StartupError::ForgettingUnderDerivedIds);
+            }
         }
 
         let selection = SelectionPolicy::new(
@@ -1032,6 +1072,7 @@ impl Document {
             refdata: Refdata {
                 state_dir: self.refdata.state_dir,
                 forget_delisted_after: self.refdata.forget_delisted_after,
+                id_allocation: self.refdata.id_allocation.into(),
                 selection,
             },
             metrics: self.metrics,

@@ -78,7 +78,11 @@ pub use pacer::{definitions_per_datagram, CycleSchedule, DefinitionPacer, TickRo
 pub use policy::{Phase, PolicyError, SelectionPolicy};
 pub use refusal::Refusal;
 pub use registry::{
-    Counts, PublishedDefinition, Registry, RegistryConfig, ShardConfig, COMPACTION_FLOOR,
+    Counts, PublishedDefinition, Registry, RegistryConfig, ShardConfig, UnavailableId,
+    COMPACTION_FLOOR,
 };
-pub use state::{encode_line, Entry, Loaded, RecordError, StateRecord, FIRST_INSTRUMENT_ID};
+pub use state::{
+    derive_instrument_id, encode_line, Entry, IdAllocation, Loaded, RecordError, StateRecord,
+    FIRST_INSTRUMENT_ID,
+};
 pub use store::{MemoryStore, StateError, StateStore};

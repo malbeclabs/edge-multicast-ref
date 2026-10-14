@@ -13,7 +13,7 @@ use dz_adapter_core::{
 use dz_edge_refdata::StrikeInterval;
 use dz_publisher_lowering::SourceId;
 use dz_publisher_refdata::{
-    CycleSchedule, ManualClock, MemoryStore, PublishedDefinition, Refusal, Registry,
+    CycleSchedule, IdAllocation, ManualClock, MemoryStore, PublishedDefinition, Refusal, Registry,
     RegistryConfig, SelectionPolicy, ShardConfig,
 };
 
@@ -53,6 +53,7 @@ fn registry(shards: Vec<ShardConfig>, cap: usize) -> (TestRegistry, ManualClock)
         selection: SelectionPolicy::from_seed(cap).expect("a seed"),
         schedule: CycleSchedule::new(CYCLE, MTU, 1),
         forget_delisted_after: None,
+        id_allocation: IdAllocation::Sequential,
     };
     let registry = Registry::open(config, MemoryStore::new(), clock.clone())
         .expect("an empty directory is a cold start");

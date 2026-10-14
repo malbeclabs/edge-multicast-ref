@@ -12,9 +12,9 @@ use dz_adapter_core::{
 };
 use dz_publisher_lowering::SourceId;
 use dz_publisher_refdata::{
-    symbol_field, CycleSchedule, Entry, ManualClock, MemoryStore, RecordError, RefdataError,
-    Refusal, Registry, RegistryConfig, SelectionPolicy, ShardConfig, StateError, StateRecord,
-    FIRST_INSTRUMENT_ID,
+    symbol_field, CycleSchedule, Entry, IdAllocation, ManualClock, MemoryStore, RecordError,
+    RefdataError, Refusal, Registry, RegistryConfig, SelectionPolicy, ShardConfig, StateError,
+    StateRecord, FIRST_INSTRUMENT_ID,
 };
 
 fn spec(symbol: &str) -> InstrumentSpec<'_> {
@@ -47,6 +47,7 @@ fn config() -> RegistryConfig {
         selection: SelectionPolicy::from_seed(8).expect("8 is a seed"),
         schedule: CycleSchedule::new(std::time::Duration::from_secs(30), 1232, 8),
         forget_delisted_after: None,
+        id_allocation: IdAllocation::Sequential,
     }
 }
 
@@ -253,11 +254,11 @@ fn a_damaged_record_stops_the_publisher_starting() {
     // basis: a layout this build does not know may hold a field that changes
     // what the fields it does know mean.
     let newer = MemoryStore::new();
-    newer.set_record(b"dz-refdata-state 3 7 1 0\n".to_vec());
+    newer.set_record(b"dz-refdata-state 4 7 1 0\n".to_vec());
     assert!(matches!(
         open(newer),
         Err(RefdataError::CorruptState(
-            RecordError::UnsupportedVersion { found: 3 }
+            RecordError::UnsupportedVersion { found: 4 }
         ))
     ));
 
@@ -281,6 +282,7 @@ fn a_damaged_record_stops_the_publisher_starting() {
                 symbol: symbol_field("AAA").0,
                 delisted_at: None,
             }],
+            allocation: IdAllocation::Sequential,
         }
         .encode(),
     );
@@ -311,6 +313,7 @@ fn a_record_minted_under_another_source_id_stops_the_publisher_starting() {
                 symbol: symbol_field("AAA").0,
                 delisted_at: None,
             }],
+            allocation: IdAllocation::Sequential,
         }
         .encode(),
     );
@@ -381,11 +384,13 @@ fn a_record_round_trips_and_encodes_the_same_bytes_whatever_order_it_was_built_i
         source_id: SOURCE_ID,
         next_id: 3,
         entries: vec![aaa, bbb],
+        allocation: IdAllocation::Sequential,
     };
     let other_way = StateRecord {
         source_id: SOURCE_ID,
         next_id: 3,
         entries: vec![bbb, aaa],
+        allocation: IdAllocation::Sequential,
     };
 
     assert_eq!(one_way.encode(), other_way.encode());

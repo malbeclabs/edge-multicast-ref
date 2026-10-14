@@ -8,12 +8,23 @@ use dz_edge_refdata::SYMBOL_LEN;
 /// apart from one of ours that is damaged.
 const FORMAT_TAG: &str = "dz-refdata-state";
 
-/// The record layout this build writes.
+/// The record layout this build writes under [`IdAllocation::Sequential`].
 ///
 /// A version rather than a guess: a later layout is refused by name, and a
 /// refusal at startup is the only safe answer to a state file this build cannot
 /// read — see [`StateRecord::load`].
 const FORMAT_VERSION: u32 = 2;
+
+/// The record layout this build writes under [`IdAllocation::Derived`].
+///
+/// Version 2 with the allocation named in the header, where the second number
+/// is the floor rather than a `next_id` that advances. Only a derived
+/// publisher writes it, so a sequential one keeps writing version 2 and can
+/// still roll back to a build that reads nothing later.
+const FORMAT_VERSION_DERIVED: u32 = 3;
+
+/// The header's last field in version 3.
+const DERIVED_TAG: &str = "derived";
 
 /// The layout before appended lines, which this build still reads.
 ///
@@ -22,6 +33,40 @@ const FORMAT_VERSION: u32 = 2;
 /// when it opens, since a line appended to it could not be told apart from the
 /// base.
 const FORMAT_VERSION_V1: u32 = 1;
+
+/// How a symbol the record does not hold is given its `Instrument ID`.
+///
+/// A symbol the record holds keeps its ID under either. The two differ only in
+/// what a new symbol gets, and so in whether two publishers that never
+/// exchange anything can agree.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum IdAllocation {
+    /// The next number, `next_id`, in the order the venue first offers each
+    /// instrument. A fact about this process's history, so two publishers
+    /// agree only while they see every listing in the same order.
+    #[default]
+    Sequential,
+    /// [`derive_instrument_id`] of the `Symbol`, at or above the record's
+    /// floor. A fact about the instrument, so two publishers that start from
+    /// the same record agree on every ID with no coordination, except where a
+    /// colliding pair is first admitted in different orders, which
+    /// [`Refusal::IdUnavailable`](crate::Refusal::IdUnavailable) describes.
+    ///
+    /// **Every path of a channel starts from the same record, or all of them
+    /// start from none.** A publisher started cold derives IDs for symbols that
+    /// a seeded one holds below its floor, and disagrees on every one of them.
+    Derived,
+}
+
+impl IdAllocation {
+    /// The record layout written under this allocation.
+    const fn version(self) -> u32 {
+        match self {
+            Self::Sequential => FORMAT_VERSION,
+            Self::Derived => FORMAT_VERSION_DERIVED,
+        }
+    }
+}
 
 /// One instrument's persisted identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,8 +127,15 @@ pub struct Entry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateRecord {
     pub source_id: u16,
+    /// Under [`IdAllocation::Derived`], the **floor**: no derived ID below it
+    /// is ever minted, and it never advances. It is the `next_id` of the
+    /// sequential record the allocation was switched on over, which is what
+    /// stops a derived ID from landing on one that was minted and forgotten.
     pub next_id: u32,
     pub entries: Vec<Entry>,
+    /// Which rule the record was written under. Decides the layout and what a
+    /// line may carry; see [`IdAllocation`].
+    pub allocation: IdAllocation,
 }
 
 /// A record as read back, and what reading it found besides the entries.
@@ -91,8 +143,9 @@ pub struct StateRecord {
 pub struct Loaded {
     /// The base with every appended line folded in.
     pub record: StateRecord,
-    /// The layout it was written in. Anything but [`FORMAT_VERSION`] is
-    /// rewritten when the registry opens.
+    /// The layout it was written in. Anything but the layout of the record's
+    /// own [`allocation`](StateRecord::allocation) is rewritten when the
+    /// registry opens, and so is a record opened under another allocation.
     pub version: u32,
     /// How many entries the base held.
     pub base: usize,
@@ -114,7 +167,7 @@ impl Loaded {
     /// free space, where a rewrite needs room for the whole record.
     #[must_use]
     pub const fn needs_rewrite(&self) -> bool {
-        self.version != FORMAT_VERSION
+        self.version != self.record.allocation.version()
     }
 }
 
@@ -183,6 +236,29 @@ pub enum RecordError {
     )]
     RestatedUnderAnotherSymbol { line: usize, instrument_id: u32 },
 
+    /// An entry at or above the floor of a derived record whose `Instrument
+    /// ID` is not [`derive_instrument_id`] of its `Symbol`.
+    ///
+    /// Recomputed rather than trusted, which a sequential record cannot do:
+    /// there the only check is that a line names the next number.
+    #[error(
+        "state record line {line}: Instrument ID {instrument_id} is not the derivation of its \
+         Symbol"
+    )]
+    NotDerived { line: usize, instrument_id: u32 },
+    /// An appended line in a derived record that mints below the floor.
+    ///
+    /// The floor is what keeps a derived ID off one a sequential record
+    /// minted and later forgot, so nothing is minted under it.
+    #[error(
+        "state record line {line}: Instrument ID {instrument_id} is minted below the floor \
+         ({floor})"
+    )]
+    MintedBelowFloor {
+        line: usize,
+        instrument_id: u32,
+        floor: u32,
+    },
     /// `Instrument ID` 0 was persisted.
     ///
     /// Zero is not minted (see [`FIRST_INSTRUMENT_ID`]), so a record holding it
@@ -198,6 +274,58 @@ pub enum RecordError {
 /// real instrument must never own it — the ID that means "nothing was set"
 /// cannot also mean "the first thing the venue listed".
 pub const FIRST_INSTRUMENT_ID: u32 = 1;
+
+/// CRC-32/ISO-HDLC, one entry per byte value: IEEE 802.3, reflected,
+/// polynomial `0xEDB88320`. Built at compile time from the polynomial rather
+/// than pasted, so the polynomial is the whole statement of it.
+const CRC32_TABLE: [u32; 256] = {
+    let mut table = [0u32; 256];
+    let mut index = 0usize;
+    while index < 256 {
+        #[allow(clippy::cast_possible_truncation)]
+        let mut crc = index as u32;
+        let mut bit = 0;
+        while bit < 8 {
+            crc = if crc & 1 == 1 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
+            bit += 1;
+        }
+        table[index] = crc;
+        index += 1;
+    }
+    table
+};
+
+/// The `Instrument ID` [`IdAllocation::Derived`] gives a symbol: CRC-32/ISO-HDLC
+/// (initial value and final XOR `0xFFFFFFFF`) over the wire `Symbol` with its
+/// trailing NULs removed.
+///
+/// The wire field, not the venue's own ticker, because it is what the record
+/// keys on: two tickers that are one symbol on the wire are one input here
+/// too. Only the trailing padding is removed, not everything after the first
+/// NUL: a ticker with an interior NUL is still admitted, and the record keys on
+/// all 64 bytes, so stopping at the first NUL would give two distinct keys one
+/// input and decline the second for ever.
+///
+/// Stated in full so the derivation can be audited. It does not let a consumer
+/// recompute IDs: a seeded symbol keeps its sequential ID and the floor is not
+/// on the wire. The result may be `0`, below a record's floor, or already
+/// held, and the registry declines all three rather than moving the ID.
+#[must_use]
+pub fn derive_instrument_id(symbol: &[u8; SYMBOL_LEN]) -> u32 {
+    let end = symbol
+        .iter()
+        .rposition(|&byte| byte != 0)
+        .map_or(0, |last| last + 1);
+    let mut crc = 0xFFFF_FFFFu32;
+    for &byte in &symbol[..end] {
+        crc = (crc >> 8) ^ CRC32_TABLE[((crc ^ u32::from(byte)) & 0xFF) as usize];
+    }
+    !crc
+}
 
 /// One appended line: this `Instrument ID` is this `Symbol`, and the
 /// instrument is published as it is written.
@@ -235,6 +363,7 @@ impl StateRecord {
             source_id,
             next_id: FIRST_INSTRUMENT_ID,
             entries: Vec::new(),
+            allocation: IdAllocation::Sequential,
         }
     }
 
@@ -249,11 +378,17 @@ impl StateRecord {
         entries.sort_unstable_by_key(|entry| entry.instrument_id);
 
         let mut out = format!(
-            "{FORMAT_TAG} {FORMAT_VERSION} {} {} {}\n",
+            "{FORMAT_TAG} {} {} {} {}",
+            self.allocation.version(),
             self.source_id,
             self.next_id,
             entries.len()
         );
+        if self.allocation == IdAllocation::Derived {
+            out.push(' ');
+            out.push_str(DERIVED_TAG);
+        }
+        out.push('\n');
         for entry in &entries {
             push_entry(&mut out, entry.instrument_id, &entry.symbol);
             if let Some(at) = entry.delisted_at {
@@ -302,7 +437,10 @@ impl StateRecord {
             .next()
             .and_then(|field| field.parse().ok())
             .ok_or(RecordError::NotOurFormat)?;
-        if version != FORMAT_VERSION && version != FORMAT_VERSION_V1 {
+        if version != FORMAT_VERSION
+            && version != FORMAT_VERSION_V1
+            && version != FORMAT_VERSION_DERIVED
+        {
             return Err(RecordError::UnsupportedVersion { found: version });
         }
         if !header.ends_with('\n') {
@@ -338,6 +476,18 @@ impl StateRecord {
                 },
             )?)
         };
+        let allocation = if version == FORMAT_VERSION_DERIVED {
+            if fields.next() != Some(DERIVED_TAG) {
+                return Err(RecordError::Malformed {
+                    line: 1,
+                    what: "a version 3 header does not name its allocation",
+                });
+            }
+            IdAllocation::Derived
+        } else {
+            IdAllocation::Sequential
+        };
+        let derived = allocation == IdAllocation::Derived;
         if fields.next().is_some() {
             return Err(RecordError::Malformed {
                 line: 1,
@@ -410,7 +560,17 @@ impl StateRecord {
                 .ok_or_else(|| malformed("an entry's Symbol is not 64 hexadecimal bytes"))?;
 
             if in_base {
-                if instrument_id >= next_id {
+                // Under derived allocation the header's number is the floor:
+                // an entry below it was minted before the switch, and one at or
+                // above it was derived, which is checked rather than trusted.
+                if derived {
+                    if instrument_id >= next_id && instrument_id != derive_instrument_id(&symbol) {
+                        return Err(RecordError::NotDerived {
+                            line: line_number,
+                            instrument_id,
+                        });
+                    }
+                } else if instrument_id >= next_id {
                     return Err(RecordError::IdNotBelowNext {
                         instrument_id,
                         next_id,
@@ -444,6 +604,36 @@ impl StateRecord {
                     });
                 }
                 entries[at].delisted_at = None;
+            } else if derived {
+                // A derived mint: its own symbol's derivation, at or above the
+                // floor. A held ID is the restatement branch above, which
+                // refuses it under another symbol; a held symbol is refused
+                // here. `next_id` is the floor and does not move.
+                if instrument_id != derive_instrument_id(&symbol) {
+                    return Err(RecordError::NotDerived {
+                        line: line_number,
+                        instrument_id,
+                    });
+                }
+                if instrument_id < next_id {
+                    return Err(RecordError::MintedBelowFloor {
+                        line: line_number,
+                        instrument_id,
+                        floor: next_id,
+                    });
+                }
+                if let Some(first) = symbols.insert(symbol, instrument_id) {
+                    return Err(RecordError::DuplicateSymbol {
+                        first,
+                        second: instrument_id,
+                    });
+                }
+                ids.insert(instrument_id, entries.len());
+                entries.push(Entry {
+                    instrument_id,
+                    symbol,
+                    delisted_at: None,
+                });
             } else if instrument_id == running_next {
                 if let Some(first) = symbols.insert(symbol, instrument_id) {
                     return Err(RecordError::DuplicateSymbol {
@@ -482,6 +672,7 @@ impl StateRecord {
                 source_id,
                 next_id: running_next,
                 entries,
+                allocation,
             },
             version,
             base: read - appended,

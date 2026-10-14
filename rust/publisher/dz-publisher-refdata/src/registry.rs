@@ -15,7 +15,7 @@ use crate::error::RefdataError;
 use crate::pacer::DefinitionPacer;
 use crate::policy::{Phase, SelectionPolicy};
 use crate::refusal::Refusal;
-use crate::state::{encode_line, Entry, StateRecord};
+use crate::state::{derive_instrument_id, encode_line, Entry, IdAllocation, StateRecord};
 use crate::store::{StateError, StateStore};
 use crate::strike;
 use crate::CycleSchedule;
@@ -88,6 +88,38 @@ pub struct RegistryConfig {
     /// anything under a second; a caller composing this itself gets whole
     /// seconds, rounded up, so the horizon is never shorter than stated.
     pub forget_delisted_after: Option<Duration>,
+    /// `[refdata] id_allocation`: how a symbol the record does not hold is
+    /// given its `Instrument ID`. See [`IdAllocation`] for what each promises,
+    /// and for the one rule a derived channel's paths must keep between them.
+    ///
+    /// [`Derived`](IdAllocation::Derived) forgets nothing, so it is refused
+    /// together with [`forget_delisted_after`](Self::forget_delisted_after).
+    pub id_allocation: IdAllocation,
+}
+
+/// An offer declined because the `Instrument ID` its symbol derives is not
+/// available, and what holds it.
+///
+/// Handed to the runtime by [`Registry::take_unavailable_ids`] for the line
+/// that goes with the count. Both symbols, because the declined one alone says
+/// nothing an operator can act on: the pair is what says whether this is a
+/// collision between two live instruments or one against a symbol long gone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnavailableId {
+    /// The symbol that was declined, as the wire would have carried it.
+    pub symbol: [u8; SYMBOL_LEN],
+    /// The ID it derives.
+    pub instrument_id: u32,
+    /// The symbol the record holds under that ID. `None` when no symbol does:
+    /// the ID is `0`, or below the floor and never issued. One below the floor
+    /// that a seeded symbol holds names it.
+    pub holder: Option<[u8; SYMBOL_LEN]>,
+    /// Whether the ID is below the floor, `0` included. Such an ID is closed to
+    /// every publisher started from the same seed, so the decline does not
+    /// depend on the order anything was admitted in. One at or above it is
+    /// held, and a publisher that admitted the two symbols in the other order
+    /// holds it under this one instead.
+    pub below_floor: bool,
 }
 
 /// The fewest appended lines that set off a compaction while running.
@@ -282,6 +314,9 @@ pub struct Counts {
     /// Strikes that changed after their instrument was first defined: a pending
     /// strike the venue fixed, or a fixed one it corrected.
     pub strikes_changed: u64,
+    /// Offers declined because the ID their symbol derives is unavailable; see
+    /// [`Refusal::IdUnavailable`]. Zero under sequential allocation.
+    pub declined_id_unavailable: u64,
     /// Symbols or legs that could not be stated honestly in their fixed-width
     /// field: truncated, or not representable as NUL-padded ASCII. Reported
     /// once per load rather than per message, which is what the codec's own
@@ -394,6 +429,15 @@ pub struct Registry<S: StateStore, C: Clock> {
     /// remembered rather than reported again.
     unknown_shards: Vec<String>,
     unknown_shards_taken: usize,
+    /// Under derived allocation, every `Instrument ID` the record holds and the
+    /// symbol holding it, so a derived ID already taken is one lookup and the
+    /// declined offer can name its holder. Empty under sequential allocation,
+    /// where `next_id` alone is the guarantee.
+    in_use: HashMap<u32, SymbolKey>,
+    /// Offers declined as [`Refusal::IdUnavailable`], one per symbol, and how
+    /// many a caller has been handed. Bounded as the unknown shard names are.
+    unavailable: Vec<UnavailableId>,
+    unavailable_taken: usize,
     last_refusal: Option<Refusal>,
     fault: Option<StateError>,
 }
@@ -406,6 +450,10 @@ pub struct Registry<S: StateStore, C: Clock> {
 /// the naming, which by then has already said the thing an operator has to act
 /// on.
 const MAX_REPORTED_UNKNOWN_SHARDS: usize = 64;
+
+/// The most distinct declined symbols one process names. A collision is rare,
+/// so reaching this says something else is wrong, and the count goes on.
+const MAX_REPORTED_UNAVAILABLE_IDS: usize = 64;
 
 impl<S: StateStore, C: Clock> Registry<S, C> {
     /// Claim the state directory, read what is in it, and be ready to admit.
@@ -471,6 +519,12 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             }
         }
 
+        // Like the shard set, a configuration that cannot be served is refused
+        // before the directory is claimed.
+        if config.id_allocation == IdAllocation::Derived && config.forget_delisted_after.is_some() {
+            return Err(RefdataError::ForgettingUnderDerivedIds);
+        }
+
         match store.claim() {
             Ok(()) => {}
             Err(StateError::AlreadyHeld) => return Err(RefdataError::StateHeldByAnotherWriter),
@@ -490,6 +544,23 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
                 configured: config.source_id.get(),
             });
         }
+        // A derived record cannot be continued sequentially. A sequential one
+        // opened under derived allocation keeps its `next_id` as the floor and
+        // is rewritten in the derived layout below, which is what seeding is.
+        if record.allocation == IdAllocation::Derived
+            && config.id_allocation == IdAllocation::Sequential
+        {
+            return Err(RefdataError::StateIsDerived);
+        }
+        let in_use: HashMap<u32, SymbolKey> = if config.id_allocation == IdAllocation::Derived {
+            record
+                .entries
+                .iter()
+                .map(|entry| (entry.instrument_id, entry.symbol))
+                .collect()
+        } else {
+            HashMap::new()
+        };
 
         // An entry recorded as published was published at the last write and
         // may have gone on being published until the process stopped. When is
@@ -545,6 +616,9 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             counts: Counts::default(),
             unknown_shards: Vec::new(),
             unknown_shards_taken: 0,
+            in_use,
+            unavailable: Vec::new(),
+            unavailable_taken: 0,
             last_refusal: None,
             fault: None,
             config,
@@ -560,7 +634,9 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         // space, and a torn line is what an append that ran the disk out of
         // room leaves.
         if let Some(loaded) = &loaded {
-            let rewritten = if loaded.needs_rewrite() {
+            let rewritten = if loaded.needs_rewrite()
+                || loaded.record.allocation != registry.config.id_allocation
+            {
                 let forgetting = registry.forgettable(now_s(&registry.clock));
                 registry
                     .write_base(None, &forgetting)
@@ -1179,6 +1255,18 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         taken
     }
 
+    /// The offers declined as [`Refusal::IdUnavailable`] since the last call,
+    /// each with the ID it derives and the symbol that holds it.
+    ///
+    /// Once per symbol, not once per offer, for the reason
+    /// [`take_unknown_shards`](Self::take_unknown_shards) gives: an adapter
+    /// re-offers its whole set every poll.
+    pub fn take_unavailable_ids(&mut self) -> Vec<UnavailableId> {
+        let taken = self.unavailable[self.unavailable_taken..].to_vec();
+        self.unavailable_taken = self.unavailable.len();
+        taken
+    }
+
     /// Offer an instrument on a shard, and report why it was declined.
     ///
     /// [`ListingSink::list_on`] is this without the reason. An adapter is given
@@ -1300,18 +1388,41 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         // run, or before a delisting - keeps the ID it was published under; a
         // new one takes the next, and only if the definition composes.
         let recalled = self.minted.get(&symbol).copied();
-        let instrument_id = recalled.map_or(self.next_id, |minted| minted.instrument_id);
-        if instrument_id == 0 {
+        let derived = recalled.is_none() && self.config.id_allocation == IdAllocation::Derived;
+        let instrument_id = match (recalled, self.config.id_allocation) {
+            (Some(minted), _) => minted.instrument_id,
+            (None, IdAllocation::Sequential) => self.next_id,
+            (None, IdAllocation::Derived) => derive_instrument_id(&symbol),
+        };
+        if instrument_id == 0 && !derived {
             return Err(Refusal::IdSpaceExhausted);
         }
+        // Composed before a derived ID is checked. A definition that could
+        // never be published is refused for that, rather than reported as a
+        // collision that sends the operator after another publisher's record.
         let composed = definition::compose(spec, instrument_id, self.config.source_id)?;
+        // Declined, never moved: see `Refusal::IdUnavailable`. `next_id` is the
+        // floor here, and nothing below it is derived into.
+        if derived
+            && (instrument_id == 0
+                || instrument_id < self.next_id
+                || self.in_use.contains_key(&instrument_id))
+        {
+            self.remember_unavailable(symbol, instrument_id);
+            return Err(Refusal::IdUnavailable);
+        }
 
         match recalled {
             None => {
-                let next_id = self
-                    .next_id
-                    .checked_add(1)
-                    .ok_or(Refusal::IdSpaceExhausted)?;
+                // The floor does not move under derived allocation; only a
+                // sequential mint advances `next_id`.
+                let next_id = match self.config.id_allocation {
+                    IdAllocation::Sequential => self
+                        .next_id
+                        .checked_add(1)
+                        .ok_or(Refusal::IdSpaceExhausted)?,
+                    IdAllocation::Derived => self.next_id,
+                };
                 // Persisted before it is admitted, and a failure to persist
                 // admits nothing: an `Instrument ID` published from memory and
                 // absent from the record is one that resolves to nothing after
@@ -1326,6 +1437,9 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
                         last_published_s: 0,
                     },
                 );
+                if self.config.id_allocation == IdAllocation::Derived {
+                    self.in_use.insert(instrument_id, symbol);
+                }
                 self.next_id = next_id;
             }
             // A relisting the record holds as delisted. Written down before it
@@ -1500,6 +1614,7 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             source_id: self.config.source_id.get(),
             next_id,
             entries,
+            allocation: self.config.id_allocation,
         };
         self.store.store(&record.encode())?;
         for symbol in forgetting {
@@ -1594,6 +1709,23 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         self.unknown_shards.push(shard.to_string());
     }
 
+    /// Remember a symbol declined as [`Refusal::IdUnavailable`], once, with
+    /// what holds its ID, for the caller that logs it.
+    fn remember_unavailable(&mut self, symbol: SymbolKey, instrument_id: u32) {
+        if self.unavailable.len() >= MAX_REPORTED_UNAVAILABLE_IDS
+            || self.unavailable.iter().any(|seen| seen.symbol == symbol)
+        {
+            return;
+        }
+        let holder = self.in_use.get(&instrument_id).copied();
+        self.unavailable.push(UnavailableId {
+            symbol,
+            instrument_id,
+            holder,
+            below_floor: instrument_id == 0 || instrument_id < self.next_id,
+        });
+    }
+
     fn count_refusal(&mut self, refusal: Refusal) {
         self.last_refusal = Some(refusal);
         // Written out rather than split on `is_ordinary`, so that a refusal
@@ -1601,6 +1733,7 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         // something it is not.
         match refusal {
             Refusal::Capped => self.counts.declined_at_cap += 1,
+            Refusal::IdUnavailable => self.counts.declined_id_unavailable += 1,
             Refusal::UnknownShard => self.counts.declined_unknown_shard += 1,
             Refusal::ShardRestated => self.counts.declined_shard_restated += 1,
             Refusal::StrikeUnfixed => self.counts.declined_strike_unfixed += 1,
