@@ -21,6 +21,7 @@ impl AppMessage for Heartbeat {
     const TYPE_ID: u8 = TYPE_HEARTBEAT;
     const SIZE: usize = SIZE_HEARTBEAT;
     const PORT_ROLES: &'static [PortRole] = &[PortRole::Mktdata];
+    const FEED_LOCAL: Option<u16> = None;
 
     fn encode_into(&self, dst: &mut [u8]) {
         debug_assert_eq!(dst.len(), Self::SIZE);

@@ -14,4 +14,5 @@ thiserror = { workspace = true }
 # Tests only. `tests/golden.rs` reads testdata/golden/manifest.json and holds
 # its `fields` block to the canonical values this crate asserts.
 [dev-dependencies]
+dz-edge-tob = { path = "../dz-edge-tob" }
 serde_json = { workspace = true }

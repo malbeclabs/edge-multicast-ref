@@ -343,6 +343,52 @@ fn a_midpoint_pushed_into_a_refdata_builder_is_a_countable_error() {
 }
 
 #[test]
+fn the_builder_refuses_what_check_refuses() {
+    let channel = ChannelSequence::new(0, ResetCount(0));
+    let mut b = DatagramBuilder::<MidpointFeed>::new(channel, PortRole::Mktdata, 1232);
+    let bad = [
+        Midpoint {
+            method: METHOD_UNKNOWN,
+            ..bbo_mid()
+        },
+        Midpoint {
+            window_ms: 0,
+            ..vwap()
+        },
+        Midpoint {
+            volume: 0,
+            ..vwap()
+        },
+        Midpoint {
+            window_ms: 1,
+            ..bbo_mid()
+        },
+        Midpoint {
+            volume: 1,
+            ..bbo_mid()
+        },
+        Midpoint {
+            quality_flags: QUALITY_ONE_SIDED,
+            ..vwap()
+        },
+    ];
+    for m in bad {
+        let rule = m.check().expect_err("each one breaks a rule");
+        assert_eq!(
+            b.push(&m),
+            Err(EncodeError::MalformedMessage {
+                message: core::any::type_name::<Midpoint>(),
+                what: rule.what(),
+            }),
+            "{m:?}"
+        );
+    }
+    assert!(b.is_empty(), "nothing was written");
+    b.push(&vwap()).unwrap();
+    b.push(&bbo_mid()).unwrap();
+}
+
+#[test]
 fn twenty_five_midpoints_fill_one_datagram() {
     // The spec's Wire Efficiency example: 25 × 48 + 24 = 1,224 bytes.
     let channel = ChannelSequence::new(0, ResetCount(0));

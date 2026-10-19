@@ -11,6 +11,7 @@ impl AppMessage for Fake {
     const TYPE_ID: u8 = 0x01;
     const SIZE: usize = 16;
     const PORT_ROLES: &'static [PortRole] = &[PortRole::Mktdata];
+    const FEED_LOCAL: Option<u16> = None;
     fn encode_into(&self, dst: &mut [u8]) {
         dst[..Self::SIZE].fill(0xAB);
     }

@@ -30,6 +30,7 @@ impl AppMessage for Trade {
     const TYPE_ID: u8 = 0x04;
     const SIZE: usize = 52;
     const PORT_ROLES: &'static [PortRole] = &[PortRole::Mktdata];
+    const FEED_LOCAL: Option<u16> = None;
 
     fn encode_into(&self, dst: &mut [u8]) {
         debug_assert_eq!(dst.len(), Self::SIZE);

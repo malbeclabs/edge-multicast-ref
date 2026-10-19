@@ -21,6 +21,7 @@ pub trait AppMessage {
     const TYPE_ID: u8;
     const SIZE: usize;
     const PORT_ROLES: &'static [PortRole];
+    const FEED_LOCAL: Option<u16>;
     fn encode_into(&self, dst: &mut [u8]);
     fn stamp_channel_id(dst: &mut [u8], channel_id: u8);
 }
@@ -29,6 +30,8 @@ pub trait AppMessage {
 `stamp_channel_id` is required rather than defaulted: the offset differs per message, so a new type cannot silently omit it.
 
 Type ID space is per feed. `0x05` is reserved on some feeds and decoded as `ChannelReset` on Top-of-Book, so core constrains no type ID.
+
+`FEED_LOCAL` is the magic of the one feed that defines the message, or `None` for a message the family shares. `0x03` is `Quote` in top-of-book and `Midpoint` in midpoint, so `DatagramBuilder::push` checks it as well as the feed's `CARRIES` table. It is required for the same reason as `stamp_channel_id`.
 
 ## Adding a feed
 

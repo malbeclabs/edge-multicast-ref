@@ -38,6 +38,7 @@ impl AppMessage for SnapshotBegin {
     const TYPE_ID: u8 = 0x20;
     const SIZE: usize = 40;
     const PORT_ROLES: &'static [PortRole] = &[PortRole::Snapshot];
+    const FEED_LOCAL: Option<u16> = None;
 
     fn encode_into(&self, dst: &mut [u8]) {
         debug_assert_eq!(dst.len(), Self::SIZE);
@@ -100,6 +101,7 @@ impl AppMessage for SnapshotLevel {
     const TYPE_ID: u8 = 0x42;
     const SIZE: usize = 32;
     const PORT_ROLES: &'static [PortRole] = &[PortRole::Snapshot];
+    const FEED_LOCAL: Option<u16> = Some(crate::MAGIC_MBP);
 
     fn encode_into(&self, dst: &mut [u8]) {
         debug_assert_eq!(dst.len(), Self::SIZE);
@@ -153,6 +155,7 @@ impl AppMessage for SnapshotEnd {
     const TYPE_ID: u8 = 0x22;
     const SIZE: usize = 20;
     const PORT_ROLES: &'static [PortRole] = &[PortRole::Snapshot];
+    const FEED_LOCAL: Option<u16> = None;
 
     fn encode_into(&self, dst: &mut [u8]) {
         debug_assert_eq!(dst.len(), Self::SIZE);

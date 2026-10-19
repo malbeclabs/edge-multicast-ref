@@ -10,7 +10,7 @@ Targets midpoint `3.0.0` (`Schema Version = 3`). The `1.x` layout (64-byte `Inst
 
 `Method` says how the price was computed. Book methods: `METHOD_BBO_MID`, `METHOD_MICRO_PRICE`, `METHOD_WEIGHTED_MID`. Trade methods: `METHOD_LAST_TRADE_FALLBACK`, `METHOD_VWAP`. For VWAP, `window_ms` and `volume` describe the window `(input_timestamp_ns − window, input_timestamp_ns]`; `Midpoint::window_ns` returns it.
 
-`encode_into` and `decode` do not apply the field rules. A publisher calls `Midpoint::check` before it pushes.
+`DatagramBuilder::push` refuses a `Midpoint` that `Midpoint::check` refuses, as `EncodeError::MalformedMessage`. `encode_into` and `decode` do not apply the rules, so a decoder keeps a message that breaks one.
 
 `price` carries the instrument's Price Exponent and `volume` its Qty Exponent. This crate does no scaling.
 

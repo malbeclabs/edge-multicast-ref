@@ -1,4 +1,4 @@
-use dz_edge_core::{AppMessage, DecodeError, PortRole};
+use dz_edge_core::{AppMessage, DecodeError, EncodeError, PortRole};
 
 /// Not a method. A publisher must not send it.
 pub const METHOD_UNKNOWN: u8 = 0;
@@ -61,14 +61,33 @@ pub enum MidpointRuleError {
     BookFlagOnTradeMethod { method: u8, quality_flags: u8 },
 }
 
+impl MidpointRuleError {
+    /// The rule, without the field values, for [`EncodeError::MalformedMessage`].
+    #[must_use]
+    pub const fn what(&self) -> &'static str {
+        match self {
+            Self::MethodUnknown => "Method is 0 (Unknown)",
+            Self::VwapWindowZero => "Method is VWAP and Window is 0",
+            Self::VwapEmptyWindowNotSynthetic => {
+                "Method is VWAP, Volume is 0 and the synthetic bit is clear"
+            }
+            Self::WindowNotZero { .. } => "Method is not VWAP and Window is not 0",
+            Self::VolumeNotZero { .. } => "Method is not VWAP and Volume is not 0",
+            Self::BookFlagOnTradeMethod { .. } => {
+                "Method is a trade method and Quality Flags set a book-only bit"
+            }
+        }
+    }
+}
+
 /// `0x03 Midpoint` (48 bytes). One derived price with its provenance.
 ///
 /// `price` carries the instrument's Price Exponent and `volume` its Qty
 /// Exponent, both from `InstrumentDefinition`. This type does no scaling.
 ///
-/// `encode_into` and `decode` do not apply the specification's field rules.
-/// A publisher calls [`Midpoint::check`] before it pushes. A decoder keeps a
-/// message that breaks a rule, so the evidence of a publisher defect survives.
+/// `DatagramBuilder::push` refuses a message that [`Midpoint::check`] refuses.
+/// `encode_into` and `decode` do not apply the rules: a decoder keeps a
+/// message that breaks one, so the evidence of a publisher defect survives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Midpoint {
     pub instrument_id: u32,
@@ -201,6 +220,7 @@ impl AppMessage for Midpoint {
     const TYPE_ID: u8 = 0x03;
     const SIZE: usize = 48;
     const PORT_ROLES: &'static [PortRole] = &[PortRole::Mktdata];
+    const FEED_LOCAL: Option<u16> = Some(crate::MAGIC_MIDPOINT);
 
     fn encode_into(&self, dst: &mut [u8]) {
         debug_assert_eq!(dst.len(), Self::SIZE);
@@ -216,6 +236,14 @@ impl AppMessage for Midpoint {
         dst[28..36].copy_from_slice(&self.price.to_le_bytes());
         dst[36..40].copy_from_slice(&self.window_ms.to_le_bytes());
         dst[40..48].copy_from_slice(&self.volume.to_le_bytes());
+    }
+
+    /// Refuses what [`Midpoint::check`] refuses, where it is written.
+    fn validate(&self) -> Result<(), EncodeError> {
+        self.check().map_err(|e| EncodeError::MalformedMessage {
+            message: core::any::type_name::<Self>(),
+            what: e.what(),
+        })
     }
 
     // Midpoint carries no redundant Channel ID.

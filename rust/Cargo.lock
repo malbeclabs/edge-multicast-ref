@@ -307,6 +307,7 @@ name = "dz-edge-midpoint"
 version = "0.6.0"
 dependencies = [
  "dz-edge-core",
+ "dz-edge-tob",
  "serde_json",
  "thiserror 1.0.69",
 ]
