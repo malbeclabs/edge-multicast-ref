@@ -1,5 +1,5 @@
 {
-  "spec_revision": "edge-feed-spec 3a8f19c615aa9270e8581a22d45c6a9e780fee66 (2026-08-23); top-of-book 3.0.1; reference-data 1.0.2; market-by-price 1.0.0. strike-interval-v3.bin: edge-feed-spec 4bf2e03f3b1b883695727bd73300d7a1271e59bd; reference-data 1.1.0. midpoint-v3.bin: edge-feed-spec e8b210921298a4c76651322c48ff9f1a49315238 (malbeclabs/edge-feed-spec#94); midpoint 3.0.0",
+  "spec_revision": "edge-feed-spec 3a8f19c615aa9270e8581a22d45c6a9e780fee66 (2026-08-23); top-of-book 3.0.1; reference-data 1.0.2; market-by-price 1.0.0. strike-interval-v3.bin: edge-feed-spec 4bf2e03f3b1b883695727bd73300d7a1271e59bd; reference-data 1.1.0. midpoint-v3.bin: edge-feed-spec 070b2dc3845118e3946534f60eb4b94aed0850fc (malbeclabs/edge-feed-spec#94); midpoint 3.0.0",
   "vectors": [
     {
       "file": "quote-v3.bin",
