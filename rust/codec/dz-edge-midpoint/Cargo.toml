@@ -1,0 +1,17 @@
+[package]
+name = "dz-edge-midpoint"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Midpoint feed wire format for DoubleZero Edge"
+
+[dependencies]
+dz-edge-core = { path = "../dz-edge-core" }
+thiserror = { workspace = true }
+
+# Tests only. `tests/golden.rs` reads testdata/golden/manifest.json and holds
+# its `fields` block to the canonical values this crate asserts.
+[dev-dependencies]
+serde_json = { workspace = true }

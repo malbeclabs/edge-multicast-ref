@@ -303,6 +303,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dz-edge-midpoint"
+version = "0.6.0"
+dependencies = [
+ "dz-edge-core",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "dz-edge-refdata"
 version = "0.6.0"
 dependencies = [
@@ -406,6 +415,7 @@ dependencies = [
  "dz-adapter-core",
  "dz-edge-core",
  "dz-edge-mbp",
+ "dz-edge-midpoint",
  "dz-edge-refdata",
  "dz-edge-tob",
  "prometheus",

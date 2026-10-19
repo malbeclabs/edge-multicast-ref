@@ -507,12 +507,13 @@ pub enum EgressMessageType {
     SnapshotLevel,
     SnapshotEnd,
     InstrumentReset,
+    Midpoint,
 }
 
 impl EgressMessageType {
     /// Every variant, in no particular order. Used to pre-create every
     /// child series of this closed-label family at construction.
-    pub(crate) const ALL: [Self; 13] = [
+    pub(crate) const ALL: [Self; 14] = [
         Self::Heartbeat,
         Self::EndOfSession,
         Self::Quote,
@@ -526,6 +527,7 @@ impl EgressMessageType {
         Self::SnapshotLevel,
         Self::SnapshotEnd,
         Self::InstrumentReset,
+        Self::Midpoint,
     ];
 
     #[must_use]
@@ -544,6 +546,7 @@ impl EgressMessageType {
             Self::SnapshotLevel => "snapshot_level",
             Self::SnapshotEnd => "snapshot_end",
             Self::InstrumentReset => "instrument_reset",
+            Self::Midpoint => "midpoint",
         }
     }
 
@@ -566,7 +569,8 @@ impl EgressMessageType {
             | Self::Trade
             | Self::LevelUpdate
             | Self::BookClear
-            | Self::InstrumentReset => &[PortRole::Mktdata],
+            | Self::InstrumentReset
+            | Self::Midpoint => &[PortRole::Mktdata],
             Self::InstrumentDefinition | Self::ManifestSummary | Self::StrikeInterval => {
                 &[PortRole::Refdata]
             }
@@ -608,6 +612,7 @@ mod tests {
         use dz_edge_mbp::{
             BookClear, InstrumentReset, LevelUpdate, SnapshotBegin, SnapshotEnd, SnapshotLevel,
         };
+        use dz_edge_midpoint::Midpoint;
         use dz_edge_refdata::{InstrumentDefinition, ManifestSummary, StrikeInterval};
         use dz_edge_tob::{Quote, Trade};
 
@@ -633,12 +638,13 @@ mod tests {
         check::<SnapshotLevel>(EgressMessageType::SnapshotLevel);
         check::<SnapshotEnd>(EgressMessageType::SnapshotEnd);
         check::<InstrumentReset>(EgressMessageType::InstrumentReset);
+        check::<Midpoint>(EgressMessageType::Midpoint);
 
         // Every variant is covered above. A message type added to the codec
         // with no entry here would be pre-created nowhere, silently.
         assert_eq!(
             EgressMessageType::ALL.len(),
-            13,
+            14,
             "a new message type needs a port-role entry and a line in this test"
         );
     }
