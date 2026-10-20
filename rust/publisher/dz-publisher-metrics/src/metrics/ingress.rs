@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
-use prometheus::{IntCounter, IntCounterVec, IntGaugeVec, Registry};
+use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Registry};
 
+use crate::buckets::INGRESS_BATCH_SIZE_BUCKETS;
 use crate::labels::{AdapterErrorReason, ConnectFailureReason, ParseErrorReason, ReconnectReason};
-use crate::opts::opts;
+use crate::opts::{histogram_opts, opts};
 
 /// Metrics for the path from the upstream source into the publisher.
 pub struct IngressMetrics {
@@ -16,6 +17,8 @@ pub struct IngressMetrics {
     connect_failures_total: IntCounterVec,
     adapter_errors_total: IntCounterVec,
     rate_limited_total: IntCounter,
+    queue_depth: IntGauge,
+    batch_size: Histogram,
     message_types: HashSet<String>,
 }
 
@@ -209,6 +212,39 @@ impl IngressMetrics {
             .register(Box::new(rate_limited_total.clone()))
             .expect("static metric registration");
 
+        // Both exist from startup, at zero, whichever input model the
+        // publisher runs: an unlabelled family is its own one series, and an
+        // inline publisher, which has no queue, leaves them there.
+        let queue_depth = IntGauge::with_opts(opts(
+            "dz_publisher_ingress_queue_depth",
+            "Decoded events waiting between the connections and the publisher loop, sampled each \
+             time the loop drains a batch. A proposed addition to the normative set, not yet in \
+             the governing playbook: a publisher that decodes on its connections' own threads \
+             has a queue the loop drains, and a queue that stays near full is a loop that cannot \
+             keep up - the state in which its connections stop reading. Always 0 for a publisher \
+             that maps every payload inline, which has no queue.",
+            labels,
+        ))
+        .expect("static metric definition");
+        registry
+            .register(Box::new(queue_depth.clone()))
+            .expect("static metric registration");
+
+        let batch_size = Histogram::with_opts(histogram_opts(
+            "dz_publisher_ingress_batch_size",
+            "Decoded events the publisher loop drained in one batch, each sent with one flush. A \
+             proposed addition to the normative set, not yet in the governing playbook: with the \
+             queue depth it says whether the loop drains as events arrive, in batches of one, or \
+             falls behind and drains full ones. Empty for a publisher that maps every payload \
+             inline.",
+            labels,
+            INGRESS_BATCH_SIZE_BUCKETS,
+        ))
+        .expect("static metric definition");
+        registry
+            .register(Box::new(batch_size.clone()))
+            .expect("static metric registration");
+
         Self {
             messages_total,
             bytes_total,
@@ -219,6 +255,8 @@ impl IngressMetrics {
             connect_failures_total,
             adapter_errors_total,
             rate_limited_total,
+            queue_depth,
+            batch_size,
             message_types: message_types.iter().map(|t| (*t).to_string()).collect(),
         }
     }
@@ -306,5 +344,25 @@ impl IngressMetrics {
     /// Records one instance of the upstream source rate-limiting ingress.
     pub fn rate_limited(&self) {
         self.rate_limited_total.inc();
+    }
+
+    /// Sets how many decoded events are waiting for the publisher loop.
+    ///
+    /// Sampled by a publisher running the threaded input model, each time its
+    /// loop drains a batch. Counts the family this crate proposes rather than
+    /// one the playbook carries.
+    pub fn set_queue_depth(&self, depth: usize) {
+        self.queue_depth
+            .set(i64::try_from(depth).unwrap_or(i64::MAX));
+    }
+
+    /// Records one batch the publisher loop drained, of `size` events.
+    ///
+    /// Counts the family this crate proposes rather than one the playbook
+    /// carries.
+    pub fn batch(&self, size: usize) {
+        // An event count, exact in an `f64` far past any batch.
+        #[allow(clippy::cast_precision_loss)]
+        self.batch_size.observe(size as f64);
     }
 }

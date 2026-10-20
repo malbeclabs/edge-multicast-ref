@@ -19,3 +19,11 @@ pub const LATENCY_BUCKETS: &[f64] = &[
 pub const REFDATA_LOAD_DURATION_BUCKETS: &[f64] = &[
     0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0,
 ];
+
+/// Buckets for `dz_publisher_ingress_batch_size`.
+///
+/// Powers of two up to 32, which is the most a threaded publisher drains in
+/// one batch: a batch is a count of events, not a duration, and the question
+/// it answers is whether the loop drains one at a time — the queue is keeping
+/// up — or full batches, which is the loop falling behind its connections.
+pub const INGRESS_BATCH_SIZE_BUCKETS: &[f64] = &[1.0, 2.0, 4.0, 8.0, 16.0, 32.0];

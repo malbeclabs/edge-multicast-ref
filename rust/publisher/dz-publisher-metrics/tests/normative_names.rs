@@ -62,6 +62,8 @@ const PROPOSED_NAMES: &[&str] = &[
     "dz_publisher_ingress_adapter_errors_total",
     "dz_publisher_lowering_refusals_total",
     "dz_publisher_channel_last_published_timestamp_seconds",
+    "dz_publisher_ingress_queue_depth",
+    "dz_publisher_ingress_batch_size",
 ];
 
 fn touch_every_family(m: &PublisherMetrics) {
@@ -74,6 +76,8 @@ fn touch_every_family(m: &PublisherMetrics) {
     m.ingress().rate_limited();
     m.ingress().connect_failure(ConnectFailureReason::Refused);
     m.ingress().adapter_error(AdapterErrorReason::NotReady);
+    m.ingress().set_queue_depth(3);
+    m.ingress().batch(32);
 
     m.lowering()
         .refusal(LoweringRefusalReason::UnknownInstrument);
