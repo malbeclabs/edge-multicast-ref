@@ -113,4 +113,6 @@ pub use config::{
     FeedSpec, ReplayConfig, Source, SourceRole, UnknownSourceRole, UnsupportedFeedSpec,
 };
 pub use context::{AdapterContext, AdapterSection};
-pub use registry::{AdapterInitError, AdapterRegistry, AdapterResolution, Venue};
+pub use registry::{
+    AdapterInitError, AdapterRegistry, AdapterResolution, SharedThreadedAdapter, Venue,
+};
