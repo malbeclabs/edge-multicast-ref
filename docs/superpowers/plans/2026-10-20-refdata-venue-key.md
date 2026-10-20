@@ -26,20 +26,20 @@ Breaks [the design](../specs/2026-10-20-refdata-venue-key-design.md) into ordere
 ### 2. The record: version 4
 
 - [ ] `state.rs`: `FORMAT_VERSION_KEYED = 4`, the header's allocation field, and the third line field (hex or `-`). `Entry::venue_key: Option<Box<[u8]>>`.
-- [ ] Loader rules: `BadVenueKey`, `DuplicateVenueKey`, and a duplicate `Symbol` allowed in version 4 only. The sequential and derived line rules are carried over unchanged.
+- [ ] Loader rules: `BadVenueKey`, `DuplicateVenueKey`, `UnresolvedVenueKey` (`-` on a full-width `Symbol`), and a duplicate `Symbol` allowed in version 4 only. A key of 64 bytes or more is always encoded in hex. The sequential and derived line rules are carried over unchanged.
 - [ ] `Loaded::needs_rewrite` takes `identity` into account.
 
 **Test:** the round trips and refusals in the design's Tests section. **The revert:** keep `DuplicateSymbol` for version 4, and the shared-`Symbol` round trip fails.
 
 ### 3. Recall on the key
 
-- [ ] `Registry`: `handles`, `minted` and `in_use` keyed on `Box<[u8]>` and looked up by `&[u8]`. Under `Symbol`, the key is the 64 padded bytes, so recall and on-disk behaviour are what they are today. Under `VenueKey`, the key is `venue_key.unwrap_or(symbol)`.
+- [ ] `Registry`: `handles` and `minted` keyed on `Box<[u8]>` and looked up by `&[u8]`. `in_use` stays `HashMap<u32, _>`, from ID to holder, and only its value type becomes the key, so the derived check in `admit` (is the ID held, and by whom) and `remember_unavailable` keep their direction. Under `Symbol`, the key is the 64 padded bytes, so recall and on-disk behaviour are what they are today. Under `VenueKey`, the key is `venue_key.unwrap_or(symbol)`.
 - [ ] `offer` validates the key (`Refusal::BadVenueKey`) before the lookup. `symbol_field` is used only for composing the definition.
 - [ ] `forgettable`, compaction and `take_unavailable_ids` work on the key, and `take_unavailable_ids` also reports the `Symbol`.
-- [ ] Opening a version 1, 2 or 3 record under `VenueKey` rewrites it as version 4. Full-width `-` entries are claimable. A claim appends the explicit key and counts `claimed_by_venue_key`.
+- [ ] Opening a version 1, 2 or 3 record under `VenueKey` rewrites it as version 4 when every `Symbol` is padded. A full-width entry refuses the open as `UnresolvedVenueKeys` until `seed` resolves it. Nothing is claimed by offer order.
 - [ ] Opening a version-4 record under `Symbol` is `RefdataError::StateIsKeyed`.
 
-**Test:** the 65-byte pair, `None` as the untruncated symbol, the upgrade and claim cases, switching back, and forgetting by key. **The revert:** look up `handles` by `symbol_field(spec.symbol)` under `VenueKey`, and the 65-byte test fails.
+**Test:** the 65-byte pair; the 64/65-byte pair mapped, in both offer orders and across a restart; `None` as the untruncated symbol; the upgrade refused until it is resolved; switching back; and forgetting by key. **The revert:** look up `handles` by `symbol_field(spec.symbol)` under `VenueKey`, and the 65-byte test fails.
 
 ### 4. `"derived_key"`
 
@@ -50,10 +50,11 @@ Breaks [the design](../specs/2026-10-20-refdata-venue-key-design.md) into ordere
 
 ### 5. `seed`
 
-- [ ] `pub fn seed(store, Seed { source_id, next_id, entries })`, where `entries` are `(venue_key, instrument_id)` pairs. It merges as the design states, writes a single base through `replace`, and returns `SeedError` for each refusal.
+- [ ] `pub fn seed(store, Seed { source_id, next_id, entries, retire_unmapped })`, where `entries` are `(venue_key, instrument_id)` pairs. It merges as the design states, including `IdMayBeForgotten` below the record's `next_id` and the resolution of full-width entries. It writes a single base through `StateStore::store`, and returns `SeedError` for each refusal.
+- [ ] Its documentation states the outcome of a failed write: `NotReplaced` leaves the old record; `Write` may follow the rename, so reload before acting. A repeated seed is a no-op.
 - [ ] `BRINGING-UP-A-FEED.md`: how a publisher moving from its own registry seeds the record, and that seeding comes before `"derived_key"`.
 
-**Test:** a fixture `instruments.json` with tickers that collide at 64 bytes; each `SeedError`; merge as union; and seed, mint, export and re-seed with no ID naming two keys. **The revert:** drop the existing-key check from the merge, and the conflict test fails.
+**Test:** a fixture `instruments.json` with tickers that collide at 64 bytes; each `SeedError`, including an absent ID below the destination's `next_id` after it was forgotten; merge as union; idempotence; a write that fails after its rename (`MemoryStore::break_flushes`), followed by a reload and a re-seed; and seed, mint, export and re-seed with no ID naming two keys. **The revert:** drop the existing-key check from the merge, and the conflict test fails.
 
 ### 6. Release
 
