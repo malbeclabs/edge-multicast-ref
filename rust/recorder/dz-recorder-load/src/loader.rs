@@ -10,6 +10,16 @@
 //! every boundary certain: out of order, the first object of every run writes an
 //! uncertain anchor and every gap inside it is reported `unverifiable`.
 //!
+//! # Oldest first within a feed, and the feeds take turns
+//!
+//! Both reasons are about one feed's objects: the preceding segment is the
+//! same feed's, and a feed's oldest object is the one of it closest to
+//! eviction. So the order is kept within every feed, and across feeds a pass
+//! takes every feed's oldest waiting object, then every feed's second, and so
+//! on. One global queue would let a feed newly added to the scan set — its whole
+//! archive older than anything the other feeds have published since — hold
+//! every other feed still until that archive drained. See [`take_turns`].
+//!
 //! # Nothing here blocks the recorder
 //!
 //! The directory is opened read-only and the ledger lives elsewhere. A
@@ -234,11 +244,32 @@ impl<S: RowSink> Loader<'_, S> {
         // up again afterwards, because the answer is a property of the object
         // and the configuration is a slice somebody may one day reload.
         let mut seen: Vec<(ObjectId, u64, bool)> = Vec::new();
-        // Turns off at a stop signal or at the pass bound, while the scan below
-        // carries on: see the comment in the loop.
-        let mut loading = true;
+        // The objects this pass may derive, as an index into `candidates` and
+        // the feed the manifest names. The scan below reads every manifest and
+        // decides what is derivable; the order they are derived in is decided
+        // only once the scan is whole, by `take_turns`, because that order
+        // depends on how much every feed has waiting.
+        //
+        // An index and a name, and NOT the manifest. A back-load is tens of
+        // thousands of unloaded objects, and a manifest carries its object's
+        // channel instances, which on a many-market feed is the bulk of it:
+        // holding every one for the length of the pass would cost a recorder
+        // host memory in proportion to how far behind its loader is. The
+        // manifest is read again for the objects the pass reaches, which is at
+        // most `max_objects` of them -- a few kilobytes each, against a scan
+        // that already read all of them.
+        let mut derivable: Vec<(usize, String)> = Vec::new();
 
-        for candidate in &candidates {
+        // The scan, over every candidate, and it does not stop at the pass
+        // bound or at a signal. That is what makes the two lag numbers whole: a
+        // pass that stopped scanning where it stopped loading would report the
+        // backlog it happened to have reached, and a loader four hours behind
+        // would publish the same small number as one that was caught up. It is
+        // also what keeps compaction honest -- the ledger is rewritten against
+        // every object present, not against the prefix this pass got through.
+        // And it is what the order needs: a feed's turn depends on how many of
+        // its objects are waiting, which only a whole scan can say.
+        for (index, candidate) in candidates.iter().enumerate() {
             let manifest = match read_manifest(&candidate.manifest_path) {
                 Ok(manifest) => manifest,
                 Err(message) => {
@@ -289,24 +320,18 @@ impl<S: RowSink> Loader<'_, S> {
                 pass.skipped += 1;
                 continue;
             }
+            derivable.push((index, manifest.feed));
+        }
 
+        for index in take_turns(derivable) {
             // Checked before the object rather than after it: a signal that
             // arrived mid-pass finishes the object it is in and stops, so a
             // restart never leaves one half-loaded. A bound on the pass does the
             // same, so a loader eight hours behind still publishes its lag every
-            // poll interval instead of after an unbounded catch-up.
-            //
-            // The scan carries on past either, and does not `break`. That is
-            // what makes the two lag numbers whole: a pass that stopped
-            // scanning where it stopped loading would report the backlog it
-            // happened to have reached, and a loader four hours behind would
-            // publish the same small number as one that was caught up. Reading
-            // the remaining manifests costs a few kilobytes each and no object
-            // is opened. It is also what keeps compaction honest — the ledger
-            // is rewritten against every object present, not against the
-            // prefix this pass got through.
+            // poll interval instead of after an unbounded catch-up. Both end
+            // only the loading; the scan above is already whole.
             if stop() {
-                loading = false;
+                break;
             }
             // Against what the pass *derived*, which is the work it did. Loading
             // is not that number any more: a sink that coalesces lands nothing
@@ -314,11 +339,22 @@ impl<S: RowSink> Loader<'_, S> {
             // whole catch-up and bounds nothing — which is the unbounded pass
             // the key exists to prevent.
             if self.max_objects != 0 && pass.derived >= self.max_objects as u64 {
-                loading = false;
+                break;
             }
-            if !loading {
-                continue;
-            }
+
+            let candidate = &candidates[index];
+            // Read again, for the reason `derivable` holds no manifest. The
+            // recorder never rewrites a published manifest -- its name is the
+            // segment's own window and sequence -- so this is the same text the
+            // scan read; one evicted between the two reads fails here as a
+            // manifest error, as it would have failed opening the object.
+            let manifest = match read_manifest(&candidate.manifest_path) {
+                Ok(manifest) => manifest,
+                Err(message) => {
+                    self.fail(ErrorKind::Manifest, message, &mut pass, &mut errors);
+                    continue;
+                }
+            };
 
             match self.load(candidate, &manifest, now_ns) {
                 Ok((recorded, rows)) => {
@@ -573,6 +609,11 @@ impl<S: RowSink> Loader<'_, S> {
     /// Every object with a manifest beside it, oldest first, from the objects
     /// directory AND from one level of subdirectory under it.
     ///
+    /// Oldest first across the whole directory, which is the order *within*
+    /// each feed that a pass keeps; the order a pass derives in is this one
+    /// with the feeds taking turns, decided in `run_once` by [`take_turns`]
+    /// once the scan has said what each feed has waiting.
+    ///
     /// **The subdirectory level is the whole point, and its absence was silent.**
     /// `dz-recorder` writes `completed/<feed spec>/` — `startup.rs`'s
     /// `config.archive.completed_dir.join(&spec)` — while this read only the top
@@ -763,7 +804,8 @@ impl<S: RowSink> Loader<'_, S> {
             });
         }
         // Oldest first: the oldest object is the one closest to eviction, and
-        // in-order loading is what makes an era boundary certain.
+        // in-order loading is what makes an era boundary certain. `take_turns`
+        // keeps this order within every feed and interleaves the feeds.
         out.sort_by_key(|c| (c.start_ns, c.object.clone()));
         let missing = self
             .feeds
@@ -843,6 +885,78 @@ pub fn record_landed(
         }
     }
     out
+}
+
+/// The order a pass derives in: every feed's oldest waiting object, then every
+/// feed's second, and so on — oldest first within each round.
+///
+/// Takes `(position, feed)` in the walk's oldest-first order and returns the
+/// positions reordered. Nothing is added or dropped; only the order changes,
+/// and it changes only where the pass bound is reached before the list ends.
+///
+/// # Why feeds take turns
+///
+/// **One queue oldest first lets a newly scanned feed stop every other feed.**
+/// A feed added to `[loader] feeds` brings its whole archive with it — up to its
+/// share of the staging budget, days of objects — and every one of them is older
+/// than anything the feeds already loading have published since. One global
+/// queue therefore derives nothing but the newcomer, `max_objects` at a time,
+/// until its archive drains, and the feeds that were current stop advancing for
+/// that long. For a consumer that settles a window only a few hours after it
+/// closes, rows that arrive later than that are not late, they are lost: the
+/// window was written short and nothing writes it again.
+///
+/// Taking turns bounds what one feed's backlog can cost another. A feed with
+/// `k` objects waiting has them at the first `k` rounds, so a feed that is
+/// current — a handful of objects since the last pass — is derived in full
+/// within the first few `feeds × handful` objects of the pass. With 60 a pass
+/// and fifteen feeds that is any feed publishing four objects or fewer per
+/// pass, whatever the other fourteen have waiting. And while the bound is at
+/// least the number of feeds, a feed with a backlog advances by at least one
+/// object every pass, so no feed waits on another, the newcomer included.
+///
+/// # What it keeps
+///
+/// **Oldest first within a feed is untouched**, and it is the half of the
+/// module's rule that correctness rests on: the adjacency check that settles an
+/// era boundary consults the previous object *of the same feed* — `segment_seq`
+/// is per feed, which is why the trailers are keyed on it — so the order
+/// across feeds never reached it. And within a round the oldest head goes
+/// first, so among the objects one round takes, the one closest to eviction is
+/// still taken first.
+///
+/// **What it gives up is global oldest first**, and only while a pass is
+/// bounded and more than one feed has a backlog. Then the globally oldest
+/// object may wait a pass longer than it did. That is the trade: a back-load
+/// drains at its share of the pass rather than at all of it, and in exchange
+/// no feed that was keeping up is made to fall behind by it. A feed the
+/// loader cannot keep up with at its share falls behind on its own account,
+/// and `dz_loader_oldest_unloaded_age_seconds` says so exactly as before,
+/// because the lag is measured over what is waiting and not over the order it
+/// is taken in.
+///
+/// Keyed on the manifest's `feed`, the key the trailers and the market data
+/// switches use, rather than on the subdirectory: a recorder configured
+/// without a spec writes loose objects at the top level, and their feed is
+/// knowable only from the manifest.
+fn take_turns(derivable: Vec<(usize, String)>) -> Vec<usize> {
+    use std::collections::HashMap;
+
+    let mut taken: HashMap<String, usize> = HashMap::new();
+    let mut ranked: Vec<(usize, usize)> = derivable
+        .into_iter()
+        .map(|(position, feed)| {
+            let round = taken.entry(feed).or_insert(0);
+            let ranked = (*round, position);
+            *round += 1;
+            ranked
+        })
+        .collect();
+    // The input is already oldest first, so ordering on (round, position) is
+    // round first and the walk's own order within one: every feed's n-th
+    // object, oldest of them first.
+    ranked.sort_unstable();
+    ranked.into_iter().map(|(_, position)| position).collect()
 }
 
 fn read_manifest(path: &Path) -> Result<SegmentManifest, String> {
@@ -1516,6 +1630,116 @@ mod pass_tests {
             "and the pass says so rather than looking done"
         );
         assert!(pass.oldest_unloaded_age_seconds > 0);
+    }
+
+    /// A feed with a backlog does not hold back a feed that is keeping up.
+    ///
+    /// **The shape a newly scanned feed takes.** Adding a feed to `[loader]
+    /// feeds` brings its whole archive, every object of it older than anything
+    /// the feeds already loading have published since, and a single queue
+    /// oldest first derived nothing else until it drained — `max_objects` of
+    /// the newcomer a pass, while the current feeds stopped.
+    ///
+    /// The fixture's objects all share one `start_ns`, so the walk's order is
+    /// the path's, and every `market-by-price` object sorts ahead of the one
+    /// `top-of-book` object: four objects of backlog in front of one that is
+    /// current, exactly as the newcomer's archive sits in front of a current
+    /// feed. Under one queue and a bound of two, the first pass took two
+    /// `market-by-price` objects and `top-of-book` none.
+    ///
+    /// And taking turns must not cost the boundaries: once every object has
+    /// loaded across bounded passes, each feed has exactly one uncertain era
+    /// row, its first, because within a feed the order is still oldest first.
+    #[test]
+    fn a_feed_with_a_backlog_does_not_hold_back_one_that_is_keeping_up() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let completed = dir.path().join("completed");
+        write_feed(dir.path(), &completed.join(FIRST_FEED), FIRST_FEED, 4, 10);
+        write_feed(dir.path(), &completed.join(SECOND_FEED), SECOND_FEED, 1, 10);
+        let rows = dir.path().join("rows");
+        let metrics = LoaderMetrics::new(SITE, RECORDER);
+        let mut ledger = Ledger::open(dir.path().join("ledger.jsonl")).expect("a new ledger");
+        let mut sink = FileSink::create(&rows).expect("the directory is writable");
+        let stop = never();
+        let mut bounded_pass = |ledger: &mut Ledger| {
+            Loader {
+                objects_dir: &completed,
+                feeds: None,
+                site: SITE,
+                recorder: RECORDER,
+                max_objects: 2,
+                ledger,
+                sink: &mut sink,
+                metrics: &metrics,
+                market_data: &[],
+                pending: &mut Vec::new(),
+            }
+            .run_once(&stop)
+        };
+
+        let (first, errors) = bounded_pass(&mut ledger);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(first.derived, 2);
+        assert!(
+            ledger.trailer(SECOND_FEED).is_some(),
+            "the current feed waited behind the other feed's backlog"
+        );
+        assert_eq!(
+            ledger.trailer(FIRST_FEED).map(|t| t.segment_seq),
+            Some(0),
+            "the backlog still advanced, and from its oldest object"
+        );
+        assert_eq!(
+            first.unloaded, 3,
+            "and the rest of the backlog is still counted"
+        );
+
+        // The backlog drains at the bound, oldest first: two more passes.
+        for _ in 0..2 {
+            let (pass, errors) = bounded_pass(&mut ledger);
+            assert!(errors.is_empty(), "{errors:?}");
+            assert!(pass.derived > 0);
+        }
+        let (last, _) = bounded_pass(&mut ledger);
+        assert_eq!(last.derived, 0);
+        assert_eq!(last.unloaded, 0);
+        assert_eq!(ledger.trailer(FIRST_FEED).map(|t| t.segment_seq), Some(3));
+
+        sink.flush(now_unix_nanos()).expect("flush");
+        let text = std::fs::read_to_string(FileSink::path_in(&rows, Grain::Era))
+            .expect("era rows were written");
+        let uncertain = text
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| {
+                serde_json::from_str::<serde_json::Value>(l).expect("one JSON object per line")
+            })
+            .filter(|era| era["anchor_certain"] == 0)
+            .count();
+        assert_eq!(
+            uncertain, 2,
+            "one uncertain boundary per feed, its first: taking turns across feeds \
+             must leave every later boundary of each feed settled"
+        );
+    }
+
+    /// Every feed's n-th waiting object before any feed's (n+1)-th, and the
+    /// walk's own order within a round and within a feed.
+    #[test]
+    fn feeds_take_turns_and_each_keeps_its_own_order() {
+        let walk = |feeds: &[&str]| -> Vec<(usize, String)> {
+            feeds
+                .iter()
+                .enumerate()
+                .map(|(i, f)| (i, (*f).to_owned()))
+                .collect()
+        };
+        // A newcomer's archive (`k`) ahead of two current feeds' newest.
+        let order = take_turns(walk(&["k", "k", "k", "k", "p", "b", "b"]));
+        assert_eq!(order, vec![0, 4, 5, 1, 6, 2, 3]);
+        // One feed is the walk, unchanged.
+        assert_eq!(take_turns(walk(&["a", "a", "a"])), vec![0, 1, 2]);
+        assert!(take_turns(Vec::new()).is_empty());
     }
 
     /// A signal finishes the object it arrived in and then stops.

@@ -314,7 +314,7 @@ Two consequences follow, and both look wrong until the above is in mind:
   whose datagram rows are present and whose gap rows are not — and that object
   reads as a clean feed for ever. Partial credit is how a gap becomes invisible.
 
-## Oldest object first
+## Oldest object first, per feed
 
 Not a preference. Two reasons, pointing the same way:
 
@@ -324,6 +324,28 @@ Not a preference. Two reasons, pointing the same way:
   segment. In order, every boundary after the first is certain; out of order,
   the first object of every run writes an uncertain anchor and every gap inside
   it is reported `unverifiable`.
+
+**Oldest first within each feed, and the feeds take turns.** Both reasons are
+about one feed's objects — the preceding segment is the same feed's, and the
+trailer the check consults is keyed on the feed — so a pass takes every feed's
+oldest waiting object, then every feed's second, and so on, oldest first within
+each round. One global queue was the alternative, and it let a newly scanned
+feed stop every other one: adding a feed to `[loader] feeds` brings its whole
+archive, up to its share of the staging budget, and every object of it is older
+than anything the feeds already loading have published since. Those feeds then
+derived nothing until the back-load drained, which for a consumer that settles a
+window a few hours after it closes is not a delay but a window written short for
+good. Taking turns, a feed that is keeping up — a few objects since the last
+pass — is derived in full within the first few rounds of the pass whatever the
+others have waiting (at `max_objects_per_pass = 60` and fifteen feeds, any feed
+publishing four objects a pass or fewer), and a back-load drains at its share of
+the pass instead of all of it.
+
+What that gives up is global oldest first, and only while a bounded pass has
+more than one feed behind: the globally oldest object may wait a pass longer.
+Nothing about the lag gauges changes — they measure what is waiting, not the
+order it is taken in — so a back-load still shows in
+`dz_loader_oldest_unloaded_age_seconds` until it drains.
 
 The loader never *waits* for a predecessor, though. Under a staging budget that
 evicts, the predecessor is routinely gone, and a loader that must see segment
