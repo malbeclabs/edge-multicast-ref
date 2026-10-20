@@ -295,3 +295,50 @@ fn a_reference_stream_whose_consumer_has_not_started_keeps_its_place_in_the_fan_
         "counted every time, under the label a failed send to a socket has",
     );
 }
+
+#[test]
+fn a_datagram_an_absorbed_would_block_lost_is_not_a_packed_datagram() {
+    // The fan-out absorbs a full send buffer and answers `Ok`, with the route
+    // up. The datagram never left the host, so the messages-per-datagram
+    // histogram must not count it; the one after it, accepted, it must.
+    let metrics = metrics(&[PortRole::Mktdata], &[7]);
+    let wire = FakeSink::essential("wire");
+    wire.script([Verdict::WouldBlock, Verdict::Accept]);
+    let mut tee = Tee::new(PortRole::Mktdata, Arc::clone(&metrics));
+    tee.add(wire.boxed());
+    let mut egress = ChannelEgress::<TestFeed, _>::new(
+        EgressEndpoint::new(PortRole::Mktdata, doc_source(), 30001),
+        tee,
+        Arc::clone(&metrics),
+        ResetCount(1),
+        MTU,
+    );
+    assert!(egress.register(7));
+    let observed = |metrics: &dz_publisher_metrics::PublisherMetrics| {
+        sample(
+            metrics,
+            "dz_publisher_egress_messages_per_datagram_count",
+            &[("port_role", "mktdata")],
+        )
+    };
+
+    egress
+        .push(7, &Small, EgressMessageType::Quote, 0)
+        .expect("push");
+    egress
+        .flush(7, 0)
+        .expect("the fan-out absorbs the full buffer");
+    assert_eq!(wire.accepted_count(), 0, "nothing left the host");
+    assert_eq!(
+        observed(&metrics),
+        0,
+        "a datagram that never left was counted"
+    );
+
+    egress
+        .push(7, &Small, EgressMessageType::Quote, 0)
+        .expect("push");
+    egress.flush(7, 0).expect("sent");
+    assert_eq!(wire.accepted_count(), 1);
+    assert_eq!(observed(&metrics), 1);
+}

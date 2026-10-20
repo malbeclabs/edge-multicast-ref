@@ -356,10 +356,11 @@ impl<F: Feed, S: DatagramSink> ChannelEgress<F, S> {
         let egress = self.metrics.egress();
         let port_role = self.endpoint.port_role;
         egress.datagram(port_role);
-        // Only a datagram that left: a fan-out whose route is down returns
-        // `Ok`, and a datagram that went nowhere is not one a packing rate
+        // Only a datagram that left. A fan-out answers `Ok` both while its
+        // route is down and when it absorbed a full send buffer with the route
+        // up, and a datagram that went nowhere is not one a packing rate
         // should count.
-        if self.sink.reached_wire() {
+        if self.sink.reached_wire() && self.sink.delivered() {
             egress.messages_in_datagram(port_role, tally.iter().map(|(_, count)| count).sum());
         }
         egress.bytes(port_role, datagram.len() as u64);
