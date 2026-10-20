@@ -1,4 +1,4 @@
-# Multicast ingest transport
+# A multicast transport, and the silence it has to notice
 
 **Status:** draft, pending review
 **Applies to:** `rust/ingress/`, venue publisher repositories
@@ -9,22 +9,15 @@
 
 ## Naming
 
-This repository is public. This document names no venue, venue repository,
-venue crate, config key, metric prefix or issue tracker, gives no count of
-publishers, and states no group address, port, instrument count or facility.
-`GLOSSARY.md` governs all vocabulary.
-
-Three terms, two governed and one borrowed:
+Three terms:
 
 - **Payload**, not datagram. `dz-ingress-core` reserves *datagram* for what this
-  family encodes and transmits — *"the wire's unit is a datagram and it does not
+  family encodes and transmits — "the wire's unit is a datagram and it does not
   appear in this crate: nothing here has reached the encoder yet. What a
-  transport delivers is a payload."* Upstream traffic arriving on a joined group
+  transport delivers is a payload." Upstream traffic arriving on a joined group
   is a payload throughout.
 - **Source IP address**, the glossary's qualified form, wherever this document
   means the layer-3 sender. The configuration key `source_address` matches it.
-  `Source-Specific Multicast`, where it appears, is an externally owned protocol
-  name in the class of `ARM64` and `Unix epoch`.
 - **Group**, never *channel*. `Channel ID` is a wire field naming a shard of our
   own published set and is unrelated to the upstream's addressing.
 
@@ -113,11 +106,11 @@ is the composition question in **Connection granularity**, and for a venue whose
 partitions must be distinguishable the answer is one block per group.
 
 That reading is what makes the guard the detector for the characteristic
-multicast failure, recorded in the recorder's `rejoin` module: *"A membership
+multicast failure, recorded in the recorder's `rejoin` module: "A membership
 goes away with the interface it was joined on, and nothing reports that: the
 socket stays open, stays readable, and is permanently silent. Silence is
 therefore the only symptom there is, and a cadence to act on it is the only
-remedy."* The recorder answers it with its own rejoin cadence because it has no
+remedy." The recorder answers it with its own rejoin cadence because it has no
 driver. Here the driver's reconnect is the rejoin: `shutdown` leaves and closes,
 `connect` binds and joins again.
 
@@ -144,8 +137,8 @@ way: a stated rule in the crate's rustdoc and in `BRINGING-UP-A-FEED.md`.
 **`stamp_source` is the first use of the kernel case in this family.** Both
 existing transports read the clock after the read returns. `SO_TIMESTAMPNS` on a
 datagram socket is the case `Received::Payload`'s `ts_ns` field was written for
-— *"a kernel receive timestamp is the case that matters, since it predates every
-scheduling delay between the packet and the read"* — and the recorder already
+— "a kernel receive timestamp is the case that matters, since it predates every
+scheduling delay between the packet and the read" — and the recorder already
 sets it on its capture sockets. One `setsockopt` and one control-message read
 per receive separates a venue-to-receive latency measuring the network from one
 measuring our scheduler.
@@ -222,22 +215,20 @@ Local failures — the interface going down, a socket error, a failed read — m
 none of the four. This transport reports them as `IngressError::Ended { reason:
 RemoteClose }` with the errno in the detail, the same choice
 `IngressError::disconnect_reason` makes for a fatal fault on a live connection:
-*"the least specific of the four rather than an invented fifth."*
+"the least specific of the four rather than an invented fifth."
 
 **Named rather than proposed.** `remote_close` on a multicast transport means
 the local path stopped working, which is true and not useful, and the detail
-string is the only place the cause lives. A fifth value would widen a closed set
-that `dz-adapter-core` and `dz-publisher-metrics` hold to each other by arity, so
-the change is larger than the imprecision it fixes. Stated so a reader is not
-misled by the label.
+string is the only place the cause lives. A fifth value would widen a closed
+set that `dz-adapter-core` and `dz-publisher-metrics` hold to each other by
+arity.
 
 ---
 
 ## Membership
 
 Membership is **any-source, IGMPv2**. Venue multicast paths carry IGMPv2 static
-joins or PIM-SM; a path offering IGMPv3 source-specific membership is not
-something this design assumes, and none is known.
+joins or PIM-SM. Source-specific membership is a non-goal.
 
 A venue publishing over multicast publishes a known transmitter address per
 group, and a payload from any other sender must not reach the adapter. Two
@@ -260,8 +251,8 @@ family gains a series. **What this needs from the framework**, proposal 1.
 
 **This inverts the recorder's gate deliberately.** `dz-recorder-capture` joins
 any-source and runs a `SourceGate` that counts and never drops, stating the
-trade in its rustdoc: *"A wrongly recorded datagram is filterable afterwards on
-the source address; a wrongly dropped one is gone."* That is right for an
+trade in its rustdoc: "A wrongly recorded datagram is filterable afterwards on
+the source address; a wrongly dropped one is gone." That is right for an
 archive, where the record is evidence and over-capture is recoverable. It
 inverts for a publisher: a payload from an unexpected sender that reaches
 `on_payload` becomes published market data on our wire, under our `Source ID`,
@@ -282,20 +273,20 @@ group, or on the wrong interface, succeeds locally and receives nothing.
 
 Joining on the wrong interface receives nothing, reports no error, and leaves
 every series in the publisher reading as a clean feed with a quiet venue. This
-is the egress `ttl` problem from the receiving side — *"a wrong hop count is
-invisible from every direction an operator can look"* — and gets the same
+is the egress `ttl` problem from the receiving side — "a wrong hop count is
+invisible from every direction an operator can look" — and gets the same
 treatment: refuse the omission at load, make the one observable symptom
 actionable.
 
 **`interface` is required, with no route-discovery fallback.** The recorder
-permits one, offering *"leave `feed.interface` unset to accept route
-discovery."* The consequence differs: a recorder joining by the default route
+permits one, offering "leave `feed.interface` unset to accept route
+discovery." The consequence differs: a recorder joining by the default route
 archives nothing and the gap is visible in the archive afterwards; a publisher
 doing it publishes nothing and the subscriber's first evidence is an empty feed.
-`BRINGING-UP-A-FEED.md` says of the transmitting side that pinning *"is not
-optional in practice"*, naming the membership report as half of the failure —
-*"the IGMP report leaves by the wrong path too, so the symptom is silence that
-reads as a clean feed."* This transport makes that a refusal.
+`BRINGING-UP-A-FEED.md` says of the transmitting side that pinning "is not
+optional in practice", naming the membership report as half of the failure —
+"the IGMP report leaves by the wrong path too, so the symptom is silence that
+reads as a clean feed." This transport makes that a refusal.
 
 **It is the interface's IPv4 address, not a device name**, because the
 membership is requested against an address and nothing in this crate resolves a
@@ -349,8 +340,8 @@ seconds rather than hundreds of milliseconds, and the crate documents the number
 with that arithmetic beside it. It is not refused in code: the transport cannot
 see `[ingress]`, and `[ingress]`'s keys are the policy every `[[source]]` block
 shares, so a floor imposed here would bind a session block in the same document.
-A publisher mixing transports and needing two sequences needs two documents or a
-per-block policy, which is a change to the core's section.
+A publisher mixing transports and needing two sequences needs two documents, or
+the per-block override in **What this needs from the framework**, proposal 3.
 
 **`shutdown` leaves explicitly rather than relying on the socket closing.**
 Dropping the socket achieves the same thing; doing it explicitly makes the
@@ -364,7 +355,7 @@ teardown a step a test can observe.
 That is a property of the crate, not of a venue's configuration.
 
 `Input::send` returns `IngressError::Fatal`, the variant the trait specifies for
-*"a message this transport cannot carry at all"* and classes as the adapter or
+"a message this transport cannot carry at all" and classes as the adapter or
 the document to correct rather than anything a reconnect reaches. An adapter
 writing into `on_connected`'s queue against a multicast `[[source]]` block has
 a composition error, and the loud failure at the first connect is the one that
@@ -386,12 +377,23 @@ gets fixed.
 UDP, and multicast UDP. Loss is ordinary, reordering is permitted, and
 duplication arrives with redundant paths.
 
-**This transport** hands every payload up in the order the kernel delivered it,
-whole, and counts bytes through `IngressObserver::bytes`. Where it reads several
-sockets it owes a single total order across them: offline re-lowering requires
-payloads in receive order and says an implementation that cannot guarantee it
-*"cannot be used here, and should say so rather than approximate it"*. Nothing
-checks it.
+**This transport** hands every payload up whole and counts bytes through
+`IngressObserver::bytes`. One `recv` returns one payload, so a block holding
+several groups needs a rule for which socket goes first. Draining one socket
+before looking at the next inverts receive order whenever a socket has two
+payloads queued and another has one stamped between them.
+
+**The rule is the earliest kernel timestamp, re-evaluated per delivery:** hold
+at most one payload read from each ready socket, and return the one with the
+lowest timestamp. A payload that arrives after a readiness check is stamped
+later than everything already held, so it cannot be owed an earlier slot. That
+makes delivery exact receive order across the block, not an approximation of
+it, which is what offline re-lowering requires of an implementation that
+"cannot be used here, and should say so rather than approximate it".
+
+The cost is a one-payload lookahead per socket. That is not the reorder buffer
+below: it holds what has arrived, in receive order, for as long as it takes to
+compare timestamps, and never waits for a payload that has not arrived.
 
 **It does not** buffer for reorder, request retransmission, detect gaps,
 deduplicate, reassemble, or infer that a quiet group has lost anything. Each
@@ -404,9 +406,9 @@ method the driver's `PayloadSink` forwards so a publisher's recovery can run.
 Our own wire's numbering is the egress side's and a different series.
 
 **`IngressObserver::duplicate` stays uncalled, as it is everywhere else.** Its
-rustdoc records why: *"the boundary gives an adapter no way to report the
+rustdoc records why: "the boundary gives an adapter no way to report the
 upstream's own sequence number or to declare a payload a repeat of one already
-published, so the driver cannot tell."* Two paths carrying one group is the
+published, so the driver cannot tell." Two paths carrying one group is the
 textbook duplicate and is still unreachable, for the same reason.
 
 **Truncation is unreachable rather than counted.** The receive buffer is sized
@@ -457,9 +459,11 @@ default, and ran something its operator did not believe it was running.
 | `source_address` | **none; required** | The glossary's qualified form; bare `source` is banned and `[[source]]` already means a block here. The transport compares every payload's sender against it and drops a mismatch |
 | `recv_buffer_bytes` | a stated constant | A burst overrunning the socket's queue is loss this host caused. The number is a property of the venue's peak rate and the host, so it is an operator's. The kernel clamps a request above its limit |
 
-Deliberately absent: `connect_timeout` and the backoff pair, which are the
-family's and stated once in `[ingress]`; a receive timeout, which is the budget
-the driver hands over; and any cadence of this transport's own.
+Deliberately absent from this transport's own tables: `connect_timeout` and the
+backoff pair, which are the family's and stated once in `[ingress]`; a receive
+timeout, which is the budget the driver hands over; and any cadence of this
+transport's own. Proposal 3 would let a `[[source]]` block override three
+`[ingress]` values, which is the block's table and not this transport's.
 
 `[ingress]` is one table for the whole document, so `idle_timeout` and the
 backoff pair bind every block in it. A publisher mixing this transport with a
@@ -470,9 +474,9 @@ in the document sets the detection latency for the busiest group.
 
 ## What this needs from the framework
 
-Four things this transport cannot supply for itself. Each is stated as a
-proposal rather than a gap, because each is small and the shape is already set
-by what the crate does elsewhere.
+Four things this transport cannot supply for itself, each stated as a proposal.
+Proposals 1, 2 and 4 follow a shape the crate already has. Proposal 3 does not,
+and says so.
 
 ### 1. Two families, because loss and refusal are different failures
 
@@ -482,10 +486,10 @@ group's `source_address` is read and then declined by this transport. The
 `dz_publisher_ingress_*` family is closed, and `IngressObserver` has one method
 per family and no defaults.
 
-**Proposal: two families, not one.** An earlier draft folded both under one
-`{reason}` label. That conflates a capacity problem with a configuration or
-security one, and an operator needs them apart: the first says buy more buffer,
-the second says someone is sending to this group who should not be.
+**Proposal: two families, not one.** One family under a shared `{reason}` label
+would conflate a capacity problem with a configuration or security one, and an
+operator needs them apart: the first says buy more buffer, the second says
+someone is sending to this group who should not be.
 
 ```
 dz_publisher_ingress_overflow_total{connection}
@@ -503,19 +507,19 @@ loss `overflow_total`, read from `ControlMessageOwned::RxqOvfl`, so `overflow`
 names the same thing the same way.
 
 **Not `dropped`.** `Tee::dropped` already names a fan-out member removed from
-the tee, and its own doc comment says that name is *"for a log line and for
-`Tee::dropped`. Never a metric."* Reusing the word for a discarded payload would
+the tee, and its own doc comment says that name is "for a log line and for
+`Tee::dropped`. Never a metric." Reusing the word for a discarded payload would
 give one term two meanings in one publisher.
 
 ### 2. `connection` on `reconnects_total` and `connect_failures_total`
 
 **Proposal: add it to both.**
 
-The test that forbids it gives the reason, and the reason is sound: *"a label
+The test that forbids it gives the reason, and the reason is sound: "a label
 that is not a dimension of what is being counted multiplies the series for
 nothing. `connection` is left off `connect_failures_total` for the same reason
 it is left off `reconnects_total`, which is its sibling: the two must aggregate
-the same way."*
+the same way."
 
 With one upstream the connection is not a dimension. With a membership set
 across several groups it is: a join that fails on one and a rejoin loop on
@@ -532,26 +536,34 @@ Without this, the only per-group signal is `connection_state{connection}`, and
 that reads 1 for a membership that is joined and permanently silent — the
 failure this design is organised around.
 
-### 3. A per-block backoff floor, and no precedent for one
+### 3. Per-block overrides for `idle_timeout` and the backoff pair
 
-`[ingress]` is one table for the whole document, so `idle_timeout` and the
-backoff pair bind every `[[source]]` block. A publisher mixing this transport
-with a session one cannot give the multicast block the longer opening delay the
-churn argument asks for, and the transport cannot impose one because it cannot
-see `[ingress]`.
+**Configuration** states why one `[ingress]` table cannot serve two transports
+in one document. The churn argument asks the multicast block for an opening
+delay in seconds; a session block in the same document wants the family's
+hundreds of milliseconds; and the transport cannot impose either, because it
+cannot see `[ingress]`.
 
-**This is stated as a constraint rather than a design, because there is no
-precedent to follow.** A `[[source]]` block carries `name`, `ingress`,
-`enabled`, `role`, `upstream` and `credentials`, and none of them overrides an
-`[ingress]` default — `upstream` is a transport's own table, not a policy
-override. So any fix here is a new shape rather than an additive match, which
-makes it a decision for whoever owns the core's section rather than something
-this document should settle.
+**Proposal: `idle_timeout`, `reconnect_backoff_initial` and
+`reconnect_backoff_max` become optional keys on `[[source]]`, overriding the
+`[ingress]` value of the same name.** `[ingress]` keeps the defaults and stays
+the only place a single-transport publisher needs to look.
 
-Two shapes exist if one is wanted: a policy key on `[[source]]`, which puts
-policy where only identity and transport live today; or per-kind defaults under
-`[ingress]`, which keeps policy in one table. **One document per transport works
-today** and is the answer until a second venue needs otherwise.
+This is a new shape and the cost should be stated: a `[[source]]` block carries
+`name`, `ingress`, `enabled`, `role`, `upstream` and `credentials` today, none
+of which overrides an `[ingress]` default, and `upstream` is a transport's own
+table rather than a policy override. So policy would appear in two places, and
+an operator reading `[ingress]` alone would no longer see what a block runs
+with. Two things contain that: the override set is closed to these three keys,
+and the resolved value per block is logged at connect beside the route and
+interface the same section already logs.
+
+The alternative shape is per-kind defaults under `[ingress]`, which keeps policy
+in one table but makes the kind a key within it and leaves two blocks of one
+kind unable to differ. The per-block form is the one that answers the case this
+transport actually has.
+
+**One document per transport works today** and is the answer until this lands.
 
 ### 4. Publisher alert rules
 
@@ -570,10 +582,6 @@ healthy.
 `BRINGING-UP-A-FEED.md` asks an operator to watch `reconnects_total` per
 connection, which the label set does not permit. That text and proposal 2 are
 the same change.
-
-Writing them is also how the first three stop being assertions. An alert that
-cannot name which of three groups failed to join is a better argument for the
-`connection` label than this section is.
 
 ### Outside this crate's reach
 
@@ -617,9 +625,26 @@ Almost none of this needs a network.
 
 ---
 
+## Decisions
+
+| Decision | Why |
+|---|---|
+| Every payload is `Received::Payload`; this transport never returns `Liveness` | Telling a heartbeat from an application message means parsing the venue's header, which is `on_payload`'s, and a receive-only membership holds no other evidence that the path works |
+| `[ingress] idle_timeout` is required, set clear of the slowest heartbeat in the membership set | A membership lost with its interface leaves the socket open, readable and permanently silent, so silence is the only symptom and the driver's reconnect is the rejoin |
+| `stamp_source` is `StampSource::Kernel` | `SO_TIMESTAMPNS` predates every scheduling delay between the packet and the read, which is the difference between measuring the network and measuring our scheduler |
+| `connect` joins every group or none | One `on_disconnected` per membership set is sound only because a reconnect restarts every group's numbering together |
+| One `[[source]]` block per group where the upstream's partitions must be distinguishable | `Payload::connection` is the only partition identity that survives `on_payload`, and `poll_listings` is called with no connection |
+| Any-source IGMPv2, with the transport comparing every sender against `source_address` and dropping a mismatch | No venue path here offers source-specific membership, and a payload from an unstated sender that reaches `on_payload` becomes published market data nothing downstream can filter back out |
+| `interface` is required, is an IPv4 address, and has no route-discovery fallback | A join on the wrong interface receives nothing, reports no error, and reads as a clean feed with a quiet venue |
+| Across a block's sockets, the lowest kernel receive timestamp is delivered first, re-evaluated per delivery | Offline re-lowering requires exact receive order, and draining one socket at a time inverts it whenever a second socket is stamped between two of the first's payloads |
+| `send` returns `IngressError::Fatal` | Nothing leaves a membership toward the upstream, so an adapter writing against a multicast block is a composition error, and the loud failure at the first connect is the one that gets fixed |
+| A local failure is `Ended { reason: RemoteClose }` with the errno in the detail | The least specific of four values, in place of widening a closed set `dz-adapter-core` and `dz-publisher-metrics` hold to each other by arity |
+
+---
+
 ## Non-goals
 
 A sequence or gap-detection path. A retransmission or recovery request. Any
-decoding of upstream payloads, heartbeats included. IPv6. A reorder or
-deduplication buffer. A second backoff. Anything about which groups a venue
-publishes or how its partitions are addressed.
+decoding of upstream payloads, heartbeats included. Source-specific membership,
+and IGMPv3. IPv6. A reorder or deduplication buffer. A second backoff. Anything
+about which groups a venue publishes or how its partitions are addressed.
