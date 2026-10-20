@@ -216,6 +216,24 @@ Signal, then each connection task stops through the Driver's existing path
 queued, applies it, and the publisher's ordered teardown runs as today,
 `EndOfSession` last. A drain deadline bounds it.
 
+### 3i. Packing: a batch leaves in as few datagrams as fit it, and at once
+
+- **One batch is one `recv_many(&mut batch, BATCH)`.** It waits only while the
+  queue is empty, then returns everything already queued, up to `BATCH` (32).
+  It never waits for more. `BATCH` is the one constant that sets this.
+- **What survives dedupe is packed, in queue order,** into its channel
+  instance's current datagram. Quotes and trades share datagrams. A datagram
+  is sent the moment the next message would not fit.
+- **At the end of every batch, every channel instance sends its partly filled
+  datagram.** Nothing carries over to the next `recv_many`, so there is no hold
+  timer, and `MAX_LIVE_HOLD` takes no part in a threaded venue.
+- **Inline venues are unchanged:** one top-of-book datagram per message. The
+  mode is fixed at composition from the venue's variant, and there is no new
+  document key.
+- **Latency is observed at the datagram's real send, once per message:**
+  `recv_to_send`, and `venue_to_recv` unless the stamp is 0. The obligation
+  that `0x04 Trade` is byte-for-byte identical across feeds still holds.
+
 ## 4. Metrics
 
 **No normative name or label changes.** `dz_publisher_ingress_duplicates_total`
