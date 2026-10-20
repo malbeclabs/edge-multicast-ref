@@ -128,11 +128,21 @@ way: a stated rule in the crate's rustdoc and in `BRINGING-UP-A-FEED.md`.
 
 | `Input` | This transport |
 |---|---|
-| `connect(timeout)` | One socket per group, socket options set, every group joined on the stated interface. **All or none**: a partial set is torn down and reported as a connect failure |
+| `connect(timeout)` | One socket per group, **bound to the group address and port**, `SO_REUSEADDR` and `SO_REUSEPORT` set, every group joined on the stated interface. **All or none**: a partial set is torn down and reported as a connect failure |
 | `recv(budget)` | The next payload from any joined group, as `Received::Payload` with the kernel's receive timestamp. An elapsed budget is `Received::Idle`. Never `Received::Liveness` |
 | `send` | `IngressError::Fatal`. See Receive-only |
 | `shutdown` | Leave every group, close every socket. Prompt and infallible, as the trait requires |
 | `stamp_source` | `StampSource::Kernel` |
+
+**The bind address is the group, not the wildcard.** `dz-recorder-capture`'s
+socket module records what the wildcard costs: it leaves `IP_MULTICAST_ALL` at
+its default, and Linux then delivers to that handle every group any socket on
+the host has joined, plus unicast to the same port. On this transport that
+would defeat the only check it has — two groups sharing one transmitter both
+pass the `source_address` comparison, so a payload would reach the adapter
+under the wrong `Payload::connection` and the wrong partition. `SO_REUSEADDR`
+and `SO_REUSEPORT` come with the group bind, so that a publisher does not
+displace another subscriber already on the pair.
 
 **`stamp_source` is the first use of the kernel case in this family.** Both
 existing transports read the clock after the read returns. `SO_TIMESTAMPNS` on a
@@ -186,8 +196,11 @@ clears the other's state and the next payload reads as a discontinuity — which
 an adapter answering a discontinuity with a reset turns into an
 `InstrumentReset` and a recovery snapshot on the live wire. One name per
 membership set is sound **because `connect` is all-or-nothing**: a reconnect
-rejoins every group, so every group's numbering restarts together, which is what
-a single `on_disconnected` tells the adapter. Per-group joins under one shared
+rejoins every group, so a single `on_disconnected` invalidates state for every
+group in the set and leaves none of it stale. It does not restart the
+upstream's numbering — a receive-only rejoin cannot, and the adapter sees a gap
+rather than a restart. Recovering from that gap is the adapter's, as **Loss,
+reordering and duplication** assigns it. Per-group joins under one shared
 name would be unsound; per-group names would mean one driver, one backoff and
 one pre-created series each.
 
@@ -288,6 +301,13 @@ optional in practice", naming the membership report as half of the failure —
 "the IGMP report leaves by the wrong path too, so the symptom is silence that
 reads as a clean feed." This transport makes that a refusal.
 
+**`0.0.0.0` is refused with the rest.** It parses as an IPv4 address, so a
+syntactic check passes it, and `IP_ADD_MEMBERSHIP` reads it as *let the routing
+table choose* — which is the route-discovery fallback this section refuses.
+`dz-recorder`'s startup maps its `Interface::Discovered` case to exactly
+`Ipv4Addr::UNSPECIFIED`, so in this workspace the unspecified address already
+means discovery. It has its own case in the refusal set.
+
 **It is the interface's IPv4 address, not a device name**, because the
 membership is requested against an address and nothing in this crate resolves a
 name to one. A value that is not an address is refused at load naming the key,
@@ -295,7 +315,7 @@ as the recorder refuses it.
 
 | When | What |
 |---|---|
-| Load | A group address that is not a multicast address, an `interface` that is not an IPv4 address, a group with no `source_address`, a port of `0` — each refused naming the key and what would have been accepted. None starts the process |
+| Load | A group address that is not a multicast address, an `interface` that is not an IPv4 address **or is `0.0.0.0`**, a group with no `source_address`, a port of `0` — each refused naming the key and what would have been accepted. None starts the process |
 | Start | The route to each group and the interface it resolves to are read and logged at connect, so a wrong binding is visible in the first lines of a run rather than inferred from silence |
 | Construction | `IngressError::Fatal`, as `WebSocketInput::new` refuses a misspelled endpoint. A publisher asking for something impossible fails where it is diagnosable, not under a backoff |
 | Connect | A failed bind or join is `IngressError::Connect`, counted by reason, with the membership set torn down. `connection_state` reaches 1 only once every join has succeeded, the rule the driver applies to subscriptions |
@@ -330,9 +350,11 @@ needs changing and none may be duplicated inside the transport.
 **The existing defaults are wrong for this transport in one place.**
 `Cycle::Proven` resets the delay sequence after a single payload. A membership
 that joins, receives one heartbeat and loses its interface therefore never
-leaves the opening window — at the documented pair of 500 ms and 30 s, about
-four attempts per three seconds, indefinitely, each a leave and a join against
-the upstream. For a session transport that is a publisher reconnecting; here it
+leaves the opening window: at the documented pair of 500 ms and 30 s, a proven
+connection draws from [500 ms, 1 s], so about 750 ms on average. The cycle is
+`idle_timeout` plus that draw, because the loss is silent and the driver cannot
+act until the guard elapses. Each cycle is a leave and a join against the
+upstream, indefinitely. For a session transport that is a publisher reconnecting; here it
 is routing churn.
 
 So `[ingress] reconnect_backoff_initial` for a multicast block belongs in
@@ -377,8 +399,9 @@ gets fixed.
 UDP, and multicast UDP. Loss is ordinary, reordering is permitted, and
 duplication arrives with redundant paths.
 
-**This transport** hands every payload up whole and counts bytes through
-`IngressObserver::bytes`. One `recv` returns one payload, so a block holding
+**This transport** hands every payload up whole. The driver counts the bytes,
+at `driver.rs:589` on the accepted-payload path; `Input` exposes no observer,
+so no transport in this family counts anything itself. One `recv` returns one payload, so a block holding
 several groups needs a rule for which socket goes first. Draining one socket
 before looking at the next inverts receive order whenever a socket has two
 payloads queued and another has one stamped between them.
@@ -388,8 +411,12 @@ at most one payload read from each ready socket, and return the one with the
 lowest timestamp. A payload that arrives after a readiness check is stamped
 later than everything already held, so it cannot be owed an earlier slot. That
 makes delivery exact receive order across the block, not an approximation of
-it, which is what offline re-lowering requires of an implementation that
-"cannot be used here, and should say so rather than approximate it".
+it. Offline re-lowering requires the order the transport yielded payloads in,
+and fixes that order at `push`, so what it needs from this transport is a yield
+order it can state. Receive order is the one worth stating, and an
+implementation that could not state one "cannot be used here, and should say so
+rather than approximate it". The rule is scoped to one block's sockets under
+one driver and claims nothing across drivers.
 
 The cost is a one-payload lookahead per socket. That is not the reorder buffer
 below: it holds what has arrived, in receive order, for as long as it takes to
@@ -475,8 +502,8 @@ in the document sets the detection latency for the busiest group.
 ## What this needs from the framework
 
 Four things this transport cannot supply for itself, each stated as a proposal.
-Proposals 1, 2 and 4 follow a shape the crate already has. Proposal 3 does not,
-and says so.
+Proposals 2 and 4 follow a shape the crate already has. Proposals 1 and 3 each
+add one, and each says where.
 
 ### 1. Two families, because loss and refusal are different failures
 
@@ -498,7 +525,23 @@ dz_publisher_ingress_refusals_total{reason, connection}
 ```
 
 with `fn overflow(&self, count: u64, connection: &'static str)` and
-`fn refusal(&self, reason: IngressRefusalReason, connection: &'static str)`.
+`fn refusal(&self, reason: IngressRefusalReason, connection: &'static str)` on
+`IngressObserver`.
+
+**The transport cannot call either one.** `Input` exposes `connection`,
+`stamp_source`, `connect`, `send`, `recv` and `shutdown`, and no observer
+reaches it — the driver holds the only handle, which is why `bytes` is counted
+at `driver.rs:589` and not in a transport. Handing an observer to `Input` would
+give every transport its own reporting path and end the property that one
+driver reports for all of them.
+
+**So the counts travel as values, and the driver reports them.** `Input` gains
+one method, `fn take_counters(&mut self) -> IngressCounters`, returning the
+overflow and refusal counts accumulated since the last call and zeroing them.
+The driver calls it where it already calls the observer, and the default
+implementation returns an empty set, so no existing transport changes. This
+keeps the transport producing facts and the driver owning every series, which
+is the split the family already has.
 
 Both names are already this workspace's. `dz_publisher_lowering_refusals_total`
 is an `IntCounterVec` keyed on a reason, so `refusals_total{reason}` is an
@@ -526,8 +569,11 @@ across several groups it is: a join that fails on one and a rejoin loop on
 another render identically today. The sibling property the test protects is
 preserved by adding the label to both.
 
-`message` and `connection_state` already take `connection: &'static str`, so the
-trait shape is unchanged. Pre-creation follows the existing cross-product: N
+`reconnect` and `connect_failure` take only a reason today, so both signatures
+change, and with them the metrics crate and the four `IngressObserver` impls in
+the driver and loopback tests. `connection: &'static str` is already the
+parameter `message` and `connection_state` carry, so the change adds no new
+shape to the trait. Pre-creation follows the existing cross-product: N
 connections against `DisconnectReason::ALL` and against
 `ConnectFailureReason`'s values, which for three groups is twelve and
 twenty-one series.
@@ -602,8 +648,8 @@ prerequisite for ever doing it against a multicast one.
 Almost none of this needs a network.
 
 - **Every refusal is a load-time test**: a group that is not a multicast
-  address, an interface that is not an address, a missing `source_address`, a
-  port of `0`, an unknown key. Each asserts the
+  address, an interface that is not an address, an interface of `0.0.0.0`, a
+  missing `source_address`, a port of `0`, an unknown key. Each asserts the
   message names the key and what would have been accepted, the standard the
   core's `ConfigError` tests hold.
 - **Every policy is a pure function**, as the recorder's rejoin policy is: the
@@ -618,6 +664,9 @@ Almost none of this needs a network.
 - **One loopback example covers the rest**, behind a feature, as the recorder's
   `IP_MULTICAST_LOOP` tests are: a real join on a real interface, a real
   receive, a kernel timestamp read back off the control message, and a leave.
+  It also carries the two claims only a real socket can settle — that two
+  groups on one port stay separate under a group bind, which a wildcard bind
+  fails, and that interleaved arrivals leave in receive order.
 - **The offline replay path cannot prove any of it.** The runtime's replay
   collapses every enabled block to one connection named after the primary, so
   nothing that turns on which connection delivered a payload is exercised. A
@@ -632,11 +681,13 @@ Almost none of this needs a network.
 | Every payload is `Received::Payload`; this transport never returns `Liveness` | Telling a heartbeat from an application message means parsing the venue's header, which is `on_payload`'s, and a receive-only membership holds no other evidence that the path works |
 | `[ingress] idle_timeout` is required, set clear of the slowest heartbeat in the membership set | A membership lost with its interface leaves the socket open, readable and permanently silent, so silence is the only symptom and the driver's reconnect is the rejoin |
 | `stamp_source` is `StampSource::Kernel` | `SO_TIMESTAMPNS` predates every scheduling delay between the packet and the read, which is the difference between measuring the network and measuring our scheduler |
-| `connect` joins every group or none | One `on_disconnected` per membership set is sound only because a reconnect restarts every group's numbering together |
+| `connect` joins every group or none | One `on_disconnected` invalidates state for every group in the set, so a partial rejoin would leave part of it stale under a name that says otherwise |
+| Each socket binds the group address and port, with `SO_REUSEADDR` and `SO_REUSEPORT` | A wildcard bind leaves `IP_MULTICAST_ALL` at its default, so Linux delivers every group any socket on the host joined, and two groups sharing a transmitter both pass the `source_address` check |
+| `interface = "0.0.0.0"` is refused | It parses as an IPv4 address but `IP_ADD_MEMBERSHIP` reads it as route discovery, which is what requiring `interface` exists to prevent |
 | One `[[source]]` block per group where the upstream's partitions must be distinguishable | `Payload::connection` is the only partition identity that survives `on_payload`, and `poll_listings` is called with no connection |
 | Any-source IGMPv2, with the transport comparing every sender against `source_address` and dropping a mismatch | No venue path here offers source-specific membership, and a payload from an unstated sender that reaches `on_payload` becomes published market data nothing downstream can filter back out |
 | `interface` is required, is an IPv4 address, and has no route-discovery fallback | A join on the wrong interface receives nothing, reports no error, and reads as a clean feed with a quiet venue |
-| Across a block's sockets, the lowest kernel receive timestamp is delivered first, re-evaluated per delivery | Offline re-lowering requires exact receive order, and draining one socket at a time inverts it whenever a second socket is stamped between two of the first's payloads |
+| Across a block's sockets, the lowest kernel receive timestamp is delivered first, re-evaluated per delivery | Offline re-lowering requires a yield order the transport can state, and draining one socket at a time states none — it inverts receive order whenever a second socket is stamped between two of the first's payloads |
 | `send` returns `IngressError::Fatal` | Nothing leaves a membership toward the upstream, so an adapter writing against a multicast block is a composition error, and the loud failure at the first connect is the one that gets fixed |
 | A local failure is `Ended { reason: RemoteClose }` with the errno in the detail | The least specific of four values, in place of widening a closed set `dz-adapter-core` and `dz-publisher-metrics` hold to each other by arity |
 
