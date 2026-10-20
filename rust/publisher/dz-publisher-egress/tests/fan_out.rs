@@ -342,3 +342,25 @@ fn a_datagram_an_absorbed_would_block_lost_is_not_a_packed_datagram() {
     assert_eq!(wire.accepted_count(), 1);
     assert_eq!(observed(&metrics), 1);
 }
+
+#[test]
+fn a_nested_fan_out_that_absorbed_a_full_buffer_did_not_deliver() {
+    // A member that is itself a fan-out answers `Ok` for a datagram it lost to
+    // a full buffer. The parent must take its member's word on delivery, not
+    // its `Ok`, or a datagram that reached no destination counts as sent.
+    let metrics = metrics(&[PortRole::Mktdata], &[7]);
+    let wire = FakeSink::essential("wire");
+    wire.script([Verdict::WouldBlock, Verdict::Accept]);
+    let mut inner = Tee::new(PortRole::Mktdata, Arc::clone(&metrics));
+    inner.add(wire.boxed());
+    let mut outer = Tee::new(PortRole::Mktdata, Arc::clone(&metrics));
+    outer.add(Box::new(inner));
+
+    outer.send(b"lost").expect("absorbed twice over");
+    assert_eq!(wire.accepted_count(), 0);
+    assert!(!outer.delivered(), "the nested fan-out delivered nothing");
+
+    outer.send(b"sent").expect("sent");
+    assert_eq!(wire.accepted_count(), 1);
+    assert!(outer.delivered());
+}

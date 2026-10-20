@@ -296,8 +296,13 @@ impl DatagramSink for Tee {
             match member.sink.send(datagram) {
                 Ok(()) => {
                     member.route_down = false;
-                    any_accepted = true;
-                    essential.1 += usize::from(is_essential);
+                    // `Ok` is not delivery: a member that is itself a fan-out
+                    // answers `Ok` for a datagram it lost to a full buffer, so
+                    // its own word on delivery is the one taken.
+                    if member.sink.delivered() {
+                        any_accepted = true;
+                        essential.1 += usize::from(is_essential);
+                    }
                 }
                 Err(error) => {
                     // Only a send that reached the route says anything about
