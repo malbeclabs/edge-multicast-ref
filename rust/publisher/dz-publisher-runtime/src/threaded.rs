@@ -720,6 +720,47 @@ where
     )
 }
 
+/// The publisher loop: the tick beside the queue, until a tick says to exit.
+///
+/// `tick` is one tick body and `apply` applies the batch just taken; both are
+/// the caller's, so this is the scheduling and nothing else. The tick goes
+/// first whenever it is due: it runs between batches, and a connection that
+/// stays ready cannot hold it off.
+async fn publish(
+    drain: &mut Drain,
+    clock: &dyn dz_ingress_core::Clock,
+    mut tick: impl FnMut(&mut Drain) -> Option<Exit>,
+    mut apply: impl FnMut(&mut Drain),
+) -> Exit {
+    let mut tick_due = clock.sleep(TICK);
+    let mut open = true;
+    loop {
+        tokio::select! {
+            biased;
+            () = &mut tick_due => {
+                if let Some(exit) = tick(drain) {
+                    return exit;
+                }
+                // After the body, as the inline loop sleeps after it. Started
+                // before, a body that takes a whole `TICK` — a tick serving
+                // snapshots — would leave the next one already due, and the
+                // biased select would serve ticks and never the queue.
+                tick_due = clock.sleep(TICK);
+            }
+            taken = drain.recv(), if open => {
+                if taken == 0 {
+                    // Every connection has ended, and only one whose failure
+                    // is not fatal can end without ending the process: the
+                    // tick carries on.
+                    open = false;
+                } else {
+                    apply(drain);
+                }
+            }
+        }
+    }
+}
+
 /// The threaded model's whole run, from the first connect to the drained
 /// queue, for [`crate::run`] to tear down after.
 ///
@@ -773,35 +814,15 @@ pub(crate) fn run<S: StateStore, K: Clock + Clone + 'static>(
         let exit = {
             let mut ticker = Ticker::new();
             let drain = &mut drain;
-            let publishing = async move {
-                let mut tick = clock.sleep(TICK);
-                let mut open = true;
-                loop {
-                    tokio::select! {
-                        // The tick first when it is due: it runs between
-                        // batches, and a connection that stays ready cannot
-                        // hold it off.
-                        biased;
-                        () = &mut tick => {
-                            tick = clock.sleep(TICK);
-                            drain.upstream(&mut SharedSink(publisher));
-                            if let Some(exit) = ticker.tick(publisher, adapter) {
-                                return exit;
-                            }
-                        }
-                        taken = drain.recv(), if open => {
-                            if taken == 0 {
-                                // Every connection has ended, and only one
-                                // whose failure is not fatal can end without
-                                // ending the process: the tick carries on.
-                                open = false;
-                            } else {
-                                drain.apply(shared, &mut SharedSink(publisher));
-                            }
-                        }
-                    }
-                }
-            };
+            let publishing = publish(
+                drain,
+                clock,
+                |drain| {
+                    drain.upstream(&mut SharedSink(publisher));
+                    ticker.tick(publisher, adapter)
+                },
+                |drain| drain.apply(shared, &mut SharedSink(publisher)),
+            );
             let first_to_give_up = connections.first_fatal_to_give_up(|connection, error| {
                 eprintln!(
                     "`{connection}` gave up. It is neither the primary nor an upstream \
@@ -838,4 +859,126 @@ pub(crate) fn run<S: StateStore, K: Clock + Clone + 'static>(
     });
     workers.shutdown_timeout(DRAIN_DEADLINE);
     Ok(exit)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::atomic::AtomicU64;
+
+    use dz_adapter_core::{InstrumentRef, Scalar, SideUpdate};
+    use dz_edge_core::PortRole;
+    use dz_publisher_metrics::PublisherMetricsConfig;
+
+    /// A clock whose time moves only when something moves it: a tick body
+    /// that takes a whole `TICK`, or a sleep polled before it is due, which
+    /// stands in for the loop waiting.
+    struct Stepped {
+        now_ns: Arc<AtomicU64>,
+    }
+
+    impl dz_ingress_core::Clock for Stepped {
+        fn wall_ns(&self) -> u64 {
+            self.now_ns.load(Ordering::SeqCst)
+        }
+
+        fn steady_ns(&self) -> u64 {
+            self.now_ns.load(Ordering::SeqCst)
+        }
+
+        fn sleep(&self, duration: Duration) -> BoxFuture<'_, ()> {
+            let due = self.now_ns.load(Ordering::SeqCst)
+                + u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
+            let now_ns = Arc::clone(&self.now_ns);
+            Box::pin(std::future::poll_fn(move |cx| {
+                if now_ns.load(Ordering::SeqCst) >= due {
+                    return Poll::Ready(());
+                }
+                // Waiting: a millisecond passes for every look.
+                now_ns.fetch_add(1_000_000, Ordering::SeqCst);
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }))
+        }
+    }
+
+    fn drain_with(events: usize) -> (Drain, mpsc::Sender<Decoded>) {
+        let metrics = Arc::new(PublisherMetrics::new(&PublisherMetricsConfig {
+            venue: "test-venue",
+            source_id: 41,
+            port_roles: &[PortRole::Mktdata],
+            connections: &[],
+            channel_ids: &[],
+            ingress_message_types: &[],
+        }));
+        let (queue, receiver) = mpsc::channel(events.max(1));
+        for n in 0..events {
+            queue
+                .try_send(Decoded {
+                    event: Event::Quote {
+                        instrument: InstrumentRef::from_admission(0),
+                        source_ts_ns: 0,
+                        bid: SideUpdate::Present {
+                            px: Scalar::fixed(n as i64, 0),
+                            qty: Scalar::fixed(1, 0),
+                            source_count: None,
+                        },
+                        ask: SideUpdate::Gone,
+                    },
+                    order: Order::None,
+                    connection: ConnectionId::new("a"),
+                    recv_ts_ns: 0,
+                })
+                .expect("room for every event");
+        }
+        let drain = Drain {
+            queue: receiver,
+            batch: Vec::with_capacity(BATCH),
+            dedupe: Dedupe::new(),
+            upstream: Arc::new(AtomicU64::new(0)),
+            seen_upstream: 0,
+            metrics,
+            clock: Arc::new(crate::clock::SystemClock::new()),
+        };
+        // The sender is handed back so the queue stays open, as it does while
+        // a connection lives.
+        (drain, queue)
+    }
+
+    #[test]
+    fn a_tick_body_as_long_as_the_tick_does_not_starve_the_queue() {
+        // Every tick body takes a whole `TICK`. If the next tick's timer were
+        // started before the body, it would be due the moment the body ended,
+        // and the biased select would pick the tick again for ever: the queue
+        // would stop draining once the first tick fired. The clock moves a
+        // millisecond per wait, so about ten batches drain before that tick:
+        // twenty are queued, so the rest have to come between ticks.
+        let events = 20 * BATCH;
+        let (mut drain, _open) = drain_with(events);
+        let clock = Stepped {
+            now_ns: Arc::new(AtomicU64::new(0)),
+        };
+        let tick_ns = u64::try_from(TICK.as_nanos()).expect("small");
+        let mut ticks = 0;
+        let mut applied = 0;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("a runtime");
+        let exit = runtime.block_on(publish(
+            &mut drain,
+            &clock,
+            |_| {
+                ticks += 1;
+                clock.now_ns.fetch_add(tick_ns, Ordering::SeqCst);
+                (ticks == 8).then_some(Exit::Signal)
+            },
+            |drain| {
+                applied += drain.batch.len();
+                drain.batch.clear();
+            },
+        ));
+        assert!(matches!(exit, Exit::Signal));
+        assert_eq!(applied, events, "the queue was starved by the tick");
+    }
 }
