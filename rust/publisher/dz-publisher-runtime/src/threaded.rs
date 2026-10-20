@@ -9,7 +9,7 @@
 //! ```text
 //! conn task 1 ─ Driver ─ Decoder ─┐
 //! conn task 2 ─ Driver ─ Decoder ─┼─ bounded queue ─ publisher loop ─ on_decoded ─ Publisher ─ egress
-//! conn task N ─ Driver ─ Decoder ─┘                  (batches of 32, one flush per batch)
+//! conn task N ─ Driver ─ Decoder ─┘                  (batches of BATCH, one flush per batch)
 //! ```
 //!
 //! # Per connection, nothing new
@@ -89,10 +89,17 @@ use crate::run::{
 /// connections slow down — not whether anything is dropped.
 pub const QUEUE_DEPTH: usize = 65_536;
 
-/// The most events the loop takes off the queue before it flushes.
+/// The most events the loop takes off the queue in one `recv_many`, and so the
+/// bound on events per flush.
 ///
-/// One flush per batch is the point: the inline model flushes when its input
-/// drains, which a connection that never stops being ready never does.
+/// One `recv_many` is one batch: it waits only while the queue is empty, then
+/// takes what is already there, up to this, and never waits for more. The
+/// batch's survivors are packed and every partly filled datagram is sent at its
+/// end, so nothing is held past it. The inline model flushes when its input
+/// drains instead, which a connection that never stops being ready never does.
+///
+/// The only constant that sets the batch. `dz_publisher_ingress_batch_size`'s
+/// top bucket is held equal to it by a test.
 pub const BATCH: usize = 32;
 
 /// How long shutdown waits for the queue to drain before the teardown runs.

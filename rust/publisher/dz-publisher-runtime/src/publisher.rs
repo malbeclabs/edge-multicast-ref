@@ -796,6 +796,10 @@ pub struct Publisher<S: StateStore, K: Clock + Clone> {
     /// snapshots than one process can send. See
     /// [`Publisher::snapshot_schedule_overruns`].
     snapshot_schedule_overruns: u64,
+    /// The threaded input model's sending rule: every packed live datagram
+    /// leaves at the end of the batch it was packed in, and no hold timer
+    /// runs. See [`Self::send_live_per_batch`].
+    live_per_batch: bool,
     seeded: bool,
 }
 
@@ -862,7 +866,31 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
             snapshots,
             snapshot_cursor: 0,
             snapshot_schedule_overruns: 0,
+            live_per_batch: false,
             seeded: false,
+        }
+    }
+
+    /// Send live messages per batch, as the threaded input model does.
+    ///
+    /// Top-of-book quotes and trades then pack into their channel instance's
+    /// open datagram as market-by-price's live messages always have, a
+    /// datagram leaves when the next message would not fit, and
+    /// [`drained`](EventSink::drained) — which the threaded loop calls at the
+    /// end of every batch — sends whatever is still open on every shard.
+    /// Nothing is held past its batch, so [`MAX_LIVE_HOLD`] is not consulted:
+    /// a hold timer firing mid-batch would only split one batch's datagram.
+    ///
+    /// Fixed at composition from the venue's variant, and never undone. An
+    /// inline venue does not call it, and keeps one top-of-book datagram per
+    /// message: its drain is the input running dry, which a busy connection
+    /// may not do, and the feeds already live on it must see no change.
+    pub fn send_live_per_batch(&mut self) {
+        self.live_per_batch = true;
+        for shard in 0..self.feeds.shard_count() {
+            if let Some(pipeline) = self.feeds.top_of_book_on_mut(shard) {
+                pipeline.pack_live();
+            }
         }
     }
 
@@ -1756,12 +1784,21 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
     }
 
     /// Send every packed live datagram.
+    ///
+    /// Market-by-price on every shard, and top-of-book where it packs, which
+    /// is under the threaded model only: an inline venue's top-of-book sent
+    /// each message as it came and has nothing open here.
     fn flush_live(&mut self) {
         let now_mono = dz_publisher_refdata::Clock::monotonic_ns(&self.clock);
         let now_unix = self.clock.unix_ns();
         for shard in 0..self.feeds.shard_count() {
             if let Some(pipeline) = self.feeds.market_by_price_on_mut(shard) {
                 let _ = pipeline.flush_mktdata(now_mono, now_unix);
+            }
+            if let Some(pipeline) = self.feeds.top_of_book_on_mut(shard) {
+                if pipeline.packs_live() {
+                    let _ = pipeline.flush_mktdata(now_mono, now_unix);
+                }
             }
             self.settle_live(Some(shard));
         }
@@ -1772,7 +1809,14 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
     ///
     /// Every shard and not only the one an event is for: the case this exists
     /// for is a shard the current traffic is not reaching.
+    ///
+    /// **Not under the threaded model**, which sends everything at the end of
+    /// each batch: called from `event` and `payload_scope`, a hold timer there
+    /// could only split one batch's datagram early.
     fn flush_expired_live(&mut self) {
+        if self.live_per_batch {
+            return;
+        }
         let now_mono = dz_publisher_refdata::Clock::monotonic_ns(&self.clock);
         let hold = u64::try_from(MAX_LIVE_HOLD.as_nanos()).unwrap_or(u64::MAX);
         for shard in 0..self.feeds.shard_count() {
@@ -1791,25 +1835,49 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
         }
     }
 
-    /// Report what left a market-by-price send path at the instant it left.
+    /// Report what left a shard's packing send paths at the instant it left.
     fn settle_live(&mut self, shard: Option<usize>) {
-        let timestamp_kind = self.venue_timestamp_kind;
-        let Some(pipeline) = shard.and_then(|shard| self.feeds.market_by_price_on_mut(shard))
-        else {
+        let Some(shard) = shard else {
             return;
         };
-        let channel_id = pipeline.channel_id();
-        let reached_wire = !pipeline.mktdata_route_down();
-        for (arrival, sent_unix_ns) in pipeline.sent_arrivals() {
-            // Not a latency: the datagram did not leave. See `published`.
-            if reached_wire {
-                observe_arrival_latency(&self.metrics, timestamp_kind, arrival, sent_unix_ns);
-            }
-        }
-        if let Some((sent_mono_ns, sent_unix_ns)) = pipeline.take_live_sent() {
+        let timestamp_kind = self.venue_timestamp_kind;
+        let metrics = &self.metrics;
+        let depth = self
+            .feeds
+            .market_by_price_on_mut(shard)
+            .and_then(|pipeline| settle(pipeline, metrics, timestamp_kind));
+        let top = self
+            .feeds
+            .top_of_book_on_mut(shard)
+            .filter(|pipeline| pipeline.packs_live())
+            .and_then(|pipeline| settle(pipeline, metrics, timestamp_kind));
+        for (channel_id, reached_wire, sent_mono_ns, sent_unix_ns) in
+            [depth, top].into_iter().flatten()
+        {
             self.published(channel_id, reached_wire, sent_mono_ns, sent_unix_ns);
         }
     }
+}
+
+/// Observe the latency of every message that left one packing send path, and
+/// say whether a packed datagram left: `(channel_id, reached_wire, monotonic,
+/// unix)` of the last one, for the channel's freshness and the idle guard.
+fn settle<F: EmittedFeed>(
+    pipeline: &mut FeedPipeline<F>,
+    metrics: &PublisherMetrics,
+    timestamp_kind: Option<TimestampKind>,
+) -> Option<(u8, bool, u64, u64)> {
+    let channel_id = pipeline.channel_id();
+    let reached_wire = !pipeline.mktdata_route_down();
+    for (arrival, sent_unix_ns) in pipeline.sent_arrivals() {
+        // Not a latency: the datagram did not leave. See `published`.
+        if reached_wire {
+            observe_arrival_latency(metrics, timestamp_kind, arrival, sent_unix_ns);
+        }
+    }
+    pipeline
+        .take_live_sent()
+        .map(|(sent_mono_ns, sent_unix_ns)| (channel_id, reached_wire, sent_mono_ns, sent_unix_ns))
 }
 
 /// The two families that measure from a payload's arrival.
@@ -2133,6 +2201,7 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                         // and the registry clears that table and the slot
                         // together — an invariant in another crate that nothing
                         // here states. Counted instead.
+                        let packed_arrival = self.arrival(source_ts_ns, kind);
                         let Some(pipeline) =
                             shard.and_then(|shard| self.feeds.top_of_book_on_mut(shard))
                         else {
@@ -2143,6 +2212,15 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                         let sent = timed(&self.metrics, EgressMessageType::Quote, || {
                             pipeline.send_quote(&quote, now_mono, now_unix)
                         });
+                        if pipeline.packs_live() {
+                            // Measured when its datagram leaves, which is the
+                            // end of this batch at the latest.
+                            if let (Ok(()), Some(arrival)) = (sent, packed_arrival) {
+                                pipeline.packed_arrival(arrival);
+                            }
+                            self.settle_live(shard);
+                            return;
+                        }
                         let reached_wire = !pipeline.mktdata_route_down();
                         if sent.is_ok() {
                             self.published(channel_id, reached_wire, now_mono, now_unix);
@@ -2198,12 +2276,22 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                         // its datagram leaves: a trade one feed refused must not
                         // refresh the other's channel.
                         let mut reached = None;
+                        let arrival = self.arrival(source_ts_ns, kind);
                         timed(&self.metrics, EgressMessageType::Trade, || {
                             if let Some(pipeline) =
                                 shard.and_then(|shard| self.feeds.top_of_book_on_mut(shard))
                             {
                                 let channel_id = pipeline.channel_id();
-                                if pipeline.send_trade(&trade, now_mono, now_unix).is_ok() {
+                                let sent = pipeline.send_trade(&trade, now_mono, now_unix);
+                                if pipeline.packs_live() {
+                                    // Packed under the threaded model, and so
+                                    // measured and counted as published when
+                                    // its datagram leaves, once per trade: on
+                                    // this feed and not again on the depth one.
+                                    if let (Ok(()), Some(arrival)) = (sent, arrival) {
+                                        pipeline.packed_arrival(arrival);
+                                    }
+                                } else if sent.is_ok() {
                                     reached = Some((channel_id, !pipeline.mktdata_route_down()));
                                 }
                             }

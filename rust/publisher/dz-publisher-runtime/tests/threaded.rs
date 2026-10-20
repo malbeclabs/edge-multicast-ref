@@ -638,3 +638,14 @@ fn the_default_worker_count_is_one_per_connection_and_never_zero() {
     assert_eq!(one, 1);
     assert!(threaded::default_decode_threads(64).get() <= cores.max(1));
 }
+
+#[test]
+fn the_batch_size_histogram_tops_out_at_the_batch_bound() {
+    // `BATCH` is the one constant setting how many events a batch takes; the
+    // metrics crate cannot depend on this one, so the bucket it states is held
+    // to it here.
+    assert_eq!(
+        dz_publisher_metrics::INGRESS_BATCH_SIZE_BUCKETS.last(),
+        Some(&(threaded::BATCH as f64))
+    );
+}

@@ -191,6 +191,13 @@ pub struct FeedPipeline<F: EmittedFeed> {
     /// *"sent when there is no other traffic"* rather than sent on a timer
     /// alongside traffic.
     last_mktdata_ns: Option<u64>,
+    /// Whether live messages are packed rather than sent one per datagram.
+    ///
+    /// Always for market-by-price. For top-of-book only once
+    /// [`pack_live`](Self::pack_live) is called, which the runtime does for a
+    /// threaded venue, whose loop sends what is packed at the end of every
+    /// batch. An inline venue's top-of-book keeps one datagram per message.
+    packs_live: bool,
     /// The open mktdata datagram holds packed live messages.
     live_packed: bool,
     /// Monotonic. When the open datagram's first live message was packed, so
@@ -264,6 +271,7 @@ impl<F: EmittedFeed> FeedPipeline<F> {
             manifest_cadence_ns: nanos(feed.manifest_cadence),
             snapshot_cycle: feed.snapshot_cycle,
             last_mktdata_ns: None,
+            packs_live: matches!(F::SPEC, FeedSpec::MarketByPrice),
             live_packed: false,
             live_since_ns: None,
             packed_arrivals: Vec::new(),
@@ -321,7 +329,23 @@ impl<F: EmittedFeed> FeedPipeline<F> {
         self.live_mktdata(quote, EgressMessageType::Quote, now_mono_ns, send_ts_ns)
     }
 
-    /// One `0x04 Trade`: sent on top-of-book, packed on market-by-price.
+    /// Pack live messages into the open datagram from now on, as
+    /// market-by-price always does, rather than sending each alone.
+    ///
+    /// For the threaded input model, which sends what is packed at the end of
+    /// every batch. Set once, at composition; a market-by-price send path
+    /// already packs and is unchanged by it.
+    pub fn pack_live(&mut self) {
+        self.packs_live = true;
+    }
+
+    /// Whether live messages are packed rather than sent one per datagram.
+    #[must_use]
+    pub const fn packs_live(&self) -> bool {
+        self.packs_live
+    }
+
+    /// One `0x04 Trade`: packed where live messages pack, otherwise sent.
     ///
     /// Takes an already-lowered `Trade` rather than lowering one, and that is
     /// the mechanism behind the cross-specification obligation: the wire
@@ -775,7 +799,9 @@ impl<F: EmittedFeed> FeedPipeline<F> {
         self.flush_mktdata(now_mono_ns, send_ts_ns)
     }
 
-    /// A live message: packed on market-by-price, sent at once on top-of-book.
+    /// A live message: packed where this send path packs live messages —
+    /// market-by-price always, top-of-book under the threaded model — and
+    /// otherwise sent at once.
     fn live_mktdata<M: AppMessage>(
         &mut self,
         message: &M,
@@ -783,22 +809,18 @@ impl<F: EmittedFeed> FeedPipeline<F> {
         now_mono_ns: u64,
         send_ts_ns: u64,
     ) -> Result<(), EgressError> {
-        match F::SPEC {
-            FeedSpec::MarketByPrice => {
-                self.pack_mktdata(message, message_type, now_mono_ns, send_ts_ns)?;
-                // After the push, which may have sent the datagram this message
-                // did not fit in: the clock is the new datagram's, and it starts
-                // with this message.
-                if !self.live_packed {
-                    self.live_since_ns = Some(now_mono_ns);
-                }
-                self.live_packed = true;
-                Ok(())
-            }
-            FeedSpec::TopOfBook => {
-                self.send_mktdata(message, message_type, now_mono_ns, send_ts_ns)
-            }
+        if !self.packs_live {
+            return self.send_mktdata(message, message_type, now_mono_ns, send_ts_ns);
         }
+        self.pack_mktdata(message, message_type, now_mono_ns, send_ts_ns)?;
+        // After the push, which may have sent the datagram this message did
+        // not fit in: the clock is the new datagram's, and it starts with this
+        // message.
+        if !self.live_packed {
+            self.live_since_ns = Some(now_mono_ns);
+        }
+        self.live_packed = true;
+        Ok(())
     }
 
     /// The datagram holding packed live messages was sent, or lost.

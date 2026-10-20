@@ -606,6 +606,12 @@ fn compose_and_run(
         feeds,
         identity.idle_guard,
     ));
+    // The threaded loop sends what it packed at the end of every batch, so its
+    // top-of-book packs as depth does; an inline venue keeps one datagram per
+    // message. Fixed here, from the venue's variant, before anything is sent.
+    if threaded.is_some() {
+        publisher.borrow_mut().send_live_per_batch();
+    }
     // A depth feed with no cadence emits recovery snapshots and no others,
     // which is a feed a subscriber cannot join mid-session. It is a legitimate
     // configuration and it is not a default anybody should get by accident, so
