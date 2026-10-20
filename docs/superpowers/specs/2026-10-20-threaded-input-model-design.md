@@ -234,9 +234,55 @@ venue-neutral:
 model from the variant. One optional document key sets the worker count.
 Existing adapters do not change, and nothing they see changes.
 
-## 6. Open questions
+## 6. Decisions taken in the implementation
 
-- Default worker count, and whether it is a key or derived from the host.
-- Whether `ClaimTable` sizes from the instrument registry or grows on listing.
-- Whether `Identity`'s window is per instrument or per adapter.
-- Whether the relower needs a threaded entry point or the inline helper is enough.
+The open questions this note first carried, answered, and the places the code
+departed from the sketch.
+
+- **Worker count: `[ingress] decode_threads`**, optional, a positive integer.
+  Absent is one thread per connection, capped at the host's cores less the
+  loop's own, and never below one. A document that states it for a venue built
+  with `Venue::new` is refused at startup, because the key would change nothing.
+- **`ClaimTable` grows on listing.** It is keyed by the instrument's admission
+  index, which is dense and never reused, in segments of 4,096 slots that are
+  allocated the first time an instrument in them is claimed. A segment never
+  moves, so a mid-session listing is claimable on its first payload with no
+  restart. The directory covers 4,194,304 admissions, and a handle beyond it
+  always claims and is always applied.
+- **`Identity`'s window is per instrument**: the last 256 keys applied for it.
+- **The inline helper is enough for the relower**, which needs no threaded
+  entry point. `threaded::on_payload` takes the loop stage's `Dedupe` as a
+  fifth argument, because the window is state and the inline output matches
+  the threaded output only if both keep it. `threaded::Inline` holds a decoder
+  per connection, the shared `ClaimTable` and the `Dedupe` for an adapter's
+  own `on_payload`.
+- **A counter that restarts** would leave a newest-wins key below its own
+  high-water mark for good. `CounterEras` is a decoder's per-instrument era,
+  advanced when it judges a restart and carried in the key's top 16 bits, so
+  both stages order a new-counter key above every old one and drop a late
+  old-counter copy. The counter is limited to 48 bits when used this way.
+- **§3c, verified by building it.** `Clock` was already `Send + Sync`.
+  `IngressObserver` was not `Sync`, and gains that bound; the runtime's own
+  observer moved its one counter from a `Cell` to an atomic. `Driver::run`
+  took `&mut dyn EventSink`, which is never `Send`, and is now generic over
+  the sink, so a `dyn` sink is accepted as before.
+- **Backpressure is a wait before the next read.** `decode` is synchronous and
+  cannot await, so the events the queue could not take are held, in order, and
+  the connection's transport waits for them to be queued before its next
+  receive or connect.
+- **A refused `push`** drops the event and counts the payload under
+  `dz_publisher_ingress_parse_errors_total{reason="schema"}`.
+- **Composition.** `Venue` gains `threaded: Option<SharedThreadedAdapter>`,
+  set only by `Venue::threaded`, which is what the runtime reads. `adapter`
+  stays meaningful: for a threaded venue it is a handle on the same object
+  that drives it inline.
+- **The idle guard's upstream half** is counted on the connections and read
+  by the loop at every batch and every tick, so a connection whose every copy
+  is a duplicate still counts as an upstream that is talking.
+- **Shutdown, §3h, follows the inline model rather than the sketch.** The
+  `Driver` has no orderly stop: it returns only on a fatal error, and the
+  inline model ends by dropping its futures. The threaded model does the
+  same, aborting each connection task. The transport and the queue sender are
+  then dropped, and no `on_disconnected` is called at shutdown, as before. The
+  loop then drains the queue, bounded by one second, before the ordered
+  teardown.
