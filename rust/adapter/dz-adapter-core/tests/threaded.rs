@@ -494,3 +494,120 @@ fn the_boundary_types_cross_threads_and_upcast() {
         .expect("parses");
     assert_eq!(out.events.len(), 1);
 }
+
+/// A decoder for one counter that restarts: `<instrument>:<counter>`, judged
+/// restarted when it falls below half the last counter this connection saw.
+struct RestartingDecoder {
+    claims: ClaimTable,
+    eras: dz_adapter_core::CounterEras,
+    last: std::collections::HashMap<u32, u64>,
+}
+
+impl Decoder for RestartingDecoder {
+    fn decode(
+        &mut self,
+        payload: &Payload<'_>,
+        out: &mut dyn DecodedSink,
+    ) -> Result<(), ParseError> {
+        let text =
+            std::str::from_utf8(payload.bytes).map_err(|_| ParseError::malformed("utf-8"))?;
+        let mut fields = text.split(':');
+        let index = field(&mut fields)? as u32;
+        let counter = field(&mut fields)?;
+        out.upstream_message("message");
+        if self.last.get(&index).is_some_and(|last| counter < last / 2) {
+            self.eras.restart(instrument(index));
+        }
+        self.last.insert(index, counter);
+        let key = self
+            .eras
+            .key(instrument(index), counter)
+            .ok_or(ParseError::malformed("counter"))?;
+        if !self.claims.claim(instrument(index), key) {
+            out.duplicate();
+            return Ok(());
+        }
+        out.push(quote(index, counter as i64), Order::Supersedes(key));
+        Ok(())
+    }
+}
+
+struct Restarting;
+
+impl ThreadedAdapter for Restarting {
+    fn decoder(&self, _conn: ConnectionId, claims: ClaimTable) -> Box<dyn Decoder> {
+        Box::new(RestartingDecoder {
+            claims,
+            eras: dz_adapter_core::CounterEras::new(),
+            last: std::collections::HashMap::new(),
+        })
+    }
+}
+
+impl Adapter for Restarting {
+    fn message_types(&self) -> &[&'static str] {
+        &["message"]
+    }
+
+    fn poll_listings(&mut self, _out: &mut dyn ListingSink) {}
+
+    fn on_payload(
+        &mut self,
+        _payload: &Payload<'_>,
+        _out: &mut dyn EventSink,
+    ) -> Result<(), ParseError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_counter_restart_starts_an_era_and_a_stale_copy_from_the_old_one_is_dropped() {
+    let mut adapter = Restarting;
+    let mut inline = Inline::new();
+    let mut out = Recorded::default();
+    // `a` sees the restart; `b` is a slower connection whose copy of 100 from
+    // the old counter arrives after it.
+    for (bytes, connection) in [
+        ("1:99", "b"),
+        ("1:100", "a"),
+        ("1:101", "a"),
+        ("1:1", "a"),
+        ("1:2", "a"),
+        ("1:100", "b"),
+        ("1:101", "b"),
+        ("1:1", "b"),
+        ("1:3", "a"),
+    ] {
+        inline
+            .on_payload(&mut adapter, &payload(bytes, connection), &mut out)
+            .expect("parses");
+    }
+    assert_eq!(
+        out.events,
+        [99, 100, 101, 1, 2, 3]
+            .iter()
+            .map(|counter| format!("{:?}", quote(1, *counter)))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn an_era_key_orders_above_the_old_counter_and_refuses_a_wide_one() {
+    let mut eras = dz_adapter_core::CounterEras::new();
+    let one = instrument(1);
+    let old = eras.key(one, 1_000_000).expect("fits");
+    eras.restart(one);
+    assert_eq!(eras.era(one), 1);
+    assert_eq!(eras.era(instrument(2)), 0, "per instrument");
+    let new = eras.key(one, 1).expect("fits");
+    assert!(new > old);
+    assert_eq!(
+        eras.key(one, 1 << dz_adapter_core::CounterEras::COUNTER_BITS),
+        None
+    );
+    // The loop stage orders them the same way.
+    let mut dedupe = Dedupe::new();
+    assert!(dedupe.admit(one, Order::Supersedes(old)));
+    assert!(dedupe.admit(one, Order::Supersedes(new)));
+    assert!(!dedupe.admit(one, Order::Supersedes(old)));
+}

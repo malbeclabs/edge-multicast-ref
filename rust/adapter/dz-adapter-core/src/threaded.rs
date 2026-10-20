@@ -33,6 +33,11 @@
 //!   bounded window, because a point event is not superseded by a later one.
 //!   [`Dedupe`] is that stage, and the inline helper runs the same one.
 //!
+//! A venue that restarts an instrument's counter would leave a newest-wins key
+//! below its own high-water mark for good. [`CounterEras`] is the decoder's way
+//! out: an era it advances when it judges a restart, carried in the key, which
+//! both stages then order correctly.
+//!
 //! # Only quotes and trades, and no text
 //!
 //! [`DecodedSink::push`] carries [`Event::Quote`] and [`Event::Trade`]. A
@@ -425,6 +430,88 @@ impl std::fmt::Debug for ClaimTable {
         f.debug_struct("ClaimTable")
             .field("segments_allocated", &allocated)
             .finish()
+    }
+}
+
+/// One decoder's count of how often each instrument's update counter has
+/// restarted, for an [`Order::Supersedes`] key that survives a restart.
+///
+/// # The failure this exists for
+///
+/// `Supersedes` is newest-wins, so a venue that restarts an instrument's
+/// counter — the key drops to near zero — would leave that instrument silent
+/// until the new counter overtook the old high-water mark: every new key loses
+/// its claim, and the loop drops every one that survives. Resetting the shared
+/// table cannot fix it, because a copy of an *old* key from a connection that
+/// has not yet seen the restart is then indistinguishable from progress.
+///
+/// So the era is each decoder's own view, and it travels in the key. A decoder
+/// that judges a restart — by whatever rule its venue warrants, usually a drop
+/// far below the last key *it* saw for the instrument — calls
+/// [`restart`](Self::restart), and from then on builds its keys with
+/// [`key`](Self::key): the era in the top 16 bits, the counter in the low
+/// [`COUNTER_BITS`](Self::COUNTER_BITS). Every connection carrying the
+/// instrument sees the same restarts, so they agree on the era; a key from the
+/// new counter is above every key from the old one, in the [`ClaimTable`] and
+/// in the loop's [`Dedupe`] alike, and a late copy from the old counter is below
+/// it and is dropped as stale.
+///
+/// # What it costs
+///
+/// A counter of 48 bits or fewer: [`key`](Self::key) refuses a larger one. A
+/// connection that never saw an instrument before its counter restarted counts
+/// one era fewer than the others for it, so its copies of that instrument lose
+/// every claim: it delivers nothing for that instrument, and the others still
+/// do. Eras stop advancing after 65,535 restarts of one instrument.
+#[derive(Debug, Clone, Default)]
+pub struct CounterEras {
+    eras: Vec<u16>,
+}
+
+impl CounterEras {
+    /// The low bits of a key that hold the venue's own counter.
+    pub const COUNTER_BITS: u32 = 48;
+
+    /// Every instrument in its first era.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// This decoder judged that `instrument`'s counter restarted: its keys from
+    /// now on are in the next era.
+    ///
+    /// Call it once per restart, before building the key of the first update
+    /// after it. A handle beyond [`MAX_TRACKED_INSTRUMENTS`] stays in era 0.
+    pub fn restart(&mut self, instrument: InstrumentRef) {
+        let index = instrument.index() as usize;
+        if index >= MAX_TRACKED_INSTRUMENTS {
+            return;
+        }
+        if self.eras.len() <= index {
+            self.eras.resize(index + 1, 0);
+        }
+        self.eras[index] = self.eras[index].saturating_add(1);
+    }
+
+    /// The era `instrument` is in, as this decoder has counted it.
+    #[must_use]
+    pub fn era(&self, instrument: InstrumentRef) -> u16 {
+        self.eras
+            .get(instrument.index() as usize)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// The key to claim and to push under [`Order::Supersedes`] for `counter`
+    /// on `instrument`: the era above the counter. `None` for a counter that
+    /// does not fit in [`COUNTER_BITS`](Self::COUNTER_BITS).
+    #[must_use]
+    pub fn key(&self, instrument: InstrumentRef, counter: u64) -> Option<u64> {
+        if counter >> Self::COUNTER_BITS != 0 {
+            return None;
+        }
+        Some(u64::from(self.era(instrument)) << Self::COUNTER_BITS | counter)
     }
 }
 
