@@ -34,7 +34,7 @@
 //! replace, because the tables are `ReplacingMergeTree` and the rows are a pure
 //! function of `(object key, sha256)`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -346,10 +346,21 @@ impl<S: RowSink> Loader<'_, S> {
             // Read again, for the reason `derivable` holds no manifest. The
             // recorder never rewrites a published manifest -- its name is the
             // segment's own window and sequence -- so this is the same text the
-            // scan read; one evicted between the two reads fails here as a
-            // manifest error, as it would have failed opening the object.
-            let manifest = match read_manifest(&candidate.manifest_path) {
-                Ok(manifest) => manifest,
+            // scan read.
+            //
+            // One that is gone was evicted between the two reads, and that is a
+            // skip, not a failure. The gap is the whole scan long, and during a
+            // back-load the objects taken first are a newcomer's oldest, which
+            // are also the ones closest to eviction: counted as a manifest
+            // error, every one of them would page as damage what is the
+            // eviction race the lag metrics already report.
+            let manifest = match read_manifest_if_present(&candidate.manifest_path) {
+                Ok(Some(manifest)) => manifest,
+                Ok(None) => {
+                    self.metrics.object_skipped(SkipReason::Evicted);
+                    pass.skipped += 1;
+                    continue;
+                }
                 Err(message) => {
                     self.fail(ErrorKind::Manifest, message, &mut pass, &mut errors);
                     continue;
@@ -376,6 +387,18 @@ impl<S: RowSink> Loader<'_, S> {
                         // objects it is still holding would leave their insert
                         // to land with no ledger entry written for any of them.
                         self.pending.clear();
+                        self.fail(failure.kind, failure.message, &mut pass, &mut errors);
+                        // **And the pass stops loading.** The objects the sink
+                        // lost were excluded from this pass's schedule by the
+                        // scan, as held, so carrying on would derive their
+                        // successors with no trailer to settle them against:
+                        // an era boundary written `anchor_certain = 0` that
+                        // gets a ledger entry when it lands, and that the
+                        // re-derivation of its predecessor next pass can never
+                        // repair. Stopping leaves every one of them for the
+                        // next scan, which sees an empty `pending` and
+                        // schedules them in order again.
+                        break;
                     }
                     self.fail(failure.kind, failure.message, &mut pass, &mut errors);
                 }
@@ -940,8 +963,6 @@ pub fn record_landed(
 /// without a spec writes loose objects at the top level, and their feed is
 /// knowable only from the manifest.
 fn take_turns(derivable: Vec<(usize, String)>) -> Vec<usize> {
-    use std::collections::HashMap;
-
     let mut taken: HashMap<String, usize> = HashMap::new();
     let mut ranked: Vec<(usize, usize)> = derivable
         .into_iter()
@@ -962,6 +983,18 @@ fn take_turns(derivable: Vec<(usize, String)>) -> Vec<usize> {
 fn read_manifest(path: &Path) -> Result<SegmentManifest, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// [`read_manifest`], with a manifest that is no longer there as `None`: the
+/// shape an eviction between the scan and the load takes.
+fn read_manifest_if_present(path: &Path) -> Result<Option<SegmentManifest>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text)
+            .map(Some)
+            .map_err(|e| format!("{}: {e}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
 }
 
 /// Which counter a derivation failure lands on.
@@ -1723,6 +1756,18 @@ mod pass_tests {
         );
     }
 
+    /// A manifest evicted between the scan and the load reads as absent, and
+    /// only that: a manifest that is there and damaged is still an error.
+    #[test]
+    fn a_manifest_that_is_gone_reads_as_absent_and_a_damaged_one_does_not() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let gone = dir.path().join("gone.json");
+        assert!(matches!(read_manifest_if_present(&gone), Ok(None)));
+        let damaged = dir.path().join("damaged.json");
+        std::fs::write(&damaged, "not a manifest").expect("writable");
+        assert!(read_manifest_if_present(&damaged).is_err());
+    }
+
     /// Every feed's n-th waiting object before any feed's (n+1)-th, and the
     /// walk's own order within a round and within a feed.
     #[test]
@@ -2120,6 +2165,11 @@ mod deferred_ledger_tests {
         /// When set, the end-of-pass `post_if_due` posts, which is the shape a
         /// pass takes when the age bound comes due in it.
         due: bool,
+        /// When set, the next `write_batch` of an object whose key starts with
+        /// this is refused and the sink loses everything it was holding with
+        /// it — the shape a batch takes that made the buffer due and whose
+        /// insert was refused. One-shot.
+        refuse_write_of: Option<String>,
         /// Every batch handed over, in order: the object it came from and the
         /// `anchor_certain` of its era rows. `held` cannot show a re-derivation
         /// — the object is already in it — and this can.
@@ -2152,6 +2202,19 @@ mod deferred_ledger_tests {
                 rows.object_key.clone(),
                 rows.era.iter().map(|e| e.anchor_certain).collect(),
             ));
+            if self
+                .refuse_write_of
+                .as_ref()
+                .is_some_and(|prefix| rows.object_key.starts_with(prefix.as_str()))
+            {
+                self.refuse_write_of = None;
+                let held = std::mem::take(&mut self.held);
+                return Err(RowSinkError::Rejected {
+                    object_key: format!("{} objects", held.len() + 1),
+                    attempts: 1,
+                    last: "the destination refused it".to_owned(),
+                });
+            }
             if !self.held.contains(&id) {
                 self.held.push(id);
             }
@@ -2461,6 +2524,132 @@ mod deferred_ledger_tests {
         );
         assert!(pending.is_empty(), "nothing is still waiting on an insert");
         assert_eq!(pass.unloaded, 1, "the damaged object, still unloaded");
+    }
+
+    /// The era boundary each object's *last* derivation wrote, keyed on the
+    /// object: the copy an insert carries is the last one handed over.
+    fn last_boundaries(sink: &HoldingSink) -> std::collections::BTreeMap<String, u8> {
+        sink.taken
+            .iter()
+            .map(|(key, eras)| (key.clone(), *eras.first().expect("one boundary per object")))
+            .collect()
+    }
+
+    /// A held predecessor, a refused write later in the schedule, and the
+    /// passes after it, over `archive`. The first pass is bounded to one object
+    /// so that object is held into the second, where the first write of
+    /// `refused_feed` is refused; the third pass is unbounded and lands
+    /// everything.
+    fn a_held_predecessor_then_a_refused_write(
+        archive: &Archive,
+        refused_feed: &str,
+    ) -> (HoldingSink, Ledger) {
+        let refused = format!("feed={refused_feed}/");
+        let metrics = LoaderMetrics::new(SITE, RECORDER);
+        let mut ledger = Ledger::open(&archive.ledger).expect("a new ledger");
+        let mut sink = HoldingSink::default();
+        let mut pending = Vec::new();
+        let pass = |max_objects: usize,
+                    ledger: &mut Ledger,
+                    sink: &mut HoldingSink,
+                    pending: &mut Vec<Pending>| {
+            Loader {
+                objects_dir: &archive.completed,
+                feeds: None,
+                site: SITE,
+                recorder: RECORDER,
+                max_objects,
+                ledger,
+                sink,
+                metrics: &metrics,
+                market_data: &[],
+                pending,
+            }
+            .run_once(&|| false)
+        };
+
+        let (first, errors) = pass(1, &mut ledger, &mut sink, &mut pending);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(first.derived, 1);
+        assert_eq!(
+            pending.len(),
+            1,
+            "the first object is held into the next pass"
+        );
+
+        sink.refuse_write_of = Some(refused.clone());
+        let taken_before = sink.taken.len();
+        let (second, errors) = pass(0, &mut ledger, &mut sink, &mut pending);
+        assert_eq!(
+            errors.len(),
+            1,
+            "the refused write, and only it: {errors:?}"
+        );
+        assert_eq!(second.failed, 1);
+        let this_pass = &sink.taken[taken_before..];
+        assert!(
+            this_pass
+                .last()
+                .is_some_and(|(key, _)| key.starts_with(&refused)),
+            "nothing is derived after the sink lost the held predecessor: {this_pass:?}"
+        );
+        assert_eq!(second.derived as usize, this_pass.len() - 1);
+        assert!(pending.is_empty(), "the lost objects are forgotten");
+        assert_eq!(ledger.entries(), 0);
+
+        sink.due = true;
+        let (third, errors) = pass(0, &mut ledger, &mut sink, &mut pending);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(third.unloaded, 0, "everything landed");
+        assert!(pending.is_empty());
+        (sink, ledger)
+    }
+
+    /// **A refused write does not let a held object's successor land unsettled.**
+    ///
+    /// The scan leaves out of the schedule an object the sink is holding, so a
+    /// refusal that loses it mid-pass leaves its successor to be derived with no
+    /// trailer: `anchor_certain = 0`, and a ledger entry when it lands, so
+    /// re-deriving the predecessor later can never repair it. Here the held
+    /// object is one feed's and the refusal is the other feed's, which is the
+    /// shape taking turns makes possible: the other feed's object is scheduled
+    /// between the held one's successors.
+    #[test]
+    fn a_refused_write_does_not_let_a_held_objects_successor_land_unsettled() {
+        let archive = archive_of_two_feeds(3, 40);
+        let (sink, ledger) = a_held_predecessor_then_a_refused_write(&archive, SECOND_FEED);
+
+        assert_eq!(ledger.entries(), 6);
+        for feed in [FIRST_FEED, SECOND_FEED] {
+            let prefix = format!("feed={feed}/");
+            let certain: Vec<u8> = last_boundaries(&sink)
+                .into_iter()
+                .filter(|(key, _)| key.starts_with(&prefix))
+                .map(|(_, certain)| certain)
+                .collect();
+            assert_eq!(
+                certain,
+                vec![0, 1, 1],
+                "{feed}: only the first boundary is unsettled"
+            );
+        }
+    }
+
+    /// And the same within one feed, which the walk without turns already got
+    /// wrong: the first object held, the second's write refused, and the third
+    /// derived against nothing.
+    #[test]
+    fn a_refused_write_does_not_let_the_next_object_of_one_feed_land_unsettled() {
+        let archive = archive(3, 40);
+        let (sink, ledger) = a_held_predecessor_then_a_refused_write(&archive, "top-of-book");
+
+        assert_eq!(ledger.entries(), 3);
+        let certain: Vec<u8> = last_boundaries(&sink).into_values().collect();
+        assert_eq!(
+            certain,
+            vec![0, 1, 1],
+            "only the first boundary is unsettled"
+        );
     }
 
     /// **`dz_loader_bytes_written_total` moves.**
