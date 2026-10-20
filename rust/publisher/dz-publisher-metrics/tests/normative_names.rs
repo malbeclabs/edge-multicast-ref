@@ -65,6 +65,7 @@ const PROPOSED_NAMES: &[&str] = &[
     "dz_publisher_ingress_queue_depth",
     "dz_publisher_ingress_batch_size",
     "dz_publisher_ingress_queue_wait_seconds",
+    "dz_publisher_egress_messages_per_datagram",
 ];
 
 fn touch_every_family(m: &PublisherMetrics) {
@@ -80,6 +81,7 @@ fn touch_every_family(m: &PublisherMetrics) {
     m.ingress().set_queue_depth(3);
     m.ingress().batch(32);
     m.ingress().observe_queue_wait(0.000_1);
+    m.egress().messages_in_datagram(PortRole::Mktdata, 3);
 
     m.lowering()
         .refusal(LoweringRefusalReason::UnknownInstrument);

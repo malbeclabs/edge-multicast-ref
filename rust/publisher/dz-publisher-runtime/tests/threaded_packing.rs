@@ -553,3 +553,57 @@ fn a_packed_trade_is_byte_for_byte_the_depth_feeds_trade() {
     assert_eq!(top.len(), 1);
     assert_eq!(top, depth);
 }
+
+/// `dz_publisher_egress_messages_per_datagram` for mktdata, as `(count, sum)`.
+fn per_datagram(h: &Harness) -> (u64, u64) {
+    let rendered = h.metrics.render();
+    let read = |suffix: &str| {
+        rendered
+            .lines()
+            .filter(|line| {
+                line.starts_with(&format!(
+                    "dz_publisher_egress_messages_per_datagram_{suffix}"
+                )) && line.contains(r#"port_role="mktdata""#)
+            })
+            .filter_map(|line| line.rsplit(' ').next())
+            .filter_map(|value| value.parse::<f64>().ok())
+            .map(|value| value as u64)
+            .sum()
+    };
+    (read("count"), read("sum"))
+}
+
+#[test]
+fn every_datagram_that_left_is_observed_once_with_its_message_count() {
+    let (payloads, expected) = mixed_script();
+    let mut threaded = Threaded::new(harness(feed()), &payloads);
+    threaded.one_batch(payloads.len());
+    let h = threaded.stop();
+    let datagrams = h.tob.as_ref().expect("tob").mktdata.len() as u64;
+    assert_eq!(per_datagram(&h), (datagrams, expected.len() as u64));
+    // The refdata role is pre-created too, as a declared port role.
+    assert!(h.metrics.render().lines().any(|line| line
+        .starts_with("dz_publisher_egress_messages_per_datagram_count")
+        && line.contains(r#"port_role="refdata""#)));
+}
+
+#[test]
+fn an_inline_venue_observes_one_message_per_datagram_and_a_lost_one_not_at_all() {
+    let mut h = harness(feed());
+    let mut listings = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut listings);
+    let instrument = listings.handles()[0];
+    for n in 1..=3 {
+        h.publisher.payload_scope(Some(n));
+        h.publisher.event(harness::quote(instrument, n));
+    }
+    assert_eq!(per_datagram(&h), (3, 3));
+
+    // While the route is down the fan-out still answers `Ok`, and the datagram
+    // went nowhere: it is not observed.
+    h.tob.as_ref().expect("tob").mktdata_route_down.set(true);
+    h.publisher.payload_scope(Some(4));
+    h.publisher.event(harness::quote(instrument, 4));
+    h.publisher.payload_scope(None);
+    assert_eq!(per_datagram(&h), (3, 3));
+}

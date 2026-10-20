@@ -248,6 +248,11 @@ venue-neutral:
   a payload's receipt to the loop dequeuing each of its events, against the
   wall clock, which is the pairing `recv_to_send` uses, so the wait is the
   first part of that same interval. Observed only under the threaded model.
+- `dz_publisher_egress_messages_per_datagram{venue, source_id, port_role}`,
+  histogram: the messages in each datagram that left the host, under either
+  model. Its buckets put each full-datagram capacity, and one below it, on a
+  bound of its own, derived from the codec's sizes, so §3i's packing can be read
+  off the wire.
 
 ## 5. Composition and migration
 
