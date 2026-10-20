@@ -347,6 +347,23 @@ Nothing about the lag gauges changes — they measure what is waiting, not the
 order it is taken in — so a back-load still shows in
 `dz_loader_oldest_unloaded_age_seconds` until it drains.
 
+**A back-load can still lose its oldest objects, and taking turns does not
+change how many in total.** The pass bound is shared: with several feeds added
+at once, each drains at its share of what the caught-up feeds leave, so N
+newcomers together drain at the rate one newcomer would alone. Only a feed at
+its staging share evicts at all — a quiet feed under its share keeps its archive
+until it is loaded — and what eviction takes from a busy one is whatever of its
+archive is older than its retention less its time in line. One global queue
+spent the pass on the oldest objects anywhere, which are the quiet feeds', while
+the busy feeds at their share evicted; taking turns gives those a share from the
+first pass. Before adding feeds, compare the expected drain time — objects
+waiting over (`max_objects_per_pass` less what the caught-up feeds publish per
+pass), times the pass period — against the busiest newcomer's retention at its
+share. If it does not fit, raise `max_objects_per_pass` for the back-load, or add
+the feeds a few at a time. A loss shows as
+`dz_loader_objects_skipped_total{reason="evicted"}`, and the history it took is
+not recoverable.
+
 The loader never *waits* for a predecessor, though. Under a staging budget that
 evicts, the predecessor is routinely gone, and a loader that must see segment
 *n−1* before it can anchor segment *n* stalls on the first eviction. It writes
