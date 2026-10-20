@@ -226,6 +226,10 @@ venue-neutral:
 
 - `dz_publisher_ingress_queue_depth{venue, source_id}`, gauge, sampled at drain.
 - `dz_publisher_ingress_batch_size{venue, source_id}`, histogram.
+- `dz_publisher_ingress_queue_wait_seconds{venue, source_id}`, histogram: from
+  a payload's receipt to the loop dequeuing each of its events, against the
+  wall clock, which is the pairing `recv_to_send` uses, so the wait is the
+  first part of that same interval. Observed only under the threaded model.
 
 ## 5. Composition and migration
 

@@ -42,6 +42,8 @@
 //!
 //! A payload's receive stamp is taken where it always is, on the connection, so
 //! `venue_to_recv` excludes the queue and `recv_to_send` includes it.
+//! `dz_publisher_ingress_queue_wait_seconds` is the part the queue accounts
+//! for: from that stamp to the moment the loop takes the event off the queue.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -437,6 +439,8 @@ pub struct Drain {
     upstream: Arc<AtomicU64>,
     seen_upstream: u64,
     metrics: Arc<PublisherMetrics>,
+    /// Read once per batch, for the queue wait.
+    clock: Arc<dyn dz_ingress_core::Clock>,
 }
 
 impl Drain {
@@ -447,8 +451,23 @@ impl Drain {
     pub async fn recv(&mut self) -> usize {
         let taken = self.queue.recv_many(&mut self.batch, BATCH).await;
         if taken > 0 {
-            self.metrics.ingress().batch(taken);
-            self.metrics.ingress().set_queue_depth(self.queue.len());
+            let ingress = self.metrics.ingress();
+            ingress.batch(taken);
+            ingress.set_queue_depth(self.queue.len());
+            // Against the wall clock, which is the pairing `recv_to_send`
+            // uses: `recv_ts_ns` is a wall or a kernel reading, and a
+            // monotonic one differenced against it means nothing. Keeping the
+            // pairing also keeps the two comparable — the queue wait is the
+            // first part of the same interval, measured from the same receipt.
+            // Saturating, because a wall clock stepped backwards is not a
+            // negative wait.
+            let now_ns = self.clock.wall_ns();
+            for decoded in &self.batch[self.batch.len() - taken..] {
+                let waited = now_ns.saturating_sub(decoded.recv_ts_ns);
+                // A nanosecond count as seconds, exact far past any wait.
+                #[allow(clippy::cast_precision_loss)]
+                ingress.observe_queue_wait(waited as f64 / 1_000_000_000.0);
+            }
         }
         taken
     }
@@ -583,6 +602,7 @@ where
     K: dz_ingress_core::Clock + 'static,
     O: IngressObserver + Send + Sync + 'static,
 {
+    let wall: Arc<dyn dz_ingress_core::Clock> = clock.clone();
     let (queue, receiver) = mpsc::channel(depth.max(1));
     let upstream = Arc::new(AtomicU64::new(0));
     let claims = dz_adapter_core::ClaimTable::new();
@@ -629,6 +649,7 @@ where
             upstream,
             seen_upstream: 0,
             metrics,
+            clock: wall,
         },
     )
 }

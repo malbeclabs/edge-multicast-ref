@@ -179,10 +179,12 @@ impl Input for Script {
             match self.payloads.pop_front() {
                 Some(payload) => {
                     self.current = payload;
-                    let n = self.delivered.fetch_add(1, Ordering::SeqCst) as u64;
+                    self.delivered.fetch_add(1, Ordering::SeqCst);
+                    // Stamped by the driver off the wall clock, as a
+                    // transport with no kernel stamp is.
                     Ok(Received::Payload {
                         bytes: &self.current,
-                        ts_ns: Some(1_000 + n),
+                        ts_ns: None,
                     })
                 }
                 None => {
@@ -472,6 +474,48 @@ fn a_full_queue_stops_the_connection_and_drops_nothing() {
     assert_eq!(keys, (1..=50).collect::<Vec<u64>>());
     assert!(out.flushes > 0);
     assert!(bench.rendered("dz_publisher_ingress_batch_size_count") > 0.0);
+}
+
+#[test]
+fn the_queue_wait_is_observed_once_per_dequeued_event() {
+    let bench = Bench::new();
+    // Twelve messages in nine payloads, every one of them applied: the wait is
+    // per event taken off the queue, not per payload and not per batch.
+    let payloads = [
+        "q:1:1 t:1:1",
+        "q:1:2",
+        "q:1:3 t:1:2 t:1:3",
+        "q:2:1",
+        "q:2:2",
+        "t:2:1",
+        "q:1:4",
+        "q:2:3",
+        "t:2:2",
+    ];
+    let (script, progress) = Script::new("a", &payloads);
+    let out = run_to_the_end(&bench, vec![script], vec![progress]);
+    assert_eq!(out.events.len(), 12);
+    assert_eq!(
+        bench.rendered("dz_publisher_ingress_queue_wait_seconds_count"),
+        12.0
+    );
+    // The receipt is a wall reading taken just before, so every wait sits in
+    // a bucket and none is the overflow a mispaired clock would produce.
+    assert!(bench.rendered("dz_publisher_ingress_queue_wait_seconds_sum") < 10.0);
+}
+
+#[test]
+fn an_inline_publisher_leaves_the_queue_wait_empty() {
+    // Nothing observes it but the threaded drain, so a fresh registry renders
+    // the family at zero.
+    let metrics = metrics();
+    let rendered = metrics.render();
+    assert!(rendered.contains("# TYPE dz_publisher_ingress_queue_wait_seconds histogram"));
+    let count = rendered
+        .lines()
+        .find(|line| line.starts_with("dz_publisher_ingress_queue_wait_seconds_count"))
+        .expect("pre-created");
+    assert!(count.ends_with(" 0"), "{count}");
 }
 
 #[test]

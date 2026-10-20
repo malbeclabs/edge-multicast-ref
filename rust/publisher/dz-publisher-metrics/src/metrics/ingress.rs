@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Registry};
 
-use crate::buckets::INGRESS_BATCH_SIZE_BUCKETS;
+use crate::buckets::{INGRESS_BATCH_SIZE_BUCKETS, LATENCY_BUCKETS};
 use crate::labels::{AdapterErrorReason, ConnectFailureReason, ParseErrorReason, ReconnectReason};
 use crate::opts::{histogram_opts, opts};
 
@@ -19,6 +19,7 @@ pub struct IngressMetrics {
     rate_limited_total: IntCounter,
     queue_depth: IntGauge,
     batch_size: Histogram,
+    queue_wait_seconds: Histogram,
     message_types: HashSet<String>,
 }
 
@@ -245,6 +246,23 @@ impl IngressMetrics {
             .register(Box::new(batch_size.clone()))
             .expect("static metric registration");
 
+        let queue_wait_seconds = Histogram::with_opts(histogram_opts(
+            "dz_publisher_ingress_queue_wait_seconds",
+            "Seconds from a payload's receipt on its connection to the moment the publisher \
+             loop took one of its decoded events off the queue, observed once per event \
+             dequeued. A proposed addition to the normative set, not yet in the governing \
+             playbook: under the threaded input model `recv_to_send` includes the queue, and \
+             this is the part of it the queue accounts for. Exists only for a publisher whose \
+             venue decodes on its connections' threads; a publisher that maps every payload \
+             inline has no queue and leaves it empty.",
+            labels,
+            LATENCY_BUCKETS,
+        ))
+        .expect("static metric definition");
+        registry
+            .register(Box::new(queue_wait_seconds.clone()))
+            .expect("static metric registration");
+
         Self {
             messages_total,
             bytes_total,
@@ -257,6 +275,7 @@ impl IngressMetrics {
             rate_limited_total,
             queue_depth,
             batch_size,
+            queue_wait_seconds,
             message_types: message_types.iter().map(|t| (*t).to_string()).collect(),
         }
     }
@@ -364,5 +383,15 @@ impl IngressMetrics {
         // An event count, exact in an `f64` far past any batch.
         #[allow(clippy::cast_precision_loss)]
         self.batch_size.observe(size as f64);
+    }
+
+    /// Records how long one decoded event waited between its payload's
+    /// receipt and the loop taking it off the queue.
+    ///
+    /// Observed by a publisher running the threaded input model, once per
+    /// event dequeued. Counts the family this crate proposes rather than one
+    /// the playbook carries.
+    pub fn observe_queue_wait(&self, seconds: f64) {
+        self.queue_wait_seconds.observe(seconds);
     }
 }

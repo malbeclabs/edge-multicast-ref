@@ -25,7 +25,7 @@
 //!
 //! # Proposed additions the playbook does not yet carry
 //!
-//! Six families and two label values here are **not** normative. Each exists
+//! Seven families and two label values here are **not** normative. Each exists
 //! because a piece of work in this workspace produced a number with nowhere to
 //! go and refused to invent a series for it, leaving the count exposed on a
 //! struct or in a log line instead. They are marked as proposals in their own
@@ -41,8 +41,10 @@
 //!   [`AdapterErrorReason`].
 //! - `dz_publisher_channel_last_published_timestamp_seconds{channel_id}` - see
 //!   [`ChannelMetrics`].
-//! - `dz_publisher_ingress_queue_depth` and `dz_publisher_ingress_batch_size` -
-//!   see [`IngressMetrics::set_queue_depth`] and [`IngressMetrics::batch`].
+//! - `dz_publisher_ingress_queue_depth`, `dz_publisher_ingress_batch_size` and
+//!   `dz_publisher_ingress_queue_wait_seconds` - see
+//!   [`IngressMetrics::set_queue_depth`], [`IngressMetrics::batch`] and
+//!   [`IngressMetrics::observe_queue_wait`].
 //! - `not_carried_by_feed` and `malformed_message` on the normative
 //!   `dz_publisher_egress_errors_total{port_role,reason}` - see
 //!   [`EgressErrorReason`].
