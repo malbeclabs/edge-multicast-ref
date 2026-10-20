@@ -26,6 +26,14 @@
 //! held across an await here would be a panic at runtime rather than a
 //! compile error, which is the cost of this shape and the reason it is
 //! confined to this module.
+//!
+//! # The second input model
+//!
+//! A venue composed with [`Venue::threaded`](crate::Venue::threaded) is not
+//! driven this way. Its connections run on a worker pool and decode there, and
+//! this task keeps only the publisher, the tick and a queue it drains: see
+//! [`crate::threaded`]. Everything above the transport — the composition, the
+//! tick body, the guards and the ordered teardown — is shared.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -448,6 +456,12 @@ fn compose_and_run(
     );
     let venue = registry.open(&cx)?;
     check_sources(&config, &venue)?;
+    // The worker count sizes threads only the threaded model has.
+    if let (None, Some(threads)) = (&venue.threaded, config.decode_threads) {
+        return Err(StartupError::DecodeThreadsInline {
+            threads: threads.get(),
+        });
+    }
     // **`[adapter.replay]` substitutes for the transport, not for the
     // adapter.** An offline run exercises this whole function — the config, the
     // registry, the venue's own adapter, the lowering, the sockets — with
@@ -484,6 +498,10 @@ fn compose_and_run(
     // Taken before the adapter is, because both are fields of the same value
     // and the adapter is about to be moved out of it.
     let venue_collectors = venue.collectors;
+    // `Some` picks the threaded input model. `venue.adapter` is then a handle on
+    // the same object, so the tick, the listings and the snapshots below reach
+    // it exactly as they reach an inline adapter.
+    let threaded = venue.threaded;
     let adapter = Arc::new(Mutex::new(venue.adapter));
     let message_types = {
         let held = adapter.lock().unwrap_or_else(|held| held.into_inner());
@@ -628,7 +646,8 @@ fn compose_and_run(
         None
     };
 
-    let observer = MetricsObserver::new(Arc::clone(&metrics));
+    // Shared, because under the threaded model every connection task holds it.
+    let observer = Arc::new(MetricsObserver::new(Arc::clone(&metrics)));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .enable_io()
@@ -652,119 +671,126 @@ fn compose_and_run(
         publisher.poll_listings(&mut **held);
     }
 
-    let exit = runtime.block_on(async {
-        // One driver per source, which is the shape `Driver` was written for:
-        // the connection, the backoff and the rate limit are per upstream, and
-        // a second source being rate limited must not pace the first. The
-        // clock, the observer and the adapter are shared, and the adapter
-        // through the same lock a single-source publisher already used —
-        // uncontended, because every driver and the tick are futures in one
-        // task on a current-thread runtime and none of them locks across an
-        // await.
-        let mut shared_adapters: Vec<SharedAdapter> = inputs
-            .iter()
-            .map(|_| SharedAdapter::new(Arc::clone(&adapter), message_types.clone()))
-            .collect();
-        let mut sinks: Vec<SharedSink<'_, _, _>> =
-            inputs.iter().map(|_| SharedSink(&publisher)).collect();
-        // Whether a fatal error from this connection ends the process.
-        //
-        // This connection's role decides it, and that is the whole of what a
-        // role decides about a live run — `primary_connection` reads it too,
-        // but only on the replay path above, and the credential rule reads it
-        // at load, where nothing is running yet.
-        // `Driver::run` returns only on `IngressError::Fatal`, which any
-        // non-retryable connect, send or receive operation can report: a
-        // per-connection configuration fault found at connect most of all, an
-        // invalid endpoint, a missing credential path or an unsupported scheme,
-        // and equally a message the transport cannot carry at all. A
-        // `comparison` connection answers `false`, because everything it
-        // carries arrives on the primary too — so a mistyped URL on a
-        // connection that by design must not reach the wire cannot take the
-        // healthy primary down, and cannot keep it down across restarts with a
-        // fault that lives in the file. A `primary` and an `upstream-partition`
-        // answer `true`: the instruments an upstream partition carries arrive
-        // on no other connection, so carrying on without it would serve that
-        // subset stale.
-        //
-        // A document that declares no upstream connections has one implicit
-        // connection and no role to read, so every input ends the process and
-        // the behaviour is exactly what a single-connection publisher has
-        // always had. An input the document does not name cannot happen —
-        // `check_sources` holds the two sets equal before this — and if it ever
-        // did, ending the process is the answer that does not silently keep a
-        // publisher running past a fault.
-        let mut drivers: Vec<(&'static str, bool, Driver<'_>)> = inputs
-            .iter_mut()
-            .zip(shared_adapters.iter_mut())
-            .map(|(input, shared)| {
-                let connection = input.connection();
-                (
-                    connection.as_str(),
-                    fatal_ends_the_process(&config.sources, connection),
-                    Driver::new(&mut **input, shared, &clock, &observer, config.ingress),
-                )
-            })
-            .collect();
-        // Not `dz_ingress_core::BoxFuture`, which is `Send`: none of these are.
-        // They reach the publisher through the `RefCell` this whole module is
-        // built around, which is sound precisely because everything stays in
-        // one task on a current-thread runtime.
-        type Run<'a> =
-            std::pin::Pin<Box<dyn std::future::Future<Output = (&'static str, IngressError)> + 'a>>;
-        let mut runs: Vec<(bool, Run<'_>)> = drivers
-            .iter_mut()
-            .zip(sinks.iter_mut())
-            .map(|((name, ends_the_process, driver), sink)| {
-                let name = *name;
-                (
-                    *ends_the_process,
-                    Box::pin(async move { (name, driver.run(sink).await) }) as Run<'_>,
-                )
-            })
-            .collect();
+    let exit = if let Some(shared) = &threaded {
+        crate::threaded::run(
+            &runtime, &publisher, &adapter, shared, inputs, &clock, &observer, &config, &metrics,
+        )?
+    } else {
+        runtime.block_on(async {
+            // One driver per source, which is the shape `Driver` was written for:
+            // the connection, the backoff and the rate limit are per upstream, and
+            // a second source being rate limited must not pace the first. The
+            // clock, the observer and the adapter are shared, and the adapter
+            // through the same lock a single-source publisher already used —
+            // uncontended, because every driver and the tick are futures in one
+            // task on a current-thread runtime and none of them locks across an
+            // await.
+            let mut shared_adapters: Vec<SharedAdapter> = inputs
+                .iter()
+                .map(|_| SharedAdapter::new(Arc::clone(&adapter), message_types.clone()))
+                .collect();
+            let mut sinks: Vec<SharedSink<'_, _, _>> =
+                inputs.iter().map(|_| SharedSink(&publisher)).collect();
+            // Whether a fatal error from this connection ends the process.
+            //
+            // This connection's role decides it, and that is the whole of what a
+            // role decides about a live run — `primary_connection` reads it too,
+            // but only on the replay path above, and the credential rule reads it
+            // at load, where nothing is running yet.
+            // `Driver::run` returns only on `IngressError::Fatal`, which any
+            // non-retryable connect, send or receive operation can report: a
+            // per-connection configuration fault found at connect most of all, an
+            // invalid endpoint, a missing credential path or an unsupported scheme,
+            // and equally a message the transport cannot carry at all. A
+            // `comparison` connection answers `false`, because everything it
+            // carries arrives on the primary too — so a mistyped URL on a
+            // connection that by design must not reach the wire cannot take the
+            // healthy primary down, and cannot keep it down across restarts with a
+            // fault that lives in the file. A `primary` and an `upstream-partition`
+            // answer `true`: the instruments an upstream partition carries arrive
+            // on no other connection, so carrying on without it would serve that
+            // subset stale.
+            //
+            // A document that declares no upstream connections has one implicit
+            // connection and no role to read, so every input ends the process and
+            // the behaviour is exactly what a single-connection publisher has
+            // always had. An input the document does not name cannot happen —
+            // `check_sources` holds the two sets equal before this — and if it ever
+            // did, ending the process is the answer that does not silently keep a
+            // publisher running past a fault.
+            let mut drivers: Vec<(&'static str, bool, Driver<'_>)> = inputs
+                .iter_mut()
+                .zip(shared_adapters.iter_mut())
+                .map(|(input, shared)| {
+                    let connection = input.connection();
+                    (
+                        connection.as_str(),
+                        fatal_ends_the_process(&config.sources, connection),
+                        Driver::new(&mut **input, shared, &clock, &*observer, config.ingress),
+                    )
+                })
+                .collect();
+            // Not `dz_ingress_core::BoxFuture`, which is `Send`: none of these are.
+            // They reach the publisher through the `RefCell` this whole module is
+            // built around, which is sound precisely because everything stays in
+            // one task on a current-thread runtime.
+            type Run<'a> = std::pin::Pin<
+                Box<dyn std::future::Future<Output = (&'static str, IngressError)> + 'a>,
+            >;
+            let mut runs: Vec<(bool, Run<'_>)> = drivers
+                .iter_mut()
+                .zip(sinks.iter_mut())
+                .map(|((name, ends_the_process, driver), sink)| {
+                    let name = *name;
+                    (
+                        *ends_the_process,
+                        Box::pin(async move { (name, driver.run(sink).await) }) as Run<'_>,
+                    )
+                })
+                .collect();
 
-        // The first driver **whose failure is fatal** to give up ends the
-        // process, and it is named. There is no `select!` over a count decided
-        // at runtime, and no task per connection either: the composed publisher
-        // is deliberately not `Send`, so polling them in turn from one future
-        // is what keeps every borrow in this task. Each returns `Pending`
-        // having registered its own waker, so this parks rather than spins.
-        //
-        // A driver whose failure is not fatal — a `comparison` connection's —
-        // is **dropped from the set and named**, and the publisher carries on.
-        // `Driver::run` returns only on a fatal error, so such a driver is
-        // permanently done and polling it again would panic; leaving it out is
-        // also what leaves its `connection_state` at 0, which is the alert for
-        // a connection that never came up. What the published set depends on is
-        // the primary and every upstream partition, and those are what the wire
-        // feels the failure of.
-        let first_to_give_up = std::future::poll_fn(|cx| {
-            poll_first_fatal_run_to_give_up(&mut runs, cx, |connection, error| {
-                // Named here rather than counted into a new family: the series
-                // that says this happened already exists and is already
-                // alerted on, and what a log adds is the reason.
-                eprintln!(
-                    "`{connection}` gave up. It is neither the primary nor an upstream \
+            // The first driver **whose failure is fatal** to give up ends the
+            // process, and it is named. There is no `select!` over a count decided
+            // at runtime, and no task per connection either: the composed publisher
+            // is deliberately not `Send`, so polling them in turn from one future
+            // is what keeps every borrow in this task. Each returns `Pending`
+            // having registered its own waker, so this parks rather than spins.
+            //
+            // A driver whose failure is not fatal — a `comparison` connection's —
+            // is **dropped from the set and named**, and the publisher carries on.
+            // `Driver::run` returns only on a fatal error, so such a driver is
+            // permanently done and polling it again would panic; leaving it out is
+            // also what leaves its `connection_state` at 0, which is the alert for
+            // a connection that never came up. What the published set depends on is
+            // the primary and every upstream partition, and those are what the wire
+            // feels the failure of.
+            let first_to_give_up = std::future::poll_fn(|cx| {
+                poll_first_fatal_run_to_give_up(&mut runs, cx, |connection, error| {
+                    // Named here rather than counted into a new family: the series
+                    // that says this happened already exists and is already
+                    // alerted on, and what a log adds is the reason.
+                    eprintln!(
+                        "`{connection}` gave up. It is neither the primary nor an upstream \
                      partition, so this publisher carries on without it. Nothing retries it: \
                      its connection_state stays at 0 until this process is restarted, which is \
                      what retries it — and several causes of a fatal error are only fatal for \
                      one attempt, a credential path that does not exist yet most of all. \
                      {error}"
-                );
-            })
-        });
+                    );
+                })
+            });
 
-        tokio::select! {
-            (connection, error) = first_to_give_up => Exit::ConsistencyGuard(
-                Inconsistency::UpstreamUnusable {
-                    detail: format!("`{connection}`: {error}"),
-                },
-            ),
-            exit = tick_loop(&publisher, &adapter, &clock) => exit,
-            () = signalled() => Exit::Signal,
-        }
-    });
+            tokio::select! {
+                (connection, error) = first_to_give_up => Exit::ConsistencyGuard(
+                    Inconsistency::UpstreamUnusable {
+                        detail: format!("`{connection}`: {error}"),
+                    },
+                ),
+                exit = tick_loop(&publisher, &adapter, &clock) => exit,
+                () = signalled() => Exit::Signal,
+            }
+        })
+    };
 
     // The drivers are dropped, so nothing more arrives from upstream: the first
     // step of the teardown is already true when `shut_down` records it.
@@ -1313,20 +1339,54 @@ async fn tick_loop<S: StateStore, K: Clock + Clone>(
     adapter: &Arc<Mutex<Box<dyn Adapter>>>,
     clock: &K,
 ) -> Exit {
-    // A fan-out member is named the first time it is seen to be gone and never
-    // again: the drop is permanent by construction, so a line per tick would be
-    // a line per tick forever. The exit report names the whole set again.
-    let mut named_dropped: Vec<String> = Vec::new();
-    // A member whose route is down is named when it goes down and again when
-    // it comes back, and not in between: it refuses every datagram while it is
-    // down, so anything per datagram or per tick is noise.
-    let mut routes: HashMap<String, RouteState> = HashMap::new();
+    let mut ticker = Ticker::new();
     loop {
         clock.sleep(TICK).await;
+        if let Some(exit) = ticker.tick(publisher, adapter) {
+            return exit;
+        }
+    }
+}
+
+/// One tick body, and what it remembers between ticks.
+///
+/// Its own type so that both input models run the same one: the inline model
+/// from [`tick_loop`], the threaded one between batches.
+pub(crate) struct Ticker {
+    /// A fan-out member is named the first time it is seen to be gone and
+    /// never again: the drop is permanent by construction, so a line per tick
+    /// would be a line per tick forever. The exit report names the whole set
+    /// again.
+    named_dropped: Vec<String>,
+    /// A member whose route is down is named when it goes down and again when
+    /// it comes back, and not in between: it refuses every datagram while it is
+    /// down, so anything per datagram or per tick is noise.
+    routes: HashMap<String, RouteState>,
+}
+
+impl Ticker {
+    pub(crate) fn new() -> Self {
+        Self {
+            named_dropped: Vec::new(),
+            routes: HashMap::new(),
+        }
+    }
+
+    /// Poll listings, serve what is owed, and tick once. `Some` when a guard
+    /// fired.
+    pub(crate) fn tick<S: StateStore, K: Clock + Clone>(
+        &mut self,
+        publisher: &RefCell<Publisher<S, K>>,
+        adapter: &Arc<Mutex<Box<dyn Adapter>>>,
+    ) -> Option<Exit> {
+        let Self {
+            named_dropped,
+            routes,
+        } = self;
         // One synchronous critical section, and nothing awaited inside it. See
         // the module note: a borrow held across an await here is a panic rather
         // than a compile error.
-        let exit = {
+        {
             let mut publisher = publisher.borrow_mut();
             {
                 let mut held = adapter.lock().unwrap_or_else(|held| held.into_inner());
@@ -1402,7 +1462,7 @@ async fn tick_loop<S: StateStore, K: Clock + Clone>(
                     named_dropped.push(name);
                 }
             }
-            for line in route_transitions(&mut routes, &publisher.route_states()) {
+            for line in route_transitions(routes, &publisher.route_states()) {
                 eprintln!("dz-publisher-runtime: {line}");
             }
             let exit = publisher.tick();
@@ -1420,9 +1480,6 @@ async fn tick_loop<S: StateStore, K: Clock + Clone>(
                 );
             }
             exit
-        };
-        if let Some(exit) = exit {
-            return exit;
         }
     }
 }
@@ -1461,7 +1518,7 @@ fn report_snapshot_refusal<S: StateStore, K: Clock + Clone>(
 
 /// Wait for `SIGTERM` or `SIGINT`.
 #[cfg(unix)]
-async fn signalled() {
+pub(crate) async fn signalled() {
     use tokio::signal::unix::{signal, SignalKind};
     // A handler that cannot be installed is not a reason to refuse to publish:
     // the process is still killable, and the cost is an abrupt end rather than
@@ -1491,7 +1548,7 @@ async fn signalled() {
 }
 
 #[cfg(not(unix))]
-async fn signalled() {
+pub(crate) async fn signalled() {
     // Nothing to install. The publisher runs until a guard fires.
     std::future::pending().await
 }
@@ -1501,7 +1558,9 @@ async fn signalled() {
 ///
 /// Nothing here awaits, which is what makes the borrow safe; see the module
 /// note.
-struct SharedSink<'a, S: StateStore, K: Clock + Clone>(&'a RefCell<Publisher<S, K>>);
+pub(crate) struct SharedSink<'a, S: StateStore, K: Clock + Clone>(
+    pub(crate) &'a RefCell<Publisher<S, K>>,
+);
 
 /// **Every method, and that is the point of writing them all out.** A wrapper
 /// that forwards some of a trait and defaults the rest compiles, runs, and
@@ -1671,7 +1730,7 @@ impl Adapter for SharedAdapter {
 /// The cost of answering `false` is stated on
 /// [`poll_first_fatal_run_to_give_up`]: that connection is then down until
 /// somebody restarts the process, because nothing else retries a fatal error.
-fn fatal_ends_the_process(sources: &[Source], connection: ConnectionId) -> bool {
+pub(crate) fn fatal_ends_the_process(sources: &[Source], connection: ConnectionId) -> bool {
     sources.is_empty()
         || sources
             .iter()
@@ -1709,7 +1768,7 @@ fn fatal_ends_the_process(sources: &[Source], connection: ConnectionId) -> bool 
 /// drives, answered by [`fatal_ends_the_process`]. Nothing here reads a role:
 /// what this needs is that one answer per run, and taking it as a `bool` is
 /// what lets the mechanism be exercised without a transport.
-fn poll_first_fatal_run_to_give_up<F, E>(
+pub(crate) fn poll_first_fatal_run_to_give_up<F, E>(
     runs: &mut Vec<(bool, F)>,
     cx: &mut std::task::Context<'_>,
     mut report: impl FnMut(&'static str, &E),
@@ -2638,6 +2697,33 @@ mod tests {
             "an accepted collector is not a refusal, and the next step is the state \
              directory: {error}"
         );
+    }
+
+    /// `[ingress] decode_threads` sizes threads only a threaded venue has, so
+    /// an inline venue's document that states it is refused by name — before
+    /// anything is opened — rather than read past.
+    #[test]
+    fn a_worker_count_for_an_inline_venue_is_refused() {
+        let state_dir = state_dir_that_cannot_be_created("decode-threads");
+        let text = document(&state_dir).replace(
+            "connect_timeout = \"5s\"\n",
+            "connect_timeout = \"5s\"\ndecode_threads = 2\n",
+        );
+        let config = crate::config::Document::parse(&text)
+            .expect("the document is valid")
+            .resolve()
+            .expect("and it resolves");
+        assert_eq!(
+            config.decode_threads.map(std::num::NonZeroUsize::get),
+            Some(2)
+        );
+        let error = compose_and_run(RUNTIME_VERSION, &AdapterRegistry::new(), config)
+            .expect_err("an inline venue has no decode threads");
+        assert!(
+            matches!(error, StartupError::DecodeThreadsInline { threads: 2 }),
+            "{error}"
+        );
+        assert!(error.to_string().contains("decode_threads"), "{error}");
     }
 
     #[test]
