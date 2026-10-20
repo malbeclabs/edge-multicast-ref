@@ -608,6 +608,12 @@ impl Drain {
     ) -> usize {
         let until = tokio::time::Instant::now() + deadline;
         loop {
+            // Checked before each batch, and not left to the timeout: a timeout
+            // polls what it wraps first, so a queue that stays ready would
+            // keep publishing past the deadline.
+            if tokio::time::Instant::now() >= until {
+                return self.queue.len() + held.len();
+            }
             match tokio::time::timeout_at(until, self.recv()).await {
                 Ok(0) => break,
                 Ok(_) => self.apply(adapter, out),

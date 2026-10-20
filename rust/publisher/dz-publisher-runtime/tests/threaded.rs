@@ -883,3 +883,33 @@ fn a_connection_ending_mid_session_hands_its_held_events_to_the_loop_in_order() 
         "the held trade was lost when the connection ended"
     );
 }
+
+#[test]
+fn a_drain_past_its_deadline_stops_taking_queued_batches_and_counts_them() {
+    // Only queued events, several batches of them, and a deadline already
+    // passed: the drain must not keep publishing ready batches past it, and
+    // what it leaves is counted.
+    let bench = Bench::new();
+    let events = 3 * threaded::BATCH;
+    let payloads: Vec<String> = (1..=events).map(|id| format!("t:1:{id}")).collect();
+    let payloads: Vec<&str> = payloads.iter().map(String::as_str).collect();
+    let (script, progress) = Script::new("a", &payloads);
+    let (mut connections, mut drain) = bench.spawn(vec![script], threaded::QUEUE_DEPTH);
+    let mut out = Applied::default();
+    let unpublished = bench.publisher_loop.block_on(async {
+        until("every trade queued", || {
+            progress.exhausted.load(Ordering::SeqCst) && drain.queued() == events
+        })
+        .await;
+        let held = connections.stop().await;
+        assert!(held.is_empty());
+        drain
+            .finish(held, &bench.adapter, &mut out, Duration::ZERO)
+            .await
+    });
+    assert_eq!(
+        unpublished, events,
+        "a ready batch was published past the deadline"
+    );
+    assert!(out.events.is_empty());
+}
