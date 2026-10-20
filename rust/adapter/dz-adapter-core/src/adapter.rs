@@ -48,7 +48,14 @@ pub trait Adapter: Send {
     ///
     /// One answer for the adapter rather than one per event, because
     /// [`Event`](crate::Event) carries one `source_ts_ns` field and a venue
-    /// reads it out of the same place in every payload. The value is a metric
+    /// reads it out of the same place in every payload.
+    ///
+    /// **Declare a kind even when only some events carry a stamp.** A venue
+    /// that stamps some of its message types and not others is ordinary: the
+    /// adapter declares the clock the stamped ones were read from, and leaves
+    /// `source_ts_ns` at 0 on the rest. 0 is the value for "not available", and
+    /// the runtime does not observe `venue_to_recv` for an event carrying it;
+    /// everything else about that event is measured as usual. The value is a metric
     /// label: it is the `timestamp_kind` of
     /// `dz_publisher_venue_to_recv_latency_seconds`, whose other half is the
     /// payload's own receive stamp — see

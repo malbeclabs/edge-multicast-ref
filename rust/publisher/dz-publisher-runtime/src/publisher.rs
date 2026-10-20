@@ -1828,6 +1828,13 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
 /// `venue_to_recv` needs a kind to label the observation with, so an
 /// adapter that reads a venue clock and does not declare which one leaves
 /// it unobserved rather than mislabelled.
+///
+/// **A `source_ts_ns` of 0 is the value for "not available", and is not
+/// observed.** A venue may stamp some of its message types and not others, and
+/// an adapter for one declares its kind and leaves the unstamped events at 0.
+/// Differenced against a receive stamp, 0 is fifty-odd years of latency in the
+/// top bucket, so the event is skipped for `venue_to_recv` alone:
+/// `recv_to_send` needs no venue clock and is observed for it as for any other.
 fn observe_arrival_latency(
     metrics: &PublisherMetrics,
     venue_timestamp_kind: Option<TimestampKind>,
@@ -1839,7 +1846,9 @@ fn observe_arrival_latency(
     // observation and not a negative duration. Zero is the honest floor.
     latency.observe_recv_to_send(kind, seconds(sent_unix_ns.saturating_sub(recv_ts_ns)));
     if let Some(kind) = venue_timestamp_kind {
-        latency.observe_venue_to_recv(kind, seconds(recv_ts_ns.saturating_sub(source_ts_ns)));
+        if source_ts_ns != 0 {
+            latency.observe_venue_to_recv(kind, seconds(recv_ts_ns.saturating_sub(source_ts_ns)));
+        }
     }
 }
 
