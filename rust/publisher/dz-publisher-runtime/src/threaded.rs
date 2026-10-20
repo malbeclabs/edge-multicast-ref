@@ -400,6 +400,35 @@ impl Future for Joined {
 pub struct Connections {
     runs: Vec<(bool, Joined)>,
     aborts: Vec<tokio::task::AbortHandle>,
+    /// Each connection's held events, shared with its task so that they
+    /// outlive it: stopping a connection must not destroy what it decoded and
+    /// could not yet queue.
+    held: Vec<Arc<Mutex<VecDeque<Decoded>>>>,
+}
+
+/// What the connections had decoded and could not queue when they stopped,
+/// one run per connection, each in the order it was pushed.
+///
+/// Handed from [`Connections::stop`] to [`Drain::finish`], which publishes it
+/// after everything already queued: a connection's events reach its held run
+/// only once the queue is full, so its queued events come first.
+#[derive(Debug, Default)]
+pub struct Held {
+    per_connection: Vec<VecDeque<Decoded>>,
+}
+
+impl Held {
+    /// How many events are held, across every connection.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.per_connection.iter().map(VecDeque::len).sum()
+    }
+
+    /// Whether nothing is held.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 impl Connections {
@@ -416,13 +445,17 @@ impl Connections {
         })
     }
 
-    /// Stop every connection and wait until each has.
+    /// Stop every connection, wait until each has, and hand back what each had
+    /// decoded and not yet queued.
     ///
     /// Through the path the inline model's drivers end by: the driver's
     /// future is dropped where it stands, and with it the connection's
-    /// transport and its hold on the queue. So once this returns, nothing more
-    /// can arrive, and draining the queue to empty is draining it to the end.
-    pub async fn stop(&mut self) {
+    /// transport and its hold on the queue. A connection stops only at an
+    /// await, never inside a decode, so every payload it read is decoded and
+    /// its events are on the queue or in [`Held`]. Once this returns nothing
+    /// more can arrive: the queue closes when it is empty, and the held runs
+    /// are all that is left.
+    pub async fn stop(&mut self) -> Held {
         for abort in &self.aborts {
             abort.abort();
         }
@@ -434,6 +467,13 @@ impl Connections {
                     }
                 }
             }
+        }
+        Held {
+            per_connection: self
+                .held
+                .iter()
+                .map(|held| std::mem::take(&mut *lock(held)))
+                .collect(),
         }
     }
 }
@@ -536,26 +576,43 @@ impl Drain {
         out.drained();
     }
 
-    /// Apply everything still queued, until every connection's hold on the
-    /// queue is gone and it is empty, or `deadline` passes. `true` when it
-    /// drained to the end.
+    /// Publish everything the connections decoded: what is queued, until the
+    /// queue is closed and empty, and then what [`Connections::stop`] found
+    /// held, connection by connection, in the order each pushed it. Applied in
+    /// batches of [`BATCH`], through the dedupe, exactly as a running loop
+    /// applies them. Returns how many events `deadline` left unpublished: `0`
+    /// is everything.
     ///
-    /// For shutdown, after [`Connections::stop`]: what was received before the
-    /// signal is published before the teardown runs.
+    /// For shutdown: what was received before the signal is published before
+    /// the teardown runs, and what the deadline cuts off is counted rather
+    /// than dropped without a word.
     pub async fn finish(
         &mut self,
+        mut held: Held,
         adapter: &SharedThreadedAdapter,
         out: &mut dyn EventSink,
         deadline: Duration,
-    ) -> bool {
+    ) -> usize {
         let until = tokio::time::Instant::now() + deadline;
         loop {
             match tokio::time::timeout_at(until, self.recv()).await {
-                Ok(0) => return true,
+                Ok(0) => break,
                 Ok(_) => self.apply(adapter, out),
-                Err(_) => return false,
+                Err(_) => return self.queue.len() + held.len(),
             }
         }
+        for run in &mut held.per_connection {
+            while !run.is_empty() {
+                if tokio::time::Instant::now() >= until {
+                    return held.len();
+                }
+                let take = run.len().min(BATCH);
+                self.batch.extend(run.drain(..take));
+                self.metrics.ingress().batch(take);
+                self.apply(adapter, out);
+            }
+        }
+        0
     }
 }
 
@@ -616,12 +673,14 @@ where
     let message_types = lock(adapter).message_types().to_vec();
     let mut runs = Vec::with_capacity(inputs.len());
     let mut aborts = Vec::with_capacity(inputs.len());
+    let mut held = Vec::with_capacity(inputs.len());
     for (input, ends_the_process) in inputs {
         let connection = input.connection();
         let outbox = Outbox {
             queue: queue.clone(),
             held: Arc::new(Mutex::new(VecDeque::new())),
         };
+        held.push(Arc::clone(&outbox.held));
         let decoder = lock(adapter).decoder(connection, claims.clone());
         let mut delegate = ConnectionAdapter {
             shared: Arc::clone(adapter),
@@ -648,7 +707,7 @@ where
         runs.push((ends_the_process, Joined(Some(handle))));
     }
     (
-        Connections { runs, aborts },
+        Connections { runs, aborts, held },
         Drain {
             queue: receiver,
             batch: Vec::with_capacity(BATCH),
@@ -762,17 +821,17 @@ pub(crate) fn run<S: StateStore, K: Clock + Clone + 'static>(
             }
         };
         // The connections stop first, so nothing more arrives; then what they
-        // had queued is published; then the teardown, as the inline model's.
-        connections.stop().await;
-        if !drain
-            .finish(shared, &mut SharedSink(publisher), DRAIN_DEADLINE)
-            .await
-        {
+        // had queued, and what they held behind a full queue, is published;
+        // then the teardown, as the inline model's.
+        let held = connections.stop().await;
+        let unpublished = drain
+            .finish(held, shared, &mut SharedSink(publisher), DRAIN_DEADLINE)
+            .await;
+        if unpublished > 0 {
             eprintln!(
-                "dz-publisher-runtime: {} decoded event(s) were still queued after {:?}, and \
-                 are not published",
-                drain.queued(),
-                DRAIN_DEADLINE
+                "dz-publisher-runtime: shutdown drain deadline: {unpublished} decoded event(s) \
+                 were still queued or held on their connections after {DRAIN_DEADLINE:?}, and \
+                 are not published"
             );
         }
         exit

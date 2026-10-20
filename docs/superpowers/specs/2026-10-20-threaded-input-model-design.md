@@ -211,10 +211,15 @@ instrument, `Supersedes` makes the applied series increasing. `Identity` and
 
 ### 3h. Shutdown
 
-Signal, then each connection task stops through the Driver's existing path
-(`Input::shutdown`, `on_disconnected`). Senders drop. The loop drains what is
-queued, applies it, and the publisher's ordered teardown runs as today,
-`EndOfSession` last. A drain deadline bounds it.
+Signal, then each connection task stops (see §6 for how). Senders drop. **No
+decoded event is lost.** A connection stops only at an await, never inside a
+decode, so everything it read is on the queue or held behind a full one, and
+the held events outlive its task. The loop publishes the queue to its end, then
+each connection's held events in the order it pushed them. A connection's
+queued events always precede its held ones, so per-connection order holds. The
+publisher's ordered teardown then runs as today, `EndOfSession` last. A drain
+deadline of one second bounds it. Whatever the deadline cuts off is counted and
+named in a log line at shutdown, never dropped without a word.
 
 ### 3i. Packing: a batch leaves in as few datagrams as fit it, and at once
 
@@ -310,6 +315,7 @@ departed from the sketch.
   `Driver` has no orderly stop: it returns only on a fatal error, and the
   inline model ends by dropping its futures. The threaded model does the
   same, aborting each connection task. The transport and the queue sender are
-  then dropped, and no `on_disconnected` is called at shutdown, as before. The
-  loop then drains the queue, bounded by one second, before the ordered
-  teardown.
+  then dropped, and no `on_disconnected` is called at shutdown, as before.
+  What a connection held behind a full queue is kept past its task and
+  published after the queue, within the same one-second bound, before the
+  ordered teardown.

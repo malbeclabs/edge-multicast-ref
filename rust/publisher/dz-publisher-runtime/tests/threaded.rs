@@ -333,11 +333,12 @@ fn run_to_the_end(bench: &Bench, scripts: Vec<Script>, progress: Vec<Progress>) 
                 .all(|progress| progress.exhausted.load(Ordering::SeqCst))
         })
         .await;
-        connections.stop().await;
-        assert!(
+        let held = connections.stop().await;
+        assert_eq!(
             drain
-                .finish(&bench.adapter, &mut out, Duration::from_secs(5))
-                .await
+                .finish(held, &bench.adapter, &mut out, Duration::from_secs(5))
+                .await,
+            0
         );
     });
     out
@@ -532,11 +533,13 @@ fn shutdown_applies_what_was_queued_before_the_teardown() {
         })
         .await;
         assert!(out.events.is_empty(), "nothing has been applied yet");
-        connections.stop().await;
-        assert!(
+        let held = connections.stop().await;
+        assert!(held.is_empty(), "nothing waited behind a queue with room");
+        assert_eq!(
             drain
-                .finish(&bench.adapter, &mut out, threaded::DRAIN_DEADLINE)
+                .finish(held, &bench.adapter, &mut out, threaded::DRAIN_DEADLINE)
                 .await,
+            0,
             "the queue did not drain to its end"
         );
     });
@@ -647,5 +650,71 @@ fn the_batch_size_histogram_tops_out_at_the_batch_bound() {
     assert_eq!(
         dz_publisher_metrics::INGRESS_BATCH_SIZE_BUCKETS.last(),
         Some(&(threaded::BATCH as f64))
+    );
+}
+
+#[test]
+fn shutdown_with_a_full_queue_publishes_the_held_overflow_too() {
+    // A queue of four and five trades: four queued, the fifth held on the
+    // connection behind them, waiting for room. Shutdown must publish all
+    // five, the held one last, rather than drop what never reached the queue.
+    let bench = Bench::new();
+    let payloads: Vec<String> = (1..=5).map(|id| format!("t:1:{id}")).collect();
+    let payloads: Vec<&str> = payloads.iter().map(String::as_str).collect();
+    let (script, progress) = Script::new("a", &payloads);
+    let (mut connections, mut drain) = bench.spawn(vec![script], 4);
+    let mut out = Applied::default();
+    bench.publisher_loop.block_on(async {
+        until("four queued and the fifth read", || {
+            drain.queued() == 4 && progress.delivered.load(Ordering::SeqCst) == 5
+        })
+        .await;
+        let held = connections.stop().await;
+        assert_eq!(held.len(), 1, "the fifth waited behind the full queue");
+        assert_eq!(
+            drain
+                .finish(held, &bench.adapter, &mut out, threaded::DRAIN_DEADLINE)
+                .await,
+            0,
+            "the drain reported everything published"
+        );
+    });
+    let ids: Vec<u64> = out.events.iter().map(|event| key(event).2).collect();
+    assert_eq!(
+        ids,
+        [1, 2, 3, 4, 5],
+        "an event held on the connection was lost"
+    );
+}
+
+#[test]
+fn a_drain_cut_off_by_its_deadline_counts_what_it_left() {
+    // The same full queue and held fifth, with no time to publish anything
+    // beyond what is already in hand: what the deadline leaves is returned as
+    // a count for the caller to name, never dropped silently.
+    let bench = Bench::new();
+    let payloads: Vec<String> = (1..=5).map(|id| format!("t:1:{id}")).collect();
+    let payloads: Vec<&str> = payloads.iter().map(String::as_str).collect();
+    let (script, progress) = Script::new("a", &payloads);
+    let (mut connections, mut drain) = bench.spawn(vec![script], 4);
+    let mut out = Applied::default();
+    let unpublished = bench.publisher_loop.block_on(async {
+        until("four queued and the fifth read", || {
+            drain.queued() == 4 && progress.delivered.load(Ordering::SeqCst) == 5
+        })
+        .await;
+        let held = connections.stop().await;
+        drain
+            .finish(held, &bench.adapter, &mut out, Duration::ZERO)
+            .await
+    });
+    assert_eq!(
+        out.events.len() + unpublished,
+        5,
+        "every event is published or counted"
+    );
+    assert!(
+        unpublished > 0,
+        "a zero deadline leaves the held event unpublished, and says so"
     );
 }
