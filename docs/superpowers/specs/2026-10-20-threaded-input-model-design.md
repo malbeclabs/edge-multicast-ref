@@ -301,7 +301,10 @@ departed from the sketch.
 - **Backpressure is a wait before the next read.** `decode` is synchronous and
   cannot await, so the events the queue could not take are held, in order, and
   the connection's transport waits for them to be queued before its next
-  receive or connect.
+  receive or connect, and when it shuts down. The driver shuts a transport down
+  on every ending, so a connection that ends mid-session, on a fatal send the
+  publisher carries on past, still hands its held events to the loop, after
+  its queued ones.
 - **A refused `push`** drops the event and counts the payload under
   `dz_publisher_ingress_parse_errors_total{reason="schema"}`.
 - **Composition.** `Venue` gains `threaded: Option<SharedThreadedAdapter>`,

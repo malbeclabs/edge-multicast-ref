@@ -219,8 +219,21 @@ impl Input for QueuedInput {
         })
     }
 
+    /// Release the transport, then wait until everything this connection
+    /// held is on the queue.
+    ///
+    /// The driver calls this on every ending — a reconnect, and the fatal one
+    /// that ends the driver mid-session, for a connection the publisher
+    /// carries on without. Held events would otherwise wait for the next
+    /// receive that never comes, and be dropped with the task. The transport
+    /// goes first, so the peer is not kept waiting on a queue it cannot see;
+    /// the wait is the backpressure every receive already applies.
     fn shutdown(&mut self) -> BoxFuture<'_, ()> {
-        self.inner.shutdown()
+        let Self { inner, outbox } = self;
+        Box::pin(async move {
+            inner.shutdown().await;
+            outbox.flush().await;
+        })
     }
 }
 

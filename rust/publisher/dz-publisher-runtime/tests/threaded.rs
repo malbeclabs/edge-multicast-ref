@@ -718,3 +718,168 @@ fn a_drain_cut_off_by_its_deadline_counts_what_it_left() {
         "a zero deadline leaves the held event unpublished, and says so"
     );
 }
+
+/// A clock whose steady reading jumps ten seconds every time it is read, so
+/// every receive is followed by the driver's upstream poll.
+struct Jumping {
+    steady_ns: std::sync::atomic::AtomicU64,
+}
+
+impl dz_ingress_core::Clock for Jumping {
+    fn wall_ns(&self) -> u64 {
+        dz_ingress_core::Clock::wall_ns(&SystemClock::new())
+    }
+
+    fn steady_ns(&self) -> u64 {
+        self.steady_ns.fetch_add(10_000_000_000, Ordering::SeqCst)
+    }
+
+    fn sleep(&self, duration: Duration) -> BoxFuture<'_, ()> {
+        Box::pin(tokio::time::sleep(duration))
+    }
+}
+
+/// The fixture, writing upstream every time it is asked.
+#[derive(Default)]
+struct Polling(Fixture);
+
+impl ThreadedAdapter for Polling {
+    fn decoder(&self, conn: ConnectionId, claims: ClaimTable) -> Box<dyn Decoder> {
+        self.0.decoder(conn, claims)
+    }
+}
+
+impl Adapter for Polling {
+    fn message_types(&self) -> &[&'static str] {
+        self.0.message_types()
+    }
+
+    fn poll_listings(&mut self, out: &mut dyn ListingSink) {
+        self.0.poll_listings(out);
+    }
+
+    fn poll_upstream(
+        &mut self,
+        _conn: ConnectionId,
+        out: &mut dyn dz_adapter_core::UpstreamSink,
+    ) -> Result<(), dz_adapter_core::AdapterError> {
+        out.send_text("outstanding");
+        Ok(())
+    }
+
+    fn on_payload(
+        &mut self,
+        payload: &Payload<'_>,
+        out: &mut dyn EventSink,
+    ) -> Result<(), ParseError> {
+        self.0.on_payload(payload, out)
+    }
+}
+
+/// Two payloads, then nothing; the second upstream send is fatal.
+struct FatalSecondSend {
+    payloads: VecDeque<Vec<u8>>,
+    current: Vec<u8>,
+    sends: usize,
+    shut: Arc<AtomicBool>,
+}
+
+impl Input for FatalSecondSend {
+    fn connection(&self) -> ConnectionId {
+        ConnectionId::new("a")
+    }
+
+    fn connect(&mut self, _timeout: Duration) -> BoxFuture<'_, Result<(), IngressError>> {
+        Box::pin(std::future::ready(Ok(())))
+    }
+
+    fn send<'a>(
+        &'a mut self,
+        _message: UpstreamMessage<'a>,
+    ) -> BoxFuture<'a, Result<(), IngressError>> {
+        self.sends += 1;
+        let result = if self.sends < 2 {
+            Ok(())
+        } else {
+            Err(IngressError::fatal("the transport cannot carry it"))
+        };
+        Box::pin(std::future::ready(result))
+    }
+
+    fn recv<'a>(
+        &'a mut self,
+        _budget: Option<Duration>,
+    ) -> BoxFuture<'a, Result<Received<'a>, IngressError>> {
+        Box::pin(async move {
+            match self.payloads.pop_front() {
+                Some(payload) => {
+                    self.current = payload;
+                    Ok(Received::Payload {
+                        bytes: &self.current,
+                        ts_ns: None,
+                    })
+                }
+                None => std::future::pending().await,
+            }
+        })
+    }
+
+    fn shutdown(&mut self) -> BoxFuture<'_, ()> {
+        self.shut.store(true, Ordering::SeqCst);
+        Box::pin(std::future::ready(()))
+    }
+}
+
+#[test]
+fn a_connection_ending_mid_session_hands_its_held_events_to_the_loop_in_order() {
+    // A queue of one. The first trade is queued; the second, decoded while the
+    // queue is full, is held; the upstream poll after it fails fatally and the
+    // connection ends while the publisher carries on. Its held trade must
+    // still reach the loop, after the queued one.
+    let bench = Bench::new();
+    let shut = Arc::new(AtomicBool::new(false));
+    let input = FatalSecondSend {
+        payloads: ["t:1:1", "t:1:2"]
+            .iter()
+            .map(|p| p.as_bytes().to_vec())
+            .collect(),
+        current: Vec::new(),
+        sends: 0,
+        shut: Arc::clone(&shut),
+    };
+    let adapter: SharedThreadedAdapter = Arc::new(Mutex::new(Box::new(Polling::default())));
+    let (_connections, mut drain) = {
+        let _entered = bench.publisher_loop.enter();
+        threaded::spawn(
+            bench.workers.handle(),
+            vec![(Box::new(input) as Box<dyn Input>, false)],
+            &adapter,
+            Arc::new(Jumping {
+                steady_ns: std::sync::atomic::AtomicU64::new(0),
+            }),
+            Arc::new(MetricsObserver::new(Arc::clone(&bench.metrics))),
+            policy(),
+            Arc::clone(&bench.metrics),
+            1,
+        )
+    };
+    let mut out = Applied::default();
+    bench.publisher_loop.block_on(async {
+        until("the connection ended", || shut.load(Ordering::SeqCst)).await;
+        // Drain until every connection's hold on the queue is gone.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match tokio::time::timeout_at(deadline, drain.recv()).await {
+                Ok(0) => break,
+                Ok(_) => drain.apply(&adapter, &mut out),
+                Err(_) => panic!("the connection never let go of the queue"),
+            }
+        }
+    });
+    let ids: Vec<u64> = out.events.iter().map(|event| key(event).2).collect();
+    assert_eq!(
+        ids,
+        [1, 2],
+        "the held trade was lost when the connection ended"
+    );
+}
