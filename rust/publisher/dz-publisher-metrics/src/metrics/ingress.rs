@@ -11,6 +11,7 @@ pub struct IngressMetrics {
     messages_total: IntCounterVec,
     bytes_total: IntCounter,
     duplicates_total: IntCounter,
+    late_identities_total: IntCounter,
     parse_errors_total: IntCounterVec,
     connection_state: IntGaugeVec,
     reconnects_total: IntCounterVec,
@@ -91,6 +92,22 @@ impl IngressMetrics {
         .expect("static metric definition");
         registry
             .register(Box::new(duplicates_total.clone()))
+            .expect("static metric registration");
+
+        let late_identities_total = IntCounter::with_opts(opts(
+            "dz_publisher_ingress_late_identities_total",
+            "Point events dropped as late: their identity, such as a trade ID, fell below the \
+             bottom of their instrument's dedupe window, so it could no longer be told from a \
+             copy already published. A proposed addition to the normative set, not yet in the \
+             governing playbook. Dropped rather than published again, because a point event \
+             published twice is double-counted downstream. Above zero, one connection is lagging \
+             another by more than the window on a busy instrument. Always 0 for a publisher that \
+             maps every payload inline.",
+            labels,
+        ))
+        .expect("static metric definition");
+        registry
+            .register(Box::new(late_identities_total.clone()))
             .expect("static metric registration");
 
         let parse_errors_total = IntCounterVec::new(
@@ -267,6 +284,7 @@ impl IngressMetrics {
             messages_total,
             bytes_total,
             duplicates_total,
+            late_identities_total,
             parse_errors_total,
             connection_state,
             reconnects_total,
@@ -312,6 +330,13 @@ impl IngressMetrics {
     /// Records one ingress message discarded as a duplicate.
     pub fn duplicate(&self) {
         self.duplicates_total.inc();
+    }
+
+    /// Records one point event dropped as late, below its instrument's dedupe
+    /// window. Counts the family this crate proposes rather than one the
+    /// playbook carries.
+    pub fn late_identity(&self) {
+        self.late_identities_total.inc();
     }
 
     /// Records one ingress parse error.

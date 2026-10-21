@@ -913,3 +913,27 @@ fn a_drain_past_its_deadline_stops_taking_queued_batches_and_counts_them() {
     );
     assert!(out.events.is_empty());
 }
+
+#[test]
+fn a_trade_copy_later_than_the_identity_window_is_dropped_and_counted_once() {
+    // Trades 1 to 257 on one instrument, then trade 1 again: the window has
+    // let it go, so it is late. It is not published a second time, and it is
+    // counted once. One connection, so the order is the script's.
+    let bench = Bench::new();
+    let window = dz_adapter_core::threaded::IDENTITY_WINDOW as u64;
+    let mut payloads: Vec<String> = (1..=window + 1).map(|id| format!("t:1:{id}")).collect();
+    payloads.push("t:1:1".to_string());
+    let payloads: Vec<&str> = payloads.iter().map(String::as_str).collect();
+    let (script, progress) = Script::new("a", &payloads);
+    let out = run_to_the_end(&bench, vec![script], vec![progress]);
+    assert_eq!(
+        out.events.len() as u64,
+        window + 1,
+        "a late copy was published again"
+    );
+    assert_eq!(
+        bench.rendered("dz_publisher_ingress_late_identities_total"),
+        1.0
+    );
+    assert_eq!(bench.rendered("dz_publisher_ingress_duplicates_total"), 0.0);
+}

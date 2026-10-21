@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use dz_adapter_core::threaded::{
-    self, carried, ClaimTable, Decoded, DecodedSink, Decoder, Dedupe, Inline, Order,
+    self, carried, Admission, ClaimTable, Decoded, DecodedSink, Decoder, Dedupe, Inline, Order,
     ThreadedAdapter, IDENTITY_WINDOW, MAX_TRACKED_INSTRUMENTS,
 };
 use dz_adapter_core::{
@@ -147,16 +147,31 @@ fn an_identity_key_is_applied_once_inside_its_window() {
 }
 
 #[test]
-fn an_identity_key_older_than_the_window_is_forgotten() {
+fn an_identity_key_evicted_from_the_window_and_seen_again_is_late() {
+    // Once the window has moved past a key, a copy of it is late, as a
+    // trade ID below a consumer's window is: dropped, not applied again.
     let mut dedupe = Dedupe::new();
     let one = instrument(1);
     assert!(dedupe.admit(one, Order::Identity(0)));
     for key in 1..IDENTITY_WINDOW as u64 {
         assert!(dedupe.admit(one, Order::Identity(key)));
     }
-    assert!(!dedupe.admit(one, Order::Identity(0)), "still inside");
+    assert_eq!(
+        dedupe.judge(one, Order::Identity(0)),
+        Admission::Duplicate,
+        "still inside"
+    );
     assert!(dedupe.admit(one, Order::Identity(IDENTITY_WINDOW as u64)));
-    assert!(dedupe.admit(one, Order::Identity(0)), "pushed out");
+    assert_eq!(
+        dedupe.judge(one, Order::Identity(0)),
+        Admission::Late,
+        "pushed out, and not applied again"
+    );
+    // And a key above everything evicted is still new.
+    assert_eq!(
+        dedupe.judge(one, Order::Identity(IDENTITY_WINDOW as u64 + 1)),
+        Admission::Applied
+    );
 }
 
 #[test]

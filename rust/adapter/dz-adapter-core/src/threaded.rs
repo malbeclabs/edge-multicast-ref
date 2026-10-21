@@ -261,10 +261,13 @@ pub enum Order {
     Supersedes(u64),
     /// A point event: each key once per instrument, inside a window.
     ///
-    /// The key is the venue's own identity for the event — a trade ID — and is
-    /// not assumed to be ordered. The window is the last [`IDENTITY_WINDOW`]
-    /// keys applied for the instrument, so a copy that arrives after that many
-    /// newer events has been forgotten and is applied again.
+    /// The key is the venue's own identity for the event — a trade ID. The
+    /// window is the last [`IDENTITY_WINDOW`] keys applied for the
+    /// instrument, in any order. A key at or below the highest one the window
+    /// has let go is **late** and dropped, as a consumer drops a trade ID
+    /// below its own window, rather than applied a second time. So the key
+    /// should grow with time: a venue whose identities do not would have a
+    /// new event below that bound dropped as late.
     Identity(u64),
 }
 
@@ -533,7 +536,9 @@ impl CounterGenerations {
 /// to compact on and a set of every trade ever applied grows for the life of
 /// the process. It has to cover the copies still in flight on the slowest
 /// connection: 256 trades on one instrument between the first copy and the
-/// last is a skew no healthy redundant upstream reaches.
+/// last is a skew no healthy redundant upstream reaches. A copy later than
+/// that is dropped as late, [`Admission::Late`], rather than applied again,
+/// and the threaded runtime counts it.
 pub const IDENTITY_WINDOW: usize = 256;
 
 /// The loop stage of dedupe, and the authority.
@@ -554,6 +559,24 @@ struct Window {
     keys: [u64; IDENTITY_WINDOW],
     len: usize,
     next: usize,
+    /// The highest key the window has evicted, so its bottom is above it.
+    evicted: Option<u64>,
+}
+
+/// What the loop stage of dedupe decided for one event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Admission {
+    /// New: apply it.
+    Applied,
+    /// A copy of what was applied, or a `Supersedes` key not above the last
+    /// one applied.
+    Duplicate,
+    /// An [`Order::Identity`] key below the bottom of its instrument's
+    /// window: at or below one the window has already let go. Dropped as
+    /// late rather than applied again, as a consumer's trade window drops an
+    /// ID below its window.
+    Late,
 }
 
 impl Window {
@@ -562,18 +585,31 @@ impl Window {
             keys: [0; IDENTITY_WINDOW],
             len: 0,
             next: 0,
+            evicted: None,
         }
     }
 
     /// Whether `key` is new, remembering it when it is.
-    fn admit(&mut self, key: u64) -> bool {
+    ///
+    /// **Fails closed below the window.** A key at or below the highest one
+    /// evicted is late: the window can no longer tell it from a copy of one
+    /// it applied, and a point event applied twice is worse than a late copy
+    /// dropped, because a subscriber double-counts it.
+    fn admit(&mut self, key: u64) -> Admission {
         if self.keys[..self.len].contains(&key) {
-            return false;
+            return Admission::Duplicate;
+        }
+        if self.evicted.is_some_and(|evicted| key <= evicted) {
+            return Admission::Late;
+        }
+        if self.len == IDENTITY_WINDOW {
+            let leaving = self.keys[self.next];
+            self.evicted = Some(self.evicted.map_or(leaving, |e| e.max(leaving)));
         }
         self.keys[self.next] = key;
         self.next = (self.next + 1) % IDENTITY_WINDOW;
         self.len = (self.len + 1).min(IDENTITY_WINDOW);
-        true
+        Admission::Applied
     }
 }
 
@@ -585,27 +621,32 @@ impl Dedupe {
     }
 
     /// Whether to apply an event for `instrument` under `order`, recording it
-    /// as applied when the answer is `true`. `false` is a duplicate.
+    /// as applied when the answer is `true`. `false` is a duplicate or late.
     ///
     /// [`Order::None`] is always applied. A handle beyond
     /// [`MAX_TRACKED_INSTRUMENTS`] is always applied.
     pub fn admit(&mut self, instrument: InstrumentRef, order: Order) -> bool {
+        self.judge(instrument, order) == Admission::Applied
+    }
+
+    /// [`admit`](Self::admit), saying why an event is not applied.
+    pub fn judge(&mut self, instrument: InstrumentRef, order: Order) -> Admission {
         let index = instrument.index() as usize;
         if index >= MAX_TRACKED_INSTRUMENTS {
-            return true;
+            return Admission::Applied;
         }
         match order {
-            Order::None => true,
+            Order::None => Admission::Applied,
             Order::Supersedes(key) => {
                 if self.applied.len() <= index {
                     self.applied.resize(index + 1, 0);
                 }
                 let stored = key.saturating_add(1);
                 if self.applied[index] >= stored {
-                    return false;
+                    return Admission::Duplicate;
                 }
                 self.applied[index] = stored;
-                true
+                Admission::Applied
             }
             Order::Identity(key) => {
                 if self.seen.len() <= index {

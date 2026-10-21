@@ -55,7 +55,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use dz_adapter_core::threaded::{carried, Dedupe};
+use dz_adapter_core::threaded::{carried, Admission, Dedupe};
 use dz_adapter_core::{
     Adapter, AdapterError, ConnectionId, Decoded, DecodedSink, Decoder, DepthBound, Desync,
     DisconnectReason, Event, EventSink, InstrumentRef, ListingSink, Order, ParseError, Payload,
@@ -573,9 +573,16 @@ impl Drain {
             let Ok(instrument) = carried(&decoded.event) else {
                 continue;
             };
-            if !self.dedupe.admit(instrument, decoded.order) {
-                self.metrics.ingress().duplicate();
-                continue;
+            match self.dedupe.judge(instrument, decoded.order) {
+                Admission::Applied => {}
+                Admission::Late => {
+                    self.metrics.ingress().late_identity();
+                    continue;
+                }
+                _ => {
+                    self.metrics.ingress().duplicate();
+                    continue;
+                }
             }
             if scope != Some(decoded.recv_ts_ns) {
                 scope = Some(decoded.recv_ts_ns);
