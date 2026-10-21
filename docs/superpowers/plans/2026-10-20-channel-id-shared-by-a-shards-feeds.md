@@ -17,8 +17,8 @@ Breaks [the design](../specs/2026-10-20-channel-id-shared-by-a-shards-feeds-desi
 
 ### 1. Pairs, not IDs
 
-- [ ] `Config::channel_ids` and `Feeds::channel_ids` become `channels()`, returning `(feed, Channel ID)` pairs in the document's order, without deduplication. Remove the comments that say the deduplication removes nothing a document can produce.
-- [ ] Every `PublisherMetricsConfig` literal passes the pairs: `run.rs:533`, `threaded.rs:1018`, the loopback example, and the tests that build one (`tests/harness/mod.rs`, `composition.rs`, `ingress_observer.rs`, `threaded.rs`, and the metrics crate's `precreated_at_startup.rs`).
+- [x] `Config::channel_ids` and `Feeds::channel_ids` become `channels()`, returning `(feed, Channel ID)` pairs in the document's order, without deduplication. Remove the comments that say the deduplication removes nothing a document can produce.
+- [x] Every `PublisherMetricsConfig` literal passes the pairs: `run.rs:533`, `threaded.rs:1018`, the loopback example, and the tests that build one (`tests/harness/mod.rs`, `composition.rs`, `ingress_observer.rs`, `threaded.rs`, and the metrics crate's `precreated_at_startup.rs`).
 
 **Test:** a document with two shards' blocks yields one pair per block, in document order. The shared-ID case cannot be stated yet (task 4 accepts it) and is added there.
 
@@ -26,19 +26,19 @@ Breaks [the design](../specs/2026-10-20-channel-id-shared-by-a-shards-feeds-desi
 
 ### 2. The `feed` label
 
-- [ ] `dz-publisher-metrics`:
+- [x] `dz-publisher-metrics`:
   - `PublisherMetricsConfig::channel_ids: &[u8]` becomes `channels: &[(&str, u8)]`;
   - `sequence_current`, `heartbeat_last_sent_timestamp_seconds` and `last_published_timestamp_seconds` gain `feed`, and pre-create per pair;
   - `set_sequence`, `set_heartbeat_last_sent` and `set_last_published` take the feed;
   - the three reference-data gauges keep `channel_id` alone, and pre-create once per distinct ID.
-- [ ] `dz-publisher-egress/src/egress.rs:388-396`: pass `F::NAME`. `publisher.rs:1787`: pass the feed of the pipeline that sent.
-- [ ] `README.md`:
+- [x] `dz-publisher-egress/src/egress.rs:388-396`: pass `F::NAME`. `publisher.rs:1787`: pass the feed of the pipeline that sent.
+- [x] `README.md`:
   - the config section explains the pairs;
   - the label is listed with the proposals;
   - the relative-staleness rule keeps matching on `feed` (`max without(channel_id)` and `ignoring(channel_id)`), and the text says it now compares channels within one feed;
   - the never-published rule joins `dz_publisher_uptime_seconds`, which carries no `feed`, with `ignoring(channel_id, feed)`. `ignoring(channel_id)` alone would leave it matching nothing;
   - a note says that `by (channel_id)` sums the two feeds' sequence series.
-- [ ] `tests/precreated_at_startup.rs`, `tests/normative_names.rs`: the label set.
+- [x] `tests/precreated_at_startup.rs`, `tests/normative_names.rs`: the label set.
 
 **Test** (metrics crate, configured directly with pairs, so it needs no document the runtime accepts yet): given `("top-of-book", 1)` and `("market-by-price", 1)`, the exposition holds two `sequence_current{port_role="mktdata",channel_id="1"}` series, one per feed. Setting one leaves the other at its value. A test evaluates both README rules against an exposition with the label and asserts that each returns a series.
 
@@ -48,14 +48,14 @@ Breaks [the design](../specs/2026-10-20-channel-id-shared-by-a-shards-feeds-desi
 
 ### 3. The recorder's book views key on `feed`
 
-- [ ] `rust/recorder/dz-recorder-clickhouse/db/clickhouse/013_recorder_book_top_feed.sql`, `CREATE OR REPLACE VIEW` only:
+- [x] `rust/recorder/dz-recorder-clickhouse/db/clickhouse/013_recorder_book_top_feed.sql`, `CREATE OR REPLACE VIEW` only:
   - `book_top_occurrence`: `feed` in the window's `PARTITION BY`, after `observation`;
   - `book_top_race`: `feed` first in the select list and in the `GROUP BY`.
 
   No `ALTER`, no table, no grant. `book_top_settled` stays as `010` states it, and it already selects `feed`.
-- [ ] The `013` header says why the views change and the table does not: the rebuild a new sort key needs, the merge the unchanged key leaves exposed, and `state_key`'s value, which may not move. It states the rule for readers: a query over `book_top` or `book_top_settled` about one instrument filters on `feed`.
-- [ ] `src/ddl.rs`: the migration in `migrations()`, which becomes `[Migration; 13]`. It is not in `ACCESS_MANAGEMENT`, so `schema()` applies it.
-- [ ] `dz-recorder-load/README.md`, the `[[market_data]]` section: two named feeds may share a `Channel ID`, as `tob_edge_binance_spot` and `tob_edge_phoenix` do, and a `book_top` reader filters on `feed`.
+- [x] The `013` header says why the views change and the table does not: the rebuild a new sort key needs, the merge the unchanged key leaves exposed, and `state_key`'s value, which may not move. It states the rule for readers: a query over `book_top` or `book_top_settled` about one instrument filters on `feed`.
+- [x] `src/ddl.rs`: the migration in `migrations()`, which becomes `[Migration; 13]`. It is not in `ACCESS_MANAGEMENT`, so `schema()` applies it.
+- [x] `dz-recorder-load/README.md`, the `[[market_data]]` section: two named feeds may share a `Channel ID`, as `tob_edge_binance_spot` and `tob_edge_phoenix` do, and a `book_top` reader filters on `feed`.
 
 **Migration notes:**
 - `CREATE OR REPLACE VIEW` is idempotent. Applying `013` twice, or during a rolling upgrade, leaves the same two views. A view holds no rows, so nothing is rewritten or backfilled.
@@ -76,15 +76,15 @@ Breaks [the design](../specs/2026-10-20-channel-id-shared-by-a-shards-feeds-desi
 
 ### 4. The rule
 
-- [ ] `config.rs`: in `Config::resolve`'s loop, check a block against **every** earlier block on its `channel_id`, not `feeds.iter().find(...)`, which stops at the first. For each such pair, in this order:
+- [x] `config.rs`: in `Config::resolve`'s loop, check a block against **every** earlier block on its `channel_id`, not `feeds.iter().find(...)`, which stops at the first. For each such pair, in this order:
   1. the same `spec`: `DuplicateChannelId`, as now;
   2. different shards: `ChannelIdOnTwoShards`;
   3. a destination port the two blocks have in common: `ChannelInstancePortShared`.
 
   Accept anything else.
-- [ ] The pairwise check is a function over each block's spec token, shard, `Channel ID` and three port keys, so its test can state a specification this build has no codec for.
-- [ ] `error.rs`: the two new variants, each naming both blocks. Each doc comment states the failure it prevents, and `DuplicateChannelId`'s doc comment is rewritten to cover one specification only.
-- [ ] `two_blocks_claiming_one_channel_id_are_refused_naming_both` becomes `a_shards_two_feeds_on_one_channel_id_resolve`, because its case is now valid. `two_shards_of_one_specification_sharing_a_channel_id_are_refused_naming_both_shards` keeps asserting `DuplicateChannelId`.
+- [x] The pairwise check is a function over each block's spec token, shard, `Channel ID` and three port keys, so its test can state a specification this build has no codec for.
+- [x] `error.rs`: the two new variants, each naming both blocks. Each doc comment states the failure it prevents, and `DuplicateChannelId`'s doc comment is rewritten to cover one specification only.
+- [x] `two_blocks_claiming_one_channel_id_are_refused_naming_both` becomes `a_shards_two_feeds_on_one_channel_id_resolve`, because its case is now valid. `two_shards_of_one_specification_sharing_a_channel_id_are_refused_naming_both_shards` keeps asserting `DuplicateChannelId`.
 
 **Test** (`config.rs`, on the pairwise check): three blocks on one `Channel ID` and one shard, with the specification tokens `top-of-book`, `market-by-price` and `market-by-order`. With nine distinct ports, they pass. With one port of the third block equal to one of the **second** block's, and none of the first's, they are refused as `ChannelInstancePortShared`, naming the second block's key. This is a unit test because no document can state it today. With two specifications, a third block on an ID shares a specification with one of the first two. On the first's specification, the comparison with the first refuses it. On the second's, `DuplicateFeedShard` refuses it on the shared shard, and the comparison with the first refuses it on another. So no document separates `find` from the loop yet.
 
@@ -102,8 +102,8 @@ Breaks [the design](../specs/2026-10-20-channel-id-shared-by-a-shards-feeds-desi
 
 ### 5. One process, both feeds, one Channel ID, on the wire
 
-- [ ] `dz-recorder-e2e`: a variant of `strike_conformance.rs`'s composition, with both feeds on one `Channel ID`. The archive is replayed per group, and `dz-conformance` passes on `tob` and on `mbp`.
-- [ ] Assert:
+- [x] `dz-recorder-e2e`: a variant of `strike_conformance.rs`'s composition, with both feeds on one `Channel ID`. The archive is replayed per group, and `dz-conformance` passes on `tob` and on `mbp`.
+- [x] Assert:
   - each channel instance's `Sequence Number` series is contiguous on its own;
   - the two feeds' `Instrument Count` and `Manifest Seq` agree per manifest;
   - an instrument has one `Instrument ID` on both feeds.
@@ -116,8 +116,8 @@ Breaks [the design](../specs/2026-10-20-channel-id-shared-by-a-shards-feeds-desi
 
 ### 6. Documents and release
 
-- [ ] `BRINGING-UP-A-FEED.md`: the `channel_id` bullet states the rule.
-- [ ] `docs/README.md`: the row for this design.
+- [x] `BRINGING-UP-A-FEED.md`: the `channel_id` bullet states the rule.
+- [x] `docs/README.md`: the row for this design.
 - [ ] The release notes for the next minor list:
   - the API change (`channels`, the three setters);
   - the new label;
