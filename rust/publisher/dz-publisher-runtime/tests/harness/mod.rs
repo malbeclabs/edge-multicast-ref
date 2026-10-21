@@ -457,6 +457,18 @@ pub fn harness_both_with_rotation(cycle: Duration) -> Harness {
     harness_inner(&[feed(), depth_feed_with_rotation(cycle)], false)
 }
 
+/// Both feeds on **one** `Channel ID`, the top-of-book block's, with a snapshot
+/// rotation on the depth block: a shard's two feeds sharing an ID, told apart
+/// on the wire by their destination ports alone.
+#[must_use]
+pub fn harness_both_on_one_channel_with_rotation(cycle: Duration) -> Harness {
+    let depth = Feed {
+        channel_id: CHANNEL_ID,
+        ..depth_feed_with_rotation(cycle)
+    };
+    harness_inner(&[feed(), depth], false)
+}
+
 /// The four `[[feed]]` blocks of a publisher carrying two shards of both
 /// specifications: four channel instances over one published set.
 ///
