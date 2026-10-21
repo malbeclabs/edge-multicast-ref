@@ -1236,6 +1236,37 @@ fn an_identity_or_venue_keys_this_build_does_not_know_is_refused() {
 }
 
 #[test]
+fn derived_key_is_read_and_refused_without_the_venue_key_identity_or_with_forgetting() {
+    let keyed = Document::parse(&with_refdata_lines(
+        "identity = \"venue_key\"\nid_allocation = \"derived_key\"\n",
+    ))
+    .expect("valid")
+    .resolve()
+    .expect("resolvable");
+    assert_eq!(keyed.refdata.id_allocation, IdAllocation::DerivedKey);
+
+    let error = Document::parse(&with_refdata_lines("id_allocation = \"derived_key\"\n"))
+        .expect("parses")
+        .resolve()
+        .unwrap_err();
+    assert!(
+        matches!(error, StartupError::DerivedKeyWithoutVenueKey),
+        "{error}"
+    );
+
+    let error = Document::parse(&with_refdata_lines(
+        "identity = \"venue_key\"\nid_allocation = \"derived_key\"\nforget_delisted_after = \"168h\"\n",
+    ))
+    .expect("parses")
+    .resolve()
+    .unwrap_err();
+    assert!(
+        matches!(error, StartupError::ForgettingUnderDerivedIds),
+        "{error}"
+    );
+}
+
+#[test]
 fn stated_venue_keys_under_the_symbol_identity_are_refused() {
     let error = Document::parse(&with_refdata_lines("venue_keys = \"stated\"\n"))
         .expect("parses")

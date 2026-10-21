@@ -38,6 +38,9 @@ const FORMAT_VERSION_KEYED: u32 = 4;
 /// The allocation as a version-4 header names it.
 const SEQUENTIAL_TAG: &str = "sequential";
 
+/// [`IdAllocation::DerivedKey`] as a version-4 header names it.
+const DERIVED_KEY_TAG: &str = "derived_key";
+
 /// How a version-4 line says the venue key is its `Symbol` with the padding
 /// removed. Allowed only where [`symbol_is_whole`] holds.
 const SYMBOL_IS_KEY: &str = "-";
@@ -89,6 +92,16 @@ pub enum IdAllocation {
     /// start from none.** A publisher started cold derives IDs for symbols that
     /// a seeded one holds below its floor, and disagrees on every one of them.
     Derived,
+    /// [`derive_instrument_id_from_key`] of the venue key, under
+    /// [`Identity::VenueKey`] only: [`Derived`](Self::Derived) with the key as
+    /// its input, and the same floor, the same decline-never-move rule, the
+    /// same refusal of forgetting and the same seeding rule.
+    ///
+    /// A different input derives different IDs, so it is a name of its own,
+    /// and a record is never moved between it and `Derived`. Under
+    /// `Derived`, two keys that share a `Symbol` derive one ID and the second
+    /// is declined; under this, each derives its own.
+    DerivedKey,
 }
 
 /// What the registry recalls an instrument by: `[refdata] identity`.
@@ -135,7 +148,16 @@ impl IdAllocation {
         match self {
             Self::Sequential => FORMAT_VERSION,
             Self::Derived => FORMAT_VERSION_DERIVED,
+            // Refused under the symbol identity, so only ever keyed.
+            Self::DerivedKey => FORMAT_VERSION_KEYED,
         }
+    }
+
+    /// Whether a new instrument's ID is derived rather than the next number:
+    /// what decides that the header's number is a floor.
+    #[must_use]
+    pub const fn is_derived(self) -> bool {
+        matches!(self, Self::Derived | Self::DerivedKey)
     }
 
     /// The allocation's name in a version-4 header.
@@ -143,6 +165,7 @@ impl IdAllocation {
         match self {
             Self::Sequential => SEQUENTIAL_TAG,
             Self::Derived => DERIVED_TAG,
+            Self::DerivedKey => DERIVED_KEY_TAG,
         }
     }
 
@@ -150,6 +173,7 @@ impl IdAllocation {
         match tag {
             SEQUENTIAL_TAG => Some(Self::Sequential),
             DERIVED_TAG => Some(Self::Derived),
+            DERIVED_KEY_TAG => Some(Self::DerivedKey),
             _ => None,
         }
     }
@@ -552,15 +576,37 @@ const CRC32_TABLE: [u32; 256] = {
 /// held, and the registry declines all three rather than moving the ID.
 #[must_use]
 pub fn derive_instrument_id(symbol: &[u8; SYMBOL_LEN]) -> u32 {
-    let end = symbol
-        .iter()
-        .rposition(|&byte| byte != 0)
-        .map_or(0, |last| last + 1);
+    crc32(unpadded(symbol))
+}
+
+/// The `Instrument ID` [`IdAllocation::DerivedKey`] gives a venue key:
+/// CRC-32/ISO-HDLC over the key's bytes, through the same table as
+/// [`derive_instrument_id`].
+///
+/// The key, not its `Symbol`: two keys that share a `Symbol` derive two IDs.
+/// The result may be `0`, below a record's floor, or already held, and the
+/// registry declines all three rather than moving the ID, as it does under
+/// [`IdAllocation::Derived`].
+#[must_use]
+pub fn derive_instrument_id_from_key(venue_key: &[u8]) -> u32 {
+    crc32(venue_key)
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
     let mut crc = 0xFFFF_FFFFu32;
-    for &byte in &symbol[..end] {
+    for &byte in bytes {
         crc = (crc >> 8) ^ CRC32_TABLE[((crc ^ u32::from(byte)) & 0xFF) as usize];
     }
     !crc
+}
+
+/// The ID `allocation` derives for `entry`, where it derives one.
+fn derivation(allocation: IdAllocation, entry: &Entry) -> Option<u32> {
+    match allocation {
+        IdAllocation::Sequential => None,
+        IdAllocation::Derived => Some(derive_instrument_id(&entry.symbol)),
+        IdAllocation::DerivedKey => Some(derive_instrument_id_from_key(entry.key())),
+    }
 }
 
 /// One appended line: this `Instrument ID` is this `Symbol`, and the
@@ -779,7 +825,7 @@ impl StateRecord {
             } else {
                 IdAllocation::Sequential
             };
-        let derived = allocation == IdAllocation::Derived;
+        let derived = allocation.is_derived();
         if fields.next().is_some() {
             return Err(RecordError::Malformed {
                 line: 1,
@@ -886,7 +932,9 @@ impl StateRecord {
                 // an entry below it was minted before the switch, and one at or
                 // above it was derived, which is checked rather than trusted.
                 if derived {
-                    if instrument_id >= next_id && instrument_id != derive_instrument_id(&symbol) {
+                    if instrument_id >= next_id
+                        && Some(instrument_id) != derivation(allocation, &entry)
+                    {
                         return Err(RecordError::NotDerived {
                             line: line_number,
                             instrument_id,
@@ -928,7 +976,7 @@ impl StateRecord {
                 // floor. A held ID is the restatement branch above, which
                 // refuses it under another symbol; a held symbol is refused
                 // here. `next_id` is the floor and does not move.
-                if instrument_id != derive_instrument_id(&symbol) {
+                if Some(instrument_id) != derivation(allocation, &entry) {
                     return Err(RecordError::NotDerived {
                         line: line_number,
                         instrument_id,

@@ -470,8 +470,10 @@ pub struct RefdataSection {
     #[serde(default, deserialize_with = "de_optional_duration")]
     pub forget_delisted_after: Option<Duration>,
     /// How a symbol the record does not hold is given its `Instrument ID`:
-    /// `"sequential"`, the next number, or `"derived"`, the CRC-32 of its
-    /// `Symbol` at or above the record's floor. Absent is `"sequential"`.
+    /// `"sequential"`, the next number, `"derived"`, the CRC-32 of its
+    /// `Symbol` at or above the record's floor, or `"derived_key"`, the CRC-32
+    /// of its venue key, under `identity = "venue_key"` only. Absent is
+    /// `"sequential"`.
     ///
     /// `"derived"` is what lets two publishers of one channel agree on every
     /// ID without sharing anything. **Every path of a channel starts from the
@@ -555,12 +557,13 @@ impl From<VenueKeysKey> for VenueKeys {
 ///
 /// `#[non_exhaustive]` for the reason [`IdAllocation`] is.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum IdAllocationKey {
     #[default]
     Sequential,
     Derived,
+    DerivedKey,
 }
 
 impl From<IdAllocationKey> for IdAllocation {
@@ -568,6 +571,7 @@ impl From<IdAllocationKey> for IdAllocation {
         match key {
             IdAllocationKey::Sequential => Self::Sequential,
             IdAllocationKey::Derived => Self::Derived,
+            IdAllocationKey::DerivedKey => Self::DerivedKey,
         }
     }
 }
@@ -1090,7 +1094,10 @@ impl Document {
                     key: "[refdata] forget_delisted_after",
                 });
             }
-            if self.refdata.id_allocation == IdAllocationKey::Derived {
+            if matches!(
+                self.refdata.id_allocation,
+                IdAllocationKey::Derived | IdAllocationKey::DerivedKey
+            ) {
                 return Err(StartupError::ForgettingUnderDerivedIds);
             }
         }
@@ -1099,6 +1106,11 @@ impl Document {
             && self.refdata.identity == IdentityKey::Symbol
         {
             return Err(StartupError::VenueKeysWithoutVenueKey);
+        }
+        if self.refdata.id_allocation == IdAllocationKey::DerivedKey
+            && self.refdata.identity == IdentityKey::Symbol
+        {
+            return Err(StartupError::DerivedKeyWithoutVenueKey);
         }
 
         let selection = SelectionPolicy::new(

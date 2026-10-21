@@ -566,8 +566,13 @@ pub enum StartupError {
     /// relisted near the horizon would come back under the record's ID on one
     /// and under a fresh derivation on the other. Derived allocation keeps
     /// every entry for good, which is what this key would undo.
-    #[error("`[refdata] id_allocation = \"derived\"` forgets nothing, so `[refdata] forget_delisted_after` cannot be set with it")]
+    #[error("`[refdata] id_allocation = \"derived\"` or `\"derived_key\"` forgets nothing, so `[refdata] forget_delisted_after` cannot be set with it")]
     ForgettingUnderDerivedIds,
+
+    /// `[refdata] id_allocation = "derived_key"` under `identity = "symbol"`,
+    /// where there is no key to derive from.
+    #[error("`[refdata] id_allocation = \"derived_key\"` needs `identity = \"venue_key\"`")]
+    DerivedKeyWithoutVenueKey,
 
     /// `[refdata] venue_keys = "stated"` under `identity = "symbol"`.
     ///

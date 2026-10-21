@@ -1,6 +1,6 @@
 //! Why a publisher's reference data will not start.
 
-use crate::state::{RecordError, VenueKeys};
+use crate::state::{IdAllocation, RecordError, VenueKeys};
 use crate::store::StateError;
 
 /// The startup failures, none of which is recoverable by continuing.
@@ -81,7 +81,7 @@ pub enum RefdataError {
     /// and under a fresh derivation on the other. The document check refuses
     /// this first; this is the second line, for a caller composing the
     /// configuration itself.
-    #[error("derived Instrument ID allocation forgets nothing, so it cannot be combined with forget_delisted_after")]
+    #[error("derived Instrument ID allocation, from the Symbol or the venue key, forgets nothing, so it cannot be combined with forget_delisted_after")]
     ForgettingUnderDerivedIds,
 
     /// The record was written under derived allocation and the configuration
@@ -100,6 +100,23 @@ pub enum RefdataError {
     /// refuses this first; this is the second line.
     #[error("venue_keys = \"stated\" declares keys that identity = \"symbol\" never reads")]
     VenueKeysWithoutVenueKey,
+
+    /// `id_allocation = "derived_key"` was configured under
+    /// `identity = "symbol"`, where there is no key to derive from.
+    #[error("id_allocation = \"derived_key\" derives from a venue key, and identity = \"symbol\" has none")]
+    DerivedKeyWithoutVenueKey,
+
+    /// The record was written under one derived allocation and the
+    /// configuration asks for the other.
+    ///
+    /// `derived` hashes the `Symbol` and `derived_key` the venue key, so every
+    /// derived ID above the floor would change, and a subscriber's books with
+    /// them.
+    #[error("the persisted state was written under id_allocation {persisted:?}, and {configured:?} derives different IDs")]
+    DerivationChanged {
+        persisted: IdAllocation,
+        configured: IdAllocation,
+    },
 
     /// The record is keyed, version 4, and the configuration asks for the
     /// symbol identity.

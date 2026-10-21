@@ -12,9 +12,10 @@ use dz_adapter_core::{
 use dz_edge_refdata::SYMBOL_LEN;
 use dz_publisher_lowering::SourceId;
 use dz_publisher_refdata::{
-    encode_keyed_line, symbol_field, CycleSchedule, Entry, IdAllocation, Identity, ManualClock,
-    MemoryStore, RecordError, RefdataError, Refusal, Registry, RegistryConfig, SelectionPolicy,
-    ShardConfig, StateRecord, StateStore, VenueKeys, COMPACTION_FLOOR,
+    derive_instrument_id, derive_instrument_id_from_key, encode_keyed_line, symbol_field,
+    CycleSchedule, Entry, IdAllocation, Identity, ManualClock, MemoryStore, RecordError,
+    RefdataError, Refusal, Registry, RegistryConfig, SelectionPolicy, ShardConfig, StateRecord,
+    StateStore, VenueKeys, COMPACTION_FLOOR,
 };
 
 const SOURCE_ID: u16 = 7;
@@ -708,4 +709,141 @@ fn forgetting_forgets_a_key_and_not_the_key_beside_it_on_one_symbol() {
     reopened.seeding_complete();
     assert_eq!(id_of(&mut reopened, &gone, None), Some(relisted));
     assert_eq!(id_of(&mut reopened, &kept, None), Some(kept_id));
+}
+
+// ---------------------------------------------------------------------------
+// "derived_key"
+// ---------------------------------------------------------------------------
+
+fn derived_key() -> RegistryConfig {
+    config(
+        Identity::VenueKey,
+        VenueKeys::Symbol,
+        IdAllocation::DerivedKey,
+    )
+}
+
+#[test]
+fn under_derived_key_two_keys_on_one_symbol_derive_two_ids() {
+    let long = ticker("KXDERIVE-", 64);
+    let (one, other) = (format!("{long}1"), format!("{long}2"));
+    let mut registry = opened(MemoryStore::new(), derived_key());
+    let a = id_of(&mut registry, &one, None).expect("admitted");
+    let b = id_of(&mut registry, &other, None).expect("admitted");
+    assert_eq!(a, derive_instrument_id_from_key(one.as_bytes()));
+    assert_eq!(b, derive_instrument_id_from_key(other.as_bytes()));
+    assert_ne!(a, b);
+    // A second host from the same (empty) seed derives the same, in the
+    // other order.
+    let mut second = opened(MemoryStore::new(), derived_key());
+    assert_eq!(id_of(&mut second, &other, None), Some(b));
+    assert_eq!(id_of(&mut second, &one, None), Some(a));
+}
+
+#[test]
+fn under_derived_two_keys_on_one_symbol_collide_and_the_decline_names_both_keys() {
+    let long = ticker("KXDERIVE-", 64);
+    let (one, other) = (format!("{long}1"), format!("{long}2"));
+    let mut registry = opened(
+        MemoryStore::new(),
+        config(Identity::VenueKey, VenueKeys::Symbol, IdAllocation::Derived),
+    );
+    let a = id_of(&mut registry, &one, None).expect("admitted");
+    assert_eq!(a, derive_instrument_id(&symbol_of(&one)));
+    assert_eq!(
+        registry.offer("default", &spec(&other, None)),
+        Err(Refusal::IdUnavailable)
+    );
+    let declined = registry.take_unavailable_ids();
+    assert_eq!(declined.len(), 1);
+    assert_eq!(declined[0].venue_key.as_deref(), Some(other.as_bytes()));
+    assert_eq!(
+        declined[0].holder_venue_key.as_deref(),
+        Some(one.as_bytes())
+    );
+    assert_eq!(declined[0].holder, Some(symbol_of(&one)));
+}
+
+#[test]
+fn derived_key_is_refused_under_the_symbol_identity_and_with_forgetting() {
+    let error = Registry::open(
+        config(
+            Identity::Symbol,
+            VenueKeys::Symbol,
+            IdAllocation::DerivedKey,
+        ),
+        MemoryStore::new(),
+        ManualClock::new(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, RefdataError::DerivedKeyWithoutVenueKey),
+        "{error}"
+    );
+
+    let error = Registry::open(
+        RegistryConfig {
+            forget_delisted_after: Some(std::time::Duration::from_secs(60)),
+            ..derived_key()
+        },
+        MemoryStore::new(),
+        ManualClock::new(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, RefdataError::ForgettingUnderDerivedIds),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_record_is_never_moved_between_the_two_derivations() {
+    for (written, opened_under) in [
+        (IdAllocation::Derived, IdAllocation::DerivedKey),
+        (IdAllocation::DerivedKey, IdAllocation::Derived),
+    ] {
+        let store = MemoryStore::new();
+        let mut registry = opened(
+            store.clone(),
+            config(Identity::VenueKey, VenueKeys::Symbol, written),
+        );
+        registry.list(&spec("AAA", None)).expect("admitted");
+        drop(registry);
+        let error = Registry::open(
+            config(Identity::VenueKey, VenueKeys::Symbol, opened_under),
+            store,
+            ManualClock::new(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                RefdataError::DerivationChanged { persisted, configured }
+                    if persisted == written && configured == opened_under
+            ),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn a_derived_key_record_checks_each_mint_against_its_key() {
+    let key = ticker("KXCHECK-", 70);
+    let symbol = symbol_of(&key);
+    let id = derive_instrument_id_from_key(key.as_bytes());
+    let record = |instrument_id: u32| {
+        format!(
+            "dz-refdata-state 4 {SOURCE_ID} 1 1 derived_key symbol\n{}",
+            line(instrument_id, &symbol, &hex(key.as_bytes()))
+        )
+        .into_bytes()
+    };
+    assert!(loaded(&record(id)).is_ok());
+    // The Symbol's derivation is not the key's.
+    let by_symbol = derive_instrument_id(&symbol);
+    assert_ne!(by_symbol, id);
+    assert!(matches!(
+        loaded(&record(by_symbol)),
+        Err(RecordError::NotDerived { .. })
+    ));
 }

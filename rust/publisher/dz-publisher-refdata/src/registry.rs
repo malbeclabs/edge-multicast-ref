@@ -16,8 +16,9 @@ use crate::pacer::DefinitionPacer;
 use crate::policy::{Phase, SelectionPolicy};
 use crate::refusal::Refusal;
 use crate::state::{
-    derive_instrument_id, encode_keyed_line, encode_line, is_venue_key, symbol_is_whole,
-    venue_key_field, Entry, IdAllocation, Identity, StateRecord, VenueKeys,
+    derive_instrument_id, derive_instrument_id_from_key, encode_keyed_line, encode_line,
+    is_venue_key, symbol_is_whole, venue_key_field, Entry, IdAllocation, Identity, StateRecord,
+    VenueKeys,
 };
 use crate::store::{StateError, StateStore};
 use crate::strike;
@@ -554,7 +555,10 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             return Err(RefdataError::VenueKeysWithoutVenueKey);
         }
         let keyed = config.identity == Identity::VenueKey;
-        if config.id_allocation == IdAllocation::Derived && config.forget_delisted_after.is_some() {
+        if config.id_allocation == IdAllocation::DerivedKey && config.identity == Identity::Symbol {
+            return Err(RefdataError::DerivedKeyWithoutVenueKey);
+        }
+        if config.id_allocation.is_derived() && config.forget_delisted_after.is_some() {
             return Err(RefdataError::ForgettingUnderDerivedIds);
         }
 
@@ -580,10 +584,18 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         // A derived record cannot be continued sequentially. A sequential one
         // opened under derived allocation keeps its `next_id` as the floor and
         // is rewritten in the derived layout below, which is what seeding is.
-        if record.allocation == IdAllocation::Derived
-            && config.id_allocation == IdAllocation::Sequential
-        {
+        if record.allocation.is_derived() && config.id_allocation == IdAllocation::Sequential {
             return Err(RefdataError::StateIsDerived);
+        }
+        // Every derived ID above the floor would change.
+        if record.allocation.is_derived()
+            && config.id_allocation.is_derived()
+            && record.allocation != config.id_allocation
+        {
+            return Err(RefdataError::DerivationChanged {
+                persisted: record.allocation,
+                configured: config.id_allocation,
+            });
         }
         match (record.keyed, keyed) {
             // Its entries may share a Symbol, which a symbol-keyed registry
@@ -622,7 +634,7 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
                 entry.symbol.to_vec().into_boxed_slice()
             }
         };
-        let in_use: HashMap<u32, RecallKey> = if config.id_allocation == IdAllocation::Derived {
+        let in_use: HashMap<u32, RecallKey> = if config.id_allocation.is_derived() {
             record
                 .entries
                 .iter()
@@ -1491,11 +1503,12 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         // run, or before a delisting - keeps the ID it was published under; a
         // new one takes the next, and only if the definition composes.
         let recalled = self.minted.get(key).copied();
-        let derived = recalled.is_none() && self.config.id_allocation == IdAllocation::Derived;
+        let derived = recalled.is_none() && self.config.id_allocation.is_derived();
         let instrument_id = match (recalled, self.config.id_allocation) {
             (Some(minted), _) => minted.instrument_id,
             (None, IdAllocation::Sequential) => self.next_id,
             (None, IdAllocation::Derived) => derive_instrument_id(&symbol),
+            (None, IdAllocation::DerivedKey) => derive_instrument_id_from_key(key),
         };
         if instrument_id == 0 && !derived {
             return Err(Refusal::IdSpaceExhausted);
@@ -1524,7 +1537,7 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
                         .next_id
                         .checked_add(1)
                         .ok_or(Refusal::IdSpaceExhausted)?,
-                    IdAllocation::Derived => self.next_id,
+                    IdAllocation::Derived | IdAllocation::DerivedKey => self.next_id,
                 };
                 // Persisted before it is admitted, and a failure to persist
                 // admits nothing: an `Instrument ID` published from memory and
@@ -1541,7 +1554,7 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
                         last_published_s: 0,
                     },
                 );
-                if self.config.id_allocation == IdAllocation::Derived {
+                if self.config.id_allocation.is_derived() {
                     self.in_use.insert(instrument_id, key.into());
                 }
                 self.next_id = next_id;
