@@ -646,7 +646,7 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         // space, and a torn line is what an append that ran the disk out of
         // room leaves.
         if let Some(loaded) = &loaded {
-            let rewritten = if loaded.needs_rewrite()
+            let rewritten = if loaded.needs_rewrite(registry.config.identity)
                 || loaded.record.allocation != registry.config.id_allocation
             {
                 let forgetting = registry.forgettable(now_s(&registry.clock));
@@ -1609,6 +1609,7 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
                 Entry {
                     instrument_id: minted.instrument_id,
                     symbol: *symbol,
+                    venue_key: None,
                     delisted_at: (!published).then_some(minted.last_published_s),
                 }
             })
@@ -1618,6 +1619,7 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             entries.push(Entry {
                 instrument_id,
                 symbol,
+                venue_key: None,
                 delisted_at: None,
             });
             next_id = next;
@@ -1627,6 +1629,7 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             next_id,
             entries,
             allocation: self.config.id_allocation,
+            keyed: None,
         };
         self.store.store(&record.encode())?;
         for symbol in forgetting {

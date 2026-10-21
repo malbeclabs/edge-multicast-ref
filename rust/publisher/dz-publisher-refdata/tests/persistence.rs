@@ -397,7 +397,7 @@ fn a_record_folds_its_appended_lines_into_its_base() {
 
     assert_eq!(loaded.record.next_id, 3, "the minting line advanced it");
     assert_eq!((loaded.base, loaded.appended), (1, 2));
-    assert!(!loaded.torn && !loaded.needs_rewrite());
+    assert!(!loaded.torn && !loaded.needs_rewrite(dz_publisher_refdata::Identity::Symbol));
     assert_eq!(loaded.record.entries.len(), 2);
     assert!(
         loaded
@@ -434,7 +434,10 @@ fn a_version_1_record_reads_as_published_and_is_rewritten_on_open() {
     let registry = opened(store.clone(), &clock, HORIZON);
     drop(registry);
     let loaded = StateRecord::load(&store.record().expect("persisted")).expect("our own bytes");
-    assert!(!loaded.needs_rewrite(), "rewritten as the current layout");
+    assert!(
+        !loaded.needs_rewrite(dz_publisher_refdata::Identity::Symbol),
+        "rewritten as the current layout"
+    );
     assert_eq!(loaded.record.next_id, 3);
     assert!(loaded
         .record

@@ -163,12 +163,14 @@ fn derived_record(floor: u32, seeded: &[(u32, &str)], derived: &[&str]) -> State
         .map(|&(instrument_id, symbol)| Entry {
             instrument_id,
             symbol: key(symbol),
+            venue_key: None,
             delisted_at: None,
         })
         .collect();
     entries.extend(derived.iter().map(|symbol| Entry {
         instrument_id: derive_instrument_id(&key(symbol)),
         symbol: key(symbol),
+        venue_key: None,
         delisted_at: None,
     }));
     StateRecord {
@@ -176,6 +178,7 @@ fn derived_record(floor: u32, seeded: &[(u32, &str)], derived: &[&str]) -> State
         next_id: floor,
         entries,
         allocation: IdAllocation::Derived,
+        keyed: None,
     }
 }
 
@@ -215,6 +218,7 @@ fn a_derived_line_whose_id_is_not_its_symbols_derivation_is_refused() {
     forged.entries.push(Entry {
         instrument_id: 4_000_000,
         symbol: key("NEW-A"),
+        venue_key: None,
         delisted_at: None,
     });
     assert!(matches!(

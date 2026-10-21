@@ -257,11 +257,11 @@ fn a_damaged_record_stops_the_publisher_starting() {
     // basis: a layout this build does not know may hold a field that changes
     // what the fields it does know mean.
     let newer = MemoryStore::new();
-    newer.set_record(b"dz-refdata-state 4 7 1 0\n".to_vec());
+    newer.set_record(b"dz-refdata-state 5 7 1 0\n".to_vec());
     assert!(matches!(
         open(newer),
         Err(RefdataError::CorruptState(
-            RecordError::UnsupportedVersion { found: 4 }
+            RecordError::UnsupportedVersion { found: 5 }
         ))
     ));
 
@@ -283,9 +283,11 @@ fn a_damaged_record_stops_the_publisher_starting() {
             entries: vec![Entry {
                 instrument_id: 1,
                 symbol: symbol_field("AAA").0,
+                venue_key: None,
                 delisted_at: None,
             }],
             allocation: IdAllocation::Sequential,
+            keyed: None,
         }
         .encode(),
     );
@@ -314,9 +316,11 @@ fn a_record_minted_under_another_source_id_stops_the_publisher_starting() {
             entries: vec![Entry {
                 instrument_id: 1,
                 symbol: symbol_field("AAA").0,
+                venue_key: None,
                 delisted_at: None,
             }],
             allocation: IdAllocation::Sequential,
+            keyed: None,
         }
         .encode(),
     );
@@ -376,24 +380,28 @@ fn a_record_round_trips_and_encodes_the_same_bytes_whatever_order_it_was_built_i
     let aaa = Entry {
         instrument_id: 1,
         symbol: symbol_field("AAA").0,
+        venue_key: None,
         delisted_at: None,
     };
     let bbb = Entry {
         instrument_id: 2,
         symbol: symbol_field("BBB").0,
+        venue_key: None,
         delisted_at: None,
     };
     let one_way = StateRecord {
         source_id: SOURCE_ID,
         next_id: 3,
-        entries: vec![aaa, bbb],
+        entries: vec![aaa.clone(), bbb.clone()],
         allocation: IdAllocation::Sequential,
+        keyed: None,
     };
     let other_way = StateRecord {
         source_id: SOURCE_ID,
         next_id: 3,
         entries: vec![bbb, aaa],
         allocation: IdAllocation::Sequential,
+        keyed: None,
     };
 
     assert_eq!(one_way.encode(), other_way.encode());

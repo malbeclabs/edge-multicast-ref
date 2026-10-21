@@ -26,6 +26,35 @@ const FORMAT_VERSION_DERIVED: u32 = 3;
 /// The header's last field in version 3.
 const DERIVED_TAG: &str = "derived";
 
+/// The record layout this build writes under [`Identity::VenueKey`], whatever
+/// the allocation.
+///
+/// Version 2 or 3 with a third field on every line, the venue key, and a
+/// header naming the allocation and [`VenueKeys`]. Only a keyed publisher
+/// writes it, so one that never sets `identity` keeps writing what an older
+/// build reads.
+const FORMAT_VERSION_KEYED: u32 = 4;
+
+/// The allocation as a version-4 header names it.
+const SEQUENTIAL_TAG: &str = "sequential";
+
+/// How a version-4 line says the venue key is its `Symbol` with the padding
+/// removed. Allowed only where [`symbol_is_whole`] holds.
+const SYMBOL_IS_KEY: &str = "-";
+
+/// The longest venue key, in bytes. Four times the wire field, and refused
+/// rather than truncated past it, because a truncated key would merge two
+/// instruments again.
+pub const MAX_VENUE_KEY_LEN: usize = 256;
+
+/// The fewest bytes of padding that prove a `Symbol` was not cut.
+///
+/// `pad_ascii` cuts at the field's width but never inside a UTF-8 character:
+/// when the cut lands inside one it backs up to that character's first byte,
+/// and the one to three bytes it gives up become padding. Four bytes of
+/// padding is more than any cut leaves.
+const WHOLE_SYMBOL_PADDING: usize = 4;
+
 /// The layout before appended lines, which this build still reads.
 ///
 /// A base with no entry count and no timestamps. Every entry in it is read
@@ -100,17 +129,97 @@ pub enum VenueKeys {
 }
 
 impl IdAllocation {
-    /// The record layout written under this allocation.
+    /// The record layout written under this allocation by a publisher that
+    /// keys on the `Symbol`.
     const fn version(self) -> u32 {
         match self {
             Self::Sequential => FORMAT_VERSION,
             Self::Derived => FORMAT_VERSION_DERIVED,
         }
     }
+
+    /// The allocation's name in a version-4 header.
+    const fn tag(self) -> &'static str {
+        match self {
+            Self::Sequential => SEQUENTIAL_TAG,
+            Self::Derived => DERIVED_TAG,
+        }
+    }
+
+    fn from_tag(tag: &str) -> Option<Self> {
+        match tag {
+            SEQUENTIAL_TAG => Some(Self::Sequential),
+            DERIVED_TAG => Some(Self::Derived),
+            _ => None,
+        }
+    }
+}
+
+impl VenueKeys {
+    /// The declaration's name in a version-4 header.
+    const fn tag(self) -> &'static str {
+        match self {
+            Self::Symbol => "symbol",
+            Self::Stated => "stated",
+        }
+    }
+
+    fn from_tag(tag: &str) -> Option<Self> {
+        match tag {
+            "symbol" => Some(Self::Symbol),
+            "stated" => Some(Self::Stated),
+            _ => None,
+        }
+    }
+}
+
+/// The record layout a record with this allocation and this keying is written
+/// in.
+const fn layout_version(allocation: IdAllocation, keyed: bool) -> u32 {
+    if keyed {
+        FORMAT_VERSION_KEYED
+    } else {
+        allocation.version()
+    }
+}
+
+/// Whether a venue key is one this crate accepts: 1 to
+/// [`MAX_VENUE_KEY_LEN`] bytes, none of them NUL.
+///
+/// A NUL is refused because the `Symbol` is NUL-padded: a key ending in one
+/// would have the same `Symbol` as the key without it, and a record line
+/// saying "the key is the `Symbol`" could not say which was meant.
+#[must_use]
+pub fn is_venue_key(key: &[u8]) -> bool {
+    (1..=MAX_VENUE_KEY_LEN).contains(&key.len()) && !key.contains(&0)
+}
+
+/// A `Symbol` with its trailing NUL padding removed.
+#[must_use]
+pub fn unpadded(symbol: &[u8; SYMBOL_LEN]) -> &[u8] {
+    let end = symbol
+        .iter()
+        .rposition(|&byte| byte != 0)
+        .map_or(0, |last| last + 1);
+    &symbol[..end]
+}
+
+/// Whether a `Symbol` cannot have been cut from a longer name: at least four
+/// bytes of padding, and no NUL before them.
+///
+/// Padding alone does not prove it. A ticker of 63 ASCII bytes followed by `é`
+/// is 65 bytes, and its `Symbol` is the 63 bytes and one NUL, the same field as
+/// the 63-byte ticker alone: the cut backed up out of the two-byte character.
+/// No cut leaves four bytes of padding. A NUL before the padding is no key at
+/// all, since a key holds none.
+#[must_use]
+pub fn symbol_is_whole(symbol: &[u8; SYMBOL_LEN]) -> bool {
+    let kept = unpadded(symbol);
+    SYMBOL_LEN - kept.len() >= WHOLE_SYMBOL_PADDING && !kept.contains(&0)
 }
 
 /// One instrument's persisted identity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     /// The `Instrument ID` minted for this symbol, once, ever.
     pub instrument_id: u32,
@@ -121,10 +230,53 @@ pub struct Entry {
     /// one symbol to every subscriber, and keying on the venue's string would
     /// mint them two `Instrument ID`s that publish as the same instrument.
     pub symbol: [u8; SYMBOL_LEN],
+    /// The venue key, in a keyed record. `None` is a key that is the `Symbol`
+    /// with its padding removed, which version 4 writes as `-` and allows only
+    /// where [`symbol_is_whole`] holds. Always `None` in versions 1 to 3,
+    /// which carry no key.
+    pub venue_key: Option<Box<[u8]>>,
     /// `None` when the instrument was published at the time this entry was
     /// written. Otherwise the Unix second it was last published, which is what
     /// `forget_delisted_after` is measured from.
     pub delisted_at: Option<u64>,
+}
+
+impl Entry {
+    /// An entry for a venue key, with the `Symbol` the wire carries for it and
+    /// the key written as `-` wherever that says the same thing.
+    #[must_use]
+    pub fn keyed(instrument_id: u32, venue_key: &str, delisted_at: Option<u64>) -> Self {
+        let symbol = dz_edge_core::pad_ascii::<SYMBOL_LEN>(venue_key).0;
+        Self {
+            instrument_id,
+            symbol,
+            venue_key: venue_key_field(venue_key.as_bytes(), &symbol),
+            delisted_at,
+        }
+    }
+
+    /// The venue key this entry is recalled by in a keyed record: the one it
+    /// carries, or its `Symbol` with the padding removed.
+    #[must_use]
+    pub fn key(&self) -> &[u8] {
+        self.venue_key
+            .as_deref()
+            .unwrap_or_else(|| unpadded(&self.symbol))
+    }
+}
+
+/// What a keyed record holds for `key` beside `symbol`: `None`, written `-`,
+/// where the key is the whole `Symbol` with its padding removed, and the key
+/// itself otherwise. A key of 61 bytes or more is therefore always held, even
+/// one equal to its `Symbol`, so the record never has to guess whether a
+/// `Symbol` is a whole key or a cut prefix.
+#[must_use]
+pub fn venue_key_field(key: &[u8], symbol: &[u8; SYMBOL_LEN]) -> Option<Box<[u8]>> {
+    if symbol_is_whole(symbol) && unpadded(symbol) == key {
+        None
+    } else {
+        Some(key.into())
+    }
 }
 
 /// Everything that has to survive a restart.
@@ -160,6 +312,16 @@ pub struct Entry {
 /// <instrument_id> <symbol, 128 hex digits>
 /// ```
 ///
+/// Version 4, which a keyed publisher writes, names the allocation and the
+/// [`VenueKeys`] declaration in its header and carries the venue key as a third
+/// field on every line, in hexadecimal or as `-`:
+///
+/// ```text
+/// dz-refdata-state 4 <source_id> <next_id> <base entries> <allocation> <venue keys>
+/// <instrument_id> <symbol, 128 hex digits> <venue key, hex | ->
+/// <instrument_id> <symbol, 128 hex digits> <venue key, hex | -> <unix seconds>
+/// ```
+///
 /// A **base** — the header and as many entries as it counts — followed by
 /// **appended lines**. [`encode`](Self::encode) writes a base and
 /// [`encode_line`] writes one appended line, which is what makes a mint cost a
@@ -177,6 +339,9 @@ pub struct StateRecord {
     /// Which rule the record was written under. Decides the layout and what a
     /// line may carry; see [`IdAllocation`].
     pub allocation: IdAllocation,
+    /// `Some` for a keyed record, version 4, with the declaration it was
+    /// written under. `None` for versions 1 to 3, which key on the `Symbol`.
+    pub keyed: Option<VenueKeys>,
 }
 
 /// A record as read back, and what reading it found besides the entries.
@@ -202,13 +367,14 @@ pub struct Loaded {
 
 impl Loaded {
     /// Whether the record has to be rewritten before a line can be appended to
-    /// it: a layout this build does not append to.
+    /// it under `identity`: a layout this build does not append to, or an
+    /// unkeyed record opened by a keyed publisher.
     ///
     /// A torn final line is not one. Cutting it off is enough, and needs no
     /// free space, where a rewrite needs room for the whole record.
     #[must_use]
-    pub const fn needs_rewrite(&self) -> bool {
-        self.version != self.record.allocation.version()
+    pub fn needs_rewrite(&self, identity: Identity) -> bool {
+        self.version != layout_version(self.record.allocation, identity == Identity::VenueKey)
     }
 }
 
@@ -242,9 +408,37 @@ pub enum RecordError {
     #[error("state record: Instrument ID {instrument_id} appears twice")]
     DuplicateId { instrument_id: u32 },
 
-    /// Two entries claim one `Symbol`.
+    /// Two entries claim one `Symbol`, in a record that keys on it. A keyed
+    /// record allows it: two keys may share a `Symbol`.
     #[error("state record: a Symbol appears twice, under IDs {first} and {second}")]
     DuplicateSymbol { first: u32, second: u32 },
+
+    /// Two entries of a keyed record claim one venue key.
+    #[error("state record: a venue key appears twice, under IDs {first} and {second}")]
+    DuplicateVenueKey { first: u32, second: u32 },
+
+    /// A venue key that is not hexadecimal, not 1 to 256 bytes, or holds a
+    /// NUL.
+    #[error(
+        "state record line {line}: the venue key is not 1 to 256 bytes of hexadecimal with no NUL"
+    )]
+    BadVenueKey { line: usize },
+
+    /// A `-` where the `Symbol` may have been cut, so it does not say what
+    /// the key is: fewer than four bytes of padding, or a NUL before them.
+    #[error(
+        "state record line {line}: Instrument ID {instrument_id} gives its Symbol as its venue \
+         key, and that Symbol may have been cut"
+    )]
+    UnresolvedVenueKey { line: usize, instrument_id: u32 },
+
+    /// An appended line that restates a known `Instrument ID` under a
+    /// different venue key.
+    #[error(
+        "state record line {line}: Instrument ID {instrument_id} is restated under a \
+         different venue key"
+    )]
+    RestatedUnderAnotherVenueKey { line: usize, instrument_id: u32 },
 
     /// An entry holds an ID that minting would hand out again.
     ///
@@ -381,6 +575,33 @@ pub fn encode_line(instrument_id: u32, symbol: &[u8; SYMBOL_LEN]) -> Vec<u8> {
     out.into_bytes()
 }
 
+/// One appended line of a keyed record: [`encode_line`] with the venue key as
+/// its third field, `-` for `None`.
+#[must_use]
+pub fn encode_keyed_line(
+    instrument_id: u32,
+    symbol: &[u8; SYMBOL_LEN],
+    venue_key: Option<&[u8]>,
+) -> Vec<u8> {
+    let mut out = String::with_capacity(16 + SYMBOL_LEN * 2);
+    push_entry(&mut out, instrument_id, symbol);
+    push_venue_key(&mut out, venue_key);
+    out.push('\n');
+    out.into_bytes()
+}
+
+fn push_venue_key(out: &mut String, venue_key: Option<&[u8]>) {
+    out.push(' ');
+    match venue_key {
+        None => out.push_str(SYMBOL_IS_KEY),
+        Some(key) => {
+            for byte in key {
+                out.push_str(&format!("{byte:02x}"));
+            }
+        }
+    }
+}
+
 fn push_entry(out: &mut String, instrument_id: u32, symbol: &[u8; SYMBOL_LEN]) {
     out.push_str(&instrument_id.to_string());
     out.push(' ');
@@ -405,6 +626,7 @@ impl StateRecord {
             next_id: FIRST_INSTRUMENT_ID,
             entries: Vec::new(),
             allocation: IdAllocation::Sequential,
+            keyed: None,
         }
     }
 
@@ -420,18 +642,29 @@ impl StateRecord {
 
         let mut out = format!(
             "{FORMAT_TAG} {} {} {} {}",
-            self.allocation.version(),
+            layout_version(self.allocation, self.keyed.is_some()),
             self.source_id,
             self.next_id,
             entries.len()
         );
-        if self.allocation == IdAllocation::Derived {
+        if let Some(venue_keys) = self.keyed {
+            out.push(' ');
+            out.push_str(self.allocation.tag());
+            out.push(' ');
+            out.push_str(venue_keys.tag());
+        } else if self.allocation == IdAllocation::Derived {
             out.push(' ');
             out.push_str(DERIVED_TAG);
         }
         out.push('\n');
         for entry in &entries {
             push_entry(&mut out, entry.instrument_id, &entry.symbol);
+            if self.keyed.is_some() {
+                // Canonical whatever the entry says: a key that is its whole
+                // Symbol is `-`, and every other key is written out.
+                let field = venue_key_field(entry.key(), &entry.symbol);
+                push_venue_key(&mut out, field.as_deref());
+            }
             if let Some(at) = entry.delisted_at {
                 out.push(' ');
                 out.push_str(&at.to_string());
@@ -481,6 +714,7 @@ impl StateRecord {
         if version != FORMAT_VERSION
             && version != FORMAT_VERSION_V1
             && version != FORMAT_VERSION_DERIVED
+            && version != FORMAT_VERSION_KEYED
         {
             return Err(RecordError::UnsupportedVersion { found: version });
         }
@@ -517,17 +751,33 @@ impl StateRecord {
                 },
             )?)
         };
-        let allocation = if version == FORMAT_VERSION_DERIVED {
-            if fields.next() != Some(DERIVED_TAG) {
-                return Err(RecordError::Malformed {
-                    line: 1,
-                    what: "a version 3 header does not name its allocation",
-                });
-            }
-            IdAllocation::Derived
-        } else {
-            IdAllocation::Sequential
-        };
+        let mut keyed = None;
+        let allocation =
+            if version == FORMAT_VERSION_DERIVED {
+                if fields.next() != Some(DERIVED_TAG) {
+                    return Err(RecordError::Malformed {
+                        line: 1,
+                        what: "a version 3 header does not name its allocation",
+                    });
+                }
+                IdAllocation::Derived
+            } else if version == FORMAT_VERSION_KEYED {
+                let allocation = fields.next().and_then(IdAllocation::from_tag).ok_or(
+                    RecordError::Malformed {
+                        line: 1,
+                        what: "a version 4 header does not name its allocation",
+                    },
+                )?;
+                keyed = Some(fields.next().and_then(VenueKeys::from_tag).ok_or(
+                    RecordError::Malformed {
+                        line: 1,
+                        what: "a version 4 header does not name its venue keys",
+                    },
+                )?);
+                allocation
+            } else {
+                IdAllocation::Sequential
+            };
         let derived = allocation == IdAllocation::Derived;
         if fields.next().is_some() {
             return Err(RecordError::Malformed {
@@ -542,6 +792,8 @@ impl StateRecord {
         // quadratic in the venue's whole history.
         let mut ids: HashMap<u32, usize> = HashMap::new();
         let mut symbols: HashMap<[u8; SYMBOL_LEN], u32> = HashMap::new();
+        // Under version 4 two entries may share a Symbol and never a key.
+        let mut keys: HashMap<Box<[u8]>, u32> = HashMap::new();
         let mut running_next = next_id;
         let mut read = 0usize;
         let mut appended = 0usize;
@@ -558,7 +810,7 @@ impl StateRecord {
                 if in_base {
                     return Err(malformed("a base entry is not a complete line"));
                 }
-                if !starts_an_appended_line(raw) {
+                if !starts_an_appended_line(raw, keyed.is_some()) {
                     return Err(malformed(
                         "a final line with no newline is not the start of an appended line",
                     ));
@@ -573,6 +825,13 @@ impl StateRecord {
             let symbol = fields
                 .next()
                 .ok_or_else(|| malformed("an entry is not `Instrument ID` then `Symbol`"))?;
+            let venue_key_text = if keyed.is_some() {
+                Some(fields.next().ok_or_else(|| {
+                    malformed("a version 4 entry is not `Instrument ID`, `Symbol` then venue key")
+                })?)
+            } else {
+                None
+            };
             let delisted_at: Option<u64> = match fields.next() {
                 None => None,
                 Some(_) if version == FORMAT_VERSION_V1 => {
@@ -599,6 +858,27 @@ impl StateRecord {
             }
             let symbol = decode_symbol(symbol)
                 .ok_or_else(|| malformed("an entry's Symbol is not 64 hexadecimal bytes"))?;
+            let venue_key = match venue_key_text {
+                None => None,
+                Some(SYMBOL_IS_KEY) => {
+                    if !symbol_is_whole(&symbol) {
+                        return Err(RecordError::UnresolvedVenueKey {
+                            line: line_number,
+                            instrument_id,
+                        });
+                    }
+                    None
+                }
+                Some(text) => Some(
+                    decode_venue_key(text).ok_or(RecordError::BadVenueKey { line: line_number })?,
+                ),
+            };
+            let entry = Entry {
+                instrument_id,
+                symbol,
+                venue_key,
+                delisted_at,
+            };
 
             if in_base {
                 // Under derived allocation the header's number is the floor:
@@ -620,17 +900,8 @@ impl StateRecord {
                 if ids.insert(instrument_id, entries.len()).is_some() {
                     return Err(RecordError::DuplicateId { instrument_id });
                 }
-                if let Some(first) = symbols.insert(symbol, instrument_id) {
-                    return Err(RecordError::DuplicateSymbol {
-                        first,
-                        second: instrument_id,
-                    });
-                }
-                entries.push(Entry {
-                    instrument_id,
-                    symbol,
-                    delisted_at,
-                });
+                hold(keyed.is_some(), &mut symbols, &mut keys, &entry)?;
+                entries.push(entry);
                 continue;
             }
 
@@ -640,6 +911,12 @@ impl StateRecord {
                 // recorded it as delisted.
                 if entries[at].symbol != symbol {
                     return Err(RecordError::RestatedUnderAnotherSymbol {
+                        line: line_number,
+                        instrument_id,
+                    });
+                }
+                if entries[at].key() != entry.key() {
+                    return Err(RecordError::RestatedUnderAnotherVenueKey {
                         line: line_number,
                         instrument_id,
                     });
@@ -663,31 +940,13 @@ impl StateRecord {
                         floor: next_id,
                     });
                 }
-                if let Some(first) = symbols.insert(symbol, instrument_id) {
-                    return Err(RecordError::DuplicateSymbol {
-                        first,
-                        second: instrument_id,
-                    });
-                }
+                hold(keyed.is_some(), &mut symbols, &mut keys, &entry)?;
                 ids.insert(instrument_id, entries.len());
-                entries.push(Entry {
-                    instrument_id,
-                    symbol,
-                    delisted_at: None,
-                });
+                entries.push(entry);
             } else if instrument_id == running_next {
-                if let Some(first) = symbols.insert(symbol, instrument_id) {
-                    return Err(RecordError::DuplicateSymbol {
-                        first,
-                        second: instrument_id,
-                    });
-                }
+                hold(keyed.is_some(), &mut symbols, &mut keys, &entry)?;
                 ids.insert(instrument_id, entries.len());
-                entries.push(Entry {
-                    instrument_id,
-                    symbol,
-                    delisted_at: None,
-                });
+                entries.push(entry);
                 running_next = running_next
                     .checked_add(1)
                     .ok_or_else(|| malformed("an appended line mints past the ID space"))?;
@@ -714,6 +973,7 @@ impl StateRecord {
                 next_id: running_next,
                 entries,
                 allocation,
+                keyed,
             },
             version,
             base: read - appended,
@@ -724,19 +984,68 @@ impl StateRecord {
     }
 }
 
-/// Whether `tail` is what [`encode_line`] writes, cut short before its newline:
-/// digits, then a space and at most `SYMBOL_LEN * 2` lowercase hexadecimal
-/// digits.
+/// Record an entry's `Symbol` and, in a keyed record, its venue key, refusing
+/// whichever of the two the record already holds under another ID.
+fn hold(
+    keyed: bool,
+    symbols: &mut HashMap<[u8; SYMBOL_LEN], u32>,
+    keys: &mut HashMap<Box<[u8]>, u32>,
+    entry: &Entry,
+) -> Result<(), RecordError> {
+    if keyed {
+        if let Some(first) = keys.insert(entry.key().into(), entry.instrument_id) {
+            return Err(RecordError::DuplicateVenueKey {
+                first,
+                second: entry.instrument_id,
+            });
+        }
+    } else if let Some(first) = symbols.insert(entry.symbol, entry.instrument_id) {
+        return Err(RecordError::DuplicateSymbol {
+            first,
+            second: entry.instrument_id,
+        });
+    }
+    Ok(())
+}
+
+/// Whether `tail` is what [`encode_line`] or, in a keyed record,
+/// [`encode_keyed_line`] writes, cut short before its newline: digits, then a
+/// space and at most `SYMBOL_LEN * 2` lowercase hexadecimal digits, and in a
+/// keyed record after all of them a space and a prefix of the venue key.
 ///
 /// Only a prefix of a line this build appends can be an append that never
 /// completed. Anything else with no newline was written by something else, and
 /// cutting it off would hide the damage rather than refuse it.
-fn starts_an_appended_line(tail: &str) -> bool {
-    let (id, symbol) = tail.split_once(' ').unwrap_or((tail, ""));
+fn starts_an_appended_line(tail: &str, keyed: bool) -> bool {
+    let mut fields = tail.splitn(3, ' ');
+    let id = fields.next().unwrap_or_default();
+    let symbol = fields.next().unwrap_or_default();
+    let key = fields.next();
     let digits = |text: &str| text.bytes().all(|byte| byte.is_ascii_digit());
+    let hex = |text: &str| text.bytes().all(|byte| nibble(byte).is_some());
     let id_fits = !id.is_empty() && id.len() <= u32::MAX.to_string().len() && digits(id);
-    let symbol_fits = symbol.len() <= SYMBOL_LEN * 2 && symbol.bytes().all(|b| nibble(b).is_some());
-    id_fits && symbol_fits
+    let symbol_fits = symbol.len() <= SYMBOL_LEN * 2 && hex(symbol);
+    let key_fits = match key {
+        None => true,
+        Some(_) if !keyed || symbol.len() != SYMBOL_LEN * 2 => false,
+        Some(key) => key == SYMBOL_IS_KEY || (key.len() <= MAX_VENUE_KEY_LEN * 2 && hex(key)),
+    };
+    id_fits && symbol_fits && key_fits
+}
+
+/// The bytes behind a venue key's hexadecimal digits, or `None` for anything
+/// [`is_venue_key`] refuses or that is not lowercase hexadecimal.
+fn decode_venue_key(text: &str) -> Option<Box<[u8]>> {
+    let digits = text.as_bytes();
+    if !digits.len().is_multiple_of(2) {
+        return None;
+    }
+    let (pairs, _) = digits.as_chunks::<2>();
+    let key = pairs
+        .iter()
+        .map(|pair| Some((nibble(pair[0])? << 4) | nibble(pair[1])?))
+        .collect::<Option<Vec<u8>>>()?;
+    is_venue_key(&key).then(|| key.into_boxed_slice())
 }
 
 /// The 64 bytes behind `SYMBOL_LEN * 2` hexadecimal digits, or `None`.
