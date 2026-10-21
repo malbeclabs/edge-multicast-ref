@@ -986,22 +986,11 @@ impl Document {
                     shard: feed.shard.as_str().to_owned(),
                 });
             }
-            // Checked here, on the blocks, because the metrics crate keys its
-            // reference-data gauges on the Channel ID alone and would fold a
-            // collision into one series on its way to the metrics that would
-            // have shown it.
-            if let Some(first) = feeds
-                .iter()
-                .find(|earlier| earlier.channel_id == feed.channel_id)
-            {
-                return Err(StartupError::DuplicateChannelId {
-                    channel_id: feed.channel_id,
-                    first_spec: first.spec.as_str().to_owned(),
-                    first_shard: first.shard.as_str().to_owned(),
-                    second_spec: feed.spec.as_str().to_owned(),
-                    second_shard: feed.shard.as_str().to_owned(),
-                });
-            }
+            // Against every earlier block on this ID, not the first: the rule
+            // is pairwise, and with a third specification a block could pass
+            // the first comparison and fail the second.
+            let claims: Vec<ChannelClaim<'_>> = feeds.iter().map(ChannelClaim::of).collect();
+            check_channel_claim(&claims, &ChannelClaim::of(&feed))?;
             feeds.push(feed);
         }
         if feeds.is_empty() {
@@ -1413,6 +1402,94 @@ impl FeedSection {
     }
 }
 
+/// What the `Channel ID` rule reads of one block: its specification's token,
+/// its shard, its ID and its three destination ports by key.
+///
+/// The specification is a token and not a [`FeedSpec`] so the rule can be
+/// tested on a specification this build has no codec for. With two
+/// specifications no document separates checking every earlier block from
+/// checking the first; with a third one does.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ChannelClaim<'a> {
+    pub(crate) spec: &'a str,
+    pub(crate) shard: &'a str,
+    pub(crate) channel_id: u8,
+    pub(crate) ports: [(&'static str, Option<u16>); 3],
+}
+
+impl<'a> ChannelClaim<'a> {
+    fn of(feed: &'a Feed) -> Self {
+        Self {
+            spec: feed.spec.as_str(),
+            shard: feed.shard.as_str(),
+            channel_id: feed.channel_id,
+            ports: [
+                ("mktdata_port", Some(feed.mktdata_port)),
+                ("refdata_port", Some(feed.refdata_port)),
+                ("snapshot_port", feed.snapshot_port),
+            ],
+        }
+    }
+}
+
+/// Two blocks may share a `Channel ID` only as one shard's two feeds.
+///
+/// Checked against every earlier block on the ID, in this order for each:
+///
+/// 1. one specification: [`StartupError::DuplicateChannelId`], two blocks
+///    writing one feed's channel;
+/// 2. two shards: [`StartupError::ChannelIdOnTwoShards`], one ID naming two
+///    instrument sets;
+/// 3. a destination port in common: [`StartupError::ChannelInstancePortShared`],
+///    one channel instance carrying two `Sequence Number` series.
+///
+/// Anything else is a shard's two feeds on one ID, which the specification
+/// allows: one ID names one instrument set, carried by both.
+pub(crate) fn check_channel_claim(
+    earlier: &[ChannelClaim<'_>],
+    claim: &ChannelClaim<'_>,
+) -> Result<(), StartupError> {
+    for first in earlier
+        .iter()
+        .filter(|first| first.channel_id == claim.channel_id)
+    {
+        if first.spec == claim.spec {
+            return Err(StartupError::DuplicateChannelId {
+                channel_id: claim.channel_id,
+                first_spec: first.spec.to_owned(),
+                first_shard: first.shard.to_owned(),
+                second_spec: claim.spec.to_owned(),
+                second_shard: claim.shard.to_owned(),
+            });
+        }
+        if first.shard != claim.shard {
+            return Err(StartupError::ChannelIdOnTwoShards {
+                channel_id: claim.channel_id,
+                first_spec: first.spec.to_owned(),
+                first_shard: first.shard.to_owned(),
+                second_spec: claim.spec.to_owned(),
+                second_shard: claim.shard.to_owned(),
+            });
+        }
+        for (first_key, first_port) in first.ports {
+            let Some(port) = first_port else { continue };
+            for (second_key, second_port) in claim.ports {
+                if second_port == Some(port) {
+                    return Err(StartupError::ChannelInstancePortShared {
+                        channel_id: claim.channel_id,
+                        port,
+                        first_spec: first.spec.to_owned(),
+                        first_key,
+                        second_spec: claim.spec.to_owned(),
+                        second_key,
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Every shard carries the same specifications, or the publisher refuses.
 ///
 /// **This is what makes [`ListingSink::list_on`] total.** A venue admits an
@@ -1711,4 +1788,71 @@ fn check_credentials(credentials: &toml::Table) -> Result<(), StartupError> {
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{check_channel_claim, ChannelClaim};
+    use crate::StartupError;
+
+    /// One block on Channel ID 1 of the default shard, with three ports.
+    fn claim(spec: &'static str, ports: [u16; 3]) -> ChannelClaim<'static> {
+        ChannelClaim {
+            spec,
+            shard: "default",
+            channel_id: 1,
+            ports: [
+                ("mktdata_port", Some(ports[0])),
+                ("refdata_port", Some(ports[1])),
+                ("snapshot_port", Some(ports[2])),
+            ],
+        }
+    }
+
+    /// Checked in document order, as `Config::resolve` checks them.
+    fn resolve(claims: &[ChannelClaim<'static>]) -> Result<(), StartupError> {
+        for (index, claim) in claims.iter().enumerate() {
+            check_channel_claim(&claims[..index], claim)?;
+        }
+        Ok(())
+    }
+
+    /// Three specifications on one ID and one shard: a third block is checked
+    /// against both earlier blocks, not only the first.
+    ///
+    /// No document can state this yet. With two specifications, a third block
+    /// on an ID shares one with an earlier block, and either the comparison
+    /// with the first block or `DuplicateFeedShard` refuses it, so no document
+    /// separates checking every earlier block from checking the first.
+    ///
+    /// **The revert:** compare a block with the first earlier block on its ID
+    /// only, as `feeds.iter().find(...)` did, and the shared port with the
+    /// second block goes unseen.
+    #[test]
+    fn a_third_block_is_checked_against_every_earlier_block_on_its_id() {
+        let top = claim("top-of-book", [30_001, 30_002, 30_003]);
+        let depth = claim("market-by-price", [30_011, 30_012, 30_013]);
+
+        let distinct = claim("market-by-order", [30_021, 30_022, 30_023]);
+        assert!(resolve(&[top, depth, distinct]).is_ok());
+
+        let shares_with_the_second = claim("market-by-order", [30_021, 30_012, 30_023]);
+        match resolve(&[top, depth, shares_with_the_second]) {
+            Err(StartupError::ChannelInstancePortShared {
+                port,
+                first_spec,
+                first_key,
+                second_spec,
+                second_key,
+                ..
+            }) => {
+                assert_eq!(port, 30_012);
+                assert_eq!(first_spec, "market-by-price");
+                assert_eq!(first_key, "refdata_port");
+                assert_eq!(second_spec, "market-by-order");
+                assert_eq!(second_key, "refdata_port");
+            }
+            other => panic!("expected the shared port with the second block, got {other:?}"),
+        }
+    }
 }

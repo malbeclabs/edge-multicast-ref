@@ -468,14 +468,15 @@ pub enum StartupError {
     )]
     ReservedShardName { spec: String, shard: String },
 
-    /// Two enabled blocks claiming one `Channel ID`.
+    /// Two enabled blocks of **one specification** claiming one `Channel ID`.
     ///
-    /// New, and it closes a hole that exists rather than one this change opens:
-    /// `Config::channel_ids()` sorts and dedups, so two blocks sharing an ID
-    /// pre-create one set of series and both write to it — `sequence_current`,
-    /// `heartbeat_last_sent`, `manifest_seq` and `manifest_valid`, each of them
-    /// two channel instances deep with nothing saying so. One channel per
-    /// specification made it unlikely; many make it a matter of time.
+    /// Two blocks of one feed on one ID are two writers of one feed's channel:
+    /// every series keyed on `(feed, Channel ID)` — `sequence_current`,
+    /// `heartbeat_last_sent`, `last_published` — would be one series two
+    /// channel instances write, and the reference-data gauges one series for
+    /// two published sets. A shard's two feeds on one ID are not this, and are
+    /// allowed: the rule `Config::resolve` applies is stated on its pairwise check.
+    ///
     /// **Each block is named by its specification *and* its shard**, because
     /// the specification alone stopped identifying a block the moment two of
     /// them could carry one. Two blocks of one specification on different
@@ -486,7 +487,7 @@ pub enum StartupError {
         "the `[[feed]]` blocks for `{first_spec}` on shard `{first_shard}` and `{second_spec}` \
          on shard `{second_shard}` both claim `channel_id = {channel_id}`. A `Channel ID` \
          identifies a channel instance on the wire and in every series keyed on one, so two \
-         blocks sharing it publish two feeds into one set of numbers."
+         blocks of one feed sharing it publish into one set of numbers."
     )]
     DuplicateChannelId {
         channel_id: u8,
@@ -494,6 +495,50 @@ pub enum StartupError {
         first_shard: String,
         second_spec: String,
         second_shard: String,
+    },
+
+    /// Two blocks of different specifications on **different shards** claiming
+    /// one `Channel ID`.
+    ///
+    /// The ID a shard's two feeds share names one instrument set, carried by
+    /// both: an `Instrument ID` on the channel means the same instrument on
+    /// either feed. Two shards are two instrument sets, so one ID across them
+    /// would name two, and a subscriber joining the two feeds on the ID would
+    /// join instruments that are not the same.
+    #[error(
+        "the `[[feed]]` blocks for `{first_spec}` on shard `{first_shard}` and `{second_spec}` \
+         on shard `{second_shard}` both claim `channel_id = {channel_id}`. Two feeds may share \
+         a `Channel ID` only on one shard, where it names one instrument set; across two \
+         shards it would name two."
+    )]
+    ChannelIdOnTwoShards {
+        channel_id: u8,
+        first_spec: String,
+        first_shard: String,
+        second_spec: String,
+        second_shard: String,
+    },
+
+    /// A shard's two feeds on one `Channel ID` sharing a destination port.
+    ///
+    /// A channel instance is keyed `(source IP address, Channel ID,
+    /// destination port)`. With the ID shared, the port is all that separates
+    /// the two feeds' instances, so a port in common is one instance carrying
+    /// two `Sequence Number` series, which a subscriber reads as one series
+    /// that goes backwards on every alternation.
+    #[error(
+        "`{first_key}` of the `{first_spec}` block and `{second_key}` of the `{second_spec}` \
+         block are both port {port}, on the `channel_id = {channel_id}` they share. With one \
+         `Channel ID`, the destination port is what keeps the two feeds' channel instances \
+         apart."
+    )]
+    ChannelInstancePortShared {
+        channel_id: u8,
+        port: u16,
+        first_spec: String,
+        first_key: &'static str,
+        second_spec: String,
+        second_key: &'static str,
     },
 
     /// Every `[[feed]]` block is disabled, or there are none.
