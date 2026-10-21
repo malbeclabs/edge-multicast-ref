@@ -29,11 +29,11 @@ use crate::ConnectFailureReason;
 /// each is a gap between this crate and the closed family set:
 ///
 /// - [`duplicate`](Self::duplicate) has a family and no caller here. The
-///   boundary gives an adapter no way to report the upstream's own sequence
-///   number or to declare a payload a repeat of one already published, so the
-///   driver cannot tell. It is declared because the runtime's implementation
-///   should be a complete mapping of the group, and because this is the place
-///   the missing channel will be noticed.
+///   inline boundary gives an adapter no way to declare a payload a repeat of
+///   one already published, so the driver cannot tell. The threaded one does —
+///   [`DecodedSink::duplicate`](dz_adapter_core::DecodedSink::duplicate) — and
+///   a runtime driving that model calls this for it, from the connection's own
+///   task.
 /// - [`adapter_error`](Self::adapter_error) is counted, and not by the closed
 ///   set. An adapter that cannot compose its own subscription is a real,
 ///   retried failure that none of the normative families can hold: it is not a
@@ -44,7 +44,15 @@ use crate::ConnectFailureReason;
 ///   anybody comparing a publisher's exposition against the playbook's list.
 ///   It had no family at all when this trait was written, and the sentence
 ///   saying so outlived that by one change.
-pub trait IngressObserver {
+///
+/// # `Sync`, for the reason [`Clock`](crate::Clock) is
+///
+/// [`Driver`](crate::Driver) holds it by shared reference and a runtime holds
+/// one for every connection it drives. Under a runtime that drives each
+/// connection on a worker thread of its own, that reference crosses threads,
+/// so the observer has to be shareable between them. Every method takes
+/// `&self`, so an implementation already counts through atomics or a lock.
+pub trait IngressObserver: Sync {
     /// `dz_publisher_ingress_messages_total{message_type,connection}`.
     ///
     /// One call per upstream message the adapter recognised — which is what the
@@ -64,8 +72,15 @@ pub trait IngressObserver {
     fn bytes(&self, count: u64);
 
     /// `dz_publisher_ingress_duplicates_total`. See the trait note: nothing in
-    /// this crate can call it yet.
+    /// this crate calls it; a threaded runtime does.
     fn duplicate(&self);
+
+    /// The proposed
+    /// `dz_publisher_ingress_claims_lost_to_newer_generation_total`: a
+    /// decoder's claim lost to a key from a counter generation it has not
+    /// adopted. As with [`duplicate`](Self::duplicate), a threaded runtime
+    /// calls it. Defaulted, so an observer that counts nothing need not.
+    fn lost_to_newer_generation(&self) {}
 
     /// `dz_publisher_ingress_parse_errors_total{reason}`.
     ///

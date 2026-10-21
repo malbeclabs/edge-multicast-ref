@@ -163,6 +163,7 @@ pub mod registry;
 pub mod replay;
 pub mod rotation;
 pub mod run;
+pub mod threaded;
 
 /// The composition seam, at the paths it has always had here.
 ///

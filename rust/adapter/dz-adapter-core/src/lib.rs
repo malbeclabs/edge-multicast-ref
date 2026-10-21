@@ -96,6 +96,16 @@
 //! have left an un-updated implementor admitting every instrument to
 //! [`DEFAULT_SHARD`] with nothing said anywhere; that is the trade, and
 //! `RELEASING.md`'s rule is that the tag message names the break.
+//!
+//! # A second input model: [`threaded`]
+//!
+//! [`Adapter::on_payload`] runs on the publisher's own loop, one payload at a
+//! time. A venue whose decode is expensive, and whose payloads arrive
+//! redundantly over several connections, implements [`ThreadedAdapter`]
+//! instead: a [`Decoder`] per connection runs on that connection's task, and
+//! only what survives the runtime's dedupe reaches the loop. It is still an
+//! [`Adapter`], and still re-runnable offline, through
+//! [`threaded::on_payload`]. Nothing in it is required of an inline adapter.
 
 #![forbid(unsafe_code)]
 
@@ -108,6 +118,7 @@ pub mod payload;
 pub mod scalar;
 pub mod sink;
 pub mod strike;
+pub mod threaded;
 pub mod timestamp;
 
 pub use adapter::Adapter;
@@ -121,4 +132,8 @@ pub use payload::{ConnectionId, DisconnectReason, Payload};
 pub use scalar::Scalar;
 pub use sink::{EventSink, ListingSink, SnapshotSink, UpstreamSink, DEFAULT_SHARD};
 pub use strike::{Strike, StrikeBound};
+pub use threaded::{
+    Admission, Claim, ClaimTable, CounterGenerations, Decoded, DecodedSink, Decoder, Order,
+    ThreadedAdapter,
+};
 pub use timestamp::VenueTimestampKind;
