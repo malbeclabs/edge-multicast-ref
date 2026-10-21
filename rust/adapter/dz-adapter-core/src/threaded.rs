@@ -38,9 +38,10 @@
 //! out: a generation it advances when it judges a restart, carried in the key, which
 //! both stages then order correctly.
 //!
-//! # Only quotes and trades, and no text
+//! # No deltas, and no text
 //!
-//! [`DecodedSink::push`] carries [`Event::Quote`] and [`Event::Trade`]. A
+//! [`DecodedSink::push`] carries [`Event::Quote`], [`Event::Trade`] and
+//! [`Event::Vwap`]. A
 //! [`Event::Level`] or [`Event::Clear`] is a delta, and two connections' deltas
 //! reordered on a queue corrupt a book while every per-connection check passes,
 //! which no first-copy floor can prevent. A [`Scalar::Text`] is the expensive
@@ -322,8 +323,8 @@ pub struct Decoded {
 /// [`ParseError::Schema`] for an [`Event::Level`] or an [`Event::Clear`]: a
 /// delta, and two connections' deltas reordered on a queue corrupt a book with
 /// every per-connection check passing. And for a [`Scalar::Text`] anywhere in a
-/// quote or a trade: the decode stage exists to parse the decimal, and a text
-/// scalar is that work handed back to the loop.
+/// quote, a trade or a VWAP: the decode stage exists to parse the decimal, and
+/// a text scalar is that work handed back to the loop.
 pub fn carried(event: &Event<'_>) -> Result<InstrumentRef, ParseError> {
     fn text(scalar: Scalar<'_>) -> bool {
         matches!(scalar, Scalar::Text(_))
@@ -362,9 +363,21 @@ pub fn carried(event: &Event<'_>) -> Result<InstrumentRef, ParseError> {
                 Ok(instrument)
             }
         }
-        Event::Level { .. } | Event::Clear { .. } => Err(ParseError::schema(
-            "the threaded model carries only quotes and trades",
-        )),
+        Event::Vwap {
+            instrument,
+            px,
+            volume,
+            ..
+        } => {
+            if text(px) || text(volume) {
+                Err(TEXT)
+            } else {
+                Ok(instrument)
+            }
+        }
+        Event::Level { .. } | Event::Clear { .. } => {
+            Err(ParseError::schema("the threaded model carries no deltas"))
+        }
     }
 }
 

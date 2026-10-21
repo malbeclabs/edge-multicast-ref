@@ -3,6 +3,7 @@
 //! inline one.
 
 use std::collections::HashSet;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use dz_adapter_core::threaded::{
@@ -41,6 +42,18 @@ fn trade(index: u32, px: i64, trade_id: u64) -> Event<'static> {
         trade_id: Some(trade_id),
         cumulative_volume: None,
         flags: TradeFlags::NONE,
+    }
+}
+
+fn vwap(px: Scalar<'static>, volume: Scalar<'static>) -> Event<'static> {
+    Event::Vwap {
+        instrument: instrument(6),
+        window_end_ns: 0,
+        window_ms: NonZeroU32::new(1_000).expect("not zero"),
+        compute_ts_ns: 0,
+        px,
+        volume,
+        stale: false,
     }
 }
 
@@ -182,9 +195,13 @@ fn an_event_with_no_order_is_always_applied() {
 }
 
 #[test]
-fn push_carries_quotes_and_trades_with_fixed_scalars_only() {
+fn push_carries_quotes_trades_and_vwaps_with_fixed_scalars_only() {
     assert_eq!(carried(&quote(4, 100)), Ok(instrument(4)));
     assert_eq!(carried(&trade(5, 100, 1)), Ok(instrument(5)));
+    assert_eq!(
+        carried(&vwap(Scalar::fixed(100, -2), Scalar::fixed(1, 0))),
+        Ok(instrument(6))
+    );
 
     let level = Event::Level {
         instrument: instrument(1),
@@ -220,7 +237,16 @@ fn push_carries_quotes_and_trades_with_fixed_scalars_only() {
         cumulative_volume: Some(Scalar::text("10")),
         flags: TradeFlags::NONE,
     };
-    for refused in [level, clear, text_quote, text_volume] {
+    let text_vwap_px = vwap(Scalar::text("1.00"), Scalar::fixed(1, 0));
+    let text_vwap_volume = vwap(Scalar::fixed(100, -2), Scalar::text("1"));
+    for refused in [
+        level,
+        clear,
+        text_quote,
+        text_volume,
+        text_vwap_px,
+        text_vwap_volume,
+    ] {
         assert!(
             matches!(carried(&refused), Err(ParseError::Schema { .. })),
             "{refused:?}"
