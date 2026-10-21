@@ -892,24 +892,79 @@ pub(crate) fn run<S: StateStore, K: Clock + Clone + 'static>(
                 () = signalled() => Exit::Signal,
             }
         };
-        // The connections stop first, so nothing more arrives; then what they
-        // had queued, and what they held behind a full queue, is published;
-        // then the teardown, as the inline model's.
+        // The connections stop first, so nothing more arrives; then, on a
+        // signal, what they had queued and held behind a full queue is
+        // published; then the teardown, as the inline model's.
         let held = connections.stop().await;
-        let unpublished = drain
-            .finish(held, shared, &mut SharedSink(publisher), DRAIN_DEADLINE)
-            .await;
-        if unpublished > 0 {
-            eprintln!(
-                "dz-publisher-runtime: shutdown drain deadline: {unpublished} decoded event(s) \
-                 were still queued or held on their connections after {DRAIN_DEADLINE:?}, and \
-                 are not published"
-            );
+        let outcome = wind_down(
+            &exit,
+            held,
+            &mut drain,
+            shared,
+            &mut SharedSink(publisher),
+            DRAIN_DEADLINE,
+        )
+        .await;
+        if let Some(message) = wind_down_message(&exit, outcome) {
+            eprintln!("{message}");
         }
         exit
     });
     workers.shutdown_timeout(DRAIN_DEADLINE);
     Ok(exit)
+}
+
+/// What became of the decoded events still queued or held at an exit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WoundDown {
+    /// A signal: published, all but `unpublished`, which the deadline cut off.
+    Drained { unpublished: usize },
+    /// A guard exit: none published, and `left` of them dropped.
+    Dropped { left: usize },
+}
+
+/// Drain the queue at an exit, **only for a signal.**
+///
+/// A signal is an orderly stop, and what was received before it is published
+/// before the teardown. A guard exit is not: the idle guard found nothing
+/// reaching the wire, and the consistency guard found the publisher unable to
+/// describe itself truthfully, an essential egress dark or its state
+/// unrecordable among them. Draining then would publish into exactly that,
+/// for up to [`DRAIN_DEADLINE`]. The inline model publishes nothing after any
+/// exit; a guard exit here does the same, and counts what it leaves.
+pub(crate) async fn wind_down(
+    exit: &Exit,
+    held: Held,
+    drain: &mut Drain,
+    shared: &SharedThreadedAdapter,
+    out: &mut dyn EventSink,
+    deadline: Duration,
+) -> WoundDown {
+    if matches!(exit, Exit::Signal) {
+        WoundDown::Drained {
+            unpublished: drain.finish(held, shared, out, deadline).await,
+        }
+    } else {
+        WoundDown::Dropped {
+            left: drain.queued() + held.len(),
+        }
+    }
+}
+
+/// The line to log about [`wind_down`]'s outcome, if there is anything to say.
+pub(crate) fn wind_down_message(exit: &Exit, outcome: WoundDown) -> Option<String> {
+    match outcome {
+        WoundDown::Drained { unpublished: 0 } | WoundDown::Dropped { left: 0 } => None,
+        WoundDown::Drained { unpublished } => Some(format!(
+            "dz-publisher-runtime: shutdown drain deadline: {unpublished} decoded event(s) were \
+             still queued or held on their connections after {DRAIN_DEADLINE:?}, and are not \
+             published"
+        )),
+        WoundDown::Dropped { left } => Some(format!(
+            "dz-publisher-runtime: exit by {exit}: {left} decoded event(s) still queued or held \
+             on their connections are not published, because only a signal drains"
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -995,6 +1050,94 @@ mod tests {
         // The sender is handed back so the queue stays open, as it does while
         // a connection lives.
         (drain, queue)
+    }
+
+    /// Forwards every decoded event.
+    struct Forward;
+    impl Adapter for Forward {
+        fn message_types(&self) -> &[&'static str] {
+            &[]
+        }
+        fn poll_listings(&mut self, _out: &mut dyn ListingSink) {}
+        fn on_payload(
+            &mut self,
+            _payload: &Payload<'_>,
+            _out: &mut dyn EventSink,
+        ) -> Result<(), ParseError> {
+            Ok(())
+        }
+    }
+    impl ThreadedAdapter for Forward {
+        fn decoder(
+            &self,
+            _conn: ConnectionId,
+            _claims: dz_adapter_core::ClaimTable,
+        ) -> Box<dyn Decoder> {
+            unreachable!("no connection runs here")
+        }
+    }
+
+    /// Counts what reaches it.
+    #[derive(Default)]
+    struct Counted(usize);
+    impl EventSink for Counted {
+        fn upstream_message(&mut self, _message_type: &'static str) {}
+        fn event(&mut self, _event: Event<'_>) {
+            self.0 += 1;
+        }
+    }
+
+    fn forward() -> SharedThreadedAdapter {
+        Arc::new(Mutex::new(Box::new(Forward)))
+    }
+
+    #[test]
+    fn a_guard_exit_publishes_nothing_more_and_says_what_it_left() {
+        // The guard fired because the publisher can no longer publish
+        // truthfully, or at all: draining would publish into that. What was
+        // queued is counted and named with the reason instead.
+        let (mut drain, _open) = drain_with(5);
+        let mut out = Counted::default();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let exit = Exit::IdleGuard;
+        let outcome = runtime.block_on(wind_down(
+            &exit,
+            Held::default(),
+            &mut drain,
+            &forward(),
+            &mut out,
+            DRAIN_DEADLINE,
+        ));
+        assert_eq!(outcome, WoundDown::Dropped { left: 5 });
+        assert_eq!(out.0, 0, "a guard exit published");
+        let said = wind_down_message(&exit, outcome).expect("something to say");
+        assert!(said.contains("5 decoded event(s)"), "{said}");
+        assert!(said.contains("idle guard"), "{said}");
+    }
+
+    #[test]
+    fn a_signal_exit_still_drains() {
+        let (mut drain, open) = drain_with(5);
+        drop(open);
+        let mut out = Counted::default();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let outcome = runtime.block_on(wind_down(
+            &Exit::Signal,
+            Held::default(),
+            &mut drain,
+            &forward(),
+            &mut out,
+            DRAIN_DEADLINE,
+        ));
+        assert_eq!(outcome, WoundDown::Drained { unpublished: 0 });
+        assert_eq!(out.0, 5);
+        assert_eq!(wind_down_message(&Exit::Signal, outcome), None);
     }
 
     #[test]

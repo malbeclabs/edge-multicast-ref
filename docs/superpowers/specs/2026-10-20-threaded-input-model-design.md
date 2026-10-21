@@ -216,6 +216,12 @@ publisher's ordered teardown then runs as today, `EndOfSession` last. A drain
 deadline of one second bounds it. Whatever the deadline cuts off is counted and
 named in a log line at shutdown, never dropped without a word.
 
+**Only a signal drains.** A guard exit (the idle guard, or the consistency
+guard with an egress dark or state that cannot be recorded) means the
+publisher cannot publish truthfully, or at all, so nothing more is published.
+What is still queued or held is counted and logged with the exit reason, as
+the inline model publishes nothing after any exit.
+
 ### 3i. Packing: a batch leaves in as few datagrams as fit it, and at once
 
 - **One batch is one `recv_many(&mut batch, BATCH)`.** It waits only while the
