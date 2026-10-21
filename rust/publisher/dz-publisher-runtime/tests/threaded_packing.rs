@@ -8,6 +8,7 @@
 mod harness;
 
 use std::collections::VecDeque;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -559,6 +560,80 @@ fn a_trade_is_measured_on_depth_while_the_top_of_book_route_is_down() {
         rendered_count(&h, "dz_publisher_venue_to_recv_latency_seconds_count"),
         1
     );
+}
+
+/// Trade 1, enough quotes to fill top-of-book's open datagram, then trade
+/// 2, on a shard with both feeds; top-of-book's route set to `first` before
+/// the batch and to `last` before its end. Returns the latency samples.
+fn mixed_batch_across_a_route_change(first: bool, last: bool) -> (u64, u64) {
+    let mut h = harness_both();
+    let route = Rc::clone(&h.tob.as_ref().expect("tob").mktdata_route_down);
+    route.set(first);
+    let mut listings = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut listings);
+    h.publisher.declare_venue_timestamps(&Packing::default());
+    h.publisher.send_live_per_batch();
+    let instrument = listings.handles()[0];
+    let trade = |id| Event::Trade {
+        instrument,
+        source_ts_ns: SOURCE_TS_NS,
+        px: Scalar::fixed(100, -2),
+        qty: Scalar::fixed(1_000, -3),
+        aggressor: Aggressor::Buy,
+        trade_id: Some(id),
+        cumulative_volume: None,
+        flags: TradeFlags::NONE,
+    };
+    let quote = |cents: i64| Event::Quote {
+        instrument,
+        source_ts_ns: SOURCE_TS_NS,
+        bid: SideUpdate::Present {
+            px: Scalar::fixed(cents, -2),
+            qty: Scalar::fixed(1_000, -3),
+            source_count: None,
+        },
+        ask: SideUpdate::Gone,
+    };
+    h.publisher.payload_scope(Some(SOURCE_TS_NS + 1_000_000));
+    h.publisher.event(trade(1));
+    // Past one datagram's worth, so top-of-book sends trade 1 mid-batch.
+    for cents in 0..(MAX_DATAGRAM_SIZE / <Quote as AppMessage>::SIZE) as i64 {
+        h.publisher.event(quote(1_000 + cents));
+    }
+    route.set(last);
+    h.publisher.event(trade(2));
+    h.publisher.payload_scope(None);
+    h.publisher.drained();
+    (
+        rendered_count(&h, "dz_publisher_recv_to_send_latency_seconds_count"),
+        rendered_count(&h, "dz_publisher_venue_to_recv_latency_seconds_count"),
+    )
+}
+
+#[test]
+fn each_trade_is_measured_once_across_a_route_change_inside_a_batch() {
+    // Top-of-book sends trade 1 in its first datagram and trade 2 in its last,
+    // and the route changes between them. Depth carries both, and leaves.
+    // Each trade is measured once, on whichever copy reached the wire first
+    // in that sense: top-of-book where its own datagram left, depth where it
+    // did not. Quotes are measured on top-of-book only.
+    let room = MAX_DATAGRAM_SIZE - DATAGRAM_HEADER_SIZE;
+    let quotes = (MAX_DATAGRAM_SIZE / <Quote as AppMessage>::SIZE) as u64;
+    // Top-of-book's first datagram: trade 1 and the quotes that fit beside
+    // it. The rest of the quotes and trade 2 are its last.
+    let in_first = ((room - <Trade as AppMessage>::SIZE) / <Quote as AppMessage>::SIZE) as u64;
+    assert!(in_first < quotes, "the batch spans two datagrams");
+    for (first, last, quotes_measured) in
+        [(false, true, in_first), (true, false, quotes - in_first)]
+    {
+        let (recv_to_send, venue_to_recv) = mixed_batch_across_a_route_change(first, last);
+        let expected = 2 + quotes_measured;
+        assert_eq!(
+            (recv_to_send, venue_to_recv),
+            (expected, expected),
+            "route down {first} then {last}"
+        );
+    }
 }
 
 #[test]

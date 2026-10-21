@@ -208,10 +208,17 @@ pub struct FeedPipeline<F: EmittedFeed> {
     /// Arrivals whose datagram left, with its `Send Timestamp`; a lost one's are dropped.
     sent_arrivals: Vec<(Arrival, u64)>,
     /// Arrivals in the open mktdata datagram that another feed measures, and
-    /// this one only if that feed's copy did not leave.
-    packed_fallbacks: Vec<Arrival>,
-    /// The same, once their datagram left.
-    sent_fallbacks: Vec<(Arrival, u64)>,
+    /// this one only if that feed's copy did not leave, each with the token
+    /// that names the message on both feeds.
+    packed_fallbacks: Vec<(Arrival, u64)>,
+    /// The same, once their datagram left, with its `Send Timestamp`.
+    sent_fallbacks: Vec<(Arrival, u64, u64)>,
+    /// Tokens of messages in the open mktdata datagram that another feed
+    /// carries as a fallback.
+    packed_tokens: Vec<u64>,
+    /// Those tokens once their datagram was decided: whether it left with its
+    /// route up.
+    resolved_tokens: Vec<(u64, bool)>,
     /// `(monotonic, unix)` of the last packed datagram to leave, until taken.
     live_sent: Option<(u64, u64)>,
     /// Monotonic. When the manifest is next due.
@@ -283,6 +290,8 @@ impl<F: EmittedFeed> FeedPipeline<F> {
             sent_arrivals: Vec::new(),
             packed_fallbacks: Vec::new(),
             sent_fallbacks: Vec::new(),
+            packed_tokens: Vec::new(),
+            resolved_tokens: Vec::new(),
             live_sent: None,
             next_manifest_ns: None,
             feed: PhantomData,
@@ -762,10 +771,22 @@ impl<F: EmittedFeed> FeedPipeline<F> {
     }
 
     /// Record the arrival of the live message just packed, for a message
-    /// another feed measures: observed here only if that feed's copy did not
-    /// leave.
-    pub fn packed_fallback_arrival(&mut self, arrival: Arrival) {
-        self.packed_fallbacks.push(arrival);
+    /// another feed measures: observed here only if that feed's copy, named
+    /// by `token`, did not leave.
+    pub fn packed_fallback_arrival(&mut self, arrival: Arrival, token: u64) {
+        self.packed_fallbacks.push((arrival, token));
+    }
+
+    /// Name the live message just packed, which another feed carries as a
+    /// fallback, so that feed learns whether this copy left.
+    pub fn packed_token(&mut self, token: u64) {
+        self.packed_tokens.push(token);
+    }
+
+    /// Tokens whose datagram was decided since the last call, each with
+    /// whether it left with its route up.
+    pub fn resolved_tokens(&mut self) -> std::vec::Drain<'_, (u64, bool)> {
+        self.resolved_tokens.drain(..)
     }
 
     /// Monotonic. When the open datagram's first live message was packed, or
@@ -785,8 +806,9 @@ impl<F: EmittedFeed> FeedPipeline<F> {
         self.sent_arrivals.drain(..)
     }
 
-    /// Fallback arrivals whose datagram left, each with its `Send Timestamp`.
-    pub fn sent_fallback_arrivals(&mut self) -> std::vec::Drain<'_, (Arrival, u64)> {
+    /// Fallback arrivals whose datagram left, each with its `Send Timestamp`
+    /// and its token.
+    pub fn sent_fallback_arrivals(&mut self) -> std::vec::Drain<'_, (Arrival, u64, u64)> {
         self.sent_fallbacks.drain(..)
     }
 
@@ -848,6 +870,11 @@ impl<F: EmittedFeed> FeedPipeline<F> {
         if !std::mem::take(&mut self.live_packed) {
             return;
         }
+        // Read right after the send that decided it: this datagram's own
+        // outcome, for the other feed's fallbacks.
+        let left = sent && !self.mktdata.sink().essential_route_down();
+        self.resolved_tokens
+            .extend(self.packed_tokens.drain(..).map(|token| (token, left)));
         if sent {
             self.last_mktdata_ns = Some(now_mono_ns);
             self.live_sent = Some((now_mono_ns, send_ts_ns));
@@ -859,7 +886,7 @@ impl<F: EmittedFeed> FeedPipeline<F> {
             self.sent_fallbacks.extend(
                 self.packed_fallbacks
                     .drain(..)
-                    .map(|arrival| (arrival, send_ts_ns)),
+                    .map(|(arrival, token)| (arrival, send_ts_ns, token)),
             );
         } else {
             self.packed_arrivals.clear();

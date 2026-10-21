@@ -800,6 +800,16 @@ pub struct Publisher<S: StateStore, K: Clock + Clone> {
     /// leaves at the end of the batch it was packed in, and no hold timer
     /// runs. See [`Self::send_live_per_batch`].
     live_per_batch: bool,
+    /// Under the threaded model, a trade on a shard with both feeds is named
+    /// by a token on both, so depth measures it only if top-of-book's copy
+    /// did not leave. The next token.
+    next_trade_token: u64,
+    /// Top-of-book's outcome for each named trade whose datagram has been
+    /// decided: whether it left. Cleared at the end of every batch.
+    trade_outcomes: std::collections::HashMap<u64, bool>,
+    /// Depth fallbacks that left before their top-of-book copy was decided:
+    /// arrival, `Send Timestamp`, token, and whether depth's own route was up.
+    deferred_fallbacks: Vec<(crate::pipeline::Arrival, u64, u64, bool)>,
     seeded: bool,
 }
 
@@ -867,6 +877,9 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
             snapshot_cursor: 0,
             snapshot_schedule_overruns: 0,
             live_per_batch: false,
+            next_trade_token: 0,
+            trade_outcomes: std::collections::HashMap::new(),
+            deferred_fallbacks: Vec::new(),
             seeded: false,
         }
     }
@@ -1802,6 +1815,9 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
             }
             self.settle_live(Some(shard));
         }
+        // Every datagram of the batch is decided, on both feeds.
+        self.trade_outcomes.clear();
+        self.deferred_fallbacks.clear();
     }
 
     /// Send every packed live datagram whose first message has waited
@@ -1842,23 +1858,42 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
         };
         let timestamp_kind = self.venue_timestamp_kind;
         let metrics = &self.metrics;
-        // A trade packed on both feeds is measured on top-of-book, and on
-        // depth only while top-of-book's route is down, so that copy did not
-        // leave. The route is read after both flushes, so it reflects them.
-        let top_route_down = self
-            .feeds
-            .top_of_book_on(shard)
-            .filter(|pipeline| pipeline.packs_live())
-            .is_some_and(FeedPipeline::mktdata_route_down);
-        let depth = self
-            .feeds
-            .market_by_price_on_mut(shard)
-            .and_then(|pipeline| settle(pipeline, metrics, timestamp_kind, top_route_down));
         let top = self
             .feeds
             .top_of_book_on_mut(shard)
             .filter(|pipeline| pipeline.packs_live())
-            .and_then(|pipeline| settle(pipeline, metrics, timestamp_kind, false));
+            .and_then(|pipeline| {
+                let settled = settle(pipeline, metrics, timestamp_kind);
+                self.trade_outcomes.extend(pipeline.resolved_tokens());
+                settled
+            });
+        let depth = self
+            .feeds
+            .market_by_price_on_mut(shard)
+            .and_then(|pipeline| {
+                let reached_wire = !pipeline.mktdata_route_down();
+                self.deferred_fallbacks
+                    .extend(pipeline.sent_fallback_arrivals().map(
+                        |(arrival, sent_unix_ns, token)| {
+                            (arrival, sent_unix_ns, token, reached_wire)
+                        },
+                    ));
+                settle(pipeline, metrics, timestamp_kind)
+            });
+        // A trade on both feeds is measured on top-of-book where that copy
+        // left, and on depth where it did not, each decided by its own
+        // datagram. A fallback whose top-of-book copy is still packed waits.
+        let outcomes = &mut self.trade_outcomes;
+        self.deferred_fallbacks
+            .retain(|&(arrival, sent_unix_ns, token, reached_wire)| {
+                let Some(top_left) = outcomes.remove(&token) else {
+                    return true;
+                };
+                if !top_left && reached_wire {
+                    observe_arrival_latency(metrics, timestamp_kind, arrival, sent_unix_ns);
+                }
+                false
+            });
         for (channel_id, reached_wire, sent_mono_ns, sent_unix_ns) in
             [depth, top].into_iter().flatten()
         {
@@ -1874,19 +1909,12 @@ fn settle<F: EmittedFeed>(
     pipeline: &mut FeedPipeline<F>,
     metrics: &PublisherMetrics,
     timestamp_kind: Option<TimestampKind>,
-    fallbacks: bool,
 ) -> Option<(u8, bool, u64, u64)> {
     let channel_id = pipeline.channel_id();
     let reached_wire = !pipeline.mktdata_route_down();
     for (arrival, sent_unix_ns) in pipeline.sent_arrivals() {
         // Not a latency: the datagram did not leave. See `published`.
         if reached_wire {
-            observe_arrival_latency(metrics, timestamp_kind, arrival, sent_unix_ns);
-        }
-    }
-    // Drained either way: a fallback the other feed measured is not kept.
-    for (arrival, sent_unix_ns) in pipeline.sent_fallback_arrivals() {
-        if fallbacks && reached_wire {
             observe_arrival_latency(metrics, timestamp_kind, arrival, sent_unix_ns);
         }
     }
@@ -2299,6 +2327,9 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                         // measured only if the top-of-book copy did not leave.
                         let mut measure_on_depth = self.live_per_batch;
                         let mut depth_fallback = false;
+                        let token = self.next_trade_token;
+                        self.next_trade_token = token.wrapping_add(1);
+                        let mut top_refused = false;
                         timed(&self.metrics, EgressMessageType::Trade, || {
                             if let Some(pipeline) =
                                 shard.and_then(|shard| self.feeds.top_of_book_on_mut(shard))
@@ -2312,6 +2343,11 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                                     // this feed and not again on the depth one.
                                     measure_on_depth = false;
                                     depth_fallback = true;
+                                    if sent.is_ok() {
+                                        pipeline.packed_token(token);
+                                    } else {
+                                        top_refused = true;
+                                    }
                                     if let (Ok(()), Some(arrival)) = (sent, arrival) {
                                         pipeline.packed_arrival(arrival);
                                     }
@@ -2327,11 +2363,15 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                                     if measure_on_depth {
                                         pipeline.packed_arrival(arrival);
                                     } else if depth_fallback {
-                                        pipeline.packed_fallback_arrival(arrival);
+                                        pipeline.packed_fallback_arrival(arrival, token);
                                     }
                                 }
                             }
                         });
+                        if top_refused {
+                            // Never packed on top-of-book: decided at once.
+                            self.trade_outcomes.insert(token, false);
+                        }
                         if let Some((channel_id, reached_wire)) = reached {
                             self.published(channel_id, reached_wire, now_mono, now_unix);
                         }
