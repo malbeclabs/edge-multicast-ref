@@ -172,10 +172,25 @@
 -- routes read through publishes them, and making them reachable from Lake is a
 -- change to Lake's exposure that belongs to whoever owns that decision.
 --
--- `lake_admin` and the indexer are not granted here either. The indexer reads
--- `book_top` and `venue_book_top` for the Phoenix rollup, under a grant to
--- `lake_indexer` that was applied by hand and is not yet written down in infra.
--- It is left out of this file for the same reason as `lake_api`.
+-- `lake_admin` and the indexer are not granted here either, but the indexer
+-- does read a venue grain. Lake's Phoenix rollup (`malbeclabs/lake#854`,
+-- `indexer/pkg/rollup/phoenix.go`) reads `book_top` and `venue_book_top`
+-- directly, as `lake_indexer`. An earlier revision of this section said nothing
+-- in the indexer read a venue grain, and that has been wrong since the rollup
+-- shipped. `lake_admin` has no account of its own: `lake-admin` logs in as
+-- `lake_indexer`.
+--
+-- THAT GRANT WAS APPLIED BY HAND ON OR ABOUT 2026-09-29 AND IS NOT YET WRITTEN
+-- DOWN ANYWHERE BUT HERE. `lake#854` asked for it in its description and in
+-- review, and merged on 2026-09-29. No record gives the exact date or the exact
+-- statement, which may name the two tables or `recorder.*`.
+-- `SHOW GRANTS FOR lake_indexer;` from an administrator's session settles both.
+-- `malbeclabs/infra#3269` tracks writing it into infra's runbook beside
+-- `lake_api`'s. Until that lands, this paragraph is the only record of it.
+--
+-- It stays out of this file for the reasons that do not depend on that record.
+-- The account is infra's, not this repository's, and a statement naming it
+-- would fail the whole file on any cluster without Lake.
 --
 -- THE THREE HAND-APPLIED `venue_*` GRANTS TO `lake_api` ARE PROBABLY GONE.
 -- They were applied to the shared ClickHouse on 2026-09-21, reached no
