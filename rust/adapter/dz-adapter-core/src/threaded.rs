@@ -181,6 +181,18 @@ pub trait ThreadedAdapter: Adapter {
     /// events are applied: per connection, the order they were pushed; across
     /// connections, none; per instrument under [`Order::Supersedes`],
     /// increasing.
+    ///
+    /// `out` is already scoped to `decoded`'s own payload, so what this emits
+    /// is measured from [`Decoded::recv_ts_ns`]. **An adapter that releases
+    /// an event it held from an earlier payload scopes it to that payload's
+    /// stamp**, with [`EventSink::payload_scope`], before emitting it, or the
+    /// hold is measured as venue-to-receive latency. The runtime puts
+    /// `decoded`'s own scope back when this returns, so the next event is
+    /// unaffected; an adapter that emits more of `decoded`'s own after a held
+    /// one scopes back to `decoded.recv_ts_ns` itself. Under the threaded
+    /// runtime a scope neither splits nor sends a datagram. The inline driver
+    /// ignores the call, so there a released event is measured from the
+    /// payload that released it.
     fn on_decoded(&mut self, decoded: &Decoded, out: &mut dyn EventSink) {
         out.event(decoded.event);
     }

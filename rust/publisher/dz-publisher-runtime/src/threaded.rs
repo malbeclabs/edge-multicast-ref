@@ -581,7 +581,17 @@ impl Drain {
                 scope = Some(decoded.recv_ts_ns);
                 out.payload_scope(scope);
             }
-            held.on_decoded(&decoded, &mut Applied(&mut *out));
+            let mut applied = Applied {
+                out: &mut *out,
+                rescoped: false,
+            };
+            held.on_decoded(&decoded, &mut applied);
+            // The adapter scoped what it emitted to another payload, such as
+            // an event it held from an earlier one: this one's stamp goes
+            // back, so the next event is not measured from that payload.
+            if applied.rescoped {
+                out.payload_scope(scope);
+            }
         }
         if scope.is_some() {
             out.payload_scope(None);
@@ -635,31 +645,42 @@ impl Drain {
     }
 }
 
-/// The sink `on_decoded` writes into: the publisher's, without the two calls
-/// that are the loop's own.
-struct Applied<'a>(&'a mut dyn EventSink);
+/// The sink `on_decoded` writes into: the publisher's, without the flush,
+/// which is the loop's own.
+struct Applied<'a> {
+    out: &'a mut dyn EventSink,
+    /// Whether the adapter changed the payload scope, so the loop puts the
+    /// event's own back when `on_decoded` returns.
+    rescoped: bool,
+}
 
 impl EventSink for Applied<'_> {
     fn upstream_message(&mut self, message_type: &'static str) {
-        self.0.upstream_message(message_type);
+        self.out.upstream_message(message_type);
     }
 
     fn upstream_identity(&mut self, sid: Option<u64>, seq: Option<u64>) {
-        self.0.upstream_identity(sid, seq);
+        self.out.upstream_identity(sid, seq);
     }
 
     fn event(&mut self, event: Event<'_>) {
-        self.0.event(event);
+        self.out.event(event);
     }
 
-    /// Not forwarded: the stamp is the payload's, stated by the loop.
-    fn payload_scope(&mut self, _recv_ts_ns: Option<u64>) {}
+    /// Forwarded, so an event the adapter held from an earlier payload is
+    /// measured from that payload's receipt. The loop states each event's own
+    /// stamp before `on_decoded` and puts it back after. Under the threaded
+    /// model the publisher neither splits nor sends a datagram on a scope.
+    fn payload_scope(&mut self, recv_ts_ns: Option<u64>) {
+        self.rescoped = true;
+        self.out.payload_scope(recv_ts_ns);
+    }
 
     /// Not forwarded: the loop flushes once per batch.
     fn drained(&mut self) {}
 
     fn desynchronised(&mut self, instrument: InstrumentRef, reason: Desync) {
-        self.0.desynchronised(instrument, reason);
+        self.out.desynchronised(instrument, reason);
     }
 }
 

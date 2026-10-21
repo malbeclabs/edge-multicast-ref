@@ -126,7 +126,8 @@ impl Adapter for Packing {
 /// A transport that hands over one payload per permit, so a test decides what
 /// is on the queue when the loop takes a batch.
 struct Gated {
-    payloads: VecDeque<Vec<u8>>,
+    /// Each payload, with the receive stamp its transport states, if any.
+    payloads: VecDeque<(Vec<u8>, Option<u64>)>,
     current: Vec<u8>,
     gate: Arc<tokio::sync::Semaphore>,
     exhausted: Arc<AtomicBool>,
@@ -158,10 +159,11 @@ impl Input for Gated {
                 return std::future::pending().await;
             }
             self.gate.acquire().await.expect("never closed").forget();
-            self.current = self.payloads.pop_front().expect("checked above");
+            let (bytes, ts_ns) = self.payloads.pop_front().expect("checked above");
+            self.current = bytes;
             Ok(Received::Payload {
                 bytes: &self.current,
-                ts_ns: None,
+                ts_ns,
             })
         })
     }
@@ -184,7 +186,19 @@ struct Threaded {
 }
 
 impl Threaded {
-    fn new(mut h: Harness, payloads: &[String]) -> Self {
+    fn new(h: Harness, payloads: &[String]) -> Self {
+        let adapter: SharedThreadedAdapter = Arc::new(Mutex::new(Box::new(Packing::default())));
+        let payloads = payloads.iter().map(|p| (p.clone(), None)).collect();
+        Self::over(h, payloads, adapter)
+    }
+
+    /// Payloads with the receive stamps their transport states, through
+    /// `adapter`.
+    fn over(
+        mut h: Harness,
+        payloads: Vec<(String, Option<u64>)>,
+        adapter: SharedThreadedAdapter,
+    ) -> Self {
         let mut listings = FakeAdapter::new(&["A-B", "C-D", "E-F"]);
         h.publisher.poll_listings(&mut listings);
         assert_eq!(
@@ -195,7 +209,6 @@ impl Threaded {
                 .collect::<Vec<_>>(),
             [0, 1, 2]
         );
-        let adapter: SharedThreadedAdapter = Arc::new(Mutex::new(Box::new(Packing::default())));
         h.publisher
             .declare_venue_timestamps(&**adapter.lock().expect("uncontended"));
         h.publisher.send_live_per_batch();
@@ -211,7 +224,10 @@ impl Threaded {
             .expect("loop");
         let gate = Arc::new(tokio::sync::Semaphore::new(0));
         let input = Gated {
-            payloads: payloads.iter().map(|p| p.as_bytes().to_vec()).collect(),
+            payloads: payloads
+                .into_iter()
+                .map(|(p, ts_ns)| (p.into_bytes(), ts_ns))
+                .collect(),
             current: Vec::new(),
             gate: Arc::clone(&gate),
             exhausted: Arc::new(AtomicBool::new(false)),
@@ -652,4 +668,111 @@ fn an_inline_venue_observes_one_message_per_datagram_and_a_lost_one_not_at_all()
     h.publisher.event(harness::quote(instrument, 4));
     h.publisher.payload_scope(None);
     assert_eq!(per_datagram(&h), (3, 3));
+}
+
+/// Holds trade `1` when it arrives and releases it on the next event, under
+/// its own receive stamp, after emitting that event: the shape of an adapter
+/// whose window holds a trade until a later one confirms it.
+#[derive(Default)]
+struct Holding {
+    inline: Option<Inline>,
+    held: Option<(Event<'static>, u64)>,
+}
+
+impl ThreadedAdapter for Holding {
+    fn decoder(&self, _conn: ConnectionId, _claims: ClaimTable) -> Box<dyn Decoder> {
+        Box::new(PackingDecoder)
+    }
+
+    fn on_decoded(&mut self, decoded: &dz_adapter_core::Decoded, out: &mut dyn EventSink) {
+        if let Event::Trade {
+            trade_id: Some(1), ..
+        } = decoded.event
+        {
+            self.held = Some((decoded.event, decoded.recv_ts_ns));
+            return;
+        }
+        out.event(decoded.event);
+        if let Some((event, recv_ts_ns)) = self.held.take() {
+            // Left in place on return: the loop puts back the next event's
+            // own stamp.
+            out.payload_scope(Some(recv_ts_ns));
+            out.event(event);
+        }
+    }
+}
+
+impl Adapter for Holding {
+    fn message_types(&self) -> &[&'static str] {
+        &["quote"]
+    }
+
+    fn source_timestamp_kind(&self) -> Option<VenueTimestampKind> {
+        Some(VenueTimestampKind::MatchingEngine)
+    }
+
+    fn poll_listings(&mut self, _out: &mut dyn ListingSink) {}
+
+    fn on_payload(
+        &mut self,
+        payload: &Payload<'_>,
+        out: &mut dyn EventSink,
+    ) -> Result<(), ParseError> {
+        let mut inline = self.inline.take().unwrap_or_default();
+        let result = inline.on_payload(self, payload, out);
+        self.inline = Some(inline);
+        result
+    }
+}
+
+/// A histogram's `_sum`, in seconds.
+fn rendered_sum(h: &Harness, family: &str) -> f64 {
+    h.metrics
+        .render()
+        .lines()
+        .filter(|line| line.starts_with(&format!("{family}_sum")))
+        .filter_map(|line| line.rsplit(' ').next())
+        .filter_map(|value| value.parse::<f64>().ok())
+        .sum()
+}
+
+#[test]
+fn a_held_event_released_under_its_own_stamp_is_measured_from_its_own_receipt() {
+    // Trade 1 arrives at R1 and is held. Trades 2 and 3 arrive together at
+    // R2; the adapter releases 1 after 2, scoped to R1. So 1 is measured from
+    // R1, and 3, the next event, from R2 again: the loop puts its stamp back.
+    // The batch still leaves as one datagram.
+    const R1: u64 = SOURCE_TS_NS + 1_000_000;
+    const R2: u64 = SOURCE_TS_NS + 3_000_000_000;
+    const SENT: u64 = SOURCE_TS_NS + 10_000_000_000;
+    let adapter: SharedThreadedAdapter = Arc::new(Mutex::new(Box::new(Holding::default())));
+    let payloads = vec![
+        ("t:0:1".to_string(), Some(R1)),
+        ("t:0:2".to_string(), Some(R2)),
+        ("t:0:3".to_string(), Some(R2)),
+    ];
+    let mut threaded = Threaded::over(harness(feed()), payloads, adapter);
+    threaded.h.clock.step_unix_ns(SENT);
+    threaded.one_batch(3);
+    let h = threaded.stop();
+
+    assert_eq!(on_the_wire(&h), [('t', 2), ('t', 1), ('t', 3)]);
+    assert_eq!(
+        h.tob.as_ref().expect("tob").mktdata.len(),
+        1,
+        "one datagram"
+    );
+    let seconds = |ns: u64| ns as f64 / 1e9;
+    let venue_to_recv = seconds(R1 - SOURCE_TS_NS) + 2.0 * seconds(R2 - SOURCE_TS_NS);
+    let recv_to_send = seconds(SENT - R1) + 2.0 * seconds(SENT - R2);
+    let read_venue = rendered_sum(&h, "dz_publisher_venue_to_recv_latency_seconds");
+    let read_send = rendered_sum(&h, "dz_publisher_recv_to_send_latency_seconds");
+    assert!(
+        (read_venue - venue_to_recv).abs() < 1e-6,
+        "venue_to_recv summed {read_venue}, not {venue_to_recv}"
+    );
+    assert!(
+        (read_send - recv_to_send).abs() < 1e-6,
+        "recv_to_send summed {read_send}, not {recv_to_send}"
+    );
 }
