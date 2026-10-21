@@ -24,6 +24,7 @@ use std::path::PathBuf;
 use dz_adapter_core::ConnectionId;
 use dz_edge_core::{Feed as WireFeed, PortRole};
 use dz_edge_mbp::MarketByPrice;
+use dz_edge_midpoint::MidpointFeed;
 use dz_edge_tob::TopOfBook;
 use dz_ingress_core::Kind;
 use serde::Deserialize;
@@ -297,18 +298,20 @@ pub enum FeedSpec {
     /// is byte-identical to top-of-book's, per the wire's cross-specification
     /// policy for `0x04`.
     MarketByPrice,
+    /// `dz-edge-midpoint`: `Midpoint`, on the mktdata and refdata port roles.
+    Midpoint,
 }
 
 impl FeedSpec {
     /// Every specification, in the order an error message names them.
-    pub const ALL: [Self; 2] = [Self::TopOfBook, Self::MarketByPrice];
+    pub const ALL: [Self; 3] = [Self::TopOfBook, Self::MarketByPrice, Self::Midpoint];
 
     /// The specifications this build can emit, for an error message.
     ///
     /// A literal so that it is a `&'static str` usable in a `thiserror` format
     /// string; held to [`ALL`](Self::ALL) by `dz-publisher-runtime`'s
     /// `tests/feed_specs.rs::the_supported_list_is_the_specification_set`.
-    pub const SUPPORTED: &'static str = "top-of-book, market-by-price";
+    pub const SUPPORTED: &'static str = "top-of-book, market-by-price, midpoint";
 
     /// The configuration token, which is the codec crate's own `Feed::NAME`.
     #[must_use]
@@ -316,6 +319,7 @@ impl FeedSpec {
         match self {
             Self::TopOfBook => <TopOfBook as WireFeed>::NAME,
             Self::MarketByPrice => <MarketByPrice as WireFeed>::NAME,
+            Self::Midpoint => <MidpointFeed as WireFeed>::NAME,
         }
     }
 
@@ -328,7 +332,7 @@ impl FeedSpec {
     #[must_use]
     pub const fn port_roles(self) -> &'static [PortRole] {
         match self {
-            Self::TopOfBook => &[PortRole::Mktdata, PortRole::Refdata],
+            Self::TopOfBook | Self::Midpoint => &[PortRole::Mktdata, PortRole::Refdata],
             // The third role is the whole difference at this level: a
             // subscriber to a depth feed holds a book that only exists because
             // it applied every message in order, so it needs somewhere to
@@ -341,7 +345,7 @@ impl FeedSpec {
     #[must_use]
     pub const fn has_snapshot_port(self) -> bool {
         match self {
-            Self::TopOfBook => false,
+            Self::TopOfBook | Self::Midpoint => false,
             Self::MarketByPrice => true,
         }
     }

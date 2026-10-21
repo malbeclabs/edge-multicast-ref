@@ -51,7 +51,8 @@ use std::time::Duration;
 
 use dz_edge_core::{AppMessage, EndOfSession, Heartbeat, PortRole, ResetCount, MAX_DATAGRAM_SIZE};
 use dz_edge_mbp::{BookClear, InstrumentReset, LevelUpdate};
-use dz_edge_refdata::ManifestSummary;
+use dz_edge_midpoint::Midpoint;
+use dz_edge_refdata::{ManifestSummary, StrikeInterval};
 use dz_edge_tob::{Quote, Trade};
 use dz_publisher_egress::{
     ChannelEgress, DatagramSink, EgressEndpoint, EgressError, RouteState, Tee,
@@ -347,6 +348,25 @@ impl<F: EmittedFeed> FeedPipeline<F> {
         self.live_mktdata(quote, EgressMessageType::Quote, now_mono_ns, send_ts_ns)
     }
 
+    /// One `0x03 Midpoint`, sent.
+    ///
+    /// # Errors
+    ///
+    /// As [`send_quote`](Self::send_quote).
+    pub fn send_midpoint(
+        &mut self,
+        midpoint: &Midpoint,
+        now_mono_ns: u64,
+        send_ts_ns: u64,
+    ) -> Result<(), EgressError> {
+        self.live_mktdata(
+            midpoint,
+            EgressMessageType::Midpoint,
+            now_mono_ns,
+            send_ts_ns,
+        )
+    }
+
     /// Pack live messages into the open datagram from now on, as
     /// market-by-price always does, rather than sending each alone.
     ///
@@ -565,6 +585,9 @@ impl<F: EmittedFeed> FeedPipeline<F> {
     /// [`definitions_per_datagram`](dz_publisher_refdata::definitions_per_datagram)
     /// paces against.
     ///
+    /// A feed that does not carry `StrikeInterval` sends the definition
+    /// alone, because the builder refuses the pair.
+    ///
     /// # Errors
     ///
     /// As [`send_quote`](Self::send_quote).
@@ -574,16 +597,16 @@ impl<F: EmittedFeed> FeedPipeline<F> {
         send_ts_ns: u64,
     ) -> Result<(), EgressError> {
         match &entry.strike {
-            None => self.refdata.push(
-                self.channel_id,
-                &entry.definition,
-                EgressMessageType::InstrumentDefinition,
-                send_ts_ns,
-            ),
-            Some(strike) => self.refdata.push_pair(
+            Some(strike) if F::carries(StrikeInterval::TYPE_ID) => self.refdata.push_pair(
                 self.channel_id,
                 (&entry.definition, EgressMessageType::InstrumentDefinition),
                 (strike, EgressMessageType::StrikeInterval),
+                send_ts_ns,
+            ),
+            _ => self.refdata.push(
+                self.channel_id,
+                &entry.definition,
+                EgressMessageType::InstrumentDefinition,
                 send_ts_ns,
             ),
         }

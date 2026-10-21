@@ -28,6 +28,7 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 use dz_edge_mbp::MAGIC_MBP;
+use dz_edge_midpoint::MAGIC_MIDPOINT;
 use dz_edge_tob::MAGIC_TOB;
 use std::time::Duration;
 
@@ -106,6 +107,7 @@ impl PortOpener for RecordingPorts {
         let magic = match feed.spec {
             FeedSpec::TopOfBook => MAGIC_TOB,
             FeedSpec::MarketByPrice => MAGIC_MBP,
+            FeedSpec::Midpoint => MAGIC_MIDPOINT,
         };
         let metrics = self.metrics.as_ref().expect("metrics");
         // The recorders are dropped: what these tests read is the shape of the

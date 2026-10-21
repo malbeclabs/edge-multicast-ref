@@ -9,6 +9,7 @@ use dz_edge_core::{AppMessage, EndOfSession, Feed as WireFeed, Heartbeat, PortRo
 use dz_edge_mbp::{
     BookClear, LevelUpdate, MarketByPrice, SnapshotBegin, SnapshotEnd, SnapshotLevel,
 };
+use dz_edge_midpoint::{Midpoint, MidpointFeed};
 use dz_edge_refdata::{InstrumentDefinition, ManifestSummary};
 use dz_edge_tob::{Quote, TopOfBook, Trade};
 use dz_publisher_runtime::{EmittedFeed, FeedSpec};
@@ -23,6 +24,10 @@ fn every_token_is_the_codec_crates_own_feed_name() {
     assert_eq!(
         FeedSpec::MarketByPrice.as_str(),
         <MarketByPrice as WireFeed>::NAME
+    );
+    assert_eq!(
+        FeedSpec::Midpoint.as_str(),
+        <MidpointFeed as WireFeed>::NAME
     );
 }
 
@@ -73,6 +78,11 @@ fn the_type_level_specification_agrees_with_the_value() {
         <MarketByPrice as EmittedFeed>::SPEC.as_str(),
         <MarketByPrice as WireFeed>::NAME
     );
+    assert_eq!(<MidpointFeed as EmittedFeed>::SPEC, FeedSpec::Midpoint);
+    assert_eq!(
+        <MidpointFeed as EmittedFeed>::SPEC.as_str(),
+        <MidpointFeed as WireFeed>::NAME
+    );
 }
 
 #[test]
@@ -117,6 +127,15 @@ fn each_specifications_port_roles_are_the_union_its_message_types_declare() {
         SnapshotEnd::PORT_ROLES,
     ]);
     assert_eq!(FeedSpec::MarketByPrice.port_roles(), market_by_price);
+
+    let midpoint = union(&[
+        Heartbeat::PORT_ROLES,
+        EndOfSession::PORT_ROLES,
+        Midpoint::PORT_ROLES,
+        InstrumentDefinition::PORT_ROLES,
+        ManifestSummary::PORT_ROLES,
+    ]);
+    assert_eq!(FeedSpec::Midpoint.port_roles(), midpoint);
 }
 
 #[test]

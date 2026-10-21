@@ -70,9 +70,12 @@ use dz_adapter_core::{
 };
 use dz_edge_core::fixed_point::ScaleError;
 use dz_edge_mbp::MarketByPrice;
+use dz_edge_midpoint::MidpointFeed;
 use dz_edge_refdata::ManifestSummary;
 use dz_edge_tob::TopOfBook;
-use dz_publisher_lowering::{DepthLowering, Lowering, LoweringError, Snapshot, SourceId};
+use dz_publisher_lowering::{
+    DepthLowering, Lowering, LoweringError, MidpointLowering, Snapshot, SourceId,
+};
 use dz_publisher_metrics::{
     EgressMessageType, EventKind, LoweringRefusalReason, PublisherMetrics, RefdataLoadErrorReason,
     TimestampKind,
@@ -155,12 +158,13 @@ pub struct ShardFeeds {
     name: String,
     top_of_book: Option<FeedPipeline<TopOfBook>>,
     market_by_price: Option<FeedPipeline<MarketByPrice>>,
+    midpoint: Option<FeedPipeline<MidpointFeed>>,
 }
 
 impl ShardFeeds {
     /// One shard's send paths, from the blocks that composed for it.
     ///
-    /// `None` when neither specification composed, which no resolved document
+    /// `None` when no specification composed, which no resolved document
     /// produces: the shard set is the distinct shards *of the enabled blocks*,
     /// so a shard with neither is a shard nothing named. It is returned rather
     /// than asserted because the caller has somewhere honest to put it — see
@@ -170,16 +174,19 @@ impl ShardFeeds {
     pub fn new(
         top_of_book: Option<FeedPipeline<TopOfBook>>,
         market_by_price: Option<FeedPipeline<MarketByPrice>>,
+        midpoint: Option<FeedPipeline<MidpointFeed>>,
     ) -> Option<Self> {
         let name = top_of_book
             .as_ref()
             .map(FeedPipeline::shard)
-            .or_else(|| market_by_price.as_ref().map(FeedPipeline::shard))?
+            .or_else(|| market_by_price.as_ref().map(FeedPipeline::shard))
+            .or_else(|| midpoint.as_ref().map(FeedPipeline::shard))?
             .to_owned();
         Some(Self {
             name,
             top_of_book,
             market_by_price,
+            midpoint,
         })
     }
 
@@ -216,6 +223,18 @@ impl ShardFeeds {
         self.market_by_price.as_mut()
     }
 
+    /// This shard's midpoint send path, or `None` if it carries no midpoint
+    /// block.
+    #[must_use]
+    pub const fn midpoint(&self) -> Option<&FeedPipeline<MidpointFeed>> {
+        self.midpoint.as_ref()
+    }
+
+    /// This shard's midpoint send path, to send on.
+    pub const fn midpoint_mut(&mut self) -> Option<&mut FeedPipeline<MidpointFeed>> {
+        self.midpoint.as_mut()
+    }
+
     /// The `Channel ID`s this shard publishes on: one per block it carries.
     ///
     /// A shard carrying both specifications is two channel instances over one
@@ -226,6 +245,7 @@ impl ShardFeeds {
             .map(FeedPipeline::channel_id)
             .into_iter()
             .chain(self.market_by_price().map(FeedPipeline::channel_id))
+            .chain(self.midpoint().map(FeedPipeline::channel_id))
     }
 
     /// A dropped fan-out member whose failure darkens this shard, on either
@@ -238,6 +258,7 @@ impl ShardFeeds {
                 self.market_by_price()
                     .and_then(FeedPipeline::dark_transmitter)
             })
+            .or_else(|| self.midpoint().and_then(FeedPipeline::dark_transmitter))
     }
 
     /// Every fan-out member of this shard, on either feed and any port role,
@@ -249,6 +270,9 @@ impl ShardFeeds {
             dropped.extend(pipeline.dropped_sinks());
         }
         if let Some(pipeline) = self.market_by_price() {
+            dropped.extend(pipeline.dropped_sinks());
+        }
+        if let Some(pipeline) = self.midpoint() {
             dropped.extend(pipeline.dropped_sinks());
         }
         dropped
@@ -263,6 +287,9 @@ impl ShardFeeds {
             states.extend(pipeline.route_states());
         }
         if let Some(pipeline) = self.market_by_price() {
+            states.extend(pipeline.route_states());
+        }
+        if let Some(pipeline) = self.midpoint() {
             states.extend(pipeline.route_states());
         }
         states
@@ -290,6 +317,9 @@ impl ShardFeeds {
         if let Some(pipeline) = self.market_by_price_mut() {
             tick_pipeline(pipeline, owed, manifest, now_mono_ns, now_unix_ns);
         }
+        if let Some(pipeline) = self.midpoint_mut() {
+            tick_pipeline(pipeline, owed, manifest, now_mono_ns, now_unix_ns);
+        }
     }
 }
 
@@ -307,8 +337,8 @@ mod shard_feeds_tests {
     /// invariant no document can violate is one a later refactor can, which is
     /// what `StartupError::ShardWithNoFeed` exists for.
     #[test]
-    fn a_shard_with_neither_specification_is_not_a_shard() {
-        assert!(ShardFeeds::new(None, None).is_none());
+    fn a_shard_with_no_specification_is_not_a_shard() {
+        assert!(ShardFeeds::new(None, None, None).is_none());
     }
 }
 
@@ -413,6 +443,18 @@ impl Feeds {
             .and_then(ShardFeeds::market_by_price_mut)
     }
 
+    /// One shard's midpoint send path, or `None` if this publisher carries no
+    /// midpoint feed for it.
+    #[must_use]
+    pub fn midpoint_on(&self, shard: usize) -> Option<&FeedPipeline<MidpointFeed>> {
+        self.shard(shard).and_then(ShardFeeds::midpoint)
+    }
+
+    /// One shard's midpoint send path, to send on.
+    pub fn midpoint_on_mut(&mut self, shard: usize) -> Option<&mut FeedPipeline<MidpointFeed>> {
+        self.shard_mut(shard).and_then(ShardFeeds::midpoint_mut)
+    }
+
     /// Whether any shard carries a top-of-book feed.
     ///
     /// The question a publisher answers before it considers a handle at all: a
@@ -426,6 +468,12 @@ impl Feeds {
     #[must_use]
     pub fn carries_market_by_price(&self) -> bool {
         self.shards().any(|shard| shard.market_by_price().is_some())
+    }
+
+    /// Whether any shard carries a midpoint feed.
+    #[must_use]
+    pub fn carries_midpoint(&self) -> bool {
+        self.shards().any(|shard| shard.midpoint().is_some())
     }
 
     /// Every enabled feed's `Channel ID`, across every shard.
@@ -746,6 +794,7 @@ pub struct Publisher<S: StateStore, K: Clock + Clone> {
     /// `Per-Instrument Seq`. Rebuilding it mid-era restarts a sequence a
     /// subscriber reads as a channel reset.
     depth: DepthLowering,
+    midpoint: MidpointLowering,
     feeds: Feeds,
     idle: IdleGuard,
     consistency: ConsistencyGuard,
@@ -860,6 +909,7 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
             clock,
             lowering: Lowering::new(source_id),
             depth: DepthLowering::new(source_id),
+            midpoint: MidpointLowering::new(source_id),
             feeds,
             idle: IdleGuard::new(idle_guard),
             consistency: ConsistencyGuard::new(),
@@ -1034,6 +1084,9 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
                 let _ = pipeline.send_manifest(&manifest, now_mono, now_unix);
             }
             if let Some(pipeline) = shard.market_by_price_mut() {
+                let _ = pipeline.send_manifest(&manifest, now_mono, now_unix);
+            }
+            if let Some(pipeline) = shard.midpoint_mut() {
                 let _ = pipeline.send_manifest(&manifest, now_mono, now_unix);
             }
         }
@@ -1474,6 +1527,9 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
             if let Some(pipeline) = shard.market_by_price_mut() {
                 let _ = pipeline.send_manifest(&manifest, now_mono, now_unix);
             }
+            if let Some(pipeline) = shard.midpoint_mut() {
+                let _ = pipeline.send_manifest(&manifest, now_mono, now_unix);
+            }
         }
         steps.push(TeardownStep::FinalManifestSent);
 
@@ -1488,6 +1544,9 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
             if let Some(pipeline) = shard.market_by_price_mut() {
                 let _ = pipeline.send_end_of_session(now_mono, now_unix);
             }
+            if let Some(pipeline) = shard.midpoint_mut() {
+                let _ = pipeline.send_end_of_session(now_mono, now_unix);
+            }
         }
         steps.push(TeardownStep::EndOfSessionSent);
 
@@ -1496,6 +1555,9 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
                 let _ = pipeline.flush(now_unix);
             }
             if let Some(pipeline) = shard.market_by_price_mut() {
+                let _ = pipeline.flush(now_unix);
+            }
+            if let Some(pipeline) = shard.midpoint_mut() {
                 let _ = pipeline.flush(now_unix);
             }
         }
@@ -1660,6 +1722,13 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
     fn market_by_price_carries(&self, shard: Option<usize>) -> bool {
         self.feeds.carries_market_by_price()
             && shard.is_none_or(|shard| self.feeds.market_by_price_on(shard).is_some())
+    }
+
+    /// Whether a message for an instrument on this shard reaches a midpoint
+    /// feed. As [`top_of_book_carries`](Self::top_of_book_carries).
+    fn midpoint_carries(&self, shard: Option<usize>) -> bool {
+        self.feeds.carries_midpoint()
+            && shard.is_none_or(|shard| self.feeds.midpoint_on(shard).is_some())
     }
 
     /// Forward the reference-data owner's counts to the registry, as deltas.
@@ -1980,6 +2049,8 @@ const fn event_kind(event: &Event<'_>) -> EventKind {
     match event {
         Event::Quote { .. } | Event::Level { .. } | Event::Clear { .. } => EventKind::BookUpdate,
         Event::Trade { .. } => EventKind::Trade,
+        // A derived price, and not an execution.
+        Event::Vwap { .. } => EventKind::BookUpdate,
         // A new feed's message is a book update until somebody decides
         // otherwise, which is the safer default: the alternative labels it a
         // trade and puts it in a panel counting executions.
@@ -2484,6 +2555,62 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                             pipeline.packed_arrival(arrival);
                         }
                         self.settle_live(shard);
+                    }
+                    Err(error) => self.refusals.record(error, &self.metrics),
+                }
+            }
+
+            Event::Vwap {
+                instrument,
+                window_end_ns,
+                window_ms,
+                compute_ts_ns,
+                px,
+                volume,
+                stale,
+            } => {
+                let shard = self.shard_of(instrument);
+                if !self.midpoint_carries(shard) {
+                    self.unroutable += 1;
+                    return;
+                }
+                let lowered = self.midpoint.lower_vwap(
+                    self.refdata.instruments(),
+                    instrument,
+                    window_end_ns,
+                    window_ms,
+                    compute_ts_ns,
+                    px,
+                    volume,
+                    stale,
+                );
+                match lowered {
+                    // Sent one per datagram: a midpoint send path never packs.
+                    Ok(midpoint) => {
+                        let Some(pipeline) =
+                            shard.and_then(|shard| self.feeds.midpoint_on_mut(shard))
+                        else {
+                            self.unroutable += 1;
+                            return;
+                        };
+                        let channel_id = pipeline.channel_id();
+                        let sent = timed(&self.metrics, EgressMessageType::Midpoint, || {
+                            pipeline.send_midpoint(&midpoint, now_mono, now_unix)
+                        });
+                        let reached_wire = !pipeline.mktdata_route_down();
+                        if sent.is_ok() {
+                            self.published(channel_id, reached_wire, now_mono, now_unix);
+                            let arrival =
+                                self.arrival(window_end_ns, kind).filter(|_| reached_wire);
+                            if let Some(arrival) = arrival {
+                                observe_arrival_latency(
+                                    &self.metrics,
+                                    self.venue_timestamp_kind,
+                                    arrival,
+                                    now_unix,
+                                );
+                            }
+                        }
                     }
                     Err(error) => self.refusals.record(error, &self.metrics),
                 }

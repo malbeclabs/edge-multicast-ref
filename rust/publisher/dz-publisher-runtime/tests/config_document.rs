@@ -1511,10 +1511,9 @@ fn a_fan_out_socket_is_named_by_the_shard_as_well_as_the_feed_and_the_role() {
         "/run/a-publisher/fan-out.top-of-book.mktdata"
     );
 
-    // Every socket two shards of both feeds open, distinct: two shards, two
-    // specifications, three port roles between them. A name missing the shard
-    // collapses these in half, which is the pair of channel instances writing
-    // to one socket.
+    // Every socket three shards of every feed open, distinct. A name missing
+    // the shard collapses them, which is two channel instances writing to one
+    // socket.
     let shards = [alpha, beta, ShardName::default_shard()];
     let mut sockets: Vec<String> = shards
         .iter()
@@ -1529,8 +1528,8 @@ fn a_fan_out_socket_is_named_by_the_shard_as_well_as_the_feed_and_the_role() {
         .collect();
     let opened = sockets.len();
     assert_eq!(
-        opened, 15,
-        "three shards of both feeds open five sockets each"
+        opened, 21,
+        "three shards of every feed open seven sockets each"
     );
     sockets.sort();
     sockets.dedup();

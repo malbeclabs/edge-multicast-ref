@@ -52,6 +52,7 @@ use dz_adapter_core::{
 };
 use dz_edge_core::{PortRole, MAX_DATAGRAM_SIZE};
 use dz_edge_mbp::MarketByPrice;
+use dz_edge_midpoint::MidpointFeed;
 use dz_edge_tob::TopOfBook;
 use dz_ingress_core::{Driver, IngressError, Input};
 use dz_publisher_egress::{
@@ -979,6 +980,7 @@ pub fn compose_feeds(
     for shard in shards {
         let mut top_of_book = None;
         let mut market_by_price = None;
+        let mut midpoint = None;
         for feed in feeds.iter().filter(|feed| feed.shard == *shard) {
             let opened = ports.open(feed)?;
             // The match is total over a set that is not `#[non_exhaustive]`, so
@@ -1002,9 +1004,17 @@ pub fn compose_feeds(
                         opened,
                     ));
                 }
+                FeedSpec::Midpoint => {
+                    midpoint = Some(FeedPipeline::new(
+                        feed,
+                        Arc::clone(metrics),
+                        eras.begin_era::<MidpointFeed>(feed.shard.era_shard())?,
+                        opened,
+                    ));
+                }
             }
         }
-        let Some(shard_feeds) = ShardFeeds::new(top_of_book, market_by_price) else {
+        let Some(shard_feeds) = ShardFeeds::new(top_of_book, market_by_price, midpoint) else {
             // Refused rather than skipped, because skipping would shift every
             // later shard's index one off the registry's and publish a shard's
             // instruments under another channel instance's sequence series.

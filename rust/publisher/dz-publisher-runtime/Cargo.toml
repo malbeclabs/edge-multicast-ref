@@ -11,6 +11,7 @@ description = "The publisher a venue links: config composition, the adapter regi
 dz-adapter-core = { path = "../../adapter/dz-adapter-core" }
 dz-edge-core = { path = "../../codec/dz-edge-core" }
 dz-edge-mbp = { path = "../../codec/dz-edge-mbp" }
+dz-edge-midpoint = { path = "../../codec/dz-edge-midpoint" }
 dz-edge-refdata = { path = "../../codec/dz-edge-refdata" }
 dz-edge-tob = { path = "../../codec/dz-edge-tob" }
 dz-ingress-core = { path = "../../ingress/dz-ingress-core" }

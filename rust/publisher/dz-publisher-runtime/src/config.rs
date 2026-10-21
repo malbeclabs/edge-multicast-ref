@@ -41,6 +41,7 @@ use std::time::Duration;
 use dz_adapter_core::ConnectionId;
 use dz_edge_core::{Feed as WireFeed, PortRole};
 use dz_edge_mbp::MarketByPrice;
+use dz_edge_midpoint::MidpointFeed;
 use dz_edge_tob::TopOfBook;
 use dz_ingress_core::{IngressConfig, Kind, Policy};
 use dz_publisher_egress::{EgressPolicy, Ipv4Prefix};
@@ -747,6 +748,10 @@ impl EmittedFeed for TopOfBook {
 
 impl EmittedFeed for MarketByPrice {
     const SPEC: FeedSpec = FeedSpec::MarketByPrice;
+}
+
+impl EmittedFeed for MidpointFeed {
+    const SPEC: FeedSpec = FeedSpec::Midpoint;
 }
 
 /// Which shard of the instrument set a block carries, as a venue names it.

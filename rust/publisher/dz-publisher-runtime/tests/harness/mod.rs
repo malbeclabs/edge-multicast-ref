@@ -30,6 +30,7 @@ use dz_adapter_core::{
 };
 use dz_edge_core::{Datagram, PortRole, ResetCount};
 use dz_edge_mbp::{MarketByPrice, MAGIC_MBP};
+use dz_edge_midpoint::{MidpointFeed, MAGIC_MIDPOINT};
 use dz_edge_tob::{TopOfBook, MAGIC_TOB};
 use dz_publisher_egress::{DatagramSink, EgressEndpoint, FailureScope, SinkError, Tee};
 use dz_publisher_lowering::SourceId;
@@ -57,6 +58,10 @@ pub const DEPTH_CHANNEL_ID: u8 = 4;
 pub const DEPTH_MKTDATA_PORT: u16 = 30011;
 pub const DEPTH_REFDATA_PORT: u16 = 30012;
 pub const DEPTH_SNAPSHOT_PORT: u16 = 30013;
+/// The midpoint feed's own `Channel ID` and ports, distinct from both others.
+pub const MIDPOINT_CHANNEL_ID: u8 = 7;
+pub const MIDPOINT_MKTDATA_PORT: u16 = 30041;
+pub const MIDPOINT_REFDATA_PORT: u16 = 30042;
 /// The era the top-of-book harness begins in: not the first, so a test that
 /// reads the header sees a value the store could only have got from a previous
 /// run.
@@ -65,6 +70,8 @@ pub const TOB_ERA: u8 = 2;
 /// keyed per feed, so a newly enabled feed must not inherit one from a feed that
 /// has published for months — and two feeds in one process must not share one.
 pub const MBP_ERA: u8 = 5;
+/// The midpoint harness's era, distinct from both others for the same reason.
+pub const MID_ERA: u8 = 8;
 /// In the assigned production range, which is what `SourceId` admits.
 pub const SOURCE_ID: u16 = 41;
 
@@ -281,6 +288,9 @@ pub struct Harness {
     /// The market-by-price feed's recorders on the first shard, when this
     /// publisher emits it.
     pub mbp: Option<FeedRecorders>,
+    /// The midpoint feed's recorders on the first shard, when this publisher
+    /// emits it.
+    pub mid: Option<FeedRecorders>,
     /// Every shard's recorders, in the order the send paths are indexed.
     ///
     /// What a test asserting *and no other shard's* reads: an emptiness across
@@ -294,6 +304,7 @@ pub struct Harness {
 pub struct ShardRecorders {
     pub tob: Option<FeedRecorders>,
     pub mbp: Option<FeedRecorders>,
+    pub mid: Option<FeedRecorders>,
 }
 
 /// What one feed's port roles recorded, and the switches that break them.
@@ -329,16 +340,14 @@ impl Harness {
     ///
     /// # Panics
     ///
-    /// When it emits both, because then "the feed" is ambiguous and the test
-    /// means one of `tob` or `mbp`.
+    /// When it emits more than one, because then "the feed" is ambiguous and
+    /// the test means one of `tob`, `mbp` or `mid`.
     #[must_use]
     pub fn only(&self) -> &FeedRecorders {
-        match (self.tob.as_ref(), self.mbp.as_ref()) {
-            (Some(one), None) | (None, Some(one)) => one,
-            (Some(_), Some(_)) => {
-                panic!("this publisher emits both feeds; name `tob` or `mbp`")
-            }
-            (None, None) => panic!("this publisher emits no feed"),
+        match (self.tob.as_ref(), self.mbp.as_ref(), self.mid.as_ref()) {
+            (Some(one), None, None) | (None, Some(one), None) | (None, None, Some(one)) => one,
+            (None, None, None) => panic!("this publisher emits no feed"),
+            _ => panic!("this publisher emits several feeds; name `tob`, `mbp` or `mid`"),
         }
     }
 
@@ -415,6 +424,18 @@ pub fn depth_feed() -> Feed {
         definition_cycle: Duration::from_secs(30),
         manifest_cadence: Duration::from_secs(1),
         idle_guard: Duration::from_secs(60),
+    }
+}
+
+/// The midpoint `[[feed]]`.
+#[must_use]
+pub fn midpoint_feed() -> Feed {
+    Feed {
+        spec: FeedSpec::Midpoint,
+        channel_id: MIDPOINT_CHANNEL_ID,
+        mktdata_port: MIDPOINT_MKTDATA_PORT,
+        refdata_port: MIDPOINT_REFDATA_PORT,
+        ..feed()
     }
 }
 
@@ -516,7 +537,7 @@ pub fn harness_two_shards_with_rotation(cycle: Duration) -> Harness {
                 snapshot_cycle: Some(cycle),
                 ..feed
             },
-            FeedSpec::TopOfBook => feed,
+            FeedSpec::TopOfBook | FeedSpec::Midpoint => feed,
         })
         .collect();
     harness_inner(&configured, false)
@@ -678,6 +699,7 @@ fn harness_inner(configured: &[Feed], break_writes: bool) -> Harness {
     for shard in &shards {
         let mut top_of_book = None;
         let mut market_by_price = None;
+        let mut midpoint = None;
         for feed in configured.iter().filter(|feed| &feed.shard == shard) {
             match feed.spec {
                 FeedSpec::TopOfBook => {
@@ -688,15 +710,24 @@ fn harness_inner(configured: &[Feed], break_writes: bool) -> Harness {
                         feed, &metrics, MBP_ERA, MAGIC_MBP,
                     ));
                 }
+                FeedSpec::Midpoint => {
+                    midpoint = Some(pipeline::<MidpointFeed>(
+                        feed,
+                        &metrics,
+                        MID_ERA,
+                        MAGIC_MIDPOINT,
+                    ));
+                }
             }
         }
         let (top_of_book, tob) = split(top_of_book);
         let (market_by_price, mbp) = split(market_by_price);
+        let (midpoint, mid) = split(midpoint);
         feeds.push(
-            ShardFeeds::new(top_of_book, market_by_price)
+            ShardFeeds::new(top_of_book, market_by_price, midpoint)
                 .expect("a shard in the list has at least one block"),
         );
-        recorded.push(ShardRecorders { tob, mbp });
+        recorded.push(ShardRecorders { tob, mbp, mid });
     }
 
     let store = MemoryStore::new();
@@ -741,9 +772,9 @@ fn harness_inner(configured: &[Feed], break_writes: bool) -> Harness {
         identity.idle_guard,
     );
 
-    let (tob, mbp) = {
+    let (tob, mbp, mid) = {
         let first = recorded.first().expect("at least one shard");
-        (first.tob.clone(), first.mbp.clone())
+        (first.tob.clone(), first.mbp.clone(), first.mid.clone())
     };
     Harness {
         publisher,
@@ -751,6 +782,7 @@ fn harness_inner(configured: &[Feed], break_writes: bool) -> Harness {
         metrics,
         tob,
         mbp,
+        mid,
         shards: recorded,
     }
 }

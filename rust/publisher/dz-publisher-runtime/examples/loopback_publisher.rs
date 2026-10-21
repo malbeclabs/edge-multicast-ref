@@ -273,6 +273,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ports,
             )),
             None,
+            None,
         )
         .expect("one top-of-book send path is a shard"),
     );

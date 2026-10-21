@@ -24,10 +24,11 @@ dz-adapter-uds = { path = "../../adapter/dz-adapter-uds" }
 
 # `FeedSpec`, whose tokens are the codec crates' own `Feed::NAME` constants and
 # whose port roles are the codec's own, rather than literals that could drift
-# from the crates that define the feeds. Each of the three is `thiserror` and,
-# for the two feeds, `dz-edge-core`.
+# from the crates that define the feeds. Each is `thiserror` and, for the
+# feeds, `dz-edge-core`.
 dz-edge-core = { path = "../../codec/dz-edge-core" }
 dz-edge-mbp = { path = "../../codec/dz-edge-mbp" }
+dz-edge-midpoint = { path = "../../codec/dz-edge-midpoint" }
 dz-edge-tob = { path = "../../codec/dz-edge-tob" }
 
 # The metrics *client* and not `dz-publisher-metrics`, which carries the
