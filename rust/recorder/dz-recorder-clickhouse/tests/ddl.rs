@@ -4499,3 +4499,46 @@ fn the_venue_file_states_the_delete_a_corrected_re_derivation_needs() {
         "the file does not say why a re-load is not enough on its own"
     );
 }
+
+/// `013`'s two views number and pair within one feed.
+///
+/// Where two feeds share a `Channel ID` at one observation, a partition or a
+/// grouping without `feed` numbers their states as one sequence and pairs one
+/// feed's with the other's. The container suite shows the rows; this holds the
+/// text, so the two clauses cannot lose the column without a test saying so.
+#[test]
+fn the_pairing_views_key_on_feed() {
+    let sql = migration("013_recorder_book_top_feed.sql").sql;
+
+    let occurrence = view_body(sql, "book_top_occurrence");
+    let partition = occurrence
+        .split("PARTITION BY")
+        .nth(1)
+        .and_then(|rest| rest.split("ORDER BY").next())
+        .expect("the ordinal's window has a partition");
+    assert!(
+        partition.contains("b.observation, b.feed,"),
+        "`feed` is not in the ordinal's partition, after `observation`: {partition}"
+    );
+
+    let race = view_body(sql, "book_top_race");
+    let grouping = race.split("GROUP BY").nth(1).expect("the race groups");
+    assert!(
+        grouping.trim_start().starts_with("feed,"),
+        "`feed` does not lead the race's grouping: {grouping}"
+    );
+    let select = race.split("SELECT").nth(1).expect("the race selects");
+    assert!(
+        select.trim_start().starts_with("feed,"),
+        "`feed` is not the race's first column: {select}"
+    );
+
+    // Views only. A table or a grant here would be a different file's job, and
+    // the header says why the table does not change.
+    for statement in migration("013_recorder_book_top_feed.sql").statements() {
+        assert!(
+            statement.contains("CREATE OR REPLACE VIEW"),
+            "`013` holds a statement that is not a view: {statement}"
+        );
+    }
+}

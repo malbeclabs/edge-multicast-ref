@@ -27,6 +27,7 @@ const VENUE_OBSERVATION: &str = include_str!("../db/clickhouse/009_recorder_venu
 const BOOK_KEY: &str = include_str!("../db/clickhouse/010_recorder_book_key.sql");
 const EVENT_BOOK_DEPTH: &str = include_str!("../db/clickhouse/011_recorder_event_book_depth.sql");
 const READER_GRANTS: &str = include_str!("../db/clickhouse/012_recorder_reader_grants.sql");
+const BOOK_TOP_FEED: &str = include_str!("../db/clickhouse/013_recorder_book_top_feed.sql");
 
 /// Every migration, in the order they are applied.
 ///
@@ -35,7 +36,7 @@ const READER_GRANTS: &str = include_str!("../db/clickhouse/012_recorder_reader_g
 /// rather than by anything that loads rows. A loader that could grant itself
 /// privileges is the thing it exists to prevent.
 #[must_use]
-pub const fn migrations() -> [Migration; 12] {
+pub const fn migrations() -> [Migration; 13] {
     [
         Migration {
             name: "001_recorder_rows.sql",
@@ -84,6 +85,10 @@ pub const fn migrations() -> [Migration; 12] {
         Migration {
             name: "012_recorder_reader_grants.sql",
             sql: READER_GRANTS,
+        },
+        Migration {
+            name: "013_recorder_book_top_feed.sql",
+            sql: BOOK_TOP_FEED,
         },
     ]
 }
