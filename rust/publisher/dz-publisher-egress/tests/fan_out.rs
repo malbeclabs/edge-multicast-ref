@@ -364,3 +364,26 @@ fn a_nested_fan_out_that_absorbed_a_full_buffer_did_not_deliver() {
     assert_eq!(wire.accepted_count(), 1);
     assert!(outer.delivered());
 }
+
+#[test]
+fn a_dropped_essential_member_is_not_delivery_by_a_surviving_auxiliary_one() {
+    // The essential member fails hard and is dropped. An auxiliary member
+    // still takes every datagram, but nothing reaches the wire: the fan-out
+    // must not say it delivered, or that the datagram reached the wire, while
+    // the runtime's guard has yet to stop the publisher.
+    let metrics = metrics(&[PortRole::Mktdata], &[7]);
+    let wire = FakeSink::essential("wire");
+    wire.always(Verdict::Broken);
+    let recording = FakeSink::new("recording");
+    let mut tee = Tee::new(PortRole::Mktdata, Arc::clone(&metrics));
+    tee.add(wire.boxed());
+    tee.add(recording.boxed());
+
+    tee.send(b"first").expect("absorbed");
+    assert!(!tee.delivered(), "the essential member refused it");
+    tee.send(b"second")
+        .expect("the auxiliary member is still live");
+    assert_eq!(recording.accepted_count(), 2);
+    assert!(!tee.delivered(), "only the auxiliary member took it");
+    assert!(!tee.reached_wire(), "nothing reached the wire");
+}

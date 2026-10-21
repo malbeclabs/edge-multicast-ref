@@ -288,11 +288,13 @@ impl DatagramSink for Tee {
         let mut essential = (0_usize, 0_usize);
         let mut any_accepted = false;
         for member in &mut self.members {
+            // Counted before the skip: a dropped essential member is one the
+            // datagram did not reach, not one that stopped counting.
+            let is_essential = member.sink.failure_scope() == FailureScope::Process;
+            essential.0 += usize::from(is_essential);
             if !member.live {
                 continue;
             }
-            let is_essential = member.sink.failure_scope() == FailureScope::Process;
-            essential.0 += usize::from(is_essential);
             match member.sink.send(datagram) {
                 Ok(()) => {
                     member.route_down = false;
@@ -333,8 +335,14 @@ impl DatagramSink for Tee {
         Ok(())
     }
 
+    /// No essential member is without a route, and none has been dropped:
+    /// a surviving auxiliary member is not the wire.
     fn reached_wire(&self) -> bool {
         !self.essential_route_down()
+            && self
+                .members
+                .iter()
+                .all(|m| m.live || m.sink.failure_scope() != FailureScope::Process)
     }
 
     /// Every essential member accepted the last datagram, or, with none, some
