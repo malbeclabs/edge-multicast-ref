@@ -240,6 +240,16 @@ pub trait DecodedSink {
     /// Counted on `dz_publisher_ingress_duplicates_total`, with the copies the
     /// loop drops. A decoder that does not claim never calls it.
     fn duplicate(&mut self);
+
+    /// A claim lost to a key from a newer generation, which this decoder did
+    /// not adopt: [`Claim::LostToNewerGeneration`]. Called beside
+    /// [`duplicate`](Self::duplicate).
+    ///
+    /// Counted on the proposed
+    /// `dz_publisher_ingress_claims_lost_to_newer_generation_total`. A few are
+    /// late copies around a restart; a steady rate is a decoder stuck a
+    /// generation behind. Defaulted, so a sink that counts nothing need not.
+    fn lost_to_newer_generation(&mut self) {}
 }
 
 /// How the runtime dedupes one event across connections.
@@ -427,6 +437,21 @@ impl ClaimTable {
         }
         slot.fetch_max(stored, Ordering::Relaxed) < stored
     }
+
+    /// The highest key claimed for `instrument` so far, by any connection, or
+    /// `None` when nothing has been. A read, for a decoder that lost a claim
+    /// to learn what beat it; see [`CounterGenerations::claim`].
+    #[must_use]
+    pub fn claimed(&self, instrument: InstrumentRef) -> Option<u64> {
+        let index = instrument.index() as usize;
+        let stored = self
+            .segments
+            .get(index >> SEGMENT_BITS)?
+            .get()?
+            .get(index & (SEGMENT - 1))?
+            .load(Ordering::Relaxed);
+        stored.checked_sub(1)
+    }
 }
 
 impl Default for ClaimTable {
@@ -473,14 +498,44 @@ impl std::fmt::Debug for ClaimTable {
 ///
 /// # What it costs
 ///
-/// A counter of 48 bits or fewer: [`key`](Self::key) refuses a larger one. A
-/// connection that never saw an instrument before its counter restarted counts
-/// one generation fewer than the others for it, so its copies of that instrument lose
-/// every claim: it delivers nothing for that instrument, and the others still
-/// do. Generations stop advancing after 65,535 restarts of one instrument.
+/// A counter of 48 bits or fewer: [`key`](Self::key) refuses a larger one.
+/// Generations stop advancing after 65,535 restarts of one instrument.
+///
+/// # A decoder that falls behind
+///
+/// A connection that reconnects past a restart counts one generation fewer
+/// than the others, and every key it builds loses. [`claim`](Self::claim)
+/// catches it up: a claim lost to a newer generation, on a counter that fell
+/// below what this decoder saw, adopts that generation. A decoder that has
+/// seen nothing of an instrument cannot tell a late copy from a new counter,
+/// so it does not adopt, and stays behind until it judges a restart itself;
+/// [`Claim::LostToNewerGeneration`] is how that shows. A decoder that builds
+/// its own keys with [`key`](Self::key) and claims them itself gets none of
+/// this.
 #[derive(Debug, Clone, Default)]
 pub struct CounterGenerations {
     generations: Vec<u16>,
+    /// The highest counter [`claim`](Self::claim) has seen per instrument in
+    /// its current generation, plus one; `0` is none.
+    last: Vec<u64>,
+}
+
+/// What [`CounterGenerations::claim`] decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Claim {
+    /// Claimed: push the event under [`Order::Supersedes`] with this key.
+    Won(u64),
+    /// A copy some connection already delivered, or older than one: call
+    /// [`DecodedSink::duplicate`] and stop.
+    Lost,
+    /// Lost to a key from a newer generation, with a counter that did not
+    /// fall: a late copy from before a restart this decoder has not seen.
+    /// Call [`DecodedSink::duplicate`] and
+    /// [`DecodedSink::lost_to_newer_generation`].
+    LostToNewerGeneration,
+    /// A counter wider than [`CounterGenerations::COUNTER_BITS`].
+    TooWide,
 }
 
 impl CounterGenerations {
@@ -507,6 +562,70 @@ impl CounterGenerations {
             self.generations.resize(index + 1, 0);
         }
         self.generations[index] = self.generations[index].saturating_add(1);
+        if let Some(last) = self.last.get_mut(index) {
+            *last = 0;
+        }
+    }
+
+    /// Claim `counter` on `instrument` in `claims`, under this decoder's
+    /// generation, and catch up with a newer one where that is safe.
+    ///
+    /// **A decoder a generation behind catches up on a falling counter.** It
+    /// can miss a restart another decoder judged: it reconnected after the
+    /// drop to near zero, or saw the instrument first after it. Its keys then
+    /// lose every claim. So when a claim loses to a slot whose generation is
+    /// newer than this decoder's, and `counter` is below the last one this
+    /// decoder saw for the instrument, the decoder adopts that generation and
+    /// claims again. A connection delivers in order, so on it a falling
+    /// counter is the restart, not a late copy.
+    ///
+    /// **A rising counter does not adopt it.** A late copy of the old counter,
+    /// on a connection that has not yet seen the restart, rises above what it
+    /// saw. Stamped with the newer generation it would claim far above the new
+    /// counter and silence it until the new counter caught up. It stays in its
+    /// generation and loses, as [`Claim::LostToNewerGeneration`].
+    pub fn claim(&mut self, claims: &ClaimTable, instrument: InstrumentRef, counter: u64) -> Claim {
+        let Some(key) = self.key(instrument, counter) else {
+            return Claim::TooWide;
+        };
+        let index = instrument.index() as usize;
+        if index >= MAX_TRACKED_INSTRUMENTS {
+            return if claims.claim(instrument, key) {
+                Claim::Won(key)
+            } else {
+                Claim::Lost
+            };
+        }
+        if self.last.len() <= index {
+            self.last.resize(index + 1, 0);
+        }
+        let seen = self.last[index];
+        let fell = seen != 0 && counter + 1 < seen;
+        self.last[index] = seen.max(counter + 1);
+        if claims.claim(instrument, key) {
+            return Claim::Won(key);
+        }
+        let Some(newer) = claims
+            .claimed(instrument)
+            .map(|slot| u16::try_from(slot >> Self::COUNTER_BITS).unwrap_or(u16::MAX))
+            .filter(|&generation| generation > self.generation(instrument))
+        else {
+            return Claim::Lost;
+        };
+        if !fell {
+            return Claim::LostToNewerGeneration;
+        }
+        if self.generations.len() <= index {
+            self.generations.resize(index + 1, 0);
+        }
+        self.generations[index] = newer;
+        self.last[index] = counter + 1;
+        let key = u64::from(newer) << Self::COUNTER_BITS | counter;
+        if claims.claim(instrument, key) {
+            Claim::Won(key)
+        } else {
+            Claim::Lost
+        }
     }
 
     /// The generation `instrument` is in, as this decoder has counted it.

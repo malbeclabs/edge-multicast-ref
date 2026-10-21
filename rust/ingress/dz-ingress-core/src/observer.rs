@@ -75,6 +75,13 @@ pub trait IngressObserver: Sync {
     /// this crate calls it; a threaded runtime does.
     fn duplicate(&self);
 
+    /// The proposed
+    /// `dz_publisher_ingress_claims_lost_to_newer_generation_total`: a
+    /// decoder's claim lost to a key from a counter generation it has not
+    /// adopted. As with [`duplicate`](Self::duplicate), a threaded runtime
+    /// calls it. Defaulted, so an observer that counts nothing need not.
+    fn lost_to_newer_generation(&self) {}
+
     /// `dz_publisher_ingress_parse_errors_total{reason}`.
     ///
     /// Takes the adapter's own error, because its variants *are* the label

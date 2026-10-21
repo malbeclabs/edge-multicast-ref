@@ -25,7 +25,7 @@
 //!
 //! # Proposed additions the playbook does not yet carry
 //!
-//! Nine families and two label values here are **not** normative. Each exists
+//! Ten families and two label values here are **not** normative. Each exists
 //! because a piece of work in this workspace produced a number with nowhere to
 //! go and refused to invent a series for it, leaving the count exposed on a
 //! struct or in a log line instead. They are marked as proposals in their own
@@ -49,6 +49,8 @@
 //!   [`EgressMetrics::messages_in_datagram`].
 //! - `dz_publisher_ingress_late_identities_total` - see
 //!   [`IngressMetrics::late_identity`].
+//! - `dz_publisher_ingress_claims_lost_to_newer_generation_total` - see
+//!   [`IngressMetrics::claim_lost_to_newer_generation`].
 //! - `not_carried_by_feed` and `malformed_message` on the normative
 //!   `dz_publisher_egress_errors_total{port_role,reason}` - see
 //!   [`EgressErrorReason`].

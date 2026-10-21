@@ -288,6 +288,11 @@ departed from the sketch.
   advanced when it judges a restart and carried in the key's top 16 bits, so
   both stages order a new-counter key above every old one and drop a late
   old-counter copy. The counter is limited to 48 bits when used this way.
+  `CounterGenerations::claim` also catches up a decoder a generation behind:
+  a claim lost to a newer generation, on a counter that fell below what that
+  decoder saw, adopts it. A rising counter does not, so a late pre-restart
+  copy cannot wedge the instrument; it is counted on the proposed
+  `dz_publisher_ingress_claims_lost_to_newer_generation_total`.
 - **§3c, verified by building it.** `Clock` was already `Send + Sync`.
   `IngressObserver` was not `Sync`, and gains that bound; the runtime's own
   observer moved its one counter from a `Cell` to an atomic. `Driver::run`

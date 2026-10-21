@@ -71,6 +71,10 @@ impl IngressObserver for MetricsObserver {
         self.metrics.ingress().duplicate();
     }
 
+    fn lost_to_newer_generation(&self) {
+        self.metrics.ingress().claim_lost_to_newer_generation();
+    }
+
     fn parse_error(&self, error: ParseError) {
         // Exhaustive, so a fifth reason on either side is a build failure.
         let reason = match error {

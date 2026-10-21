@@ -352,6 +352,10 @@ impl<O: IngressObserver> DecodedSink for ConnectionSink<'_, O> {
     fn duplicate(&mut self) {
         self.observer.duplicate();
     }
+
+    fn lost_to_newer_generation(&mut self) {
+        self.observer.lost_to_newer_generation();
+    }
 }
 
 /// The sink a connection's driver runs against.

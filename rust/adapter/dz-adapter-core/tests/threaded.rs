@@ -626,3 +626,42 @@ fn a_generation_key_orders_above_the_old_counter_and_refuses_a_wide_one() {
     assert!(dedupe.admit(one, Order::Supersedes(new)));
     assert!(!dedupe.admit(one, Order::Supersedes(old)));
 }
+
+#[test]
+fn a_decoder_a_generation_behind_catches_up_on_its_next_falling_update() {
+    // A and B share a claim table. A judges a restart; B, which saw 500,000,
+    // never sees the drop to near zero. B's next update is below what it saw,
+    // and the slot holds a newer generation: B adopts it and wins.
+    use dz_adapter_core::threaded::Claim;
+    let claims = ClaimTable::new();
+    let one = instrument(1);
+    let mut a = dz_adapter_core::CounterGenerations::new();
+    let mut b = dz_adapter_core::CounterGenerations::new();
+    assert!(matches!(a.claim(&claims, one, 500_000), Claim::Won(_)));
+    assert_eq!(b.claim(&claims, one, 500_000), Claim::Lost);
+    a.restart(one);
+    assert!(matches!(a.claim(&claims, one, 1), Claim::Won(_)));
+    assert!(matches!(b.claim(&claims, one, 10_002), Claim::Won(_)));
+    assert_eq!(b.generation(one), 1);
+    assert!(matches!(b.claim(&claims, one, 600_000), Claim::Won(_)));
+}
+
+#[test]
+fn a_late_pre_restart_copy_does_not_adopt_a_newer_generation() {
+    // B is live and has not yet seen the restart A judged. Its copy of the
+    // old counter is rising, not falling: it keeps its generation and loses,
+    // and says it lost to a newer one.
+    use dz_adapter_core::threaded::Claim;
+    let claims = ClaimTable::new();
+    let one = instrument(1);
+    let mut a = dz_adapter_core::CounterGenerations::new();
+    let mut b = dz_adapter_core::CounterGenerations::new();
+    assert!(matches!(a.claim(&claims, one, 500_000), Claim::Won(_)));
+    assert_eq!(b.claim(&claims, one, 500_000), Claim::Lost);
+    a.restart(one);
+    assert!(matches!(a.claim(&claims, one, 1), Claim::Won(_)));
+    assert_eq!(b.claim(&claims, one, 500_001), Claim::LostToNewerGeneration);
+    assert_eq!(b.generation(one), 0, "a late copy promoted its decoder");
+    // A's next update still wins: nothing was wedged above it.
+    assert!(matches!(a.claim(&claims, one, 2), Claim::Won(_)));
+}

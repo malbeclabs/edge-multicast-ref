@@ -12,6 +12,7 @@ pub struct IngressMetrics {
     bytes_total: IntCounter,
     duplicates_total: IntCounter,
     late_identities_total: IntCounter,
+    claims_lost_to_newer_generation_total: IntCounter,
     parse_errors_total: IntCounterVec,
     connection_state: IntGaugeVec,
     reconnects_total: IntCounterVec,
@@ -108,6 +109,21 @@ impl IngressMetrics {
         .expect("static metric definition");
         registry
             .register(Box::new(late_identities_total.clone()))
+            .expect("static metric registration");
+
+        let claims_lost_to_newer_generation_total = IntCounter::with_opts(opts(
+            "dz_publisher_ingress_claims_lost_to_newer_generation_total",
+            "Claims a decoder lost to a key from a newer counter generation, on a counter that \
+             did not fall, so it did not adopt that generation. A proposed addition to the \
+             normative set, not yet in the governing playbook. A few around an upstream counter \
+             restart are late copies from before it, dropped as they should be. A steady rate is \
+             a decoder stuck a generation behind, delivering nothing for an instrument the \
+             others still publish. Always 0 for a publisher that maps every payload inline.",
+            labels,
+        ))
+        .expect("static metric definition");
+        registry
+            .register(Box::new(claims_lost_to_newer_generation_total.clone()))
             .expect("static metric registration");
 
         let parse_errors_total = IntCounterVec::new(
@@ -285,6 +301,7 @@ impl IngressMetrics {
             bytes_total,
             duplicates_total,
             late_identities_total,
+            claims_lost_to_newer_generation_total,
             parse_errors_total,
             connection_state,
             reconnects_total,
@@ -337,6 +354,13 @@ impl IngressMetrics {
     /// playbook carries.
     pub fn late_identity(&self) {
         self.late_identities_total.inc();
+    }
+
+    /// Records one claim a decoder lost to a newer counter generation it did
+    /// not adopt. Counts the family this crate proposes rather than one the
+    /// playbook carries.
+    pub fn claim_lost_to_newer_generation(&self) {
+        self.claims_lost_to_newer_generation_total.inc();
     }
 
     /// Records one ingress parse error.

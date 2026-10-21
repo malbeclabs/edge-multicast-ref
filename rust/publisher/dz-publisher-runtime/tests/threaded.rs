@@ -33,6 +33,10 @@ struct Fixture {
 
 struct FixtureDecoder {
     claims: ClaimTable,
+    /// Two decoders' generations in one, so a test can order them:
+    /// `g:<view>:<instrument>:<counter>` claims through one of them, and
+    /// `r:<view>:<instrument>:<counter>` has it judge a restart first.
+    views: [dz_adapter_core::CounterGenerations; 2],
 }
 
 fn quote(index: u32, update: u64) -> Event<'static> {
@@ -72,6 +76,33 @@ impl Decoder for FixtureDecoder {
         for message in text.split(' ') {
             let mut fields = message.split(':');
             let kind = fields.next().ok_or(ParseError::truncated("kind"))?;
+            if kind == "g" || kind == "r" {
+                let mut number = || {
+                    fields
+                        .next()
+                        .and_then(|field| field.parse::<u64>().ok())
+                        .ok_or(ParseError::malformed("field"))
+                };
+                let view = number()? as usize;
+                let index = number()? as u32;
+                let counter = number()?;
+                out.upstream_message("m");
+                let instrument = InstrumentRef::from_admission(index);
+                if kind == "r" {
+                    self.views[view].restart(instrument);
+                }
+                match self.views[view].claim(&self.claims, instrument, counter) {
+                    dz_adapter_core::Claim::Won(key) => {
+                        out.push(quote(index, key), Order::Supersedes(key));
+                    }
+                    dz_adapter_core::Claim::LostToNewerGeneration => {
+                        out.duplicate();
+                        out.lost_to_newer_generation();
+                    }
+                    _ => out.duplicate(),
+                }
+                continue;
+            }
             let mut number = || {
                 fields
                     .next()
@@ -99,7 +130,10 @@ impl Decoder for FixtureDecoder {
 
 impl ThreadedAdapter for Fixture {
     fn decoder(&self, _conn: ConnectionId, claims: ClaimTable) -> Box<dyn Decoder> {
-        Box::new(FixtureDecoder { claims })
+        Box::new(FixtureDecoder {
+            claims,
+            views: Default::default(),
+        })
     }
 }
 
@@ -936,4 +970,28 @@ fn a_trade_copy_later_than_the_identity_window_is_dropped_and_counted_once() {
         1.0
     );
     assert_eq!(bench.rendered("dz_publisher_ingress_duplicates_total"), 0.0);
+}
+
+#[test]
+fn a_claim_lost_to_a_newer_generation_is_counted() {
+    // View 1 saw 500,000 and never sees the restart view 0 judges. Its rising
+    // 500,001 loses to the newer generation and is counted; its falling
+    // 10,002 adopts it and is published.
+    let bench = Bench::new();
+    let (script, progress) = Script::new(
+        "a",
+        &[
+            "g:0:1:500000",
+            "g:1:1:500000",
+            "r:0:1:1",
+            "g:1:1:500001",
+            "g:1:1:10002",
+        ],
+    );
+    let out = run_to_the_end(&bench, vec![script], vec![progress]);
+    assert_eq!(out.events.len(), 3, "500,000, 1 and 10,002");
+    assert_eq!(
+        bench.rendered("dz_publisher_ingress_claims_lost_to_newer_generation_total"),
+        1.0
+    );
 }

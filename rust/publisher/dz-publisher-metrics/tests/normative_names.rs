@@ -67,6 +67,7 @@ const PROPOSED_NAMES: &[&str] = &[
     "dz_publisher_ingress_queue_wait_seconds",
     "dz_publisher_egress_messages_per_datagram",
     "dz_publisher_ingress_late_identities_total",
+    "dz_publisher_ingress_claims_lost_to_newer_generation_total",
 ];
 
 fn touch_every_family(m: &PublisherMetrics) {
@@ -83,6 +84,7 @@ fn touch_every_family(m: &PublisherMetrics) {
     m.ingress().batch(32);
     m.ingress().observe_queue_wait(0.000_1);
     m.ingress().late_identity();
+    m.ingress().claim_lost_to_newer_generation();
     m.egress().messages_in_datagram(PortRole::Mktdata, 3);
 
     m.lowering()
