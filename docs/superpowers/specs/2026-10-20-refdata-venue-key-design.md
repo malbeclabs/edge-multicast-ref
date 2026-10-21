@@ -104,6 +104,7 @@ The reverse needs no new API: `StateRecord::load` returns the entries, and in ve
 
 - **Upgrade, `identity` unset:** no change on disk, on the wire, or in behaviour.
 - **Upgrade to `"venue_key"`:** the record is rewritten as version 4 at open. A record with unresolved entries is refused until a mapping resolves them, and under `venue_keys = "stated"` that is every entry.
+- **Changing `venue_keys` on a version-4 record:** refused at open (`RefdataError::VenueKeysChanged`), and there is no way out of it. `seed` resolves only an unkeyed record, so an adapter that starts stating its own keys after its record was written under `symbol` can only start a fresh record, and every instrument takes a new ID. Declare `stated` before the first open under `"venue_key"` if the adapter will ever state keys.
 - **Switching back to `"symbol"`:** a version-4 record is refused at startup (`RefdataError::StateIsKeyed`). Its entries may share a `Symbol`, and a symbol-keyed registry cannot hold them.
 - **Rollback to an older build:** that build refuses version 4 as `UnsupportedVersion`, which is what the format tag is for.
 - **Wire:** no change. Two published instruments may now carry one `Symbol`, which the spec has always allowed.
