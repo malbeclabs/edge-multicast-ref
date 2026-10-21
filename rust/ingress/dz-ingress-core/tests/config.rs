@@ -373,3 +373,20 @@ fn the_old_spelling_of_the_polled_transport_is_refused_and_not_aliased() {
         assert!(message.contains(kind.as_token()), "{message}");
     }
 }
+
+#[test]
+fn the_decode_worker_count_is_optional_and_never_zero() {
+    let absent = parse(r#"kind = "websocket""#).expect("absent is the default");
+    assert_eq!(absent.decode_threads, None);
+    assert_eq!(IngressConfig::default().decode_threads, None);
+
+    let stated = parse("kind = \"websocket\"\ndecode_threads = 3").expect("a count parses");
+    assert_eq!(
+        stated.decode_threads.map(std::num::NonZeroUsize::get),
+        Some(3)
+    );
+
+    // Zero threads would decode nothing, so it is not a value the key takes.
+    let zero = parse("kind = \"websocket\"\ndecode_threads = 0");
+    assert!(zero.is_err(), "{zero:?}");
+}

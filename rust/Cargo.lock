@@ -266,7 +266,7 @@ dependencies = [
 
 [[package]]
 name = "dz-adapter-core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "dz-edge-mbp",
  "dz-edge-refdata",
@@ -276,7 +276,7 @@ dependencies = [
 
 [[package]]
 name = "dz-adapter-uds"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "dz-adapter-core",
  "dz-edge-core",
@@ -288,14 +288,14 @@ dependencies = [
 
 [[package]]
 name = "dz-edge-core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "thiserror 1.0.69",
 ]
 
 [[package]]
 name = "dz-edge-mbp"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "dz-edge-core",
  "dz-edge-tob",
@@ -314,7 +314,7 @@ dependencies = [
 
 [[package]]
 name = "dz-edge-refdata"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "dz-edge-core",
  "serde_json",
@@ -322,7 +322,7 @@ dependencies = [
 
 [[package]]
 name = "dz-edge-tob"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "dz-edge-core",
  "serde_json",
@@ -330,7 +330,7 @@ dependencies = [
 
 [[package]]
 name = "dz-ingress-core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "dz-adapter-core",
  "dz-publisher-metrics",
@@ -342,7 +342,7 @@ dependencies = [
 
 [[package]]
 name = "dz-ingress-fix"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "dz-adapter-core",
  "dz-ingress-core",
@@ -358,7 +358,7 @@ dependencies = [
 
 [[package]]
 name = "dz-ingress-poll"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "dz-adapter-core",
  "dz-ingress-core",
@@ -376,7 +376,7 @@ dependencies = [
 
 [[package]]
 name = "dz-ingress-websocket"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "dz-adapter-core",
  "dz-ingress-core",
@@ -389,7 +389,7 @@ dependencies = [
 
 [[package]]
 name = "dz-publisher-egress"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "dz-edge-core",
  "dz-publisher-metrics",
@@ -398,7 +398,7 @@ dependencies = [
 
 [[package]]
 name = "dz-publisher-lowering"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "dz-adapter-core",
  "dz-edge-core",
@@ -411,7 +411,7 @@ dependencies = [
 
 [[package]]
 name = "dz-publisher-metrics"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "dz-adapter-core",
  "dz-edge-core",
@@ -426,7 +426,7 @@ dependencies = [
 
 [[package]]
 name = "dz-publisher-refdata"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "dz-adapter-core",
  "dz-edge-core",
@@ -439,7 +439,7 @@ dependencies = [
 
 [[package]]
 name = "dz-publisher-runtime"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "dz-adapter-core",
  "dz-edge-core",
@@ -482,7 +482,7 @@ dependencies = [
 
 [[package]]
 name = "dz-recorder-archive"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "dz-edge-core",
  "dz-recorder-core",
@@ -497,7 +497,7 @@ dependencies = [
 
 [[package]]
 name = "dz-recorder-capture"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "dz-edge-core",
  "dz-recorder-core",
@@ -509,7 +509,7 @@ dependencies = [
 
 [[package]]
 name = "dz-recorder-clickhouse"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "dz-edge-core",
  "dz-recorder-archive",
@@ -527,7 +527,7 @@ dependencies = [
 
 [[package]]
 name = "dz-recorder-conformance"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "dz-edge-core",
  "dz-recorder-archive",
@@ -541,7 +541,7 @@ dependencies = [
 
 [[package]]
 name = "dz-recorder-core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "dz-edge-core",
  "serde",
@@ -552,7 +552,7 @@ dependencies = [
 
 [[package]]
 name = "dz-recorder-e2e"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "dz-adapter-core",
  "dz-edge-core",
@@ -580,7 +580,7 @@ dependencies = [
 
 [[package]]
 name = "dz-recorder-events"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "dz-edge-core",
  "dz-edge-mbp",
@@ -594,7 +594,7 @@ dependencies = [
 
 [[package]]
 name = "dz-recorder-health"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "dz-edge-core",
  "dz-recorder-core",
@@ -604,7 +604,7 @@ dependencies = [
 
 [[package]]
 name = "dz-recorder-inline"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "dz-edge-core",
  "dz-recorder-archive",
@@ -622,7 +622,7 @@ dependencies = [
 
 [[package]]
 name = "dz-recorder-load"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "ctrlc",
  "dz-edge-core",
@@ -646,7 +646,7 @@ dependencies = [
 
 [[package]]
 name = "dz-recorder-loss"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "dz-edge-core",
  "dz-edge-tob",
@@ -661,7 +661,7 @@ dependencies = [
 
 [[package]]
 name = "dz-recorder-relower"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "dz-adapter-core",
  "dz-edge-core",
@@ -676,7 +676,7 @@ dependencies = [
 
 [[package]]
 name = "dz-recorder-replay"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "dz-edge-core",
  "dz-recorder-archive",
@@ -689,7 +689,7 @@ dependencies = [
 
 [[package]]
 name = "dz-recorder-rows"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "dz-edge-core",
  "dz-recorder-archive",
@@ -705,7 +705,7 @@ dependencies = [
 
 [[package]]
 name = "dz-recorder-venue"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "dz-adapter-core",
  "dz-publisher-lowering",
@@ -721,7 +721,7 @@ dependencies = [
 
 [[package]]
 name = "dz-venue-composition"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "dz-adapter-core",
  "dz-adapter-uds",

@@ -1,21 +1,27 @@
 use std::collections::{HashMap, HashSet};
 
-use prometheus::{IntCounter, IntCounterVec, IntGaugeVec, Registry};
+use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Registry};
 
+use crate::buckets::{INGRESS_BATCH_SIZE_BUCKETS, LATENCY_BUCKETS};
 use crate::labels::{AdapterErrorReason, ConnectFailureReason, ParseErrorReason, ReconnectReason};
-use crate::opts::opts;
+use crate::opts::{histogram_opts, opts};
 
 /// Metrics for the path from the upstream source into the publisher.
 pub struct IngressMetrics {
     messages_total: IntCounterVec,
     bytes_total: IntCounter,
     duplicates_total: IntCounter,
+    late_identities_total: IntCounter,
+    claims_lost_to_newer_generation_total: IntCounter,
     parse_errors_total: IntCounterVec,
     connection_state: IntGaugeVec,
     reconnects_total: IntCounterVec,
     connect_failures_total: IntCounterVec,
     adapter_errors_total: IntCounterVec,
     rate_limited_total: IntCounter,
+    queue_depth: IntGauge,
+    batch_size: Histogram,
+    queue_wait_seconds: Histogram,
     message_types: HashSet<String>,
 }
 
@@ -87,6 +93,37 @@ impl IngressMetrics {
         .expect("static metric definition");
         registry
             .register(Box::new(duplicates_total.clone()))
+            .expect("static metric registration");
+
+        let late_identities_total = IntCounter::with_opts(opts(
+            "dz_publisher_ingress_late_identities_total",
+            "Point events dropped as late: their identity, such as a trade ID, fell below the \
+             bottom of their instrument's dedupe window, so it could no longer be told from a \
+             copy already published. A proposed addition to the normative set, not yet in the \
+             governing playbook. Dropped rather than published again, because a point event \
+             published twice is double-counted downstream. Above zero, one connection is lagging \
+             another by more than the window on a busy instrument. Always 0 for a publisher that \
+             maps every payload inline.",
+            labels,
+        ))
+        .expect("static metric definition");
+        registry
+            .register(Box::new(late_identities_total.clone()))
+            .expect("static metric registration");
+
+        let claims_lost_to_newer_generation_total = IntCounter::with_opts(opts(
+            "dz_publisher_ingress_claims_lost_to_newer_generation_total",
+            "Claims a decoder lost to a key from a newer counter generation, on a counter that \
+             did not fall, so it did not adopt that generation. A proposed addition to the \
+             normative set, not yet in the governing playbook. A few around an upstream counter \
+             restart are late copies from before it, dropped as they should be. A steady rate is \
+             a decoder stuck a generation behind, delivering nothing for an instrument the \
+             others still publish. Always 0 for a publisher that maps every payload inline.",
+            labels,
+        ))
+        .expect("static metric definition");
+        registry
+            .register(Box::new(claims_lost_to_newer_generation_total.clone()))
             .expect("static metric registration");
 
         let parse_errors_total = IntCounterVec::new(
@@ -209,16 +246,71 @@ impl IngressMetrics {
             .register(Box::new(rate_limited_total.clone()))
             .expect("static metric registration");
 
+        // Both exist from startup, at zero, whichever input model the
+        // publisher runs: an unlabelled family is its own one series, and an
+        // inline publisher, which has no queue, leaves them there.
+        let queue_depth = IntGauge::with_opts(opts(
+            "dz_publisher_ingress_queue_depth",
+            "Decoded events waiting between the connections and the publisher loop, sampled each \
+             time the loop drains a batch. A proposed addition to the normative set, not yet in \
+             the governing playbook: a publisher that decodes on its connections' own threads \
+             has a queue the loop drains, and a queue that stays near full is a loop that cannot \
+             keep up - the state in which its connections stop reading. Always 0 for a publisher \
+             that maps every payload inline, which has no queue.",
+            labels,
+        ))
+        .expect("static metric definition");
+        registry
+            .register(Box::new(queue_depth.clone()))
+            .expect("static metric registration");
+
+        let batch_size = Histogram::with_opts(histogram_opts(
+            "dz_publisher_ingress_batch_size",
+            "Decoded events the publisher loop drained in one batch, each sent with one flush. A \
+             proposed addition to the normative set, not yet in the governing playbook: with the \
+             queue depth it says whether the loop drains as events arrive, in batches of one, or \
+             falls behind and drains full ones. Empty for a publisher that maps every payload \
+             inline.",
+            labels,
+            INGRESS_BATCH_SIZE_BUCKETS,
+        ))
+        .expect("static metric definition");
+        registry
+            .register(Box::new(batch_size.clone()))
+            .expect("static metric registration");
+
+        let queue_wait_seconds = Histogram::with_opts(histogram_opts(
+            "dz_publisher_ingress_queue_wait_seconds",
+            "Seconds from a payload's receipt on its connection to the moment the publisher \
+             loop took one of its decoded events off the queue, observed once per event \
+             dequeued. A proposed addition to the normative set, not yet in the governing \
+             playbook: under the threaded input model `recv_to_send` includes the queue, and \
+             this is the part of it the queue accounts for. Exists only for a publisher whose \
+             venue decodes on its connections' threads; a publisher that maps every payload \
+             inline has no queue and leaves it empty.",
+            labels,
+            LATENCY_BUCKETS,
+        ))
+        .expect("static metric definition");
+        registry
+            .register(Box::new(queue_wait_seconds.clone()))
+            .expect("static metric registration");
+
         Self {
             messages_total,
             bytes_total,
             duplicates_total,
+            late_identities_total,
+            claims_lost_to_newer_generation_total,
             parse_errors_total,
             connection_state,
             reconnects_total,
             connect_failures_total,
             adapter_errors_total,
             rate_limited_total,
+            queue_depth,
+            batch_size,
+            queue_wait_seconds,
             message_types: message_types.iter().map(|t| (*t).to_string()).collect(),
         }
     }
@@ -255,6 +347,20 @@ impl IngressMetrics {
     /// Records one ingress message discarded as a duplicate.
     pub fn duplicate(&self) {
         self.duplicates_total.inc();
+    }
+
+    /// Records one point event dropped as late, below its instrument's dedupe
+    /// window. Counts the family this crate proposes rather than one the
+    /// playbook carries.
+    pub fn late_identity(&self) {
+        self.late_identities_total.inc();
+    }
+
+    /// Records one claim a decoder lost to a newer counter generation it did
+    /// not adopt. Counts the family this crate proposes rather than one the
+    /// playbook carries.
+    pub fn claim_lost_to_newer_generation(&self) {
+        self.claims_lost_to_newer_generation_total.inc();
     }
 
     /// Records one ingress parse error.
@@ -306,5 +412,35 @@ impl IngressMetrics {
     /// Records one instance of the upstream source rate-limiting ingress.
     pub fn rate_limited(&self) {
         self.rate_limited_total.inc();
+    }
+
+    /// Sets how many decoded events are waiting for the publisher loop.
+    ///
+    /// Sampled by a publisher running the threaded input model, each time its
+    /// loop drains a batch. Counts the family this crate proposes rather than
+    /// one the playbook carries.
+    pub fn set_queue_depth(&self, depth: usize) {
+        self.queue_depth
+            .set(i64::try_from(depth).unwrap_or(i64::MAX));
+    }
+
+    /// Records one batch the publisher loop drained, of `size` events.
+    ///
+    /// Counts the family this crate proposes rather than one the playbook
+    /// carries.
+    pub fn batch(&self, size: usize) {
+        // An event count, exact in an `f64` far past any batch.
+        #[allow(clippy::cast_precision_loss)]
+        self.batch_size.observe(size as f64);
+    }
+
+    /// Records how long one decoded event waited between its payload's
+    /// receipt and the loop taking it off the queue.
+    ///
+    /// Observed by a publisher running the threaded input model, once per
+    /// event dequeued. Counts the family this crate proposes rather than one
+    /// the playbook carries.
+    pub fn observe_queue_wait(&self, seconds: f64) {
+        self.queue_wait_seconds.observe(seconds);
     }
 }

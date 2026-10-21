@@ -9,6 +9,7 @@
 //! and hands this section over, so nothing here needs a TOML parser — only a
 //! deserializer.
 
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use serde::de::Error as _;
@@ -89,6 +90,19 @@ pub struct IngressConfig {
     /// no evidence at all.
     #[serde(default, deserialize_with = "de_optional_duration")]
     pub idle_timeout: Option<Duration>,
+
+    /// How many worker threads decode on, for a venue composed for the
+    /// threaded input model. Absent is the runtime's default: one per
+    /// connection, and never more than this host has cores to spare beside the
+    /// publisher loop's own.
+    ///
+    /// Read by the runtime, which is where the threads are, and parsed here
+    /// because this is where every other `[ingress]` key is. A publisher whose
+    /// venue decodes inline has no such threads, and the runtime refuses the key
+    /// there rather than reading past it: a key that changes nothing is one an
+    /// operator believes is doing something.
+    #[serde(default)]
+    pub decode_threads: Option<NonZeroUsize>,
 }
 
 /// Every key's own default, so the whole section may be absent.
@@ -112,6 +126,7 @@ impl Default for IngressConfig {
             reconnect_backoff_max: default_backoff_max(),
             rate_limit_per_second: 0,
             idle_timeout: None,
+            decode_threads: None,
         }
     }
 }

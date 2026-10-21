@@ -25,7 +25,7 @@
 //!
 //! # Proposed additions the playbook does not yet carry
 //!
-//! Four families and two label values here are **not** normative. Each exists
+//! Ten families and two label values here are **not** normative. Each exists
 //! because a piece of work in this workspace produced a number with nowhere to
 //! go and refused to invent a series for it, leaving the count exposed on a
 //! struct or in a log line instead. They are marked as proposals in their own
@@ -41,6 +41,16 @@
 //!   [`AdapterErrorReason`].
 //! - `dz_publisher_channel_last_published_timestamp_seconds{channel_id}` - see
 //!   [`ChannelMetrics`].
+//! - `dz_publisher_ingress_queue_depth`, `dz_publisher_ingress_batch_size` and
+//!   `dz_publisher_ingress_queue_wait_seconds` - see
+//!   [`IngressMetrics::set_queue_depth`], [`IngressMetrics::batch`] and
+//!   [`IngressMetrics::observe_queue_wait`].
+//! - `dz_publisher_egress_messages_per_datagram{port_role}` - see
+//!   [`EgressMetrics::messages_in_datagram`].
+//! - `dz_publisher_ingress_late_identities_total` - see
+//!   [`IngressMetrics::late_identity`].
+//! - `dz_publisher_ingress_claims_lost_to_newer_generation_total` - see
+//!   [`IngressMetrics::claim_lost_to_newer_generation`].
 //! - `not_carried_by_feed` and `malformed_message` on the normative
 //!   `dz_publisher_egress_errors_total{port_role,reason}` - see
 //!   [`EgressErrorReason`].
@@ -71,7 +81,10 @@ mod venue_registry;
 use prometheus::proto::LabelPair;
 use prometheus::{Registry, TextEncoder};
 
-pub use buckets::{LATENCY_BUCKETS, REFDATA_LOAD_DURATION_BUCKETS};
+pub use buckets::{
+    messages_per_datagram_buckets, INGRESS_BATCH_SIZE_BUCKETS, LATENCY_BUCKETS,
+    QUOTES_PER_DATAGRAM, REFDATA_LOAD_DURATION_BUCKETS, TRADES_PER_DATAGRAM,
+};
 pub use error::MetricsError;
 pub use labels::{
     AdapterErrorReason, ConnectFailureReason, EgressErrorReason, EgressMessageType, EventKind,

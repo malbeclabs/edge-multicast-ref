@@ -116,14 +116,21 @@ pub enum SkipReason {
     /// under a poll interval far shorter than `insert_max_delay` that is most
     /// of the passes an object is alive for.
     Held,
+    /// Its manifest was gone when the pass came to load it, though the scan
+    /// had read it: evicted under the staging budget in between. The objects a
+    /// back-load takes first are the oldest, which are the ones closest to
+    /// eviction, so this is how a loader losing that race shows up object by
+    /// object, beside the lag metrics that measure it.
+    Evicted,
 }
 
 impl SkipReason {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::AlreadyLoaded,
         Self::ForeignHost,
         Self::Unpaired,
         Self::Held,
+        Self::Evicted,
     ];
 
     #[must_use]
@@ -133,6 +140,7 @@ impl SkipReason {
             Self::ForeignHost => "foreign_host",
             Self::Unpaired => "unpaired",
             Self::Held => "held",
+            Self::Evicted => "evicted",
         }
     }
 }
