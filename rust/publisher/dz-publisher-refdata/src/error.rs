@@ -148,7 +148,7 @@ pub enum RefdataError {
     /// cut, or under `venue_keys = "stated"` for any key at all. Giving the ID
     /// to whichever key is offered first depends on what one host saw first,
     /// so the record opens only after a mapping resolves them through
-    /// [`seed`](crate::seed). Each entry is named by its ID and `Symbol`.
+    /// [`seed`](crate::seed()). Each entry is named by its ID and `Symbol`.
     #[error("{} entries of the persisted state have no known venue key; resolve them with a seed mapping", entries.len())]
     UnresolvedVenueKeys {
         entries: Vec<(u32, [u8; dz_edge_refdata::SYMBOL_LEN])>,
