@@ -34,17 +34,12 @@ an await.
 It is the wrong model for **a venue whose payload is text that is expensive to
 decode, delivered redundantly over several connections at high rate.** Every
 copy is decoded on one core, and most copies are duplicates found only after
-decoding. A publisher built outside this framework for that case measured,
-over 24 hours on one host:
-
-| | Mean | Peak, 10 s |
-|---|---|---|
-| Inbound payloads/s, every copy | 23,000 | 146,000 to 159,000 |
-| Outbound datagrams/s | 7,800 | 73,000 to 75,000 |
-
-Two payloads in three were duplicates. Its single loop did the JSON walk,
-decimal parsing, dedupe, packing and a `sendto` per payload, and its
-65,536-deep queue filled on every host. It fixed this by decoding and
+decoding. A publisher built outside this framework for that case saw inbound
+payloads in the tens of thousands per second on average and over a hundred
+thousand per second at peak, every copy counted, with outbound datagrams about
+a third of that. Two payloads in three were duplicates. Its single loop did
+the JSON walk, decimal parsing, dedupe, packing and a `sendto` per payload,
+and its 65,536-deep queue filled on every host. It fixed this by decoding and
 pre-checking duplicates on the connection tasks, then draining the queue in
 batches of 32 with one flush per batch. That design is the reference for this
 one, described generically below.
