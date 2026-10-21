@@ -525,11 +525,20 @@ impl Adapter for LineAdapter {
                 out.upstream_message("quote");
                 let bid = side_update(&mut fields)?;
                 let ask = side_update(&mut fields)?;
+                // An optional last field: the venue's update counter.
+                let venue_update_id = fields
+                    .next()
+                    .map(|id| {
+                        id.parse()
+                            .map_err(|_| ParseError::malformed("update id is not a number"))
+                    })
+                    .transpose()?;
                 out.event(Event::Quote {
                     instrument,
                     source_ts_ns,
                     bid,
                     ask,
+                    venue_update_id,
                 });
             }
             "t" => {

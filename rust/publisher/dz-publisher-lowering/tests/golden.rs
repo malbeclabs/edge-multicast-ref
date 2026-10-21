@@ -84,6 +84,7 @@ fn a_normalized_quote_lowers_to_the_canonical_quote_vector() {
                 qty: Scalar::text("72.50"),
                 source_count: Some(4),
             },
+            None,
         )
         .expect("the vector's values are exact at these exponents");
 
@@ -164,6 +165,7 @@ fn the_venues_own_integers_reach_the_canonical_bytes_too() {
                 qty: Scalar::fixed(7_250, QTY_EXPONENT),
                 source_count: Some(4),
             },
+            None,
         )
         .expect("integers at the instrument's own exponent need no rescale");
 

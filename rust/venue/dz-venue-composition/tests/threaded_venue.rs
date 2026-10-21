@@ -40,6 +40,7 @@ impl Decoder for OneQuoteDecoder {
                     source_count: None,
                 },
                 ask: SideUpdate::Gone,
+                venue_update_id: None,
             },
             Order::Supersedes(u64::from(key)),
         );

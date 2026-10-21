@@ -73,6 +73,7 @@ impl Decoder for PackingDecoder {
                         source_count: None,
                     },
                     ask: SideUpdate::Gone,
+                    venue_update_id: None,
                 },
                 Order::None,
             ),
@@ -453,6 +454,7 @@ fn a_packed_message_is_measured_at_its_send_and_not_before() {
             source_count: None,
         },
         ask: SideUpdate::Gone,
+        venue_update_id: None,
     };
     h.publisher.payload_scope(Some(SOURCE_TS_NS + 1_000_000));
     h.publisher.event(quote(SOURCE_TS_NS));
@@ -593,6 +595,7 @@ fn mixed_batch_across_a_route_change(first: bool, last: bool) -> (u64, u64) {
             source_count: None,
         },
         ask: SideUpdate::Gone,
+        venue_update_id: None,
     };
     h.publisher.payload_scope(Some(SOURCE_TS_NS + 1_000_000));
     h.publisher.event(trade(1));

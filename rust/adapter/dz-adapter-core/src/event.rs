@@ -43,6 +43,24 @@ pub enum Event<'a> {
         source_ts_ns: u64,
         bid: SideUpdate<'a>,
         ask: SideUpdate<'a>,
+        /// The venue's own per-instrument book update counter for the state
+        /// this quote shows, where the venue assigns one. `None` where it
+        /// does not.
+        ///
+        /// It is what lets two paths of one channel be told apart from two
+        /// updates: the venue assigns it, so every connection and every
+        /// publisher reading the same book state reads the same number. That
+        /// is also why it must be copied from what the venue sent and never
+        /// derived from a counter of our own, for the reason
+        /// [`Event::Trade`]'s `trade_id` states.
+        ///
+        /// **Stated whole; the lowering takes the wire's low 32 bits.** The
+        /// rule for narrowing it belongs to the specification and is applied
+        /// in one place, so an adapter cannot narrow it some other way. A
+        /// counter whose low 32 bits are zero is published as zero, which the
+        /// wire reads as *unavailable*, and that is what the specification
+        /// requires rather than a loss this boundary could avoid.
+        venue_update_id: Option<u64>,
     },
 
     /// One execution.
@@ -281,6 +299,7 @@ mod tests {
                 source_count: None,
             },
             ask: SideUpdate::Gone,
+            venue_update_id: None,
         };
         match quote {
             Event::Quote { bid, ask, .. } => {

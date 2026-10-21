@@ -456,6 +456,7 @@ impl Adapter for RecordingAdapter {
                     source_count: None,
                 },
                 ask: SideUpdate::Gone,
+                venue_update_id: None,
             });
         }
         Ok(())

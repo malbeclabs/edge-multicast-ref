@@ -72,7 +72,7 @@ fn every_pair_of_sides_produces_the_byte_the_live_publishers_produce() {
 
     for (state, bid, ask, expected) in cases {
         let quote = lowering
-            .lower_quote(&instruments, instrument, 7, bid, ask)
+            .lower_quote(&instruments, instrument, 7, bid, ask, None)
             .expect("the table's instrument and exact decimals");
         assert_eq!(
             quote.update_flags, expected,
@@ -103,7 +103,7 @@ fn an_encoder_writing_both_updated_bits_is_wrong_for_three_of_the_four() {
 
     for (bid, ask) in one_sided_or_empty {
         let quote = lowering
-            .lower_quote(&instruments, instrument, 7, bid, ask)
+            .lower_quote(&instruments, instrument, 7, bid, ask, None)
             .expect("lowers");
         assert_ne!(
             quote.update_flags, unconditional,
@@ -118,6 +118,7 @@ fn an_encoder_writing_both_updated_bits_is_wrong_for_three_of_the_four() {
             7,
             present("0.41"),
             present("0.43"),
+            None,
         )
         .expect("lowers");
     assert_eq!(two_sided.update_flags, unconditional);
@@ -136,7 +137,7 @@ fn a_side_never_sets_both_of_its_bits() {
     for bid in [present("0.41"), SideUpdate::Gone] {
         for ask in [present("0.43"), SideUpdate::Gone] {
             let flags = lowering
-                .lower_quote(&instruments, instrument, 7, bid, ask)
+                .lower_quote(&instruments, instrument, 7, bid, ask, None)
                 .expect("lowers")
                 .update_flags;
 
@@ -175,7 +176,7 @@ fn no_pair_of_sides_can_produce_an_empty_flags_byte() {
     for bid in [present("0.41"), SideUpdate::Gone] {
         for ask in [present("0.43"), SideUpdate::Gone] {
             let flags = lowering
-                .lower_quote(&instruments, instrument, 7, bid, ask)
+                .lower_quote(&instruments, instrument, 7, bid, ask, None)
                 .expect("lowers")
                 .update_flags;
             assert_ne!(
@@ -211,6 +212,7 @@ fn a_gone_side_is_zeroed_and_only_the_flag_says_so() {
             7,
             SideUpdate::Gone,
             present("0.43"),
+            None,
         )
         .expect("lowers");
 
@@ -228,6 +230,7 @@ fn a_gone_side_is_zeroed_and_only_the_flag_says_so() {
             7,
             present("0.0000"),
             present("0.43"),
+            None,
         )
         .expect("lowers");
     assert_eq!(at_zero.bid_price, quote.bid_price);
@@ -255,6 +258,7 @@ fn a_venues_source_count_reaches_the_wire_and_its_absence_is_zero() {
                 source_count: Some(3),
             },
             present("0.43"),
+            None,
         )
         .expect("lowers");
 

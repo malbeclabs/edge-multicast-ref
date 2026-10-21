@@ -11,7 +11,15 @@ pub const QUOTE_ASK_GONE: u8 = 0x08;
 /// Exponent, both from `InstrumentDefinition`. This type does no scaling: the
 /// caller supplies the raw fixed-point integers, which is what keeps the wire
 /// exact.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Default` is zero-initialization, **not a conformant quote.** Zero is the
+/// *unavailable* of the source counts and of `Venue Update ID`, but a zero
+/// price is a price, and zero `Update Flags` state neither side, which no
+/// quote may. A caller using `..Quote::default()` still states the identity,
+/// the flags and both sides; what the default spares it is naming a field it
+/// leaves unavailable, such as one defined later inside the declared 60
+/// bytes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Quote {
     pub instrument_id: u32,
     pub source_id: u16,
@@ -23,6 +31,18 @@ pub struct Quote {
     pub ask_qty: u64,
     pub bid_source_count: u16,
     pub ask_source_count: u16,
+    /// `Venue Update ID`, offset 56: the low 32 bits of the venue's own
+    /// per-instrument book update counter for the state this quote shows.
+    ///
+    /// **Zero is *unavailable*, and it is what every caller that does not set
+    /// the field writes.** These four bytes were padding before the field was
+    /// defined, so a quote that leaves this at zero encodes to exactly the
+    /// bytes it did then. Two nonzero values compare with serial number
+    /// arithmetic, never with `>`: the counter's low bits wrap.
+    ///
+    /// The value is copied, never made. A count of quotes sent is not a venue
+    /// counter, and a subscriber that dedupes on one would drop real updates.
+    pub venue_update_id: u32,
 }
 
 impl AppMessage for Quote {
@@ -46,7 +66,7 @@ impl AppMessage for Quote {
         dst[44..52].copy_from_slice(&self.ask_qty.to_le_bytes());
         dst[52..54].copy_from_slice(&self.bid_source_count.to_le_bytes());
         dst[54..56].copy_from_slice(&self.ask_source_count.to_le_bytes());
-        dst[56..60].fill(0);
+        dst[56..60].copy_from_slice(&self.venue_update_id.to_le_bytes());
     }
 
     // Quote carries no redundant Channel ID.
@@ -106,6 +126,11 @@ impl Quote {
             ),
             bid_source_count: u16::from_le_bytes([buf[52], buf[53]]),
             ask_source_count: u16::from_le_bytes([buf[54], buf[55]]),
+            venue_update_id: u32::from_le_bytes(
+                buf[56..60]
+                    .try_into()
+                    .expect("range width matches the target array"),
+            ),
         })
     }
 }

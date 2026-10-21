@@ -30,6 +30,11 @@ fn canonical_quote() -> Quote {
         ask_qty: 7_250,
         bid_source_count: 3,
         ask_source_count: 4,
+        // Zero, and deliberately so: `quote-v3.bin` was transcribed while these
+        // four bytes were padding, so a canonical quote that still reproduces
+        // it is the proof that a caller which does not set the field encodes
+        // exactly what it did before the field existed.
+        venue_update_id: 0,
     }
 }
 

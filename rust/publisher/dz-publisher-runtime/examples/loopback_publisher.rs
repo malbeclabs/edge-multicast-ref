@@ -116,6 +116,7 @@ impl Adapter for Fixture {
                 qty: Scalar::text("72.50"),
                 source_count: Some(4),
             },
+            venue_update_id: None,
         });
 
         // A one-sided quote, so the gone flag reaches a subscriber that has
@@ -129,6 +130,7 @@ impl Adapter for Fixture {
                 qty: Scalar::text("72.50"),
                 source_count: None,
             },
+            venue_update_id: None,
         });
 
         out.event(dz_adapter_core::Event::Trade {

@@ -2211,6 +2211,7 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                 source_ts_ns,
                 bid,
                 ask,
+                venue_update_id,
             } => {
                 // Resolved once, here, and every send below is an indexed load
                 // on it. A name compared per message would put the size of the
@@ -2230,6 +2231,7 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                     source_ts_ns,
                     bid,
                     ask,
+                    venue_update_id,
                 );
                 match lowered {
                     Ok(quote) => {

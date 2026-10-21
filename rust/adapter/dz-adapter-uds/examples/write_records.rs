@@ -60,6 +60,7 @@ fn main() -> std::io::Result<()> {
                 qty: Scalar::text("72.50"),
                 source_count: Some(4),
             },
+            venue_update_id: None,
         },
         Event::Trade {
             instrument,
@@ -83,6 +84,7 @@ fn main() -> std::io::Result<()> {
                 qty: Scalar::text("72.50"),
                 source_count: None,
             },
+            venue_update_id: None,
         },
     ];
 

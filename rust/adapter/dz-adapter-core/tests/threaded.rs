@@ -28,6 +28,7 @@ fn quote(index: u32, bid: i64) -> Event<'static> {
             source_count: None,
         },
         ask: SideUpdate::Gone,
+        venue_update_id: None,
     }
 }
 
@@ -209,6 +210,7 @@ fn push_carries_quotes_and_trades_with_fixed_scalars_only() {
             qty: Scalar::fixed(1, 0),
             source_count: None,
         },
+        venue_update_id: None,
     };
     let text_volume = Event::Trade {
         instrument: instrument(1),
@@ -316,6 +318,7 @@ impl Decoder for FixtureDecoder {
                             source_count: None,
                         },
                         ask: SideUpdate::Gone,
+                        venue_update_id: None,
                     },
                     Order::Supersedes(key),
                 ),
