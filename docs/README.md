@@ -26,6 +26,7 @@ Names we do not own, or have not renamed, are left as written wherever they appe
 | [A document states its TTL](superpowers/specs/2026-09-09-egress-ttl-and-a-boundary-correction-design.md) · [plan](superpowers/plans/2026-09-09-egress-ttl-and-a-boundary-correction.md) | Why `[egress] ttl` loses its default, why the refusal cannot be conditioned on `expected_prefix`, and what a document that omits the key used to publish |
 | [Minting an Instrument ID costs one line](superpowers/specs/2026-09-28-refdata-append-only-state-design.md) · [plan](superpowers/plans/2026-09-28-refdata-append-only-state.md) | The state record as a base with appended lines, compaction on a threshold, and `forget_delisted_after`: what forgetting a delisted instrument keeps and what it costs |
 | [Instrument IDs two hosts agree on without talking](superpowers/specs/2026-10-09-refdata-derived-instrument-ids-design.md) · [plan](superpowers/plans/2026-10-09-refdata-derived-instrument-ids.md) | `[refdata] id_allocation = "derived"`: a new ID is the CRC-32 of its record key above a floor, a seed is a copied record, a collision is declined rather than moved, and every path of a channel starts from the same seed or none |
+| [A threaded input model for the publisher runtime](superpowers/specs/2026-10-20-threaded-input-model-design.md) | `Venue::threaded`: decode on each connection's own task, a runtime-owned dedupe in two stages, a bounded queue, and one flush per batch on the publisher loop. The inline model stays the default |
 
 ## Feeds
 

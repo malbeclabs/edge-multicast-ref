@@ -699,6 +699,18 @@ pub enum StartupError {
         source: io::Error,
     },
 
+    /// `[ingress] decode_threads` is set, and the venue decodes inline.
+    ///
+    /// Refused rather than read past. The key sizes the threads the threaded
+    /// input model decodes on, and a venue composed with `Venue::new` has none:
+    /// left in place, it reads as a publisher using more cores than it is.
+    #[error(
+        "`[ingress] decode_threads` is set to {threads}, and this venue's adapter decodes \
+         inline on the publisher loop, so the key would change nothing: remove it, or compose \
+         the venue with `Venue::threaded`"
+    )]
+    DecodeThreadsInline { threads: usize },
+
     /// No configuration file was named.
     #[error("no configuration file: {usage}")]
     NoConfigPath { usage: &'static str },

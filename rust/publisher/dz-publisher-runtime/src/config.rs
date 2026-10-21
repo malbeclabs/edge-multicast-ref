@@ -897,6 +897,10 @@ pub struct Config {
     /// refused at load.
     pub ingress_kind: Option<Kind>,
     pub ingress: Policy,
+    /// `[ingress] decode_threads`: the threaded input model's worker count,
+    /// when the document states one. See
+    /// [`IngressConfig::decode_threads`](dz_ingress_core::IngressConfig::decode_threads).
+    pub decode_threads: Option<std::num::NonZeroUsize>,
     /// Every enabled `[[source]]`, resolved. Empty means one source, named by
     /// the transport the venue builds — see [`SourceSection`].
     pub sources: Vec<Source>,
@@ -1038,6 +1042,7 @@ impl Document {
         // with one source or once per `[[source]]`, and never in both places. A
         // key that is read only when another is absent is a key an operator
         // cannot reason about from the file in front of them.
+        let decode_threads = self.ingress.decode_threads;
         let (ingress_kind, ingress) = if self.sources.is_empty() {
             let (kind, policy) = self.ingress.resolve()?;
             (Some(kind), policy)
@@ -1081,6 +1086,7 @@ impl Document {
             metrics: self.metrics,
             ingress_kind,
             ingress,
+            decode_threads,
             sources,
             adapter: self.adapter,
         })
