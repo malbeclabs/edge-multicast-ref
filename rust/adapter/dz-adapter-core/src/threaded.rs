@@ -166,6 +166,19 @@ use crate::sink::EventSink;
 /// [`Adapter::on_payload`] is still required, and an implementation writes it
 /// with [`on_payload`] or [`Inline`]: see the module documentation. A runtime
 /// driving the threaded model never calls it.
+///
+/// # Connection callbacks are not ordered against a connection's events
+///
+/// [`Adapter::on_connected`] and [`Adapter::on_disconnected`] run on the
+/// connection's task, while that connection's decoded events may still be
+/// queued for the loop. So [`on_decoded`](Self::on_decoded) can see a
+/// connection's events after its `on_disconnected`, and after its next
+/// `on_connected`. Inline, that order never happens. **An adapter must not
+/// key how it handles an event on connect or disconnect state**: state reset
+/// on a disconnect may have a dead session's events applied on top of it.
+/// Carrying connect and disconnect through the queue as markers, so the loop
+/// applies them in order, is
+/// <https://github.com/malbeclabs/edge-multicast-ref/issues/218>.
 pub trait ThreadedAdapter: Adapter {
     /// One decoder per connection, built once at startup and kept across
     /// reconnects. It runs on that connection's task.
@@ -180,7 +193,9 @@ pub trait ThreadedAdapter: Adapter {
     /// quote here, as it does in `on_payload` today. Called in the order the
     /// events are applied: per connection, the order they were pushed; across
     /// connections, none; per instrument under [`Order::Supersedes`],
-    /// increasing.
+    /// increasing. **Not ordered against the connection callbacks**: an event
+    /// can arrive after its connection's `on_disconnected` or next
+    /// `on_connected`. See the trait documentation.
     ///
     /// `out` is already scoped to `decoded`'s own payload, so what this emits
     /// is measured from [`Decoded::recv_ts_ns`]. **An adapter that releases
