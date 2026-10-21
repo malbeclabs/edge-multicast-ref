@@ -1564,8 +1564,14 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             // outlive this publication: after a restart that the venue did not
             // relist it across, it would read as delisted since then, and be
             // forgotten early.
+            //
+            // The line restates the Symbol the record holds, not the one
+            // offered: under stated keys a venue may rename its display
+            // ticker, and a restatement under another Symbol is a line the
+            // loader refuses. The record's Symbol is the one the ID was first
+            // recorded with; the definition carries the one stated now.
             Some(minted) if !minted.recorded_published => {
-                self.persist(instrument_id, key, symbol, self.next_id)?;
+                self.persist(instrument_id, key, minted.symbol, self.next_id)?;
                 if let Some(minted) = self.minted.get_mut(key) {
                     minted.recorded_published = true;
                 }

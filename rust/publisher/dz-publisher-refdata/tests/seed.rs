@@ -653,3 +653,77 @@ fn a_derived_record_takes_a_resolve_only_seed_and_nothing_else() {
         Some(derive_instrument_id(&symbol_field("AAA").0))
     );
 }
+
+// ---------------------------------------------------------------------------
+// A stated key relisted under another display Symbol
+// ---------------------------------------------------------------------------
+
+/// Offer enough other keys that the registry writes a base, which records
+/// whatever is not published as delisted.
+fn churn<S: StateStore>(registry: &mut Registry<S, ManualClock>) {
+    for index in 0..=COMPACTION_FLOOR {
+        registry
+            .list(&spec(&format!("W{index}"), Some(&format!("w-{index}"))))
+            .expect("admitted");
+    }
+}
+
+#[test]
+fn a_stated_key_relisted_under_another_symbol_keeps_its_id_across_a_restart() {
+    let store = MemoryStore::new();
+    let mut registry = opened(store.clone(), stated());
+    let handle = registry
+        .list(&spec("OLD-DISPLAY", Some("venue-1")))
+        .expect("admitted");
+    let id = registry
+        .definition(handle)
+        .expect("published")
+        .instrument_id;
+    registry.delist(handle);
+    churn(&mut registry);
+
+    // The venue renamed its display ticker. The key is the same instrument.
+    let relisted = registry
+        .list(&spec("NEW-DISPLAY", Some("venue-1")))
+        .expect("relisted");
+    let definition = registry.definition(relisted).expect("published");
+    assert_eq!(definition.instrument_id, id);
+    assert_eq!(
+        definition.symbol,
+        symbol_field("NEW-DISPLAY").0,
+        "the wire carries the Symbol the venue states now"
+    );
+    drop(registry);
+
+    let mut reopened = Registry::open(stated(), store, ManualClock::new())
+        .expect("the record the relisting appended to reads back");
+    reopened.seeding_complete();
+    assert_eq!(
+        id_of(&mut reopened, "NEW-DISPLAY", Some("venue-1")),
+        Some(id)
+    );
+}
+
+#[test]
+fn a_seeded_stated_key_relisted_under_its_display_symbol_keeps_its_id_across_a_restart() {
+    // A seeded entry's Symbol is its key's wire field, and the adapter's
+    // display Symbol is another.
+    let store = MemoryStore::new();
+    seed(
+        store.clone(),
+        &Seed {
+            venue_keys: VenueKeys::Stated,
+            ..a_seed(2, &[("venue-a", 1)])
+        },
+    )
+    .expect("seeded");
+    let mut registry = opened(store.clone(), stated());
+    churn(&mut registry);
+    assert_eq!(id_of(&mut registry, "DISPLAY", Some("venue-a")), Some(1));
+    drop(registry);
+
+    let mut reopened = Registry::open(stated(), store, ManualClock::new())
+        .expect("the record the relisting appended to reads back");
+    reopened.seeding_complete();
+    assert_eq!(id_of(&mut reopened, "DISPLAY", Some("venue-a")), Some(1));
+}
