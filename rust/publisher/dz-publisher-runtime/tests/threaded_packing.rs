@@ -526,6 +526,42 @@ fn a_trade_is_measured_once_whichever_feeds_its_shard_carries() {
 }
 
 #[test]
+fn a_trade_is_measured_on_depth_while_the_top_of_book_route_is_down() {
+    // Both feeds, the top-of-book route down: that copy does not leave, so
+    // its arrival is no latency, and the depth copy that does leave is
+    // measured instead, once.
+    let mut h = harness_both();
+    h.tob.as_ref().expect("tob").mktdata_route_down.set(true);
+    let mut listings = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut listings);
+    h.publisher.declare_venue_timestamps(&Packing::default());
+    h.publisher.send_live_per_batch();
+    let instrument = listings.handles()[0];
+    h.publisher.payload_scope(Some(SOURCE_TS_NS + 1_000_000));
+    h.publisher.event(Event::Trade {
+        instrument,
+        source_ts_ns: SOURCE_TS_NS,
+        px: Scalar::fixed(100, -2),
+        qty: Scalar::fixed(1_000, -3),
+        aggressor: Aggressor::Buy,
+        trade_id: Some(1),
+        cumulative_volume: None,
+        flags: TradeFlags::NONE,
+    });
+    h.publisher.payload_scope(None);
+    h.publisher.drained();
+    assert_eq!(h.mbp.as_ref().expect("mbp").mktdata.len(), 1);
+    assert_eq!(
+        rendered_count(&h, "dz_publisher_recv_to_send_latency_seconds_count"),
+        1
+    );
+    assert_eq!(
+        rendered_count(&h, "dz_publisher_venue_to_recv_latency_seconds_count"),
+        1
+    );
+}
+
+#[test]
 fn a_hold_timer_does_not_split_a_threaded_batch() {
     // Past `MAX_LIVE_HOLD` between two trades of one batch, on a shard carrying
     // both feeds: under the threaded model the hold is not consulted, so each

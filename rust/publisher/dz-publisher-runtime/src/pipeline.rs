@@ -207,6 +207,11 @@ pub struct FeedPipeline<F: EmittedFeed> {
     packed_arrivals: Vec<Arrival>,
     /// Arrivals whose datagram left, with its `Send Timestamp`; a lost one's are dropped.
     sent_arrivals: Vec<(Arrival, u64)>,
+    /// Arrivals in the open mktdata datagram that another feed measures, and
+    /// this one only if that feed's copy did not leave.
+    packed_fallbacks: Vec<Arrival>,
+    /// The same, once their datagram left.
+    sent_fallbacks: Vec<(Arrival, u64)>,
     /// `(monotonic, unix)` of the last packed datagram to leave, until taken.
     live_sent: Option<(u64, u64)>,
     /// Monotonic. When the manifest is next due.
@@ -276,6 +281,8 @@ impl<F: EmittedFeed> FeedPipeline<F> {
             live_since_ns: None,
             packed_arrivals: Vec::new(),
             sent_arrivals: Vec::new(),
+            packed_fallbacks: Vec::new(),
+            sent_fallbacks: Vec::new(),
             live_sent: None,
             next_manifest_ns: None,
             feed: PhantomData,
@@ -754,6 +761,13 @@ impl<F: EmittedFeed> FeedPipeline<F> {
         self.packed_arrivals.push(arrival);
     }
 
+    /// Record the arrival of the live message just packed, for a message
+    /// another feed measures: observed here only if that feed's copy did not
+    /// leave.
+    pub fn packed_fallback_arrival(&mut self, arrival: Arrival) {
+        self.packed_fallbacks.push(arrival);
+    }
+
     /// Monotonic. When the open datagram's first live message was packed, or
     /// `None` when nothing live is waiting.
     #[must_use]
@@ -769,6 +783,11 @@ impl<F: EmittedFeed> FeedPipeline<F> {
     /// Arrivals whose datagram left, each with its `Send Timestamp`.
     pub fn sent_arrivals(&mut self) -> std::vec::Drain<'_, (Arrival, u64)> {
         self.sent_arrivals.drain(..)
+    }
+
+    /// Fallback arrivals whose datagram left, each with its `Send Timestamp`.
+    pub fn sent_fallback_arrivals(&mut self) -> std::vec::Drain<'_, (Arrival, u64)> {
+        self.sent_fallbacks.drain(..)
     }
 
     /// `Anchor Seq` for a book captured now; sends the open datagram first.
@@ -837,8 +856,14 @@ impl<F: EmittedFeed> FeedPipeline<F> {
                     .drain(..)
                     .map(|arrival| (arrival, send_ts_ns)),
             );
+            self.sent_fallbacks.extend(
+                self.packed_fallbacks
+                    .drain(..)
+                    .map(|arrival| (arrival, send_ts_ns)),
+            );
         } else {
             self.packed_arrivals.clear();
+            self.packed_fallbacks.clear();
         }
     }
 

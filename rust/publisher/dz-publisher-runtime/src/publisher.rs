@@ -1842,15 +1842,23 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
         };
         let timestamp_kind = self.venue_timestamp_kind;
         let metrics = &self.metrics;
+        // A trade packed on both feeds is measured on top-of-book, and on
+        // depth only while top-of-book's route is down, so that copy did not
+        // leave. The route is read after both flushes, so it reflects them.
+        let top_route_down = self
+            .feeds
+            .top_of_book_on(shard)
+            .filter(|pipeline| pipeline.packs_live())
+            .is_some_and(FeedPipeline::mktdata_route_down);
         let depth = self
             .feeds
             .market_by_price_on_mut(shard)
-            .and_then(|pipeline| settle(pipeline, metrics, timestamp_kind));
+            .and_then(|pipeline| settle(pipeline, metrics, timestamp_kind, top_route_down));
         let top = self
             .feeds
             .top_of_book_on_mut(shard)
             .filter(|pipeline| pipeline.packs_live())
-            .and_then(|pipeline| settle(pipeline, metrics, timestamp_kind));
+            .and_then(|pipeline| settle(pipeline, metrics, timestamp_kind, false));
         for (channel_id, reached_wire, sent_mono_ns, sent_unix_ns) in
             [depth, top].into_iter().flatten()
         {
@@ -1866,12 +1874,19 @@ fn settle<F: EmittedFeed>(
     pipeline: &mut FeedPipeline<F>,
     metrics: &PublisherMetrics,
     timestamp_kind: Option<TimestampKind>,
+    fallbacks: bool,
 ) -> Option<(u8, bool, u64, u64)> {
     let channel_id = pipeline.channel_id();
     let reached_wire = !pipeline.mktdata_route_down();
     for (arrival, sent_unix_ns) in pipeline.sent_arrivals() {
         // Not a latency: the datagram did not leave. See `published`.
         if reached_wire {
+            observe_arrival_latency(metrics, timestamp_kind, arrival, sent_unix_ns);
+        }
+    }
+    // Drained either way: a fallback the other feed measured is not kept.
+    for (arrival, sent_unix_ns) in pipeline.sent_fallback_arrivals() {
+        if fallbacks && reached_wire {
             observe_arrival_latency(metrics, timestamp_kind, arrival, sent_unix_ns);
         }
     }
@@ -2279,8 +2294,11 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                         let arrival = self.arrival(source_ts_ns, kind);
                         // Under the threaded model a trade is measured once,
                         // when its datagram leaves: on top-of-book where the
-                        // shard carries it, otherwise on depth.
+                        // shard carries it, otherwise on depth. Beside a
+                        // top-of-book feed the depth copy is a fallback,
+                        // measured only if the top-of-book copy did not leave.
                         let mut measure_on_depth = self.live_per_batch;
+                        let mut depth_fallback = false;
                         timed(&self.metrics, EgressMessageType::Trade, || {
                             if let Some(pipeline) =
                                 shard.and_then(|shard| self.feeds.top_of_book_on_mut(shard))
@@ -2293,6 +2311,7 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                                     // its datagram leaves, once per trade: on
                                     // this feed and not again on the depth one.
                                     measure_on_depth = false;
+                                    depth_fallback = true;
                                     if let (Ok(()), Some(arrival)) = (sent, arrival) {
                                         pipeline.packed_arrival(arrival);
                                     }
@@ -2304,9 +2323,11 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                                 shard.and_then(|shard| self.feeds.market_by_price_on_mut(shard))
                             {
                                 let sent = pipeline.send_trade(&trade, now_mono, now_unix);
-                                if measure_on_depth {
-                                    if let (Ok(()), Some(arrival)) = (sent, arrival) {
+                                if let (Ok(()), Some(arrival)) = (sent, arrival) {
+                                    if measure_on_depth {
                                         pipeline.packed_arrival(arrival);
+                                    } else if depth_fallback {
+                                        pipeline.packed_fallback_arrival(arrival);
                                     }
                                 }
                             }
