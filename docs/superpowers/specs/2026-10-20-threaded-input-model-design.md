@@ -259,10 +259,15 @@ venue-neutral:
   model. Its buckets put each full-datagram capacity, and one below it, on a
   bound of its own, derived from the codec's sizes, so §3i's packing can be read
   off the wire.
+- `dz_publisher_ingress_late_identities_total{venue, source_id}`, counter:
+  `Order::Identity` events dropped as late, below their instrument's window.
+- `dz_publisher_ingress_claims_lost_to_newer_generation_total{venue,
+  source_id}`, counter: claims a decoder lost to a newer counter generation
+  without adopting it.
 
 ## 5. Composition and migration
 
-`Venue::threaded(adapter: Box<dyn ThreadedAdapter>, sources)` beside
+`Venue::threaded(adapter: Box<dyn ThreadedAdapter>, inputs)` beside
 `Venue::new` (`dz-venue-composition/src/registry.rs:264`). The runtime picks the
 model from the variant. One optional document key sets the worker count.
 Existing adapters do not change, and nothing they see changes.
