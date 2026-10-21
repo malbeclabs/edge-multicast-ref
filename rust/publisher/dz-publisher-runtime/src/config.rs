@@ -1107,6 +1107,10 @@ impl Config {
     /// The feed is the specification's token, the codec's `Feed::NAME`, and it
     /// is what tells a shard's two feeds apart when they share a `Channel ID`.
     /// Not deduplicated: each pair is a channel this process sends on.
+    ///
+    /// The one list of them. The composed send paths are grouped by shard, and
+    /// a second list read off them would be in a different order; nothing
+    /// needs one.
     #[must_use]
     pub fn channels(&self) -> Vec<(&'static str, u8)> {
         self.feeds

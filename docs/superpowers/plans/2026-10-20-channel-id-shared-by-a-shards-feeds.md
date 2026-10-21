@@ -17,7 +17,7 @@ Breaks [the design](../specs/2026-10-20-channel-id-shared-by-a-shards-feeds-desi
 
 ### 1. Pairs, not IDs
 
-- [x] `Config::channel_ids` and `Feeds::channel_ids` become `channels()`, returning `(feed, Channel ID)` pairs in the document's order, without deduplication. Remove the comments that say the deduplication removes nothing a document can produce.
+- [x] `Config::channel_ids` becomes `channels()`, returning `(feed, Channel ID)` pairs in the document's order, without deduplication. `Feeds::channel_ids`, which had no caller, is removed rather than renamed: the composed send paths are grouped by shard, so a list read off them would not be in the document's order. Remove the comments that say the deduplication removes nothing a document can produce.
 - [x] Every `PublisherMetricsConfig` literal passes the pairs: `run.rs:533`, `threaded.rs:1018`, the loopback example, and the tests that build one (`tests/harness/mod.rs`, `composition.rs`, `ingress_observer.rs`, `threaded.rs`, and the metrics crate's `precreated_at_startup.rs`).
 
 **Test:** a document with two shards' blocks yields one pair per block, in document order. The shared-ID case cannot be stated yet (task 4 accepts it) and is added there.

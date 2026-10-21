@@ -228,18 +228,6 @@ impl ShardFeeds {
             .chain(self.market_by_price().map(FeedPipeline::channel_id))
     }
 
-    /// This shard's `(feed, Channel ID)` pairs: one per block it carries, the
-    /// feed being the codec's `Feed::NAME`.
-    pub fn channels(&self) -> impl Iterator<Item = (&'static str, u8)> + '_ {
-        self.top_of_book()
-            .map(|pipeline| (pipeline.feed(), pipeline.channel_id()))
-            .into_iter()
-            .chain(
-                self.market_by_price()
-                    .map(|pipeline| (pipeline.feed(), pipeline.channel_id())),
-            )
-    }
-
     /// A dropped fan-out member whose failure darkens this shard, on either
     /// feed and any port role.
     #[must_use]
@@ -438,17 +426,6 @@ impl Feeds {
     #[must_use]
     pub fn carries_market_by_price(&self) -> bool {
         self.shards().any(|shard| shard.market_by_price().is_some())
-    }
-
-    /// Every enabled feed's `(feed, Channel ID)`, across every shard, in shard
-    /// order and top-of-book before market-by-price within one.
-    ///
-    /// The feed is the codec's `Feed::NAME`. Not deduplicated: a shard's two
-    /// feeds may share a `Channel ID`, and each is a channel instance of its
-    /// own.
-    #[must_use]
-    pub fn channels(&self) -> Vec<(&'static str, u8)> {
-        self.shards().flat_map(ShardFeeds::channels).collect()
     }
 
     /// The `Channel ID`s one shard publishes on. See
