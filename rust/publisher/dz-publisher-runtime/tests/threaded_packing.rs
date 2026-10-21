@@ -637,6 +637,53 @@ fn each_trade_is_measured_once_across_a_route_change_inside_a_batch() {
 }
 
 #[test]
+fn a_trade_top_of_book_lost_to_a_full_buffer_is_measured_only_where_it_left() {
+    // Top-of-book's send buffer full: the fan-out absorbs it with the route
+    // up, and that copy did not leave. Alone, the trade has no sample. Beside
+    // depth, whose copy did leave, it is measured there, once.
+    for (h, label, expected) in [
+        (harness(feed()), "top-of-book only", 0),
+        (harness_both(), "both feeds", 1),
+    ] {
+        let mut h = h;
+        h.tob.as_ref().expect("tob").mktdata_would_block.set(true);
+        let mut listings = FakeAdapter::new(&["A-B"]);
+        h.publisher.poll_listings(&mut listings);
+        h.publisher.declare_venue_timestamps(&Packing::default());
+        h.publisher.send_live_per_batch();
+        let instrument = listings.handles()[0];
+        h.publisher.payload_scope(Some(SOURCE_TS_NS + 1_000_000));
+        h.publisher.event(Event::Trade {
+            instrument,
+            source_ts_ns: SOURCE_TS_NS,
+            px: Scalar::fixed(100, -2),
+            qty: Scalar::fixed(1_000, -3),
+            aggressor: Aggressor::Buy,
+            trade_id: Some(1),
+            cumulative_volume: None,
+            flags: TradeFlags::NONE,
+        });
+        h.publisher.payload_scope(None);
+        h.publisher.drained();
+        assert_eq!(
+            h.tob.as_ref().expect("tob").mktdata.len(),
+            0,
+            "{label}: nothing left on top-of-book"
+        );
+        assert_eq!(
+            rendered_count(&h, "dz_publisher_recv_to_send_latency_seconds_count"),
+            expected,
+            "{label}"
+        );
+        assert_eq!(
+            rendered_count(&h, "dz_publisher_venue_to_recv_latency_seconds_count"),
+            expected,
+            "{label}"
+        );
+    }
+}
+
+#[test]
 fn a_hold_timer_does_not_split_a_threaded_batch() {
     // Past `MAX_LIVE_HOLD` between two trades of one batch, on a shard carrying
     // both feeds: under the threaded model the hold is not consulted, so each

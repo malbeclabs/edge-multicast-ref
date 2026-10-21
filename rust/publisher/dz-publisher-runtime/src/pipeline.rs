@@ -53,7 +53,9 @@ use dz_edge_core::{AppMessage, EndOfSession, Heartbeat, PortRole, ResetCount, MA
 use dz_edge_mbp::{BookClear, InstrumentReset, LevelUpdate};
 use dz_edge_refdata::ManifestSummary;
 use dz_edge_tob::{Quote, Trade};
-use dz_publisher_egress::{ChannelEgress, EgressEndpoint, EgressError, RouteState, Tee};
+use dz_publisher_egress::{
+    ChannelEgress, DatagramSink, EgressEndpoint, EgressError, RouteState, Tee,
+};
 use dz_publisher_lowering::Snapshot;
 use dz_publisher_metrics::{EgressMessageType, EventKind, PublisherMetrics};
 use dz_publisher_refdata::PublishedDefinition;
@@ -870,14 +872,20 @@ impl<F: EmittedFeed> FeedPipeline<F> {
         if !std::mem::take(&mut self.live_packed) {
             return;
         }
-        // Read right after the send that decided it: this datagram's own
-        // outcome, for the other feed's fallbacks.
-        let left = sent && !self.mktdata.sink().essential_route_down();
+        // Read right after the send that decided it: whether this datagram
+        // left. `Ok` is not that: the fan-out absorbs a full send buffer with
+        // the route up, so its own word on delivery is the one taken. A copy
+        // that did not leave has no latency, and the other feed's fallback
+        // for it is measured instead.
+        let left =
+            sent && self.mktdata.sink().delivered() && !self.mktdata.sink().essential_route_down();
         self.resolved_tokens
             .extend(self.packed_tokens.drain(..).map(|token| (token, left)));
         if sent {
             self.last_mktdata_ns = Some(now_mono_ns);
             self.live_sent = Some((now_mono_ns, send_ts_ns));
+        }
+        if left {
             self.sent_arrivals.extend(
                 self.packed_arrivals
                     .drain(..)
