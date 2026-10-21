@@ -133,6 +133,6 @@ pub use scalar::Scalar;
 pub use sink::{EventSink, ListingSink, SnapshotSink, UpstreamSink, DEFAULT_SHARD};
 pub use strike::{Strike, StrikeBound};
 pub use threaded::{
-    ClaimTable, CounterEras, Decoded, DecodedSink, Decoder, Order, ThreadedAdapter,
+    ClaimTable, CounterGenerations, Decoded, DecodedSink, Decoder, Order, ThreadedAdapter,
 };
 pub use timestamp::VenueTimestampKind;

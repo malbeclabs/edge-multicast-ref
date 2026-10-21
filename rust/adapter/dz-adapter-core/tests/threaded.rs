@@ -499,7 +499,7 @@ fn the_boundary_types_cross_threads_and_upcast() {
 /// restarted when it falls below half the last counter this connection saw.
 struct RestartingDecoder {
     claims: ClaimTable,
-    eras: dz_adapter_core::CounterEras,
+    generations: dz_adapter_core::CounterGenerations,
     last: std::collections::HashMap<u32, u64>,
 }
 
@@ -516,11 +516,11 @@ impl Decoder for RestartingDecoder {
         let counter = field(&mut fields)?;
         out.upstream_message("message");
         if self.last.get(&index).is_some_and(|last| counter < last / 2) {
-            self.eras.restart(instrument(index));
+            self.generations.restart(instrument(index));
         }
         self.last.insert(index, counter);
         let key = self
-            .eras
+            .generations
             .key(instrument(index), counter)
             .ok_or(ParseError::malformed("counter"))?;
         if !self.claims.claim(instrument(index), key) {
@@ -538,7 +538,7 @@ impl ThreadedAdapter for Restarting {
     fn decoder(&self, _conn: ConnectionId, claims: ClaimTable) -> Box<dyn Decoder> {
         Box::new(RestartingDecoder {
             claims,
-            eras: dz_adapter_core::CounterEras::new(),
+            generations: dz_adapter_core::CounterGenerations::new(),
             last: std::collections::HashMap::new(),
         })
     }
@@ -561,7 +561,7 @@ impl Adapter for Restarting {
 }
 
 #[test]
-fn a_counter_restart_starts_an_era_and_a_stale_copy_from_the_old_one_is_dropped() {
+fn a_counter_restart_starts_a_generation_and_a_stale_copy_from_the_old_one_is_dropped() {
     let mut adapter = Restarting;
     let mut inline = Inline::new();
     let mut out = Recorded::default();
@@ -592,17 +592,17 @@ fn a_counter_restart_starts_an_era_and_a_stale_copy_from_the_old_one_is_dropped(
 }
 
 #[test]
-fn an_era_key_orders_above_the_old_counter_and_refuses_a_wide_one() {
-    let mut eras = dz_adapter_core::CounterEras::new();
+fn a_generation_key_orders_above_the_old_counter_and_refuses_a_wide_one() {
+    let mut generations = dz_adapter_core::CounterGenerations::new();
     let one = instrument(1);
-    let old = eras.key(one, 1_000_000).expect("fits");
-    eras.restart(one);
-    assert_eq!(eras.era(one), 1);
-    assert_eq!(eras.era(instrument(2)), 0, "per instrument");
-    let new = eras.key(one, 1).expect("fits");
+    let old = generations.key(one, 1_000_000).expect("fits");
+    generations.restart(one);
+    assert_eq!(generations.generation(one), 1);
+    assert_eq!(generations.generation(instrument(2)), 0, "per instrument");
+    let new = generations.key(one, 1).expect("fits");
     assert!(new > old);
     assert_eq!(
-        eras.key(one, 1 << dz_adapter_core::CounterEras::COUNTER_BITS),
+        generations.key(one, 1 << dz_adapter_core::CounterGenerations::COUNTER_BITS),
         None
     );
     // The loop stage orders them the same way.

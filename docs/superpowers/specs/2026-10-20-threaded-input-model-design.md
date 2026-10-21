@@ -284,7 +284,7 @@ departed from the sketch.
   per connection, the shared `ClaimTable` and the `Dedupe` for an adapter's
   own `on_payload`.
 - **A counter that restarts** would leave a newest-wins key below its own
-  high-water mark for good. `CounterEras` is a decoder's per-instrument era,
+  high-water mark for good. `CounterGenerations` is a decoder's per-instrument generation,
   advanced when it judges a restart and carried in the key's top 16 bits, so
   both stages order a new-counter key above every old one and drop a late
   old-counter copy. The counter is limited to 48 bits when used this way.
