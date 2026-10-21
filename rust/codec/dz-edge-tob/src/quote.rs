@@ -12,10 +12,13 @@ pub const QUOTE_ASK_GONE: u8 = 0x08;
 /// caller supplies the raw fixed-point integers, which is what keeps the wire
 /// exact.
 ///
-/// `Default` is every field zero, which is what each field's *unavailable*
-/// is on the wire. It exists so a caller can state the fields it fills and
-/// leave the rest as `..Quote::default()`, which is how a field added inside
-/// the declared 60 bytes reaches a caller without one more literal to edit.
+/// `Default` is zero-initialization, **not a conformant quote.** Zero is the
+/// *unavailable* of the source counts and of `Venue Update ID`, but a zero
+/// price is a price, and zero `Update Flags` state neither side, which no
+/// quote may. A caller using `..Quote::default()` still states the identity,
+/// the flags and both sides; what the default spares it is naming a field it
+/// leaves unavailable, such as one defined later inside the declared 60
+/// bytes.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Quote {
     pub instrument_id: u32,
