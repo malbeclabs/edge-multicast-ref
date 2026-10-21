@@ -1775,6 +1775,7 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
     /// the crate documentation.
     fn published(
         &mut self,
+        feed: &'static str,
         channel_id: u8,
         reached_wire: bool,
         now_mono_ns: u64,
@@ -1793,7 +1794,7 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
         if reached_wire {
             self.metrics
                 .channel()
-                .set_last_published(channel_id, unix_seconds);
+                .set_last_published(feed, channel_id, unix_seconds);
         }
     }
 
@@ -1903,22 +1904,24 @@ impl<S: StateStore, K: Clock + Clone> Publisher<S, K> {
                 }
                 false
             });
-        for (channel_id, reached_wire, sent_mono_ns, sent_unix_ns) in
+        for (feed, channel_id, reached_wire, sent_mono_ns, sent_unix_ns) in
             [depth, top].into_iter().flatten()
         {
-            self.published(channel_id, reached_wire, sent_mono_ns, sent_unix_ns);
+            self.published(feed, channel_id, reached_wire, sent_mono_ns, sent_unix_ns);
         }
     }
 }
 
 /// Observe the latency of every message that left one packing send path, and
-/// say whether a packed datagram left: `(channel_id, reached_wire, monotonic,
-/// unix)` of the last one, for the channel's freshness and the idle guard.
+/// say whether a packed datagram left: `(feed, channel_id, reached_wire,
+/// monotonic, unix)` of the last one, for the channel's freshness and the idle
+/// guard.
 fn settle<F: EmittedFeed>(
     pipeline: &mut FeedPipeline<F>,
     metrics: &PublisherMetrics,
     timestamp_kind: Option<TimestampKind>,
-) -> Option<(u8, bool, u64, u64)> {
+) -> Option<(&'static str, u8, bool, u64, u64)> {
+    let feed = pipeline.feed();
     let channel_id = pipeline.channel_id();
     let reached_wire = !pipeline.mktdata_route_down();
     for (arrival, sent_unix_ns) in pipeline.sent_arrivals() {
@@ -1929,7 +1932,9 @@ fn settle<F: EmittedFeed>(
     }
     pipeline
         .take_live_sent()
-        .map(|(sent_mono_ns, sent_unix_ns)| (channel_id, reached_wire, sent_mono_ns, sent_unix_ns))
+        .map(|(sent_mono_ns, sent_unix_ns)| {
+            (feed, channel_id, reached_wire, sent_mono_ns, sent_unix_ns)
+        })
 }
 
 /// The two families that measure from a payload's arrival.
@@ -2166,6 +2171,7 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                     self.unroutable += 1;
                     return;
                 };
+                let feed = pipeline.feed();
                 let channel_id = pipeline.channel_id();
                 let sent = timed(&self.metrics, EgressMessageType::InstrumentReset, || {
                     pipeline.send_instrument_reset(&reset, now_mono, now_unix)
@@ -2176,7 +2182,7 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                     // snapshot owed for a reset no subscriber saw would arrive
                     // with an anchor nobody is waiting for.
                     self.owed.push((instrument, reset.new_anchor_seq));
-                    self.published(channel_id, reached_wire, now_mono, now_unix);
+                    self.published(feed, channel_id, reached_wire, now_mono, now_unix);
                 }
             }
             Err(error) => self.refusals.record(error, &self.metrics),
@@ -2260,6 +2266,7 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                             self.unroutable += 1;
                             return;
                         };
+                        let feed = pipeline.feed();
                         let channel_id = pipeline.channel_id();
                         let sent = timed(&self.metrics, EgressMessageType::Quote, || {
                             pipeline.send_quote(&quote, now_mono, now_unix)
@@ -2275,7 +2282,7 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                         }
                         let reached_wire = !pipeline.mktdata_route_down();
                         if sent.is_ok() {
-                            self.published(channel_id, reached_wire, now_mono, now_unix);
+                            self.published(feed, channel_id, reached_wire, now_mono, now_unix);
                             let arrival = self.arrival(source_ts_ns, kind).filter(|_| reached_wire);
                             if let Some(arrival) = arrival {
                                 observe_arrival_latency(
@@ -2343,6 +2350,7 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                             if let Some(pipeline) =
                                 shard.and_then(|shard| self.feeds.top_of_book_on_mut(shard))
                             {
+                                let feed = pipeline.feed();
                                 let channel_id = pipeline.channel_id();
                                 let sent = pipeline.send_trade(&trade, now_mono, now_unix);
                                 if pipeline.packs_live() {
@@ -2361,7 +2369,8 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                                         pipeline.packed_arrival(arrival);
                                     }
                                 } else if sent.is_ok() {
-                                    reached = Some((channel_id, !pipeline.mktdata_route_down()));
+                                    reached =
+                                        Some((feed, channel_id, !pipeline.mktdata_route_down()));
                                 }
                             }
                             if let Some(pipeline) =
@@ -2381,8 +2390,8 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                             // Never packed on top-of-book: decided at once.
                             self.trade_outcomes.insert(token, false);
                         }
-                        if let Some((channel_id, reached_wire)) = reached {
-                            self.published(channel_id, reached_wire, now_mono, now_unix);
+                        if let Some((feed, channel_id, reached_wire)) = reached {
+                            self.published(feed, channel_id, reached_wire, now_mono, now_unix);
                         }
                         self.settle_live(shard);
                     }

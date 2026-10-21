@@ -43,7 +43,7 @@ fn a_sequence_number_beyond_i64_saturates_rather_than_wrapping() {
 
     metrics
         .egress()
-        .set_sequence(PortRole::Mktdata, 1, u64::MAX);
+        .set_sequence(PortRole::Mktdata, "top-of-book", 1, u64::MAX);
     metrics.refdata().set_manifest_seq(1, u64::MAX);
 
     let rendered = metrics.render();

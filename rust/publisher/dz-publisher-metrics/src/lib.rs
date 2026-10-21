@@ -192,13 +192,15 @@ impl PublisherMetrics {
         let lowering = LoweringMetrics::new(&registry, &labels);
         let book = BookMetrics::new(&registry, &labels);
         // The reference-data gauges are keyed on Channel ID alone: the
-        // published set behind one ID is one shard's, whichever feed carries it.
+        // published set behind one ID is one shard's, whichever feed carries it,
+        // so they are pre-created once per distinct ID. The sequence, heartbeat
+        // and last-published gauges carry `feed` and are pre-created per pair.
         let mut channel_ids: Vec<u8> = config.channels.iter().map(|&(_, id)| id).collect();
         channel_ids.sort_unstable();
         channel_ids.dedup();
         let refdata = RefdataMetrics::new(&registry, &labels, &channel_ids, config.port_roles);
-        let egress = EgressMetrics::new(&registry, &labels, config.port_roles, &channel_ids);
-        let channel = ChannelMetrics::new(&registry, &labels, &channel_ids);
+        let egress = EgressMetrics::new(&registry, &labels, config.port_roles, config.channels);
+        let channel = ChannelMetrics::new(&registry, &labels, config.channels);
         let latency = LatencyMetrics::new(&registry, &labels);
         let process = ProcessMetrics::new(&registry, &labels);
 

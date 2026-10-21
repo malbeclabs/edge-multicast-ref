@@ -70,6 +70,39 @@ const PROPOSED_NAMES: &[&str] = &[
     "dz_publisher_ingress_claims_lost_to_newer_generation_total",
 ];
 
+/// The `feed` label this crate proposes on three families keyed on `Channel
+/// ID`, two of them normative: a shard's two feeds may share an ID, and each
+/// is a channel instance of its own. Listed as a proposal until the playbook
+/// carries it.
+const PROPOSED_FEED_LABEL_ON: &[&str] = &[
+    "dz_publisher_egress_sequence_current",
+    "dz_publisher_egress_heartbeat_last_sent_timestamp_seconds",
+    "dz_publisher_channel_last_published_timestamp_seconds",
+];
+
+#[test]
+fn the_proposed_feed_label_is_on_exactly_its_three_families() {
+    let metrics = PublisherMetrics::new(&PublisherMetricsConfig {
+        venue: "test-venue",
+        source_id: 7,
+        port_roles: &[PortRole::Mktdata, PortRole::Refdata],
+        connections: &[],
+        channels: &[("top-of-book", 1)],
+        ingress_message_types: &[],
+    });
+    let rendered = metrics.render();
+    let carrying: std::collections::BTreeSet<&str> = rendered
+        .lines()
+        .filter(|line| !line.starts_with('#') && line.contains("feed=\""))
+        .filter_map(|line| line.split_once('{').map(|(family, _)| family))
+        .collect();
+    assert_eq!(
+        carrying,
+        PROPOSED_FEED_LABEL_ON.iter().copied().collect(),
+        "{rendered}"
+    );
+}
+
 fn touch_every_family(m: &PublisherMetrics) {
     m.ingress().message("trade", "primary");
     m.ingress().bytes(1);
@@ -112,11 +145,12 @@ fn touch_every_family(m: &PublisherMetrics) {
     m.egress().bytes(PortRole::Mktdata, 1);
     m.egress()
         .error(PortRole::Mktdata, EgressErrorReason::SocketError);
-    m.egress().set_sequence(PortRole::Mktdata, 1, 1);
     m.egress()
-        .set_heartbeat_last_sent(PortRole::Mktdata, 1, 1.0);
+        .set_sequence(PortRole::Mktdata, "top-of-book", 1, 1);
+    m.egress()
+        .set_heartbeat_last_sent(PortRole::Mktdata, "top-of-book", 1, 1.0);
 
-    m.channel().set_last_published(1, 1.0);
+    m.channel().set_last_published("top-of-book", 1, 1.0);
 
     m.latency()
         .observe_venue_to_recv(TimestampKind::ExchangeRecv, 0.001);

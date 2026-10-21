@@ -350,12 +350,20 @@ fn declared_channel_ids_render_at_zero_from_startup() {
         assert_zero(
             &rendered,
             "dz_publisher_egress_sequence_current",
-            &[("port_role", "mktdata"), ("channel_id", channel_id)],
+            &[
+                ("port_role", "mktdata"),
+                ("feed", "top-of-book"),
+                ("channel_id", channel_id),
+            ],
         );
         assert_zero(
             &rendered,
             "dz_publisher_egress_heartbeat_last_sent_timestamp_seconds",
-            &[("port_role", "mktdata"), ("channel_id", channel_id)],
+            &[
+                ("port_role", "mktdata"),
+                ("feed", "top-of-book"),
+                ("channel_id", channel_id),
+            ],
         );
         assert_zero(
             &rendered,
@@ -375,7 +383,7 @@ fn declared_channel_ids_render_at_zero_from_startup() {
         assert_zero(
             &rendered,
             "dz_publisher_channel_last_published_timestamp_seconds",
-            &[("channel_id", channel_id)],
+            &[("feed", "top-of-book"), ("channel_id", channel_id)],
         );
     }
 }
