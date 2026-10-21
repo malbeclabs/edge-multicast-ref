@@ -13,8 +13,8 @@ use dz_edge_refdata::SYMBOL_LEN;
 use dz_publisher_lowering::SourceId;
 use dz_publisher_refdata::{
     encode_keyed_line, symbol_field, CycleSchedule, Entry, IdAllocation, Identity, ManualClock,
-    MemoryStore, RecordError, RefdataError, Registry, RegistryConfig, SelectionPolicy, ShardConfig,
-    StateRecord, StateStore, VenueKeys,
+    MemoryStore, RecordError, RefdataError, Refusal, Registry, RegistryConfig, SelectionPolicy,
+    ShardConfig, StateRecord, StateStore, VenueKeys, COMPACTION_FLOOR,
 };
 
 const SOURCE_ID: u16 = 7;
@@ -122,7 +122,6 @@ fn the_symbol_identity_ignores_a_stated_venue_key() {
     let first = id_of(&mut registry, "SAME", Some("key-one")).expect("admitted");
     let second = id_of(&mut registry, "SAME", Some("key-two")).expect("recalled");
     assert_eq!(first, second);
-    let _ = keyed();
 }
 
 // ---------------------------------------------------------------------------
@@ -403,4 +402,310 @@ fn a_version_4_header_names_its_allocation_and_its_venue_keys() {
     }
     let read = loaded(b"dz-refdata-state 4 7 1 0 sequential stated\n").expect("empty");
     assert_eq!(read.keyed, Some(VenueKeys::Stated));
+}
+
+// ---------------------------------------------------------------------------
+// Recall on the key
+// ---------------------------------------------------------------------------
+
+/// A sequential, unkeyed record holding `symbols` as IDs 1, 2, 3 ..., written
+/// by a publisher under the symbol identity.
+fn unkeyed_record(symbols: &[&str]) -> Vec<u8> {
+    let store = MemoryStore::new();
+    let mut first = opened(
+        store.clone(),
+        config(
+            Identity::Symbol,
+            VenueKeys::Symbol,
+            IdAllocation::Sequential,
+        ),
+    );
+    for symbol in symbols {
+        first.list(&spec(symbol, None)).expect("admitted");
+    }
+    drop(first);
+    store.record().expect("a record")
+}
+
+fn holding(bytes: &[u8]) -> MemoryStore {
+    let store = MemoryStore::new();
+    store.set_record(bytes.to_vec());
+    store
+}
+
+#[test]
+fn two_tickers_that_share_a_symbol_are_two_instruments() {
+    let long = ticker("KXNCAAFGAME-26NOV28-OHIO-STATE-MICHIGAN-TOTAL-POINTS-", 64);
+    let (one, other) = (format!("{long}1"), format!("{long}2"));
+    let mut registry = opened(MemoryStore::new(), keyed());
+
+    // The key stated, and equal to the symbol, which the symbol declaration
+    // allows.
+    let first = registry.list(&spec(&one, Some(&one))).expect("admitted");
+    let second = registry
+        .list(&spec(&other, Some(&other)))
+        .expect("admitted");
+    assert_ne!(first, second, "each gets its own handle, and its own book");
+    let (a, b) = (
+        registry.definition(first).expect("published"),
+        registry.definition(second).expect("published"),
+    );
+    assert_ne!(a.instrument_id, b.instrument_id);
+    assert_eq!(a.symbol, b.symbol, "both carry one truncated Symbol");
+    assert_eq!(registry.published(), 2);
+
+    // A re-offer finds each again.
+    assert_eq!(registry.list(&spec(&one, Some(&one))), Some(first));
+    assert_eq!(registry.list(&spec(&other, Some(&other))), Some(second));
+}
+
+#[test]
+fn a_spec_stating_no_key_is_keyed_on_its_untruncated_symbol() {
+    let long = ticker("KXMLBGAME-", 64);
+    let (one, other) = (format!("{long}A"), format!("{long}B"));
+    let mut registry = opened(MemoryStore::new(), keyed());
+    let a = id_of(&mut registry, &one, None).expect("admitted");
+    let b = id_of(&mut registry, &other, None).expect("admitted");
+    assert_ne!(a, b);
+}
+
+#[test]
+fn a_64_and_a_65_byte_key_keep_their_own_ids_in_either_order_and_across_a_restart() {
+    let sixty_four = ticker("KXNFLGAME-", 64);
+    let sixty_five = format!("{sixty_four}Z");
+    for order in [[&sixty_four, &sixty_five], [&sixty_five, &sixty_four]] {
+        let store = MemoryStore::new();
+        let mut registry = opened(store.clone(), keyed());
+        let first = id_of(&mut registry, order[0], None).expect("admitted");
+        let second = id_of(&mut registry, order[1], None).expect("admitted");
+        assert_ne!(first, second);
+        drop(registry);
+
+        let mut reopened = opened(store, keyed());
+        assert_eq!(id_of(&mut reopened, order[1], None), Some(second));
+        assert_eq!(id_of(&mut reopened, order[0], None), Some(first));
+    }
+}
+
+#[test]
+fn a_venue_key_that_is_not_one_is_refused() {
+    let mut registry = opened(
+        MemoryStore::new(),
+        config(
+            Identity::VenueKey,
+            VenueKeys::Stated,
+            IdAllocation::Sequential,
+        ),
+    );
+    let too_long = ticker("K", 257);
+    for key in ["", "with\0nul", too_long.as_str()] {
+        assert_eq!(
+            registry.offer("default", &spec("DISPLAY", Some(key))),
+            Err(Refusal::BadVenueKey),
+            "{key:?}"
+        );
+    }
+    let longest = ticker("K", 256);
+    assert!(registry
+        .offer("default", &spec("DISPLAY", Some(&longest)))
+        .is_ok());
+}
+
+#[test]
+fn a_key_the_configuration_did_not_declare_is_refused() {
+    let mut registry = opened(MemoryStore::new(), keyed());
+    assert_eq!(
+        registry.offer("default", &spec("DISPLAY", Some("venue-1"))),
+        Err(Refusal::VenueKeyNotDeclared)
+    );
+    assert_eq!(registry.counts().declined_unrepresentable, 1);
+    // Stating the symbol itself is no declaration of its own keys.
+    assert!(registry
+        .offer("default", &spec("DISPLAY", Some("DISPLAY")))
+        .is_ok());
+
+    let mut stated = opened(
+        MemoryStore::new(),
+        config(
+            Identity::VenueKey,
+            VenueKeys::Stated,
+            IdAllocation::Sequential,
+        ),
+    );
+    assert!(stated
+        .offer("default", &spec("DISPLAY", Some("venue-1")))
+        .is_ok());
+}
+
+#[test]
+fn an_unkeyed_record_of_whole_symbols_is_rewritten_keyed_and_keeps_every_id() {
+    let short = ticker("S", 60);
+    let bytes = unkeyed_record(&["AAA", "BBB", &short]);
+    assert!(bytes.starts_with(b"dz-refdata-state 2 "));
+    let store = holding(&bytes);
+    let mut registry = opened(store.clone(), keyed());
+    assert!(
+        store
+            .record()
+            .expect("a record")
+            .starts_with(b"dz-refdata-state 4 "),
+        "rewritten at open"
+    );
+    assert_eq!(id_of(&mut registry, "BBB", None), Some(2));
+    assert_eq!(id_of(&mut registry, &short, None), Some(3));
+    assert_eq!(id_of(&mut registry, "AAA", None), Some(1));
+    assert_eq!(
+        id_of(&mut registry, "CCC", None),
+        Some(4),
+        "next_id carried"
+    );
+}
+
+fn unresolved(error: &RefdataError) -> Vec<u32> {
+    match error {
+        RefdataError::UnresolvedVenueKeys { entries } => {
+            entries.iter().map(|(id, _)| *id).collect()
+        }
+        other => panic!("not unresolved: {other}"),
+    }
+}
+
+#[test]
+fn an_unkeyed_record_with_a_full_width_entry_is_refused_at_open() {
+    let full = ticker("F", 64);
+    let bytes = unkeyed_record(&["AAA", &full]);
+    let store = holding(&bytes);
+    let error = Registry::open(keyed(), store.clone(), ManualClock::new()).unwrap_err();
+    assert_eq!(unresolved(&error), vec![2]);
+    assert_eq!(store.record(), Some(bytes), "nothing is rewritten");
+}
+
+#[test]
+fn a_multi_byte_character_across_byte_64_leaves_its_entry_unresolved() {
+    // 63 ASCII bytes and `é`: one byte of padding. A 4-byte character from
+    // byte 61: three.
+    let two_byte = format!("{}é", ticker("C", 63));
+    let four_byte = format!("{}🦀", ticker("D", 61));
+    assert_eq!(two_byte.len(), 65);
+    assert_eq!(four_byte.len(), 65);
+    let bytes = unkeyed_record(&["AAA", &two_byte, &four_byte]);
+    let error = Registry::open(keyed(), holding(&bytes), ManualClock::new()).unwrap_err();
+    assert_eq!(unresolved(&error), vec![2, 3]);
+}
+
+#[test]
+fn under_stated_keys_every_entry_of_an_unkeyed_record_is_unresolved() {
+    let bytes = unkeyed_record(&["AAA", "BBB"]);
+    let error = Registry::open(
+        config(
+            Identity::VenueKey,
+            VenueKeys::Stated,
+            IdAllocation::Sequential,
+        ),
+        holding(&bytes),
+        ManualClock::new(),
+    )
+    .unwrap_err();
+    assert_eq!(unresolved(&error), vec![1, 2]);
+}
+
+/// A keyed record, written by a keyed publisher under `venue_keys`.
+fn keyed_record_under(venue_keys: VenueKeys) -> Vec<u8> {
+    let store = MemoryStore::new();
+    let mut registry = opened(
+        store.clone(),
+        config(Identity::VenueKey, venue_keys, IdAllocation::Sequential),
+    );
+    registry.list(&spec("AAA", None)).expect("admitted");
+    drop(registry);
+    store.record().expect("a record")
+}
+
+#[test]
+fn a_keyed_record_is_refused_under_the_other_venue_keys() {
+    for (written, opened_under) in [
+        (VenueKeys::Symbol, VenueKeys::Stated),
+        (VenueKeys::Stated, VenueKeys::Symbol),
+    ] {
+        let error = Registry::open(
+            config(Identity::VenueKey, opened_under, IdAllocation::Sequential),
+            holding(&keyed_record_under(written)),
+            ManualClock::new(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                RefdataError::VenueKeysChanged { persisted, configured }
+                    if persisted == written && configured == opened_under
+            ),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn a_keyed_record_is_refused_under_the_symbol_identity() {
+    let error = Registry::open(
+        config(
+            Identity::Symbol,
+            VenueKeys::Symbol,
+            IdAllocation::Sequential,
+        ),
+        holding(&keyed_record_under(VenueKeys::Symbol)),
+        ManualClock::new(),
+    )
+    .unwrap_err();
+    assert!(matches!(error, RefdataError::StateIsKeyed), "{error}");
+}
+
+#[test]
+fn forgetting_forgets_a_key_and_not_the_key_beside_it_on_one_symbol() {
+    let long = ticker("KXFORGET-", 64);
+    let (gone, kept) = (format!("{long}1"), format!("{long}2"));
+    let forgetting = RegistryConfig {
+        forget_delisted_after: Some(std::time::Duration::from_secs(60)),
+        selection: SelectionPolicy::from_seed(4096).expect("4096 is a seed"),
+        ..keyed()
+    };
+    let store = MemoryStore::new();
+    let clock = ManualClock::new();
+    let mut registry =
+        Registry::open(forgetting.clone(), store.clone(), clock.clone()).expect("opens");
+    registry.seeding_complete();
+    let gone_handle = registry.list(&spec(&gone, None)).expect("admitted");
+    let gone_id = registry
+        .definition(gone_handle)
+        .expect("published")
+        .instrument_id;
+    let kept_id = id_of(&mut registry, &kept, None).expect("admitted");
+    registry.delist(gone_handle);
+
+    // Past the horizon, a compaction forgets the delisted key. The churn is
+    // what sets the compaction off, as the venue's own listings would.
+    clock.advance(std::time::Duration::from_secs(120));
+    for index in 0..=COMPACTION_FLOOR {
+        registry
+            .list(&spec(&format!("W{index}"), None))
+            .expect("admitted");
+    }
+    let record = StateRecord::decode(&store.record().expect("a record")).expect("it reads back");
+    assert!(record
+        .entries
+        .iter()
+        .all(|entry| entry.key() != gone.as_bytes()));
+    assert!(record
+        .entries
+        .iter()
+        .any(|entry| entry.key() == kept.as_bytes()));
+
+    let relisted = id_of(&mut registry, &gone, None).expect("admitted again");
+    assert_ne!(relisted, gone_id, "a forgotten key is a new instrument");
+    assert_eq!(id_of(&mut registry, &kept, None), Some(kept_id));
+    drop(registry);
+
+    let mut reopened = Registry::open(forgetting, store, clock).expect("opens");
+    reopened.seeding_complete();
+    assert_eq!(id_of(&mut reopened, &gone, None), Some(relisted));
+    assert_eq!(id_of(&mut reopened, &kept, None), Some(kept_id));
 }

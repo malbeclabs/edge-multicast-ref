@@ -1150,13 +1150,18 @@ fn unknown_shard_line(offered: &str, configured: &[String]) -> String {
 /// floor is closed to every publisher on the same seed whoever holds it, and
 /// saying otherwise sends the operator after a split that cannot exist.
 fn unavailable_id_line(declined: &UnavailableId) -> String {
-    let why = match (&declined.holder, declined.below_floor) {
+    // Under `identity = "venue_key"` the key is what was declined and what
+    // holds the ID, and two keys may share the Symbol beside them.
+    let holder = declined
+        .holder
+        .as_ref()
+        .map(|holder| named(holder, declined.holder_venue_key.as_deref()));
+    let why = match (holder, declined.below_floor) {
         (None, _) => "which is zero or below the state record's floor".to_owned(),
-        (Some(holder), true) => format!(
-            "which `{}` already holds, below the state record's floor",
-            symbol_text(holder)
-        ),
-        (Some(holder), false) => format!("which `{}` already holds", symbol_text(holder)),
+        (Some(holder), true) => {
+            format!("which {holder} already holds, below the state record's floor")
+        }
+        (Some(holder), false) => format!("which {holder} already holds"),
     };
     let other_order = if declined.holder.is_some() && !declined.below_floor {
         " A publisher of this channel that admitted the two symbols in the other order holds the \
@@ -1165,12 +1170,25 @@ fn unavailable_id_line(declined: &UnavailableId) -> String {
         ""
     };
     format!(
-        "dz-publisher-runtime: `{}` derives Instrument ID {}, {why}. It is declined and reaches no \
+        "dz-publisher-runtime: {} derives Instrument ID {}, {why}. It is declined and reaches no \
          channel. The ID is not moved, because where it would move to depends on what this \
          publisher admitted first.{other_order} Said once for this symbol.",
-        symbol_text(&declined.symbol),
+        named(&declined.symbol, declined.venue_key.as_deref()),
         declined.instrument_id,
     )
+}
+
+/// An instrument for a log line: its `Symbol`, and its venue key beside it
+/// where the registry recalls by one.
+fn named(symbol: &[u8; dz_edge_refdata::SYMBOL_LEN], venue_key: Option<&[u8]>) -> String {
+    match venue_key {
+        None => format!("`{}`", symbol_text(symbol)),
+        Some(key) => format!(
+            "venue key `{}` (Symbol `{}`)",
+            String::from_utf8_lossy(key).escape_debug(),
+            symbol_text(symbol)
+        ),
+    }
 }
 
 /// A wire `Symbol` for a log line: its trailing NUL padding trimmed, as the
@@ -2764,6 +2782,8 @@ mod tests {
         holder[..4].copy_from_slice(b"OLDS");
         let collided = unavailable_id_line(&UnavailableId {
             symbol,
+            venue_key: None,
+            holder_venue_key: None,
             instrument_id: 77,
             holder: Some(holder),
             below_floor: false,
@@ -2782,6 +2802,8 @@ mod tests {
         // is no other order to speak of, held or not.
         let below = unavailable_id_line(&UnavailableId {
             symbol,
+            venue_key: None,
+            holder_venue_key: None,
             instrument_id: 3,
             holder: None,
             below_floor: true,
@@ -2791,6 +2813,8 @@ mod tests {
 
         let seeded = unavailable_id_line(&UnavailableId {
             symbol,
+            venue_key: None,
+            holder_venue_key: None,
             instrument_id: 3,
             holder: Some(holder),
             below_floor: true,
@@ -2800,6 +2824,27 @@ mod tests {
             "{seeded}"
         );
         assert!(!seeded.contains("other order"), "{seeded}");
+    }
+
+    #[test]
+    fn the_unavailable_id_line_names_the_venue_keys_beside_one_symbol() {
+        // Under the venue-key identity two keys may share the Symbol, so the
+        // Symbol alone would name the declined key and its holder alike.
+        let mut symbol = [0u8; dz_edge_refdata::SYMBOL_LEN];
+        symbol[..4].copy_from_slice(b"LONG");
+        let line = unavailable_id_line(&UnavailableId {
+            symbol,
+            venue_key: Some(b"LONG-TICKER-2".to_vec().into_boxed_slice()),
+            holder_venue_key: Some(b"LONG-TICKER-1".to_vec().into_boxed_slice()),
+            instrument_id: 77,
+            holder: Some(symbol),
+            below_floor: false,
+        });
+        assert!(
+            line.contains("venue key `LONG-TICKER-2` (Symbol `LONG`)")
+                && line.contains("venue key `LONG-TICKER-1`"),
+            "{line}"
+        );
     }
 
     #[test]

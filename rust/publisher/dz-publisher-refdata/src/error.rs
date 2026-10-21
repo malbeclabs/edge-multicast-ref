@@ -1,6 +1,6 @@
 //! Why a publisher's reference data will not start.
 
-use crate::state::RecordError;
+use crate::state::{RecordError, VenueKeys};
 use crate::store::StateError;
 
 /// The startup failures, none of which is recoverable by continuing.
@@ -100,4 +100,40 @@ pub enum RefdataError {
     /// refuses this first; this is the second line.
     #[error("venue_keys = \"stated\" declares keys that identity = \"symbol\" never reads")]
     VenueKeysWithoutVenueKey,
+
+    /// The record is keyed, version 4, and the configuration asks for the
+    /// symbol identity.
+    ///
+    /// Its entries may share a `Symbol`, and a registry that recalls by the
+    /// `Symbol` cannot hold two instruments under one.
+    #[error("the persisted state is keyed by venue key, and identity = \"symbol\" cannot read it")]
+    StateIsKeyed,
+
+    /// The record was written under one `venue_keys` declaration and the
+    /// configuration states the other.
+    ///
+    /// Under `symbol` every `-` entry is "the key is the Symbol", which an
+    /// adapter stating its own keys would never offer; under `stated` the
+    /// reverse. Either way every offer would miss and be given a new ID. There
+    /// is no way back that keeps the IDs: a fresh record is the only path.
+    #[error(
+        "the persisted state was written under venue_keys = {persisted:?}, not {configured:?}"
+    )]
+    VenueKeysChanged {
+        persisted: VenueKeys,
+        configured: VenueKeys,
+    },
+
+    /// An unkeyed record holds entries whose venue key is not known, and the
+    /// configuration recalls by venue key.
+    ///
+    /// Each could stand for its exact `Symbol` or for a longer name that was
+    /// cut, or under `venue_keys = "stated"` for any key at all. Giving the ID
+    /// to whichever key is offered first depends on what one host saw first,
+    /// so the record opens only after a mapping resolves them through
+    /// [`seed`](crate::seed). Each entry is named by its ID and `Symbol`.
+    #[error("{} entries of the persisted state have no known venue key; resolve them with a seed mapping", entries.len())]
+    UnresolvedVenueKeys {
+        entries: Vec<(u32, [u8; dz_edge_refdata::SYMBOL_LEN])>,
+    },
 }

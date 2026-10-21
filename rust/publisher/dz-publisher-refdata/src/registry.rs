@@ -16,15 +16,21 @@ use crate::pacer::DefinitionPacer;
 use crate::policy::{Phase, SelectionPolicy};
 use crate::refusal::Refusal;
 use crate::state::{
-    derive_instrument_id, encode_line, Entry, IdAllocation, Identity, StateRecord, VenueKeys,
+    derive_instrument_id, encode_keyed_line, encode_line, is_venue_key, symbol_is_whole,
+    venue_key_field, Entry, IdAllocation, Identity, StateRecord, VenueKeys,
 };
 use crate::store::{StateError, StateStore};
 use crate::strike;
 use crate::CycleSchedule;
 
-/// A venue's ticker as the wire carries it, which is the identity everything
-/// here keys on.
+/// A venue's ticker as the wire carries it.
 type SymbolKey = [u8; SYMBOL_LEN];
+
+/// What an instrument is recalled by: the 64 bytes of its padded `Symbol`
+/// under [`Identity::Symbol`], and its venue key under
+/// [`Identity::VenueKey`]. Boxed so that a re-offer looks it up by `&[u8]`
+/// with no allocation, and the two identities share one set of maps.
+type RecallKey = Box<[u8]>;
 
 /// One shard, and the `Channel ID` its reference data is published on.
 ///
@@ -117,6 +123,12 @@ pub struct RegistryConfig {
 pub struct UnavailableId {
     /// The symbol that was declined, as the wire would have carried it.
     pub symbol: [u8; SYMBOL_LEN],
+    /// Under [`Identity::VenueKey`], the venue key that was declined, beside
+    /// its `Symbol`. `None` under [`Identity::Symbol`].
+    pub venue_key: Option<Box<[u8]>>,
+    /// Under [`Identity::VenueKey`], the venue key holding the ID, where one
+    /// does. `None` under [`Identity::Symbol`].
+    pub holder_venue_key: Option<Box<[u8]>>,
     /// The ID it derives.
     pub instrument_id: u32,
     /// The symbol the record holds under that ID. `None` when no symbol does:
@@ -142,6 +154,9 @@ pub const COMPACTION_FLOOR: usize = 1_024;
 #[derive(Debug, Clone, Copy)]
 struct Minted {
     instrument_id: u32,
+    /// The wire `Symbol` it was published under, which the record writes
+    /// beside the key. Under [`Identity::Symbol`] it is the key.
+    symbol: SymbolKey,
     /// Whether the record holds this entry as published when written. A
     /// relisting of one it does not is written down, so that a timestamp in
     /// the record is never older than the instrument's last publication.
@@ -154,7 +169,6 @@ struct Minted {
 /// One published instrument.
 #[derive(Debug, Clone, Copy)]
 struct Published {
-    symbol: SymbolKey,
     /// Which shard's published set this instrument is in, as an index into the
     /// configured shards.
     ///
@@ -394,10 +408,11 @@ pub struct Registry<S: StateStore, C: Clock> {
     config: RegistryConfig,
     store: S,
     clock: C,
-    /// Every retained `Instrument ID`, by symbol. A delisting leaves the entry,
-    /// which is what lets a relisted symbol come back as itself; only the
-    /// horizon removes one. What makes an ID unreusable is `next_id`.
-    minted: HashMap<SymbolKey, Minted>,
+    /// Every retained `Instrument ID`, by what it is recalled by. A delisting
+    /// leaves the entry, which is what lets a relisted instrument come back as
+    /// itself; only the horizon removes one. What makes an ID unreusable is
+    /// `next_id`.
+    minted: HashMap<RecallKey, Minted>,
     next_id: u32,
     /// Whether the directory holds a base that lines can be appended to.
     /// False only before the first mint of a publisher that has never minted.
@@ -412,12 +427,16 @@ pub struct Registry<S: StateStore, C: Clock> {
     /// written, so a full disk is not asked to take the whole record again on
     /// every mint.
     compaction_at: usize,
-    /// The live handle for each published symbol, so a re-offer is one lookup.
-    handles: HashMap<SymbolKey, InstrumentRef>,
+    /// The live handle for each published instrument, by what it is recalled
+    /// by, so a re-offer is one lookup.
+    handles: HashMap<RecallKey, InstrumentRef>,
     /// Parallel to the instrument table's slots, so the definition cycle walks
     /// the published set in admission order and a withdrawn instrument leaves
     /// the same hole in both.
     slots: Vec<Option<Published>>,
+    /// Parallel to `slots`: what each published instrument is recalled by,
+    /// kept apart so that a published entry stays `Copy` for the cycle.
+    slot_keys: Vec<Option<RecallKey>>,
     /// What is published across every shard, which is what the selection
     /// policy's caps are measured against. `max_published` is a cap on what
     /// this publisher publishes and not on what a channel carries, so the
@@ -438,11 +457,12 @@ pub struct Registry<S: StateStore, C: Clock> {
     /// remembered rather than reported again.
     unknown_shards: Vec<String>,
     unknown_shards_taken: usize,
-    /// Under derived allocation, every `Instrument ID` the record holds and the
-    /// symbol holding it, so a derived ID already taken is one lookup and the
-    /// declined offer can name its holder. Empty under sequential allocation,
-    /// where `next_id` alone is the guarantee.
-    in_use: HashMap<u32, SymbolKey>,
+    /// Under derived allocation, every `Instrument ID` the record holds and
+    /// what holds it, so a derived ID already taken is one lookup and the
+    /// declined offer can name its holder. Keyed by ID, the direction that
+    /// question needs. Empty under sequential allocation, where `next_id`
+    /// alone is the guarantee.
+    in_use: HashMap<u32, RecallKey>,
     /// Offers declined as [`Refusal::IdUnavailable`], one per symbol, and how
     /// many a caller has been handed. Bounded as the unknown shard names are.
     unavailable: Vec<UnavailableId>,
@@ -533,6 +553,7 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         if config.venue_keys == VenueKeys::Stated && config.identity == Identity::Symbol {
             return Err(RefdataError::VenueKeysWithoutVenueKey);
         }
+        let keyed = config.identity == Identity::VenueKey;
         if config.id_allocation == IdAllocation::Derived && config.forget_delisted_after.is_some() {
             return Err(RefdataError::ForgettingUnderDerivedIds);
         }
@@ -564,11 +585,48 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         {
             return Err(RefdataError::StateIsDerived);
         }
-        let in_use: HashMap<u32, SymbolKey> = if config.id_allocation == IdAllocation::Derived {
+        match (record.keyed, keyed) {
+            // Its entries may share a Symbol, which a symbol-keyed registry
+            // cannot hold.
+            (Some(_), false) => return Err(RefdataError::StateIsKeyed),
+            (Some(persisted), true) if persisted != config.venue_keys => {
+                return Err(RefdataError::VenueKeysChanged {
+                    persisted,
+                    configured: config.venue_keys,
+                });
+            }
+            // An unkeyed record, opened by a keyed publisher. An entry whose
+            // key is not known is not guessed at: giving its ID to whichever
+            // key is offered first depends on what this host saw first.
+            (None, true) => {
+                let unresolved: Vec<(u32, SymbolKey)> = record
+                    .entries
+                    .iter()
+                    .filter(|entry| {
+                        config.venue_keys == VenueKeys::Stated || !symbol_is_whole(&entry.symbol)
+                    })
+                    .map(|entry| (entry.instrument_id, entry.symbol))
+                    .collect();
+                if !unresolved.is_empty() {
+                    return Err(RefdataError::UnresolvedVenueKeys {
+                        entries: unresolved,
+                    });
+                }
+            }
+            (Some(_) | None, _) => {}
+        }
+        let recall_key = |entry: &Entry| -> RecallKey {
+            if keyed {
+                entry.key().into()
+            } else {
+                entry.symbol.to_vec().into_boxed_slice()
+            }
+        };
+        let in_use: HashMap<u32, RecallKey> = if config.id_allocation == IdAllocation::Derived {
             record
                 .entries
                 .iter()
-                .map(|entry| (entry.instrument_id, entry.symbol))
+                .map(|entry| (entry.instrument_id, recall_key(entry)))
                 .collect()
         } else {
             HashMap::new()
@@ -584,9 +642,10 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             .iter()
             .map(|entry| {
                 (
-                    entry.symbol,
+                    recall_key(entry),
                     Minted {
                         instrument_id: entry.instrument_id,
+                        symbol: entry.symbol,
                         recorded_published: entry.delisted_at.is_none(),
                         last_published_s: entry.delisted_at.unwrap_or(opened_s),
                     },
@@ -620,6 +679,7 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
                 .max(COMPACTION_FLOOR),
             handles: HashMap::new(),
             slots: Vec::new(),
+            slot_keys: Vec::new(),
             published: 0,
             instruments: InstrumentTable::new(),
             sets,
@@ -1304,13 +1364,43 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             return Err(Refusal::UnknownShard);
         };
         let (symbol, _fit) = definition::symbol_field(spec.symbol);
-        if let Some(&handle) = self.handles.get(&symbol) {
+        let key: &[u8] = match self.config.identity {
+            Identity::Symbol => &symbol,
+            Identity::VenueKey => match self.venue_key(spec) {
+                Ok(key) => key,
+                Err(refusal) => {
+                    self.count_refusal(refusal);
+                    return Err(refusal);
+                }
+            },
+        };
+        if let Some(&handle) = self.handles.get(key) {
             self.reoffer(handle, index, spec);
             return Ok(handle);
         }
-        self.admit(symbol, index, spec).inspect_err(|&refusal| {
-            self.count_refusal(refusal);
-        })
+        self.admit(key, symbol, index, spec)
+            .inspect_err(|&refusal| {
+                self.count_refusal(refusal);
+            })
+    }
+
+    /// The venue key an offer is recalled by under [`Identity::VenueKey`]:
+    /// the one it states, or its `symbol` untruncated.
+    ///
+    /// Checked before the lookup, because a key that is not one, or one the
+    /// configuration did not declare, would otherwise be recalled or minted
+    /// under.
+    fn venue_key<'a>(&self, spec: &InstrumentSpec<'a>) -> Result<&'a [u8], Refusal> {
+        if self.config.venue_keys == VenueKeys::Symbol
+            && spec.venue_key.is_some_and(|key| key != spec.symbol)
+        {
+            return Err(Refusal::VenueKeyNotDeclared);
+        }
+        let key = spec.venue_key.unwrap_or(spec.symbol).as_bytes();
+        if !is_venue_key(key) {
+            return Err(Refusal::BadVenueKey);
+        }
+        Ok(key)
     }
 
     /// A symbol that is already published.
@@ -1381,6 +1471,7 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
     /// A symbol that has never been published in this process.
     fn admit(
         &mut self,
+        key: &[u8],
         symbol: SymbolKey,
         shard: usize,
         spec: &InstrumentSpec<'_>,
@@ -1399,7 +1490,7 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         // committed. A symbol that has been admitted before - in an earlier
         // run, or before a delisting - keeps the ID it was published under; a
         // new one takes the next, and only if the definition composes.
-        let recalled = self.minted.get(&symbol).copied();
+        let recalled = self.minted.get(key).copied();
         let derived = recalled.is_none() && self.config.id_allocation == IdAllocation::Derived;
         let instrument_id = match (recalled, self.config.id_allocation) {
             (Some(minted), _) => minted.instrument_id,
@@ -1420,7 +1511,7 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
                 || instrument_id < self.next_id
                 || self.in_use.contains_key(&instrument_id))
         {
-            self.remember_unavailable(symbol, instrument_id);
+            self.remember_unavailable(key, symbol, instrument_id);
             return Err(Refusal::IdUnavailable);
         }
 
@@ -1440,17 +1531,18 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
                 // absent from the record is one that resolves to nothing after
                 // a restart, and one that the next run will hand to a
                 // different instrument.
-                self.persist(instrument_id, symbol, next_id)?;
+                self.persist(instrument_id, key, symbol, next_id)?;
                 self.minted.insert(
-                    symbol,
+                    key.into(),
                     Minted {
                         instrument_id,
+                        symbol,
                         recorded_published: true,
                         last_published_s: 0,
                     },
                 );
                 if self.config.id_allocation == IdAllocation::Derived {
-                    self.in_use.insert(instrument_id, symbol);
+                    self.in_use.insert(instrument_id, key.into());
                 }
                 self.next_id = next_id;
             }
@@ -1460,8 +1552,8 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             // relist it across, it would read as delisted since then, and be
             // forgotten early.
             Some(minted) if !minted.recorded_published => {
-                self.persist(instrument_id, symbol, self.next_id)?;
-                if let Some(minted) = self.minted.get_mut(&symbol) {
+                self.persist(instrument_id, key, symbol, self.next_id)?;
+                if let Some(minted) = self.minted.get_mut(key) {
                     minted.recorded_published = true;
                 }
             }
@@ -1472,15 +1564,16 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         let index = handle.index() as usize;
         if index >= self.slots.len() {
             self.slots.resize(index + 1, None);
+            self.slot_keys.resize(index + 1, None);
         }
+        self.slot_keys[index] = Some(key.into());
         self.slots[index] = Some(Published {
-            symbol,
             shard,
             definition: composed.definition,
             strike: None,
             defined: false,
         });
-        self.handles.insert(symbol, handle);
+        self.handles.insert(key.into(), handle);
         self.published += 1;
         self.sets[shard].published += 1;
         self.counts.admitted += 1;
@@ -1504,15 +1597,23 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
     fn persist(
         &mut self,
         instrument_id: u32,
+        key: &[u8],
         symbol: SymbolKey,
         next_id: u32,
     ) -> Result<(), Refusal> {
         let written = if self.base_written {
-            self.store
-                .append(&encode_line(instrument_id, &symbol))
-                .map(|()| self.appended += 1)
+            let line = if self.keyed() {
+                encode_keyed_line(
+                    instrument_id,
+                    &symbol,
+                    venue_key_field(key, &symbol).as_deref(),
+                )
+            } else {
+                encode_line(instrument_id, &symbol)
+            };
+            self.store.append(&line).map(|()| self.appended += 1)
         } else {
-            self.write_base(Some((instrument_id, symbol, next_id)), &HashSet::new())
+            self.write_base(Some((instrument_id, key, symbol, next_id)), &HashSet::new())
         };
         written.map_err(|error| {
             self.fault = Some(error);
@@ -1566,7 +1667,7 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
     /// `next_id` is untouched, and it is what keeps a forgotten ID from being
     /// minted again. What goes is the promise that the symbol comes back under
     /// that ID, which is the cost the configuration's key states.
-    fn forgettable(&self, now_s: u64) -> HashSet<SymbolKey> {
+    fn forgettable(&self, now_s: u64) -> HashSet<RecallKey> {
         let Some(horizon) = self.config.forget_delisted_after else {
             return HashSet::new();
         };
@@ -1576,11 +1677,11 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         let horizon_s = horizon.as_secs() + u64::from(horizon.subsec_nanos() > 0);
         self.minted
             .iter()
-            .filter(|(symbol, minted)| {
-                !self.handles.contains_key(*symbol)
+            .filter(|(key, minted)| {
+                !self.handles.contains_key(*key)
                     && now_s >= minted.last_published_s.saturating_add(horizon_s)
             })
-            .map(|(symbol, _)| *symbol)
+            .map(|(key, _)| key.clone())
             .collect()
     }
 
@@ -1595,31 +1696,34 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
     /// written with the second it was last published.
     fn write_base(
         &mut self,
-        minting: Option<(u32, SymbolKey, u32)>,
-        forgetting: &HashSet<SymbolKey>,
+        minting: Option<(u32, &[u8], SymbolKey, u32)>,
+        forgetting: &HashSet<RecallKey>,
     ) -> Result<(), StateError> {
         let seeding = matches!(self.phase, Phase::Seeding);
+        let keyed = self.keyed();
+        let field =
+            |key: &[u8], symbol: &SymbolKey| keyed.then(|| venue_key_field(key, symbol)).flatten();
         let mut entries: Vec<Entry> = self
             .minted
             .iter()
-            .filter(|(symbol, _)| !forgetting.contains(*symbol))
-            .map(|(symbol, minted)| {
+            .filter(|(key, _)| !forgetting.contains(*key))
+            .map(|(key, minted)| {
                 let published =
-                    self.handles.contains_key(symbol) || (seeding && minted.recorded_published);
+                    self.handles.contains_key(key) || (seeding && minted.recorded_published);
                 Entry {
                     instrument_id: minted.instrument_id,
-                    symbol: *symbol,
-                    venue_key: None,
+                    symbol: minted.symbol,
+                    venue_key: field(key, &minted.symbol),
                     delisted_at: (!published).then_some(minted.last_published_s),
                 }
             })
             .collect();
         let mut next_id = self.next_id;
-        if let Some((instrument_id, symbol, next)) = minting {
+        if let Some((instrument_id, key, symbol, next)) = minting {
             entries.push(Entry {
                 instrument_id,
                 symbol,
-                venue_key: None,
+                venue_key: field(key, &symbol),
                 delisted_at: None,
             });
             next_id = next;
@@ -1629,18 +1733,18 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             next_id,
             entries,
             allocation: self.config.id_allocation,
-            keyed: None,
+            keyed: keyed.then_some(self.config.venue_keys),
         };
         self.store.store(&record.encode())?;
-        for symbol in forgetting {
-            self.minted.remove(symbol);
+        for key in forgetting {
+            self.minted.remove(key);
         }
         self.base_entries = record.entries.len();
         self.compaction_at = self.base_entries.max(COMPACTION_FLOOR);
         let handles = &self.handles;
-        for (symbol, minted) in &mut self.minted {
+        for (key, minted) in &mut self.minted {
             minted.recorded_published =
-                handles.contains_key(symbol) || (seeding && minted.recorded_published);
+                handles.contains_key(key) || (seeding && minted.recorded_published);
         }
         self.base_written = true;
         self.appended = 0;
@@ -1654,7 +1758,8 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         };
         let entry = self.slots[index].expect("checked above");
         self.slots[index] = None;
-        self.handles.remove(&entry.symbol);
+        let key = self.slot_keys[index].take().expect("kept beside the slot");
+        self.handles.remove(&key);
         self.instruments.withdraw(instrument);
         self.published -= 1;
         self.sets[entry.shard].published -= 1;
@@ -1666,7 +1771,7 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         // relists it. A delisting writes nothing, which is why it cannot fail:
         // when it happened is held here until the next base writes it.
         let delisted_s = stamp_s(&self.clock);
-        if let Some(minted) = self.minted.get_mut(&entry.symbol) {
+        if let Some(minted) = self.minted.get_mut(&key) {
             minted.last_published_s = delisted_s;
         }
         self.set_changed(entry.shard);
@@ -1726,19 +1831,35 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
 
     /// Remember a symbol declined as [`Refusal::IdUnavailable`], once, with
     /// what holds its ID, for the caller that logs it.
-    fn remember_unavailable(&mut self, symbol: SymbolKey, instrument_id: u32) {
+    fn remember_unavailable(&mut self, key: &[u8], symbol: SymbolKey, instrument_id: u32) {
+        let keyed = self.keyed();
+        let venue_key: Option<Box<[u8]>> = keyed.then(|| key.into());
         if self.unavailable.len() >= MAX_REPORTED_UNAVAILABLE_IDS
-            || self.unavailable.iter().any(|seen| seen.symbol == symbol)
+            || self
+                .unavailable
+                .iter()
+                .any(|seen| seen.symbol == symbol && seen.venue_key == venue_key)
         {
             return;
         }
-        let holder = self.in_use.get(&instrument_id).copied();
+        let holding = self.in_use.get(&instrument_id);
+        let holder = holding
+            .and_then(|held| self.minted.get(held))
+            .map(|minted| minted.symbol);
+        let holder_venue_key = holding.filter(|_| keyed).cloned();
         self.unavailable.push(UnavailableId {
             symbol,
+            venue_key,
+            holder_venue_key,
             instrument_id,
             holder,
             below_floor: instrument_id == 0 || instrument_id < self.next_id,
         });
+    }
+
+    /// Whether this registry recalls by venue key, and so writes version 4.
+    fn keyed(&self) -> bool {
+        self.config.identity == Identity::VenueKey
     }
 
     fn count_refusal(&mut self, refusal: Refusal) {
@@ -1754,6 +1875,8 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             Refusal::StrikeUnfixed => self.counts.declined_strike_unfixed += 1,
             Refusal::StrikePresence => self.counts.declined_strike_presence += 1,
             Refusal::ContractSize
+            | Refusal::BadVenueKey
+            | Refusal::VenueKeyNotDeclared
             | Refusal::Field(_)
             | Refusal::StrikeUnrepresentable
             | Refusal::StrikeEmpty

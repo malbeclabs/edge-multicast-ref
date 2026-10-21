@@ -204,8 +204,9 @@ pub fn unpadded(symbol: &[u8; SYMBOL_LEN]) -> &[u8] {
     &symbol[..end]
 }
 
-/// Whether a `Symbol` cannot have been cut from a longer name: at least four
-/// bytes of padding, and no NUL before them.
+/// Whether a `Symbol` cannot have been cut from a longer name, and is a key:
+/// at least four bytes of padding, no NUL before them, and at least one byte
+/// that is not padding.
 ///
 /// Padding alone does not prove it. A ticker of 63 ASCII bytes followed by `é`
 /// is 65 bytes, and its `Symbol` is the 63 bytes and one NUL, the same field as
@@ -215,7 +216,7 @@ pub fn unpadded(symbol: &[u8; SYMBOL_LEN]) -> &[u8] {
 #[must_use]
 pub fn symbol_is_whole(symbol: &[u8; SYMBOL_LEN]) -> bool {
     let kept = unpadded(symbol);
-    SYMBOL_LEN - kept.len() >= WHOLE_SYMBOL_PADDING && !kept.contains(&0)
+    !kept.is_empty() && SYMBOL_LEN - kept.len() >= WHOLE_SYMBOL_PADDING && !kept.contains(&0)
 }
 
 /// One instrument's persisted identity.
