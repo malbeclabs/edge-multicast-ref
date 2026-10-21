@@ -106,6 +106,8 @@
 //!                     source_count: None,
 //!                 },
 //!                 ask: SideUpdate::Gone,
+//!                 // The venue's own counter, so it goes on the wire too.
+//!                 venue_update_id: Some(update),
 //!             },
 //!             Order::Supersedes(update),
 //!         );

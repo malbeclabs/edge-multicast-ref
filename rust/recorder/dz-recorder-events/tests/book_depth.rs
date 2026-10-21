@@ -490,6 +490,7 @@ fn a_quote_feed_has_no_resting_levels_and_is_ready_all_the_same() {
             ask_qty: 7,
             bid_source_count: 0,
             ask_source_count: 0,
+            venue_update_id: 0,
         })],
         PortRole::Mktdata,
         100,

@@ -1031,6 +1031,7 @@ mod tests {
                             source_count: None,
                         },
                         ask: SideUpdate::Gone,
+                        venue_update_id: None,
                     },
                     order: Order::None,
                     connection: ConnectionId::new("a"),

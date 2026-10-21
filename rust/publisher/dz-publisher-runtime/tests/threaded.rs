@@ -49,6 +49,9 @@ fn quote(index: u32, update: u64) -> Event<'static> {
             source_count: None,
         },
         ask: SideUpdate::Gone,
+        // The venue's counter is the claim's key, as it is for a venue that
+        // claims on the counter it publishes.
+        venue_update_id: Some(update),
     }
 }
 
@@ -441,6 +444,14 @@ fn two_connections_racing_emit_each_update_once_and_in_order_per_instrument() {
     let mut applied = HashSet::new();
     for event in &out.events {
         let (instrument, kind, key) = key(event);
+        if let Event::Quote {
+            venue_update_id, ..
+        } = *event
+        {
+            // Carried through the queue and the dedupe untouched, on the copy
+            // that won.
+            assert_eq!(venue_update_id, Some(key), "{event:?}");
+        }
         assert!(
             applied.insert((instrument, kind, key)),
             "emitted twice: {event:?}"

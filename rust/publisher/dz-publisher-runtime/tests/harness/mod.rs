@@ -1103,6 +1103,7 @@ pub fn quote(instrument: InstrumentRef, source_ts_ns: u64) -> dz_adapter_core::E
             qty: Scalar::text("1.250"),
             source_count: None,
         },
+        venue_update_id: None,
     }
 }
 
@@ -1122,6 +1123,7 @@ pub fn one_sided_quote(
             source_count: None,
         },
         ask: SideUpdate::Gone,
+        venue_update_id: None,
     }
 }
 
@@ -1230,6 +1232,7 @@ pub fn too_precise_quote(
             source_count: None,
         },
         ask: SideUpdate::Gone,
+        venue_update_id: None,
     }
 }
 

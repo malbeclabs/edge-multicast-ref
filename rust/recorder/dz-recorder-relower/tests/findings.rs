@@ -364,6 +364,7 @@ fn quote(ts: u64, flags: u8, bid_price: i64, bid_qty: u64, ask_price: i64, ask_q
         // answers.
         bid_source_count: 0,
         ask_source_count: 0,
+        venue_update_id: 0,
     }
 }
 
@@ -435,6 +436,35 @@ fn a_quote_joins_on_instrument_timestamp_and_update_flags() {
             tie: TopOfBookTie::UpdateFlags(BID_GONE_ASK_UPDATED),
         }
     );
+}
+
+#[test]
+fn a_venue_update_id_the_publisher_did_not_write_is_one_finding_naming_the_field() {
+    // The venue stated a counter, the mapping carries it, and the copy on the
+    // wire says *unavailable*. `Venue Update ID` is not part of the join key,
+    // so the two copies meet and the difference is named rather than read as
+    // two absences.
+    let payloads_with_id = [
+        "q AAA 1000000001 99.50 12 100.50 7 4294967301",
+        TOB_PAYLOADS[1],
+        TOB_PAYLOADS[2],
+    ];
+    let mut archive = tob_archive(&tob_on_the_wire(), Framing::tight());
+    let mut adapter = LineAdapter::over(&[AAA]);
+    let mut upstream = payloads(&payloads_with_id);
+
+    let report = compare_archives(&mut adapter, &mut upstream, &mut archive, MAGIC_TOB)
+        .expect("both archives are complete");
+
+    assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+    let Finding::FieldsDiffer { fields, .. } = &report.findings[0] else {
+        panic!("expected a field difference, got {}", report.findings[0]);
+    };
+    assert_eq!(fields.len(), 1, "{fields:?}");
+    assert_eq!(fields[0].field, "venue_update_id");
+    assert_eq!(fields[0].on_wire, "0");
+    // The counter is 2^32 + 5, and the wire carries its low 32 bits.
+    assert_eq!(fields[0].re_lowered, "5");
 }
 
 #[test]

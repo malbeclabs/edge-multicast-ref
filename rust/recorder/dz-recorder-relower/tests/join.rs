@@ -210,6 +210,7 @@ fn a_quote_and_a_trade_the_venue_stamped_at_one_instant_do_not_join_to_each_othe
         ask_qty: 7,
         bid_source_count: 0,
         ask_source_count: 0,
+        venue_update_id: 0,
     };
     let trade = Trade {
         instrument_id: AAA.instrument_id,

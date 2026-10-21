@@ -54,10 +54,17 @@ fn the_two_scalar_shapes_carrying_one_value_lower_to_identical_bytes() {
     };
 
     let from_text = lowering
-        .lower_quote(&instruments, instrument, 7, as_text, SideUpdate::Gone)
+        .lower_quote(&instruments, instrument, 7, as_text, SideUpdate::Gone, None)
         .expect("exact at this exponent");
     let from_integers = lowering
-        .lower_quote(&instruments, instrument, 7, as_integers, SideUpdate::Gone)
+        .lower_quote(
+            &instruments,
+            instrument,
+            7,
+            as_integers,
+            SideUpdate::Gone,
+            None,
+        )
         .expect("exact at this exponent");
 
     assert_eq!(from_text, from_integers);
@@ -87,6 +94,7 @@ fn a_value_too_precise_for_the_exponent_is_refused_rather_than_rounded() {
                 source_count: None,
             },
             SideUpdate::Gone,
+            None,
         );
 
         let error = refused.expect_err("a fifth decimal place cannot be stated at -4");

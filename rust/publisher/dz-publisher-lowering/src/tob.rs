@@ -58,6 +58,14 @@ impl Lowering {
     /// zeros mean nothing on their own and the flag is what says so — which is
     /// exactly why an adapter must not be able to write the flag.
     ///
+    /// # `Venue Update ID` is narrowed here
+    ///
+    /// The event states the venue's counter whole, and the wire carries its
+    /// low 32 bits. `None` is written as zero, the field's *unavailable*, and
+    /// so is a counter whose low 32 bits happen to be zero: the specification
+    /// requires zero there rather than a substitute, because any other value
+    /// is a real update's identifier.
+    ///
     /// # Errors
     ///
     /// [`LoweringError::UnknownInstrument`] for a handle the table does not
@@ -70,6 +78,7 @@ impl Lowering {
         source_ts_ns: u64,
         bid: SideUpdate<'_>,
         ask: SideUpdate<'_>,
+        venue_update_id: Option<u64>,
     ) -> Result<Quote, LoweringError> {
         let inst = instruments.get(instrument)?;
 
@@ -87,6 +96,9 @@ impl Lowering {
             ask_qty: ask.qty,
             bid_source_count: bid.source_count,
             ask_source_count: ask.source_count,
+            // The low 32 bits, by truncation, as the specification defines
+            // the field.
+            venue_update_id: venue_update_id.map_or(0, |id| id as u32),
         })
     }
 

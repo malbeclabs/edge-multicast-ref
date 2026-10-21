@@ -105,6 +105,9 @@ fn a_fake_adapters_events_reach_a_fake_datagram_sink_as_datagrams() {
     // from the depth feed's sentinel for the same question.
     assert_eq!(two_sided.bid_source_count, 0);
     assert_eq!(two_sided.ask_source_count, 0);
+    // The harness's quotes state no venue counter, so `Venue Update ID` is its
+    // *unavailable*, the zeros these bytes held when they were padding.
+    assert_eq!(two_sided.venue_update_id, 0);
 
     // The one-sided quote: the ask's *gone* bit, and zeros on that side, which
     // the specification requires. Zero is an in-range price on the wire, so the
@@ -292,6 +295,44 @@ fn an_event_no_enabled_feed_carries_is_dropped_without_spending_a_sequence_numbe
             .last(instrument),
         0
     );
+}
+
+#[test]
+fn a_venue_counter_reaches_the_wire_as_its_low_32_bits() {
+    let mut h = harness(feed());
+    let mut adapter = FakeAdapter::new(&["A-B"]);
+    h.publisher.poll_listings(&mut adapter);
+    let instrument = adapter.handles()[0];
+
+    let with_counter = |venue_update_id| match harness::quote(instrument, 1) {
+        dz_adapter_core::Event::Quote {
+            instrument,
+            source_ts_ns,
+            bid,
+            ask,
+            ..
+        } => dz_adapter_core::Event::Quote {
+            instrument,
+            source_ts_ns,
+            bid,
+            ask,
+            venue_update_id,
+        },
+        _ => unreachable!("the harness's quote is a quote"),
+    };
+    // 2^32 + 42: the high bits are the venue's and the wire has no room for
+    // them. And one whose low bits are zero, which goes out as zero.
+    h.publisher.arrive(with_counter(Some((1 << 32) + 42)));
+    h.publisher.arrive(with_counter(Some(1 << 33)));
+
+    let ids: Vec<u32> = h
+        .mktdata()
+        .messages()
+        .iter()
+        .filter(|(type_id, _)| *type_id == 0x03)
+        .map(|(_, bytes)| Quote::decode(bytes).expect("composed").venue_update_id)
+        .collect();
+    assert_eq!(ids, [42, 0]);
 }
 
 #[test]
