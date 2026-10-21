@@ -368,18 +368,18 @@ impl Venue {
     /// A venue whose decode runs on each connection's own task.
     ///
     /// The threaded input model, beside the inline one [`Venue::new`] builds:
-    /// a [`Decoder`](dz_adapter_core::Decoder) per source decodes in parallel,
-    /// the runtime dedupes across sources in two stages, and only what
-    /// survives reaches the publisher loop, through
+    /// a [`Decoder`](dz_adapter_core::Decoder) per connection decodes in
+    /// parallel, the runtime dedupes across connections in two stages, and
+    /// only what survives reaches the publisher loop, through
     /// [`ThreadedAdapter::on_decoded`]. For a venue whose payloads are
     /// expensive to decode and arrive redundantly; a cheap decode is better
     /// served inline, with no queue between the transport and the loop.
     ///
-    /// Everything else is what [`Venue::new`] gives: the same sources, the
+    /// Everything else is what [`Venue::new`] gives: the same inputs, the
     /// same collectors, and an [`adapter`](Self::adapter) field that drives
     /// this same object inline.
     #[must_use]
-    pub fn threaded(adapter: Box<dyn ThreadedAdapter>, sources: Vec<Box<dyn Input>>) -> Self {
+    pub fn threaded(adapter: Box<dyn ThreadedAdapter>, inputs: Vec<Box<dyn Input>>) -> Self {
         let message_types = adapter.message_types().to_vec();
         let shared: SharedThreadedAdapter = Arc::new(Mutex::new(adapter));
         Self {
@@ -387,7 +387,7 @@ impl Venue {
                 shared: Arc::clone(&shared),
                 message_types,
             }),
-            sources,
+            sources: inputs,
             collectors: Vec::new(),
             threaded: Some(shared),
         }
