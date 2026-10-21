@@ -2277,6 +2277,10 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                         // refresh the other's channel.
                         let mut reached = None;
                         let arrival = self.arrival(source_ts_ns, kind);
+                        // Under the threaded model a trade is measured once,
+                        // when its datagram leaves: on top-of-book where the
+                        // shard carries it, otherwise on depth.
+                        let mut measure_on_depth = self.live_per_batch;
                         timed(&self.metrics, EgressMessageType::Trade, || {
                             if let Some(pipeline) =
                                 shard.and_then(|shard| self.feeds.top_of_book_on_mut(shard))
@@ -2288,6 +2292,7 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                                     // measured and counted as published when
                                     // its datagram leaves, once per trade: on
                                     // this feed and not again on the depth one.
+                                    measure_on_depth = false;
                                     if let (Ok(()), Some(arrival)) = (sent, arrival) {
                                         pipeline.packed_arrival(arrival);
                                     }
@@ -2298,7 +2303,12 @@ impl<S: StateStore, K: Clock + Clone> EventSink for Publisher<S, K> {
                             if let Some(pipeline) =
                                 shard.and_then(|shard| self.feeds.market_by_price_on_mut(shard))
                             {
-                                let _ = pipeline.send_trade(&trade, now_mono, now_unix);
+                                let sent = pipeline.send_trade(&trade, now_mono, now_unix);
+                                if measure_on_depth {
+                                    if let (Ok(()), Some(arrival)) = (sent, arrival) {
+                                        pipeline.packed_arrival(arrival);
+                                    }
+                                }
                             }
                         });
                         if let Some((channel_id, reached_wire)) = reached {

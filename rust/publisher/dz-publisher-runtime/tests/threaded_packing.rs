@@ -26,7 +26,7 @@ use dz_ingress_core::{
 use dz_publisher_runtime::threaded::{self, Connections, Drain};
 use dz_publisher_runtime::{MetricsObserver, SystemClock};
 use dz_venue_composition::SharedThreadedAdapter;
-use harness::{feed, harness, harness_both, FakeAdapter, Harness};
+use harness::{depth_feed, feed, harness, harness_both, FakeAdapter, Harness};
 
 /// The venue's own stamp on every event the fixture decodes, so that
 /// `venue_to_recv` has something to measure.
@@ -461,6 +461,52 @@ fn a_packed_message_is_measured_at_its_send_and_not_before() {
         rendered_count(&h, "dz_publisher_venue_to_recv_latency_seconds_count"),
         1
     );
+}
+
+#[test]
+fn a_trade_is_measured_once_whichever_feeds_its_shard_carries() {
+    // On a shard with no top-of-book feed the trade leaves only on the depth
+    // feed, so that is where its arrival is recorded. On one carrying both it
+    // is measured once, on top-of-book, and not again on depth.
+    for (h, label) in [
+        (harness(depth_feed()), "depth only"),
+        (harness_both(), "both feeds"),
+    ] {
+        let mut h = h;
+        let mut listings = FakeAdapter::new(&["A-B"]);
+        h.publisher.poll_listings(&mut listings);
+        h.publisher.declare_venue_timestamps(&Packing::default());
+        h.publisher.send_live_per_batch();
+        let instrument = listings.handles()[0];
+        h.publisher.payload_scope(Some(SOURCE_TS_NS + 1_000_000));
+        h.publisher.event(Event::Trade {
+            instrument,
+            source_ts_ns: SOURCE_TS_NS,
+            px: Scalar::fixed(100, -2),
+            qty: Scalar::fixed(1_000, -3),
+            aggressor: Aggressor::Buy,
+            trade_id: Some(1),
+            cumulative_volume: None,
+            flags: TradeFlags::NONE,
+        });
+        h.publisher.payload_scope(None);
+        h.publisher.drained();
+        assert_eq!(
+            h.mbp.as_ref().expect("mbp").mktdata.len(),
+            1,
+            "{label}: the trade left on depth"
+        );
+        assert_eq!(
+            rendered_count(&h, "dz_publisher_recv_to_send_latency_seconds_count"),
+            1,
+            "{label}"
+        );
+        assert_eq!(
+            rendered_count(&h, "dz_publisher_venue_to_recv_latency_seconds_count"),
+            1,
+            "{label}"
+        );
+    }
 }
 
 #[test]
