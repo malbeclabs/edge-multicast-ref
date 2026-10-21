@@ -62,6 +62,43 @@ pub enum IdAllocation {
     Derived,
 }
 
+/// What the registry recalls an instrument by: `[refdata] identity`.
+///
+/// `#[non_exhaustive]` for the reason [`IdAllocation`] is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Identity {
+    /// The padded wire `Symbol`, as before. The venue key is ignored, and the
+    /// record is written in version 2 or 3.
+    #[default]
+    Symbol,
+    /// The venue key: [`InstrumentSpec::venue_key`](dz_adapter_core::InstrumentSpec::venue_key),
+    /// or the stated `symbol` untruncated where it is `None`. Two instruments
+    /// may share a `Symbol` and never a key. The record is written in version
+    /// 4, which carries the key beside the `Symbol`.
+    VenueKey,
+}
+
+/// Whether the adapter states keys of its own: `[refdata] venue_keys`.
+///
+/// Declared rather than inferred because the open has to know it before the
+/// first offer: it decides which entries of an unkeyed record have a known key.
+/// Read only under [`Identity::VenueKey`], and refused under
+/// [`Identity::Symbol`].
+///
+/// `#[non_exhaustive]` for the reason [`IdAllocation`] is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VenueKeys {
+    /// Every key is the stated `symbol`. An offer stating a `venue_key` that
+    /// differs from its `symbol` is refused as
+    /// [`Refusal::VenueKeyNotDeclared`](crate::Refusal::VenueKeyNotDeclared).
+    #[default]
+    Symbol,
+    /// The adapter states its keys, and they need not be its `Symbol`s.
+    Stated,
+}
+
 impl IdAllocation {
     /// The record layout written under this allocation.
     const fn version(self) -> u32 {

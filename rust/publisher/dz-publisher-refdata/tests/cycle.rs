@@ -32,6 +32,7 @@ const CYCLE: Duration = Duration::from_secs(30);
 fn spec(symbol: &str) -> InstrumentSpec<'_> {
     InstrumentSpec {
         symbol,
+        venue_key: None,
         leg1: None,
         leg2: None,
         asset_class: AssetClass::CryptoSpot,
@@ -62,6 +63,8 @@ fn seeded(
         schedule: CycleSchedule::new(CYCLE, MTU, datagrams_per_tick),
         forget_delisted_after: None,
         id_allocation: IdAllocation::Sequential,
+        identity: dz_publisher_refdata::Identity::Symbol,
+        venue_keys: dz_publisher_refdata::VenueKeys::Symbol,
     };
     let mut registry = Registry::open(config, MemoryStore::new(), clock.clone())
         .expect("an empty directory is a cold start");
@@ -108,6 +111,8 @@ fn seeded_on_two_shards(
         schedule: CycleSchedule::new(CYCLE, MTU, datagrams_per_tick),
         forget_delisted_after: None,
         id_allocation: IdAllocation::Sequential,
+        identity: dz_publisher_refdata::Identity::Symbol,
+        venue_keys: dz_publisher_refdata::VenueKeys::Symbol,
     };
     let mut registry = Registry::open(config, MemoryStore::new(), clock.clone())
         .expect("an empty directory is a cold start");
@@ -393,6 +398,8 @@ fn the_valid_flag_means_the_published_set_is_established() {
         schedule: CycleSchedule::new(CYCLE, MTU, 8),
         forget_delisted_after: None,
         id_allocation: IdAllocation::Sequential,
+        identity: dz_publisher_refdata::Identity::Symbol,
+        venue_keys: dz_publisher_refdata::VenueKeys::Symbol,
     };
     let mut registry = Registry::open(config, MemoryStore::new(), clock.clone())
         .expect("an empty directory is a cold start");

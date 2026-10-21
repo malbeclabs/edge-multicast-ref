@@ -585,6 +585,8 @@ fn compose_and_run(
             schedule,
             forget_delisted_after: config.refdata.forget_delisted_after,
             id_allocation: config.refdata.id_allocation,
+            identity: config.refdata.identity,
+            venue_keys: config.refdata.venue_keys,
         },
         FileStore::new(&config.refdata.state_dir),
         clock.clone(),

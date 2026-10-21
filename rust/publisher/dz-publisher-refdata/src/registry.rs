@@ -15,7 +15,9 @@ use crate::error::RefdataError;
 use crate::pacer::DefinitionPacer;
 use crate::policy::{Phase, SelectionPolicy};
 use crate::refusal::Refusal;
-use crate::state::{derive_instrument_id, encode_line, Entry, IdAllocation, StateRecord};
+use crate::state::{
+    derive_instrument_id, encode_line, Entry, IdAllocation, Identity, StateRecord, VenueKeys,
+};
 use crate::store::{StateError, StateStore};
 use crate::strike;
 use crate::CycleSchedule;
@@ -95,6 +97,13 @@ pub struct RegistryConfig {
     /// [`Derived`](IdAllocation::Derived) forgets nothing, so it is refused
     /// together with [`forget_delisted_after`](Self::forget_delisted_after).
     pub id_allocation: IdAllocation,
+    /// `[refdata] identity`: what an instrument is recalled by. See
+    /// [`Identity`].
+    pub identity: Identity,
+    /// `[refdata] venue_keys`: whether the adapter states keys of its own.
+    /// [`Stated`](VenueKeys::Stated) is refused under
+    /// [`Identity::Symbol`], where there is no key to state.
+    pub venue_keys: VenueKeys,
 }
 
 /// An offer declined because the `Instrument ID` its symbol derives is not
@@ -521,6 +530,9 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
 
         // Like the shard set, a configuration that cannot be served is refused
         // before the directory is claimed.
+        if config.venue_keys == VenueKeys::Stated && config.identity == Identity::Symbol {
+            return Err(RefdataError::VenueKeysWithoutVenueKey);
+        }
         if config.id_allocation == IdAllocation::Derived && config.forget_delisted_after.is_some() {
             return Err(RefdataError::ForgettingUnderDerivedIds);
         }

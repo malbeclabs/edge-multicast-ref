@@ -390,6 +390,8 @@ fn a_send_for_a_shard_with_no_pipeline_is_refused_before_the_lowering() {
             schedule: CycleSchedule::new(Duration::from_secs(30), 1232, 1),
             forget_delisted_after: None,
             id_allocation: dz_publisher_refdata::IdAllocation::Sequential,
+            identity: dz_publisher_refdata::Identity::Symbol,
+            venue_keys: dz_publisher_refdata::VenueKeys::Symbol,
         },
         MemoryStore::new(),
         ManualClock::at_unix_ns(1_700_000_000_000_000_000),

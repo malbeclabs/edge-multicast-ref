@@ -29,6 +29,7 @@ type TestRegistry = Registry<MemoryStore, ManualClock>;
 fn spec(symbol: &str) -> InstrumentSpec<'_> {
     InstrumentSpec {
         symbol,
+        venue_key: None,
         leg1: None,
         leg2: None,
         asset_class: AssetClass::PredictionBinary,
@@ -54,6 +55,8 @@ fn registry(shards: Vec<ShardConfig>, cap: usize) -> (TestRegistry, ManualClock)
         schedule: CycleSchedule::new(CYCLE, MTU, 1),
         forget_delisted_after: None,
         id_allocation: IdAllocation::Sequential,
+        identity: dz_publisher_refdata::Identity::Symbol,
+        venue_keys: dz_publisher_refdata::VenueKeys::Symbol,
     };
     let registry = Registry::open(config, MemoryStore::new(), clock.clone())
         .expect("an empty directory is a cold start");

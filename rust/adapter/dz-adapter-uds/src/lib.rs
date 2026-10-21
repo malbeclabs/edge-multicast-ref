@@ -117,6 +117,7 @@ impl UdsListing {
         use dz_adapter_core::Scalar;
         InstrumentSpec {
             symbol: &self.symbol,
+            venue_key: None,
             leg1: self.leg1.as_deref(),
             leg2: self.leg2.as_deref(),
             asset_class: self.asset_class,

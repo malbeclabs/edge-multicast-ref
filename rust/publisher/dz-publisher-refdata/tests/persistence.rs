@@ -26,6 +26,7 @@ const START_NS: u64 = 1_800_000_000 * 1_000_000_000;
 fn spec(symbol: &str) -> InstrumentSpec<'_> {
     InstrumentSpec {
         symbol,
+        venue_key: None,
         leg1: None,
         leg2: None,
         asset_class: AssetClass::CryptoSpot,
@@ -50,6 +51,8 @@ fn config(forget_delisted_after: Option<Duration>) -> RegistryConfig {
         schedule: CycleSchedule::new(Duration::from_secs(30), 1232, 8),
         forget_delisted_after,
         id_allocation: IdAllocation::Sequential,
+        identity: dz_publisher_refdata::Identity::Symbol,
+        venue_keys: dz_publisher_refdata::VenueKeys::Symbol,
     }
 }
 

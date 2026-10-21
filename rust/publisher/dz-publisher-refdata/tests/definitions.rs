@@ -33,6 +33,7 @@ fn source_id() -> SourceId {
 fn everything() -> InstrumentSpec<'static> {
     InstrumentSpec {
         symbol: "BTC-USD-PERP",
+        venue_key: None,
         leg1: Some("BTC"),
         leg2: Some("USD"),
         asset_class: AssetClass::PerpetualFuture,
@@ -53,6 +54,7 @@ fn everything() -> InstrumentSpec<'static> {
 fn nothing_optional() -> InstrumentSpec<'static> {
     InstrumentSpec {
         symbol: "AAA",
+        venue_key: None,
         leg1: None,
         leg2: None,
         asset_class: AssetClass::Unknown,
@@ -77,6 +79,8 @@ fn config(selection: SelectionPolicy) -> RegistryConfig {
         schedule: CycleSchedule::new(std::time::Duration::from_secs(30), 1232, 8),
         forget_delisted_after: None,
         id_allocation: IdAllocation::Sequential,
+        identity: dz_publisher_refdata::Identity::Symbol,
+        venue_keys: dz_publisher_refdata::VenueKeys::Symbol,
     }
 }
 

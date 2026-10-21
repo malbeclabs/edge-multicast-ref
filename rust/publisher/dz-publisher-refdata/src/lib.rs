@@ -82,7 +82,7 @@ pub use registry::{
     COMPACTION_FLOOR,
 };
 pub use state::{
-    derive_instrument_id, encode_line, Entry, IdAllocation, Loaded, RecordError, StateRecord,
-    FIRST_INSTRUMENT_ID,
+    derive_instrument_id, encode_line, Entry, IdAllocation, Identity, Loaded, RecordError,
+    StateRecord, VenueKeys, FIRST_INSTRUMENT_ID,
 };
 pub use store::{MemoryStore, StateError, StateStore};

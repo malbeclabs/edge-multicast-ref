@@ -92,4 +92,12 @@ pub enum RefdataError {
     /// keeps every published ID, so there is none here.
     #[error("the persisted state was written under derived Instrument ID allocation, and sequential allocation cannot continue it")]
     StateIsDerived,
+
+    /// `venue_keys = "stated"` was configured under `identity = "symbol"`.
+    ///
+    /// The symbol identity ignores every venue key, so a declaration that the
+    /// adapter states its own would be read by nothing. The document check
+    /// refuses this first; this is the second line.
+    #[error("venue_keys = \"stated\" declares keys that identity = \"symbol\" never reads")]
+    VenueKeysWithoutVenueKey,
 }

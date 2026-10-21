@@ -569,6 +569,14 @@ pub enum StartupError {
     #[error("`[refdata] id_allocation = \"derived\"` forgets nothing, so `[refdata] forget_delisted_after` cannot be set with it")]
     ForgettingUnderDerivedIds,
 
+    /// `[refdata] venue_keys = "stated"` under `identity = "symbol"`.
+    ///
+    /// The symbol identity reads no venue key, so the declaration would be
+    /// read by nothing, and an operator who wrote it believes the adapter's
+    /// keys are in use.
+    #[error("`[refdata] venue_keys = \"stated\"` is read only under `identity = \"venue_key\"`")]
+    VenueKeysWithoutVenueKey,
+
     /// `[egress] ttl` is not stated, and it has no default.
     ///
     /// # Why the key is stated rather than defaulted
