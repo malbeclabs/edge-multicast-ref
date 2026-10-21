@@ -1,6 +1,8 @@
 //! What an adapter produces: one market event, resolved, in the venue's own
 //! units.
 
+use core::num::NonZeroU32;
+
 use crate::instrument::InstrumentRef;
 use crate::scalar::Scalar;
 
@@ -87,6 +89,27 @@ pub enum Event<'a> {
         instrument: InstrumentRef,
         source_ts_ns: u64,
         scope: ClearScope<'a>,
+    },
+
+    /// A volume-weighted average price over a trailing window of trades.
+    ///
+    /// The window is `(window_end_ns − window_ms, window_end_ns]`. A window
+    /// with no trades has a `volume` of zero and carries over the last price,
+    /// and the lowering marks that price synthetic. An instrument with no
+    /// price yet has no event to emit.
+    Vwap {
+        instrument: InstrumentRef,
+        /// The end of the window: a venue timestamp, in nanoseconds.
+        window_end_ns: u64,
+        /// The window length, in milliseconds.
+        window_ms: NonZeroU32,
+        /// When the price was computed, in nanoseconds.
+        compute_ts_ns: u64,
+        px: Scalar<'a>,
+        /// The sum of trade quantity in the window. Zero: no trades.
+        volume: Scalar<'a>,
+        /// The inputs have not updated within the adapter's freshness window.
+        stale: bool,
     },
 }
 

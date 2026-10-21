@@ -43,8 +43,9 @@
 //!
 //! # Scope
 //!
-//! Top-of-book (`0x03`, `0x04`) and market by price (`0x40`, `0x41`, and the
-//! three snapshot messages) are here. Market-by-order follows its codec crate.
+//! Top-of-book (`0x03`, `0x04`), market by price (`0x40`, `0x41`, and the
+//! three snapshot messages) and midpoint (`0x03`, VWAP only) are here.
+//! Market-by-order follows its codec crate.
 
 #![forbid(unsafe_code)]
 
@@ -52,6 +53,7 @@ pub mod contract;
 pub mod depth;
 pub mod error;
 pub mod instrument;
+pub mod midpoint;
 pub mod scale;
 pub mod seq;
 pub mod snapshot;
@@ -63,6 +65,7 @@ pub use contract::ContractSize;
 pub use depth::DepthLowering;
 pub use error::LoweringError;
 pub use instrument::{Instrument, InstrumentTable};
+pub use midpoint::MidpointLowering;
 pub use scale::{price_at, price_for, qty_at, qty_for};
 pub use seq::PerInstrumentSeq;
 pub use snapshot::{Snapshot, SnapshotFramer};

@@ -16,12 +16,14 @@
 //! same values. A change here is a wire change and must be justified against
 //! the specification, never adjusted to match code that started failing.
 
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 
 use dz_adapter_core::{Aggressor, Scalar, SideUpdate, TradeFlags};
 use dz_edge_core::AppMessage;
+use dz_edge_midpoint::Midpoint;
 use dz_edge_tob::{Quote, Trade};
-use dz_publisher_lowering::{Instrument, InstrumentTable, Lowering, SourceId};
+use dz_publisher_lowering::{Instrument, InstrumentTable, Lowering, MidpointLowering, SourceId};
 
 /// The vectors' `Source ID`. `2` in every one of them, and an assigned
 /// production id, so the checked type admits it.
@@ -137,6 +139,39 @@ fn a_normalized_trade_lowers_to_the_canonical_trade_vector() {
     assert_eq!(
         Trade::decode(&bytes).expect("the canonical bytes decode"),
         trade
+    );
+}
+
+#[test]
+fn a_normalized_vwap_lowers_to_the_canonical_midpoint_vector() {
+    // `quality_flags = 1` is the stale bit alone. The volume is not zero, so
+    // the lowering sets no synthetic bit.
+    let instruments = table();
+    let lowering = MidpointLowering::new(source_id());
+
+    let midpoint = lowering
+        .lower_vwap(
+            &instruments,
+            dz_adapter_core::InstrumentRef::from_admission(0),
+            1_700_000_000_000_000_000,
+            NonZeroU32::new(60_000).expect("not zero"),
+            1_700_000_000_000_250_000,
+            Scalar::text("1000.0123"),
+            Scalar::text("12345.00"),
+            true,
+        )
+        .expect("the vector's values are exact at these exponents");
+
+    let mut bytes = [0u8; Midpoint::SIZE];
+    midpoint.encode_into(&mut bytes);
+    assert_eq!(
+        bytes.as_slice(),
+        golden("midpoint-v3.bin").as_slice(),
+        "the lowering no longer reproduces the cross-language vector"
+    );
+    assert_eq!(
+        Midpoint::decode(&bytes).expect("the canonical bytes decode"),
+        midpoint
     );
 }
 

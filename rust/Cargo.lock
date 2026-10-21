@@ -403,6 +403,7 @@ dependencies = [
  "dz-adapter-core",
  "dz-edge-core",
  "dz-edge-mbp",
+ "dz-edge-midpoint",
  "dz-edge-refdata",
  "dz-edge-tob",
  "serde_json",
