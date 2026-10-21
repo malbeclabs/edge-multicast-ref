@@ -986,9 +986,10 @@ impl Document {
                     shard: feed.shard.as_str().to_owned(),
                 });
             }
-            // Checked here rather than in `channel_ids`, which sorts and dedups
-            // and would therefore make a collision disappear on its way to the
-            // metrics that would have shown it.
+            // Checked here, on the blocks, because the metrics crate keys its
+            // reference-data gauges on the Channel ID alone and would fold a
+            // collision into one series on its way to the metrics that would
+            // have shown it.
             if let Some(first) = feeds
                 .iter()
                 .find(|earlier| earlier.channel_id == feed.channel_id)
@@ -1109,15 +1110,20 @@ impl Config {
         Document::parse(&text)?.resolve()
     }
 
-    /// Every `Channel ID` this publisher sends on, so the sequence, heartbeat,
+    /// Every `(feed, Channel ID)` this publisher sends on, one per enabled
+    /// block in the document's order, so the sequence, heartbeat,
     /// last-published and manifest gauges exist from startup rather than
     /// appearing once something has already gone wrong.
+    ///
+    /// The feed is the specification's token, the codec's `Feed::NAME`, and it
+    /// is what tells a shard's two feeds apart when they share a `Channel ID`.
+    /// Not deduplicated: each pair is a channel this process sends on.
     #[must_use]
-    pub fn channel_ids(&self) -> Vec<u8> {
-        let mut ids: Vec<u8> = self.feeds.iter().map(|feed| feed.channel_id).collect();
-        ids.sort_unstable();
-        ids.dedup();
-        ids
+    pub fn channels(&self) -> Vec<(&'static str, u8)> {
+        self.feeds
+            .iter()
+            .map(|feed| (feed.spec.as_str(), feed.channel_id))
+            .collect()
     }
 
     /// Every enabled feed's specification, in the document's own order.

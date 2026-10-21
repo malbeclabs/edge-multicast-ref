@@ -24,7 +24,7 @@ fn answers_metrics_with_a_known_name_and_404s_elsewhere() {
         source_id: 1,
         port_roles: &[],
         connections: &[],
-        channel_ids: &[],
+        channels: &[],
         ingress_message_types: &[],
     }));
     metrics.ingress().rate_limited();
@@ -51,7 +51,7 @@ fn answers_metrics_with_a_query_string() {
         source_id: 1,
         port_roles: &[],
         connections: &[],
-        channel_ids: &[],
+        channels: &[],
         ingress_message_types: &[],
     }));
     metrics.ingress().rate_limited();
@@ -76,7 +76,7 @@ fn a_stalled_scraper_does_not_wedge_the_endpoint() {
         source_id: 1,
         port_roles: &[],
         connections: &[],
-        channel_ids: &[],
+        channels: &[],
         ingress_message_types: &[],
     }));
 

@@ -140,7 +140,7 @@ fn every_normative_family_renders_under_its_exact_name() {
         source_id: 7,
         port_roles: &[PortRole::Mktdata],
         connections: &[],
-        channel_ids: &[],
+        channels: &[],
         ingress_message_types: &[],
     });
     touch_every_family(&metrics);
@@ -161,7 +161,7 @@ fn every_proposed_family_renders_under_its_exact_name() {
         source_id: 7,
         port_roles: &[PortRole::Mktdata],
         connections: &[],
-        channel_ids: &[],
+        channels: &[],
         ingress_message_types: &[],
     });
     touch_every_family(&metrics);
@@ -191,7 +191,7 @@ fn every_proposed_family_says_in_its_help_that_it_is_a_proposal() {
         source_id: 7,
         port_roles: &[PortRole::Mktdata],
         connections: &[],
-        channel_ids: &[1],
+        channels: &[("top-of-book", 1)],
         ingress_message_types: &[],
     });
     let rendered = metrics.render();

@@ -332,6 +332,13 @@ impl<F: EmittedFeed> FeedPipeline<F> {
         self.channel_id
     }
 
+    /// The feed this path sends, as the codec names it (`Feed::NAME`): the
+    /// value of the `feed` label on the series it writes.
+    #[must_use]
+    pub const fn feed(&self) -> &'static str {
+        F::NAME
+    }
+
     /// One `0x03 Quote`, sent.
     ///
     /// # Errors

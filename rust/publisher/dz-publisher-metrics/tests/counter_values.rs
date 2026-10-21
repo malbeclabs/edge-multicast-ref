@@ -7,7 +7,7 @@ fn a_counter_incremented_twice_renders_the_value_two() {
         source_id: 1,
         port_roles: &[],
         connections: &[],
-        channel_ids: &[],
+        channels: &[],
         ingress_message_types: &[],
     });
 
@@ -37,7 +37,7 @@ fn a_sequence_number_beyond_i64_saturates_rather_than_wrapping() {
         source_id: 1,
         port_roles: &[PortRole::Mktdata],
         connections: &[],
-        channel_ids: &[1],
+        channels: &[("top-of-book", 1)],
         ingress_message_types: &[],
     });
 

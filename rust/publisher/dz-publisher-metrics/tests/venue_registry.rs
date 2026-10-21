@@ -14,7 +14,7 @@ fn rejects_a_name_beginning_with_the_reserved_prefix() {
         source_id: 1,
         port_roles: &[],
         connections: &[],
-        channel_ids: &[],
+        channels: &[],
         ingress_message_types: &[],
     });
     let counter =
@@ -38,7 +38,7 @@ fn accepts_a_name_outside_the_reserved_prefix() {
         source_id: 1,
         port_roles: &[],
         connections: &[],
-        channel_ids: &[],
+        channels: &[],
         ingress_message_types: &[],
     });
     let counter = IntCounter::with_opts(Opts::new(
@@ -77,7 +77,7 @@ fn rejects_a_collector_carrying_a_reserved_label_name() {
         source_id: 1,
         port_roles: &[],
         connections: &[],
-        channel_ids: &[],
+        channels: &[],
         ingress_message_types: &[],
     });
 
@@ -146,7 +146,7 @@ fn render_drops_a_venue_family_that_collects_into_the_reserved_namespace() {
         source_id: 1,
         port_roles: &[],
         connections: &[],
-        channel_ids: &[],
+        channels: &[],
         ingress_message_types: &[],
     });
 
@@ -220,7 +220,7 @@ fn render_survives_a_venue_collector_the_encoder_cannot_encode() {
             source_id: 1,
             port_roles: &[],
             connections: &[],
-            channel_ids: &[],
+            channels: &[],
             ingress_message_types: &[],
         });
         metrics.ingress().rate_limited();
@@ -293,7 +293,7 @@ fn render_drops_a_venue_family_that_gathers_a_duplicate_label_name() {
         source_id: 1,
         port_roles: &[],
         connections: &[],
-        channel_ids: &[],
+        channels: &[],
         ingress_message_types: &[],
     });
     metrics.ingress().rate_limited();

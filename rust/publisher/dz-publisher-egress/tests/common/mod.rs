@@ -390,12 +390,16 @@ impl RouteLookup for FakeRoute {
 /// The normative metric set, as a publisher would build it.
 #[must_use]
 pub fn metrics(port_roles: &[PortRole], channel_ids: &[u8]) -> Arc<PublisherMetrics> {
+    let channels: Vec<(&str, u8)> = channel_ids
+        .iter()
+        .map(|&channel_id| (TestFeed::NAME, channel_id))
+        .collect();
     Arc::new(PublisherMetrics::new(&PublisherMetricsConfig {
         venue: "test-venue",
         source_id: 1,
         port_roles,
         connections: &[],
-        channel_ids,
+        channels: &channels,
         ingress_message_types: &[],
     }))
 }

@@ -651,14 +651,17 @@ fn harness_inner(configured: &[Feed], break_writes: bool) -> Harness {
             }
         }
     }
-    let channel_ids: Vec<u8> = configured.iter().map(|feed| feed.channel_id).collect();
+    let channels: Vec<(&str, u8)> = configured
+        .iter()
+        .map(|feed| (feed.spec.as_str(), feed.channel_id))
+        .collect();
 
     let metrics = Arc::new(PublisherMetrics::new(&PublisherMetricsConfig {
         venue: "a-venue",
         source_id: identity.source_id.get(),
         port_roles: &port_roles,
         connections: &["upstream"],
-        channel_ids: &channel_ids,
+        channels: &channels,
         ingress_message_types: &["quote", "trade", "level"],
     }));
 

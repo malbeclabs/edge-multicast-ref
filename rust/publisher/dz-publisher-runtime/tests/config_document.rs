@@ -230,7 +230,7 @@ fn a_valid_document_resolves_end_to_end() {
             dz_edge_core::PortRole::Refdata
         ]
     );
-    assert_eq!(config.channel_ids(), [CHANNEL_ID]);
+    assert_eq!(config.channels(), [("top-of-book", CHANNEL_ID)]);
 }
 
 #[test]
@@ -295,7 +295,10 @@ fn a_depth_feed_resolves_with_the_three_port_roles_it_operates() {
         config.port_roles(),
         [PortRole::Mktdata, PortRole::Refdata, PortRole::Snapshot]
     );
-    assert_eq!(config.channel_ids(), [harness::DEPTH_CHANNEL_ID]);
+    assert_eq!(
+        config.channels(),
+        [("market-by-price", harness::DEPTH_CHANNEL_ID)]
+    );
 }
 
 #[test]
@@ -374,8 +377,11 @@ fn both_feeds_in_one_document_resolve() {
         [PortRole::Mktdata, PortRole::Refdata, PortRole::Snapshot]
     );
     assert_eq!(
-        config.channel_ids(),
-        [harness::CHANNEL_ID, harness::DEPTH_CHANNEL_ID]
+        config.channels(),
+        [
+            ("top-of-book", harness::CHANNEL_ID),
+            ("market-by-price", harness::DEPTH_CHANNEL_ID)
+        ]
     );
 }
 
@@ -571,6 +577,39 @@ fn two_blocks_of_one_specification_on_different_shards_resolve() {
         config.feed_specs().len(),
         1,
         "and one specification, however many shards carry it"
+    );
+}
+
+/// One `(feed, Channel ID)` pair per block, in the document's order.
+///
+/// The second block's ID is the lower one, so a list sorted by ID, as
+/// `channel_ids()` was, puts them the other way round.
+#[test]
+fn channels_are_one_pair_per_block_in_document_order() {
+    let mut doc = Doc::valid();
+    let second = doc
+        .feed
+        .replace(
+            &format!("channel_id = {CHANNEL_ID}"),
+            &format!("channel_id = {}\nshard = \"beta\"", CHANNEL_ID - 1),
+        )
+        .replace(
+            &format!("mktdata_port = {MKTDATA_PORT}"),
+            &format!("mktdata_port = {}", MKTDATA_PORT + 20),
+        )
+        .replace(
+            &format!("refdata_port = {REFDATA_PORT}"),
+            &format!("refdata_port = {}", REFDATA_PORT + 20),
+        );
+    doc.feed = format!("{}\n{second}", doc.feed);
+
+    let config = Document::parse(&doc.render())
+        .expect("parses")
+        .resolve()
+        .expect("two shards of one specification resolve");
+    assert_eq!(
+        config.channels(),
+        [("top-of-book", CHANNEL_ID), ("top-of-book", CHANNEL_ID - 1)]
     );
 }
 
