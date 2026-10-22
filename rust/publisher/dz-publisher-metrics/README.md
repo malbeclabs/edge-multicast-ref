@@ -57,19 +57,19 @@ Only the upstream's own activity sets the last-published gauge: a quote, a trade
 A channel whose instruments are dormant is silent and healthy, so the rule for *this feed has died while its siblings have not* is a comparison between channels rather than a threshold on one:
 
 ```promql
-  max without(channel_id) (dz_publisher_channel_last_published_timestamp_seconds > 0)
-- ignoring(channel_id) group_right()
+  max without(channel_id, feed) (dz_publisher_channel_last_published_timestamp_seconds > 0)
+- ignoring(channel_id, feed) group_right()
   (dz_publisher_channel_last_published_timestamp_seconds > 0)
 > 900
 ```
 
-It reads *this channel is fifteen minutes staler than the freshest channel of the same feed of the same publisher*. `max without(channel_id)` keeps `feed`, so the comparison is between channels of one feed: a Top-of-Book channel is measured against the freshest Top-of-Book channel and not against a Market-by-Price one.
+It reads *this channel is fifteen minutes staler than the freshest channel of the same publisher*, whichever feed either one is. `feed` is dropped on both sides along with `channel_id`: a publisher with one channel per feed, such as a single shard's Top-of-Book and Market-by-Price, has no second channel of either feed, so a per-feed comparison would measure each channel against itself and never fire. Across feeds, a dead Market-by-Price channel beside a live Top-of-Book one is stale relative to it.
 
 **The fifteen minutes is the operator's number and the rule is a heuristic.** What separates a dead channel from a dormant one is whether its instruments would have traded, and no series a publisher emits knows that: a genuinely quiet instrument set on a busy venue meets this rule too, and the only thing the comparison buys is that it is not defeated by the venue being closed — when every channel goes quiet together, none of them is stale relative to the others. Set the threshold from the venue's calendar, at longer than the quietest channel's longest legitimate gap between prints, and read a firing as *go and look* rather than as proof.
 
 **It is blind in the other direction too, and for a reason specific to this pair of feeds.** A trade is the one message both specifications carry: it is lowered once and handed to both send paths, so where a Top-of-Book channel and a Market-by-Price channel cover the same instruments, one trade refreshes both gauges. A venue whose level stream dies while its trades go on printing therefore keeps the two channels equally fresh and never makes this rule fire. Only the per-message-type egress rate separates them — `dz_publisher_egress_messages_total` carries it — so on a publisher with a depth feed, alert on that alongside this.
 
-Two details of the expression are load-bearing. `ignoring(channel_id)` rather than `on(venue, source_id)` on both joins, because two redundant paths of one channel carry the same `venue` and `source_id`: what tells them apart is the scrape's own target labels, and ignoring one label keeps them. And `> 0` on both sides, because the pre-created 0 is the whole Unix epoch away from a real timestamp — a rule that included it would page for every channel that had not yet published, at any uptime, which is why no `dz_publisher_uptime_seconds` guard appears here.
+Two details of the expression are load-bearing. `ignoring(channel_id, feed)` rather than `on(venue, source_id)` on both joins, because two redundant paths of one channel carry the same `venue` and `source_id`: what tells them apart is the scrape's own target labels, and ignoring one label keeps them. And `> 0` on both sides, because the pre-created 0 is the whole Unix epoch away from a real timestamp — a rule that included it would page for every channel that had not yet published, at any uptime, which is why no `dz_publisher_uptime_seconds` guard appears here.
 
 A channel that has published nothing at all is the other half of the condition and is its own rule, because only an operator knows how long their venue's calendar makes that normal:
 

@@ -35,7 +35,7 @@ Breaks [the design](../specs/2026-10-20-channel-id-shared-by-a-shards-feeds-desi
 - [x] `README.md`:
   - the config section explains the pairs;
   - the label is listed with the proposals;
-  - the relative-staleness rule keeps matching on `feed` (`max without(channel_id)` and `ignoring(channel_id)`), and the text says it now compares channels within one feed;
+  - the relative-staleness rule drops `feed` along with `channel_id` (`max without(channel_id, feed)` and `ignoring(channel_id, feed)`), so it still compares channels across feeds and fires on a publisher with one channel per feed;
   - the never-published rule joins `dz_publisher_uptime_seconds`, which carries no `feed`, with `ignoring(channel_id, feed)`. `ignoring(channel_id)` alone would leave it matching nothing;
   - a note says that `by (channel_id)` sums the two feeds' sequence series.
 - [x] `tests/precreated_at_startup.rs`, `tests/normative_names.rs`: the label set.

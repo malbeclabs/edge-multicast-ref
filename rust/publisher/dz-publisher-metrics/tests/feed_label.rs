@@ -207,15 +207,16 @@ fn the_readme_rules_match_with_the_feed_label() {
         .expect("the never-published rule");
 
     // Relative staleness: `max without(...)` groups the non-zero series, and
-    // each non-zero series must find its group under `ignoring(...)`. The
-    // groups are per feed, so a Top-of-Book channel is measured against
-    // Top-of-Book's freshest.
+    // each non-zero series must find its group under `ignoring(...)`. There
+    // is one group across both feeds, so a publisher with one channel per
+    // feed still compares its Top-of-Book channel with its Market-by-Price
+    // one rather than each with itself.
     let without = label_list(staleness, "without");
     let ignoring = label_list(staleness, "ignoring");
     let live: Vec<&&Sample> = last_published.iter().filter(|s| s.value > 0.0).collect();
     let groups: BTreeSet<BTreeMap<String, String>> =
         live.iter().map(|s| key(s, &without)).collect();
-    assert_eq!(groups.len(), 2, "one group per feed: {groups:?}");
+    assert_eq!(groups.len(), 1, "one group across both feeds: {groups:?}");
     for sample in &live {
         assert!(
             groups.contains(&key(sample, &ignoring)),
