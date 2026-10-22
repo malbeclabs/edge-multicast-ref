@@ -106,6 +106,17 @@ pub enum RefdataError {
     #[error("id_allocation = \"derived_key\" derives from a venue key, and identity = \"symbol\" has none")]
     DerivedKeyWithoutVenueKey,
 
+    /// `id_allocation = "derived"` was configured with `venue_keys = "stated"`.
+    ///
+    /// `"derived"` takes a new key's ID from its display `Symbol`, which a
+    /// venue stating its own keys may rename under the same key. A host that
+    /// admitted the key before a rename and one starting from no record after
+    /// it would publish one instrument under two IDs. `"derived_key"` derives
+    /// from the key, which a rename leaves alone. The document check refuses
+    /// this first; this is the second line.
+    #[error("id_allocation = \"derived\" derives from a Symbol that venue_keys = \"stated\" lets the venue rename; use id_allocation = \"derived_key\"")]
+    DerivedWithStatedVenueKeys,
+
     /// The record was written under one derived allocation and the
     /// configuration asks for the other.
     ///

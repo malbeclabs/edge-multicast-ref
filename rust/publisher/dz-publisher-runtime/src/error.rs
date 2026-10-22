@@ -582,6 +582,16 @@ pub enum StartupError {
     #[error("`[refdata] venue_keys = \"stated\"` is read only under `identity = \"venue_key\"`")]
     VenueKeysWithoutVenueKey,
 
+    /// `[refdata] id_allocation = "derived"` with `venue_keys = "stated"`.
+    ///
+    /// `"derived"` takes a new key's ID from its display `Symbol`, which a
+    /// venue stating its own keys may rename under the same key. A host that
+    /// admitted the key before a rename and one started from no record after
+    /// it would publish one instrument under two IDs. `"derived_key"` derives
+    /// from the key, which a rename leaves alone.
+    #[error("`[refdata] id_allocation = \"derived\"` derives from a `Symbol` that `venue_keys = \"stated\"` lets the venue rename; use `id_allocation = \"derived_key\"`")]
+    DerivedWithStatedVenueKeys,
+
     /// `[egress] ttl` is not stated, and it has no default.
     ///
     /// # Why the key is stated rather than defaulted

@@ -1278,6 +1278,28 @@ fn stated_venue_keys_under_the_symbol_identity_are_refused() {
     );
 }
 
+#[test]
+fn derived_ids_with_stated_venue_keys_are_refused() {
+    let error = Document::parse(&with_refdata_lines(
+        "identity = \"venue_key\"\nvenue_keys = \"stated\"\nid_allocation = \"derived\"\n",
+    ))
+    .expect("parses")
+    .resolve()
+    .unwrap_err();
+    assert!(
+        matches!(error, StartupError::DerivedWithStatedVenueKeys),
+        "{error}"
+    );
+
+    let keyed = Document::parse(&with_refdata_lines(
+        "identity = \"venue_key\"\nvenue_keys = \"stated\"\nid_allocation = \"derived_key\"\n",
+    ))
+    .expect("valid")
+    .resolve()
+    .expect("derived_key derives from the key, which a rename leaves alone");
+    assert_eq!(keyed.refdata.id_allocation, IdAllocation::DerivedKey);
+}
+
 // ---------------------------------------------------------------------------
 // Two feeds, one publisher: the keys that cannot differ.
 // ---------------------------------------------------------------------------

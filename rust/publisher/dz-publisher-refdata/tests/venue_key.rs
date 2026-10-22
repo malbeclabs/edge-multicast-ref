@@ -764,6 +764,32 @@ fn under_derived_two_keys_on_one_symbol_collide_and_the_decline_names_both_keys(
     assert_eq!(declined[0].holder, Some(symbol_of(&one)));
 }
 
+/// `"derived"` takes a new key's ID from its display `Symbol`, which a stated
+/// key may be renamed under, so two hosts either side of a rename would derive
+/// two IDs for one instrument. `"derived_key"` is what takes stated keys.
+#[test]
+fn derived_ids_are_refused_with_stated_venue_keys() {
+    let error = Registry::open(
+        config(Identity::VenueKey, VenueKeys::Stated, IdAllocation::Derived),
+        MemoryStore::new(),
+        ManualClock::new(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, RefdataError::DerivedWithStatedVenueKeys),
+        "{error}"
+    );
+
+    opened(
+        MemoryStore::new(),
+        config(
+            Identity::VenueKey,
+            VenueKeys::Stated,
+            IdAllocation::DerivedKey,
+        ),
+    );
+}
+
 #[test]
 fn derived_key_is_refused_under_the_symbol_identity_and_with_forgetting() {
     let error = Registry::open(

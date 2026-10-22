@@ -558,6 +558,9 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
         if config.id_allocation == IdAllocation::DerivedKey && config.identity == Identity::Symbol {
             return Err(RefdataError::DerivedKeyWithoutVenueKey);
         }
+        if config.id_allocation == IdAllocation::Derived && config.venue_keys == VenueKeys::Stated {
+            return Err(RefdataError::DerivedWithStatedVenueKeys);
+        }
         if config.id_allocation.is_derived() && config.forget_delisted_after.is_some() {
             return Err(RefdataError::ForgettingUnderDerivedIds);
         }

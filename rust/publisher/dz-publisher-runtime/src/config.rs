@@ -502,6 +502,8 @@ pub struct RefdataSection {
     /// Whether the adapter states keys of its own: `"symbol"`, every key is
     /// the stated `symbol`, or `"stated"`. Absent is `"symbol"`. Read only
     /// under `identity = "venue_key"`, and refused under `"symbol"`.
+    /// `"stated"` is refused with `id_allocation = "derived"`, whose IDs come
+    /// from a `Symbol` the venue may rename; `"derived_key"` is the one to use.
     ///
     /// Declare `"stated"` before the first start under `"venue_key"` if the
     /// adapter will ever state keys: a keyed record is refused under the other
@@ -1111,6 +1113,11 @@ impl Document {
             && self.refdata.identity == IdentityKey::Symbol
         {
             return Err(StartupError::DerivedKeyWithoutVenueKey);
+        }
+        if self.refdata.id_allocation == IdAllocationKey::Derived
+            && self.refdata.venue_keys == VenueKeysKey::Stated
+        {
+            return Err(StartupError::DerivedWithStatedVenueKeys);
         }
 
         let selection = SelectionPolicy::new(
