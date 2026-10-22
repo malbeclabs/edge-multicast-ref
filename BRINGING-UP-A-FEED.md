@@ -550,13 +550,22 @@ kind = "a-venue-tob"
     resolves the cut entries of an unkeyed record, or with `retire_unmapped`
     forgets the ones it does not name. A rollback exports with
     `StateRecord::load`, whose entries carry their keys, and the next import
-    seeds again. After a `StateError::Write` the outcome is not known: reload,
+    seeds again. The exported `next_id` must be above every ID the entries
+    hold. A sequential record's is; a `"derived"` or `"derived_key"` record's
+    is the floor under every derived ID, so a sequential registry handed it
+    would mint IDs a derived key already holds. Export one more than the
+    highest held ID instead. After a `StateError::Write` the outcome is not known: reload,
     and run the same seed again, which is safe.
   - **Seeding comes before `id_allocation = "derived_key"`, not after.**
     `"derived_key"` is `"derived"` with the venue key as its input, so two
     keys on one `Symbol` derive two IDs. A derived record takes only a seed
     that resolves entries it already holds, and a record is never moved
-    between `"derived"` and `"derived_key"`.
+    between `"derived"` and `"derived_key"`. `"derived"` is refused with
+    `venue_keys = "stated"`: it derives from the display `Symbol`, which a
+    venue may rename under the same key, so a host that admitted the key
+    before a rename and one started from no record after it would publish one
+    instrument under two IDs. `"derived_key"` derives from the key, which a
+    rename leaves alone.
 - **A depth feed with no `snapshot_cycle` cannot be joined mid-session.** It
   still emits the recovery snapshots a reset obliges, but a subscriber that
   arrives after the deltas started has nothing to build a book from — a level
