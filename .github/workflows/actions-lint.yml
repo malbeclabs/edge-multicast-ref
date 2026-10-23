@@ -1,0 +1,58 @@
+name: actions-lint
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  actions-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      # actionlint 1.7.12 needs Go 1.25.
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: "1.25"
+          cache: false
+      # Installed and run from outside the checkout, so no file a PR adds can stand in
+      # for either tool: `pipx run zizmor==...` would run a file of that name in the
+      # working directory instead.
+      - name: Install actionlint and zizmor
+        env:
+          ZIZMOR_VERSION: v1.30.1
+          ZIZMOR_SHA256: e65324f4430c2717591937edcec90ccbefaf14c174f8ec9415e03ca875b46e1a
+        run: |
+          cd "$RUNNER_TEMP"
+          GOBIN="$RUNNER_TEMP" go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          curl -sSfL -o zizmor.tar.gz \
+            "https://github.com/zizmorcore/zizmor/releases/download/${ZIZMOR_VERSION}/zizmor-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${ZIZMOR_SHA256}  zizmor.tar.gz" | sha256sum -c -
+          tar xzf zizmor.tar.gz zizmor
+      # zizmor fails on pull_request_target and workflow_run triggers, actions not
+      # pinned to a commit SHA, a missing permissions block, and a checkout that
+      # keeps its token. It runs online, and with --no-config and --no-ignores so that
+      # neither a config file nor an ignore comment can switch its rules off. Every
+      # workflow is linted except the ones listed here, which stay disabled in the
+      # repository's Actions settings until they are hardened (malbeclabs/infra#3034).
+      # Remove a name in the PR that hardens that workflow.
+      - name: Lint workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          disabled=(
+            # Releases (malbeclabs/infra#3350)
+            loader-release.yml
+            recorder-release.yml
+            # Scheduled workflows (malbeclabs/infra#3352)
+            glossary-sync.yml
+          )
+          excluded=()
+          for name in "${disabled[@]}"; do excluded+=(! -name "$name"); done
+          mapfile -t workflows < <(find .github/workflows -name '*.y*ml' "${excluded[@]}" | sort)
+          "$RUNNER_TEMP/actionlint" "${workflows[@]}"
+          "$RUNNER_TEMP/zizmor" --no-config --no-ignores "${workflows[@]}"
