@@ -1743,6 +1743,7 @@ impl<S: StateStore, C: Clock> Registry<S, C> {
             | Refusal::StrikeUnrepresentable
             | Refusal::StrikeEmpty
             | Refusal::ScaleRestated
+            | Refusal::DatedFutureTerms
             | Refusal::IdSpaceExhausted
             | Refusal::Unpersistable
             | Refusal::ShuttingDown => self.counts.declined_unrepresentable += 1,
