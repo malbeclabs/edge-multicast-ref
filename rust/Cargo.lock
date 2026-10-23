@@ -611,7 +611,7 @@ dependencies = [
 
 [[package]]
 name = "dz-recorder-load"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "ctrlc",
  "dz-edge-core",
