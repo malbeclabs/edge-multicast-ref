@@ -200,6 +200,38 @@ impl Failed {
     }
 }
 
+/// What a pass's scan found, before it decides which of it to derive.
+struct Scan {
+    /// Every object whose manifest the scan read, which is what the ledger is
+    /// compacted against.
+    present: HashSet<(String, String)>,
+    /// Every object the pass saw that had no ledger entry when it was
+    /// scanned, with the end of its receive window. Filtered against the
+    /// ledger *after* the pass rather than pruned during it, because an
+    /// object can land at any point: the sink coalesces, so the insert that
+    /// makes object one durable may be the one object four triggered.
+    /// The flag is whether this object's feed derives market data, read from
+    /// the manifest that named the feed. Kept per object rather than looked
+    /// up again afterwards, because the answer is a property of the object
+    /// and the configuration is a slice somebody may one day reload.
+    seen: Vec<(ObjectId, u64, bool)>,
+    /// The objects this pass may derive, as an index into the candidates and
+    /// the feed the manifest names. The scan reads every manifest and decides
+    /// what is derivable; the order they are derived in is decided only once
+    /// the scan is whole, by `take_turns`, because that order depends on how
+    /// much every feed has waiting.
+    ///
+    /// An index and a name, and NOT the manifest. A back-load is tens of
+    /// thousands of unloaded objects, and a manifest carries its object's
+    /// channel instances, which on a many-market feed is the bulk of it:
+    /// holding every one for the length of the pass would cost a recorder
+    /// host memory in proportion to how far behind its loader is. The
+    /// manifest is read again for the objects the pass reaches, which is at
+    /// most `max_objects` of them -- a few kilobytes each, against a scan
+    /// that already read all of them.
+    derivable: Vec<(usize, String)>,
+}
+
 /// Whether a pass saw the whole objects directory, or only part of it.
 ///
 /// **A named outcome and not a `bool`, because the call site spends it on the
@@ -233,95 +265,11 @@ impl<S: RowSink> Loader<'_, S> {
         let mut pass = Pass::default();
         let mut errors = Vec::new();
         let (candidates, enumeration, feeds_without_objects) = self.candidates(&mut errors);
-        let mut present: HashSet<(String, String)> = HashSet::new();
-        // Every object the pass saw that had no ledger entry when it was
-        // scanned, with the end of its receive window. Filtered against the
-        // ledger *after* the pass rather than pruned during it, because an
-        // object can land at any point: the sink coalesces, so the insert that
-        // makes object one durable may be the one object four triggered.
-        // The flag is whether this object's feed derives market data, read from
-        // the manifest that named the feed. Kept per object rather than looked
-        // up again afterwards, because the answer is a property of the object
-        // and the configuration is a slice somebody may one day reload.
-        let mut seen: Vec<(ObjectId, u64, bool)> = Vec::new();
-        // The objects this pass may derive, as an index into `candidates` and
-        // the feed the manifest names. The scan below reads every manifest and
-        // decides what is derivable; the order they are derived in is decided
-        // only once the scan is whole, by `take_turns`, because that order
-        // depends on how much every feed has waiting.
-        //
-        // An index and a name, and NOT the manifest. A back-load is tens of
-        // thousands of unloaded objects, and a manifest carries its object's
-        // channel instances, which on a many-market feed is the bulk of it:
-        // holding every one for the length of the pass would cost a recorder
-        // host memory in proportion to how far behind its loader is. The
-        // manifest is read again for the objects the pass reaches, which is at
-        // most `max_objects` of them -- a few kilobytes each, against a scan
-        // that already read all of them.
-        let mut derivable: Vec<(usize, String)> = Vec::new();
-
-        // The scan, over every candidate, and it does not stop at the pass
-        // bound or at a signal. That is what makes the two lag numbers whole: a
-        // pass that stopped scanning where it stopped loading would report the
-        // backlog it happened to have reached, and a loader four hours behind
-        // would publish the same small number as one that was caught up. It is
-        // also what keeps compaction honest -- the ledger is rewritten against
-        // every object present, not against the prefix this pass got through.
-        // And it is what the order needs: a feed's turn depends on how many of
-        // its objects are waiting, which only a whole scan can say.
-        for (index, candidate) in candidates.iter().enumerate() {
-            let manifest = match read_manifest(&candidate.manifest_path) {
-                Ok(manifest) => manifest,
-                Err(message) => {
-                    self.fail(ErrorKind::Manifest, message, &mut pass, &mut errors);
-                    continue;
-                }
-            };
-            present.insert((manifest.object_key.clone(), manifest.sha256.clone()));
-
-            if manifest.site != self.site || manifest.recorder != self.recorder {
-                // Counted rather than loaded: a `dz_loader_*` series labelled
-                // with this host's name for another host's archive is worse than
-                // a gap in the numbers, and an object from elsewhere in this
-                // directory is a deployment mistake worth seeing.
-                self.metrics.object_skipped(SkipReason::ForeignHost);
-                pass.skipped += 1;
-                continue;
-            }
-            if self
-                .ledger
-                .is_loaded(&manifest.object_key, &manifest.sha256)
-            {
-                self.metrics.object_skipped(SkipReason::AlreadyLoaded);
-                pass.skipped += 1;
-                continue;
-            }
-            let id = ObjectId {
-                key: manifest.object_key.clone(),
-                sha256: manifest.sha256.clone(),
-            };
-            seen.push((
-                id.clone(),
-                manifest.end_ns,
-                derivation_for(self.market_data, &manifest.feed).is_some(),
-            ));
-
-            // Derived already, and with the sink: an object waiting for the
-            // insert that carries its rows has no ledger entry by design, so
-            // the check above does not see it and the walk would derive it
-            // again on every pass until the insert went — thirty times over at
-            // the deployed poll interval. The re-derivation is not free and it
-            // is not harmless: the second copy is derived against a *pending*
-            // trailer of its own object rather than its predecessor's, so it
-            // writes as unverified the era boundaries the first copy settled,
-            // and the second copy is the one that lands.
-            if self.pending.iter().any(|p| p.id == id) {
-                self.metrics.object_skipped(SkipReason::Held);
-                pass.skipped += 1;
-                continue;
-            }
-            derivable.push((index, manifest.feed));
-        }
+        let Scan {
+            present,
+            seen,
+            derivable,
+        } = self.scan(&candidates, &mut pass, &mut errors);
 
         for index in take_turns(derivable) {
             // Checked before the object rather than after it: a signal that
@@ -610,6 +558,97 @@ impl<S: RowSink> Loader<'_, S> {
     /// so the re-load that follows is a replace.
     fn record_landed(&mut self, landed: &[ObjectId]) -> Recorded {
         record_landed(landed, self.pending, self.ledger, self.metrics)
+    }
+
+    /// Reads every candidate's manifest and sorts the objects into what the
+    /// pass may derive and what it skips. What each part of the result holds
+    /// is on [`Scan`]; why the scan covers every candidate is on its loop.
+    fn scan(&self, candidates: &[Candidate], pass: &mut Pass, errors: &mut Vec<String>) -> Scan {
+        let mut present: HashSet<(String, String)> = HashSet::new();
+        let mut seen: Vec<(ObjectId, u64, bool)> = Vec::new();
+        let mut derivable: Vec<(usize, String)> = Vec::new();
+
+        // The scan, over every candidate, and it does not stop at the pass
+        // bound or at a signal. That is what makes the two lag numbers whole: a
+        // pass that stopped scanning where it stopped loading would report the
+        // backlog it happened to have reached, and a loader four hours behind
+        // would publish the same small number as one that was caught up. It is
+        // also what keeps compaction honest -- the ledger is rewritten against
+        // every object present, not against the prefix this pass got through.
+        // And it is what the order needs: a feed's turn depends on how many of
+        // its objects are waiting, which only a whole scan can say.
+        for (index, candidate) in candidates.iter().enumerate() {
+            // Gone since the walk listed it: evicted under the staging budget
+            // in between. A skip, as it is at the load, and not `Evicted`:
+            // with no manifest there is no `(object key, sha256)` to ask the
+            // ledger about, so the scan cannot say whether the object was
+            // loaded before it went -- and on a caught-up loader it almost
+            // always was. Counted as a manifest error, it read as damage on a
+            // healthy host, a back-load whose oldest objects were going under
+            // the budget could burst it past the errors alert, and a loss
+            // among them read on the error counter while `evicted` stayed at 0.
+            let manifest = match read_manifest_if_present(&candidate.manifest_path) {
+                Ok(Some(manifest)) => manifest,
+                Ok(None) => {
+                    self.metrics.object_skipped(SkipReason::Vanished);
+                    pass.skipped += 1;
+                    continue;
+                }
+                Err(message) => {
+                    self.fail(ErrorKind::Manifest, message, pass, errors);
+                    continue;
+                }
+            };
+            present.insert((manifest.object_key.clone(), manifest.sha256.clone()));
+
+            if manifest.site != self.site || manifest.recorder != self.recorder {
+                // Counted rather than loaded: a `dz_loader_*` series labelled
+                // with this host's name for another host's archive is worse than
+                // a gap in the numbers, and an object from elsewhere in this
+                // directory is a deployment mistake worth seeing.
+                self.metrics.object_skipped(SkipReason::ForeignHost);
+                pass.skipped += 1;
+                continue;
+            }
+            if self
+                .ledger
+                .is_loaded(&manifest.object_key, &manifest.sha256)
+            {
+                self.metrics.object_skipped(SkipReason::AlreadyLoaded);
+                pass.skipped += 1;
+                continue;
+            }
+            let id = ObjectId {
+                key: manifest.object_key.clone(),
+                sha256: manifest.sha256.clone(),
+            };
+            seen.push((
+                id.clone(),
+                manifest.end_ns,
+                derivation_for(self.market_data, &manifest.feed).is_some(),
+            ));
+
+            // Derived already, and with the sink: an object waiting for the
+            // insert that carries its rows has no ledger entry by design, so
+            // the check above does not see it and the walk would derive it
+            // again on every pass until the insert went — thirty times over at
+            // the deployed poll interval. The re-derivation is not free and it
+            // is not harmless: the second copy is derived against a *pending*
+            // trailer of its own object rather than its predecessor's, so it
+            // writes as unverified the era boundaries the first copy settled,
+            // and the second copy is the one that lands.
+            if self.pending.iter().any(|p| p.id == id) {
+                self.metrics.object_skipped(SkipReason::Held);
+                pass.skipped += 1;
+                continue;
+            }
+            derivable.push((index, manifest.feed));
+        }
+        Scan {
+            present,
+            seen,
+            derivable,
+        }
     }
 
     fn fail(&self, kind: ErrorKind, message: String, pass: &mut Pass, errors: &mut Vec<String>) {
@@ -980,13 +1019,8 @@ fn take_turns(derivable: Vec<(usize, String)>) -> Vec<usize> {
     ranked.into_iter().map(|(_, position)| position).collect()
 }
 
-fn read_manifest(path: &Path) -> Result<SegmentManifest, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
-}
-
-/// [`read_manifest`], with a manifest that is no longer there as `None`: the
-/// shape an eviction between the scan and the load takes.
+/// A manifest, with one that is no longer there as `None`: the shape an
+/// eviction takes between the walk and the scan, or the scan and the load.
 fn read_manifest_if_present(path: &Path) -> Result<Option<SegmentManifest>, String> {
     match std::fs::read_to_string(path) {
         Ok(text) => serde_json::from_str(&text)
@@ -1766,6 +1800,58 @@ mod pass_tests {
         let damaged = dir.path().join("damaged.json");
         std::fs::write(&damaged, "not a manifest").expect("writable");
         assert!(read_manifest_if_present(&damaged).is_err());
+    }
+
+    /// A manifest evicted between the walk and the scan is a skip, not a
+    /// manifest error: on a caught-up host it is history going under the
+    /// staging budget, and it must not page as damage.
+    #[test]
+    fn a_manifest_gone_before_the_scan_is_a_skip_and_not_an_error() {
+        let archive = archive(3, 20);
+        let metrics = LoaderMetrics::new(SITE, RECORDER);
+        let mut ledger = Ledger::open(&archive.ledger).expect("a new ledger");
+        let mut sink = FileSink::create(&archive.rows).expect("the directory is writable");
+        let loader = Loader {
+            objects_dir: &archive.completed,
+            feeds: None,
+            site: SITE,
+            recorder: RECORDER,
+            max_objects: 0,
+            ledger: &mut ledger,
+            sink: &mut sink,
+            metrics: &metrics,
+            market_data: &[],
+            pending: &mut Vec::new(),
+        };
+        let mut errors = Vec::new();
+        let (candidates, _, _) = loader.candidates(&mut errors);
+        assert_eq!(candidates.len(), 3);
+        std::fs::remove_file(&candidates[0].manifest_path).expect("the manifest is removable");
+
+        let mut pass = Pass::default();
+        let scan = loader.scan(&candidates, &mut pass, &mut errors);
+
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(pass.failed, 0);
+        assert_eq!(pass.skipped, 1);
+        assert_eq!(scan.present.len(), 2, "a vanished object is not present");
+        assert_eq!(
+            scan.derivable.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        let text = metrics.render();
+        assert!(
+            text.contains(&format!(
+                "dz_loader_objects_skipped_total{{reason=\"vanished\",recorder=\"{RECORDER}\",site=\"{SITE}\"}} 1"
+            )),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!(
+                "dz_loader_errors_total{{kind=\"manifest\",recorder=\"{RECORDER}\",site=\"{SITE}\"}} 0"
+            )),
+            "{text}"
+        );
     }
 
     /// Every feed's n-th waiting object before any feed's (n+1)-th, and the

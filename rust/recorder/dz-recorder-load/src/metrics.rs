@@ -122,15 +122,23 @@ pub enum SkipReason {
     /// eviction, so this is how a loader losing that race shows up object by
     /// object, beside the lag metrics that measure it.
     Evicted,
+    /// Its manifest was gone before the scan could read it: evicted under the
+    /// staging budget after the walk listed it. Not [`Evicted`](Self::Evicted),
+    /// because with no manifest there is no ledger key to ask, so whether the
+    /// object had been loaded is unknown -- and on a caught-up loader it almost
+    /// always had. A loader falling behind shows this beside a growing
+    /// `oldest_unloaded_age_seconds`; one that is caught up shows it alone.
+    Vanished,
 }
 
 impl SkipReason {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::AlreadyLoaded,
         Self::ForeignHost,
         Self::Unpaired,
         Self::Held,
         Self::Evicted,
+        Self::Vanished,
     ];
 
     #[must_use]
@@ -141,6 +149,7 @@ impl SkipReason {
             Self::Unpaired => "unpaired",
             Self::Held => "held",
             Self::Evicted => "evicted",
+            Self::Vanished => "vanished",
         }
     }
 }
