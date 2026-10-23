@@ -59,14 +59,14 @@ pub struct ChannelMetrics {
 }
 
 impl ChannelMetrics {
-    /// `channel_ids` is every Channel ID this publisher sends on, so the gauge
-    /// exists at 0 for each of them from startup rather than appearing only
-    /// once a channel has published something — which is the case the series
-    /// most exists for.
+    /// `channels` is every `(feed, Channel ID)` this publisher sends on, so
+    /// the gauge exists at 0 for each of them from startup rather than
+    /// appearing only once a channel has published something — which is the
+    /// case the series most exists for.
     pub(crate) fn new(
         registry: &Registry,
         labels: &HashMap<String, String>,
-        channel_ids: &[u8],
+        channels: &[(&str, u8)],
     ) -> Self {
         let last_published_timestamp_seconds = GaugeVec::new(
             opts(
@@ -84,14 +84,15 @@ impl ChannelMetrics {
                  this` alone.",
                 labels,
             ),
-            &["channel_id"],
+            &["feed", "channel_id"],
         )
         .expect("static metric definition");
         registry
             .register(Box::new(last_published_timestamp_seconds.clone()))
             .expect("static metric registration");
-        for channel_id in channel_ids {
-            last_published_timestamp_seconds.with_label_values(&[channel_id_label(*channel_id)]);
+        for &(feed, channel_id) in channels {
+            last_published_timestamp_seconds
+                .with_label_values(&[feed, channel_id_label(channel_id)]);
         }
 
         Self {
@@ -100,10 +101,10 @@ impl ChannelMetrics {
     }
 
     /// Sets the Unix timestamp the upstream's activity last put a message on
-    /// `channel_id`.
-    pub fn set_last_published(&self, channel_id: u8, unix_seconds: f64) {
+    /// `feed`'s channel `channel_id`.
+    pub fn set_last_published(&self, feed: &str, channel_id: u8, unix_seconds: f64) {
         self.last_published_timestamp_seconds
-            .with_label_values(&[channel_id_label(channel_id)])
+            .with_label_values(&[feed, channel_id_label(channel_id)])
             .set(unix_seconds);
     }
 }

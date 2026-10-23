@@ -50,7 +50,7 @@ fn every_closed_label_family_renders_zero_at_construction() {
         source_id: 1,
         port_roles: &[PortRole::Mktdata, PortRole::Refdata],
         connections: &[],
-        channel_ids: &[],
+        channels: &[],
         ingress_message_types: &[],
     });
     let rendered = metrics.render();
@@ -203,7 +203,7 @@ fn egress_datagrams_total_only_covers_the_supplied_port_roles() {
         source_id: 1,
         port_roles: &[PortRole::Mktdata, PortRole::Refdata],
         connections: &[],
-        channel_ids: &[],
+        channels: &[],
         ingress_message_types: &[],
     });
     let rendered = metrics.render();
@@ -237,7 +237,7 @@ fn the_only_open_label_family_is_absent_until_touched_then_present() {
         source_id: 1,
         port_roles: &[PortRole::Mktdata],
         connections: &["primary"],
-        channel_ids: &[1],
+        channels: &[("top-of-book", 1)],
         ingress_message_types: &["trade"],
     });
 
@@ -270,7 +270,7 @@ fn declared_ingress_message_types_render_at_zero_and_the_rest_fall_to_other() {
         source_id: 1,
         port_roles: &[PortRole::Mktdata],
         connections: &["primary"],
-        channel_ids: &[],
+        channels: &[],
         ingress_message_types: &["trade", "book_delta"],
     });
 
@@ -320,7 +320,7 @@ fn declared_connections_render_at_zero_from_startup() {
         source_id: 1,
         port_roles: &[PortRole::Mktdata],
         connections: &["primary", "backup"],
-        channel_ids: &[],
+        channels: &[],
         ingress_message_types: &[],
     });
     let rendered = metrics.render();
@@ -341,7 +341,7 @@ fn declared_channel_ids_render_at_zero_from_startup() {
         source_id: 1,
         port_roles: &[PortRole::Mktdata, PortRole::Refdata],
         connections: &[],
-        channel_ids: &[0, 7],
+        channels: &[("top-of-book", 0), ("top-of-book", 7)],
         ingress_message_types: &[],
     });
     let rendered = metrics.render();
@@ -350,12 +350,20 @@ fn declared_channel_ids_render_at_zero_from_startup() {
         assert_zero(
             &rendered,
             "dz_publisher_egress_sequence_current",
-            &[("port_role", "mktdata"), ("channel_id", channel_id)],
+            &[
+                ("port_role", "mktdata"),
+                ("feed", "top-of-book"),
+                ("channel_id", channel_id),
+            ],
         );
         assert_zero(
             &rendered,
             "dz_publisher_egress_heartbeat_last_sent_timestamp_seconds",
-            &[("port_role", "mktdata"), ("channel_id", channel_id)],
+            &[
+                ("port_role", "mktdata"),
+                ("feed", "top-of-book"),
+                ("channel_id", channel_id),
+            ],
         );
         assert_zero(
             &rendered,
@@ -375,7 +383,7 @@ fn declared_channel_ids_render_at_zero_from_startup() {
         assert_zero(
             &rendered,
             "dz_publisher_channel_last_published_timestamp_seconds",
-            &[("channel_id", channel_id)],
+            &[("feed", "top-of-book"), ("channel_id", channel_id)],
         );
     }
 }
@@ -401,13 +409,13 @@ fn channel_keyed_series(rendered: &str) -> BTreeMap<&str, usize> {
     counts
 }
 
-fn precreated_channel_keyed(channel_ids: &[u8]) -> BTreeMap<&'static str, usize> {
+fn precreated_channel_keyed(channels: &[(&str, u8)]) -> BTreeMap<&'static str, usize> {
     let metrics = PublisherMetrics::new(&PublisherMetricsConfig {
         venue: "test-venue",
         source_id: 1,
         port_roles: &[PortRole::Mktdata, PortRole::Refdata, PortRole::Snapshot],
         connections: &[],
-        channel_ids,
+        channels,
         ingress_message_types: &[],
     });
     // The keys borrow the rendered exposition, which does not outlive this
@@ -447,7 +455,7 @@ fn seven_channel_keyed_series_and_one_instrument_count_are_precreated_per_channe
     // are counted off the gathered exposition; neither is arithmetic this test
     // performs, because arithmetic here would agree with the same mistake in
     // the code.
-    let at_two = precreated_channel_keyed(&[0, 1]);
+    let at_two = precreated_channel_keyed(&[("top-of-book", 0), ("market-by-price", 1)]);
     assert_eq!(
         at_two,
         BTreeMap::from([
@@ -464,7 +472,16 @@ fn seven_channel_keyed_series_and_one_instrument_count_are_precreated_per_channe
         "14 channel-keyed series plus 2 for the instrument count"
     );
 
-    let sixty_two: Vec<u8> = (0..62).collect();
+    let sixty_two: Vec<(&str, u8)> = (0..62)
+        .map(|channel_id| {
+            let feed = if channel_id % 2 == 0 {
+                "top-of-book"
+            } else {
+                "market-by-price"
+            };
+            (feed, channel_id)
+        })
+        .collect();
     let at_sixty_two = precreated_channel_keyed(&sixty_two);
     assert_eq!(
         at_sixty_two,
@@ -510,7 +527,7 @@ fn the_instrument_count_is_per_channel_and_a_write_to_one_leaves_the_others_alon
         source_id: 1,
         port_roles: &[PortRole::Mktdata, PortRole::Refdata],
         connections: &[],
-        channel_ids: &[4, 9],
+        channels: &[("top-of-book", 4), ("top-of-book", 9)],
         ingress_message_types: &[],
     });
     metrics.refdata().set_instruments_current(4, 3);
@@ -536,7 +553,7 @@ fn egress_message_types_are_precreated_only_on_the_port_roles_that_permit_them()
         source_id: 1,
         port_roles: &[PortRole::Mktdata, PortRole::Refdata],
         connections: &[],
-        channel_ids: &[],
+        channels: &[],
         ingress_message_types: &[],
     });
     let rendered = metrics.render();
@@ -580,7 +597,7 @@ fn every_egress_message_type_precreates_an_encode_duration_series() {
         source_id: 1,
         port_roles: &[PortRole::Mktdata],
         connections: &[],
-        channel_ids: &[],
+        channels: &[],
         ingress_message_types: &[],
     });
     let rendered = metrics.render();
@@ -609,7 +626,7 @@ fn set_build_info_renders_the_gauge_at_one_with_its_labels() {
         source_id: 1,
         port_roles: &[],
         connections: &[],
-        channel_ids: &[],
+        channels: &[],
         ingress_message_types: &[],
     });
     metrics
@@ -649,7 +666,7 @@ fn the_heartbeat_gauge_is_precreated_only_where_a_heartbeat_is_permitted() {
         source_id: 1,
         port_roles: &[PortRole::Mktdata, PortRole::Refdata, PortRole::Snapshot],
         connections: &[],
-        channel_ids: &[1],
+        channels: &[("top-of-book", 1)],
         ingress_message_types: &[],
     });
     let rendered = metrics.render();
@@ -686,7 +703,7 @@ fn the_manifest_gauges_are_absent_without_a_refdata_port() {
         source_id: 1,
         port_roles: &[PortRole::Mktdata],
         connections: &[],
-        channel_ids: &[3],
+        channels: &[("top-of-book", 3)],
         ingress_message_types: &[],
     });
     let rendered = metrics.render();
@@ -714,7 +731,7 @@ fn the_proposed_egress_reasons_are_precreated_only_on_the_supplied_port_roles() 
         source_id: 1,
         port_roles: &[PortRole::Mktdata],
         connections: &[],
-        channel_ids: &[],
+        channels: &[],
         ingress_message_types: &[],
     });
     let rendered = metrics.render();
@@ -753,7 +770,7 @@ fn the_proposed_families_carry_no_port_role_or_connection_label() {
         source_id: 1,
         port_roles: &[PortRole::Mktdata],
         connections: &["primary"],
-        channel_ids: &[],
+        channels: &[],
         ingress_message_types: &[],
     });
     let rendered = metrics.render();

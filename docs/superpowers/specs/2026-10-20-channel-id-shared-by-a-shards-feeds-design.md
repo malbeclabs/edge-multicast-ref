@@ -62,7 +62,7 @@ The three reference-data gauges stay keyed on `channel_id` alone. Their value is
 
 **What a query sees:**
 - A query that selects or aggregates `by (channel_id)` now sums the two feeds' series. On sequence numbers that sum means nothing, and the crate `README` says so.
-- The README's staleness rule, `max without(channel_id)`, now compares channels within one feed. That is the comparison it should make: its own note says a trade refreshes both feeds' gauges.
+- The README's staleness rule drops `feed` with `channel_id` (`max without(channel_id, feed)`, `ignoring(channel_id, feed)`), so it keeps the cross-feed comparison it made before. Kept per feed, it would never fire on a publisher with one channel per feed, which includes every single-shard Top-of-Book and Market-by-Price publisher and the shared-ID shape this design adds.
 - The never-published rule joins `dz_publisher_uptime_seconds`, which has no `feed`, so its join becomes `ignoring(channel_id, feed)`.
 
 **Normative status.** `sequence_current` and `heartbeat_last_sent` are normative families (Feed Publisher Playbook, Phase 6.5), so the label is a change to the normative set and is listed with the four existing proposals until the playbook carries it. `last_published` is already a proposal.

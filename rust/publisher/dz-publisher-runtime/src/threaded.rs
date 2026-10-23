@@ -1015,7 +1015,7 @@ mod tests {
             source_id: 41,
             port_roles: &[PortRole::Mktdata],
             connections: &[],
-            channel_ids: &[],
+            channels: &[],
             ingress_message_types: &[],
         }));
         let (queue, receiver) = mpsc::channel(events.max(1));

@@ -457,6 +457,18 @@ pub fn harness_both_with_rotation(cycle: Duration) -> Harness {
     harness_inner(&[feed(), depth_feed_with_rotation(cycle)], false)
 }
 
+/// Both feeds on **one** `Channel ID`, the top-of-book block's, with a snapshot
+/// rotation on the depth block: a shard's two feeds sharing an ID, told apart
+/// on the wire by their destination ports alone.
+#[must_use]
+pub fn harness_both_on_one_channel_with_rotation(cycle: Duration) -> Harness {
+    let depth = Feed {
+        channel_id: CHANNEL_ID,
+        ..depth_feed_with_rotation(cycle)
+    };
+    harness_inner(&[feed(), depth], false)
+}
+
 /// The four `[[feed]]` blocks of a publisher carrying two shards of both
 /// specifications: four channel instances over one published set.
 ///
@@ -651,14 +663,17 @@ fn harness_inner(configured: &[Feed], break_writes: bool) -> Harness {
             }
         }
     }
-    let channel_ids: Vec<u8> = configured.iter().map(|feed| feed.channel_id).collect();
+    let channels: Vec<(&str, u8)> = configured
+        .iter()
+        .map(|feed| (feed.spec.as_str(), feed.channel_id))
+        .collect();
 
     let metrics = Arc::new(PublisherMetrics::new(&PublisherMetricsConfig {
         venue: "a-venue",
         source_id: identity.source_id.get(),
         port_roles: &port_roles,
         connections: &["upstream"],
-        channel_ids: &channel_ids,
+        channels: &channels,
         ingress_message_types: &["quote", "trade", "level"],
     }));
 

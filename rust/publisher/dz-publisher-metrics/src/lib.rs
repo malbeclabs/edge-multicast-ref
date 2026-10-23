@@ -122,9 +122,14 @@ pub struct PublisherMetricsConfig<'a> {
     /// metric most exists for. Leaving this empty leaves that alert unable
     /// to fire until the first successful connection.
     pub connections: &'a [&'a str],
-    /// Every Channel ID this publisher sends on, so the sequence,
+    /// Every `(feed, Channel ID)` this publisher sends on, so the sequence,
     /// heartbeat, manifest and last-published gauges exist from startup.
-    pub channel_ids: &'a [u8],
+    ///
+    /// The feed is the specification's name, the codec's `Feed::NAME`
+    /// (`top-of-book`, `market-by-price`). A shard's two feeds may share a
+    /// Channel ID, and each is a channel instance of its own, so one pair per
+    /// feed the publisher sends.
+    pub channels: &'a [(&'a str, u8)],
     /// The upstream source's own message-type names that this publisher
     /// counts individually on `dz_publisher_ingress_messages_total`.
     ///
@@ -186,10 +191,16 @@ impl PublisherMetrics {
         );
         let lowering = LoweringMetrics::new(&registry, &labels);
         let book = BookMetrics::new(&registry, &labels);
-        let refdata =
-            RefdataMetrics::new(&registry, &labels, config.channel_ids, config.port_roles);
-        let egress = EgressMetrics::new(&registry, &labels, config.port_roles, config.channel_ids);
-        let channel = ChannelMetrics::new(&registry, &labels, config.channel_ids);
+        // The reference-data gauges are keyed on Channel ID alone: the
+        // published set behind one ID is one shard's, whichever feed carries it,
+        // so they are pre-created once per distinct ID. The sequence, heartbeat
+        // and last-published gauges carry `feed` and are pre-created per pair.
+        let mut channel_ids: Vec<u8> = config.channels.iter().map(|&(_, id)| id).collect();
+        channel_ids.sort_unstable();
+        channel_ids.dedup();
+        let refdata = RefdataMetrics::new(&registry, &labels, &channel_ids, config.port_roles);
+        let egress = EgressMetrics::new(&registry, &labels, config.port_roles, config.channels);
+        let channel = ChannelMetrics::new(&registry, &labels, config.channels);
         let latency = LatencyMetrics::new(&registry, &labels);
         let process = ProcessMetrics::new(&registry, &labels);
 

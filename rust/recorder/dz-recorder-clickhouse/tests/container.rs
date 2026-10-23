@@ -17,10 +17,10 @@ mod common;
 use common::{
     batch, batch_on_role, cross_observer_publisher_side, cross_observer_venue_side,
     cross_site_fixture, json_each_row, just_after_midnight_ns, midday_ns, now_ns, race_fixture,
-    venue_batched_record, venue_race_fixture, venue_rotation_boundary, venue_rotation_collision,
-    venue_top, ABSENT_BUT_A_SITE_OVERFLOWED, ABSENT_EVERYWHERE, A_SITE_IS_UP_AND_SILENT,
-    A_SITE_REUSED_THE_SEQUENCE, BOTH_OBSERVERS_SAW, MISSING_FROM, MISSING_TO,
-    NOBODY_ELSE_HAS_LOADED, ONLY_A_CO_LOCATED_RECORDER, ONLY_THE_PUBLISHER_SAW,
+    two_feeds_on_one_channel, venue_batched_record, venue_race_fixture, venue_rotation_boundary,
+    venue_rotation_collision, venue_top, ABSENT_BUT_A_SITE_OVERFLOWED, ABSENT_EVERYWHERE,
+    A_SITE_IS_UP_AND_SILENT, A_SITE_REUSED_THE_SEQUENCE, BOTH_OBSERVERS_SAW, MISSING_FROM,
+    MISSING_TO, NOBODY_ELSE_HAS_LOADED, ONLY_A_CO_LOCATED_RECORDER, ONLY_THE_PUBLISHER_SAW,
     OUR_OWN_SCOPE_CANNOT_SUBTRACT, PRESENT_AT_ANOTHER_SITE, REPEATED, VENUE_ACROSS_A_ROTATION,
     VENUE_BATCH_FIRST, VENUE_BATCH_FIRST_SEQ, VENUE_BATCH_REPEATED, VENUE_BATCH_SECOND,
     VENUE_BATCH_SECOND_SEQ, VENUE_EXPONENTS_DISAGREE, VENUE_INSIDE_ONE_ROTATION_TICK,
@@ -789,6 +789,71 @@ fn a_repeating_state_pairs_one_to_one_and_the_unpaired_occurrence_stays_visible(
         )),
         (tops - 1).to_string(),
         "the anchor row is excluded from the numbering and nothing else is"
+    );
+}
+
+/// Two feeds on one `Channel ID` at one observation are numbered apart.
+///
+/// One row each, one `state_key`: each feed's row is its own first occurrence,
+/// and not the first and second of one sequence.
+///
+/// **The revert:** take `feed` out of `book_top_occurrence`'s partition, and
+/// the second row is numbered `2`.
+#[test]
+fn two_feeds_on_one_channel_id_are_numbered_apart_at_one_observation() {
+    let mut scratch = Scratch::open("feed_occurrence");
+    let base = now_ns();
+    scratch
+        .sink
+        .write_batch(
+            two_feeds_on_one_channel(base, &[("a", "tob", 10), ("a", "mbp", 11)]),
+            NOW,
+        )
+        .expect("the load");
+    assert_eq!(scratch.count("book_top"), 2, "both rows are in the table");
+
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT groupArray(concat(feed, ':', toString(occurrence))) FROM (SELECT feed, \
+             occurrence FROM {}.book_top_occurrence WHERE state_key = {REPEATED} \
+             ORDER BY feed)",
+            scratch.database
+        )),
+        "['mbp:1','tob:1']",
+        "each feed numbers its own occurrences"
+    );
+}
+
+/// One feed's row at each of two observations is two races, not one.
+///
+/// The two rows share a `Channel ID`, an `Instrument ID` and a `state_key`, and
+/// are of different feeds. Paired across the feeds they would read as one
+/// state both observations saw, with a lead time nobody measured.
+///
+/// **The revert:** take `feed` out of `book_top_race`'s grouping, and the two
+/// rows are one race of two observations.
+#[test]
+fn one_feeds_row_at_each_observation_is_two_races_and_not_one() {
+    let mut scratch = Scratch::open("feed_race");
+    let base = now_ns();
+    scratch
+        .sink
+        .write_batch(
+            two_feeds_on_one_channel(base, &[("a", "tob", 10), ("b", "mbp", 12)]),
+            NOW,
+        )
+        .expect("the load");
+    assert_eq!(scratch.count("book_top"), 2, "both rows are in the table");
+
+    assert_eq!(
+        scratch.scalar(&format!(
+            "SELECT groupArray(concat(feed, ':', toString(observations), ':', \
+             toString(isNull(lead_ms)))) FROM (SELECT feed, observations, lead_ms FROM \
+             {}.book_top_race WHERE state_key = {REPEATED} ORDER BY feed)",
+            scratch.database
+        )),
+        "['mbp:1:1','tob:1:1']",
+        "two races of one observation each, neither with a lead"
     );
 }
 

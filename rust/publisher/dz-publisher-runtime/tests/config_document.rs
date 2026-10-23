@@ -230,7 +230,7 @@ fn a_valid_document_resolves_end_to_end() {
             dz_edge_core::PortRole::Refdata
         ]
     );
-    assert_eq!(config.channel_ids(), [CHANNEL_ID]);
+    assert_eq!(config.channels(), [("top-of-book", CHANNEL_ID)]);
 }
 
 #[test]
@@ -295,7 +295,10 @@ fn a_depth_feed_resolves_with_the_three_port_roles_it_operates() {
         config.port_roles(),
         [PortRole::Mktdata, PortRole::Refdata, PortRole::Snapshot]
     );
-    assert_eq!(config.channel_ids(), [harness::DEPTH_CHANNEL_ID]);
+    assert_eq!(
+        config.channels(),
+        [("market-by-price", harness::DEPTH_CHANNEL_ID)]
+    );
 }
 
 #[test]
@@ -374,8 +377,11 @@ fn both_feeds_in_one_document_resolve() {
         [PortRole::Mktdata, PortRole::Refdata, PortRole::Snapshot]
     );
     assert_eq!(
-        config.channel_ids(),
-        [harness::CHANNEL_ID, harness::DEPTH_CHANNEL_ID]
+        config.channels(),
+        [
+            ("top-of-book", harness::CHANNEL_ID),
+            ("market-by-price", harness::DEPTH_CHANNEL_ID)
+        ]
     );
 }
 
@@ -571,6 +577,39 @@ fn two_blocks_of_one_specification_on_different_shards_resolve() {
         config.feed_specs().len(),
         1,
         "and one specification, however many shards carry it"
+    );
+}
+
+/// One `(feed, Channel ID)` pair per block, in the document's order.
+///
+/// The second block's ID is the lower one, so a list sorted by ID, as
+/// `channel_ids()` was, puts them the other way round.
+#[test]
+fn channels_are_one_pair_per_block_in_document_order() {
+    let mut doc = Doc::valid();
+    let second = doc
+        .feed
+        .replace(
+            &format!("channel_id = {CHANNEL_ID}"),
+            &format!("channel_id = {}\nshard = \"beta\"", CHANNEL_ID - 1),
+        )
+        .replace(
+            &format!("mktdata_port = {MKTDATA_PORT}"),
+            &format!("mktdata_port = {}", MKTDATA_PORT + 20),
+        )
+        .replace(
+            &format!("refdata_port = {REFDATA_PORT}"),
+            &format!("refdata_port = {}", REFDATA_PORT + 20),
+        );
+    doc.feed = format!("{}\n{second}", doc.feed);
+
+    let config = Document::parse(&doc.render())
+        .expect("parses")
+        .resolve()
+        .expect("two shards of one specification resolve");
+    assert_eq!(
+        config.channels(),
+        [("top-of-book", CHANNEL_ID), ("top-of-book", CHANNEL_ID - 1)]
     );
 }
 
@@ -1672,23 +1711,79 @@ fn a_document_with_no_shard_key_resolves_to_the_default_shard() {
     );
 }
 
-/// Two enabled blocks claiming one `Channel ID` are refused, naming both.
-///
-/// **The mutant to check on this one is the check itself.** `channel_ids()`
-/// sorts and dedups, so without it the document loads, one set of series is
-/// pre-created, two channel instances write to it, and nothing anywhere says
-/// so — not an error, not a counter, not a log line.
-#[test]
-fn two_blocks_claiming_one_channel_id_are_refused_naming_both() {
-    let mut doc = Doc::valid();
-    // The harness's own depth block, so this test is about the `Channel ID`
-    // collision rather than about a market-by-price block's snapshot port —
-    // which is refused first, and by a different check.
-    let second = Doc::depth_feed_block().replace(
+/// The harness's depth block, moved onto the top-of-book block's `Channel ID`
+/// and, with `shard`, onto a shard of its own. Its ports stay its own.
+fn depth_on_the_shared_id(shard: Option<&str>) -> String {
+    let block = Doc::depth_feed_block().replace(
         &format!("channel_id = {DEPTH_CHANNEL_ID}"),
         &format!("channel_id = {CHANNEL_ID}"),
     );
-    doc.feed = format!("{}\n{second}", doc.feed);
+    match shard {
+        Some(shard) => block.replace(
+            &format!("channel_id = {CHANNEL_ID}"),
+            &format!("channel_id = {CHANNEL_ID}\nshard = \"{shard}\""),
+        ),
+        None => block,
+    }
+}
+
+/// A shard's two feeds on one `Channel ID`, with five distinct ports, resolve.
+///
+/// This case was refused as `DuplicateChannelId` until the rule was keyed on
+/// the specification. The contract is that one ID names one instrument set on
+/// both feeds, and a shard's two feeds carry exactly that.
+///
+/// With the ID shared, `channels()` yields one pair per feed, and the metrics
+/// built from them hold one sequence series per feed.
+#[test]
+fn a_shards_two_feeds_on_one_channel_id_resolve() {
+    let mut doc = Doc::valid();
+    doc.feed = format!("{}\n{}", doc.feed, depth_on_the_shared_id(None));
+
+    let config = Document::parse(&doc.render())
+        .expect("parses")
+        .resolve()
+        .expect("a shard's two feeds may share a Channel ID");
+    assert_eq!(
+        config.channels(),
+        [("top-of-book", CHANNEL_ID), ("market-by-price", CHANNEL_ID)]
+    );
+
+    let metrics = dz_publisher_metrics::PublisherMetrics::new(
+        &dz_publisher_metrics::PublisherMetricsConfig {
+            venue: "a-venue",
+            source_id: SOURCE_ID,
+            port_roles: &config.port_roles(),
+            connections: &[],
+            channels: &config.channels(),
+            ingress_message_types: &[],
+        },
+    );
+    let rendered = metrics.render();
+    for feed in ["top-of-book", "market-by-price"] {
+        let series = rendered
+            .lines()
+            .filter(|line| {
+                line.starts_with("dz_publisher_egress_sequence_current{")
+                    && line.contains("port_role=\"mktdata\"")
+                    && line.contains(&format!("channel_id=\"{CHANNEL_ID}\""))
+                    && line.contains(&format!("feed=\"{feed}\""))
+            })
+            .count();
+        assert_eq!(
+            series, 1,
+            "one mktdata sequence series for {feed}:\n{rendered}"
+        );
+    }
+}
+
+/// The same two blocks on two shards are refused, naming both shards.
+///
+/// **The revert:** drop the two-shards check, and this resolves.
+#[test]
+fn two_feeds_on_one_channel_id_across_two_shards_are_refused_naming_both() {
+    let mut doc = Doc::valid();
+    doc.feed = format!("{}\n{}", doc.feed, depth_on_the_shared_id(Some("beta")));
 
     let error = Document::parse(&doc.render())
         .expect("parses")
@@ -1696,11 +1791,80 @@ fn two_blocks_claiming_one_channel_id_are_refused_naming_both() {
         .unwrap_err();
     let message = error.to_string();
     assert!(
-        matches!(error, StartupError::DuplicateChannelId { .. }),
-        "two blocks shared a Channel ID and it was accepted: {message}"
+        matches!(error, StartupError::ChannelIdOnTwoShards { .. }),
+        "{message}"
     );
+    assert!(message.contains("`default`"), "{message}");
+    assert!(message.contains("`beta`"), "{message}");
     assert!(message.contains("top-of-book"), "{message}");
     assert!(message.contains("market-by-price"), "{message}");
+}
+
+/// A shard's two feeds on one `Channel ID` sharing any destination port are
+/// refused, naming both keys. Every pair of keys, one from each block.
+///
+/// **The revert:** drop the shared-port check, and each of these resolves.
+#[test]
+fn two_feeds_on_one_channel_id_sharing_a_port_are_refused_naming_both_keys() {
+    use harness::{DEPTH_MKTDATA_PORT, DEPTH_REFDATA_PORT, DEPTH_SNAPSHOT_PORT};
+
+    for (top_key, top_port) in [
+        ("mktdata_port", MKTDATA_PORT),
+        ("refdata_port", REFDATA_PORT),
+    ] {
+        for (depth_key, depth_port) in [
+            ("mktdata_port", DEPTH_MKTDATA_PORT),
+            ("refdata_port", DEPTH_REFDATA_PORT),
+            ("snapshot_port", DEPTH_SNAPSHOT_PORT),
+        ] {
+            let mut doc = Doc::valid();
+            let depth = depth_on_the_shared_id(None).replace(
+                &format!("{depth_key} = {depth_port}"),
+                &format!("{depth_key} = {top_port}"),
+            );
+            doc.feed = format!("{}\n{depth}", doc.feed);
+
+            let error = Document::parse(&doc.render())
+                .expect("parses")
+                .resolve()
+                .unwrap_err();
+            let message = error.to_string();
+            match &error {
+                StartupError::ChannelInstancePortShared {
+                    port,
+                    first_key,
+                    second_key,
+                    ..
+                } => {
+                    assert_eq!(*port, top_port, "{message}");
+                    assert_eq!(*first_key, top_key, "{message}");
+                    assert_eq!(*second_key, depth_key, "{message}");
+                }
+                other => panic!("{top_key} = {depth_key}: {other}"),
+            }
+            assert!(message.contains(top_key), "{message}");
+            assert!(message.contains(depth_key), "{message}");
+        }
+    }
+}
+
+/// Two blocks on different `Channel ID`s with one port in common still
+/// resolve: they are two channel instances, told apart by the ID.
+#[test]
+fn two_feeds_on_different_channel_ids_sharing_a_port_resolve() {
+    use harness::DEPTH_MKTDATA_PORT;
+
+    let mut doc = Doc::valid();
+    let depth = Doc::depth_feed_block().replace(
+        &format!("mktdata_port = {DEPTH_MKTDATA_PORT}"),
+        &format!("mktdata_port = {MKTDATA_PORT}"),
+    );
+    doc.feed = format!("{}\n{depth}", doc.feed);
+
+    Document::parse(&doc.render())
+        .expect("parses")
+        .resolve()
+        .expect("different Channel IDs are different channel instances");
 }
 
 /// And the shard, because the specification alone stopped identifying a block.
