@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use dz_edge_core::PortRole;
 use dz_publisher_egress::DEFAULT_TTL;
-use dz_publisher_refdata::IdAllocation;
+use dz_publisher_refdata::{IdAllocation, Identity, VenueKeys};
 use dz_publisher_runtime::config::ShardName;
 use dz_publisher_runtime::{Document, FeedSpec, StartupError, TeeConfig};
 use harness::{Doc, CHANNEL_ID, DEPTH_CHANNEL_ID, GROUP, MKTDATA_PORT, REFDATA_PORT, SOURCE_ID};
@@ -1185,6 +1185,119 @@ fn derived_allocation_with_forget_delisted_after_is_refused() {
         matches!(error, StartupError::ForgettingUnderDerivedIds),
         "{error}"
     );
+}
+
+#[test]
+fn identity_and_venue_keys_are_symbol_unless_stated() {
+    // Absent is what every document written before the keys must get.
+    let absent = Document::parse(&Doc::valid().render())
+        .expect("valid")
+        .resolve()
+        .expect("resolvable");
+    assert_eq!(absent.refdata.identity, Identity::Symbol);
+    assert_eq!(absent.refdata.venue_keys, VenueKeys::Symbol);
+
+    let keyed = Document::parse(&with_refdata_lines("identity = \"venue_key\"\n"))
+        .expect("valid")
+        .resolve()
+        .expect("resolvable");
+    assert_eq!(keyed.refdata.identity, Identity::VenueKey);
+    assert_eq!(keyed.refdata.venue_keys, VenueKeys::Symbol);
+
+    let stated = Document::parse(&with_refdata_lines(
+        "identity = \"venue_key\"\nvenue_keys = \"stated\"\n",
+    ))
+    .expect("valid")
+    .resolve()
+    .expect("resolvable");
+    assert_eq!(stated.refdata.identity, Identity::VenueKey);
+    assert_eq!(stated.refdata.venue_keys, VenueKeys::Stated);
+
+    let spelled = Document::parse(&with_refdata_lines(
+        "identity = \"symbol\"\nvenue_keys = \"symbol\"\n",
+    ))
+    .expect("valid")
+    .resolve()
+    .expect("resolvable");
+    assert_eq!(spelled.refdata.identity, Identity::Symbol);
+    assert_eq!(spelled.refdata.venue_keys, VenueKeys::Symbol);
+}
+
+#[test]
+fn an_identity_or_venue_keys_this_build_does_not_know_is_refused() {
+    // A misspelling would otherwise fall back to the symbol, and a feed meant
+    // to keep its full tickers apart would merge them again.
+    assert!(Document::parse(&with_refdata_lines("identity = \"venuekey\"\n")).is_err());
+    assert!(Document::parse(&with_refdata_lines("identity = \"ticker\"\n")).is_err());
+    assert!(Document::parse(&with_refdata_lines(
+        "identity = \"venue_key\"\nvenue_keys = \"own\"\n"
+    ))
+    .is_err());
+}
+
+#[test]
+fn derived_key_is_read_and_refused_without_the_venue_key_identity_or_with_forgetting() {
+    let keyed = Document::parse(&with_refdata_lines(
+        "identity = \"venue_key\"\nid_allocation = \"derived_key\"\n",
+    ))
+    .expect("valid")
+    .resolve()
+    .expect("resolvable");
+    assert_eq!(keyed.refdata.id_allocation, IdAllocation::DerivedKey);
+
+    let error = Document::parse(&with_refdata_lines("id_allocation = \"derived_key\"\n"))
+        .expect("parses")
+        .resolve()
+        .unwrap_err();
+    assert!(
+        matches!(error, StartupError::DerivedKeyWithoutVenueKey),
+        "{error}"
+    );
+
+    let error = Document::parse(&with_refdata_lines(
+        "identity = \"venue_key\"\nid_allocation = \"derived_key\"\nforget_delisted_after = \"168h\"\n",
+    ))
+    .expect("parses")
+    .resolve()
+    .unwrap_err();
+    assert!(
+        matches!(error, StartupError::ForgettingUnderDerivedIds),
+        "{error}"
+    );
+}
+
+#[test]
+fn stated_venue_keys_under_the_symbol_identity_are_refused() {
+    let error = Document::parse(&with_refdata_lines("venue_keys = \"stated\"\n"))
+        .expect("parses")
+        .resolve()
+        .unwrap_err();
+    assert!(
+        matches!(error, StartupError::VenueKeysWithoutVenueKey),
+        "{error}"
+    );
+}
+
+#[test]
+fn derived_ids_with_stated_venue_keys_are_refused() {
+    let error = Document::parse(&with_refdata_lines(
+        "identity = \"venue_key\"\nvenue_keys = \"stated\"\nid_allocation = \"derived\"\n",
+    ))
+    .expect("parses")
+    .resolve()
+    .unwrap_err();
+    assert!(
+        matches!(error, StartupError::DerivedWithStatedVenueKeys),
+        "{error}"
+    );
+
+    let keyed = Document::parse(&with_refdata_lines(
+        "identity = \"venue_key\"\nvenue_keys = \"stated\"\nid_allocation = \"derived_key\"\n",
+    ))
+    .expect("valid")
+    .resolve()
+    .expect("derived_key derives from the key, which a rename leaves alone");
+    assert_eq!(keyed.refdata.id_allocation, IdAllocation::DerivedKey);
 }
 
 // ---------------------------------------------------------------------------

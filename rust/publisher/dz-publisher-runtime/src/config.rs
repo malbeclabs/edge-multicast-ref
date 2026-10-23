@@ -45,7 +45,7 @@ use dz_edge_tob::TopOfBook;
 use dz_ingress_core::{IngressConfig, Kind, Policy};
 use dz_publisher_egress::{EgressPolicy, Ipv4Prefix};
 use dz_publisher_lowering::SourceId;
-use dz_publisher_refdata::{IdAllocation, SelectionPolicy};
+use dz_publisher_refdata::{IdAllocation, Identity, SelectionPolicy, VenueKeys};
 use dz_venue_composition::AdapterSection;
 use serde::Deserialize;
 
@@ -470,8 +470,10 @@ pub struct RefdataSection {
     #[serde(default, deserialize_with = "de_optional_duration")]
     pub forget_delisted_after: Option<Duration>,
     /// How a symbol the record does not hold is given its `Instrument ID`:
-    /// `"sequential"`, the next number, or `"derived"`, the CRC-32 of its
-    /// `Symbol` at or above the record's floor. Absent is `"sequential"`.
+    /// `"sequential"`, the next number, `"derived"`, the CRC-32 of its
+    /// `Symbol` at or above the record's floor, or `"derived_key"`, the CRC-32
+    /// of its venue key, under `identity = "venue_key"` only. Absent is
+    /// `"sequential"`.
     ///
     /// `"derived"` is what lets two publishers of one channel agree on every
     /// ID without sharing anything. **Every path of a channel starts from the
@@ -487,19 +489,83 @@ pub struct RefdataSection {
     /// later `"sequential"` start.
     #[serde(default)]
     pub id_allocation: IdAllocationKey,
+    /// What an instrument is recalled by: `"symbol"`, the padded wire
+    /// `Symbol`, or `"venue_key"`, the venue's own name for it. Absent is
+    /// `"symbol"`, which changes nothing on disk or on the wire.
+    ///
+    /// Under `"venue_key"` two instruments whose tickers agree on their first
+    /// 64 bytes are two instruments with two IDs, both carrying the same
+    /// truncated `Symbol`. The record is rewritten in a keyed layout, and a
+    /// later `"symbol"` start refuses it.
+    #[serde(default)]
+    pub identity: IdentityKey,
+    /// Whether the adapter states keys of its own: `"symbol"`, every key is
+    /// the stated `symbol`, or `"stated"`. Absent is `"symbol"`. Read only
+    /// under `identity = "venue_key"`, and refused under `"symbol"`.
+    /// `"stated"` is refused with `id_allocation = "derived"`, whose IDs come
+    /// from a `Symbol` the venue may rename; `"derived_key"` is the one to use.
+    ///
+    /// Declare `"stated"` before the first start under `"venue_key"` if the
+    /// adapter will ever state keys: a keyed record is refused under the other
+    /// declaration, and the only way past that is a fresh record.
+    #[serde(default)]
+    pub venue_keys: VenueKeysKey,
     pub selection: SelectionSection,
+}
+
+/// The values `[refdata] identity` takes.
+///
+/// `#[non_exhaustive]` for the reason [`Identity`] is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum IdentityKey {
+    #[default]
+    Symbol,
+    VenueKey,
+}
+
+impl From<IdentityKey> for Identity {
+    fn from(key: IdentityKey) -> Self {
+        match key {
+            IdentityKey::Symbol => Self::Symbol,
+            IdentityKey::VenueKey => Self::VenueKey,
+        }
+    }
+}
+
+/// The values `[refdata] venue_keys` takes.
+///
+/// `#[non_exhaustive]` for the reason [`VenueKeys`] is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum VenueKeysKey {
+    #[default]
+    Symbol,
+    Stated,
+}
+
+impl From<VenueKeysKey> for VenueKeys {
+    fn from(key: VenueKeysKey) -> Self {
+        match key {
+            VenueKeysKey::Symbol => Self::Symbol,
+            VenueKeysKey::Stated => Self::Stated,
+        }
+    }
 }
 
 /// The values `[refdata] id_allocation` takes.
 ///
 /// `#[non_exhaustive]` for the reason [`IdAllocation`] is.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum IdAllocationKey {
     #[default]
     Sequential,
     Derived,
+    DerivedKey,
 }
 
 impl From<IdAllocationKey> for IdAllocation {
@@ -507,6 +573,7 @@ impl From<IdAllocationKey> for IdAllocation {
         match key {
             IdAllocationKey::Sequential => Self::Sequential,
             IdAllocationKey::Derived => Self::Derived,
+            IdAllocationKey::DerivedKey => Self::DerivedKey,
         }
     }
 }
@@ -872,6 +939,8 @@ pub struct Refdata {
     pub state_dir: PathBuf,
     pub forget_delisted_after: Option<Duration>,
     pub id_allocation: IdAllocation,
+    pub identity: Identity,
+    pub venue_keys: VenueKeys,
     pub selection: SelectionPolicy,
 }
 
@@ -1027,9 +1096,28 @@ impl Document {
                     key: "[refdata] forget_delisted_after",
                 });
             }
-            if self.refdata.id_allocation == IdAllocationKey::Derived {
+            if matches!(
+                self.refdata.id_allocation,
+                IdAllocationKey::Derived | IdAllocationKey::DerivedKey
+            ) {
                 return Err(StartupError::ForgettingUnderDerivedIds);
             }
+        }
+
+        if self.refdata.venue_keys == VenueKeysKey::Stated
+            && self.refdata.identity == IdentityKey::Symbol
+        {
+            return Err(StartupError::VenueKeysWithoutVenueKey);
+        }
+        if self.refdata.id_allocation == IdAllocationKey::DerivedKey
+            && self.refdata.identity == IdentityKey::Symbol
+        {
+            return Err(StartupError::DerivedKeyWithoutVenueKey);
+        }
+        if self.refdata.id_allocation == IdAllocationKey::Derived
+            && self.refdata.venue_keys == VenueKeysKey::Stated
+        {
+            return Err(StartupError::DerivedWithStatedVenueKeys);
         }
 
         let selection = SelectionPolicy::new(
@@ -1081,6 +1169,8 @@ impl Document {
                 state_dir: self.refdata.state_dir,
                 forget_delisted_after: self.refdata.forget_delisted_after,
                 id_allocation: self.refdata.id_allocation.into(),
+                identity: self.refdata.identity.into(),
+                venue_keys: self.refdata.venue_keys.into(),
                 selection,
             },
             metrics: self.metrics,

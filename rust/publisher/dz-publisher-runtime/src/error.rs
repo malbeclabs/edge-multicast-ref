@@ -566,8 +566,31 @@ pub enum StartupError {
     /// relisted near the horizon would come back under the record's ID on one
     /// and under a fresh derivation on the other. Derived allocation keeps
     /// every entry for good, which is what this key would undo.
-    #[error("`[refdata] id_allocation = \"derived\"` forgets nothing, so `[refdata] forget_delisted_after` cannot be set with it")]
+    #[error("`[refdata] id_allocation = \"derived\"` or `\"derived_key\"` forgets nothing, so `[refdata] forget_delisted_after` cannot be set with it")]
     ForgettingUnderDerivedIds,
+
+    /// `[refdata] id_allocation = "derived_key"` under `identity = "symbol"`,
+    /// where there is no key to derive from.
+    #[error("`[refdata] id_allocation = \"derived_key\"` needs `identity = \"venue_key\"`")]
+    DerivedKeyWithoutVenueKey,
+
+    /// `[refdata] venue_keys = "stated"` under `identity = "symbol"`.
+    ///
+    /// The symbol identity reads no venue key, so the declaration would be
+    /// read by nothing, and an operator who wrote it believes the adapter's
+    /// keys are in use.
+    #[error("`[refdata] venue_keys = \"stated\"` is read only under `identity = \"venue_key\"`")]
+    VenueKeysWithoutVenueKey,
+
+    /// `[refdata] id_allocation = "derived"` with `venue_keys = "stated"`.
+    ///
+    /// `"derived"` takes a new key's ID from its display `Symbol`, which a
+    /// venue stating its own keys may rename under the same key. A host that
+    /// admitted the key before a rename and one started from no record after
+    /// it would publish one instrument under two IDs. `"derived_key"` derives
+    /// from the key, which a rename leaves alone.
+    #[error("`[refdata] id_allocation = \"derived\"` derives from a `Symbol` that `venue_keys = \"stated\"` lets the venue rename; use `id_allocation = \"derived_key\"`")]
+    DerivedWithStatedVenueKeys,
 
     /// `[egress] ttl` is not stated, and it has no default.
     ///

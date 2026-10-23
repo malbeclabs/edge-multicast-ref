@@ -466,6 +466,7 @@ impl Adapter for LineAdapter {
             }
             let spec = InstrumentSpec {
                 symbol,
+                venue_key: None,
                 leg1: None,
                 leg2: None,
                 asset_class: AssetClass::CryptoSpot,

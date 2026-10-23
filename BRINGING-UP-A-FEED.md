@@ -412,6 +412,8 @@ idle_guard = "30s"
 state_dir = "/var/lib/a-venue-publisher"
 # forget_delisted_after = "168h"   # absent keeps every Instrument ID for good
 # id_allocation = "derived"        # absent is "sequential"; see below before setting it
+# identity = "venue_key"          # absent is "symbol"; see below before setting it
+# venue_keys = "stated"            # absent is "symbol"; only under identity = "venue_key"
 
 [refdata.selection]
 bootstrap_top_n = 64
@@ -520,6 +522,50 @@ kind = "a-venue-tob"
     `forget_delisted_after`.
   - **There is no way back.** A record written under `"derived"` is refused by
     a later `"sequential"` start.
+- **`identity = "venue_key"` is for a venue whose names outgrow the
+  `Symbol`.** Under the default, `"symbol"`, the registry recalls an
+  instrument by its padded 64-byte wire `Symbol`, so two tickers that agree on
+  their first 64 bytes are one instrument and share a book. Under
+  `"venue_key"` it recalls by the venue key: `InstrumentSpec::venue_key`, or
+  the stated `symbol` untruncated where that is `None`. Two such tickers are
+  then two instruments with two IDs, both carrying the same truncated
+  `Symbol`, which a subscriber tells apart by `Instrument ID`. The record is
+  rewritten in a keyed layout at the first start, and a later `"symbol"`
+  start refuses it. Four rules come with it:
+  - **Declare whether the adapter states its own keys.** `venue_keys =
+    "symbol"`, the default, says every key is the stated `symbol`, and an
+    offer stating a different `venue_key` is refused. `"stated"` takes the
+    adapter's keys. A keyed record is refused under the other declaration,
+    and the only way past that is a fresh record, with new IDs, so declare
+    `"stated"` before the first start if the adapter will ever state keys.
+  - **An unkeyed record opens only where every key is known.** An entry whose
+    `Symbol` may have been cut from a longer name (fewer than four bytes of
+    padding), and under `"stated"` every entry, is refused at the first start
+    until a mapping resolves it. Nothing is claimed by offer order.
+  - **A publisher moving from its own registry seeds before its first start.**
+    `dz_publisher_refdata::seed` writes `(venue key, Instrument ID)` pairs and
+    a `next_id` into the state directory, merging with what is there and
+    refusing every disagreement. Kalshi's `instruments.json`, `{ "next_id": N,
+    "tickers": { ticker: id } }`, is exactly such a mapping. The same call
+    resolves the cut entries of an unkeyed record, or with `retire_unmapped`
+    forgets the ones it does not name. A rollback exports with
+    `StateRecord::load`, whose entries carry their keys, and the next import
+    seeds again. The exported `next_id` must be above every ID the entries
+    hold. A sequential record's is; a `"derived"` or `"derived_key"` record's
+    is the floor under every derived ID, so a sequential registry handed it
+    would mint IDs a derived key already holds. Export one more than the
+    highest held ID instead. After a `StateError::Write` the outcome is not known: reload,
+    and run the same seed again, which is safe.
+  - **Seeding comes before `id_allocation = "derived_key"`, not after.**
+    `"derived_key"` is `"derived"` with the venue key as its input, so two
+    keys on one `Symbol` derive two IDs. A derived record takes only a seed
+    that resolves entries it already holds, and a record is never moved
+    between `"derived"` and `"derived_key"`. `"derived"` is refused with
+    `venue_keys = "stated"`: it derives from the display `Symbol`, which a
+    venue may rename under the same key, so a host that admitted the key
+    before a rename and one started from no record after it would publish one
+    instrument under two IDs. `"derived_key"` derives from the key, which a
+    rename leaves alone.
 - **A depth feed with no `snapshot_cycle` cannot be joined mid-session.** It
   still emits the recovery snapshots a reset obliges, but a subscriber that
   arrives after the deltas started has nothing to build a book from — a level

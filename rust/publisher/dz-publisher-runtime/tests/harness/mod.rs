@@ -726,6 +726,8 @@ fn harness_inner(configured: &[Feed], break_writes: bool) -> Harness {
             schedule: CycleSchedule::new(identity.definition_cycle, 1232, 1),
             forget_delisted_after: None,
             id_allocation: dz_publisher_refdata::IdAllocation::Sequential,
+            identity: dz_publisher_refdata::Identity::Symbol,
+            venue_keys: dz_publisher_refdata::VenueKeys::Symbol,
         },
         store,
         clock.clone(),
@@ -761,6 +763,7 @@ fn harness_inner(configured: &[Feed], break_writes: bool) -> Harness {
 pub fn spec(symbol: &str) -> InstrumentSpec<'_> {
     InstrumentSpec {
         symbol,
+        venue_key: None,
         leg1: None,
         leg2: None,
         asset_class: AssetClass::CryptoSpot,
