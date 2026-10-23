@@ -39,6 +39,7 @@ impl AppMessage for Sixteen {
     const TYPE_ID: u8 = 0x01;
     const SIZE: usize = 16;
     const PORT_ROLES: &'static [PortRole] = &[PortRole::Mktdata, PortRole::Snapshot];
+    const FEED_LOCAL: Option<u16> = None;
     fn encode_into(&self, dst: &mut [u8]) {
         dst[0] = Self::TYPE_ID;
         dst[1] = Self::SIZE as u8;
@@ -55,6 +56,7 @@ impl AppMessage for SelfFlagged {
     const TYPE_ID: u8 = 0x01;
     const SIZE: usize = 16;
     const PORT_ROLES: &'static [PortRole] = &[PortRole::Mktdata];
+    const FEED_LOCAL: Option<u16> = None;
     fn encode_into(&self, dst: &mut [u8]) {
         dst[0] = Self::TYPE_ID;
         dst[1] = Self::SIZE as u8;
@@ -72,6 +74,7 @@ impl AppMessage for HeaderOnly {
     const TYPE_ID: u8 = 0x01;
     const SIZE: usize = 4;
     const PORT_ROLES: &'static [PortRole] = &[PortRole::Mktdata];
+    const FEED_LOCAL: Option<u16> = None;
     fn encode_into(&self, dst: &mut [u8]) {
         dst[0] = Self::TYPE_ID;
         dst[1] = Self::SIZE as u8;
@@ -368,6 +371,7 @@ impl AppMessage for TooSmallForMessageHeader {
     const TYPE_ID: u8 = 0x01;
     const SIZE: usize = 2;
     const PORT_ROLES: &'static [PortRole] = &[PortRole::Mktdata];
+    const FEED_LOCAL: Option<u16> = None;
     fn encode_into(&self, dst: &mut [u8]) {
         dst.fill(0);
     }
@@ -389,6 +393,7 @@ impl AppMessage for TooLargeForLengthField {
     const TYPE_ID: u8 = 0x01;
     const SIZE: usize = 300;
     const PORT_ROLES: &'static [PortRole] = &[PortRole::Mktdata];
+    const FEED_LOCAL: Option<u16> = None;
     fn encode_into(&self, dst: &mut [u8]) {
         dst.fill(0);
     }

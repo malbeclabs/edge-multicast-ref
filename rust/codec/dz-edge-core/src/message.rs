@@ -16,6 +16,18 @@ pub trait AppMessage {
     /// at the push rather than on a capture after a deploy.
     const PORT_ROLES: &'static [PortRole];
 
+    /// The magic of the one feed that defines this message, or `None` for a
+    /// message the family shares.
+    ///
+    /// A feed's `CARRIES` table names Type IDs, and a feed-local Type ID means
+    /// a different message in each feed that uses it: `0x03` is `Quote` in
+    /// top-of-book and `Midpoint` in midpoint. Both tables list it, so the
+    /// table alone lets either message into the other's datagram. The builder
+    /// refuses a message whose `FEED_LOCAL` is not its feed's magic.
+    ///
+    /// Required, not defaulted, so each new message states which kind it is.
+    const FEED_LOCAL: Option<u16>;
+
     /// Whether this message's fields may be sent together.
     ///
     /// Defaulted to `Ok`, because most message types constrain no combination

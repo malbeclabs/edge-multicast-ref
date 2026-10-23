@@ -92,6 +92,7 @@ fn a_quote_cannot_go_into_a_market_by_price_datagram() {
         refused,
         EncodeError::NotCarriedByFeed {
             feed: "market-by-price",
+            message: core::any::type_name::<Quote>(),
             type_id: 0x03,
         }
     );
@@ -112,6 +113,7 @@ fn a_level_update_cannot_go_into_a_top_of_book_datagram() {
             .expect_err("0x40 is not a top-of-book type"),
         EncodeError::NotCarriedByFeed {
             feed: "top-of-book",
+            message: core::any::type_name::<LevelUpdate>(),
             type_id: 0x40,
         }
     );
@@ -151,6 +153,7 @@ fn the_membership_check_comes_before_every_other_refusal() {
             .expect_err("neither carried nor small enough"),
         EncodeError::NotCarriedByFeed {
             feed: "market-by-price",
+            message: core::any::type_name::<Quote>(),
             type_id: 0x03,
         }
     );
