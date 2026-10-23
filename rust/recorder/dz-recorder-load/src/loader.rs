@@ -205,11 +205,30 @@ struct Scan {
     /// Every object whose manifest the scan read, which is what the ledger is
     /// compacted against.
     present: HashSet<(String, String)>,
-    /// Every object with no ledger entry when it was scanned, with the end of
-    /// its receive window and whether its feed derives market data.
+    /// Every object the pass saw that had no ledger entry when it was
+    /// scanned, with the end of its receive window. Filtered against the
+    /// ledger *after* the pass rather than pruned during it, because an
+    /// object can land at any point: the sink coalesces, so the insert that
+    /// makes object one durable may be the one object four triggered.
+    /// The flag is whether this object's feed derives market data, read from
+    /// the manifest that named the feed. Kept per object rather than looked
+    /// up again afterwards, because the answer is a property of the object
+    /// and the configuration is a slice somebody may one day reload.
     seen: Vec<(ObjectId, u64, bool)>,
-    /// The objects the pass may derive, as an index into the candidates and
-    /// the feed the manifest names.
+    /// The objects this pass may derive, as an index into the candidates and
+    /// the feed the manifest names. The scan reads every manifest and decides
+    /// what is derivable; the order they are derived in is decided only once
+    /// the scan is whole, by `take_turns`, because that order depends on how
+    /// much every feed has waiting.
+    ///
+    /// An index and a name, and NOT the manifest. A back-load is tens of
+    /// thousands of unloaded objects, and a manifest carries its object's
+    /// channel instances, which on a many-market feed is the bulk of it:
+    /// holding every one for the length of the pass would cost a recorder
+    /// host memory in proportion to how far behind its loader is. The
+    /// manifest is read again for the objects the pass reaches, which is at
+    /// most `max_objects` of them -- a few kilobytes each, against a scan
+    /// that already read all of them.
     derivable: Vec<(usize, String)>,
 }
 
@@ -542,34 +561,11 @@ impl<S: RowSink> Loader<'_, S> {
     }
 
     /// Reads every candidate's manifest and sorts the objects into what the
-    /// pass may derive and what it skips. See `run_once` for why the scan is
-    /// whole and the order decided only after it.
+    /// pass may derive and what it skips. What each part of the result holds
+    /// is on [`Scan`]; why the scan covers every candidate is on its loop.
     fn scan(&self, candidates: &[Candidate], pass: &mut Pass, errors: &mut Vec<String>) -> Scan {
         let mut present: HashSet<(String, String)> = HashSet::new();
-        // Every object the pass saw that had no ledger entry when it was
-        // scanned, with the end of its receive window. Filtered against the
-        // ledger *after* the pass rather than pruned during it, because an
-        // object can land at any point: the sink coalesces, so the insert that
-        // makes object one durable may be the one object four triggered.
-        // The flag is whether this object's feed derives market data, read from
-        // the manifest that named the feed. Kept per object rather than looked
-        // up again afterwards, because the answer is a property of the object
-        // and the configuration is a slice somebody may one day reload.
         let mut seen: Vec<(ObjectId, u64, bool)> = Vec::new();
-        // The objects this pass may derive, as an index into `candidates` and
-        // the feed the manifest names. The scan below reads every manifest and
-        // decides what is derivable; the order they are derived in is decided
-        // only once the scan is whole, by `take_turns`, because that order
-        // depends on how much every feed has waiting.
-        //
-        // An index and a name, and NOT the manifest. A back-load is tens of
-        // thousands of unloaded objects, and a manifest carries its object's
-        // channel instances, which on a many-market feed is the bulk of it:
-        // holding every one for the length of the pass would cost a recorder
-        // host memory in proportion to how far behind its loader is. The
-        // manifest is read again for the objects the pass reaches, which is at
-        // most `max_objects` of them -- a few kilobytes each, against a scan
-        // that already read all of them.
         let mut derivable: Vec<(usize, String)> = Vec::new();
 
         // The scan, over every candidate, and it does not stop at the pass
@@ -583,13 +579,14 @@ impl<S: RowSink> Loader<'_, S> {
         // its objects are waiting, which only a whole scan can say.
         for (index, candidate) in candidates.iter().enumerate() {
             // Gone since the walk listed it: evicted under the staging budget
-            // in between. A skip, as it is at the load, and not `Evicted`: with no manifest
-            // there is no `(object key, sha256)` to ask the ledger about, so
-            // the scan cannot say whether the object was loaded before it went
-            // -- and on a caught-up loader it almost always was. Counted as a
-            // manifest error, every one paged as damage on a healthy host,
-            // and a loss among them read on the error counter while `evicted`
-            // stayed at 0.
+            // in between. A skip, as it is at the load, and not `Evicted`:
+            // with no manifest there is no `(object key, sha256)` to ask the
+            // ledger about, so the scan cannot say whether the object was
+            // loaded before it went -- and on a caught-up loader it almost
+            // always was. Counted as a manifest error, it read as damage on a
+            // healthy host, a back-load whose oldest objects were going under
+            // the budget could burst it past the errors alert, and a loss
+            // among them read on the error counter while `evicted` stayed at 0.
             let manifest = match read_manifest_if_present(&candidate.manifest_path) {
                 Ok(Some(manifest)) => manifest,
                 Ok(None) => {
